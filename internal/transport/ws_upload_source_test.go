@@ -215,6 +215,7 @@ type recordingEmitter struct {
 	kind     session.Kind
 	unknown  bool // the session is not open at all
 	sessions []string
+	targets  []string
 	picks    [][]SourcePick
 }
 
@@ -225,8 +226,9 @@ func (r *recordingEmitter) TabKind(string) (session.Kind, bool) {
 	return r.kind, true
 }
 
-func (r *recordingEmitter) EmitFilesDropped(sessionID string, picks []SourcePick) error {
+func (r *recordingEmitter) EmitFilesDropped(sessionID, target string, picks []SourcePick) error {
 	r.sessions = append(r.sessions, sessionID)
+	r.targets = append(r.targets, target)
 	r.picks = append(r.picks, picks)
 	return nil
 }
@@ -254,7 +256,7 @@ func TestFilesDropped_MintsPerFileAndNamesNoDestination(t *testing.T) {
 	st := NewSourceTicketStore(em)
 
 	if err := st.Dropped(paths, map[string]string{
-		"data-file-drop-target": "",
+		"data-file-drop-target": "terminal",
 		"data-session-id":       dropSessionID,
 	}); err != nil {
 		t.Fatalf("Dropped: %v", err)
@@ -310,7 +312,7 @@ func TestFilesDropped_RefusesATargetThatNamesNoSession(t *testing.T) {
 	em := remoteEmitter()
 	st := NewSourceTicketStore(em)
 	err := st.Dropped([]string{seedFile(t, "x.bin", 1)}, map[string]string{
-		"data-file-drop-target": "",
+		"data-file-drop-target": "terminal",
 	})
 	if err == nil {
 		t.Fatalf("a drop with no data-session-id was accepted")
@@ -329,13 +331,63 @@ func TestFilesDropped_RefusesASessionIDThatIsNotOne(t *testing.T) {
 	em := remoteEmitter()
 	st := NewSourceTicketStore(em)
 	err := st.Dropped([]string{seedFile(t, "x.bin", 1)}, map[string]string{
-		"data-session-id": "../../etc/passwd",
+		"data-session-id":       "../../etc/passwd",
+		"data-file-drop-target": "terminal",
 	})
 	if err == nil {
 		t.Fatalf("a hostile data-session-id was accepted")
 	}
 	if st.Len() != 0 || len(em.picks) != 0 {
 		t.Errorf("a refused drop minted %d tickets and emitted %d notifications", st.Len(), len(em.picks))
+	}
+}
+
+// The drop target's NAME is what separates two surfaces that share one
+// session. Without it the import dialog and the terminal pane of the same
+// local tab both act on one gesture, and which one wins is evaluation
+// order — a rule nobody wrote down.
+func TestDropped_CarriesTheTargetName(t *testing.T) {
+	em := &recordingEmitter{kind: session.KindLocal}
+	st := NewSourceTicketStore(em)
+
+	if err := st.Dropped([]string{seedFile(t, "acme.postman_collection.json", 2)}, map[string]string{
+		"data-session-id":       dropSessionID,
+		"data-file-drop-target": "api-import",
+	}); err != nil {
+		t.Fatalf("Dropped: %v", err)
+	}
+	if len(em.targets) != 1 {
+		t.Fatalf("emitted %d notifications, want 1", len(em.targets))
+	}
+	if em.targets[0] != "api-import" {
+		t.Errorf("emitted target = %q, want %q", em.targets[0], "api-import")
+	}
+}
+
+// A target that names nothing is refused the way a drop with no session
+// already is: a notification nobody can attribute is one every subscriber
+// must guess about.
+func TestDropped_RefusesATargetThatNamesNothing(t *testing.T) {
+	for name, attrs := range map[string]map[string]string{
+		"absent": {"data-session-id": dropSessionID},
+		"empty": {
+			"data-session-id":       dropSessionID,
+			"data-file-drop-target": "",
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			em := remoteEmitter()
+			st := NewSourceTicketStore(em)
+			if err := st.Dropped([]string{seedFile(t, "acme.postman_collection.json", 2)}, attrs); err == nil {
+				t.Fatal("Dropped succeeded with a target that names nothing")
+			}
+			if st.Len() != 0 {
+				t.Errorf("minted %d tickets; a refused drop mints none", st.Len())
+			}
+			if len(em.picks) != 0 {
+				t.Errorf("emitted %d notifications; a refused drop emits none", len(em.picks))
+			}
+		})
 	}
 }
 
@@ -353,7 +405,7 @@ func TestFilesDropped_SkipsWhatCannotBeMintedAndSaysSo(t *testing.T) {
 	}
 	em := remoteEmitter()
 	st := NewSourceTicketStore(em)
-	err := st.Dropped([]string{file, sub}, map[string]string{"data-session-id": dropSessionID})
+	err := st.Dropped([]string{file, sub}, map[string]string{"data-session-id": dropSessionID, "data-file-drop-target": "terminal"})
 	if err == nil {
 		t.Fatalf("a drop with an unusable member reported success")
 	}
@@ -620,7 +672,7 @@ func TestFilesDropped_ReachesTheRendererOverTheSocket(t *testing.T) {
 	path := seedFile(t, "dropped.bin", 5)
 
 	if err := e.ws.UploadSources().Dropped([]string{path},
-		map[string]string{"data-session-id": e.sid}); err != nil {
+		map[string]string{"data-session-id": e.sid, "data-file-drop-target": "terminal"}); err != nil {
 		t.Fatalf("Dropped: %v", err)
 	}
 
@@ -672,7 +724,7 @@ func TestFilesDropped_WithNoRendererMintsNothing(t *testing.T) {
 	})
 
 	st := e.ws.UploadSources()
-	err := st.Dropped([]string{seedFile(t, "nobody.bin", 1)}, map[string]string{"data-session-id": e.sid})
+	err := st.Dropped([]string{seedFile(t, "nobody.bin", 1)}, map[string]string{"data-session-id": e.sid, "data-file-drop-target": "terminal"})
 	if err == nil {
 		t.Fatalf("a drop with no renderer attached reported success")
 	}
@@ -885,7 +937,7 @@ type failingEmitter struct {
 
 func (f *failingEmitter) TabKind(string) (session.Kind, bool) { return session.KindRemote, true }
 
-func (f *failingEmitter) EmitFilesDropped(_ string, picks []SourcePick) error {
+func (f *failingEmitter) EmitFilesDropped(_, _ string, picks []SourcePick) error {
 	f.st.mu.Lock()
 	for _, p := range picks {
 		if e := f.st.entries[p.Ticket]; e != nil {
@@ -903,7 +955,7 @@ func TestFilesDropped_AnUndeliveredDropClosesItsHandles(t *testing.T) {
 	st := NewSourceTicketStore(em)
 	em.st = st
 	err := st.Dropped([]string{seedFile(t, "undelivered.bin", 3)},
-		map[string]string{"data-session-id": dropSessionID})
+		map[string]string{"data-session-id": dropSessionID, "data-file-drop-target": "terminal"})
 	if err == nil {
 		t.Fatal("a drop whose emit failed reported success")
 	}
@@ -932,7 +984,7 @@ func TestSourceTicketStore_ADroppedTicketCarriesItsTab(t *testing.T) {
 	em := remoteEmitter()
 	st := NewSourceTicketStore(em)
 	if err := st.Dropped([]string{seedFile(t, "bound.bin", 2)},
-		map[string]string{"data-session-id": dropSessionID}); err != nil {
+		map[string]string{"data-session-id": dropSessionID, "data-file-drop-target": "terminal"}); err != nil {
 		t.Fatalf("Dropped: %v", err)
 	}
 	src, ok := st.Claim(em.picks[0][0].Ticket)
@@ -958,7 +1010,7 @@ func TestFilesDropped_ALocalTabMintsNoTicket(t *testing.T) {
 	em := &recordingEmitter{kind: session.KindLocal}
 	st := NewSourceTicketStore(em)
 	if err := st.Dropped([]string{seedFile(t, "typed.txt", 3)},
-		map[string]string{"data-session-id": dropSessionID}); err != nil {
+		map[string]string{"data-session-id": dropSessionID, "data-file-drop-target": "terminal"}); err != nil {
 		t.Fatalf("Dropped: %v", err)
 	}
 	if st.Len() != 0 {
@@ -994,7 +1046,7 @@ func TestFilesDropped_ALocalTabCarriesTheAbsolutePath(t *testing.T) {
 	st := NewSourceTicketStore(em)
 	path := seedFile(t, "typed.txt", 3)
 	if err := st.Dropped([]string{path},
-		map[string]string{"data-session-id": dropSessionID}); err != nil {
+		map[string]string{"data-session-id": dropSessionID, "data-file-drop-target": "terminal"}); err != nil {
 		t.Fatalf("Dropped: %v", err)
 	}
 	if len(em.picks) != 1 || len(em.picks[0]) != 1 {
@@ -1021,7 +1073,7 @@ func TestFilesDropped_ARemoteTabCarriesNoPath(t *testing.T) {
 	st := NewSourceTicketStore(em)
 	path := seedFile(t, "secret.pem", 5)
 	if err := st.Dropped([]string{path},
-		map[string]string{"data-session-id": dropSessionID}); err != nil {
+		map[string]string{"data-session-id": dropSessionID, "data-file-drop-target": "terminal"}); err != nil {
 		t.Fatalf("Dropped: %v", err)
 	}
 	if len(em.picks) != 1 || len(em.picks[0]) != 1 {
@@ -1096,7 +1148,7 @@ func TestFilesDropped_RefusesATabThatIsNotOpen(t *testing.T) {
 	em := &recordingEmitter{unknown: true}
 	st := NewSourceTicketStore(em)
 	err := st.Dropped([]string{seedFile(t, "ghost.bin", 1)},
-		map[string]string{"data-session-id": dropSessionID})
+		map[string]string{"data-session-id": dropSessionID, "data-file-drop-target": "terminal"})
 	if err == nil {
 		t.Fatal("a drop on a session that is not open was accepted")
 	}
@@ -1121,11 +1173,11 @@ func TestFilesDropped_IsAddressedToTheTabItWasDroppedOn(t *testing.T) {
 
 	st := e.ws.UploadSources()
 	if err := st.Dropped([]string{seedFile(t, "for-a.bin", 1)},
-		map[string]string{"data-session-id": e.sid}); err != nil {
+		map[string]string{"data-session-id": e.sid, "data-file-drop-target": "terminal"}); err != nil {
 		t.Fatalf("Dropped on A: %v", err)
 	}
 	if err := st.Dropped([]string{seedFile(t, "for-b.bin", 2)},
-		map[string]string{"data-session-id": sidB}); err != nil {
+		map[string]string{"data-session-id": sidB, "data-file-drop-target": "terminal"}); err != nil {
 		t.Fatalf("Dropped on B: %v", err)
 	}
 

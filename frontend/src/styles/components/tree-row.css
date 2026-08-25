@@ -31,6 +31,36 @@
   border-radius: var(--control-radius-sm);
   cursor: default;
   color: var(--color-text);
+  /* A GUIDE PER LEVEL THE ROW IS INSIDE, one hairline at each indent step up
+     to its own depth.
+
+     Indentation alone cannot answer the question a tree is asked most often,
+     which is what CONTAINS this row. An empty folder that is expanded sits
+     immediately above its own siblings, and they are drawn at its depth with
+     their icons in its icon's column — so the folder reads as their parent
+     and its emptiness reads as "these are what is in it". The owner hit
+     exactly that: a new empty folder appeared to have swallowed every request
+     in the collection.
+
+     FROM THE SECOND LEVEL DOWN, not the first. Everything in a collection is
+     inside it, so a guide at the very left edge separates nothing — and it
+     lands in the column the selection plate starts in, where it reads as a
+     marker rather than as structure. The first guide therefore stands at one
+     indent step, which is the first boundary that is a fact about the row.
+
+     Drawn rather than counted: the gradient repeats every indent step and is
+     clipped to the row's own indent, so a row at depth 3 shows two guides and
+     one at depth 1 shows none, with no per-level markup and nothing for a
+     surface to keep in step. background-image, so the plate a hovered,
+     selected or focused row paints underneath still shows through. */
+  background-image: repeating-linear-gradient(
+    to right,
+    var(--color-divider) 0 1px,
+    transparent 1px var(--tree-row-indent)
+  );
+  background-repeat: no-repeat;
+  background-position-x: var(--tree-row-indent);
+  background-size: calc((var(--tree-row-depth) - 1) * var(--tree-row-indent)) 100%;
 }
 
 /* No font-size on the row on purpose: the name inherits its surroundings so a
@@ -42,9 +72,30 @@
 
 /* Selection is the persistent choice, focus the current keyboard target — a
    focused row reads stronger, and is ordered after so it wins at equal
-   specificity when a row is both. */
+   specificity when a row is both.
+
+   THE SELECTED ROW SPEAKS THE RAIL'S REGISTER, not hover's. It used to carry
+   --color-surface-hover, which is the token the row already takes under the
+   pointer: the open request was painted exactly like whatever the mouse
+   happened to be over, so on a tree of fifteen rows nothing said which one
+   was open. The plate is the environments rail's, which is the ghost
+   Button's --color-tab-active (button.css, nocx-dgsp) — deliberately the
+   TAB'S token and not the ghost hover one, because selected and hover sit
+   adjacent in a list and a shared plate is what makes the two states
+   indistinguishable.
+
+   THE PLATE IS THE WHOLE CHANGE. The rail also carries a 2px accent marker
+   on the leading edge; the tree does not take it. A tree row's leading edge
+   already means something — the indent says where the row is — and a second
+   mark in that column competes with it. */
 .ui-tree-row[data-selected='true'] {
-  background: var(--color-surface-hover);
+  background: var(--color-tab-active);
+}
+
+/* A selected row holds its plate under the pointer, like the tab strip's —
+   hover is for rows that are not the current one. */
+.ui-tree-row[data-selected='true']:hover {
+  background: var(--color-tab-active);
 }
 
 .ui-tree-row[data-focused='true'] {

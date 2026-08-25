@@ -30,9 +30,32 @@
  * What the two genuinely share is about 25 lines of keyboard handling; if a
  * third consumer ever appears, the thing to extract is that helper, not a
  * component.
+ *
+ * THE IDENTITY CONTRACT — the same one row-list.tsx states, bought a second
+ * time and in a worse way.
+ *
+ * Rows and panels are keyed by POSITION (`<Index>`), never by the item
+ * object, and each panel's `content` is captured ONCE for its position. The
+ * reason is what callers actually pass: an `items` array written inline in
+ * JSX. Any signal that expression reads — a label carrying a count, a status
+ * derived from the form — makes Solid rebuild the whole array on every
+ * keystroke, with brand-new item objects in it. Keyed by reference, `<For>`
+ * then disposed and rebuilt every panel, which destroyed the input the
+ * person was typing into: THE FOCUS LEFT THE FIELD AFTER EVERY CHARACTER.
+ * That is the defect this file was carrying, and it was reachable from any
+ * caller whose tab labels were not constants.
+ *
+ * A captured `content` closure does NOT go stale: it reads its own
+ * surface's props and signals, which are live. What it must not do is
+ * capture a VALUE — the same rule row-list states for `row()`.
+ *
+ * The consequence, stated so nobody has to rediscover it: the tab at a
+ * position is the same tab for the life of the component. Reordering the
+ * items array or swapping which section sits at index 2 is not supported —
+ * change what a section RENDERS, never which section a position is.
  */
 
-import { For, Show, type JSX } from 'solid-js'
+import { Index, Show, children, untrack, type JSX } from 'solid-js'
 import { Button } from './button'
 import { StatusDot } from './status-dot'
 
@@ -59,10 +82,34 @@ export interface TabsProps {
   onChange: (id: string) => void
   orientation?: 'vertical' | 'horizontal'
   ariaLabel?: string
+  /**
+   * A slot at the trailing end of the tab row — HORIZONTAL only.
+   *
+   * For what belongs to the WHOLE set of sections and is the same whichever
+   * one is open: the run card puts its status, size and elapsed here, and
+   * those three are facts about the exchange rather than about the view of it
+   * a person happens to have chosen.
+   *
+   * NOT for a control drawn on one tab only. That was this slot's first use —
+   * the request form's body kind and auth scheme — and it made the row that
+   * NAMES the sections also hold one section's contents, swapped under the
+   * tabs as a person moved between them. It also made the row overflow: the
+   * bar measured 566px in a 496px column and the excess travelled up until
+   * the surface drew a horizontal scrollbar (nocx-kdawd). A control present
+   * for exactly one section IS that section's content, and it belongs at the
+   * top of the panel it governs (nocx-n9npi). The test is mechanical: if what
+   * you are about to pass is wrapped in a `<Show when={active === …}>`, it
+   * does not go here.
+   *
+   * It sits beside the tablist and never inside it: a `tablist` whose
+   * children are not tabs is a broken one, so the row is a box holding both.
+   */
+  actions?: JSX.Element
 }
 
 export function Tabs(props: TabsProps) {
   const orientation = () => props.orientation ?? 'vertical'
+  const actions = children(() => props.actions)
 
   const move = (delta: number) => {
     const items = props.items
@@ -97,39 +144,56 @@ export function Tabs(props: TabsProps) {
 
   return (
     <div class="ui-tabs" data-orientation={orientation()}>
-      <div
-        class="ui-tabs__list"
-        role="tablist"
-        aria-orientation={orientation()}
-        aria-label={props.ariaLabel ?? undefined}
-        onKeyDown={onKeyDown}
-      >
-        {/* A row is a ghost Button with `selected` — which is what the settings
+      <div class="ui-tabs__bar">
+        <div
+          class="ui-tabs__list"
+          role="tablist"
+          aria-orientation={orientation()}
+          aria-label={props.ariaLabel ?? undefined}
+          onKeyDown={onKeyDown}
+        >
+          {/* A row is a ghost Button with `selected` — which is what the settings
             rail already is. A second way to draw "the current choice in a list"
             is the duplication the kit exists to prevent, and Button's own doc
             names this as its case. */}
-        <For each={props.items}>
-          {(item) => (
-            <Button
-              variant="ghost"
-              selected={props.active === item.id}
-              role="tab"
-              id={`ui-tab-${item.id}`}
-              aria-controls={`ui-tabpanel-${item.id}`}
-              // Roving tabindex: one tab stop for the whole list.
-              tabIndex={props.active === item.id ? 0 : -1}
-              onClick={() => props.onChange(item.id)}
-            >
-              <Show when={item.status} fallback={item.label}>
-                {(status) => (
-                  <StatusDot tone={status().tone} accessibleName={status().accessibleName}>
-                    {item.label}
-                  </StatusDot>
-                )}
-              </Show>
-            </Button>
-          )}
-        </For>
+          <Index each={props.items}>
+            {(item) => (
+              <Button
+                variant="ghost"
+                selected={props.active === item().id}
+                role="tab"
+                id={`ui-tab-${item().id}`}
+                aria-controls={`ui-tabpanel-${item().id}`}
+                // Roving tabindex: one tab stop for the whole list.
+                tabIndex={props.active === item().id ? 0 : -1}
+                onClick={() => props.onChange(item().id)}
+              >
+                {/* `item()` is read INSIDE the row, so a label that changes —
+                    a count, a dirty mark — updates the text in place instead
+                    of replacing the button. */}
+                <Show when={item().status} fallback={item().label}>
+                  {(status) => (
+                    <StatusDot tone={status().tone} accessibleName={status().accessibleName}>
+                      {item().label}
+                    </StatusDot>
+                  )}
+                </Show>
+              </Button>
+            )}
+          </Index>
+        </div>
+        {/* READ ONCE, THROUGH `children`. A JSX element passed as a prop is
+            a GETTER: every access re-creates the whole subtree it describes.
+            Guarding this with `<Show when={props.actions}>` read it twice
+            per evaluation — and re-evaluated whenever anything that subtree
+            read had changed, which for a control bound to the form being
+            edited is every keystroke. Each pass built two fresh Selects,
+            mounted one and left the other with its effects: the tab stopped
+            responding within a minute of typing.
+            `children()` is the kit's guarantee that it is read exactly once
+            however the caller wrote it, and the wrapper is unconditional
+            because an absent slot is a zero-width box that cannot leak. */}
+        <div class="ui-tabs__actions">{actions()}</div>
       </div>
       {/* Every section is still rendered (the content functions are called
           for all of them, so each keeps its own state), but only the active
@@ -144,21 +208,28 @@ export function Tabs(props: TabsProps) {
           they replaced — it only stops them contributing their size, which
           was the entire reason that choice was made and is now the point. */}
       <div class="ui-tabs__panels">
-        <For each={props.items}>
-          {(item) => (
-            <div
-              class="ui-tabs__panel"
-              role="tabpanel"
-              id={`ui-tabpanel-${item.id}`}
-              aria-labelledby={`ui-tab-${item.id}`}
-              data-active={props.active === item.id ? 'true' : undefined}
-              hidden={props.active !== item.id}
-              tabIndex={props.active === item.id ? 0 : -1}
-            >
-              {item.content()}
-            </div>
-          )}
-        </For>
+        <Index each={props.items}>
+          {(item) => {
+            // ONCE per position, and untracked so reading it never
+            // subscribes this panel to the array being rebuilt. Everything
+            // the section renders stays live: the closure reads its own
+            // surface's props, which are the reactive thing.
+            const content = untrack(() => item().content)
+            return (
+              <div
+                class="ui-tabs__panel"
+                role="tabpanel"
+                id={`ui-tabpanel-${item().id}`}
+                aria-labelledby={`ui-tab-${item().id}`}
+                data-active={props.active === item().id ? 'true' : undefined}
+                hidden={props.active !== item().id}
+                tabIndex={props.active === item().id ? 0 : -1}
+              >
+                {content()}
+              </div>
+            )
+          }}
+        </Index>
       </div>
     </div>
   )

@@ -1,0 +1,103 @@
+/* AnswerMarkdown (ui/README table) — the structure a model emits, painted
+   one completed line at a time inside an answer's body. Colours are tokens
+   only (ADR-0013 §4).
+
+   Every selector here is qualified by `data-md` or a `ui-md-` class, both of
+   which only ui/answer-markdown.ts writes. An answer line with no structure
+   carries neither, so a plain answer is untouched by this whole file — which
+   is the criterion, expressed in the cascade. */
+
+/* Headings. Weight carries the level, size barely does: an answer lives in a
+   scrollback row eight lines from a command, and a 2rem <h1> in that column
+   reads as a different application rather than as a title. */
+.term-line[data-md='h1'],
+.term-line[data-md='h2'],
+.term-line[data-md='h3'],
+.term-line[data-md='h4'],
+.term-line[data-md='h5'],
+.term-line[data-md='h6'] {
+  font-weight: 600;
+  color: var(--color-text);
+  margin-top: 8px;
+  /* `.term-line` pins line-height to the renderer's measured CELL HEIGHT so
+     a frozen row is one grid row. A heading is larger than a cell and would
+     sit clipped in that box — and an answer's rows are prose, never aligned
+     against the grid, so releasing the pitch here costs nothing the grid
+     rule was protecting. */
+  line-height: 1.35;
+  min-height: 0;
+}
+
+.term-line[data-md='h1'] {
+  font-size: 1.15em;
+}
+
+.term-line[data-md='h2'] {
+  font-size: 1.08em;
+}
+
+/* h3…h6 are the body size in bold. A model that nests six deep in a terminal
+   answer is not building a document, and inventing four more sizes would
+   only make the small ones illegible. */
+
+/* List items. The indent is the nesting the model wrote; the marker is
+   hung in it, so the text of every item at one level starts in one column.
+   The hanging is the MARKER'S OWN negative margin, never text-indent:
+   text-indent is inherited, and the marker is inline-block — a block
+   container — so a text-indent here would apply a second time to the
+   marker's first line and drag the glyph out through .cmd-children's
+   border-left into the gutter. */
+.term-line[data-md='li'] {
+  padding-left: calc(1.2em + var(--md-depth, 0) * 1.2em);
+}
+
+.term-line[data-md='li'][data-md-depth='1'] {
+  --md-depth: 1;
+}
+
+.term-line[data-md='li'][data-md-depth='2'] {
+  --md-depth: 2;
+}
+
+.term-line[data-md='li'][data-md-depth='3'] {
+  --md-depth: 3;
+}
+
+/* Deeper than three is clamped by having no rule: it renders at depth 3's
+   indent rather than marching off the right edge of a pane. */
+
+.ui-md-marker {
+  display: inline-block;
+  width: 1.2em;
+  margin-left: -1.2em;
+  color: var(--color-text-dim);
+}
+
+/* A quote. The rule on the left is the whole signal — a quote in an answer
+   is usually the model repeating something the person already wrote. */
+.term-line[data-md='quote'] {
+  padding-left: 10px;
+  border-left: 2px solid var(--color-border);
+  color: var(--color-text-muted);
+}
+
+/* Inline code. Monospace and a sunken ground, the same pair the kit's
+   CodeBlock uses — a span of code inside a sentence must read as code
+   without becoming a box. */
+.ui-md-code {
+  font-family: var(--font-family-mono);
+  font-size: 0.95em;
+  padding: 0 4px;
+  border-radius: 3px;
+  background: var(--color-surface-sunken);
+  color: var(--color-text);
+}
+
+.ui-md-strong {
+  font-weight: 600;
+  color: var(--color-text);
+}
+
+.ui-md-em {
+  font-style: italic;
+}

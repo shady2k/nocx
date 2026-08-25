@@ -203,7 +203,7 @@ means the handler keeps its injected seams and touches no domain store.
 | `shell.environmentObserved`                                       | Passport seam.                                                                                                    |
 | `shell.footprint.status` / `shell.footprint.uninstall`            | installedFacts / remoteUninstaller seams.                                                                         |
 | `shell.openUrl`                                                   | urlOpener seam.                                                                                                   |
-| `dialog.openFile`                                                 | dialogService seam.                                                                                               |
+| `dialog.openFile` / `dialog.openDirectory`                        | dialogService seam (one capability, one admission slot).                                                          |
 | `fs.complete`                                                     | Pure local path completion.                                                                                       |
 
 ## Code the migration worker must delete from the transport

@@ -222,7 +222,7 @@ func TestQueryEntriesKindExcludesEveryOtherKind(t *testing.T) {
 	shell := entryID(1)
 	agent := entryID(2)
 	submitAt(t, led, shell, "local", "/repo", content.EntryShell, "make test")
-	submitAt(t, led, agent, "local", "/repo", content.EntryAgent, "why did it fail")
+	submitAt(t, led, agent, "local", "/repo", content.EntryAsk, "why did it fail")
 
 	page := queryOK(t, led, content.LedgerQuery{
 		Scope: content.ScopeEverywhere, Kind: content.EntryShell, Limit: 10,

@@ -124,16 +124,25 @@ uses all three, strongest first:
   when the tool is about to be executed". This is where the arguments are visible and where
   the three outcomes live:
 
-- **refuse** — do not call `next`, **and return `ErrPolicyRefused`**. Withholding `next` is
-  not by itself terminal: a middleware must return something, and a `ToolOutput` with no
-  error becomes a tool result the model reads and works around. `ToolsNode` aborts on a
-  non-interrupt error rather than producing a tool message, so the category is what makes the
-  refusal a control decision; the run adapter terminalizes the attempt as `refused`, and no
-  second model request is made.
+- **refuse** — do not call `next`. **AMENDED 2026-08-24 (nocx-uvac6.1):** return a
+  nocx-owned TOOL RESULT in the refused call's own slot, with no error, and let the run
+  continue. The earlier decision required a refusal error because a tool result with no error
+  was treated as text the model could work around; the system prompt promises the opposite:
+  "a refusal is an answer", so the refusal-as-result is now the deliberate contract. The
+  distinction is structural: a refusal returns `(result, nil)`, while every real failure
+  remains on the error channel. No downstream code rediscovers a refusal category; the former
+  refusal error sentinel is deleted.
 - **stop the rest** — eino's sequential runner invokes every task and inspects errors only
-  afterwards, so the middleware carries a batch latch: after a refusal or an interrupt, later
-  calls in the same model response return without calling `next`. The framework's
-  `ExecuteSequentially` gives order, not short-circuiting.
+  afterwards, so the middleware carries a batch latch. **AMENDED 2026-08-24
+  (nocx-uvac6.1):** the latch trips for escalations only; a refusal is one call's answer and
+  every other call in the same response is decided on its own merits. This is a trade-off,
+  not an obsolete implementation detail: the narrowed rule was defence in depth, stopping
+  a pre-planned alternative route inside one response before any refusal result reached the
+  model. The current tool registry has no sequence where a refused call's forbidden resource
+  becomes reachable through another call in the same batch: a later call inherits no
+  arguments, output, scope or capability from the refused one. The system prompt still tells
+  the model never to route around a refusal, so that defence now lives in the prompt rather
+  than the refusal latch. `ExecuteSequentially` still gives order, not short-circuiting.
 - **escalate** — `StatefulInterrupt` **before** calling `next`, so the call that is asking has
   not run; approval resumes from the checkpoint as a **new attempt with
   a new grant**, never by mutating a running one (ADR-0020 §5).
@@ -152,6 +161,35 @@ middleware resolves the run's grant into a **scoped capability** and the tool ho
 that — so it cannot exceed the grant, because it never has more than it. Package privacy is
 not a substitute: Go's `internal` stops another package naming a symbol, not code in the
 same package calling it, and such a test rots at the first refactor.
+
+The prohibition on a rule over a tool name does not prohibit a backend
+classification of the **validated call**. The declaration remains the tool's
+worst-case effect, while the policy gate may lower that effect for a command
+carrier only when all of these conditions hold:
+
+- The command is split on the shell's own separators, and every subcommand
+  qualifies independently.
+- Lowering uses only a closed table of programs that cannot write in any
+  invocation. A program with an output-file option has a per-program guard
+  for that option.
+- A carrier of somebody else's program, an exec wrapper, command substitution,
+  redirection to a file, backgrounding, or `tee` keeps the declared worst case.
+- Matching is on whole tokens, so `ls` never matches `lsof`.
+- Anything unparsed keeps the declared worst case.
+
+This is sound because the parser is a backend mechanical gate, not a renderer
+or model-supplied effect. An alias or shell function can still **lie**: it is
+resolved by the person's shell, whose rc files nocx does not read. The bound is
+deliberate. A lowered call becomes `observe`, whose default policy remains
+"Ask every time"; a mistaken alias classification can lose only the blanket
+grant, never the question.
+
+Two independent reference implementations use the same shape. Claude Code
+keys a Bash rule on the command and saves it as permanent per repository and
+command, splitting compound commands and refusing prefix approval for exec
+wrappers. pi-permission-system layers Bash patterns with most-restrictive-wins
+and resolves an unparseable command to `ask`. These are evidence for the
+conditions above, not authority for the product's policy.
 
 **5. The ledger stays ours, and the framework's state is a projection.** eino owns run
 mechanics; ADR-0019 owns the record. Its checkpoints, message history and retries are
@@ -187,13 +225,23 @@ second implementation of iteration that is already written and tested.
 - **We inherit an upgrade cadence we do not control** on the most security-sensitive path in
   the product, and the surface is wider than two APIs: the agent driver, all four tool-wrapper
   shapes, `ToolsNode`'s error classification, sequential-versus-parallel execution, the
-  interrupt bookkeeping and the checkpoint format. A change to any of them is a break, and the
-  tests that prove never-declared, refusal-terminalizes and narrowing are what turn it into a
-  red build.
-- **Checkpoints are process-lifetime state, not records.** They are encrypted, deleted on
-  terminalization, swept at startup — and approval therefore does not survive a restart, which
-  is already what the recovery rule says. Durable approval would make a checkpoint an artifact
-  with its own version, retention and migration, and that is deliberately not v1.
+  interrupt bookkeeping and the checkpoint format. A change to any of them is a break, and
+  the tests that prove never-declared, refusal-as-result-and-continues, and narrowing are what
+  turn it into a red build.
+- **Checkpoints are process-lifetime state, not records.** They live in one in-memory store
+  keyed by run id, are deleted on terminalization, and are swept at startup by the store being
+  born empty — so approval does not survive a restart, which is already what the recovery rule
+  says. Durable approval would make a checkpoint an artifact with its own version, retention
+  and migration, and that is deliberately not v1.
+
+  This bullet said "encrypted" until 2026-08-22 (nocx-04g2d), and the store built for it
+  (`internal/assistant/checkpoints.go`) does not encrypt. The word was struck rather than
+  implemented: the blob sits in the same address space that already holds the run's messages,
+  the question and the model's answer in the clear, so a key held beside it protects nothing
+  from anyone who can read the rest. Encryption is a property of the ledger AT REST
+  (ADR-0018), where the threat is a file somebody else can open; a checkpoint is never at
+  rest. If a checkpoint ever becomes durable, this decision is reopened with it.
+
 - **v1 permits ordinary invokable tools only.** `adk` wraps four tool shapes through four
   methods; a streaming or enhanced tool added later would route around a single installed
   wrapper. Registration refuses the other shapes until each is wrapped and tested.

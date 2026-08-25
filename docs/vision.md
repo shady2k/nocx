@@ -123,6 +123,9 @@ carrying `mvp` in beads are the authoritative list; this section is the prose ve
 - Scrollback + find-in-output (search)
 - Semantic command line: in-band validation, completion, ghost-text — `nocx-w7h`
 - Configurable vertical tab placement — `nocx-d3q`
+- API testing: a collection is a folder of files you own, imported from Postman,
+  curl or a URL, and sent from this machine or through an SSH connection already
+  open — no account, and no credential in the folder — `nocx-h8jzd`
 
 ### OUT (non-goals)
 
@@ -135,7 +138,7 @@ carrying `mvp` in beads are the authoritative list; this section is the prose ve
 Phases as one-liners. The detailed, executable backlog lives in **beads**, not in this doc.
 
 - **Phase 1 — MVP.** Local terminal with agent-TUI-grade rendering, tabs/cwd features, SSH client, GUI config, a CodeMirror 6 command editor with Warp-style blocks, the secrets vault, and Warpify-style UX in nested shells. macOS.
-- **Phase 2 — Comfort layer.** Splits/panes + scrollback search + the semantic command line.
+- **Phase 2 — Comfort layer.** Splits/panes + scrollback search + the semantic command line + API testing without an account.
 - **Phase 3 — Ask an agent + reach.** Natural-language query from the terminal to any AI model the user chooses — bring-your-own, including a fully local model; expand to Windows / Linux.
 
 ## 7. Tech stack

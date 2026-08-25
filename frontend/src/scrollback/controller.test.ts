@@ -6,6 +6,7 @@ import { CommandSnapshotStore } from '../command-snapshot'
 import type { LiveContentHeightSpy } from '../test-support/panes-fixtures'
 import type { ExecutionAttempt } from '../lifecycle/state'
 import { mintDomain, type IntegrationDomain } from '../lifecycle/domains'
+import { BufferLine } from './test-helpers'
 
 function makeRenderer(): TerminalRenderer {
   return {
@@ -103,6 +104,117 @@ describe('ScrollbackController restorePast (nocx-l21ib.3)', () => {
     controller.scrollbackArea.scrollTo = scrollTo
     controller.restorePast([])
     expect(scrollTo).not.toHaveBeenCalled()
+    expect(controller.scrollbackInner.querySelector('.scrollback-restore-boundary')).toBeNull()
+  })
+})
+
+// ── `clear` empties the WHOLE scrollback (nocx-0zb1m) ─────────────────────
+// The restored past used to be inserted past the manager, straight into
+// `.scrollback-inner`, so `clearAll` — which walks what the manager holds —
+// could not see it: `clear` ran, got its own block, and the previous
+// session stayed on screen under its boundary. One owner is the fix, so
+// these tests are about what the CONTAINER holds after the clear path, not
+// about which list the manager kept it in.
+describe('clear empties the whole scrollback, restored blocks included (nocx-0zb1m)', () => {
+  /** A restored block as `restoredBlock()` builds one: a `.cmd-block`
+   *  carrying `data-restored`. */
+  const restored = (label: string): HTMLElement => {
+    const el = document.createElement('div')
+    el.className = 'cmd-block'
+    el.dataset.restored = 'true'
+    el.textContent = label
+    return el
+  }
+
+  function makeRestoredController() {
+    const { controller } = makeController()
+    const scrollTo = vi.fn()
+    controller.scrollbackArea.scrollTo = scrollTo
+    Object.defineProperty(controller.scrollbackArea, 'scrollHeight', {
+      value: 4000,
+      configurable: true,
+    })
+    return { controller, scrollTo }
+  }
+
+  it('takes the restored blocks and their boundary with it', () => {
+    const { controller } = makeRestoredController()
+    controller.restorePast([restored('oldest'), restored('newest')])
+    controller.blockManager.startBlock('clear', '~', 0)
+    expect(controller.scrollbackInner.querySelectorAll('[data-restored]').length).toBe(2)
+
+    controller.maybeClear('clear')
+
+    expect(controller.scrollbackInner.querySelectorAll('[data-restored]').length).toBe(0)
+    expect(controller.scrollbackInner.querySelector('.scrollback-restore-boundary')).toBeNull()
+    expect(controller.scrollbackInner.querySelectorAll('.cmd-block').length).toBe(0)
+  })
+
+  it('and a frozen block goes too — the freeze swaps the element the manager owns', () => {
+    const { controller } = makeRestoredController()
+    controller.restorePast([restored('old')])
+    controller.blockManager.startBlock('ls', '~', 0)
+    controller.blockManager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
+    expect(controller.scrollbackInner.querySelectorAll('.cmd-block').length).toBe(2)
+
+    controller.maybeClear('clear')
+
+    expect(controller.scrollbackInner.querySelectorAll('.cmd-block').length).toBe(0)
+    expect(controller.scrollbackInner.querySelector('.scrollback-restore-boundary')).toBeNull()
+  })
+
+  it('restoration itself is unchanged: the past is above the present, the boundary between them', () => {
+    const { controller, scrollTo } = makeRestoredController()
+    // A pane that has already printed something: the past must not land
+    // underneath its present.
+    const live = controller.blockManager.startBlock('echo hi', '~', 0).el
+
+    controller.restorePast([restored('oldest'), restored('newest')])
+
+    const kids = Array.from(controller.scrollbackInner.children)
+    const boundary = controller.scrollbackInner.querySelector('.scrollback-restore-boundary')
+    expect(boundary?.textContent).toBe('Previous session')
+    // oldest, newest, boundary, ... live block ... — the past above, the
+    // line that labels it directly under it, the live session below.
+    expect(kids.slice(0, 3).map((k) => k.textContent)).toEqual([
+      'oldest',
+      'newest',
+      'Previous session',
+    ])
+    expect(kids.indexOf(live)).toBeGreaterThan(kids.indexOf(boundary as Element))
+    // And the view still lands at the newest block.
+    expect(scrollTo).toHaveBeenCalledWith({ top: 4000, behavior: 'instant' })
+  })
+
+  it('a clear in a pane with NO restored past still clears exactly what it did before', () => {
+    const { controller } = makeRestoredController()
+    controller.blockManager.startBlock('ls', '~', 0)
+    controller.blockManager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
+    controller.blockManager.startBlock('clear', '~', 0)
+
+    controller.maybeClear('clear')
+
+    expect(controller.blockManager.blocks.length).toBe(0)
+    expect(controller.blockManager.runningBlock).toBeNull()
+    expect(controller.scrollbackInner.querySelectorAll('.cmd-block').length).toBe(0)
+    // The chrome the manager anchors on is NOT the manager's to remove.
+    expect(controller.scrollbackInner.querySelector('.xterm-live-container')).not.toBeNull()
+    expect(controller.scrollbackInner.querySelector('.scrollback-separator')).not.toBeNull()
+  })
+
+  it('a restore into a pane that has already been cleared still draws the past', () => {
+    const { controller } = makeRestoredController()
+    controller.blockManager.startBlock('clear', '~', 0)
+    controller.maybeClear('clear')
+
+    controller.restorePast([restored('oldest'), restored('newest')])
+
+    expect(controller.scrollbackInner.querySelectorAll('[data-restored]').length).toBe(2)
+    expect(controller.scrollbackInner.querySelector('.scrollback-restore-boundary')).not.toBeNull()
+    // And a second clear takes that past too — the registration is not a
+    // one-shot that only the first restore gets.
+    controller.maybeClear('clear')
+    expect(controller.scrollbackInner.querySelectorAll('[data-restored]').length).toBe(0)
     expect(controller.scrollbackInner.querySelector('.scrollback-restore-boundary')).toBeNull()
   })
 })

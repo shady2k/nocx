@@ -10,8 +10,11 @@ import type { HistoryQuery } from './generated/history.query'
 import type { ExecutionAttempt, LifecycleFact } from './lifecycle/state'
 import { mintDomain, type IntegrationDomain } from './lifecycle/domains'
 import type { WSClient } from './ipc'
+import { log } from './log'
 function fakeClient(): { call: ReturnType<typeof vi.fn> } {
-  return { call: vi.fn().mockResolvedValue({}) }
+  // The ack confirms the minted source (a schema-valid minimal shape); a
+  // test that exercises the mismatch path overrides it.
+  return { call: vi.fn().mockResolvedValue({ source: 'user' }) }
 }
 
 // The authority: an authenticated attempt. Its domain is branded (only the
@@ -40,6 +43,7 @@ function completedRecord(overrides: Partial<CommandRecord> = {}): CommandRecord 
     id: 7,
     command: 'make deploy',
     cwd: '/repo',
+    author: 'shell',
     host: '',
     status: 'success',
     exitCode: 0,
@@ -60,9 +64,11 @@ describe('recordCommand', () => {
     const [method, params] = client.call.mock.calls[0] as [string, Record<string, unknown>]
     expect(method).toBe('history.record')
     expect(params).toEqual({
+      attemptId: 'att-7',
       command: 'make deploy',
       cwd: '/repo',
       host: '',
+      source: 'user',
       status: 'success',
       exitCode: 0,
       // performance.now() floats are rounded at the wire boundary — the
@@ -71,6 +77,21 @@ describe('recordCommand', () => {
       endedAt: 1201,
       paneId: 'tab-1',
     })
+  })
+
+  it("the record's author crosses as the ledger's source — one mapping, never re-derived (nocx-iadtt)", () => {
+    // An agent-submitted command's record carries author 'agent'; the wire
+    // fact is the ledger's entries.source vocabulary — 'assistant' — and
+    // the mapping lives HERE, at the wire: the display vocabulary and the
+    // store's source is one fact in two words, and deriving the wire value
+    // from the kind again would repaint the defect the source column
+    // exists to remove (nocx-dc2fr).
+    const client = fakeClient()
+    client.call.mockResolvedValue({ source: 'assistant' })
+    const rec = completedRecord({ author: 'agent' })
+    void recordCommand(client as unknown as WSClient, 'tab-1', rec, completedAttempt())
+    const [, params] = client.call.mock.calls[0] as [string, Record<string, unknown>]
+    expect(params.source).toBe('assistant')
   })
 
   it('never sends the session-owned fields (id, lineOf, disposed) or output', () => {
@@ -87,12 +108,14 @@ describe('recordCommand', () => {
     expect(params).not.toHaveProperty('disposed')
     expect(params).not.toHaveProperty('output')
     expect(Object.keys(params as object).sort()).toEqual([
+      'attemptId',
       'command',
       'cwd',
       'endedAt',
       'exitCode',
       'host',
       'paneId',
+      'source',
       'startedAt',
       'status',
     ])
@@ -146,6 +169,43 @@ describe('recordCommand', () => {
     void recordCommand(client as unknown as WSClient, 'tab-1', rec, completedAttempt())
     const [, params] = client.call.mock.calls[0] as [string, Record<string, unknown>]
     expect(params.command).toBe('make deploy {{secret:ci-token}}')
+  })
+
+  it('returns the ack when it confirms the minted source — the echo is the verification (nocx-iadtt)', async () => {
+    const client = fakeClient()
+    const ack = {
+      source: 'user',
+      maskedCount: 0,
+      maskedKinds: [],
+      entryId: '',
+      redactions: [],
+      maskedCommand: 'make deploy',
+      captures: [],
+    }
+    client.call.mockResolvedValue(ack)
+    await expect(
+      recordCommand(client as unknown as WSClient, 'tab-1', completedRecord(), completedAttempt()),
+    ).resolves.toEqual(ack)
+  })
+
+  it('refuses an ack whose source contradicts the minted record — a wire-integrity failure, not a recoverable difference (nocx-iadtt)', async () => {
+    const client = fakeClient()
+    client.call.mockResolvedValue({ source: 'user' })
+    const warn = vi.spyOn(log, 'warn').mockImplementation(() => {})
+    try {
+      await expect(
+        recordCommand(
+          client as unknown as WSClient,
+          'tab-1',
+          completedRecord({ author: 'agent' }),
+          completedAttempt(),
+        ),
+      ).resolves.toBeNull()
+      expect(warn).toHaveBeenCalledTimes(1)
+      expect(warn.mock.calls[0]?.[0]).toContain('ack source mismatch')
+    } finally {
+      warn.mockRestore()
+    }
   })
 
   it('an open or abandoned attempt persists nothing — only a completed attempt is authority', async () => {

@@ -138,6 +138,22 @@ describe('TextField', () => {
   })
 
   // ── Multiline (textarea) variance ──────────────────────────────────
+  // A multiline field holds one of two kinds of content and they want
+  // opposite treatment: VERBATIM MATERIAL (a pasted private key) must stay
+  // on the lines it came on, and PROSE (a person's standing instructions to
+  // the assistant) must wrap to the box. The default is verbatim, because
+  // that is what the first caller pastes and a wrapped key reads as a
+  // different key.
+  it('keeps multiline content on its own lines by default', () => {
+    const { container } = subject({ multiline: true, value: 'a very long line' })
+    expect(container.querySelector('.ui-text-field')!.getAttribute('data-wrap')).toBeNull()
+  })
+
+  it('marks a prose field as wrapping', () => {
+    const { container } = subject({ multiline: true, wrap: true, value: 'a very long line' })
+    expect(container.querySelector('.ui-text-field')!.getAttribute('data-wrap')).toBe('true')
+  })
+
   it('renders a textarea when multiline is set', () => {
     subject({ multiline: true, value: 'key content' })
     const input = screen.getByRole('textbox')
@@ -279,5 +295,150 @@ describe('composition with Field', () => {
     const label = container.querySelector('label')
     expect(label?.getAttribute('for')).toBe('cred-y')
     expect(label?.textContent?.trim()).toBe('Name')
+  })
+})
+
+/**
+ * The commit gesture (nocx-gihi6). A field whose value is WRITTEN rather than
+ * merely validated cannot write per keystroke — the Agent policy page's scope
+ * field is checked by `ParseEffectPolicy`, which rejects a non-absolute path,
+ * so a half-typed `/w` would be a refused write and a toast on every character
+ * of `/workspace`. Blur and Enter are the same gesture ("I am done with this
+ * value") and the kit says so once, rather than every caller pairing `onBlur`
+ * with a hand-rolled keydown.
+ */
+describe('TextField commit gesture', () => {
+  it('commits on blur, with the field value', () => {
+    const onCommit = vi.fn()
+    subject({ value: '/workspace', onCommit })
+    fireEvent.blur(screen.getByRole('textbox'))
+    expect(onCommit).toHaveBeenCalledWith('/workspace')
+  })
+
+  it('commits on Enter without waiting for focus to leave', () => {
+    const onCommit = vi.fn()
+    subject({ value: '/workspace', onCommit })
+    fireEvent.keyDown(screen.getByRole('textbox'), { key: 'Enter' })
+    expect(onCommit).toHaveBeenCalledWith('/workspace')
+  })
+
+  it('does not commit on any other key', () => {
+    const onCommit = vi.fn()
+    subject({ value: '/w', onCommit })
+    const input = screen.getByRole('textbox')
+    fireEvent.keyDown(input, { key: 'w' })
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it('does not commit per keystroke', () => {
+    const onCommit = vi.fn()
+    const onInput = vi.fn()
+    subject({ value: '', onCommit, onInput })
+    fireEvent.input(screen.getByRole('textbox'), { target: { value: '/w' } })
+    expect(onInput).toHaveBeenCalledTimes(1)
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+
+  it('leaves onBlur alone: a caller using both gets both', () => {
+    const onBlur = vi.fn()
+    const onCommit = vi.fn()
+    subject({ value: 'x', onBlur, onCommit })
+    fireEvent.blur(screen.getByRole('textbox'))
+    expect(onBlur).toHaveBeenCalledWith('x')
+    expect(onCommit).toHaveBeenCalledWith('x')
+  })
+
+  it('commits a multiline value on blur, and never on Enter — Enter is a newline there', () => {
+    const onCommit = vi.fn()
+    subject({ value: 'a note', multiline: true, onCommit })
+    const area = screen.getByRole('textbox')
+    fireEvent.keyDown(area, { key: 'Enter' })
+    expect(onCommit).not.toHaveBeenCalled()
+    fireEvent.blur(area)
+    expect(onCommit).toHaveBeenCalledWith('a note')
+  })
+})
+
+describe('marks — the ink layer', () => {
+  const inkOf = (container: HTMLElement) =>
+    container.querySelector<HTMLElement>('.ui-text-field__ink')
+
+  it('paints the marked run and leaves the rest plain', () => {
+    const { container } = render(() => (
+      <TextField id="u" value="{{baseUrl}}/zen" marks={[{ from: 0, to: 11 }]} />
+    ))
+    const ink = inkOf(container)
+    expect(ink?.textContent).toBe('{{baseUrl}}/zen')
+    const marks = ink?.querySelectorAll('.ui-text-field__mark') ?? []
+    expect(marks.length).toBe(1)
+    expect(marks[0].textContent).toBe('{{baseUrl}}')
+  })
+
+  it('the ink says the same text as the value, character for character', () => {
+    // The two layers are only ever aligned because they hold the same
+    // characters; a run dropped or doubled here is a highlight sitting over
+    // the wrong part of the address.
+    const value = 'a{{x}}b{{y}}c'
+    const { container } = render(() => (
+      <TextField
+        id="u"
+        value={value}
+        marks={[
+          { from: 1, to: 6 },
+          { from: 7, to: 12 },
+        ]}
+      />
+    ))
+    expect(inkOf(container)?.textContent).toBe(value)
+  })
+
+  it('marks the control so the input gives up its glyphs', () => {
+    const { container } = render(() => (
+      <TextField id="u" value="{{a}}" marks={[{ from: 0, to: 5 }]} />
+    ))
+    expect(container.querySelector('.ui-text-field__control')?.getAttribute('data-ink')).toBe(
+      'true',
+    )
+  })
+
+  it('draws no layer at all without marks', () => {
+    const { container } = render(() => <TextField id="u" value="{{a}}" />)
+    expect(inkOf(container)).toBeNull()
+    expect(container.querySelector('.ui-text-field__control')?.hasAttribute('data-ink')).toBe(false)
+  })
+
+  it('ignores a mark that does not land inside the value', () => {
+    // A stale mark is a caller that has not caught up. Painting it anyway
+    // would put a highlight over characters it was never about.
+    const { container } = render(() => (
+      <TextField id="u" value="short" marks={[{ from: 2, to: 99 }]} />
+    ))
+    expect(inkOf(container)?.textContent).toBe('short')
+    expect(inkOf(container)?.querySelectorAll('.ui-text-field__mark').length).toBe(0)
+  })
+
+  it('ignores marks that go backwards or overlap the previous one', () => {
+    const { container } = render(() => (
+      <TextField
+        id="u"
+        value="abcdef"
+        marks={[
+          { from: 2, to: 4 },
+          { from: 3, to: 5 },
+          { from: 4, to: 4 },
+        ]}
+      />
+    ))
+    const ink = inkOf(container)
+    expect(ink?.textContent).toBe('abcdef')
+    expect(ink?.querySelectorAll('.ui-text-field__mark').length).toBe(1)
+  })
+
+  it('a multiline field has no ink — it scrolls in two dimensions', () => {
+    const { container } = render(() => (
+      <TextField id="u" multiline value="{{a}}" marks={[{ from: 0, to: 5 }]} />
+    ))
+    expect(inkOf(container)).toBeNull()
   })
 })

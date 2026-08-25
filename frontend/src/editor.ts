@@ -23,6 +23,7 @@ import {
   type UnresolvedSpan,
 } from './unresolved-redactions'
 import type { SubmitPlan } from './submit'
+import type { ModelChipState } from './agent-readiness'
 
 /**
  * The indent a pasted command arrives with, when it arrives at the very
@@ -72,6 +73,20 @@ export interface EditorActions {
   // Without it, Ctrl-C in the editor is a no-op and the stale text corrupts
   // the next command.
   cancel: () => void
+  /** The host's first refusal on Escape, before the editor clears the draft.
+   *  Return true to consume the key.
+   *
+   *  It exists because Escape has one more meaning than the editor knows
+   *  about: when the editor was SUMMONED over a running command
+   *  (nocx-92gfl), Escape means "put this away and give the keys back to the
+   *  process" — and it must not throw the half-typed question away on the
+   *  way out. Anywhere else the host declines and Escape is the clear it has
+   *  always been.
+   *
+   *  Consulted from BOTH Escape entry points — the editor's own keydown and
+   *  the host's document rescue — so the decision order is one order and not
+   *  two (AD-8). The editor stays passive: it asks, it does not decide. */
+  onEscape?: () => boolean
   /** Fired on every user-driven document change with the current value.
    *  Use to drive external filter logic without coupling the data source
    *  to the editor. */
@@ -146,19 +161,16 @@ export interface EditorActions {
    *  untouched, and the next plain Enter goes wherever the person just
    *  put it. */
   onToggleTarget?: () => void
-  /** A reference chip's drop control: the host removes that chip (the
-   *  chip is data the host owns; this only reports the dismissal). */
-  onDismissChip?: (id: string) => void
 }
 
 export class CommandEditor {
   readonly root: HTMLElement
-  private view: EditorView
   private chrome: HTMLElement
-  /** The reference chip strip (nocx-4wtlh): the chips a selection raises,
-   *  rendered between the chrome row and the input. The chips are DATA the
-   *  host owns; this container is their surface. Hidden while empty. */
-  private referencesEl: HTMLElement
+  private view: EditorView
+
+  /** The permanent grant chip in the chrome row. */
+  private grantChip: HTMLButtonElement
+  private _onGrantChipClick: (() => void) | null = null
   /** Left chip group: the location + cwd chips sit together, the clock
    *  keeps the right edge of the chrome row. */
   private chromeLeft: HTMLElement
@@ -170,6 +182,24 @@ export class CommandEditor {
    *  popover (nocx-atyf.2). */
   private recoveryChip: HTMLButtonElement
   private _recoveryOnClick: (() => void) | null = null
+  /** The model chip pair (nocx-rikz5): the endpoint that will answer and
+   *  the model it will answer with, or — when the answering role does not
+   *  resolve — one chip carrying the rung of the ladder the person is on.
+   *  Buttons, because they are controls: a chip that navigates must be
+   *  reachable by keyboard, and `recoveryChip` above is the precedent.
+   *  Hidden until setModelChip is called with a state, exactly as
+   *  locationChip is, so the row's height never moves (nocx-6c546). */
+  private modelEndpointChip: HTMLButtonElement
+  private modelChip: HTMLButtonElement
+  /** Where each chip goes when clicked. STORED rather than captured in a
+   *  closure: the chips' meaning changes with every state while the
+   *  listeners are permanent. Re-adding a listener per state change is how
+   *  one click ends up firing three times. */
+  private _modelChipTargets: {
+    endpoint: 'endpoints' | 'roles' | null
+    model: 'endpoints' | 'roles' | null
+  } = { endpoint: null, model: null }
+  private _onModelChipClick: ((page: 'endpoints' | 'roles') => void) | null = null
   /** Where the pending command would land: the SAME string the block header
    *  shows (routed from locationLine, never derived a second way). Empty
    *  for a local session, where the absence of a chip is the information. */
@@ -307,6 +337,14 @@ export class CommandEditor {
     this.cwdChip.className = 'nocx-chip nocx-editor-cwd'
     this.cwdChip.textContent = '📁 ~'
 
+    this.grantChip = document.createElement('button')
+    this.grantChip.type = 'button'
+    this.grantChip.className = 'nocx-chip nocx-editor-grant'
+    this.grantChip.dataset.state = 'default'
+    this.grantChip.textContent = 'marked for the question · 0'
+    this.grantChip.title = 'Open the marked blocks'
+    this.grantChip.setAttribute('aria-label', 'marked for the question · 0')
+    this.grantChip.addEventListener('click', () => this._onGrantChipClick?.())
     this.timeChip = document.createElement('span')
     this.timeChip.className = 'nocx-chip nocx-editor-time'
 
@@ -316,19 +354,38 @@ export class CommandEditor {
     this.recoveryChip.style.display = 'none'
     this.recoveryChip.addEventListener('click', () => this._recoveryOnClick?.())
 
-    this.chromeLeft.append(this.recoveryChip, this.locationChip, this.cwdChip)
+    // The model that will answer, and the way to change it (nocx-rikz5).
+    // The same .nocx-chip family as every other chip in this row: the row
+    // has no ui-badge in it and must not grow one — two visual grammars in
+    // one row is worse than one old grammar.
+    this.modelEndpointChip = document.createElement('button')
+    this.modelEndpointChip.type = 'button'
+    this.modelEndpointChip.className = 'nocx-chip nocx-editor-model'
+    this.modelEndpointChip.style.display = 'none'
+    this.modelEndpointChip.addEventListener('click', () => {
+      const page = this._modelChipTargets.endpoint
+      if (page) this._onModelChipClick?.(page)
+    })
+
+    this.modelChip = document.createElement('button')
+    this.modelChip.type = 'button'
+    this.modelChip.className = 'nocx-chip nocx-editor-model'
+    this.modelChip.style.display = 'none'
+    this.modelChip.addEventListener('click', () => {
+      const page = this._modelChipTargets.model
+      if (page) this._onModelChipClick?.(page)
+    })
+
+    this.chromeLeft.append(
+      this.recoveryChip,
+      this.locationChip,
+      this.cwdChip,
+      this.modelEndpointChip,
+      this.modelChip,
+      this.grantChip,
+    )
     this.chrome.append(this.chromeLeft, this.timeChip)
     this.root.appendChild(this.chrome)
-
-    // ── Reference chip strip (nocx-4wtlh) ─────────────────────────────
-    // Between the chrome and the input: part of the input surface, never
-    // floating over it. Rendered by setReferenceChips; the host owns the
-    // chips' lifecycle (selection raises them, a question consumes them,
-    // a cleared scrollback takes their blocks).
-    this.referencesEl = document.createElement('div')
-    this.referencesEl.className = 'nocx-editor-references'
-    this.referencesEl.style.display = 'none'
-    this.root.appendChild(this.referencesEl)
 
     // ── CodeMirror 6 surface (ADR-0010) ────────────────────────────────
     // The extension list is a constructor parameter: the editor must not
@@ -452,6 +509,69 @@ export class CommandEditor {
     this.recoveryChip.textContent = label
   }
 
+  /** Where a model chip's click goes. Installed once by the host; the
+   *  chips themselves carry no destination — they read the slot the last
+   *  setModelChip wrote. */
+  onModelChipClick(handler: (page: 'endpoints' | 'roles') => void): void {
+    this._onModelChipClick = handler
+  }
+
+  /**
+   * The model chip's ONE writer (nocx-rikz5). Null hides both chips — the
+   * state a Run target is in, where no model answers anything and a chip
+   * claiming one would be decoration.
+   */
+  setModelChip(state: ModelChipState | null): void {
+    this._modelChipTargets = { endpoint: null, model: null }
+    if (state === null) {
+      this.modelEndpointChip.style.display = 'none'
+      this.modelChip.style.display = 'none'
+      return
+    }
+    if (state.kind === 'ready') {
+      this._modelChipTargets = { endpoint: 'endpoints', model: 'roles' }
+      this.modelEndpointChip.disabled = false
+      this.modelEndpointChip.style.display = ''
+      this.modelEndpointChip.textContent = state.endpoint
+      this.modelEndpointChip.title = state.endpoint
+      this.modelEndpointChip.setAttribute(
+        'aria-label',
+        `Answers with ${state.endpoint}. Open Endpoints.`,
+      )
+      // The id is long and must not wrap: a wrapped chip is the layout
+      // shift the row's single height exists to prevent. The CSS truncates
+      // it; the title and the accessible name carry the whole value, so
+      // nothing a person needs is only in the ellipsis.
+      this.modelChip.disabled = false
+      this.modelChip.style.display = ''
+      this.modelChip.textContent = state.model
+      this.modelChip.title = state.model
+      this.modelChip.setAttribute(
+        'aria-label',
+        `Answers with the model ${state.model}. Open Roles.`,
+      )
+      return
+    }
+    // An action rung. A rung with no destination ('unavailable') is not a
+    // control: a button that leads nowhere invites a click that does
+    // nothing, which reads as the app being broken rather than the store
+    // being unreadable. `disabled` is reset on the way OUT of that state
+    // too (the ready branch above) — a chip that stayed dead after the
+    // store came back would be the same defect with a longer fuse.
+    this._modelChipTargets = { endpoint: null, model: state.page }
+    this.modelEndpointChip.style.display = 'none'
+    this.modelChip.disabled = state.page === null
+    this.modelChip.style.display = ''
+    this.modelChip.textContent = state.text
+    this.modelChip.title = state.text
+    // No "Opens settings." when nothing opens: the accessible name may not
+    // promise an action the chip does not have.
+    this.modelChip.setAttribute(
+      'aria-label',
+      state.page === null ? state.text : `${state.text}. Opens settings.`,
+    )
+  }
+
   /** Update the cwd chip text. Uses the same short directoryLabel shape. */
   setCwd(cwd: string): void {
     const path = cwd.trim().replace(/\/+$/, '') || '~'
@@ -506,6 +626,15 @@ export class CommandEditor {
     // stale findings after a clear; programmatic clears fire no input
     // events, so this is the one seam that tells the host.
     this.actions.onDocCleared?.()
+  }
+
+  /** Clear the document through the same seam a submit uses: programmatic,
+   *  firing no input events, but announcing the clear (onDocCleared) so
+   *  the host's floating surfaces hold no stale findings over the empty
+   *  line. The per-target draft swap uses this for a target with no saved
+   *  draft (nocx-4ff.7) — the incoming mode's line is genuinely empty. */
+  clear(): void {
+    this.clearDoc()
   }
 
   /** True while a beforeSubmit verdict is in flight: a second Enter in that
@@ -760,10 +889,12 @@ export class CommandEditor {
       e.stopPropagation()
       return
     }
-    // Escape clears the draft without interrupting the shell (Ctrl-C).
+    // Escape clears the draft without interrupting the shell (Ctrl-C) —
+    // unless the host claims the key first (onEscape).
     if (e.key === 'Escape') {
       e.preventDefault()
       e.stopPropagation()
+      if (this.actions.onEscape?.()) return
       this.escapeClear()
       return
     }
@@ -811,6 +942,10 @@ export class CommandEditor {
   handleExternalEscape(e: KeyboardEvent): boolean {
     if (e.isComposing || e.keyCode === 229) return false
     if (this.keyArbiter?.(e)) return true
+    // The same order the internal path takes: the host's claim, then the
+    // clear. A summoned editor dismissed from out here leaves nothing to
+    // focus, so the focus call belongs after the claim, not before it.
+    if (this.actions.onEscape?.()) return true
     this.escapeClear()
     this.view.focus()
     return true
@@ -1006,40 +1141,16 @@ export class CommandEditor {
     return this.root.contains(el)
   }
 
-  /** Render the reference chips the host owns (nocx-4wtlh). Each chip is
-   *  the kit's nocx-chip identity with a drop control; the strip hides
-   *  itself when empty. The host re-renders on every add/remove — the
-   *  chips are a short list and the strip is their only surface. */
-  setReferenceChips(chips: ReadonlyArray<{ id: string; label: string }>): void {
-    this.referencesEl.replaceChildren()
-    if (chips.length === 0) {
-      this.referencesEl.style.display = 'none'
-      return
-    }
-    this.referencesEl.style.display = ''
-    for (const chip of chips) {
-      const el = document.createElement('span')
-      el.className = 'nocx-chip nocx-editor-reference-chip'
-      el.dataset.chipId = chip.id
-      el.title = chip.label
-      const name = document.createElement('span')
-      name.className = 'nocx-editor-reference-chip__name'
-      name.textContent = chip.label
-      const drop = document.createElement('button')
-      drop.type = 'button'
-      drop.className = 'nocx-editor-reference-chip__drop'
-      drop.textContent = '×'
-      drop.setAttribute('aria-label', `remove reference ${chip.label}`)
-      drop.addEventListener('click', () => this.actions.onDismissChip?.(chip.id))
-      el.append(name, drop)
-      this.referencesEl.appendChild(el)
-    }
+  /** Install the host's grant-popover opener once. */
+  onGrantChipClick(handler: () => void): void {
+    this._onGrantChipClick = handler
   }
 
-  /** Drop every reference chip (the host consumed them — a question
-   *  carried them, or a cleared scrollback took their blocks). */
-  clearReferenceChips(): void {
-    this.setReferenceChips([])
+  /** Render the permanent grant chip; its state is a typed data attribute. */
+  setGrantCount(count: number): void {
+    this.grantChip.dataset.state = count === 0 ? 'default' : 'chosen'
+    this.grantChip.textContent = `marked for the question · ${count}`
+    this.grantChip.setAttribute('aria-label', `marked for the question · ${count}`)
   }
 
   dispose(): void {
@@ -1050,6 +1161,7 @@ export class CommandEditor {
     // The arbiter outlives the overlay it points at otherwise; a closed tab
     // must not keep consuming keys through a dead closure.
     this.keyArbiter = null
+    this._onGrantChipClick = null
     this.root.removeEventListener('keydown', this.onKeydown, true)
     this.view.destroy()
     this.root.remove()

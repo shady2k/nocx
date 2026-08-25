@@ -36,6 +36,10 @@ export interface Endpoint {
    */
   schema: 'openai-compatible'
   /**
+   * True only when the person explicitly declared that this endpoint needs no API key. False preserves the credential-required default; this is not inferred from the URL.
+   */
+  noKey: boolean
+  /**
    * Row handle (secrow:...) of the endpoint's own vault secret, or null when no key is set (created without one, or the key was deleted on the Secrets page). A reference never crosses the wire.
    */
   credential: string | null

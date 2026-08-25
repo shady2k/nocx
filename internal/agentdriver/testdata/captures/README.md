@@ -2,7 +2,7 @@
 
 Real byte streams off a real PTY, produced by `cmd/agent-capture` and driven by the
 scripts in `scripts/`. Nothing here is synthesised, for the reason
-[ADR-0038](../../../../docs/decisions/0038-x-vt-as-the-backend-emulator.md) gives about its
+[ADR-0041](../../../../docs/decisions/0041-x-vt-as-the-backend-emulator.md) gives about its
 own corpus and for the one `AGENTS.md` rule 4 gives about tests: a fixture written by the
 person writing the classifier encodes that person's model of the TUI, including the parts
 that are wrong, and then the code and the test agree and are wrong together.

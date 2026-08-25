@@ -24,6 +24,7 @@ import type { GitLogResult } from '../generated/git.log'
 import type { ActiveOrigin } from '../pane-content'
 import type { ClipboardAccess } from '../clipboard'
 import type { UrlOpener } from '../open-url'
+import { RpcError } from '../dispatcher'
 import { ToastHost, clearToasts } from '../ui/toast'
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
@@ -536,6 +537,65 @@ describe('the commit path', () => {
     // The message stays in the form.
     expect((panel.querySelector('#git-commit-subject') as HTMLInputElement).value).toBe('keep me')
   })
+
+  it('a nothing-to-commit refusal is a toast, not a silent re-open (nocx-bpqil)', async () => {
+    // ErrNothingToCommit shares -32602 with unknown-binding; before the
+    // reason discriminator the store re-resolved it into a silent no-op.
+    // Now it reaches the mutationFailureMessage branch a person reads.
+    const commit = vi
+      .fn()
+      .mockRejectedValue(
+        new RpcError('git: nothing is staged to commit', -32602, { reason: 'nothing-to-commit' }),
+      )
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: stagedFile })),
+      commit,
+    })
+    const { panel, open, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+    fireEvent.input(panel.querySelector('#git-commit-subject') as HTMLInputElement, {
+      target: { value: 'doomed' },
+    })
+    fireEvent.click(panel.querySelector('[data-testid="git-commit"]') as HTMLButtonElement)
+    await settle()
+    expect(open).not.toHaveBeenCalled()
+    expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
+      'Nothing is staged to commit — stage a file first.',
+    )
+  })
+
+  it('an amend-on-unborn refusal is a toast, not a silent re-open (nocx-bpqil)', async () => {
+    const commit = vi.fn().mockRejectedValue(
+      new RpcError('git: cannot amend a commit on an unborn branch', -32602, {
+        reason: 'amend-unborn',
+      }),
+    )
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: stagedFile })),
+      commit,
+    })
+    const { panel, open, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+    // Tick Amend so the commit is an amend — the user's seam is the kit
+    // checkbox beside the form (label "Amend last commit").
+    const amendBox = panel.querySelector<HTMLInputElement>(
+      '.git-commit-form input[type="checkbox"]',
+    )
+    expect(amendBox).not.toBeNull()
+    fireEvent.click(amendBox as HTMLInputElement)
+    await settle()
+    fireEvent.input(panel.querySelector('#git-commit-subject') as HTMLInputElement, {
+      target: { value: 'doomed' },
+    })
+    fireEvent.click(panel.querySelector('[data-testid="git-commit"]') as HTMLButtonElement)
+    await settle()
+    expect(open).not.toHaveBeenCalled()
+    expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
+      'This branch has no commit to amend yet.',
+    )
+  })
 })
 
 // ── The row action owns its click ────────────────────────────────────────
@@ -583,6 +643,129 @@ describe('row actions', () => {
     fireEvent.click(rowNamed(panel, 'a.txt'))
     const target = open.mock.calls[0][0] as GitDiffTarget
     expect(target.side).toBe('staged')
+  })
+
+  it('a rejected stage is a danger toast with the mapped sentence — never a div in the panel', async () => {
+    // A dropped socket rejects with the transport's plain words (no RPC
+    // code), which is the shape the connection classifier maps. Domain
+    // refusals carry data.reason (nocx-bpqil): only reason
+    // "unknown-binding" re-resolves; every other refusal reaches this
+    // toast as the refusal it is.
+    const stage = vi.fn().mockRejectedValue(new Error('ws closed'))
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: unstagedFile })),
+      stage,
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    fireEvent.click(panel.querySelector('[data-testid="git-row-stage"]') as HTMLElement)
+    await settle()
+    // The failure is an action outcome, announced by the kit toast the way
+    // a user sees it. The raw wire words live in the toast, never in the
+    // document flow: the panel body must not hold the message (the old
+    // git-mutation-error div rendered exactly that).
+    expect(panel.textContent).not.toContain('ws closed')
+    expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
+      'The change could not be made — the connection was lost.',
+    )
+  })
+
+  it('a conflicted refusal reaches the toast as itself — never a silent re-open (nocx-bpqil)', async () => {
+    // The old isUnknownBinding swallowed every -32602, so a conflicted
+    // stage-all re-resolved through git.open and the refusal was lost.
+    // Now the store re-resolves only on reason "unknown-binding": a
+    // conflicted entry (same code, reason "conflicted") reaches the
+    // mutationFailureMessage branch a person should read.
+    const stage = vi.fn().mockRejectedValue(
+      new RpcError('git: cannot stage or unstage all while "conf.txt" is conflicted', -32602, {
+        reason: 'conflicted',
+      }),
+    )
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: unstagedFile })),
+      stage,
+    })
+    const { panel, open, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    fireEvent.click(panel.querySelector('[data-testid="git-row-stage"]') as HTMLElement)
+    await settle()
+    // NOT re-opened: the binding was fine; the repository refused.
+    expect(open).not.toHaveBeenCalled()
+    // The mapped sentence is the refusal a person reads.
+    expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
+      'The change could not be made while a merge conflict is unresolved.',
+    )
+  })
+
+  it('a not-owned refusal is a toast — the repository is gone from this view, not silently re-opened (nocx-bpqil)', async () => {
+    // ErrNotOwned shares -32602 with unknown-binding. The binding EXISTS —
+    // it belongs to another session — so re-opening through git.open could
+    // not fix it and would mint a second binding for a repository this view
+    // cannot own. The reason discriminator keeps it a visible refusal.
+    const stage = vi
+      .fn()
+      .mockRejectedValue(
+        new RpcError(
+          'git: binding "b1" belongs to session "other", which the caller does not own',
+          -32602,
+          { reason: 'not-owned' },
+        ),
+      )
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: unstagedFile })),
+      stage,
+    })
+    const { panel, open, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    fireEvent.click(panel.querySelector('[data-testid="git-row-stage"]') as HTMLElement)
+    await settle()
+    expect(open).not.toHaveBeenCalled()
+    expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
+      "The change could not be made — this view's repository is no longer available.",
+    )
+  })
+
+  it('a rejected commit appends the raw reason — the open sentence never swallows it', async () => {
+    const commit = vi.fn().mockRejectedValue(new RpcError('index.lock exists', -32603))
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: stagedFile })),
+      commit,
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+    fireEvent.input(panel.querySelector('#git-commit-subject') as HTMLInputElement, {
+      target: { value: 'doomed' },
+    })
+    fireEvent.click(panel.querySelector('[data-testid="git-commit"]') as HTMLButtonElement)
+    await settle()
+    expect(document.querySelector('.ui-toast__message')?.textContent).toContain(
+      'The change could not be made (index.lock exists).',
+    )
+  })
+
+  it("a saturation refusal is the dispatcher's own toast — the panel does not toast twice", async () => {
+    const stage = vi.fn().mockRejectedValue(new RpcError('Control plane busy', -32004))
+    const services = fakeServices({
+      open: vi.fn().mockResolvedValue(openOk({ status: unstagedFile })),
+      stage,
+    })
+    const { panel, setActiveOrigin } = mountApp(services)
+    setActiveOrigin(LOCAL_ORIGIN)
+    await settle()
+
+    fireEvent.click(panel.querySelector('[data-testid="git-row-stage"]') as HTMLElement)
+    await settle()
+    expect(document.querySelector('.ui-toast__message')).toBeNull()
+    // The store still holds the account, so the panel does not silently
+    // swallow the refusal — the stale banner carries the recovery.
+    expect(panel.querySelector('[data-testid="git-status-stale"]')).not.toBeNull()
   })
 })
 

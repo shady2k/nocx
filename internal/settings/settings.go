@@ -29,6 +29,7 @@ import (
 	"sort"
 	"strconv"
 	"sync"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/storage"
@@ -121,6 +122,11 @@ type Declaration struct {
 	Max         *float64       `json:"max,omitempty"`
 	Unit        string         `json:"unit,omitempty"`
 	ZeroLabel   string         `json:"zeroLabel,omitempty"`
+	// Multiline is the text control's paragraph variant (nocx-avogl.4):
+	// present only on control "text", and the screen renders the kit's
+	// multiline TextField for it. Max then bounds the text in characters
+	// and Unit names them.
+	Multiline bool `json:"multiline,omitempty"`
 }
 
 // ── Group catalogue ────────────────────────────────────────────────────
@@ -216,6 +222,29 @@ type StringSpec struct {
 	Description string
 	DataClass   DataClass
 	Default     string
+	// Multiline declares that this text is a PARAGRAPH rather than a value:
+	// the screen renders the kit's multiline TextField, and Enter inserts a
+	// newline instead of committing.
+	//
+	// A variant of the text control, deliberately not a sixth ControlKind.
+	// The kit already answered this question — `TextField` takes a
+	// `multiline` prop and there is no second component — and a
+	// ControlKind of its own would have meant paired cases doing exactly
+	// the same thing in validateValue, coerceValue and the settings.set
+	// handler, plus a second branch on the screen rendering the same
+	// component. That is two truths about "this is a string setting"
+	// (AGENTS.md, "Look for the existing answer"); this is one, with its
+	// variance declared.
+	Multiline bool
+	// MaxLength bounds the text, in characters (runes, not bytes — the
+	// bound must mean the same thing to somebody writing Cyrillic as to
+	// somebody writing ASCII). Zero means unbounded.
+	//
+	// DECLARED rather than enforced privately, because the screen renders
+	// its caption from the declaration: a limit that lived only inside
+	// SetString could not be stated on screen and could only be discovered
+	// by losing text to it. Over-long text is REFUSED, never truncated.
+	MaxLength int
 }
 
 // NumberSpec is the declaration site for a numeric setting.
@@ -306,6 +335,8 @@ type String struct {
 	description string
 	dataClass   DataClass
 	default_    string
+	multiline   bool
+	maxLength   int
 }
 
 func (s *String) Key() string             { return s.key }
@@ -317,10 +348,26 @@ func (s *String) DataClass() DataClass    { return s.dataClass }
 func (s *String) Default() any            { return s.default_ }
 func (s *String) Options() []SelectOption { return nil }
 func (s *String) Min() *float64           { return nil }
-func (s *String) Max() *float64           { return nil }
+
+// Max is the declared length bound, in characters — the same Descriptor
+// slot a Number's ceiling uses, because it is the same question ("how large
+// may this value be") and the screen already renders a caption from it. On
+// a text setting it can only mean length, and Unit says what it counts.
+func (s *String) Max() *float64 {
+	if s.maxLength <= 0 {
+		return nil
+	}
+	m := float64(s.maxLength)
+	return &m
+}
+
+// Multiline reports whether this text is a paragraph. Not on Descriptor:
+// only a text setting can answer it, and the four other kinds would carry a
+// method that is always false.
+func (s *String) Multiline() bool { return s.multiline }
 
 func (s *String) toDeclaration() Declaration {
-	return Declaration{
+	d := Declaration{
 		Key:         s.key,
 		Section:     s.section,
 		Label:       s.label,
@@ -328,7 +375,16 @@ func (s *String) toDeclaration() Declaration {
 		Control:     ControlText,
 		DataClass:   s.dataClass,
 		Default:     s.default_,
+		Multiline:   s.Multiline(),
+		Max:         s.Max(),
 	}
+	if s.maxLength > 0 {
+		// Filled here rather than at the declaration site: a text bound is
+		// a count of characters and nothing else, so no declaration may
+		// say it counts something different.
+		d.Unit = "characters"
+	}
+	return d
 }
 
 // Number is a typed key for a numeric setting with optional min/max.
@@ -477,6 +533,8 @@ func MustRegisterString(spec StringSpec) *String {
 		description: spec.Description,
 		dataClass:   spec.DataClass,
 		default_:    spec.Default,
+		multiline:   spec.Multiline,
+		maxLength:   spec.MaxLength,
 	}
 	assertValidKey(s.key)
 	allDecls = append(allDecls, s)
@@ -759,6 +817,67 @@ var UITheme = MustRegisterSelect(SelectSpec{
 	},
 })
 
+// AssistantPersonalInstructions is the person's own paragraph, appended to
+// the assistant's system prompt (design §1 item 6, nocx-avogl.4).
+//
+// It is settings-shaped because it is a standing preference rather than a
+// property of one question: written on change like every other setting,
+// kept in the settings document, and read fresh by the transport on every
+// ask so a change takes effect on the next question with no restart.
+//
+// TWO THINGS IT IS NOT. It is not authority — the policy decides what a
+// call may do and never reads this text, so a paragraph asking for more
+// than the person has granted is answered by the model rather than obeyed
+// (internal/assistant/systemprompt_authority_test.go holds that line). And
+// it is not unbounded: 2000 characters, refused past that rather than
+// truncated, and the number is on the screen as the field's caption. 2000
+// is about a page of standing preferences — enough for the rules a person
+// actually repeats to an assistant ("this machine uses nix, never brew",
+// "answer in Russian"), far short of a second system prompt smuggled in
+// beside ours.
+//
+// PrivateContent: it is the person's own prose about how they work, it
+// leaves for the provider on every ask, and it must never be logged or
+// exported as though it were configuration.
+var AssistantPersonalInstructions = MustRegisterString(StringSpec{
+	Key:         "assistant.personalInstructions",
+	Section:     "Instructions",
+	Label:       "Your instructions to the assistant",
+	Description: "Standing instructions added to the end of every question you ask the assistant — how you like answers, what this machine is, anything you would otherwise repeat. They come last, so where they contradict nocx's own instructions yours win. They are not permissions: what the assistant may do is decided on the Agent policy page, and nothing written here changes it.",
+	DataClass:   PrivateContent,
+	Default:     "",
+	Multiline:   true,
+	MaxLength:   2000,
+})
+
+// AssistantExpandReasoning decides whether an answer's reasoning note opens
+// by itself (nocx-y9e88).
+//
+// nocx-s92so put the model's thinking in its own COLLAPSED note, and that is
+// right for the person who came for the answer. It is wrong for the person
+// who came to watch the model think, and until this existed there was no way
+// for them to say so: every answer arrived closed and every note had to be
+// opened by hand, one at a time, forever.
+//
+// It is a setting and not UI state (ADR-0033): a person chooses it
+// deliberately, at a control, it means the same on any machine, and
+// differing from the default is worth a badge. Opening one note by clicking
+// its summary is the other class — a side effect of reading — and is
+// therefore NOT written anywhere. That is the whole shape of the feature:
+// this decides what a note does UNTIL somebody says otherwise, exactly as
+// terminal.wrapOutput decides what a block does.
+//
+// Default false. The answer is what a person asked for; the thinking is
+// several times longer and would push it off the screen.
+var AssistantExpandReasoning = MustRegisterBool(BoolSpec{
+	Key:         "assistant.expandReasoning",
+	Section:     "Answers",
+	Label:       "Always show the model's thinking",
+	Description: "Open the thinking note on every answer instead of leaving it collapsed. You can still close any single note by clicking it, and a model that returns no thinking still shows nothing at all.",
+	DataClass:   PublicConfig,
+	Default:     false,
+})
+
 // The sidebar's width used to be registered here as `sidebar.width`. It is
 // not a setting and never was: a setting is something a user DELIBERATELY
 // CHOOSES, and a width produced by dragging a panel edge is what the app must
@@ -782,6 +901,8 @@ func init() {
 	RegisterGroup(SettingsGroup{ID: "vault", Title: "Vault", Order: 1})
 	RegisterGroup(SettingsGroup{ID: "application", Title: "Application", Order: 2})
 	RegisterGroup(SettingsGroup{ID: "developer", Title: "Developer", Order: 3})
+	RegisterSectionGroup("Instructions", "assistant")
+	RegisterSectionGroup("Answers", "assistant")
 	RegisterSectionGroup("Interface", "application")
 	RegisterSectionGroup("Clipboard", "application")
 	RegisterSectionGroup("History", "application")
@@ -1013,12 +1134,17 @@ func (r *Registry) GetString(s *String) (string, error) {
 }
 
 // SetString validates and persists a string setting. Rejects empty strings
-// for settings that have a non-empty default.
+// for settings that have a non-empty default, and text past the declared
+// length bound.
 func (r *Registry) SetString(s *String, value string) error {
 	r.mu.Lock()
 	if value == "" && s.default_ != "" {
 		r.mu.Unlock()
 		return &ValidationError{SettingKey: s.key, Value: value, Message: "value must not be empty"}
+	}
+	if err := checkTextLength(s, value); err != nil {
+		r.mu.Unlock()
+		return err
 	}
 	newValues := copyValues(r.values)
 	newValues[s.key] = value
@@ -1238,6 +1364,11 @@ func validateValue(d Descriptor, value any) error {
 		if def, ok := d.Default().(string); ok && def != "" && s == "" {
 			return &ValidationError{SettingKey: d.Key(), Message: "cannot be empty"}
 		}
+		if str, isStr := d.(*String); isStr {
+			if err := checkTextLength(str, s); err != nil {
+				return err
+			}
+		}
 	case ControlNumber:
 		f, ok := toFloat64(value)
 		if !ok {
@@ -1364,6 +1495,9 @@ func coerceValue(d Descriptor, value any) (any, error) {
 		}
 		if s == "" && str.default_ != "" {
 			return nil, &ValidationError{SettingKey: d.Key(), Value: s, Message: "value must not be empty"}
+		}
+		if err := checkTextLength(str, s); err != nil {
+			return nil, err
 		}
 		return s, nil
 	case ControlSelect:
@@ -1557,6 +1691,24 @@ func copyRefs(src map[string]credential.SecretID) map[string]credential.SecretID
 		dst[k] = v
 	}
 	return dst
+}
+
+// checkTextLength enforces a text setting's declared bound. It REFUSES
+// rather than truncating: a paragraph cut mid-sentence would be a different
+// rule from the one the person wrote, and the model would be told the
+// wrong one. Counted in runes, so the bound the screen states means the
+// same thing in Cyrillic as in ASCII.
+func checkTextLength(s *String, value string) error {
+	if s.maxLength <= 0 {
+		return nil
+	}
+	if n := utf8.RuneCountInString(value); n > s.maxLength {
+		return &ValidationError{
+			SettingKey: s.key, Value: n,
+			Message: fmt.Sprintf("value is %d characters, the limit is %d", n, s.maxLength),
+		}
+	}
+	return nil
 }
 
 func toFloat64(v any) (float64, bool) {

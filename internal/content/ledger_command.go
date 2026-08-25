@@ -22,16 +22,12 @@ package content
 // shape is CaptureFrame's (ledger_agent_sqlite.go), which does the same thing
 // for the same reason, down to sharing ensureLedgerContext.
 //
-// # Why the backend mints the id here
+// # Why the backend mints an id when no lifecycle attempt exists
 //
-// Every other entry id is a client-minted UUIDv7 and an idempotency key
-// (design §7). history.record carries none — it never has — so the backend
-// mints one, exactly as CaptureFrame mints a frame's. The consequence is
-// stated rather than hidden: a retried history.record writes a SECOND row,
-// because there is no key to recognise the first by. That is unchanged from
-// command_history, which had no idempotency either, and closing it belongs to
-// nocx-rtg0.7, where the renderer starts sending the lifecycle it already
-// tracks.
+// history.record traditionally carried no id, so the backend minted one for
+// completed-only callers. A lifecycle submit now carries AttemptID; that
+// path updates the already-open row and returns its id instead. RecordCompleted
+// remains for callers that have no authenticated lifecycle attempt.
 
 import (
 	"context"
@@ -47,6 +43,9 @@ import (
 type CompletedCommand struct {
 	// Client binds the row to who wrote it, as every entry's does.
 	Client string
+	// AttemptID is the lifecycle attempt row opened at submit. When present,
+	// this completion updates that row instead of minting a second identity.
+	AttemptID string
 	// Env is the environment the command ran in, derived from the facts the
 	// caller holds and never from a session (design §3.1). Ensured here.
 	Env Environment
@@ -76,11 +75,27 @@ type CompletedCommand struct {
 	// TerminationReason is the execution's own fact: which of the outcomes a
 	// status plus an exit code cannot separate (ADR-0020 §4) this run had.
 	TerminationReason TerminationReason
+	// Source is the IMMEDIATE subject that submitted the command (design
+	// §3.1, nocx-iadtt/nocx-e5vsc): SourceUser is the person at the
+	// keyboard, SourceAssistant is the assistant's lane. A command is a
+	// SHELL entry whatever its source — the kind says what the row is, and
+	// source says who asked for it. It is carried from the renderer's
+	// submit — the one place that knows which input target ran the line —
+	// and never derived here from a lane or a run state, or a human command
+	// typed while the agent works would be recorded as the assistant's.
+	// REQUIRED, and deliberately not defaulted. It used to default to the
+	// person's shell, on the argument that a caller naming no author was the
+	// ordinary path — true while this was the author of a command, and wrong
+	// now that it is provenance the audit reads. "Nobody said who submitted
+	// this" must not become "the person did": that is a claim, it is the one
+	// this column exists to make, and a silent default makes it without
+	// anybody deciding. A caller that forgets is a caller with a bug, and it
+	// is told so.
+	Source Source
 }
 
-// RecordCompleted writes one finished command and returns the entry id the
-// backend minted for it. That id is the handle every later reference uses —
-// the capture rewrite, provenance detail, and history.query's page.
+// RecordCompleted closes the lifecycle row named by AttemptID when supplied.
+// Without it, the completed-only path mints and returns a new entry id.
 func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand) (string, error) {
 	if in.Client == "" {
 		return "", fmt.Errorf("content: record: client is required — it binds the row to who wrote it")
@@ -96,6 +111,15 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 	}
 	if in.TerminationReason == "" {
 		in.TerminationReason = TermCompleted
+	}
+	switch in.Source {
+	case SourceUser, SourceAssistant:
+	default:
+		// `source`, `action` and `text` are not subjects a command can have
+		// asked for, and an unknown source would write a row the CHECK
+		// constraint refuses halfway through the transaction. Refused here,
+		// where the message can say what the vocabulary is.
+		return "", fmt.Errorf("content: record: %q is not a command source; want user or assistant", in.Source)
 	}
 	// Keep-history-off: a command runs and no row appears, and that is not an
 	// error — the same rule the interim table's Add followed, moved here with
@@ -117,6 +141,48 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 			return err
 		}
 		defer func() { _ = tx.Rollback() }()
+
+		var lookupErr error
+		if in.AttemptID != "" {
+			var phase, client string
+			lookupErr = tx.QueryRowContext(ctx, `SELECT phase, client FROM entries WHERE id = ?`, in.AttemptID).Scan(&phase, &client)
+			if lookupErr == nil {
+				if client != in.Client {
+					return fmt.Errorf("content: record: attempt %q belongs to another client", in.AttemptID)
+				}
+				if phase == string(PhaseClosed) {
+					id = in.AttemptID
+					return tx.Commit()
+				}
+				var executionID int64
+				if executionErr := tx.QueryRowContext(ctx,
+					`SELECT id FROM executions WHERE entry_id = ? ORDER BY attempt DESC LIMIT 1`,
+					in.AttemptID).Scan(&executionID); executionErr != nil {
+					return fmt.Errorf("content: record: find attempt execution: %w", executionErr)
+				}
+				now := time.Now().UnixMilli()
+				if _, updateErr := tx.ExecContext(ctx,
+					`UPDATE executions SET ended_at = ?, termination_reason = ? WHERE id = ?`,
+					coalesceTime(in.EndedAt, now), string(in.TerminationReason), executionID); updateErr != nil {
+					return updateErr
+				}
+				if _, entryErr := tx.ExecContext(ctx,
+					`UPDATE entries SET phase = 'closed', status = ?,
+					   started_at = COALESCE(started_at, ?),
+					   ended_at = ?, duration_ms = COALESCE(?, duration_ms),
+					   payload = json_patch(payload, ?)
+					 WHERE id = ?`,
+					string(in.Status), in.StartedAt, coalesceTime(in.EndedAt, now),
+					in.DurationMs, in.Payload, in.AttemptID); entryErr != nil {
+					return entryErr
+				}
+				id = in.AttemptID
+				return tx.Commit()
+			}
+			if lookupErr != sql.ErrNoRows {
+				return lookupErr
+			}
+		}
 
 		// The anchor is RESOLVED before the write, never left to the foreign
 		// key — the same rule Submit follows — but its failure is NOT fatal
@@ -147,17 +213,19 @@ func (s *sqliteContent) RecordCompleted(ctx context.Context, in CompletedCommand
 		// replays this id — the backend minted it — so it is provenance here
 		// rather than an idempotency check, and it is written because every
 		// entry has one and a NULL would be a second shape of row.
+		// The kind is ALWAYS shell: a command is WHAT the row is, and the
+		// source says WHO asked for it.
 		digest := entryDigest(SubmitEntry{
 			Client: in.Client, EnvironmentID: in.Env.ID, Cwd: in.Cwd, Intent: in.Intent,
-			Payload: in.Payload, Kind: EntryShell, Sensitivity: in.Sensitivity,
+			Payload: in.Payload, Kind: EntryShell, Source: in.Source, Sensitivity: in.Sensitivity,
 			PaneID: pane,
 		})
 
 		if _, err := tx.ExecContext(ctx, `INSERT INTO entries
-			(id, ingest_seq, client, digest, environment_id, pane_id, session_id, cwd, kind, intent,
+			(id, ingest_seq, client, digest, environment_id, pane_id, session_id, cwd, kind, source, intent,
 			 phase, status, submitted_at, started_at, ended_at, duration_ms, sensitivity, payload)
-			VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'shell', ?, 'closed', ?, ?, ?, ?, ?, ?, ?)`,
-			entryID, seq, in.Client, digest, in.Env.ID, pane, in.Cwd, in.Intent,
+			VALUES (?, ?, ?, ?, ?, ?, NULL, ?, 'shell', ?, ?, 'closed', ?, ?, ?, ?, ?, ?, ?)`,
+			entryID, seq, in.Client, digest, in.Env.ID, pane, in.Cwd, string(in.Source), in.Intent,
 			string(in.Status), now, in.StartedAt, in.EndedAt, in.DurationMs,
 			string(in.Sensitivity), in.Payload); err != nil {
 			return err

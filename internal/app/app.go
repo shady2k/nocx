@@ -14,11 +14,17 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/agentdriver"
+	"github.com/shady2k/nocx/internal/agenttools"
+	"github.com/shady2k/nocx/internal/apibind"
+	"github.com/shady2k/nocx/internal/apicoll"
+	"github.com/shady2k/nocx/internal/apifetch"
+	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/bootstrapprogress"
@@ -49,6 +55,7 @@ import (
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/reveal"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/shellintegration"
@@ -271,10 +278,11 @@ func clearWindowOnCleanStart(ctx context.Context, reg *settings.Registry, db con
 	}
 }
 
-// SetDialogService attaches the native dialog capability (dialog.* RPCs). It
-// is wired from main.go's WailsApp.startup — the Wails context it needs only
-// exists there, after the transport was built — and must be called before
-// Start, so no renderer request can observe the unset state.
+// SetDialogService attaches the native dialog capability (dialog.openFile and
+// dialog.openDirectory — one service, because one native dialog is open at a
+// time). It is wired from main.go's WailsApp.startup — the Wails context it
+// needs only exists there, after the transport was built — and must be called
+// before Start, so no renderer request can observe the unset state.
 func (a *App) SetDialogService(ds transport.DialogService) {
 	a.Transport.SetDialogService(ds)
 }
@@ -746,6 +754,47 @@ func New(opts ...Option) (*App, error) {
 		return hex.EncodeToString(raw[:])
 	})
 
+	// The API-testing collection (design §6, §7). Both are constructed here
+	// and handed to the transport, which is what makes internal/apicoll and
+	// internal/apisend reachable from main() at all — before this they were
+	// reachable from their own tests and nowhere else (AGENTS.md check 5).
+	//
+	// The collection service holds no state that outlives the process: the
+	// app remembers the LIST of opened folders, never their contents, so
+	// handles are minted fresh each run and every read goes to disk. It is
+	// given the app paths because a collection created with no place named
+	// goes to a default folder under the app directory (§6.1) — the location
+	// is derived inside apicoll, so no caller names a path in order to get
+	// one, and the build tag decides which app directory that is.
+	//
+	// The sender is given the ROUTE TABLE, which is what makes an
+	// environment's "how to get there" reach the dialer (§6.5, §7.1): a
+	// direct environment sends from this machine, and one naming a
+	// connection sends through a lease on that profile's pooled SSH
+	// connection. A connection that cannot be leased FAILS the send — it is
+	// never quietly downgraded to a local dial, which would put a production
+	// request on this machine's own interface, around the bastion the
+	// environment named.
+	//
+	// The binding document itself is built further down, once the vault
+	// exists: it is the one thing in this feature that holds an identifier
+	// for stored credential material (design §8.1), so it cannot be
+	// constructed before the store that holds the values.
+	apiCollections := apicoll.NewCollections(paths)
+	apiRoutes := &apiRouteLeaser{client: sshClient}
+	// The import's URL entrance gets the SAME route table the sender has,
+	// so "through prod-bastion" means one thing in this product: a fetch
+	// and a send that name one connection lease the same pooled SSH
+	// connection, and a connection that cannot be leased refuses both. A
+	// second table here would be a second answer to "how do I get there",
+	// agreeing until the day one of them was edited.
+	apiRouteTable := apisend.NewRoutes(apiRoutes)
+	apiSender := apisend.New(
+		apisend.WithLogger(logger),
+		apisend.WithRoutes(apiRouteTable),
+	)
+	apiFetcher := apifetch.New(apiRouteTable, logger)
+
 	// The UI-state document (ADR-0033): the same document family again, and
 	// deliberately NOT the settings registry — a drag is not a decision. It
 	// never fails to open, because an absent document is an ordinary state
@@ -826,6 +875,28 @@ func New(opts ...Option) (*App, error) {
 
 	settingsRegistry := settings.New(docStore, v)
 
+	// The binding document (design §8, §8.1): the map from a collection's
+	// variable NAME to a value in the vault. It is constructed HERE rather
+	// than beside the collection service above because it takes the vault,
+	// and it is handed to the transport twice under two different contracts
+	// — which is apibind's own split, not a second answer to one question.
+	//
+	// apibind.Store is the WRITE half and it is what turns on
+	// api.import.postman: an import that had nowhere to put a token would
+	// have to drop it silently or write it into the collection folder, and
+	// the folder being safe to commit BY CONSTRUCTION is the whole security
+	// argument. apibind.ValueResolver is the READ half, and it is the half
+	// that never yields an identifier: a caller holding one can ask what a
+	// variable is worth and has nothing to hand an id to. The send path gets
+	// exactly that one, which is how §8's property survives the wiring as
+	// well as the format.
+	//
+	// The document store is this composition root's choice, not apibind's,
+	// and it is the same one the profiles, the snippets and the vault file
+	// provider use: one directory, one version protocol, one place a backup
+	// has to know about.
+	apiBindings := apibind.NewStore(docStore, v, apibind.WithLogger(logger))
+
 	// The content key opens BOTH encrypted stores — the history database
 	// and the notes one. One key, one lifecycle, two files: they differ in
 	// their UPGRADE rule, not in their secrecy. History rebuilds its file
@@ -888,8 +959,8 @@ func New(opts ...Option) (*App, error) {
 	}
 
 	backupService := backup.NewService(profileStore, settingsRegistry, docStore, snippetStore, noteBackup)
-	if err := backupService.Recover(); err != nil {
-		return nil, fmt.Errorf("backup recovery: %w", err)
+	if recoverErr := backupService.Recover(); recoverErr != nil {
+		return nil, fmt.Errorf("backup recovery: %w", recoverErr)
 	}
 
 	// The ContentDB key, once at startup (nocx-rtg0.9 as amended by
@@ -959,16 +1030,16 @@ func New(opts ...Option) (*App, error) {
 			switch k {
 			case settings.HistoryEnabled.Key(), settings.HistoryRetentionDays.Key(),
 				settings.HistoryOutputEnabled.Key(), settings.HistoryOutputCapKB.Key():
-				if v, err := settingsRegistry.GetBool(settings.HistoryEnabled); err == nil {
+				if v, getErr := settingsRegistry.GetBool(settings.HistoryEnabled); getErr == nil {
 					historyPolicy.SetEnabled(v)
 				}
-				if v, err := settingsRegistry.GetNumber(settings.HistoryRetentionDays); err == nil {
+				if v, getErr := settingsRegistry.GetNumber(settings.HistoryRetentionDays); getErr == nil {
 					historyPolicy.SetRetentionDays(int(v))
 				}
-				if v, err := settingsRegistry.GetBool(settings.HistoryOutputEnabled); err == nil {
+				if v, getErr := settingsRegistry.GetBool(settings.HistoryOutputEnabled); getErr == nil {
 					historyPolicy.SetOutputEnabled(v)
 				}
-				if v, err := settingsRegistry.GetNumber(settings.HistoryOutputCapKB); err == nil {
+				if v, getErr := settingsRegistry.GetNumber(settings.HistoryOutputCapKB); getErr == nil {
 					historyPolicy.SetOutputCapBytes(int(v) << 10)
 				}
 			}
@@ -1017,6 +1088,24 @@ func New(opts ...Option) (*App, error) {
 	// (nocx-6pz0).
 	gitFactory := gitlocal.NewFactory()
 
+	// The ONE global agent policy (ADR-0020 §7 as amended 2026-08-16,
+	// accepted): the matrix every run's grant is minted from. Persisted as a
+	// JSON document beside the settings; the run mint and the
+	// policy.get/set RPCs read the same store live, so a
+	// Settings save applies without a restart. An unset or unreadable
+	// store IS a policy — the zero matrix, which asks — never an error.
+	policyStore := assistant.NewGlobalPolicyStore(docStore, "agent-policy.json")
+
+	// The file-manager revealer (nocx-ngf3u): per-OS behind the interface
+	// the transport already declares (FilesRevealer). macOS: `open -R`;
+	// Linux: xdg-open on the containing directory; other platforms: nil
+	// (files.reveal answers -32601, the menu item does not render). This
+	// is the same shape contentkey uses for the per-OS identity question.
+	filesRevealer, filesRevealerErr := reveal.New()
+	if filesRevealerErr != nil {
+		slogger.Warn("file-manager reveal unavailable", "reason", filesRevealerErr)
+	}
+
 	tpOpts := []transport.WSServerOption{
 		transport.WithProfileRepository(profileStore),
 		transport.WithBackupService(backupService),
@@ -1024,7 +1113,17 @@ func New(opts ...Option) (*App, error) {
 		transport.WithGroupRepository(profileStore),
 		transport.WithCredentialStore(v),
 		transport.WithVaultLifecycle(v),
+		transport.WithAgentKnownMaterial(transport.NewVaultKnownMaterial(v)),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
+		transport.WithAgentPolicy(policyStore),
+		// Which of that policy's seven rows govern anything at all: the
+		// effect classes at least one DECLARED tool carries. Read HERE, off
+		// the tool declaration table, for the same reason WithBuildInfo
+		// reads internal/version here — it is compile-time state, and the
+		// composition root is where state becomes a dependency. The
+		// settings surface needs it so five controls that govern nothing do
+		// not look like the two that do.
+		transport.WithLiveEffects(agenttools.LiveEffects()),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithContentDB(contentDB),
 		transport.WithHistoryStatus(historyStatus),
@@ -1033,6 +1132,10 @@ func New(opts ...Option) (*App, error) {
 		transport.WithSnippets(snippetSvc),
 		transport.WithNotes(noteSvc),
 		transport.WithUIState(uiStateStore),
+		transport.WithAPI(apiCollections, apiSender),
+		transport.WithAPIImportFetcher(apiFetcher),
+		transport.WithAPIBindings(apiBindings),
+		transport.WithAPIVariables(apiBindings),
 		// What this binary is, for app.about (nocx-8bbp). Read here rather
 		// than inside the transport: internal/version's vars are link-time
 		// state, and the composition root is where state becomes a
@@ -1159,6 +1262,16 @@ func New(opts ...Option) (*App, error) {
 		// install lease, discover the remote home, run deploy.Uninstall
 		// over SFTP); the raw SSH client never leaves internal/ssh.
 		transport.WithRemoteHelperUninstaller(sshClient),
+		// The file-manager reveal (nocx-ngf3u): the OS-specific revealer
+		// behind the interface that already exists (FilesRevealer, one
+		// method). This is the same per-OS problem internal/contentkey
+		// already solved — one behaviour, chosen at the composition root.
+		// On macOS the reveal is `open -R`; on Linux xdg-open opens the
+		// containing directory; on other platforms New returns nil and
+		// files.reveal answers -32601 (the menu item does not render).
+		// Before this line the revealer was nil in the shipped app and
+		// "Show in Finder" raised a danger toast on every use.
+		transport.WithFilesRevealer(filesRevealer),
 	}
 	// The lifecycle publication boundary (ADR-0024 decision 7, bead
 	// nocx-u7uh.5): one kernel, one publisher, and the transport as its
@@ -1251,6 +1364,13 @@ func New(opts ...Option) (*App, error) {
 	// sequential client's back-to-back requests are never told the control
 	// plane is busy; exhausting the wait is the only refusal.
 	tpOpts = append(tpOpts, transport.WithDomainConflictWaitTimeout(transport.DefaultDomainConflictWaitTimeout))
+	// The run lease (ADR-0020 decision 2) every agent run is supervised
+	// under, named here the way the lane capacity is: the wall-clock
+	// deadline, the inactivity deadline, the output budget and the
+	// escalation grace. The transport's default IS the production value —
+	// this line names it, so the seam stays reachable from production and
+	// a future settings surface flips one option here, not a default.
+	tpOpts = append(tpOpts, transport.WithRunLease(transport.DefaultRunLeaseConfig()))
 	// The notification router (ADR-0029): the only holder of "where" a raised
 	// notification goes. Before this line the whole notify package was
 	// reachable from its own tests and nowhere else (AGENTS.md check 5).
@@ -1309,10 +1429,10 @@ func New(opts ...Option) (*App, error) {
 				// cannot answer, including this one.
 				return false
 			}
-			on, err := settingsRegistry.GetBool(toggle)
-			if err != nil {
+			on, readErr := settingsRegistry.GetBool(toggle)
+			if readErr != nil {
 				logger.Warn("notification routing cell unreadable; treating it as off",
-					"key", toggle.Key(), "error", err)
+					"key", toggle.Key(), "error", readErr)
 				return false
 			}
 			return on
@@ -1412,11 +1532,11 @@ func New(opts ...Option) (*App, error) {
 	// flood the policy exists to prevent. So the degrade is to the default,
 	// and it says so in the log rather than only in behaviour.
 	notifyWindow := notify.WindowSource(func() time.Duration {
-		seconds, err := settingsRegistry.GetNumber(notifyDebounceWindowSetting)
-		if err != nil {
+		seconds, readErr := settingsRegistry.GetNumber(notifyDebounceWindowSetting)
+		if readErr != nil {
 			logger.Warn("debounce window unreadable; falling back to the default",
 				"key", notifyDebounceWindowSetting.Key(),
-				"default", notifyDebounceWindow, "error", err)
+				"default", notifyDebounceWindow, "error", readErr)
 			return 0
 		}
 		return time.Duration(seconds * float64(time.Second))
@@ -1504,8 +1624,16 @@ func New(opts ...Option) (*App, error) {
 	// process-lifetime: agent.status's "last probe result" fact, whose
 	// meaning expires with the endpoint that produced it.
 	assistantProbes := assistant.NewProbeStore()
+	// NewClient fails loudly when the tool schemas did not reach the binary
+	// (nocx-jtz3q): an assistant whose registry assembled empty would offer
+	// no tools to any run and fail silently — the composition root refuses
+	// to start with a broken registry instead.
+	assistantClient, err := assistant.NewClient(logger)
+	if err != nil {
+		return nil, err
+	}
 	tpOpts = append(tpOpts,
-		transport.WithAssistantClient(assistant.NewClient(logger)),
+		transport.WithAssistantClient(assistantClient),
 		transport.WithAssistantProbeStore(assistantProbes),
 	)
 	// The same store the publisher enrols into, on its other end: the
@@ -1646,6 +1774,14 @@ func New(opts ...Option) (*App, error) {
 		connection.WithRemoteInstaller(shint),
 	)
 	tp.SetProfileResolver(resolver)
+	// The same resolver the transport uses, handed to the API route table.
+	// It is set here rather than at construction for the reason the
+	// transport's own holder gives: the resolver needs the transport (the
+	// connection-password ask) and the transport needs the sender, so one of
+	// the three has to be wired after the other two exist. There is one
+	// resolver, not two — the API route asks the same question a tab asks
+	// and gets the same answer, credentials and jump route included.
+	apiRoutes.setResolver(resolver)
 	app := &App{
 		Logger:           logger,
 		Pty:              ptf,
@@ -2808,4 +2944,72 @@ func (p *remoteLifecycleProvider) Establish(ctx context.Context, host string, op
 		Capability: cfg.Capability,
 		Recovery:   cfg.Recovery,
 	}, adapter, nil
+}
+
+// apiRouteLeaser turns the PROFILE an API-testing environment names into a
+// lease on that profile's pooled SSH connection (design §6.5, §7.1). It is
+// apisend.ConnectionLeaser, and it exists here rather than in that package
+// because resolving a profile is the composition root's job: the sender
+// knows about routes, not about credentials, jump routes or the profile
+// store.
+//
+// Two things it deliberately does NOT do.
+//
+// It does not resolve the profile itself. connection.Resolver is the one
+// owner of "what does this profile id mean", the same one a tab and a port
+// forward go through — so a request routed through a connection is
+// authorized by exactly the credential authorization a tab is, and reaches
+// the same host through the same jump route.
+//
+// It does not take a connection of its own. ssh.RealClient.TunnelConn goes
+// through acquirePooled, which SHARES when the resolved pool key matches and
+// establishes one otherwise (AD-7, AD-4). So a send rides the connection a
+// tab already has when the key matches, and authenticates anew when it does
+// not — a route names a destination, not a window, and the design says so in
+// as many words rather than promising a particular live session.
+//
+// The lease is not released here. apisend's route holds it for as long as
+// the connection lives and takes a fresh one when it dies; releasing it
+// after one send would drop a pool reference other tabs and forwards are
+// counting on, and would cost every send a new authentication.
+type apiRouteLeaser struct {
+	client *ssh.RealClient
+
+	// mu guards the resolver, which is set after construction. The
+	// transport's own resolverHolder has the same shape for the same
+	// reason: the value is read per call, never captured, so a lease taken
+	// before SetProfileResolver refuses by name instead of dereferencing
+	// nil.
+	mu       sync.RWMutex
+	resolver transport.ProfileResolver
+}
+
+func (l *apiRouteLeaser) setResolver(r transport.ProfileResolver) {
+	l.mu.Lock()
+	l.resolver = r
+	l.mu.Unlock()
+}
+
+// LeaseForProfile implements apisend.ConnectionLeaser.
+func (l *apiRouteLeaser) LeaseForProfile(ctx context.Context, profileID string) (ssh.TunnelConn, error) {
+	l.mu.RLock()
+	resolver := l.resolver
+	l.mu.RUnlock()
+	if resolver == nil {
+		return nil, fmt.Errorf("no profile resolver is wired, so connection %s cannot be resolved", profileID)
+	}
+	host, cfg, err := resolver.Resolve(profileID)
+	if err != nil {
+		// Resolving reads the stored secret, so a sealed vault surfaces
+		// here — and the sender wraps this into its own named refusal, so
+		// the reason reaches a surface that can offer the unlock prompt.
+		return nil, fmt.Errorf("resolve connection %s: %w", profileID, err)
+	}
+	if cfg == nil {
+		return nil, fmt.Errorf("connection %s resolved to no configuration", profileID)
+	}
+	// The WHOLE resolved config rides one option, exactly as a forward's
+	// does (ws_tunnel.go): credentials, jump route and authorized endpoints
+	// together, so the lease is pool-keyed and authorized like a tab.
+	return l.client.TunnelConn(ctx, host, func(dst *ssh.ConnectConfig) { *dst = *cfg })
 }

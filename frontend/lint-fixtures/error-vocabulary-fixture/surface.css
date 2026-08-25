@@ -1,0 +1,50 @@
+/* Error-vocabulary fixture — negative fixtures for
+   check-error-vocabulary.mjs (nocx-8sudy). Every class here is valid CSS
+   that the browser accepts silently, so a checker that quietly stopped
+   firing would look exactly like a clean codebase.
+
+   Intentional violations (the gate asserts these fire):
+     .conn-refusal-message — a surface naming a refusal AND painting danger
+     .git-push-error       — a surface naming an error AND painting danger
+
+   Must stay silent (the gate asserts these do NOT fire):
+     .ui-field-error                — the kit's own error identity (kit identity)
+     .ui-toast[data-level='danger'] — kit identity painting its danger state
+     .conn-impact-dangerous        — danger paint, but a CLASSIFICATION name,
+                                     not an error/refusal name
+     .files-watch-error             — an error-named class with NO danger paint
+     .git-commit-output             — an error-named class with NO danger paint */
+
+.conn-refusal-message {
+  color: var(--color-danger);
+  font-size: var(--font-size-sm);
+}
+
+.git-push-error {
+  color: var(--color-error);
+  font-size: var(--font-size-sm);
+}
+
+.ui-field-error {
+  color: var(--color-error);
+  font-size: var(--font-size-sm);
+}
+
+.ui-toast[data-level='danger'] {
+  --toast-accent: var(--color-danger);
+}
+
+.cm-impact-dangerous {
+  color: var(--color-danger);
+  font-weight: 600;
+}
+
+.files-watch-error {
+  display: flex;
+  gap: var(--space-3);
+}
+
+.git-commit-output {
+  max-height: 12rem;
+  overflow: auto;
+}

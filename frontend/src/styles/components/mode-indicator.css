@@ -1,0 +1,17 @@
+/* ModeIndicator (ui/README table) — the kit's badge wearing the operable
+   target-switch variance (ADR-0004 §3, nocx-4ff.7): what a submit reaches
+   and the person's one explicit switch. The badge shape and tone are
+   ui-badge's (data-tone: neutral for the shell, info for the assistant —
+   the same register the running block wears); this file owns only the
+   button affordances the badge lacks: the border that reads as a control,
+   the pointer, the hover. Colours are tokens only — no literals
+   (ADR-0013 §4). */
+.ui-mode-indicator {
+  cursor: pointer;
+  border: 1px solid var(--color-surface-raised);
+  padding: 1px 7px;
+}
+
+.ui-mode-indicator:hover {
+  color: var(--color-text);
+}

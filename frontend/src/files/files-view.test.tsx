@@ -55,6 +55,10 @@ vi.mock('../renderers/xterm', () => ({
 const openFixture = (over: Partial<FilesOpenResult> = {}): FilesOpenResult => ({
   bindingId: 'b1',
   endpointId: null,
+  // A revealer wired: the default fixture models a supported backend, so
+  // the local-tab menu expectations below exercise the offered path. The
+  // absent case passes revealAvailable: false explicitly.
+  revealAvailable: true,
   root: { path: '/', display: '/', inferred: false, inferredReason: '' },
   ...over,
 })
@@ -851,6 +855,56 @@ describe('files sidebar view', () => {
     fireEvent.contextMenu(rowNamed(panel, 'remote.md'), { clientX: 10, clientY: 10 })
     expect(menuItems()).toEqual(['Copy Relative Path', 'Copy Absolute Path'])
     expect(menuItems()).not.toContain('Show in Finder')
+  })
+
+  it('"Show in Finder" is ABSENT on a local tab when the backend has no revealer', async () => {
+    // The other half of the capability gate (nocx-ngf3u): a backend on a
+    // platform nocx ships no file-manager reveal for answers
+    // revealAvailable:false on the open result, and the item must not
+    // render — a menu that offers a capability the backend refuses is the
+    // exact defect this bead exists to remove. Absence, not a greyed-out
+    // row, and not a toast the person discovers by clicking.
+    const open = vi.fn().mockResolvedValue(openFixture({ revealAvailable: false }))
+    const { panel } = await mountApp(
+      fakeServices({
+        open,
+        list: vi
+          .fn()
+          .mockResolvedValue(
+            listFixture('C:/', [entryFixture({ name: 'notes.md', path: '/notes.md' })]),
+          ),
+      }),
+    )
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
+
+    fireEvent.contextMenu(rowNamed(panel, 'notes.md'), { clientX: 10, clientY: 10 })
+    const menuItems = () =>
+      [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].map((i) => i.textContent)
+    expect(menuItems()).toEqual(['Copy Relative Path', 'Copy Absolute Path'])
+    expect(menuItems()).not.toContain('Show in Finder')
+  })
+
+  it('"Show in Finder" IS present on a local tab when the backend has a revealer', async () => {
+    // The paired positive of the gate: the default fixture carries
+    // revealAvailable:true (a supported backend), and the item renders —
+    // the absence above is the exception, not the rule.
+    const open = vi.fn().mockResolvedValue(openFixture({ revealAvailable: true }))
+    const { panel } = await mountApp(
+      fakeServices({
+        open,
+        list: vi
+          .fn()
+          .mockResolvedValue(
+            listFixture('C:/', [entryFixture({ name: 'notes.md', path: '/notes.md' })]),
+          ),
+      }),
+    )
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
+
+    fireEvent.contextMenu(rowNamed(panel, 'notes.md'), { clientX: 10, clientY: 10 })
+    const menuItems = () =>
+      [...document.querySelectorAll<HTMLElement>('[role="menuitem"]')].map((i) => i.textContent)
+    expect(menuItems()).toContain('Show in Finder')
   })
 
   it('a refused files.reveal is rendered as a toast, never swallowed', async () => {

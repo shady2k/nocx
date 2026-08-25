@@ -15,7 +15,7 @@
 
 import { For, Show, createResource } from 'solid-js'
 
-import { Badge, Button, PageSection, Stack } from './ui'
+import { Badge, Button, PageSection, Stack, StatusCard } from './ui'
 import { showToast } from './ui/toast'
 import type { AppAbout } from './generated/app.about'
 import type { ClipboardAccess } from './clipboard'
@@ -90,9 +90,11 @@ export function AboutSection(props: AboutSectionProps) {
       <Show
         when={!about.error}
         fallback={
-          <p class="ab-failed">
-            Could not read this build's details. The backend answered with an error.
-          </p>
+          <StatusCard
+            tone="danger"
+            title="Could not read this build's details"
+            description="The backend answered with an error."
+          />
         }
       >
         <Show when={about()} fallback={<p class="ab-loading">Reading the build…</p>}>

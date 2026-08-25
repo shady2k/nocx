@@ -15,17 +15,18 @@
   align-items: center;
 }
 
+/* The spacer is the whole separation between the two zones (nocx-5b3ab). It
+   takes every spare pixel of a full-height column, so the views sit on the
+   bar's ceiling and the actions on its floor.
+
+   It used to draw a 24px hairline through a `::before` as well — added with
+   the shell itself (0f6671de, nocx-82l9.6), long before the API surface put
+   a second entry in the bottom zone. The owner asked for the rule to go; the
+   growth below is what was doing the work, and sidebar.test.tsx pins both
+   halves so the next person does not restore a rule to solve a gap that is
+   already solved. */
 .activity-bar-spacer {
   flex: 1 1 auto;
-}
-
-.activity-bar-spacer::before {
-  content: '';
-  display: block;
-  width: 24px;
-  height: 1px;
-  background: var(--color-border);
-  margin: 4px auto;
 }
 
 /* ── Activity bar contents ─────────────────────────────────────────────────

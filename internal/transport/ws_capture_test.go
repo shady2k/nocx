@@ -46,6 +46,7 @@ func (f *captureFakeDB) Backup(_ context.Context, _ string) error      { return 
 func (f *captureFakeDB) Close() error                                  { return nil }
 func (f *captureFakeDB) Ledger() content.LedgerRepository              { return f }
 func (f *captureFakeDB) Layout() content.LayoutRepository              { return nil }
+func (f *captureFakeDB) APIRuns() content.APIRunRepository             { return nil }
 
 func (f *captureFakeDB) RecordCompleted(_ context.Context, in content.CompletedCommand) (string, error) {
 	f.mu.Lock()

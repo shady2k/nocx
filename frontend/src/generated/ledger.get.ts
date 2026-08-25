@@ -22,6 +22,14 @@ export interface LedgerGet {
    * The metadata of every artifact of every execution of this entry, in execution order. Never null: no capture is [].
    */
   artifacts: Artifact[]
+  /**
+   * Whether the prose of THIS RUN is no longer kept: retention took the bodies of its `text` children (ADR-0040's retention rule, ADR-0019 §7). It is the ONE place a reader asks that question, and it is a fact about the RUN because the run is the unit — the prose of one run is retained or evicted together, so a turn cut into seven pieces and a turn written in one report the same single answer, and the renderer drawing the turn has one sentence to say rather than one per hole. False on every kind that has no prose, which includes a command whose own terminal body was evicted — that block says its own sentence, and a turn does not say it for it.
+   */
+  proseEvicted: boolean
+  /**
+   * Everything this entry caused, in the causal order the turn assigned (nocx-h1l4o) — the `caused-by` edges above, resolved. The join and the order are the ledger's: a reader that resolved raw edges itself would own the arrangement a second time (AD-8). Never null: an entry that caused nothing is [], which is also what a reader gets when the relation is missing, and it draws plain ledger order.
+   */
+  caused: Caused[]
 }
 /**
  * One row of recall: the ledger's identity for the entry plus every fact a block or a history row is rendered from.
@@ -48,9 +56,13 @@ export interface Entry {
    */
   cwd: string
   /**
-   * What kind of intent this was. Closed set, mirroring the store's CHECK constraint.
+   * What this ledger ROW is — the discriminator of the row, not of a visual block (the brief's decision). Closed set, mirroring the store's CHECK constraint. `ask` is a TURN — the word the renderer's BlockKind already uses for it; `frame` is a captured frame, a row that is never drawn as a block of its own (kind is what lets the ask's reference check tell a frame from a turn by the discriminated column rather than by comparing intent against a magic string); `text` is one run of assistant prose (ADR-0040) — the only member that is not an intent, because it was PRINTED rather than attempted. WHO submitted the row is NOT here: that is the `source` field. It was missing here until nocx-dc2fr.7: the store gained the kind and this shared definition did not, so ledger.get on a prose block — which is exactly what the restore reads, per entry — answered a payload that violated its own contract.
    */
-  kind: 'shell' | 'agent' | 'action'
+  kind: 'shell' | 'ask' | 'action' | 'text' | 'frame'
+  /**
+   * The IMMEDIATE subject that submitted the content or the intent this entry represents — entries.source, never derived from the kind. Initiation is NOT transitive: the command the assistant ran was submitted by the assistant, so it stays 'assistant' even though a person started the assistant. Approval does not change it: a call the assistant proposed stays 'assistant' after a person allows it. The restore badge is painted from this (frontend/src/restore-client.ts), which is the whole point: a command the assistant ran is kind=shell AND source=assistant, and both halves must survive a restart.
+   */
+  source: 'user' | 'assistant'
   /**
    * The intent as recorded — for a shell entry, the command line. Secrets are masked before the row is written: the durable text is always the masked one, and maskedCount/maskedKinds say what was removed. Never truncated here.
    */
@@ -245,4 +257,60 @@ export interface Gap {
    * Why the range is missing.
    */
   reason: string
+}
+/**
+ * One CHILD of this entry, at its seat among its siblings (ADR-0040). There is deliberately no `at`: the offset said how much of one stored answer had been written when the cause happened, and it existed only while the unit that was DRAWN (a run of prose) and the unit that was STORED (the whole answer) were different things. They are the same thing now — prose is a `text` child with a seat of its own — so `position` IS the place and there is nothing left to cut. A command the turn ran is a block the page already carries and is placed by this; a tool call is an action entry that opened no block of its own and is drawn as a child naming its tool and its arguments; a run of prose is a `text` child whose body is fetched like any other.
+ */
+export interface Caused {
+  /**
+   * The caused entry's id — the same id a page row carries for a command, and the address ledger.get takes.
+   */
+  entryId: string
+  /**
+   * Where it sits inside the turn: a causal index the turn assigned, 0 for the first thing it caused. NOT a timestamp and NOT ingest_seq, which is commit order and never causality (ADR-0019 §2).
+   */
+  position: number
+  /**
+   * Whether this cause's work became a TOP-LEVEL BLOCK of its own — the tool declaration's fact (internal/agenttools Declaration.OpensBlock), stored on the ACTION row with its attempt and read back here. True only for an action entry whose tool opens a block (`run`): the command's block, its output and its exit status are the account of that call, so the turn draws nothing beside it, and a second child would restate what the block already shows. False for every other action, whose own child is the only trace it left, and false for a shell entry — a command a turn ran IS a block and does not also say it opened one. Read rather than matched on `intent`, so a reader is never a second copy of the tool table.
+   */
+  opensBlock: boolean
+  /**
+   * What kind of entry it is. Closed set, mirroring the store's CHECK constraint — `text` included, because a run of assistant prose is a child like any other since ADR-0040 and the read returns it. `ask` is a TURN, which is never a child of a turn; the member is here because the enum mirrors the store.
+   */
+  kind: 'shell' | 'ask' | 'action' | 'text'
+  /**
+   * Who submitted the child's content or intent — the same entries.source fact a page row carries, so a restored turn's badge never guesses it from the child's kind.
+   */
+  source: 'user' | 'assistant'
+  /**
+   * The child's own intent: the command line for a shell entry, the declared tool name for an action, and EMPTY for a `text` child — prose has no intent, which is a clause of its CHECK rather than a convention a reader has to know.
+   */
+  intent: string
+  /**
+   * What the model asked for, as the tool's schema validated it, read back off the ACTION row's own record (content.ActionFacts). Null on every other kind — a command a turn ran is not a tool call and asked for nothing. It is here for the reason it is on agent.runToolCall: the arguments are what tell two calls of one tool apart, and a restored call naming only its tool and its derived resource would say LESS than the live one did — which is the defect ADR-0040 was written against, arriving one restart later. Stored rather than re-derived, like the effect and the resource beside it.
+   */
+  args: {
+    [k: string]: unknown
+  } | null
+  /**
+   * The effect class the gate decided for an ACTION entry, read back off that row's own record. Null on every other kind — a command a turn ran is not a tool call and has no effect class.
+   */
+  effect:
+    | (
+        | 'observe'
+        | 'mutate-reversible'
+        | 'mutate-destructive'
+        | 'privilege-change'
+        | 'disclose'
+        | 'cross-boundary'
+        | 'delegate'
+      )
+    | null
+  /**
+   * What the call named, as the backend derived it at the moment it decided about the call — never re-derived by a reader. Null when the tool names no resource in its parameters at all, and null for a non-action entry.
+   */
+  resource: {
+    kind: string
+    id: string
+  } | null
 }

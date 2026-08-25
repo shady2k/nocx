@@ -126,7 +126,7 @@ func TestGenericObject_Floor(t *testing.T) {
 // nonetheless weaker than a validator that knows a field is required and what
 // it means, and each conversion is a method that can no longer be reached with
 // a well-shaped payload that means nothing.
-const genericObjectBaseline = 2
+const genericObjectBaseline = 1
 
 func TestGenericObjectRatchet_OnlyShrinks(t *testing.T) {
 	pattern := regexp.MustCompile(`genericObject\(`)

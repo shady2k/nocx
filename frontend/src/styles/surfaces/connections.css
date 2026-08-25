@@ -225,12 +225,6 @@
   align-items: start;
 }
 
-.cm-forwards-error {
-  margin: 0;
-  color: var(--color-error);
-  font-size: var(--font-size-sm);
-}
-
 .cm-provenance-link {
   color: var(--color-accent);
   text-decoration: none;

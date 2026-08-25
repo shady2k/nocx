@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.request.cancel.schema.json",
+  "title": "ApiRequestCancelResult",
+  "description": "Result of the api.request.cancel JSON-RPC method: stop the exchange running under a token. It answers EMPTY, and the emptiness is the design — the outcome of a stopped exchange is not reported here but on api.request.send's own result, which comes back as `outcome: \"stopped\"` on the very request that was stopped. Two methods reporting one exchange's end would be two accounts of it, and the renderer would have to decide which to believe. A token that names no running exchange is REFUSED by name (-32602) rather than answered with this, because \"there was nothing to stop\" and \"it is stopped\" are different facts and a caller that cannot tell them apart cannot report either.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": []
+}

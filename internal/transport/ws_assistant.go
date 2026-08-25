@@ -31,8 +31,10 @@ import (
 // contracts/agent.status.schema.json. lastProbe is required on the wire and
 // null when none has run — a nil pointer marshals to null. credential names
 // which of the credential facts is true (design §7, ADR-0032): one
-// authoritative enum, never a boolean that hides the reason. It is null only
-// when no endpoint is configured (there is nothing to ask about).
+// authoritative enum, never a boolean that hides the reason. It is the fact
+// of the endpoint the ANSWERING ROLE resolved to and of no other, and null
+// whenever the role does not resolve — there is then no endpoint the
+// question is about (nocx-rikz5).
 //
 // The three facts the product distinguishes are 'none' (the endpoint has no
 // reference at all), 'deleted' (the referenced secret is gone) and 'sealed'
@@ -44,7 +46,45 @@ type agentStatusResult struct {
 	EndpointConfigured bool                   `json:"endpointConfigured"`
 	Credential         *string                `json:"credential"`
 	LastProbe          *assistant.ProbeResult `json:"lastProbe"`
+	// Answering is the resolution of the role the ask will use. Ready, or
+	// one of the refusal reasons; never absent, because readiness is the
+	// question the ask surface asks and a status with no answer to it is
+	// what let "an endpoint exists" pass for "the assistant can answer"
+	// (nocx-rikz5).
+	Answering answeringWire `json:"answering"`
 }
+
+// answeringWire is agent.status's answer to "will the assistant answer, and
+// with what". Ready plus the (endpoint, model) that will answer, or Reason
+// naming the rung the person is on. All four fields are required on the
+// wire and null when they do not apply — a field that vanishes is a field
+// the renderer reads as "unknown" and renders as nothing.
+type answeringWire struct {
+	Ready    bool    `json:"ready"`
+	Reason   *string `json:"reason"`
+	Endpoint *string `json:"endpoint"`
+	Model    *string `json:"model"`
+}
+
+// The answering reason enum: the wire's vocabulary for "why the role does
+// not resolve". Six values, not four — `no-models` and `unavailable` are
+// states the real system reaches and that the four-value set answered
+// wrongly: an endpoint offering nothing would have been told to "choose a
+// model" from an empty picker, and a store that could not answer would have
+// been an error toast with no repair path.
+const (
+	reasonNoEndpoints  = "no-endpoints"
+	reasonNoModels     = "no-models"
+	reasonUnassigned   = "unassigned"
+	reasonEndpointGone = "endpoint-gone"
+	reasonModelGone    = "model-gone"
+	reasonUnavailable  = "unavailable"
+)
+
+// reasonPtr is the wire's "present and non-null" for a reason constant.
+// Not named strPtr: ws_effective_test.go already owns that name in this
+// package, and this one only ever wraps a member of the enum above.
+func reasonPtr(s string) *string { return &s }
 
 // The credential enum: the wire's single vocabulary for "can the ask
 // authenticate", and the reason when it cannot.
@@ -54,6 +94,7 @@ const (
 	credDeleted     = "deleted"
 	credSealed      = "sealed"
 	credUnavailable = "unavailable"
+	credNotRequired = "not-required"
 )
 
 // endpointProbeParams are the form's DRAFT values (design §4.5) plus the
@@ -61,27 +102,23 @@ const (
 // input that rides the params once and never crosses back (ADR-0030).
 // Params are not contracted (contracts/README.md) — the handler validates
 // what it parses.
-//
 // The credential resolution rule, in code:
 //
-//  1. A non-empty key WINS — the user typed a key to test it before saving
-//     it (the other half of what this button is for), so the stored
-//     credential must not be consulted at all. The other order would
-//     silently test the credential the user is actively replacing.
-//  2. Else, endpointId names the record and the BACKEND resolves the
-//     credential that record owns — exactly how connections.test resolves
-//     a profile by its id (the renderer never re-fetches the material,
-//     which ADR-0030 forbids crossing back). A sealed or unavailable vault
-//     is a probe RESULT naming that, never a Go error and never a
-//     no-key dial (which would 401 and lie about a working endpoint).
-//  3. Else (no key, no id, or a saved endpoint with no credential) the
-//     probe runs without one — the local-model case.
+//  1. A non-empty key wins when the draft declares that a credential is
+//     required — the user typed a key to test before saving it.
+//  2. A draft declaring noKey never resolves the endpoint credential. The
+//     declaration is explicit; no URL heuristic or empty-key inference is
+//     allowed.
+//  3. Otherwise endpointId names the record and the backend resolves the
+//     credential that record owns. A missing credential is a refusal, not an
+//     unauthenticated dial.
 //
-// The baseUrl and model stay the form's: the button sits on the form, so
-// the form's target is what is tested; only the credential is resolved.
+// The baseUrl and model stay the form's: the button sits on the form, so the
+// form's target is what is tested; only the credential is resolved.
 type endpointProbeParams struct {
 	Name       string `json:"name"`
 	BaseURL    string `json:"baseUrl"`
+	NoKey      bool   `json:"noKey"`
 	Key        string `json:"key"`
 	Model      string `json:"model"`
 	EndpointID string `json:"endpointId"`
@@ -112,45 +149,74 @@ func (h assistantStatusHandlers) handleAgentStatus(ctx context.Context, req json
 	if h.probes != nil {
 		res.LastProbe = h.probes.Last()
 	}
+	// The order is the whole change (nocx-rikz5): resolve the ROLE first,
+	// then ask about THAT endpoint's key. The handler used to decide the
+	// credential by scanning every endpoint and returning early when there
+	// were none — which skipped the answering fact in the very case that
+	// most needs a reason, and reported "resolvable" whenever ANY endpoint
+	// resolved, so a healthy endpoint nobody chose vouched for the one that
+	// would actually answer.
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.ConfigService) error {
 		eps, err := svc.ListEndpoints()
 		if err != nil {
-			return err
+			// A store that cannot answer is a rung, not an RPC error: an
+			// error toast leaves a person with nothing to do next, and the
+			// ladder must have a sentence for this.
+			res.Answering = answeringWire{Reason: reasonPtr(reasonUnavailable)}
+			return nil
 		}
 		res.EndpointConfigured = len(eps) > 0
-		if !res.EndpointConfigured {
-			return nil // credential stays null: nothing to ask about
-		}
-		// One resolvable endpoint is enough to ask. When none resolves, the
-		// reason is the most actionable one present: a sealed vault
-		// outranks the rest (the ask surface's whole point is to offer the
-		// unlock), then the first endpoint's own fact.
-		resolved := false
-		sealed := false
-		firstOther := ""
-		for _, ep := range eps {
-			st := h.credentialStateFor(ctx, ep.CredentialRef)
-			switch st {
-			case credResolvable:
-				resolved = true
-			case credSealed:
-				sealed = true
-			default:
-				if firstOther == "" {
-					firstOther = st
-				}
+
+		ep, model, resolveErr := svc.ResolveRole(profile.RoleAnswering)
+		switch {
+		case resolveErr == nil:
+			name := ep.Name
+			res.Answering = answeringWire{Ready: true, Endpoint: &name, Model: &model}
+			// THE CREDENTIAL OF THE ENDPOINT THAT WILL ANSWER, and of no
+			// other. Fleet-wide endpoint health belongs on the Endpoints
+			// page; here the question is about one endpoint.
+			cred := h.credentialStateFor(ctx, ep)
+			res.Credential = &cred
+			// A probe describes ONE endpoint and one model. Reported only
+			// when it describes this one; otherwise "Last test ok" is about
+			// something the person is not asking.
+			if res.LastProbe != nil && !probeDescribes(res.LastProbe, ep, model) {
+				res.LastProbe = nil
 			}
-		}
-		cred := credResolvable
-		if !resolved {
-			switch {
-			case sealed:
-				cred = credSealed
-			case firstOther != "":
-				cred = firstOther
+		case len(eps) == 0:
+			// Before every other refusal: with no endpoints there is
+			// nothing to assign, nothing to repair and nothing to name, and
+			// sending a person to choose from an empty list is the one
+			// answer worse than saying nothing.
+			res.Answering = answeringWire{Reason: reasonPtr(reasonNoEndpoints)}
+		case errors.Is(resolveErr, profile.ErrRoleEndpointGone):
+			res.Answering = answeringWire{Reason: reasonPtr(reasonEndpointGone)}
+		case errors.Is(resolveErr, profile.ErrRoleModelGone):
+			res.Answering = answeringWire{Reason: reasonPtr(reasonModelGone)}
+		case errors.Is(resolveErr, profile.ErrRoleUnassigned):
+			// `no-models` is a REFINEMENT of "you have not chosen yet", not
+			// a rung competing with the two above it: it is the case where
+			// "choose a model" would open a picker with no options — a
+			// repair the person cannot perform. It is nested here rather
+			// than tested first because a fleet-wide fact must never
+			// outrank a selection the person actually made: a default
+			// naming a deleted endpoint, next to a surviving endpoint that
+			// happens to offer nothing, used to report `no-models` and sent
+			// them to add a model to an endpoint they never chose.
+			if !anyEndpointOffersAModel(eps) {
+				res.Answering = answeringWire{Reason: reasonPtr(reasonNoModels)}
+			} else {
+				res.Answering = answeringWire{Reason: reasonPtr(reasonUnassigned)}
 			}
+		default:
+			// Includes a role-store read failure surfaced through
+			// ResolveRole, and a role name this build does not know.
+			res.Answering = answeringWire{Reason: reasonPtr(reasonUnavailable)}
 		}
-		res.Credential = &cred
+		// credential stays null on every refusal arm: with no resolved
+		// endpoint there is no key the question is about, and the old
+		// "first other endpoint's fact" would be a sentence about an
+		// endpoint nobody chose.
 		return nil
 	})
 	if err != nil {
@@ -160,17 +226,19 @@ func (h assistantStatusHandlers) handleAgentStatus(ctx context.Context, req json
 	_ = h.r.TryResult(req.ID, mustMarshal(res))
 }
 
-// credentialStateFor classifies one endpoint's credential reference into the
-// wire's facts: 'resolvable' when the vault answers, 'none' when the
-// endpoint has no reference (or no store is wired), 'deleted' when the
-// referenced secret is gone, 'sealed' when the vault cannot answer right
-// now, and 'unavailable' for a store failure that is none of those — it is
-// never mislabelled as one of the three.
+// credentialStateFor classifies one endpoint's authentication fact into the
+// wire vocabulary. The endpoint's NeedsCredential method is the one
+// derivation shared with the ask and probe paths: not-required is a quiet
+// completed state, while none means a credential is expected but missing.
 //
 // This is a read that REPORTS: it swallows the sealed condition instead of
 // surfacing it, so agent.status never raises the unlock prompt while
 // somebody is looking at a settings page (asserted by assertNoPendingAsk).
-func (h assistantStatusHandlers) credentialStateFor(ctx context.Context, ref string) string {
+func (h assistantStatusHandlers) credentialStateFor(ctx context.Context, ep profile.Endpoint) string {
+	if !ep.NeedsCredential() {
+		return credNotRequired
+	}
+	ref := ep.CredentialRef
 	if ref == "" || h.secrets == nil {
 		return credNone
 	}
@@ -193,6 +261,34 @@ func (h assistantStatusHandlers) credentialStateFor(ctx context.Context, ref str
 		return credDeleted
 	}
 	return credResolvable
+}
+
+// anyEndpointOffersAModel reports whether any stored endpoint offers at
+// least one model. It splits the UNASSIGNED case in two — "you have not
+// chosen yet" from "there is nothing to choose" — and is asked ONLY there:
+// it is a fact about the fleet, and a fact about the fleet must never
+// outrank a selection the person made, which is why a dangling endpoint or
+// a removed model is answered before this is consulted at all.
+// ValidateEndpoint refuses a zero-model record at create and at update, so
+// a false answer here is reachable only from a document written underneath
+// us — and a rung that reads "choose a model" over an empty picker is a
+// repair instruction a person cannot follow.
+func anyEndpointOffersAModel(eps []profile.Endpoint) bool {
+	for _, ep := range eps {
+		if len(ep.Models) > 0 {
+			return true
+		}
+	}
+	return false
+}
+
+// probeDescribes reports whether a recorded probe is about the endpoint and
+// model the role just resolved to. Both must match: a connection check names
+// no model at all (Model is empty by definition), so it describes the
+// endpoint but never this model, and reporting its verdict as this model's
+// would be the same lie in a quieter voice.
+func probeDescribes(p *assistant.ProbeResult, ep profile.Endpoint, model string) bool {
+	return p.EndpointName == ep.Name && p.Model == model
 }
 
 // assistantProbeHandlers answers endpoints.probe: probe the form's draft
@@ -390,47 +486,46 @@ func refusedProbeHeadersResult(params endpointProbeParams, headers []endpointHea
 //  2. Else, endpointId names the record; its OWN credential is resolved
 //     from the vault. Unavailable (sealed vault, deleted secret, missing
 func (h assistantProbeHandlers) resolveProbeCredential(ctx context.Context, params endpointProbeParams) (credential.Secret, *assistant.ProbeResult, error) {
+	draft := profile.Endpoint{NoKey: params.NoKey}
+	if !draft.NeedsCredential() {
+		if params.Key != "" {
+			return credential.Secret{}, nil, errors.New("endpoint declaring noKey cannot accept a key")
+		}
+		return credential.Secret{}, nil, nil
+	}
 	typed := credential.NewSecret(params.Key)
 	if !typed.IsEmpty() {
 		return typed, nil, nil
 	}
 	if params.EndpointID == "" {
-		return credential.Secret{}, nil, nil
+		return credential.Secret{}, refusedProbeResult(params), nil
 	}
 
-	var ref string
+	var endpoint profile.Endpoint
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.ConfigService) error {
-		ep, err := svc.GetEndpoint(params.EndpointID)
-		if err != nil {
-			return err
-		}
-		ref = ep.CredentialRef
-		return nil
+		var err error
+		endpoint, err = svc.GetEndpoint(params.EndpointID)
+		return err
 	})
 	if err != nil {
 		return credential.Secret{}, nil, err
 	}
-	if ref == "" {
-		// The endpoint honestly has no credential (created without one, or
-		// its key was deleted on the Secrets page): probe without one.
+	if !endpoint.NeedsCredential() {
 		return credential.Secret{}, nil, nil
+	}
+	if endpoint.CredentialRef == "" {
+		return credential.Secret{}, refusedProbeResult(params), nil
 	}
 	if h.secrets == nil {
 		// No store to resolve with: the probe must not dial without the
-		// credential (a no-key dial would 401 and lie about a working
-		// endpoint). This is a build-configuration state, not the sealed
-		// vault, so it stays a refused result with the honest sentence.
+		// credential, so it stays a refused result with the honest sentence.
 		return credential.Secret{}, refusedProbeResult(params), nil
 	}
-	secret, err := h.secrets.Resolve(ctx, credential.SecretID(ref), credential.ForOperation)
+	secret, err := h.secrets.Resolve(ctx, credential.SecretID(endpoint.CredentialRef), credential.ForOperation)
 	if err != nil {
 		if errors.Is(err, vault.ErrVaultSealed) {
-			// The vault is sealed: this is a sealed-vault failure. The
-			// dispatcher's seam normalizes it to the canonical error, the
-			// renderer raises the unlock and re-sends the probe — the call
-			// completes once the vault answers (ADR-0032). Never a probe
-			// RESULT naming the sealed state: that was the dead end this
-			// bead exists to delete.
+			// The dispatcher normalizes this into the canonical unlock
+			// request; the probe is retried once the vault answers.
 			return credential.Secret{}, nil, vault.ErrVaultSealed
 		}
 		return credential.Secret{}, refusedProbeResult(params), nil
@@ -507,6 +602,9 @@ func validateProbeParams(p endpointProbeParams) string {
 	}
 	if utf8.RuneCountInString(p.Key) > maxProbeKeyRunes {
 		return fmt.Sprintf("key exceeds %d characters", maxProbeKeyRunes)
+	}
+	if p.NoKey && p.Key != "" {
+		return "endpoint declaring noKey cannot accept a key"
 	}
 	if utf8.RuneCountInString(p.EndpointID) > maxProbeIDRunes {
 		return fmt.Sprintf("endpointId exceeds %d characters", maxProbeIDRunes)

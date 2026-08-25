@@ -17,12 +17,24 @@ import type { ExecutionAttempt } from './lifecycle/state'
 // The status vocabulary of a ledger record. Exported because the
 // completion projection reconnects the ledger to history persistence and
 // the block model, which name a status across modules (ADR-0024 §5).
+// Who submitted a command, in the ledger's own vocabulary: entries.kind
+// (internal/content/sqlite.go) distinguishes exactly the two command-bearing
+// kinds — the human's shell and the agent's lane. 'action' is the ledger's
+// third kind and can never be an author: an action has no block and no
+// command line. The author is minted at submit, by the target that submits
+// (design §3.1, nocx-iadtt) — never derived afterwards, or a human command
+// typed while an agent run is in flight would be attributed to the agent.
+export type CommandAuthor = 'shell' | 'agent'
 export type CommandStatus = 'running' | 'success' | 'failure' | 'interrupted' | 'unknown'
 export interface CommandRecord {
   readonly id: number
   readonly command: string
   readonly cwd: string
   readonly host: string
+  /** The submitting target's author, minted at submit and never derived
+   *  afterwards (design §3.1). 'shell' is the human; 'agent' is the
+   *  assistant's lane. */
+  readonly author: CommandAuthor
   status: CommandStatus
   exitCode: number | null
   startedAt: number | null
@@ -70,12 +82,16 @@ export class CommandLedger {
    * @param cwd Current working directory at submission time.
    * @param host Empty for local shells, hostname for SSH.
    * @param lineOf An opaque accessor backed by a live xterm IMarker.
+   * @param author The submitting target's author — minted at submit, by
+   *   the target that submits, and required so no submit path can forget
+   *   it and silently attribute a command to the human (design §3.1).
    */
   open(
     command: string,
     cwd: string,
     host: string,
     lineOf: () => number | undefined,
+    author: CommandAuthor,
   ): CommandRecord {
     if (!command) throw new Error('command must not be empty')
 
@@ -88,6 +104,7 @@ export class CommandLedger {
       exitCode: null,
       startedAt: this._now(),
       endedAt: null,
+      author,
       lineOf,
       disposed: false,
     }

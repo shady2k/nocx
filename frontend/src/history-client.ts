@@ -22,19 +22,27 @@ import type { HistoryQuery } from './generated/history.query'
 import type { HistoryRecord } from './generated/history.record'
 import { HistoryOutbox, payloadBytes } from './history-outbox'
 import type { WSClient } from './ipc'
+import { log } from './log'
 import type { RecallScope } from './recall'
 
-/** The history.record request — the ledger's facts minus what never crosses
- *  (the session-local id, the live marker-line accessor, the disposed flag)
- *  and minus the output, which is never retained (ADR-0008). paneId is the
- *  ONE deliberate exception to "session-local ids never cross the wire"
- *  (nocx-tsajw): the renderer-minted per-tab identity that scopes the
- *  pending-capture registry. It is opaque to the backend — minted once per
- *  tab, never reused, and bound to the connection it arrives on. */
+/** The history.record request — the ledger's facts plus the authenticated
+ *  lifecycle attempt id that identifies the row opened at submit. What never
+ *  crosses is the session-local id, the live marker-line accessor, the
+ *  disposed flag, and output (ADR-0008). paneId is the ONE deliberate
+ *  exception to "session-local ids never cross the wire" (nocx-tsajw): the
+ *  renderer-minted per-tab identity that scopes pending captures. It is opaque
+ *  to the backend — minted once per tab, never reused, and bound to the
+ *  connection it arrives on. */
 export interface HistoryRecordParams {
+  attemptId: string
   command: string
   cwd: string
   host: string
+  /** Who submitted the command, minted at submit by the submitting target
+   *  (design §3.1, nocx-iadtt) — mapped into the LEDGER's entries.source
+   *  vocabulary ('user' is the human, 'assistant' is the assistant's lane)
+   *  here at the wire. The store side never derives it from anything else. */
+  source: 'user' | 'assistant'
   status: CommandStatus
   exitCode: number | null
   startedAt: number | null
@@ -46,15 +54,16 @@ export interface HistoryRecordParams {
  *  authenticated attempt that completed it. Best-effort by design: a
  *  socket drop or an unavailable store loses the entry for this session —
  *  the honest cost of not blocking the terminal — and the recall overlay
- *  still answers from the session ledger until the store comes back.
+ *  answers from the session ledger until the store comes back.
  *
- *  The attempt is authority, never data: the record's command text is what
- *  persists (app-owned, reference-intact), and the attempt's own command
- *  field never crosses this seam. `trusted` does not exist on the wire.
- *  Only a COMPLETED attempt persists: an open attempt has nothing to
- *  record, and an abandoned one is `unknown` — the ledger keeps it for the
- *  session, but nothing unreported crosses to the store (ADR-0024 §5's
- *  interval: absence of a completion is not a status).
+ *  The attempt id is authority and row identity: the record's command text
+ *  is what persists (app-owned, reference-intact), and the attempt's own
+ *  command field never crosses this seam. `trusted` does not exist on the
+ *  wire.
+ *  Only a COMPLETED attempt persists: an open attempt has nothing to record,
+ *  and an abandoned one is `unknown` — the ledger keeps it for the session,
+ *  but nothing unreported crosses to the store (ADR-0024 §5's interval:
+ *  absence of a completion is not a status).
  *  Resolves with the store's ack — what was masked and, when a credential
  *  was detected, the pending-capture offers — or null on failure. The ack
  *  is what lets the block show the masked command and attach the
@@ -67,11 +76,19 @@ export function recordCommand(
   attempt: ExecutionAttempt,
 ): Promise<HistoryRecord | null> {
   if (attempt.state !== 'completed') return Promise.resolve(null)
-  void attempt // the authority the caller already proved; the params carry only the record
+  void attempt // the authority and stable row identity for this completed command
   const params: HistoryRecordParams = {
+    attemptId: attempt.id,
     command: rec.command,
     cwd: rec.cwd,
     host: rec.host,
+    // The wire speaks the LEDGER's vocabulary now (entries.source):
+    // 'shell' the InputTarget author is 'user', 'agent' is 'assistant'.
+    // One mapping, here at the wire — the renderer's display vocabulary
+    // and the store's source vocabulary are different words for one fact,
+    // and deriving the wire value from the kind again would repaint the
+    // defect the source column exists to remove (nocx-dc2fr).
+    source: rec.author === 'agent' ? 'assistant' : 'user',
     status: rec.status,
     exitCode: rec.exitCode,
     // The ledger clocks wall-clock epoch milliseconds (Date.now()), already
@@ -92,10 +109,28 @@ export function recordCommand(
   // record delivered later reports nothing back, deliberately — by then the
   // block that asked has its answer, and moving a receipt under a person who
   // has stopped looking is worse than not moving it.
-  return historyOutbox.submit<HistoryRecord>({
-    bytes: payloadBytes(params),
-    send: () => client.call<HistoryRecord>('history.record', params),
-  })
+  return historyOutbox
+    .submit<HistoryRecord>({
+      bytes: payloadBytes(params),
+      send: () => client.call<HistoryRecord>('history.record', params),
+    })
+    .then((ack) => {
+      // The ack is trusted only when it confirms the source the record was
+      // minted with (design §3.1, nocx-iadtt): the backend must keep the
+      // fact it was handed, never derive its own from a lane or a run
+      // state. A mismatch means the row was accepted under a different
+      // source than the renderer minted — a wire-integrity failure, not a
+      // recoverable difference. Treated like a dropped record (null:
+      // nothing to show; the masked command and capture offers belong to a
+      // row the renderer cannot vouch for) and logged for the one place
+      // that can act on it. Compared in the wire vocabulary — the ack
+      // echoes the source it accepted.
+      if (ack !== null && ack.source !== params.source) {
+        log.warn('history.record: ack source mismatch', { sent: params.source, acked: ack.source })
+        return null
+      }
+      return ack
+    })
 }
 
 /**

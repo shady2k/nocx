@@ -39,7 +39,7 @@
 // here rather than being computed on demand.
 //
 // The emulator is github.com/charmbracelet/x/vt, chosen by measurement in
-// nocx-szb40.1 and recorded in docs/decisions/0038-x-vt-as-the-backend-emulator.md:
+// nocx-szb40.1 and recorded in docs/decisions/0041-x-vt-as-the-backend-emulator.md:
 // it is the only candidate that reproduces xterm.js's COLUMN GEOMETRY across a
 // double-width character, and both powers above are positional.
 package panegrid

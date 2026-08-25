@@ -18,6 +18,11 @@ import type { PaneContent, ContentDescriptor, SurfaceType, SingletonKey } from '
 
 export const SURFACE_ID_SETTINGS = 'settings'
 
+/** The API workbench (design §9.1). One pane, singleton-keyed: a request
+ *  opens INSIDE it rather than as its own tab, so there is exactly one of it
+ *  and the id is also what the activity bar's entry is called. */
+export const SURFACE_ID_API = 'api'
+
 // ── Registration ──────────────────────────────────────────────────────────
 
 export interface SurfaceRegistration {

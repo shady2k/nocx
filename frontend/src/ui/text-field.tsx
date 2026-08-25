@@ -8,17 +8,61 @@
  * - settings.ts: input[type=text] and input[type=number] with change event, min/max
  * - connections.ts: inputField() / textField() / numberField() — label + input with input event
  */
-import { Show, Switch, Match, type JSX } from 'solid-js'
+import { For, Show, Switch, Match, type JSX } from 'solid-js'
 import { Field } from './field'
 import { mirrorControlledValue } from './controlled-value'
+
+/** One marked span of a field's text. `to` is exclusive. */
+export interface TextFieldMark {
+  from: number
+  to: number
+  /**
+   * What the mark says about the span — `reference` (the default) is "this
+   * is a reference", `secret` is "and what it stands for is not readable
+   * here", `unknown` is "and nothing answers it".
+   *
+   * Two tones and not a boolean because the third state is real and must not
+   * be drawn as either: a surface that does not yet KNOW whether a name is
+   * answered passes `reference`, and a warning colour appears only once
+   * somebody can say it is warranted. Crying wolf while a listing is in
+   * flight is how a person learns to ignore the colour.
+   */
+  tone?: 'reference' | 'secret' | 'unknown'
+}
 
 export interface TextFieldProps {
   id?: string
   label?: string
+  /**
+   * The control's accessible name when it has NO visible label.
+   *
+   * For a field whose surroundings already say what it is — a filter at the
+   * head of the list it filters, a search box in a toolbar — where a visible
+   * label would be a second word for a thing the person is looking straight
+   * at. It is not an alternative to `label`: a field that has one does not
+   * need this, and a field that has neither is a control assistive tech
+   * announces as unnamed, which is the defect Field's own `label` comment
+   * describes (nocx-uxs5.5).
+   */
+  ariaLabel?: string
   description?: string
   error?: string
   /** When true, renders a <textarea> instead of an <input>. */
   multiline?: boolean
+  /**
+   * Wrap long lines to the width of the box instead of scrolling them
+   * sideways. `multiline` only.
+   *
+   * The two kinds of content a textarea holds want opposite treatment, and
+   * neither can be inferred from the other. VERBATIM MATERIAL — a pasted
+   * private key — must stay on the lines it arrived on, because a wrapped
+   * key looks like a different key and a person checking it by eye cannot
+   * tell. PROSE — a person's own standing instructions to the assistant —
+   * has no lines of its own, and not wrapping it puts a paragraph behind a
+   * horizontal scrollbar. Default is verbatim: it is what the first caller
+   * pastes, and the safer of the two to be wrong about.
+   */
+  wrap?: boolean
   value: string | number
   /** Fires on every keystroke (input event). */
   onInput?: (value: string) => void
@@ -30,6 +74,21 @@ export interface TextFieldProps {
    * a field answered on blur rather than on input. See `ui/validation.ts`.
    */
   onBlur?: (value: string) => void
+  /**
+   * Fires when the person is FINISHED with the value: when focus leaves, and
+   * on Enter in a single-line field.
+   *
+   * For a field whose value is WRITTEN rather than merely validated. The
+   * Agent policy page's scope field is checked by `ParseEffectPolicy`, which
+   * rejects a non-absolute path, so writing per keystroke would be a refused
+   * write and a toast on every character of `/workspace`. Blur and Enter are
+   * one gesture — "done" — and naming it here keeps every caller from pairing
+   * `onBlur` with a hand-rolled keydown of its own.
+   *
+   * Enter does NOT commit a `multiline` field: there it inserts a newline,
+   * and only blur means done.
+   */
+  onCommit?: (value: string) => void
   type?: 'text' | 'number' | 'password'
   placeholder?: string
   min?: number
@@ -65,6 +124,39 @@ export interface TextFieldProps {
    */
   caption?: string
   /**
+   * Spans of the value the reader must see as something other than plain
+   * text — a `{{variable}}` inside a URL.
+   *
+   * The caller says WHICH spans and the kit says what they look like, and
+   * that split is the whole point: which characters are a reference is the
+   * API domain's grammar (it must agree, character for character, with the
+   * backend that substitutes them), while how a marked span is painted is
+   * one decision for the whole product. A surface that highlighted its own
+   * field would be repainting a kit control, which is the thing the kit
+   * exists to stop.
+   *
+   * Offsets are UTF-16 code units into `value`, half-open [from, to), in
+   * order and non-overlapping. A mark outside the value is ignored rather
+   * than clamped: a stale mark is a caller that has not caught up, and
+   * painting it somewhere it does not belong would be worse than not
+   * painting it.
+   *
+   * Single-line fields only. A textarea scrolls in two dimensions and the
+   * ink layer follows one, so `multiline` ignores this.
+   */
+  marks?: readonly TextFieldMark[]
+  /**
+   * What a click on a marked span does. Absent means a mark is decoration
+   * and the click falls through to the field, which is what a caret needs.
+   *
+   * THE MARK TAKES THE CLICK when this is present: the span is the one place
+   * on the line where the pointer means "tell me about this", and the rest of
+   * the field still places the caret. It is a trade rather than a free win —
+   * clicking the middle of `{{baseUrl}}` no longer puts the caret there — and
+   * it is the same one Postman makes for the same reason.
+   */
+  onMarkClick?: (mark: TextFieldMark, at: { x: number; y: number }) => void
+  /**
    * Which edge the caption is flush with — 'start' (the default) or 'end'.
    *
    * It follows the column the field sits in, not the field: on a settings
@@ -89,6 +181,15 @@ export function TextField(props: TextFieldProps) {
   const onBlur = (e: FocusEvent) => {
     const target = e.currentTarget as HTMLInputElement
     props.onBlur?.(target.value)
+    props.onCommit?.(target.value)
+  }
+
+  /** Enter commits a single-line field. Wired to the input only — in a
+   *  textarea Enter is a newline, and stealing it would make the control
+   *  unable to do the one thing multiline exists for. */
+  const onKeyDown = (e: KeyboardEvent) => {
+    if (e.key !== 'Enter') return
+    props.onCommit?.((e.currentTarget as HTMLInputElement).value)
   }
 
   const inputElement = () => (
@@ -101,6 +202,7 @@ export function TextField(props: TextFieldProps) {
       max={props.max !== undefined ? String(props.max) : undefined}
       disabled={props.disabled === true}
       required={props.required === true}
+      aria-label={props.ariaLabel}
       aria-invalid={props.error !== undefined ? true : undefined}
       aria-describedby={ariaDescribedBy()}
       autofocus={props.autoFocus === true}
@@ -124,6 +226,8 @@ export function TextField(props: TextFieldProps) {
       }}
       onInput={onInput}
       onBlur={onBlur}
+      onKeyDown={onKeyDown}
+      onScroll={followScroll}
     />
   )
 
@@ -134,6 +238,7 @@ export function TextField(props: TextFieldProps) {
       placeholder={props.placeholder ?? ''}
       disabled={props.disabled === true}
       required={props.required === true}
+      aria-label={props.ariaLabel}
       aria-invalid={props.error !== undefined ? true : undefined}
       aria-describedby={ariaDescribedBy()}
       autofocus={props.autoFocus === true}
@@ -155,17 +260,95 @@ export function TextField(props: TextFieldProps) {
     />
   )
 
+  /**
+   * The value split into plain and marked runs.
+   *
+   * Built from the marks the caller gave, in order, skipping anything that
+   * does not land inside the value. The runs are what the ink layer draws:
+   * the SAME characters the input holds, in the same font at the same
+   * position, so the two layers cannot drift — only the paint differs. That
+   * is why a mark is a highlight and not a widget: a chip of a different
+   * width would put every character after it in a different place than the
+   * caret believes it is.
+   */
+  const runs = (): Array<{
+    text: string
+    marked: boolean
+    tone?: 'reference' | 'secret' | 'unknown'
+    mark?: TextFieldMark
+  }> => {
+    const text = String(props.value)
+    const out: Array<{
+      text: string
+      marked: boolean
+      tone?: 'reference' | 'secret' | 'unknown'
+      mark?: TextFieldMark
+    }> = []
+    let at = 0
+    for (const m of props.marks ?? []) {
+      if (m.from < at || m.to > text.length || m.from >= m.to) continue
+      if (m.from > at) out.push({ text: text.slice(at, m.from), marked: false })
+      out.push({
+        text: text.slice(m.from, m.to),
+        marked: true,
+        tone: m.tone ?? 'reference',
+        mark: m,
+      })
+      at = m.to
+    }
+    if (at < text.length) out.push({ text: text.slice(at), marked: false })
+    return out
+  }
+
+  const inked = () => props.multiline !== true && (props.marks?.length ?? 0) > 0
+
+  // The ink follows the input's own horizontal scroll. A URL longer than the
+  // field scrolls under the caret, and a layer that stayed put would sit a
+  // word to the left of the text it is marking.
+  let ink: HTMLDivElement | undefined
+  const followScroll = (e: Event): void => {
+    const el = e.currentTarget as HTMLInputElement
+    if (ink) ink.style.transform = `translateX(${-el.scrollLeft}px)`
+  }
+
   const input = () => (
     <>
       <div
         class="ui-text-field__control"
         data-trailing={props.trailing !== undefined ? 'true' : 'false'}
         data-unit={props.unit !== undefined && props.multiline !== true ? 'true' : undefined}
+        data-ink={inked() ? 'true' : undefined}
       >
         <Switch>
           <Match when={props.multiline === true}>{textareaElement()}</Match>
           <Match when={true}>{inputElement()}</Match>
         </Switch>
+        {/* ABOVE the input and inert: it paints the same characters the input
+            holds, while the input keeps the caret, the selection and every
+            gesture. aria-hidden because it is the same text twice — a reader
+            announcing both would hear the value stutter. */}
+        <Show when={inked()}>
+          <div class="ui-text-field__ink" aria-hidden="true" ref={ink}>
+            <For each={runs()}>
+              {(run) => (
+                <Show when={run.marked} fallback={<span>{run.text}</span>}>
+                  <span
+                    class="ui-text-field__mark"
+                    data-tone={run.tone}
+                    data-interactive={props.onMarkClick ? 'true' : undefined}
+                    onClick={(e: MouseEvent) => {
+                      const mark = run.mark
+                      if (!mark) return
+                      props.onMarkClick?.(mark, { x: e.clientX, y: e.clientY })
+                    }}
+                  >
+                    {run.text}
+                  </span>
+                </Show>
+              )}
+            </For>
+          </div>
+        </Show>
         <Show when={!props.multiline && props.trailing}>
           <span class="ui-text-field__trailing">{props.trailing}</span>
         </Show>
@@ -203,7 +386,11 @@ export function TextField(props: TextFieldProps) {
     props.required === true
 
   return (
-    <div class="ui-text-field" data-multiline={props.multiline ? 'true' : undefined}>
+    <div
+      class="ui-text-field"
+      data-multiline={props.multiline ? 'true' : undefined}
+      data-wrap={props.multiline && props.wrap ? 'true' : undefined}
+    >
       <Show when={hasFieldContent()} fallback={input()}>
         {/* When a caption slot exists it OWNS the error (the error replaces the
             caption in that slot); Field must not render a second one. */}

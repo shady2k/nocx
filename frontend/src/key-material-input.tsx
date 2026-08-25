@@ -52,17 +52,27 @@ const KEY_MODES: { value: KeyInputMode; label: string }[] = [
   { value: 'secret', label: 'Secret' },
 ]
 
-/** Select options for a vault-row picker: the inventory rows plus, when the
- *  bound row is missing from the inventory (vault locked, row filtered out),
- *  a fallback option carrying the opaque handle — so a bound secret is never
- *  shown as "None". The handle is a row id, not a secret reference. */
+/** Select options for a vault-row picker: the inventory rows, each named by
+ *  its secret's name, plus — when the bound row is missing from that
+ *  inventory (the secret was deleted, the vault could not answer, the row is
+ *  of another kind) — a fallback option that KEEPS the binding as its value.
+ *  Dropping it would read as "None", and the next save would clear a
+ *  credential nobody meant to clear.
+ *
+ *  Its label says the picker cannot name it. It used to be the row handle,
+ *  and that is what a person saw in the endpoint editor over a locked vault:
+ *  `secrow:dd39558499fe31b5ddce0f88a5d31320` where the name of their own API
+ *  key belongs, with nothing on screen to say why (nocx-5ratm). The handle
+ *  is a row id, not a secret reference, and it means nothing to anybody. */
+const UNLISTED_SECRET_LABEL = 'Unavailable secret'
+
 export function secretOptions(
   entries: InventoryEntry[],
   bound?: string,
 ): { value: string; label: string }[] {
   const opts = entries.map((entry) => ({ value: entry.id, label: entry.name }))
   if (bound && !opts.some((o) => o.value === bound)) {
-    opts.push({ value: bound, label: bound })
+    opts.push({ value: bound, label: UNLISTED_SECRET_LABEL })
   }
   return opts
 }
@@ -135,11 +145,9 @@ export function publicKeyMistake(text: string): string | undefined {
 
 export function KeyMaterialInput(props: KeyMaterialInputProps) {
   const [fileError, setFileError] = createSignal<string | undefined>(undefined)
-  const [browseHint, setBrowseHint] = createSignal<string | undefined>(undefined)
 
   const changeMode = (value: string) => {
     setFileError(undefined)
-    setBrowseHint(undefined)
     props.onModeChange(value as KeyInputMode)
   }
 
@@ -149,12 +157,19 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
     if (!props.openFileDialog) return
     const open = props.openFileDialog
     const changePath = props.onPathChange
-    setBrowseHint(undefined)
     void open().then(
       (result) => {
         if (result.path) changePath(result.path)
       },
-      () => setBrowseHint('The native file picker is not available here. Type the path by hand.'),
+      () => {
+        // The native picker's absence is the outcome of pressing Browse, not
+        // a standing property of the field — the toast carries it, and it
+        // tells the user what to do instead.
+        showToast({
+          level: 'danger',
+          message: 'The native file picker is not available here. Type the path by hand.',
+        })
+      },
     )
   }
 
@@ -174,6 +189,7 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
             value={props.pathValue}
             onInput={(value) => props.onPathChange(value)}
             placeholder={props.pathPlaceholder ?? '~/.ssh/id_ed25519'}
+            error={props.error}
           />
           <Show when={props.openFileDialog}>
             <Button
@@ -186,38 +202,37 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
             </Button>
           </Show>
         </div>
-        <Show when={browseHint()}>
-          <p class="cm-key-file-error">{browseHint()}</p>
-        </Show>
       </Show>
       <Show when={props.mode === 'file'}>
-        <FileInput
-          accept="*"
-          onChange={(file) => {
-            if (!file) return
-            const change = props.onMaterialChange
-            setFileError(undefined)
-            void file.text().then(
-              (text) => {
-                setFileError(publicKeyMistake(text))
-                change(text)
-              },
-              () => setFileError('Could not read that file. Choose another, or paste the key.'),
-            )
-          }}
-          ariaLabel="Choose private key file"
-          buttonLabel="Choose file…"
-        />
-      </Show>
-      {/* ONE message about the material, in whichever mode supplied it.
-          Local first: the eager check knows the user chose a .pub and says
-          which file is wanted, while the backend can only report that it
-          failed to parse — so stacking both put "That is a public key…" above
-          "ssh: no key found", which is the same news twice and the second
-          telling is the less useful one. The toast carries the outcome; this
-          carries which control to fix. */}
-      <Show when={props.mode !== 'material' && (fileError() ?? props.error)}>
-        <p class="cm-key-file-error">{fileError() ?? props.error}</p>
+        <Field for={`${props.id}-file`} error={fileError() ?? props.error}>
+          <FileInput
+            id={`${props.id}-file`}
+            accept="*"
+            onChange={(file) => {
+              if (!file) return
+              const change = props.onMaterialChange
+              setFileError(undefined)
+              void file.text().then(
+                (text) => {
+                  setFileError(publicKeyMistake(text))
+                  change(text)
+                },
+                () => {
+                  setFileError(undefined)
+                  // A file that cannot be read is the outcome of the read,
+                  // not a fact about the field — the toast carries it. The
+                  // field error stays for what is known at the moment of choosing.
+                  showToast({
+                    level: 'danger',
+                    message: 'Could not read that file. Choose another, or paste the key.',
+                  })
+                },
+              )
+            }}
+            ariaLabel="Choose private key file"
+            buttonLabel="Choose file…"
+          />
+        </Field>
       </Show>
       <Show when={props.mode === 'material'}>
         <TextField
@@ -237,7 +252,7 @@ export function KeyMaterialInput(props: KeyMaterialInputProps) {
         </Show>
       </Show>
       <Show when={props.mode === 'secret'}>
-        <Field for={`${props.id}-secret`} label="Private Key Secret">
+        <Field for={`${props.id}-secret`} label="Private Key Secret" error={props.error}>
           <Select
             value={props.secretValue ?? ''}
             onChange={(value) => props.onSecretChange?.(value || undefined)}

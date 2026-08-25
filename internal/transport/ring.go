@@ -49,6 +49,13 @@ type outputRing struct {
 	base    uint64        // byte offset of buf[0] in the output stream
 	acked   uint64        // furthest acked offset (0 = nothing acked yet)
 	closed  bool
+
+	// writeObs is notified with the byte count of every write. ONE slot,
+	// deliberately: the run lease is the only consumer, and one run is in
+	// flight per lane at a time (the shell runs one foreground job). The
+	// lease counts bytes and observes activity through it — a count, never
+	// a peek at the bytes (AD-6: the backend never sniffs the stream).
+	writeObs func(int)
 }
 
 func newOutputRing() *outputRing {
@@ -101,8 +108,19 @@ func (r *outputRing) write(p []byte) error {
 	}
 
 	r.buf = append(r.buf, p...)
+	if r.writeObs != nil {
+		r.writeObs(len(p))
+	}
 	r.signal()
 	return nil
+}
+
+// setWriteObserver installs or clears the per-write byte-count observer
+// (nil clears). The observer runs under the ring's lock and must not block.
+func (r *outputRing) setWriteObserver(f func(int)) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.writeObs = f
 }
 
 // trim discards bytes from the front of buf that have been acked.

@@ -488,10 +488,15 @@ func newRecordNotifyWS(t *testing.T, db content.ContentDB, raiser NotifyRaiser) 
 // has to walk the pane.
 func recordOf(pane, command, status string, exitCode *int) map[string]any {
 	return map[string]any{
-		"command":   command,
-		"cwd":       "/repos/nocx",
-		"host":      "",
-		"status":    status,
+		"command": command,
+		"cwd":     "/repos/nocx",
+		"host":    "",
+		"status":  status,
+		// The person at the keyboard: these are a user running a command,
+		// which is the seam this file is about. Required at the wire since
+		// the source became part of the record's vocabulary — a request
+		// without one is malformed rather than defaulted.
+		"source":    string(content.SourceUser),
 		"exitCode":  exitCode,
 		"startedAt": int64(1_750_000_000_000),
 		"endedAt":   int64(1_750_000_000_040),

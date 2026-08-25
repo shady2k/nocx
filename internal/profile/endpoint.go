@@ -31,6 +31,14 @@ func validEndpointSchema(v EndpointSchema) bool {
 	return v == EndpointSchemaOpenAICompatible
 }
 
+// NeedsCredential is the ONE derivation of the endpoint authentication fact.
+// NoKey is explicit because a URL cannot tell whether a local or remote
+// provider expects authentication; false preserves the credential-required
+// behavior of records written before this field existed.
+func (e Endpoint) NeedsCredential() bool {
+	return !e.NoKey
+}
+
 // EndpointModel is one model an endpoint offers: the model id the API
 // understands, plus an optional alias the picker shows instead of the id.
 // Alias is nil when the picker should show Name.
@@ -47,14 +55,16 @@ type EndpointModel struct {
 // reference (sec:v1:...) — on the wire the transport replaces it with the
 // renderer's row handle, exactly like profile secret bindings (ADR-0017
 // §1), so a reference never crosses the boundary. Empty means no key is
-// set: the endpoint was created without one, or the key was deleted on the
-// Secrets page (ClearSecretRefs), and agent.status then reports the
-// credential unresolvable.
+// set: the endpoint's explicit NoKey fact or a deleted credential is
+// represented separately so the ask path can distinguish them.
 type Endpoint struct {
-	ID            string          `json:"id"`
-	Name          string          `json:"name"`
-	BaseURL       string          `json:"baseUrl"`
-	Schema        EndpointSchema  `json:"schema"`
+	ID      string         `json:"id"`
+	Name    string         `json:"name"`
+	BaseURL string         `json:"baseUrl"`
+	Schema  EndpointSchema `json:"schema"`
+	// NoKey is a person-declared fact, not a URL heuristic. Its false zero
+	// value keeps old records credential-required.
+	NoKey         bool            `json:"noKey"`
 	CredentialRef string          `json:"credentialRef"`
 	Models        []EndpointModel `json:"models"`
 	// Headers are the custom HTTP headers the endpoint sends on every
@@ -256,6 +266,12 @@ func ValidateEndpoint(e Endpoint) error {
 	if err := ValidateBaseURL(e.BaseURL); err != nil {
 		return err
 	}
+	if e.NoKey && e.CredentialRef != "" {
+		// Refuse the contradiction rather than silently dropping a stored
+		// credential: the explicit declaration is allowed to be corrected
+		// without hiding a secret reference the person still owns.
+		return errors.New("endpoint declaring noKey must not carry a credential reference")
+	}
 	if len(e.Models) == 0 {
 		return fmt.Errorf("endpoint requires at least one model")
 	}
@@ -289,6 +305,7 @@ type EndpointDTO struct {
 	Name       string             `json:"name"`
 	BaseURL    string             `json:"baseUrl"`
 	Schema     EndpointSchema     `json:"schema"`
+	NoKey      bool               `json:"noKey"`
 	Credential *string            `json:"credential"`
 	Models     []EndpointModelDTO `json:"models"`
 	// Headers is never null: an endpoint with no custom headers sends [] —

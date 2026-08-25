@@ -1,0 +1,35 @@
+{
+  "//": [
+    "DO NOT EDIT MANUALLY. Regenerate with `node lint-fixtures/update-error-vocabulary-baseline.mjs`.",
+    "",
+    "Every entry is a surface CSS class that names an error/refusal concept",
+    "AND paints a danger token (--color-danger/--color-error) — the private",
+    "error vocabulary nocx-8sudy removed and this gate exists to prevent",
+    "from reappearing. The baseline may only shrink; a violation it does not",
+    "list is new and fails the lint gate.",
+    "",
+    "Each entry carries the one-line reason that makes it acceptable to keep.",
+    "When the reason stops holding, delete the entry (or regenerate — the",
+    "updater copies reasons forward by key and refuses to grow)."
+  ],
+  "violations": [
+    {
+      "file": "src/styles/base.css",
+      "selector": ".pane-error",
+      "line": 498,
+      "reason": "A pane whose terminal failed to start shows its own dead state over the preserved scrollback (terminal-content.ts prepends it; nocx-mb3x2): the notice IS the pane's content, not a status line a working UI also renders — the run-list StatusCard shape, not the error-vocabulary shape."
+    },
+    {
+      "file": "src/styles/components/block-receipt.css",
+      "selector": ".ui-block-receipt__row-error",
+      "line": 39,
+      "reason": "A kit identity rendered imperatively: ui/block-receipt.ts creates this class by string (not JSX), so the derived identity set from scan-kit-identities cannot see it — a documented scanner gap, not a surface vocabulary (it is the ui-block-receipt family's own row-error state, painted by the kit's component stylesheet)."
+    },
+    {
+      "file": "src/styles/surfaces/update-notice.css",
+      "selector": ".error",
+      "line": 20,
+      "reason": "The update notice's whole job IS reporting update state (like run-list holds run outcomes): its error branch is the surface's own content, rendered by update-notice.tsx's state switch, not a private status line over a UI that has other things to say. The class name is the state suffix `error` on .update-notice."
+    }
+  ]
+}

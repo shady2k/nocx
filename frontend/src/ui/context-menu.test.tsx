@@ -3,6 +3,7 @@ import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { Show, createSignal } from 'solid-js'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { ContextMenu, type ContextMenuItem } from './context-menu'
+import { clampMenuPosition } from './menu-geometry'
 
 // The menu PORTALS into document.body (the kit's portal root), so the
 // queries target the document, never render()'s container.
@@ -49,6 +50,17 @@ describe('ContextMenu', () => {
     const y = Number.parseInt(el!.style.top, 10)
     expect(x).toBeLessThanOrEqual(window.innerWidth - 8)
     expect(y).toBeLessThanOrEqual(window.innerHeight - 8)
+    // AND the position is exactly what the shared geometry says
+    // (nocx-vnirv.2): this component must not carry a private copy of the
+    // clamp — the scrollback's block menu clamps through the same function,
+    // and two copies would drift.
+    const rect = el!.getBoundingClientRect()
+    const expected = clampMenuPosition(
+      { x: 1000, y: 2000 },
+      { width: rect.width, height: rect.height },
+      { width: window.innerWidth, height: window.innerHeight },
+    )
+    expect({ left: x, top: y }).toEqual(expected)
   })
 
   it('gives the first item focus on open', () => {

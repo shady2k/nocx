@@ -4,8 +4,9 @@
 # that the AST kit-identity scanner matches fixture expectations,
 # that the CSS colour grammar checker catches violation patterns,
 # that the menu-icons checker catches a context-menu row built with no mark,
+# that the error-vocabulary checker catches a surface class that names an
+# error/refusal concept AND paints a danger token (nocx-8sudy),
 # and that the CSS integrity checker catches every one of its violation classes —
-# ten as of nocx-pp3y.2, each asserted by name below, several in both directions.
 # Run from the frontend/ directory (e.g. via `npm run lint:fixture-check`).
 # Exits 0 if all rules fire, 1 otherwise.
 set -eu
@@ -79,6 +80,28 @@ if echo "$row_grammar_check" | grep -q 'ui-record-row__title\|plain-widget'; the
   exit 1
 fi
 
+
+# ── Error-vocabulary fixture check (nocx-8sudy) ─────────────────────────
+# A surface's own error vocabulary is a class that names an error/refusal
+# concept AND paints a danger token — the shape commit 7ce9b934 removed
+# eight times over. The fixture's two intentional violations must fire; the
+# kit's own identities, a danger-painted CLASSIFICATION (.cm-impact-dangerous)
+# and error-named classes with no danger paint must stay silent, because a
+# rule that reported those would be turned off.
+error_vocab_check=$(node "${fixture_dir}/check-error-vocabulary.mjs" \
+  --dir="${fixture_dir}/error-vocabulary-fixture" 2>/dev/null || true)
+
+for cls in conn-refusal-message git-push-error; do
+  if ! echo "$error_vocab_check" | grep -q "$cls"; then
+    echo "ERROR-VOCABULARY GATE FAILED — class '${cls}' did not fire on the fixture"
+    exit 1
+  fi
+done
+
+if echo "$error_vocab_check" | grep -qE 'ui-field-error|ui-toast|cm-impact-dangerous|files-watch-error|git-commit-output'; then
+  echo "ERROR-VOCABULARY GATE FAILED — reported the kit's own identity, a classification, or a class with no danger paint"
+  exit 1
+fi
 # ── Menu-icons fixture check (nocx-inbw1) ────────────────────────────────
 # The kit's ContextMenu reserves the icon column whether or not an icon is
 # passed, so an unmarked row compiles, renders, passes its unit tests and
@@ -332,5 +355,5 @@ if [ -z "$ts_reactivity" ]; then
   exit 1
 fi
 
-echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity + row-grammar + menu-icons verified (11 integrity rules)"
+echo "OK — all 10 lint rules fired; kit identities verified; CSS colour + integrity + row-grammar + error-vocabulary + menu-icons verified (11 integrity rules)"
 exit 0

@@ -6,10 +6,10 @@ import {
   ReportHealthy,
 } from '../bindings/github.com/shady2k/nocx/wailsapp'
 import { render } from 'solid-js/web'
-import { Show, createSignal } from 'solid-js'
+import { Show, createSignal, untrack } from 'solid-js'
 import App from './App'
 import { log } from './log'
-import { installBrowserTransport } from './wails-runtime'
+import { hasWailsWebview, installBrowserTransport } from './wails-runtime'
 import { WSClient } from './ipc'
 import { LayoutStore } from './layout/layout-store'
 import { LayoutClient } from './layout/layout-client'
@@ -24,20 +24,29 @@ import { DialogClient } from './dialog-client'
 import { createVaultState, SetupDialog, UnlockDialog } from './vault'
 import { ConnectionPasswordPrompt } from './connection-password-prompt'
 import type { ConnectionsPasswordRequest } from './generated/connections.passwordRequest'
+import { AgentApprovalPrompt } from './agent-approval-prompt'
+import type { AgentApprove } from './generated/agent.approve'
+import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
+import type { FilesDropped } from './generated/files.dropped'
 import { VaultObserver } from './vault-observer'
 import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { HistoryStatusStore } from './history-status'
 import { FootprintClient } from './footprint-client'
 import { EndpointClient } from './endpoints'
+import { PolicyClient } from './policy-client'
 import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
+import { apiSidebarAction, registerApiSurface } from './api'
+import { createApiWorkbenchServices, nativePickers } from './api/api-client'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
 import { BellIcon, CheckCircleIcon, PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
+import { mountReadScreenHandler } from './read-screen'
+import { mountRunCommandHandler } from './run-command'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
 import {
@@ -80,6 +89,7 @@ import {
 } from './sidebar-width'
 import { UIStateClient } from './uistate-client'
 import { OUTPUT_WRAP_DEFAULT, OUTPUT_WRAP_KEY, applyOutputWrap } from './output-wrap'
+import { REASONING_EXPANDED_KEY, applyReasoningExpanded } from './reasoning-expanded'
 import { applyOutputCap, OUTPUT_CAP_KEY } from './output-cap'
 import { applyRestoreOnStartup, RESTORE_ON_STARTUP_KEY } from './restore-setting'
 import type { TunnelOpenResult } from './generated/tunnel.open'
@@ -183,6 +193,7 @@ async function main() {
   // wire, a writer re-reads). Constructed with the other clients because
   // the Settings tab's factory below closes over it.
   const snippetsStore = new SnippetsStore(new SnippetsClient(dispatcher))
+  const policyClient = new PolicyClient(dispatcher)
   const vaultObserver = new VaultObserver(dispatcher)
   const vaultController = createVaultState(vaultClient)
   vaultObserver.start(() => {
@@ -216,6 +227,65 @@ async function main() {
     if (!p || !p.requestId) return
     setPendingConnectionPassword(p)
   })
+
+  // ── Backend-initiated approval questions (nocx-z9hj4) ──────────────
+  // A run suspended — the policy gate or the egress gate asked a person a
+  // question. ONE surface for both (design §7.3): the prompt renders the
+  // question and the decision names the exact binding. Questions are
+  // QUEUED keyed by runId: two runs can escalate while a person is deciding
+  // the first, and no run may be stranded unanswered — the next question
+  // shows when the current one is decided.
+  const pendingApprovals = new Map<string, AgentApprovalRequested>()
+  const [activeApproval, setActiveApproval] = createSignal<AgentApprovalRequested | null>(null)
+  const [approvalBusy, setApprovalBusy] = createSignal(false)
+  dispatcher.subscribe('agent.approvalRequested', (params) => {
+    const p = params as AgentApprovalRequested
+    if (!p || !p.runId || !p.argHash) return
+    if (pendingApprovals.has(p.runId)) return // the same run's question is already open
+    pendingApprovals.set(p.runId, p)
+    // One-shot guard: only the FIRST unanswered question is shown; the
+    // rest wait in the queue. The read is deliberately untracked — this is
+    // an event handler, not a reactive scope.
+    if (!untrack(() => activeApproval())) setActiveApproval(p)
+  })
+  const nextApproval = () => {
+    const first = pendingApprovals.values().next().value
+    setActiveApproval(first ?? null)
+  }
+  const decideApproval = async (approved: boolean, scope: AgentApprove['scope']) => {
+    const ask = activeApproval()
+    if (!ask || approvalBusy()) return
+    setApprovalBusy(true)
+    try {
+      await dispatcher.call('agent.approve', {
+        runId: ask.runId,
+        attempt: ask.attempt,
+        tool: ask.tool,
+        callId: ask.callId,
+        argHash: ask.argHash,
+        approved,
+        // How far the answer reaches, as the person chose it in the prompt.
+        // It travels with the decision because the BACKEND applies it: a
+        // renderer that read the matrix, edited a row and wrote it back would
+        // be a second owner of the policy document, racing the settings page
+        // (nocx-gycwo, design §"Three wire changes").
+        scope,
+      } satisfies AgentApprove)
+      // Only a RECORDED decision closes the question. A refusal (a stale
+      // binding — the question was already answered) keeps the prompt up:
+      // the person sees the honest refusal and can answer anew or deny.
+      pendingApprovals.delete(ask.runId)
+      nextApproval()
+    } catch (err) {
+      showToast({
+        level: 'danger',
+        message: `Could not record the decision: ${err instanceof Error ? err.message : String(err)}`,
+        duration: 0,
+      })
+    } finally {
+      setApprovalBusy(false)
+    }
+  }
 
   // Open-time host-key decisions share the same consent surface as
   // Connections → Test. Requests are queued because restored tabs can fail
@@ -298,6 +368,10 @@ async function main() {
     // The default wrap for a command block's output — one attribute on the
     // root, read by the CSS; the per-block ⋮ override is not touched by it.
     applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
+    // Whether an answer's thinking note opens by itself (nocx-y9e88), beside
+    // the wrap for the same reason: it decides what the surface does before
+    // anything is drawn on it.
+    applyReasoningExpanded(snap.values[REASONING_EXPANDED_KEY])
     // How much of one command's output is kept. Applied here beside the wrap
     // for the same reason: the renderer is where it is enforced, so it has to
     // know before the first block freezes.
@@ -342,7 +416,28 @@ async function main() {
   // problem, this opens where it is fixed — Settings → Endpoints with the
   // editor already up on a blank one.
   tm.onCreateEndpoint = () => openSettingsPane().startNewEndpoint()
+  // The composer's model chip names the model that will answer and IS the
+  // way to change it (nocx-rikz5): the Roles page is where that choice is
+  // made. Beside onCreateEndpoint because it is the same idea — a state
+  // names the one page that repairs it — and it reuses that seam for the
+  // endpoints destination rather than growing a second one.
+  tm.onOpenRoles = () => openSettingsPane().openPage('roles')
   tm.onActivity = reportActivity
+
+  // ── Backend-initiated readScreen requests (nocx-ljfwz) ─────────────
+  // The broker's pull: the backend asks the renderer to produce a session's
+  // frame (the readScreen tool). The handler resolves the session to the
+  // pane that owns its grid; a request for a session no pane holds is
+  // answered failed, honestly — never a hang.
+  mountReadScreenHandler(dispatcher, (sessionId) => tm.terminalContentForSession(sessionId))
+
+  // ── Backend-initiated run requests (nocx-tjppv) ─────────────────────
+  // The broker's pull for the headline tool: the backend asks the renderer
+  // to run a command through the same submit path a person uses, in the
+  // lane session the grant permitted. The handler resolves the session to
+  // the pane that owns it; a request for a session no pane holds is answered
+  // failed, honestly — never a hang.
+  mountRunCommandHandler(dispatcher, (sessionId) => tm.terminalContentForSession(sessionId))
 
   // ── The workspace overview (nocx-edhcu) ──────────────────────────────
   // Every workspace and every pane at once, as text cards. The controller
@@ -380,6 +475,7 @@ async function main() {
         historyStatusStore,
         aboutClient,
         clipboard,
+        policyClient,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
@@ -513,6 +609,103 @@ async function main() {
     downloadOperations(downloadSurface.store),
   ])
   const operationsView = createOperationsView(operations)
+
+  // The API workbench (design §9.1): ONE pane, singleton-keyed, holding the
+  // collection tree, the request form and the runs. Registered through its
+  // own module rather than inline here, because the singleton key and the
+  // activity-bar entry are the surface's decisions and not the shell's — the
+  // file viewer and the notes surface are wired the same way.
+  //
+  // Two capabilities are handed in, and BOTH may be absent — absence is the
+  // capability, never a stub that fails when pressed.
+  //
+  // The two pickers come off the ONE dialog client (AD-8): `dialog.*` needs
+  // a Wails runtime and the `make dev-web` harness has none, so the workbench
+  // draws a Browse control only where the picker is real.
+  //
+  // The collection watch comes off the ONE files client, for the same reason
+  // and with a second condition. A collection is a folder on disk that a
+  // `git pull` rewrites underneath the panel, and the product already answers
+  // "how does a surface learn a directory changed" — `files.watch` plus
+  // `files.changed`, which the Files panel above uses. So the workbench is
+  // given that answer rather than a second one (nocx-19rcp). It is wired here
+  // rather than inside the api client because `files.*` is another module's
+  // method: the workbench declares the slice it needs, and the composition
+  // root is what may know both halves.
+  //
+  // It is registered after the files wrapper deliberately — the wrapper is
+  // the composition root's binding-liveness bookkeeping and every binding
+  // this window opens goes through it.
+  //
+  // THIS IS THE ONE READING OF `hasWailsWebview()` ON THIS PATH, and every
+  // capability below that turns on "can this build reach the Wails runtime"
+  // is derived from it rather than asking again. Both pickers were asking a
+  // DIFFERENT question until nocx-h9f8y — whether the client object carries
+  // the method, which a class instance always does — and so were handed in
+  // on builds where `dialog.*` answers -32601.
+  const nativeRuntime = hasWailsWebview()
+  const pickers = nativePickers(dialogClient, nativeRuntime)
+  registerApiSurface(
+    registry,
+    tm,
+    createApiWorkbenchServices(
+      dispatcher,
+      pickers.directory,
+      {
+        // Which local session this window can address, asked at call time —
+        // PaneManager.anyLocalSession() walks the open panes, so a tab that
+        // has been closed cannot be named. A latch here held the first local
+        // session ever seen and outlived its tab, and `files.open` refuses a
+        // session the registry no longer has open.
+        localSession: () => tm.anyLocalSession(),
+        open: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),
+        watch: (bindingId, paths) => filesServicesTracked.watch(bindingId, paths),
+        close: (bindingId) => filesServicesTracked.close(bindingId),
+        subscribeChanged: (handler) => filesServicesTracked.subscribeFilesChanged(handler),
+        onConnect: (handler) => filesServicesTracked.onConnect(handler),
+      },
+      // The connections an environment may route through (§6.5). Bound HERE
+      // because only the composition root may know both halves: `profiles.list`
+      // is ProfileClient's, and the API workbench names a connection without
+      // learning to speak that domain (AD-8). Narrowed to the two fields the
+      // route needs — an id to store and a name to show.
+      () =>
+        profileClient
+          .listProfiles()
+          .then((profiles) => profiles.map((p) => ({ id: p.id, name: p.name }))),
+      // And the FILE picker, off the same dialog client, for the one path
+      // this surface reads rather than writes: a Postman export. It comes
+      // out of the same call as the directory one because there is one
+      // reason for neither to exist — no runtime to serve `dialog.*` — and
+      // they still retire independently once there is one (api-client.ts).
+      pickers.file,
+      // The native drop, and BOTH halves of "is there one" are decided here
+      // because only the composition root knows both: the Wails runtime is a
+      // property of this build (wails-runtime.ts), and the open local session
+      // is the pane manager's to answer.
+      //
+      // It reads the ONE answer taken above rather than asking again, and the
+      // workbench derives the rest from what it was handed (api-pane.tsx,
+      // `nativeWindow`). Handed nothing, the ask is not without a drop:
+      // outside the webview a drop is a DOM event carrying the BYTES, and
+      // `api.import.postman` takes the document as well as a path (spec §1a).
+      // What this port selects is which of the two routes a gesture travels,
+      // never whether the ask has one.
+      //
+      // Bound off the ONE upload surface's services rather than a second
+      // subscription to files.dropped: two subscribers to one notification
+      // is two owners of when it has been handled, and the terminal pane's
+      // subscriber is already the other one. They do not collide because
+      // each filters on its own `target` (files.dropped's contract).
+      nativeRuntime
+        ? {
+            session: () => tm.anyLocalSession(),
+            subscribe: (handler: (p: FilesDropped) => void) =>
+              uploadSurface.services.subscribeDropped(handler),
+          }
+        : undefined,
+    ),
+  )
 
   // ── Git panel (design §5.4) and its diff surface (worker G) ───────────
   // The panel's backend surface, wrapped so the composition root owns the
@@ -702,6 +895,10 @@ async function main() {
         // has overridden, in place, with no restart and no reflow of the
         // blocks that carry their own answer.
         applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
+        // Live in the same sense: flipping it opens or shuts the thinking
+        // notes ALREADY on screen, so the setting is never contradicted by
+        // the answers a person is looking at.
+        applyReasoningExpanded(snap.values[REASONING_EXPANDED_KEY])
         // The cap is live too: a block frozen after the change is captured
         // under the new number, and blocks already stored keep what they got.
         applyOutputCap(snap.values[OUTPUT_CAP_KEY])
@@ -878,6 +1075,11 @@ async function main() {
     sidebarPanel,
     sidebarViews,
     /* actions */ [
+      // The bottom zone: an action opens a tab and never touches the panel.
+      // The API workbench belongs here rather than in the view zone for the
+      // reason design §9.2 gives — the tree lives IN the workbench, and a
+      // second tree in the panel would be a second owner of one selection.
+      apiSidebarAction(),
       {
         id: 'settings',
         title: 'Settings',
@@ -1298,6 +1500,23 @@ async function main() {
               onDone={() => {
                 setPendingConnectionPassword(null)
               }}
+            />
+          )}
+        </Show>
+        <Show when={activeApproval()} keyed>
+          {(ask) => (
+            <AgentApprovalPrompt
+              open
+              ask={ask}
+              busy={approvalBusy()}
+              copy={(text) => clipboard.writeText(text)}
+              onDecide={(approved, scope) => void decideApproval(approved, scope)}
+              // A session in the question is named by the pane that holds
+              // it, through the tab strip's own derivation (nocx-vnzek) —
+              // the same one the answer's tool-call lines read — together
+              // with the machine that pane is talking to (nocx-njn8s), so
+              // the question says where a command would actually land.
+              sessionWhere={(id) => tm.sessionWhere(id)}
             />
           )}
         </Show>

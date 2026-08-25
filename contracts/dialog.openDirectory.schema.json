@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/dialog.openDirectory.schema.json",
+  "title": "DialogOpenDirectory",
+  "description": "Result of the dialog.openDirectory JSON-RPC method: the native directory picker, reached through the backend because the renderer has no path to the Wails runtime (AD-1). It is the same capability as dialog.openFile — one native dialog at a time — and answers the same shape: the chosen ABSOLUTE path, or an empty string when the user cancelled. The method reports itself unavailable (-32601) when no native runtime exists — the dev-web harness has no Wails at all, and that is the ordinary configuration — and the surface degrades to typing the path by hand.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {
+    "path": {
+      "description": "The absolute path of the chosen directory, or \"\" when the picker was cancelled.",
+      "type": "string"
+    }
+  }
+}

@@ -50,9 +50,23 @@ func (c *client) Probe(ctx context.Context, p ProbeParams) (ProbeResult, error) 
 	defer cancel()
 
 	var sb strings.Builder
+	// The probe is the connectivity question, never a run with authority: it
+	// always declares zero tools, which keeps it on the no-tools path — and
+	// therefore has nothing that can suspend and no run id to key a
+	// checkpoint by. It passes the client's store with an empty id: nothing
+	// is written, nothing is looked up.
 	streamErr := streamModelAnswer(probeCtx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers,
-		[]*schema.Message{schema.UserMessage(probePrompt)},
-		func(delta string) error { sb.WriteString(delta); return nil })
+		[]*schema.Message{schema.UserMessage(probePrompt)}, nil, nil, c.checkpoints, "",
+		// The probe asks "does this model answer", so only the ANSWER
+		// counts: a reasoning model that thought and said nothing has not
+		// answered, and a probe that accepted its thinking would report a
+		// working endpoint on a stream with no reply in it.
+		func(e AskEvent) error {
+			if e.Kind == AskAnswer {
+				sb.WriteString(e.Text)
+			}
+			return nil
+		})
 
 	res := ProbeResult{
 		EndpointName: p.Name,

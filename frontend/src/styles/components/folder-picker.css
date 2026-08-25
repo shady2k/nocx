@@ -1,0 +1,106 @@
+/* FolderPicker — the dialog that browses directories (folder-picker.tsx).
+   Everything a picker row can look like lives here; the dialog places its
+   parts and never repaints the kit components it composes (the path field,
+   the buttons, the reason card, the empty state all keep their own paint).
+
+   The rows are the picker's own, not TreeRow's: this dialog shows one
+   directory at a time and its rows are choices in a listbox, not branches of
+   a tree. The reasoning is in folder-picker.tsx; the glyph is still the kit's
+   single answer to "what does a folder look like". */
+
+.ui-folder-picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+/* The path field and the two navigation buttons on one line. Aligned to the
+   end so the buttons sit level with the input rather than with the label
+   above it. */
+.ui-folder-picker__path {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+}
+
+.ui-folder-picker__path > :first-child {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* A definite height, not a cap: the listing is swappable content, and a
+   container whose height follows its content moves the footer buttons out
+   from under the pointer reaching for them on every directory change. Two
+   hundred and forty pixels is ten rows at the small control height. */
+.ui-folder-picker__list {
+  height: 240px;
+  overflow-y: auto;
+  padding: var(--space-1);
+  border: 1px solid var(--color-border);
+  border-radius: var(--control-radius-md);
+  background: var(--color-surface-sunken);
+}
+
+.ui-folder-picker__row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  min-height: var(--control-height-sm);
+  padding: 0 var(--space-2);
+  border-radius: var(--control-radius-sm);
+  cursor: default;
+  color: var(--color-text);
+}
+
+/* Only a directory is a choice. A file row is listed so an empty folder and a
+   folder of files do not look alike, and is inert in every way a row can be:
+   dimmed, not a tab stop, no hover, no selection. */
+.ui-folder-picker__row[data-kind='dir'] {
+  cursor: pointer;
+}
+
+.ui-folder-picker__row[data-kind='dir']:hover {
+  background: var(--color-surface-hover);
+}
+
+.ui-folder-picker__row[data-selected='true'] {
+  background: var(--color-surface-active);
+}
+
+.ui-folder-picker__row[aria-disabled='true'] {
+  color: var(--color-text-dim);
+}
+
+/* focus-visible only: a click that happens to focus a row must not paint a
+   ring — the same pairing as the collection row. */
+.ui-folder-picker__row:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: -2px;
+}
+
+.ui-folder-picker__icon {
+  flex: 0 0 auto;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 1em;
+  height: 1em;
+  font-size: var(--font-size-md);
+  color: var(--color-text-dim);
+}
+
+.ui-folder-picker__icon svg {
+  width: 1em;
+  height: 1em;
+}
+
+/* One line, ellipsis at the tail — a long directory name loses its least
+   informative part, the same rule the tree row's name follows. */
+.ui-folder-picker__label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}

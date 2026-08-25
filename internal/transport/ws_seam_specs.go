@@ -2,7 +2,7 @@ package transport
 
 // seamSpecs — the seam-backed control methods as constructed types
 // (migration map, "Seam handlers"): connections.test, connections.trustHostKey,
-// dialog.openFile, sshConfig.aliases/path, sessions.status, fs.complete,
+// dialog.openFile/openDirectory, sshConfig.aliases/path, sessions.status, fs.complete,
 // tunnel.open/stop, ports.status/sample/pause/visible and shell.openUrl. Each
 // handler holds only its seams — the resolver holder, prober, dialog service
 // holder, tunnel ledger, discovery scheduler, url opener holder — and its
@@ -63,9 +63,16 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 		// in the inflight set; the native-picker capability itself is
 		// dialogAdmit, a capacity-one WAITING gate the handler acquires on
 		// the task goroutine (ws.go says why it may not be a submission's).
+		// All three own the SAME gate: the native dialog is one capability,
+		// so no picker can open over an outstanding one, whichever method
+		// asked for it.
 		regResponder(s.dialogSub, "dialog.openFile", noParams(), func(r Responder) handlerFunc {
 			h := dialogHandlers{dialog: dialog, admit: s.dialogAdmit, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenFile(ctx, req) }
+		}),
+		regResponder(s.dialogSub, "dialog.openDirectory", noParams(), func(r Responder) handlerFunc {
+			h := dialogHandlers{dialog: dialog, admit: s.dialogAdmit, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenDirectory(ctx, req) }
 		}),
 		// dialog.openFileForUpload rides the SAME capacity-one picker
 		// gate: it opens the same native picker, and two pickers must

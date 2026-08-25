@@ -32,3 +32,25 @@
 .ui-resize-handle[data-dragging='true']::before {
   background: var(--color-accent);
 }
+
+/* The same seam turned through ninety degrees: a horizontal edge between a
+   pane above and one below. Only the axis changes — the hit area, the grab
+   line and the accent are the vertical one's, restated on the other side.
+   `[data-orientation]` is the component's own variant attribute; a caller
+   never reaches in to turn it. */
+.ui-resize-handle[data-orientation='horizontal'] {
+  width: auto;
+  height: 6px;
+  align-self: auto;
+  justify-self: stretch;
+  cursor: row-resize;
+}
+
+.ui-resize-handle[data-orientation='horizontal']::before {
+  top: 2px;
+  bottom: auto;
+  left: 0;
+  right: 0;
+  width: auto;
+  height: 1px;
+}

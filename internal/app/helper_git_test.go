@@ -458,6 +458,12 @@ func (s *fakeRemoteSession) EnqueueWrite([]byte) bool  { return false }
 func (s *fakeRemoteSession) Resize(context.Context, uint16, uint16, uint16, uint16) error {
 	return nil
 }
+
+// The pipe this fake never opened. A zero time is the honest answer for a
+// double that has no pipe, and it is what the other session doubles in this
+// package return (fs_provider_factory_test.go).
+func (s *fakeRemoteSession) OpenedAt() time.Time { return time.Time{} }
+
 func (s *fakeRemoteSession) Close() error { return nil }
 func (s *fakeRemoteSession) Done() <-chan struct{} {
 	return make(chan struct{})

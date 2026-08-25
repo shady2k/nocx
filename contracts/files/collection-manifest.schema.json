@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files/collection-manifest.schema.json",
+  "title": "CollectionManifestFile",
+  "description": "nocx-collection.json — the file that makes a folder a collection (design §6.1). It carries the name and the version and nothing else: the list of requests IS the folder, not a field, so two people adding two requests conflict in two files rather than in one (§6.2). This is a PERSISTED format, not a JSON-RPC result; see contracts/files/README.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "name"],
+  "properties": {
+    "schemaVersion": {
+      "description": "The persisted format's own monotonic version (storage.Module{Name: \"apicoll\", Current: 1}). It is probed BEFORE anything is decoded, and a manifest from a newer build is refused with a sentence naming the version — decoding first would report a type error for what is really \"this file is from the future\", and the message the user needs would be lost.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "name": { "type": "string" }
+  }
+}

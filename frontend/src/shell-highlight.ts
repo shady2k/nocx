@@ -32,6 +32,7 @@ import type { Extension, Range } from '@codemirror/state'
 import { Decoration, EditorView, ViewPlugin } from '@codemirror/view'
 import type { DecorationSet, ViewUpdate } from '@codemirror/view'
 import type { CommandSnapshotStore } from './command-snapshot'
+import { escapeHtml } from './ui/escape-html'
 
 // ── Grammar loading ─────────────────────────────────────────────────────────
 
@@ -321,13 +322,6 @@ export function shellExtensions(store: CommandSnapshotStore): Extension[] {
 }
 
 // ── Frozen headers: the same tokens as HTML ─────────────────────────────────
-
-const ESCAPE: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;' }
-
-/** Escape text for an HTML text node (enough for our own span building). */
-function escapeHtml(text: string): string {
-  return text.replace(/[&<>]/g, (ch) => ESCAPE[ch])
-}
 
 /**
  * Static pass for frozen block headers: tokenize `text` with the same

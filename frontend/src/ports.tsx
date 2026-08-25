@@ -289,6 +289,55 @@ export function PortsPanel(props: PortsPanelProps) {
     }),
   )
 
+  /** Turn one status/sample failure into the sentence a person reads in a
+   *  Toast. The reason that reaches `setError` is the wire's, and a message
+   *  about an action does not live in the document flow (ui/README "Toast")
+   *  — but dropping the wire's words is a soft degrade: "Could not read the
+   *  ports" cannot tell a dropped connection from a permission refusal,
+   *  which need different responses (nocx-8sudy). So the mapped sentence
+   *  still carries what happened; only the phrasing is ours.
+   *
+   *  The backend's own words (ws_ports.go): -32603 "Port discovery not
+   *  available (no discovery scheduler wired)" for an unwired scheduler,
+   *  and -32602 "Invalid params: profileId required" for a malformed call
+   *  (which this panel never makes). The rest is an open set from arbitrary
+   *  transport and host failures — the dispatcher rejects with the RPC
+   *  message for a control error, or a plain Error from `rejectAllPending`
+   *  ("closed", "ws closed", "not connected") when the socket dropped. */
+  const listingFailureMessage = (reason: string): string => {
+    const r = reason.toLowerCase()
+    if (
+      /not connected|ws closed|closed|connection (lost|closed|reset|refused)/.test(r) ||
+      r.includes('disconnected')
+    ) {
+      return 'Could not read the ports — the connection was lost.'
+    }
+    if (r.includes('discovery scheduler') || r.includes('not available')) {
+      return 'Could not read the ports — port discovery is not available.'
+    }
+    if (r.includes('invalid params')) {
+      return 'Could not read the ports — the request was not valid.'
+    }
+    // The open set: never pretend to a completeness we cannot have. The
+    // sentence stays a person's; the reason is appended so the diagnostic
+    // survives (AGENTS.md: a soft degrade must be visible in the product).
+    return `Could not read the ports (${reason}).`
+  }
+
+  /** Raise the outcome of a failed status/sample call once, at the moment
+   *  it happens — never once per poll tick (danger is sticky; a repeated
+   *  failure is the same news twice). Edge-triggered on the `error`
+   *  signal's VALUE: `on()` fires only when it changes, so a string that
+   *  persists across failing polls raises once, and a recovery (null)
+   *  followed by another failure raises again. */
+  createEffect(
+    on(error, (msg) => {
+      if (msg !== null) {
+        showToast({ level: 'danger', message: listingFailureMessage(msg) })
+      }
+    }),
+  )
+
   // The backend's per-profile visible flag — the scheduler pauses discovery
   // sampling while nothing is watching. Re-scope retires the previous
   // profile's flag before arming the current one.
@@ -620,10 +669,6 @@ export function PortsPanel(props: PortsPanelProps) {
       }
     >
       <Stack gap="loose">
-        <Show when={error()}>
-          <Badge tone="danger">{error() ?? ''}</Badge>
-        </Show>
-
         {/* ── Discovery state ─────────────────────────────────────── */}
         <Show
           when={!loading()}
@@ -735,6 +780,7 @@ export function PortsPanel(props: PortsPanelProps) {
                             class="ports-row"
                             data-testid="detected-row"
                             data-state={running ? 'forwarded' : failed ? 'failed' : undefined}
+                            title={failed?.error ?? undefined}
                           >
                             <div class="ports-row__main">
                               <div class="ports-row__text">
@@ -776,9 +822,6 @@ export function PortsPanel(props: PortsPanelProps) {
                                             <Badge tone="danger" truncate>
                                               {rec.stopReason ?? 'stopped'}
                                             </Badge>
-                                            <Show when={rec.error}>
-                                              <span class="ports-row__proc">{rec.error}</span>
-                                            </Show>
                                           </>
                                         )
                                       }}
@@ -939,16 +982,18 @@ export function PortsPanel(props: PortsPanelProps) {
                       <Show
                         when={f.state === 'running'}
                         fallback={
-                          <div class="ports-row" data-testid="forwarded-row" data-state="failed">
+                          <div
+                            class="ports-row"
+                            data-testid="forwarded-row"
+                            data-state="failed"
+                            title={f.error ?? undefined}
+                          >
                             <div class="ports-row__main">
                               <div class="ports-row__text">
                                 <span class="ports-row__addr">{f.destination}</span>
                                 <Badge tone="danger" truncate>
                                   {f.stopReason ?? 'stopped'}
                                 </Badge>
-                                <Show when={f.error}>
-                                  <span class="ports-row__proc">{f.error}</span>
-                                </Show>
                               </div>
                               <Button data-testid="ports-retry-forward" onClick={() => retry(f)}>
                                 Retry
@@ -1005,10 +1050,10 @@ export function PortsPanel(props: PortsPanelProps) {
                             </div>
                           </div>
                           {/* A -R forward whose bind sshd silently replaced
-                                carries Caveat() — render it as the kit's note
-                                (a caveat about the item above it), never as an
-                                error: the forward is running. Empty caveat
-                                renders nothing. */}
+                               carries Caveat() — render it as the kit's note
+                               (a caveat about the item above it), never as an
+                               error: the forward is running. Empty caveat
+                               renders nothing. */}
                           <Show when={f.caveat}>
                             <MarkerList items={[{ text: f.caveat, tone: 'note' }]} />
                           </Show>

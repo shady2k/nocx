@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files/environment.schema.json",
+  "title": "EnvironmentFile",
+  "description": "One environment, one JSON file under environments/ inside a collection folder. An environment answers BOTH \"where\" and \"how to get there\" (design §6.5): baseUrl-style values and the route are one record, so a production request cannot accidentally go out around the bastion — the address and the route cannot drift apart because they are not two facts. It holds plain values, the NAMES of its secret variables, and the route; it holds no secret values and no identifiers for them. This is a PERSISTED format; see contracts/files/README.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "route"],
+  "properties": {
+    "name": { "type": "string" },
+    "values": {
+      "description": "Plain, non-secret values by variable name.",
+      "type": "object",
+      "additionalProperties": { "type": "string" }
+    },
+    "secretVars": {
+      "description": "The NAMES of the variables whose values are secret, and nothing else — not the values, and not identifiers for them. An unresolved one BLOCKS the send and names itself: not the literal {{braces}} sent to the server, and not an empty string quietly substituted, which is worse than the failure it hides (design §6.5).",
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["direct", "connection"] },
+        "profileId": {
+          "description": "The saved connection a \"connection\" route goes through. A profile id, never a credential.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,759 @@
+/* The API workbench (design §9) — the tree, the request form and the run
+   list in one pane. Placement only: every control is a kit component, and
+   this file names none of their identities. */
+
+/* Five columns, two of them SEAMS, and three rows: the header, the URL line,
+   and the two halves under them. The sizes come from the pane as custom
+   properties — the surface owns what a person dragged to, and this file owns
+   only where the tracks are. The fallbacks are what a workbench looks like
+   before anything is dragged. */
+.api-workbench {
+  display: grid;
+  grid-template-columns:
+    var(--api-tree-width, 260px) auto
+    var(--api-request-width, 520px) auto minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
+  grid-template-areas:
+    'tree vsplit head head head'
+    'tree vsplit line line line'
+    'tree vsplit request rsplit runs';
+  height: 100%;
+  min-height: 0;
+  overflow: hidden;
+}
+
+/* The two seams, placed. Neither is repainted here: the hit area, the grab
+   line and the accent are resize-handle.css's, and a surface may place a kit
+   component and may never repaint it — so each sits in a box of the
+   surface's own, which is the thing the grid places. */
+.api-workbench__seam {
+  display: flex;
+  min-width: 0;
+}
+
+.api-workbench__seam[data-seam='tree'] {
+  grid-area: vsplit;
+}
+
+.api-workbench__seam[data-seam='request'] {
+  grid-area: rsplit;
+}
+
+.api-workbench__head {
+  grid-area: head;
+  border-bottom: 1px solid var(--color-divider);
+}
+
+/* ── The crumbs ────────────────────────────────────────────────────────── */
+/* Where the request lives, what it is called, and Save. */
+.api-crumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+  padding: var(--space-2) var(--space-3);
+  min-width: 0;
+  /* THE ROW IS ONE HEIGHT, ALWAYS. With nothing open it holds plain text and
+     with a request open it holds a button and Save — so the header grew the
+     moment a request was clicked, and everything below it jumped.
+     The floor is the tallest thing it can hold PLUS the row's own padding,
+     which is the half the first attempt left out: `min-height` is a border-box
+     height here, so naming the control height alone declared a floor two
+     paddings SHORTER than the row a control makes. Measured on the reported
+     case: 32.5px with nothing open, 48.5px with a request open, one floor
+     that could not be reached in either state. */
+  min-height: calc(var(--control-height-md) + 2 * var(--space-2));
+}
+
+.api-crumbs__collection {
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The folder segment in the same register the collection sits in: muted,
+   ellipsised, and not a control — the name beyond it is the thing a
+   person can rename. */
+.api-crumbs__folder {
+  color: var(--color-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 12rem;
+}
+.api-crumbs__sep {
+  color: var(--color-text-dim);
+}
+
+/* The name reads as the crumb trail's last segment, so the button that
+   carries it sits flush — placement only; the ghost Button paints itself. */
+.api-crumbs__name {
+  min-width: 0;
+}
+
+.api-crumbs__name .ui-button {
+  font-weight: 500;
+  max-width: 24rem;
+}
+
+.api-crumbs__field {
+  flex: 0 1 20rem;
+  min-width: 0;
+}
+
+/* Save and the request's own menu read as one group, at the trailing end. */
+.api-crumbs__save {
+  margin-left: auto;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* The line: the verb, the address and Send, across the whole right half. */
+.api-workbench__line {
+  grid-area: line;
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-divider);
+}
+
+/* A page that takes the whole lower half — the environments today. It is
+   placed by line rather than by name because it spans three named areas, and
+   a fourth name for "all of them" would be a second way to say where the two
+   halves are. */
+/* A page that takes the WHOLE right half, the URL line's row included: with
+   the environments open there is no request, so there is no line. Placed by
+   line rather than by name because it spans four named areas, and a fifth
+   name for "all of them" would be a second way to say where the halves are. */
+.api-workbench__page {
+  grid-column: 3 / -1;
+  grid-row: 2 / -1;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* The trail's last segment when it names a PAGE rather than a request: not a
+   control, because there is nothing to rename. */
+.api-crumbs__here {
+  font-weight: 500;
+}
+
+/* WHAT IS IN A FOLDER, inside the page that takes the right half. Placement
+   only: the rows are the kit's records and paint themselves. The column is
+   what a list of records is everywhere else in this product. */
+.api-folder {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+}
+
+.api-workbench__tree {
+  grid-area: tree;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-height: 0;
+  overflow: hidden;
+  padding: var(--space-2) var(--space-2) var(--space-3);
+  border-right: 1px solid var(--color-divider);
+}
+
+/* The filter, one row under the bar. Placement only — the control is the
+   kit's TextField and nothing here repaints it. */
+.api-tree__filter {
+  display: flex;
+}
+
+.api-tree__filter .ui-text-field {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.api-workbench__request {
+  grid-area: request;
+  overflow-y: auto;
+  min-height: 0;
+  /* AND min-width, which is the half that was missing (nocx-kdawd). A grid
+     item's min-width is `auto`, so it refuses to shrink below its content:
+     one long line in the body editor pushed this column wider than its track
+     and the COLUMN scrolled sideways instead of the editor. The editor's own
+     box was already right — `.api-body-editor` clips and its `.cm-scroller`
+     scrolls — but nothing downstream can scroll if an ancestor grew to fit
+     the content first. Both axes are needed at every step, which is why the
+     same line appears on `.api-request` and `.api-body-editor` below. */
+  min-width: 0;
+  padding: var(--space-3);
+}
+
+.api-workbench__runs {
+  grid-area: runs;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  overflow-y: auto;
+  min-height: 0;
+  padding: var(--space-3);
+  /* The seam between the halves is a hit area, not a rule — its grab line is
+     transparent until it is hovered — so the VISIBLE division between the two
+     columns is this border, the same way the tree column's own edge is drawn.
+     Without it the two halves read as one field of floating text. */
+  border-left: 1px solid var(--color-divider);
+}
+
+.api-workbench__runs-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+}
+
+/* ── The tree ──────────────────────────────────────────────────────────── */
+
+/* The collections section is what grows; the environments one takes what it
+   needs. Both are kit Sections and neither is repainted here — a surface may
+   place a component, and this places two. */
+.api-workbench__tree > .ui-section#api-collections {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  margin-bottom: 0;
+}
+
+.api-workbench__tree > .ui-section#api-collections > .ui-stack {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.api-workbench__tree > .ui-section#api-environments {
+  flex: 0 0 auto;
+  margin-bottom: 0;
+}
+
+/* A status card says something went wrong; it must not be squeezed to
+   nothing by the tree beside it, and it must not push the tree off screen
+   either. It keeps its own height and the column scrolls if both need more
+   than there is. */
+.api-workbench__tree > .ui-status-card {
+  flex: 0 0 auto;
+}
+
+.api-tree {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* The row's two controls, side by side inside the row's trailing slot. */
+.api-tree__row-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+}
+
+/* A row's actions: present for the pointer that is on the row, and always
+   present to the keyboard, which cannot hover. Placement and visibility only
+   — the buttons are the kit's IconButton and nothing here repaints them. */
+.api-tree__row .ui-icon-button {
+  opacity: 0;
+}
+
+.api-tree__row:hover .ui-icon-button,
+.api-tree__row .ui-icon-button:focus-visible {
+  opacity: 1;
+}
+
+.api-tree__row {
+  cursor: default;
+}
+
+/* ── Drag-to-move feedback (nocx-9db1m) ─────────────────────────────────
+   What the row under the pointer says while a request drag is over it. The
+   verdict rides the SURFACE's own wrapper (`data-drop-target` on
+   `api-tree__row`), never the kit's row: `ok` draws an accent ring around
+   the row, `no` dims it. A drag with no feedback is a drag people do not
+   trust, and a row that says neither while a request hangs over it leaves
+   the person guessing whether the release will land. */
+.api-tree__row[data-drop-target='ok'] {
+  outline: 2px solid var(--color-accent);
+  outline-offset: -2px;
+}
+
+.api-tree__row[data-drop-target='no'] {
+  opacity: 0.55;
+}
+
+/* A request row is grabbable; a folder row is not a source, only a target. */
+.api-tree__row[draggable='true'] {
+  cursor: grab;
+}
+
+/* ── The request ───────────────────────────────────────────────────────── */
+
+/* The line's controls carry no visible labels — the verb, the address and
+   the environment are what a person is looking straight at — so they align on
+   their centres rather than on the baseline a label column used to give them. */
+.api-request__line {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* The editor fills its column and the tab panel is what scrolls, so the tab
+   bar stays put while a long form moves under it. */
+.api-request {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  min-width: 0;
+  height: 100%;
+}
+
+.api-request .ui-tabs {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.api-request__method {
+  flex: 0 0 auto;
+}
+
+.api-request__url {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.api-request__environment,
+.api-request__save,
+.api-request__send {
+  flex: 0 0 auto;
+}
+
+/* The environment sits beside the Send it governs. A bounded width so a long
+   environment name cannot take the line from the URL, which is the field a
+   person is actually editing. */
+.api-request__environment {
+  max-width: 12rem;
+}
+
+/* A SECTION'S OWN CONTROLS, at the top of the section (nocx-n9npi). Placement
+   only: the row decides where the kit's Select and Button sit and paints
+   neither.
+
+   BOTH BOUNDS, because either alone leaves the old overflow. A flex item is
+   `min-width: auto`, so the wrapper round the select refuses to shrink below
+   its content and hands the excess back to the row; and a native <select>
+   takes its INTRINSIC width — the longest option, `From a file in the
+   collection` here — which `min-width: 0` does not touch and `max-width`
+   does. Measured on the tab row this moved off: the wrapper had shrunk to
+   178px with the select still at 204, and the 26px hung past the box until
+   `max-width` bound it (nocx-kdawd). The row is inside `.ui-tabs__panel`,
+   which is `min-width: 0`, so the shrink has somewhere to go. */
+.api-request__controls {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex: 0 0 auto;
+  min-width: 0;
+  padding-bottom: var(--space-2);
+}
+
+.api-request__controls > * {
+  min-width: 0;
+}
+
+.api-request__mode .ui-select {
+  max-width: 100%;
+}
+
+.api-request__row {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+.api-request__idle {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* ── The runs ──────────────────────────────────────────────────────────── */
+
+.api-runs {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.api-run {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-4);
+  border-bottom: 1px solid var(--color-divider);
+}
+
+/* What was sent: the verb, the address and the environment it went out
+   under. The numbers are NOT here — they ride the tab row below, beside the
+   choice of what to look at. */
+.api-run__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.api-run__url {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+}
+
+.api-run__environment,
+.api-run__route,
+.api-run__verb {
+  flex: 0 0 auto;
+}
+
+/* What the exchange went out under: the environment, the connection, and
+   whether the certificate was checked. Its own line under the address, which
+   is the thing that must stay readable. */
+.api-run__under {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  flex-wrap: wrap;
+}
+
+/* A run that has not answered yet: what is happening, and for how long. It
+   sits where the tab row will be once the exchange settles, so the row does
+   not jump when it does. */
+.api-run__state {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+/* Status, time and size as one group at the end of the tab row. */
+.api-run__stats {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+.api-run__state .api-run__elapsed {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+/* The response viewer. The host paints the text (cm-host.ts owns the CM6
+   theme); this gives it a box and a ceiling, because a run is one of many in
+   a column and a 20 KB body must not push the next one out of reach. */
+.api-response-body {
+  display: flex;
+  flex-direction: column;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--control-radius-md);
+  overflow: hidden;
+}
+
+.api-response-body .cm-editor {
+  max-height: 24rem;
+}
+
+.api-response-body .cm-scroller {
+  overflow: auto;
+}
+
+.api-run__raw {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+/* ── The environments page ─────────────────────────────────────────────── */
+
+.api-environments {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  height: 100%;
+}
+
+.api-environments__head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-2) var(--space-3);
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.api-environments__title {
+  margin: 0;
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+.api-environments__head .ui-icon-button {
+  margin-left: auto;
+}
+
+/* The list beside the one being edited — the shape that made this a page
+   rather than a dialog. */
+.api-environments__body {
+  display: grid;
+  grid-template-columns: minmax(160px, 220px) minmax(0, 1fr);
+  min-height: 0;
+  flex: 1 1 auto;
+}
+
+.api-environments__list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  border-right: 1px solid var(--color-divider);
+  overflow-y: auto;
+}
+
+.api-environments__list-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.api-environments__list-head .ui-icon-button {
+  margin-left: auto;
+}
+
+/* The rows are the kit's ghost Buttons; this only places them — full width,
+   with the "sending" badge pushed to the trailing edge. */
+.api-environments__list .ui-button {
+  width: 100%;
+  justify-content: space-between;
+}
+
+.api-environments__editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  padding: var(--space-3);
+  min-width: 0;
+  overflow-y: auto;
+}
+
+.api-environments__actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+}
+
+.api-environments__note {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.api-folder__note {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* The panel fills the tab box, so what is inside it can too. PLACEMENT of a
+   kit component, which a surface may do — nothing here paints the panel. */
+.api-request .ui-tabs__panel {
+  display: flex;
+  flex-direction: column;
+}
+
+/* The body editor. The host paints the text (cm-host.ts owns the CM6 theme);
+   this only gives it a box and lets it fill one.
+
+   FLEX, NOT A PERCENTAGE. `height: 100%` on the editor resolved against a
+   parent whose height came from `min-height` — which is not a definite
+   height, so the rule did nothing and CM6 stayed one line tall inside a box
+   twelve rems deep. What that looked like was a field with a background
+   behind the text and none under it, in which only the top band could be
+   clicked: everything below was outside the editor, so the panel refused to
+   take a character. */
+.api-body-editor {
+  display: flex;
+  flex-direction: column;
+  flex: 1 1 auto;
+  min-height: 12rem;
+  min-width: 0;
+  border: 1px solid var(--color-divider);
+  border-radius: var(--control-radius-md);
+  overflow: hidden;
+}
+
+.api-body-editor .cm-editor {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.api-body-editor .cm-scroller {
+  overflow: auto;
+}
+
+/* ── The environments rail ─────────────────────────────────────────────── */
+/* Beside the collections, because an environment is CHOSEN many times a day
+   and edited rarely. Placement only: the rows are the kit's ghost Buttons. */
+.api-environments-rail {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  max-height: 14rem;
+  overflow-y: auto;
+}
+
+.api-environments-rail .ui-button {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+/* The route: the two pickers read as one answer, so they sit together with
+   the sentence about what the choice promises under them. */
+.api-environments__route {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.api-environments__route .ui-select {
+  max-width: 20rem;
+}
+
+/* What a switched-off certificate check means, said in the panel. Danger's
+   colour on a caption's weight: it is a consequence, not a failure. */
+.api-environments__warning {
+  margin: 0;
+  color: var(--color-warning);
+  font-size: var(--font-size-sm);
+}
+
+/* ── The exchange, drawn to scale ─────────────────────────────────────────
+   Five phases of one run as one bar (api/timing-bar.tsx says why it is here
+   and not in the kit). Colours are tokens, and each phase gets a DIFFERENT
+   token rather than five mixes of one: a reader who cannot separate two
+   hues still has a legend under the bar naming every span it draws, and the
+   swatch beside each name is the same paint as the span. */
+.api-timing {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}
+
+.api-timing__bar {
+  display: flex;
+  width: 100%;
+  height: 8px;
+  border-radius: 4px;
+  overflow: hidden;
+  background: var(--color-surface-raised);
+}
+
+.api-timing__span {
+  height: 100%;
+  min-width: 2px;
+  /* The share is the only thing the component says about a span; the
+     property's fallback is what a span looks like before one is set. */
+  width: var(--api-timing-share, 0%);
+}
+
+.api-timing__legend {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+  align-items: center;
+}
+
+.api-timing__key {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+}
+
+/* The total is a fact about the whole bar, not a span on it, so it carries no
+   swatch and sits after the phases it sums. */
+.api-timing__key[data-total='true'] {
+  margin-left: auto;
+}
+
+.api-timing__swatch {
+  width: 8px;
+  height: 8px;
+  border-radius: 2px;
+  flex: 0 0 auto;
+}
+
+.api-timing__span[data-phase='resolve'],
+.api-timing__swatch[data-phase='resolve'] {
+  background: var(--color-accent-secondary);
+}
+
+.api-timing__span[data-phase='connect'],
+.api-timing__swatch[data-phase='connect'] {
+  background: var(--color-accent);
+}
+
+.api-timing__span[data-phase='tls'],
+.api-timing__swatch[data-phase='tls'] {
+  background: var(--color-success);
+}
+
+/* Waiting is the far side thinking, and it is the span that is usually the
+   longest and the one worth noticing — the warning tone is the loudest thing
+   on the bar for that reason, not because waiting is wrong. */
+.api-timing__span[data-phase='waiting'],
+.api-timing__swatch[data-phase='waiting'] {
+  background: var(--color-warning);
+}
+
+.api-timing__span[data-phase='download'],
+.api-timing__swatch[data-phase='download'] {
+  background: var(--color-text-dim);
+}
+
+/* THE IMPORT ASK'S TWO STATEMENT LINES — what the ask is holding, and where
+   the collection goes. PLACEMENT ONLY, and there is nothing else to write:
+   the words are the dialog body's own type and the control beside them is the
+   kit's IconButton, so a colour, a border or a font here would be this
+   surface repainting a component it only places (nocx-ysyy2).
+
+   `overflow-wrap` is here because the two values are a person's: a downloads
+   path and a share URL are both longer than a 480px panel, and a line that
+   cannot break pushes the dialog wider than the width Dialog names. */
+.api-import-source,
+.api-import-dest {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+/* ── THE MOVE-TO-FOLDER CHOOSER ───────────────────────────────────────── */
+/* The folder list is a column of kit Radios; this owns the layout and the
+   role, nothing else — the rows paint themselves. */
+.api-move__folders {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+}

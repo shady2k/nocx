@@ -695,6 +695,38 @@ func TestHistorySectionDeclaresUserDecisions(t *testing.T) {
 	}
 }
 
+// The Answers section carries the one decision a person makes about how an
+// answer is DRAWN (nocx-y9e88): whether the model's thinking opens by itself.
+// It is a toggle, it defaults to closed, and it sits under Assistant — a
+// setting rendered in the wrong group is a setting nobody finds.
+func TestAnswersSectionDeclaresTheThinkingDefault(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{data: map[credential.SecretID]string{}})
+	var decl settings.Declaration
+	found := false
+	for _, d := range reg.Declarations() {
+		if d.Key == "assistant.expandReasoning" {
+			decl, found = d, true
+		}
+	}
+	if !found {
+		t.Fatal("assistant.expandReasoning is not declared — the setting has no screen")
+	}
+	if decl.Section != "Answers" {
+		t.Errorf("section %q, want %q", decl.Section, "Answers")
+	}
+	if decl.Control != "toggle" {
+		t.Errorf("control %q, want %q — the kit renders a toggle as a switch", decl.Control, "toggle")
+	}
+	// The answer is what a person came for; the thinking is several times
+	// longer. Closed until they say otherwise.
+	if decl.Default != false {
+		t.Errorf("default %v, want false", decl.Default)
+	}
+	if got := reg.SectionGroups()["Answers"]; got != "assistant" {
+		t.Errorf("Answers → group %q, want %q", got, "assistant")
+	}
+}
+
 // A sentinel that is explained only in prose is a sentinel nobody reads. The
 // meaning of 0 travels on the wire beside the unit and the bounds, so the
 // screen has nothing to infer (nocx-w7h.12).
@@ -1137,4 +1169,102 @@ func TestHistoryOutputCap_IsDeclaredBoundedAndAgreesWithTheStore(t *testing.T) {
 	if err := reg.SetNumber(settings.HistoryOutputCapKB, 1024); err != nil {
 		t.Fatalf("a value inside the bounds was refused: %v", err)
 	}
+}
+
+// ── The person's own paragraph (nocx-avogl.4, design §1 item 6) ────────
+
+// TestPersonalInstructions_AreDeclaredMultilineAndBounded is the criterion
+// "bounded in length, and the bound is stated rather than enforced
+// silently", at the declaration end. The bound is DECLARED — Max on the
+// descriptor, in characters — because that is what the screen renders its
+// caption from; a limit that lived only inside SetString could not be shown
+// and could only be discovered by losing text to it.
+func TestPersonalInstructions_AreDeclaredMultilineAndBounded(t *testing.T) {
+	d := settings.AssistantPersonalInstructions
+
+	if d.Control() != settings.ControlText {
+		t.Fatalf("control = %q, want %q", d.Control(), settings.ControlText)
+	}
+	if !d.Multiline() {
+		t.Error("a paragraph field is declared single-line: the screen would render a one-line input")
+	}
+	max := d.Max()
+	if max == nil || *max <= 0 {
+		t.Fatalf("no declared length bound: Max() = %v", max)
+	}
+	decl := declarationFor(t, d.Key())
+	if decl.Max == nil || *decl.Max != *max {
+		t.Errorf("the wire declaration does not carry the bound: %+v", decl)
+	}
+	if decl.Unit == "" {
+		t.Error("the bound reaches the screen as a bare number: no unit says what it counts")
+	}
+	if !decl.Multiline {
+		t.Error("the wire declaration does not say the control is multiline")
+	}
+	if def, ok := d.Default().(string); !ok || def != "" {
+		t.Errorf("default = %#v, want the empty string — the person has added nothing until they do", d.Default())
+	}
+}
+
+// TestPersonalInstructions_RefuseTooMuchTextRatherThanTruncateIt is the
+// failure mode the criterion names. A silent truncation is the one outcome
+// forbidden: the person's rule would be cut mid-sentence and the model would
+// be told a different rule from the one they wrote.
+func TestPersonalInstructions_RefuseTooMuchTextRatherThanTruncateIt(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	d := settings.AssistantPersonalInstructions
+	limit := int(*d.Max())
+
+	// Empty is legal and is what "the person added nothing" looks like —
+	// the empty-string rejection SetString applies to a field with a
+	// non-empty default must not apply here.
+	if err := reg.SetString(d, ""); err != nil {
+		t.Fatalf("clearing the field was refused: %v", err)
+	}
+
+	atLimit := strings.Repeat("a", limit)
+	if err := reg.SetString(d, atLimit); err != nil {
+		t.Fatalf("a value exactly at the bound was refused: %v", err)
+	}
+	if got, _ := reg.GetString(d); got != atLimit {
+		t.Fatalf("the stored text is %d characters, want %d — it was truncated", len(got), limit)
+	}
+
+	over := strings.Repeat("b", limit+1)
+	err := reg.SetString(d, over)
+	if err == nil {
+		t.Fatal("one character past the bound was accepted")
+	}
+	if !errors.Is(err, settings.ErrValidation) {
+		t.Errorf("error = %v, want a validation error the transport can map", err)
+	}
+	if got, _ := reg.GetString(d); got != atLimit {
+		t.Errorf("a refused write changed the stored value to %q", got)
+	}
+}
+
+// TestPersonalInstructions_LiveOnTheAssistantRail keeps the setting
+// reachable: it is declared in a section, and the section belongs to the
+// Assistant group, so the rail shows it beside Endpoints, Roles and Agent
+// policy rather than at top level.
+func TestPersonalInstructions_LiveOnTheAssistantRail(t *testing.T) {
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	section := settings.AssistantPersonalInstructions.Section()
+	if got := reg.SectionGroups()[section]; got != "assistant" {
+		t.Errorf("section %q is in group %q, want assistant", section, got)
+	}
+}
+
+// declarationFor finds one setting's wire declaration by key.
+func declarationFor(t *testing.T, key string) settings.Declaration {
+	t.Helper()
+	reg := settings.New(&fakeDoc{}, &fakeSecretStore{})
+	for _, d := range reg.Declarations() {
+		if d.Key == key {
+			return d
+		}
+	}
+	t.Fatalf("no declaration for %q", key)
+	return settings.Declaration{}
 }

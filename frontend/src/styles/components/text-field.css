@@ -44,6 +44,78 @@
   padding-right: 40px;
 }
 
+/* ── The ink layer: marked spans of the value ─────────────────────────────
+   The same characters as the input, in the same font at the same offset,
+   painted on top of it while the input keeps the caret and every gesture.
+   Two rules keep the two layers from drifting: the metrics below are the
+   input's own (font, size, padding, height), and a mark changes COLOUR only —
+   never padding, never a border box that would take horizontal space, because
+   one extra pixel of width puts every character after it somewhere the caret
+   is not. */
+.ui-text-field__ink {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 8px;
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-md);
+  color: var(--color-text);
+  white-space: pre;
+  overflow: hidden;
+  pointer-events: none;
+}
+
+/* The input under it keeps its ground and its border and gives up only its
+   glyphs; the caret is coloured back explicitly, because `color: transparent`
+   would otherwise take it too and the field would look dead while being
+   typed into. */
+.ui-text-field__control[data-ink='true'] .ui-text-field__input {
+  color: transparent;
+  caret-color: var(--color-text);
+}
+
+/* A reference reads as ours: the accent, at the badge's own strength, so a
+   `{{variable}}` in a URL and a variable named anywhere else in the product
+   are the same colour. */
+.ui-text-field__mark {
+  border-radius: 3px;
+  background: color-mix(in srgb, var(--color-accent), transparent 80%);
+  color: var(--color-accent);
+}
+
+/* A reference to a SECRET wears the vault's own colour — the one the secret
+   chip uses everywhere else in the product — so "this stands for something I
+   cannot read here" is the same colour wherever a person meets it. It cannot
+   wear the chip's LOCK: the ink layer holds the same characters as the input
+   in the same places, and a glyph would put every character after it
+   somewhere the caret is not. Colour is the whole of what this layer may
+   change. */
+.ui-text-field__mark[data-tone='secret'] {
+  background: color-mix(in srgb, var(--color-accent-secondary), transparent 78%);
+  color: var(--color-accent-secondary);
+}
+
+/* And a reference NOTHING ANSWERS is the warning tone — the same one a badge
+   uses to say "this will not do what it looks like". It is a different colour
+   AND, through the field's own title, a different sentence: a reader who
+   cannot separate the two hues still gets the fact (WCAG 1.4.1). */
+.ui-text-field__mark[data-tone='unknown'] {
+  background: color-mix(in srgb, var(--color-warning), transparent 80%);
+  color: var(--color-warning);
+}
+
+/* A mark that answers a click takes the pointer for its own span — the rest
+   of the ink stays inert so the field keeps the caret. */
+.ui-text-field__mark[data-interactive='true'] {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.ui-text-field__mark[data-interactive='true']:hover {
+  text-decoration: underline;
+}
+
 .ui-text-field__trailing {
   position: absolute;
   top: 50%;
@@ -93,6 +165,16 @@
   white-space: pre;
   min-height: calc(var(--control-height-md) * 2);
   field-sizing: content;
+}
+
+/* The prose variant of the textarea. `white-space: pre` above is right for
+   the material a person PASTES — a private key wrapped to the box reads as a
+   different key — and wrong for the prose a person WRITES, which has no
+   lines of its own and would otherwise sit behind a horizontal scrollbar.
+   One property, one variant, declared by the caller. */
+.ui-text-field[data-multiline='true'][data-wrap='true'] .ui-text-field__input {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
 }
 
 /* The unit suffix of a number field — inside the control, so the number and

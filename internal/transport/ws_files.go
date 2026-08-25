@@ -323,9 +323,10 @@ type filesOpenParams struct {
 }
 
 type filesOpenResult struct {
-	BindingID  string          `json:"bindingId"`
-	EndpointID *string         `json:"endpointId"` // null for a local binding, never absent
-	Root       filesRootResult `json:"root"`
+	BindingID       string          `json:"bindingId"`
+	EndpointID      *string         `json:"endpointId"` // null for a local binding, never absent
+	Root            filesRootResult `json:"root"`
+	RevealAvailable bool            `json:"revealAvailable"`
 }
 
 type filesRootResult struct {
@@ -435,7 +436,12 @@ type filesOpenHandlers struct {
 	op      capability.FilesystemOpenOperation // nil → filesystem not wired
 	factory capability.ProviderFactory         // nil → no provider factory wired
 	machine filesMachine
-	r       Responder
+	// revealAvailable is the composition fact carried on every open result:
+	// whether this build has a file-manager revealer wired. Set once from
+	// s.revealer != nil at registration; the renderer reads it to decide
+	// whether the "Show in Finder" action exists at all (nocx-ngf3u).
+	revealAvailable bool
+	r               Responder
 }
 
 // handleOpen resolves a session the requesting connection owns and registers
@@ -508,8 +514,9 @@ func (h filesOpenHandlers) handleOpen(ctx context.Context, state *connState, req
 			ep = &endpointID
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(filesOpenResult{
-			BindingID:  bid,
-			EndpointID: ep,
+			BindingID:       bid,
+			EndpointID:      ep,
+			RevealAvailable: h.revealAvailable,
 			Root: filesRootResult{
 				Path:           root.Path,
 				Display:        root.Display,
@@ -900,7 +907,7 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 	bindingSub := s.operationQueue("files")
 	specs := []methodSpec{
 		reg(openSub, "files.open", params(validateFilesOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := filesOpenHandlers{op: openOp, factory: factory, machine: s, r: r}
+			h := filesOpenHandlers{op: openOp, factory: factory, machine: s, revealAvailable: s.revealer != nil, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, state, req) }
 		}),
 		reg(bindingSub, "files.list", params(validateFilesListRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {

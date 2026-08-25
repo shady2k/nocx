@@ -454,6 +454,37 @@ export function documentDir(isolatedHome: string): string {
 }
 
 /**
+ * Where an API collection's folder lives under a given isolated home.
+ *
+ * Two functions rather than one, because two directories: documentDir above
+ * resolves the CONFIG dir and a collection lives under the DATA dir. They
+ * coincide on darwin only — internal/storage/paths.go sends both to
+ * `~/Library/Application Support/<app>` there, while everything else splits
+ * os.UserConfigDir() (`~/.config/<app>`) from resolveDataDir, which reads
+ * XDG_DATA_HOME or falls back to `~/.local/share/<app>`. The home boundary
+ * strips XDG_DATA_HOME, so the fallback is the one that runs here.
+ *
+ * It takes the isolated home rather than a DisposableRoot for the same reason
+ * documentDir does, and because there is already an owner of "what is the
+ * home inside this root": home-isolation.ts, which canonicalises it (a tmpdir
+ * path is an alias on macOS) and which VaultBackend hands back as
+ * `backend.isolatedHome`. A caller re-deriving `<root>/home` here would be
+ * the third derivation of that, and this file's own documentDir comment
+ * records what the second one cost.
+ *
+ * api-tree.spec.ts and api-move.spec.ts both seed and assert files inside a
+ * collection, and each had written this out for itself.
+ */
+export function collectionsDir(isolatedHome: string, name: string): string {
+  const app = 'nocx-dev'
+  const dataDir =
+    process.platform === 'darwin'
+      ? join(isolatedHome, 'Library', 'Application Support', app)
+      : join(isolatedHome, '.local', 'share', app)
+  return join(dataDir, 'collections', name)
+}
+
+/**
  * Point the page at a backend THIS SPEC started, by supplying the two wails
  * bindings the frontend reads at startup.
  *
@@ -512,6 +543,169 @@ export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promi
     },
     { p: endpoint.port, t: endpoint.token },
   )
+}
+
+/**
+ * What an AI endpoint is created with, through the dialog a person uses.
+ *
+ * NOT to be confused with `bindEndpoint` above, whatever the two names
+ * suggest: that one points the PAGE at a backend's WebSocket, and has
+ * nothing to do with the assistant. The collision is worth a sentence
+ * because the plan for nocx-rikz5 read one as the other and briefed a
+ * `bindEndpoint(page, { baseURL, model, assignRole: false })` that has never
+ * existed.
+ */
+export interface AiEndpointSpec {
+  /** The endpoint's name — what the row, the Roles selects and the model
+   *  chip's first half all show. */
+  name: string
+  /** The OpenAI-compatible base URL: FakeOpenAI.baseUrl() in this suite. */
+  baseUrl: string
+  /** The model ids the endpoint offers, in order. At least one: an endpoint
+   *  offering none is a different rung of the ladder ('no-models'). */
+  models: string[]
+  /** The key typed into the form — minted into the vault, never stored in
+   *  the record. */
+  key: string
+  /** The passphrase to answer the vault setup sheet with, IF this save is
+   *  the one that has to create the vault. */
+  vaultPassphrase: string
+}
+
+/**
+ * Create an AI endpoint and STOP THERE — no role assigned, no default
+ * chosen.
+ *
+ * Stopping is the point. Until nocx-rikz5 there was no way to have an
+ * endpoint without also naming the model that answers, so every spec that
+ * wanted one configured both in a single gesture (agent-ask.spec.ts's
+ * assignAnsweringRole, inline). The state BETWEEN the two — a valid key and
+ * no model chosen — is the one the readiness ladder exists for, and it is
+ * unobservable while the two are one step. `setDefaultModel` below is the
+ * second step, deliberately a separate call.
+ *
+ * Additive: nothing that existed before this behaves differently, because
+ * no spec had a shared helper for this at all — endpoints-through-the-form
+ * was open-coded in agent-ask.spec.ts and vault-sealed-probe.spec.ts. This
+ * is where the third copy would have gone.
+ *
+ * THE VAULT BRANCH IS READ, NOT ASSUMED. A fresh home has no vault and the
+ * key is minted INTO one (design §4.5.3), so the first save stops on the
+ * setup sheet and is retried once the vault exists; a later save on the same
+ * home just lands. Which of the two happened is decided by polling the two
+ * observable states — a sheet on screen, or the dialog gone — never by
+ * waiting out a duration.
+ */
+export async function createAiEndpoint(page: Page, spec: AiEndpointSpec): Promise<void> {
+  const dialog = page.getByRole('dialog').filter({ hasText: 'New Endpoint' })
+  // The dialog may ALREADY be open: the model chip's endpoints destination
+  // opens it (main.tsx onCreateEndpoint → startNewEndpoint), and clicking
+  // "+ New endpoint" on top of it would be a second one. One read of a state
+  // the caller has already waited for — not a poll for a frame in flight.
+  if (!(await dialog.isVisible())) {
+    await page.getByRole('button', { name: '+ New endpoint' }).first().click()
+  }
+  await baseExpect(dialog).toBeVisible({ timeout: 10_000 })
+  await dialog.locator('#endpoint-name').fill(spec.name)
+  await dialog.locator('#endpoint-base-url').fill(spec.baseUrl)
+  await dialog.locator('#endpoint-key').fill(spec.key)
+  for (const [i, model] of spec.models.entries()) {
+    await dialog.getByRole('button', { name: 'Add model' }).click()
+    await dialog.locator(`#endpoint-model-${i}-name`).fill(model)
+    // The model field is a SuggestionField, and the form's silent discovery
+    // probe (endpoints-section discoverModels) fills it from the endpoint's
+    // own /models. With the list open its options COVER the buttons below —
+    // "Add model" and "Create Endpoint" both take the click on an <li>
+    // instead, which in the container was 51 retries and a timeout rather
+    // than a failed assertion.
+    //
+    // Focus moves to the row's own alias field, which is what a person does
+    // next and is what closes the list (suggestion-field onBlur). NOT
+    // Escape: that closes the list only while it is EXPANDED, so a model id
+    // matching no suggestion would send the key to the native <dialog> and
+    // shut the form the caller is still filling in.
+    await dialog.locator(`#endpoint-model-${i}-alias`).click()
+  }
+  await dialog.getByRole('button', { name: 'Create Endpoint', exact: true }).click()
+
+  const setupSheet = page
+    .locator('.ui-prompt-overlay')
+    .filter({ has: page.locator('#vault-setup-passphrase') })
+  await baseExpect
+    .poll(
+      async () => {
+        if (await setupSheet.isVisible()) return 'vault-setup'
+        if (!(await dialog.isVisible())) return 'saved'
+        return 'pending'
+      },
+      { timeout: 15_000 },
+    )
+    .not.toBe('pending')
+
+  if (await setupSheet.isVisible()) {
+    await page.locator('#vault-setup-passphrase').fill(spec.vaultPassphrase)
+    await page.locator('#vault-setup-confirm').fill(spec.vaultPassphrase)
+    await page
+      .getByRole('dialog')
+      .getByRole('button', { name: /Set Up/i })
+      .click()
+    // The recovery code, then Done — the sheet's own two steps.
+    await baseExpect(page.locator('.ui-vault-code-block-wrap .ui-code-block')).toBeVisible({
+      timeout: 10_000,
+    })
+    await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+    await baseExpect(setupSheet).not.toBeVisible({ timeout: 10_000 })
+    await baseExpect(dialog).not.toBeVisible({ timeout: 10_000 })
+  }
+
+  // The record exists — which is all this helper can honestly claim, and all
+  // its callers need before going on. It used to wait for a green "Key
+  // saved" on the row and read that as proof the key had landed; a caption
+  // is not evidence of a secret, and the owner struck the caption anyway.
+  // Whether the KEY landed is proved where it can be: a probe through the
+  // fake endpoint, which records the material it was sent.
+  await baseExpect(page.locator('.ui-collection-row').filter({ hasText: spec.name })).toBeVisible({
+    timeout: 10_000,
+  })
+}
+
+/**
+ * Choose the DEFAULT model on Settings → Roles — the one choice the whole
+ * ladder exists to lead a person to (nocx-rikz5).
+ *
+ * The caller brings the Roles page: in the readiness spec the model chip
+ * itself is what opens it, and a helper that navigated would hide exactly
+ * the thing under test. It waits for the control, not for a duration.
+ *
+ * Two selects, endpoint first, because a half pair is never written
+ * (roles-section onDefaultEndpointChange).
+ *
+ * The confirmation is the control's OWN selects, and that is not the test
+ * reading back what it typed: every write re-adopts the table the backend
+ * returned (roles-section `adopt`), so a select holding the pair is the
+ * store's answer, never the draft. The answering row used to carry a green
+ * "As default: …" sentence and this waited on that; the owner struck it as
+ * a restatement of the control above, and a spec that waits on a line the
+ * product no longer has is the defect AGENTS.md names, not a regression to
+ * revert.
+ */
+export async function setDefaultModel(
+  page: Page,
+  endpointName: string,
+  model: string,
+): Promise<void> {
+  const control = page.locator('.roles-default')
+  await baseExpect(control).toBeVisible({ timeout: 10_000 })
+  await control.locator('select').first().selectOption({ label: endpointName })
+  const modelSelect = control.locator('select').nth(1)
+  await baseExpect(modelSelect).toBeEnabled()
+  await modelSelect.selectOption({ label: model })
+  await baseExpect(control.locator('select').first()).toHaveValue(/.+/, { timeout: 10_000 })
+  await baseExpect(modelSelect).toHaveValue(/.+/, { timeout: 10_000 })
+  // And the answering role, which has no pair of its own, stops refusing:
+  // its warning line is gone because the default now carries it.
+  const answering = page.locator('.roles-role').filter({ hasText: 'Answering' })
+  await baseExpect(answering.locator('.roles-role__state')).toHaveCount(0, { timeout: 10_000 })
 }
 
 export class VaultBackend {

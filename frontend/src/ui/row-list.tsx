@@ -23,6 +23,20 @@
  * the field they just finished, and it never separates the rows from the
  * control that adds one.
  *
+ * TWO SHAPES, ONE VOCABULARY. `cards` (the default) is a bordered box per
+ * row, which is right for a row of several labelled fields — a port forward,
+ * a mount. `table` is a grid with a header, which is right for rows of two or
+ * three SHORT values where the labels would otherwise be repeated on every
+ * row: query parameters, headers, environment variables. The card shape was
+ * being used for all of them, and a list of three parameters came out as
+ * three boxes with "Name" and "Value" printed six times.
+ *
+ * A variant rather than a second component, because everything else is the
+ * same: the caller owns the rows, the kit owns the rhythm, the remove
+ * affordance and the add control at the foot. In `table` the render callback
+ * returns CELLS (`<td>`) instead of fields — the one part of the contract
+ * that differs, and it differs because a table row is made of cells.
+ *
  * The rows are controlled: the caller owns the data and passes `rows`,
  * `renderRow`, `onRemove` and `onAdd`. Nothing here mutates state.
  *
@@ -43,7 +57,27 @@ import { Button } from './button'
 import { IconButton } from './icon-button'
 import { CloseIcon, PlusIcon } from './icons'
 
+/** One column of the table variant. A column whose control needs no visible
+ *  heading — a tick box, the remove column — still owes assistive technology
+ *  a name, so the label is hidden rather than absent. */
+interface RowListColumn {
+  label: string
+  labelHidden?: boolean
+}
+
 export interface EditableRowListProps<T> {
+  /**
+   * Which shape. `cards` (default) is a bordered box per row; `table` is a
+   * grid with a header, for rows of short values whose labels would
+   * otherwise repeat on every row.
+   */
+  variant?: 'cards' | 'table'
+  /**
+   * The table's columns, header order. Required by `table` and ignored by
+   * `cards`. The remove column is the kit's own and is NOT listed here —
+   * every table has one and it is not the caller's to place.
+   */
+  columns?: RowListColumn[]
   /** The rows being edited. Read-only: the caller owns the data. */
   rows: readonly T[]
   /**
@@ -54,13 +88,13 @@ export interface EditableRowListProps<T> {
    */
   renderRow: (row: () => T, index: number) => JSX.Element
   /** Called with the row's index when its remove control is activated. */
-  onRemove: (index: number) => void
+  onRemove?: (index: number) => void
   /** Called when the foot add control is activated. */
-  onAdd: () => void
+  onAdd?: () => void
   /** Visible label of the add control, e.g. "Add forward". */
-  addLabel: string
+  addLabel?: string
   /** Accessible name for one row's remove control, e.g. "Remove forward 2". */
-  removeLabel: (index: number) => string
+  removeLabel?: (index: number) => string
   /** Shown above the add control when there are no rows. */
   emptyLabel?: string
   /**
@@ -72,44 +106,112 @@ export interface EditableRowListProps<T> {
   error?: string
   /** Accessible name for the list itself. */
   ariaLabel: string
+  /** Hide editing affordances for a list that only explains inherited rows. */
+  readOnly?: boolean
   disabled?: boolean
 }
 
 export function EditableRowList<T>(props: EditableRowListProps<T>) {
-  return (
-    <div class="ui-row-list" role="list" aria-label={props.ariaLabel}>
-      <Index each={props.rows}>
-        {(row, i) => (
-          <div class="ui-row-list__row" role="listitem">
-            <div class="ui-row-list__content">{props.renderRow(row, i)}</div>
-            <div class="ui-row-list__remove">
-              <IconButton
-                size="sm"
-                title="Remove"
-                ariaLabel={props.removeLabel(i)}
-                disabled={props.disabled === true}
-                onClick={() => props.onRemove(i)}
-              >
-                <CloseIcon />
-              </IconButton>
-            </div>
-          </div>
-        )}
-      </Index>
-      <Show when={(props.rows?.length ?? 0) === 0 && props.emptyLabel}>
-        <p class="ui-row-list__empty">{props.emptyLabel}</p>
-      </Show>
-      <div class="ui-row-list__add">
-        <Button variant="ghost" disabled={props.disabled === true} onClick={props.onAdd}>
-          <PlusIcon />
-          {props.addLabel}
-        </Button>
-      </div>
-      <Show when={props.error !== undefined}>
-        <p class="ui-field-error" role="alert">
-          {props.error}
-        </p>
-      </Show>
-    </div>
+  const remove = (i: number): JSX.Element => (
+    <IconButton
+      size="sm"
+      title="Remove"
+      ariaLabel={props.removeLabel?.(i) ?? `Remove row ${i + 1}`}
+      disabled={props.disabled === true}
+      onClick={() => props.onRemove?.(i)}
+    >
+      <CloseIcon />
+    </IconButton>
   )
+
+  const foot = (): JSX.Element => (
+    <Show when={props.readOnly !== true}>
+      <>
+        <div class="ui-row-list__add">
+          <Button
+            variant="ghost"
+            disabled={props.disabled === true}
+            onClick={() => props.onAdd?.()}
+          >
+            <PlusIcon />
+            {props.addLabel ?? 'Add'}
+          </Button>
+        </div>
+        <Show when={props.error !== undefined}>
+          <p class="ui-field-error" role="alert">
+            {props.error}
+          </p>
+        </Show>
+      </>
+    </Show>
+  )
+
+  return (
+    <Show
+      when={props.variant === 'table'}
+      fallback={
+        <div class="ui-row-list" role="list" aria-label={props.ariaLabel}>
+          <Index each={props.rows}>
+            {(row, i) => (
+              <div class="ui-row-list__row" role="listitem">
+                <div class="ui-row-list__content">{props.renderRow(row, i)}</div>
+                <Show when={props.readOnly !== true}>
+                  <div class="ui-row-list__remove">{remove(i)}</div>
+                </Show>
+              </div>
+            )}
+          </Index>
+          <Show when={(props.rows?.length ?? 0) === 0 && props.emptyLabel}>
+            <p class="ui-row-list__empty">{props.emptyLabel}</p>
+          </Show>
+          {foot()}
+        </div>
+      }
+    >
+      <div class="ui-row-list" data-variant="table">
+        <Show when={(props.rows?.length ?? 0) > 0}>
+          <table class="ui-row-list__table" aria-label={props.ariaLabel}>
+            <thead>
+              <tr>
+                <Index each={props.columns ?? []}>
+                  {(col) => (
+                    <th scope="col">
+                      <Show when={col().labelHidden !== true} fallback={srOnly(col().label)}>
+                        {col().label}
+                      </Show>
+                    </th>
+                  )}
+                </Index>
+                <Show when={props.readOnly !== true}>
+                  <th scope="col">{srOnly('Remove')}</th>
+                </Show>
+              </tr>
+            </thead>
+            <tbody>
+              <Index each={props.rows}>
+                {(row, i) => (
+                  <tr>
+                    {props.renderRow(row, i)}
+                    <Show when={props.readOnly !== true}>
+                      <td class="ui-row-list__remove">{remove(i)}</td>
+                    </Show>
+                  </tr>
+                )}
+              </Index>
+            </tbody>
+          </table>
+        </Show>
+        <Show when={(props.rows?.length ?? 0) === 0 && props.emptyLabel}>
+          <p class="ui-row-list__empty">{props.emptyLabel}</p>
+        </Show>
+        {foot()}
+      </div>
+    </Show>
+  )
+}
+
+/** A heading only assistive technology reads. The class is the kit's, painted
+ *  by row-list.css — a surface never re-declares the clip. */
+function srOnly(label: string): JSX.Element {
+  return <span class="ui-row-list__sr">{label}</span>
 }

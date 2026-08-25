@@ -220,10 +220,15 @@ describe('LifecycleClient', () => {
       command: 'make',
       cwd: '/srv/app',
       host: 'build.example.com',
+      source: 'assistant',
     })
 
     // The request went out with the app-owned half of the execution —
-    // command, cwd and host captured at submit (ADR-0024 decision 5).
+    // command, cwd and host captured at submit (ADR-0024 decision 5) — and
+    // the author that submitted it, which is what opens the durable row's
+    // source column (nocx-1druc). Asserted with `assistant` rather than the
+    // ordinary case: a params object dropped on the floor would still look
+    // right if every field here were the default.
     const sent = JSON.parse(lastSocket().sent[0]) as { method: string; params: unknown }
     expect(sent.method).toBe('lifecycle.submitAttempt')
     expect(sent.params).toEqual({
@@ -231,6 +236,7 @@ describe('LifecycleClient', () => {
       command: 'make',
       cwd: '/srv/app',
       host: 'build.example.com',
+      source: 'assistant',
     })
 
     lastSocket().deliver({
@@ -253,7 +259,13 @@ describe('LifecycleClient', () => {
     const dispatcher = new Dispatcher()
     await connectAndAccept(dispatcher)
     const client = new LifecycleClient(dispatcher)
-    const p = client.submitAttempt({ domain: 'd1', command: 'make', cwd: '', host: '' })
+    const p = client.submitAttempt({
+      domain: 'd1',
+      command: 'make',
+      cwd: '',
+      host: '',
+      source: 'user',
+    })
     lastSocket().deliver({
       id: 1,
       error: { code: -32602, message: 'lifecycle: no prompt is ready' },

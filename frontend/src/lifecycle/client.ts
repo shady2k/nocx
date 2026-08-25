@@ -48,6 +48,18 @@ export interface LifecycleSubmitAttemptParams {
   readonly cwd: string
   /** The host the command runs on, captured at submit. */
   readonly host: string
+  /** WHO submitted it, in the LEDGER's vocabulary ('user' is the person at
+   *  the keyboard, 'assistant' is the agent's lane) — the same mapping
+   *  history-client.ts makes at the wire, because the two calls write one
+   *  column and must speak one language.
+   *
+   *  Required, with no default. The durable row is OPENED by this call
+   *  (nocx-kpqr3), so this is where the submitting target's author reaches
+   *  the store; the later history.record moves the status and leaves the
+   *  column alone. A default here would let a submit path forget it and
+   *  quietly attribute the assistant's command to the person — which is
+   *  exactly what a restored pane then showed (nocx-1druc). */
+  readonly source: 'user' | 'assistant'
 }
 
 export class LifecycleClient {

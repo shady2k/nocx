@@ -56,6 +56,43 @@ func (s *Stub) Layout() LayoutRepository {
 	return &layoutStub{log: s.log}
 }
 
+// APIRuns returns a stub API-run repository.
+func (s *Stub) APIRuns() APIRunRepository {
+	s.log.Info("content stub: APIRuns called (no-op)")
+	return &apiRunStub{log: s.log}
+}
+
+type apiRunStub struct {
+	log log.Logger
+}
+
+func (s *apiRunStub) Begin(_ context.Context, start APIRunStart) (APIRun, error) {
+	s.log.Info("content stub: APIRunRepository.Begin", "collection", start.CollectionPath, "request", start.RequestRelPath)
+	return APIRun{}, ErrNotImplemented
+}
+
+func (s *apiRunStub) Complete(_ context.Context, id int64, _ APIRunResult) (APIRun, error) {
+	s.log.Info("content stub: APIRunRepository.Complete", "id", id)
+	return APIRun{}, ErrNotImplemented
+}
+
+func (s *apiRunStub) Get(_ context.Context, id int64) (APIRun, error) {
+	s.log.Info("content stub: APIRunRepository.Get", "id", id)
+	return APIRun{}, ErrNotImplemented
+}
+
+func (s *apiRunStub) List(_ context.Context, collectionPath, requestRelPath string) ([]APIRun, error) {
+	s.log.Info("content stub: APIRunRepository.List", "collection", collectionPath, "request", requestRelPath)
+	return nil, ErrNotImplemented
+}
+
+func (s *apiRunStub) Delete(_ context.Context, id int64) error {
+	s.log.Info("content stub: APIRunRepository.Delete", "id", id)
+	return ErrNotImplemented
+}
+
+var _ APIRunRepository = (*apiRunStub)(nil)
+
 // Backup returns ErrNotImplemented: the stub has nothing to snapshot.
 func (s *Stub) Backup(_ context.Context, destPath string) error {
 	s.log.Info("content stub: Backup called (no-op)", "dest", destPath)
@@ -135,6 +172,11 @@ func (s *ledgerStub) EvictEntries(_ context.Context, req EvictionRequest) (Evict
 	return EvictionResult{}, ErrNotImplemented
 }
 
+func (s *ledgerStub) EvictBodies(_ context.Context, req BodyEvictionRequest) (BodyEvictionResult, error) {
+	s.log.Info("content stub: LedgerRepository.EvictBodies", "keep", req.KeepBytes, "max", req.Max)
+	return BodyEvictionResult{}, ErrNotImplemented
+}
+
 func (s *ledgerStub) Watermark(_ context.Context) (RetentionWatermark, error) {
 	s.log.Info("content stub: LedgerRepository.Watermark")
 	return RetentionWatermark{}, ErrNotImplemented
@@ -182,9 +224,34 @@ func (s *ledgerStub) Edges(_ context.Context, entryID string) ([]Edge, error) {
 	return nil, ErrNotImplemented
 }
 
+func (s *ledgerStub) AddCause(_ context.Context, turnID, causedID string) (int, error) {
+	s.log.Info("content stub: LedgerRepository.AddCause", "turn", turnID, "caused", causedID)
+	return 0, ErrNotImplemented
+}
+
+func (s *ledgerStub) Caused(_ context.Context, entryID string) ([]CausedEntry, error) {
+	s.log.Info("content stub: LedgerRepository.Caused", "entry", entryID)
+	return nil, ErrNotImplemented
+}
+
 func (s *ledgerStub) CaptureFrame(_ context.Context, in CaptureFrame) (CaptureFrameResult, error) {
 	s.log.Info("content stub: LedgerRepository.CaptureFrame", "capture", in.CaptureID, "source", string(in.Source))
 	return CaptureFrameResult{}, ErrNotImplemented
+}
+
+func (s *ledgerStub) OpenProse(_ context.Context, turnID string, runID int64) (ProseBlock, error) {
+	s.log.Info("content stub: LedgerRepository.OpenProse", "turn", turnID, "run", runID)
+	return ProseBlock{}, ErrNotImplemented
+}
+
+func (s *ledgerStub) PriorTurn(_ context.Context, paneID, beforeEntryID string) (*PriorTurn, error) {
+	s.log.Info("content stub: LedgerRepository.PriorTurn", "pane", paneID, "before", beforeEntryID)
+	return nil, ErrNotImplemented
+}
+
+func (s *ledgerStub) SealProse(_ context.Context, entryID string) error {
+	s.log.Info("content stub: LedgerRepository.SealProse", "entry", entryID)
+	return ErrNotImplemented
 }
 
 func (s *ledgerStub) SubmitAgentAsk(_ context.Context, in AgentAsk) (AgentAskResult, error) {

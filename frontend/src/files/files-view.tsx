@@ -31,6 +31,7 @@ import { SearchField } from '../ui/search-field'
 import { Spinner } from '../ui/spinner'
 import { showToast } from '../ui/toast'
 import { isExpandable, TreeRow } from '../ui/tree-row'
+import { WatchBadge } from '../ui/watch-badge'
 import type { FilesPanelServices } from './files-client'
 import {
   createFilesTreeStore,
@@ -367,6 +368,11 @@ function FilesPanel(props: FilesPanelProps) {
       },
     ]
     const o = props.store.origin()
+    // The binding carries the backend's reveal capability (nocx-ngf3u):
+    // "Show in Finder" is offered only where a revealer is wired, exactly
+    // as it is offered only where the tab is local — absence, never a
+    // greyed-out row.
+    const b = props.store.binding()
     // Upload joins where an upload would actually MOVE the file, expressed
     // as ABSENCE — the same mechanism "Show in Finder" uses below in the
     // opposite direction, and for the same reason: where the capability does
@@ -435,7 +441,7 @@ function FilesPanel(props: FilesPanelProps) {
         onSelect: () => void downloadFile(m.node),
       })
     }
-    if (o !== null && o.kind === 'local') {
+    if (o !== null && o.kind === 'local' && (b?.revealAvailable ?? false)) {
       items.push({
         id: 'reveal',
         label: 'Show in Finder',
@@ -831,33 +837,20 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
               reason is a real degrade — the persistent badge beside
               Refresh, hover carries the reason, cleared the instant
               watching recovers. A remote binding's designed-mode polling
-              has no reason and warns about nothing. */}
-        {/* The slot carries the established mode as a data attribute. It is
-              the only observable that says files.watch has RETURNED — the
-              tree rows say files.list returned, which is a different call —
-              and something has to say it, or a check that a change arrives
-              has no way to know watching had begun and races the baseline.
-              The badge below is the warning; this is the state. */}
-        <span
-          data-testid="files-polling-badge-slot"
-          data-watch-mode={store.watchMode() ?? undefined}
-        >
-          <Show
-            when={
-              store.watchMode() === 'polling' &&
-              store.watchDegradedReason() !== null &&
-              store.origin()?.kind === 'local'
-            }
-          >
-            <Badge
-              tone="warning"
-              data-testid="files-polling-badge"
-              title={store.watchDegradedReason() ?? undefined}
-            >
-              Polling
-            </Badge>
-          </Show>
-        </span>
+              has no reason and warns about nothing.
+
+              The judgement and the slot that carries the established mode
+              are the KIT's now (`ui/watch-badge.tsx`), because the API
+              workbench needed the same answer and a second copy of it would
+              have agreed with this one everywhere anybody looked. The
+              identities this panel's checks address — the slot, the badge
+              and `data-watch-mode` — are unchanged; only their owner is. */}
+        <WatchBadge
+          testId="files-polling-badge"
+          mode={store.watchMode()}
+          reason={store.watchDegradedReason()}
+          local={store.origin()?.kind === 'local'}
+        />
         {/* The overflow. It draws nothing when it would open empty — a
             menu button that opens on nothing is worse than no button. */}
         <Show when={overflowItems().length > 0}>

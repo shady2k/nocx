@@ -6,7 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
+	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -18,6 +21,10 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
+	"github.com/shady2k/nocx/internal/apibind"
+	"github.com/shady2k/nocx/internal/apicoll"
+	"github.com/shady2k/nocx/internal/apifetch"
+	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
@@ -687,6 +694,7 @@ func TestFilesDropped_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "files.dropped.schema.json")
 	raw, err := json.Marshal(map[string]any{
 		"sessionId": "0123456789abcdef0123456789abcdef",
+		"target":    "terminal",
 		"sources": []SourcePick{
 			{Ticket: "abcdef0123456789abcdef0123456789", Name: "a.txt", Size: 2},
 		},
@@ -700,6 +708,7 @@ func TestFilesDropped_DTOConformsToContract(t *testing.T) {
 	// ticket, and the absolute path the prompt insert needs (D9).
 	rawLocal, err := json.Marshal(map[string]any{
 		"sessionId": "0123456789abcdef0123456789abcdef",
+		"target":    "api-import",
 		"sources": []SourcePick{
 			{Name: "a.txt", Size: 2, LocalPath: "/home/dev/Downloads/a.txt"},
 		},
@@ -719,7 +728,7 @@ func TestFilesDropped_OverTheWireConformsToContract(t *testing.T) {
 	e := newDropEnv(t)
 	if err := e.ws.UploadSources().Dropped(
 		[]string{seedFile(t, "dropped-over-the-wire.bin", 3)},
-		map[string]string{"data-session-id": e.sid},
+		map[string]string{"data-session-id": e.sid, "data-file-drop-target": "terminal"},
 	); err != nil {
 		t.Fatalf("Dropped: %v", err)
 	}
@@ -732,6 +741,19 @@ func TestFilesDropped_OverTheWireConformsToContract(t *testing.T) {
 	// cannot pass for an absent one.
 	if bytes.Contains(params, []byte("localPath")) {
 		t.Fatalf("a remote tab's files.dropped carries a path: %s", params)
+	}
+	// The schema can only say the field is there and non-empty. Which
+	// surface it names is what the subscriber filters on, so the VALUE is
+	// asserted off the wire too: a target the server rewrote or defaulted
+	// would pass the schema and still deliver the drop to the wrong pane.
+	var addressed struct {
+		Target string `json:"target"`
+	}
+	if err := json.Unmarshal(params, &addressed); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, params)
+	}
+	if addressed.Target != "terminal" {
+		t.Fatalf("target = %q, want the drop element's own data-file-drop-target", addressed.Target)
 	}
 }
 
@@ -747,7 +769,7 @@ func TestFilesDropped_ALocalTabsNotificationConformsToContract(t *testing.T) {
 	path := seedFile(t, "local-drop.bin", 3)
 	if err := e.ws.UploadSources().Dropped(
 		[]string{path},
-		map[string]string{"data-session-id": sid},
+		map[string]string{"data-session-id": sid, "data-file-drop-target": "api-import"},
 	); err != nil {
 		t.Fatalf("Dropped: %v", err)
 	}
@@ -2805,12 +2827,16 @@ func TestFilesOpen_DTOConformsToContract(t *testing.T) {
 
 	ep := "v1:attestation"
 	cases := map[string]filesOpenResult{
-		// The state every local tab is actually in: endpointId must be
-		// null — never absent, never "" — and the root carries the
-		// inferred label when the caller sent no rootPath.
-		"local": {
-			BindingID:  "ab12cd34",
-			EndpointID: nil,
+		// A build WITH a revealer wired: revealAvailable is a build fact
+		// constant for the life of the process — the same value on every
+		// binding — so the case names the build, never the binding kind.
+		// The local/remote distinction is carried by endpointId alone
+		// (null vs attestation, D4); this case is a local binding on a
+		// supported build.
+		"supportedBuild": {
+			BindingID:       "ab12cd34",
+			EndpointID:      nil,
+			RevealAvailable: true,
 			Root: filesRootResult{
 				Path:           "/home/dev",
 				Display:        "~/",
@@ -2818,11 +2844,15 @@ func TestFilesOpen_DTOConformsToContract(t *testing.T) {
 				InferredReason: "no verified working directory — using home",
 			},
 		},
-		// A remote binding attests its resolved destination (D4); the
-		// SFTP wave stamps it here.
-		"remote": {
-			BindingID:  "ef56",
-			EndpointID: &ep,
+		// A build with NO revealer: the same binding shapes as above, with
+		// revealAvailable false — and here a remote binding attests its
+		// destination (D4), proving the field does not ride the endpoint
+		// kind. Both boolean values are exercised so the DTO is pinned for
+		// each rather than passing on the zero value's accident.
+		"unsupportedBuild": {
+			BindingID:       "ef56",
+			EndpointID:      &ep,
+			RevealAvailable: false,
 			Root: filesRootResult{
 				Path:    "/home/deploy",
 				Display: "/home/deploy",
@@ -2877,6 +2907,46 @@ func TestFilesOpen_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if got.Root.Inferred {
 		t.Error("root is inferred although rootPath was given and usable")
+	}
+	if got.RevealAvailable {
+		t.Error("revealAvailable is true although no revealer is wired")
+	}
+}
+
+// TestFilesOpen_RevealAvailableRidesTheWireWhenWired is the paired
+// positive: with a revealer wired through the option that exists, the
+// open result carries revealAvailable=true off the real socket. The
+// schema's required+additionalProperties:false proves the field is
+// present; this proves its VALUE is the composition seam's, not a
+// default (nocx-ngf3u).
+func TestFilesOpen_RevealAvailableRidesTheWireWhenWired(t *testing.T) {
+	schema := loadSchema(t, "files.open.schema.json")
+	e := newFilesTestEnv(t, WithFilesRevealer(&stubRevealer{}))
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.open", map[string]any{
+		"sessionId": sid,
+		"rootPath":  dir,
+	}, 2)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, resp)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.open: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "files.open result (real socket, revealer wired)")
+
+	var got filesOpenResult
+	if err := json.Unmarshal(envelope.Result, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !got.RevealAvailable {
+		t.Error("revealAvailable is false although a revealer is wired")
 	}
 }
 
@@ -4765,7 +4835,7 @@ func TestLifecycleSubmitAttempt_OverTheWireConformsToContract(t *testing.T) {
 	ackEstablishmentFrom(t, pub, lane, h, e.conn)
 
 	resp := jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt", map[string]string{
-		"domain": string(h.Domain), "command": "make", "cwd": "/srv/app", "host": "build.example.com",
+		"domain": string(h.Domain), "command": "make", "cwd": "/srv/app", "host": "build.example.com", "source": "user",
 	}, 41)
 	var envelope struct {
 		Result json.RawMessage  `json:"result"`
@@ -5363,54 +5433,17 @@ func TestNotesWithoutAServiceRefuseRatherThanAnswerEmpty(t *testing.T) {
 	}
 }
 
-// ── agent.captureFrame / agent.ask (nocx-f4s5, design §7) ────────────────
-
-// The DTOs' own conformance: field tags, omitempty behaviour, whether the
-// enum spells what the schema says.
-func TestAgentCaptureFrame_DTOConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "agent.captureFrame.schema.json")
-	raw, err := json.Marshal(captureFrameResponse{FrameID: "0123456789abcdef0123456789abcdef"})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	validateJSON(t, schema, raw, "agent.captureFrame DTO")
-}
-
 func TestAgentAsk_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.ask.schema.json")
 	raw, err := json.Marshal(agentAskResponse{
-		RunID: 7, QuestionID: "ask-1", AnswerEntryID: "answer-1",
+		RunID: 7, EntryID: "ask-1",
 		State: string(content.RunPrepared), IngestSeq: 3, Replayed: false,
+		Model: "qwen3",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	validateJSON(t, schema, raw, "agent.ask DTO")
-}
-
-// The real methods through the real socket — the assertion that would have
-// caught a field nobody sends. Nothing here names a field, so nothing here
-// can omit one.
-func TestAgentCaptureFrame_OverTheWireConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "agent.captureFrame.schema.json")
-	ws, _, stop := newAgentWSServer(t)
-	defer stop()
-	conn := connectWS(t, ws)
-	defer conn.Close() //nolint:errcheck
-	sid := openLocalSession(t, conn)
-
-	resp := jsonrpcCallWithID(t, conn, "agent.captureFrame", frameParams(sid, "cap-contract"), 1)
-	var env struct {
-		Result json.RawMessage  `json:"result"`
-		Error  *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(resp, &env); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if env.Error != nil {
-		t.Fatalf("captureFrame error: %+v", env.Error)
-	}
-	validateJSON(t, schema, env.Result, "agent.captureFrame result")
 }
 
 func TestAgentAsk_OverTheWireConformsToContract(t *testing.T) {
@@ -5419,14 +5452,10 @@ func TestAgentAsk_OverTheWireConformsToContract(t *testing.T) {
 	h.createEndpoint()
 	conn := h.conn
 	sid := openLocalSession(t, conn)
-	frameID, errObj := captureFrameOverWire(t, conn, frameParams(sid, "cap-contract"), 1)
-	if errObj != nil {
-		t.Fatalf("captureFrame: %+v", errObj)
-	}
 
 	resp := jsonrpcCallWithID(t, conn, "agent.ask", map[string]any{
 		"askId": "ask-contract", "sessionId": sid, "question": "q", "cwd": "/repo",
-		"references": []any{map[string]any{"frameId": frameID, "region": map[string]any{"rowStart": 0, "rowEnd": 2}}},
+		"attachedContent": []any{},
 	}, 2)
 	var env struct {
 		Result json.RawMessage  `json:"result"`
@@ -5441,12 +5470,203 @@ func TestAgentAsk_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, env.Result, "agent.ask result")
 }
 
+// ── agent.readScreenRequest / agent.readScreenResolved (nocx-ljfwz) ──────
+
+// The request notification is SERVER-built, so its contract check is the
+// real payload off the real socket: the broker's request params (requestId
+// + sessionId, the narrowing already applied) must satisfy the schema the
+// renderer's generated type was declared from.
+func TestAgentReadScreenRequest_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.readScreenRequest.schema.json")
+	ws, _, stop := newAgentWSServer(t)
+	defer stop()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+	sid := openLocalSession(t, conn)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := ws.RequestScreen(t.Context(), sid, nil)
+		done <- err
+	}()
+	raw := readNotification(t, conn, "agent.readScreenRequest", 5*time.Second)
+	validateJSON(t, schema, raw, "agent.readScreenRequest notification params")
+
+	// Settle the request so the goroutine above exits: a failed outcome is
+	// the honest terminal answer for a test that only wants the params.
+	var req struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("requestId decode: %v", err)
+	}
+	resp := jsonrpcCall(t, conn, "agent.readScreenResolved", map[string]any{
+		"requestId": req.RequestID,
+		"outcome":   "failed",
+		"error":     "contract test",
+	})
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("resolution refused: %+v", env.Error)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "could not capture the screen") {
+			t.Fatalf("RequestScreen returned %v, want the failed-outcome error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RequestScreen never settled")
+	}
+}
+
+func TestAgentReadScreenResolved_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.readScreenResolved.schema.json")
+	body, err := json.Marshal(readScreenResolvedParams{
+		Outcome: "frame",
+		Rows: []frameRowWire{{
+			Kind: "cells",
+			Cells: []frameCellWire{
+				{Char: "h", Attrs: frameAttrsWire{}},
+				{Char: "i", Attrs: frameAttrsWire{}},
+			},
+		}},
+		Cursor: &frameCursorWire{Line: 0, Col: 0},
+		Identity: &frameIdentityWire{
+			Buffer: frameBufferWire{Kind: "normal"},
+			Cols:   2, Rows: 1, Generation: 1,
+		},
+		Range: &frameRangeWire{Start: 0, End: 1},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// The wire envelope carries the broker-minted requestId beside the
+	// resolution body — the renderer echoes it back (the broker correlates
+	// on it before the kind's shape check runs).
+	var wire map[string]any
+	if wireErr := json.Unmarshal(body, &wire); wireErr != nil {
+		t.Fatalf("decode body: %v", wireErr)
+	}
+	wire["requestId"] = "0123456789abcdef"
+	raw, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("marshal wire: %v", err)
+	}
+	validateJSON(t, schema, raw, "agent.readScreenResolved DTO")
+}
+
+// ── agent.runRequest / agent.runResolved (nocx-tjppv) ─────────────────────
+
+// The run request notification is SERVER-built, so its contract check is the
+// real payload off the real socket: the broker's request params (requestId +
+// sessionId + command) must satisfy the schema the renderer's generated type
+// was declared from.
+func TestAgentRunRequest_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.runRequest.schema.json")
+	ws, _, stop := newAgentWSServer(t)
+	defer stop()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+	sid := openLocalSession(t, conn)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := ws.RequestRun(t.Context(), sid, "ls -la")
+		done <- err
+	}()
+	raw := readNotification(t, conn, "agent.runRequest", 5*time.Second)
+	validateJSON(t, schema, raw, "agent.runRequest notification params")
+
+	// Settle the request so the goroutine above exits: a failed outcome is
+	// the honest terminal answer for a test that only wants the params.
+	var req struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("requestId decode: %v", err)
+	}
+	resp := jsonrpcCall(t, conn, "agent.runResolved", map[string]any{
+		"requestId": req.RequestID,
+		"outcome":   "failed",
+		"error":     "contract test",
+	})
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("resolution refused: %+v", env.Error)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "could not run the command") {
+			t.Fatalf("RequestRun returned %v, want the failed-outcome error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RequestRun never settled")
+	}
+}
+
+func TestAgentRunResolved_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.runResolved.schema.json")
+	body, err := json.Marshal(runResolvedParams{
+		Outcome:  "completed",
+		EntryID:  "entry-7",
+		ExitCode: new(0),
+		Status:   "success",
+		Total:    2,
+		Start:    0,
+		End:      2,
+		Text:     "file1\nfile2",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// The wire envelope carries the broker-minted requestId beside the
+	// resolution body — the renderer echoes it back (the broker correlates
+	// on it before the kind's shape check runs).
+	var wire map[string]any
+	if wireErr := json.Unmarshal(body, &wire); wireErr != nil {
+		t.Fatalf("decode body: %v", wireErr)
+	}
+	wire["requestId"] = "0123456789abcdef"
+	raw, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("marshal wire: %v", err)
+	}
+	validateJSON(t, schema, raw, "agent.runResolved DTO")
+}
+
+// The failed outcome's shape: no run body, only the requestId and the
+// failure sentence.
+func TestAgentRunResolved_FailedDTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.runResolved.schema.json")
+	raw, err := json.Marshal(map[string]any{
+		"requestId": "0123456789abcdef",
+		"outcome":   "failed",
+		"error":     "the agent lane is not prompt-ready",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "agent.runResolved failed DTO")
+}
+
 // ── agent.runDelta / agent.runState notifications (nocx-x8s2.2, design §7) ─
 
 // The DTOs' conformance: field tags and enum spelling.
 func TestAgentRunNotifications_DTOsConformToContract(t *testing.T) {
 	deltaSchema := loadSchema(t, "agent.runDelta.schema.json")
-	raw, err := json.Marshal(agentRunDelta{RunID: 7, EntryID: "answer-1", Seq: 0, Text: "hello"})
+	raw, err := json.Marshal(agentRunDelta{
+		RunID: 7, EntryID: "answer-1", BlockID: "answer-1/text-1", Seq: 0, Text: "hello",
+	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -5476,13 +5696,9 @@ func TestAgentRunNotifications_OverTheWireConformToContract(t *testing.T) {
 	h.createEndpoint()
 	conn := h.conn
 	sid := openLocalSession(t, conn)
-	frameID, errObj := captureFrameOverWire(t, conn, frozenWireFrame(sid, "frame-1"), 1)
-	if errObj != nil {
-		t.Fatalf("captureFrame: %+v", errObj)
-	}
-	_, errObj = askOverWire(t, conn, map[string]any{
+	_, errObj := askOverWire(t, conn, map[string]any{
 		"askId": "ask-1", "sessionId": sid, "question": "q", "cwd": "/repo",
-		"references": []any{map[string]any{"frameId": frameID, "region": map[string]any{"rowStart": 0, "rowEnd": 2}}},
+		"attachedContent": []any{},
 	}, 2)
 	if errObj != nil {
 		t.Fatalf("ask: %+v", errObj)
@@ -5574,6 +5790,92 @@ func TestExit_DTOStatusRulesAreExact(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ── policy.get / policy.set ──────────────────────────────────────────────
+
+// The DTO's own conformance for policy.get: the matrix's wire form — seven
+// rows, effective decisions for unstated rows, non-null scopes arrays — must
+// satisfy the schema exactly (additionalProperties false on the result AND on
+// every row AND every scope, so nothing extra can ride along).
+func TestPolicyGet_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.get.schema.json")
+
+	askOnMutate := content.EffectPolicy{Observe: content.EffectRow{Decision: content.DecisionPermit}}
+	raw, err := json.Marshal(policyResult{Policy: askOnMutate})
+	if err != nil {
+		t.Fatalf("marshal ask-on-mutate: %v", err)
+	}
+	validateJSON(t, schema, raw, "policy.get ask-on-mutate DTO")
+
+	var finer content.EffectPolicy
+	finer.Observe = content.EffectRow{
+		Decision: content.DecisionPermit,
+		Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}},
+	}
+	finer.MutateDestructive = content.EffectRow{Decision: content.DecisionRefuse}
+	rawFiner, err := json.Marshal(policyResult{Policy: finer})
+	if err != nil {
+		t.Fatalf("marshal finer: %v", err)
+	}
+	validateJSON(t, schema, rawFiner, "policy.get finer-than-presets DTO")
+}
+
+// The real result off the real socket: the handler's response — not a test
+// payload — must satisfy the contract, with the scope and decisions the store
+// actually holds (the third row of the contracts README's table).
+func TestPolicyGet_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.get.schema.json")
+	h, store := newPolicyHarness(t)
+	var p content.EffectPolicy
+	p.Observe = content.EffectRow{
+		Decision: content.DecisionPermit,
+		Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}},
+	}
+	p.Delegate = content.EffectRow{Decision: content.DecisionRefuse}
+	if err := store.SetPolicy(p); err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+
+	resp := jsonrpcCall(t, h.conn, "policy.get", nil)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.get: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "policy.get result (real socket)")
+}
+
+// The policy.set result's conformance: {ok: true}, asserted off the real
+// socket after a set the validator accepted.
+func TestPolicySet_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.set.schema.json")
+	h, _ := newPolicyHarness(t)
+
+	resp := jsonrpcCall(t, h.conn, "policy.set", map[string]any{
+		"policy": map[string]any{
+			"observe": map[string]any{
+				"decision": "permit",
+				"scopes":   []any{map[string]any{"kind": "path", "id": "/workspace"}},
+			},
+		},
+	})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.set: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "policy.set result (real socket)")
 }
 
 // ── ledger.open / ledger.bind / ledger.close ─────────────────────────────
@@ -5693,7 +5995,7 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 	exit := 2
 	entry := ledgerEntryWire{
 		ID: "01924f9c-0000-7000-8000-000000000001", Seq: 7,
-		EnvID: "3f1a", Host: &host, Cwd: "/repo", Kind: "shell",
+		EnvID: "3f1a", Host: &host, Cwd: "/repo", Kind: "shell", Source: "user",
 		Intent: "make deploy", Phase: "closed", Status: "failure",
 		SubmittedAt: started, StartedAt: &started, EndedAt: &ended,
 		DurationMs: &duration, ExitCode: &exit, MaskedCount: 1,
@@ -5705,7 +6007,7 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 	// The row a live command produces: no end, no exit code, no host row.
 	running := ledgerEntryWire{
 		ID: "01924f9c-0000-7000-8000-000000000002", Seq: 8,
-		EnvID: "3f1a", Host: nil, Cwd: "/repo", Kind: "shell",
+		EnvID: "3f1a", Host: nil, Cwd: "/repo", Kind: "shell", Source: "user",
 		Intent: "make watch", Phase: "bound", Status: "running",
 		SubmittedAt: started, MaskedKinds: []string{}, Redactions: []redactionWire{},
 	}
@@ -5735,6 +6037,7 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 	stream := "combined"
 	truncated := "cap"
 	offset, end := int64(0), int64(4096)
+	effect := "observe"
 	getCases := map[string]ledgerGetResponse{
 		"populated": {
 			Entry: entry,
@@ -5742,6 +6045,20 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 				From: entry.ID, To: running.ID, Rel: "rerun-of",
 				Payload: json.RawMessage(`{"note":"anything"}`),
 			}},
+			// The causal flow, both kinds it can hold: a tool call, whose
+			// effect and resource are its own, and a command the turn ran,
+			// which has neither and says so with nulls (nocx-h1l4o).
+			Caused: []ledgerCausedWire{
+				{
+					EntryID: "01924f9c-0000-7000-8000-00000000000a", Position: 0,
+					Kind: "action", Source: "assistant", Intent: "files.read", Effect: &effect,
+					Resource: &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/go.mod"},
+				},
+				{
+					EntryID: running.ID, Position: 1, Kind: "shell", Source: "assistant",
+					Intent: "make watch", Effect: nil, Resource: nil,
+				},
+			},
 			Artifacts: []ledgerArtifactWire{{
 				ID: "artifact-1", ExecutionID: 3, MediaType: "text/plain",
 				DerivedFrom: nil, State: "sealed", ByteLen: 4096, ChunkCount: 2,
@@ -5751,9 +6068,11 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 				Gaps:    []ledgerGapWire{{Start: 10, End: 20, Reason: "dropped"}},
 				Payload: json.RawMessage(`{}`),
 			}},
+			ProseEvicted: true,
 		},
 		"an entry with no relations and no captures": {
 			Entry: running, Edges: []ledgerEdgeWire{}, Artifacts: []ledgerArtifactWire{},
+			Caused: []ledgerCausedWire{}, ProseEvicted: false,
 		},
 	}
 	getSchema := loadSchema(t, "ledger.get.schema.json")
@@ -5819,6 +6138,154 @@ func TestLedgerReads_OverTheWireConformToContract(t *testing.T) {
 		t.Fatalf("ledger.get: %+v", got.Error)
 	}
 	validateJSON(t, getSchema, got.Result, "ledger.get result (a closed entry)")
+
+	// And an entry that CAUSED something (nocx-h1l4o). The relation is
+	// written through the store's own seam because no JSON-RPC method
+	// writes one — the backend does, from a fact the renderer never sends
+	// — but the read under test is the real handler answering off the real
+	// socket, which is the row that matters in contracts/README.md.
+	led := db.Ledger()
+	action := content.SubmitEntry{
+		ID: "01924f9c-0000-7000-8000-0000000000aa", Client: "agent",
+		EnvironmentID: localEnvironmentID(), Cwd: "/", Kind: content.EntryAction,
+		Intent: "files.read",
+		Payload: `{"tool":"files.read","effect":"observe","opensBlock":true,` +
+			`"resource":{"kind":"path","id":"/repo/go.mod"}}`,
+	}
+	if _, err := led.Submit(context.Background(), action); err != nil {
+		t.Fatalf("submit the action entry: %v", err)
+	}
+	for _, caused := range []string{action.ID, "wire-2"} {
+		if _, err := led.AddCause(context.Background(), "wire-1", caused); err != nil {
+			t.Fatalf("AddCause(%s): %v", caused, err)
+		}
+	}
+	withCauses := vaultCall(t, conn, "ledger.get", map[string]any{"id": "wire-1"}, 12)
+	if withCauses.Error != nil {
+		t.Fatalf("ledger.get with causes: %+v", withCauses.Error)
+	}
+	validateJSON(t, getSchema, withCauses.Result, "ledger.get result (an entry that caused two others)")
+	var body struct {
+		Caused []struct {
+			EntryID    string `json:"entryId"`
+			Position   int    `json:"position"`
+			Kind       string `json:"kind"`
+			OpensBlock bool   `json:"opensBlock"`
+			Effect     *string
+			Resource   *content.GrantScope
+		} `json:"caused"`
+	}
+	if err := json.Unmarshal(withCauses.Result, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Caused) != 2 {
+		t.Fatalf("caused off the socket = %+v, want both", body.Caused)
+	}
+	if body.Caused[0].EntryID != action.ID || body.Caused[0].Position != 0 ||
+		body.Caused[0].Kind != "action" {
+		t.Fatalf("the first cause off the socket = %+v", body.Caused[0])
+	}
+	if body.Caused[0].Effect == nil || *body.Caused[0].Effect != "observe" {
+		t.Fatalf("the action's effect off the socket = %v, want observe", body.Caused[0].Effect)
+	}
+	if body.Caused[0].Resource == nil || body.Caused[0].Resource.ID != "/repo/go.mod" {
+		t.Fatalf("the action's resource off the socket = %+v", body.Caused[0].Resource)
+	}
+	// The command the turn ran is not a tool call: both are null, and the
+	// renderer draws it as the block it is.
+	if body.Caused[1].EntryID != "wire-2" || body.Caused[1].Position != 1 {
+		t.Fatalf("the second cause off the socket = %+v", body.Caused[1])
+	}
+	if body.Caused[1].Effect != nil || body.Caused[1].Resource != nil {
+		t.Fatalf("a command came back with tool facts: %+v", body.Caused[1])
+	}
+	if !body.Caused[0].OpensBlock {
+		t.Fatalf("the action's opensBlock off the socket = false, want the stored true")
+	}
+	if body.Caused[1].OpensBlock {
+		t.Fatalf("a command came back saying it opened a block: %+v", body.Caused[1])
+	}
+}
+
+// The negative for the causal flow: the schema refuses what it must, or the
+// `caused` list is a shape nobody is holding to anything.
+func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
+	schema := loadSchema(t, "ledger.get.schema.json")
+	entry := `{"id":"a","seq":1,"environmentId":"e","host":null,"cwd":"/","kind":"ask","source":"user",` +
+		`"intent":"x","phase":"closed","status":"success","submittedAt":1,"startedAt":null,` +
+		`"endedAt":null,"durationMs":null,"exitCode":null,"maskedCount":0,"maskedKinds":[],` +
+		`"redactions":[]}`
+	body := func(caused string) string {
+		return `{"entry":` + entry + `,"edges":[],"artifacts":[],"proseEvicted":false,"caused":` + caused + `}`
+	}
+	// And the shape itself: the schema refuses a ledger.get result that
+	// will not say whether the prose of the run is gone — absent and false
+	// must not be the same wire state for the one fact a turn's reader
+	// cannot re-derive.
+	if err := validateJSONErr(schema, []byte(
+		`{"entry":`+entry+`,"edges":[],"artifacts":[],"caused":[]}`,
+	)); err == nil {
+		t.Fatal("the schema accepted a ledger.get result that omits proseEvicted")
+	}
+	bad := map[string]string{
+		"caused as null": body(`null`),
+		"a cause with no position": body(
+			`[{"entryId":"b","kind":"shell","intent":"ls","effect":null,"resource":null}]`),
+		"a negative position": body(
+			`[{"entryId":"b","position":-1,"kind":"shell","intent":"ls","effect":null,"resource":null}]`),
+		"an effect nobody named": body(
+			`[{"entryId":"b","position":0,"kind":"action","intent":"x","effect":"rummage","resource":null}]`),
+		"a half-named resource": body(
+			`[{"entryId":"b","position":0,"kind":"action","intent":"x","effect":"observe","resource":{"kind":"path"}}]`),
+		"an undeclared field on a cause": body(
+			`[{"entryId":"b","position":0,"kind":"shell","intent":"ls","effect":null,"resource":null,"parent":"a"}]`),
+		// THE ANCHOR IS GONE FROM THE CONTRACT (ADR-0040), so it is refused
+		// like any other field nobody declared — additionalProperties does
+		// that, and this is the assertion that it really is off the schema
+		// rather than merely unset by the server.
+		"a cause still carrying the anchor": body(
+			`[{"entryId":"b","position":0,"at":0,"kind":"shell","intent":"ls","effect":null,"resource":null,"opensBlock":false}]`),
+		// The block fact is required for the reason the position is: a cause
+		// that will not say whether it opened a block is one a restored turn
+		// cannot draw, and "absent" and "false" must not be the same thing on
+		// the wire.
+		"a cause that will not say whether it opened a block": body(
+			`[{"entryId":"b","position":0,"kind":"shell","intent":"ls","effect":null,"resource":null}]`),
+		// The arguments are required for the reason the resource is: two
+		// calls of one session-scoped tool have the same tool and the same
+		// resource, and a cause that will not say what it ASKED FOR is one a
+		// restored turn cannot tell from its neighbour (ADR-0040). A shell
+		// child says `null` — it asked for nothing — and that is still
+		// saying it.
+		"a cause that will not say what it asked for": body(
+			`[{"entryId":"b","position":0,"kind":"shell","intent":"ls","effect":null,"resource":null,"opensBlock":false}]`),
+		"arguments that are not an object": body(
+			`[{"entryId":"b","position":0,"kind":"action","intent":"x","args":"{\"a\":1}","effect":"observe","resource":null,"opensBlock":false}]`),
+	}
+	for name, raw := range bad {
+		t.Run(name, func(t *testing.T) {
+			if err := validateJSONErr(schema, []byte(raw)); err == nil {
+				t.Fatalf("the schema accepted %s — additionalProperties/required is not doing its job", name)
+			}
+		})
+	}
+	// And the shape it must ACCEPT, so the refusals above are a contract
+	// and not an accident of a schema that refuses everything.
+	ok := body(`[{"entryId":"b","position":0,"kind":"action","source":"assistant","intent":"files.read",` +
+		`"args":{"path":"/repo/go.mod"},` +
+		`"effect":"observe","resource":{"kind":"path","id":"/repo/go.mod"},"opensBlock":false}]`)
+	if err := validateJSONErr(schema, []byte(ok)); err != nil {
+		t.Fatalf("the schema refused a well-formed cause: %v", err)
+	}
+	// And a run of prose, which is a child like any other since ADR-0040: it
+	// names no intent, has no effect and no resource, and opens no block. The
+	// server sends these now, so a schema that could not express one would be
+	// a contract the wire cannot keep.
+	prose := body(`[{"entryId":"t","position":1,"kind":"text","source":"assistant","intent":"","args":null,` +
+		`"effect":null,"resource":null,"opensBlock":false}]`)
+	if err := validateJSONErr(schema, []byte(prose)); err != nil {
+		t.Fatalf("the schema refused a run of prose: %v", err)
+	}
 }
 
 // And the negative: the schema REFUSES a page that is missing a required
@@ -5841,6 +6308,1021 @@ func TestLedgerQuery_ContractRefusesWhatItMustRefuse(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			if err := validateJSONErr(schema, []byte(raw)); err == nil {
 				t.Fatalf("the contract accepted %s: %s", name, raw)
+			}
+		})
+	}
+}
+
+// ── session.signal ─────────────────────────────────────────────────────────
+
+// The DTO's own conformance: the two enums' spelling and the tags. Every
+// (signal, outcome) pair the handler can produce, because the field the
+// renderer branches on is the outcome and a word it has never seen is a
+// branch it does not have.
+func TestSessionSignal_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "session.signal.schema.json")
+	for _, sig := range []string{signalInterrupt, signalStop} {
+		for _, outcome := range []string{
+			string(foregroundDelivered), string(foregroundNothingRunning), "unsupported",
+		} {
+			raw, err := json.Marshal(signalResult{Signal: sig, Outcome: outcome})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, fmt.Sprintf("session.signal DTO (%s/%s)", sig, outcome))
+		}
+	}
+}
+
+// And the negative, which is what makes the pair above evidence: the schema
+// REFUSES an outcome nobody declared, a missing field and an undeclared one.
+func TestSessionSignal_ContractRefusesWhatItMustRefuse(t *testing.T) {
+	schema := loadSchema(t, "session.signal.schema.json")
+	bad := map[string]string{
+		"an outcome nobody named": `{"signal":"stop","outcome":"maybe"}`,
+		"a signal nobody named":   `{"signal":"sighup","outcome":"delivered"}`,
+		"the outcome missing":     `{"signal":"stop"}`,
+		"the signal missing":      `{"outcome":"delivered"}`,
+		"an undeclared field":     `{"signal":"stop","outcome":"delivered","pid":4242}`,
+	}
+	for name, raw := range bad {
+		t.Run(name, func(t *testing.T) {
+			if err := validateJSONErr(schema, []byte(raw)); err == nil {
+				t.Fatalf("the contract accepted %s: %s", name, raw)
+			}
+		})
+	}
+}
+
+// THE REAL RESULT OFF THE REAL SOCKET — the row contracts/README.md says is
+// the reason the directory exists. A payload this test built would prove the
+// struct is well-formed; only driving the method through the socket proves
+// the handler sends it.
+//
+// Both outcomes a local session can produce are driven here, in one
+// connection, because a contract satisfied by only the happy shape is a
+// contract with an untested half: the refusal is the one a person meets when
+// their command has just finished, and it travels in the result rather than
+// as an error precisely so the renderer can read it.
+func TestSessionSignal_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "session.signal.schema.json")
+	conn, tap := signalServer(t)
+	sid := openSessionTapped(t, conn, tap)
+
+	// At a prompt: nothing to signal. The shell echoing its own output is
+	// what says the prompt is there — never a sleep.
+	submitCommand(t, conn, sid, "printf %s%s CONTRACT -PROMPT")
+	tapDataFor(t, tap, sid, "CONTRACT-PROMPT", 20*time.Second)
+	atPrompt := tapCall(t, conn, tap, 21, "session.signal", map[string]any{
+		"sessionId": sid, "signal": signalInterrupt,
+	})
+	validateJSON(t, schema, resultOf(t, atPrompt), "session.signal result at a prompt (real socket)")
+
+	// And with a job in the foreground: delivered.
+	submitCommand(t, conn, sid, "sh -c 'printf %s%s CONTRACT -RUNNING; sleep 300'")
+	tapDataFor(t, tap, sid, "CONTRACT-RUNNING", 20*time.Second)
+	running := tapCall(t, conn, tap, 22, "session.signal", map[string]any{
+		"sessionId": sid, "signal": signalStop,
+	})
+	validateJSON(t, schema, resultOf(t, running), "session.signal result over a running command (real socket)")
+}
+
+// resultOf pulls the `result` out of a JSON-RPC response envelope, failing
+// on an error object — so a schema assertion can never silently validate
+// nothing.
+func resultOf(t *testing.T, raw json.RawMessage) json.RawMessage {
+	t.Helper()
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal response: %v\nraw: %s", err, raw)
+	}
+	if env.Error != nil {
+		t.Fatalf("the method answered an error: %+v", env.Error)
+	}
+	if len(env.Result) == 0 {
+		t.Fatalf("the method answered no result: %s", raw)
+	}
+	return env.Result
+}
+
+// ── api.* (the API-testing collection) ──────────────────────────────────
+//
+// Two boundaries are tested here and they are not the same boundary. The
+// DTO tests pin what the transport's own wire structs marshal to; the
+// over-the-wire tests drive the real method through the real socket against
+// a real folder on disk and a real HTTP server, which is the only test that
+// can report a field the handler never sends.
+//
+// The third test in this block is neither: it asserts that no api.* method
+// except collections.open and import.postman will ACCEPT a path at all
+// (design §13.1). That rule is what makes the backend-held handle mean
+// something, and a rule nobody can fail is a rule nobody keeps.
+
+// apiFakeBindings is an in-memory apibind.Store for the import test. The
+// real one does not exist yet (internal/apibind declares the interface
+// ahead of its implementation), and api.import.postman writes secret values
+// through it, so the test supplies the seam the composition root will.
+type apiFakeBindings struct {
+	mu    sync.Mutex
+	bound map[apibind.Key]string
+	// bindErr, when set, is what Bind returns — the failure half of
+	// "every external call has a test where it fails".
+	bindErr error
+}
+
+func newAPIFakeBindings() *apiFakeBindings {
+	return &apiFakeBindings{bound: map[apibind.Key]string{}}
+}
+
+func (b *apiFakeBindings) Lookup(k apibind.Key) (string, bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	v, ok := b.bound[k]
+	return v, ok, nil
+}
+
+func (b *apiFakeBindings) Bind(_ context.Context, k apibind.Key, value []byte) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.bindErr != nil {
+		return b.bindErr
+	}
+	b.bound[k] = string(value)
+	return nil
+}
+
+func (b *apiFakeBindings) Unbind(_ context.Context, k apibind.Key) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	delete(b.bound, k)
+	return nil
+}
+
+func (b *apiFakeBindings) UnbindCollection(_ context.Context, collection string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for k := range b.bound {
+		if k.Collection == collection {
+			delete(b.bound, k)
+		}
+	}
+	return nil
+}
+
+func (b *apiFakeBindings) count() int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return len(b.bound)
+}
+
+// newAPIWSServer starts a server with the whole api.* surface wired, the way
+// the composition root wires it plus the binding store that does not exist
+// yet.
+//
+// The import fetcher gets a route table with NO leaser, which is the shape
+// the app has whenever the SSH side is not wired: the direct route dials and
+// every connection route refuses by name. A test that needs a connection
+// route to carry bytes supplies its own pool through the variant below.
+func newAPIWSServer(t *testing.T, bindings apibind.Store) (*WSServer, *websocket.Conn) {
+	t.Helper()
+	return newAPIWSServerWithPool(t, bindings, nil)
+}
+
+// newAPIWSServerWithPool is the same server with the import fetcher's route
+// table built over the caller's pool. Only the POOL is a double — the
+// fetcher, the route table, the transport, the capability and the writer are
+// all the real ones, because a fetcher double would certify the test's own
+// object instead of the seam.
+func newAPIWSServerWithPool(t *testing.T, bindings apibind.Store, leaser apisend.ConnectionLeaser) (*WSServer, *websocket.Conn) {
+	t.Helper()
+	logger := log.NewSlogAdapter(nil)
+	opts := []WSServerOption{
+		WithAPI(apicoll.NewCollections(apiTestPaths(t)), apisend.New(apisend.WithLogger(logger))),
+		WithAPIImportFetcher(apifetch.New(apisend.NewRoutes(leaser), logger)),
+	}
+	if bindings != nil {
+		opts = append(opts, WithAPIBindings(bindings))
+		// The read half is a separate option because the two halves wire
+		// apart (ws.go). A store that has one gets it; apiFakeBindings does
+		// not, which is how the import tests keep exercising a build where
+		// an auth variable resolves to nothing.
+		if values, ok := bindings.(apibind.ValueResolver); ok {
+			opts = append(opts, WithAPIVariables(values))
+		}
+	}
+	ws := NewWSServer(logger, newRegWithStub(logger), opts...)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	return ws, connectWS(t, ws)
+}
+
+// apiCollectionFolder builds a real collection on disk: a manifest and two
+// request files, one of which points at url.
+func apiCollectionFolder(t *testing.T, url string) string {
+	t.Helper()
+	root := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		full := filepath.Join(root, rel)
+		if err := os.MkdirAll(filepath.Dir(full), 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", rel, err)
+		}
+		if err := os.WriteFile(full, []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	write("nocx-collection.json", `{"schemaVersion":1,"name":"acme"}`)
+	write("ping.json", `{"id":"r1","name":"ping","method":"GET","url":"`+url+`",`+
+		`"headers":[{"name":"X-Probe","value":"1","enabled":true}],"query":[],`+
+		`"body":{"kind":"none"},"auth":{"kind":"none"}}`)
+	write("nested/echo.json", `{"id":"r2","name":"echo","method":"POST","url":"`+url+`",`+
+		`"body":{"kind":"raw","text":"hello"},"auth":{"kind":"none"}}`)
+	return root
+}
+
+// openAPICollection opens root over the socket and returns the handle.
+func openAPICollection(t *testing.T, conn *websocket.Conn, root string, id int) string {
+	t.Helper()
+	resp := vaultCall(t, conn, "api.collections.open", map[string]any{"path": root}, id)
+	if resp.Error != nil {
+		t.Fatalf("api.collections.open: %+v", resp.Error)
+	}
+	var got struct {
+		Handle string `json:"handle"`
+	}
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal open result: %v", err)
+	}
+	if got.Handle == "" {
+		t.Fatal("api.collections.open returned an empty handle")
+	}
+	return got.Handle
+}
+
+func TestAPICollectionsOpen_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "api.collections.open.schema.json")
+
+	cases := map[string]apiOpenResponse{
+		"populated": {
+			Handle: "0123456789abcdef0123456789abcdef",
+			Collection: apiCollectionWire{
+				Name: "acme",
+				Requests: []apiRequestRefWire{
+					{RelPath: "ping.json", Name: "ping", Method: "GET"},
+				},
+				// A folder holding a request and one holding nothing: the
+				// second is the case this list exists for.
+				Folders:         []string{"v1", "v1/reports"},
+				VariableFolders: []string{},
+				Malformed: []apiMalformedRefWire{
+					{RelPath: "broken.json", Reason: "invalid JSON"},
+					{RelPath: "environments/bad.json", Reason: "not a regular file; symlinks are not followed"},
+				},
+				Environments: []apiEnvironmentRefWire{
+					// The NAME differs from the file's stem on purpose: the
+					// two are separate facts and only the file knows the
+					// first, which is why the ref carries both.
+					{RelPath: "environments/default.json", Name: "prod"},
+				},
+			},
+		},
+		// The empty folder: every list is [] and never null — the
+		// renderer's first .map assumes it (nocx-25k9.14 class).
+		"empty": {
+			Handle: "0123456789abcdef0123456789abcdef",
+			Collection: apiCollectionWire{
+				Name:            "acme",
+				Requests:        []apiRequestRefWire{},
+				Folders:         []string{},
+				VariableFolders: []string{},
+				Malformed:       []apiMalformedRefWire{},
+				Environments:    []apiEnvironmentRefWire{},
+			},
+		},
+		// The folder that was ALREADY open. It is a case here because the
+		// field is a bool and false is its zero value: a struct that had
+		// dropped it would marshal indistinguishably from the two above,
+		// and the schema would go on accepting them.
+		"already open": {
+			Handle:      "0123456789abcdef0123456789abcdef",
+			AlreadyOpen: true,
+			Collection: apiCollectionWire{
+				Name:            "acme",
+				Requests:        []apiRequestRefWire{},
+				Folders:         []string{},
+				VariableFolders: []string{},
+				Malformed:       []apiMalformedRefWire{},
+				Environments:    []apiEnvironmentRefWire{},
+			},
+		},
+	}
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "api.collections.open DTO")
+		})
+	}
+}
+
+// api.collections.create answers the handle and collection
+// api.collections.open does — a create leaves the collection open — through
+// the same assembler, validated against its own schema. What it does not
+// carry is alreadyOpen: a folder minted a moment ago cannot have been open,
+// and the schema's additionalProperties:false is what holds the two results
+// apart on that one field. The interesting case is the one the method
+// actually produces: an empty collection, whose two lists must be [] and
+// never null.
+func TestAPICollectionsCreate_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "api.collections.create.schema.json")
+
+	cases := map[string]apiCreateResponse{
+		"a collection just made": {
+			Handle: "0123456789abcdef0123456789abcdef",
+			Collection: apiCollectionWire{
+				Name:            "acme",
+				Requests:        []apiRequestRefWire{},
+				Folders:         []string{},
+				VariableFolders: []string{},
+				Malformed:       []apiMalformedRefWire{},
+				// Create makes `environments/` and leaves it empty, so a
+				// freshly minted collection carries [] rather than null.
+				Environments: []apiEnvironmentRefWire{},
+			},
+		},
+	}
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "api.collections.create DTO")
+		})
+	}
+}
+
+// The real result off the real socket. A test that validates a payload the
+// test itself built proves the struct is well-formed, not that the server
+// sends it — which is the whole reason contracts/ exists.
+func TestAPICollectionsCreate_OverTheWireConformsToContract(t *testing.T) {
+	createSchema := loadSchema(t, "api.collections.create.schema.json")
+	listSchema := loadSchema(t, "api.collections.list.schema.json")
+
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+
+	resp := vaultCall(t, conn, "api.collections.create", map[string]any{"name": "acme"}, 1)
+	if resp.Error != nil {
+		t.Fatalf("api.collections.create: %+v", resp.Error)
+	}
+	validateJSON(t, createSchema, resp.Result, "api.collections.create result")
+
+	var made apiOpenResponse
+	if err := json.Unmarshal(resp.Result, &made); err != nil {
+		t.Fatalf("unmarshal create result: %v", err)
+	}
+	if made.Collection.Name != "acme" {
+		t.Errorf("name = %q, want acme", made.Collection.Name)
+	}
+
+	// And it is open: the listing carries it, which is the difference
+	// between "a folder was written" and "the user has a collection".
+	listed := vaultCall(t, conn, "api.collections.list", map[string]any{}, 2)
+	if listed.Error != nil {
+		t.Fatalf("api.collections.list: %+v", listed.Error)
+	}
+	validateJSON(t, listSchema, listed.Result, "api.collections.list after create")
+	var list apiCollectionsListResponse
+	if err := json.Unmarshal(listed.Result, &list); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	chosen := chosenCollections(list.Collections)
+	if len(chosen) != 1 || chosen[0].Handle != made.Handle {
+		t.Fatalf("opened folders = %+v, want the collection just created", chosen)
+	}
+}
+
+// api.collections.createFolder carries the folder that was made AND the
+// collection it is in, so the two shapes are validated together. The
+// interesting case is the empty one: a folder made a second ago holds
+// nothing, and `folders` is the only field in which it exists at all.
+func TestAPICollectionsCreateFolder_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "api.collections.createFolder.schema.json")
+
+	cases := map[string]apiCollectionsCreateFolderResponse{
+		"a folder at the root": {
+			RelPath: "users",
+			Collection: apiCollectionWire{
+				Name:            "acme",
+				Requests:        []apiRequestRefWire{},
+				Folders:         []string{"users"},
+				VariableFolders: []string{},
+				Malformed:       []apiMalformedRefWire{},
+				Environments:    []apiEnvironmentRefWire{},
+			},
+		},
+		"a folder inside a folder, beside a request": {
+			RelPath: "v1/users",
+			Collection: apiCollectionWire{
+				Name:            "acme",
+				Requests:        []apiRequestRefWire{{RelPath: "ping.json", Name: "ping", Method: "GET"}},
+				Folders:         []string{"v1", "v1/users"},
+				VariableFolders: []string{},
+				Malformed:       []apiMalformedRefWire{},
+				Environments:    []apiEnvironmentRefWire{},
+			},
+		},
+	}
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "api.collections.createFolder DTO")
+		})
+	}
+}
+
+// The real result off the real socket, and then the real listing: a folder
+// the tree cannot see is a folder that does not exist as far as a person is
+// concerned, so the assertion is not that the call succeeded but that
+// api.collections.list carries it afterwards.
+func TestAPICollectionsCreateFolder_OverTheWireConformsToContract(t *testing.T) {
+	folderSchema := loadSchema(t, "api.collections.createFolder.schema.json")
+	listSchema := loadSchema(t, "api.collections.list.schema.json")
+
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+
+	created := vaultCall(t, conn, "api.collections.create", map[string]any{"name": "acme"}, 1)
+	if created.Error != nil {
+		t.Fatalf("api.collections.create: %+v", created.Error)
+	}
+	var made apiOpenResponse
+	if err := json.Unmarshal(created.Result, &made); err != nil {
+		t.Fatalf("unmarshal create result: %v", err)
+	}
+	if made.Collection.Folders == nil || len(made.Collection.Folders) != 0 {
+		t.Errorf("a new collection's folders = %v, want []", made.Collection.Folders)
+	}
+
+	resp := vaultCall(t, conn, "api.collections.createFolder",
+		map[string]any{"handle": made.Handle, "name": "users"}, 2)
+	if resp.Error != nil {
+		t.Fatalf("api.collections.createFolder: %+v", resp.Error)
+	}
+	validateJSON(t, folderSchema, resp.Result, "api.collections.createFolder result")
+
+	var folder apiCollectionsCreateFolderResponse
+	if err := json.Unmarshal(resp.Result, &folder); err != nil {
+		t.Fatalf("unmarshal createFolder result: %v", err)
+	}
+	if folder.RelPath != "users" {
+		t.Errorf("relPath = %q, want users", folder.RelPath)
+	}
+
+	// One inside it, named by the relPath the call before handed back —
+	// which is how nesting is spelled on this surface.
+	nested := vaultCall(t, conn, "api.collections.createFolder",
+		map[string]any{"handle": made.Handle, "parentRelPath": folder.RelPath, "name": "admin"}, 3)
+	if nested.Error != nil {
+		t.Fatalf("api.collections.createFolder nested: %+v", nested.Error)
+	}
+	validateJSON(t, folderSchema, nested.Result, "api.collections.createFolder nested result")
+	var deeper apiCollectionsCreateFolderResponse
+	if err := json.Unmarshal(nested.Result, &deeper); err != nil {
+		t.Fatalf("unmarshal nested result: %v", err)
+	}
+	if deeper.RelPath != "users/admin" {
+		t.Errorf("nested relPath = %q, want users/admin", deeper.RelPath)
+	}
+
+	// And the listing every surface actually reads carries both, with
+	// nothing in either of them.
+	listed := vaultCall(t, conn, "api.collections.list", map[string]any{}, 4)
+	if listed.Error != nil {
+		t.Fatalf("api.collections.list: %+v", listed.Error)
+	}
+	validateJSON(t, listSchema, listed.Result, "api.collections.list after createFolder")
+	var list apiCollectionsListResponse
+	if err := json.Unmarshal(listed.Result, &list); err != nil {
+		t.Fatalf("unmarshal list: %v", err)
+	}
+	chosen := chosenCollections(list.Collections)
+	if len(chosen) != 1 {
+		t.Fatalf("opened folders = %+v, want the one collection", chosen)
+	}
+	got := map[string]bool{}
+	for _, f := range chosen[0].Collection.Folders {
+		got[f] = true
+	}
+	for _, want := range []string{"users", "users/admin"} {
+		if !got[want] {
+			t.Errorf("api.collections.list folders = %v, want %q among them",
+				chosen[0].Collection.Folders, want)
+		}
+	}
+	if len(chosen[0].Collection.Requests) != 0 {
+		t.Errorf("requests = %+v, want none — the folders are visible because they are listed",
+			chosen[0].Collection.Requests)
+	}
+}
+
+// The refusals, each with the pair that succeeds on the same socket
+// (AGENTS.md testing rule 3). A name that is not one path component is
+// refused BY NAME rather than sanitised — a folder quietly created under a
+// name the person did not type is a surface reporting something it did not
+// do — and every one of them is the caller's error, so every one is -32602.
+func TestAPICollectionsCreateFolder_RefusesOverTheWire(t *testing.T) {
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+
+	created := vaultCall(t, conn, "api.collections.create", map[string]any{"name": "acme"}, 1)
+	if created.Error != nil {
+		t.Fatalf("api.collections.create: %+v", created.Error)
+	}
+	var made apiOpenResponse
+	if err := json.Unmarshal(created.Result, &made); err != nil {
+		t.Fatalf("unmarshal create result: %v", err)
+	}
+
+	id := 10
+	refused := func(what string, params map[string]any) {
+		t.Helper()
+		id++
+		resp := vaultCall(t, conn, "api.collections.createFolder", params, id)
+		if resp.Error == nil {
+			t.Errorf("%s was accepted, want a refusal", what)
+			return
+		}
+		if resp.Error.Code != -32602 {
+			t.Errorf("%s answered %d, want -32602 — the caller's move is to name something else",
+				what, resp.Error.Code)
+		}
+		if resp.Error.Message == "" {
+			t.Errorf("%s answered no sentence; a surface has nothing to show", what)
+		}
+	}
+
+	refused("a name that is a path", map[string]any{"handle": made.Handle, "name": "a/b"})
+	refused("a traversal", map[string]any{"handle": made.Handle, "name": ".."})
+	refused("an empty name", map[string]any{"handle": made.Handle, "name": ""})
+	refused("a name that is only dots", map[string]any{"handle": made.Handle, "name": "..."})
+	refused("the environments directory", map[string]any{"handle": made.Handle, "name": "environments"})
+	refused("a parent that is not there",
+		map[string]any{"handle": made.Handle, "parentRelPath": "nope", "name": "users"})
+	refused("a parent outside the collection",
+		map[string]any{"handle": made.Handle, "parentRelPath": "../..", "name": "users"})
+	refused("a handle nobody minted",
+		map[string]any{"handle": "0123456789abcdef0123456789abcdef", "name": "users"})
+
+	// And on an ordinary machine it succeeds — twice for one name is the
+	// only refusal left, and it is a refusal rather than a merge.
+	id++
+	ok := vaultCall(t, conn, "api.collections.createFolder",
+		map[string]any{"handle": made.Handle, "name": "users"}, id)
+	if ok.Error != nil {
+		t.Fatalf("an ordinary folder name was refused: %+v", ok.Error)
+	}
+	refused("a name that is already taken", map[string]any{"handle": made.Handle, "name": "users"})
+}
+
+// api.request.move answers ONE string: the request's new path. The DTO's
+// conformance is a single populated case — there is exactly one field, and
+// every interesting thing about it is "it is there and it is the path the
+// move landed at", which the shape itself says (apiMethodErrorCode owns the
+// refusal half).
+func TestAPIRequestMove_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "api.request.move.schema.json")
+
+	cases := map[string]apiRequestMoveResponse{
+		"into a folder":       {RelPath: "users/ping.json"},
+		"back to the root":    {RelPath: "ping.json"},
+		"a deeply nested one": {RelPath: "v1/users/admin/ping.json"},
+	}
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "api.request.move DTO")
+		})
+	}
+}
+
+// The real method through the real socket, against a real folder: the file
+// is written, moved, and read back at the new path — the address the result
+// handed back is the address that WORKS, which is what "the result carries
+// the new relPath" has to mean. The bytes at the new path are the bytes at
+// the old, and the old path no longer answers.
+func TestAPIRequestMove_OverTheWireConformsToContract(t *testing.T) {
+	moveSchema := loadSchema(t, "api.request.move.schema.json")
+
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	root := apiCollectionFolder(t, "https://example.test/ping")
+	handle := openAPICollection(t, conn, root, 1)
+
+	// A folder to move into, made the way the product makes one.
+	folder := vaultCall(t, conn, "api.collections.createFolder",
+		map[string]any{"handle": handle, "name": "users"}, 2)
+	if folder.Error != nil {
+		t.Fatalf("api.collections.createFolder: %+v", folder.Error)
+	}
+
+	moved := vaultCall(t, conn, "api.request.move",
+		map[string]any{"handle": handle, "relPath": "ping.json", "toRelPath": "users/ping.json"}, 3)
+	if moved.Error != nil {
+		t.Fatalf("api.request.move: %+v", moved.Error)
+	}
+	validateJSON(t, moveSchema, moved.Result, "api.request.move result")
+	var got apiRequestMoveResponse
+	if err := json.Unmarshal(moved.Result, &got); err != nil {
+		t.Fatalf("unmarshal move result: %v", err)
+	}
+	if got.RelPath != "users/ping.json" {
+		t.Errorf("relPath = %q, want users/ping.json", got.RelPath)
+	}
+
+	// The path the result carried is a path that READS. The request that
+	// was at the root answers at the folder now, bytes and all.
+	read := vaultCall(t, conn, "api.request.read",
+		map[string]any{"handle": handle, "relPath": "users/ping.json"}, 4)
+	if read.Error != nil {
+		t.Fatalf("api.request.read at the new path: %+v", read.Error)
+	}
+	var back apiRequestReadResponse
+	if err := json.Unmarshal(read.Result, &back); err != nil {
+		t.Fatalf("unmarshal read result: %v", err)
+	}
+	if back.Request.Name != "ping" || back.Request.URL != "https://example.test/ping" {
+		t.Errorf("read at the new path = %+v, want the request that was at the root", back.Request)
+	}
+
+	// And the old path no longer answers: a move leaves exactly one place
+	// the file is.
+	gone := vaultCall(t, conn, "api.request.read",
+		map[string]any{"handle": handle, "relPath": "ping.json"}, 5)
+	if gone.Error == nil {
+		t.Fatal("api.request.read still answers at the OLD path after the move; the request is at both")
+	}
+
+	// And back to the root, which is the other direction a person moves.
+	backMove := vaultCall(t, conn, "api.request.move",
+		map[string]any{"handle": handle, "relPath": "users/ping.json", "toRelPath": "ping.json"}, 6)
+	if backMove.Error != nil {
+		t.Fatalf("api.request.move back to the root: %+v", backMove.Error)
+	}
+	validateJSON(t, moveSchema, backMove.Result, "api.request.move result (back to the root)")
+	var backGot apiRequestMoveResponse
+	if err := json.Unmarshal(backMove.Result, &backGot); err != nil {
+		t.Fatalf("unmarshal move result: %v", err)
+	}
+	if backGot.RelPath != "ping.json" {
+		t.Errorf("relPath = %q, want ping.json", backGot.RelPath)
+	}
+}
+
+// A move that CANNOT happen is refused over the wire, each by the sentence
+// a surface can show, and each paired with the success it belongs to in the
+// happy-path test above (AGENTS.md testing rule 3). A collision is the one
+// that matters most: the whole reason the move is a no-replace rename.
+func TestAPIRequestMove_RefusesOverTheWire(t *testing.T) {
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	root := apiCollectionFolder(t, "https://example.test/ping")
+	handle := openAPICollection(t, conn, root, 1)
+
+	if fe := vaultCall(t, conn, "api.collections.createFolder",
+		map[string]any{"handle": handle, "name": "users"}, 2); fe.Error != nil {
+		t.Fatalf("createFolder: %+v", fe.Error)
+	}
+	// A second file colliding with the move.
+	if we := vaultCall(t, conn, "api.request.write", map[string]any{
+		"handle": handle, "relPath": "users/ping.json",
+		"request": map[string]any{
+			"id": "r9", "name": "other", "method": "GET",
+			"url": "https://example.test/other", "body": map[string]any{"kind": "none"},
+			"auth": map[string]any{"kind": "none"},
+		},
+	}, 3); we.Error != nil {
+		t.Fatalf("write users/ping: %+v", we.Error)
+	}
+
+	id := 10
+	refused := func(what string, params map[string]any) {
+		t.Helper()
+		id++
+		resp := vaultCall(t, conn, "api.request.move", params, id)
+		if resp.Error == nil {
+			t.Errorf("%s was accepted, want a refusal", what)
+			return
+		}
+		if resp.Error.Code != -32602 {
+			t.Errorf("%s answered %d, want -32602 — the caller's move is to name something else",
+				what, resp.Error.Code)
+		}
+		if resp.Error.Message == "" {
+			t.Errorf("%s answered no sentence; a surface has nothing to show", what)
+		}
+	}
+
+	refused("a destination that already holds a file",
+		map[string]any{"handle": handle, "relPath": "ping.json", "toRelPath": "users/ping.json"})
+	refused("a destination folder that is not there",
+		map[string]any{"handle": handle, "relPath": "ping.json", "toRelPath": "nope/ping.json"})
+	refused("a destination outside the collection",
+		map[string]any{"handle": handle, "relPath": "ping.json", "toRelPath": "../ping.json"})
+	refused("a source that is not there",
+		map[string]any{"handle": handle, "relPath": "ghost.json", "toRelPath": "users/ghost.json"})
+	refused("a handle nobody minted",
+		map[string]any{
+			"handle":  "0123456789abcdef0123456789abcdef",
+			"relPath": "ping.json", "toRelPath": "users/ping.json",
+		})
+
+	// And on an ordinary machine the same move succeeds — the pair that
+	// proves the refusals are the method's and not this build's.
+	ok := vaultCall(t, conn, "api.request.move",
+		map[string]any{"handle": handle, "relPath": "ping.json", "toRelPath": "users/other-ping.json"}, id+1)
+	if ok.Error != nil {
+		t.Fatalf("an ordinary move was refused: %+v", ok.Error)
+	}
+}
+
+func TestAPIRequestRead_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "api.request.read.schema.json")
+
+	cases := map[string]apiRequestReadResponse{
+		"populated": {Request: apiRequestWire{
+			ID: "r1", Name: "ping", Method: "GET", URL: "https://example.test/{{path}}",
+			Headers: []apiHeaderWire{{Name: "X-Probe", Value: "1", Enabled: true}},
+			Query:   []apiParamWire{{Name: "q", Value: "{{term}}", Enabled: false}},
+			// The request's OWN variables — the third list, carried like the
+			// other two, including a disabled row: one the person keeps and
+			// has switched off, which resolves nothing.
+			Variables: []apiParamWire{
+				{Name: "path", Value: "users", Enabled: true},
+				{Name: "term", Value: "unused", Enabled: false},
+			},
+			Body: apiBodyWire{Kind: "raw", Text: "hello"},
+			Auth: apiAuthWire{Kind: "bearer", Token: "{{token}}"},
+		}},
+		// A request with no headers, no query and no variables: all three
+		// are [], never null.
+		"bare": {Request: apiRequestWire{
+			ID: "r2", Name: "bare", Method: "GET", URL: "https://example.test",
+			Headers: []apiHeaderWire{}, Query: []apiParamWire{}, Variables: []apiParamWire{},
+			Body: apiBodyWire{Kind: "none"}, Auth: apiAuthWire{Kind: "none"},
+		}},
+	}
+	for name, resp := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(resp)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "api.request.read DTO")
+		})
+	}
+}
+
+// The whole collection surface through the real socket, against a real
+// folder: open, list, read, write, read back, close. Nothing here names a
+// field of the result, so nothing here can omit one — the schema's
+// additionalProperties:false plus required makes the key set exact in both
+// directions.
+func TestAPICollections_OverTheWireConformsToContract(t *testing.T) {
+	openSchema := loadSchema(t, "api.collections.open.schema.json")
+	listSchema := loadSchema(t, "api.collections.list.schema.json")
+	readSchema := loadSchema(t, "api.request.read.schema.json")
+	writeSchema := loadSchema(t, "api.request.write.schema.json")
+	closeSchema := loadSchema(t, "api.collections.close.schema.json")
+
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	root := apiCollectionFolder(t, "https://example.test/ping")
+
+	// The empty list, before anything is opened: [] and never null.
+	empty := vaultCall(t, conn, "api.collections.list", map[string]any{}, 1)
+	if empty.Error != nil {
+		t.Fatalf("api.collections.list on a fresh server: %+v", empty.Error)
+	}
+	validateJSON(t, listSchema, empty.Result, "api.collections.list result (nothing open)")
+
+	openResp := vaultCall(t, conn, "api.collections.open", map[string]any{"path": root}, 2)
+	if openResp.Error != nil {
+		t.Fatalf("api.collections.open: %+v", openResp.Error)
+	}
+	validateJSON(t, openSchema, openResp.Result, "api.collections.open result")
+
+	var opened apiOpenResponse
+	if err := json.Unmarshal(openResp.Result, &opened); err != nil {
+		t.Fatalf("unmarshal open result: %v", err)
+	}
+	if opened.Collection.Name != "acme" {
+		t.Errorf("collection name = %q, want acme", opened.Collection.Name)
+	}
+	if len(opened.Collection.Requests) != 2 {
+		t.Errorf("requests = %+v, want the two request files", opened.Collection.Requests)
+	}
+	if opened.AlreadyOpen {
+		t.Error("the first open of a folder answered alreadyOpen:true")
+	}
+
+	listResp := vaultCall(t, conn, "api.collections.list", map[string]any{}, 3)
+	if listResp.Error != nil {
+		t.Fatalf("api.collections.list: %+v", listResp.Error)
+	}
+	validateJSON(t, listSchema, listResp.Result, "api.collections.list result (one open)")
+	var listed apiCollectionsListResponse
+	if err := json.Unmarshal(listResp.Result, &listed); err != nil {
+		t.Fatalf("unmarshal list result: %v", err)
+	}
+	chosen := chosenCollections(listed.Collections)
+	if len(chosen) != 1 || chosen[0].Handle != opened.Handle {
+		t.Fatalf("opened-folder list = %+v, want the one folder just opened", chosen)
+	}
+	if chosen[0].Path != root {
+		t.Errorf("listed path = %q, want %q", chosen[0].Path, root)
+	}
+
+	// THE SAME FOLDER, NAMED A SECOND WAY, off the real socket. This is the
+	// sequence that put one collection in the tree twice under two handles:
+	// the importer opens its destination, the person then reaches for "Open
+	// a collection folder…" out of habit, and the two spellings of the path
+	// need not match (nocx-ghuq3). One folder has one handle, the list does
+	// not grow, and the RESULT says which of the two things happened so the
+	// renderer need not read it off the tree.
+	againResp := vaultCall(t, conn, "api.collections.open",
+		map[string]any{"path": root}, 10)
+	if againResp.Error != nil {
+		t.Fatalf("api.collections.open of a folder already open: %+v", againResp.Error)
+	}
+	validateJSON(t, openSchema, againResp.Result, "api.collections.open result (already open)")
+	var again apiOpenResponse
+	if err := json.Unmarshal(againResp.Result, &again); err != nil {
+		t.Fatalf("unmarshal the second open: %v", err)
+	}
+	if again.Handle != opened.Handle {
+		t.Errorf("re-opening minted %q beside %q; one folder has one handle", again.Handle, opened.Handle)
+	}
+	if !again.AlreadyOpen {
+		t.Error("re-opening answered alreadyOpen:false; a surface cannot then tell an open from an already-open")
+	}
+	if again.Collection.Name != opened.Collection.Name || len(again.Collection.Requests) != 2 {
+		t.Errorf("the second open answered %+v, want the same collection", again.Collection)
+	}
+	sameList := vaultCall(t, conn, "api.collections.list", map[string]any{}, 11)
+	if sameList.Error != nil {
+		t.Fatalf("api.collections.list after a re-open: %+v", sameList.Error)
+	}
+	validateJSON(t, listSchema, sameList.Result, "api.collections.list result (after a re-open)")
+	var listedAgain apiCollectionsListResponse
+	if err := json.Unmarshal(sameList.Result, &listedAgain); err != nil {
+		t.Fatalf("unmarshal list after a re-open: %v", err)
+	}
+	if still := chosenCollections(listedAgain.Collections); len(still) != 1 || still[0].Handle != opened.Handle {
+		t.Errorf("opened-folder list after a re-open = %+v, want the one folder under the one handle", still)
+	}
+
+	// And a DIFFERENT path that leads to the same folder. The wire refuses a
+	// path that is not already clean and absolute (validateAPIFolderPath),
+	// so a symlink is the spelling that actually reaches this method twice —
+	// and it is the one a person hits, since a dialog answers with whatever
+	// name they walked in by.
+	link := filepath.Join(t.TempDir(), "acme-link")
+	if err := os.Symlink(root, link); err != nil {
+		t.Fatalf("symlink: %v", err)
+	}
+	byLink := vaultCall(t, conn, "api.collections.open", map[string]any{"path": link}, 12)
+	if byLink.Error != nil {
+		t.Fatalf("api.collections.open through a symlink: %+v", byLink.Error)
+	}
+	validateJSON(t, openSchema, byLink.Result, "api.collections.open result (a second name)")
+	var linked apiOpenResponse
+	if err := json.Unmarshal(byLink.Result, &linked); err != nil {
+		t.Fatalf("unmarshal the open through a symlink: %v", err)
+	}
+	if linked.Handle != opened.Handle || !linked.AlreadyOpen {
+		t.Errorf("opening %q answered handle %q alreadyOpen=%v, want the handle that exists and true — "+
+			"two names for one directory are one collection", link, linked.Handle, linked.AlreadyOpen)
+	}
+	// WHERE A NEW COLLECTION WOULD GO, off the real socket. The renderer
+	// proposes an import destination from it, so a listing that answered ""
+	// on a build that HAS an app directory is an ask back to demanding an
+	// absolute path with nothing in it (nocx-6hg2w.14).
+	if listed.DefaultRoot == "" {
+		t.Error("defaultRoot is empty on a server built with an app directory")
+	}
+	if filepath.Base(listed.DefaultRoot) != apicoll.DefaultCollectionsDirName {
+		t.Errorf("defaultRoot = %q, want the collections directory under the data dir", listed.DefaultRoot)
+	}
+
+	readResp := vaultCall(t, conn, "api.request.read",
+		map[string]any{"handle": opened.Handle, "relPath": "ping.json"}, 4)
+	if readResp.Error != nil {
+		t.Fatalf("api.request.read: %+v", readResp.Error)
+	}
+	validateJSON(t, readSchema, readResp.Result, "api.request.read result")
+	var read apiRequestReadResponse
+	if err := json.Unmarshal(readResp.Result, &read); err != nil {
+		t.Fatalf("unmarshal read result: %v", err)
+	}
+	if read.Request.Name != "ping" || read.Request.Method != "GET" {
+		t.Errorf("request = %+v, want the ping request", read.Request)
+	}
+
+	// Write it back with a changed name, and read it back changed: the
+	// user's edit reaches disk and comes back, which is what the pane does.
+	edited := read.Request
+	edited.Name = "ping renamed"
+	writeResp := vaultCall(t, conn, "api.request.write", map[string]any{
+		"handle": opened.Handle, "relPath": "ping.json", "request": edited,
+	}, 5)
+	if writeResp.Error != nil {
+		t.Fatalf("api.request.write: %+v", writeResp.Error)
+	}
+	validateJSON(t, writeSchema, writeResp.Result, "api.request.write result")
+
+	reread := vaultCall(t, conn, "api.request.read",
+		map[string]any{"handle": opened.Handle, "relPath": "ping.json"}, 6)
+	if reread.Error != nil {
+		t.Fatalf("api.request.read after write: %+v", reread.Error)
+	}
+	var back apiRequestReadResponse
+	if err := json.Unmarshal(reread.Result, &back); err != nil {
+		t.Fatalf("unmarshal reread: %v", err)
+	}
+	if back.Request.Name != "ping renamed" {
+		t.Errorf("name after write = %q, want %q — the edit did not reach disk", back.Request.Name, "ping renamed")
+	}
+
+	closeResp := vaultCall(t, conn, "api.collections.close", map[string]any{"handle": opened.Handle}, 7)
+	if closeResp.Error != nil {
+		t.Fatalf("api.collections.close: %+v", closeResp.Error)
+	}
+	validateJSON(t, closeSchema, closeResp.Result, "api.collections.close result")
+
+	// The closing event, asserted: the handle stops working the moment the
+	// collection is closed, and the folder leaves the list.
+	afterClose := vaultCall(t, conn, "api.request.read",
+		map[string]any{"handle": opened.Handle, "relPath": "ping.json"}, 8)
+	if afterClose.Error == nil {
+		t.Fatal("api.request.read answered on a CLOSED handle; a closed collection must refuse")
+	}
+	gone := vaultCall(t, conn, "api.collections.list", map[string]any{}, 9)
+	if gone.Error != nil {
+		t.Fatalf("api.collections.list after close: %+v", gone.Error)
+	}
+	validateJSON(t, listSchema, gone.Result, "api.collections.list result (after close)")
+	var empties apiCollectionsListResponse
+	if err := json.Unmarshal(gone.Result, &empties); err != nil {
+		t.Fatalf("unmarshal list after close: %v", err)
+	}
+	if left := chosenCollections(empties.Collections); len(left) != 0 {
+		t.Errorf("opened-folder list after close = %+v, want empty", left)
+	}
+}
+
+// The failure half. Every one of these is a real external condition — a
+// folder that is not a collection, a handle nobody minted, a request file
+// that is not there, a path trying to leave the collection — and each is
+// paired with the success above.
+func TestAPICollections_FailuresAreReportedNotPaperedOver(t *testing.T) {
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	root := apiCollectionFolder(t, "https://example.test/ping")
+	handle := openAPICollection(t, conn, root, 1)
+
+	notACollection := t.TempDir()
+	outside := filepath.Join(t.TempDir(), "id_ed25519")
+	if err := os.WriteFile(outside, []byte("PRIVATE KEY"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	for name, tc := range map[string]struct {
+		method string
+		params map[string]any
+	}{
+		"a folder with no manifest":      {"api.collections.open", map[string]any{"path": notACollection}},
+		"a handle nobody minted":         {"api.request.read", map[string]any{"handle": "ffffffffffffffffffffffffffffffff", "relPath": "ping.json"}},
+		"a request that is not there":    {"api.request.read", map[string]any{"handle": handle, "relPath": "nope.json"}},
+		"a path leaving the folder":      {"api.request.read", map[string]any{"handle": handle, "relPath": "../../id_ed25519"}},
+		"an absolute path":               {"api.request.read", map[string]any{"handle": handle, "relPath": outside}},
+		"closing a handle nobody minted": {"api.collections.close", map[string]any{"handle": "ffffffffffffffffffffffffffffffff"}},
+	} {
+		t.Run(name, func(t *testing.T) {
+			resp := vaultCall(t, conn, tc.method, tc.params, 20)
+			if resp.Error == nil {
+				t.Fatalf("%s(%v) succeeded; %s must be refused by name", tc.method, tc.params, name)
+			}
+			if strings.Contains(resp.Error.Message, "PRIVATE KEY") {
+				t.Fatalf("the refusal echoed the file it refused to read: %s", resp.Error.Message)
 			}
 		})
 	}
@@ -5931,6 +7413,282 @@ func TestSessionIntegrationChanged_BootstrapOutcomesAreReadableOffTheWire(t *tes
 			}
 			if got.Reason == string(ssh.ReasonUnknown) {
 				t.Error("the product was told the backend cannot say why, and it can")
+			}
+		})
+	}
+}
+
+// A collection whose root is replaced under it. The handle is re-validated
+// per operation rather than trusted from open time (§13.1's fourth rule),
+// and the list REPORTS the failure on the entry rather than dropping the
+// folder silently — a soft degrade the UI contradicts is how a feature that
+// does not exist survives a release.
+func TestAPICollectionsList_ReportsARootThatWasReplaced(t *testing.T) {
+	listSchema := loadSchema(t, "api.collections.list.schema.json")
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+
+	parent := t.TempDir()
+	root := filepath.Join(parent, "coll")
+	if err := os.MkdirAll(root, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "nocx-collection.json"),
+		[]byte(`{"schemaVersion":1,"name":"acme"}`), 0o600); err != nil {
+		t.Fatalf("write manifest: %v", err)
+	}
+	handle := openAPICollection(t, conn, root, 1)
+
+	if err := os.RemoveAll(root); err != nil {
+		t.Fatalf("remove root: %v", err)
+	}
+
+	resp := vaultCall(t, conn, "api.collections.list", map[string]any{}, 2)
+	if resp.Error != nil {
+		t.Fatalf("api.collections.list: %+v", resp.Error)
+	}
+	validateJSON(t, listSchema, resp.Result, "api.collections.list result (root replaced)")
+	var listed apiCollectionsListResponse
+	if err := json.Unmarshal(resp.Result, &listed); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	chosen := chosenCollections(listed.Collections)
+	if len(chosen) != 1 {
+		t.Fatalf("collections = %+v, want the folder still listed with its failure named", chosen)
+	}
+	if chosen[0].Handle != handle {
+		t.Errorf("handle = %q, want %q", chosen[0].Handle, handle)
+	}
+	if chosen[0].Error == "" {
+		t.Error("a folder whose root was removed listed with no error; the failure must be reported, not papered over")
+	}
+}
+
+// api.request.send through the real socket, against a real HTTP server. The
+// gate is released before the dial (capability/api.go) — asserted here by
+// a second, unrelated method answering WHILE a send is in flight against a
+// server that does not reply until it is let go.
+func TestAPIRequestSend_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "api.request.send.schema.json")
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		w.WriteHeader(201)
+		_, _ = w.Write([]byte("pong"))
+	}))
+	defer srv.Close()
+
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	root := apiCollectionFolder(t, srv.URL)
+	handle := openAPICollection(t, conn, root, 1)
+
+	resp := vaultCall(t, conn, "api.request.send",
+		map[string]any{"handle": handle, "relPath": "ping.json", "token": "t-1"}, 2)
+	if resp.Error != nil {
+		t.Fatalf("api.request.send: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "api.request.send result")
+
+	var got apiSendResponse
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal send result: %v", err)
+	}
+	if got.Response.Status != 201 {
+		t.Errorf("status = %d, want 201", got.Response.Status)
+	}
+	if got.Response.Text != "pong" {
+		t.Errorf("text = %q, want %q", got.Response.Text, "pong")
+	}
+	if got.Response.Size != int64(len("pong")) {
+		t.Errorf("size = %d, want %d", got.Response.Size, len("pong"))
+	}
+}
+
+// The api gate is NOT held across the dial. Asserted, rather than asserted
+// about in a comment.
+//
+// A send is put in flight against a server that will not answer until this
+// test lets it. While it hangs there, an unrelated api.* method is called on
+// a SECOND socket of the same server and must answer. The api gate is
+// capacity one and both methods hold it, so a send that kept it across the
+// exchange would make the second call wait behind a remote server — which
+// in production is every collection operation blocking on one hung host.
+//
+// The waits are on observable state — the server goroutine reports it has
+// the request; the second method's response arrives — and never on a
+// duration. A spec that needs a slow machine to pass is broken on a fast
+// one too, it has just not been caught yet.
+func TestAPIRequestSend_DoesNotHoldTheGateAcrossTheDial(t *testing.T) {
+	arrived := make(chan struct{})
+	release := make(chan struct{})
+	var releaseOnce sync.Once
+	letGo := func() { releaseOnce.Do(func() { close(release) }) }
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		close(arrived)
+		<-release
+		_, _ = w.Write([]byte("late"))
+	}))
+	defer srv.Close()
+	defer letGo()
+
+	ws, conn := newAPIWSServer(t, newAPIFakeBindings())
+	root := apiCollectionFolder(t, srv.URL)
+	handle := openAPICollection(t, conn, root, 1)
+
+	// Write the send WITHOUT reading its response, so the exchange is
+	// genuinely outstanding while the next call is made.
+	req, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": 2, "method": "api.request.send",
+		"params": map[string]any{"handle": handle, "relPath": "ping.json", "token": "t-inflight"},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, req); err != nil {
+		t.Fatalf("write send: %v", err)
+	}
+	<-arrived // the request has reached the server; the send is mid-exchange
+
+	// A second socket of the same WSServer, so it shares the api gate.
+	second := connectWS(t, ws)
+	listed := vaultCall(t, second, "api.collections.list", map[string]any{}, 3)
+	if listed.Error != nil {
+		t.Fatalf("api.collections.list while a send was in flight: %+v — the send is "+
+			"holding the api gate across the dial", listed.Error)
+	}
+
+	letGo()
+	// And the send still completes: releasing the gate early did not cost
+	// the exchange its answer.
+	for {
+		_ = conn.SetReadDeadline(time.Now().Add(wantWithin))
+		_, data, readErr := conn.ReadMessage()
+		if readErr != nil {
+			t.Fatalf("read send response: %v", readErr)
+		}
+		var msg vaultRPCResult
+		if json.Unmarshal(data, &msg) != nil || msg.ID != 2 {
+			continue
+		}
+		if msg.Error != nil {
+			t.Fatalf("api.request.send: %+v", msg.Error)
+		}
+		var got apiSendResponse
+		if err := json.Unmarshal(msg.Result, &got); err != nil {
+			t.Fatalf("unmarshal send result: %v", err)
+		}
+		if got.Response.Text != "late" {
+			t.Errorf("text = %q, want %q", got.Response.Text, "late")
+		}
+		return
+	}
+}
+
+// The DTO's own conformance, on ALL THREE OUTCOMES. It is cheap and it is
+// not the test that catches a missing field — the socket test below is —
+// but it is the one that catches the three shapes disagreeing with each
+// other: a `response` pointer that marshals as `{}` rather than `null`, a
+// phase spelt differently from the enum, a certificate list that arrives as
+// null on the path nobody populated it on.
+//
+// A FAILED and a STOPPED case, deliberately, and not only the answered one.
+// The whole change is that a run exists when there is no answer; a
+// conformance table covering only the answer would check the half that was
+// never in doubt.
+func TestAPIRequestSend_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "api.request.send.schema.json")
+
+	route := apicoll.Route{Kind: apicoll.RouteConnection, ProfileID: "ssh:bastion:1", InsecureTLS: true}
+	request := apisend.Raw{Text: "GET /users HTTP/1.1\nHost: api.internal\n\n", Spans: []apisend.Span{}}
+
+	cases := map[string]apisend.Exchange{
+		"answered": {
+			Outcome:      apisend.Answered,
+			Request:      request,
+			RemoteAddr:   "10.0.0.4:443",
+			Timings:      apisend.Timings{DNS: time.Millisecond, Connect: 2 * time.Millisecond, Total: 9 * time.Millisecond},
+			Certificates: []apisend.Certificate{{Subject: "CN=api.internal", Issuer: "CN=api.internal", SelfSigned: true, DNSNames: []string{"api.internal"}, IPAddresses: []string{}}},
+			Response: &apisend.Response{
+				Status:  200,
+				Headers: []apicoll.Header{{Name: "Content-Type", Value: "application/json", Enabled: true}},
+				Text:    `{"ok":true}`,
+				Size:    11,
+				Raw:     apisend.Raw{Text: "HTTP/1.1 200 OK\n\n", Spans: []apisend.Span{}},
+				// The route above has verification off, and this is what
+				// that route's run actually accepted — the state a badge is
+				// drawn from, carrying the verifier's own sentence.
+				Trust: apisend.Trust{
+					State:  apisend.TrustUncheckedUntrusted,
+					Reason: "x509: certificate signed by unknown authority",
+				},
+			},
+		},
+		// The ordinary connection: verification ran and there is nothing to
+		// report. Beside the case above so the two states that a run can
+		// legitimately carry are both marshalled, and neither is only ever
+		// seen as the other's absence.
+		"answered over a verified chain": {
+			Outcome:      apisend.Answered,
+			Request:      request,
+			RemoteAddr:   "10.0.0.4:443",
+			Certificates: []apisend.Certificate{},
+			Response: &apisend.Response{
+				Status:  200,
+				Headers: []apicoll.Header{},
+				Raw:     apisend.Raw{Spans: []apisend.Span{}},
+				Trust:   apisend.Trust{State: apisend.TrustVerified},
+			},
+		},
+		// The failure the whole change exists for: a request, a route, how
+		// far it got — and NO response.
+		"failed at dial": {
+			Outcome:      apisend.Failed,
+			Request:      request,
+			Certificates: []apisend.Certificate{},
+			Timings:      apisend.Timings{DNS: 3 * time.Millisecond},
+			Failure:      &apisend.Failure{Phase: apisend.PhaseDial, Reason: "apisend: GET http://api.internal/users: connection refused"},
+		},
+		// A stop is not a failure, and the wire has to be able to say so:
+		// the outcome differs while the failure block is present in both.
+		"stopped": {
+			Outcome:      apisend.Stopped,
+			Request:      request,
+			RemoteAddr:   "10.0.0.4:443",
+			Certificates: []apisend.Certificate{},
+			Failure:      &apisend.Failure{Phase: apisend.PhaseStopped, Reason: "context canceled"},
+		},
+		// And the phase with nothing composed behind it: the request block
+		// is still there, empty, because the renderer walks it either way.
+		"failed at compose": {
+			Outcome:      apisend.Failed,
+			Request:      apisend.Raw{Spans: []apisend.Span{}},
+			Certificates: []apisend.Certificate{},
+			Failure:      &apisend.Failure{Phase: apisend.PhaseCompose, Reason: `apisend: "users" is not an absolute URL`},
+		},
+	}
+
+	for name, ex := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(wireExchange(ex, "prod", route))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "api.request.send DTO")
+
+			// `null` and not `{}`: the pointer is the whole reason a reader
+			// can tell "no answer" from "an answer with nothing in it".
+			var probe struct {
+				Response json.RawMessage `json:"response"`
+				Failure  json.RawMessage `json:"failure"`
+			}
+			if err := json.Unmarshal(raw, &probe); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if ex.Response == nil && string(probe.Response) != "null" {
+				t.Errorf("response = %s for an exchange with no answer, want null", probe.Response)
+			}
+			if ex.Failure == nil && string(probe.Failure) != "null" {
+				t.Errorf("failure = %s for an answered exchange, want null", probe.Failure)
 			}
 		})
 	}
@@ -6146,6 +7904,374 @@ func TestFilesDownloadProgress_DTOConformsToContract(t *testing.T) {
 	}
 }
 
+// THE FAILED EXCHANGE, OFF THE REAL SOCKET — and this is the one that
+// matters, because a payload the test itself built proves the struct is
+// well formed and says nothing about whether the server sends it.
+//
+// A server that is not there. Before this change the answer was a JSON-RPC
+// error: one sentence, no request text, no route, no timing — while apisend
+// was holding all of it at the moment it failed. Now it is a RUN, and every
+// assertion below is a thing that used to reach the renderer nowhere at all.
+func TestAPIRequestSend_AFailedExchangeIsARunOverTheWire(t *testing.T) {
+	schema := loadSchema(t, "api.request.send.schema.json")
+
+	// A listener opened and immediately closed gives an address nothing is
+	// on, without depending on a port being free by guesswork.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	dead := "http://" + l.Addr().String() + "/gone"
+	_ = l.Close()
+
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	root := apiCollectionFolder(t, dead)
+	handle := openAPICollection(t, conn, root, 1)
+
+	resp := vaultCall(t, conn, "api.request.send",
+		map[string]any{"handle": handle, "relPath": "ping.json", "token": "t-1"}, 2)
+	if resp.Error != nil {
+		t.Fatalf("a send that could not connect answered an ERROR (%+v); it is an exchange "+
+			"that failed, and a person who pressed Send has a run whatever the world did next", resp.Error)
+	}
+	// The SCHEMA on the failure path. Without this the contract would be
+	// checked only on the shape that already worked.
+	validateJSON(t, schema, resp.Result, "api.request.send result (failed)")
+
+	var got apiSendResponse
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal send result: %v", err)
+	}
+	if got.Outcome != "failed" {
+		t.Errorf("outcome = %q, want failed", got.Outcome)
+	}
+	if got.Response != nil {
+		t.Errorf("a failed exchange carries a response: %+v", *got.Response)
+	}
+	if got.Failure == nil {
+		t.Fatal("a failed exchange carries no failure")
+	}
+	if got.Failure.Phase != "dial" {
+		t.Errorf("phase = %q, want dial — nothing accepted a connection", got.Failure.Phase)
+	}
+	if got.Failure.Reason == "" {
+		t.Error("the failure has no reason; the run has nothing to show a person")
+	}
+	// The whole point: what was SENT is on the failed run.
+	if !strings.Contains(got.Request.Text, "GET /gone HTTP/1.1") {
+		t.Errorf("the failed run carries no request line:\n%s", got.Request.Text)
+	}
+	if got.Request.Spans == nil {
+		t.Error("request.spans is null; a side with nothing to mark is []")
+	}
+	if got.Certificates == nil {
+		t.Error("certificates is null; a chain of none is []")
+	}
+	// And the route, which a failed send used to leave the renderer
+	// guessing at — the panel knows what it configured, not what was used.
+	if got.Route.Kind != "direct" {
+		t.Errorf("route.kind = %q, want direct", got.Route.Kind)
+	}
+}
+
+// api.request.cancel refuses a token that names no running exchange, BY
+// NAME. "There was nothing to stop" and "it is stopped" are different facts,
+// and a caller that cannot tell them apart cannot report either.
+func TestAPIRequestCancel_AnUnknownTokenIsRefusedByName(t *testing.T) {
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+
+	resp := vaultCall(t, conn, "api.request.cancel", map[string]any{"token": "nothing-is-running"}, 1)
+	if resp.Error == nil {
+		t.Fatal("cancelling a token nothing is running under was accepted")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("code = %d, want -32602", resp.Error.Code)
+	}
+	if !strings.Contains(resp.Error.Message, "nothing-is-running") {
+		t.Errorf("message = %q, want it to name the token it does not know", resp.Error.Message)
+	}
+}
+
+// api.request.send is refused when no sender is wired, rather than answering
+// an empty response. The whole point of the -32601 gate: the caller's next
+// move is to stop calling it.
+func TestAPIRequestSend_RefusedWhenNothingIsWired(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	ws := NewWSServer(logger, newRegWithStub(logger))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+
+	for _, method := range []string{
+		"api.collections.list", "api.collections.open", "api.collections.close",
+		"api.request.read", "api.request.write", "api.request.move",
+		"api.folder.read", "api.folder.write",
+		"api.request.send", "api.import.postman",
+	} {
+		resp := vaultCall(t, conn, method, map[string]any{}, 1)
+		if resp.Error == nil {
+			t.Errorf("%s answered on a server with no api wiring; it must report the method is not there", method)
+			continue
+		}
+		if resp.Error.Code != -32601 {
+			t.Errorf("%s error code = %d, want -32601 (method not found)", method, resp.Error.Code)
+		}
+	}
+}
+
+func TestAPIImportCurl_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "api.import.curl.schema.json")
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+
+	resp := vaultCall(t, conn, "api.import.curl", map[string]any{
+		"line": `curl -X POST https://example.test/v1/things?page=2 -H 'X-Probe: 1' -d '{"a":1}'`,
+	}, 1)
+	if resp.Error != nil {
+		t.Fatalf("api.import.curl: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "api.import.curl result")
+
+	var got apiImportCurlResponse
+	if err := json.Unmarshal(resp.Result, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Request.Method != "POST" {
+		t.Errorf("method = %q, want POST", got.Request.Method)
+	}
+	if got.Request.URL != "https://example.test/v1/things" {
+		t.Errorf("url = %q, want the URL with its query split off", got.Request.URL)
+	}
+
+	// The failure half, and it is a real one: a line curl itself could not
+	// parse. An unterminated quote is refused rather than guessed at.
+	bad := vaultCall(t, conn, "api.import.curl", map[string]any{"line": `curl -H 'X: 1`}, 2)
+	if bad.Error == nil {
+		t.Fatal("an unterminated quote was accepted; a line that cannot be parsed must be refused")
+	}
+}
+
+func TestAPIImportPostman_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "api.import.postman.schema.json")
+	bindings := newAPIFakeBindings()
+	_, conn := newAPIWSServer(t, bindings)
+
+	doc := filepath.Join(t.TempDir(), "export.json")
+	if err := os.WriteFile(doc, []byte(`{
+      "info": {"name": "acme", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+      "variable": [{"key": "token", "value": "sk-secret-value", "type": "secret"}],
+      "item": [{"name": "ping", "request": {"method": "GET", "url": "https://example.test/ping"}}]
+    }`), 0o600); err != nil {
+		t.Fatalf("write export: %v", err)
+	}
+	dest := filepath.Join(t.TempDir(), "imported")
+
+	resp := vaultCall(t, conn, "api.import.postman", map[string]any{"path": doc, "dest": dest}, 1)
+	if resp.Error != nil {
+		t.Fatalf("api.import.postman: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "api.import.postman result")
+
+	// AND THE IMPORTED FOLDER OPENS. Restored here per the instruction left by
+	// TestAPIImportPostman_ImportedFolderCannotBeOpened_DEFECT, which recorded
+	// the manifest mismatch as a test so it could not evaporate between rounds
+	// and went red the moment nocx-1qtef fixed it. Import and open are one
+	// user gesture in two halves — you import a Postman export in order to
+	// work in it — so the assertion that they agree belongs on the happy path
+	// rather than in a test of its own.
+	openAPICollection(t, conn, dest, 2)
+
+	// The secret value went to the binding store and NOT into the folder.
+	if bindings.count() != 1 {
+		t.Errorf("bound values = %d, want 1 — the secret must reach the binding store", bindings.count())
+	}
+	walkErr := filepath.WalkDir(dest, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		body, readErr := os.ReadFile(p) //nolint:gosec // a test-only path under t.TempDir()
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(body), "sk-secret-value") {
+			t.Errorf("%s contains the secret VALUE; a collection file names a variable, never a secret", p)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walk %s: %v", dest, walkErr)
+	}
+
+	// AND THE THIRD ENTRANCE, off the same socket. A conformance test that
+	// certifies two entrances out of three certifies the wrong thing: the
+	// URL route reaches the same writer by a different path through the
+	// handler, and it is the only one whose result nobody had validated
+	// against the schema.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{
+      "info": {"name": "acme", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+      "variable": [{"key": "token", "value": "sk-secret-value", "type": "secret"}],
+      "item": [{"name": "ping", "request": {"method": "GET", "url": "https://example.test/ping"}}]
+    }`))
+	}))
+	defer srv.Close()
+
+	byURL := filepath.Join(t.TempDir(), "fetched")
+	fetched := vaultCall(t, conn, "api.import.postman", map[string]any{
+		"url":   srv.URL + "/export.json",
+		"route": map[string]any{"kind": "direct"},
+		"dest":  byURL,
+	}, 3)
+	if fetched.Error != nil {
+		t.Fatalf("api.import.postman by url: %+v", fetched.Error)
+	}
+	validateJSON(t, schema, fetched.Result, "api.import.postman result (url)")
+	// `unsupported: []` and not `null`: an export that converts whole says
+	// so with an empty LIST, which is what the renderer's first .map walks.
+	if !strings.Contains(string(fetched.Result), `"unsupported":[]`) {
+		t.Errorf("result = %s, want an empty unsupported list on an export that converts whole", fetched.Result)
+	}
+	openAPICollection(t, conn, byURL, 4)
+	if bindings.count() != 2 {
+		t.Errorf("bound values = %d, want 2 — the secret must reach the binding store on this route too", bindings.count())
+	}
+}
+
+// The import's failure half, both external calls that can fail: the document
+// that is not there, and the binding store that refuses. The second one
+// matters most — the folder must not survive a binding that failed.
+func TestAPIImportPostman_FailuresLeaveNoCollection(t *testing.T) {
+	bindings := newAPIFakeBindings()
+	bindings.bindErr = errors.New("no vault")
+	_, conn := newAPIWSServer(t, bindings)
+
+	doc := filepath.Join(t.TempDir(), "export.json")
+	if err := os.WriteFile(doc, []byte(`{
+      "info": {"name": "acme", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
+      "variable": [{"key": "token", "value": "sk-secret-value", "type": "secret"}],
+      "item": [{"name": "ping", "request": {"method": "GET", "url": "https://example.test/ping"}}]
+    }`), 0o600); err != nil {
+		t.Fatalf("write export: %v", err)
+	}
+
+	missing := filepath.Join(t.TempDir(), "not-there.json")
+	dest := filepath.Join(t.TempDir(), "imported")
+
+	gone := vaultCall(t, conn, "api.import.postman", map[string]any{"path": missing, "dest": dest}, 1)
+	if gone.Error == nil {
+		t.Fatal("importing a document that is not there succeeded")
+	}
+
+	refused := vaultCall(t, conn, "api.import.postman", map[string]any{"path": doc, "dest": dest}, 2)
+	if refused.Error == nil {
+		t.Fatal("an import whose binding store refused reported success")
+	}
+	if _, err := os.Lstat(dest); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("Lstat(%s) = %v, want not-exist — a failed import leaves no collection behind", dest, err)
+	}
+}
+
+// Design §13.1, made enforceable rather than remembered.
+//
+// Opening a collection mints a backend-held handle, and `root` is never
+// accepted again — but "never accepted" is only a rule if a params object
+// carrying one is REFUSED. A tolerant decoder would IGNORE the extra field,
+// which reads identically from the renderer and leaves the property as a
+// habit somebody has to keep. Every api.* method but collections.open and
+// import.postman is asserted here to refuse a path outright.
+func TestAPIMethods_OnlyOpenAndImportPostmanAcceptAPath(t *testing.T) {
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	root := apiCollectionFolder(t, "https://example.test/ping")
+	handle := openAPICollection(t, conn, root, 1)
+
+	secret := filepath.Join(t.TempDir(), "id_ed25519")
+	if err := os.WriteFile(secret, []byte("PRIVATE KEY"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	// Every method on the surface except the two that legitimately take
+	// one, with valid params for the method plus a path bolted on.
+	base := map[string]map[string]any{
+		"api.collections.list":         {},
+		"api.collections.create":       {"name": "made-up"},
+		"api.collections.createFolder": {"handle": handle, "name": "made-up"},
+		"api.collections.close":        {"handle": handle},
+		"api.request.read":             {"handle": handle, "relPath": "ping.json"},
+		"api.request.write":            {"handle": handle, "relPath": "ping.json", "request": map[string]any{"id": "r1", "name": "ping", "method": "GET", "url": "https://example.test", "body": map[string]any{"kind": "none"}, "auth": map[string]any{"kind": "none"}}},
+		"api.request.send":             {"handle": handle, "relPath": "ping.json"},
+		"api.import.curl":              {"line": "curl https://example.test"},
+	}
+	// The names a path arrives under. Any of them reaching a handler would
+	// be a second way to address a file.
+	pathKeys := []string{"path", "root", "rootPath", "dest", "file"}
+
+	id := 10
+	for method, params := range base {
+		for _, key := range pathKeys {
+			id++
+			withPath := map[string]any{}
+			for k, v := range params {
+				withPath[k] = v
+			}
+			withPath[key] = secret
+			resp := vaultCall(t, conn, method, withPath, id)
+			if resp.Error == nil {
+				t.Errorf("%s accepted a %q param; only api.collections.open and api.import.postman may take a path (design §13.1)", method, key)
+				continue
+			}
+			if resp.Error.Code != -32602 {
+				t.Errorf("%s with a %q param: code = %d, want -32602", method, key, resp.Error.Code)
+			}
+		}
+	}
+
+	// And the two that may: they answer rather than refuse. Without this
+	// half the test above would pass on a surface that refused everything.
+	ok := vaultCall(t, conn, "api.collections.open", map[string]any{"path": root}, 90)
+	if ok.Error != nil {
+		t.Fatalf("api.collections.open must accept a path: %+v", ok.Error)
+	}
+}
+
+// The negatives: the schemas refuse what they must refuse. Without
+// additionalProperties:false and an explicit required list a schema accepts
+// anything and the gate is theatre.
+func TestAPIContracts_RefuseWhatTheyMustRefuse(t *testing.T) {
+	for name, tc := range map[string]struct {
+		schema string
+		raw    string
+	}{
+		"open with no handle":                    {"api.collections.open.schema.json", `{"collection":{"name":"a","requests":[],"malformed":[]}}`},
+		"create with no handle":                  {"api.collections.create.schema.json", `{"collection":{"name":"a","requests":[],"malformed":[]}}`},
+		"create with a field nobody declared":    {"api.collections.create.schema.json", `{"handle":"a","collection":{"name":"a","requests":[],"malformed":[]},"path":"/tmp/acme"}`},
+		"open with an undeclared key":            {"api.collections.open.schema.json", `{"handle":"h","collection":{"name":"a","requests":[],"malformed":[]},"root":"/etc"}`},
+		"a null request list":                    {"api.collections.open.schema.json", `{"handle":"h","collection":{"name":"a","requests":null,"malformed":[]}}`},
+		"list with null collections":             {"api.collections.list.schema.json", `{"collections":null,"defaultRoot":""}`},
+		"list with no defaultRoot":               {"api.collections.list.schema.json", `{"collections":[]}`},
+		"a read with no request":                 {"api.request.read.schema.json", `{}`},
+		"a request with null variables":          {"api.request.read.schema.json", `{"request":{"id":"r","name":"n","method":"GET","url":"u","headers":[],"query":[],"variables":null,"body":{"kind":"none","text":"","fileRef":""},"auth":{"kind":"none","var":"","user":""}}}`},
+		"a request with no variables key":        {"api.request.read.schema.json", `{"request":{"id":"r","name":"n","method":"GET","url":"u","headers":[],"query":[],"body":{"kind":"none","text":"","fileRef":""},"auth":{"kind":"none","var":"","user":""}}}`},
+		"a send with no outcome":                 {"api.request.send.schema.json", `{"request":{"text":"","spans":[]},"response":null,"failure":{"phase":"dial","reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":[]}`},
+		"a send with no request block":           {"api.request.send.schema.json", `{"outcome":"failed","response":null,"failure":{"phase":"dial","reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":[]}`},
+		"a send with a phase nobody declared":    {"api.request.send.schema.json", `{"outcome":"failed","request":{"text":"","spans":[]},"response":null,"failure":{"phase":"handshake","reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":[]}`},
+		"a send with an outcome nobody declared": {"api.request.send.schema.json", `{"outcome":"cancelled","request":{"text":"","spans":[]},"response":null,"failure":{"phase":"stopped","reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":[]}`},
+		"a failure with no phase":                {"api.request.send.schema.json", `{"outcome":"failed","request":{"text":"","spans":[]},"response":null,"failure":{"reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":[]}`},
+		"a send with null certificates":          {"api.request.send.schema.json", `{"outcome":"failed","request":{"text":"","spans":[]},"response":null,"failure":{"phase":"dial","reason":"x"},"environment":"","route":{"kind":"direct","profileId":"","insecureTls":false},"remoteAddr":"","timings":{"dnsMs":0,"connectMs":0,"tlsMs":0,"ttfbMs":0,"totalMs":0},"certificates":null}`},
+		"a cancel that says something":           {"api.request.cancel.schema.json", `{"stopped":true}`},
+		"an import with null list":               {"api.import.postman.schema.json", `{"unsupported":null}`},
+		"a close that says something":            {"api.collections.close.schema.json", `{"closed":true}`},
+	} {
+		t.Run(name, func(t *testing.T) {
+			schema := loadSchema(t, tc.schema)
+			if err := validateJSONErr(schema, []byte(tc.raw)); err == nil {
+				t.Fatalf("%s accepted %s", tc.schema, tc.raw)
+			}
+		})
+	}
+}
+
 // The real progress notification off the real socket. The source holds
 // inside Get after reporting, so the frame is guaranteed rather than raced.
 func TestFilesDownloadProgress_OverTheWireConformsToContract(t *testing.T) {
@@ -6205,6 +8331,25 @@ func TestFilesDownloadDone_DTOConformsToContract(t *testing.T) {
 			}
 		})
 	}
+}
+
+// chosenCollections drops the BUILT-IN collection from a listing.
+//
+// api.collections.list opens the Playground once per process before it
+// answers (capability.apiCollectionService.ensureStarter), because a panel
+// with nothing in it asks a person to do administration before it will show
+// them anything. The assertions below are about the folder the TEST opened —
+// what a create leaves open, what a close removes, how a replaced root is
+// reported — and the built-in row is not part of any of those questions.
+func chosenCollections(in []apiOpenCollectionWire) []apiOpenCollectionWire {
+	out := make([]apiOpenCollectionWire, 0, len(in))
+	for _, c := range in {
+		if filepath.Base(c.Path) == apicoll.StarterName {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out
 }
 
 // The real terminal notification off the real socket, in both of the ways
@@ -6588,4 +8733,52 @@ func TestNotifyPaneWorkFinished_DTOConformsToContract(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestAPIFolderReadAndWrite_DTOConformToContracts(t *testing.T) {
+	readSchema := loadSchema(t, "api.folder.read.schema.json")
+	writeSchema := loadSchema(t, "api.folder.write.schema.json")
+	rawRead, err := json.Marshal(apiFolderReadResponse{Variables: []apiParamWire{{
+		Name: "baseUrl", Value: "https://example.test", Enabled: true,
+	}}})
+	if err != nil {
+		t.Fatalf("marshal read: %v", err)
+	}
+	validateJSON(t, readSchema, rawRead, "api.folder.read DTO")
+
+	rawWrite, err := json.Marshal(apiFolderWriteResponse{Variables: []apiParamWire{{
+		Name: "baseUrl", Value: "https://example.test", Enabled: true,
+	}}})
+	if err != nil {
+		t.Fatalf("marshal write: %v", err)
+	}
+	validateJSON(t, writeSchema, rawWrite, "api.folder.write DTO")
+}
+
+func TestAPIFolderReadAndWrite_OverTheWireConformToContracts(t *testing.T) {
+	readSchema := loadSchema(t, "api.folder.read.schema.json")
+	writeSchema := loadSchema(t, "api.folder.write.schema.json")
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	root := apiCollectionFolder(t, "https://example.test/ping")
+	handle := openAPICollection(t, conn, root, 1)
+
+	written := vaultCall(t, conn, "api.folder.write", map[string]any{
+		"handle":  handle,
+		"relPath": "",
+		"variables": []map[string]any{{
+			"name": "baseUrl", "value": "https://example.test", "enabled": true,
+		}},
+	}, 2)
+	if written.Error != nil {
+		t.Fatalf("api.folder.write: %+v", written.Error)
+	}
+	validateJSON(t, writeSchema, written.Result, "api.folder.write result")
+
+	read := vaultCall(t, conn, "api.folder.read", map[string]any{
+		"handle": handle, "relPath": "",
+	}, 3)
+	if read.Error != nil {
+		t.Fatalf("api.folder.read: %+v", read.Error)
+	}
+	validateJSON(t, readSchema, read.Result, "api.folder.read result")
 }

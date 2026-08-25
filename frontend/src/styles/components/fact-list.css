@@ -1,0 +1,62 @@
+/* FactList — read-only named facts (nocx-n7xha). See ui/fact-list.tsx.
+
+   Two columns, not a table: the name column sizes to the longest name and
+   the value takes the rest, so a row's value starts at the same x wherever
+   it is in the list — which is the only reason a named-fact list reads
+   faster than the same facts in a sentence. `max-content` rather than a
+   fixed width because the names are the caller's (an argument's own key),
+   and a guessed column is either too narrow for `working directory` or
+   half empty for `path`. */
+
+.ui-fact-list {
+  display: grid;
+  grid-template-columns: max-content 1fr;
+  gap: var(--space-2) var(--space-3);
+  align-items: baseline;
+  margin: 0;
+  min-width: 0;
+}
+
+/* The row is a grouping element for the DOM and for screen readers, and it
+   must not be one for the LAYOUT: a grid on the row computes `max-content`
+   from that row's own name, so every row gets a column of its own width and
+   the values step raggedly down the list — which is the one thing this
+   component exists to prevent. `display: contents` lifts the dt and dd into
+   the list's grid, where the name column is the longest name in the LIST.
+   The comment above used to describe this and the code did not do it
+   (nocx-n7xha follow-up). */
+.ui-fact-list__row {
+  display: contents;
+}
+
+/* The name is the quiet half: a person scans the values and reads a name
+   only to find out which value they are looking at. Mono, because these
+   names are the model's own argument keys and a proportional face makes
+   `sessionId` look like prose. */
+.ui-fact-list__name {
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+  white-space: nowrap;
+}
+
+/* The value is body text: this is a surface where the reader has been
+   interrupted and is being asked to decide, and the facts they decide on
+   are not fine print (README, "Dialog body text is body text").
+   `overflow-wrap: anywhere` because a value is a path or a host name and
+   has no length the caller can promise. */
+.ui-fact-list__value {
+  margin: 0;
+  min-width: 0;
+  color: var(--color-text);
+  overflow-wrap: anywhere;
+}
+
+/* The qualification, on its own line under the value it qualifies — never
+   beside it, where a long value would push it off the row and out of the
+   reader's way at exactly the moment it matters. */
+.ui-fact-list__note {
+  display: block;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-dim);
+}

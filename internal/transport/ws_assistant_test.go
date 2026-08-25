@@ -10,6 +10,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -40,7 +41,11 @@ func (s *stubAssistantClient) Probe(ctx context.Context, p assistant.ProbeParams
 	return s.probe(ctx, p)
 }
 
-func (s *stubAssistantClient) Ask(ctx context.Context, p assistant.AskParams, onDelta func(string) error) error {
+// Discard implements assistant.Client. This fake holds no suspended
+// state, so there is nothing to drop.
+func (*stubAssistantClient) Discard(string) {}
+
+func (s *stubAssistantClient) Ask(ctx context.Context, p assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
 	return nil
 }
 
@@ -61,7 +66,39 @@ type assistantHarness struct {
 	conn   *websocket.Conn
 }
 
+// scriptedEndpoints replaces the ENDPOINT read of the wired store with a
+// fixed answer: a list the wire cannot produce (an endpoint offering no
+// models — ValidateEndpoint refuses one at create AND at update, so the
+// only way into that state is a document written underneath us), or a
+// failure. Everything else — roles, the default, profiles, groups — is the
+// real JSONStore, because those are the reads the handler must still make.
+type scriptedEndpoints struct {
+	list []profile.Endpoint
+	err  error
+}
+
+// scriptedEndpointStore is the real store with LoadEndpoints scripted. It
+// embeds *profile.JSONStore, so it satisfies every repository interface the
+// server asserts for (profiles, groups, endpoints, roles) and only the one
+// read is faked.
+type scriptedEndpointStore struct {
+	*profile.JSONStore
+	script *scriptedEndpoints
+}
+
+func (s *scriptedEndpointStore) LoadEndpoints() ([]profile.Endpoint, error) {
+	if s.script.err != nil {
+		return nil, s.script.err
+	}
+	return s.script.list, nil
+}
+
 func newAssistantHarness(t *testing.T, stub *stubAssistantClient) *assistantHarness {
+	t.Helper()
+	return newAssistantHarnessWith(t, stub, nil)
+}
+
+func newAssistantHarnessWith(t *testing.T, stub *stubAssistantClient, script *scriptedEndpoints) *assistantHarness {
 	t.Helper()
 	dir := t.TempDir()
 	docStore := storage.NewDocumentStore(dir)
@@ -79,8 +116,12 @@ func newAssistantHarness(t *testing.T, stub *stubAssistantClient) *assistantHarn
 
 	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
 
+	var profiles profile.ProfileRepository = ps
+	if script != nil {
+		profiles = &scriptedEndpointStore{JSONStore: ps, script: script}
+	}
 	opts := []WSServerOption{
-		WithProfileRepository(ps), WithGroupRepository(ps),
+		WithProfileRepository(profiles), WithGroupRepository(ps),
 		WithCredentialStore(v), WithVaultLifecycle(v),
 	}
 	if stub != nil {
@@ -184,7 +225,12 @@ func TestAgentStatus_EndpointWithoutKey(t *testing.T) {
 	h.setupAndUnseal()
 	p := testEndpointParams()
 	delete(p, "key")
-	h.createEndpoint(t, p)
+	e := h.createEndpoint(t, p)
+	// The credential is now a fact about the endpoint the ROLE resolves to,
+	// so the role must resolve before there is a credential to report at all
+	// (nocx-rikz5). What this test is about — the classification — is
+	// unchanged; its precondition is not.
+	h.mustSetDefault(e.ID, "qwen3")
 
 	raw := jsonrpcCall(t, h.conn, "agent.status", nil)
 	res, code := decodeAgentStatus(t, raw)
@@ -202,7 +248,8 @@ func TestAgentStatus_EndpointWithoutKey(t *testing.T) {
 func TestAgentStatus_CredentialResolvable(t *testing.T) {
 	h := newAssistantHarness(t, &stubAssistantClient{})
 	h.setupAndUnseal()
-	h.createEndpoint(t, testEndpointParams())
+	e := h.createEndpoint(t, testEndpointParams())
+	h.mustSetDefault(e.ID, "qwen3")
 
 	raw := jsonrpcCall(t, h.conn, "agent.status", nil)
 	res, code := decodeAgentStatus(t, raw)
@@ -220,7 +267,8 @@ func TestAgentStatus_CredentialResolvable(t *testing.T) {
 func TestAgentStatus_SealedVaultNotResolvable(t *testing.T) {
 	h := newAssistantHarness(t, &stubAssistantClient{})
 	h.setupAndUnseal()
-	h.createEndpoint(t, testEndpointParams())
+	e := h.createEndpoint(t, testEndpointParams())
+	h.mustSetDefault(e.ID, "qwen3")
 	// Seal the vault: the key material is no longer readable, so the
 	// credential is unresolvable even though the record still references it.
 	h.v.Seal()
@@ -301,6 +349,360 @@ func TestAgentStatus_Unwired(t *testing.T) {
 	}
 }
 
+// ── agent.status: the answering role's resolution (nocx-rikz5) ───────────
+//
+// These decode the wire into an ANONYMOUS struct rather than
+// agentStatusResult on purpose: the point of the first one is to fail on the
+// assertion — "ready with no model chosen" — and not on a compile error
+// about a field that does not exist yet.
+
+type wireAnswering struct {
+	Ready    bool    `json:"ready"`
+	Reason   *string `json:"reason"`
+	Endpoint *string `json:"endpoint"`
+	Model    *string `json:"model"`
+}
+
+type wireAgentStatus struct {
+	EndpointConfigured bool          `json:"endpointConfigured"`
+	Credential         *string       `json:"credential"`
+	Answering          wireAnswering `json:"answering"`
+}
+
+func decodeWireStatus(t *testing.T, raw []byte) (wireAgentStatus, int) {
+	t.Helper()
+	var env struct {
+		Error *struct {
+			Code int `json:"code"`
+		} `json:"error"`
+		Result json.RawMessage `json:"result"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal envelope: %v\nraw: %s", err, raw)
+	}
+	if env.Error != nil {
+		return wireAgentStatus{}, env.Error.Code
+	}
+	var got wireAgentStatus
+	if err := json.Unmarshal(env.Result, &got); err != nil {
+		t.Fatalf("unmarshal result: %v\nraw: %s", err, env.Result)
+	}
+	return got, 0
+}
+
+func reasonOf(a wireAnswering) string {
+	if a.Reason == nil {
+		return "null"
+	}
+	return *a.Reason
+}
+
+func (h *assistantHarness) mustSetDefault(endpointID, model string) {
+	h.t.Helper()
+	if err := h.ps.SetDefaultModel(profile.DefaultModel{EndpointID: endpointID, Model: model}); err != nil {
+		h.t.Fatalf("SetDefaultModel: %v", err)
+	}
+}
+
+// mustForceDefault writes a DANGLING default straight into the document,
+// bypassing SetDefaultModel — which now refuses one, because the store owns
+// the invariant "a stored default names an endpoint that exists and a model
+// it offers" (bead nocx-rikz5). The state is still reachable in the product:
+// another process deletes the endpoint, or an update drops the model, after
+// the default was written. That is exactly what these rungs report, so the
+// tests have to be able to produce it — the same reason scriptedEndpoints
+// exists for an endpoint offering no models.
+func (h *assistantHarness) mustForceDefault(endpointID, model string) {
+	h.t.Helper()
+	d, err := h.ps.LoadAll()
+	if err != nil {
+		h.t.Fatalf("LoadAll: %v", err)
+	}
+	d.DefaultModel = profile.DefaultModel{EndpointID: endpointID, Model: model}
+	if err := h.ps.WriteAll(d); err != nil {
+		h.t.Fatalf("WriteAll: %v", err)
+	}
+}
+
+// endpointParamsWithModel extends the existing endpointParams (which pins
+// one model id for every endpoint it makes) with the model NAMED: a role
+// resolves to one (endpoint, model) pair, so these tests need the two
+// endpoints to offer different models, which is exactly what endpointParams
+// cannot express.
+func endpointParamsWithModel(name, model string, withKey bool) map[string]any {
+	key := "sk-test-123"
+	if !withKey {
+		key = ""
+	}
+	p := endpointParams(name, "http://127.0.0.1:11434/v1", key)
+	p["models"] = []map[string]any{{"name": model}}
+	return p
+}
+
+func TestAgentStatus_AnEndpointWithNoModelChosenIsNotReady(t *testing.T) {
+	// The defect this task exists for: an endpoint with a resolvable key and
+	// nothing assigned reported "Ready", and the refusal arrived one
+	// keystroke later.
+	h := newAssistantHarness(t, &stubAssistantClient{})
+	h.setupAndUnseal()
+	h.createEndpoint(t, testEndpointParams())
+
+	raw := jsonrpcCall(t, h.conn, "agent.status", nil)
+	got, code := decodeWireStatus(t, raw)
+	if code != 0 {
+		t.Fatalf("agent.status: code %d\nraw: %s", code, raw)
+	}
+	if !got.EndpointConfigured {
+		t.Fatal("endpointConfigured = false, want true — the endpoint exists")
+	}
+	if got.Answering.Ready {
+		t.Fatalf("answering.ready = true with no model chosen — this is the lie\nraw: %s", raw)
+	}
+	if reasonOf(got.Answering) != "unassigned" {
+		t.Fatalf("reason = %s, want unassigned", reasonOf(got.Answering))
+	}
+	// No resolved endpoint means no key the question is about: the old
+	// aggregate would have reported the fleet's fact here.
+	if got.Credential != nil {
+		t.Fatalf("credential = %q, want null — no endpoint resolved", *got.Credential)
+	}
+}
+
+func TestAgentStatus_NoEndpointsSaysSoRatherThanUnassigned(t *testing.T) {
+	// Before `unassigned`: with no endpoints there is nothing to assign, and
+	// sending a person to choose from an empty list is worse than silence.
+	h := newAssistantHarness(t, &stubAssistantClient{})
+	h.setupAndUnseal()
+
+	got, code := decodeWireStatus(t, jsonrpcCall(t, h.conn, "agent.status", nil))
+	if code != 0 {
+		t.Fatalf("agent.status: code %d", code)
+	}
+	if got.Answering.Ready || reasonOf(got.Answering) != "no-endpoints" {
+		t.Fatalf("answering = %+v, want not-ready with reason no-endpoints", got.Answering)
+	}
+}
+
+func TestAgentStatus_ADefaultMakesItReadyAndNamesTheModel(t *testing.T) {
+	h := newAssistantHarness(t, &stubAssistantClient{})
+	h.setupAndUnseal()
+	e := h.createEndpoint(t, testEndpointParams())
+	h.mustSetDefault(e.ID, "qwen3")
+
+	got, code := decodeWireStatus(t, jsonrpcCall(t, h.conn, "agent.status", nil))
+	if code != 0 {
+		t.Fatalf("agent.status: code %d", code)
+	}
+	if !got.Answering.Ready {
+		t.Fatalf("answering = %+v, want ready", got.Answering)
+	}
+	if got.Answering.Endpoint == nil || *got.Answering.Endpoint != "Local" {
+		t.Fatalf("answering.endpoint = %v, want Local", got.Answering.Endpoint)
+	}
+	if got.Answering.Model == nil || *got.Answering.Model != "qwen3" {
+		t.Fatalf("answering.model = %v, want qwen3", got.Answering.Model)
+	}
+	if got.Answering.Reason != nil {
+		t.Fatalf("reason = %q on a ready status, want null", *got.Answering.Reason)
+	}
+}
+
+func TestAgentStatus_AnAssignmentOutranksTheDefaultAndNamesItsOwnModel(t *testing.T) {
+	// The role's own assignment wins: agent.status must report what will
+	// actually answer, not the convenience it overrode.
+	h := newAssistantHarness(t, &stubAssistantClient{})
+	h.setupAndUnseal()
+	chosen := h.createEndpoint(t, endpointParamsWithModel("chosen", "m-a", true))
+	other := h.createEndpoint(t, endpointParamsWithModel("fallback", "m-b", true))
+	h.mustSetDefault(other.ID, "m-b")
+	if err := h.ps.AssignRole(profile.RoleAssignment{
+		Role: profile.RoleAnswering, EndpointID: chosen.ID, Model: "m-a",
+	}); err != nil {
+		t.Fatalf("AssignRole: %v", err)
+	}
+
+	got, _ := decodeWireStatus(t, jsonrpcCall(t, h.conn, "agent.status", nil))
+	if !got.Answering.Ready || got.Answering.Endpoint == nil || *got.Answering.Endpoint != "chosen" {
+		t.Fatalf("answering = %+v, want ready on chosen", got.Answering)
+	}
+}
+
+func TestAgentStatus_TheCredentialIsTheResolvedEndpointsAndNoOther(t *testing.T) {
+	// The defect: an unrelated healthy endpoint used to make the whole thing
+	// report resolvable while the endpoint that would actually answer had no
+	// key at all.
+	h := newAssistantHarness(t, &stubAssistantClient{})
+	h.setupAndUnseal()
+	chosen := h.createEndpoint(t, endpointParamsWithModel("chosen", "m-a", false))
+	h.createEndpoint(t, endpointParamsWithModel("unrelated", "m-b", true))
+	h.mustSetDefault(chosen.ID, "m-a")
+
+	got, code := decodeWireStatus(t, jsonrpcCall(t, h.conn, "agent.status", nil))
+	if code != 0 {
+		t.Fatalf("agent.status: code %d", code)
+	}
+	if got.Credential == nil || *got.Credential != credNone {
+		t.Fatalf("credential = %v, want none — chosen answers and chosen has no key", got.Credential)
+	}
+}
+
+func TestAgentStatus_ADefaultWhoseEndpointIsGoneSaysEndpointGone(t *testing.T) {
+	// The default's endpoint deleted by another process between load and
+	// resolve: the clear-on-delete is the tidy path, not the safety net.
+	h := newAssistantHarness(t, &stubAssistantClient{})
+	h.setupAndUnseal()
+	h.createEndpoint(t, testEndpointParams())
+	h.mustForceDefault("endpoint:custom:gone:0000", "qwen3")
+
+	got, _ := decodeWireStatus(t, jsonrpcCall(t, h.conn, "agent.status", nil))
+	if got.Answering.Ready || reasonOf(got.Answering) != "endpoint-gone" {
+		t.Fatalf("answering = %+v, want reason endpoint-gone", got.Answering)
+	}
+	if got.Credential != nil {
+		t.Fatalf("credential = %q, want null on a refusal", *got.Credential)
+	}
+}
+
+func TestAgentStatus_ADefaultNamingARemovedModelSaysModelGone(t *testing.T) {
+	h := newAssistantHarness(t, &stubAssistantClient{})
+	h.setupAndUnseal()
+	e := h.createEndpoint(t, testEndpointParams())
+	h.mustForceDefault(e.ID, "a-model-this-endpoint-never-offered")
+
+	got, _ := decodeWireStatus(t, jsonrpcCall(t, h.conn, "agent.status", nil))
+	if got.Answering.Ready || reasonOf(got.Answering) != "model-gone" {
+		t.Fatalf("answering = %+v, want reason model-gone", got.Answering)
+	}
+}
+
+func TestAgentStatus_AnEndpointOfferingNoModelsSaysSo(t *testing.T) {
+	// "Choose a model" would open a picker with no options — a repair the
+	// person cannot perform, so it gets its own rung.
+	h := newAssistantHarnessWith(t, &stubAssistantClient{}, &scriptedEndpoints{
+		list: []profile.Endpoint{{
+			ID: "e1", Name: "empty", BaseURL: "http://127.0.0.1:11434/v1",
+			Schema: profile.EndpointSchemaOpenAICompatible,
+		}},
+	})
+	h.setupAndUnseal()
+
+	got, code := decodeWireStatus(t, jsonrpcCall(t, h.conn, "agent.status", nil))
+	if code != 0 {
+		t.Fatalf("agent.status: code %d", code)
+	}
+	if !got.EndpointConfigured {
+		t.Fatal("endpointConfigured = false, want true — the endpoint exists")
+	}
+	if got.Answering.Ready || reasonOf(got.Answering) != "no-models" {
+		t.Fatalf("answering = %+v, want reason no-models", got.Answering)
+	}
+}
+
+// `no-models` may not shadow `endpoint-gone`. A default naming an endpoint
+// that is gone, while the surviving endpoint happens to offer no models,
+// used to report `no-models` — which sends the person to add a model to an
+// endpoint they never chose, instead of to the choice that actually broke.
+func TestAgentStatus_ADanglingEndpointOutranksNoModels(t *testing.T) {
+	h := newAssistantHarnessWith(t, &stubAssistantClient{}, &scriptedEndpoints{
+		list: []profile.Endpoint{{
+			ID: "e-empty", Name: "empty", BaseURL: "http://127.0.0.1:11434/v1",
+			Schema: profile.EndpointSchemaOpenAICompatible,
+		}},
+	})
+	h.setupAndUnseal()
+	h.mustForceDefault("endpoint:custom:gone:0000", "qwen3")
+
+	got, code := decodeWireStatus(t, jsonrpcCall(t, h.conn, "agent.status", nil))
+	if code != 0 {
+		t.Fatalf("agent.status: code %d", code)
+	}
+	if got.Answering.Ready || reasonOf(got.Answering) != "endpoint-gone" {
+		t.Fatalf("reason = %s, want endpoint-gone — an explicit dangling selection keeps its own rung", reasonOf(got.Answering))
+	}
+}
+
+// And `no-models` may not shadow `model-gone`. The chosen endpoint survives
+// but no longer offers the chosen model, and it is the only endpoint there,
+// so nothing offers a model at all — the answer is still what broke, not
+// the fleet-wide fact.
+func TestAgentStatus_ARemovedModelOutranksNoModels(t *testing.T) {
+	h := newAssistantHarnessWith(t, &stubAssistantClient{}, &scriptedEndpoints{
+		list: []profile.Endpoint{{
+			ID: "e1", Name: "stripped", BaseURL: "http://127.0.0.1:11434/v1",
+			Schema: profile.EndpointSchemaOpenAICompatible,
+		}},
+	})
+	h.setupAndUnseal()
+	h.mustForceDefault("e1", "qwen3")
+
+	got, code := decodeWireStatus(t, jsonrpcCall(t, h.conn, "agent.status", nil))
+	if code != 0 {
+		t.Fatalf("agent.status: code %d", code)
+	}
+	if got.Answering.Ready || reasonOf(got.Answering) != "model-gone" {
+		t.Fatalf("reason = %s, want model-gone — the selected endpoint is still there, its model is not", reasonOf(got.Answering))
+	}
+}
+
+func TestAgentStatus_AStoreThatCannotAnswerIsARungNotAnError(t *testing.T) {
+	h := newAssistantHarnessWith(t, &stubAssistantClient{}, &scriptedEndpoints{
+		err: errors.New("disk gone"),
+	})
+	h.setupAndUnseal()
+
+	raw := jsonrpcCall(t, h.conn, "agent.status", nil)
+	got, code := decodeWireStatus(t, raw)
+	if code != 0 {
+		t.Fatalf("code = %d; a store failure must be a reported state, not an RPC error\nraw: %s", code, raw)
+	}
+	if got.Answering.Ready || reasonOf(got.Answering) != "unavailable" {
+		t.Fatalf("answering = %+v, want reason unavailable", got.Answering)
+	}
+	if got.EndpointConfigured {
+		t.Fatal("endpointConfigured = true off a store that cannot answer")
+	}
+}
+
+func TestAgentStatus_AProbeOfAnotherModelIsNotReportedForThisOne(t *testing.T) {
+	// A probe describes ONE endpoint and model. "Last test ok" about a model
+	// nobody is asking is a lie the person cannot see through.
+	h := newAssistantHarness(t, &stubAssistantClient{
+		probe: func(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
+			return assistant.ProbeResult{
+				EndpointName: p.Name, Model: p.Model, Kind: probeKindFor(p), OK: true, At: time.Now(),
+			}, nil
+		},
+	})
+	h.setupAndUnseal()
+	e := h.createEndpoint(t, testEndpointParams())
+	h.mustSetDefault(e.ID, "qwen3")
+
+	// A probe of a DIFFERENT model on the same endpoint.
+	if raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
+		"name": "Local", "baseUrl": "http://127.0.0.1:11434/v1", "key": "sk", "model": "some-other-model",
+	}); isErrorResponse(t, raw) {
+		t.Fatalf("endpoints.probe: %s", raw)
+	}
+	res, code := decodeAgentStatus(t, jsonrpcCall(t, h.conn, "agent.status", nil))
+	if code != 0 {
+		t.Fatalf("agent.status: code %d", code)
+	}
+	if res.LastProbe != nil {
+		t.Fatalf("lastProbe = %+v, want null — it describes some-other-model", res.LastProbe)
+	}
+
+	// The same endpoint AND the same model: now it does describe this one.
+	if raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
+		"name": "Local", "baseUrl": "http://127.0.0.1:11434/v1", "key": "sk", "model": "qwen3",
+	}); isErrorResponse(t, raw) {
+		t.Fatalf("endpoints.probe: %s", raw)
+	}
+	res, _ = decodeAgentStatus(t, jsonrpcCall(t, h.conn, "agent.status", nil))
+	if res.LastProbe == nil || res.LastProbe.Model != "qwen3" {
+		t.Fatalf("lastProbe = %+v, want the qwen3 probe", res.LastProbe)
+	}
+}
+
 // ── endpoints.probe ───────────────────────────────────────────────────────
 
 func TestEndpointsProbe_ProbesTheDraft(t *testing.T) {
@@ -349,7 +751,7 @@ func TestEndpointsProbe_ProbeFailureIsAResult(t *testing.T) {
 	})
 
 	raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
-		"name": "Local", "baseUrl": "http://127.0.0.1:1/v1", "key": "", "model": "qwen3",
+		"name": "Local", "baseUrl": "http://127.0.0.1:1/v1", "key": "", "noKey": true, "model": "qwen3",
 	})
 
 	if isErrorResponse(t, raw) {
@@ -378,7 +780,7 @@ func TestEndpointsProbe_EngineGoErrorIsAnRPCError(t *testing.T) {
 	})
 
 	raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
-		"name": "Local", "baseUrl": "http://127.0.0.1:11434/v1", "key": "", "model": "qwen3",
+		"name": "Local", "baseUrl": "http://127.0.0.1:11434/v1", "key": "", "noKey": true, "model": "qwen3",
 	})
 	if !strings.Contains(string(raw), "-32603") {
 		t.Fatalf("endpoints.probe with a Go error = %s, want -32603", raw)

@@ -762,6 +762,10 @@ export class PaneManager {
    *  Endpoints with the editor up on a blank one, so the refusal carries
    *  its repair. */
   onCreateEndpoint?: () => void
+  /** The composer's model chip, clicked on the model — opens Settings →
+   *  Roles, where the model that answers is chosen (nocx-rikz5). Relayed
+   *  beside onCreateEndpoint, which the chip's other destination reuses. */
+  onOpenRoles?: () => void
   /** Called when the user performs a UI action that should reset the
    *  vault idle timer. Wired by main.tsx to vaultClient.activity(). */
   onActivity?: () => void
@@ -1099,6 +1103,10 @@ export class PaneManager {
       undefined,
       {
         onSubtitleChange: (subtitle) => paneRef.current?.updateSubtitle(subtitle),
+        // A tool call in an answer names the session it touched by the
+        // pane's own name (nocx-vnzek). Only this manager can answer it —
+        // the session may be another pane's.
+        sessionName: (id) => this.sessionDisplayName(id),
         onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
         onPortsTargetChange: () => this.onActivePaneChange?.(),
         onActiveOriginChange: () => this.onActivePaneChange?.(),
@@ -1108,6 +1116,7 @@ export class PaneManager {
         snippets: this.snippets,
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
+        onOpenRoles: this.onOpenRoles,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
         onPaneObservationChange: (state) => paneRef.current?.updatePaneObservation(state),
         // Where the pane IS, recorded so a restart reopens it there
@@ -1178,6 +1187,10 @@ export class PaneManager {
       sshOpts,
       {
         onSubtitleChange: (subtitle) => paneRef.current?.updateSubtitle(subtitle),
+        // A tool call in an answer names the session it touched by the
+        // pane's own name (nocx-vnzek). Only this manager can answer it —
+        // the session may be another pane's.
+        sessionName: (id) => this.sessionDisplayName(id),
         onAdoptabilityChange: (adoptable: boolean) => {
           const pane = paneRef.current
           if (!pane) return
@@ -1200,6 +1213,7 @@ export class PaneManager {
         snippets: this.snippets,
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
+        onOpenRoles: this.onOpenRoles,
       },
     )
     const descriptor: ContentDescriptor = {
@@ -2091,6 +2105,85 @@ export class PaneManager {
     return this.panes.find((p) => p.content.lineage?.()?.sessionId === sessionId)
   }
 
+  /** The pane whose session matches, when any pane in this window holds it.
+   *  ONE walk, because "which pane is this session" is one question and the
+   *  two callers below want different halves of the answer. */
+  private paneForSession(sessionId: string): Pane | null {
+    for (const pane of this.panes) {
+      const content = pane.content
+      if (content instanceof TerminalContent && content.sessionId() === sessionId) {
+        return pane
+      }
+    }
+    return null
+  }
+
+  /** The terminal content whose session matches, when any pane holds it —
+   *  the readScreen pull's lookup (nocx-ljfwz): the renderer answers a
+   *  screen request only for the pane that owns the session's grid. */
+  terminalContentForSession(sessionId: string): TerminalContent | null {
+    const content = this.paneForSession(sessionId)?.content
+    return content instanceof TerminalContent ? content : null
+  }
+
+  /** What a session is called TO A PERSON (nocx-vnzek): the pane's own
+   *  display title — the words already on the tab and in its tooltip.
+   *  Null when no pane in this window holds that session, or when the pane
+   *  has no title yet (a pane one round trip old); a caller must treat that
+   *  as "cannot be named", never fall back to the id, which is the internal
+   *  handle this exists to keep off the screen.
+   *
+   *  There is no second derivation here: `displayTitle` composes the typed
+   *  tab name, the pane's own title and the descriptor's default exactly
+   *  once (layout/tab-label.ts), and this is that answer asked by session
+   *  rather than by pane. */
+  sessionDisplayName(sessionId: string): string | null {
+    return this.paneForSession(sessionId)?.displayTitle || null
+  }
+
+  /** Where a session IS, for a surface that has to say so in a sentence
+   *  (the approval prompt, nocx-njn8s): the tab it is in, the machine its
+   *  ACTIVE domain is talking to, and the directory it is in. Null when no
+   *  pane in this window holds it — the same "cannot be named" the caller
+   *  above returns, and a caller must treat it the same way rather than
+   *  printing the id back.
+   *
+   *  `machine` is `user@host` for a remote domain and '' for a local shell,
+   *  and '' is a real answer: the product's words for "here" belong to the
+   *  surface, not to this layer. `cwd` is '' the same way, for a session
+   *  that has no directory to report (a fresh domain, a lane gap).
+   *
+   *  `cwdVerified` travels WITH `cwd` and is not optional (nocx-n7xha).
+   *  Only a cwd an OSC 7 report confirmed is a claim; the one a session was
+   *  opened with is the provider's fallback question (AD-5), and a surface
+   *  that prints the second as fact lies at the moment lying costs most.
+   *  The pair is `TerminalContent.activeOrigin`'s, which is where the two
+   *  are already held together — a caller reading a bare cwd from somewhere
+   *  else would be the second derivation this method exists to prevent.
+   *
+   *  Nothing here is derived: the tab is `sessionDisplayName`, the machine
+   *  is `TerminalContent.hostLabel` (what the block header and the close
+   *  prompt read), the directory is the origin answer the Files panel
+   *  follows. This exists only because a person deciding on a command needs
+   *  all of it in one question, and several injected callbacks that could
+   *  disagree would be the defect this is fixing, in a new place. */
+  sessionWhere(
+    sessionId: string,
+  ): { tab: string; machine: string; cwd: string; cwdVerified: boolean } | null {
+    const tab = this.sessionDisplayName(sessionId)
+    if (tab === null) return null
+    const content = this.terminalContentForSession(sessionId)
+    // Null for a tab whose shell has exited — the pane is still named and
+    // still on a machine, and there is no longer a directory to report.
+    const origin = content?.activeOrigin() ?? null
+    return {
+      tab,
+      machine: content?.hostLabel() ?? '',
+      cwd: origin?.cwd ?? '',
+      cwdVerified: origin?.cwdVerified ?? false,
+    }
+  }
+
   /** The active pane's PANE element — the always-visible mount the snippet
    *  palette floats in (design §10.1: it must answer when the editor is
    *  hidden, so it cannot live inside the editor root). Null when no tab
@@ -2125,6 +2218,27 @@ export class PaneManager {
     const pane = this.activePane
     const origin = pane?.content.activeOrigin?.()
     return pane && origin ? { paneId: pane.id, ...origin } : null
+  }
+
+  /** The session id of SOME open local pane, or null.
+   *
+   *  Read at call time and never latched. It replaces a signal in the
+   *  composition root that held the first local session ever seen and was
+   *  never cleared: a gesture that names a session — a window drop, a
+   *  files.open for a collection watch — is refused by the backend when that
+   *  session is not open, and the refusal then named a tab the person had
+   *  closed and was not thinking about.
+   *
+   *  ACTIVE is deliberately not the question. The collection watch and the
+   *  import drop both want "a local session this window can address", and the
+   *  tab in front is not that question — the workbench pane is usually the one
+   *  in front while either happens. */
+  anyLocalSession(): string | null {
+    for (const pane of this.panes) {
+      const origin = pane.content.activeOrigin?.()
+      if (origin && origin.kind === 'local') return origin.sessionId
+    }
+    return null
   }
 
   /** The ACTIVE pane's surface type (B.8) — the seam chrome reads to answer

@@ -709,12 +709,15 @@ func validateSettingsSecretSetRaw(raw json.RawMessage) string {
 // on save — and the key rides the params once to become an Authorization
 // header, so it gets the probe key's bound and the control-character
 // refusal.
-func validateEndpointParamsWith(name, baseURL string, schema profile.EndpointSchema, key, credentialRow string, models []endpointModelInput, headers []endpointHeaderInput) string {
+func validateEndpointParamsWith(name, baseURL string, schema profile.EndpointSchema, noKey bool, key, credentialRow string, models []endpointModelInput, headers []endpointHeaderInput) string {
 	if msg := boundedRunes("name", name, maxConfigNameRunes); msg != "" {
 		return msg
 	}
 	if msg := boundedRunes("baseUrl", baseURL, maxEndpointURLRunes); msg != "" {
 		return msg
+	}
+	if noKey && (key != "" || credentialRow != "") {
+		return "endpoint declaring noKey must not carry a credential"
 	}
 	if key != "" {
 		if msg := boundedRunes("key", key, maxProbeKeyRunes); msg != "" {
@@ -759,6 +762,7 @@ func validateEndpointParamsWith(name, baseURL string, schema profile.EndpointSch
 		Name:          name,
 		BaseURL:       baseURL,
 		Schema:        resolveEndpointSchema(schema),
+		NoKey:         noKey,
 		CredentialRef: credentialRow,
 		Models:        wireModelsToStored(models),
 		Headers:       wireHeadersToStored(headers),
@@ -808,7 +812,7 @@ func validateEndpointCreateRaw(raw json.RawMessage) string {
 	if msg := decodeObject(raw, &p); msg != "" {
 		return msg
 	}
-	return validateEndpointParamsWith(p.Name, p.BaseURL, p.Schema, p.Key, p.Credential, p.Models, p.Headers)
+	return validateEndpointParamsWith(p.Name, p.BaseURL, p.Schema, p.NoKey, p.Key, p.Credential, p.Models, p.Headers)
 }
 
 // validateEndpointUpdateRaw is the registered validator for endpoints.update.
@@ -823,7 +827,7 @@ func validateEndpointUpdateRaw(raw json.RawMessage) string {
 	if msg := configIDRunes("id", p.ID); msg != "" {
 		return msg
 	}
-	return validateEndpointParamsWith(p.Name, p.BaseURL, p.Schema, p.Key, p.Credential, p.Models, p.Headers)
+	return validateEndpointParamsWith(p.Name, p.BaseURL, p.Schema, p.NoKey, p.Key, p.Credential, p.Models, p.Headers)
 }
 
 // validateEndpointDeleteRaw is the registered validator for endpoints.delete.
@@ -2245,9 +2249,17 @@ func (s *WSServer) buildConfigOp(lane, configGate, vaultGate control.Admission) 
 			endpointsRepo = er
 		}
 	}
+	// Role assignments ride the same document (bead nocx-e6kn2): a role
+	// names an endpoint, and the pair shares the endpoints' atomic writes.
+	var rolesRepo profile.RoleRepository
+	if s.profiles != nil {
+		if rr, ok := s.profiles.(profile.RoleRepository); ok {
+			rolesRepo = rr
+		}
+	}
 	return capability.NewConfigOperation(
 		configGate, vaultGate, lane,
-		s.profiles, s.groups, endpointsRepo, s.profileSvc, s.settings,
+		s.profiles, s.groups, endpointsRepo, rolesRepo, s.profileSvc, s.settings,
 		s.vaultRowResolver(), s.vaultEndpointSecrets(),
 	), endpointsRepo != nil
 }
@@ -2317,6 +2329,23 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 		}),
 		regResponder(configSub, "endpoints.delete", params(validateEndpointDeleteRaw), func(r Responder) handlerFunc {
 			h := endpointHandlers{op: configOp, wired: endpointWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		// The role methods (beads nocx-e6kn2, nocx-rikz5): roles.list,
+		// roles.assign and roles.setDefault ride the same config operation
+		// as the endpoints they reference — one queue, so a default and an
+		// assignment can never be written against two different endpoint
+		// tables.
+		regResponder(configSub, "roles.list", noParams(), func(r Responder) handlerFunc {
+			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "roles.assign", params(validateRoleAssignRaw), func(r Responder) handlerFunc {
+			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}),
+		regResponder(configSub, "roles.setDefault", params(validateRoleSetDefaultRaw), func(r Responder) handlerFunc {
+			h := roleHandlers{op: configOp, wired: endpointWired, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}),
 		// The assistant's methods (nocx-edio): endpoints.probe is the Test

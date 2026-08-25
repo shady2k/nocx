@@ -32,6 +32,7 @@ function ep(overrides: Partial<Endpoint> = {}): Endpoint {
     name: 'provider',
     baseUrl: 'https://api.example.com/v1',
     schema: 'openai-compatible',
+    noKey: false,
     credential: null,
     models: [{ name: 'gpt-4o', alias: null }],
     headers: [],
@@ -71,6 +72,7 @@ function createHarness(initial: Endpoint[] = [], opts: { firstListError?: Error 
         name: input.name,
         baseUrl: input.baseUrl,
         schema: 'openai-compatible',
+        noKey: input.noKey,
         // The backend mints the key into the vault and returns only the row
         // handle — the value never crosses back.
         credential: input.key !== '' ? `secrow:${next++}` : null,
@@ -91,6 +93,7 @@ function createHarness(initial: Endpoint[] = [], opts: { firstListError?: Error 
         ...existing,
         name: input.name,
         baseUrl: input.baseUrl,
+        noKey: input.noKey,
         models: input.models.map((m) => ({ name: m.name, alias: m.alias })),
       }
       store[index] = updated
@@ -106,21 +109,21 @@ function createHarness(initial: Endpoint[] = [], opts: { firstListError?: Error 
       )
       return {}
     })
-  const probeEndpoint = vi.spyOn(client, 'probeEndpoint').mockImplementation(
-    // eslint-disable-next-line @typescript-eslint/require-await
-    async (input: { name: string; baseUrl: string; key: string; model: string }) => {
-      // A backend probe answers with a result — the Test button's whole
-      // contract is that a failed probe is a RESULT, not an error.
-      return {
-        name: input.name,
-        model: input.model,
-        kind: 'model' as const,
-        ok: true,
-        elapsedMs: 12,
-        at: new Date().toISOString(),
-      }
-    },
-  )
+  const probeEndpoint = vi
+    .spyOn(client, 'probeEndpoint')
+    .mockImplementation(
+      (input: { name: string; baseUrl: string; noKey: boolean; key: string; model: string }) =>
+        Promise.resolve({
+          // A backend probe answers with a result — the Test button's whole
+          // contract is that a failed probe is a RESULT, not an error.
+          name: input.name,
+          model: input.model,
+          kind: 'model' as const,
+          ok: true,
+          elapsedMs: 12,
+          at: new Date().toISOString(),
+        }),
+    )
   return {
     client,
     listEndpoints,
@@ -311,6 +314,7 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     expect(createEndpoint.mock.calls[0][0]).toEqual({
       name: 'My provider',
       baseUrl: 'https://api.example.com/v1',
+      noKey: false,
       key: 'sk-live-abc',
       // No schema on the wire: the form has no dialect control while one
       // schema exists (design §4.5, decision 2), so the backend owns the
@@ -323,14 +327,62 @@ describe('AI endpoints surface — real surface, real client seam', () => {
       models: [{ name: 'gpt-4o', alias: 'Flagship' }],
     })
 
-    // The saved row appears in the list, saying the key is saved — but never
-    // the key itself.
+    // The saved row appears in the list — and never the key itself, which is
+    // the whole point: a key crosses to the backend once and never back.
     await waitForRows(container, 1)
     const row = rows(container)[0]
     expect(row.textContent).toContain('My provider')
-    expect(row.textContent).toContain('Key saved')
     expect(row.textContent).not.toContain('sk-live-abc')
     expect(toastMessages()).toContain('Saved "My provider"')
+  })
+
+  it('creates an explicitly keyless endpoint without rendering or sending key material', async () => {
+    const { container, createEndpoint } = mount()
+    await waitForRows(container, 0)
+    const dialog = openNew(container)
+    fillField(container, 'endpoint-name', 'Local model')
+    fillField(container, 'endpoint-base-url', 'http://127.0.0.1:11434/v1')
+    const noKey = dialog.querySelector('input[type="checkbox"]') as HTMLInputElement
+    expect(noKey).toBeTruthy()
+    fireEvent.click(noKey)
+    expect(dialog.querySelector('#endpoint-key')).toBeNull()
+    clickButton(dialog, 'Add model')
+    fillField(container, 'endpoint-model-0-name', 'qwen3')
+    clickButton(dialog, 'Create Endpoint')
+    await vi.waitFor(() => {
+      expect(createEndpoint).toHaveBeenCalledTimes(1)
+    })
+    expect(createEndpoint.mock.calls[0][0]).toMatchObject({
+      name: 'Local model',
+      baseUrl: 'http://127.0.0.1:11434/v1',
+      noKey: true,
+      key: '',
+      credential: '',
+    })
+  })
+
+  it('the dialog is ordered by what Test actually tests: headers before the button, models after', async () => {
+    const { container } = mount()
+    await waitForRows(container, 0)
+    const dialog = openNew(container)
+
+    // Custom headers ride on every request the probe sends
+    // (ws_assistant.go resolveProbeHeaders), so they are part of the
+    // CONNECTION and belong above the button that checks it. Models are
+    // what the connection then offers — and the model field discovers them
+    // from a successful test — so they belong below it. The dialog used to
+    // read name, url, key, TEST, models, headers, which asked a person to
+    // configure half the connection after already testing it.
+    const headers = dialog.querySelector('[aria-label="Custom headers"]')!
+    const testRow = dialog.querySelector('.ep-test-row')!
+    const models = dialog.querySelector('[aria-label="Endpoint models"]')!
+    expect(headers).toBeTruthy()
+    expect(testRow).toBeTruthy()
+    expect(models).toBeTruthy()
+
+    const before = Node.DOCUMENT_POSITION_FOLLOWING
+    expect(headers.compareDocumentPosition(testRow) & before).toBeTruthy()
+    expect(testRow.compareDocumentPosition(models) & before).toBeTruthy()
   })
 
   it('Enter with the model list open takes the option instead of saving; Enter with it closed submits (nocx-0plm6)', async () => {
@@ -632,6 +684,7 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     expect(probeEndpoint.mock.calls[0][0]).toEqual({
       name: 'Local',
       baseUrl: 'http://127.0.0.1:11434/v1',
+      noKey: false,
       key: '',
       model: 'qwen3',
       headers: [],
@@ -702,6 +755,7 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     expect(probeEndpoint.mock.calls[0][0]).toEqual({
       name: 'provider',
       baseUrl: 'https://api.example.com/v1',
+      noKey: false,
       key: '',
       model: 'gpt-4o',
       endpointId: 'endpoint:custom:provider:1',
@@ -1004,8 +1058,11 @@ describe('the saved endpoint row (nocx-9bx0m)', () => {
     expect(badges.length).toBe(1)
     expect(badges[0].textContent).toBe('OpenAI-compatible')
     expect(row.querySelector('.ui-record-row__meta-text')?.textContent).toBe('1 model')
-    expect(row.querySelector('.ui-status-dot')?.getAttribute('data-tone')).toBe('ok')
-    expect(row.textContent).toContain('Key saved')
+    // And NOTHING about the credential. A resolvable key is the absence of a
+    // problem; the row speaks only to refuse. "Key saved" was a green
+    // reassurance under every healthy endpoint and the owner struck it.
+    expect(row.querySelector('.ui-record-row__status')).toBeNull()
+    expect(row.textContent).not.toContain('Key saved')
   })
 
   it('a keyless endpoint renders "No key" as the neutral dot + text, and the Test stays enabled', async () => {
@@ -1020,6 +1077,23 @@ describe('the saved endpoint row (nocx-9bx0m)', () => {
     // check needs no model and no key).
     const test = row.querySelector('[aria-label="Test provider"]') as HTMLButtonElement
     expect(test.disabled).toBe(false)
+  })
+
+  it('keeps an explicitly keyless row quiet while leaving Test enabled', async () => {
+    const { container, probeEndpoint } = mount([
+      ep({ id: 'endpoint:custom:local:1', name: 'local', noKey: true }),
+    ])
+    await waitForRows(container, 1)
+    const row = rows(container)[0]
+    expect(row.querySelector('.ui-record-row__status')).toBeNull()
+    expect(row.textContent).not.toContain('No key')
+    const test = row.querySelector('[aria-label="Test local"]') as HTMLButtonElement
+    expect(test.disabled).toBe(false)
+    fireEvent.click(test)
+    await vi.waitFor(() => {
+      expect(probeEndpoint).toHaveBeenCalledTimes(1)
+    })
+    expect(probeEndpoint.mock.calls[0][0].noKey).toBe(true)
   })
 
   it('a saved endpoint row is tested by naming the record — the SAME client method the editor uses', async () => {
@@ -1047,6 +1121,7 @@ describe('the saved endpoint row (nocx-9bx0m)', () => {
     expect(probeEndpoint.mock.calls[0][0]).toEqual({
       name: 'provider',
       baseUrl: 'https://api.example.com/v1',
+      noKey: false,
       key: '',
       model: '',
       endpointId: 'endpoint:custom:provider:1',
@@ -1100,7 +1175,7 @@ describe('the saved endpoint row (nocx-9bx0m)', () => {
     )
   })
 
-  it('a sealed vault says so on the row and does not run the check (credential cannot resolve)', async () => {
+  it('a sealed vault says nothing on the row and leaves the Test live — pressing it is what raises the unlock', async () => {
     const { container, probeEndpoint, ctrl } = mountWithVault(
       [ep({ id: 'endpoint:custom:provider:1', name: 'provider', credential: 'secrow:abc' })],
       vaultHarness({ state: 'sealed' as const, hasPassphrase: true }),
@@ -1111,13 +1186,18 @@ describe('the saved endpoint row (nocx-9bx0m)', () => {
     await waitForRows(container, 1)
 
     const row = rows(container)[0]
-    // The agent.status vocabulary, verbatim: the vault cannot answer right
-    // now, and the row is not the place to raise the unlock prompt.
-    expect(row.textContent).toContain('The vault is locked — unlock it to use the assistant')
+    // A locked vault is the vault's resting state, not this endpoint's
+    // defect: the row does not narrate it, and does not pre-refuse the
+    // check either. endpoints.probe raises vault.ErrVaultSealed, the
+    // dispatcher seam normalizes it and the renderer raises the unlock and
+    // re-sends (ADR-0032, ws_assistant.go resolveProbeCredential) — so the
+    // check completes once the vault answers. Greying the button out was
+    // the frontend refusing a path the backend had kept open.
+    expect(row.querySelector('.ui-record-row__status')).toBeNull()
     const test = row.querySelector('[aria-label="Test provider"]') as HTMLButtonElement
-    expect(test.disabled).toBe(true)
+    expect(test.disabled).toBe(false)
     fireEvent.click(test)
-    expect(probeEndpoint).not.toHaveBeenCalled()
+    await vi.waitFor(() => expect(probeEndpoint).toHaveBeenCalled())
   })
 
   it('a vanished vault says the key was deleted on the row and does not run the check', async () => {
@@ -1216,8 +1296,10 @@ describe('the saved endpoint row (nocx-9bx0m)', () => {
     await waitForRows(container, 1)
 
     const row = rows(container)[0]
+    // The unsealed vault lists the row, so the credential resolves — and the
+    // row therefore says nothing about it. The live Test is the assertion.
     await vi.waitFor(() => {
-      expect(row.textContent).toContain('Key saved')
+      expect(row.querySelector('.ui-record-row__status')).toBeNull()
     })
     const test = row.querySelector('[aria-label="Test provider"]') as HTMLButtonElement
     expect(test.disabled).toBe(false)

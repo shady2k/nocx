@@ -123,6 +123,35 @@ type ConfigService interface {
 
 	// Settings is the settings surface of the config domain.
 	Settings() SettingsService
+
+	// Model roles (bead nocx-e6kn2): the layer above endpoints — a named
+	// role resolves to one (endpoint, model) pair, and a feature asks for
+	// a role, never for a model id. The roles surface and the ask
+	// transaction both go through the service, so ResolveRole is the ONE
+	// resolution path in the product.
+	// ListRoleAssignments returns the stored assignments; the wire's
+	// roles.list completes them to the closed role set, so an unassigned
+	// role is a visible null row, never an absent one.
+	ListRoleAssignments() ([]profile.RoleAssignment, error)
+	// AssignRole upserts ONE role's (endpoint, model) pair.
+	AssignRole(a profile.RoleAssignment) error
+	// ResolveRole maps a role to its assigned endpoint and model, or
+	// refuses (profile.ErrRoleUnassigned / ErrRoleEndpointGone /
+	// ErrRoleModelGone) — resolution is the truth-teller: a deleted
+	// endpoint or removed model stays a refusal, never a neighbour hop.
+	ResolveRole(role profile.ModelRole) (profile.Endpoint, string, error)
+	// DefaultModel returns the one pair every role WITHOUT an assignment
+	// of its own resolves through (bead nocx-rikz5), or the zero value
+	// when the person has chosen none. Unset is a value, not an error.
+	DefaultModel() (profile.DefaultModel, error)
+	// SetDefaultModel replaces the default; the empty pair clears it. A
+	// pair naming an endpoint that does not exist, or a model that
+	// endpoint does not offer, is REFUSED and nothing is stored: a
+	// dangling default breaks every unassigned role at once, and nothing
+	// on screen names which choice did it. The refusal comes from the
+	// store, which checks and writes under one lock — see
+	// profile.RoleRepository.SetDefaultModel.
+	SetDefaultModel(d profile.DefaultModel) error
 }
 
 // ConfigOperation is the typed operation for the config domain. Its gates
@@ -143,13 +172,14 @@ func NewConfigOperation(
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	endpoints profile.EndpointRepository,
+	roles profile.RoleRepository,
 	svc *profile.ProfileService,
 	reg *settings.Registry,
 	rows RowResolver,
 	secrets EndpointSecrets,
 ) ConfigOperation {
 	g := &guard{}
-	return newOperation[ConfigService](control.NewComposite(configGate, vaultGate, lane), g, newConfigService(g, profiles, groups, endpoints, svc, reg, rows, secrets))
+	return newOperation[ConfigService](control.NewComposite(configGate, vaultGate, lane), g, newConfigService(g, profiles, groups, endpoints, roles, svc, reg, rows, secrets))
 }
 
 // newConfigService builds the concrete config service bound to guard g.
@@ -160,6 +190,7 @@ func newConfigService(
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 	endpoints profile.EndpointRepository,
+	roles profile.RoleRepository,
 	svc *profile.ProfileService,
 	reg *settings.Registry,
 	rows RowResolver,
@@ -170,6 +201,7 @@ func newConfigService(
 		profiles:  profiles,
 		groups:    groups,
 		endpoints: endpoints,
+		roles:     roles,
 		svc:       svc,
 		settings:  reg,
 		rows:      rows,
@@ -182,6 +214,7 @@ type configService struct {
 	profiles  profile.ProfileRepository
 	groups    profile.GroupRepository
 	endpoints profile.EndpointRepository
+	roles     profile.RoleRepository
 	svc       *profile.ProfileService
 	settings  *settings.Registry
 	rows      RowResolver
@@ -416,6 +449,9 @@ func (s *configService) CreateEndpoint(ctx context.Context, e profile.Endpoint, 
 	if err := profile.ValidateEndpoint(e); err != nil {
 		return profile.Endpoint{}, err
 	}
+	if e.NoKey && !key.IsEmpty() {
+		return profile.Endpoint{}, errors.New("endpoint declaring noKey cannot accept a typed key")
+	}
 	// Row handles resolve BEFORE the mint or the write: a bad row must not
 	// orphan a freshly-minted key (the same ordering as validation).
 	headers, err := s.resolveEndpointHeaders(e.Headers)
@@ -514,6 +550,13 @@ func (s *configService) UpdateEndpoint(ctx context.Context, e profile.Endpoint, 
 	e.Headers = headers
 
 	switch {
+	case e.NoKey:
+		if key != nil && !key.IsEmpty() {
+			return profile.Endpoint{}, errors.New("endpoint declaring noKey cannot accept a typed key")
+		}
+		// The declaration is an explicit replacement for the previous
+		// credential choice, so it clears the old reference before storage.
+		e.CredentialRef = ""
 	case e.CredentialRef != "":
 		if key != nil && !key.IsEmpty() {
 			return profile.Endpoint{}, errors.New("endpoint credential has two sources: a typed key and a key row are mutually exclusive")
@@ -584,6 +627,106 @@ func (s *configService) DeleteEndpoint(ctx context.Context, id string) error {
 	}
 	_ = s.secrets.Delete(ctx, credential.SecretID(ref))
 	return nil
+}
+
+func (s *configService) ListRoleAssignments() ([]profile.RoleAssignment, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	if s.roles == nil {
+		return nil, errors.New("role store not wired")
+	}
+	return s.roles.LoadRoleAssignments()
+}
+
+// AssignRole upserts ONE role's (endpoint, model) pair (bead nocx-e6kn2).
+// The assignment references the endpoint and model by NAME — nothing
+// secret — so this is a config-domain write like any endpoint write, with
+// no vault involvement.
+func (s *configService) AssignRole(a profile.RoleAssignment) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	if s.roles == nil {
+		return errors.New("role store not wired")
+	}
+	return s.roles.AssignRole(a)
+}
+
+// ResolveRole is the config domain's one role→(endpoint, model) resolution
+// (bead nocx-e6kn2): it loads the assignments, the default and the endpoints
+// and calls
+// profile.ResolveRole — the pure, storage-free resolver — so the refusal
+// rules (unassigned, endpoint gone, model gone) live in exactly one place
+// and every consumer (agent.ask, the classifier bead, the roles surface
+// itself) sees the same answers. Re-read per call: an assignment made a
+// moment ago is picked up by the next ask (acceptance: "picks up the
+// change").
+func (s *configService) ResolveRole(role profile.ModelRole) (profile.Endpoint, string, error) {
+	if err := s.guard.check(); err != nil {
+		return profile.Endpoint{}, "", err
+	}
+	if s.roles == nil {
+		return profile.Endpoint{}, "", errors.New("role store not wired")
+	}
+	assignments, err := s.roles.LoadRoleAssignments()
+	if err != nil {
+		return profile.Endpoint{}, "", err
+	}
+	// The default is READ here and handed to the resolver as an input, so
+	// the resolution itself stays in one place (bead nocx-rikz5). Its error
+	// is RETURNED, never swallowed into "no default": a store that cannot
+	// answer must not look like a person who chose nothing, or an unreadable
+	// file renders as an honest "choose a model" and sends someone to
+	// re-choose what they already chose.
+	def, err := s.roles.LoadDefaultModel()
+	if err != nil {
+		return profile.Endpoint{}, "", err
+	}
+	eps, err := s.endpoints.LoadEndpoints()
+	if err != nil {
+		return profile.Endpoint{}, "", err
+	}
+	return profile.ResolveRole(role, assignments, def, eps)
+}
+
+// DefaultModel returns the chosen default, or the zero value when nobody
+// has chosen one (bead nocx-rikz5). It is a plain config read: the pair
+// names an endpoint and a model by identity, nothing secret.
+func (s *configService) DefaultModel() (profile.DefaultModel, error) {
+	if err := s.guard.check(); err != nil {
+		return profile.DefaultModel{}, err
+	}
+	if s.roles == nil {
+		return profile.DefaultModel{}, errors.New("role store not wired")
+	}
+	return s.roles.LoadDefaultModel()
+}
+
+// SetDefaultModel replaces the default in one write, refusing a pair whose
+// endpoint does not exist or whose model that endpoint does not offer
+// (bead nocx-rikz5).
+//
+// Those two refusals are the STORE's, not this layer's, and that is the
+// correction: this method used to load the endpoint list, decide, and then
+// call the store, which reloads and writes under its own lock. Between the
+// decision and the write a concurrent DeleteEndpoint could land, and the
+// write would then store a default naming an endpoint that is gone — the
+// state the design's interval forbids. Only the holder of the lock can make
+// the checks and the write one operation, so the invariant lives with the
+// lock (profile.JSONStore.SetDefaultModel) and this layer keeps what is
+// genuinely its own: the config guard and the wiring check. In-process
+// callers are serialized by ConfigOperation, so the window needed an
+// external writer to bite; an invariant that holds only because somebody
+// else takes a lock is not held.
+func (s *configService) SetDefaultModel(d profile.DefaultModel) error {
+	if err := s.guard.check(); err != nil {
+		return err
+	}
+	if s.roles == nil {
+		return errors.New("role store not wired")
+	}
+	return s.roles.SetDefaultModel(d)
 }
 
 // loadEndpoint returns the stored endpoint with the given id, or nil when

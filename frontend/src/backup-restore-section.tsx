@@ -26,11 +26,38 @@ interface State {
   contents: string | null
   strategy: RestoreStrategy
   preview: RestorePreview | null
-  previewError: string | null
   fileInputResetKey: number
 }
 
 const PLAINTEXT_WARNING = `The backup file is plaintext JSON. All settings values, hostnames, connection names, inline usernames, and auth modes are stored without encryption. Credential secrets (passwords, key passphrases) are never included, but the connection metadata may still be sensitive.`
+
+/** A file the person picked that `readBackupText` could not read, in their words. */
+function readBackupFileSentence(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err)
+  // `readBackupText` throws exactly one error of its own: the size cap. Name
+  // the limit in a unit a person reads — not the byte count the wire carries.
+  if (raw.startsWith('File exceeds ')) {
+    return `The file is larger than ${MAX_BACKUP_BYTES / (1024 * 1024)} MiB`
+  }
+  // Everything else is `file.text()` rejecting — a read the page cannot name
+  // more precisely than the file being unreadable.
+  return 'the file could not be read'
+}
+
+/**
+ * The backend's exact preview refusal, in a person's words.
+ *
+ * Readable backup bytes still get refused by the backend (a wrong format, an
+ * unsupported version, a rule the document violates), and the wire carries
+ * the reason verbatim — `invalid backup document: …`. A person who chose a
+ * file wants to know the file is wrong, not that a package refused it.
+ */
+function restorePreviewSentence(err: unknown): string {
+  const raw = err instanceof Error ? err.message : String(err)
+  const invalid = /^invalid backup document: (.+)$/.exec(raw)
+  if (invalid) return invalid[1]
+  return 'the backup could not be previewed'
+}
 
 export function BackupRestoreSection(props: Props) {
   const [state, setState] = createStore<State>({
@@ -40,7 +67,6 @@ export function BackupRestoreSection(props: Props) {
     contents: null,
     strategy: 'merge',
     preview: null,
-    previewError: null,
     fileInputResetKey: 0,
   })
 
@@ -108,21 +134,20 @@ export function BackupRestoreSection(props: Props) {
     const gen = ++fileGen
     previewGen++
     if (!file) {
-      setState({ contents: null, preview: null, previewError: null, previewing: false })
+      setState({ contents: null, preview: null, previewing: false })
       return
     }
-    setState({ previewing: true, previewError: null, preview: null })
+    setState({ previewing: true, preview: null })
     try {
       const text = await readBackupText(file)
       if (gen !== fileGen) return
       setState('contents', text)
     } catch (err) {
       if (gen !== fileGen) return
-      setState({
-        preview: null,
-        previewError: (err as Error).message,
-        fileInputResetKey: state.fileInputResetKey + 1,
-        previewing: false,
+      setState({ preview: null, fileInputResetKey: state.fileInputResetKey + 1, previewing: false })
+      showToast({
+        message: `Could not read the backup file: ${readBackupFileSentence(err)}`,
+        level: 'danger',
       })
     }
   }
@@ -132,16 +157,20 @@ export function BackupRestoreSection(props: Props) {
       () => [state.strategy, state.contents] as const,
       async ([strat, contents]) => {
         if (!contents) return
-        setState({ previewing: true, previewError: null, preview: null })
+        setState({ previewing: true, preview: null })
         previewGen++
         const gen = previewGen
         try {
           const result = await props.profileClient.previewBackupRestore(contents, strat)
           if (gen !== previewGen) return
-          setState({ preview: result, previewError: null })
+          setState({ preview: result })
         } catch (err) {
           if (gen !== previewGen) return
-          setState({ preview: null, previewError: (err as Error).message })
+          setState({ preview: null })
+          showToast({
+            message: `Could not preview the backup: ${restorePreviewSentence(err)}`,
+            level: 'danger',
+          })
         } finally {
           if (gen === previewGen) setState('previewing', false)
         }
@@ -149,7 +178,6 @@ export function BackupRestoreSection(props: Props) {
       { defer: true },
     ),
   )
-
   const handleRestore = async () => {
     if (!state.contents || !state.preview) return
     const isReplace = state.strategy === 'replace'
@@ -187,13 +215,12 @@ export function BackupRestoreSection(props: Props) {
       setState({
         contents: null,
         preview: null,
-        previewError: null,
         fileInputResetKey: state.fileInputResetKey + 1,
       })
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       if (msg.includes('preview is stale')) {
-        setState({ preview: null, previewError: null })
+        setState({ preview: null })
         previewGen++
         const saved = state.contents
         setState('contents', null)
@@ -279,9 +306,6 @@ export function BackupRestoreSection(props: Props) {
 
         <Show when={state.previewing}>
           <p class="backup-restore__status">Generating preview…</p>
-        </Show>
-        <Show when={state.previewError}>
-          <div class="backup-restore__error">{state.previewError}</div>
         </Show>
 
         <Show when={preview()}>

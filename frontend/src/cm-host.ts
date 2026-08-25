@@ -44,28 +44,39 @@ import { EditorView, keymap } from '@codemirror/view'
  *  editor's own module learned the same lesson about history() — the
  *  package was a dependency and the extension was installed nowhere, so
  *  Ctrl+Z did nothing in a field that looked like every other one. */
-/*  Wrapping belongs here and not to a caller, because it follows from the
- *  mode. What a person types into these hosts is PROSE — a snippet body, a
- *  note — and CM6 does not wrap unless it is told to, so a pasted paragraph
- *  came out as one line running off the right edge of the dialog, clipped at
- *  the frame with a horizontal scrollbar under it (nocx-dn33v).
+const editingExtensions: Extension[] = [history(), keymap.of([...defaultKeymap, ...historyKeymap])]
+
+/**
+ * WHAT IS BEING EDITED, which is the one thing that decides whether a long
+ * line wraps or is reached by scrolling sideways.
  *
- *  The read-only modes deliberately do not take it. Their surfaces are the file
- *  viewer and the git diff, where a line is a line: wrapping one puts what the
- *  reader sees out of step with what the file says, and a diff whose rows stop
- *  aligning row-for-row has stopped being a diff. That is the same rule the
- *  terminal's frozen output is held to (nocx-juau) — long content is reached by
- *  scrolling sideways.
+ * `prose` wraps. A snippet body and a note are paragraphs, and CM6 does not
+ * wrap unless it is told to, so a pasted paragraph came out as one line
+ * running off the right edge of the dialog, clipped at the frame with a
+ * horizontal scrollbar under it (nocx-dn33v).
  *
- *  The command editor (src/editor.ts) states this for itself. It builds its own
- *  EditorView rather than going through this host, so there is nothing here for
- *  it to inherit; it is named so the next reader knows the two are not one
- *  setting with two spellings. */
-const editingExtensions: Extension[] = [
-  history(),
-  keymap.of([...defaultKeymap, ...historyKeymap]),
-  EditorView.lineWrapping,
-]
+ * `code` does not. A JSON request body is a DOCUMENT: wrapping one puts what
+ * the reader sees out of step with what the file says, its indentation stops
+ * marking depth, and the wrapped remainder of a token sits against the line
+ * numbers rather than under its own. A long value is reached by scrolling
+ * sideways INSIDE the editor's own box — CM6's gutter is sticky, so the line
+ * numbers stay put while the text moves (nocx-kdawd).
+ *
+ * This used to follow from the MODE rather than from the content, on the
+ * argument that everything a person types into these hosts is prose. The API
+ * request body is the case that is not, and the read-only modes had the right
+ * answer for it all along: the file viewer and the git diff scroll sideways,
+ * because a diff whose rows stop aligning row-for-row has stopped being a
+ * diff, and that is the same rule the terminal's frozen output is held to
+ * (nocx-juau). So there is ONE answer in this product for a long line of
+ * code, and `code` is how an editable surface asks for it.
+ *
+ * The command editor (src/editor.ts) states this for itself. It builds its own
+ * EditorView rather than going through this host, so there is nothing here for
+ * it to inherit; it is named so the next reader knows the two are not one
+ * setting with two spellings.
+ */
+export type EditableContent = 'prose' | 'code'
 
 /** CM6 look: colours only, resolved through the app's --color-* tokens so a
  *  theme switch recolours every host surface (ADR-0013). Layout lives in
@@ -110,7 +121,12 @@ class CMHost {
   /** Bound once so dispose() can detach it; a late abort is then a no-op. */
   private readonly onAbort = (): void => this.dispose()
 
-  protected constructor(private readonly editable: boolean) {}
+  protected constructor(
+    private readonly editable: boolean,
+    /** Whether a long line wraps. See EditableContent — the read-only modes
+     *  never wrap, and the editable one is told by its caller. */
+    private readonly wraps: boolean,
+  ) {}
 
   /**
    * Construct and mount the view into `parent`, with the caller's extensions
@@ -144,6 +160,7 @@ class CMHost {
           EditorView.editable.of(this.editable),
           themeFor(this.editable),
           ...(this.editable ? editingExtensions : []),
+          ...(this.wraps ? [EditorView.lineWrapping] : []),
           ...(onDocChange
             ? [
                 EditorView.updateListener.of((u) => {
@@ -195,15 +212,19 @@ class CMHost {
  *  document, and no caller extension can re-enable editing. */
 export class ReadOnlyHost extends CMHost {
   constructor() {
-    super(false)
+    super(false, false)
   }
 }
 
 /** The mode for a surface a person types into (the snippet body editor).
  *  The caller reads `doc()` when it saves and follows `onDocChange` while
- *  the person types. */
+ *  the person types.
+ *
+ *  `content` defaults to `prose`, which is what the two surfaces that were
+ *  here first are; a surface holding a document says `code` and gets the
+ *  sideways scroll the read-only modes already have. */
 export class EditableHost extends CMHost {
-  constructor() {
-    super(true)
+  constructor(content: EditableContent = 'prose') {
+    super(true, content === 'prose')
   }
 }

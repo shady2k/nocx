@@ -1,0 +1,73 @@
+/* DropZone — the kit's drop surface.
+
+   THE REGION IS DRAWN AT REST. The overlay used to appear on dragover only,
+   and the ask then looked exactly as it had before the drop existed
+   (nocx-9hb5g): the affordance argued itself out of the column and took the
+   discoverability of the whole gesture with it. What is left of that argument
+   is the shape — one centred stack, ~72px, above the fields rather than over
+   them. */
+
+/* Not a box of its own where it draws no region: `contents` puts the caller's
+   children straight into whatever lays them out — the dialog body's own
+   column — so a build with no drop has no gap where the region would be. */
+.ui-drop-zone {
+  display: contents;
+}
+
+/* Live, the wrapper becomes that column's inner stack. --space-4 is the
+   dialog body's own gap: the region is one more thing in the stack, spaced
+   like the fields under it rather than like a banner stuck to them.
+
+   `data-drop-live` and not `data-file-drop-target`: the region is drawn for
+   EITHER half — the native one, which is what that attribute names, or a
+   browser drop, which names no target because Wails is what reads it
+   (nocx-1gfbw). Keying the layout on the native attribute left the browser's
+   region as a `contents` child of the dialog body, outside the
+   `max-width: 100%` the body gives its own children. */
+.ui-drop-zone[data-drop-live] {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-4);
+}
+
+.ui-drop-zone__region {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-4);
+  border: 1px dashed var(--color-border);
+  border-radius: var(--control-radius-md);
+  background: var(--color-surface-sunken);
+  color: var(--color-text-muted);
+  text-align: center;
+}
+
+/* Dim and small at rest: the region is an OFFER standing above the field a
+   person may simply type into, so it may not out-shout it. */
+.ui-drop-zone__icon {
+  display: flex;
+  color: var(--color-text-dim);
+}
+
+.ui-drop-zone__icon svg {
+  width: 24px;
+  height: 24px;
+}
+
+.ui-drop-zone__hint {
+  font-size: var(--font-size-sm);
+}
+
+/* Under a drag it is the same region, said louder: the dashes close up, the
+   accent arrives on the edge, and the surface rises. A change of appearance,
+   which is what a target confirming it will take this drop looks like —
+   never an appearance from nothing. --color-surface-raised is opaque in every
+   theme, and half of the ten here are light, so this reads the same in all of
+   them. */
+.ui-drop-zone[data-drop-active] .ui-drop-zone__region {
+  border-style: solid;
+  border-color: var(--color-accent);
+  background: var(--color-surface-raised);
+  color: var(--color-text);
+}

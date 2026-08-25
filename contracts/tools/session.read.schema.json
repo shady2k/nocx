@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/session.read.schema.json",
+  "title": "SessionReadParams",
+  "description": "Parameters for the session.read agent tool: read one item in a terminal session, or the current screen when id is omitted. The result identifies whether it is a running item, an exited item, or the current screen; an alternate-buffer result is current screen content, not scrollback.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The session containing the item or screen."
+    },
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "description": "An item id from session.list. Omit it to read the current screen."
+    },
+    "start": {
+      "type": "integer",
+      "minimum": 0,
+      "description": "First output line for an exited item or screen region."
+    },
+    "count": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 2000,
+      "description": "Maximum number of output lines to return."
+    }
+  }
+}

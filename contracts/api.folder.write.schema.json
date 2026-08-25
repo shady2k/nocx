@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.folder.write.schema.json",
+  "title": "ApiFolderWriteResult",
+  "description": "The canonical variables persisted for one folder.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["variables"],
+  "properties": {
+    "variables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "value", "enabled"],
+        "properties": {
+          "name": { "type": "string" },
+          "value": { "type": "string" },
+          "enabled": { "type": "boolean" }
+        }
+      }
+    }
+  }
+}

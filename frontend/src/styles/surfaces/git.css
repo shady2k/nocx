@@ -97,18 +97,11 @@
   font-size: var(--font-size-sm);
 }
 
-/* A rejected mutation call: inline, never a toast that evaporates. */
-.git-mutation-error {
-  color: var(--color-danger);
-  font-size: var(--font-size-sm);
-}
-
-/* The consent prompt's accept failure: inline beside the offer, never a
-   toast that evaporates (the mutation-error rule, for the accept). */
-.git-consent-error {
-  color: var(--color-danger);
-  font-size: var(--font-size-sm);
-}
+/* No .git-mutation-error / .git-consent-error here: a surface naming its own
+   error concept in its own danger colour is the second dialect the
+   error-vocabulary gate exists to prevent (nocx-8sudy). The mutation one had
+   no caller left; the consent refusal renders through the kit's
+   `ui-field-error`, which is the same words in the same colour everywhere. */
 
 /* The whole-index controls sit above the lists; the refusal below them
    carries the D19 reason. The two actions split the rail between them. Sized to their

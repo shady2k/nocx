@@ -13,6 +13,7 @@
  */
 import { For, Show, createEffect, createMemo, createSignal, on, onMount } from 'solid-js'
 import { Badge } from './ui/badge'
+import { Checkbox } from './ui/checkbox'
 import { Button } from './ui/button'
 import { CollectionView } from './ui/collection-view'
 import { RecordRow } from './ui/record-row'
@@ -70,41 +71,24 @@ function probeOutcomeLine(
   }
 }
 
-/** The row's credential state, in the agent.status vocabulary (nocx-y7fg):
- *  what the frontend can know without a vault read that raises the unlock
- *  prompt.
- *
- *  - none — the endpoint has no reference at all.
- *  - sealed — the vault is locked right now (its own status); the check
- *    cannot pass, and the list is not the place to raise the unlock prompt.
- *  - deleted — the referenced secret is gone: no vault exists (never set
- *    up, or reset), or the unsealed vault's own inventory no longer lists
- *    the row the endpoint references. The deleted secret case is read from
- *    the SAME inventory the editor's secret pickers read (vault.inventory),
- *    loaded at list time and only while the vault is unsealed — a sealed
- *    vault is never asked, so the list cannot raise the prompt.
- *  - unavailable — the inventory read failed (a store failure that is none
- *    of the above): the honest sentence, and the check cannot pass.
- *  - resolvable — the vault is unsealed and the inventory lists the row, or
- *    the inventory has not been asked (no controller — the dev-web harness
- *    — or still loading): the backend resolves the stored credential at
- *    probe time, and the probe's own refusal is the truth if it does not. */
-type RowCredentialState = 'resolvable' | 'none' | 'deleted' | 'sealed' | 'unavailable'
+/** The row's credential state, in the agent.status vocabulary (nocx-y7fg).
+ * noKey is an explicit completed state, while an empty credential on an
+ * endpoint that needs one remains a warning. */
+type RowCredentialState =
+  'resolvable' | 'not-required' | 'none' | 'deleted' | 'sealed' | 'unavailable'
 
-/** The inventory fact the row derivation reads: whether the unsealed vault
- *  has answered, and which rows it lists. 'idle'/'loading' mean not asked
- *  or in flight — treated optimistically, because the probe is the
- *  truth-teller when the credential really cannot resolve. */
 interface RowInventoryFact {
   state: 'idle' | 'loading' | 'loaded' | 'failed'
   entries: InventoryEntry[]
 }
 
 function rowCredentialState(
+  noKey: boolean,
   ref: string | null,
   vaultState: 'uninitialized' | 'sealed' | 'unsealed' | undefined,
   inventory: RowInventoryFact,
 ): RowCredentialState {
+  if (noKey) return 'not-required'
   if (ref === null) return 'none'
   if (vaultState === 'sealed') return 'sealed'
   if (vaultState === 'uninitialized') return 'deleted'
@@ -141,6 +125,7 @@ interface HeaderDraft {
 interface EndpointDraft {
   name: string
   baseUrl: string
+  noKey: boolean
   keyMode: SecretSourceMode
   /** A key typed fresh ('new' mode). Sent once, minted/rotated by the
    *  backend, never read back. */
@@ -154,6 +139,7 @@ interface EndpointDraft {
 const blankDraft = (): EndpointDraft => ({
   name: '',
   baseUrl: '',
+  noKey: false,
   keyMode: 'new',
   key: '',
   keyRow: '',
@@ -203,27 +189,18 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       },
     ),
   )
-  /** The vault's password rows for the pickers (ADR-0017). Empty when the
-   *  vault is sealed or absent (dev harness). */
+  /** The vault's password rows for the pickers (ADR-0017), from the last
+   *  read that answered. */
   const [secretRows, setSecretRows] = createSignal<InventoryEntry[]>([])
-  /** The pickers only ever offer live vault data: while the vault is sealed
-   *  or uninitialized, stale rows from an earlier load must not be offered. */
-  const vaultOffersSecrets = createMemo(() => {
-    const state = props.vaultController?.status()?.state
-    return state === undefined || state === 'unsealed'
-  })
   /** The pickers' rows, filtered to the kind a secret-valued header may
    *  reference — an API key is a password-kind secret (ADR-0030's mint is
    *  KindPassword). */
-  const passwordRows = createMemo(() =>
-    vaultOffersSecrets() ? secretRows().filter((e) => e.kind === 'password') : [],
-  )
-  /** Whether the unsealed vault's inventory has answered, for the row
-   *  credential state (nocx-9bx0m). Loaded at list time ONLY while the
-   *  vault is unsealed: a sealed vault is never asked, so the list cannot
-   *  raise the unlock prompt it would otherwise (ADR-0032). 'failed' means
-   *  the store did not answer — the honest 'unavailable' sentence, never a
-   *  fabricated 'deleted'. */
+  const passwordRows = createMemo(() => secretRows().filter((e) => e.kind === 'password'))
+  /** Whether the vault's inventory has answered, for the row credential
+   *  state (nocx-9bx0m). The LIST asks only while the vault is unsealed, so
+   *  showing a page never asks for a passphrase; the EDITOR asks whatever
+   *  the state is (ADR-0032). 'failed' means the store did not answer — the
+   *  honest 'unavailable' sentence, never a fabricated 'deleted'. */
   const [inventoryState, setInventoryState] = createSignal<
     'idle' | 'loading' | 'loaded' | 'failed'
   >('idle')
@@ -239,7 +216,41 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   // next editor open already retries through the shared loader.
   createEffect(() => {
     const state = props.vaultController?.status()?.state
-    if (state === 'unsealed' && inventoryState() === 'idle') void loadInventory()
+    if (state === 'unsealed' && inventoryState() === 'idle') void loadInventory('list')
+  })
+  // A vault that can no longer answer must not go on offering what it said
+  // before it was shut: sealing (or a reset) drops the rows and forgets the
+  // read, so the next unseal loads them again instead of serving a list from
+  // before the lock.
+  createEffect(() => {
+    const state = props.vaultController?.status()?.state
+    if (state === 'sealed' || state === 'uninitialized') {
+      setSecretRows([])
+      setInventoryState('idle')
+    }
+  })
+  /** Whether this opened form has already asked the vault. One ask per open:
+   *  a dismissed unlock is a decision, not something to re-ask on the next
+   *  keystroke that re-runs the effect. */
+  const [pickerAsked, setPickerAsked] = createSignal(false)
+  // THE PICKER is what wants the vault. A form showing one is asking for
+  // secret NAMES, and that request goes to the vault whatever state the
+  // vault is in — the vault raises its own unlock (ADR-0032) and the
+  // dispatcher re-sends the call. So an endpoint whose key IS a bound row
+  // opens on "Use existing secret" and asks at once, which is the whole of
+  // nocx-5ratm; while "+ New endpoint" over a locked vault shows no picker,
+  // wants nothing, and asks for no passphrase until the source is switched.
+  //
+  // This is the line the ADR draws, applied to a surface rather than a call
+  // site: not "an editor door may never ask" (which left the pickers empty
+  // and the bound row wearing its own handle), and not "any open asks"
+  // (which demands a passphrase for a form that will never touch a secret).
+  createEffect(() => {
+    if (!dialogOpen() || pickerAsked()) return
+    const d = draft()
+    if (d.keyMode !== 'secret' && !d.headers.some((h) => h.mode === 'secret')) return
+    setPickerAsked(true)
+    void loadInventory('picker')
   })
   const [discovered, setDiscovered] = createSignal<string[]>([])
   /** The endpoint being edited, or null for a new one. */
@@ -301,6 +312,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       const res = await props.client.probeEndpoint({
         name: d.name.trim(),
         baseUrl: d.baseUrl.trim(),
+        noKey: d.noKey,
         key: draftKey(d),
         model,
         headers: draftHeaders(d),
@@ -339,39 +351,60 @@ export function EndpointsSection(props: EndpointsSectionProps) {
 
   // ── Draft editing ────────────────────────────────────────────────────
   /** Load the vault inventory — the ONE owner of the inventory fetch and
-   *  the secretRows state (AD-8). Two consumers share it: the pickers
-   *  (called when an editor opens) and the row credential state (called
-   *  at list time once the vault is unsealed — the rows render a
-   *  per-endpoint credential fact, so the list now needs the same read
-   *  the pickers already make). The failure state ('failed') is what keeps
-   *  a failed read from being misread as an empty vault — the rows say
-   *  'unavailable', never a fabricated 'deleted'.
+   *  the secretRows state (AD-8). Two consumers share it, and they differ in
+   *  exactly one thing: whether a LOCKED vault may be asked.
    *
-   *  A sealed or uninitialized vault is SKIPPED, not probed (nocx-q27y's
-   *  headers fix): the pickers offer nothing while the vault cannot answer,
-   *  and neither the editor door nor the list may raise the unlock prompt —
-   *  the vault-backed OPERATION (the Test button resolving a credential)
-   *  is what raises it (ADR-0032). The skip resets the state to 'idle', so
-   *  the list's unseal-triggered effect still loads once the vault can
-   *  answer — a stale 'loaded' from before a seal would otherwise be
-   *  misread after it. */
-  async function loadInventory() {
+   *  - 'picker' — a secret picker is on screen and must render secret NAMES.
+   *    That is a request for vault data, so it goes to the vault whatever
+   *    state the vault is in: a sealed vault answers -32001, and the
+   *    renderer's dispatcher raises the unlock and re-sends the call
+   *    (ADR-0032). Reading the status here to decide NOT to ask is the
+   *    per-call-site logic that ADR deletes — "needing the vault is a
+   *    property of the call, not of the call site" — and it is what left the
+   *    pickers empty and the bound row labelled with its own `secrow:`
+   *    handle, with nothing on screen to say why (nocx-5ratm).
+   *  - 'list' — the endpoints LIST needs the same rows for its per-endpoint
+   *    credential state, and merely showing a page must never ask for a
+   *    passphrase. It asks only while the vault is already unsealed.
+   *
+   *  An UNINITIALIZED vault is skipped either way: there is no vault to
+   *  unlock, so the call could only fail. The skip leaves the state 'idle',
+   *  so a later setup still loads — a stale 'loaded' would be misread.
+   *
+   *  A dismissed unlock is a choice, not a store failure: it leaves the
+   *  state 'idle', so no row says 'unavailable' about it and a later unseal
+   *  still loads. 'failed' is kept for a store that really did not answer. */
+  async function loadInventory(intent: 'picker' | 'list') {
     if (!props.vaultClient) return
     if (inventoryState() === 'loading') return // one fetch owner, one in flight
     const state = props.vaultController?.status()?.state
-    if (state === 'sealed' || state === 'uninitialized') {
+    if (state === 'uninitialized') {
       setSecretRows([])
       setInventoryState('idle')
       return
     }
+    // A list read on a vault that cannot answer is skipped, and the skip
+    // FORGETS the previous answer rather than keeping it: a stale 'loaded'
+    // that predates a just-minted key reports that key as deleted, which is
+    // what a person saw one second after saving it. 'idle' says what is
+    // true — nobody has asked — and the row stays quiet.
+    if (intent === 'list' && state !== 'unsealed') {
+      setSecretRows([])
+      setInventoryState('idle')
+      return
+    }
+    // Clear first: a re-opened editor must not offer rows from an earlier
+    // load while this request is in flight — it may be waiting behind an
+    // unlock dialog.
+    setSecretRows([])
     setInventoryState('loading')
     try {
       const inv = await props.vaultClient.inventory()
       setSecretRows(inv?.entries ?? [])
       setInventoryState('loaded')
-    } catch {
+    } catch (err) {
       setSecretRows([])
-      setInventoryState('failed')
+      setInventoryState(err instanceof VaultOperationCancelledError ? 'idle' : 'failed')
     }
   }
 
@@ -382,7 +415,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     setDiscovered([])
     setDiscoveryKey('')
     validation.reset()
-    void loadInventory()
+    setPickerAsked(false)
     setDialogOpen(true)
   }
 
@@ -397,6 +430,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       name: ep.name,
       baseUrl: ep.baseUrl,
       keyMode: ep.credential !== null ? 'secret' : 'new',
+      noKey: ep.noKey,
       key: '',
       keyRow: ep.credential ?? '',
       models: ep.models.map((m) => ({ name: m.name, alias: m.alias ?? '' })),
@@ -410,7 +444,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     setProbeResult(null)
     setDiscovered([])
     setDiscoveryKey('')
-    void loadInventory()
+    setPickerAsked(false)
     setDialogOpen(true)
   }
 
@@ -460,12 +494,13 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   /** The key the WIRE carries: only a fresh 'new' mode key is material. In
    *  'secret' mode the wire carries the row handle instead (draftKeyRow),
    *  and a blank 'new' key keeps the existing material on update (design
-   *  §4.5.4) — the source control has made "keep" a visible choice. */
-  const draftKey = (d: EndpointDraft): string => (d.keyMode === 'new' ? d.key : '')
+   *  §4.5.4). */
+  const draftKey = (d: EndpointDraft): string => (d.noKey ? '' : d.keyMode === 'new' ? d.key : '')
 
   /** The row handle the WIRE carries in 'secret' mode, or '' to keep the
    *  existing reference (or stay keyless on create). */
-  const draftKeyRow = (d: EndpointDraft): string => (d.keyMode === 'secret' ? d.keyRow : '')
+  const draftKeyRow = (d: EndpointDraft): string =>
+    d.noKey ? '' : d.keyMode === 'secret' ? d.keyRow : ''
 
   /** The wire form of the draft's header rows: exactly one source per row,
    *  the unused side null. A 'secret' row with no picker selection is
@@ -528,6 +563,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     const input = {
       name: d.name.trim(),
       baseUrl: d.baseUrl.trim(),
+      noKey: d.noKey,
       key: draftKey(d),
       credential: draftKeyRow(d),
       headers: draftHeaders(d),
@@ -568,7 +604,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       // loaded before the mint says the row's brand-new key is deleted —
       // which is what a person saw one second after saving it. Reload it
       // beside the endpoints, from the same success.
-      await loadInventory()
+      await loadInventory('list')
       showToast({ level: 'success', message: `Saved "${input.name}"` })
     } catch (err) {
       // A cancelled setup/unlock is not an error: the sheet is the surface
@@ -643,13 +679,14 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     const baseUrl = d.baseUrl.trim()
     if (baseUrl === '' || probing()) return
     const ep = editing()
-    const key = `${baseUrl}${draftKey(d)}${draftKeyRow(d)}${ep?.id ?? ''}`
+    const key = `${baseUrl}${d.noKey}${draftKey(d)}${draftKeyRow(d)}${ep?.id ?? ''}`
     if (discoveryKey() === key) return
     setDiscoveryKey(key)
     try {
       const res = await props.client.probeEndpoint({
         name: d.name.trim(),
         baseUrl,
+        noKey: d.noKey,
         key: draftKey(d),
         model: '',
         headers: draftHeaders(d),
@@ -705,6 +742,7 @@ export function EndpointsSection(props: EndpointsSectionProps) {
       const res = await props.client.probeEndpoint({
         name: ep.name,
         baseUrl: ep.baseUrl,
+        noKey: ep.noKey,
         key: '',
         model: '',
         endpointId: ep.id,
@@ -740,35 +778,63 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     }
   }
 
-  /** The row's Test is refused exactly when the credential cannot resolve:
-   *  the vault is sealed, the referenced secret is gone (no vault, or the
-   *  unsealed vault's inventory no longer lists it), or the store did not
-   *  answer. A no-key endpoint stays testable — the connection check can
-   *  still pass against a public endpoint. */
+  /** The row's Test is refused only when NOTHING can make the check
+   *  meaningful: the referenced secret is gone (no vault, or the unsealed
+   *  vault's inventory no longer lists it), or the store did not answer.
+   *
+   *  A SEALED vault is not one of those. endpoints.probe raises
+   *  vault.ErrVaultSealed for it, the backend's sealedNormalizer rewrites
+   *  that to the canonical -32001, and the renderer's dispatcher raises the
+   *  unlock and re-sends the request verbatim (ADR-0032; the rationale is
+   *  written out at ws_assistant.go resolveProbeCredential, which calls a
+   *  probe RESULT naming the sealed state "the dead end this bead exists to
+   *  delete"). Greying the button out was this surface refusing a path the
+   *  backend had deliberately kept open — so pressing Test on a locked
+   *  vault asks for the passphrase and then runs the check, which is what a
+   *  person means by pressing it.
+   *
+   *  A no-key endpoint stays testable too — the connection check can still
+   *  pass against a public endpoint. */
   function rowTestDisabled(ep: Endpoint): boolean {
     const state = rowCredentialState(
+      ep.noKey,
       ep.credential,
       props.vaultController?.status()?.state,
       inventoryFact(),
     )
-    return state === 'sealed' || state === 'deleted' || state === 'unavailable'
+    return state === 'deleted' || state === 'unavailable'
   }
-  function rowStatus(ep: Endpoint): { tone: StatusDotTone; text: string } {
+
+  /** The row's status, or NULL for silence.
+   *
+   *  The row speaks only to REFUSE, or to answer a check the person asked
+   *  for. A resolvable credential is the absence of a problem and says
+   *  nothing; so is a sealed vault, now that Test raises the unlock rather
+   *  than being blocked by it. Both used to render — a green "Key saved"
+   *  under every healthy endpoint and a full sentence about the vault on
+   *  every row of a list the vault is not about — and the owner struck them
+   *  in the same pass that struck the Roles page's green line. The rule the
+   *  two share: a healthy state is silent.
+   *
+   *  The probe outcome is the exception and not one: it is the answer to a
+   *  button, not an unsolicited reassurance. */
+  function rowStatus(ep: Endpoint): { tone: StatusDotTone; text: string } | undefined {
     const probe = rowProbes()[ep.id]
     if (probe) {
       const line = probeOutcomeLine(probe)!
       return { tone: line.tone === 'danger' ? 'error' : 'ok', text: line.text }
     }
     const state = rowCredentialState(
+      ep.noKey,
       ep.credential,
       props.vaultController?.status()?.state,
       inventoryFact(),
     )
     if (state === 'none') return { tone: 'neutral', text: 'No key' }
-    if (state === 'resolvable') return { tone: 'ok', text: 'Key saved' }
-    // sealed / deleted / unavailable: the sentences agent-status-line owns,
-    // always in the StatusDot's warning — the Badge tone that mapping
-    // speaks (warning) is the same meaning, spelled for the dot.
+    if (state === 'not-required' || state === 'resolvable' || state === 'sealed') return undefined
+    // deleted / unavailable: the sentences agent-status-line owns, always in
+    // the StatusDot's warning — the Badge tone that mapping speaks (warning)
+    // is the same meaning, spelled for the dot.
     return { tone: 'warning', text: credentialLine(state)!.text }
   }
 
@@ -878,7 +944,6 @@ export function EndpointsSection(props: EndpointsSectionProps) {
           secrets={passwordRows()}
           value={row().row}
           onValueChange={(v) => updateHeader(index, { row: v ?? '' })}
-          placeholder="\u2014 None \u2014"
         />
       </div>
     )
@@ -984,27 +1049,59 @@ export function EndpointsSection(props: EndpointsSectionProps) {
             error={validation.error('baseUrl')}
             placeholder="https://api.example.com/v1"
           />
-          <SecretSource
-            id="endpoint-key"
-            label="API key"
-            mode={draft().keyMode}
-            onModeChange={(mode) => setDraft((d) => ({ ...d, keyMode: mode }))}
-            newLabel="Type a new one"
-            secretLabel="Use existing secret"
-            ariaLabel="API key source"
-            newControl={
-              <TextField
-                id="endpoint-key"
-                label="API key"
-                type="password"
-                value={draft().key}
-                onInput={(v) => setDraftField('key', v)}
-                description="The key is stored in your vault, never in the record. Choosing an existing secret references it instead of minting a second copy."
-              />
+          <Checkbox
+            label="This endpoint does not require an API key"
+            checked={draft().noKey}
+            onChange={(checked) =>
+              setDraft((d) => ({
+                ...d,
+                noKey: checked,
+                keyMode: checked ? 'new' : d.keyMode,
+                key: checked ? '' : d.key,
+                keyRow: checked ? '' : d.keyRow,
+              }))
             }
-            secrets={passwordRows()}
-            value={draft().keyRow}
-            onValueChange={(v) => setDraft((d) => ({ ...d, keyRow: v ?? '' }))}
+          />
+          <Show when={!draft().noKey}>
+            <SecretSource
+              id="endpoint-key"
+              label="API key"
+              mode={draft().keyMode}
+              onModeChange={(mode) => setDraft((d) => ({ ...d, keyMode: mode }))}
+              newLabel="Type a new one"
+              secretLabel="Use existing secret"
+              ariaLabel="API key source"
+              newControl={
+                <TextField
+                  id="endpoint-key"
+                  label="API key"
+                  type="password"
+                  value={draft().key}
+                  onInput={(v) => setDraftField('key', v)}
+                  description="The key is stored in your vault, never in the record. Choosing an existing secret references it instead of minting a second copy."
+                />
+              }
+              secrets={passwordRows()}
+              value={draft().keyRow}
+              onValueChange={(v) => setDraft((d) => ({ ...d, keyRow: v ?? '' }))}
+            />
+          </Show>
+          {/* Custom headers belong to the CONNECTION, so they come before the
+              button that checks it: the probe sends them on every request it
+              makes (ws_assistant.go resolveProbeHeaders), and a header typed
+              after a green test was never part of what went green. Models
+              come after, because they are what the connection then offers and
+              the model field discovers them from a successful test. */}
+          <EditableRowList
+            rows={draft().headers}
+            ariaLabel="Custom headers"
+            addLabel="Add header"
+            emptyLabel="No custom headers — requests go out with just the credential."
+            removeLabel={(i) => `Remove header ${i + 1}`}
+            onRemove={removeHeader}
+            onAdd={addHeader}
+            error={validation.error('headers')}
+            renderRow={renderHeaderRow}
           />
           <div class="ep-test-row">
             <Button
@@ -1035,17 +1132,6 @@ export function EndpointsSection(props: EndpointsSectionProps) {
             onAdd={addModel}
             error={validation.error('models')}
             renderRow={renderModelRow}
-          />
-          <EditableRowList
-            rows={draft().headers}
-            ariaLabel="Custom headers"
-            addLabel="Add header"
-            emptyLabel="No custom headers — requests go out with just the credential."
-            removeLabel={(i) => `Remove header ${i + 1}`}
-            onRemove={removeHeader}
-            onAdd={addHeader}
-            error={validation.error('headers')}
-            renderRow={renderHeaderRow}
           />
         </Stack>
       </Dialog>

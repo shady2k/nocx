@@ -19,11 +19,12 @@
  *   block carries (scrollback/blocks.ts createCommandBlock; answer blocks
  *   carry none). It raises the ask chip, anchors the block visually, and
  *   activates the agent input target (terminal-content.ts activateAsk).
- * - The chip is a BlockReceipt ask variant:
- *   `.ui-block-receipt[data-variant="ask"]` mounted INSIDE the block, whose
- *   `.ui-block-receipt__value` names the block by its command text
- *   (blockCommandText). One chip, one mode; activating a second block moves
- *   it. Its primary `Ask` focuses the editor; `Done` returns to shell.
+ * - What a selection LEAVES BEHIND is one whole-block GRANT (nocx-wcswn):
+ *   the block is marked where it stands (`data-granted`) and the input
+ *   line's chip counts the marks. The chip is a count and never a second
+ *   list of command names; the names live in its popover, and the block
+ *   itself is where a person reads them. The per-block Ask control, and the
+ *   receipt that used to carry a chip inside the block, are both gone.
  * - The question is typed in the ORDINARY editor (design §3.1: no second
  *   input surface) and routed by InputTargetRegistry.active()
  *   (terminal-content.ts submit: `const active = inputTargets.active()`;
@@ -37,8 +38,8 @@
  *   other block's (bead acceptance 2).
  * - agent.status drives the no-endpoint sentence on BOTH surfaces: the
  *   Endpoints readiness line (the page was renamed from AI Endpoints) and
- *   the ask chip's
- *   `.ui-block-receipt__status` (agent-status-line.ts, one derivation).
+ *   the composer's own readiness line (agent-status-line.ts, one
+ *   derivation).
  *
  * FRESH-STATE PATH (nocx-4egm): a fresh dev home has NO vault, and creating
  * an endpoint WITH a key mints the key into the vault (design §4.5.3) — so
@@ -50,7 +51,8 @@
  * RPC errors, so the wrapper could not tell "the vault needs setup" from a
  * disk error and the save died in a toast. The first test drives the
  * save-first path — the owner's exact repro, a fresh home with no vault and
- * a key typed into the form — and the row must read "Key saved" afterwards.
+ * a key typed into the form — and the endpoint must then actually answer,
+ * which is the only proof the key landed.
  * The connections path asks at the moment a secret is created (nocx-v64o);
  * the endpoints path now does the same.
  * The fake model endpoint (e2e/fake-openai.ts) is scripted and held open by
@@ -107,11 +109,46 @@ const devharnessBin = () => readStand().devharness
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
 const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
-/** The reference chip a selection raises, in the INPUT LINE — not in the
- *  block. The ask entry is a gesture at the prompt now (nocx-4wtlh): the
- *  per-block Ask control is gone, and with it the receipt that used to
- *  carry the chip inside its block. */
-const REF_CHIP = '.nocx-editor-reference-chip'
+/** WHAT A SELECTION LEAVES BEHIND (nocx-wcswn). The ask entry is a gesture
+ *  at the prompt (nocx-4wtlh) — the per-block Ask control and the receipt
+ *  that carried its chip are both gone — and a selection now GRANTS its
+ *  whole containing block rather than quoting rows out of it. Two surfaces
+ *  say so, and this spec reads the gesture through both:
+ *
+ *  - the BLOCK is marked where it stands (`data-granted`), which is what a
+ *    person points at and the only place a block is named; and
+ *  - the CHIP in the input line is a COUNT and deliberately not a second
+ *    list of command names (grant.ts) — the names live in its popover.
+ *
+ *  So "the chip names the block it came from" is asserted as "the block the
+ *  selection came from is the one that is marked", which is the same claim
+ *  and does not restate a list the surface refuses to keep twice. */
+const GRANT_CHIP = '.pane.active .nocx-editor-grant'
+const GRANTED = '.pane.active .cmd-block[data-granted="true"]'
+
+/** The blocks a question would carry, by their own header text — read off
+ *  the marks, in the order the flow holds them. */
+async function grantedCommands(page: Page): Promise<string[]> {
+  return page
+    .locator(GRANTED)
+    .evaluateAll((els) =>
+      els.map((el) => el.querySelector('.cmd-header-text')?.textContent?.trim() ?? ''),
+    )
+}
+
+/** The gesture landed: the block is marked and the chip says how many. The
+ *  count is asserted on the chip because that is the surface a person reads
+ *  before pressing Enter. */
+async function expectGranted(page: Page, commands: string[]): Promise<void> {
+  await expect(page.locator(GRANTED)).toHaveCount(commands.length, { timeout: 10_000 })
+  await expect(page.locator(GRANT_CHIP)).toHaveAttribute(
+    'data-state',
+    commands.length === 0 ? 'default' : 'chosen',
+    { timeout: 10_000 },
+  )
+  await expect(page.locator(GRANT_CHIP)).toContainText(`· ${commands.length}`)
+  expect(await grantedCommands(page)).toEqual(commands)
+}
 
 const test = base
 
@@ -174,6 +211,38 @@ async function backToTerminal(page: Page): Promise<void> {
   await expect(input).toBeFocused({ timeout: 10_000 })
 }
 
+/** Assign the answering role to one endpoint's model — Settings → Roles,
+ *  the surface the model-roles epic (nocx-e6kn2) gave the ask path: the
+ *  ask resolves the ANSWERING ROLE to its assigned (endpoint, model) pair,
+ *  so creating an endpoint never makes it askable and an unassigned role
+ *  refuses with "no model assigned" before any request reaches the model.
+ *  The two selects are the kit's native `<select>`s (ADR-0014): the first
+ *  picks the endpoint, the second completes the pair and writes it — a
+ *  half-pair is never written. */
+async function assignAnsweringRole(page: Page, endpointName: string, model: string): Promise<void> {
+  await page.keyboard.press('Meta+,')
+  await page.locator('.ui-grouped-nav__item[data-item="roles"]').click()
+  const answering = page.locator('.roles-role').filter({ hasText: 'Answering' })
+  await expect(answering).toBeVisible({ timeout: 10_000 })
+  await answering.locator('select').first().selectOption({ label: endpointName })
+  const modelSelect = answering.locator('select').nth(1)
+  await expect(modelSelect).toBeEnabled()
+  await modelSelect.selectOption({ label: model })
+  // The SELECTS are where an explicit assignment is legible, and since
+  // nocx-rikz5 they are the only place. The row's state sentence used to
+  // repeat them — "Answers with openrouter · m-a" directly under two controls
+  // already saying exactly that — and it now stays SILENT when a role
+  // resolves to what the selects show, speaking only when resolution goes
+  // somewhere they cannot show (through the default) or fails. So waiting for
+  // that sentence here waits for a line the product deliberately no longer
+  // draws.
+  await expect(answering.locator('select').first().locator('option:checked')).toHaveText(
+    endpointName,
+    { timeout: 10_000 },
+  )
+  await expect(answering.locator('select').nth(1).locator('option:checked')).toHaveText(model)
+}
+
 /** Run one command and wait for its finished (frozen) block. */
 async function runCommand(
   page: Page,
@@ -193,10 +262,12 @@ async function runCommand(
   return { block }
 }
 
-/** THE GESTURE, as shipped (nocx-4wtlh): select a region of a finished
- *  block's output and it freezes into a reference chip in the input line —
- *  "if you ask, this comes with you". Nothing else moves: the active target
- *  is untouched, so plain Enter still runs the line as a command.
+/** THE GESTURE, as shipped (nocx-4wtlh, nocx-wcswn): select a region of a
+ *  finished block's output and its WHOLE BLOCK is marked for the next
+ *  question — "if you ask, this comes with you". A selection is a quote and
+ *  a grant, never a row range: the payload is the block, so the mark is on
+ *  the block. Nothing else moves — the active target is untouched, so plain
+ *  Enter still runs the line as a command.
  *
  *  The selection is made through a real DOM Range over the block's rows and
  *  announced with the `selectionchange` event the product listens for,
@@ -230,7 +301,7 @@ async function askFromPrompt(page: Page, question: string): Promise<void> {
   // `:visible` on purpose: CM6 keeps a hidden measurement spacer beside the
   // real marker, carrying an identical button. The visible one is the
   // person's.
-  const indicator = page.locator('.pane.active .nocx-editor-target-indicator:visible')
+  const indicator = page.locator('.pane.active .ui-mode-indicator:visible')
   if ((await indicator.getAttribute('data-target')) !== 'agent') {
     await page.keyboard.press('ControlOrMeta+Enter')
     await expect(indicator).toHaveAttribute('data-target', 'agent', { timeout: 10_000 })
@@ -258,21 +329,26 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     const marker = `ask-status-${nonce}`
     const { block } = await runCommand(page, `echo ${marker}`, marker)
 
-    // The gesture still works with nothing configured: the selection
-    // freezes into a chip in the input line, naming the block it came from.
+    // The gesture still works with nothing configured: the selection marks
+    // the block it was made in, and the input line says one block is marked.
     await pointAt(block)
-    const chip = page.locator(REF_CHIP).first()
-    await expect(chip).toBeVisible({ timeout: 10_000 })
-    await expect(chip).toContainText(`echo ${marker}`)
+    await expectGranted(page, [`echo ${marker}`])
 
     // The ask is refused, and the refusal carries its repair: the toast
     // names the problem and the Endpoints page opens with the editor up on
     // a blank endpoint. A sentence with nowhere to go is how a person
     // concludes the feature is broken rather than unconfigured.
+    // The sentence is the answering ROLE's refusal (nocx-e6kn2): the ask
+    // resolves the role to its assigned (endpoint, model) pair, so the
+    // first dev-stand state refuses with "no model assigned" and points at
+    // Settings → Roles, not with the pre-roles "no endpoint configured".
     await askFromPrompt(page, 'What did this print?')
-    await expect(page.locator('.ui-toast')).toContainText('no endpoint configured', {
-      timeout: 15_000,
-    })
+    await expect(page.locator('.ui-toast')).toContainText(
+      'the answering role has no model assigned — assign one in Settings → Roles',
+      {
+        timeout: 15_000,
+      },
+    )
     await expect(page.locator('.ep-root')).toBeVisible({ timeout: 15_000 })
     await expect(page.getByRole('dialog').filter({ hasText: 'New Endpoint' })).toBeVisible({
       timeout: 15_000,
@@ -327,10 +403,10 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
     await expect(setupSheet).not.toBeVisible({ timeout: 10_000 })
 
-    // The deferred save ran with the vault now existing: the endpoint dialog
-    // closes and the SAVED ROW carries the key — the row's own word for it
-    // (the "Key saved" badge renders exactly when the record's credential
-    // reference is set, endpoints-section.tsx renderRow).
+    // The deferred save ran with the vault now existing: the dialog closes
+    // and the record is in the list. That the KEY landed is not asserted
+    // from any caption — it is proved below, where this same endpoint
+    // answers a real question through the fake.
     await expect(dialog).not.toBeVisible({ timeout: 10_000 })
     // The record landed and the row says so. The page deliberately shows no
     // assistant-readiness badge: readiness belongs on the ask chip, where a
@@ -340,7 +416,14 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // root: this file creates a second endpoint later, and a page-wide
     // contains would then pass on the wrong row.
     const savedRow = page.locator('.ui-collection-row').filter({ hasText: `E2E Fake ${nonce}` })
-    await expect(savedRow).toContainText('Key saved', { timeout: 10_000 })
+    await expect(savedRow).toBeVisible({ timeout: 10_000 })
+
+    // ── The answering role (nocx-e6kn2): the ask resolves the role to
+    // its assigned (endpoint, model) pair, so the fresh endpoint is not
+    // askable until the role names it — the refusal for an unassigned
+    // role is "no model assigned", and the ask would never reach the
+    // fake. The assignment goes through the surface a person uses.
+    await assignAnsweringRole(page, `E2E Fake ${nonce}`, 'e2e-model')
 
     // ── Two finished blocks with output that cannot be confused ──────────
     await backToTerminal(page)
@@ -364,12 +447,10 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     fake.setScript({ chunks: ['The first block printed ', markerA, '.'], holdAfter: 1 })
     await pointAt(blockA)
 
-    // The chip is in the INPUT LINE and names the block BEFORE the question
-    // is sent — the payload is what the person pointed at, and they can see
-    // it while they type.
-    const chip = page.locator(REF_CHIP).first()
-    await expect(chip).toBeVisible({ timeout: 10_000 })
-    await expect(chip).toContainText(cmdA)
+    // The mark is on the block and the count is in the INPUT LINE BEFORE the
+    // question is sent — the payload is what the person pointed at, and they
+    // can see it while they type.
+    await expectGranted(page, [cmdA])
 
     // ── The question, in the ordinary editor ─────────────────────────────
     const question = 'What did the first block print?'
@@ -468,10 +549,10 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     const base = fake.requests().length
     fake.setScript({ chunks: ['ok ', marker] })
     await pointAt(block)
-    // The chip names the block before the question is sent; then the
-    // question goes out and the completion lands — the ask must actually be
-    // SENT for there to be a completion to inspect.
-    await expect(page.locator(REF_CHIP).first()).toContainText(`echo ${marker}`)
+    // The block is marked before the question is sent; then the question
+    // goes out and the completion lands — the ask must actually be SENT for
+    // there to be a completion to inspect.
+    await expectGranted(page, [`echo ${marker}`])
     await askFromPrompt(page, 'What did it print?')
     const req = await fake.waitForRequests(base + 1)
     expect(req[base].path.endsWith('/chat/completions')).toBe(true)
@@ -506,7 +587,7 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
 
     // Ask about A; the stream opens and is held.
     await pointAt(blockA)
-    await expect(page.locator(REF_CHIP).first()).toContainText(cmdA)
+    await expectGranted(page, [cmdA])
     const q1 = 'Question one about the first block?'
     await askFromPrompt(page, q1)
     const reqs1 = await fake.waitForRequests(base + 1)
@@ -517,14 +598,13 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
       timeout: 15_000,
     })
 
-    // WHILE the first answer is still streaming, point at B: the previous
-    // chip was CONSUMED by the question that carried it, so the line now
-    // holds exactly one chip and it names B. (Under the shipped gesture a
-    // question can carry several chips at once — that is the point of a
-    // strip — but each question takes the ones it rode with it.)
+    // WHILE the first answer is still streaming, point at B: A's mark was
+    // CONSUMED by the question that carried it, so exactly one block is
+    // marked now and it is B. (Under the shipped gesture a question can
+    // carry several blocks at once — that is the point of a count — but each
+    // question takes the ones it rode with it.)
     await pointAt(blockB)
-    await expect(page.locator(REF_CHIP)).toHaveCount(1, { timeout: 10_000 })
-    await expect(page.locator(REF_CHIP).first()).toContainText(cmdB)
+    await expectGranted(page, [cmdB])
     const q2 = 'Question two about the second block?'
     // The editor is still up: a question is not a handoff, so the agent
     // path never hides it and the next one can be typed straight away
@@ -637,7 +717,11 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     expect(typedProbe.authorization).toBe(`Bearer ${typedKey}`)
     await expect(editDialog).toContainText(/e2e-model answered in \d+ ms/, { timeout: 15_000 })
 
-    // ── No credential at all (a local model) still probes without one ───
+    // ── A DECLARED keyless endpoint (a local model) probes without one ──
+    // Keyless is a DECLARATION now, not an empty field (nocx-8e6v5): an
+    // endpoint with no key and no declaration is a credential that has not
+    // been supplied yet, and the two used to be one silent state. So the
+    // person ticks the box, which is the gesture this half is about.
     await editDialog.getByRole('button', { name: 'Cancel' }).click()
     const localName = `E2E Local ${nonce}`
     await page.getByRole('button', { name: '+ New endpoint' }).first().click()
@@ -645,6 +729,12 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await expect(localDialog).toBeVisible()
     await localDialog.locator('#endpoint-name').fill(localName)
     await localDialog.locator('#endpoint-base-url').fill(fake.baseUrl())
+    await localDialog
+      .getByRole('checkbox', { name: 'This endpoint does not require an API key' })
+      .check()
+    // The key field goes away with the declaration — there is nothing left
+    // to type, which is the point of saying so once.
+    await expect(localDialog.locator('#endpoint-key')).toHaveCount(0)
     await localDialog.getByRole('button', { name: 'Add model' }).click()
     await localDialog.locator('#endpoint-model-0-name').fill('e2e-model')
     await localDialog.getByRole('button', { name: 'Create Endpoint', exact: true }).click()
@@ -698,12 +788,14 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await expect(unlockSheet).not.toBeVisible({ timeout: 10_000 })
 
     // The re-sent request carried the key: the save waits for it, so the
-    // dialog closes only after the record exists — and the SAVED ROW says
-    // so. Before the closeDialog fix this closed and toasted "Saved" while
-    // the create was still in flight, leaving no row and no error.
+    // dialog closes only after the record exists. Before the closeDialog fix
+    // this closed and toasted "Saved" while the create was still in flight,
+    // leaving no row and no error — so the row's EXISTENCE is the assertion,
+    // and the key itself is proved two steps down, where the Test resolves
+    // the STORED credential and the fake reports the material it received.
     await expect(dialog).not.toBeVisible({ timeout: 10_000 })
     const savedRow = page.locator('.ui-collection-row').filter({ hasText: name })
-    await expect(savedRow).toContainText('Key saved', { timeout: 10_000 })
+    await expect(savedRow).toBeVisible({ timeout: 10_000 })
     // The stored material is the key the form was filled with — the Test
     // button resolves the STORED credential and the fake records it.
     await page.getByRole('button', { name: `Edit ${name}` }).click()

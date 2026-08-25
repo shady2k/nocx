@@ -2,32 +2,52 @@ package content
 
 // Schema v1 of the one authoritative ledger (nocx-rtg0.2), per ADR-0019,
 // ADR-0020 and design §5.2. The types here are the public repository seam:
-// ContentDB.Ledger() returns a LedgerRepository, the only writer of the v1
-// tables. The interim command_history table and CommandHistoryRepository are
-// untouched by this surface — they remain the live history path until
-// nocx-rtg0.19 removes them, and nothing may write both (ADR-0019 §4).
+// ContentDB.Ledger() returns a LedgerRepository, and since nocx-rtg0.19 it is
+// the only writer of a command anywhere in nocx — command_history and
+// CommandHistoryRepository are gone, so ADR-0019 §4's "nothing may write
+// both" is now satisfied by there being nothing else to write.
 //
 // The entry lifecycle IS wired as of nocx-rtg0.3: internal/transport's
 // ledger.open / ledger.bind / ledger.close (ws_ledger.go) drive Submit,
 // StartExecution and FinishExecution through capability.LedgerService, and
 // the ask transaction (agent.captureFrame / agent.ask) drives CaptureFrame,
-// SubmitAgentAsk, TransitionRun and FinishAgentRun. The READ path is wired
-// as of nocx-rtg0.20: ledger.query drives QueryEntries and ledger.get drives
-// Entry plus Edges (ws_ledger_query.go), and the query's `host` field is
-// what finally asks a resolved environment row for its host — so
-// Environment.Host has a renderer. What is still test-reachable only:
-// CreateSession, DeleteSession, ListEntries, DeleteEntry, AppendArtifact and
-// AddEdge — plus the whole of LayoutRepository (layout.go), which keeps the
-// same statement in its own header.
+// SubmitAgentAsk, TransitionRun, OpenProse, SealProse, AppendChunk and
+// FinishAgentRun. The READ
+// path is wired as of nocx-rtg0.20: ledger.query drives QueryEntries and
+// ledger.get drives Entry plus Edges plus Caused (ws_ledger_query.go), and the query's
+// `host` field is what finally asks a resolved environment row for its host —
+// so Environment.Host has a renderer. history.record drives RecordCompleted
+// (nocx-rtg0.19), which is where a finished command lands now, under the
+// author the renderer minted (nocx-iadtt); ledger.capture drives
+// CaptureOutput.
 //
-// RewriteRedaction is the awkward third case and is written down rather than
-// rounded to one of the other two: it is WIRED — secrets.captureSave reaches
-// it through capability.CaptureSaveService, which routes a link by the id it
-// carries — but no production caller mints a link keyed by an entry id yet.
-// history.record is what mints links, and it writes command_history rows. So
-// the path is live and correct, and in production the router always takes the
-// other arm until nocx-rtg0.19 replaces history.record's writer
-// (nocx-rtg0.24).
+// WHAT IS STILL TEST-REACHABLE ONLY: CreateSession, DeleteSession,
+// ListEntries, DeleteEntry, AppendArtifact, AddEdge and RunState.
+//
+// AddCause and Caused were never on that list: they arrived wired
+// (nocx-h1l4o). internal/assistant's policy middleware reaches AddCause for
+// every entry a turn causes (policyMiddleware.noteCause) and ledger.get
+// reaches Caused. Since ADR-0040 both work the tree — AddCause seats a child,
+// Caused reads a block's children in pos order — rather than the retired
+// `caused-by` edge. Both were checked with `deadcode -tags gtk3 -whylive`,
+// which is the only form that answers this question — see the note below
+// about -filter.
+//
+// EvictEntries, EvictBodies and Watermark are the third category, and it is
+// written down rather than rounded to either of the other two: no production
+// caller reaches the INTERFACE METHOD, and the behaviour behind it is
+// nonetheless live on every submit — evictOnWrite calls the unexported
+// evictEntries and evictBodies directly (retention.go), and the query path
+// reads the unexported watermark inside its own transaction. So "no caller"
+// here means the seam is untested in production, not that retention is
+// asleep.
+//
+// RewriteRedaction stopped being the awkward case when command_history went
+// (nocx-rtg0.19). It is wired and TAKEN: secrets.captureSave reaches it
+// through capability.CaptureSaveService, the id router that used to choose a
+// store by parsing an integer is gone with the second store, and
+// history.record now mints the entry-keyed links that made the ledger arm
+// unreachable in production before.
 //
 // Read that list rather than a deadcode run. `deadcode -filter
 // 'nocx/internal/content'` prints nothing for this package and always has —
@@ -45,6 +65,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 )
 
 // ── closed enums; each mirrors a CHECK constraint in schemaV1 ─────────────
@@ -53,8 +74,37 @@ type EntryKind string
 
 const (
 	EntryShell  EntryKind = "shell"
-	EntryAgent  EntryKind = "agent"
+	EntryAsk    EntryKind = "ask"
 	EntryAction EntryKind = "action"
+	// EntryText is one run of assistant prose (ADR-0040): a thing that was
+	// PRINTED, not attempted. It has no intent, no execution and no outcome
+	// to wait for, so the schema's CHECK pins its shape — inside a block
+	// (parent and pos), empty intent, born closed and successful. Everything
+	// drawn in the scrollback is an entry, and this is the kind that makes
+	// that true of what the model writes between its calls.
+	EntryText EntryKind = "text"
+	// EntryFrame is a captured frame (design §2.2): a row the ledger owns —
+	// it has no output and no outcome (a capture is a fact, complete at
+	// ingest), but it is a row, and giving it a kind is what lets the ask's
+	// reference check tell a frame from a turn by the discriminated column
+	// rather than by comparing intent against a magic string. It is never
+	// drawn as a block of its own — a frame is a reference into an ask.
+	EntryFrame EntryKind = "frame"
+)
+
+// Source is the IMMEDIATE subject that submitted the content or the intent
+// this entry represents (schemaV1's column, in the brief's words, verbatim
+// for the boundary cases): initiation is NOT transitive — the assistant was
+// set going by a person, and the command the assistant ran was submitted by
+// the assistant, so if initiation chained every row would be `user` and the
+// column would say nothing. Approval does not change it: a call the
+// assistant proposed stays `assistant` after a person allows it, because the
+// person authorised somebody else's intent, they did not submit it.
+type Source string
+
+const (
+	SourceUser      Source = "user"
+	SourceAssistant Source = "assistant"
 )
 
 // Phase is the entry lifecycle (design §3.7): open until execution is
@@ -82,10 +132,13 @@ const (
 // Relation is the edge vocabulary (design §3.4).
 type Relation string
 
+// `caused-by` was here and is retired (ADR-0040): containment is
+// entries.parent_id now, which is one parent the database enforces rather
+// than however many rows anybody inserted. What is left is what is genuinely
+// not a tree.
 const (
 	RelRerunOf    Relation = "rerun-of"
 	RelSupersedes Relation = "supersedes"
-	RelCausedBy   Relation = "caused-by"
 	RelCites      Relation = "cites"
 	RelInSpan     Relation = "in-span"
 	// RelReferences joins a question entry to the frame entry it points at
@@ -161,6 +214,10 @@ const (
 // TerminationReason distinguishes the five outcomes a single status plus
 // exit code cannot (ADR-0020 §4): the command failed, the executor timed
 // out, the transport vanished, the user killed it, the agent declined.
+// The lease (ADR-0020 decision 2) adds the two deadlines a single
+// "timeout" cannot tell apart — silence is a different failure from
+// slowness — and the output budget, so "which bound ended this run" is
+// answerable from the record, never reconstructed.
 type TerminationReason string
 
 const (
@@ -171,15 +228,15 @@ const (
 	TermUserKilled    TerminationReason = "user-killed"
 	TermAgentDeclined TerminationReason = "agent-declined"
 	TermInterrupted   TerminationReason = "interrupted"
-)
-
-// GrantPolicy is the autonomy preset the workspace mints (ADR-0020 §7).
-type GrantPolicy string
-
-const (
-	GrantAskEveryTime GrantPolicy = "ask-every-time"
-	GrantAskOnMutate  GrantPolicy = "ask-on-mutate"
-	GrantAutonomous   GrantPolicy = "autonomous"
+	// TermInactivity is the lease's silence bound: the execution produced
+	// no output for the inactivity deadline and was terminalized for it.
+	// Distinct from TermTimeout because a command can be slow AND alive;
+	// silence is the failure that looks like life.
+	TermInactivity TerminationReason = "inactivity"
+	// TermOutputBudget is the lease's volume bound: the execution produced
+	// more than its output budget allowed and was terminalized for it —
+	// bounded visibly, never truncated silently.
+	TermOutputBudget TerminationReason = "output-budget"
 )
 
 type ResourceKind string
@@ -191,6 +248,28 @@ const (
 	ResourceCredential  ResourceKind = "credential"
 	ResourceDestination ResourceKind = "destination"
 	ResourceTool        ResourceKind = "tool"
+)
+
+// Effect is the ADR-0020 effect lattice — what an execution may do to the
+// world (docs/decisions/0020-the-agent-gets-a-lane-authority-is-granted-per-run.md
+// decision 6): observe | mutate-reversible | mutate-destructive |
+// privilege-change | disclose | cross-boundary | delegate. It lives here
+// beside ResourceKind for the same reason ResourceKind does: the ledger owns
+// the vocabulary the durable grant record stores, and a consumer (the agent
+// tool registry, the policy) consumes it, never duplicates it. A grant names
+// the effect classes it permits; authority_grants persists them
+// (grant_effects), so "forgot to classify a tool" stops compiling in the
+// registry and stops persisting here.
+type Effect string
+
+const (
+	EffectObserve           Effect = "observe"
+	EffectMutateReversible  Effect = "mutate-reversible"
+	EffectMutateDestructive Effect = "mutate-destructive"
+	EffectPrivilegeChange   Effect = "privilege-change"
+	EffectDisclose          Effect = "disclose"
+	EffectCrossBoundary     Effect = "cross-boundary"
+	EffectDelegate          Effect = "delegate"
 )
 
 // CaptureMethod records whether artifact text came from terminal cells, from
@@ -301,17 +380,39 @@ type SubmitEntry struct {
 	// refused with ErrUnknownPane rather than stored dangling. Nil means the
 	// entry is attached to no recorded pane, which is what an agent run
 	// outside a terminal and every submit before nocx-rtg0.28 look like.
-	PaneID         *string
-	SessionID      *string
-	Cwd            string
-	Kind           EntryKind
-	Intent         string
-	ConversationID *string
-	StartedAt      *int64 // frontend monotonic clock — durations only
-	EndedAt        *int64
-	DurationMs     *int64
-	Sensitivity    Sensitivity
-	Payload        string // kind payload JSON (sparse extension only)
+	PaneID    *string
+	SessionID *string
+	// ParentID and Pos place the entry IN THE TREE (ADR-0040): the block it
+	// sits inside and where among that block's children it sits. Both nil is
+	// a top-level block, whose order stays ingest_seq.
+	//
+	// They travel together — a parent with no seat cannot be drawn and a seat
+	// with no parent is not a place — and the pair is the caller's, because
+	// only the caller knows where in what it is writing this belongs. A
+	// second child at a position already taken is refused by the database,
+	// never silently reordered.
+	ParentID *string
+	Pos      *int
+	Cwd      string
+	Kind     EntryKind
+	// Source is the IMMEDIATE subject that submitted the content or the
+	// intent this entry represents (schemaV1's column, in the brief's own
+	// words): initiation is NOT transitive — the assistant was set going by
+	// a person, and the command the assistant ran was submitted by the
+	// assistant, so if initiation chained every row would be `user` and the
+	// column would say nothing. Approval does not change it: a call the
+	// assistant proposed stays `assistant` after a person allows it,
+	// because the person authorised somebody else's intent, they did not
+	// submit it. Empty defaults to SourceUser at the writer, never here —
+	// the stores that cannot mean it refuse it (RecordCompleted) or the
+	// caller names it (Submit's assistant callers).
+	Source      Source
+	Intent      string
+	StartedAt   *int64 // frontend monotonic clock — durations only
+	EndedAt     *int64
+	DurationMs  *int64
+	Sensitivity Sensitivity
+	Payload     string // kind payload JSON (sparse extension only)
 }
 
 // SubmitResult is the store's answer to Submit: the backend-assigned
@@ -434,12 +535,37 @@ func ShellExitCodeOf(payload string) (*int, error) {
 	return out, nil
 }
 
+// Grant is the authority recorded on a run (ADR-0020 §5): versioned,
+// expiring, immutable once execution starts. It names BOTH dimensions of
+// the authority — the effect classes permitted (what the run may do to the
+// world, decision 6) and the resource scopes it may touch (what exists to
+// be touched, decision 5). A grant over effect classes alone permits
+// nothing in particular and everything in general: "may observe" reaches
+// every path, session and credential unless the scopes say otherwise.
+//
+// Policy is the decision MATRIX of the amended §7 (policy.go): one row per
+// effect class. Effects and Scopes are the matrix's derivations, materialized
+// by EffectPolicy.AsGrant when the run's grant is minted — the matrix is the
+// one source of what a run may do, and a grant built any other way is a
+// hand-rolled authority the consumer cannot have reasoned about.
+type Grant struct {
+	Version   int
+	ExpiresAt int64
+	Policy    EffectPolicy
+	Effects   []Effect
+	Scopes    []GrantScope
+}
+
 // FinishAgentRun is the terminal close of an assistant run (the state
 // machine this slice's driver persists: prepared → streaming → completed |
 // failed | cancelled | interrupted). The run's terminal state and the
 // entries close in ONE transaction (FinishAgentRun); the failure sentence —
 // what agent.runState's error carries, a sentence a person reads, never a
 // Go error string — is recorded on the run's payload.
+//
+// EndedAt closes the turn's interval and is what its duration is measured
+// against: unlike a shell command, nobody but this process times a turn, so
+// the close is the only place the number can come from (nocx-hoeq3).
 type FinishAgentRun struct {
 	State             RunState // RunCompleted or RunFailed (this slice)
 	TerminationReason TerminationReason
@@ -447,19 +573,13 @@ type FinishAgentRun struct {
 	EndedAt           int64
 }
 
-// Grant is the authority recorded on a run (ADR-0020 §5).
-type Grant struct {
-	Version   int
-	ExpiresAt int64
-	Policy    GrantPolicy
-	Scopes    []GrantScope
-}
-
 // GrantScope is one resource the grant touches — what "this run held a grant
 // for these environments and touched these three sessions" is a query over.
+// The json tags are the wire form of a policy row's scope (the settings RPC);
+// the durable record persists kind and id as columns, not JSON.
 type GrantScope struct {
-	Kind ResourceKind
-	ID   string
+	Kind ResourceKind `json:"kind"`
+	ID   string       `json:"id"`
 }
 
 // ── the assistant ask (design §5, §7; bead nocx-f4s5) ────────────────────
@@ -492,9 +612,11 @@ func (s RunState) IsTerminal() bool {
 	return false
 }
 
-// FrameIntent marks a frame entry (kind=agent): the capture is a fact,
-// complete at ingest, closed at capture time. The ask's reference check
-// recognises frames by kind+intent — an id that is not a frame is refused.
+// FrameIntent is the intent value a frame row carries (kind=frame): the
+// capture is a fact, complete at ingest, closed at capture time. The ask's
+// reference check recognises a frame by its KIND — the discriminated column,
+// never this string (the magic-string comparison is what the kind exists to
+// retire).
 const FrameIntent = "frame-capture"
 
 // FrameSource is which capture path a frame came from (design §2.2). The
@@ -599,9 +721,17 @@ type CaptureFrame struct {
 	// session is rejected", design §5).
 	SessionID *string
 	// Cwd is where the capture happened (the renderer's OSC 7 fact).
-	Cwd    string
-	Source FrameSource
-	Rows   []FrameRow
+	Cwd string
+	// Source is the CAPTURE PATH (design §2.2): live cells versus
+	// serialized text. Subject is WHO asked for the capture — the
+	// immediate subject, in the entries.source vocabulary — and the two
+	// are deliberately different fields: a live frame is a person's
+	// capture today and can equally be the readScreen tool's pull
+	// tomorrow, so the path must never be read as authorship (the
+	// brief's transitivity trap in miniature).
+	Source  FrameSource
+	Subject Source
+	Rows    []FrameRow
 	// Cursor is the live cursor; null for a frozen frame.
 	Cursor *FrameCursor
 	// Identity is the live capture identity — required for source=live.
@@ -639,12 +769,6 @@ type FrameRegion struct {
 	ColEnd   *int
 }
 
-// AnswerIntent marks an answer entry (kind=agent): the model's streamed
-// reply to a question, joined to it by a caused-by edge (design §5 — the
-// answer is an entry, never a string held in a map that dies with the
-// process).
-const AnswerIntent = "answer"
-
 // RunFacts is the run's configuration as it was at the time (design §5:
 // "run mode, endpoint and model as they were at the time") — pinned into
 // the execution's payload at ask time, so a later endpoint change never
@@ -659,19 +783,33 @@ type RunFacts struct {
 
 // AgentAsk is one ask transaction (agent.ask, design §5, §7): the question
 // text plus references to already-captured frames. The backend records the
-// frame references, the question, the answer entry and a PENDING RUN in ONE
-// atomic create, before the model would be called — the identities and the
-// recovery state exist first, or a frame lands with no question, a question
-// with no run, a run with no answer entry, or a retry duplicates both.
+// frame references, the TURN and a PENDING RUN with the body it will stream
+// into, in ONE atomic create, before the model would be called — the
+// identities and the recovery state exist first, or a frame lands with no
+// question, a question with no run, a run with nowhere to write, or a retry
+// duplicates both.
 type AgentAsk struct {
 	// ID is the renderer-minted ask id — the UNTRUSTED idempotency key of
 	// the question entry (the schema's own "client-minted UUIDv7" rule):
 	// bound to Client and a digest of the ask content, so a replay returns
 	// the original run id and the same id with different content is
 	// ErrIDConflict.
-	ID         string
-	Client     string
-	Env        Environment
+	ID     string
+	Client string
+	Env    Environment
+	// PaneID is the turn's DURABLE anchor, and it is the same one a command
+	// carries (design §6.1, nocx-4em1z): a turn IS a block, so it hangs on
+	// the thing that outlives the backend. SessionID beside it is
+	// provenance — which pipe the question was asked in — and is null from
+	// the first Open after that backend exited. Anchoring a turn to the
+	// session alone is what lost every dialogue on restore: the read is by
+	// pane, and by then there is no session to match.
+	//
+	// The TRANSPORT fills it from the live session, exactly as ledger.open
+	// does, and the renderer never sends one: the backend already resolved
+	// which pane a session is the pipe of, and a second copy on the wire
+	// would be one input under two owners.
+	PaneID     *string
 	SessionID  *string
 	Cwd        string
 	Question   string
@@ -683,18 +821,154 @@ type AgentAsk struct {
 }
 
 // AgentAskResult is the answer to an ask: the BACKEND-MINTED run id (the
-// execution row — what agent.cancel/approve/status will address), the
-// question entry id, the ANSWER entry id (where the streamed deltas land —
-// agent.runDelta's entryId), the answer artifact id, the question's
-// ingest_seq and whether this was a replay. The run is in state prepared:
-// recorded, never executed.
+// execution row — what agent.cancel/approve/status will address), the TURN's
+// entry id, the artifact the answer is written into, the entry's ingest_seq
+// and whether this was a replay. The run is in state prepared: recorded,
+// never executed.
+//
+// ONE entry id and not two (nocx-4em1z). A turn is a block: the question is
+// the entry's intent, and its BODY IS ITS CHILDREN (ADR-0040, amending
+// ADR-0039). The answer used to be an entry of its own joined by a caused-by
+// edge (assistant design §5) and nothing needed it to be — its id was a
+// routing ADDRESS for deltas, reasoning, tool calls and copy, and the
+// turn's own id addresses all four.
+//
+// NO ANSWER ARTIFACT IS OPENED HERE, and the absence is the change. The ask
+// used to open one text/plain artifact on the run and every delta appended to
+// it, which is precisely the arrangement ADR-0040 retires: the unit that is
+// DRAWN (a run of prose) and the unit that was STORED (the whole answer) were
+// different things, and something had to translate between them. The run
+// opens a `text` child per run of prose instead (OpenProse), so the turn
+// itself now carries no body at all.
 type AgentAskResult struct {
-	RunID            int64
-	QuestionID       string
-	AnswerEntryID    string
-	AnswerArtifactID string
-	IngestSeq        int64
-	Replayed         bool
+	RunID int64
+	// EntryID is the turn: what the deltas are routed by, what the flow
+	// renders as a block, and what a restore reads back. It is the PARENT the
+	// prose blocks are opened under, never the thing prose appends to.
+	EntryID   string
+	IngestSeq int64
+	Replayed  bool
+}
+
+// ProseBlock is one run of assistant prose as the store holds it (ADR-0040):
+// the `text` child of the turn, and the artifact that child's deltas append
+// to. Two ids because they are two rows doing two jobs — the block is what is
+// DRAWN and what the wire addresses, the artifact is the body it grows.
+type ProseBlock struct {
+	// EntryID is the `text` entry: a child of the turn, at its own seat,
+	// born closed and successful because prose was printed, not attempted.
+	EntryID string
+	// ArtifactID is that block's body, open until the block is sealed.
+	ArtifactID string
+}
+
+// ProseFacts is the part of a TEXT entry's payload the ledger reads back:
+// WHICH RUN printed this piece of prose (ADR-0040's "the conversation is
+// assembled from the children, in pos order, per run").
+//
+// It is a payload key rather than a column because it is what ONE kind has —
+// the distinction ADR-0040 drew when it rejected an attributes table: "a
+// column is what every kind has and the database must check, and payload is
+// what one kind has". And it is deliberately not artifacts.execution_id: that
+// column says which ATTEMPT produced a body, and a run of prose was printed
+// rather than attempted — the store writes it NULL for prose and a test
+// asserts it (TestAnAskIsOneEntryWhoseBodyIsItsProseChildren).
+//
+// What it buys is the retry case and only the retry case. A turn with one
+// agent run needs nothing recorded: every `text` child of that turn is that
+// run's prose, because there is no other run it could belong to. A turn with
+// SEVERAL agent-lane executions cannot be read that way — sorting its
+// children by pos alone splices two attempts into one incoherent message —
+// and this is the fact that separates them.
+type ProseFacts struct {
+	// RunID is the agent execution that opened this block. Zero — an absent
+	// key — means the block records no run, which is what a `text` row
+	// written by anything other than OpenProse looks like.
+	RunID int64 `json:"runId"`
+}
+
+// ProseFactsOf decodes a TEXT entry's payload. It is the one reader of that
+// key, beside ShellExitCodeOf and EntryMaskingOf: one decoder per key, and it
+// is the one that already exists.
+//
+// A payload that is not JSON, or carries no runId, is NOT an error: it is a
+// block that records no run, and saying so is the honest answer. The error
+// return is kept for the malformed-JSON case a caller may want to log.
+func ProseFactsOf(payload string) (ProseFacts, error) {
+	var f ProseFacts
+	if strings.TrimSpace(payload) == "" {
+		return f, nil
+	}
+	if err := json.Unmarshal([]byte(payload), &f); err != nil {
+		return ProseFacts{}, fmt.Errorf("content: decode prose facts: %w", err)
+	}
+	return f, nil
+}
+
+// TurnProse is one turn's answer as a reader must be told it: the prose of
+// ONE run, in seat order, or the honest statement that it is gone.
+//
+// WHICH RUN, stated on the value rather than left to the caller to work out
+// (the brief's trap 2: "be explicit about which run's prose the assembled
+// message is"). It is the turn's LATEST agent-lane execution — the attempt
+// whose text is the one a person just read, and therefore the one a follow-up
+// question is asked about. An earlier attempt's prose is not in Text and is
+// not counted in Blocks; it is not a hole either, because an attempt that was
+// superseded is not part of the answer that stands.
+//
+// Today a turn has exactly one agent run: SubmitAgentAsk writes attempt 1 and
+// the approval resume drives that SAME execution to completion (the resume is
+// a real checkpoint resume — internal/transport askRunContext.nextSeq). So
+// the selection is a no-op on every path the product has, and it exists
+// because `executions` permits a second agent-lane row per entry by design
+// (ADR-0020 decision 4) and a reader that ignored the possibility would
+// interleave two attempts the day one arrived.
+type TurnProse struct {
+	// RunID and Attempt are the execution this prose is of — the answer to
+	// "which run", carried so a caller never has to re-derive it.
+	RunID   int64
+	Attempt int
+	// State is that run's own state, and it is what decides whether Text is
+	// a finished answer or an unfinished attempt (the brief's trap 3). The
+	// presence of `text` children cannot answer that: a run interrupted
+	// halfway leaves exactly the same rows as one that finished.
+	State RunState
+	// Blocks is how many runs of prose Text was joined from — zero when the
+	// run printed nothing, and zero when retention took what it printed.
+	Blocks int
+	// Text is those blocks' bodies, in pos order, concatenated. The order is
+	// the whole meaning: a sentence written before a call explains why the
+	// call was made, and a sentence written after it is a conclusion drawn
+	// from its output.
+	Text string
+	// Evicted says retention took the bodies of this run's prose (ADR-0040's
+	// retention rule: the prose of one run is evicted as a unit). It is read
+	// off the SAME receipt LedgerEntry.ProseEvicted reads — the sweep's mark
+	// on the body — narrowed to this run's blocks, so there is one stored
+	// fact and one reading of it.
+	//
+	// It is the reason Text being empty is not ambiguous. Evicted with empty
+	// Text is "there was an answer and it is no longer kept"; not evicted
+	// with empty Text is "this run printed nothing". A reader that could not
+	// tell them apart would have to either invent text or leave a hole, and
+	// both are worse than the sentence that says which it is.
+	Evicted bool
+}
+
+// PriorTurn is the turn that came before another one in the same pane: the
+// question that was asked and the answer that stands to it.
+//
+// The pane is the thread. A turn is anchored to a pane and not to a session
+// (nocx-4em1z: a session is gone by the time a restore runs), so "what did we
+// just say" is a pane-scoped question, and it is the same scope the restore
+// reads and the block tools list.
+type PriorTurn struct {
+	// EntryID is that turn's block — the id a caller can go on to read.
+	EntryID string
+	// Question is its intent: what was asked, exactly as it was recorded.
+	Question string
+	// Prose is what the run answered, already arranged (see TurnProse).
+	Prose TurnProse
 }
 
 // The ask's reference-validation failures — reachable from the renderer (an
@@ -758,11 +1032,15 @@ type CaptureOutput struct {
 	Body []byte
 }
 
-// AppendArtifact creates one artifact of an execution, with its capture
+// AppendArtifact creates one artifact of a BLOCK, with its capture
 // provenance (ADR-0019 §6). Content arrives via AppendChunk; an artifact is
 // never one BLOB.
 type AppendArtifact struct {
-	ExecutionID    int64
+	// EntryID is the OWNER: the block this is a body of (ADR-0040). Required.
+	EntryID string
+	// ExecutionID is PROVENANCE: which attempt produced this body. Nil when
+	// there was no attempt — a `text` block was printed, not run.
+	ExecutionID    *int64
 	ID             string // client-minted UUIDv7
 	MediaType      MediaType
 	DerivedFrom    *string
@@ -795,8 +1073,102 @@ type Edge struct {
 	Rel  Relation
 	// Payload is the edge's sparse extension — for a `references` edge it
 	// is the region JSON (FrameRegion). Default '{}'; the store never
-	// interprets it.
+	// interprets it. It carried a `caused-by` edge's causal position until
+	// ADR-0040 made containment a column, and no relation left here has a
+	// field the store reads.
 	Payload string
+}
+
+// ActionFacts is the part of an ACTION entry's payload the ledger reads
+// back: what the call was, what the gate classed it as, and what it named.
+//
+// The row is written by internal/assistant (policy.go openAttempt and
+// recordProposal), whose payload carries more than this — the run id, the
+// approval binding, the classifier's verdict — none of which a restored turn
+// draws. This declares the part with a READER, so the contract between the
+// two sides is a type rather than three string literals in two packages.
+type ActionFacts struct {
+	Tool   string `json:"tool"`
+	Effect Effect `json:"effect"`
+	// Args is what the model asked for, as the tool's schema validated it —
+	// written with the attempt and read back here so a RESTORED call can be
+	// named the same way the live one was.
+	//
+	// It has a reader now, and that is the change (ADR-0040). Two calls of
+	// one session-scoped tool have the same tool name and the same derived
+	// resource; what separates them is the arguments, so a restore without
+	// them would say strictly less than the live announcement did — the
+	// defect this ADR was written against, arriving one restart later.
+	Args map[string]any `json:"args,omitempty"`
+	// OpensBlock is the tool declaration's own fact
+	// (agenttools.Declaration.OpensBlock), written with the attempt: the
+	// call's work became a BLOCK of its own, so that block — its command, its
+	// output, its exit status — is the account of the call, and a second child
+	// beside it would restate the same command twice (ADR-0040).
+	//
+	// Stored rather than matched on Tool by the reader, for the reason
+	// Effect is stored: a reader holding its own list of which tools open
+	// blocks is a second copy of the tool table.
+	OpensBlock bool `json:"opensBlock,omitempty"`
+	// Resource is what the call named, derived ONCE at the moment the gate
+	// decided about the call and stored with it. Absent when the tool names
+	// no resource in its parameters at all.
+	Resource *GrantScope `json:"resource,omitempty"`
+}
+
+// CausedEntry is one CHILD of a block, resolved: its seat and the facts a
+// reader needs to draw it, off its own row (ADR-0040).
+//
+// It used to be a `caused-by` edge's other end and it is a child row now.
+// What it carried and no longer does is `at` — how far the turn's prose had
+// got when this happened — because that offset existed only while the unit
+// that is DRAWN (a run of prose) and the unit that is STORED (one whole
+// answer) were different things. They are the same thing now: prose is a
+// `text` child with a seat of its own, so the sequence is the children in
+// pos order and there is nothing left to cut.
+//
+// The JOIN happens HERE, in the ledger, and that is the point (AD-8). A
+// reader handed raw ids would have to resolve each one, order the result and
+// decide what a dangling one means — a second owner of the arrangement, in
+// the surface that has the least idea what it means. The ledger owns the
+// arrangement; a reader draws what it is told.
+type CausedEntry struct {
+	// EntryID is the child — a run of prose the turn wrote, a shell command
+	// it ran, or the action entry of a tool call it made.
+	EntryID string
+	// Position is the child's seat among its siblings (entries.pos).
+	Position int
+	Kind     EntryKind
+	// Source is who submitted the child's content or intent — the same
+	// entries.source fact a page row carries, so a restored turn's badge
+	// never guesses it from the child's kind.
+	Source Source
+	// Intent is the child row's own intent: the command line for a shell
+	// entry, the tool name for an action, and EMPTY for a `text` child —
+	// prose has no intent, which is a clause of its CHECK rather than a
+	// convention a reader has to know.
+	Intent string
+	// Effect is the effect class the gate decided for an ACTION entry, read
+	// back off that row's payload. Empty on every other kind — a command a
+	// turn ran is not a tool call and has no effect class.
+	Effect Effect
+	// Args is what the call asked for, off the same row's payload
+	// (ActionFacts.Args). Nil on every other kind — a command a turn ran
+	// asked for nothing — and nil for an action whose row predates the
+	// field, which reads as a call named by its tool alone rather than as an
+	// error.
+	Args map[string]any
+	// Resource is what the call named, as the backend derived it at the
+	// moment it decided about the call (internal/assistant namedResource is
+	// the ONE derivation). Nil when the tool names no resource in its
+	// parameters at all, and nil for a non-action entry. It is STORED
+	// rather than re-derived because re-deriving it in a reader would be a
+	// second answer to a question that already has an owner.
+	Resource *GrantScope
+	// OpensBlock says this call's work became a block of its own
+	// (ActionFacts.OpensBlock). False on every non-action kind: a command a
+	// turn ran IS a block and does not also say it opened one.
+	OpensBlock bool
 }
 
 // LedgerEntrySummary is one row of the timeline: enough to page and render
@@ -824,6 +1196,9 @@ type LedgerEntrySummary struct {
 	StartedAt  *int64
 	EndedAt    *int64
 	DurationMs *int64
+	// Source is who submitted the content or intent this entry represents
+	// (entries.source) — the fact the restore badge is painted from.
+	Source Source
 	// Payload is the entry's kind payload column, raw. Two readers own its
 	// keys and neither is the store: ShellExitCodeOf for the shell arm and
 	// EntryMaskingOf for the redaction receipt (nocx-rtg0.24). The store
@@ -842,6 +1217,7 @@ func (e LedgerEntry) Summary() LedgerEntrySummary {
 		Environment: e.Environment, Cwd: e.Cwd, Kind: e.Kind, Intent: e.Intent,
 		Phase: e.Phase, Status: e.Status, SubmittedAt: e.SubmittedAt,
 		StartedAt: e.StartedAt, EndedAt: e.EndedAt, DurationMs: e.DurationMs,
+		Source:  e.Source,
 		Payload: e.Payload,
 	}
 }
@@ -955,22 +1331,56 @@ type LedgerEntry struct {
 	// PaneID is the anchor the restore path reads; SessionID beside it is
 	// provenance, and it is nil from the first Open after the backend that
 	// wrote it exited (design §6.1).
-	PaneID         *string
-	SessionID      *string
-	Cwd            string
-	Kind           EntryKind
-	Intent         string
-	Phase          Phase
-	Status         EntryStatus
-	ConversationID *string
-	SubmittedAt    int64
-	StartedAt      *int64
-	EndedAt        *int64
-	DurationMs     *int64
-	Sensitivity    Sensitivity
-	ReviewedAt     *int64
-	Payload        string
-	Executions     []Execution
+	PaneID    *string
+	SessionID *string
+	// ParentID and Pos are the entry's place in the tree (ADR-0040): the
+	// block it sits inside and its seat among that block's children. Both nil
+	// on a top-level block.
+	ParentID    *string
+	Pos         *int
+	Cwd         string
+	Kind        EntryKind
+	Intent      string
+	Phase       Phase
+	Status      EntryStatus
+	SubmittedAt int64
+	StartedAt   *int64
+	EndedAt     *int64
+	DurationMs  *int64
+	// Source is who submitted the content or intent this entry represents
+	// (entries.source) — carried on the detail read for the same reason it
+	// is on the summary: the restore badge is painted from it.
+	Source      Source
+	Sensitivity Sensitivity
+	Payload     string
+	// Artifacts are the entry's OWN bodies — the ones no execution produced
+	// (ADR-0040 decision 3: an artifact belongs to its block, and which
+	// attempt made it is a second, weaker fact that a `text` block does not
+	// have). A run of prose is exactly that case, and without this it could
+	// be written and never enumerated: the per-execution lists below reach a
+	// body through its attempt, and there is no attempt to reach through.
+	//
+	// It is deliberately NOT every artifact of the entry. A command's output
+	// hangs on the attempt that produced it and is listed there; repeating it
+	// here would be one body in two lists, which is two owners of one fact
+	// the moment either list is filtered. Metadata only, like the others —
+	// the recall read never hauls bytes.
+	Artifacts []Artifact
+	// ProseEvicted says the prose of THIS RUN is no longer kept: retention
+	// took the bodies of its `text` children (ADR-0040's retention rule,
+	// ADR-0019 §7). It is the ONE place a reader asks that question, and it
+	// is a fact about the RUN because the run is the unit — the prose of one
+	// run is retained or evicted together, so a turn cut into seven pieces
+	// and a turn written in one report the same single answer, and a reader
+	// drawing the turn has one sentence to say rather than one per hole.
+	//
+	// Derived, never stored: it is EXISTS over the receipts the sweep leaves
+	// on the bodies themselves (Artifact.Evicted), so there is one stored
+	// fact and one reading of it. False on every kind that has no prose,
+	// which includes a command whose own terminal body was evicted — that
+	// block says its own sentence, and a turn does not say it for it.
+	ProseEvicted bool
+	Executions   []Execution
 }
 
 // Execution is one run: lease bounds, interactivity policy, process group,
@@ -1009,8 +1419,11 @@ type Execution struct {
 // the bodies in seq order; it is nil on artifacts embedded in LedgerEntry
 // (the recall read must not haul bytes — Artifact fetches them).
 type Artifact struct {
-	ID             string
-	ExecutionID    int64
+	ID string
+	// EntryID is the block this body belongs to; ExecutionID is which
+	// attempt produced it, nil when there was none (ADR-0040).
+	EntryID        string
+	ExecutionID    *int64
 	MediaType      MediaType
 	DerivedFrom    *string
 	State          ArtifactState
@@ -1027,8 +1440,15 @@ type Artifact struct {
 	ByteEnd        *int64
 	Encoding       string
 	Gaps           []Gap
-	Payload        string
-	Chunks         [][]byte
+	// Evicted says the store HAD this body and retention took it, as
+	// distinct from a capture that never held anything: both are zero bytes
+	// over zero chunks, and "this command printed nothing" and "this output
+	// is no longer kept" are different sentences that must stay different.
+	// The row survives the eviction precisely to carry this — §7 evicts
+	// bodies and leaves everything that says what was there.
+	Evicted bool
+	Payload string
+	Chunks  [][]byte
 }
 
 // LedgerRepository is the typed repository for schema v1 (ADR-0019,
@@ -1116,6 +1536,25 @@ type LedgerRepository interface {
 	// deletion without its watermark would silently narrow what the store
 	// can answer while it went on claiming full coverage.
 	EvictEntries(ctx context.Context, req EvictionRequest) (EvictionResult, error)
+	// EvictBodies is the SIZE-driven sweep: it frees the oldest bodies the
+	// retention budget no longer covers and leaves every entry, every
+	// artifact row and every chunk of accounting behind it (ADR-0019 §7).
+	// Oldest-first by the owning block's ingest_seq, the same total order
+	// EvictEntries walks, and a pinned body is exempt for the same reason.
+	//
+	// IT EVICTS UNITS, NOT ARTIFACTS. The prose of one assistant run is one
+	// unit (ADR-0040): a pass that takes one `text` body of a run takes all
+	// of them, and a pin on any piece exempts the whole run. Everything else
+	// is its own unit, so a command's terminal body still evicts
+	// independently of the prose around it. Max bounds the pass in bodies
+	// and is measured BETWEEN units — a pass overruns it to finish a run
+	// rather than tear one in half.
+	//
+	// The retention watermark does not move. It answers what ROWS this store
+	// has lost and how far back it can speak for them, and a stripped body
+	// leaves every row in place; the loss is reported where a reader meets
+	// it, on the block itself (Artifact.Evicted, LedgerEntry.ProseEvicted).
+	EvictBodies(ctx context.Context, req BodyEvictionRequest) (BodyEvictionResult, error)
 	// Watermark reports what this store has ever lost to eviction: the
 	// running count and the horizon its knowledge is complete after. Both
 	// are read from the watermark alone — that they are underivable from
@@ -1130,8 +1569,9 @@ type LedgerRepository interface {
 	// FinishExecution closes the run with its termination reason and
 	// closes the entry with its final status.
 	FinishExecution(ctx context.Context, executionID int64, end FinishExecution) error
-	// AppendArtifact creates one artifact of an execution (never a BLOB:
-	// content arrives chunked).
+	// AppendArtifact creates one artifact of a BLOCK (never a BLOB: content
+	// arrives chunked). The entry owns it; the execution, when there was
+	// one, is the provenance of which attempt produced it.
 	AppendArtifact(ctx context.Context, in AppendArtifact) (string, error)
 	// CaptureOutput records one body of a frozen block: the artifact if it
 	// is not there yet and the chunk at its seq, in one transaction against
@@ -1171,6 +1611,36 @@ type LedgerRepository interface {
 	// Idempotent on (ID, Client, digest): a replay returns the original
 	// run id; the same ask id with different content is ErrIDConflict.
 	SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentAskResult, error)
+	// OpenProse opens ONE run of assistant prose under a turn (ADR-0040): a
+	// `text` child at the turn's next free seat, with an artifact of its own
+	// for the deltas that follow. Both rows land in one transaction — a block
+	// with nowhere to put its text is not a block anyone can draw.
+	//
+	// THE SEAT IS THE STORE'S, taken as MAX(pos)+1 under the parent inside
+	// that transaction, exactly as AddCause takes it: two writers of one
+	// column, one rule for what free means, so a command a turn ran and a run
+	// of prose it wrote can never claim the same place.
+	//
+	// The BOUNDARY is the caller's, and that is the whole point of the method
+	// existing: the backend decides where one run of prose ends and the next
+	// begins (the first delta after a call opens one, the next call seals
+	// it), so the renderer never has to. ErrNoSuchEntry when nothing carries
+	// turnID — a body seated under a parent that is not there is the one
+	// answer worse than an error.
+	//
+	// runID is the agent-lane execution that is printing this prose, and it
+	// is recorded on the block (ProseFacts). The store REFUSES a run that is
+	// not an agent-lane execution of turnID: prose attributed to another
+	// turn's run is worse than prose attributed to none, because it would be
+	// assembled into that turn's message.
+	OpenProse(ctx context.Context, turnID string, runID int64) (ProseBlock, error)
+	// SealProse seals one prose block's body: nothing may be appended to it
+	// again. Called when the boundary arrives — the tool call that ends this
+	// run of prose — and by the run's terminal close for whatever was still
+	// open. Idempotent, and a block that carries no body is a no-op rather
+	// than an error, because the caller's fact is "this block is finished",
+	// which is true either way.
+	SealProse(ctx context.Context, entryID string) error
 	// RunState returns the assistant run state of one execution: the
 	// durable state a reconnecting renderer reads (design §7 — it never
 	// infers liveness from notifications having stopped). Nil when the
@@ -1186,15 +1656,81 @@ type LedgerRepository interface {
 	// inside that span (after the streaming transition commits, before the
 	// terminal close).
 	TransitionRun(ctx context.Context, runID int64, to RunState) error
-	// FinishAgentRun closes the run AND its entries in ONE transaction —
-	// the terminal state this slice's driver persists: the run's state, end
-	// and termination reason, the question entry, the answer entry (found
-	// via its caused-by edge) and the answer artifact (sealed). A run is
-	// never reported terminal in the run vocabulary while its entries still
-	// say otherwise — both lifecycles close together, or neither does.
+	// FinishAgentRun closes the run AND its turn in ONE transaction — the
+	// terminal state this slice's driver persists: the run's state, end and
+	// termination reason, the turn's entry and the interval it took, and
+	// every prose block it wrote (sealed).
+	// A run is never reported terminal in the run vocabulary while its
+	// entry still says otherwise — both lifecycles close together, or
+	// neither does.
 	FinishAgentRun(ctx context.Context, runID int64, in FinishAgentRun) error
 	// AddEdge records one relation between two entries.
 	AddEdge(ctx context.Context, e Edge) error
 	// Edges returns every edge touching entryID, in either direction.
 	Edges(ctx context.Context, entryID string) ([]Edge, error)
+	// AddCause seats an EXISTING entry as the next child of turnID and
+	// returns the seat it took (nocx-h1l4o, ADR-0039's closing sentence, as
+	// amended by ADR-0040). It is the write path for a block the turn caused
+	// but did not create — a command a `run` call opened, the action entry
+	// of a tool call — whose row was submitted before anyone knew where in
+	// the turn it belonged. An entry that knows its place when it is written
+	// carries it on Submit instead (SubmitEntry.ParentID/Pos), which is what
+	// a `text` block does.
+	//
+	// THE SEAT IS THE STORE'S, and the caller may not supply one. It is read
+	// and written inside one transaction, so two children recorded at once
+	// cannot take the same index and a process that restarted mid-turn
+	// continues from what is stored rather than from zero — an in-memory
+	// counter would restart on every approval resume, which re-runs the
+	// pipeline over a turn that already has children.
+	//
+	// IDEMPOTENT ON THE PAIR: seating a child that is already under this
+	// parent returns its ORIGINAL position and moves nothing. The approval
+	// resume passes the same call through the pipeline a second time, and a
+	// counter that advanced on the replay would move the resumed call to
+	// after everything that followed it.
+	//
+	// ONE PARENT, which is the whole reason this is a column and not an
+	// edge: an entry already seated under a DIFFERENT block is refused, not
+	// re-parented, because moving a block out of the turn that drew it is
+	// not something a second caller may do by accident. Either id naming an
+	// entry that is not there is refused too, so nothing is left seated
+	// under a parent the store does not hold.
+	AddCause(ctx context.Context, turnID, causedID string) (int, error)
+	// Caused returns entryID's CHILDREN in pos order — everything drawn
+	// inside that block, prose included — each resolved into what a reader
+	// draws it with. It read `caused-by` edges until ADR-0040 made
+	// containment a column; the order it returns is the order on screen, and
+	// the sequence is the whole meaning (a sentence before a command is why
+	// the command was run). Empty — never an error — for a block with no
+	// children and for an id no row carries: "what is inside this" has an
+	// honest answer either way.
+	Caused(ctx context.Context, entryID string) ([]CausedEntry, error)
+	// PriorTurn returns the agent turn that precedes beforeEntryID in paneID
+	// — the question that was asked and the prose of the run that answered
+	// it, already arranged (PriorTurn, TurnProse). Nil, and no error, when
+	// nothing precedes it: "there is no earlier turn in this pane" is an
+	// honest answer, and the caller's next question ("so send no history")
+	// is answered by it.
+	//
+	// THE JOIN IS HERE, and that is the point (AD-8). It is three questions —
+	// which turn came before this one, which of its runs is the one that
+	// stands, and what that run printed in what order — and each of them has
+	// exactly one right answer. A caller that stitched them from a children
+	// read would be a second owner of the arrangement, in the surface with
+	// the least idea what it means, which is the defect ADR-0040 exists to
+	// remove.
+	//
+	// beforeEntryID names the turn to look BEFORE, and it is resolved to that
+	// row's ingest_seq inside the read — the same rule LedgerQuery.BeforeID
+	// states, and for the same reason: a UUIDv7 sorts by the moment a client
+	// minted it, which is not the moment the backend accepted it. An id no
+	// row carries is refused with ErrNoSuchEntry rather than answered with
+	// the newest turn in the pane, which would be a different turn's answer
+	// presented as this one's context.
+	//
+	// An empty paneID answers nil: a session that is the pipe of no recorded
+	// pane has no thread to read, and inventing one out of every pane's turns
+	// would put another tab's conversation into this one.
+	PriorTurn(ctx context.Context, paneID, beforeEntryID string) (*PriorTurn, error)
 }

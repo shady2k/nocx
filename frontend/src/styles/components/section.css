@@ -22,7 +22,12 @@
 /* The heading and its rule. The divider was previously only on the hand-rolled
    groups, so three of the five groups in the connections form had one and two did
    not — a difference nobody chose. One heading now, and it is this one. */
+/* The heading is a ROW: the title (or the disclosure that is the title) and,
+   at its trailing end, the actions that belong to the group. */
 .ui-section h2 {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
   font-family: var(--font-family-ui);
   font-size: var(--font-size-lg);
   font-weight: 600;
@@ -37,6 +42,15 @@
   color: var(--color-text-dim);
   font-size: var(--font-size-sm);
   margin: 0 0 12px;
+}
+
+/* Placement only: the controls are kit components and nothing here repaints
+   them. */
+.ui-section__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-1);
 }
 
 /* ── Dense variant ──────────────────────────────────────────────────────

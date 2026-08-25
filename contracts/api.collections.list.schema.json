@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.collections.list.schema.json",
+  "title": "ApiCollectionsListResult",
+  "description": "Result of the api.collections.list JSON-RPC method: every collection folder the user currently has open, in the order they opened them. The app remembers the LIST of opened folders and never their contents (design §6.1), so each entry's collection is re-read from disk on every call — a request file a colleague's git pull added appears without anything being told about it.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["collections", "defaultRoot"],
+  "properties": {
+    "collections": {
+      "description": "Never null — nothing open is [].",
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/openCollection"
+      }
+    },
+    "defaultRoot": {
+      "description": "WHERE a collection made with no place named goes — the DIRECTORY that holds them, `<data dir>/collections`, and never a collection inside it. It rides the listing because it is a fact about this build rather than about any one folder, and the listing is the call every surface already makes.\n\nIt exists so an ask can PROPOSE a destination instead of demanding one. `api.collections.create` takes a name and puts the folder here; the import ask next door asked for an absolute path with nothing filled in, which is the same concept behind two doors of very different difficulty — and the harder one is what somebody arriving from Postman meets. A proposal rather than \"send nothing and let the backend decide\": the person has to be able to SEE where their collection is about to land and change it, which an empty field with a sentence under it does not give them.\n\n\"\" when this build has no app directory to derive it from — the state apicoll.ErrNoDefaultLocation names for the creation path. A surface that gets \"\" proposes nothing and the person types a path, which is what they already do; nothing was promised, so nothing degraded.",
+      "type": "string"
+    }
+  },
+  "$defs": {
+    "openCollection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["handle", "path", "collection", "error"],
+      "properties": {
+        "handle": {
+          "type": "string"
+        },
+        "path": {
+          "description": "The path the user chose, exactly as they gave it. It is what the folder is CALLED, never something to send back: addressing a request means the handle plus a path relative to it (design §13.1).",
+          "type": "string"
+        },
+        "collection": {
+          "$ref": "api.collections.open.schema.json#/$defs/collection"
+        },
+        "error": {
+          "description": "Why this one folder could not be re-read — a root replaced or removed since it was opened — and \"\" when it could. On the entry rather than in an error beside the listing, so one dead folder cannot hide every live one, and present rather than dropped, so a vanished collection is visible in the product and not only in a log.",
+          "type": "string"
+        }
+      }
+    }
+  }
+}

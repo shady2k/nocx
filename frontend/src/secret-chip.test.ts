@@ -8,7 +8,7 @@ import { describe, it, expect, vi } from 'vitest'
 import { EditorView } from '@codemirror/view'
 import { CommandEditor } from './editor'
 import { secretChipExtension } from './secret-chip'
-import { createSecretChip } from './ui/secret-chip'
+import { createSecretChip, createSecretChipDamaged } from './ui/secret-chip'
 
 const viewOf = (ed: CommandEditor): EditorView => {
   const withView = ed as unknown as { view: EditorView }
@@ -38,6 +38,34 @@ describe('createSecretChip (the emitter)', () => {
     expect(chip.textContent).toContain('openai-key')
     expect(chip.textContent).not.toContain('{{secret:')
     expect(chip.querySelector('.ui-secret-chip__lock')).not.toBeNull()
+  })
+})
+
+// §11.1's three states, never two. The middle one is what makes the badge
+// safe rather than decorative: without it, "show the text when it does not
+// match" would print the beginning of a live credential in the clear.
+describe('createSecretChipDamaged (the emitter)', () => {
+  it('names the secret and the SHAPE of the damage, and never a byte of it', () => {
+    const chip = createSecretChipDamaged('API_TOKEN', 'truncated, 24 of 214 bytes')
+    expect(chip.className).toContain('ui-badge')
+    expect(chip.className).toContain('ui-secret-chip')
+    expect(chip.dataset.variant).toBe('damaged')
+    expect(chip.textContent).toContain('API_TOKEN')
+    expect(chip.textContent).toContain('truncated, 24 of 214 bytes')
+  })
+
+  it('is visibly different from an intact chip by more than its colour', () => {
+    const intact = createSecretChip('API_TOKEN')
+    const damaged = createSecretChipDamaged('API_TOKEN', 'truncated, 24 of 214 bytes')
+    // The tone differs…
+    expect(damaged.dataset.tone).not.toBe(intact.dataset.tone)
+    // …and so does the glyph and the text, because colour alone is not a
+    // difference a person who cannot see it can read (WCAG 1.4.1).
+    const glyph = (el: HTMLElement) => el.querySelector('.ui-secret-chip__lock')?.textContent
+    expect(glyph(damaged)).not.toBe(glyph(intact))
+    expect(damaged.textContent).not.toBe(intact.textContent)
+    expect(damaged.querySelector('.ui-secret-chip__damage')).not.toBeNull()
+    expect(intact.querySelector('.ui-secret-chip__damage')).toBeNull()
   })
 })
 

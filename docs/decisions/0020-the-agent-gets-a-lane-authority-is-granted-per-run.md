@@ -1,7 +1,7 @@
 # ADR-0020 — The agent gets a lane, and authority is granted per run
 
 - **Status:** Proposed
-- **Date:** 2026-08-02
+- **Date:** 2026-08-02 (§7 amended 2026-08-16, accepted)
 - **Related:** [ADR-0019](0019-one-authoritative-ledger-disposable-projections.md) (the
   ledger it writes to), [ADR-0004](0004-input-ownership-and-editor-abstraction.md) (who owns
   the line), [ADR-0006](0006-marker-only-prompt-mode.md) (marker-only shell integration —
@@ -150,6 +150,76 @@ backwards, and unanswerable after the fact.
   adjacency means causation (ADR-0019 §2).
 - `phase = open | bound | closed` stays small and stays on the entry; approvals, retries,
   takeover, cancellation and timeouts live on the execution.
+
+## Amendment (accepted 2026-08-16) — §7: the three presets become a matrix
+
+**Accepted by the owner, 2026-08-16.** It amends §7; everything above it stands.
+The owner declined the three-preset flip that day — _"нужна более гибкая политика.
+Нужны scope. Нужна гибкая настройка."_ — and, on being shown the matrix, settled
+where the boundary is enforced: _"по capability нужно."_
+
+That last sentence is the half a policy document usually leaves out, so it is
+written into the decision rather than left to the implementation. **The matrix
+decides; the narrowed capability enforces.** A row's scopes are not a predicate
+consulted before the call — they are the bound of the object the tool is handed,
+so a tool cannot reach outside its row because it never holds more than the row
+allows. A check would leave the tool holding a full manager and would rot at the
+first refactor; the capability cannot.
+
+### What changed
+
+§7 shipped "three presets on top of the policy function" — `ask-every-time`,
+`ask-on-mutate`, `autonomous` — and deferred the full effect lattice as "the enum we
+grow into, not a policy engine we build now". That deferral is revoked. The policy a
+workspace (and, until a workspace exists, the product as a whole) configures is a
+**matrix**:
+
+- One row per effect class of decision 6 (`observe | mutate-reversible |
+mutate-destructive | privilege-change | disclose | cross-boundary | delegate`).
+- Each row carries exactly one of `permit | ask | refuse` — never fewer, never a
+  second decision for the same effect, so the matrix evaluates without a conflict
+  resolver and a person sees what is permitted without simulating rules.
+- Each row carries the **resource scopes** (paths, sessions — the ledger's closed
+  `ResourceKind` set) the decision applies within. A row with no stated scope
+  applies within the grant's own bound (the run's session at mint); a
+  resource named outside the row's scopes is refused, never silently re-scoped.
+
+The three presets remain expressible in this form: `ask-every-time` is every row
+`ask`, `ask-on-mutate` is `observe → permit` and the rest `ask`, `autonomous` is
+every row `permit`. A run under each behaves exactly as it did — the matrix is the
+preset generalized, and a preset is its rows: there is no preset vocabulary on the
+wire or in the store, only the matrix. The equivalence is pinned by the tests, so
+"the presets still exist" stays true without a second representation to drift.
+
+Decision **7 is amended accordingly**: what ships first now includes
+this matrix as the shape of the policy, with the global default policy minting the
+run grant and a workspace-level override arriving with the workspace grant-source
+bead `nocx-mp2vd` (the resolution order is stated once, in the resolver: workspace
+overrides global; global is the default).
+
+### Why the deferral no longer holds
+
+The deferral's own condition is met: "a policy engine nobody has needed yet" —
+somebody needs it, and said so in terms the three presets cannot express (per-effect
+and per-scope configuration). And the shape chosen is deliberately NOT the research
+project the deferral feared: a fixed seven-row matrix over a closed effect enum is a
+table, not a rule language; it adds no conflict resolution, no precedence, and no
+new vocabulary — the scopes and effects it composes are the grant's existing
+vocabulary (ADR-0028: the grant is over resources and effects).
+
+### What is still deliberately out
+
+- **Rules over tool names.** The matrix is over effects and resources only; a
+  configuration that permits `readScreen` rather than `observe within these
+sessions` re-introduces the `--no-tools` mistake at the settings layer
+  (ADR-0028 decision 4) and is rejected by construction.
+- A dynamic rule language, precedence, or any conflict-resolution machinery.
+- A migration for the stored grant shape: greenfield, the store rebuilds on a
+  shape change.
+- The workspace as a second grant source until nocx-mp2vd lands; the global
+  policy is the one source now, and mp2vd overrides it rather than supplementing it.
+- The approval UI, retention and sensitivity of AI dialogues — already listed under
+  "Not decided here"; this change does not move them.
 
 ## Alternatives considered
 

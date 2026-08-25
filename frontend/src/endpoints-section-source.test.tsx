@@ -12,7 +12,7 @@ import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { EndpointsSection } from './endpoints-section'
 import { EndpointClient, type Endpoint, type EndpointWrite } from './endpoints'
 import { Dispatcher } from './dispatcher'
-import { createVaultState, type VaultController } from './vault'
+import { VaultOperationCancelledError, createVaultState, type VaultController } from './vault'
 import type { VaultClient, InventoryEntry } from './vault-client'
 
 afterEach(cleanup)
@@ -22,6 +22,7 @@ function ep(overrides: Partial<Endpoint> = {}): Endpoint {
     id: 'endpoint:custom:provider:1',
     name: 'provider',
     baseUrl: 'https://api.example.com/v1',
+    noKey: false,
     schema: 'openai-compatible',
     credential: null,
     models: [{ name: 'gpt-4o', alias: null }],
@@ -46,6 +47,7 @@ function createClient(initial: Endpoint[] = []) {
         name: input.name,
         baseUrl: input.baseUrl,
         schema: 'openai-compatible',
+        noKey: input.noKey,
         credential:
           input.key !== '' ? `secrow:${next++}` : input.credential !== '' ? input.credential : null,
         models: input.models.map((m) => ({ name: m.name, alias: m.alias })),
@@ -65,6 +67,7 @@ function createClient(initial: Endpoint[] = []) {
         ...existing,
         name: input.name,
         baseUrl: input.baseUrl,
+        noKey: input.noKey,
         models: input.models.map((m) => ({ name: m.name, alias: m.alias })),
         headers: input.headers.map((h) => ({ name: h.name, value: h.value, secret: h.secret })),
       }
@@ -126,6 +129,12 @@ function mount(
     { container },
   )
   return { ...harness, ...vault, container }
+}
+
+/** Flush the microtask chain deterministically — the repo's convention for
+ *  "let a promise settle" (no real timers, AGENTS.md). */
+const flush = async (): Promise<void> => {
+  for (let i = 0; i < 5; i++) await Promise.resolve()
 }
 
 async function waitForRows(container: HTMLElement, count: number) {
@@ -201,10 +210,15 @@ describe('the endpoint key source control (nocx-rzjw)', () => {
     const segments = Array.from(dialog.querySelectorAll('[role="radio"]')).map((r) => r.textContent)
     expect(segments).toContain('Type a new one')
     expect(segments).toContain('Use existing secret')
-    expect(inventory).toHaveBeenCalled()
 
     // Choose the existing secret: the picker lists the vault's password rows.
+    // Putting it on screen is what asks the vault for them (nocx-5ratm); a
+    // blank form showing no picker never does.
+    expect(inventory).not.toHaveBeenCalled()
     clickSegment(dialog, 'Use existing secret')
+    await waitFor(() => {
+      expect(inventory).toHaveBeenCalled()
+    })
     const picker = dialog.querySelector('select') as HTMLSelectElement
     expect(picker).toBeTruthy()
     await pickSecret(picker, 'secrow:aaaaaaaa', 'prod api key')
@@ -284,6 +298,24 @@ describe('custom header rows (nocx-lyyk)', () => {
     ])
   })
 
+  it('offers an em-dashed "None" as the empty choice, not the text of an escape (nocx-0sagl)', async () => {
+    const { container } = mount()
+    await waitForRows(container, 0)
+    const dialog = openNew(container)
+    clickButton(dialog, 'Add header')
+
+    const row = dialog.querySelector('.ui-row-list__row') as HTMLElement
+    clickSegment(row, 'Use existing secret')
+    const picker = row.querySelector('select') as HTMLSelectElement
+    // The placeholder is a JS string, so it must arrive through an
+    // expression: as a JSX string attribute the escapes are never
+    // interpreted and the person reads the source code of a dash.
+    await waitFor(() => {
+      expect(Array.from(picker.options).map((o) => o.text)).toContain('\u2014 None \u2014')
+    })
+    expect(picker.textContent).not.toContain('u2014')
+  })
+
   it("a saved endpoint's header rows reopen with their sources intact", async () => {
     const { container, updateEndpoint } = mount([
       ep({
@@ -320,5 +352,150 @@ describe('custom header rows (nocx-lyyk)', () => {
       { name: 'HTTP-Referer', value: 'nocx', secret: null },
       { name: 'api-key', value: null, secret: 'secrow:aaaaaaaa' },
     ])
+  })
+})
+
+/** A SEALED vault. The pickers must still ask it: needing the vault is a
+ *  property of the call, not of the call site (ADR-0032), and the layer
+ *  that owns the unlock dialog can only raise it for a call that reaches
+ *  it. `status` stays visible so a test can flip it after the unlock. */
+function sealedVault(rows: InventoryEntry[], state: 'sealed' | 'uninitialized' = 'sealed') {
+  const status = vi.fn().mockResolvedValue({
+    state,
+    osKeyAvailable: false,
+    osKeyCapable: false,
+    hasPassphrase: state === 'sealed',
+    autoSealMinutes: 0,
+    providers: [],
+    defaultProvider: null,
+  })
+  const inventory = vi.fn().mockResolvedValue({ entries: rows })
+  const client = { status, inventory } as unknown as VaultClient
+  const ctrl = createVaultState(client)
+  return { ctrl, client, status, inventory }
+}
+
+const UNSEALED_STATUS = {
+  state: 'unsealed' as const,
+  osKeyAvailable: false,
+  osKeyCapable: true,
+  hasPassphrase: true,
+  autoSealMinutes: 0,
+  providers: [],
+  defaultProvider: null,
+}
+
+function openEdit(container: HTMLElement, name: string) {
+  const edit = container.querySelector(`[aria-label="Edit ${name}"]`) as HTMLElement
+  expect(edit, `Edit button for "${name}" not found`).toBeTruthy()
+  fireEvent.click(edit)
+  const dialog = findDialogByTitle(container, 'Edit Endpoint')
+  expect(dialog, 'edit dialog did not open').toBeTruthy()
+  return dialog as HTMLElement
+}
+
+describe('the picker asks the vault (nocx-5ratm, ADR-0032)', () => {
+  it('asks a SEALED vault the moment a picker is on screen — the vault layer is what raises the unlock', async () => {
+    const vault = sealedVault(PASSWORD_ROWS)
+    const { container, inventory, ctrl } = mount([], vault)
+    await ctrl.refresh()
+    expect(ctrl.status()?.state).toBe('sealed')
+    await waitForRows(container, 0)
+    expect(inventory).not.toHaveBeenCalled() // the LIST never asks
+
+    // A blank form shows no picker and wants nothing from the vault.
+    const dialog = openNew(container)
+    await flush()
+    expect(inventory).not.toHaveBeenCalled()
+
+    // Switching the key's source to the vault puts a picker on screen —
+    // and a picker renders secret NAMES, which only the vault can answer.
+    // The caller must not read the vault's state and decide not to ask: the
+    // sealed seam (dispatcher.ts) raises the unlock for any call that lands
+    // on a sealed vault and re-sends it once unlocked.
+    clickSegment(dialog, 'Use existing secret')
+    await waitFor(() => {
+      expect(inventory).toHaveBeenCalled()
+    })
+  })
+
+  it('asks on open when the key IS a bound row, and names it — never its handle', async () => {
+    const vault = sealedVault(PASSWORD_ROWS)
+    const { container, ctrl, status, inventory } = mount(
+      [ep({ name: 'provider', credential: 'secrow:aaaaaaaa' })],
+      vault,
+    )
+    await ctrl.refresh()
+    await waitForRows(container, 1)
+    expect(inventory).not.toHaveBeenCalled()
+
+    // The editor opens on "Use existing secret" with the row bound, so the
+    // picker is on screen from the first frame and asks at once.
+    const dialog = openEdit(container, 'provider')
+    await waitFor(() => {
+      expect(inventory).toHaveBeenCalled()
+    })
+
+    // The unlock resolves: the vault is open and the rows arrive.
+    status.mockResolvedValue(UNSEALED_STATUS)
+    await ctrl.refresh()
+
+    const picker = dialog.querySelector('select') as HTMLSelectElement
+    await waitFor(() => {
+      expect(Array.from(picker.options).map((o) => o.text)).toContain('prod api key')
+    })
+    // The bound row reads as what it IS. A picker labelling it
+    // `secrow:aaaaaaaa` shows the person an opaque id where the name of
+    // their own secret belongs.
+    expect(picker.value).toBe('secrow:aaaaaaaa')
+    expect(picker.selectedOptions[0].text).toBe('prod api key')
+    expect(Array.from(picker.options).map((o) => o.text)).not.toContain('secrow:aaaaaaaa')
+  })
+
+  it('does not ask an UNINITIALIZED vault: there is nothing to unlock', async () => {
+    const vault = sealedVault(PASSWORD_ROWS, 'uninitialized')
+    const { container, inventory, ctrl } = mount([], vault)
+    await ctrl.refresh()
+    expect(ctrl.status()?.state).toBe('uninitialized')
+    await waitForRows(container, 0)
+
+    const dialog = openNew(container)
+    clickSegment(dialog, 'Use existing secret')
+    await flush()
+
+    expect(inventory).not.toHaveBeenCalled()
+    expect(ctrl.showUnlock()).toBe(false)
+  })
+
+  it('a dismissed unlock leaves the editor usable, and a later unseal still loads the rows', async () => {
+    const vault = sealedVault(PASSWORD_ROWS)
+    const { container, ctrl, status, inventory } = mount(
+      [ep({ name: 'provider', credential: 'secrow:aaaaaaaa' })],
+      vault,
+    )
+    await ctrl.refresh()
+    await waitForRows(container, 1)
+
+    // The person chose not to unlock: the deferred call rejects with the
+    // cancellation the vault layer speaks.
+    inventory.mockRejectedValueOnce(new VaultOperationCancelledError())
+    const dialog = openEdit(container, 'provider')
+    await waitFor(() => {
+      expect(inventory).toHaveBeenCalledTimes(1)
+    })
+
+    // The editor still works — a dismissal is a choice, not a failure.
+    fillField(container, 'endpoint-name', 'renamed')
+    expect((container.querySelector('#endpoint-name') as HTMLInputElement).value).toBe('renamed')
+    const picker = dialog.querySelector('select') as HTMLSelectElement
+    expect(Array.from(picker.options).map((o) => o.text)).not.toContain('prod api key')
+
+    // And the refusal is not remembered as a store failure: unsealing the
+    // vault later loads the rows the list needs for its credential state.
+    status.mockResolvedValue(UNSEALED_STATUS)
+    await ctrl.refresh()
+    await waitFor(() => {
+      expect(inventory).toHaveBeenCalledTimes(2)
+    })
   })
 })

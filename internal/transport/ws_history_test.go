@@ -37,6 +37,7 @@ func (f *fakeHistoryDB) Backup(_ context.Context, _ string) error      { return 
 func (f *fakeHistoryDB) Close() error                                  { return nil }
 func (f *fakeHistoryDB) Ledger() content.LedgerRepository              { return f }
 func (f *fakeHistoryDB) Layout() content.LayoutRepository              { return nil }
+func (f *fakeHistoryDB) APIRuns() content.APIRunRepository             { return nil }
 
 // RecordCompleted keeps no row: this fake is the STORE-FAILURE arm of the
 // write path (TestHistoryRecord_StoreErrorIsRPCError). The fake that actually

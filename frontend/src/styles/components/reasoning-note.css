@@ -1,0 +1,31 @@
+/* ReasoningNote (ui/README table) — the model's thinking, collapsed, beside
+   the answer. Colours are tokens only (ADR-0013 §4).
+
+   Quieter than the tool-call line, which is quieter than the answer: the
+   ranking is deliberate. The answer is what was asked for; a call is a fact
+   about what happened; the thinking is available and nothing more. */
+.ui-reasoning {
+  margin: 4px 0;
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+.ui-reasoning__summary {
+  cursor: pointer;
+  -webkit-user-select: none;
+  user-select: none;
+  color: var(--color-text-dim);
+  /* The native marker stays: it is the affordance a person already knows
+     for a disclosure, and replacing it with a glyph of ours would be a
+     hand-rolled control wearing a native element's clothes. */
+}
+
+.ui-reasoning__body {
+  margin-top: 4px;
+  padding-left: 10px;
+  border-left: 1px solid var(--color-border);
+  /* The model's own line breaks are the only structure thinking has. */
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}

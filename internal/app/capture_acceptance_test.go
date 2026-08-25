@@ -48,7 +48,7 @@ func TestCapture_SaveNowAndSaveLaterOverTheRealSocket(t *testing.T) {
 	// ── leg 1: submit a key, save it, read the row as a reference ────────
 	record := callAppWS(t, conn, "history.record", map[string]any{
 		"command": `curl -H "Authorization: Bearer sk-proj-abcdef1234567890" https://openrouter.ai/api`,
-		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0,
+		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0, "source": "user",
 		// The capture scope is (connection, tab): a pending capture belongs to
 		// the tab that submitted it and dies with that tab (nocx-tsajw).
 		"paneId":    "pane-acceptance",
@@ -137,7 +137,7 @@ func TestCapture_SaveNowAndSaveLaterOverTheRealSocket(t *testing.T) {
 	// first offer is still answerable afterwards.
 	record2 := callAppWS(t, conn, "history.record", map[string]any{
 		"command": "TOKEN=abcdefghijklmnopqrstuvwxyz123456 ./run.sh",
-		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0,
+		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0, "source": "user",
 		// The capture scope is (connection, tab): a pending capture belongs to
 		// the tab that submitted it and dies with that tab (nocx-tsajw).
 		"paneId":    "pane-acceptance",
@@ -166,7 +166,7 @@ func TestCapture_SaveNowAndSaveLaterOverTheRealSocket(t *testing.T) {
 	// Ordinary work carries on in the same tab.
 	record3 := callAppWS(t, conn, "history.record", map[string]any{
 		"command": "echo done",
-		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0,
+		"cwd":     "/srv", "host": "", "status": "success", "exitCode": 0, "source": "user",
 		// The capture scope is (connection, tab): a pending capture belongs to
 		// the tab that submitted it and dies with that tab (nocx-tsajw).
 		"paneId":    "pane-acceptance",

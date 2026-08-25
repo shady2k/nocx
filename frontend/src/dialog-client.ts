@@ -8,6 +8,7 @@
 // caller then degrades rather than failing.
 
 import type { Dispatcher } from './dispatcher'
+import type { DialogOpenDirectory } from './generated/dialog.openDirectory'
 import type { DialogOpenFile } from './generated/dialog.openFile'
 
 export class DialogClient {
@@ -18,5 +19,15 @@ export class DialogClient {
    *  exists — the surface must degrade to typing the path by hand. */
   openFileDialog(): Promise<DialogOpenFile> {
     return this.dispatcher.call('dialog.openFile', {})
+  }
+
+  /** Open the native directory picker. Resolves to the chosen ABSOLUTE path,
+   *  or an empty path when the user cancelled — a cancel is a result, never a
+   *  rejection, so a caller must not treat "" as a failure. Rejects when no
+   *  native runtime exists (-32601, the dev-web case) and when one native
+   *  dialog is already open, which is the same capability as the file picker
+   *  and refuses rather than stacking a second one. */
+  openDirectoryDialog(): Promise<DialogOpenDirectory> {
+    return this.dispatcher.call('dialog.openDirectory', {})
   }
 }

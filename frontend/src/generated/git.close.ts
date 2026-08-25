@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the git.close JSON-RPC method: the binding is closed — removed from the registry and drained — so the repository it guarded is released. closed is always true in a result; a close of an unknown binding answers the unknownBinding error instead (the store re-resolves on it).
+ * Result of the git.close JSON-RPC method: the binding is closed — removed from the registry and drained — so the repository it guarded is released. closed is always true in a result; a close of an unknown binding answers the unknownBinding error instead (the store re-resolves on the one reason "unknown-binding", nocx-bpqil).
  */
 export interface GitCloseResult {
   closed: boolean

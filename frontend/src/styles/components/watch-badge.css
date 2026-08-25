@@ -1,0 +1,12 @@
+/* WatchBadge — the slot that carries the established watch mode, and the
+   degrade warning inside it. Placement only: the badge is the kit's Badge and
+   nothing here repaints it. The slot is on the page whether or not it holds a
+   badge, so it must not reserve space when it is empty — `inline-flex` on an
+   empty span is a zero-width box, and the gap belongs to the row that places
+   it. */
+
+.ui-watch-badge {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+}

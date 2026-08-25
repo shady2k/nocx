@@ -22,6 +22,7 @@
  */
 import { For, Show, createEffect, onCleanup, type Component } from 'solid-js'
 import { Portal } from 'solid-js/web'
+import { clampMenuPosition } from './menu-geometry'
 
 export interface ContextMenuItem {
   /** Stable identity for the item — keying and data-testid. */
@@ -46,6 +47,17 @@ export interface ContextMenuItem {
 }
 
 export interface ContextMenuProps {
+  /**
+   * One non-interactive line at the top, naming what the menu is ABOUT.
+   *
+   * A menu whose rows are all actions cannot state a fact, and some menus are
+   * opened at a thing rather than at a place — a variable in an address, say,
+   * where "what is this and is it answered" is most of what the person came
+   * for and the action is the smaller half. It is not a row: it takes no
+   * focus, answers no key and is skipped by the keyboard walk, because a line
+   * that cannot be chosen must not look like one that can.
+   */
+  header?: string
   /** Show the menu at (x, y) viewport coordinates. */
   open: boolean
   x: number
@@ -56,9 +68,6 @@ export interface ContextMenuProps {
   onClose: () => void
   'data-testid'?: string
 }
-
-/** Clearance from the viewport edge when clamping the menu on screen. */
-const EDGE_MARGIN_PX = 8
 
 export function ContextMenu(props: ContextMenuProps) {
   let element: HTMLDivElement | undefined
@@ -101,19 +110,18 @@ export function ContextMenu(props: ContextMenuProps) {
     if (!props.open) return
     const el = element
     if (!el) return
-    // The rect is the laid-out size; the position is clamped so a menu
-    // near the bottom or right edge flips inward instead of overflowing.
+    // The rect is the laid-out size; the position is the shared clamp
+    // (menu-geometry.ts), so a menu near the bottom or right edge flips
+    // inward instead of overflowing — the same geometry the scrollback's
+    // imperative block menu uses (nocx-vnirv.2).
     const rect = el.getBoundingClientRect()
-    const x = Math.min(
-      Math.max(props.x, EDGE_MARGIN_PX),
-      Math.max(EDGE_MARGIN_PX, window.innerWidth - rect.width - EDGE_MARGIN_PX),
+    const { left, top } = clampMenuPosition(
+      { x: props.x, y: props.y },
+      { width: rect.width, height: rect.height },
+      { width: window.innerWidth, height: window.innerHeight },
     )
-    const y = Math.min(
-      Math.max(props.y, EDGE_MARGIN_PX),
-      Math.max(EDGE_MARGIN_PX, window.innerHeight - rect.height - EDGE_MARGIN_PX),
-    )
-    el.style.left = `${x}px`
-    el.style.top = `${y}px`
+    el.style.left = `${left}px`
+    el.style.top = `${top}px`
     opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
     el.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus()
   })
@@ -168,6 +176,12 @@ export function ContextMenu(props: ContextMenuProps) {
             element = el
           }}
         >
+          {/* Not a row: no role, no tabindex, nothing the keyboard walk can
+              land on. A line that cannot be chosen must not look like one
+              that can. */}
+          <Show when={props.header !== undefined}>
+            <div class="ui-context-menu__header">{props.header}</div>
+          </Show>
           <For each={props.items}>
             {(item) => (
               <button

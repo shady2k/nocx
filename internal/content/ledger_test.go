@@ -179,9 +179,9 @@ func TestStrictRejectsStringInDurationMs(t *testing.T) {
 
 	err = rawLedger(t, path, keyHex,
 		`INSERT INTO environments (id, kind, first_seen) VALUES ('env', 'local', 1)`,
-		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, intent,
+		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
 			phase, status, submitted_at, duration_ms)
-		VALUES ('bad', 1, 'c', 'd', 'env', '/', 'shell', 'x', 'open', 'pending', 1, 'not-a-number')`,
+		VALUES ('bad', 1, 'c', 'd', 'env', '/', 'shell', 'user', 'x', 'open', 'pending', 1, 'not-a-number')`,
 	)
 	if err == nil {
 		t.Fatal("a string in duration_ms was accepted — STRICT is not in force")
@@ -222,7 +222,7 @@ func TestDeleteEntryCascadesToEdgesAndArtifacts(t *testing.T) {
 	ids := submitIntents(t, led, "source", "target")
 	src, dst := ids[0], ids[1]
 
-	if err := led.AddEdge(ctx, content.Edge{From: src, To: dst, Rel: content.RelCausedBy}); err != nil {
+	if err := led.AddEdge(ctx, content.Edge{From: src, To: dst, Rel: content.RelRerunOf}); err != nil {
 		t.Fatalf("AddEdge: %v", err)
 	}
 	execID, err := led.StartExecution(ctx, content.StartExecution{EntryID: src})
@@ -230,7 +230,7 @@ func TestDeleteEntryCascadesToEdgesAndArtifacts(t *testing.T) {
 		t.Fatalf("StartExecution: %v", err)
 	}
 	artID, err := led.AppendArtifact(ctx, content.AppendArtifact{
-		ExecutionID: execID, ID: "aaaaaaaa-0000-7000-8000-000000000001",
+		EntryID: src, ExecutionID: &execID, ID: "aaaaaaaa-0000-7000-8000-000000000001",
 		MediaType: content.MediaText, CaptureMethod: content.CaptureRawOutput,
 	})
 	if err != nil {
@@ -305,7 +305,8 @@ func TestArtifactsAttachToExecutionNotEntry(t *testing.T) {
 	}
 	for i, eid := range execIDs {
 		if _, err := led.AppendArtifact(ctx, content.AppendArtifact{
-			ExecutionID: eid,
+			EntryID:     entryID,
+			ExecutionID: &eid,
 			ID:          fmt.Sprintf("bbbbbbbb-0000-7000-8000-%012d", i),
 			MediaType:   content.MediaText,
 		}); err != nil {
@@ -1072,15 +1073,20 @@ func TestExecutionRecordsGrantWithScopes(t *testing.T) {
 	entryID := "00000000-0000-7000-8000-000000000100"
 	if _, err := led.Submit(ctx, content.SubmitEntry{
 		ID: entryID, Client: "c", EnvironmentID: "local", Cwd: "/repo",
-		Kind: content.EntryAgent, Intent: "fix the deploy",
+		Kind: content.EntryAsk, Intent: "fix the deploy",
 	}); err != nil {
 		t.Fatalf("Submit: %v", err)
 	}
+	grantPolicy := presetAutonomous()
 	if _, err := led.StartExecution(ctx, content.StartExecution{
 		EntryID: entryID, Lane: strPtr("lane-1"), Executor: strPtr("agent:eino"),
 		Grant: &content.Grant{
 			Version: 2, ExpiresAt: 1_750_000_200_000,
-			Policy: content.GrantAutonomous,
+			Policy: grantPolicy,
+			Effects: []content.Effect{
+				content.EffectObserve,
+				content.EffectMutateReversible,
+			},
 			Scopes: []content.GrantScope{
 				{Kind: content.ResourceEnvironment, ID: "local"},
 				{Kind: content.ResourceSession, ID: "sess-1"},
@@ -1098,8 +1104,20 @@ func TestExecutionRecordsGrantWithScopes(t *testing.T) {
 	if g == nil {
 		t.Fatal("grant missing from the run — 'this run held a grant' must be a query, not a reconstruction")
 	}
-	if g.Version != 2 || g.Policy != content.GrantAutonomous || g.ExpiresAt != 1_750_000_200_000 {
-		t.Fatalf("grant = %+v, want version 2 autonomous expiring 1750000200000", g)
+	if g.Version != 2 || g.ExpiresAt != 1_750_000_200_000 {
+		t.Fatalf("grant = %+v, want version 2 expiring 1750000200000", g)
+	}
+	for _, e := range []content.Effect{
+		content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive,
+		content.EffectPrivilegeChange, content.EffectDisclose, content.EffectCrossBoundary,
+		content.EffectDelegate,
+	} {
+		if got, want := g.Policy.DecisionFor(e), grantPolicy.DecisionFor(e); got != want {
+			t.Fatalf("roundtripped policy decides %s = %s, want %s (the autonomous matrix recorded on the run)", e, got, want)
+		}
+	}
+	if len(g.Effects) != 2 || g.Effects[0] != content.EffectMutateReversible || g.Effects[1] != content.EffectObserve {
+		t.Fatalf("grant effects = %v, want [mutate-reversible observe] (stored ORDER BY effect)", g.Effects)
 	}
 	if len(g.Scopes) != 2 || g.Scopes[0].Kind != content.ResourceEnvironment || g.Scopes[1].Kind != content.ResourceSession {
 		t.Fatalf("grant scopes = %+v, want environment + session", g.Scopes)
@@ -1189,7 +1207,7 @@ func TestArtifactProvenanceRoundTrips(t *testing.T) {
 	off, end := int64(2048), int64(4096)
 	stream := content.StreamCombined
 	artID, err := led.AppendArtifact(ctx, content.AppendArtifact{
-		ExecutionID: execID, ID: "cccccccc-0000-7000-8000-000000000001",
+		EntryID: entryID, ExecutionID: &execID, ID: "cccccccc-0000-7000-8000-000000000001",
 		MediaType: content.MediaText, CaptureMethod: content.CaptureTerminalCells,
 		CaptureVersion: 3, TerminalCols: &cols, TerminalRows: &rows,
 		Stream: &stream, ByteOffset: &off, ByteEnd: &end, Encoding: "utf-8",
@@ -1238,7 +1256,7 @@ func TestAppendChunkMaintainsByteLen(t *testing.T) {
 		t.Fatalf("StartExecution: %v", err)
 	}
 	artID, err := led.AppendArtifact(ctx, content.AppendArtifact{
-		ExecutionID: execID, ID: "cccccccc-0000-7000-8000-000000000002",
+		EntryID: entryID, ExecutionID: &execID, ID: "cccccccc-0000-7000-8000-000000000002",
 		MediaType: content.MediaText,
 	})
 	if err != nil {
@@ -1272,8 +1290,9 @@ func TestAppendChunkMaintainsByteLen(t *testing.T) {
 	}
 }
 
-// An artifact needs a real execution and a closed media type; a chunk needs
-// a real artifact. The FK and the CHECK are the checks.
+// An artifact needs a real BLOCK, a real execution when it names one, and a
+// closed media type; a chunk needs a real artifact. The FK and the CHECK are
+// the checks.
 func TestArtifactWritesValidateTheirTargets(t *testing.T) {
 	_, led := newLedger(t)
 	ctx := context.Background()
@@ -1291,21 +1310,34 @@ func TestArtifactWritesValidateTheirTargets(t *testing.T) {
 		t.Fatalf("StartExecution: %v", err)
 	}
 
+	ghost := int64(999_999)
 	if _, err = led.AppendArtifact(ctx, content.AppendArtifact{
-		ExecutionID: 999_999, ID: "cccccccc-0000-7000-8000-000000000003",
+		EntryID: entryID, ExecutionID: &ghost, ID: "cccccccc-0000-7000-8000-000000000003",
 		MediaType: content.MediaText,
 	}); err == nil {
 		t.Fatal("artifact under a missing execution succeeded")
 	}
 	if _, err = led.AppendArtifact(ctx, content.AppendArtifact{
-		ExecutionID: execID, ID: "cccccccc-0000-7000-8000-000000000004",
+		EntryID: "no-such-entry", ExecutionID: &execID, ID: "cccccccc-0000-7000-8000-000000000006",
+		MediaType: content.MediaText,
+	}); err == nil {
+		t.Fatal("artifact under a missing block succeeded")
+	}
+	if _, err = led.AppendArtifact(ctx, content.AppendArtifact{
+		ExecutionID: &execID, ID: "cccccccc-0000-7000-8000-000000000007",
+		MediaType: content.MediaText,
+	}); err == nil {
+		t.Fatal("artifact with no block at all succeeded — an artifact belongs to its block")
+	}
+	if _, err = led.AppendArtifact(ctx, content.AppendArtifact{
+		EntryID: entryID, ExecutionID: &execID, ID: "cccccccc-0000-7000-8000-000000000004",
 		MediaType: "image/png",
 	}); err == nil {
 		t.Fatal("artifact with a media type outside the closed set succeeded")
 	}
 	// Paired successes.
 	artID, err := led.AppendArtifact(ctx, content.AppendArtifact{
-		ExecutionID: execID, ID: "cccccccc-0000-7000-8000-000000000005",
+		EntryID: entryID, ExecutionID: &execID, ID: "cccccccc-0000-7000-8000-000000000005",
 		MediaType: content.MediaText,
 	})
 	if err != nil {
@@ -1341,10 +1373,10 @@ func TestClosedEnumsRejectUnknownValues(t *testing.T) {
 		`INSERT INTO environments (id, kind, first_seen) VALUES ('env', 'local', 1)`,
 		`INSERT INTO environment_observations (environment_id, version, observed_at, criticality)
 			VALUES ('env', 1, 1, 'routine')`,
-		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, intent,
-			phase, status, submitted_at) VALUES ('a', 1, 'c', 'd', 'env', '/', 'shell', 'x', 'open', 'pending', 1)`,
-		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, intent,
-			phase, status, submitted_at) VALUES ('b', 2, 'c', 'd', 'env', '/', 'shell', 'x', 'open', 'pending', 1)`,
+		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			phase, status, submitted_at) VALUES ('a', 1, 'c', 'd', 'env', '/', 'shell', 'user', 'x', 'open', 'pending', 1)`,
+		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			phase, status, submitted_at) VALUES ('b', 2, 'c', 'd', 'env', '/', 'shell', 'user', 'x', 'open', 'pending', 1)`,
 		`INSERT INTO executions (entry_id, environment_obs_id) VALUES ('a', 1)`,
 	); err != nil {
 		t.Fatalf("seed rows: %v", err)
@@ -1354,14 +1386,14 @@ func TestClosedEnumsRejectUnknownValues(t *testing.T) {
 		name string
 		sql  string
 	}{
-		{"entries.kind", `INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, intent,
-			phase, status, submitted_at) VALUES ('k1', 3, 'c', 'd', 'env', '/', 'banana', 'x', 'open', 'pending', 1)`},
-		{"entries.phase", `INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, intent,
-			phase, status, submitted_at) VALUES ('p1', 3, 'c', 'd', 'env', '/', 'shell', 'x', 'weird', 'pending', 1)`},
-		{"entries.status", `INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, intent,
-			phase, status, submitted_at) VALUES ('s1', 3, 'c', 'd', 'env', '/', 'shell', 'x', 'open', 'done', 1)`},
-		{"entries.sensitivity", `INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, intent,
-			phase, status, submitted_at, sensitivity) VALUES ('se1', 3, 'c', 'd', 'env', '/', 'shell', 'x', 'open', 'pending', 1, 'secret')`},
+		{"entries.kind", `INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			phase, status, submitted_at) VALUES ('k1', 3, 'c', 'd', 'env', '/', 'banana', 'user', 'x', 'open', 'pending', 1)`},
+		{"entries.phase", `INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			phase, status, submitted_at) VALUES ('p1', 3, 'c', 'd', 'env', '/', 'shell', 'user', 'x', 'weird', 'pending', 1)`},
+		{"entries.status", `INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			phase, status, submitted_at) VALUES ('s1', 3, 'c', 'd', 'env', '/', 'shell', 'user', 'x', 'open', 'done', 1)`},
+		{"entries.sensitivity", `INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			phase, status, submitted_at, sensitivity) VALUES ('se1', 3, 'c', 'd', 'env', '/', 'shell', 'user', 'x', 'open', 'pending', 1, 'secret')`},
 		{"edges.rel", `INSERT INTO edges (from_id, to_id, rel) VALUES ('a', 'b', 'related-to')`},
 		{"environments.kind", `INSERT INTO environments (id, kind, first_seen) VALUES ('e2', 'docker', 1)`},
 		{"environment_observations.criticality", `INSERT INTO environment_observations
@@ -1372,17 +1404,70 @@ func TestClosedEnumsRejectUnknownValues(t *testing.T) {
 			VALUES ('b', 1, 'exploded')`},
 		{"authority_grants.policy", `INSERT INTO authority_grants
 			(execution_id, version, issued_at, expires_at, policy) VALUES (1, 1, 1, 2, 'yolo')`},
-		{"artifacts.media_type", `INSERT INTO artifacts (id, execution_id, media_type)
-			VALUES ('art', 1, 'text/html')`},
-		{"artifacts.truncated", `INSERT INTO artifacts (id, execution_id, media_type, truncated)
-			VALUES ('art2', 1, 'text/plain', 'clipped')`},
-		{"artifacts.capture_method", `INSERT INTO artifacts (id, execution_id, media_type, capture_method)
-			VALUES ('art3', 1, 'text/plain', 'telepathy')`},
+		{"artifacts.media_type", `INSERT INTO artifacts (id, entry_id, execution_id, media_type)
+			VALUES ('art', 'a', 1, 'text/html')`},
+		{"artifacts.truncated", `INSERT INTO artifacts (id, entry_id, execution_id, media_type, truncated)
+			VALUES ('art2', 'a', 1, 'text/plain', 'clipped')`},
+		{"artifacts.capture_method", `INSERT INTO artifacts (id, entry_id, execution_id, media_type, capture_method)
+			VALUES ('art3', 'a', 1, 'text/plain', 'telepathy')`},
 	}
 	for _, c := range cases {
 		if err := rawLedger(t, path, keyHex, c.sql); err == nil {
 			t.Errorf("%s: an unknown value was accepted", c.name)
 		}
+	}
+}
+
+// ── the source and the seat are the database's (criteria 4, 7) ───────────
+
+// The two CHECKs this task added are the schema's, and a raw statement is
+// the only way to test them: a Go-typed caller cannot express an unknown
+// source, and Submit refuses to write a seatless root before the engine
+// ever sees it. Each refusal gets its paired success on an ordinary row.
+func TestSchemaRefusesBadSourceAndSeatlessRoots(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.db")
+	db, err := content.Open(context.Background(), content.Config{
+		Path: path, Key: testKey(), Budget: testBudget,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+	keyHex := hex.EncodeToString(testKey())
+	if err := rawLedger(t, path, keyHex,
+		`INSERT INTO environments (id, kind, first_seen) VALUES ('env', 'local', 1)`,
+	); err != nil {
+		t.Fatalf("seed environment: %v", err)
+	}
+
+	refused := []struct {
+		name string
+		sql  string
+	}{
+		{"a source outside the enum", `INSERT INTO entries
+			(id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			 phase, status, submitted_at) VALUES ('s1', 1, 'c', 'd', 'env', '/', 'shell', 'robot', 'x', 'open', 'pending', 1)`},
+		{"a root that holds a seat", `INSERT INTO entries
+			(id, ingest_seq, client, digest, environment_id, parent_id, pos, cwd, kind, source, intent,
+			 phase, status, submitted_at) VALUES ('s2', 2, 'c', 'd', 'env', NULL, 5, '/', 'shell', 'user', 'x', 'open', 'pending', 1)`},
+	}
+	for _, c := range refused {
+		if err := rawLedger(t, path, keyHex, c.sql); err == nil {
+			t.Errorf("%s: the schema accepted it", c.name)
+		}
+	}
+
+	// THE PAIRED SUCCESSES (criterion 7): an ordinary row with a valid
+	// source, and a child that legitimately holds a seat — both land.
+	if err := rawLedger(t, path, keyHex,
+		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			phase, status, submitted_at) VALUES ('ok1', 3, 'c', 'd', 'env', '/', 'shell', 'assistant', 'x', 'open', 'pending', 1)`,
+		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, source, intent,
+			phase, status, submitted_at) VALUES ('ok2', 4, 'c', 'd', 'env', '/', 'shell', 'user', 'x', 'open', 'pending', 1)`,
+		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, parent_id, pos, cwd, kind, source, intent,
+			phase, status, submitted_at) VALUES ('ok3', 5, 'c', 'd', 'env', 'ok2', 0, '/', 'shell', 'user', 'x', 'open', 'pending', 1)`,
+	); err != nil {
+		t.Fatalf("the paired successes were refused: %v", err)
 	}
 }
 
@@ -1427,12 +1512,18 @@ func TestLedgerRejectsAllWritesAfterClose(t *testing.T) {
 			return led.FinishExecution(ctx, 1, content.FinishExecution{})
 		}},
 		{"AppendArtifact", func() error {
-			_, err := led.AppendArtifact(ctx, content.AppendArtifact{ID: "a", MediaType: content.MediaText})
+			_, err := led.AppendArtifact(ctx, content.AppendArtifact{
+				ID: "a", EntryID: "i", MediaType: content.MediaText,
+			})
 			return err
 		}},
 		{"AppendChunk", func() error { return led.AppendChunk(ctx, "a", 1, []byte("x")) }},
 		{"AddEdge", func() error {
 			return led.AddEdge(ctx, content.Edge{From: "i", To: "i", Rel: content.RelCites})
+		}},
+		{"AddCause", func() error {
+			_, err := led.AddCause(ctx, "i", "i")
+			return err
 		}},
 	}
 	for _, w := range writes {

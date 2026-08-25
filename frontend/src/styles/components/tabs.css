@@ -8,6 +8,15 @@
      content, or the panel pushes the dialog past its max-height instead of
      scrolling inside it. */
   min-height: 0;
+  /* And the same on the other axis, which went unsaid for a year and cost
+     nocx-kdawd. Measured, not deduced: with a long line in the API body
+     editor, `.ui-tabs` reported client=496 scroll=566 with `min-width: auto`
+     while every element below it — the panel, the panels grid, the editor —
+     already said 0. A panel that cannot shrink hands its width upwards, so
+     the scrollbar appeared under the whole request column and the editor,
+     which clips and whose own scroller was ready to move, never got the
+     chance. */
+  min-width: 0;
   /* The distance from the divider to the section's content. Was
      `var(--space-5)`, which is not a token — the scale is 1,2,3,4,6,8,12 — and
      an undefined custom property makes the declaration invalid at computed
@@ -51,8 +60,72 @@
 
 .ui-tabs[data-orientation='horizontal'] .ui-tabs__list {
   flex-direction: row;
-  border-bottom: 1px solid var(--color-divider);
   padding-bottom: var(--space-2);
+  /* The tabs give way before the section's controls do, and they scroll
+     rather than wrap: a wrapped tab row changes the bar's HEIGHT, which moves
+     everything under it every time a control appears. `flex` overrides the
+     base `0 0 auto` for this orientation only — the settings rail is vertical
+     and still may not shrink. */
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow-x: auto;
+}
+
+/* The row that holds the tablist and the section's own control. The rule
+   under the tabs belongs to the ROW, not to the list, so it runs the whole
+   width whether or not there is a control at the end of it. */
+.ui-tabs__bar {
+  display: contents;
+}
+
+.ui-tabs[data-orientation='horizontal'] .ui-tabs__bar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  border-bottom: 1px solid var(--color-divider);
+  /* The bar may be narrower than the tabs and the section's controls put
+     together, and when it is, the LIST is what moves (below). Without this it
+     is the bar that grows: measured in a 496px request column, `__list` (350)
+     plus `__actions` (204) reported scrollWidth 566 with `min-width: auto`,
+     and the overflow travelled up until the request column drew a scrollbar
+     under the whole surface. What that looked like was a body editor whose
+     long line moved the pane — which is where nocx-kdawd was hunted twice
+     before this was measured. */
+  min-width: 0;
+}
+
+.ui-tabs__actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding-bottom: var(--space-2);
+  /* Shrinkable too, so a narrow column takes it out of both rather than
+     pushing the surface sideways. */
+  min-width: 0;
+}
+
+/* AND WHAT A SURFACE PUTS IN THERE. A slot's contents usually arrive wrapped
+   in a plain div, and a plain div is a flex item with `min-width: auto`, so it
+   refuses to shrink below its content and hands the overflow back to the bar.
+   Measured on the request form's mode picker, which used to sit here: with the
+   bar and the actions both at 0 the row still reported 522 in a 496 box, and
+   the 26px were the select inside its wrapper. That picker has since moved
+   into the panel it governs (nocx-n9npi) and these two rules stay, because the
+   shape is the slot's and not that caller's. The kit says it here once, rather
+   than every surface remembering to say it about every wrapper. */
+.ui-tabs__actions > * {
+  min-width: 0;
+}
+
+/* A native <select> takes its INTRINSIC width — the longest option — and
+   `min-width: 0` does not touch that: measured, that select sat at 204px
+   inside a wrapper that had already shrunk to 178 and hung 26px past the
+   bar's right edge, which is the whole of the overflow the request column
+   was scrolling. `max-width` is what binds an intrinsic width to its box, and
+   `.api-request__controls` carries the same pair for the same reason. */
+.ui-tabs__actions .ui-select {
+  max-width: 100%;
 }
 
 /* How a rail row sits, and nothing about how it looks — a selected Button's

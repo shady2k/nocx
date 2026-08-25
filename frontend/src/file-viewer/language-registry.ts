@@ -17,12 +17,14 @@
 import { HighlightStyle, StreamLanguage, syntaxHighlighting } from '@codemirror/language'
 import { go } from '@codemirror/lang-go'
 import { javascript } from '@codemirror/lang-javascript'
-import { json } from '@codemirror/lang-json'
+import { json, jsonParseLinter } from '@codemirror/lang-json'
+import { linter, lintGutter } from '@codemirror/lint'
 import { markdown } from '@codemirror/lang-markdown'
 import { python } from '@codemirror/lang-python'
 import { yaml } from '@codemirror/lang-yaml'
 import { shell } from '@codemirror/legacy-modes/mode/shell'
 import type { Extension } from '@codemirror/state'
+import { lineNumbers } from '@codemirror/view'
 import { tags } from '@lezer/highlight'
 
 // ── Highlighting: CM6 tags → the repo's tok-* vocabulary ───────────────────
@@ -101,6 +103,19 @@ export function extensionOf(path: string): string {
  *  one question with one owner. */
 export function markdownLanguage(): Extension {
   return markdown()
+}
+
+/** JSON by NAME, WITH ITS PARSER'S OPINION: the language module plus the
+ *  linter that reports where the document stops being JSON. They are one
+ *  export because they are one answer — a surface that declares "this is
+ *  JSON" and then does not say where it is broken has declared nothing a
+ *  person can act on. `@codemirror/lang-json` ships the linter; nothing here
+ *  writes a second parser.
+ *
+ *  The gutter comes with it: a squiggle says WHERE, and the marker in the
+ *  gutter is what makes it visible when the error scrolled off. */
+export function jsonEditing(): Extension {
+  return [json(), lineNumbers(), linter(jsonParseLinter()), lintGutter()]
 }
 
 /** The CM6 language extension for a file path, or [] for plain text. */

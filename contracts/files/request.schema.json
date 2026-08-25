@@ -1,0 +1,66 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files/request.schema.json",
+  "title": "RequestFile",
+  "description": "One request, one JSON file inside a collection folder (design §6.2). Not one file per collection: two people editing two requests conflict in two files rather than in one, and the entire \"shared through git\" claim rests on that. The optional keys here are what an RPC result must not have — an absent \"headers\" is a request with no headers, which is right for a file and wrong on the wire, where the renderer's first .map would throw. This is a PERSISTED format; see contracts/files/README.md.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "name", "method", "url", "body", "auth"],
+  "properties": {
+    "id": { "type": "string" },
+    "name": { "type": "string" },
+    "method": { "type": "string" },
+    "url": {
+      "description": "May carry {{variable}} spans. They are substituted on send, from the environment, and never at rest.",
+      "type": "string"
+    },
+    "headers": { "type": "array", "items": { "$ref": "#/$defs/row" } },
+    "query": { "type": "array", "items": { "$ref": "#/$defs/row" } },
+    "body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["none", "raw", "form", "file"] },
+        "text": { "type": "string" },
+        "fileRef": {
+          "description": "A path WITHIN the collection. It is resolved on send under the handle's path rules and opened WITHOUT following symlinks: a collection from a pull request may not read ~/.ssh/id_ed25519 by pointing a request file at it (design §13.1).",
+          "type": "string"
+        }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["none", "bearer", "basic", "apikey"] },
+        "user": {
+          "description": "The basic-auth username, or the api-key header name.",
+          "type": "string"
+        },
+        "token": {
+          "description": "The bearer token or the api-key value. TEXT, like every other field in this file (nocx-6hg2w.20): a literal the person pasted is sent and is written here, and a {{name}} written into it resolves on send. The plain-vs-vault distinction is by construction, not by heuristic: a name the binding document answers is a secret, and the binding lives in internal/apibind, which never enters this folder. Design §8 still holds — there is no syntax in which a file names a secret; an identifier typed here is the literal it is.",
+          "type": "string"
+        },
+        "password": {
+          "description": "The basic-auth password, the same text.",
+          "type": "string"
+        }
+      }
+    }
+  },
+  "$defs": {
+    "row": {
+      "description": "A header or query row. Enabled is carried because a disabled row is a row the user keeps: deleting it to turn it off loses the value they will want back.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value", "enabled"],
+      "properties": {
+        "name": { "type": "string" },
+        "value": { "type": "string" },
+        "enabled": { "type": "boolean" }
+      }
+    }
+  }
+}

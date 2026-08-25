@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.collections.close.schema.json",
+  "title": "ApiCollectionsCloseResult",
+  "description": "Result of the api.collections.close JSON-RPC method: the folder has left the opened-folder list and its handle stops resolving. An empty result is still a contract — additionalProperties: false on an empty shape is what makes \"returns nothing\" enforceable, and a renderer that wants a field here cannot be written. Closing a handle nobody minted answers an error instead.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": []
+}

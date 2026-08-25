@@ -232,9 +232,10 @@ func (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOpti
 		Logger:         w.backend.Logger,
 	})
 
-	// The native file dialog is a control-plane capability (AD-1): the
-	// renderer reaches the Wails runtime through dialog.openFile on the
-	// WebSocket, and this is the only place the shell exists to back it.
+	// The native file and directory dialogs are one control-plane
+	// capability (AD-1): the renderer reaches the Wails runtime through
+	// dialog.openFile and dialog.openDirectory on the WebSocket, and this
+	// is the only place the shell exists to back them.
 	// Wired before Start so no renderer request can observe the unset
 	// state. The dev-web harness never runs this — the method then reports
 	// itself unavailable and the surfaces fall back to typing paths.
@@ -495,9 +496,9 @@ func (p wailsWindowProbe) Geometry() (uistate.Window, []uistate.Display, bool) {
 	}, displays, true
 }
 
-// wailsDialogService opens the platform file picker through the Wails
-// runtime. The renderer never calls it directly; it is the backend of the
-// dialog.openFile control-plane method.
+// wailsDialogService opens the platform file and directory pickers through
+// the Wails runtime. The renderer never calls it directly; it is the backend
+// of the dialog.openFile and dialog.openDirectory control-plane methods.
 //
 // The platform-adapter contract (transport.DialogService) permits observing
 // ctx and dismissing the dialog where the native API allows it. This adapter
@@ -519,6 +520,21 @@ func (d *wailsDialogService) OpenFile(_ context.Context) (string, error) {
 		CanChooseFiles(true).
 		SetTitle("Choose a private key").
 		AddFilter("All files", "*").
+		PromptForSingleSelection()
+}
+
+// OpenDirectory is the same v3 open dialog restricted to directories:
+// CanChooseFiles(false) is what makes a file unselectable, so a caller
+// expecting a folder cannot be handed a file. It is bound by the same
+// contract as OpenFile above — the picker cannot be dismissed from here, so
+// the transport's context is deliberately ignored and the capability stays
+// busy until the user acts.
+func (d *wailsDialogService) OpenDirectory(_ context.Context) (string, error) {
+	return d.app.Dialog.OpenFile().
+		CanChooseFiles(false).
+		CanChooseDirectories(true).
+		CanCreateDirectories(true).
+		SetTitle("Choose a folder").
 		PromptForSingleSelection()
 }
 

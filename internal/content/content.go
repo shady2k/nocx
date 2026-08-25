@@ -72,6 +72,10 @@ type ContentDB interface {
 	// those tables — the workspace included, which is why CreateWorkspace is
 	// not on LedgerRepository: one table, one repository owner.
 	Layout() LayoutRepository
+	// APIRuns returns the durable API exchange repository. Its identity is
+	// the collection path plus request relative path; the renderer's
+	// session-only collection handle is never persisted.
+	APIRuns() APIRunRepository
 }
 
 // Redaction is one structured redaction segment on a history row. Offsets

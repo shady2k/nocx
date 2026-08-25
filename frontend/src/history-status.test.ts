@@ -409,6 +409,16 @@ describe('Settings → History says when durable history is not running', () => 
     await settle()
 
     await mountSettings(target, store)
+    // Walk to the other section the way a person does. A section that is not
+    // the open one is not in the page at all, so the only place this fact can
+    // be checked is the section the person is actually looking at.
+    const terminalLink = target.querySelector<HTMLButtonElement>(
+      '.ui-grouped-nav__item[data-item="Terminal"] > .ui-button',
+    )
+    expect(terminalLink).toBeTruthy()
+    terminalLink!.click()
+    await settle()
+
     const terminal = target.querySelector<HTMLElement>('#st-section-Terminal')
     expect(terminal).not.toBeNull()
     expect(terminal?.querySelector('.ui-status-card')).toBeNull()

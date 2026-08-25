@@ -1,93 +1,51 @@
 // The ask entry gesture (nocx-4wtlh): the caret indicator that renders
-// InputTargetRegistry.active(), and the reference chips a selection raises.
-//
-// The rule the whole gesture stands on: NOTHING but the person changes where
-// Enter goes. The indicator is the ADR-0004 §3 "UI chip" — the active
-// target, rendered in the input line immediately left of the cursor. It is
-// operable (click, and the ⌘/Ctrl+Enter chord) because the ADR requires an
-// explicit switch, but in ordinary use nobody operates it: it is the
-// confirmation that Enter goes to the shell.
-//
-// Selecting a region of a finished block's output FREEZES that region into a
-// reference chip in the input line: "if you ask, this comes with you". It
-// never arms ask — the active target does not move (the owner's Warp
-// complaint: a selection that armed ask would send the next typed command
-// to the model).
+// InputTargetRegistry.active(), and the whole blocks a person grants to a
+// question. Selection is a quote; the grant is the permission to read the
+// surrounding block through session.read.
 
 import { StateEffect, type Extension } from '@codemirror/state'
 import { EditorView, GutterMarker, ViewPlugin, gutter } from '@codemirror/view'
+import type { BadgeTone } from './ui/badge'
+import { createModeIndicator } from './ui/mode-indicator'
 
-// ── Reference chips ────────────────────────────────────────────────────────
-
-export interface ReferenceChip {
-  /** Stable identity for dismissal and exact-duplicate dedupe. */
-  readonly id: string
-  /** The finished block the selection landed in — the frame source and the
-   *  chip's scope. Never re-derived from DOM selection at submit time
-   *  (AD-8: selection is copy; the chip is the mode's record). */
+export interface GrantBlock {
+  readonly itemId: string
   readonly blockEl: HTMLElement
-  /** The chip's name: the block's command and the covered row range. */
-  readonly label: string
-  /** First covered term-line index, inclusive, 0-based. */
-  readonly rowStart: number
-  /** One past the last covered term-line index, exclusive. */
-  readonly rowEnd: number
+  readonly command: string
+  readonly state: 'running' | 'exited'
 }
 
-/** The block output whose term-line indices a chip's rows refer to. A chip
- *  may only point into ONE finished block's output: a running block's rows
- *  move, and a selection crossing two blocks has no single frame. */
-function chipSourceOf(node: Node | null): HTMLElement | null {
-  const el = node instanceof Element ? node : (node?.parentElement ?? null)
-  const output = el?.closest<HTMLElement>('.cmd-output')
-  if (!output) return null
-  const block = output.closest<HTMLElement>('.cmd-block')
-  if (!block || block.classList.contains('cmd-block-running')) return null
-  return output
+function blockOf(node: Node | null): HTMLElement | null {
+  const element = node instanceof Element ? node : (node?.parentElement ?? null)
+  return element?.closest<HTMLElement>('.cmd-block') ?? null
 }
 
-/** Map a live DOM selection to a frozen-region chip, or null when the
- *  selection cannot be one: collapsed, spanning two blocks, or anchored
- *  outside a finished block's output. Both ends must land inside the SAME
- *  output's term-lines; the covered rows are the inclusive span between
- *  them. */
-export function chipFromSelection(
-  sel: Selection | null,
-): Omit<ReferenceChip, 'id' | 'label'> | null {
-  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null
-  const range = sel.getRangeAt(0)
-  const startOutput = chipSourceOf(range.startContainer)
-  const endOutput = chipSourceOf(range.endContainer)
-  if (!startOutput || startOutput !== endOutput) return null
-  const lines = Array.from(startOutput.querySelectorAll<HTMLElement>('.term-line'))
-  if (lines.length === 0) return null
-  const startLine =
-    range.startContainer instanceof Element
-      ? range.startContainer.closest<HTMLElement>('.term-line')
-      : range.startContainer.parentElement?.closest<HTMLElement>('.term-line')
-  const endLine =
-    range.endContainer instanceof Element
-      ? range.endContainer.closest<HTMLElement>('.term-line')
-      : range.endContainer.parentElement?.closest<HTMLElement>('.term-line')
-  if (!startLine || !endLine) return null
-  const rowStart = lines.indexOf(startLine)
-  const rowEnd = lines.indexOf(endLine)
-  if (rowStart === -1 || rowEnd === -1) return null
-  const first = Math.min(rowStart, rowEnd)
-  const last = Math.max(rowStart, rowEnd)
+/** Derive one whole-block grant from the block's durable `data-entry-id`.
+ *  Commands receive the lifecycle attempt id when they bind; restored and
+ *  answer blocks carry their ledger entry id. Renderer selection counters
+ *  are deliberately not grant identities. */
+export function grantBlockFromElement(blockEl: HTMLElement): GrantBlock | null {
+  const itemId = blockEl.dataset.entryId
+  if (!itemId) return null
   return {
-    blockEl: startOutput.closest<HTMLElement>('.cmd-block')!,
-    rowStart: first,
-    rowEnd: last + 1,
+    itemId,
+    blockEl,
+    command:
+      blockEl.dataset.recordedCommand ??
+      blockEl.querySelector('.cmd-header-text')?.textContent ??
+      '',
+    state: blockEl.classList.contains('cmd-block-running') ? 'running' : 'exited',
   }
 }
 
-/** The exact-duplicate fingerprint: same block, same rows. Reselecting the
- *  identical region must not stack a second chip. */
-export function chipFingerprint(
-  chip: Pick<ReferenceChip, 'blockEl' | 'rowStart' | 'rowEnd'>,
-): string {
-  return `${chip.blockEl.dataset.blockId ?? 'block'}:${chip.rowStart}:${chip.rowEnd}`
+/** A selection grants its containing block, never a row range. */
+export function grantBlockFromSelection(sel: Selection | null): GrantBlock | null {
+  if (!sel || sel.isCollapsed || sel.rangeCount === 0) return null
+  const range = sel.getRangeAt(0)
+  const start = blockOf(range.startContainer)
+  const end = blockOf(range.endContainer)
+  if (!start || start !== end) return null
+  return grantBlockFromElement(start)
 }
 
 // ── The line-start indicator (ADR-0004 §3's UI chip) ───────────────────────
@@ -96,46 +54,45 @@ export function chipFingerprint(
  *  the chip re-read). */
 const refreshIndicator = StateEffect.define<null>()
 
-/** The indicator's OWN word for a target — what the person does, never the
- *  target's internal name. InputTarget.label stays the registry's word
- *  ('Shell'/'Agent' — other consumers may legitimately read it); this map
- *  is the indicator's vocabulary, keyed by target id. Unknown ids fall
- *  back to the label (a future target still gets an honest chip). */
-const TARGET_WORD: Record<string, string> = {
-  shell: 'Run',
-  agent: 'Ask',
+/** The indicator's OWN presentation of a target — the word the person
+ *  reads and the badge tone the state wears, never the target's internal
+ *  name. InputTarget.label stays the registry's word ('Shell'/'Agent' —
+ *  other consumers may legitimately read it); this map is the indicator's
+ *  vocabulary, keyed by target id, and the tone is the badge register the
+ *  running block already uses for the same author (agent = info). Unknown
+ *  ids fall back to the label and the neutral tone (a future target still
+ *  gets an honest chip). */
+const TARGET_PRESENTATION: Record<string, { word: string; tone: BadgeTone }> = {
+  shell: { word: 'Run', tone: 'neutral' },
+  agent: { word: 'Ask', tone: 'info' },
 }
 
-function targetWord(targetId: string, label: string): string {
-  return TARGET_WORD[targetId] ?? label
+function targetPresentation(targetId: string, label: string): { word: string; tone: BadgeTone } {
+  return TARGET_PRESENTATION[targetId] ?? { word: label, tone: 'neutral' }
 }
 
 class TargetMarker extends GutterMarker {
   constructor(
     private readonly word: string,
+    private readonly tone: BadgeTone,
     private readonly targetId: string,
     private readonly onToggle: () => void,
   ) {
     super()
   }
   eq(other: TargetMarker): boolean {
-    return other.word === this.word && other.targetId === this.targetId
+    return other.word === this.word && other.tone === this.tone && other.targetId === this.targetId
   }
   toDOM(): HTMLElement {
-    const btn = document.createElement('button')
-    btn.type = 'button'
-    btn.className = 'nocx-chip nocx-editor-target-indicator'
-    btn.dataset.target = this.targetId
-    btn.setAttribute('aria-label', `Enter goes to ${this.word}. Click to switch.`)
-    btn.textContent = this.word
-    btn.addEventListener('mousedown', (e) => {
-      // The chip is a control, not a caret placement: never let the press
-      // also move the caret or steal the editor's focus.
-      e.preventDefault()
-      e.stopPropagation()
-      this.onToggle()
+    // The kit's ModeIndicator: the badge shape and tone are ui-badge's, the
+    // operable variance is the indicator's own (ui/mode-indicator.ts). The
+    // gutter PLACES it; the component owns its appearance.
+    return createModeIndicator({
+      word: this.word,
+      tone: this.tone,
+      targetId: this.targetId,
+      onClick: this.onToggle,
     })
-    return btn
   }
 }
 
@@ -143,9 +100,9 @@ class TargetMarker extends GutterMarker {
  * The line-start indicator: the token in the prompt rendering what the
  * ACTIVE target does — `Run` for the shell, `Ask` for the assistant — and
  * toggling the target on click. The host wires the registry's active target
- * and pushes every change through set(); the word is this module's own
- * mapping (targetWord), never a rename of the target. The editor stays
- * passive; this is a decoration, never a second input owner.
+ * and pushes every change through set(); the word and tone are this
+ * module's own mapping (targetPresentation), never a rename of the target.
+ * The editor stays passive; this is a decoration, never a second input owner.
  *
  * IT IS A GUTTER, NOT A WIDGET IN THE DOCUMENT, and that is the whole point
  * (nocx-4wtlh, after the widget shipped and was lived with). A widget at
@@ -167,7 +124,9 @@ class TargetMarker extends GutterMarker {
  */
 export class TargetIndicator {
   /** The word currently rendered, for the gutter's marker. */
-  word = targetWord('shell', 'Shell')
+  word = targetPresentation('shell', 'Shell').word
+  /** The badge tone currently rendered — the active state's register. */
+  tone: BadgeTone = targetPresentation('shell', 'Shell').tone
   /** The target id currently rendered (the data-target hook). */
   targetId = 'shell'
   /** The explicit switch (ADR-0004 §3): wired once by the host; the marker
@@ -192,12 +151,14 @@ export class TargetIndicator {
 
   /** Repaint with the registry's active target — called by the host
    *  whenever the registry reports a change, never on any other signal.
-   *  The WORD is derived here (targetWord); the indicator never shows the
-   *  target's internal label. */
+   *  The WORD and TONE are derived here (targetPresentation); the
+   *  indicator never shows the target's internal label. */
   set(targetId: string, label: string): void {
-    const word = targetWord(targetId, label)
-    if (this.word === word && this.targetId === targetId && this.view) return
-    this.word = word
+    const p = targetPresentation(targetId, label)
+    if (this.word === p.word && this.tone === p.tone && this.targetId === targetId && this.view)
+      return
+    this.word = p.word
+    this.tone = p.tone
     this.targetId = targetId
     this.view?.dispatch({ effects: refreshIndicator.of(null) })
   }
@@ -211,7 +172,7 @@ export class TargetIndicator {
  *  renders. */
 function indicatorGutter(indicator: TargetIndicator): Extension {
   const marker = (): TargetMarker =>
-    new TargetMarker(indicator.word, indicator.targetId, indicator.toggle)
+    new TargetMarker(indicator.word, indicator.tone, indicator.targetId, indicator.toggle)
   return [
     ViewPlugin.define((view) => {
       indicator.attachView(view)

@@ -152,6 +152,13 @@ const (
 	// tab it is. Wails delivers every attribute of the element that carries
 	// data-file-drop-target; this is the one we read.
 	dropSessionAttr = "data-session-id"
+	// dropTargetAttr is that element's own attribute, and it carries a NAME
+	// rather than being a bare marker. It is what separates two surfaces
+	// that legitimately share a session: the terminal pane of a local tab
+	// and the API workbench's import ask both name that tab, and without a
+	// target name one drop reaches both — whichever acts first wins, which
+	// is not a rule anybody wrote down.
+	dropTargetAttr = "data-file-drop-target"
 )
 
 // Refusals, worded without the path (see the file comment). The caller
@@ -162,6 +169,7 @@ var (
 	errSourceNotRegular  = errors.New("only a regular file can be uploaded")
 	errSourceStoreFull   = errors.New("too many files are waiting to be uploaded")
 	errDropNamesNoTab    = errors.New("the drop target does not name a session")
+	errDropNamesNoTarget = errors.New("the drop target does not name itself")
 	errDropTabNotOpen    = errors.New("the drop target names a tab that is not open")
 	errDropNoRenderer    = errors.New("no renderer is attached to receive the dropped files")
 )
@@ -184,8 +192,11 @@ type DropHost interface {
 	// TabKind is the kind of the session a drop target named, and whether
 	// that session is open at all. False refuses the drop whole.
 	TabKind(sessionID string) (session.Kind, bool)
-	// EmitFilesDropped tells that tab's renderer what was dropped on it.
-	EmitFilesDropped(sessionID string, picks []SourcePick) error
+	// EmitFilesDropped tells that tab's renderer what was dropped on it,
+	// and on WHICH of that tab's surfaces — a session can carry more than
+	// one legitimate drop target, and a subscriber filtering on the session
+	// alone would act on a gesture aimed at its neighbour.
+	EmitFilesDropped(sessionID, target string, picks []SourcePick) error
 }
 
 type sourceTicketEntry struct {
@@ -452,6 +463,16 @@ func (s *SourceTicketStore) Dropped(filenames []string, attrs map[string]string)
 	if msg := validateSessionIDShape(sessionID); msg != "" {
 		return fmt.Errorf("the drop target's session id %s", msg)
 	}
+	// The session says which TAB; this says which surface OF that tab, and
+	// the two are different questions the moment more than one surface can
+	// legitimately name one session. A target that names nothing is refused
+	// rather than delivered to everybody, for the same reason a drop that
+	// names no session is: a notification nobody can attribute is one every
+	// subscriber has to guess about.
+	target := attrs[dropTargetAttr]
+	if target == "" {
+		return errDropNamesNoTarget
+	}
 	if s.emit == nil {
 		return errDropNoRenderer
 	}
@@ -491,7 +512,7 @@ func (s *SourceTicketStore) Dropped(filenames []string, attrs map[string]string)
 	if len(picks) == 0 {
 		return fmt.Errorf("none of the %d dropped files could be read: %w", len(filenames), firstErr)
 	}
-	if err := s.emit.EmitFilesDropped(sessionID, picks); err != nil {
+	if err := s.emit.EmitFilesDropped(sessionID, target, picks); err != nil {
 		// Undelivered tickets are live credentials nobody can use. Take
 		// them back rather than leaving them to time out.
 		s.forget(picks)
@@ -553,7 +574,7 @@ func (s *WSServer) TabKind(sessionID string) (session.Kind, bool) {
 // person is inside, and a drop nobody was attached for is a gesture that
 // did not happen. The refusal is reported so the caller can take the
 // tickets back.
-func (s *WSServer) EmitFilesDropped(sessionID string, picks []SourcePick) error {
+func (s *WSServer) EmitFilesDropped(sessionID, target string, picks []SourcePick) error {
 	rx := s.getRx(session.ID(sessionID))
 	if rx == nil {
 		return errDropNoRenderer
@@ -564,6 +585,7 @@ func (s *WSServer) EmitFilesDropped(sessionID string, picks []SourcePick) error 
 	}
 	return wconn.TryNotify("files.dropped", mustMarshal(map[string]any{
 		"sessionId": sessionID,
+		"target":    target,
 		"sources":   picks,
 	}))
 }

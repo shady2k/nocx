@@ -59,9 +59,13 @@ export interface Entry {
    */
   cwd: string
   /**
-   * What kind of intent this was. Closed set, mirroring the store's CHECK constraint.
+   * What this ledger ROW is — the discriminator of the row, not of a visual block (the brief's decision). Closed set, mirroring the store's CHECK constraint. `ask` is a TURN — the word the renderer's BlockKind already uses for it; `frame` is a captured frame, a row that is never drawn as a block of its own (kind is what lets the ask's reference check tell a frame from a turn by the discriminated column rather than by comparing intent against a magic string); `text` is one run of assistant prose (ADR-0040) — the only member that is not an intent, because it was PRINTED rather than attempted. WHO submitted the row is NOT here: that is the `source` field. It was missing here until nocx-dc2fr.7: the store gained the kind and this shared definition did not, so ledger.get on a prose block — which is exactly what the restore reads, per entry — answered a payload that violated its own contract.
    */
-  kind: 'shell' | 'agent' | 'action'
+  kind: 'shell' | 'ask' | 'action' | 'text' | 'frame'
+  /**
+   * The IMMEDIATE subject that submitted the content or the intent this entry represents — entries.source, never derived from the kind. Initiation is NOT transitive: the command the assistant ran was submitted by the assistant, so it stays 'assistant' even though a person started the assistant. Approval does not change it: a call the assistant proposed stays 'assistant' after a person allows it. The restore badge is painted from this (frontend/src/restore-client.ts), which is the whole point: a command the assistant ran is kind=shell AND source=assistant, and both halves must survive a restart.
+   */
+  source: 'user' | 'assistant'
   /**
    * The intent as recorded — for a shell entry, the command line. Secrets are masked before the row is written: the durable text is always the masked one, and maskedCount/maskedKinds say what was removed. Never truncated here.
    */

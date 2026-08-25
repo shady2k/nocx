@@ -90,12 +90,16 @@ func TestCaptureOutput_StoresTheBodyWithItsProvenance(t *testing.T) {
 	if art.ByteLen != int64(len(capturedBody)) {
 		t.Fatalf("byte_len = %d, want %d", art.ByteLen, len(capturedBody))
 	}
-	// It hangs on the entry's own execution, which RecordCompleted wrote in
-	// the same transaction as the entry. An artifact against somebody else's
-	// run is a body attributed to a command that did not print it.
+	// It BELONGS to the entry (ADR-0040) and records the entry's own
+	// execution as its provenance — the one RecordCompleted wrote in the
+	// same transaction as the entry. An artifact against somebody else's
+	// block is a body attributed to a command that did not print it.
 	entry, _ := led.Entry(ctx, entryID)
-	if len(entry.Executions) != 1 || art.ExecutionID != entry.Executions[0].ID {
-		t.Fatalf("artifact hangs on execution %d, want the entry's own", art.ExecutionID)
+	if art.EntryID != entryID {
+		t.Fatalf("artifact belongs to block %q, want %q", art.EntryID, entryID)
+	}
+	if len(entry.Executions) != 1 || art.ExecutionID == nil || *art.ExecutionID != entry.Executions[0].ID {
+		t.Fatalf("artifact names execution %v, want the entry's own", art.ExecutionID)
 	}
 }
 

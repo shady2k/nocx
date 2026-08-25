@@ -1,11 +1,11 @@
-# ADR-0037 — an HTTP download route beside the WebSocket
+# ADR-0040 — an HTTP download route beside the WebSocket
 
 - **Status:** accepted (2026-08-22)
 - **Amends:** `AD-1` (what may travel beside its two planes) —
   `docs/architecture.md:101`, the bulk-file-bytes amendment at `:111`. That
   amendment ends "nothing further may be added to this route without its own
   ADR", and this is that ADR. See "What this leaves to AD-1" below.
-- **Extends:** [ADR-0036](0036-an-http-upload-route-beside-the-websocket.md),
+- **Extends:** [ADR-0039](0036-an-http-upload-route-beside-the-websocket.md),
   whose decision is scoped to `POST /upload/{ticket}` and whose own words are
   "exactly one documented exception, **in one direction**, for one payload
   class". This is the other direction.
@@ -22,9 +22,9 @@ a `bindingId` and a path, and answers with a `transferId`, a single-use ticket,
 a URL, the file's base name and its size — and the bytes then travel on a
 `GET /download/{ticket}`.
 
-ADR-0036 already argued the general shape and the whole of that argument holds
+ADR-0039 already argued the general shape and the whole of that argument holds
 here. What this document exists for is the part that does **not** simply carry
-over: the direction. ADR-0036 was careful to bound its own crossing to one
+over: the direction. ADR-0039 was careful to bound its own crossing to one
 direction and one payload class, and the AD-1 amendment it produced names the
 upload route explicitly and forbids adding to it without a new record. So a
 second route is a second crossing, however similar it looks, and this is it.
@@ -36,7 +36,7 @@ second route is a second crossing, however similar it looks, and this is it.
 `/session` and `/upload/{ticket}`. They travel on neither of AD-1's two planes,
 and no msg-type is allocated on the data plane.**
 
-The same three bounds ADR-0036 set apply unchanged, and a fourth is added by
+The same three bounds ADR-0039 set apply unchanged, and a fourth is added by
 this route existing beside the first:
 
 1. **The control plane still owns the transfer.** `files.download`,
@@ -66,12 +66,12 @@ this route existing beside the first:
 
 ## Rationale
 
-ADR-0036's three reasons apply, and each is **stronger** in this direction.
+ADR-0039's three reasons apply, and each is **stronger** in this direction.
 There is also a fourth that decides it on its own.
 
 ### 1. Contention: the collision is now head-on
 
-ADR-0036's strongest argument was that an upload multiplexed onto the data plane
+ADR-0039's strongest argument was that an upload multiplexed onto the data plane
 would compete with PTY traffic for one TCP stream and one read loop. It could
 still say that an upload runs renderer→backend — the same way keystrokes go, and
 the opposite way from bulk PTY output.
@@ -91,7 +91,7 @@ the renderer treats as a cue to reconnect. A dropped chunk of terminal output is
 a redraw; a dropped chunk of a file is a corrupted result.
 
 Making file bytes undroppable on that path means inventing the same missing
-half ADR-0036 refused to invent, in the mirror: application-level credit in the
+half ADR-0039 refused to invent, in the mirror: application-level credit in the
 server→client direction that is separate from the PTY credit, an ack for it, a
 chunk sequence, and a resume rule. An HTTP response gets all of it from TCP: the
 handler's write blocks when the client stops reading, and that backpressure
@@ -118,7 +118,7 @@ WKWebView the desktop app ships.
 
 ### The ticket is a bearer credential, and it authorises a READ
 
-ADR-0036 said of the sink ticket that possession authorises the destination and
+ADR-0039 said of the sink ticket that possession authorises the destination and
 the bytes written to it, which is an integrity violation rather than merely a
 denial of service. State this one's shape plainly, because it is a different
 violation and the mitigations are chosen for it:
@@ -177,7 +177,7 @@ was sent.
 
 ### The route sets its own deadline, and it is a WRITE deadline
 
-ADR-0036 noted that the shared `http.Server` has `ReadHeaderTimeout: 0` because
+ADR-0039 noted that the shared `http.Server` has `ReadHeaderTimeout: 0` because
 `/session` is a long-lived upgrade, so every non-upgrade handler owns its own
 bounds. This route inherits that and needs the mirror: a per-**write** stall
 deadline, re-armed before every chunk, because an `http.ResponseWriter` blocks
@@ -228,7 +228,7 @@ its own ADR". This document is that ADR, and the line now needs widening to name
 both directions and both routes.
 
 That widening is deliberately **not** done here, following the precedent
-ADR-0036 set in these words: "This document was written without claiming the
+ADR-0039 set in these words: "This document was written without claiming the
 authority to widen AD-1's own wording, because that was the coordinator's call
 rather than a side effect of writing it." The same holds. The half of the change
 that lives in `docs/architecture.md` is the coordinator's, and until it lands

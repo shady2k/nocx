@@ -1,0 +1,59 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/roles.list.schema.json",
+  "title": "RolesListResult",
+  "description": "Result of the roles.list JSON-RPC method (bead nocx-e6kn2): every model role in the CLOSED product set, with the (endpoint, model) pair each has been assigned. The role set is defined by the product, never by the user — a role is requested by a feature, so a user-invented name would have nobody to ask for it. An unassigned role is a row with null endpointId and model, never an absent row: the 'no model assigned' failure is a first-class state the surface renders, and the ask transaction refuses on it. endpointId and model are the ASSIGNED pair's identities; the renderer joins its own endpoint list for display names.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["roles", "default"],
+  "properties": {
+    "roles": {
+      "description": "Every role of the closed set, in product order. Never null: an empty store still lists the roles, null-assigned.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/role" }
+    },
+    "default": {
+      "description": "The one (endpoint, model) pair every role with no assignment of its own resolves through (bead nocx-rikz5). Null when the person has chosen none — which is the state a fresh profile is in, and the state in which the assistant is not ready. It is never a pair the product picked: a default the product invented is the silent fallback nocx-e6kn2 forbids. Declared here once and referenced cross-file by roles.assign, whose result is this same table after a write; roles.setDefault returns this shape too.",
+      "anyOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["endpointId", "model"],
+          "properties": {
+            "endpointId": {
+              "description": "The default endpoint's backend-minted id. The endpoint EXISTS at the moment of the write — roles.setDefault refuses an id naming no endpoint, because a dangling default breaks every unassigned role at once with nothing on screen naming which choice did it.",
+              "type": "string"
+            },
+            "model": {
+              "description": "The default model id the endpoint's API understands (never the picker alias). A model that later disappears leaves the default unresolvable and says so; it is never repaired into a neighbouring model.",
+              "type": "string"
+            }
+          }
+        },
+        { "type": "null" }
+      ]
+    }
+  },
+  "$defs": {
+    "role": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["role", "endpointId", "model"],
+      "properties": {
+        "role": {
+          "description": "The role name, a closed enum: 'answering' is the model the assistant speaks with; 'classifier' is the second model judging proposed tool calls (its own bead).",
+          "type": "string",
+          "enum": ["answering", "classifier"]
+        },
+        "endpointId": {
+          "description": "The assigned endpoint's backend-minted id, or null when the role has no assignment.",
+          "type": ["string", "null"]
+        },
+        "model": {
+          "description": "The assigned model id the endpoint's API understands (never the picker alias), or null when the role has no assignment.",
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

@@ -71,6 +71,23 @@ type storeData struct {
 	Profiles  []SSHProfile   `json:"profiles,omitempty"`
 	Groups    []ProfileGroup `json:"groups,omitempty"`
 	Endpoints []Endpoint     `json:"endpoints,omitempty"`
+	// Roles are the role assignments (bead nocx-e6kn2): each role's one
+	// (endpoint, model) pair. They share this document with endpoints
+	// because a role names an endpoint — the same reason endpoints share
+	// it with profiles (ADR-0030) — and a vault reset's reference sweeps
+	// stay one atomic write. An assignment may dangle (deleted endpoint,
+	// removed model); resolution reports the dangle instead of resolving
+	// to a neighbour.
+	Roles []RoleAssignment `json:"roles,omitempty"`
+	// DefaultModel is the one pair every role WITHOUT its own assignment
+	// resolves through (bead nocx-rikz5). It rides this document for the
+	// same reason Roles does — it names an endpoint, and DeleteEndpoint
+	// clears it in the endpoint's own write. No `omitempty`: encoding/json
+	// does not omit an empty struct, so the tag would claim an absence the
+	// encoder never produces. The zero value IS "no default", and an absent
+	// key decodes to it, so a document written before this field existed
+	// reads back as a person who has chosen nothing — which they had not.
+	DefaultModel DefaultModel `json:"defaultModel"`
 }
 
 func (s *JSONStore) load() (*storeData, error) {
@@ -400,10 +417,17 @@ func (s *JSONStore) ApplyGroups(groups []ProfileGroup) error {
 
 // ErrEndpointIDRequired, ErrEndpointExists and ErrEndpointNotFound make
 // endpoint create and update distinguishable.
+// ErrEndpointModelNotFound is the same class one step further in: the
+// endpoint is there and does not offer the named model. It is separate from
+// ErrEndpointNotFound because the two send a person to different repairs
+// ("that endpoint is gone" vs "that endpoint no longer lists that model"),
+// and it is deliberately NOT ErrRoleModelGone — that one is resolution
+// REPORTING a dangle it found, this one is a write being REFUSED.
 var (
-	ErrEndpointIDRequired = errors.New("endpoint ID is required")
-	ErrEndpointExists     = errors.New("endpoint already exists")
-	ErrEndpointNotFound   = errors.New("endpoint not found")
+	ErrEndpointIDRequired    = errors.New("endpoint ID is required")
+	ErrEndpointExists        = errors.New("endpoint already exists")
+	ErrEndpointNotFound      = errors.New("endpoint not found")
+	ErrEndpointModelNotFound = errors.New("endpoint does not offer this model")
 )
 
 func (s *JSONStore) LoadEndpoints() ([]Endpoint, error) {
@@ -491,6 +515,18 @@ func (s *JSONStore) DeleteEndpoint(id string) (string, error) {
 			ref := existing.CredentialRef
 			d.Endpoints = append(d.Endpoints[:i], d.Endpoints[i+1:]...)
 			clearSecretRefLocked(d, ref)
+			// The default is a single global convenience with nothing to
+			// reassign, so it goes with the endpoint it named (bead
+			// nocx-rikz5): it must never point at nothing. A per-role
+			// ASSIGNMENT deliberately does NOT go: it is a statement about
+			// one role that the person made, and they are entitled to be
+			// told it broke rather than to find it silently forgotten
+			// (role.go's dangle rule, tested at role_test.go:199). This is
+			// the SAME write as the removal — a second write could fail in
+			// between and leave the state the interval forbids.
+			if d.DefaultModel.EndpointID == id {
+				d.DefaultModel = DefaultModel{}
+			}
 			if err := s.writeLocked(d); err != nil {
 				return "", err
 			}
@@ -498,6 +534,137 @@ func (s *JSONStore) DeleteEndpoint(id string) (string, error) {
 		}
 	}
 	return "", nil
+}
+
+// LoadRoleAssignments returns every stored role assignment (bead
+// nocx-e6kn2). Never nil: a store with no assignments returns an empty
+// slice — the wire's roles.list still lists every role, null-assigned.
+func (s *JSONStore) LoadRoleAssignments() ([]RoleAssignment, error) {
+	d, err := s.load()
+	if err != nil {
+		return nil, err
+	}
+	return d.Roles, nil
+}
+
+// LoadDefaultModel returns the chosen default, or the zero value when none
+// has been chosen (bead nocx-rikz5) — "unset" is a value here, never an
+// error, so a caller can tell a person who chose nothing from a store that
+// could not answer.
+func (s *JSONStore) LoadDefaultModel() (DefaultModel, error) {
+	d, err := s.load()
+	if err != nil {
+		return DefaultModel{}, err
+	}
+	return d.DefaultModel, nil
+}
+
+// SetDefaultModel replaces the default in ONE write. The empty pair clears
+// it, returning every role without its own assignment to the visible
+// "no model assigned" failure state; a half-set pair is refused
+// (ValidateDefaultModel), because it names nothing.
+//
+// The EXISTENCE checks live HERE, inside the lock, against the one loaded
+// document — not in the capability layer above (bead nocx-rikz5). The store
+// is what holds the lock, so only the store can make "check the endpoint,
+// check the model, write" a single operation; a caller that loads the
+// endpoint list, decides, and then calls this leaves a window in which a
+// DeleteEndpoint lands between the two and the write stores a default
+// naming an endpoint that is gone — the exact state the design forbids
+// ("the default must never point at nothing"). This is the same shape
+// DeleteEndpoint already has, where the removal and the clearing of a
+// default naming it are one write.
+//
+// The asymmetry with AssignRole is deliberate and unchanged: a per-role
+// assignment is a statement about one role, so a dangling one must survive
+// to be reported against that role. The default is a global convenience
+// every unassigned role inherits silently, so a dangling one breaks all of
+// them at once with nothing naming the choice that did it — it is refused
+// at the moment it is written. Resolution still refuses at read time: the
+// endpoint can be deleted a moment later, and ResolveRole is the
+// truth-teller for that.
+func (s *JSONStore) SetDefaultModel(m DefaultModel) error {
+	if err := ValidateDefaultModel(m); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	if m.IsSet() {
+		if err := offersModelLocked(d, m.EndpointID, m.Model); err != nil {
+			return err
+		}
+	}
+	d.DefaultModel = m
+	return s.writeLocked(d)
+}
+
+// offersModelLocked reports whether the loaded document holds an endpoint
+// with this id that offers this model, naming which half is missing. The
+// caller MUST hold s.mu, and MUST pass the document it is about to write —
+// that identity is the whole point of the check living here.
+func offersModelLocked(d *storeData, endpointID, model string) error {
+	for i := range d.Endpoints {
+		if d.Endpoints[i].ID != endpointID {
+			continue
+		}
+		for _, offered := range d.Endpoints[i].Models {
+			if offered.Name == model {
+				return nil
+			}
+		}
+		return fmt.Errorf("default model: endpoint %s: %q: %w", endpointID, model, ErrEndpointModelNotFound)
+	}
+	return fmt.Errorf("default model: %s: %w", endpointID, ErrEndpointNotFound)
+}
+
+// AssignRole upserts ONE role's assignment (bead nocx-e6kn2): a role has at
+// most one (endpoint, model) pair, so a second assignment for the same role
+// REPLACES the first in the same single write. A CLEAR write (both fields
+// empty) REMOVES the assignment, returning the role to the visible
+// "no model assigned" state. Shape-validates the assignment first
+// (ValidateRoleAssignment); whether the endpoint and model still exist is
+// deliberately not this write's question — resolution answers it, once, so
+// a deletion or model-list update can never race a write into a
+// validated-but-stale assignment.
+func (s *JSONStore) AssignRole(a RoleAssignment) error {
+	if err := ValidateRoleAssignment(a); err != nil {
+		return err
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	d, err := s.load()
+	if err != nil {
+		return err
+	}
+	// The empty pair is the CLEAR write: remove the role's assignment so
+	// the role is unresolvable again — the visible "no model assigned"
+	// failure state. Idempotent: clearing an already-clear role writes
+	// nothing.
+	if a.EndpointID == "" && a.Model == "" {
+		for i, existing := range d.Roles {
+			if existing.Role == a.Role {
+				d.Roles = append(d.Roles[:i], d.Roles[i+1:]...)
+				return s.writeLocked(d)
+			}
+		}
+		return nil
+	}
+	for i, existing := range d.Roles {
+		if existing.Role == a.Role {
+			d.Roles[i] = a
+			return s.writeLocked(d)
+		}
+	}
+	d.Roles = append(d.Roles, a)
+	return s.writeLocked(d)
 }
 
 // LoadConnectionSnapshot returns one locked copy of profiles and groups.

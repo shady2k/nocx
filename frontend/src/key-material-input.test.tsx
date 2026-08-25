@@ -1,8 +1,48 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { render, fireEvent } from '@solidjs/testing-library'
-import { KeyMaterialInput, publicKeyMistake } from './key-material-input'
+import { KeyMaterialInput, publicKeyMistake, secretOptions } from './key-material-input'
+import { toasts, clearToasts } from './ui/toast'
 import type { InventoryEntry } from './vault-client'
+
+function entry(overrides: Partial<InventoryEntry> = {}): InventoryEntry {
+  return {
+    id: 'secrow:aaaa',
+    name: 'prod api key',
+    kind: 'password',
+    provider: 'file',
+    ownerId: '',
+    usedBy: 0,
+    reachable: true,
+    ...overrides,
+  }
+}
+
+// A picker labels a secret with the secret's NAME. The one case where it
+// cannot — the record names a row the inventory does not list, because the
+// secret was deleted or the vault could not answer — is where the label used
+// to be the row handle itself, so a person opening their endpoint read
+// `secrow:dd39558499fe31b5ddce0f88a5d31320` where the name of their own key
+// belongs (nocx-5ratm).
+describe('secretOptions', () => {
+  it('names each row the vault listed', () => {
+    expect(secretOptions([entry()])).toEqual([{ value: 'secrow:aaaa', label: 'prod api key' }])
+  })
+
+  it('keeps a bound row that the vault did not list, and never labels it with its handle', () => {
+    const opts = secretOptions([entry()], 'secrow:gone')
+    // The binding is not silently dropped: dropping it would read as "None"
+    // and a save would then clear a credential nobody meant to clear.
+    expect(opts.map((o) => o.value)).toEqual(['secrow:aaaa', 'secrow:gone'])
+    const fallback = opts[1]
+    expect(fallback.label).not.toContain('secrow:')
+    expect(fallback.label).toBe('Unavailable secret')
+  })
+
+  it('adds nothing when the bound row is listed', () => {
+    expect(secretOptions([entry()], 'secrow:aaaa')).toHaveLength(1)
+  })
+})
 
 // Uploading `id_ed25519.pub` instead of `id_ed25519` is the mistake this
 // catches, and it is the one a user actually made: the backend answered "not a
@@ -47,12 +87,13 @@ describe('publicKeyMistake', () => {
     ).toBeUndefined()
   })
 })
-
 // One message about the material, not a stack of them. Choosing a .pub used to
 // render "That is a public key…" and "not a valid private key: ssh: no key
 // found" one above the other, plus a toast — the same news three times, and
 // the two the eye lands on first were the least useful.
 describe('KeyMaterialInput error reporting', () => {
+  beforeEach(() => clearToasts())
+
   function renderWith(error: string | undefined) {
     return render(() => (
       <KeyMaterialInput
@@ -71,9 +112,10 @@ describe('KeyMaterialInput error reporting', () => {
   it('shows the parent verdict when nothing local was found', async () => {
     const { container } = renderWith('not a valid private key: ssh: no key found')
     await Promise.resolve()
-    const shown = container.querySelectorAll('.cm-key-file-error')
+    const shown = Array.from(container.querySelectorAll('.ui-field-error')).filter((e) =>
+      e.textContent?.includes('ssh: no key found'),
+    )
     expect(shown.length).toBe(1)
-    expect(shown[0].textContent).toContain('ssh: no key found')
   })
 
   it('shows exactly one message, never two', async () => {
@@ -84,11 +126,36 @@ describe('KeyMaterialInput error reporting', () => {
     fireEvent.change(native)
 
     await vi.waitFor(() => {
-      const shown = container.querySelectorAll('.cm-key-file-error')
+      const shown = Array.from(container.querySelectorAll('.ui-field-error')).filter((e) =>
+        e.textContent?.includes('.pub'),
+      )
       expect(shown.length).toBe(1)
       // And it is the local one, which names the file the user wants.
       expect(shown[0].textContent).toContain('.pub')
     })
+  })
+
+  it('raises a toast, not a field paragraph, when the chosen file cannot be read', async () => {
+    const { container } = renderWith(undefined)
+    const native = container.querySelector('.ui-file-input__native') as HTMLInputElement
+    const unreadable = {
+      name: 'broken.key',
+      text: () => Promise.reject(new Error('read failure')),
+    }
+    Object.defineProperty(native, 'files', { value: [unreadable], configurable: true })
+    fireEvent.change(native)
+
+    await vi.waitFor(() => {
+      expect(
+        toasts().some((t) => t.level === 'danger' && t.message.includes('Could not read')),
+      ).toBe(true)
+    })
+    // A read failure is the outcome of the read, not a verdict on the field.
+    expect(
+      Array.from(container.querySelectorAll('.ui-field-error')).some((e) =>
+        e.textContent?.includes('Could not read'),
+      ),
+    ).toBe(false)
   })
 })
 

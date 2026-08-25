@@ -33,11 +33,27 @@ import (
 // set in both directions: a method in it must be registered immediate, and no
 // other method may be. The set is deliberate and closed — a handler that
 // wrongly claims immediate recreates the original bug (a blocking handler on
-// the read loop freezes every tab).
+// the read loop freezes every tab). It grows only for a handler whose
+// non-blocking shape is proven and whose latency the read loop can afford:
+// agent.laneInteractivity is a mutex-guarded state update whose consumer —
+// the run lease, a pending requestor under the ask stream — waits on the
+// transition, so a report queued behind a full lane would delay the
+// awaiting-takeover transition and a lease that has not seen it would keep
+// enforcing its bounds on a TUI the human now owns.
 var ingressCriticalMethods = map[string]struct{}{
 	"ack":                          {},
 	"vault.unlockResolved":         {},
 	"connections.passwordResolved": {},
+	// The broker's resolutions (nocx-e2j1z): a pending requestor — a tool
+	// under the ask stream — blocks on the answer, so an answer queued
+	// behind a full lane would deadlock the run. Same disposition as the
+	// two existing resolvers, for the same reason.
+	"agent.readScreenResolved": {},
+	"agent.runResolved":        {},
+	// The lane interactivity report (ADR-0020 decision 3): the run lease
+	// waits on the awaiting-takeover transition it feeds, so it must never
+	// queue behind the lane either. Handler: a mutex update, microseconds.
+	"agent.laneInteractivity": {},
 }
 
 // methodSpec declares one control method at server construction: the
@@ -381,4 +397,9 @@ var coarseMethodClasses = map[string]string{
 	"dialog":      "dialog",
 	"connections": "connections",
 	"sessions":    "session",
+	// The api.* surface is one product area to a person — "API testing" —
+	// however many method families it grows, so both prefixes map to one
+	// class. The renderer groups refusals by product area, never by raw
+	// method name.
+	"api": "api",
 }

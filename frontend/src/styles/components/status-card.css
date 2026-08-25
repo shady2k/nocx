@@ -74,6 +74,12 @@
 }
 
 .ui-status-card__desc {
+  /* A REASON IS SOMEBODY ELSE'S TEXT. It is the backend's sentence and it
+     may quote what the user pasted — a URL two kilobytes long with no space
+     in it to break on. Without this the card grows a column one character
+     wide and takes the panel's layout with it, which is what a mis-pasted
+     line did to the API sidebar. */
+  overflow-wrap: anywhere;
   /* A measure of its own, tighter than the page's: this is one or two lines of
      explanation, and a line that runs the full width of the card is read as a
      paragraph to be skimmed rather than a caption to be taken in at once. */

@@ -56,6 +56,43 @@ func (s *Stub) Layout() LayoutRepository {
 	return &layoutStub{log: s.log}
 }
 
+// APIRuns returns a stub API-run repository.
+func (s *Stub) APIRuns() APIRunRepository {
+	s.log.Info("content stub: APIRuns called (no-op)")
+	return &apiRunStub{log: s.log}
+}
+
+type apiRunStub struct {
+	log log.Logger
+}
+
+func (s *apiRunStub) Begin(_ context.Context, start APIRunStart) (APIRun, error) {
+	s.log.Info("content stub: APIRunRepository.Begin", "collection", start.CollectionPath, "request", start.RequestRelPath)
+	return APIRun{}, ErrNotImplemented
+}
+
+func (s *apiRunStub) Complete(_ context.Context, id int64, _ APIRunResult) (APIRun, error) {
+	s.log.Info("content stub: APIRunRepository.Complete", "id", id)
+	return APIRun{}, ErrNotImplemented
+}
+
+func (s *apiRunStub) Get(_ context.Context, id int64) (APIRun, error) {
+	s.log.Info("content stub: APIRunRepository.Get", "id", id)
+	return APIRun{}, ErrNotImplemented
+}
+
+func (s *apiRunStub) List(_ context.Context, collectionPath, requestRelPath string) ([]APIRun, error) {
+	s.log.Info("content stub: APIRunRepository.List", "collection", collectionPath, "request", requestRelPath)
+	return nil, ErrNotImplemented
+}
+
+func (s *apiRunStub) Delete(_ context.Context, id int64) error {
+	s.log.Info("content stub: APIRunRepository.Delete", "id", id)
+	return ErrNotImplemented
+}
+
+var _ APIRunRepository = (*apiRunStub)(nil)
+
 // Backup returns ErrNotImplemented: the stub has nothing to snapshot.
 func (s *Stub) Backup(_ context.Context, destPath string) error {
 	s.log.Info("content stub: Backup called (no-op)", "dest", destPath)

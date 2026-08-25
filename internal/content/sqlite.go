@@ -244,6 +244,9 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 		if _, err := createConn.ExecContext(ctx, schemaV1); err != nil {
 			return fmt.Errorf("content: schema: %w", err)
 		}
+		if err := migrateAPIRuns(ctx, createConn); err != nil {
+			return err
+		}
 		// Startup reconciliation (spec §4.3): every entry that never reached
 		// 'closed' — a crash, a force-quit, a session that died — is closed
 		// as status='unknown' through the entries_open partial index. Must
@@ -394,6 +397,7 @@ const schemaVersion = 11
 // schema of THIS store and is discarded deliberately; one containing any
 // other table is refused.
 var rebuildDropOrder = []string{
+	"api_run_artifact_chunks", "api_run_artifacts", "api_runs", "api_run_schema",
 	"grant_scopes", "artifact_chunks", "authority_grants", "artifacts",
 	"edges", "executions", "environment_observations", "entries",
 	"panes", "tabs",

@@ -17,6 +17,8 @@
 // method, because it is a property of the surface.
 
 import type { Dispatcher } from '../dispatcher'
+import type { SecretPickerSource } from '../ui/secret-picker'
+import type { InventoryEntry } from '../vault-client'
 import type { ApiCollectionsListResult } from '../generated/api.collections.list'
 import type { ApiCollectionsOpenResult } from '../generated/api.collections.open'
 import type { ApiCollectionsCreateResult } from '../generated/api.collections.create'
@@ -603,6 +605,12 @@ export interface ApiWorkbenchServices {
    * `make dev-web` too, and this port's absence selects which route it is.
    */
   nativeDrop?: NativeDropPort
+  /** The vault-backed source for @ pickers and Auth's existing-secret mode. */
+  secretSource?: SecretPickerSource
+  /** Full vault rows for Auth's existing-secret selector. */
+  secretInventory?: () => Promise<InventoryEntry[]>
+  /** Navigate to the vault's Secrets page from a reference menu. */
+  openSecrets?: () => void
 }
 
 /** One connection an environment may route through: the id the route
@@ -627,6 +635,9 @@ export function createApiWorkbenchServices(
   listConnections?: () => Promise<readonly ApiConnection[]>,
   files?: FilePicker,
   nativeDrop?: NativeDropPort,
+  secretSource?: SecretPickerSource,
+  secretInventory?: () => Promise<InventoryEntry[]>,
+  openSecrets?: () => void,
 ): ApiWorkbenchServices {
   const client = new ApiClient(dispatcher)
   return {
@@ -635,6 +646,9 @@ export function createApiWorkbenchServices(
     ...(watchCollections ? { watchCollections } : {}),
     ...(listConnections ? { listConnections } : {}),
     ...(nativeDrop ? { nativeDrop } : {}),
+    ...(secretSource ? { secretSource } : {}),
+    ...(secretInventory ? { secretInventory } : {}),
+    ...(openSecrets ? { openSecrets } : {}),
     listCollections: () => client.listCollections(),
     openCollection: (path) => client.openCollection(path),
     createCollection: (name) => client.createCollection(name),

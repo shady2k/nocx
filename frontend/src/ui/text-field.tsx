@@ -12,7 +12,7 @@ import { For, Show, Switch, Match, type JSX } from 'solid-js'
 import { Field } from './field'
 import { mirrorControlledValue } from './controlled-value'
 
-/** One marked span of a field's text. `to` is exclusive. */
+/** One marked span of the value. */
 export interface TextFieldMark {
   from: number
   to: number
@@ -20,14 +20,12 @@ export interface TextFieldMark {
    * What the mark says about the span — `reference` (the default) is "this
    * is a reference", `secret` is "and what it stands for is not readable
    * here", `unknown` is "and nothing answers it".
-   *
-   * Two tones and not a boolean because the third state is real and must not
-   * be drawn as either: a surface that does not yet KNOW whether a name is
-   * answered passes `reference`, and a warning colour appears only once
-   * somebody can say it is warranted. Crying wolf while a listing is in
-   * flight is how a person learns to ignore the colour.
    */
   tone?: 'reference' | 'secret' | 'unknown'
+  /** The human-facing label painted over an opaque secret reference. */
+  displayText?: string
+  /** The opaque secret row handle, when this mark is a vault reference. */
+  secretHandle?: string
 }
 
 export interface TextFieldProps {
@@ -59,6 +57,8 @@ export interface TextFieldProps {
    * typing the first character of an empty field, so `createFormValidation` marks
    * a field answered on blur rather than on input. See `ui/validation.ts`.
    */
+  /** Fires when a key reaches the input, before the surface handles it. */
+  onKeyDown?: (event: KeyboardEvent) => void
   onBlur?: (value: string) => void
   type?: 'text' | 'number' | 'password'
   placeholder?: string
@@ -187,6 +187,7 @@ export function TextField(props: TextFieldProps) {
         mirrorControlledValue(element, () => props.value)
       }}
       onInput={onInput}
+      onKeyDown={props.onKeyDown}
       onBlur={onBlur}
       onScroll={followScroll}
     />
@@ -217,6 +218,7 @@ export function TextField(props: TextFieldProps) {
         mirrorControlledValue(element, () => props.value)
       }}
       onInput={onInput}
+      onKeyDown={props.onKeyDown}
       onBlur={onBlur}
     />
   )
@@ -303,7 +305,7 @@ export function TextField(props: TextFieldProps) {
                       props.onMarkClick?.(mark, { x: e.clientX, y: e.clientY })
                     }}
                   >
-                    {run.text}
+                    {run.mark?.displayText ?? run.text}
                   </span>
                 </Show>
               )}

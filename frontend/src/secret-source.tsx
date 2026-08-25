@@ -68,6 +68,7 @@ export const SecretSource: Component<SecretSourceProps> = (props) => {
       <Show when={props.mode === 'secret'}>
         <Field for={`${props.id}-secret`} label="Existing secret">
           <Select
+            id={`${props.id}-secret`}
             value={props.value ?? ''}
             onChange={(value) => props.onValueChange(value || undefined)}
             options={secretOptions(props.secrets, props.value)}

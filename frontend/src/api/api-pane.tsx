@@ -81,10 +81,12 @@ import {
 import { API_IMPORT_DROP_TARGET, CurlImportDialog, PostmanImportDialog } from './import-dialogs'
 import { RequestCrumbs } from './request-crumbs'
 import { MoveToFolderDialog } from './move-dialog'
-import { RequestEditor, RequestLine, type SecretTarget } from './request-form'
+import { RequestEditor, RequestLine } from './request-form'
 import { RunList } from './run-list'
 import type { ApiStore, VariableAnswer } from './api-store'
 import type { DirectoryPicker, FilePicker, ImportSource, NativeDropPort } from './api-client'
+import type { SecretEntry, SecretPickerSource } from '../ui/secret-picker'
+import type { InventoryEntry } from '../vault-client'
 import type { ApiOpenCollection, ApiParam, ApiRequest, ApiRoute } from './api-model'
 import { findVariables } from './variable-reference'
 
@@ -120,6 +122,12 @@ export interface ApiPaneProps {
    * (`nativeWindow`, below).
    */
   nativeDrop?: NativeDropPort
+  /** The vault-backed source shared by all request text fields. */
+  /** Full vault inventory used by Auth's existing-secret selector. */
+  secretInventory?: () => Promise<InventoryEntry[]>
+  secretSource?: SecretPickerSource
+  /** Opens the existing Secrets settings page from a reference menu. */
+  openSecrets?: () => void
 }
 
 /** Floors for the two seams: a tree column narrower than this cannot show a
@@ -312,6 +320,48 @@ export function ApiPane(props: ApiPaneProps) {
   const filePicker = props.openFile
   // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
   const nativeDrop = props.nativeDrop
+  // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
+  const secretSource = props.secretSource
+  // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
+  const openSecrets = props.openSecrets
+  const secretInventory = props.secretInventory
+  let openRequestSecretPicker: (() => void) | undefined
+  const [secretEntries, setSecretEntries] = createSignal<SecretEntry[]>([])
+  const [secretInventoryEntries, setSecretInventoryEntries] = createSignal<InventoryEntry[]>([])
+  const [vaultState, setVaultState] = createSignal<
+    'uninitialized' | 'sealed' | 'unsealed' | 'unknown'
+  >('unknown')
+  const refreshSecretEntries = async (): Promise<void> => {
+    if (secretSource === undefined) {
+      setVaultState('unknown')
+      setSecretEntries([])
+      setSecretInventoryEntries([])
+      return
+    }
+    try {
+      const status = await secretSource.status()
+      setVaultState(status.state)
+      if (status.state !== 'unsealed') {
+        setSecretEntries([])
+        setSecretInventoryEntries([])
+        return
+      }
+      const entries = await secretSource.list()
+      setSecretEntries(entries)
+      try {
+        setSecretInventoryEntries((await secretInventory?.()) ?? [])
+      } catch {
+        setSecretInventoryEntries([])
+      }
+    } catch {
+      setVaultState('sealed')
+      setSecretEntries([])
+      setSecretInventoryEntries([])
+    }
+  }
+  onMount(() => {
+    void refreshSecretEntries()
+  })
   // The clipboard a copied path lands on (AD-8). The composition root
   // injects one into the surfaces whose copy was designed with it; the
   // workbench predates that seam, so it makes its own through the same
@@ -465,7 +515,13 @@ export function ApiPane(props: ApiPaneProps) {
   // rather than the collections menu's: two menus that shared one open flag
   // would be two surfaces owning one input, and the second one to open would
   // close the first from underneath the pointer.
-  const [varMenu, setVarMenu] = createSignal<{ name: string; x: number; y: number } | null>(null)
+  const [varMenu, setVarMenu] = createSignal<{
+    name: string
+    x: number
+    y: number
+    secret?: boolean
+    replace?: () => void
+  } | null>(null)
 
   const [curling, setCurling] = createSignal(false)
   const [curlLine, setCurlLine] = createSignal('')
@@ -1682,6 +1738,9 @@ export function ApiPane(props: ApiPaneProps) {
     }
   }
 
+  const environmentName = (relPath: string): string =>
+    store.environments().find((environment) => environment.relPath === relPath)?.name ?? relPath
+
   /** What the panel says about the variable that was clicked — one line,
    *  naming WHICH SCOPE answered, and never a secret's value: the renderer
    *  does not have it (ADR-0021) and says where it lives instead. */
@@ -1720,6 +1779,29 @@ export function ApiPane(props: ApiPaneProps) {
    */
   const variableMenuItems = () => {
     const name = varMenu()?.name ?? ''
+    if (varMenu()?.secret === true) {
+      return [
+        {
+          id: 'api-secret-replace',
+          label: 'Replace with another secret',
+          icon: PencilIcon,
+          onSelect: () => {
+            const replace = varMenu()?.replace
+            setVarMenu(null)
+            replace?.()
+          },
+        },
+        {
+          id: 'api-secret-open',
+          label: 'Open in Secrets',
+          icon: FolderOpenIcon,
+          onSelect: () => {
+            setVarMenu(null)
+            openSecrets?.()
+          },
+        },
+      ]
+    }
     if (name === '') return []
     const answer = store.variableAnswer(name)
     const env = store.activeEnvironment()
@@ -1785,42 +1867,6 @@ export function ApiPane(props: ApiPaneProps) {
     })
   }
 
-  /** The environment's own NAME, by the path the picker chose it under. */
-  const environmentName = (relPath: string): string =>
-    store.environments().find((e) => e.relPath === relPath)?.name ?? relPath
-
-  /**
-   * Where a secret made on the Auth tab would be bound — read from the same
-   * two answers the WRITE uses, so the tab cannot name one environment while
-   * `bindSecret` addresses another.
-   *
-   * Both absences are real states of this panel and neither is an error: a
-   * converted curl line has no file until it is saved, and "No environment"
-   * is a row a person can choose. The tab says which one it is; it does not
-   * draw a control that would fail.
-   */
-  const secretTarget = (): SecretTarget => {
-    if (store.selected() === null) return { kind: 'no-collection' }
-    const relPath = store.activeEnvironment()
-    if (relPath === '') return { kind: 'no-environment' }
-    return { kind: 'environment', name: environmentName(relPath) }
-  }
-
-  /**
-   * Give the auth variable its value — the store's method, not the client's.
-   * The store is what knows which collection and which environment a binding
-   * belongs to, and a form working that out for itself would be a second
-   * answer to a question that already has one.
-   *
-   * `false` becomes a REJECTION here because the store answers a boolean and
-   * keeps the reason in `error()`. Without the translation the field would
-   * empty on a refusal, and a value that never landed would look stored.
-   */
-  const createSecret = async (variable: string, value: string): Promise<void> => {
-    if (!(await store.bindSecret(variable, value))) {
-      throw new Error(store.error() || 'The value was not stored.')
-    }
-  }
 
   /**
    * Open the environment editor with this name in it, ready to be given a
@@ -2213,6 +2259,19 @@ export function ApiPane(props: ApiPaneProps) {
 
   const requestMenuItems = (): ContextMenuItem[] => {
     const items: ContextMenuItem[] = [
+      ...(secretSource !== undefined
+        ? [
+            {
+              id: 'api-insert-secret',
+              label: 'Insert a secret…',
+              icon: PlusIcon,
+              onSelect: () => {
+                openRequestSecretPicker?.()
+                setRequestMenu(null)
+              },
+            },
+          ]
+        : []),
       {
         id: 'api-row-duplicate',
         label: 'Duplicate',
@@ -3133,8 +3192,6 @@ export function ApiPane(props: ApiPaneProps) {
               <Show when={store.draft() !== null}>
                 <IconButton
                   id="api-folder-close"
-                  size="sm"
-                  title="Back to the request"
                   ariaLabel="Back to the request"
                   onClick={showRequest}
                 >
@@ -3189,6 +3246,15 @@ export function ApiPane(props: ApiPaneProps) {
             onEdit={(next) => store.editDraft(next)}
             variableState={variableState}
             onVariable={(name, at) => setVarMenu({ name, x: at.x, y: at.y })}
+            secretSource={secretSource}
+            secretEntries={secretEntries}
+            vaultState={vaultState}
+            onSecretReference={(handle, at, replace) =>
+              setVarMenu({ name: handle, x: at.x, y: at.y, secret: true, replace })
+            }
+            onPickerReady={(open) => {
+              openRequestSecretPicker = open
+            }}
             onSend={() => void store.send()}
             onStop={() => void store.stop()}
           />
@@ -3276,8 +3342,15 @@ export function ApiPane(props: ApiPaneProps) {
               request={store.draft()}
               scopeVariables={store.scopeVariables()}
               onEdit={(next) => store.editDraft(next)}
-              secretTarget={secretTarget()}
-              onCreateSecret={createSecret}
+              secretSource={secretSource}
+              secretEntries={secretInventoryEntries}
+              vaultState={vaultState}
+              onSecretReference={(handle, at, replace) =>
+                setVarMenu({ name: handle, x: at.x, y: at.y, secret: true, replace })
+              }
+              onPickerReady={(open) => {
+                openRequestSecretPicker = open
+              }}
             />
           </section>
 

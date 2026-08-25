@@ -63,6 +63,7 @@ When a collision is cited by number alone, disambiguate by filename.
 | 0035 | [The channel we own is the carrier, not the command line](0035-the-channel-we-own-is-the-carrier.md)                              | Accepted (2026-08-20)                |
 | 0036 | [An HTTP upload route beside the WebSocket](0036-an-http-upload-route-beside-the-websocket.md)                                    | Accepted (2026-08-21)                |
 | 0037 | [An HTTP download route beside the WebSocket](0037-an-http-download-route-beside-the-websocket.md)                                | Accepted (2026-08-22)                |
+| 0038 | [A forward is a route blind to the name](0038-a-forward-is-a-route-blind-to-the-name.md)                                          | Proposed (2026-08-25)                |
 
 ## Adding one
 

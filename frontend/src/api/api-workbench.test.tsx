@@ -3488,6 +3488,7 @@ describe('the request Variables tab explains the effective scope', () => {
             from: '',
             overridden: false,
             refused: '',
+            secret: false,
           },
           {
             name: 'id',
@@ -3496,6 +3497,7 @@ describe('the request Variables tab explains the effective scope', () => {
             from: 'users',
             overridden: true,
             refused: '',
+            secret: false,
           },
           {
             name: 'baseUrl',
@@ -3504,8 +3506,9 @@ describe('the request Variables tab explains the effective scope', () => {
             from: 'environments/dev.json',
             overridden: false,
             refused: '',
+            secret: false,
           },
-          { name: 'token', value: '', scope: 'vault', from: '', overridden: false, refused: '' },
+          { name: 'token', value: '', scope: 'environment', from: '', overridden: false, refused: '', secret: true },
         ],
       }),
     })
@@ -3534,6 +3537,7 @@ describe('the request Variables tab explains the effective scope', () => {
             from: 'environments/dev.json',
             overridden: false,
             refused: 'api: a request variable would shadow a name this environment declares secret',
+            secret: false,
           },
         ],
       }),
@@ -3566,6 +3570,7 @@ describe('the request Variables tab explains the effective scope', () => {
               from: 'users',
               overridden: variables.some((variable) => variable.enabled && variable.name === 'id'),
               refused: '',
+              secret: false,
             },
           ],
         }),
@@ -3616,7 +3621,6 @@ describe('a variable in the address says whether anything answers it', () => {
       environment: {
         name: 'dev',
         values,
-        secretVars: [],
         route: { kind: 'direct' as const, profileId: '', insecureTls: false },
       },
     }),
@@ -3638,6 +3642,7 @@ describe('a variable in the address says whether anything answers it', () => {
                 from: '',
                 overridden: false,
                 refused: '',
+                secret: false,
               })),
               ...Object.entries(values).map(([name, value]) => ({
                 name,
@@ -3646,6 +3651,7 @@ describe('a variable in the address says whether anything answers it', () => {
                 from: DEV_ENV.relPath,
                 overridden: false,
                 refused: '',
+                secret: false,
               })),
             ],
           }),
@@ -3661,6 +3667,7 @@ describe('a variable in the address says whether anything answers it', () => {
           from: 'users',
           overridden: false,
           refused: '',
+          secret: false,
         },
       ],
     }
@@ -3710,6 +3717,7 @@ describe('a variable in the address says whether anything answers it', () => {
           from: 'users',
           overridden: false,
           refused: '',
+          secret: false,
         },
       ],
     })
@@ -3775,7 +3783,6 @@ describe('a variable in the address says whether anything answers it', () => {
         environment: {
           name: 'dev',
           values: {},
-          secretVars: ['baseUrl'],
           route: { kind: 'direct' as const, profileId: '', insecureTls: false },
         },
       }),
@@ -3784,10 +3791,11 @@ describe('a variable in the address says whether anything answers it', () => {
           {
             name: 'baseUrl',
             value: '',
-            scope: 'vault',
+            scope: 'environment',
             from: '',
             overridden: false,
             refused: '',
+            secret: true,
           },
         ],
       }),

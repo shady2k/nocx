@@ -401,7 +401,6 @@ export function watchFixture(
 const ENVIRONMENT = {
   name: 'Local',
   values: { baseUrl: 'https://api.example.test' },
-  secretVars: [],
   route: { kind: 'direct' as const, profileId: '', insecureTls: false },
 }
 

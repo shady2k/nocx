@@ -3323,13 +3323,6 @@ export function ApiPane(props: ApiPaneProps) {
                 setEnvDirty(true)
               }}
               connections={store.connections()}
-              // The one control in this panel that carries a credential. It
-              // is handed the store's method rather than the client's: the
-              // store is what knows which collection and which environment
-              // the editor is showing, and a surface naming those itself
-              // would be a second answer to a question the store already
-              // owns.
-              onBindSecret={(variable, value) => store.bindSecret(variable, value).then(() => {})}
               onSave={saveEnvironment}
               onReset={resetEnvironment}
             />

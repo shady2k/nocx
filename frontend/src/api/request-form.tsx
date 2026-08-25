@@ -602,7 +602,7 @@ export function RequestEditor(props: RequestEditorProps) {
                           <>
                             <td>{row().scope}</td>
                             <td>{row().name}</td>
-                            <td>{row().scope === 'vault' ? 'Bound in the vault' : row().value}</td>
+                            <td>{row().secret ? 'Bound in the vault' : row().value}</td>
                             <td>{row().from === '' ? 'Collection root' : row().from}</td>
                             <td>{row().overridden ? 'Overridden' : 'Used'}</td>
                           </>

@@ -212,6 +212,7 @@ describe('ApiStore — the request in the form', () => {
           from: '',
           overridden: false,
           refused: '',
+          secret: false,
         },
       ],
     }
@@ -224,6 +225,7 @@ describe('ApiStore — the request in the form', () => {
           from: 'users',
           overridden: false,
           refused: '',
+          secret: false,
         },
       ],
     }

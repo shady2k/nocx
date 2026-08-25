@@ -913,7 +913,7 @@ export function createApiStore(
     const row = rows.find((candidate) => candidate.name === name)
     if (row === undefined) return { scope: 'none', value: null, from: null }
 
-    if (row.scope === 'vault') return { scope: 'secret', value: null, from: null }
+    if (row.secret) return { scope: 'secret', value: null, from: null }
     return {
       scope: row.scope,
       value: row.value,

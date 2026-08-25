@@ -46,6 +46,7 @@ import { PromptVaultController } from './prompt-vault'
 import { VaultClient } from './vault-client'
 import { showToast } from './ui/toast'
 import type { SessionIntegrationChanged } from './generated/session.integrationChanged'
+import type { DriverState } from './pane-observation'
 import {
   IntegrationSilenceStore,
   integrationMessage,
@@ -249,6 +250,11 @@ export interface TerminalContentHooks {
    *  title, not the tab label). Only TerminalContent knows the two
    *  apart, so it pushes the program title on its own hook. */
   onProgramTitleChange?: (programTitle: string) => void
+  /** What an ENROLLED pane's driver says its screen is inviting
+   *  (nocx-szb40.3). Pushed like the program title, and for the same reason:
+   *  the content owns the session handle, the pane owns what the tab shows.
+   *  Null when the pane stops being observed. */
+  onPaneObservationChange?: (state: DriverState | null) => void
   /** The session is an alias (not a saved profile) and can be adopted as a
    *  nocx connection. True = adoptable, false = not. */
   onAdoptabilityChange?: (adoptable: boolean) => void
@@ -2495,6 +2501,15 @@ export class TerminalContent extends BasePaneContent {
           return
         }
         this.session?.send(data)
+      })
+      // The pane's classification, for an enrolled agent pane. Registered
+      // beside the exit handler and before anything else touches the
+      // session: the backend replays the current observation immediately
+      // after an attach, so a subscription made later would miss the state
+      // of a pane that then sits still — which for a settled agent is
+      // forever.
+      session.onObservation((observation) => {
+        this.hooks.onPaneObservationChange?.(observation.state)
       })
       session.onExit((exit) => {
         log.info('nocx: session exited', {

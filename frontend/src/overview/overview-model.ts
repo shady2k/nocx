@@ -10,7 +10,7 @@ import type { StatusDotTone } from '../ui/status-dot'
 import type { WorkspaceColour } from '../layout/workspace-colours'
 
 import type { CommandStatus } from '../command-ledger'
-import type { AgentStatus } from '../agent-status'
+import type { PaneActivity } from '../pane-observation'
 import type { OverviewBlockFacts, OverviewPaneFacts, OverviewSnapshot } from './overview-port'
 
 /**
@@ -51,8 +51,14 @@ function present(value: string | null): string | null {
  */
 export function paneState(f: OverviewPaneFacts): PaneState {
   if (f.failed) return 'failed'
-  if (f.agentStatus === 'idle') return 'waiting'
-  if (f.agentStatus === 'working') return 'running'
+  // Everything that wants a person: an agent that went idle, one holding a
+  // dialog open, and one whose process is gone with its work behind it.
+  if (f.agentStatus === 'idle' || f.agentStatus === 'waiting') return 'waiting'
+  if (f.agentStatus === 'exited') return 'waiting'
+  // 'unknown' is the driver saying it could not read the screen, and every
+  // consumer treats that as busy. Filing it under "nothing to see" would be
+  // the failure this surface exists to prevent, in the other direction.
+  if (f.agentStatus === 'working' || f.agentStatus === 'unknown') return 'running'
   if (present(f.runningCommand) !== null) return 'running'
   return 'idle'
 }
@@ -190,7 +196,7 @@ export function cardLocation(f: OverviewPaneFacts): string | null {
  */
 export interface QuoteFacts {
   readonly title: string | null
-  readonly agentStatus: AgentStatus | null
+  readonly agentStatus: PaneActivity | null
   readonly runningCommand: string | null
   readonly fullScreen: boolean
   readonly lastBlock: OverviewBlockFacts | null

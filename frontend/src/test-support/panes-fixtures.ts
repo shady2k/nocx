@@ -36,6 +36,8 @@ import type { SSHProfile } from '../profiles'
 import type { PaneManager } from '../panes'
 import type { DesiredMode } from '../capability'
 import type { SessionLiveness } from '../generated/session.liveness'
+import type { SessionObservationChanged } from '../generated/session.observationChanged'
+import type { DriverState } from '../pane-observation'
 import type { Open } from '../generated/open'
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -283,10 +285,15 @@ export interface SessionFake {
   /** The reachability axis (nocx-iarf9): the backend's revised belief about
    *  reaching this session. */
   onLiveness: ReturnType<typeof vi.fn>
+  /** What an enrolled pane's driver says its screen is inviting
+   *  (nocx-szb40.3). */
+  onObservation: ReturnType<typeof vi.fn>
   /** Fire the registered data callback. */
   fireData(data: string): void
   /** Fire the registered liveness callback with one observation. */
   fireLiveness(liveness: 'alive' | 'unknown', livenessEpoch?: number): void
+  /** Fire the registered pane-observation callback with one classification. */
+  fireObservation(state: DriverState, agent?: string): void
 }
 
 /**
@@ -299,6 +306,7 @@ export interface SessionFake {
 export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
   let dataCb: ((data: string) => void) | null = null
   let livenessCb: ((l: SessionLiveness) => void) | null = null
+  let observationCb: ((o: SessionObservationChanged) => void) | null = null
   const sessionId = `mock-sid-${++sessionCounter}`
   return {
     sessionId,
@@ -317,8 +325,20 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     onLiveness: vi.fn((cb: (l: SessionLiveness) => void) => {
       livenessCb = cb
     }),
+    onObservation: vi.fn((cb: (o: SessionObservationChanged) => void) => {
+      observationCb = cb
+    }),
     fireData: (data: string) => {
       dataCb?.(data)
+    },
+    fireObservation: (state: DriverState, agent = 'claude') => {
+      observationCb?.({
+        sessionId,
+        instanceId: 'fedcba9876543210fedcba9876543210',
+        sessionEpoch: 1,
+        agent,
+        state,
+      })
     },
     fireLiveness: (liveness: 'alive' | 'unknown', livenessEpoch = 2) => {
       livenessCb?.({

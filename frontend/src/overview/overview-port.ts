@@ -20,7 +20,7 @@
 // them into a state and a sentence. The alternative, a port that hands over a
 // finished `state`, would put the ✳-means-waiting rule in the composition root
 // where nothing tests it.
-import type { AgentStatus } from '../agent-status'
+import type { PaneActivity } from '../pane-observation'
 import type { CommandStatus } from '../command-ledger'
 import type { WorkspaceColour } from '../layout/workspace-colours'
 
@@ -53,7 +53,7 @@ export interface OverviewPaneFacts {
    * ON A HUMAN. The model turns that into `'waiting'`, which is the whole
    * question this surface answers.
    */
-  readonly agentStatus: AgentStatus | null
+  readonly agentStatus: PaneActivity | null
   /** The command running in the foreground right now, or null
    *  (`PaneContent.liveWork`). */
   readonly runningCommand: string | null

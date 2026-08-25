@@ -319,3 +319,40 @@ describe('Tab', () => {
     expect(tab.getAttribute('title')).toBe('~/repos/nocx')
   })
 })
+
+// ── What the pane is doing, and how strong the evidence is (nocx-szb40.4) ──
+describe('Tab pane indicator', () => {
+  // The epic's deliverable, at the seam that draws it: three workers in three
+  // states are three distinguishable tabs at the same time. Before this the
+  // whole vocabulary was working/idle, so a worker holding a permission dialog
+  // open and a worker that had exited were the same tab.
+  it('renders a distinct status for each state a worker can be in', () => {
+    const seen = new Set<string>()
+    for (const status of ['working', 'waiting', 'idle', 'unknown', 'exited'] as const) {
+      cleanup()
+      subject({ agentStatus: status, agentSource: 'driver' })
+      const attr = screen.getByRole('tab').getAttribute('data-agent-status')
+      expect(attr).toBe(status)
+      seen.add(String(attr))
+    }
+    expect(seen.size).toBe(5)
+  })
+
+  // The provenance travels with the value, on the same indicator. A second dot
+  // for the weaker source would be a second vocabulary for one concept.
+  it('marks which source the reading came from', () => {
+    subject({ agentStatus: 'working', agentSource: 'title' })
+    const tab = screen.getByRole('tab')
+    expect(tab.getAttribute('data-agent-status')).toBe('working')
+    expect(tab.getAttribute('data-agent-source')).toBe('title')
+  })
+
+  // A pane with nothing to say carries neither attribute, so the dot has
+  // nothing to hang off and the tab is undecorated.
+  it('carries no status attributes when neither source has anything', () => {
+    subject({ agentStatus: null, agentSource: null })
+    const tab = screen.getByRole('tab')
+    expect(tab.hasAttribute('data-agent-status')).toBe(false)
+    expect(tab.hasAttribute('data-agent-source')).toBe(false)
+  })
+})

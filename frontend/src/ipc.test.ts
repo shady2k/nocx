@@ -1347,3 +1347,68 @@ describe('session.liveness notification', () => {
     expect(seen).toEqual([])
   })
 })
+
+// ── session.observationChanged (nocx-szb40.3) ─────────────────────────────
+//
+// What an ENROLLED agent pane's screen is inviting, classified in the backend
+// where the grid lives. Guarded at the boundary like every other unsolicited
+// notification, and bound to the incarnation HERE — this is the one place that
+// holds the (instanceId, sessionEpoch) pair the open ack minted, so every
+// consumer downstream inherits the binding instead of remembering it.
+describe('session.observationChanged notification', () => {
+  const observation = (over: Record<string, unknown> = {}) => ({
+    jsonrpc: '2.0',
+    method: 'session.observationChanged',
+    params: {
+      sessionId: SID,
+      ...OPEN_IDENTITY,
+      agent: 'claude',
+      state: 'free_text',
+      ...over,
+    },
+  })
+
+  it('delivers what the driver said about this pane', async () => {
+    const { session, ws } = await connectedSession()
+    const seen: string[] = []
+    session.onObservation((o) => seen.push(`${o.agent}:${o.state}`))
+
+    ws.deliverText(observation())
+    ws.deliverText(observation({ state: 'permission_choice' }))
+
+    expect(seen).toEqual(['claude:free_text', 'claude:permission_choice'])
+  })
+
+  // A report naming another incarnation is about a different session that
+  // merely shares the id (nocx-3oupk) — and applying it would let a pane from
+  // a previous backend instance decide what this tab shows.
+  it('refuses a report from another incarnation or another session', async () => {
+    const { session, ws } = await connectedSession()
+    const seen: string[] = []
+    session.onObservation((o) => seen.push(o.state))
+
+    ws.deliverText(observation({ instanceId: '00000000000000000000000000000000' }))
+    ws.deliverText(observation({ sessionEpoch: 99 }))
+    ws.deliverText(observation({ sessionId: OTHER_SID }))
+
+    expect(seen).toEqual([])
+  })
+
+  // The set is CLOSED. A value nobody wrote a branch for would reach the
+  // indicator and land in whichever branch was written last — and every
+  // consumer treats what it cannot read as busy, which only works if what it
+  // cannot read never gets through.
+  it('refuses a state that is not in the closed set', async () => {
+    const { session, ws } = await connectedSession()
+    const seen: string[] = []
+    session.onObservation((o) => seen.push(o.state))
+
+    ws.deliverText(observation({ state: 'busy' }))
+    ws.deliverText(observation({ state: '' }))
+    ws.deliverText(observation({ state: 42 }))
+    ws.deliverText(observation({ agent: '' }))
+    ws.deliverText(observation({ agent: 7 }))
+
+    expect(seen).toEqual([])
+  })
+})

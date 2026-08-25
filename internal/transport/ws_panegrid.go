@@ -15,13 +15,13 @@ func WithPaneGrid(o panegrid.Observer) WSServerOption {
 	return func(s *WSServer) { s.paneGrid = o }
 }
 
-// The ENROLMENT ACT has no wire method yet, and that is deliberate rather
-// than unfinished. A JSON-RPC method lands with its schema and its caller in
-// the same commit; nothing in the renderer has a reason to observe a pane
-// until nocx-szb40.3's driver reads a frame, and the frontend's dead-export
-// ratchet refuses a generated contract type nobody imports — correctly. So
-// enrolment is a Go seam today, wired at the composition root, and becomes
-// session.observe when the thing that calls it exists.
+// The ENROLMENT ACT still has no wire method, and now it never needs one. It
+// is an authenticated shell asking to be watched, over the channel ADR-0024
+// already gives it — the renderer neither performs it nor witnesses it, so a
+// JSON-RPC method for it would have no caller. What crosses to the renderer is
+// the CLASSIFICATION rather than the act: session.observationChanged
+// (ws_paneobserve.go), which is a typed fact under AD-1 and is contracted like
+// every other server-initiated one.
 
 // feedPaneGrid tees a session's bytes into its grid, if it has one.
 //
@@ -35,6 +35,11 @@ func (s *WSServer) feedPaneGrid(sid session.ID, data []byte) {
 		return
 	}
 	s.paneGrid.Feed(string(sid), data)
+	// And the pane has moved. Touch takes one lock and does nothing else;
+	// the classification happens on the coalescing sweep, off this path.
+	if s.paneObserver != nil {
+		s.paneObserver.Touch(string(sid))
+	}
 }
 
 // withdrawPaneGrid closes the interval when the SESSION is done — called from
@@ -49,6 +54,13 @@ func (s *WSServer) feedPaneGrid(sid session.ID, data []byte) {
 // handler is installed — so the withdrawal ran at session START, raced the
 // enrolment, and left the interval with no second end at all.
 func (s *WSServer) withdrawPaneGrid(sid session.ID) {
+	// The observation closes with the grid it reads, and BEFORE it: a sweep
+	// that ran between the two would find no frame for a pane it is still
+	// watching, which is the ordinary race and is handled, but there is no
+	// reason to open it here.
+	if s.paneObserver != nil {
+		s.paneObserver.Unwatch(string(sid))
+	}
 	if s.paneGrid == nil {
 		return
 	}

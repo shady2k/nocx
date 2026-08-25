@@ -18,6 +18,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/bootstrapprogress"
@@ -44,6 +45,7 @@ import (
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
@@ -1177,6 +1179,23 @@ func New(opts ...Option) (*App, error) {
 	// publisher opens and closes intervals through it, and the transport feeds
 	// it from the session read path.
 	paneGrid := panegrid.New(logger)
+	// One driver per agent (AD-8), validated once, here. NewRegistry fails
+	// only on a wiring mistake — a driver that cannot name its agent, or two
+	// for one agent — and a wiring mistake belongs to process start rather
+	// than to the first frame off a pane.
+	// Its own error name rather than the function's `err`: reusing that one
+	// here extends its live range past a dozen `if err := …` blocks above,
+	// and govet's shadow check then reports every one of them.
+	paneDrivers, driversErr := agentdriver.NewRegistry(agentdriver.Claude())
+	if driversErr != nil {
+		return nil, fmt.Errorf("pane drivers: %w", driversErr)
+	}
+	// What turns a grid into something a person or a wave can act on
+	// (nocx-szb40.3): it classifies a watched pane and reports only the
+	// CHANGES. Built here because both ends need it — the enroller opens an
+	// observation beside the grid's interval, and the transport touches it
+	// from the session read path and is where its reports go.
+	paneWatch := paneobserve.New(logger, paneGrid, paneDrivers)
 	// The establishment bound is stated here for the same reason the hello
 	// timeouts below are: how long a minted accept may wait for the
 	// renderer's acknowledgement before the domain is rolled back and the
@@ -1199,7 +1218,7 @@ func New(opts ...Option) (*App, error) {
 		// answers. Wired here rather than defaulted anywhere, because an
 		// unwired enroller refuses every enrolment — the fail-closed half of
 		// D4, and the opposite of the grant builder above it.
-		lifecyclepub.WithAgentEnroller(newPaneEnroller(logger, childSessions, paneGrid)))
+		lifecyclepub.WithAgentEnroller(newPaneEnroller(logger, childSessions, paneGrid, paneWatch)))
 	// The pty factory drives the channel against the PUBLISHER, not the raw
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.
@@ -1491,7 +1510,7 @@ func New(opts ...Option) (*App, error) {
 	)
 	// The same store the publisher enrols into, on its other end: the
 	// transport is what feeds it, from the session's own read path.
-	tpOpts = append(tpOpts, transport.WithPaneGrid(paneGrid))
+	tpOpts = append(tpOpts, transport.WithPaneGrid(paneGrid), transport.WithPaneObserver(paneWatch))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 	// The feed's change hint, bound now that the server exists: every
 	// mutation tells the attached renderers the revision moved. It carries
@@ -1508,6 +1527,13 @@ func New(opts ...Option) (*App, error) {
 	// server is built above; the window before this line is empty (no
 	// session can have spawned a shell yet).
 	lifecyclePub.SetEmitter(tp)
+
+	// Where a pane's classification goes, bound post-construction for the
+	// same reason as the emitter above. Without this line the backend would
+	// go on classifying every enrolled pane and telling nobody — which is
+	// precisely the silent degrade AGENTS.md names, so the watcher refuses
+	// to sweep at all until it has a destination.
+	paneWatch.SetEmitter(tp.EmitPaneObservation)
 
 	// The liveness projection's watcher (nocx-iarf9), bound here for the same
 	// reason as the emitter above. The registry decides WHEN a session's

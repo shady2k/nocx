@@ -83,8 +83,9 @@ func TestTheGridKeepsBeingFedAfterTheClientDisconnects(t *testing.T) {
 	conn := connectWS(t, ws)
 	sid := openSessionOnConn(t, ws, conn, 1)
 
-	// Enrolment through the Go seam, which is the only one there is until
-	// nocx-szb40.3 brings a wire method and the caller that justifies it.
+	// Enrolment through the Go seam, which is the only one there is: the act
+	// belongs to the authenticated shell channel, and what reaches the
+	// renderer is the classification (ws_paneobserve.go), never the act.
 	if err := store.Enrol(sid, 40, 6); err != nil {
 		t.Fatalf("enrol: %v", err)
 	}

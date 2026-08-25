@@ -26,7 +26,7 @@ import {
 import type { JSX, Setter } from 'solid-js'
 import { createStore } from 'solid-js/store'
 import { render } from 'solid-js/web'
-import type { AgentStatus } from './agent-status'
+import type { PaneActivity, PaneActivitySource } from './pane-observation'
 
 /**
  * The vertical strip's width bounds, in CSS pixels.
@@ -58,7 +58,12 @@ export interface PaneView {
   /** Title shown before content publishes its first dynamic title. */
   readonly displayTitle?: string
   readonly hasActivity: boolean
-  readonly agentStatus: AgentStatus | null
+  /** What the pane is doing, from whichever source is strongest — see
+   *  pane-observation.ts. */
+  readonly agentStatus: PaneActivity | null
+  /** How strong that evidence is. The strip draws the difference; it never
+   *  decides it. */
+  readonly agentSource: PaneActivitySource | null
   readonly tooltip: string
   /** The tab's location for the strip's second line, or '' when the title already
    *  says it — see Tab.subtitle. */
@@ -111,7 +116,8 @@ interface PaneDisplayRecord {
   warning: boolean
   warningLabel: string
   hasActivity: boolean
-  agentStatus: AgentStatus | null
+  agentStatus: PaneActivity | null
+  agentSource: PaneActivitySource | null
   colour: string | null
   pinned: boolean
   groupKey: string
@@ -658,6 +664,7 @@ abstract class TabStripBase implements TabStrip {
             depth={Math.min(display.records[item.id]?.depth ?? 0, MAX_DRAWN_DEPTH)}
             active={display.activeId === item.id}
             agentStatus={display.records[item.id]?.agentStatus ?? null}
+            agentSource={display.records[item.id]?.agentSource ?? null}
             adoptable={display.records[item.id]?.adoptable === true}
             warning={display.records[item.id]?.warning === true}
             warningLabel={display.records[item.id]?.warningLabel || undefined}
@@ -991,6 +998,7 @@ abstract class TabStripBase implements TabStrip {
         warningLabel: tab.warningLabel ?? '',
         hasActivity: tab.hasActivity,
         agentStatus: tab.agentStatus,
+        agentSource: tab.agentSource,
         colour: tab.colour ?? null,
         pinned: tab.pinned === true,
         groupKey: tab.groupKey ?? '',
@@ -1011,6 +1019,7 @@ abstract class TabStripBase implements TabStrip {
       warningLabel: tab.warningLabel ?? '',
       hasActivity: tab.hasActivity,
       agentStatus: tab.agentStatus,
+      agentSource: tab.agentSource,
       colour: tab.colour ?? null,
       pinned: tab.pinned === true,
       groupKey: tab.groupKey ?? '',

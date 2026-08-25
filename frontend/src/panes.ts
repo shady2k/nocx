@@ -23,6 +23,12 @@
 
 import type { WSClient } from './ipc'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
+import {
+  paneIndicator,
+  type PaneActivity,
+  type PaneActivitySource,
+  type DriverState,
+} from './pane-observation'
 import { WorkFinishedWatch } from './pane-work-finished'
 import { type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
@@ -101,6 +107,11 @@ export class Pane implements PaneHost {
    *  separately, through updateProgramTitle. */
   private _pushedTitle = ''
   private _hasActivity = false
+  /** What an ENROLLED pane's driver last said its screen was inviting
+   *  (nocx-szb40.3), or null for a pane nobody enrolled — which is almost
+   *  every pane. Never derived here: it is classified in the backend, where
+   *  the grid lives, and arrives as session.observationChanged. */
+  private _observation: DriverState | null = null
   /** Whether the content has declared its opening over (PaneHost.
    *  contentSettled). Output before that is the pane starting up, not
    *  something the user missed. */
@@ -241,8 +252,20 @@ export class Pane implements PaneHost {
     return this._hasActivity
   }
 
-  get agentStatus(): AgentStatus | null {
-    return this._agentStatus
+  /** What this pane is doing, merged from both sources — the enrolled pane's
+   *  driver when there is one, the terminal title otherwise. See
+   *  pane-observation.ts, which owns the merge. `_agentStatus` below is NOT
+   *  this: it is the title's own reading, kept separate because the
+   *  work-finished watcher's edge is a claim about the title and must stay
+   *  one (its trust class is `heuristic` for that reason). */
+  get agentStatus(): PaneActivity | null {
+    return paneIndicator(this._observation, this._agentStatus)?.activity ?? null
+  }
+
+  /** How strong the evidence behind agentStatus is. `title` is the weaker row
+   *  of the provenance table: it may light an indicator and decides nothing. */
+  get agentSource(): PaneActivitySource | null {
+    return paneIndicator(this._observation, this._agentStatus)?.source ?? null
   }
 
   get tooltip(): string {
@@ -409,6 +432,20 @@ export class Pane implements PaneHost {
    *  string; that empty delivery reaches here too and resets the status,
    *  the way an empty title always did.
    *  Wired through TerminalContent's constructor. */
+  /** The backend's classification of this pane's screen (nocx-szb40.3).
+   *
+   *  Pushed by the content, which owns the session handle, exactly as the
+   *  program title is. Null when the pane stops being observed — its agent
+   *  exited, or the enrolment was withdrawn — and the indicator falls back to
+   *  the title's weaker reading rather than holding a stale finding.
+   */
+  updatePaneObservation(state: DriverState | null): void {
+    if (this._disposed) return
+    if (state === this._observation) return
+    this._observation = state
+    this.onDisplayChange?.()
+  }
+
   updateProgramTitle(programTitle: string): void {
     if (this._disposed) return
     this.updateAgentStatus(programTitle)
@@ -1072,6 +1109,7 @@ export class PaneManager {
         onSnippetAccepted: this.onSnippetAccepted,
         onCreateEndpoint: this.onCreateEndpoint,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
+        onPaneObservationChange: (state) => paneRef.current?.updatePaneObservation(state),
         // Where the pane IS, recorded so a restart reopens it there
         // (nocx-zkiv4). Fire-and-forget and fail-quiet: a directory the
         // chain did not take costs the NEXT restore its cwd — it falls back
@@ -1151,6 +1189,7 @@ export class PaneManager {
         },
         onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
+        onPaneObservationChange: (state) => paneRef.current?.updatePaneObservation(state),
         onActiveOriginChange: () => this.onActivePaneChange?.(),
         onPortsTargetChange: () => this.onActivePaneChange?.(),
         onVaultSealed: this.onVaultSealed,

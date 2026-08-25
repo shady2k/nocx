@@ -23,10 +23,23 @@ type paneEnroller struct {
 	log      log.Logger
 	sessions *sessionRegistry
 	grid     panegrid.Observer
+	// watch is the OBSERVATION's end of the same act. It opens and closes
+	// with the grid and never before or after it: a pane nocx reports a
+	// state for but declined to watch would be a claim with no evidence
+	// behind it, and one it watches without reporting is the silent degrade.
+	watch paneWatcher
 }
 
-func newPaneEnroller(lg log.Logger, sessions *sessionRegistry, grid panegrid.Observer) *paneEnroller {
-	return &paneEnroller{log: lg, sessions: sessions, grid: grid}
+// paneWatcher is the enroller's narrow view of the observation (AD-8): open
+// one, close one. It classifies nothing here and could not — what it is handed
+// is a pane id and an agent name.
+type paneWatcher interface {
+	Watch(paneID, agent string)
+	Exited(paneID string)
+}
+
+func newPaneEnroller(lg log.Logger, sessions *sessionRegistry, grid panegrid.Observer, watch paneWatcher) *paneEnroller {
+	return &paneEnroller{log: lg, sessions: sessions, grid: grid, watch: watch}
 }
 
 // Enrol opens the interval for the pane the lane belongs to.
@@ -66,6 +79,8 @@ func (e *paneEnroller) Enrol(lane lifecycle.LaneID, agent string, cols, rows int
 			return errors.New("nocx could not start watching this pane")
 		}
 	}
+	// Only now, and only for an enrolment that actually opened a grid.
+	e.watch.Watch(sid, agent)
 	e.log.Info("agent enrolled", "lane", string(lane), "session_id", sid,
 		"agent", agent, "cols", cols, "rows", rows)
 	return nil
@@ -81,6 +96,11 @@ func (e *paneEnroller) Withdraw(lane lifecycle.LaneID) {
 	if !ok || sid == "" {
 		return
 	}
+	// The agent withdrawing IS the agent finishing, and it is the one moment
+	// nocx knows a process is gone rather than inferring it from a screen.
+	// Before the grid closes: what it reports is the pane's last state, and
+	// a client attaching afterwards is answered with it.
+	e.watch.Exited(sid)
 	e.grid.Withdraw(sid)
 	e.log.Info("agent withdrawn", "lane", string(lane), "session_id", sid)
 }

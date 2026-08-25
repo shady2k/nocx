@@ -5,9 +5,11 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneobserve"
 )
 
 // realGrid is the product's own store rather than a double: what this seam is
@@ -15,10 +17,23 @@ import (
 // only report that the seam called something.
 func newEnroller(t *testing.T) (*paneEnroller, *panegrid.Store, *sessionRegistry) {
 	t.Helper()
+	e, grid, sessions, _ := newEnrollerWithWatcher(t)
+	return e, grid, sessions
+}
+
+// The same, plus the watcher — for the tests that assert the observation opens
+// and closes with the grid rather than beside it.
+func newEnrollerWithWatcher(t *testing.T) (*paneEnroller, *panegrid.Store, *sessionRegistry, *paneobserve.Watcher) {
+	t.Helper()
 	lg := log.NewSlogAdapter(nil)
 	grid := panegrid.New(lg)
+	drivers, err := agentdriver.NewRegistry(agentdriver.Claude())
+	if err != nil {
+		t.Fatalf("registry: %v", err)
+	}
+	watch := paneobserve.New(lg, grid, drivers)
 	sessions := newSessionRegistry()
-	return newPaneEnroller(lg, sessions, grid), grid, sessions
+	return newPaneEnroller(lg, sessions, grid, watch), grid, sessions, watch
 }
 
 // The ordinary case, and every refusal below is paired against it: a lane that
@@ -128,5 +143,81 @@ func TestPaneEnrollerRefusalsAreErrorsThePublisherCanShow(t *testing.T) {
 		// A wrapped error would carry an internal chain into a sentence a
 		// person reads in their own pane.
 		t.Fatalf("refusal = %v, want a plain sentence", err)
+	}
+}
+
+// The enrolment act opens the OBSERVATION as well as the grid, and the pane is
+// classified without waiting for another byte. A pane already has a screen by
+// the time its agent asks to be watched; a watcher that waited for the next
+// chunk would leave a settled agent invisible for as long as it stayed settled,
+// which is exactly the state the indicator most needs to show.
+func TestEnrolmentOpensTheObservationAndTheFirstSweepReportsThePane(t *testing.T) {
+	e, grid, sessions, watch := newEnrollerWithWatcher(t)
+	sessions.register("lane-1", "sess-1")
+	var got []paneobserve.Observation
+	watch.SetEmitter(func(o paneobserve.Observation) { got = append(got, o) })
+
+	if err := e.Enrol("lane-1", "claude", 40, 14); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	rule := strings.Repeat("─", 40)
+	grid.Feed("sess-1", []byte("\x1b[2J\x1b[7;1H  0 tokens\x1b[8;1H"+rule+
+		"\x1b[9;1H❯ \x1b[10;1H"+rule+"\x1b[12;1H  ⏵⏵ auto mode on\x1b[9;3H"))
+	watch.Sweep()
+
+	if len(got) != 1 {
+		t.Fatalf("observations = %+v, want one for the enrolled pane", got)
+	}
+	if got[0].PaneID != "sess-1" || got[0].Agent != "claude" {
+		t.Errorf("observation = %+v, want sess-1/claude", got[0])
+	}
+}
+
+// And closes it. The interval has both ends here too: a withdrawn pane is not
+// observed, and the observation does not outlive the grid it reads.
+func TestWithdrawalClosesTheObservationWithTheGrid(t *testing.T) {
+	e, _, sessions, watch := newEnrollerWithWatcher(t)
+	sessions.register("lane-1", "sess-1")
+	var got []paneobserve.Observation
+	watch.SetEmitter(func(o paneobserve.Observation) { got = append(got, o) })
+
+	if err := e.Enrol("lane-1", "claude", 40, 14); err != nil {
+		t.Fatalf("enrol: %v", err)
+	}
+	e.Withdraw("lane-1")
+	// The withdrawal SAYS SO rather than going quiet. A worker that finished
+	// and simply stopped being reported leaves its tab showing whatever its
+	// title last said — which for an agent that exits without repainting is
+	// "working", forever.
+	if len(got) != 1 || got[0].State != agentdriver.StateExited {
+		t.Fatalf("after the withdrawal: %+v, want one exited observation", got)
+	}
+	got = nil
+	watch.Touch("sess-1")
+	watch.Sweep()
+	if len(got) != 0 {
+		t.Fatalf("a withdrawn pane was still classified: %+v", got)
+	}
+	// And a client attaching afterwards learns what became of the pane.
+	o, ok := watch.Snapshot("sess-1")
+	if !ok || o.State != agentdriver.StateExited {
+		t.Fatalf("snapshot after withdrawal = %+v/%v, want an exited observation", o, ok)
+	}
+}
+
+// A refused enrolment opens NOTHING. The grid is refused and the observation
+// must be refused with it, or nocx would go on reporting a state for a pane it
+// declined to watch — a claim with no evidence behind it.
+func TestARefusedEnrolmentOpensNoObservation(t *testing.T) {
+	e, _, _, watch := newEnrollerWithWatcher(t)
+	var got []paneobserve.Observation
+	watch.SetEmitter(func(o paneobserve.Observation) { got = append(got, o) })
+
+	if err := e.Enrol("lane-unknown", "claude", 40, 14); err == nil {
+		t.Fatal("a lane that maps to no session was enrolled")
+	}
+	watch.Sweep()
+	if len(got) != 0 {
+		t.Fatalf("a refused enrolment produced %+v", got)
 	}
 }

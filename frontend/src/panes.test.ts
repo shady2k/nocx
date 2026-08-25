@@ -2309,3 +2309,166 @@ describe('closing a workspace names what is live before anything dies (nocx-isop
     expect(message).not.toContain('Still running')
   })
 })
+
+// ── What the pane is doing, from two sources (nocx-szb40.3, nocx-szb40.4) ──
+//
+// The tab used to carry ONE boolean and a title-derived guess. The driver adds
+// a reading taken from the agent's own chrome, out of a grid the backend keeps
+// for an enrolled pane — and the two must never become two answers to one
+// question, so the pane merges them in one place and carries the provenance.
+describe('the pane indicator reads the driver, and marks the weaker source', () => {
+  function agentPane(id: number): Pane {
+    return new Pane(
+      new CountingTestContent(),
+      {
+        surfaceType: SURFACE_TERMINAL,
+        singletonKey: null,
+        restoreDescriptor: { type: 'local' },
+        supportsAttention: true,
+        defaultTitle: '',
+      },
+      id,
+      `tab-wire-observation-${id}`,
+    )
+  }
+
+  // A pane nobody enrolled still lights, and looks like the guess it is.
+  it('lights from the title when there is no driver, on the weaker source', () => {
+    const pane = agentPane(1)
+    pane.updateProgramTitle('⣿ working')
+    expect(pane.agentStatus).toBe('working')
+    expect(pane.agentSource).toBe('title')
+  })
+
+  // THE WHOLE POINT. A pane blocked on a permission dialog keeps a spinner in
+  // its title, so the title says "working" — a busy worker that is in fact
+  // holding a question open for a person. The driver's reading displaces it.
+  it('prefers the driver over a title that disagrees with it', () => {
+    const pane = agentPane(2)
+    pane.updateProgramTitle('⣿ working')
+    pane.updatePaneObservation('permission_choice')
+    expect(pane.agentStatus).toBe('waiting')
+    expect(pane.agentSource).toBe('driver')
+  })
+
+  // The epic's own deliverable: three workers stop collapsing into one dot.
+  it('shows three workers in three states at the same time', () => {
+    const working = agentPane(3)
+    const waiting = agentPane(4)
+    const exited = agentPane(5)
+    working.updatePaneObservation('working')
+    waiting.updatePaneObservation('permission_choice')
+    exited.updatePaneObservation('exited')
+
+    const shown = [working.agentStatus, waiting.agentStatus, exited.agentStatus]
+    expect(shown).toEqual(['working', 'waiting', 'exited'])
+    expect(new Set(shown).size).toBe(3)
+  })
+
+  // Activating a tab clears its UNREAD-OUTPUT mark, which is what that mark is
+  // for. It must not clear what the pane is doing: the failure the epic opens
+  // with is a dot that activating the tab erases, and a worker holding a
+  // dialog open does not stop holding it because you looked at the tab.
+  it('does not erase what the indicator was reporting when the tab is activated', () => {
+    const pane = agentPane(6)
+    pane.updatePaneObservation('permission_choice')
+    pane.requestAttention()
+    pane.setActive(true)
+    expect(pane.agentStatus).toBe('waiting')
+    expect(pane.agentSource).toBe('driver')
+    expect(pane.hasActivity).toBe(false)
+  })
+
+  // And the finding does not outlive the evidence. When the pane stops being
+  // observed — its agent exited, or the enrolment was withdrawn — the
+  // indicator falls back to the title's weaker reading rather than holding a
+  // classification nothing is producing any more.
+  it('falls back to the title when the pane stops being observed', () => {
+    const pane = agentPane(7)
+    pane.updateProgramTitle('⣿ working')
+    pane.updatePaneObservation('permission_choice')
+    expect(pane.agentStatus).toBe('waiting')
+
+    pane.updatePaneObservation(null)
+    expect(pane.agentStatus).toBe('working')
+    expect(pane.agentSource).toBe('title')
+  })
+
+  // A driver that cannot read the screen displaces the title too. "This screen
+  // could not be read" is a better answer than a confident wrong one, and
+  // every consumer treats unknown as busy.
+  it("keeps the driver's unknown rather than falling back to the title", () => {
+    const pane = agentPane(8)
+    pane.updateProgramTitle('✳ waiting for input')
+    pane.updatePaneObservation('unknown')
+    expect(pane.agentStatus).toBe('unknown')
+    expect(pane.agentSource).toBe('driver')
+  })
+})
+
+// ── The whole renderer chain, from the notification to the tab ────────────
+//
+// Everything above tests one link. This one watches a person's tab change
+// because the backend classified their pane: the notification is delivered to
+// the session handle, the content pushes it to the pane, the pane merges the
+// two sources, and the strip draws the result. Every link tested alone is how
+// a connection manager shipped with no way to create a group.
+describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', () => {
+  it('lights the tab as waiting when the pane raises a permission dialog', async () => {
+    const { client, manager, bar } = await mountPaneManager()
+    manager.activateByIndex(0)
+
+    client._sessions[0].fireObservation('permission_choice')
+
+    await vi.waitFor(() => {
+      const tab = bar.querySelectorAll('[role="tab"]')[0]
+      expect(tab.getAttribute('data-agent-status')).toBe('waiting')
+      expect(tab.getAttribute('data-agent-source')).toBe('driver')
+    })
+  })
+
+  // THE EPIC'S OWN DELIVERABLE, at the seam a person actually looks at: three
+  // panes in three states are three distinguishable tabs AT THE SAME TIME.
+  // Before this the whole vocabulary was one boolean that activating the tab
+  // erased, so a worker that had finished, one holding a question open and one
+  // whose agent was gone were the same dot.
+  it('shows three panes in three states at once', async () => {
+    const { client, manager, bar } = await mountPaneManager()
+    manager.newPane()
+    manager.newPane()
+    await vi.waitFor(() => {
+      expect(client.openSession).toHaveBeenCalledTimes(3)
+    })
+
+    client._sessions[0].fireObservation('working')
+    client._sessions[1].fireObservation('permission_choice')
+    client._sessions[2].fireObservation('exited')
+
+    await vi.waitFor(() => {
+      const shown = [...bar.querySelectorAll('[role="tab"]')].map((t) =>
+        t.getAttribute('data-agent-status'),
+      )
+      expect(shown).toEqual(['working', 'waiting', 'exited'])
+      expect(new Set(shown).size).toBe(3)
+    })
+  })
+
+  // And the state moves with the pane, rather than latching on the first thing
+  // it was told.
+  it('follows the pane back to waiting for input when the dialog is answered', async () => {
+    const { client, manager, bar } = await mountPaneManager()
+    manager.activateByIndex(0)
+
+    client._sessions[0].fireObservation('working')
+    await vi.waitFor(() => {
+      expect(bar.querySelectorAll('[role="tab"]')[0].getAttribute('data-agent-status')).toBe(
+        'working',
+      )
+    })
+
+    client._sessions[0].fireObservation('free_text')
+    await vi.waitFor(() => {
+      expect(bar.querySelectorAll('[role="tab"]')[0].getAttribute('data-agent-status')).toBe('idle')
+    })
+  })
+})

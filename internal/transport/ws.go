@@ -179,6 +179,9 @@ type WSServer struct {
 	// the AD-6 amendment). Nil is the normal state: a session without one
 	// runs exactly as it did before, and the byte path never depends on it.
 	paneGrid panegrid.Observer
+	// paneObserver classifies an enrolled pane's grid and reports the
+	// changes (nocx-szb40.3). Nil when unwired, like paneGrid above.
+	paneObserver paneObserver
 
 	backupFileSaver func(string, string) (*backup.SaveResult, error)
 
@@ -1238,6 +1241,13 @@ func (s *WSServer) Start(ctx context.Context) error {
 	// Fail closed: no entropy → no token → no connections.
 	if err := s.mintToken(); err != nil {
 		return err
+	}
+
+	// The pane-observation coalescer, for the life of the server (see
+	// ws_paneobserve.go). It runs whether or not anything is enrolled: a
+	// sweep with no watched pane touches one lock and returns.
+	if s.paneObserver != nil {
+		go s.runPaneObserverSweeps(ctx)
 	}
 
 	// Configure the upgrader to accept only our token as the subprotocol,

@@ -61,6 +61,12 @@ type sessionMachine interface {
 	// the handshake expired must learn it is in a conventional terminal,
 	// and no further transition is ever coming to tell it.
 	replayIntegration(sid session.ID)
+	// replayPaneObservation re-sends an enrolled pane's current
+	// classification on reattach (nocx-szb40.3). Beside replayIntegration
+	// and for the identical reason: only changes are pushed, so a renderer
+	// that reconnects to a settled agent would otherwise never be told what
+	// the pane is.
+	replayPaneObservation(sid session.ID)
 }
 
 // openMachine is the transport-owned machinery handleOpen needs after the
@@ -869,6 +875,7 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		// last saw this session.
 		h.machine.replayLifecycleFacts(sid)
 		h.machine.replayIntegration(sid)
+		h.machine.replayPaneObservation(sid)
 
 		sidBytes, _ := session.IDToBytes(sid)
 		go h.machine.ringToConn(ctx, wconn, sidBytes, rx.ring, from)

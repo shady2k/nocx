@@ -1,3 +1,5 @@
 bin/
 capture
 features
+node_modules/
+frames/

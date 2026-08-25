@@ -16,13 +16,15 @@ const SOURCE: SecretPickerSource = {
 
 afterEach(() => cleanup())
 
-function mount(over: {
-  variables?: Array<{ name: string; value: string; enabled: boolean }>
-  onVariables?: (variables: readonly { name: string; value: string; enabled: boolean }[]) => void
-  secretSource?: SecretPickerSource
-  secretEntries?: readonly typeof SECRET[]
-  vaultState?: 'uninitialized' | 'sealed' | 'unsealed' | 'unknown'
-} = {}) {
+function mount(
+  over: {
+    variables?: Array<{ name: string; value: string; enabled: boolean }>
+    onVariables?: (variables: readonly { name: string; value: string; enabled: boolean }[]) => void
+    secretSource?: SecretPickerSource
+    secretEntries?: readonly (typeof SECRET)[]
+    vaultState?: 'uninitialized' | 'sealed' | 'unsealed' | 'unknown'
+  } = {},
+) {
   const [variables, setVariables] = createSignal(
     over.variables ?? [{ name: 'token', value: '', enabled: true }],
   )
@@ -93,7 +95,9 @@ describe('folder variables', () => {
     field.setSelectionRange(field.value.length, field.value.length)
     fireEvent.input(field)
     await vi.waitFor(() =>
-      expect(document.querySelector('.ui-floating-panel__row')?.textContent).toContain('Deploy token'),
+      expect(document.querySelector('.ui-floating-panel__row')?.textContent).toContain(
+        'Deploy token',
+      ),
     )
     fireEvent.mouseDown(document.querySelector('.ui-floating-panel__row')!)
 
@@ -120,9 +124,7 @@ describe('folder variables', () => {
 
   it('destroys the row picker when the row is removed', async () => {
     function Harness() {
-      const [variables, setVariables] = createSignal([
-        { name: 'token', value: '', enabled: true },
-      ])
+      const [variables, setVariables] = createSignal([{ name: 'token', value: '', enabled: true }])
       return (
         <FolderView
           folder="users"
@@ -149,7 +151,9 @@ describe('folder variables', () => {
     expect(document.querySelectorAll('.ui-floating-panel[data-variant="secret"]')).toHaveLength(1)
     fireEvent.click(document.querySelector('button[aria-label="Remove variable 1"]')!)
     await vi.waitFor(() =>
-      expect(document.querySelectorAll('.ui-floating-panel[data-variant="secret"]')).toHaveLength(0),
+      expect(document.querySelectorAll('.ui-floating-panel[data-variant="secret"]')).toHaveLength(
+        0,
+      ),
     )
   })
 

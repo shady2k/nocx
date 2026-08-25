@@ -30,7 +30,12 @@ import { FolderIcon, PlusIcon } from '../ui/icons'
 import { StatusCard } from '../ui/status-card'
 import { Tabs } from '../ui/tabs'
 import { TextField } from '../ui/text-field'
-import { SecretTextField, secretMarks, type SecretEntry, type VaultState } from './secret-text-field'
+import {
+  SecretTextField,
+  secretMarks,
+  type SecretEntry,
+  type VaultState,
+} from './secret-text-field'
 import type { SecretPickerSource } from '../ui/secret-picker'
 import type { ApiParam } from './api-model'
 // The label rule for a table's tab is stated once, by the surface that first
@@ -103,11 +108,7 @@ export interface FolderViewProps {
   secretSource?: SecretPickerSource
   secretEntries?: () => readonly SecretEntry[]
   vaultState?: () => VaultState
-  onSecretReference?: (
-    handle: string,
-    at: { x: number; y: number },
-    replace: () => void,
-  ) => void
+  onSecretReference?: (handle: string, at: { x: number; y: number }, replace: () => void) => void
 }
 
 export function FolderView(props: FolderViewProps) {

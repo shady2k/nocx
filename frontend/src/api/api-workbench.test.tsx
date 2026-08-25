@@ -3269,7 +3269,6 @@ async function openAuth(
   return { bindSecret, writeRequest, writeEnvironment, sendRequest }
 }
 
-
 describe('Auth uses the shared SecretSource control', () => {
   const inventory = [
     {
@@ -3508,7 +3507,15 @@ describe('the request Variables tab explains the effective scope', () => {
             refused: '',
             secret: false,
           },
-          { name: 'token', value: '', scope: 'environment', from: '', overridden: false, refused: '', secret: true },
+          {
+            name: 'token',
+            value: '',
+            scope: 'environment',
+            from: '',
+            overridden: false,
+            refused: '',
+            secret: true,
+          },
         ],
       }),
     })
@@ -6238,7 +6245,6 @@ describe('secrets are doors in every request field', () => {
     fireEvent.click(row(CREATE_REL_PATH))
     await vi.waitFor(() => expect(field('api-url')).toBeTruthy())
   }
-
 
   it.each(fieldCases)(
     'from a $label value with no environment, @ inserts and saves an opaque reference',

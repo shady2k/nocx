@@ -61,7 +61,12 @@ import { applyTypedUrl, urlWithParams } from './api-url'
 import { findVariables } from './variable-reference'
 import { findReferences } from '../secret-reference'
 import type { SecretPickerSource } from '../ui/secret-picker'
-import { SecretTextField, secretMarks, type SecretEntry, type VaultState } from './secret-text-field'
+import {
+  SecretTextField,
+  secretMarks,
+  type SecretEntry,
+  type VaultState,
+} from './secret-text-field'
 import type { InventoryEntry } from '../vault-client'
 import { SecretSource, type SecretSourceMode } from '../secret-source'
 import type { ApiHeader, ApiParam, ApiRequest } from './api-model'
@@ -87,8 +92,6 @@ const AUTH_KINDS: Array<{ value: ApiRequest['auth']['kind']; label: string }> = 
   { value: 'basic', label: 'Basic' },
   { value: 'apikey', label: 'API key' },
 ]
-
-
 
 /** How many rows a tab is holding, for the tab's own label. A count that is
  *  zero is not shown: "Headers 0" is a longer way to write "Headers", and the
@@ -165,11 +168,7 @@ export interface RequestLineProps {
   secretSource?: SecretPickerSource
   secretEntries?: () => readonly SecretEntry[]
   vaultState?: () => VaultState
-  onSecretReference?: (
-    handle: string,
-    at: { x: number; y: number },
-    replace: () => void,
-  ) => void
+  onSecretReference?: (handle: string, at: { x: number; y: number }, replace: () => void) => void
   onPickerReady?: (open: () => void) => void
 }
 
@@ -251,9 +250,10 @@ export function RequestLine(props: RequestLineProps) {
     }))
 
   const urlMarks = (): TextFieldMark[] =>
-    [...variableMarks(), ...secretMarks(typedUrl(), props.secretEntries?.() ?? [], props.vaultState?.() ?? 'unknown')].sort(
-      (a, b) => a.from - b.from,
-    )
+    [
+      ...variableMarks(),
+      ...secretMarks(typedUrl(), props.secretEntries?.() ?? [], props.vaultState?.() ?? 'unknown'),
+    ].sort((a, b) => a.from - b.from)
 
   /** The kit's word for what this reference is. `unknown` is used ONLY when
    *  somebody can say so: a missing backend scope answer leaves every mark in
@@ -333,7 +333,6 @@ export function RequestLine(props: RequestLineProps) {
   )
 }
 
-
 export interface RequestEditorProps {
   request: ApiRequest | null
   scopeVariables: readonly ApiScopeVariable[] | null
@@ -342,11 +341,7 @@ export interface RequestEditorProps {
   secretSource?: SecretPickerSource
   secretEntries?: () => readonly InventoryEntry[]
   vaultState?: () => VaultState
-  onSecretReference?: (
-    handle: string,
-    at: { x: number; y: number },
-    replace: () => void,
-  ) => void
+  onSecretReference?: (handle: string, at: { x: number; y: number }, replace: () => void) => void
   onPickerReady?: (open: () => void) => void
 }
 

@@ -54,11 +54,7 @@ export function secretMarks(
 export interface SecretTextFieldProps extends TextFieldProps {
   source?: SecretPickerSource
   onPickerReady?: (open: () => void) => void
-  onSecretReference?: (
-    handle: string,
-    at: { x: number; y: number },
-    replace: () => void,
-  ) => void
+  onSecretReference?: (handle: string, at: { x: number; y: number }, replace: () => void) => void
 }
 
 export function SecretTextField(props: SecretTextFieldProps) {
@@ -79,7 +75,8 @@ export function SecretTextField(props: SecretTextFieldProps) {
             props.onInput?.(next)
             queueMicrotask(() => {
               const input = props.id
-                ? document.getElementById(props.id) as HTMLInputElement | HTMLTextAreaElement | null
+                ? (document.getElementById(props.id) as
+                    HTMLInputElement | HTMLTextAreaElement | null)
                 : null
               input?.focus()
               input?.setSelectionRange(caret, caret)
@@ -91,7 +88,7 @@ export function SecretTextField(props: SecretTextFieldProps) {
   const openAt = (from: number, to: number): void => {
     if (picker === null) return
     const input = props.id
-      ? document.getElementById(props.id) as HTMLInputElement | HTMLTextAreaElement | null
+      ? (document.getElementById(props.id) as HTMLInputElement | HTMLTextAreaElement | null)
       : null
     const current = String(props.value)
     const next = current.slice(0, from) + '@' + current.slice(to)
@@ -104,7 +101,7 @@ export function SecretTextField(props: SecretTextFieldProps) {
   }
   const open = (): void => {
     const input = props.id
-      ? document.getElementById(props.id) as HTMLInputElement | HTMLTextAreaElement | null
+      ? (document.getElementById(props.id) as HTMLInputElement | HTMLTextAreaElement | null)
       : null
     const current = String(props.value)
     const caret = input?.selectionStart ?? current.length
@@ -127,7 +124,7 @@ export function SecretTextField(props: SecretTextFieldProps) {
       }}
       onInput={(value) => {
         const input = props.id
-          ? document.getElementById(props.id) as HTMLInputElement | HTMLTextAreaElement | null
+          ? (document.getElementById(props.id) as HTMLInputElement | HTMLTextAreaElement | null)
           : null
         const caret = input?.selectionStart ?? value.length
         props.onInput?.(value)

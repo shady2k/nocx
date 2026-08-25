@@ -115,7 +115,6 @@ export function createSecretPickerField(opts: {
     closeIfNoMatch(filter)
   }
 
-
   const findTrigger = (value: string, caret: number): Trigger | null => {
     const end = Math.max(0, Math.min(value.length, caret))
     let start = end

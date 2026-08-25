@@ -777,7 +777,6 @@ async function main() {
     return live
   }
 
-
   // The sidebar width controller (nocx-qmcu): the single owner of the
   // panel's width between the drag handle, the settings observer and the
   // persistence seam. Created here at the composition root because all

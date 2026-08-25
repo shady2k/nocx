@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, render } from '@solidjs/testing-library'
-import { SecretTextField, secretMarks, type SecretEntry, type VaultState } from './secret-text-field'
+import {
+  SecretTextField,
+  secretMarks,
+  type SecretEntry,
+  type VaultState,
+} from './secret-text-field'
 import type { TextFieldMark } from '../ui/text-field'
 
 afterEach(() => cleanup())
@@ -71,7 +76,9 @@ describe('the extracted secret text field seam', () => {
       </>
     ))
 
-    expect([...document.querySelectorAll('.ui-text-field__mark')].map((mark) => mark.textContent)).toEqual([
+    expect(
+      [...document.querySelectorAll('.ui-text-field__mark')].map((mark) => mark.textContent),
+    ).toEqual([
       'Deploy token',
       missingValue,
       'Vault locked — unlock to view',

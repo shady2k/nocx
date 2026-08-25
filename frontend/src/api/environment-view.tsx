@@ -29,7 +29,12 @@ import { Field } from '../ui/field'
 import { Select } from '../ui/select'
 import { IconButton } from '../ui/icon-button'
 import { PlusIcon } from '../ui/icons'
-import { SecretTextField, secretMarks, type SecretEntry, type VaultState } from './secret-text-field'
+import {
+  SecretTextField,
+  secretMarks,
+  type SecretEntry,
+  type VaultState,
+} from './secret-text-field'
 import type { SecretPickerSource } from '../ui/secret-picker'
 import { TextField } from '../ui/text-field'
 import { environmentPath } from './api-paths'
@@ -90,11 +95,7 @@ export interface EnvironmentViewProps {
   secretSource?: SecretPickerSource
   secretEntries?: () => readonly SecretEntry[]
   vaultState?: () => VaultState
-  onSecretReference?: (
-    handle: string,
-    at: { x: number; y: number },
-    replace: () => void,
-  ) => void
+  onSecretReference?: (handle: string, at: { x: number; y: number }, replace: () => void) => void
 }
 
 export function EnvironmentView(props: EnvironmentViewProps) {

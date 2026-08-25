@@ -20,17 +20,19 @@ const SOURCE: SecretPickerSource = {
   requestCreate: vi.fn(),
 }
 
-function mount(over: {
-  rows?: ValueRow[]
-  creating?: boolean
-  error?: string
-  route?: ApiRoute
-  onRoute?: (route: ApiRoute) => void
-  onRows?: (rows: readonly ValueRow[]) => void
-  secretSource?: SecretPickerSource
-  secretEntries?: readonly typeof SECRET[]
-  vaultState?: 'uninitialized' | 'sealed' | 'unsealed' | 'unknown'
-} = {}) {
+function mount(
+  over: {
+    rows?: ValueRow[]
+    creating?: boolean
+    error?: string
+    route?: ApiRoute
+    onRoute?: (route: ApiRoute) => void
+    onRows?: (rows: readonly ValueRow[]) => void
+    secretSource?: SecretPickerSource
+    secretEntries?: readonly (typeof SECRET)[]
+    vaultState?: 'uninitialized' | 'sealed' | 'unsealed' | 'unknown'
+  } = {},
+) {
   const [rows, setRows] = createSignal<ValueRow[]>(over.rows ?? [{ name: 'token', value: '' }])
   const onRows = (next: readonly ValueRow[]): void => {
     over.onRows?.(next)
@@ -67,9 +69,7 @@ function mount(over: {
 
 describe('environment variables', () => {
   it('stores a secret reference as an ordinary value', () => {
-    const bytes = JSON.stringify(
-      toStored([{ name: 'token', value: '{{secret:secrow:abc123}}' }]),
-    )
+    const bytes = JSON.stringify(toStored([{ name: 'token', value: '{{secret:secrow:abc123}}' }]))
 
     expect(bytes).toContain('{{secret:secrow:abc123}}')
     expect(JSON.parse(bytes)).toEqual({
@@ -102,7 +102,6 @@ describe('environment variables', () => {
     await vi.waitFor(() => expect(document.querySelector('.ui-floating-panel__row')).toBeNull())
   })
 
-
   it('lets @ insert the opaque reference into a value cell', async () => {
     const onRows = vi.fn()
     mount({ onRows, secretSource: SOURCE, secretEntries: [SECRET], vaultState: 'unsealed' })
@@ -113,7 +112,9 @@ describe('environment variables', () => {
     field.setSelectionRange(field.value.length, field.value.length)
     fireEvent.input(field)
     await vi.waitFor(() =>
-      expect(document.querySelector('.ui-floating-panel__row')?.textContent).toContain('Deploy token'),
+      expect(document.querySelector('.ui-floating-panel__row')?.textContent).toContain(
+        'Deploy token',
+      ),
     )
     fireEvent.mouseDown(document.querySelector('.ui-floating-panel__row')!)
 
@@ -191,7 +192,9 @@ describe('environment variables', () => {
     expect(document.querySelectorAll('.ui-floating-panel[data-variant="secret"]')).toHaveLength(1)
     fireEvent.click(document.querySelector('button[aria-label="Remove variable 1"]')!)
     await vi.waitFor(() =>
-      expect(document.querySelectorAll('.ui-floating-panel[data-variant="secret"]')).toHaveLength(0),
+      expect(document.querySelectorAll('.ui-floating-panel[data-variant="secret"]')).toHaveLength(
+        0,
+      ),
     )
   })
 })

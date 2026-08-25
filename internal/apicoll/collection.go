@@ -58,6 +58,11 @@ type Request struct {
 	// RequestLookup can keep the existing request → environment seam while
 	// adding the folder scope between them.
 	folderVariables []Param
+	// folderVariableSources parallels folderVariables and keeps the folder
+	// path that supplied each row for the effective-scope projection. It is
+	// private for the same reason as folderVariables: source metadata is not
+	// part of the request file or request.read wire shape.
+	folderVariableSources []string
 }
 
 // Header and Param carry Enabled because a disabled row is a row the user

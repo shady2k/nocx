@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.request.scope.schema.json",
+  "title": "ApiRequestScopeResult",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["variables"],
+  "properties": {
+    "variables": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["name", "value", "scope", "from", "overridden", "refused"],
+        "properties": {
+          "name": { "type": "string" },
+          "value": { "type": "string" },
+          "scope": { "type": "string", "enum": ["request", "folder", "environment", "vault"] },
+          "from": { "type": "string" },
+          "overridden": { "type": "boolean" },
+          "refused": { "type": "string" }
+        }
+      }
+    }
+  }
+}

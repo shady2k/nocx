@@ -66,9 +66,10 @@ func readFolderVariablesFile(full, rel string) ([]Param, bool, error) {
 // order is load-bearing: RequestLookup's first-row-wins rule then makes the
 // nearest folder answer before its parents, while the request's own rows
 // remain ahead of all inherited rows.
-func folderVariablesFor(root, requestRelPath string) ([]Param, error) {
+func folderVariablesFor(root, requestRelPath string) ([]Param, []string, error) {
 	dir := filepath.ToSlash(filepath.Dir(requestRelPath))
 	var inherited []Param
+	var sources []string
 	for {
 		full := filepath.Join(root, filepath.FromSlash(dir), folderVariablesFileName)
 		rel := filepath.ToSlash(filepath.Join(dir, folderVariablesFileName))
@@ -77,25 +78,29 @@ func folderVariablesFor(root, requestRelPath string) ([]Param, error) {
 		}
 		variables, exists, err := readFolderVariablesFile(full, rel)
 		if err != nil {
-			return nil, err
+			return nil, nil, err
 		}
 		if exists {
 			inherited = append(inherited, variables...)
+			for range variables {
+				sources = append(sources, folderVariableFolder(rel))
+			}
 		}
 		if dir == "." {
 			break
 		}
 		dir = filepath.ToSlash(filepath.Dir(dir))
 	}
-	return inherited, nil
+	return inherited, sources, nil
 }
 
 func attachFolderVariables(root, requestRelPath string, r Request) (Request, error) {
-	inherited, err := folderVariablesFor(root, requestRelPath)
+	inherited, sources, err := folderVariablesFor(root, requestRelPath)
 	if err != nil {
 		return Request{}, err
 	}
 	r.folderVariables = inherited
+	r.folderVariableSources = sources
 	return r, nil
 }
 

@@ -287,6 +287,8 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 			_ = h.r.TryResult(req.ID, mustMarshal(apiFolderWriteResponse{
 				Variables: wireParams(variables),
 			}))
+		case "api.request.scope":
+			h.handleRequestScope(ctx, req, svc)
 		}
 		return nil
 	})
@@ -2345,6 +2347,10 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
 		whenAvailable(regResponder(sub, "api.folder.write", params(validateAPIFolderWriteRaw), func(r Responder) handlerFunc {
+			h := collHandlers(r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}), collAvailable, apiCollectionsUnavailable),
+		whenAvailable(regResponder(sub, "api.request.scope", params(validateAPIRequestScopeRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),

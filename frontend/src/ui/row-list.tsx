@@ -88,13 +88,13 @@ export interface EditableRowListProps<T> {
    */
   renderRow: (row: () => T, index: number) => JSX.Element
   /** Called with the row's index when its remove control is activated. */
-  onRemove: (index: number) => void
+  onRemove?: (index: number) => void
   /** Called when the foot add control is activated. */
-  onAdd: () => void
+  onAdd?: () => void
   /** Visible label of the add control, e.g. "Add forward". */
-  addLabel: string
+  addLabel?: string
   /** Accessible name for one row's remove control, e.g. "Remove forward 2". */
-  removeLabel: (index: number) => string
+  removeLabel?: (index: number) => string
   /** Shown above the add control when there are no rows. */
   emptyLabel?: string
   /**
@@ -106,6 +106,8 @@ export interface EditableRowListProps<T> {
   error?: string
   /** Accessible name for the list itself. */
   ariaLabel: string
+  /** Hide editing affordances for a list that only explains inherited rows. */
+  readOnly?: boolean
   disabled?: boolean
 }
 
@@ -114,28 +116,34 @@ export function EditableRowList<T>(props: EditableRowListProps<T>) {
     <IconButton
       size="sm"
       title="Remove"
-      ariaLabel={props.removeLabel(i)}
+      ariaLabel={props.removeLabel?.(i) ?? `Remove row ${i + 1}`}
       disabled={props.disabled === true}
-      onClick={() => props.onRemove(i)}
+      onClick={() => props.onRemove?.(i)}
     >
       <CloseIcon />
     </IconButton>
   )
 
   const foot = (): JSX.Element => (
-    <>
-      <div class="ui-row-list__add">
-        <Button variant="ghost" disabled={props.disabled === true} onClick={props.onAdd}>
-          <PlusIcon />
-          {props.addLabel}
-        </Button>
-      </div>
-      <Show when={props.error !== undefined}>
-        <p class="ui-field-error" role="alert">
-          {props.error}
-        </p>
-      </Show>
-    </>
+    <Show when={props.readOnly !== true}>
+      <>
+        <div class="ui-row-list__add">
+          <Button
+            variant="ghost"
+            disabled={props.disabled === true}
+            onClick={() => props.onAdd?.()}
+          >
+            <PlusIcon />
+            {props.addLabel ?? 'Add'}
+          </Button>
+        </div>
+        <Show when={props.error !== undefined}>
+          <p class="ui-field-error" role="alert">
+            {props.error}
+          </p>
+        </Show>
+      </>
+    </Show>
   )
 
   return (
@@ -147,7 +155,9 @@ export function EditableRowList<T>(props: EditableRowListProps<T>) {
             {(row, i) => (
               <div class="ui-row-list__row" role="listitem">
                 <div class="ui-row-list__content">{props.renderRow(row, i)}</div>
-                <div class="ui-row-list__remove">{remove(i)}</div>
+                <Show when={props.readOnly !== true}>
+                  <div class="ui-row-list__remove">{remove(i)}</div>
+                </Show>
               </div>
             )}
           </Index>
@@ -172,7 +182,9 @@ export function EditableRowList<T>(props: EditableRowListProps<T>) {
                     </th>
                   )}
                 </Index>
-                <th scope="col">{srOnly('Remove')}</th>
+                <Show when={props.readOnly !== true}>
+                  <th scope="col">{srOnly('Remove')}</th>
+                </Show>
               </tr>
             </thead>
             <tbody>
@@ -180,7 +192,9 @@ export function EditableRowList<T>(props: EditableRowListProps<T>) {
                 {(row, i) => (
                   <tr>
                     {props.renderRow(row, i)}
-                    <td class="ui-row-list__remove">{remove(i)}</td>
+                    <Show when={props.readOnly !== true}>
+                      <td class="ui-row-list__remove">{remove(i)}</td>
+                    </Show>
                   </tr>
                 )}
               </Index>

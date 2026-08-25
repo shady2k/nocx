@@ -7,6 +7,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApiStore, type ApiStoreOptions } from './api-store'
 import type { ApiWorkbenchServices } from './api-client'
+import type { ApiRequestScopeResult } from '../generated/api.request.scope'
 import type { ApiEnvironmentRef, ApiRequest } from './api-model'
 import {
   COLLECTION_PATH,
@@ -185,6 +186,53 @@ describe('ApiStore — the request in the form', () => {
     await store.openRequest('h1', 'users/broken.json')
     expect(store.draft()?.url).toBe('{{baseUrl}}/users')
     expect(store.error()).toBe('bad JSON')
+  })
+
+  it('keeps the newest scope answer when an older refresh resolves later', async () => {
+    const pending: Array<(value: ApiRequestScopeResult) => void> = []
+    const requestScope = vi.fn().mockImplementation(
+      () =>
+        new Promise<ApiRequestScopeResult>((resolve) => {
+          pending.push(resolve)
+        }),
+    )
+    const { store } = storeWith({ requestScope })
+
+    const opening = store.openRequest('h1', 'users/create.json')
+    await vi.waitFor(() => expect(requestScope).toHaveBeenCalledTimes(1))
+    store.editDraft({ ...REQUEST, variables: [{ name: 'id', value: 'draft', enabled: true }] })
+    await vi.waitFor(() => expect(requestScope).toHaveBeenCalledTimes(2))
+
+    const newest: ApiRequestScopeResult = {
+      variables: [
+        {
+          name: 'id',
+          value: 'draft',
+          scope: 'request',
+          from: '',
+          overridden: false,
+          refused: '',
+        },
+      ],
+    }
+    const older: ApiRequestScopeResult = {
+      variables: [
+        {
+          name: 'id',
+          value: 'folder',
+          scope: 'folder',
+          from: 'users',
+          overridden: false,
+          refused: '',
+        },
+      ],
+    }
+    pending[1](newest)
+    await Promise.resolve()
+    pending[0](older)
+    await opening
+
+    expect(store.scopeVariables()).toEqual(newest.variables)
   })
 })
 

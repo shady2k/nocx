@@ -1652,15 +1652,15 @@ export function ApiPane(props: ApiPaneProps) {
   /**
    * What answers a name, as the address field needs it.
    *
-   * `unknown` is not a hedge: until an environment has been read there is no
-   * answer to give for a name this request does not answer itself, and
-   * painting it as unanswered in that window is how a person learns to
-   * ignore the colour.
+   * `unknown` is not a hedge: until the backend scope has been read there is
+   * no answer to give for a name, and painting it as unanswered in that
+   * window is how a person learns to ignore the colour.
    */
   const variableState = (name: string): 'bound' | 'secret' | 'unbound' | 'unknown' => {
     const answer: VariableAnswer = store.variableAnswer(name)
     switch (answer.scope) {
       case 'request':
+      case 'folder':
       case 'environment':
         return 'bound'
       case 'secret':
@@ -1684,12 +1684,14 @@ export function ApiPane(props: ApiPaneProps) {
         // else: the same name can be answered twice, and which one wins
         // decides what goes out.
         return `{{${name}}} = ${answer.value ?? ''} — this request's own`
+      case 'folder':
+        return `{{${name}}} = ${answer.value ?? ''} — from folder ${answer.from ?? ''}`
       case 'environment':
         return `{{${name}}} = ${answer.value ?? ''} — from ${environmentName(env)}`
       case 'secret':
         return `{{${name}}} = a secret, from the vault`
       case 'unknown':
-        return `{{${name}}} — no environment has been read yet`
+        return `{{${name}}} — no scope has been read yet`
       case 'none':
         return env === ''
           ? `{{${name}}} — nothing answers it: not this request, and no environment is chosen`
@@ -1723,6 +1725,22 @@ export function ApiPane(props: ApiPaneProps) {
         env === '' ? `Add ${name} to a new environment` : `Add ${name} to ${environmentName(env)}`,
       icon: PlusIcon,
       onSelect: () => defineVariable(name),
+    }
+    if (answer.scope === 'folder' && answer.from !== null) {
+      return [
+        {
+          id: 'api-variable-open-folder',
+          label: `Edit folder ${answer.from}`,
+          icon: PencilIcon,
+          onSelect: () => {
+            setVarMenu(null)
+            const handle = store.activeCollection()
+            if (handle === '') return
+            store.enterFolder(handle, answer.from as string)
+            setView('folder')
+          },
+        },
+      ]
     }
     if (answer.scope === 'request') return [defineThere]
     if (answer.scope === 'environment' || answer.scope === 'secret') {
@@ -3212,6 +3230,7 @@ export function ApiPane(props: ApiPaneProps) {
           <section class="api-workbench__request" aria-label="Request">
             <RequestEditor
               request={store.draft()}
+              scopeVariables={store.scopeVariables()}
               onEdit={(next) => store.editDraft(next)}
               secretTarget={secretTarget()}
               onCreateSecret={createSecret}

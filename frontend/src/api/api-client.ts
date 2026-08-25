@@ -29,6 +29,7 @@ import type { ApiEnvironmentWriteResult } from '../generated/api.environment.wri
 import type { ApiEnvironmentBindSecretResult } from '../generated/api.environment.bindSecret'
 import type { ApiRequestDeleteResult } from '../generated/api.request.delete'
 import type { ApiRequestReadResult } from '../generated/api.request.read'
+import type { ApiRequestScopeResult } from '../generated/api.request.scope'
 import type { ApiRequestWriteResult } from '../generated/api.request.write'
 import type { ApiRequestMoveResult } from '../generated/api.request.move'
 import type { ApiRequestSendResult } from '../generated/api.request.send'
@@ -41,6 +42,7 @@ import type { FilesCloseResult } from '../generated/files.close'
 import type { FilesChanged } from '../generated/files.changed'
 import type { FilesDropped } from '../generated/files.dropped'
 import type { ApiEnvironment, ApiRequest, ApiRoute } from './api-model'
+type ApiRequestVariable = ApiRequest['variables'][number]
 
 class ApiClient {
   constructor(private dispatcher: Dispatcher) {}
@@ -187,6 +189,21 @@ class ApiClient {
    *  (design §6.4). */
   readRequest(handle: string, relPath: string): Promise<ApiRequestReadResult> {
     return this.dispatcher.call<ApiRequestReadResult>('api.request.read', { handle, relPath })
+  }
+
+  /** Explain the effective request scope using the draft's own rows. */
+  requestScope(
+    handle: string,
+    relPath: string,
+    envRelPath: string,
+    variables: readonly ApiRequestVariable[],
+  ): Promise<ApiRequestScopeResult> {
+    return this.dispatcher.call<ApiRequestScopeResult>('api.request.scope', {
+      handle,
+      relPath,
+      envRelPath,
+      variables,
+    })
   }
 
   /** Put what the form holds into the file. */
@@ -506,6 +523,12 @@ export interface ApiWorkbenchServices {
     value: string,
   ): Promise<ApiEnvironmentBindSecretResult>
   readRequest(handle: string, relPath: string): Promise<ApiRequestReadResult>
+  requestScope(
+    handle: string,
+    relPath: string,
+    envRelPath: string,
+    variables: readonly ApiRequestVariable[],
+  ): Promise<ApiRequestScopeResult>
   writeRequest(handle: string, relPath: string, request: ApiRequest): Promise<ApiRequestWriteResult>
   moveRequest(handle: string, relPath: string, toRelPath: string): Promise<ApiRequestMoveResult>
   deleteRequest(handle: string, relPath: string): Promise<ApiRequestDeleteResult>
@@ -625,6 +648,8 @@ export function createApiWorkbenchServices(
     bindSecret: (handle, relPath, variable, value) =>
       client.bindSecret(handle, relPath, variable, value),
     readRequest: (handle, relPath) => client.readRequest(handle, relPath),
+    requestScope: (handle, relPath, envRelPath, variables) =>
+      client.requestScope(handle, relPath, envRelPath, variables),
     writeRequest: (handle, relPath, request) => client.writeRequest(handle, relPath, request),
     deleteRequest: (handle, relPath) => client.deleteRequest(handle, relPath),
     moveRequest: (handle, relPath, toRelPath) => client.moveRequest(handle, relPath, toRelPath),

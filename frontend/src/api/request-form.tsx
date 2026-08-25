@@ -49,7 +49,7 @@
 // anything in it. A tab bar says the same four things in one line and puts
 // the count where a person can see it without opening anything.
 
-import { Show, createEffect, createSignal } from 'solid-js'
+import { For, Show, createEffect, createSignal } from 'solid-js'
 import { Button } from '../ui/button'
 import { Checkbox } from '../ui/checkbox'
 import { Select } from '../ui/select'
@@ -63,6 +63,7 @@ import { SecretValueField } from '../ui/secret-value-field'
 import { applyTypedUrl, urlWithParams } from './api-url'
 import { findVariables } from './variable-reference'
 import type { ApiHeader, ApiParam, ApiRequest } from './api-model'
+import type { ApiScopeVariable } from './api-store'
 
 /** The verbs the picker offers. A file may hold anything the wire accepts,
  *  so whatever the request actually has is added to the list rather than
@@ -265,16 +266,15 @@ export function RequestLine(props: RequestLineProps) {
       from,
       to,
       // `unknown` is the kit's word for "a reference nothing answers", and it
-      // is used ONLY when somebody can say so: an environment that has not
-      // been read yet leaves every mark in the ordinary tone rather than
-      // painting the address as broken while a listing is in flight.
+      // is used ONLY when the backend scope has answered that way. A scope
+      // refresh in flight leaves the mark in the ordinary tone rather than
+      // painting the address as broken while the answer is unavailable.
       tone: markTone(props.variableState?.(name)),
     }))
 
   /** The kit's word for what this reference is. `unknown` is used ONLY when
-   *  somebody can say so: an environment that has not been read yet leaves
-   *  every mark in the ordinary tone rather than painting the address as
-   *  broken while a listing is in flight. */
+   *  somebody can say so: a missing backend scope answer leaves every mark in
+   *  the ordinary tone rather than painting the address as broken. */
   const markTone = (state?: 'bound' | 'secret' | 'unbound' | 'unknown'): TextFieldMark['tone'] => {
     if (state === 'unbound') return 'unknown'
     if (state === 'secret') return 'secret'
@@ -445,6 +445,7 @@ function AuthSecret(props: {
 
 export interface RequestEditorProps {
   request: ApiRequest | null
+  scopeVariables: readonly ApiScopeVariable[] | null
   onEdit: (next: ApiRequest) => void
   /**
    * Give the auth variable its VALUE — the one call from this form that
@@ -485,6 +486,7 @@ export function RequestEditor(props: RequestEditorProps) {
     over: Partial<T>,
   ): T[] => rows.map((r, i) => (i === index ? { ...r, ...over } : r))
 
+  const scopeRows = (): readonly ApiScopeVariable[] => props.scopeVariables ?? []
   // HOW MANY TIMES THIS BODY HAS BEEN LAID OUT — the editor's docKey carries
   // it, and that is the whole mechanism.
   //
@@ -608,65 +610,97 @@ export function RequestEditor(props: RequestEditorProps) {
                 id: 'variables',
                 label: counted('Variables', req().variables),
                 content: () => (
-                  <EditableRowList
-                    variant="table"
-                    ariaLabel="Request variables"
-                    columns={[
-                      { label: 'Send', labelHidden: true },
-                      { label: 'Name' },
-                      { label: 'Value' },
-                    ]}
-                    rows={req().variables}
-                    addLabel="Add variable"
-                    // The empty state says what the tab is FOR, because a
-                    // person arriving here has usually just been sent by the
-                    // panel behind a `{{name}}` they clicked: this is the
-                    // scope that beats the environment, and that sentence is
-                    // the whole reason to type a row here rather than there.
-                    emptyLabel="No variables of this request's own. One here answers before the environment does."
-                    removeLabel={(i) => `Remove variable ${i + 1}`}
-                    renderRow={(row, i) => (
-                      <>
-                        <td>
-                          <Checkbox
-                            ariaLabel={`Use variable ${i + 1}`}
-                            checked={row().enabled}
-                            onChange={(v) =>
-                              patch({ variables: patchRow(req().variables, i, { enabled: v }) })
-                            }
-                          />
-                        </td>
-                        <td>
-                          <TextField
-                            id={`api-variable-name-${i}`}
-                            ariaLabel={`Variable ${i + 1} name`}
-                            value={row().name}
-                            onInput={(v) =>
-                              patch({ variables: patchRow(req().variables, i, { name: v }) })
-                            }
-                          />
-                        </td>
-                        <td>
-                          <TextField
-                            id={`api-variable-value-${i}`}
-                            ariaLabel={`Variable ${i + 1} value`}
-                            value={row().value}
-                            onInput={(v) =>
-                              patch({ variables: patchRow(req().variables, i, { value: v }) })
-                            }
-                          />
-                        </td>
-                      </>
-                    )}
-                    onRemove={(i) =>
-                      patch({ variables: req().variables.filter((_, j) => j !== i) })
-                    }
-                    onAdd={() =>
-                      patch({
-                        variables: [...req().variables, { name: '', value: '', enabled: true }],
-                      })
-                    }
-                  />
+                  <>
+                    <EditableRowList
+                      variant="table"
+                      ariaLabel="Request variables"
+                      columns={[
+                        { label: 'Send', labelHidden: true },
+                        { label: 'Name' },
+                        { label: 'Value' },
+                      ]}
+                      rows={req().variables}
+                      addLabel="Add variable"
+                      emptyLabel={undefined}
+                      removeLabel={(i) => `Remove variable ${i + 1}`}
+                      renderRow={(row, i) => (
+                        <>
+                          <td>
+                            <Checkbox
+                              ariaLabel={`Use variable ${i + 1}`}
+                              checked={row().enabled}
+                              onChange={(v) =>
+                                patch({ variables: patchRow(req().variables, i, { enabled: v }) })
+                              }
+                            />
+                          </td>
+                          <td>
+                            <TextField
+                              id={`api-variable-name-${i}`}
+                              ariaLabel={`Variable ${i + 1} name`}
+                              value={row().name}
+                              onInput={(v) =>
+                                patch({ variables: patchRow(req().variables, i, { name: v }) })
+                              }
+                            />
+                          </td>
+                          <td>
+                            <TextField
+                              id={`api-variable-value-${i}`}
+                              ariaLabel={`Variable ${i + 1} value`}
+                              value={row().value}
+                              onInput={(v) =>
+                                patch({ variables: patchRow(req().variables, i, { value: v }) })
+                              }
+                            />
+                          </td>
+                        </>
+                      )}
+                      onRemove={(i) =>
+                        patch({ variables: req().variables.filter((_, j) => j !== i) })
+                      }
+                      onAdd={() =>
+                        patch({
+                          variables: [...req().variables, { name: '', value: '', enabled: true }],
+                        })
+                      }
+                    />
+                    <Show when={props.scopeVariables !== null}>
+                      <For each={scopeRows().filter((variable) => variable.refused !== '')}>
+                        {(variable) => (
+                          <p class="api-request__idle" role="alert" data-api-scope-refusal>
+                            Variable {variable.name} is refused: {variable.refused} Send is refused
+                            while it stands.
+                          </p>
+                        )}
+                      </For>
+                      <EditableRowList
+                        variant="table"
+                        readOnly
+                        ariaLabel="Inherited request variables"
+                        columns={[
+                          { label: 'Scope' },
+                          { label: 'Name' },
+                          { label: 'Value' },
+                          { label: 'From' },
+                          { label: 'Status' },
+                        ]}
+                        rows={scopeRows().filter(
+                          (variable) => variable.scope !== 'request' && variable.refused === '',
+                        )}
+                        emptyLabel="No variables in this request's effective scope."
+                        renderRow={(row) => (
+                          <>
+                            <td>{row().scope}</td>
+                            <td>{row().name}</td>
+                            <td>{row().scope === 'vault' ? 'Bound in the vault' : row().value}</td>
+                            <td>{row().from === '' ? 'Collection root' : row().from}</td>
+                            <td>{row().overridden ? 'Overridden' : 'Used'}</td>
+                          </>
+                        )}
+                      />
+                    </Show>
+                  </>
                 ),
               },
               {

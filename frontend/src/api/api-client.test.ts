@@ -100,6 +100,23 @@ describe('ApiClient — one method per contract', () => {
     })
   })
 
+  it('reads the backend-computed request scope with its draft variables', async () => {
+    const { dispatcher, call } = fakeDispatcher({ variables: [] })
+    const variables = [{ name: 'id', value: 'draft', enabled: true }]
+    await createApiWorkbenchServices(dispatcher).requestScope(
+      'h1',
+      'users/create.json',
+      'environments/prod.json',
+      variables,
+    )
+    expect(call).toHaveBeenCalledWith('api.request.scope', {
+      handle: 'h1',
+      relPath: 'users/create.json',
+      envRelPath: 'environments/prod.json',
+      variables,
+    })
+  })
+
   it('writes the request the form holds', async () => {
     const { dispatcher, call } = fakeDispatcher({})
     await createApiWorkbenchServices(dispatcher).writeRequest('h1', 'users/create.json', REQUEST)

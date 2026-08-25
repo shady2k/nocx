@@ -23,6 +23,7 @@ import { ArrowRightIcon, ArrowRightLeftIcon } from '../ui/icons'
 import { apiSidebarAction, openApiWorkbench, registerApiSurface } from './index'
 import type { ApiWorkbenchServices } from './api-client'
 import { RpcError } from '../dispatcher'
+import type { ApiRequestScopeResult } from '../generated/api.request.scope'
 import type { PaneHost } from '../pane-content'
 import type { ApiEnvironmentRef, ApiRequest } from './api-model'
 import {
@@ -3569,6 +3570,123 @@ describe('ApiContent lifecycle', () => {
   })
 })
 
+describe('the request Variables tab explains the effective scope', () => {
+  it('shows ordered inherited rows, sources, winners and redacted vault names', async () => {
+    const { bar } = await mountApp({
+      requestScope: vi.fn().mockResolvedValue({
+        variables: [
+          {
+            name: 'id',
+            value: 'request',
+            scope: 'request',
+            from: '',
+            overridden: false,
+            refused: '',
+          },
+          {
+            name: 'id',
+            value: 'users',
+            scope: 'folder',
+            from: 'users',
+            overridden: true,
+            refused: '',
+          },
+          {
+            name: 'baseUrl',
+            value: 'https://api.example.test',
+            scope: 'environment',
+            from: 'environments/dev.json',
+            overridden: false,
+            refused: '',
+          },
+          { name: 'token', value: '', scope: 'vault', from: '', overridden: false, refused: '' },
+        ],
+      }),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Variables'))
+
+    await vi.waitFor(() => {
+      expect(workbench().textContent).toContain('users')
+      expect(workbench().textContent).toContain('Overridden')
+      expect(workbench().textContent).toContain('https://api.example.test')
+      expect(workbench().textContent).toContain('Bound in the vault')
+    })
+    expect(workbench().textContent).not.toContain('request-scope-secret-value')
+    expect(
+      workbench().querySelector('table[aria-label="Inherited request variables"] button'),
+    ).toBeNull()
+  })
+  it('shows a scope refusal and the empty state without exposing a value', async () => {
+    const { bar } = await mountApp({
+      requestScope: vi.fn().mockResolvedValue({
+        variables: [
+          {
+            name: 'token',
+            value: '',
+            scope: 'environment',
+            from: 'environments/dev.json',
+            overridden: false,
+            refused: 'api: a request variable would shadow a name this environment declares secret',
+          },
+        ],
+      }),
+    })
+    await openRequest(bar)
+    fireEvent.click(button('Variables'))
+
+    await vi.waitFor(() => {
+      expect(workbench().querySelector('[data-api-scope-refusal]')?.textContent).toContain('token')
+      expect(workbench().textContent).toContain("No variables in this request's effective scope.")
+    })
+    expect(workbench().textContent).not.toContain('request-scope-secret-value')
+  })
+
+  it('sends every draft variable change to the backend scope resolver', async () => {
+    const requestScope = vi
+      .fn()
+      .mockImplementation(
+        (
+          _handle: string,
+          _relPath: string,
+          _envRelPath: string,
+          variables: ApiRequest['variables'],
+        ) => ({
+          variables: [
+            {
+              name: 'id',
+              value: 'users',
+              scope: 'folder',
+              from: 'users',
+              overridden: variables.some((variable) => variable.enabled && variable.name === 'id'),
+              refused: '',
+            },
+          ],
+        }),
+      )
+    const { bar } = await mountApp({ requestScope })
+    await openRequest(bar)
+    fireEvent.click(button('Variables'))
+    await vi.waitFor(() => expect(workbench().textContent).toContain('users'))
+
+    fireEvent.click(button('Add variable'))
+    const nameInputs = () =>
+      [...workbench().querySelectorAll<HTMLInputElement>('input')].filter(
+        (input) => input.id.startsWith('api-variable-name-') && reachable(input),
+      )
+    await vi.waitFor(() => expect(nameInputs()).toHaveLength(1))
+    fireEvent.input(nameInputs()[0], { target: { value: 'id' } })
+
+    await vi.waitFor(() => {
+      const inherited = workbench().querySelector('table[aria-label="Inherited request variables"]')
+      expect(inherited?.textContent).toContain('Overridden')
+    })
+    expect(requestScope.mock.calls[requestScope.mock.calls.length - 1]?.[3]).toEqual([
+      { name: 'id', value: '', enabled: true },
+    ])
+  })
+})
+
 describe('a variable in the address says whether anything answers it', () => {
   const marks = (): HTMLElement[] => [
     ...workbench().querySelectorAll<HTMLElement>('.ui-text-field__mark'),
@@ -3596,6 +3714,101 @@ describe('a variable in the address says whether anything answers it', () => {
         route: { kind: 'direct' as const, profileId: '', insecureTls: false },
       },
     }),
+    requestScope: vi
+      .fn()
+      .mockImplementation(
+        (
+          _handle: string,
+          _relPath: string,
+          _envRelPath: string,
+          requestVariables: ApiRequest['variables'],
+        ): Promise<ApiRequestScopeResult> =>
+          Promise.resolve({
+            variables: [
+              ...requestVariables.map((variable) => ({
+                name: variable.name,
+                value: variable.value,
+                scope: 'request' as const,
+                from: '',
+                overridden: false,
+                refused: '',
+              })),
+              ...Object.entries(values).map(([name, value]) => ({
+                name,
+                value,
+                scope: 'environment' as const,
+                from: DEV_ENV.relPath,
+                overridden: false,
+                refused: '',
+              })),
+            ],
+          }),
+      ),
+  })
+  it("a folder's variable binds the address and offers that folder to edit", async () => {
+    const folderScope: ApiRequestScopeResult = {
+      variables: [
+        {
+          name: 'baseUrl',
+          value: 'https://folder.example.test',
+          scope: 'folder',
+          from: 'users',
+          overridden: false,
+          refused: '',
+        },
+      ],
+    }
+    const { bar } = await mountApp({
+      requestScope: vi.fn().mockResolvedValue(folderScope),
+    })
+    await openRequest(bar)
+
+    await vi.waitFor(() => expect(marks()[0]?.dataset.tone).toBe('reference'))
+    fireEvent.click(marks()[0])
+    await vi.waitFor(() => expect(variableMenu()).toBeTruthy())
+
+    expect(variableMenu()?.textContent).toContain('https://folder.example.test')
+    expect(variableMenu()?.textContent).toContain('from folder users')
+    expect(
+      [...(variableMenu()?.querySelectorAll('button') ?? [])].some((button) =>
+        (button.textContent ?? '').includes('Edit folder users'),
+      ),
+    ).toBe(true)
+    expect(
+      [...(variableMenu()?.querySelectorAll('button') ?? [])].some((button) =>
+        (button.textContent ?? '').includes('Add baseUrl'),
+      ),
+    ).toBe(false)
+  })
+
+  it('does not paint an unanswered address while the scope answer is in flight', async () => {
+    let resolveScope!: (result: ApiRequestScopeResult) => void
+    const requestScope = vi.fn().mockImplementation(
+      () =>
+        new Promise<ApiRequestScopeResult>((resolve) => {
+          resolveScope = resolve
+        }),
+    )
+    const { bar } = await mountApp({ requestScope })
+    const opening = openRequest(bar)
+
+    await vi.waitFor(() => expect(requestScope).toHaveBeenCalled())
+    expect(marks()[0]?.dataset.tone).toBe('reference')
+
+    resolveScope({
+      variables: [
+        {
+          name: 'baseUrl',
+          value: 'https://folder.example.test',
+          scope: 'folder',
+          from: 'users',
+          overridden: false,
+          refused: '',
+        },
+      ],
+    })
+    await opening
+    await vi.waitFor(() => expect(marks()[0]?.dataset.tone).toBe('reference'))
   })
 
   it('an environment that answers the name leaves the mark ordinary, and says what it is', async () => {
@@ -3660,9 +3873,20 @@ describe('a variable in the address says whether anything answers it', () => {
           route: { kind: 'direct' as const, profileId: '', insecureTls: false },
         },
       }),
+      requestScope: vi.fn().mockResolvedValue({
+        variables: [
+          {
+            name: 'baseUrl',
+            value: '',
+            scope: 'vault',
+            from: '',
+            overridden: false,
+            refused: '',
+          },
+        ],
+      }),
     })
     await openRequest(bar)
-
     await vi.waitFor(() => expect(marks()[0]?.dataset.tone).toBe('secret'))
 
     fireEvent.click(marks()[0])

@@ -310,6 +310,16 @@ type APICollectionService interface {
 	// vault, which is a call that can be cancelled — the only thing in the
 	// snapshot that is not a file read.
 	Snapshot(ctx context.Context, h apicoll.HandleID, relPath, envRelPath string) (SendInputs, error)
+	// RequestScope returns the same request-to-vault resolution order as
+	// Snapshot, with every row and its source exposed for the Variables tab.
+	// variables is the draft's request layer; it replaces only the stored
+	// request rows for this call.
+	RequestScope(
+		ctx context.Context,
+		h apicoll.HandleID,
+		relPath, envRelPath string,
+		variables []apicoll.Param,
+	) (RequestScopeResult, error)
 }
 
 // APICollectionOperation is the typed operation for every api.collections.*
@@ -788,12 +798,12 @@ func (s *apiCollectionService) Snapshot(ctx context.Context, h apicoll.HandleID,
 	// request file goes into git and a credential belongs in the vault, so
 	// the two meeting is refused rather than resolved silently in either
 	// direction.
-	own, ownErr := apicoll.RequestLookup(req, env)
-	if ownErr != nil {
-		return inputs, ownErr
+	look, lookupErr := requestLookup(req, env, look, secrets)
+	if lookupErr != nil {
+		return inputs, lookupErr
 	}
 
-	resolved, err := apicoll.Substitute(req, apicoll.Chain(own, look, secrets))
+	resolved, err := apicoll.Substitute(req, look)
 	if err != nil {
 		// THE INPUTS COME BACK WITH THE ERROR, and that is the one thing
 		// this signature does that a plain failure would not. An unresolved

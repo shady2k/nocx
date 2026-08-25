@@ -92,6 +92,27 @@ func (e *UnresolvedError) Unwrap() error { return ErrUnresolvedVariable }
 // the table and something else on the wire.
 var ErrSecretShadowed = errors.New("apicoll: a request variable would shadow a name this environment declares secret")
 
+type secretShadowedError struct {
+	name string
+}
+
+func (e *secretShadowedError) Error() string {
+	return fmt.Sprintf("%s: %q", ErrSecretShadowed, e.name)
+}
+
+func (e *secretShadowedError) Unwrap() error { return ErrSecretShadowed }
+
+// SecretShadowedName returns the request or folder variable name that caused
+// ErrSecretShadowed. The name is for the scope explanation only; callers must
+// still preserve the refusal sentence from the original error.
+func SecretShadowedName(err error) (string, bool) {
+	var shadow *secretShadowedError
+	if !errors.As(err, &shadow) {
+		return "", false
+	}
+	return shadow.name, true
+}
+
 // RequestLookup answers a request's own variables and its inherited folder
 // variables, refusing either scope when it would shadow an environment
 // secret. Folder rows arrive nearest-first from ReadRequest, so the existing
@@ -114,7 +135,7 @@ func RequestLookup(r Request, env Environment) (Lookup, error) {
 				continue
 			}
 			if env.IsSecret(name) {
-				return fmt.Errorf("%w: %q", ErrSecretShadowed, name)
+				return &secretShadowedError{name: name}
 			}
 			// FIRST ROW WINS, so a duplicate name is the one nearer the top
 			// of the table — or, for inherited rows, the nearest folder.

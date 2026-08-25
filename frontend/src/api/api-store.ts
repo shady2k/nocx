@@ -63,6 +63,7 @@ import { createSignal, untrack } from 'solid-js'
 import { showConfirm } from '../ui/dialog'
 import type { ApiConnection, ApiWorkbenchServices, ImportSource } from './api-client'
 import type { ApiImportCurlResult } from '../generated/api.import.curl'
+import type { ApiRequestScopeResult } from '../generated/api.request.scope'
 import type { FilesChanged } from '../generated/files.changed'
 import {
   adoptCreatedCollection,
@@ -216,32 +217,24 @@ interface ApiSelection {
   readonly relPath: string
 }
 
-/** What the active environment answers, as the store holds it: the plain
- *  values, and the NAMES of the ones whose value lives in the vault. It is
- *  the environment document's own two fields — nothing derived, so nothing
- *  to fall out of step. */
 /**
- * Who answers a variable, and with what.
+ * Who answers a variable, and with what, from the backend-computed scope.
  *
- * `value` is null for every scope that has no value to give a renderer:
- * `secret` never does (it is the vault's, ADR-0021), `none` has none, and
- * `unknown` has not been read. A scope that carries a value carries it as a
- * string, never as "the value or ''": an empty BOUND value is a value, and
- * the whole of §6.5 rests on that distinction.
+ * `value` is null for the vault and for names with no answer. `from` carries
+ * the folder path only for a folder answer; the renderer never derives
+ * precedence or reads a second source.
  */
 export interface VariableAnswer {
-  readonly scope: 'request' | 'environment' | 'secret' | 'none' | 'unknown'
+  readonly scope: 'request' | 'folder' | 'environment' | 'secret' | 'none' | 'unknown'
   readonly value: string | null
+  readonly from: string | null
 }
 interface ApiFolderVariablesResult {
   readonly variables: readonly ApiParam[] | null
   readonly error: string
 }
 
-interface EnvironmentKnowledge {
-  readonly values: Readonly<Record<string, string>>
-  readonly secretVars: readonly string[]
-}
+export type ApiScopeVariable = ApiRequestScopeResult['variables'][number]
 
 export interface ApiStore {
   collections(): readonly ApiOpenCollection[]
@@ -298,6 +291,7 @@ export interface ApiStore {
   activeEnvironment(): string
   selected(): ApiSelection | null
   draft(): ApiRequest | null
+  saved(): ApiRequest | null
   /** True while the draft differs from what the file last answered. */
   dirty(): boolean
   /** The exchanges of the request that is OPEN, newest first — never the
@@ -319,18 +313,13 @@ export interface ApiStore {
   pending(): ApiRun | null
 
   /**
-   * The names the active environment answers, or null for "nobody has said
-   * yet" — a read that has not happened or one that failed.
-   *
-   * Null is not an empty set and a surface must not treat it as one: empty
-   * means this environment answers nothing, null means do not claim either
-   * way. Marking every reference as unanswered while a listing is in flight
-   * is how a person learns to ignore the colour.
+   * Who answers a name according to the backend-computed scope rows, or
+   * `unknown` while that scope has not been read.
    */
-  /** Who answers a name and with what, in the backend's own order: this
-   *  request, then the environment, then the vault for a secret one. */
   variableAnswer(name: string): VariableAnswer
 
+  /** The backend-computed request, folder, environment and vault rows. */
+  scopeVariables(): readonly ApiScopeVariable[] | null
   /** Give a secret variable its value — the one call that carries a
    *  credential. Answers whether it landed; the value is never kept. */
   bindSecret(variable: string, value: string): Promise<boolean>
@@ -892,81 +881,81 @@ export function createApiStore(
   const activeEnvironment = (): string => environmentFor(activeCollection())
 
   /**
-   * The names the ACTIVE environment answers — or null for "nobody has said
-   * yet".
+   * The backend-computed scope rows for the OPEN request, or null while no
+   * current scope answer exists.
    *
-   * NULL IS A THIRD STATE AND IT CARRIES ITS WEIGHT. A surface marking an
-   * unanswered variable must not do it from an empty set it got because a
-   * read failed, or because none has been made yet: that paints every
-   * reference as broken for as long as the panel is starting, which teaches
-   * the reader to ignore the colour. Empty means "this environment answers
-   * nothing"; null means "do not say".
+   * NULL IS A THIRD STATE... A surface marking an unanswered variable must
+   * not do it from an empty set it got because a read is in flight: that
+   * paints every reference as broken while the panel is starting.
+   * An empty array means the backend answered that nothing resolved.
    *
-   * A SECRET VARIABLE COUNTS AS ANSWERED. Its value lives in the vault and
-   * the renderer will never see it (ADR-0021); what the environment file
-   * declares is the NAME, and a name that is declared is a name that
-   * resolves at send time.
+   * Secret rows carry their NAME and no value; the renderer never receives
+   * the vault's bytes (ADR-0021).
    */
-  const [environmentKnowledge, setEnvironmentKnowledge] = createSignal<EnvironmentKnowledge | null>(
-    null,
-  )
+  const [scopeVariables, setScopeVariables] = createSignal<readonly ApiScopeVariable[] | null>(null)
+  let scopeRevision = 0
 
   /**
    * WHO ANSWERS A NAME, and with what — the one accessor for it.
    *
-   * The order is the backend's own (apicoll.Chain, built by Snapshot): the
-   * REQUEST's own variables first, then the environment's, then the vault
-   * for a name the environment declares secret. Stating it in one function
-   * is what keeps this side agreeing with the side that actually
-   * substitutes — three accessors, each deriving part of the answer, is how
-   * a panel comes to say `bound` about a name the sender then refuses.
+   * The backend scope rows are the only precedence decision here. They are
+   * already ordered winner first, so this function only selects the row and
+   * maps its wire vocabulary to the address field's vocabulary.
    *
-   * `unknown` is not a hedge and not the same as `unbound`: until an
-   * environment has been read, a name the REQUEST does not answer has no
-   * answer here, and painting it as unanswered would cry wolf for as long
-   * as a listing is in flight.
+   * `unknown` is not a hedge and not the same as `unbound`: until a scope
+   * refresh answers, painting a name as unanswered would cry wolf while the
+   * answer is in flight.
    */
   const variableAnswer = (name: string): VariableAnswer => {
-    // The DRAFT, not the file: a person who has just typed a row expects the
-    // address above it to stop complaining, and the draft is what a send
-    // would write and then use.
-    const own = untrack(draft)?.variables.find((v) => v.enabled && v.name === name)
-    if (own !== undefined) return { scope: 'request', value: own.value }
+    const rows = scopeVariables()
+    if (rows === null) return { scope: 'unknown', value: null, from: null }
 
-    const known = environmentKnowledge()
-    if (known === null) return { scope: 'unknown', value: null }
-    if (known.secretVars.includes(name)) return { scope: 'secret', value: null }
-    if (Object.prototype.hasOwnProperty.call(known.values, name)) {
-      return { scope: 'environment', value: known.values[name] }
+    const row = rows.find((candidate) => candidate.name === name)
+    if (row === undefined) return { scope: 'none', value: null, from: null }
+
+    if (row.scope === 'vault') return { scope: 'secret', value: null, from: null }
+    return {
+      scope: row.scope,
+      value: row.value,
+      from: row.scope === 'folder' ? row.from : null,
     }
-    return { scope: 'none', value: null }
   }
 
-  /**
-   * Re-read what the active environment answers.
-   *
-   * Called where the answer can change: after a listing (a colleague's edit
-   * arrives that way), and when the environment is switched. Not an effect —
-   * this store has none, and a read that fires from a signal read is a read
-   * nobody can find later.
-   */
+  const refreshScope = async (): Promise<void> => {
+    const revision = ++scopeRevision
+    setScopeVariables(null)
+    const target = untrack(selected)
+    if (target === null) return
+    const envRelPath = untrack(() => environmentFor(target.handle))
+    const variables = untrack(draft)?.variables ?? []
+    const isCurrent = (): boolean => {
+      const current = untrack(selected)
+      return (
+        scopeRevision === revision &&
+        current?.handle === target.handle &&
+        current.relPath === target.relPath &&
+        untrack(() => environmentFor(target.handle)) === envRelPath
+      )
+    }
+    try {
+      const result = await services.requestScope(
+        target.handle,
+        target.relPath,
+        envRelPath,
+        variables,
+      )
+      if (isCurrent()) setScopeVariables(result.variables)
+    } catch (err) {
+      if (isCurrent()) {
+        setScopeVariables(null)
+        setError(message(err))
+      }
+    }
+  }
+
+  /** Refresh the complete backend-computed scope after a source change. */
   const refreshVariables = async (): Promise<void> => {
-    const handle = untrack(activeCollection)
-    const relPath = untrack(() => environmentFor(handle))
-    if (handle === '' || relPath === '') {
-      // No environment chosen answers nothing, and that is a FACT rather than
-      // an absence of one: every `{{name}}` in the address is unanswered, and
-      // saying so is the whole reason a person can be told what to do next.
-      setEnvironmentKnowledge({ values: {}, secretVars: [] })
-      return
-    }
-    const env = await readEnvironment(relPath)
-    // A read that failed is not a claim that nothing is bound.
-    if (env === null) {
-      setEnvironmentKnowledge(null)
-      return
-    }
-    setEnvironmentKnowledge({ values: env.values, secretVars: env.secretVars })
+    await refreshScope()
   }
 
   const setEnvironment = (relPath: string): void => {
@@ -1058,11 +1047,8 @@ export function createApiStore(
     await readCollections()
     publishedPaths = null
     await syncWatchSet()
-    // The listing is also how a colleague's edit to an environment file
-    // arrives, so what that environment ANSWERS is re-read with it. After
-    // the listing rather than beside it: which environment is active can
-    // depend on what the listing just brought (a collection with exactly one
-    // environment is that environment's).
+    // The listing may have changed a folder variable, so refresh the
+    // backend-computed scope after it completes.
     await refreshVariables()
   }
 
@@ -1246,6 +1232,7 @@ export function createApiStore(
       setDraft(adopted)
       setSaved(adopted)
       setError('')
+      await refreshVariables()
     } catch (err) {
       // The previous request stays in the form. Clearing it would make one
       // unreadable file look like the whole collection went away.
@@ -1335,6 +1322,7 @@ export function createApiStore(
 
   const editDraft = (next: ApiRequest): void => {
     applyDraft(next)
+    void refreshScope()
     scheduleSave()
   }
 
@@ -1758,8 +1746,8 @@ export function createApiStore(
     try {
       await services.bindSecret(handle, relPath, variable, value)
       setError('')
-      // What the environment ANSWERS has changed — the name is bound now,
-      // so a reference to it stops being unanswered in the address field.
+      // The backend scope answer has changed, so a reference to it stops
+      // being unanswered in the address field.
       await refreshVariables()
       return true
     } catch (err) {
@@ -2033,11 +2021,13 @@ export function createApiStore(
     activeEnvironment,
     selected,
     draft,
+    saved,
     dirty,
     runs: visibleRuns,
     notes,
     error,
     loading,
+    scopeVariables,
     pending,
     defaultRoot,
     watchMode,

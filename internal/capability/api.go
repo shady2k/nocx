@@ -887,7 +887,7 @@ func (s *apiCollectionService) resolveRequestSecrets(ctx context.Context, req ap
 			return apicoll.Request{}, nil, err
 		}
 	}
-	if out.Body.Kind == apicoll.BodyRaw || out.Body.Kind == apicoll.BodyForm {
+	if out.Body.Kind == apicoll.BodyRaw || out.Body.Kind == apicoll.BodyJSON || out.Body.Kind == apicoll.BodyForm {
 		if out.Body.Text, err = resolve(out.Body.Text); err != nil {
 			return apicoll.Request{}, nil, err
 		}
@@ -899,7 +899,7 @@ func appendUniquePlaced(dst []PlacedSecret, refs ...PlacedSecret) []PlacedSecret
 	for _, ref := range refs {
 		found := false
 		for _, existing := range dst {
-			if existing.Name == ref.Name {
+			if existing.Name == ref.Name && existing.Value == ref.Value {
 				found = true
 				break
 			}

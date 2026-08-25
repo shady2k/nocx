@@ -401,9 +401,6 @@ func validVarName(name string) bool {
 	return true
 }
 
-// MaxVarNameLen is the bound validVarName applies.
-func MaxVarNameLen() int { return maxVarNameLen }
-
 // ExactReference reports whether s is EXACTLY one `{{name}}` reference and
 // the name inside it — the whole string and nothing else. It is the grammar
 // validVarName applies, exported for a caller that must know whether a

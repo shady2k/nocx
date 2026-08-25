@@ -20,6 +20,7 @@ import { AboutClient } from './about-client'
 import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
 import { VaultClient } from './vault-client'
+import type { SecretPickerSource } from './ui/secret-picker'
 import { DialogClient } from './dialog-client'
 import { createVaultState, SetupDialog, UnlockDialog } from './vault'
 import { ConnectionPasswordPrompt } from './connection-password-prompt'
@@ -187,6 +188,20 @@ async function main() {
     void vaultController.refresh()
   })
   void vaultController.refresh()
+
+  const apiSecretSource: SecretPickerSource = {
+    status: async () => ({ state: (await vaultClient.status()).state }),
+    list: async () => (await vaultClient.inventory()).entries,
+    requestUnseal: async () => {
+      vaultController.openUnlock('use its secrets')
+      await vaultClient.inventory()
+    },
+    requestSetup: async () => {
+      vaultController.openSetup()
+      return true
+    },
+    requestCreate: (name) => openSettingsPane().startNewSecret(name),
+  }
 
   // ── Backend-initiated unlock requests ──────────────────────────────
   // The dispatcher's onVaultSealed handles renderer-initiated calls.
@@ -606,6 +621,9 @@ async function main() {
               uploadSurface.services.subscribeDropped(handler),
           }
         : undefined,
+      apiSecretSource,
+      () => vaultClient.inventory().then((inventory) => inventory.entries),
+      () => openSettingsPane().openPage('secrets'),
     ),
   )
 
@@ -758,6 +776,7 @@ async function main() {
     }
     return live
   }
+
 
   // The sidebar width controller (nocx-qmcu): the single owner of the
   // panel's width between the drag handle, the settings observer and the

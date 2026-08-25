@@ -28,6 +28,10 @@ export interface TextFieldMark {
    * flight is how a person learns to ignore the colour.
    */
   tone?: 'reference' | 'secret' | 'unknown'
+  /** The human-facing label painted over an opaque secret reference. */
+  displayText?: string
+  /** The opaque secret row handle, when this mark is a vault reference. */
+  secretHandle?: string
 }
 
 export interface TextFieldProps {
@@ -52,6 +56,8 @@ export interface TextFieldProps {
   value: string | number
   /** Fires on every keystroke (input event). */
   onInput?: (value: string) => void
+  /** Fires when the control receives focus. */
+  onFocus?: (event: FocusEvent) => void
   /**
    * Fires when focus leaves the input.
    *
@@ -59,6 +65,8 @@ export interface TextFieldProps {
    * typing the first character of an empty field, so `createFormValidation` marks
    * a field answered on blur rather than on input. See `ui/validation.ts`.
    */
+  /** Fires when a key reaches the input, before the surface handles it. */
+  onKeyDown?: (event: KeyboardEvent) => void
   onBlur?: (value: string) => void
   type?: 'text' | 'number' | 'password'
   placeholder?: string
@@ -186,7 +194,9 @@ export function TextField(props: TextFieldProps) {
         // eslint-disable-next-line solid/reactivity -- helper-boundary contract
         mirrorControlledValue(element, () => props.value)
       }}
+      onFocus={props.onFocus}
       onInput={onInput}
+      onKeyDown={props.onKeyDown}
       onBlur={onBlur}
       onScroll={followScroll}
     />
@@ -216,7 +226,9 @@ export function TextField(props: TextFieldProps) {
         // eslint-disable-next-line solid/reactivity -- same helper-boundary contract.
         mirrorControlledValue(element, () => props.value)
       }}
+      onFocus={props.onFocus}
       onInput={onInput}
+      onKeyDown={props.onKeyDown}
       onBlur={onBlur}
     />
   )
@@ -303,7 +315,7 @@ export function TextField(props: TextFieldProps) {
                       props.onMarkClick?.(mark, { x: e.clientX, y: e.clientY })
                     }}
                   >
-                    {run.text}
+                    {run.mark?.displayText ?? run.text}
                   </span>
                 </Show>
               )}

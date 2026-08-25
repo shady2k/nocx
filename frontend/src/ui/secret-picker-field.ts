@@ -89,7 +89,7 @@ export function createSecretPickerField(opts: {
   }
 
   const closeIfNoMatch = (filter: string): void => {
-    if (loadedEntries === null || filter === '') return
+    if (loadedEntries === null || loadedEntries.length === 0 || filter === '') return
     const needle = filter.toLowerCase()
     if (!loadedEntries.some((entry) => entry.name.toLowerCase().includes(needle))) close()
   }
@@ -97,7 +97,8 @@ export function createSecretPickerField(opts: {
   const findTrigger = (value: string, caret: number): Trigger | null => {
     const end = Math.max(0, Math.min(value.length, caret))
     let start = end
-    while (start > 0 && !/\s/.test(value[start - 1] ?? '')) start--
+    while (start > 0 && !/\s/.test(value[start - 1] ?? '') && value[start - 1] !== '@') start--
+    if (start > 0 && value[start - 1] === '@') start--
     if (start >= end || value[start] !== '@') return null
     return { from: start, to: end, filter: value.slice(start + 1, end) }
   }

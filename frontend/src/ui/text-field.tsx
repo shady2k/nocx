@@ -12,7 +12,7 @@ import { For, Show, Switch, Match, type JSX } from 'solid-js'
 import { Field } from './field'
 import { mirrorControlledValue } from './controlled-value'
 
-/** One marked span of the value. */
+/** One marked span of a field's text. `to` is exclusive. */
 export interface TextFieldMark {
   from: number
   to: number
@@ -20,6 +20,12 @@ export interface TextFieldMark {
    * What the mark says about the span — `reference` (the default) is "this
    * is a reference", `secret` is "and what it stands for is not readable
    * here", `unknown` is "and nothing answers it".
+   *
+   * Two tones and not a boolean because the third state is real and must not
+   * be drawn as either: a surface that does not yet KNOW whether a name is
+   * answered passes `reference`, and a warning colour appears only once
+   * somebody can say it is warranted. Crying wolf while a listing is in
+   * flight is how a person learns to ignore the colour.
    */
   tone?: 'reference' | 'secret' | 'unknown'
   /** The human-facing label painted over an opaque secret reference. */
@@ -50,6 +56,8 @@ export interface TextFieldProps {
   value: string | number
   /** Fires on every keystroke (input event). */
   onInput?: (value: string) => void
+  /** Fires when the control receives focus. */
+  onFocus?: (event: FocusEvent) => void
   /**
    * Fires when focus leaves the input.
    *
@@ -186,6 +194,7 @@ export function TextField(props: TextFieldProps) {
         // eslint-disable-next-line solid/reactivity -- helper-boundary contract
         mirrorControlledValue(element, () => props.value)
       }}
+      onFocus={props.onFocus}
       onInput={onInput}
       onKeyDown={props.onKeyDown}
       onBlur={onBlur}
@@ -217,6 +226,7 @@ export function TextField(props: TextFieldProps) {
         // eslint-disable-next-line solid/reactivity -- same helper-boundary contract.
         mirrorControlledValue(element, () => props.value)
       }}
+      onFocus={props.onFocus}
       onInput={onInput}
       onKeyDown={props.onKeyDown}
       onBlur={onBlur}

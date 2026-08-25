@@ -341,10 +341,12 @@ export class SecretPicker {
         // secret…" row, which is the whole answer to "there is nothing
         // here". Resolving a recalled command is different — what is
         // missing there is the key itself, and the empty state says so.
+        const initialFilter = this.pendingFilter ?? filter
+        this.pendingFilter = null
         this.state =
           this.purpose === 'resolve'
             ? { name: 'empty' }
-            : { name: 'list', entries: [], filter: '', selected: 0 }
+            : { name: 'list', entries: [], filter: initialFilter, selected: 0 }
         this.render()
         return
       }

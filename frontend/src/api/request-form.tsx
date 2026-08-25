@@ -195,7 +195,6 @@ function SecretTextField(
     const caret = input?.selectionStart ?? current.length
     openAt(caret, caret)
   }
-  onPickerReady?.(open)
 
   return (
     <TextField
@@ -206,6 +205,10 @@ function SecretTextField(
           return
         }
         props.onMarkClick?.(mark, at)
+      }}
+      onFocus={(event) => {
+        fieldProps.onFocus?.(event)
+        onPickerReady?.(open)
       }}
       onInput={(value) => {
         const input = props.id

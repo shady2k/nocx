@@ -502,10 +502,9 @@ func composeUnsent(r apicoll.Request) string {
 		b.WriteByte('\n')
 	}
 	b.WriteByte('\n')
-	switch r.Body.Kind {
-	case apicoll.BodyRaw, apicoll.BodyJSON, apicoll.BodyForm:
+	if r.Body.TransmitsText() {
 		b.WriteString(r.Body.Text)
-	case apicoll.BodyFile:
+	} else if r.Body.Kind == apicoll.BodyFile {
 		// The bytes were never read — that is the caller's to do (ErrFileBody)
 		// — so the run says which file it would have sent rather than
 		// pretending to show it.

@@ -106,3 +106,33 @@ func TestResolveRequestSecretsKeepsDistinctValuesForOneHandle(t *testing.T) {
 		t.Fatalf("placed secrets = %+v, want both values", placed)
 	}
 }
+
+func TestResolveRequestSecretsFollowsEveryBodyKind(t *testing.T) {
+	for _, tc := range []struct {
+		kind      string
+		transmits bool
+	}{
+		{kind: apicoll.BodyNone, transmits: false},
+		{kind: apicoll.BodyRaw, transmits: true},
+		{kind: apicoll.BodyJSON, transmits: true},
+		{kind: apicoll.BodyForm, transmits: true},
+		{kind: apicoll.BodyFile, transmits: false},
+	} {
+		t.Run(tc.kind, func(t *testing.T) {
+			request := apicoll.Request{Body: apicoll.Body{Kind: tc.kind, Text: resolverTestReference}}
+			resolved, _, err := (&apiCollectionService{
+				refs: &resolverTestRefs{value: func(int) string { return "resolved" }},
+			}).resolveRequestSecrets(context.Background(), request)
+			if err != nil {
+				t.Fatalf("resolveRequestSecrets: %v", err)
+			}
+			want := resolverTestReference
+			if tc.transmits {
+				want = "resolved"
+			}
+			if resolved.Body.Text != want {
+				t.Fatalf("body text = %q, want %q", resolved.Body.Text, want)
+			}
+		})
+	}
+}

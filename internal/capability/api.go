@@ -887,7 +887,7 @@ func (s *apiCollectionService) resolveRequestSecrets(ctx context.Context, req ap
 			return apicoll.Request{}, nil, err
 		}
 	}
-	if out.Body.Kind == apicoll.BodyRaw || out.Body.Kind == apicoll.BodyJSON || out.Body.Kind == apicoll.BodyForm {
+	if out.Body.TransmitsText() {
 		if out.Body.Text, err = resolve(out.Body.Text); err != nil {
 			return apicoll.Request{}, nil, err
 		}

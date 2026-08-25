@@ -96,6 +96,19 @@ const (
 	BodyFile = "file"
 )
 
+// TransmitsText reports whether Text is sent as the request body. This is the
+// one owner of the body-kind list shared by capability resolution and
+// apisend composition; keeping separate lists caused the JSON secret reference
+// regression where literal bytes reached the server.
+func (b Body) TransmitsText() bool {
+	switch b.Kind {
+	case BodyRaw, BodyJSON, BodyForm:
+		return true
+	default:
+		return false
+	}
+}
+
 type Body struct {
 	Kind    string `json:"kind"`
 	Text    string `json:"text,omitempty"`

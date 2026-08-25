@@ -14,6 +14,7 @@ import (
 	"sync/atomic"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/capability"
 )
 
@@ -254,14 +255,28 @@ func apiSecretCollectionWithBody(t *testing.T, baseURL, kind, source string) str
 	return root
 }
 
-func TestAPIRequestSend_SecretReferenceCoversEveryTransmittedBodyKind(t *testing.T) {
-	for _, kind := range []string{"raw", "json", "form"} {
-		for _, source := range []string{apiSecretReference, "{{secret:display name}}"} {
-			t.Run(kind+"/"+source, func(t *testing.T) {
+func TestAPIRequestSend_SecretReferenceCoversEveryBodyKind(t *testing.T) {
+	for _, body := range []struct {
+		kind      string
+		transmits bool
+	}{
+		{kind: apicoll.BodyNone, transmits: false},
+		{kind: apicoll.BodyRaw, transmits: true},
+		{kind: apicoll.BodyJSON, transmits: true},
+		{kind: apicoll.BodyForm, transmits: true},
+		{kind: apicoll.BodyFile, transmits: false},
+	} {
+		sources := []string{apiSecretReference}
+		if body.transmits {
+			sources = append(sources, "{{secret:display name}}")
+		}
+		for _, source := range sources {
+			t.Run(body.kind+"/"+source, func(t *testing.T) {
 				srv, received := apiSecretHTTPServer(t)
-				refs := &apiSecretRefs{value: apiSecretValue}
+				calls := &atomic.Int64{}
+				refs := &apiSecretRefs{value: apiSecretValue, calls: calls}
 				_, conn := newAPIWSServerWithSecretRefs(t, refs)
-				root := apiSecretCollectionWithBody(t, srv.URL, kind, source)
+				root := apiSecretCollectionWithBody(t, srv.URL, body.kind, source)
 				handle := openAPICollection(t, conn, root, 1)
 				resp := vaultCall(t, conn, "api.request.send", map[string]any{
 					"handle": handle, "relPath": "send.json",
@@ -274,19 +289,32 @@ func TestAPIRequestSend_SecretReferenceCoversEveryTransmittedBodyKind(t *testing
 					t.Fatalf("decode exchange: %v", err)
 				}
 				got := received.snapshot()
-				if source == apiSecretReference {
+				if body.transmits && source == apiSecretReference {
 					if got.hits != 1 || !strings.Contains(got.body, apiSecretValue) {
 						t.Fatalf("server received body %q in %d requests, want resolved value once", got.body, got.hits)
 					}
 					if strings.Contains(exchange.Request.Text, apiSecretValue) {
 						t.Fatalf("raw request contains secret value: %s", exchange.Request.Text)
 					}
-				} else {
+					if calls.Load() == 0 {
+						t.Fatal("resolver was not called for transmitted body text")
+					}
+				} else if body.transmits {
 					if got.hits != 0 {
 						t.Fatal("server was reached for an unresolved body secret")
 					}
 					if exchange.Failure == nil || !strings.Contains(exchange.Failure.Reason, "display name") {
 						t.Fatalf("failure = %+v, want the body reference named", exchange.Failure)
+					}
+				} else {
+					if body.kind == apicoll.BodyNone && got.hits != 1 {
+						t.Fatalf("none body reached server %d times, want once", got.hits)
+					}
+					if body.kind == apicoll.BodyFile && got.hits != 0 {
+						t.Fatal("file body reached server despite non-transmitted file contents")
+					}
+					if strings.Contains(exchange.Request.Text, apiSecretReference) && calls.Load() != 0 {
+						t.Fatalf("non-transmitted body invoked resolver and retained reference: %s", exchange.Request.Text)
 					}
 				}
 			})

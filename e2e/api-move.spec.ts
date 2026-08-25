@@ -159,6 +159,10 @@ test.describe('a request can be moved into a folder, and stays open', () => {
     expect(await requestMenu.locator('.ui-context-menu__label').allTextContents()).toEqual([
       'Duplicate',
       'Move to folder…',
+      // The act nocx-8aczn.10 added: a request can be put down, not only
+      // deleted. Read in full on purpose, so an act appearing is as visible
+      // here as an act going missing.
+      'Close request',
       'Delete request…',
     ])
     await requestMenu.getByRole('menuitem', { name: 'Move to folder…' }).click()

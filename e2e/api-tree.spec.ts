@@ -282,12 +282,20 @@ test.describe('the collections tree: folders, a row’s acts, and the mark that 
     await page.keyboard.press('Enter')
     await page.locator('#api-url').fill(SAVED_URL)
 
-    const save = page.locator('#api-save-request')
-    // Enabled BECAUSE the form is dirty — the state a person is in when they
-    // press it. Asserting it is enabled first is what makes a later failure
-    // read as "the write was refused" rather than "the button did nothing".
-    await expect(save).toBeEnabled()
-    await save.click()
+    // SAVE IS GONE (nocx-2aunx). The draft reaches its file when typing
+    // stops, so there is no button to press and nothing to assert enabled.
+    // What replaces it is the same guarantee stated as an observable event:
+    // Send offers to save first only while the draft is dirty, so the title
+    // going back to `Send this request` IS the write having landed. Waiting
+    // on that rather than on the coalescing interval is what keeps this spec
+    // off a duration — and asserting it before the re-read below is what
+    // still makes a later failure read as "the write was refused" rather
+    // than "the bytes had not been written yet".
+    await expect(workbench.getByRole('button', { name: 'Send', exact: true })).toHaveAttribute(
+      'title',
+      'Send this request',
+      { timeout: 15_000 },
+    )
 
     // ── The re-read, which is what makes the save a claim about the DISK ───
     //
@@ -338,6 +346,10 @@ test.describe('the collections tree: folders, a row’s acts, and the mark that 
     // `Move to folder…` is the act nocx-8aczn.2 added beside these two.
     await treeRow(page, workbench, ZEN).click({ button: 'right' })
     const fromTheRow = await menuLabels(requestMenu)
+    // `Close request` is NOT here, and its absence is the assertion: the act
+    // nocx-8aczn.10 added is offered only by a menu aimed at the request
+    // that is currently in the form, and this row is not that request. An
+    // item to put down something you are not holding is a door onto nothing.
     expect(fromTheRow).toEqual(['Duplicate', 'Move to folder…', 'Delete request…'])
 
     // ── Duplicate makes a copy that appears in the tree ───────────────────
@@ -357,8 +369,27 @@ test.describe('the collections tree: folders, a row’s acts, and the mark that 
     await expect(page.locator('.api-crumbs__name')).toHaveText(ZEN_COPY)
 
     // ── The header's ⋮ offers the SAME list ───────────────────────────────
+    //
+    // Compared against the row menu of the OPEN request rather than the one
+    // captured above. "Two doors, one list" is a claim about ONE request seen
+    // through two surfaces, and the list captured earlier was aimed at a
+    // different one — so comparing them would now assert that two doors
+    // pointing at two requests offer the same acts, which is not the promise
+    // and is not true. Aimed at the copy, both doors carry `Close request`,
+    // because for this request there is something to close.
+    await copy.click({ button: 'right' })
+    const fromTheOpenRow = await menuLabels(requestMenu)
+    expect(fromTheOpenRow).toEqual([
+      'Duplicate',
+      'Move to folder…',
+      'Close request',
+      'Delete request…',
+    ])
+    await page.keyboard.press('Escape')
+    await expect(requestMenu).toBeHidden()
+
     await page.locator('#api-request-menu').click()
-    expect(await menuLabels(requestMenu)).toEqual(fromTheRow)
+    expect(await menuLabels(requestMenu)).toEqual(fromTheOpenRow)
     await page.keyboard.press('Escape')
     await expect(requestMenu).toBeHidden()
 

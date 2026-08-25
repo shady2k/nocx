@@ -151,14 +151,35 @@ test.describe('a request inherits and sends a folder variable', () => {
     await expect(workbench.getByText('None yet. A URL written in', { exact: false })).toBeVisible()
     await folderRow.click()
 
-    const folderView = workbench.getByRole('region', { name: 'Folder variables' })
+    // THE FOLDER PAGE OPENS ON ITS CONTENTS (nocx-x3cax.6). The variables
+    // editor is the strip's second section rather than the top of the page,
+    // so the scope is reached here the way a person reaches it. The tab
+    // counts its rows — `Variables` bare, `Variables 1` once there is one —
+    // so it is matched on the word and not on the whole label.
+    const folderPage = workbench.locator('.api-folder')
+    await folderPage.getByRole('tab', { name: /^Variables\b/ }).click()
+
+    // AN EMPTY SCOPE IS NOT AN EMPTY TABLE. `EditableRowList` draws its
+    // `<table aria-label>` only once there is a row to put in it
+    // (ui/row-list.tsx), so before `Add variable` there is a sentence saying
+    // the folder declares nothing and the button that ends that — and the
+    // button is reached from the page, not from inside a table that does not
+    // exist yet. The old locator asked for `region`, which nothing here has
+    // ever been: a labelled `<table>` is `table`.
+    await expect(folderPage.getByText('No variables declared in this folder.')).toBeVisible()
+    await folderPage.getByRole('button', { name: 'Add variable' }).click()
+
+    const folderView = folderPage.getByRole('table', { name: 'Folder variables' })
     await expect(folderView).toBeVisible({ timeout: 15_000 })
-    await folderView.getByRole('button', { name: 'Add variable' }).click()
     await folderView.locator('#api-folder-var-name-0').fill(VARIABLE_NAME)
     await folderView.locator('#api-folder-var-value-0').fill(VARIABLE_VALUE)
-    await folderView.getByRole('button', { name: 'Save', exact: true }).click()
+    // THERE IS NO SAVE (nocx-x3cax.7): the rows write themselves once typing
+    // stops. The page states the two states that exist, so this waits on
+    // `Saved` — the observable event that says the write landed — and never
+    // on the coalescing interval. `exact` is what keeps `Saving…` from
+    // satisfying it.
     await expect(folderView.locator('#api-folder-var-name-0')).toHaveValue(VARIABLE_NAME)
-    await expect(page.getByText('Saved folder variables', { exact: true })).toBeVisible()
+    await expect(folderPage.getByText('Saved', { exact: true })).toBeVisible({ timeout: 15_000 })
 
     const requestRow = workbench.locator('.api-tree__row').filter({ hasText: REQUEST_NAME })
     await expect(requestRow).toBeVisible({ timeout: 15_000 })

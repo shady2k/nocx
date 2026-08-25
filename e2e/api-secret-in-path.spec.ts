@@ -218,7 +218,17 @@ test.describe('a secret in the path: the value crosses to the server and never t
     // token's path and everything else is a 404, so this number cannot be
     // reached by a request carrying `{{token}}`.
     await expect(run.locator('.api-run__stats')).toContainText('HTTP status 200')
-    await expect(run.locator('[aria-label="Response body"]')).toContainText(SENT_MESSAGE_BODY)
+    // The body is LAID OUT FOR READING (nocx-7c39h, nocx-dhojo), so this
+    // surface indents the document and CodeMirror draws a line-number gutter
+    // beside it. The claim being made is that the bytes the server sent are
+    // what is on screen, so it is made against the editor's own content —
+    // never the gutter — with the whitespace the layout added taken back
+    // out. Raw, asserted below, is the surface that keeps them exactly.
+    const shownBody = run.locator('[aria-label="Response body"] .cm-content')
+    await expect(shownBody).toBeVisible()
+    expect((await shownBody.innerText()).replace(/\s/g, '')).toContain(
+      SENT_MESSAGE_BODY.replace(/\s/g, ''),
+    )
     // Said a second way, from the server's own record.
     expect(server.paths()).toEqual([`/bot${TELEGRAM_BOT_TOKEN}/sendMessage`])
 

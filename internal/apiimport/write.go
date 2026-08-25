@@ -217,15 +217,6 @@ func curlImport(line string) (postmanResult, error) {
 	return res, nil
 }
 
-func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
-}
-
 // collectionNameFor names a one-request collection after its host, which is
 // what a person recognises in a list of folders.
 func collectionNameFor(rawURL string) string {

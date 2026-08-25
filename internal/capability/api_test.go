@@ -8,17 +8,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apiimport"
 	"github.com/shady2k/nocx/internal/capability"
 )
-
-// stubBindWriter is the narrow consumer contract the importer declares: one
-// method, and the import test is not about where a secret ends up.
-type stubBindWriter struct{}
-
-func (stubBindWriter) Bind(context.Context, apibind.Key, []byte) error { return nil }
 
 // apiPaths is a storage.Paths whose three roles land under one test root, so
 // a created collection goes there rather than into the developer's own app
@@ -338,14 +331,12 @@ func TestAPICollectionService_ListOpenReportsADeadFolderBesideALiveOne(t *testin
 // The import's own external call: the document it is told to read. A path
 // that is not a regular file is refused BY NAME rather than opened — a fifo
 // would block the read for as long as nothing wrote to it, while holding
-// both the vault and api gates.
+// the api gate and execution lane.
 func TestAPIImportService_RefusesADocumentThatIsNotAFile(t *testing.T) {
 	op := capability.NewAPIImportOperation(
-		capability.Gate(capability.GateVault, 1, 64, 5*time.Second),
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apiimport.NewOSFS(),
-		stubBindWriter{},
 		// No fetcher: this test is about the two entrances that reach no
 		// network, and a build without one is a coherent build (it refuses
 		// the URL entrance by name — api_import_url_test.go).
@@ -404,11 +395,9 @@ func TestAPIImportService_RefusesADocumentThatIsNotAFile(t *testing.T) {
 // makes: a document apiimport cannot parse.
 func TestAPIImportService_ImportsADocumentItWasHandedTheBytesOf(t *testing.T) {
 	op := capability.NewAPIImportOperation(
-		capability.Gate(capability.GateVault, 1, 64, 5*time.Second),
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apiimport.NewOSFS(),
-		stubBindWriter{},
 		// No fetcher: this test is about the two entrances that reach no
 		// network, and a build without one is a coherent build (it refuses
 		// the URL entrance by name — api_import_url_test.go).

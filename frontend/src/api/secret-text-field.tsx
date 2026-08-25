@@ -24,12 +24,28 @@ export function secretMarks(
         secretHandle: reference.name,
       }
     }
+    if (vaultState === 'sealed') {
+      return {
+        from: reference.from,
+        to: reference.to,
+        tone: 'secret' as const,
+        displayText: 'Vault locked — unlock to view',
+        secretHandle: reference.name,
+      }
+    }
+    if (vaultState === 'unsealed') {
+      return {
+        from: reference.from,
+        to: reference.to,
+        tone: 'unknown' as const,
+        displayText: 'Secret not on this machine',
+        secretHandle: reference.name,
+      }
+    }
     return {
       from: reference.from,
       to: reference.to,
-      tone: vaultState === 'sealed' ? ('secret' as const) : ('unknown' as const),
-      displayText:
-        vaultState === 'sealed' ? 'Vault locked — unlock to view' : 'Secret not on this machine',
+      tone: 'reference' as const,
       secretHandle: reference.name,
     }
   })

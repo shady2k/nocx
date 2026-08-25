@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.access.changed.schema.json",
+  "title": "SandboxAccessChanged",
+  "description": "Path-free invalidation for the in-memory sandbox access inbox. Clients re-list; private event metadata is never broadcast.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["revision"],
+  "properties": {
+    "revision": { "type": "integer", "minimum": 0 }
+  }
+}

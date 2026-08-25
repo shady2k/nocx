@@ -3469,6 +3469,7 @@ describe('a token pasted into the Auth tab is sent as the literal it is', () => 
 function paneHostFake(over: Partial<PaneHost> = {}): PaneHost {
   return {
     setTitle: vi.fn(),
+    updateTooltip: vi.fn(),
     requestAttention: vi.fn(),
     requestClose: vi.fn(),
     contentSettled: vi.fn(),

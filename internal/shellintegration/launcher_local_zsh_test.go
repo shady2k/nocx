@@ -124,9 +124,9 @@ func TestLocalZshRcfile_RequiresEnhancedSession(t *testing.T) {
 // capability in TMPDIR — and a directory another user can read makes the
 // capability theirs.
 func TestWriteLocalZDOTDIR_MatchesSelfDeleteGuardAndStaysPrivate(t *testing.T) {
-	dir, err := WriteLocalZDOTDIR("# test zshrc\n")
+	dir, err := writeLocalZDOTDIRIn("# test zshrc\n", t.TempDir())
 	if err != nil {
-		t.Fatalf("WriteLocalZDOTDIR: %v", err)
+		t.Fatalf("writeLocalZDOTDIRIn: %v", err)
 	}
 	defer func() { _ = os.RemoveAll(dir) }()
 
@@ -167,13 +167,12 @@ func TestWriteLocalZDOTDIR_LeavesNothingBehindWhenItCannotWrite(t *testing.T) {
 	if err := os.Mkdir(readOnly, 0o500); err != nil {
 		t.Fatalf("mkdir: %v", err)
 	}
-	t.Setenv("TMPDIR", readOnly)
 	if os.Geteuid() == 0 {
 		t.Skip("running as root: mode 0500 does not refuse root, so there is no failure to observe")
 	}
 
-	if _, err := WriteLocalZDOTDIR("# unreachable\n"); err == nil {
-		t.Fatal("WriteLocalZDOTDIR must fail when the temp directory refuses creation")
+	if _, err := writeLocalZDOTDIRIn("# unreachable\n", readOnly); err == nil {
+		t.Fatal("writeLocalZDOTDIRIn must fail when the parent directory refuses creation")
 	}
 	entries, err := os.ReadDir(readOnly)
 	if err != nil {

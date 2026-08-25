@@ -68,9 +68,9 @@ func TestLocalBashRcfile_RequiresEnhancedSession(t *testing.T) {
 // and every session would leave a file containing the capability in TMPDIR.
 // The file is created 0600 with O_EXCL from the start.
 func TestWriteLocalRcfile_MatchesSelfDeleteGuard(t *testing.T) {
-	path, err := WriteLocalRcfile("# test rcfile\n")
+	path, err := writeLocalRcfileIn("# test rcfile\n", t.TempDir())
 	if err != nil {
-		t.Fatalf("WriteLocalRcfile: %v", err)
+		t.Fatalf("writeLocalRcfileIn: %v", err)
 	}
 	defer func() { _ = os.Remove(path) }()
 	name := filepath.Base(path)

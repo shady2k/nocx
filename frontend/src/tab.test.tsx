@@ -110,6 +110,15 @@ describe('Tab', () => {
     expect(tab.hasAttribute('data-agent-status')).toBe(false)
   })
 
+  it('prefixes a sandboxed tab name with the shield before every other marker', () => {
+    subject({ sandboxed: true, pinned: true, warning: true, title: 'Project shell' })
+
+    const line = screen.getByRole('tab').querySelector('.nocx-tab-line')
+    expect(line?.firstElementChild?.classList.contains('nocx-tab-sandboxed-marker')).toBe(true)
+    expect(line?.firstElementChild?.querySelector('svg')).not.toBeNull()
+    expect(line?.querySelector('.nocx-tab-title')?.textContent).toBe('Project shell')
+  })
+
   it('sets title (tooltip)', () => {
     subject({ tooltip: 'My terminal' })
     const tab = screen.getByRole('tab')

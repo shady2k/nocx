@@ -455,9 +455,9 @@ export class ScrollbackController {
    * scrollback. What is left here is the part that is genuinely the
    * controller's, because it is about the VIEW rather than about the blocks.
    */
-  restorePast(blocks: HTMLElement[]): void {
+  restorePast(blocks: HTMLElement[], boundaryLabel = 'Previous session'): void {
     if (blocks.length === 0) return
-    this._blockManager.restorePast(blocks)
+    this._blockManager.restorePast(blocks, boundaryLabel)
     // AND LAND AT THE NEWEST BLOCK, which is where a terminal always puts
     // you. The insert goes ABOVE everything, so the scroller keeps the
     // offset it had — 0, on a pane that has just been built — and the person

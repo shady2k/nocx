@@ -81,6 +81,8 @@ export interface PaneView {
   /** Whether the backend has this tab pinned. The strip draws the mark and
    *  places the tab (layout/strip-order.ts); the flag is stored. */
   readonly pinned?: boolean
+  /** True only after the backend confirms native sandbox readiness. */
+  readonly sandboxed?: boolean
   readonly paneId: string
   /** Which group this row is drawn under (nocx-isoph.5). The AXIS is the
    *  caller's — workspace here, `descriptor.surfaceType` in nocx-jv3q.1,
@@ -116,6 +118,7 @@ interface PaneDisplayRecord {
   pinned: boolean
   groupKey: string
   depth: number
+  sandboxed: boolean
 }
 
 /** What stands above one group of rows, or null for a group that draws no
@@ -661,6 +664,7 @@ abstract class TabStripBase implements TabStrip {
             adoptable={display.records[item.id]?.adoptable === true}
             warning={display.records[item.id]?.warning === true}
             warningLabel={display.records[item.id]?.warningLabel || undefined}
+            sandboxed={display.records[item.id]?.sandboxed === true}
             onAdopt={item.onAdopt ?? undefined}
             title={display.records[item.id]?.title ?? ''}
             tooltip={display.records[item.id]?.tooltip ?? ''}
@@ -864,11 +868,6 @@ abstract class TabStripBase implements TabStrip {
                   {
                     id: 'quick-connect',
                     label: 'Quick connect…',
-                    // The marks are the ones each action already wears
-                    // elsewhere in the product — the key that opens the
-                    // secret picker, the layers that stand for a workspace —
-                    // so the menu teaches the glyph a person will next meet
-                    // on a button rather than inventing a second set.
                     icon: PlugIcon,
                     onSelect: () => this.onQuickConnect?.(),
                   },
@@ -995,6 +994,7 @@ abstract class TabStripBase implements TabStrip {
         pinned: tab.pinned === true,
         groupKey: tab.groupKey ?? '',
         depth: tab.depth ?? 0,
+        sandboxed: tab.sandboxed === true,
       })
     }
 
@@ -1015,6 +1015,7 @@ abstract class TabStripBase implements TabStrip {
       pinned: tab.pinned === true,
       groupKey: tab.groupKey ?? '',
       depth: tab.depth ?? 0,
+      sandboxed: tab.sandboxed === true,
     })
 
     // Link pane to button (aria-labelledby)

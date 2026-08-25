@@ -1,0 +1,47 @@
+# Sandbox grant model and shield conversion
+
+- **Status:** Approved; entry-point and diagnostics/profile sections amended by [ADR-0044](../../decisions/0044-sandbox-command-statistics-and-workspace-profiles.md)
+- **Date:** 2026-08-22
+- **Decision:** [ADR-0043](../../decisions/0043-sandbox-grants-and-the-shield-entry.md)
+
+## Goal
+
+Represent sandbox authority as an immutable pane-subject grant and provide the initial launch path through the activity-bar shield. ADR-0044 subsequently adds the exact `/sandbox` command as a second entry into the same conversion controller; it does not add a second authority path.
+
+## Persistence and startup
+
+`panes` contains only durable pane facts. `sandbox_grants(pane_id UNIQUE, version, issued_at, workspace, payload)` records the realized authority. `payload` mirrors the enforced `open.result.sandbox` metadata for a future explicit restart-with-rights flow; this change does not read it in the UI.
+
+A startup transaction selects open panes joined to `sandbox_grants`, marks them closed, and dissolves empty tabs and workspaces using the existing layout rules. Pane rows and ledger anchors survive. `layout.read` exposes `sandboxGranted` as an annotation derived from the join.
+
+## Open gate and enforcement ordering
+
+A sandbox `open` must name an open pane with no existing grant. Duplicate grants return `-32602`; lookup/storage failures remain internal errors. After `sandbox.BuildPolicy` realizes canonical roots, the PTY boundary invokes a grant callback before `StartWithSize`. Grant insertion failure closes prepared resources and no helper starts. If process start or native readiness fails after insertion, the launch path removes the grant through the same serialized repository writer before returning; rollback failure remains fail-closed and is reported with the setup failure. Native readiness is the boundary after which the grant is immutable and the session may register.
+
+## Shield eligibility
+
+The shield is hidden when `sandbox.enabled` is false unless the active tab is already sandboxed. Applying sandbox is disabled unless `sandbox.status.available` is true, the active surface is a local terminal, and its cwd came from verified OSC 7. The composition root retains the complete `SandboxStatus` rather than collapsing it to a boolean, so an unavailable shield title carries the backend's safe detail or reason. A sandboxed active tab keeps the shield visible and selected even if the feature flag or sandbox backend becomes unavailable; removing sandbox needs only a verified local cwd. A ready title names the workspace and whether the action applies or removes sandbox.
+
+The activity bar's top zone owns action buttons that sit beside view icons without activating a view. The shield renders there immediately after Files; it is not part of the Files panel header. It uses the UI kit `IconButton` and existing `ShieldIcon`.
+
+A confirmed sandbox tab prefixes its title line with `ShieldIcon`. The marker is the first element of the name line; pin, warning, activity, title, cwd, and status follow it.
+
+## Conversion
+
+Clicking a ready shield disables it for the duration of the conversion, then opens the existing permission dialog with the verified cwd supplied as the workspace; the initial native picker is skipped, while the dialog's per-grant folder pickers remain native. Confirmation creates a new sandbox pane. The source pane is captured before creation. On create acknowledgement and successful transcript installation the new durable tab replaces the source tab id in the workspace's cached order, then the source pane closes. On create or transcript-installation failure the failed replacement closes, the source remains unchanged, and transcript-installation failure produces a visible error.
+
+Removing sandbox is the reverse replacement. The selected shield creates an ordinary local pane with the verified current cwd carried in the strict `open.cwd` field. The backend accepts only an existing absolute local directory and canonicalizes symlinks; SSH and sandbox requests reject `cwd`. After create acknowledgement and transcript installation the new tab takes the old strip position and the sandbox pane closes. A failed replacement closes without touching the source; transcript-installation failure produces the same visible error. The immutable grant is not deleted or mutated; it remains attached to the closed historical pane.
+
+## Transcript handoff
+
+Before creating either replacement, `TerminalContent.captureConversionTranscript` snapshots frontend-owned presentation state: frozen command blocks, inherited restored blocks from earlier toggles, the settled normal xterm buffer as SGR, and the unsent editor document, selection, and scroll offset. Alternate-screen frames are deliberately omitted: they are a live program's repaintable screen, not terminal history.
+
+After the replacement session reports ready, `installConversionTranscript` renders the blocks through the existing `restoredBlock` grammar, restores the draft, and inserts a visible `Sandbox enabled — new shell` or `Sandbox removed — new shell` boundary. Only then may the source pane close. Failed creation or hydration leaves the source pane untouched. The handoff is in-memory and frontend-only; no PTY bytes or transcript enter JSON-RPC, the content database, or logs.
+
+## Removed paths
+
+The command palette has no `Sandboxed shell…` row. The tab-strip More menu has no `New sandboxed tab` row and no sandbox-enabled imperative state. `+`, Cmd/Ctrl+T, ordinary local creation, SSH creation, and Settings placement are unchanged.
+
+## Verification
+
+Backend tests cover grant insertion/existence/enumeration, startup sweep, duplicate-open refusal, fail-closed grant persistence, and `layout.read` annotation. Frontend tests cover every shield state, workspace override, panel action ordering, conversion readiness, and absence of the removed palette/menu entries. The e2e scenario verifies flag visibility, backend-dependent disabled state, palette absence, and conversion when native enforcement is available.

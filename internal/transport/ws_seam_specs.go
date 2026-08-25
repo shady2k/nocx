@@ -59,6 +59,38 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 			h := trustHostKeyHandlers{truster: s.hostKeyTruster, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleConnectionsTrustHostKey(ctx, req) }
 		}),
+		regResponder(s.lane, "sandbox.status", noParams(), func(r Responder) handlerFunc {
+			h := sandboxHandlers{svc: s.sandboxSvc, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleStatus(ctx, req) }
+		}),
+		regResponder(s.lane, "sandbox.access.status", noParams(), func(r Responder) handlerFunc {
+			h := sandboxAccessHandlers{inbox: s.sandboxAccess, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleStatus(ctx, req) }
+		}),
+		regResponder(s.lane, "sandbox.access.list", params(validateSandboxAccessListRaw), func(r Responder) handlerFunc {
+			h := sandboxAccessHandlers{inbox: s.sandboxAccess, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleList(ctx, req) }
+		}),
+		regResponder(s.lane, "sandbox.access.resolve", params(validateSandboxAccessResolveRaw), func(r Responder) handlerFunc {
+			h := sandboxAccessHandlers{inbox: s.sandboxAccess, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleResolve(ctx, req) }
+		}),
+		regResponder(s.lane, "sandbox.profile.get", params(validateSandboxProfileGetRaw), func(r Responder) handlerFunc {
+			h := sandboxProfileHandlers{layout: s.profileLayout(), settings: s.settings, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleProfileGet(ctx, req) }
+		}),
+		regResponder(s.lane, "sandbox.profile.set", params(validateSandboxProfileSetRaw), func(r Responder) handlerFunc {
+			h := sandboxProfileHandlers{layout: s.profileLayout(), settings: s.settings, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleProfileSet(ctx, req) }
+		}),
+		regResponder(s.lane, "sandbox.profile.delete", params(validateSandboxProfileDeleteRaw), func(r Responder) handlerFunc {
+			h := sandboxProfileHandlers{layout: s.profileLayout(), settings: s.settings, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleProfileDelete(ctx, req) }
+		}),
+		regResponder(s.lane, "sandbox.grant.get", params(validateSandboxGrantGetRaw), func(r Responder) handlerFunc {
+			h := sandboxProfileHandlers{layout: s.profileLayout(), settings: s.settings, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleGrantGet(ctx, req) }
+		}),
 		// The dialog methods run under a bounded queue submission wrapped
 		// in the inflight set; the native-picker capability itself is
 		// dialogAdmit, a capacity-one WAITING gate the handler acquires on

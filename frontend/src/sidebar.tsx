@@ -129,12 +129,15 @@ export interface SidebarViewDescriptor {
   readonly status?: () => SidebarViewStatus | null
 }
 
-/** An action button in the bottom zone (global actions, never opens panel). */
+/** An action button in the activity bar that never opens a panel. */
 export interface SidebarAction {
   readonly id: string
-  readonly title: string
+  readonly title: string | (() => string)
   readonly icon: Component
   readonly onActivate: () => void
+  readonly selected?: () => boolean
+  readonly disabled?: () => boolean
+  readonly hidden?: () => boolean
 }
 
 /** The sidebar's remembered state, and the seam that records a change.
@@ -272,6 +275,7 @@ interface SidebarSolidProps {
   panel: HTMLElement
   views: readonly SidebarViewDescriptor[]
   actions: readonly SidebarAction[]
+  viewActions: readonly SidebarAction[]
   persistence: SidebarPersistence | null
   state: AppState
   storeActions: AppActions
@@ -298,9 +302,10 @@ function SidebarSolid(props: SidebarSolidProps) {
       const found = props.views.find((v) => v.id === props.state.sidebar.activeViewId)
       if (found) return found.id
     }
-    // Fall back to the first item in toolbar order (views, then the
-    // bottom zone in the order it renders).
+    // Fall back to the first item in toolbar order (views, view actions,
+    // then bottom actions).
     if (props.views.length > 0) return props.views[0].id
+    if (props.viewActions.length > 0) return props.viewActions[0].id
     if (props.actions.length > 0) return props.actions[0].id
     return null
   })
@@ -394,7 +399,7 @@ function SidebarSolid(props: SidebarSolidProps) {
   const handleKeyDown = (e: KeyboardEvent) => {
     const toolbar = props.bar.querySelector('[role="toolbar"]')
     if (!toolbar) return
-    const buttons = [...toolbar.querySelectorAll<HTMLElement>('button')]
+    const buttons = [...toolbar.querySelectorAll<HTMLElement>('button:not(:disabled)')]
     if (buttons.length === 0) return
 
     const currentIdx = buttons.findIndex((b) => b.getAttribute('tabindex') === '0')
@@ -452,60 +457,71 @@ function SidebarSolid(props: SidebarSolidProps) {
   // ── Render ─────────────────────────────────────────────────────────────
   return (
     <div role="toolbar" aria-label="Activity bar" class="activity-bar" onKeyDown={handleKeyDown}>
-      {/* Top zone: views */}
-      <div class="activity-bar-zone activity-bar-top" role="group" aria-label="Views">
-        <For each={props.views}>
-          {(view) => {
-            const status = () => view.status?.() ?? null
-            const count = () => status()?.count ?? 0
-            const progress = () => status()?.progress ?? null
-            /* The name carries the count, because somebody who reaches this
-               button with the keyboard cannot see the badge. */
-            const label = () => (count() === 0 ? view.title : `${view.title} — ${count()} running`)
-            return (
-              <IconButton
-                size="lg"
-                selected={
-                  view.id === props.state.sidebar.activeViewId && !props.state.sidebar.collapsed
-                }
-                data-view={view.id}
-                title={label()}
-                ariaLabel={label()}
-                tabIndex={view.id === tabbableId() ? 0 : -1}
-                railIndicator={true}
-                onClick={() => handleViewClick(view)}
-              >
-                <view.icon />
-                {/* Inside the button, not beside it: the button is the
-                    positioning context and the only toolbar stop, so a mark
-                    drawn on it cannot become a second thing to tab to. Both
-                    are pointer-events:none in CSS — the whole button is one
-                    target. */}
-                <Show when={count() > 0}>
-                  <span class="activity-bar-badge" data-view-badge={view.id}>
-                    <Badge tone="info">{String(count())}</Badge>
-                  </span>
-                </Show>
-                {/* The guard is on PRESENCE and not on truthiness: zero is a
-                    real fraction, and `when={progress()}` would hide the bar
-                    for a transfer that has not moved a byte yet. */}
-                <Show when={progress() !== null}>
-                  <span class="activity-bar-progress" data-view-progress={view.id}>
-                    {/* Non-null inside this branch by the guard above, which
-                        is what the cast rests on. Deliberately not
-                        `progress() ?? 0`: a default painted at the render
-                        site is a fraction the view never produced and cannot
-                        see. */}
-                    <ProgressBar
-                      value={progress() as number}
-                      ariaLabel={`${view.title} progress`}
-                    />
-                  </span>
-                </Show>
-              </IconButton>
-            )
-          }}
-        </For>
+      {/* Top zone: view navigation, then active-tab actions. Separate ARIA
+          groups: the shield acts on a tab and must not masquerade as a view. */}
+      <div class="activity-bar-top">
+        <div class="activity-bar-zone" role="group" aria-label="Views">
+          <For each={props.views}>
+            {(view) => {
+              const status = () => view.status?.() ?? null
+              const count = () => status()?.count ?? 0
+              const progress = () => status()?.progress ?? null
+              const label = () =>
+                count() === 0 ? view.title : `${view.title} — ${count()} running`
+              return (
+                <IconButton
+                  size="lg"
+                  selected={
+                    view.id === props.state.sidebar.activeViewId && !props.state.sidebar.collapsed
+                  }
+                  data-view={view.id}
+                  title={label()}
+                  ariaLabel={label()}
+                  tabIndex={view.id === tabbableId() ? 0 : -1}
+                  railIndicator={true}
+                  onClick={() => handleViewClick(view)}
+                >
+                  <view.icon />
+                  <Show when={count() > 0}>
+                    <span class="activity-bar-badge" data-view-badge={view.id}>
+                      <Badge tone="info">{String(count())}</Badge>
+                    </span>
+                  </Show>
+                  <Show when={progress() !== null}>
+                    <span class="activity-bar-progress" data-view-progress={view.id}>
+                      <ProgressBar
+                        value={progress() as number}
+                        ariaLabel={`${view.title} progress`}
+                      />
+                    </span>
+                  </Show>
+                </IconButton>
+              )
+            }}
+          </For>
+        </div>
+        <div class="activity-bar-zone" role="group" aria-label="Active tab actions">
+          <For each={props.viewActions}>
+            {(action) => (
+              <Show when={action.hidden?.() !== true}>
+                <IconButton
+                  size="lg"
+                  data-action={action.id}
+                  railIndicator={true}
+                  data-testid={action.id}
+                  title={typeof action.title === 'function' ? action.title() : action.title}
+                  ariaLabel={typeof action.title === 'function' ? action.title() : action.title}
+                  selected={action.selected?.() === true}
+                  disabled={action.disabled?.() === true}
+                  tabIndex={action.disabled?.() !== true && action.id === tabbableId() ? 0 : -1}
+                  onClick={() => handleActionClick(action)}
+                >
+                  <action.icon />
+                </IconButton>
+              </Show>
+            )}
+          </For>
+        </div>
       </div>
 
       {/* Spacer pushes bottom zone to the bottom */}
@@ -515,16 +531,20 @@ function SidebarSolid(props: SidebarSolidProps) {
       <div class="activity-bar-zone activity-bar-bottom" role="group" aria-label="Actions">
         <For each={props.actions}>
           {(action) => (
-            <IconButton
-              size="lg"
-              data-action={action.id}
-              title={action.title}
-              ariaLabel={action.title}
-              tabIndex={action.id === tabbableId() ? 0 : -1}
-              onClick={() => handleActionClick(action)}
-            >
-              <action.icon />
-            </IconButton>
+            <Show when={action.hidden?.() !== true}>
+              <IconButton
+                size="lg"
+                data-action={action.id}
+                selected={action.selected?.() === true}
+                title={typeof action.title === 'function' ? action.title() : action.title}
+                ariaLabel={typeof action.title === 'function' ? action.title() : action.title}
+                disabled={action.disabled?.() === true}
+                tabIndex={action.id === tabbableId() ? 0 : -1}
+                onClick={() => handleActionClick(action)}
+              >
+                <action.icon />
+              </IconButton>
+            </Show>
           )}
         </For>
       </div>
@@ -581,10 +601,12 @@ export function mountSidebar(
   getActiveOrigin?: () => ActiveOrigin | null,
   resize?: SidebarWidthController,
   getActivePaneIsSettings?: () => boolean,
+  viewActions: readonly SidebarAction[] = [],
 ): SidebarHandle {
   const activeProfileId = getActiveProfileId ?? (() => null)
   const activeOrigin = getActiveOrigin ?? (() => null)
   const activePaneIsSettings = getActivePaneIsSettings ?? (() => false)
+  const actionsBesideViews = viewActions
 
   const [state, storeActions] = createAppStore()
 
@@ -617,6 +639,7 @@ export function mountSidebar(
     () => (
       <SidebarSolid
         bar={bar}
+        viewActions={actionsBesideViews}
         panel={panel}
         views={views}
         actions={actions}

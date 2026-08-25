@@ -6,6 +6,46 @@ import type { Open } from './generated/open'
 import type { SessionLiveness } from './generated/session.liveness'
 import type { SessionSignal } from './generated/session.signal'
 import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
+import type { SandboxStatus } from './generated/sandbox.status'
+import type { SandboxAccessChanged } from './generated/sandbox.access.changed'
+import type {
+  SandboxAccessList,
+  Event as SandboxAccessEvent,
+} from './generated/sandbox.access.list'
+import type { SandboxAccessResolve } from './generated/sandbox.access.resolve'
+import type { SandboxAccessStatus } from './generated/sandbox.access.status'
+import type { SandboxProfileGet } from './generated/sandbox.profile.get'
+import type { SandboxProfileSet } from './generated/sandbox.profile.set'
+import type { SandboxProfileDelete } from './generated/sandbox.profile.delete'
+import type { SandboxGrantGet } from './generated/sandbox.grant.get'
+
+export type {
+  SandboxStatus,
+  SandboxAccessChanged,
+  SandboxAccessEvent,
+  SandboxAccessList,
+  SandboxAccessResolve,
+  SandboxAccessStatus,
+  SandboxProfileGet,
+  SandboxProfileSet,
+  SandboxProfileDelete,
+  SandboxGrantGet,
+}
+
+export type SessionSandboxInfo = NonNullable<Open['sandbox']>
+
+export interface SandboxLaunch {
+  readonly settingsRevision: number
+  readonly profileRevision: number | null
+  readonly addWritable: string[]
+  readonly removeWritable: string[]
+  readonly addReadOnly: string[]
+  readonly removeReadOnly: string[]
+}
+
+export interface SandboxRequest extends SandboxLaunch {
+  readonly workspace: string
+}
 
 /** The open ack's wire shape (contracts/open.schema.json): the server
  *  assigns the session id (AD-7), and the resolved destination mode rides the
@@ -36,6 +76,7 @@ type OpenResult = {
    *  is the one message that carries it. PROVENANCE ONLY — see
    *  SessionHandle.parent. */
   parent?: Open['parent']
+  sandbox?: Open['sandbox']
 }
 
 /**
@@ -62,13 +103,16 @@ export interface OpenAnchor {
    * blank.
    */
   paneId?: string
+  /** Canonical local cwd for a replacement shell; absent uses backend default. */
+  cwd?: string
 }
 
-/** The paneId as the wire wants it: the key, or no key at all. One helper for
- *  all three openers, because "how an absent pane is expressed" is one fact
- *  and three copies of `...(x ? {paneId: x} : {})` would be three. */
-function paneParam(anchor: OpenAnchor): { paneId?: string } {
-  return anchor.paneId ? { paneId: anchor.paneId } : {}
+/** Optional ordinary-open facts as the wire wants them. */
+function paneParam(anchor: OpenAnchor): { paneId?: string; cwd?: string } {
+  return {
+    ...(anchor.paneId ? { paneId: anchor.paneId } : {}),
+    ...(anchor.cwd ? { cwd: anchor.cwd } : {}),
+  }
 }
 
 // Ack throttle: at most one ack per session per ~100 ms. Per-frame acks on
@@ -290,6 +334,8 @@ export class SessionHandle {
      *  is decoded here rather than dropped: this ack is the only message
      *  that carries it. */
     readonly workspaceId: string = '',
+    /** Immutable realized policy for a sandboxed local session. */
+    readonly sandbox?: SessionSandboxInfo,
   ) {}
 
   send(data: string): void {
@@ -632,6 +678,103 @@ export class WSClient {
       .then((result) => this._registerHandle(result))
   }
 
+  openSandboxedSession(
+    cols: number,
+    rows: number,
+    request: SandboxRequest,
+    anchor: OpenAnchor,
+  ): Promise<SessionHandle> {
+    const sandbox: {
+      workspace: string
+      settingsRevision: number
+      profileRevision: number | null
+      addWritable?: string[]
+      removeWritable?: string[]
+      addReadOnly?: string[]
+      removeReadOnly?: string[]
+    } = {
+      workspace: request.workspace,
+      settingsRevision: request.settingsRevision,
+      profileRevision: request.profileRevision,
+    }
+    if (request.addWritable.length > 0) sandbox.addWritable = [...request.addWritable]
+    if (request.removeWritable.length > 0) sandbox.removeWritable = [...request.removeWritable]
+    if (request.addReadOnly.length > 0) sandbox.addReadOnly = [...request.addReadOnly]
+    if (request.removeReadOnly.length > 0) sandbox.removeReadOnly = [...request.removeReadOnly]
+    return this.dispatcher
+      .call<OpenResult>('open', {
+        cols,
+        rows,
+        xpixel: 0,
+        ypixel: 0,
+        ...paneParam(anchor),
+        sandbox,
+      })
+      .then((result) => this._registerHandle(result))
+  }
+
+  sandboxStatus(): Promise<SandboxStatus | null> {
+    return this.dispatcher.call<SandboxStatus | null>('sandbox.status', {})
+  }
+  sandboxProfileGet(paneId: string): Promise<SandboxProfileGet> {
+    return this.dispatcher.call<SandboxProfileGet>('sandbox.profile.get', { paneId })
+  }
+
+  sandboxProfileSet(
+    workspaceId: string,
+    expectedRevision: number,
+    writablePaths: string[],
+    readOnlyPaths: string[],
+  ): Promise<SandboxProfileSet> {
+    return this.dispatcher.call<SandboxProfileSet>('sandbox.profile.set', {
+      workspaceId,
+      expectedRevision,
+      writablePaths,
+      readOnlyPaths,
+    })
+  }
+
+  sandboxProfileDelete(
+    workspaceId: string,
+    expectedRevision: number,
+  ): Promise<SandboxProfileDelete> {
+    return this.dispatcher.call<SandboxProfileDelete>('sandbox.profile.delete', {
+      workspaceId,
+      expectedRevision,
+    })
+  }
+
+  sandboxGrantGet(paneId: string): Promise<SandboxGrantGet> {
+    return this.dispatcher.call<SandboxGrantGet>('sandbox.grant.get', { paneId })
+  }
+
+  sandboxAccessStatus(): Promise<SandboxAccessStatus | null> {
+    return this.dispatcher.call<SandboxAccessStatus | null>('sandbox.access.status', {})
+  }
+
+  sandboxAccessList(limit = 200): Promise<SandboxAccessList> {
+    return this.dispatcher.call<SandboxAccessList>('sandbox.access.list', { limit })
+  }
+
+  sandboxAccessResolve(
+    eventId: string,
+    decision: 'dismiss' | 'workspaceReadOnly' | 'workspaceReadWrite',
+  ): Promise<SandboxAccessResolve> {
+    return this.dispatcher.call<SandboxAccessResolve>('sandbox.access.resolve', {
+      eventId,
+      decision,
+    })
+  }
+
+  onSandboxAccessChanged(callback: (change: SandboxAccessChanged) => void): () => void {
+    return this.dispatcher.subscribe('sandbox.access.changed', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const revision = (params as Record<string, unknown>).revision
+      if (typeof revision !== 'number' || !Number.isSafeInteger(revision) || revision < 0) return
+      callback({ revision })
+    })
+  }
+
   // openSSHSession opens an SSH session via a profile ID. The backend
   // resolves host, auth and jump host from the profile store.
   // Passwords are never sent over the wire.
@@ -712,6 +855,7 @@ export class WSClient {
       result?.desiredMode ?? 'script',
       result?.parent ?? null,
       result?.workspaceId ?? '',
+      result?.sandbox,
     )
   }
 

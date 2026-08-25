@@ -1,0 +1,186 @@
+// Package sandbox implements the opt-in, experimental, filesystem-only
+// per-pane sandbox (ADR-0036, design spec 2026-08-02-native-filesystem-sandbox).
+//
+// The renderer requests a workspace plus bounded add/remove deltas; the
+// backend canonicalizes them and owns policy construction and enforcement.
+// Platform backends live behind the
+// single Service interface; the composition root selects one via build tags
+// (sandbox_linux.go / sandbox_darwin.go / sandbox_other.go) and injects it at
+// internal/app/app.go — no package globals.
+package sandbox
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"sync"
+)
+
+// Backend names are frozen wire values (design spec §4.2).
+const (
+	BackendLandlock    = "landlock"
+	BackendSeatbelt    = "seatbelt"
+	BackendUnsupported = "unsupported"
+)
+
+// Stable backend status reasons (design spec §4.2).
+const (
+	ReasonLandlockUnavailable    = "landlock-unavailable"
+	ReasonLandlockABITooOld      = "landlock-abi-too-old"
+	ReasonSandboxExecUnavailable = "sandbox-exec-unavailable"
+	ReasonProbeFailed            = "probe-failed"
+	ReasonUnsupportedPlatform    = "unsupported-platform"
+	// ReasonPolicyTooLarge is the one setup failure a user can act on: the
+	// policy this machine derives does not fit the enforceable bounds. It is
+	// reported instead of the generic "setup-failed" so the message can name
+	// the machine rather than an internal constant (nocx-263da).
+	ReasonPolicyTooLarge = "policy-too-large"
+)
+
+// helperEnvPrefix marks variables the Linux helper strips before exec so
+// helper internals never reach the shell. Defined here (not in the
+// linux-tagged helper file) because the shared enforcement probe also asserts
+// the strip on every platform.
+const helperEnvPrefix = "NOCX_SANDBOX_HELPER_"
+
+// Request carries the backend-owned policy inputs for one sandboxed tab
+// (design spec §6). GlobalWritable and GlobalReadOnly are the persisted
+// baselines of additional writable and read-only directories; Add*/Remove*
+// are the class-scoped per-tab deltas. RuntimeRoot is minted by the
+// composition root for a sandboxed enhanced launch so its private bootstrap
+// artefact is born inside the tree the native backend will enforce; it is
+// never decoded from the renderer. The backend canonicalizes every user path
+// and never mutates the caller's slices.
+type Request struct {
+	Workspace      string
+	GlobalWritable []string
+	GlobalReadOnly []string
+	AddWritable    []string
+	RemoveWritable []string
+	AddReadOnly    []string
+	RemoveReadOnly []string
+	RuntimeRoot    string `json:"-"`
+	// Identity is minted by the session registry before native preparation.
+	// It never comes from the renderer and binds access observations to one
+	// exact backend/session incarnation.
+	Identity SessionIdentity `json:"-"`
+	// PaneID and WorkspaceID are backend-owned provenance (design 2026-08-23
+	// §4.4): the pane this session is the pipe of and the layout workspace it
+	// belongs to, resolved by handleOpen. They never come from open.sandbox
+	// and are carried to AccessInbox.BeginSession.
+	PaneID      string `json:"-"`
+	WorkspaceID string `json:"-"`
+}
+
+// Status reports backend availability. It is the payload of sandbox.status
+// and the reason surfaced by the Quick Connect "Sandbox unavailable" row.
+type Status struct {
+	Available bool   `json:"available"`
+	Backend   string `json:"backend"`
+	Reason    string `json:"reason,omitempty"`
+	Detail    string `json:"detail,omitempty"`
+	ABI       int    `json:"abi,omitempty"`
+}
+
+// CommandSpec is the ordinary shell command pty.NewLocal builds today:
+// shell detection, cmd.Dir, and the scrubbed/UTF-8-forced environment. The
+// backend wraps it (helper re-exec on Linux, sandbox-exec on macOS) or, for
+// an ordinary request, pty.NewLocal never touches this package at all.
+type CommandSpec struct {
+	Path       string
+	Args       []string
+	Dir        string
+	Env        []string
+	ExtraFiles []*os.File `json:"-"`
+}
+
+// PreparedCommand owns the *exec.Cmd of the sandboxed process, the
+// post-start readiness handshake, and idempotent cleanup. WaitReady must be
+// called after the process is started; Close may be called once — later
+// calls are no-ops, so failure and normal-exit paths can both run it.
+// Backend and Policy are the realized enforcement metadata surfaced to the
+// tab (design spec §3.3).
+type PreparedCommand struct {
+	Cmd     *exec.Cmd
+	Backend string
+	Policy  *Policy
+
+	// policyFile is the sole parent-side owner of the Linux helper's policy
+	// descriptor. ExtraFiles duplicates it for the child; Close releases this
+	// object once, never the raw descriptor number.
+	policyFile *os.File
+	waitReady  func(context.Context) error
+	cleanup    func()
+	once       sync.Once
+}
+
+// WaitReady blocks until the sandboxed process reports enforcement
+// readiness, or ctx is done. Both native backends use a post-enforcement
+// acknowledgement; a nil seam exists only for focused tests.
+func (p *PreparedCommand) WaitReady(ctx context.Context) error {
+	if p == nil || p.waitReady == nil {
+		return nil
+	}
+	return p.waitReady(ctx)
+}
+
+// Close releases the sandboxed process and its runtime resources exactly
+// once. Safe after WaitReady failure and after child exit; idempotent.
+func (p *PreparedCommand) Close() {
+	if p == nil {
+		return
+	}
+	p.once.Do(func() {
+		if p.policyFile != nil {
+			_ = p.policyFile.Close()
+		}
+		if p.cleanup != nil {
+			p.cleanup()
+		}
+	})
+}
+
+// Service is the platform-neutral sandbox boundary. Status answers
+// sandbox.status; NewRuntimeRoot reserves the private per-session tree before
+// local nocxify renders its bootstrap; Prepare adopts that root and turns an
+// ordinary CommandSpec into a sandboxed process that fails closed on any
+// policy/launch/handshake error.
+type Service interface {
+	Status(ctx context.Context) Status
+	NewRuntimeRoot() (string, error)
+	Prepare(ctx context.Context, req Request, spec CommandSpec) (*PreparedCommand, error)
+}
+
+// SessionInfo is the immutable sandbox metadata carried by a sandboxed tab
+// and returned in the open result (design spec §3.3, §4.5). Ordinary and SSH
+// sessions have none.
+type SessionInfo struct {
+	Backend         string           `json:"backend"`
+	Workspace       string           `json:"workspace"`
+	WritableRoots   []string         `json:"writableRoots"`
+	ReadOnlyRoots   []string         `json:"readOnlyRoots"`
+	HomeProjections []HomeProjection `json:"homeProjections"`
+}
+
+// Clone returns a deep copy so session metadata cannot be mutated through an
+// interface accessor after native enforcement has fixed the policy.
+func (s *SessionInfo) Clone() *SessionInfo {
+	if s == nil {
+		return nil
+	}
+	return &SessionInfo{
+		Backend:         s.Backend,
+		Workspace:       s.Workspace,
+		WritableRoots:   append([]string(nil), s.WritableRoots...),
+		ReadOnlyRoots:   append([]string(nil), s.ReadOnlyRoots...),
+		HomeProjections: cloneHomeProjections(s.HomeProjections),
+	}
+}
+
+// CanonicalizeWorkspace resolves the open-param workspace to its single
+// canonical value (design spec §6): Abs → EvalSymlinks → Stat, requiring an
+// existing absolute directory. The transport calls it; errors wrap
+// ErrInvalidPermissions (-32602).
+func CanonicalizeWorkspace(workspace string) (string, error) {
+	return canonicalizeWorkspace(workspace)
+}

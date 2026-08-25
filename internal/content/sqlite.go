@@ -388,7 +388,7 @@ func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 14
+const schemaVersion = 15
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -400,7 +400,7 @@ var rebuildDropOrder = []string{
 	"api_run_artifact_chunks", "api_run_artifacts", "api_runs", "api_run_schema",
 	"grant_scopes", "grant_effects", "artifact_chunks", "authority_grants", "artifacts",
 	"edges", "executions", "environment_observations", "entries",
-	"panes", "tabs",
+	"sandbox_grants", "panes", "tabs",
 	"sessions", "environments", "workspaces", "ledger_sequence",
 	"retention_watermark",
 	// RETIRED, AND STILL LISTED ON PURPOSE (nocx-rtg0.19). command_history
@@ -871,6 +871,15 @@ CREATE TABLE IF NOT EXISTS authority_grants (
   -- not even JSON cannot be recorded.
   policy       TEXT NOT NULL CHECK (json_valid(policy)),
   payload      TEXT NOT NULL DEFAULT '{}'
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS sandbox_grants (
+  id         INTEGER PRIMARY KEY,
+  pane_id    TEXT NOT NULL UNIQUE REFERENCES panes(id),
+  version    INTEGER NOT NULL,
+  issued_at  INTEGER NOT NULL,           -- backend wall clock
+  workspace  TEXT NOT NULL,
+  payload    TEXT NOT NULL DEFAULT '{}'  -- realized policy roots (JSON)
 ) STRICT;
 
 CREATE TABLE IF NOT EXISTS grant_scopes (

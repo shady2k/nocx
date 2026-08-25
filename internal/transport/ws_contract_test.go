@@ -37,6 +37,7 @@ import (
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/snippet"
@@ -1787,6 +1788,28 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 		}
 		validateJSON(t, schema, raw, "open DTO ("+name+" mode)")
 	}
+	sandboxRaw, err := json.Marshal(openResult{
+		SessionID:    "0123456789abcdef0123456789abcdef",
+		InstanceID:   "fedcba9876543210fedcba9876543210",
+		SessionEpoch: 1,
+		WorkspaceID:  string(workspace.Default),
+		Cwd:          "~/work",
+		DesiredMode:  "script",
+		Sandbox: &sandbox.SessionInfo{
+			Backend:       sandbox.BackendLandlock,
+			Workspace:     "/home/user/work",
+			WritableRoots: []string{"/home/user/work"},
+			ReadOnlyRoots: []string{"/usr"},
+			HomeProjections: []sandbox.HomeProjection{
+				{HostPath: "/home/user/work", RelativePath: "work"},
+				{HostPath: "/home/user/.config/opencode", RelativePath: ".config/opencode"},
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal sandbox open result: %v", err)
+	}
+	validateJSON(t, schema, sandboxRaw, "sandbox open DTO")
 
 	// The removed field is removed, not merely unset: an ack that still
 	// carried it must fail the contract, or "removed" is a claim nothing

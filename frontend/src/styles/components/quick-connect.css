@@ -83,7 +83,7 @@
   flex: 0 0 auto;
 }
 
-.quick-connect__item:not(.quick-connect__item--selected):hover {
+.quick-connect__item:not(.quick-connect__item--selected):not(.quick-connect__item--disabled):hover {
   background: var(--color-surface-hover);
 }
 
@@ -96,6 +96,10 @@
 .quick-connect__item--selected .quick-connect__item-label,
 .quick-connect__item--selected .quick-connect__item-detail {
   color: var(--color-canvas);
+}
+.quick-connect__item--disabled {
+  cursor: default;
+  opacity: 0.56;
 }
 
 .quick-connect__item-label {

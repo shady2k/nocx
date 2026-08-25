@@ -24,6 +24,7 @@ import {
 } from './unresolved-redactions'
 import type { SubmitPlan } from './submit'
 import type { ModelChipState } from './agent-readiness'
+import type { InternalCommandOutcome } from './sandbox-command'
 
 /**
  * The indent a pasted command arrives with, when it arrives at the very
@@ -110,6 +111,15 @@ export interface EditorActions {
    *  Enter), so this fires only when closed. Tab never moves the focus
    *  either way (nocx-w7h.2/.3). */
   onTab?: () => void
+  /**
+   * Optional typed internal-command seam, run BEFORE secret resolution, shell
+   * planning, editor handoff, terminal bytes, and ledger creation. A nocx
+   * editor command (e.g. `/sandbox`) is recognized here. `consumed` clears
+   * the draft and suppresses PTY/history/ledger; `refused` keeps the draft
+   * and suppresses them (the host has already reported why); `notHandled`
+   * falls through to the ordinary submit path.
+   */
+  internalCommand?: (doc: string) => InternalCommandOutcome
   /**
    * Optional async planning seam, run BEFORE the atomic handoff. The host
    * resolves references (vault.resolveLine) and vetoes masked history rows
@@ -677,6 +687,21 @@ export class CommandEditor {
       this.clearDoc()
       if (this.actions.handoffToShell?.() ?? true) this.actions.submitEmpty?.()
       return
+    }
+    const internal = this.actions.internalCommand
+    if (internal) {
+      const outcome = internal(doc)
+      if (outcome.kind === 'consumed') {
+        // A nocx command, not shell input: clear the draft and send nothing
+        // to the pty, history, or ledger. The host has already started the
+        // command's effect; the pane is typically about to be replaced.
+        this.clearDoc()
+        return
+      }
+      if (outcome.kind === 'refused') {
+        // The host has already reported the reason; the draft stays.
+        return
+      }
     }
     const hook = this.actions.beforeSubmit
     if (!hook) {

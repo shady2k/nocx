@@ -99,12 +99,13 @@ type tabWire struct {
 }
 
 type paneWire struct {
-	ID        string  `json:"id"`
-	TabID     string  `json:"tabId"`
-	Cwd       string  `json:"cwd"`
-	Kind      string  `json:"kind"`
-	Endpoint  *string `json:"endpoint"`
-	SizeShare float64 `json:"sizeShare"`
+	ID             string  `json:"id"`
+	TabID          string  `json:"tabId"`
+	Cwd            string  `json:"cwd"`
+	Kind           string  `json:"kind"`
+	Endpoint       *string `json:"endpoint"`
+	SizeShare      float64 `json:"sizeShare"`
+	SandboxGranted bool    `json:"sandboxGranted"`
 }
 
 func wireWorkspace(ws content.Workspace) workspaceWire {
@@ -126,6 +127,12 @@ func wirePane(p content.Pane) paneWire {
 	}
 }
 
+func wireGrantedPane(p content.Pane, granted map[string]struct{}) paneWire {
+	w := wirePane(p)
+	_, w.SandboxGranted = granted[p.ID]
+	return w
+}
+
 // wireWorkspaces, wireTabs and wirePanes force the slice to be non-nil: an
 // empty collection must marshal as [] and never null — the renderer's first
 // .map assumes it, and a null there is the nocx-25k9.14 class of defect.
@@ -145,10 +152,10 @@ func wireTabs(all []content.Tab) []tabWire {
 	return out
 }
 
-func wirePanes(all []content.Pane) []paneWire {
+func wirePanes(all []content.Pane, granted map[string]struct{}) []paneWire {
 	out := make([]paneWire, 0, len(all))
 	for _, p := range all {
-		out = append(out, wirePane(p))
+		out = append(out, wireGrantedPane(p, granted))
 	}
 	return out
 }
@@ -791,12 +798,16 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 		switch req.Method {
 		case "layout.read":
 			snap, err := svc.Snapshot(ctx)
+			granted := map[string]struct{}{}
+			if err == nil {
+				granted, err = svc.SandboxGrantedPaneIDs(ctx)
+			}
 			h.answer(req, err, func() any {
 				return layoutReadResponse{
 					DefaultWorkspaceID: snap.DefaultWorkspaceID,
 					Workspaces:         wireWorkspaces(snap.Workspaces),
 					Tabs:               wireTabs(snap.Tabs),
-					Panes:              wirePanes(snap.Panes),
+					Panes:              wirePanes(snap.Panes, granted),
 				}
 			})
 		case "workspaces.create":
@@ -914,14 +925,26 @@ func (h layoutHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) {
 				return nil
 			}
 			pane, err := svc.SetPaneCwd(ctx, p.ID, p.Cwd)
-			h.answer(req, err, func() any { return paneResponse{Pane: wirePane(pane)} })
+			var granted map[string]struct{}
+			if err == nil {
+				granted, err = svc.SandboxGrantedPaneIDs(ctx)
+			}
+			h.answer(req, err, func() any {
+				return paneResponse{Pane: wireGrantedPane(pane, granted)}
+			})
 		case "panes.move":
 			var p paneMoveParams
 			if !h.decode(req, &p) {
 				return nil
 			}
 			pane, err := svc.MovePane(ctx, p.ID, p.TabID)
-			h.answer(req, err, func() any { return paneResponse{Pane: wirePane(pane)} })
+			var granted map[string]struct{}
+			if err == nil {
+				granted, err = svc.SandboxGrantedPaneIDs(ctx)
+			}
+			h.answer(req, err, func() any {
+				return paneResponse{Pane: wireGrantedPane(pane, granted)}
+			})
 		case "panes.close":
 			var p layoutCloseParams
 			if !h.decode(req, &p) {

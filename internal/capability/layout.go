@@ -35,6 +35,7 @@ type LayoutService interface {
 	// no write is checked against: it exists for the renderer, which draws
 	// itself from it (nocx-isoph.4).
 	Snapshot(ctx context.Context) (content.LayoutSnapshot, error)
+	SandboxGrantedPaneIDs(ctx context.Context) (map[string]struct{}, error)
 
 	CreateWorkspace(ctx context.Context, ws content.Workspace, firstTab content.Tab, firstPane content.Pane) (content.Created[content.NewWorkspace], error)
 	RenameWorkspace(ctx context.Context, id, name string) (content.Workspace, error)
@@ -195,4 +196,11 @@ func (s *layoutService) Snapshot(ctx context.Context) (content.LayoutSnapshot, e
 		return content.LayoutSnapshot{}, err
 	}
 	return s.layout.Snapshot(ctx)
+}
+
+func (s *layoutService) SandboxGrantedPaneIDs(ctx context.Context) (map[string]struct{}, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	return s.layout.SandboxGrantedPaneIDs(ctx)
 }

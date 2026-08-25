@@ -729,17 +729,21 @@ describe('the activity bar reads as two zones without a rule between them', () =
     expect(CSS).toMatch(/\.activity-bar\s*\{[^}]*height:\s*100%/)
   })
 
-  it('and they are still two groups a screen reader can tell apart', () => {
+  it('and a screen reader distinguishes views, active-tab actions, and global actions', () => {
     const { bar, panel } = mount()
     mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION])
 
     const groups = [...bar.querySelectorAll('[role="group"]')]
-    expect(groups.map((g) => g.getAttribute('aria-label'))).toEqual(['Views', 'Actions'])
-    // The spacer is between them in document order — the separation is
-    // structural, so it survives whatever the stylesheet does.
+    expect(groups.map((g) => g.getAttribute('aria-label'))).toEqual([
+      'Views',
+      'Active tab actions',
+      'Actions',
+    ])
+    // The spacer still separates the top and bottom visual zones in document
+    // order; the nested active-tab group stays semantically distinct from views.
     const children = [...(bar.querySelector('.activity-bar')?.children ?? [])]
     expect(children.map((c) => c.className)).toEqual([
-      'activity-bar-zone activity-bar-top',
+      'activity-bar-top',
       'activity-bar-spacer',
       'activity-bar-zone activity-bar-bottom',
     ])
@@ -791,5 +795,73 @@ describe('the filter slot', () => {
     const { bar, panel } = mount()
     mountSidebar(bar, panel, TWO_VIEWS, [])
     expect(panel.querySelector('.ui-sidebar-view__actions')).toBeNull()
+  })
+})
+
+describe('sidebar view-zone actions', () => {
+  it('renders an action beside the Files view, not in the Files panel header', () => {
+    const { bar, panel } = mount()
+    mountSidebar(
+      bar,
+      panel,
+      [TWO_VIEWS[0]],
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [
+        {
+          id: 'sandbox-shield',
+          title: 'Sandbox',
+          icon: TestIcon,
+          onActivate: () => {},
+          selected: () => true,
+        },
+      ],
+    )
+
+    const topButtons = [...bar.querySelectorAll<HTMLElement>('.activity-bar-top button')]
+    expect(
+      topButtons.map((button) => button.getAttribute('data-view') ?? button.dataset.action),
+    ).toEqual(['alpha', 'sandbox-shield'])
+    const shield = topButtons[1]
+    expect(shield.getAttribute('aria-selected')).toBe('true')
+    expect(shield.dataset.railIndicator).toBe('true')
+    expect(panel.querySelector('[data-testid="sandbox-shield"]')).toBeNull()
+  })
+
+  it('skips a disabled shield during roving keyboard navigation', () => {
+    const { bar, panel } = mount()
+    mountSidebar(
+      bar,
+      panel,
+      [TWO_VIEWS[0]],
+      [],
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      [
+        {
+          id: 'sandbox-shield',
+          title: 'Sandbox unavailable',
+          icon: TestIcon,
+          onActivate: () => {},
+          disabled: () => true,
+        },
+      ],
+    )
+
+    const view = viewBtn(bar, 'alpha')
+    const shield = actionBtn(bar, 'sandbox-shield')
+    view.focus()
+    fireEvent.keyDown(view, { key: 'ArrowDown' })
+
+    expect(document.activeElement).toBe(view)
+    expect(view.tabIndex).toBe(0)
+    expect(shield.tabIndex).toBe(-1)
   })
 })

@@ -43,6 +43,7 @@ import {
   isSubmitFailure,
   type SubmitPlan,
 } from './submit'
+import type { InternalCommandOutcome } from './sandbox-command'
 import { secretChipExtension } from './secret-chip'
 import { secretCandidateExtension } from './secret-candidate'
 import { unresolvedRedactionField } from './unresolved-redactions'
@@ -61,7 +62,7 @@ import {
 import { mountIntegrationNotice } from './integration/notice'
 import { BlockReceipt } from './ui/block-receipt'
 import type { HistoryRecord } from './generated/history.record'
-import { blockOutputText, renderRecordedCommand } from './scrollback/blocks'
+import { blockOutputText, renderRecordedCommand, type FrozenStatus } from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { NATIVE_RESTORE } from './native-mode'
 import { isInteractiveTransition, extractDestination } from './ssh-transition'
@@ -80,10 +81,10 @@ import { captureBlock } from './capture-client'
 import { answerTextForEntry, arrangedByCause, blocksForPane, restoredBody } from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
 import { toolCallTitle } from './scrollback/tool-call-title'
-import { fromITheme } from './scrollback/serializer'
+import { fromITheme, serializeRangeSGR } from './scrollback/serializer'
 import { getCurrentTheme } from './renderers/theme-adapter'
 import { log, logDecision, isDecisionTracing } from './log'
-import type { WSClient, SessionHandle, OpenAnchor } from './ipc'
+import type { WSClient, SessionHandle, OpenAnchor, SessionSandboxInfo, SandboxRequest } from './ipc'
 import { showConfirm } from './ui/dialog'
 import { createFilesPanelServices } from './files/files-client'
 import { attachTerminalDrop, TERMINAL_DROP_TARGET } from './files/terminal-drop'
@@ -328,6 +329,14 @@ export interface TerminalContentHooks {
    *  main.tsx to the Settings tab's Endpoints page. Reused, not duplicated,
    *  by the model chip's `endpoints` destination (nocx-rikz5). */
   onCreateEndpoint?: () => void
+  /** The typed `/sandbox` command seam — wired by main.tsx to the shared
+   *  conversion controller's `runCommand`. Absent in tests and any host that
+   *  does not wire it: the editor then treats every line as ordinary input. */
+  sandboxCommand?: (doc: string) => InternalCommandOutcome
+  /** Backend-authorized filesystem sandbox request for this local pane. */
+  sandbox?: SandboxRequest
+  /** Verified cwd for a replacement local shell; empty uses backend default. */
+  initialCwd?: string
   /** What a session is called TO A PERSON — the pane's own display title,
    *  the words already on the tab (nocx-vnzek). A tool-call line in an
    *  answer names the session it touched with this instead of the session
@@ -408,6 +417,27 @@ export interface PaneBlock {
   readonly command: string
   readonly status: CommandStatus
   readonly exitCode: number | null
+}
+
+export interface ConversionTranscript {
+  blocks: Array<{
+    command: string
+    cwd: string
+    location: string
+    durationMs: number
+    exitCode: number | null
+    status: FrozenStatus
+    body: string
+  }>
+  liveBody: string
+  draft: string
+  selection: { from: number; to: number }
+  editorScrollTop: number
+  alternateScreenOmitted: boolean
+}
+
+function safeTranscriptBody(text: string): string {
+  return text.replace(/[&<>]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;' })[char]!)
 }
 
 export class TerminalContent extends BasePaneContent {
@@ -996,6 +1026,108 @@ export class TerminalContent extends BasePaneContent {
     return lines.reverse()
   }
 
+  /** Capture the text a replacement tab must keep. Frontend-only: the VT
+   *  buffer stays under AD-6 and no PTY bytes cross the control plane. */
+  captureConversionTranscript(): ConversionTranscript {
+    const renderer = this.renderer
+    const scrollback = this.scrollback
+    const editor = this.editor
+    const location = this.hostLabel()
+    const inherited =
+      [
+        ...(scrollback?.scrollbackInner.querySelectorAll<HTMLElement>('[data-restored="true"]') ??
+          []),
+      ].map((block) => ({
+        command:
+          block.dataset.recordedCommand ??
+          block.querySelector<HTMLElement>('.cmd-header-text')?.textContent ??
+          'Previous command',
+        cwd:
+          block.querySelector<HTMLElement>('.cmd-header-cwd')?.textContent?.replace(/^📁\s*/, '') ??
+          '',
+        location: block.querySelector<HTMLElement>('.cmd-header-location')?.textContent ?? location,
+        durationMs: 0,
+        exitCode: null,
+        status: 'unknown' as const,
+        body: block.dataset.sgr ?? safeTranscriptBody(blockOutputText(block)),
+      })) ?? []
+    const current =
+      scrollback?.blockManager.blocks.map((block) => ({
+        command: block.command,
+        cwd: block.cwd,
+        location,
+        durationMs: block.durationMs ?? 0,
+        exitCode: block.exitCode,
+        status: block.status === 'running' ? ('unknown' as const) : block.status,
+        body: block.captured?.sgr ?? safeTranscriptBody(blockOutputText(block.el)),
+      })) ?? []
+    const blocks = [...inherited, ...current]
+    const liveBody =
+      renderer && this._bufferType === 'normal'
+        ? serializeRangeSGR((line) => renderer.getBufferLine(line), 0, renderer.cursorLine())
+        : ''
+    return {
+      blocks,
+      liveBody,
+      draft: editor?.getDoc() ?? '',
+      selection: editor?.getSelection() ?? { from: 0, to: 0 },
+      editorScrollTop: editor?.getScrollTop() ?? 0,
+      alternateScreenOmitted: this._bufferType === 'alternate',
+    }
+  }
+
+  /** Install a previous shell's immutable transcript above this shell. */
+  installConversionTranscript(transcript: ConversionTranscript, boundaryLabel: string): void {
+    const scrollback = this.scrollback
+    if (!scrollback) return
+    const snapshot = fromITheme(getCurrentTheme())
+    const els = transcript.blocks.map((block) =>
+      restoredBlock(
+        {
+          id: scrollback.blockManager.nextRestoredId(),
+          ...block,
+          author: 'shell',
+          kind: 'command',
+        },
+        snapshot,
+        () => scrollback.scrollbackInner,
+        () => {},
+        scrollback.snapshotStore,
+      ),
+    )
+    if (transcript.liveBody !== '') {
+      els.push(
+        restoredBlock(
+          {
+            id: scrollback.blockManager.nextRestoredId(),
+            command: transcript.alternateScreenOmitted
+              ? 'Previous full-screen program ended during sandbox switch'
+              : 'Previous shell output',
+            cwd: this._cwd,
+            location: this.hostLabel(),
+            durationMs: 0,
+            exitCode: null,
+            status: 'unknown',
+            body: transcript.liveBody,
+            author: 'shell',
+            kind: 'command',
+          },
+          snapshot,
+          () => scrollback.scrollbackInner,
+          () => {},
+          scrollback.snapshotStore,
+        ),
+      )
+    }
+    scrollback.restorePast(els, boundaryLabel)
+    this.editor?.replaceDoc(
+      transcript.draft,
+      Math.min(transcript.selection.from, transcript.draft.length),
+      Math.min(transcript.selection.to, transcript.draft.length),
+    )
+    this.editor?.setScrollTop(transcript.editorScrollTop)
+  }
+
   /**
    * The last line this pane actually DREW, or null when there is nothing to
    * quote (nocx-edhcu).
@@ -1207,9 +1339,17 @@ export class TerminalContent extends BasePaneContent {
    * the open goes out exactly as it did before this bead, unanchored.
    */
   private async openRequestedSession(): Promise<SessionHandle> {
-    const anchor: OpenAnchor = (await this.pane.registered) ? { paneId: this.pane.paneId } : {}
+    const registered = await this.pane.registered
+    if (!this.sshOpts && this.hooks.sandbox) {
+      if (!registered) throw new Error('sandbox pane was not recorded')
+      return this.client.openSandboxedSession(this.cols, this.rows, this.hooks.sandbox, {
+        paneId: this.pane.paneId,
+      })
+    }
+    const anchor: OpenAnchor = registered ? { paneId: this.pane.paneId } : {}
     if (!this.sshOpts) {
-      return this.client.openSession(this.cols, this.rows, anchor)
+      const local = this.hooks.initialCwd ? { ...anchor, cwd: this.hooks.initialCwd } : anchor
+      return this.client.openSession(this.cols, this.rows, local)
     }
     if (this.sshOpts.profileId) {
       return this.client.openSSHSession(this.cols, this.rows, this.sshOpts.profileId, anchor)
@@ -1570,6 +1710,15 @@ export class TerminalContent extends BasePaneContent {
           // an ordinary Enter keeps its no-gap atomic handoff. A recalled
           // masked row is refused first: the draft stays and resolution
           // opens on the first chip (ADR-0021's consequence).
+          // The typed `/sandbox` command is recognized BEFORE any secret
+          // resolution (design §5.1): it is a nocx command, not shell input,
+          // and a consumed one must produce no PTY bytes, history, or ledger.
+          // The hook is the shared controller's runCommand; unwired (tests,
+          // any pane built before main wires it) it is a notHandled no-op.
+          internalCommand: (doc) =>
+            this.inputTargets?.active().routesToShell
+              ? (this.hooks.sandboxCommand?.(doc) ?? { kind: 'notHandled' })
+              : { kind: 'notHandled' },
           beforeSubmit: (doc) => {
             if (this.promptVault?.openResolution()) return false
             const sync = planSubmitSync(doc)
@@ -2636,6 +2785,21 @@ export class TerminalContent extends BasePaneContent {
         if (fact.sessionId !== session.sessionId) return
         this._applyIntegration(fact)
       })
+      const sandboxInfo: SessionSandboxInfo | undefined = session.sandbox
+      if (sandboxInfo) {
+        const writable = sandboxInfo.writableRoots.join(', ')
+        const readOnly = sandboxInfo.readOnlyRoots.join(', ')
+        const home =
+          sandboxInfo.homeProjections.length === 0
+            ? 'Home: isolated; no host folders projected'
+            : `Home projections: ${sandboxInfo.homeProjections
+                .map(({ relativePath, hostPath }) => `~/${relativePath} -> ${hostPath}`)
+                .join(', ')}`
+        this.host.setTitle(sandboxInfo.workspace || session.cwd || '')
+        this.host.updateTooltip(
+          `${session.cwd ? `${session.cwd} (initial cwd)\n` : ''}Sandboxed (${sandboxInfo.backend}) — writable: ${writable} — read-only: ${readOnly}\n${home}`,
+        )
+      }
       // The statement is OBSERVED: until the first marker arrives, an auto
       // session honestly reads "Native input" — the launcher may be
       // mid-start, and the first prompt flips it to command blocks.
@@ -3000,6 +3164,14 @@ export class TerminalContent extends BasePaneContent {
           this._readyResolve(false)
           return
         }
+      }
+      if (this.hooks.sandbox) {
+        const message = err instanceof Error ? err.message : String(err)
+        showToast({ level: 'danger', message: `Sandboxed shell failed to start: ${message}` })
+        this._readyResolve(false)
+        log.error('nocx: sandboxed terminal failed', { error: message })
+        host.requestClose()
+        return
       }
       const notice = document.createElement('pre')
       notice.className = 'pane-error'

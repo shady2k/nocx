@@ -234,6 +234,98 @@ async function mountTerminal(
   }
 }
 
+describe('sandboxed session launch', () => {
+  const sandboxRequest = {
+    workspace: '/w',
+    settingsRevision: 0,
+    profileRevision: null,
+    addWritable: [],
+    removeWritable: [],
+    addReadOnly: [],
+    removeReadOnly: [],
+  }
+
+  it('shows the typed failure and removes the unconfirmed tab', async () => {
+    const failure = new RpcError('sandbox setup failed', -32007, { reason: 'setup-failed' })
+    const client = makeClient({
+      openSandboxedSession: vi.fn().mockRejectedValue(failure),
+    })
+    const content = new TerminalContent(
+      client as unknown as WSClient,
+      anchoredPane('sandbox-failure'),
+      makeClipboard(),
+      new ClipboardGate(),
+      makeBanner(),
+      null,
+      () => {},
+      undefined,
+      { sandbox: { ...sandboxRequest, workspace: '/workspace' } },
+    )
+    const tab = new Pane(
+      content,
+      {
+        surfaceType: SURFACE_TERMINAL,
+        singletonKey: null,
+        restoreDescriptor: null,
+        supportsAttention: true,
+        defaultTitle: '',
+      },
+      100,
+      'sandbox-failure-tab',
+    )
+    const requestClose = vi.fn()
+    tab.onCloseRequested = requestClose
+
+    await tab.start()
+
+    await expect(content.ready).resolves.toBe(false)
+    expect(client.openSession).not.toHaveBeenCalled()
+    expect(showToast).toHaveBeenCalledWith({
+      level: 'danger',
+      message: 'Sandboxed shell failed to start: sandbox setup failed',
+    })
+    expect(requestClose).toHaveBeenCalledOnce()
+    tab.close()
+  })
+
+  it('shows both installed root classes and HOME projections', async () => {
+    const client = makeClient({
+      openSandboxedSession: vi.fn(() =>
+        Promise.resolve(
+          makeSession({
+            sandbox: {
+              backend: 'landlock',
+              workspace: '/w',
+              writableRoots: ['/w', '/extra'],
+              readOnlyRoots: ['/usr', '/opt'],
+              homeProjections: [
+                {
+                  hostPath: '/host/home/.config/opencode',
+                  relativePath: '.config/opencode',
+                },
+              ],
+            },
+          }),
+        ),
+      ),
+    })
+    const { tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { sandbox: sandboxRequest } },
+      client,
+    )
+    try {
+      expect(tab.tooltip).toContain('writable: /w, /extra')
+      expect(tab.tooltip).toContain('read-only: /usr, /opt')
+      expect(tab.tooltip).toContain(
+        'Home projections: ~/.config/opencode -> /host/home/.config/opencode',
+      )
+    } finally {
+      teardown()
+    }
+  })
+})
+
 describe('the pane is the native file-drop target (nocx-9le.5.8)', () => {
   // In the Wails window a drop delivers absolute paths on the BACKEND's
   // machine, and the renderer may never learn one (design R2). The runtime

@@ -159,6 +159,7 @@ function mockReady(
 function mockPaneHost(): PaneHost {
   return {
     setTitle: vi.fn(),
+    updateTooltip: vi.fn(),
     requestAttention: vi.fn(),
     requestClose: vi.fn(),
     contentSettled: vi.fn(),

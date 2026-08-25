@@ -10,13 +10,16 @@ import { Show, createSignal, untrack } from 'solid-js'
 import App from './App'
 import { log } from './log'
 import { hasWailsWebview, installBrowserTransport } from './wails-runtime'
-import { WSClient } from './ipc'
+import { WSClient, type SandboxStatus } from './ipc'
+import { createSandboxConvertController } from './sandbox-convert'
+import { shieldState } from './sandbox-shield'
+import { showSandboxPermissions } from './sandbox-permissions-dialog'
 import { LayoutStore } from './layout/layout-store'
 import { LayoutClient } from './layout/layout-client'
 import { PaneManager } from './panes'
 import { mountSidebar, type SidebarViewDescriptor } from './sidebar'
-import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { AboutClient } from './about-client'
+import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
 import { VaultClient } from './vault-client'
@@ -31,19 +34,28 @@ import type { FilesDropped } from './generated/files.dropped'
 import { VaultObserver } from './vault-observer'
 import { Dispatcher } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
+import {
+  SandboxStatisticsContent,
+  SINGLETON_SANDBOX_STATISTICS,
+  SURFACE_SANDBOX_STATISTICS,
+} from './sandbox-statistics-content'
 import { HistoryStatusStore } from './history-status'
 import { FootprintClient } from './footprint-client'
 import { EndpointClient } from './endpoints'
 import { PolicyClient } from './policy-client'
 import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
-import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
+import {
+  SurfaceRegistry,
+  SURFACE_ID_SETTINGS,
+  SURFACE_ID_SANDBOX_STATISTICS,
+} from './surface-registry'
 import { apiSidebarAction, registerApiSurface } from './api'
 import { createApiWorkbenchServices, nativePickers } from './api/api-client'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
-import { PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
+import { PlugIcon, RefreshIcon, SandboxReportIcon, SettingsIcon, ShieldIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { mountReadScreenHandler } from './read-screen'
 import { mountRunCommandHandler } from './run-command'
@@ -340,12 +352,31 @@ async function main() {
   // stop working with nothing on screen to say why.
   const PLACEMENT_KEY = 'tab.placement'
   const THEME_KEY = 'ui.theme'
+  const SANDBOX_ENABLED_KEY = 'sandbox.enabled'
 
   // The declared default, painted BEFORE the snapshot arrives: the first
   // frame must not show the opposite of what the backend is about to say.
   applyOutputWrap(OUTPUT_WRAP_DEFAULT)
 
   let placement: unknown = 'horizontal'
+  const [sandboxEnabledLive, setSandboxEnabledLive] = createSignal(false)
+  const [sandboxStatus, setSandboxStatus] = createSignal<SandboxStatus | null>(null)
+  const refreshSandboxAvailability = async (enabled: boolean): Promise<void> => {
+    if (!enabled) {
+      setSandboxStatus(null)
+      return
+    }
+    const sandboxClient = client
+    if (!sandboxClient) {
+      setSandboxStatus(null)
+      return
+    }
+    try {
+      setSandboxStatus(await sandboxClient.sandboxStatus())
+    } catch {
+      setSandboxStatus(null)
+    }
+  }
   // The sidebar's remembered state, from the UI-state document rather than
   // the settings snapshot below — a drag is not a decision (ADR-0033). A
   // failure falls back to the declared defaults, which is also what the CSS
@@ -356,6 +387,9 @@ async function main() {
   try {
     const snap = await profileClient.getSnapshot()
     placement = snap.values[PLACEMENT_KEY] ?? 'horizontal'
+    const enabled = snap.values[SANDBOX_ENABLED_KEY] === true
+    setSandboxEnabledLive(enabled)
+    void refreshSandboxAvailability(enabled)
     // Reconcile the Go theme setting against the bootstrap cache. Go is
     // authoritative (ADR-0013 §8.1): the bootstrap cache covers the first
     // frame, but the persisted Go value wins on snapshot arrival.
@@ -449,6 +483,8 @@ async function main() {
   // the same surface) reaches a screen that is already on the section.
   const historyStatusStore = new HistoryStatusStore(client)
   historyStatusStore.start()
+  const [sandboxStatisticsPaneId, setSandboxStatisticsPaneId] = createSignal<string | null>(null)
+  let relaunchSandbox: (paneId: string) => Promise<void> = async () => {}
 
   // Surface registry — surfaces declared once, every entry point resolves
   // through the registry rather than rebuilding the descriptor. (AD-8)
@@ -495,6 +531,24 @@ async function main() {
       defaultTitle: 'Settings',
     },
   })
+  registry.register(SURFACE_ID_SANDBOX_STATISTICS, {
+    surfaceType: SURFACE_SANDBOX_STATISTICS,
+    singletonKey: SINGLETON_SANDBOX_STATISTICS,
+    factory: () =>
+      new SandboxStatisticsContent(client, {
+        activePaneId: () => sandboxStatisticsPaneId(),
+        relaunch: () => {
+          const paneId = sandboxStatisticsPaneId()
+          if (paneId) void relaunchSandbox(paneId)
+        },
+        openDirectory: () => dialogClient.openDirectoryDialog(),
+      }),
+    descriptor: {
+      restoreDescriptor: null,
+      supportsAttention: false,
+      defaultTitle: 'Sandbox',
+    },
+  })
 
   // Ports (nocx-wzc4.7): a SIDEBAR VIEW, not a tab. The owner's reference
   // (Orca's PORTS panel) sits beside the terminal so a port can be watched
@@ -517,6 +571,7 @@ async function main() {
   // PaneManager.activeOrigin() reads a plain field, so the accessor must be
   // this signal, never a direct call.
   const [activeOrigin, setActiveOrigin] = createSignal<ActiveOrigin | null>(tm.activeOrigin())
+  const [activeSandboxed, setActiveSandboxed] = createSignal(tm.activePaneSandboxed())
   const [activeSurfaceType, setActiveSurfaceType] = createSignal<SurfaceType | null>(
     tm.activeSurfaceType(),
   )
@@ -525,7 +580,17 @@ async function main() {
     setPortsTargetId(tm.portsTargetId())
     setPortsUnavailable(tm.portsUnavailableReason())
     setActiveOrigin(tm.activeOrigin())
+    setActiveSandboxed(tm.activePaneSandboxed())
   }
+  let convertActiveTabToSandboxed: () => Promise<void> = async () => {}
+  const [sandboxConversionInFlight, setSandboxConversionInFlight] = createSignal(false)
+  const currentShieldState = () =>
+    shieldState({
+      enabled: sandboxEnabledLive(),
+      status: sandboxStatus(),
+      origin: activeOrigin(),
+      sandboxed: activeSandboxed(),
+    })
   // ── Files panel (fm-w10) and its viewer (fm-w7) ──────────────────────
   // The panel's backend surface, wrapped so the composition root owns the
   // binding lifecycle: a binding is live from the files.open that created
@@ -576,14 +641,7 @@ async function main() {
     readFile: (params) => filesServicesTracked.read(params.bindingId, params.path, 0),
     onBindingLiveness: onFilesBindingLiveness,
   })
-  // The upload surface (design §5.5), resolved from the dispatcher — the
-  // SAME instance the terminal panes resolve, because a transfer has one
-  // state and two stores would each mint a row for every transfer the other
-  // started. Without this the panel's Upload action would be dead code.
   const uploadSurface = uploadSurfaceFor(dispatcher)
-  // The download surface (nocx-9le.8.3), resolved the same way and for the
-  // same reason: one store per dispatcher, because a transfer has one state.
-  // Without this the panel's Download item would be dead code.
   const downloadSurface = downloadSurfaceFor(dispatcher)
   const filesView = createFilesView({
     services: filesServicesTracked,
@@ -594,11 +652,6 @@ async function main() {
     download: downloadSurface,
   })
 
-  // Everything running on somebody's behalf, in one list (nocx-hbdw4). Each
-  // store is read as operations rather than being the list itself, which is
-  // what made download a one-line ADDITION here: it has no panel of its own,
-  // it joins as a second source, and nothing in the model, the indicator or
-  // the row changed to receive it.
   const operations = createOperationsModel([
     uploadOperations(uploadSurface.store),
     downloadOperations(downloadSurface.store),
@@ -851,6 +904,17 @@ async function main() {
     }
     return live
   }
+  function openSandboxStatisticsPane(): SandboxStatisticsContent {
+    if (tm.activeOrigin() !== null) {
+      setSandboxStatisticsPaneId(tm.activePaneWireId())
+    }
+    const { content, descriptor } = registry.build(SURFACE_ID_SANDBOX_STATISTICS)
+    const live = tm.openPane(content, descriptor).content
+    if (!(live instanceof SandboxStatisticsContent)) {
+      throw new Error('nocx: the Sandbox singleton is not a SandboxStatisticsContent')
+    }
+    return live
+  }
 
   // The sidebar width controller (nocx-qmcu): the single owner of the
   // panel's width between the drag handle, the settings observer and the
@@ -877,6 +941,9 @@ async function main() {
       try {
         const snap = await profileClient.getSnapshot()
         observer.setRevision(snap.revision)
+        const enabled = snap.values[SANDBOX_ENABLED_KEY] === true
+        setSandboxEnabledLive(enabled)
+        void refreshSandboxAvailability(enabled)
         const next = snap.values[PLACEMENT_KEY] ?? 'horizontal'
         if (next !== placement) {
           placement = next
@@ -920,10 +987,6 @@ async function main() {
   // controller feeds both the header toggle and the panel's status merges,
   // so the two can never disagree about the backend's flag.
   const portsPause = createPortsPauseControl()
-  // The filter is a HEADER-LEVEL slot too (nocx-708q.3), for the same
-  // reason Pause is: one control shared between the shell's pinned row and
-  // the panel, so the field and the rows read one signal. In the body it
-  // scrolled away with the list it narrows.
   const portsFilter = createPortsFilterControl()
   const PORTS_VIEW: SidebarViewDescriptor = {
     id: 'ports',
@@ -966,10 +1029,6 @@ async function main() {
   // point of the feature (design §6.3).
   const notesStore = new NotesStore(new NotesClient(dispatcher))
   registerNotesSurface(tm, notesStore)
-  // The descriptor is `createNotesView`, beside the Files, Git and
-  // Operations ones, rather than a literal here (nocx-708q.3): the header
-  // action, the pinned filter and the body all read one store, and a
-  // descriptor that lives with its panel is a descriptor a test can mount.
   const notesView = createNotesView({
     store: notesStore,
     onOpen: (id) => openNote(id, ''),
@@ -986,7 +1045,6 @@ async function main() {
   // by their order field — the field then means what it says, and a future
   // view cannot slip in front by registration order. Files registers below
   // Ports (FILES_VIEW_ORDER < 0) and must be the FIRST icon in the view
-  // zone — an owner requirement, asserted here and in files-view.test.tsx.
   const sidebar = mountSidebar(
     activityBar,
     sidebarPanel,
@@ -997,6 +1055,16 @@ async function main() {
       // reason design §9.2 gives — the tree lives IN the workbench, and a
       // second tree in the panel would be a second owner of one selection.
       apiSidebarAction(),
+      {
+        id: 'sandbox-statistics',
+        title: 'Sandbox statistics',
+        icon: SandboxReportIcon,
+        selected: () => activeSurfaceType() === SURFACE_SANDBOX_STATISTICS,
+        onActivate: () => {
+          log.info('nocx: opening Sandbox statistics tab')
+          openSandboxStatisticsPane()
+        },
+      },
       {
         id: 'settings',
         title: 'Settings',
@@ -1028,7 +1096,29 @@ async function main() {
     () => portsTargetId(),
     () => activeOrigin(),
     sidebarWidthCtrl,
-    () => activeSurfaceType() === SURFACE_SETTINGS,
+    () =>
+      activeSurfaceType() === SURFACE_SETTINGS ||
+      activeSurfaceType() === SURFACE_SANDBOX_STATISTICS,
+    [
+      {
+        id: 'sandbox-shield',
+        title: () => {
+          const state = currentShieldState()
+          return state.kind === 'ready'
+            ? state.action === 'remove'
+              ? `Remove sandbox from this tab (${state.workspace})`
+              : `Convert this tab to a sandboxed shell (${state.workspace})`
+            : state.kind === 'disabled'
+              ? state.reason
+              : 'Convert active tab to a sandboxed shell'
+        },
+        icon: ShieldIcon,
+        selected: () => activeSandboxed(),
+        hidden: () => currentShieldState().kind === 'hidden',
+        disabled: () => sandboxConversionInFlight() || currentShieldState().kind !== 'ready',
+        onActivate: () => void convertActiveTabToSandboxed(),
+      },
+    ],
   )
 
   // Cmd/Ctrl+, opens or focuses the Settings tab.
@@ -1163,6 +1253,62 @@ async function main() {
       void openForward(server.item.id, destination, localPort)
     },
   }
+
+  const getSandboxState = async (): Promise<{
+    enabled: boolean
+    status: SandboxStatus | null
+  }> => {
+    const snap = await profileClient.getSnapshot()
+    const enabled = snap.values[SANDBOX_ENABLED_KEY] === true
+    let status: SandboxStatus | null = null
+    if (enabled) {
+      try {
+        status = await client.sandboxStatus()
+      } catch {
+        status = null
+      }
+    }
+    return { enabled, status }
+  }
+  const reportSandboxOpenError = (message: string): void => {
+    showToast({ level: 'danger', message: `Could not open a sandboxed shell: ${message}` })
+  }
+  const reportSandboxConversionError = (): void => {
+    showToast({ level: 'danger', message: 'Could not convert this tab: replacement shell failed' })
+  }
+
+  // The ONE conversion controller (design §5.2): the sidebar shield and the
+  // typed `/sandbox` command both call it, and the statistics tab's future
+  // relaunch reuses `toggle`. The shared in-flight guard is the same signal
+  // the shield reads for its disabled state above.
+  const sandboxConvert = createSandboxConvertController({
+    shieldInput: () => ({
+      enabled: sandboxEnabledLive(),
+      status: sandboxStatus(),
+      origin: activeOrigin(),
+      sandboxed: activeSandboxed(),
+    }),
+    inFlight: () => sandboxConversionInFlight(),
+    setInFlight: setSandboxConversionInFlight,
+    paneManager: tm,
+    getSandboxState,
+    getSnapshot: () => profileClient.getSnapshot(),
+    getProfile: (paneId) => client.sandboxProfileGet(paneId),
+    openDirectory: () => dialogClient.openDirectoryDialog(),
+    showPermissions: showSandboxPermissions,
+    reportOpenError: reportSandboxOpenError,
+    reportConversionError: reportSandboxConversionError,
+    reportRefusal: (message) => showToast({ message, level: 'warning' }),
+  })
+  relaunchSandbox = async (paneId) => {
+    if (await tm.activatePaneByWireId(paneId)) {
+      await sandboxConvert.relaunch()
+    }
+  }
+  convertActiveTabToSandboxed = () => sandboxConvert.toggle()
+  // The `/sandbox` command seam, forwarded through PaneManager to every
+  // pane's editor. Set before openInitialPane() so restored panes carry it.
+  tm.sandboxCommand = (doc) => sandboxConvert.runCommand(doc)
 
   const qcProviders: QuickConnectProvider[] = [
     new ActionsQuickConnectProvider(
@@ -1308,7 +1454,7 @@ async function main() {
   // with PaneManager (Ctrl+T/W/1-9), the terminal (single keystrokes), or
   // CodeMirror (which does not register this binding in its keymap).
   document.addEventListener('keydown', (e) => {
-    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key === 'P') {
+    if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.code === 'KeyP') {
       e.preventDefault()
       qc.showPalette()
     }

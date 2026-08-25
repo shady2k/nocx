@@ -81,7 +81,9 @@ func firstTab(id string) map[string]any {
 }
 
 func firstPane(id, cwd string) map[string]any {
-	return map[string]any{"id": id, "cwd": cwd, "kind": "local", "sizeShare": 1}
+	return map[string]any{
+		"id": id, "cwd": cwd, "kind": "local", "sizeShare": 1,
+	}
 }
 
 // aReplacement is the identity of the tab that appears if a close empties the
@@ -379,12 +381,18 @@ func TestLayoutPaneMoveChangesOnlyTheReference(t *testing.T) {
 		"id": tabID2, "workspaceId": wsID1, "position": 1, "layout": "row",
 		"firstPane": firstPane(paneID2, "/var"),
 	}, 30)
+	if err := db.Layout().InsertSandboxGrant(t.Context(), content.SandboxGrant{
+		PaneID: paneID1, Version: 1, IssuedAt: 42, Workspace: "/repos/nocx", Payload: `{}`,
+	}); err != nil {
+		t.Fatalf("InsertSandboxGrant: %v", err)
+	}
 
 	var moved struct {
 		Pane struct {
-			ID    string `json:"id"`
-			TabID string `json:"tabId"`
-			Cwd   string `json:"cwd"`
+			ID             string `json:"id"`
+			TabID          string `json:"tabId"`
+			Cwd            string `json:"cwd"`
+			SandboxGranted bool   `json:"sandboxGranted"`
 		} `json:"pane"`
 	}
 	if err := json.Unmarshal(mustLayoutCall(t, conn, "panes.move",
@@ -396,6 +404,9 @@ func TestLayoutPaneMoveChangesOnlyTheReference(t *testing.T) {
 	}
 	if moved.Pane.TabID != tabID2 {
 		t.Fatalf("moved pane tab = %q, want %q", moved.Pane.TabID, tabID2)
+	}
+	if !moved.Pane.SandboxGranted {
+		t.Fatal("moved granted pane reported sandboxGranted=false")
 	}
 	// The source tab held only this pane, so nocx-isoph.3's rule takes it:
 	// a tab exists only while it holds a member, and the row goes in the same

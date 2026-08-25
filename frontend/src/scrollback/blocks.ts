@@ -1738,14 +1738,14 @@ export class BlockManager {
    * keeps the scroll decision, which is about the view and not about the
    * blocks.
    */
-  restorePast(blocks: HTMLElement[]): void {
+  restorePast(blocks: HTMLElement[], boundaryLabel = 'Previous session'): void {
     if (blocks.length === 0) return
     const anchor = this._scrollbackInner.firstChild
     for (const el of blocks) this._own(el, anchor)
     const boundary = document.createElement('div')
     boundary.className = 'scrollback-restore-boundary'
     boundary.dataset.restoreBoundary = 'true'
-    boundary.textContent = 'Previous session'
+    boundary.textContent = boundaryLabel
     this._own(boundary, anchor)
   }
 

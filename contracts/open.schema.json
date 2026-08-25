@@ -62,6 +62,53 @@
           "minimum": 1
         }
       }
+    },
+    "sandbox": {
+      "description": "Immutable realized sandbox metadata for a sandboxed local session. Absent for ordinary and SSH sessions. The backend returns a deep copy of the enforced policy after native readiness; request deltas and settings revisions are never echoed.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["backend", "workspace", "writableRoots", "readOnlyRoots", "homeProjections"],
+      "properties": {
+        "backend": {
+          "type": "string",
+          "enum": ["landlock", "seatbelt"]
+        },
+        "workspace": {
+          "type": "string",
+          "minLength": 1
+        },
+        "writableRoots": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "readOnlyRoots": {
+          "type": "array",
+          "items": { "type": "string", "minLength": 1 }
+        },
+        "homeProjections": {
+          "description": "Disposable discoverability aliases from the isolated runtime HOME to exact canonical host roots. These objects carry no access class; writableRoots and readOnlyRoots remain authoritative.",
+          "type": "array",
+          "maxItems": 129,
+          "uniqueItems": true,
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["hostPath", "relativePath"],
+            "properties": {
+              "hostPath": {
+                "type": "string",
+                "pattern": "^/"
+              },
+              "relativePath": {
+                "type": "string",
+                "minLength": 1,
+                "pattern": "^[^/]+(/[^/]+)*$",
+                "not": { "pattern": "(^|/)\\.\\.?(/|$)" }
+              }
+            }
+          }
+        }
+      }
     }
   }
 }

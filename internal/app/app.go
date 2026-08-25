@@ -52,6 +52,7 @@ import (
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/reveal"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/shellintegration"
@@ -94,6 +95,9 @@ type App struct {
 	Updater          update.Updater
 	Profiles         profile.ProfileRepository
 	Credentials      credential.SecretStore
+	// Sandbox is the per-pane filesystem sandbox backend (ADR-0036). Injected
+	// here — the single composition root — and nowhere else.
+	Sandbox sandbox.Service
 
 	// vaultCloser releases the vault's background worker and seals it at
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
@@ -209,6 +213,19 @@ func policyFromSettings(reg *settings.Registry) *content.Policy {
 		p.SetOutputCapBytes(int(v) << 10)
 	}
 	return p
+}
+
+// closeSandboxPanesOnStartup enforces the non-restorable sandbox-grant
+// boundary before any layout read can reach the renderer. A failure is
+// FATAL: a sandbox pane left open would be restored as an ordinary local
+// shell in its sandbox workspace, silently dropping the boundary the grant
+// exists to hold. Startup refuses rather than open on that.
+func closeSandboxPanesOnStartup(ctx context.Context, db content.ContentDB, logger *slog.Logger) error {
+	if err := db.Layout().CloseSandboxPanes(ctx); err != nil {
+		logger.Error("sandbox panes could not be closed before restore; refusing to start", "error", err)
+		return fmt.Errorf("sandbox pane sweep: %w", err)
+	}
+	return nil
 }
 
 // clearWindowOnCleanStart is the whole of "reopen tabs and panes on startup"
@@ -521,6 +538,11 @@ func New(opts ...Option) (*App, error) {
 	installLogrusContainment(logger)
 
 	shint := shellintegration.New(logger)
+	// One platform sandbox service at the composition root (AD-8). It owns
+	// policy construction and the per-session runtime roots; callers only
+	// carry an optional workspace request.
+	accessInbox := sandbox.NewAccessInbox(nil)
+	sandboxSvc := sandbox.NewWithAccess(logger, paths.CacheDir(), accessInbox)
 	// The child-domain registries (nocx-u7uh.11): the grant builder needs
 	// to know each lifecycle transport's kind (fd vs forwarded port) and
 	// each lane's owning session before it can compose a child bootstrap.
@@ -540,7 +562,7 @@ func New(opts ...Option) (*App, error) {
 	// composition root is where the platform half gets wired in.
 	ptf := &localPTYFactory{
 		log: logger, shint: shint, transports: childTransports,
-		shells: loginshell.New(), procs: procs,
+		shells: loginshell.New(), procs: procs, sandbox: sandboxSvc,
 	}
 	sess := session.New(logger, ptf)
 
@@ -699,6 +721,10 @@ func New(opts ...Option) (*App, error) {
 	}
 
 	settingsRegistry := settings.New(docStore, v)
+	accessInbox.SetGrantStore(sandboxGrantStore{
+		registry: settingsRegistry,
+		layout:   func() sandboxWorkspaceProfiles { return contentDB.Layout() },
+	})
 
 	// The binding document (design §8, §8.1): the map from a collection's
 	// variable NAME to a value in the vault. It is constructed HERE rather
@@ -844,6 +870,9 @@ func New(opts ...Option) (*App, error) {
 		// inferred, and this is the line a retry (or nocx-rtg0.10's queue
 		// draining) closes its episode on.
 		historyStatus.Clear()
+		if sweepErr := closeSandboxPanesOnStartup(ctx, db, slogger); sweepErr != nil {
+			return nil, sweepErr
+		}
 		clearWindowOnCleanStart(ctx, settingsRegistry, db, slogger)
 	}
 
@@ -937,6 +966,9 @@ func New(opts ...Option) (*App, error) {
 		transport.WithBackupFileSaver(backup.SaveToFile),
 		transport.WithGroupRepository(profileStore),
 		transport.WithCredentialStore(v),
+		transport.WithSettingsRegistry(settingsRegistry),
+		transport.WithSandboxService(sandboxSvc),
+		transport.WithSandboxAccessInbox(accessInbox),
 		transport.WithVaultLifecycle(v),
 		transport.WithAgentKnownMaterial(transport.NewVaultKnownMaterial(v)),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
@@ -949,7 +981,6 @@ func New(opts ...Option) (*App, error) {
 		// settings surface needs it so five controls that govern nothing do
 		// not look like the two that do.
 		transport.WithLiveEffects(agenttools.LiveEffects()),
-		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithContentDB(contentDB),
 		transport.WithHistoryStatus(historyStatus),
 		transport.WithProber(&proberAdapter{client: sshClient}),
@@ -1359,6 +1390,7 @@ func New(opts ...Option) (*App, error) {
 		ShellIntegration: shint,
 		Profiles:         profileStore,
 		Credentials:      v,
+		Sandbox:          sandboxSvc,
 		vaultCloser:      v,
 		noteCloser:       noteCloser,
 		discoverySched:   discoverySched,
@@ -1659,9 +1691,10 @@ func appendRouteHops(cfg *ssh.ConnectConfig, hops *[]endpointHop) {
 }
 
 type localPTYFactory struct {
-	log    log.Logger
-	shint  shellintegration.ShellIntegration
-	kernel lifecyclechannel.Kernel
+	log     log.Logger
+	shint   shellintegration.ShellIntegration
+	sandbox sandbox.Service
+	kernel  lifecyclechannel.Kernel
 	// shells answers which shell this user logs in with. Injected because the
 	// platform half is a subprocess against the OS account database, and
 	// because the answer decides the tier: it is the single call site of the
@@ -1750,8 +1783,12 @@ func (p *lifecyclePTY) Close() error {
 
 func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, error) {
 	env := f.shint.ActivationEnv(cfg.Enhanced)
+	sandboxed := cfg.Sandbox != nil
+	if sandboxed && (!cfg.Enhanced || f.kernel == nil) {
+		return nil, sandbox.NewSetupErrorf("sandboxed shell requires local shell integration")
+	}
 	if !cfg.Enhanced || f.kernel == nil {
-		return pty.NewLocal(f.log, cfg, pty.WithExtraEnv(env))
+		return f.newLocal(cfg, pty.WithExtraEnv(env))
 	}
 	// Which shell the user logs in with, and which local tier starts it. One
 	// resolution, one log line, one decision — everything below reads them
@@ -1764,6 +1801,9 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 		"shell", shell.Path, "source", string(shell.Source), "tier", string(kind))
 
 	if kind == shellintegration.ShellUnknown {
+		if sandboxed {
+			return nil, sandbox.NewSetupErrorf("sandboxed shell requires a supported login shell")
+		}
 		// fish, csh, tcsh, dash, anything: started as itself, integrated not
 		// at all, and SAID so. Substituting bash here is the defect this bead
 		// is; degrading silently is the one AGENTS.md names. The activation
@@ -1771,7 +1811,7 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 		// must not be told it is being integrated.
 		cfg.Command = shell.Path
 		cfg.Args = []string{"-l"}
-		p, err := pty.NewLocal(f.log, cfg, pty.WithExtraEnv(f.shint.ActivationEnv(false)))
+		p, err := f.newLocal(cfg, pty.WithExtraEnv(f.shint.ActivationEnv(false)))
 		if err != nil {
 			return nil, err
 		}
@@ -1786,6 +1826,24 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 		f.report(cfg.SessionID, shell.Path, transport.IntegrationConventional, ssh.ReasonUnsupportedShell)
 		return p, nil
 	}
+	runtimeRoot := ""
+	var err error
+	if sandboxed {
+		if f.sandbox == nil {
+			return nil, sandbox.NewSetupErrorf("sandbox request without a sandbox service")
+		}
+		runtimeRoot, err = f.sandbox.NewRuntimeRoot()
+		if err != nil {
+			return nil, err
+		}
+		req := *cfg.Sandbox
+		req.RuntimeRoot = runtimeRoot
+		cfg.Sandbox = &req
+	}
+	artifactDir := ""
+	if runtimeRoot != "" {
+		artifactDir = filepath.Join(runtimeRoot, "tmp")
+	}
 	// Enhanced: the shell reports its lifecycle over a descriptor that is not
 	// the tty (ADR-0024 decision 2). The child end goes in as fd 3; the parent
 	// end stays here and is pumped by the adapter.
@@ -1797,6 +1855,7 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 		lifecyclechannel.WithHelloTimeout(lifecycle.HelloTimeout),
 		lifecyclechannel.WithLossReporter(f.noteLifecycleLoss))
 	if err != nil {
+		sandbox.RemoveRuntimeRoot(runtimeRoot)
 		return nil, err
 	}
 	// The bootstrap progress descriptor (nocx-yww2): a SECOND, one-way
@@ -1831,20 +1890,25 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 		Epoch:       launch.Epoch,
 		LifecycleFD: 3, // the child end of the socketpair, via ExtraFiles
 		BootstrapFD: bootstrapFD(bpChild),
+		ArtifactDir: artifactDir,
 	})
 	if rerr != nil {
-		f.log.Warn("local lifecycle bootstrap failed; session stays conventional",
-			"shell", shell.Path, "tier", string(kind), "error", rerr)
 		_ = ch.Close()
 		_ = child.Close()
 		closeProgress(bp, bpChild)
+		if sandboxed {
+			sandbox.RemoveRuntimeRoot(runtimeRoot)
+			return nil, sandbox.NewSetupErrorf("sandboxed shell bootstrap failed")
+		}
+		f.log.Warn("local lifecycle bootstrap failed; session stays conventional",
+			"shell", shell.Path, "tier", string(kind), "error", rerr)
 		// No channel and no bootstrap: the user's OWN login shell, plain, with
 		// a visible native prompt (the script's init bails without config).
 		// The activation env is the conventional one — a shell that will not
 		// be integrated must not be told it is being integrated.
 		cfg.Command = shell.Path
 		cfg.Args = []string{"-i"}
-		p, perr := pty.NewLocal(f.log, cfg, pty.WithExtraEnv(f.shint.ActivationEnv(false)))
+		p, perr := f.newLocal(cfg, pty.WithExtraEnv(f.shint.ActivationEnv(false)))
 		if perr != nil {
 			return nil, perr
 		}
@@ -1862,8 +1926,12 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 	// the bootstrap progress pipe, and the rcfile reads both numbers from the
 	// environment block LaunchOptions rendered above. Appending the progress
 	// end second is what makes bootstrapFD's answer true.
-	p, err := pty.NewLocal(f.log, cfg,
-		pty.WithExtraEnv(env), pty.WithExtraEnv(local.Env), pty.WithExtraFiles(extraFiles(child, bpChild)...))
+	localOpts := []pty.Option{
+		pty.WithExtraEnv(env),
+		pty.WithExtraEnv(local.Env),
+		pty.WithExtraFiles(extraFiles(child, bpChild)...),
+	}
+	p, err := f.newLocal(cfg, localOpts...)
 	// The child ends are the shell's once the fork has happened; this process
 	// keeps no reference either way.
 	_ = child.Close()
@@ -1879,6 +1947,7 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 		// failure there is no shell, so the capability would sit in TMPDIR
 		// until the machine cleaned it.
 		local.Cleanup()
+		sandbox.RemoveRuntimeRoot(runtimeRoot)
 		return nil, err
 	}
 	// Bind the lane to the session that will receive its facts. Without
@@ -1893,10 +1962,19 @@ func (f *localPTYFactory) NewPTY(_ context.Context, cfg pty.Config) (pty.Pty, er
 	// would have nowhere to land. Registering the axis afterwards is the
 	// safe order — the status is only emitted after the open ack anyway.
 	f.report(cfg.SessionID, p.Shell(), transport.IntegrationStarting, ssh.ReasonNone)
-	// Watched only here, on the one path that has a handshake to shorten.
-	// A session already reported conventional has nothing an observation
-	// could bring forward, and watching it could only produce noise.
-	return &lifecyclePTY{Pty: p, ch: ch, bp: bp, stopWatch: f.watchForReplacement(cfg.SessionID, p)}, nil
+	// The sandboxed process remains the login shell after authenticated
+	// bootstrap. Keep the ordinary replacement observer active: an exec from
+	// user startup files is still an unexpected takeover inside the cage.
+	stopWatch := f.watchForReplacement(cfg.SessionID, p)
+	return &lifecyclePTY{Pty: p, ch: ch, bp: bp, stopWatch: stopWatch}, nil
+}
+
+// newLocal is the only local-PTY constructor path. Appending the sandbox
+// service here means every launch tier preserves the same fail-closed
+// behavior; a future branch cannot accidentally omit enforcement.
+func (f *localPTYFactory) newLocal(cfg pty.Config, opts ...pty.Option) (*pty.LocalPty, error) {
+	opts = append(opts, pty.WithSandboxService(f.sandbox))
+	return pty.NewLocal(f.log, cfg, opts...)
 }
 
 // watchForReplacement asks the observer to say when the shell this factory
@@ -2488,6 +2566,97 @@ func (p *remoteLifecycleProvider) Establish(ctx context.Context, host string, op
 		Capability: cfg.Capability,
 		Recovery:   cfg.Recovery,
 	}, adapter, nil
+}
+
+type sandboxSettingsStore interface {
+	AppendSandboxPath(profile *settings.PathList, path string) (int, error)
+	GetSnapshot() (settings.SettingsSnapshot, error)
+}
+
+type sandboxWorkspaceProfiles interface {
+	WorkspaceSandboxProfile(ctx context.Context, workspaceID string) (*content.WorkspaceSandboxProfile, error)
+	SetWorkspaceSandboxProfile(ctx context.Context, workspaceID string, expectedRevision int64, profile content.WorkspaceSandboxProfile) (int64, error)
+}
+
+type sandboxGrantStore struct {
+	registry sandboxSettingsStore
+	layout   func() sandboxWorkspaceProfiles
+}
+
+func (s sandboxGrantStore) PromoteSandboxPath(workspaceID string, access sandbox.AccessClass, path string) (int64, error) {
+	if workspaceID == content.DefaultWorkspaceID {
+		var (
+			revision int
+			err      error
+		)
+		switch access {
+		case sandbox.AccessReadOnly:
+			revision, err = s.registry.AppendSandboxPath(settings.SandboxAllowedReadOnlyPaths, path)
+		case sandbox.AccessReadWrite:
+			revision, err = s.registry.AppendSandboxPath(settings.SandboxAllowedWritablePaths, path)
+		default:
+			return 0, sandbox.ErrInvalidAccessDecision
+		}
+		return int64(revision), err
+	}
+	if s.layout == nil {
+		return 0, sandbox.ErrAccessGrantUnavailable
+	}
+	layout := s.layout()
+	for range 3 {
+		profile, err := layout.WorkspaceSandboxProfile(context.Background(), workspaceID)
+		if err != nil {
+			return 0, sandbox.ErrAccessGrantUnavailable
+		}
+		var expected int64
+		if profile == nil {
+			profile, err = s.standardSandboxProfile()
+			if err != nil {
+				return 0, sandbox.ErrAccessGrantUnavailable
+			}
+		} else {
+			expected = profile.Revision
+		}
+		switch access {
+		case sandbox.AccessReadOnly:
+			profile.ReadOnlyPaths = append(profile.ReadOnlyPaths, path)
+		case sandbox.AccessReadWrite:
+			profile.WritablePaths = append(profile.WritablePaths, path)
+		default:
+			return 0, sandbox.ErrInvalidAccessDecision
+		}
+		profile.WritablePaths, profile.ReadOnlyPaths, err = settings.CanonicalizeSandboxProfile(
+			profile.WritablePaths, profile.ReadOnlyPaths,
+		)
+		if err != nil {
+			return 0, sandbox.ErrAccessGrantUnavailable
+		}
+		revision, err := layout.SetWorkspaceSandboxProfile(context.Background(), workspaceID, expected, *profile)
+		if errors.Is(err, content.ErrSandboxProfileRevision) {
+			continue
+		}
+		if err != nil {
+			return 0, sandbox.ErrAccessGrantUnavailable
+		}
+		return revision, nil
+	}
+	return 0, sandbox.ErrAccessGrantUnavailable
+}
+
+func (s sandboxGrantStore) standardSandboxProfile() (*content.WorkspaceSandboxProfile, error) {
+	snapshot, err := s.registry.GetSnapshot()
+	if err != nil {
+		return nil, err
+	}
+	writable, readOnly, err := settings.SandboxProfileFromSnapshot(snapshot)
+	if err != nil {
+		return nil, err
+	}
+	return &content.WorkspaceSandboxProfile{
+		SchemaVersion: 1,
+		WritablePaths: writable,
+		ReadOnlyPaths: readOnly,
+	}, nil
 }
 
 // apiRouteLeaser turns the PROFILE an API-testing environment names into a

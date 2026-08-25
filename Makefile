@@ -1,5 +1,7 @@
 .PHONY: all init build dev dev-web lint format test clean hooks ci ci-full \
         ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e \
+        sandbox-smoke-linux sandbox-smoke-linux-artifact \
+        sandbox-smoke-macos sandbox-smoke-macos-artifact \
         print-os-pkgs print-portable-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci
 
@@ -109,6 +111,33 @@ test:
 # knows about. Run it when the ssh -G parsing or the resolver changes.
 conformance:
 	NOCX_TEST_SSH_G=1 $(GO) test -v -count=1 -run Conformance ./internal/ssh/...
+
+# Native sandbox enforcement smokes. These fail rather than skip when the
+# platform cannot prove the advertised backend.
+sandbox-smoke-linux:
+	@abi=$$(go run github.com/landlock-lsm/go-landlock/cmd/landlock-abi-version 2>/dev/null || echo 0); \
+	echo "=== Landlock enforcement smoke (detected ABI $$abi, floor 3) ==="; \
+	if [ "$$abi" -lt 3 ]; then echo "FAIL: Landlock ABI $$abi < 3 — enforcement smoke cannot run on this kernel"; exit 1; fi
+	$(GO) test -v -count=1 -run 'TestLandlockEnforcement|TestNewLocal_SandboxedEndToEnd' ./internal/sandbox/
+
+sandbox-smoke-linux-artifact:
+	@echo "=== Landlock release-artifact smoke ==="
+	@if [ "$$(uname -s)" != "Linux" ]; then echo "FAIL: sandbox-smoke-linux-artifact requires Linux"; exit 1; fi
+	@if [ -z "$(NOCX_SANDBOX_ARTIFACT)" ] || [ ! -x "$(NOCX_SANDBOX_ARTIFACT)" ]; then echo "FAIL: NOCX_SANDBOX_ARTIFACT must name an executable nocx binary"; exit 1; fi
+	$(GO) run ./cmd/sandboxprobe -artifact "$(NOCX_SANDBOX_ARTIFACT)"
+
+sandbox-smoke-macos:
+	@echo "=== Seatbelt enforcement smoke (macOS) ==="
+	@if [ "$$(uname -s)" != "Darwin" ]; then echo "FAIL: sandbox-smoke-macos requires macOS"; exit 1; fi
+	@if [ ! -x /usr/bin/sandbox-exec ]; then echo "FAIL: sandbox-exec is unavailable — enforcement smoke cannot run"; exit 1; fi
+	$(GO) test -v -count=1 -run 'TestSeatbeltEnforcement|TestDarwinService|TestNewLocal_SandboxedEndToEnd' ./internal/sandbox/
+
+sandbox-smoke-macos-artifact:
+	@echo "=== Seatbelt release-artifact smoke ==="
+	@if [ "$$(uname -s)" != "Darwin" ]; then echo "FAIL: sandbox-smoke-macos-artifact requires macOS"; exit 1; fi
+	@if [ ! -x /usr/bin/sandbox-exec ]; then echo "FAIL: sandbox-exec is unavailable — artifact smoke cannot run"; exit 1; fi
+	@if [ -z "$(NOCX_SANDBOX_ARTIFACT)" ] || [ ! -x "$(NOCX_SANDBOX_ARTIFACT)" ]; then echo "FAIL: NOCX_SANDBOX_ARTIFACT must name the executable inside the packaged .app"; exit 1; fi
+	$(GO) run ./cmd/sandboxprobe -artifact "$(NOCX_SANDBOX_ARTIFACT)"
 
 clean:
 	$(GO) clean -cache
@@ -261,7 +290,7 @@ ci-backend:
 	@echo "=== ci-backend: the portable half of ci.yml's backend-linux job ==="
 	./scripts/ci-linux.sh -- $$($(GO) list ./... | grep -vE 'nocx/$(OS_PKG_RE)(/|$$)')
 
-ci-linux:
+ci-linux: sandbox-smoke-linux
 	@echo "=== ci-linux: the OS-specific half of ci.yml's backend-linux job ==="
 	./scripts/ci-linux.sh -- $(OS_PKGS)
 

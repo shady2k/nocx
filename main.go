@@ -16,6 +16,7 @@ import (
 	"github.com/shady2k/nocx/internal/app"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/notify/wailsadapter"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/update"
@@ -39,6 +40,11 @@ const mainWindowName = "main"
 var errFocusSessionUnrouted = errors.New("notification click raised the window, but the tab holding the session was not activated: the backend has no control-plane channel to ask the renderer (nocx-jiwq.1)")
 
 func main() {
+	// Native sandbox helpers re-exec this binary. They must run before the
+	// backend, Wails services, or any window exists.
+	if sandbox.MaybeHelper() || sandbox.MaybeArtifactSmoke() {
+		return
+	}
 	// Checked before any backend or window exists so CI's release smoke check
 	// (distribution design §5) and a user's `nocx --version` print the linked
 	// build metadata and exit, never opening a terminal.

@@ -80,6 +80,11 @@ type LaunchOptions struct {
 	// two. Zero means no progress reporting, which is what every remote
 	// tier gets — there is no second descriptor to hand a far shell.
 	BootstrapFD int
+	// ArtifactDir is a local-only bootstrap location override. Empty keeps the
+	// ordinary local path on os.TempDir; a sandboxed composition root supplies
+	// its private runtime tmp directory so the shell can read and self-delete
+	// the capability-bearing artifact after native policy enforcement.
+	ArtifactDir string
 }
 
 // RemoteLauncher builds the command string passed to an SSH session's

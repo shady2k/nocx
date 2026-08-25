@@ -10,15 +10,23 @@ package transport
 // and runs inline via the ImmediateSubmission (registration.go).
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
+	"time"
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/vault"
@@ -40,11 +48,6 @@ type sessionMachine interface {
 	closeSession(sid session.ID, sess session.Session)
 	ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, ring *outputRing, startOffset uint64)
 	flushFilesChanged(sid session.ID, wconn Responder)
-	// flushUploadDone re-emits the upload outcomes that settled while
-	// nothing was attached (upload design §5.3). Separate from the files
-	// flush because it is a terminal fact rather than an invalidation: a
-	// missed files.changed costs a stale listing the next poll corrects,
-	// and a missed uploadDone leaves the UI saying "uploading" forever.
 	flushUploadDone(sid session.ID, wconn Responder)
 	notifyInputStalled(sid session.ID)
 	// replayLifecycleFacts re-emits the current lifecycle projection of the
@@ -89,14 +92,11 @@ type openMachine interface {
 // the connection as the session's subscriber, so the handler receives the
 // *wsConn per call.
 type openHandlers struct {
-	op       capability.OpenOperation
-	sess     openMachine
-	resolver *resolverHolder // profile resolver, readable post-construction
-	sshCfg   ssh.ConfigResolver
-	launcher ssh.RemoteLauncher
-	// installer publishes the bundle over SFTP on the direct-host path,
-	// which is the only thing that installs it now that the command
-	// carries no payload.
+	op        capability.OpenOperation
+	sess      openMachine
+	resolver  *resolverHolder // profile resolver, readable post-construction
+	sshCfg    ssh.ConfigResolver
+	launcher  ssh.RemoteLauncher
 	installer ssh.RemoteInstaller
 	// lifecycle is the authenticated-channel seam (ADR-0024): the dial
 	// hands it to the far side so the shell can hand its lifecycle back
@@ -116,17 +116,20 @@ type openHandlers struct {
 	// held by an open the whole control plane would stop. The read itself
 	// needs no gate: layout reads go straight to the pool and never through
 	// the single writer goroutine.
-	panes paneWorkspaces
-	log   log.Logger
+	panes    paneWorkspaces
+	settings capability.SettingsService
+	log      log.Logger
 }
 
-// paneWorkspaces answers "which workspace is this pane in" — the one
-// derivation §4.5 leaves in the backend, satisfied by
-// content.LayoutRepository. Declared here as the narrow seam this handler
-// needs rather than taken as the whole repository: an open may resolve a
-// workspace and may not write a layout row.
+// paneWorkspaces is the narrow layout seam needed by open: resolve pane
+// provenance, reject duplicate sandbox authority, and durably record the
+// realized grant before native enforcement starts.
 type paneWorkspaces interface {
 	WorkspaceForPane(ctx context.Context, paneID string) (string, error)
+	WorkspaceSandboxProfile(ctx context.Context, workspaceID string) (*content.WorkspaceSandboxProfile, error)
+	SandboxGrantExists(ctx context.Context, paneID string) (bool, error)
+	InsertSandboxGrantIfCurrent(ctx context.Context, grant content.SandboxGrant, expectation content.SandboxGrantExpectation) error
+	RemoveSandboxGrant(ctx context.Context, paneID string) error
 }
 
 // workspaceForOpen derives the workspace this session's ack will carry.
@@ -171,7 +174,8 @@ type openResult struct {
 	// Null for a root session — and null rather than absent, because the
 	// schema requires the key: an omitempty here would drop it for every root
 	// session and leave "no parent" indistinguishable from "an old backend".
-	Parent *openParentResult `json:"parent"`
+	Parent  *openParentResult    `json:"parent"`
+	Sandbox *sandbox.SessionInfo `json:"sandbox,omitempty"`
 }
 
 // openParentResult is the recorded parent edge on the wire: the full identity
@@ -238,6 +242,55 @@ func (h openHandlers) answerOpenFailure(r Responder, req jsonrpcRequest, err err
 		_ = respond(r, newJSONRPCError(req.ID, -32602, "Invalid params: "+err.Error()))
 		return
 	}
+	if errors.Is(err, content.ErrSandboxGrantExists) {
+		_ = r.TryError(req.ID, RPCError{
+			Code: -32602, Message: "Invalid params: sandbox pane already granted",
+		})
+		return
+	}
+	if errors.Is(err, content.ErrSandboxGrantStale) ||
+		errors.Is(err, content.ErrNoSuchPane) ||
+		errors.Is(err, settings.ErrRevisionMismatch) {
+		_ = r.TryError(req.ID, RPCError{
+			Code: -32602, Message: "Invalid params: sandbox context changed before launch",
+		})
+		return
+	}
+	var statusErr *sandbox.StatusError
+	if errors.As(err, &statusErr) {
+		h.log.Warn("sandbox backend unavailable",
+			"backend", statusErr.Status.Backend,
+			"reason", statusErr.Status.Reason,
+			"abi", statusErr.Status.ABI,
+		)
+		_ = r.TryError(req.ID, RPCError{
+			Code: -32006, Message: statusErr.Status.Reason,
+			Data: map[string]any{"reason": statusErr.Status.Reason},
+		})
+		return
+	}
+	var setupErr *sandbox.SetupError
+	if errors.As(err, &setupErr) {
+		// The reason is a fixed token the sandbox package chose, never the
+		// error text: the detail behind it names paths, and neither the wire
+		// nor the log may carry those. A setup failure with no typed reason
+		// stays generic.
+		reason := setupErr.Reason
+		if reason == "" {
+			reason = "setup-failed"
+		}
+		h.log.Error("sandbox setup failed", "reason", reason)
+		_ = r.TryError(req.ID, RPCError{
+			Code: -32007, Message: "sandbox setup failed",
+			Data: map[string]any{"reason": reason},
+		})
+		return
+	}
+	if errors.Is(err, sandbox.ErrInvalidPermissions) {
+		h.log.Warn("sandbox request paths became invalid before launch")
+		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+		return
+	}
 	h.log.Error("failed to open session", "error", err)
 	// A sealed vault surfaces here for EVERY connection that needs it —
 	// this is still a vault access, and the renderer must get the reason
@@ -267,6 +320,27 @@ func (h openHandlers) answerOpenFailure(r Responder, req jsonrpcRequest, err err
 	_ = respond(r, resp)
 }
 
+func canonicalizeOpenCwd(path string) (string, error) {
+	if path == "" {
+		return "", nil
+	}
+	if !filepath.IsAbs(path) {
+		return "", errors.New("cwd must be absolute")
+	}
+	canonical, err := filepath.EvalSymlinks(filepath.Clean(path))
+	if err != nil {
+		return "", err
+	}
+	info, err := os.Stat(canonical)
+	if err != nil {
+		return "", err
+	}
+	if !info.IsDir() {
+		return "", errors.New("cwd must be a directory")
+	}
+	return canonical, nil
+}
+
 // handleOpen creates a new session and output ring.
 //
 // Per AD-7: the server assigns the authoritative session-id. The JSON-RPC
@@ -274,8 +348,8 @@ func (h openHandlers) answerOpenFailure(r Responder, req jsonrpcRequest, err err
 // correlationId field, because two correlation identifiers for one exchange
 // is redundant state with two owners.
 func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder, state *connState, req jsonrpcRequest) {
-	var params openParams
-	if err := json.Unmarshal(req.Params, &params); err != nil || params.Cols == 0 || params.Rows == 0 {
+	params, err := decodeOpenParams(req.Params)
+	if err != nil || params.Cols == 0 || params.Rows == 0 {
 		resp := newJSONRPCError(req.ID, -32602, "Invalid params: cols and rows required")
 		_ = respond(r, resp)
 		return
@@ -291,9 +365,123 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		return
 	}
 
+	var sandboxReq *sandbox.Request
+	var effProfile effectiveSandboxProfile
+	if params.Sandbox != nil {
+		if params.Kind == "ssh" || params.ProfileID != "" || params.Host != "" {
+			_ = r.TryError(req.ID, RPCError{
+				Code: -32602, Message: "Invalid params: sandbox is only valid for local sessions",
+			})
+			return
+		}
+		if h.settings == nil {
+			_ = r.TryError(req.ID, RPCError{
+				Code: -32005, Message: "Filesystem sandbox is disabled",
+				Data: map[string]any{"reason": "feature-disabled"},
+			})
+			return
+		}
+		snap, snapErr := h.settings.GetSnapshot()
+		if snapErr != nil {
+			h.log.Error("sandbox settings snapshot failed", "reason", "setup-failed")
+			_ = r.TryError(req.ID, RPCError{
+				Code: -32007, Message: "sandbox setup failed",
+				Data: map[string]any{"reason": "setup-failed"},
+			})
+			return
+		}
+		enabled, _ := snap.Values[settings.SandboxEnabled.Key()].(bool)
+		if !enabled {
+			_ = r.TryError(req.ID, RPCError{
+				Code: -32005, Message: "Filesystem sandbox is disabled",
+				Data: map[string]any{"reason": "feature-disabled"},
+			})
+			return
+		}
+		if snap.Revision != params.Sandbox.SettingsRevision {
+			_ = r.TryError(req.ID, RPCError{
+				Code: -32602, Message: "Invalid params: settings revision mismatch",
+			})
+			return
+		}
+		workspacePath, workspaceErr := sandbox.CanonicalizeWorkspace(params.Sandbox.Workspace)
+		if workspaceErr != nil {
+			_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params"})
+			return
+		}
+		if params.PaneID == "" || h.panes == nil {
+			_ = r.TryError(req.ID, RPCError{
+				Code: -32602, Message: "Invalid params: sandbox requires an open pane",
+			})
+			return
+		}
+		granted, grantErr := h.panes.SandboxGrantExists(ctx, params.PaneID)
+		if grantErr != nil {
+			if errors.Is(grantErr, content.ErrNoSuchPane) {
+				_ = r.TryError(req.ID, RPCError{
+					Code: -32602, Message: "Invalid params: sandbox requires an open pane",
+				})
+			} else {
+				h.log.Error("sandbox grant lookup failed")
+				_ = r.TryError(req.ID, RPCError{Code: -32603, Message: "Internal error"})
+			}
+			return
+		}
+		if granted {
+			_ = r.TryError(req.ID, RPCError{
+				Code: -32602, Message: "Invalid params: sandbox pane already granted",
+			})
+			return
+		}
+		// Resolve the effective profile and gate the displayed revision
+		// (design 2026-08-23 §4.3). The backend derives the source from
+		// pane → workspace; a standard-source launch must carry
+		// profileRevision null, a workspace-source launch the exact
+		// per-workspace revision. A workspace profile replaces the standard
+		// roots rather than merging with them.
+		eff, profileErr := resolveEffectiveSandboxProfile(ctx, h.panes, snap, workspaceID)
+		if profileErr != nil {
+			h.log.Error("sandbox setup failed", "reason", "setup-failed")
+			_ = r.TryError(req.ID, RPCError{
+				Code: -32007, Message: "sandbox setup failed",
+				Data: map[string]any{"reason": "setup-failed"},
+			})
+			return
+		}
+		if revErr := checkSandboxProfileRevision(params.Sandbox.ProfileRevision, eff); revErr != nil {
+			_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + revErr.Error()})
+			return
+		}
+		effProfile = eff
+		sandboxReq = &sandbox.Request{
+			Workspace:      workspacePath,
+			GlobalWritable: eff.WritablePaths,
+			GlobalReadOnly: eff.ReadOnlyPaths,
+			AddWritable:    params.Sandbox.AddWritable,
+			RemoveWritable: params.Sandbox.RemoveWritable,
+			AddReadOnly:    params.Sandbox.AddReadOnly,
+			RemoveReadOnly: params.Sandbox.RemoveReadOnly,
+			PaneID:         params.PaneID,
+			WorkspaceID:    workspaceID,
+		}
+	}
+
+	if params.Cwd != "" && (params.Kind == "ssh" || params.Sandbox != nil) {
+		_ = r.TryError(req.ID, RPCError{
+			Code: -32602, Message: "Invalid params: cwd is only valid for ordinary local sessions",
+		})
+		return
+	}
+	localCwd, cwdErr := canonicalizeOpenCwd(params.Cwd)
+	if cwdErr != nil {
+		_ = r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: cwd"})
+		return
+	}
+
 	cfg := session.Config{
 		Kind:   session.KindLocal,
 		Cols:   params.Cols,
+		Cwd:    localCwd,
 		Rows:   params.Rows,
 		XPixel: params.XPixel,
 		YPixel: params.YPixel,
@@ -315,6 +503,48 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		// above has already resolved, so a session never carries one that
 		// names nothing.
 		PaneID: params.PaneID,
+	}
+	if sandboxReq != nil {
+		cfg.Cwd = sandboxReq.Workspace
+		cfg.Sandbox = sandboxReq
+		cfg.SandboxPrepared = func(prepared *sandbox.PreparedCommand) error {
+			info := sandbox.SessionInfo{
+				Backend:         prepared.Backend,
+				Workspace:       prepared.Policy.Workspace,
+				WritableRoots:   append([]string(nil), prepared.Policy.WritableRoots...),
+				ReadOnlyRoots:   append([]string(nil), prepared.Policy.ReadOnlyRoots...),
+				HomeProjections: append([]sandbox.HomeProjection(nil), prepared.Policy.HomeProjections...),
+			}
+			profileRevision := effProfile.Revision
+			payload, marshalErr := json.Marshal(sandbox.GrantPayload{
+				Realized: &info,
+				Provenance: &sandbox.GrantProvenance{
+					WorkspaceID:     workspaceID,
+					ProfileSource:   effProfile.Source,
+					ProfileRevision: &profileRevision,
+				},
+			})
+			if marshalErr != nil {
+				return marshalErr
+			}
+			var workspaceProfileRevision *int64
+			if effProfile.Source == sandbox.ProfileSourceWorkspace {
+				revision := effProfile.Revision
+				workspaceProfileRevision = &revision
+			}
+			return h.settings.WithSnapshot(params.Sandbox.SettingsRevision, func(_ settings.SettingsSnapshot) error {
+				return h.panes.InsertSandboxGrantIfCurrent(ctx, content.SandboxGrant{
+					PaneID: params.PaneID, Version: 1, IssuedAt: time.Now().UnixMilli(),
+					Workspace: sandboxReq.Workspace, Payload: string(payload),
+				}, content.SandboxGrantExpectation{
+					WorkspaceID:              workspaceID,
+					WorkspaceProfileRevision: workspaceProfileRevision,
+				})
+			})
+		}
+		cfg.SandboxStartFailed = func() error {
+			return h.panes.RemoveSandboxGrant(context.WithoutCancel(ctx), params.PaneID)
+		}
 	}
 	// The claimed parent edge (nocx-9hu9d). Carried into the registry as a
 	// claim; the registry is the single owner of whether it may be recorded,
@@ -342,7 +572,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	answered := false
 	// PHASE ONE — resolve, under [config, session]. Store and vault reads
 	// only; both gates are released before anything is dialed (open.go).
-	err := h.op.Prepare(ctx, func(ctx context.Context, svc capability.OpenService) error {
+	err = h.op.Prepare(ctx, func(ctx context.Context, svc capability.OpenService) error {
 		// SSH session — when kind="ssh", open a remote channel instead of
 		// local PTY. Only the RESOLVE runs here.
 		if params.Kind == "ssh" {
@@ -359,13 +589,13 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 					return nil
 				}
 
-				var err error
-				host, remote, err = svc.Resolve(params.ProfileID)
-				if err != nil {
-					h.log.Error("profile resolve failed", "profileId", params.ProfileID, "error", err)
+				var resolveErr error
+				host, remote, resolveErr = svc.Resolve(params.ProfileID)
+				if resolveErr != nil {
+					h.log.Error("profile resolve failed", "profileId", params.ProfileID, "error", resolveErr)
 					// Resolving reads the stored password, so a sealed vault surfaces
 					// here — the renderer needs the reason to offer an unlock.
-					_ = r.TryError(req.ID, rpcErrorFor(-32603, "", err))
+					_ = r.TryError(req.ID, rpcErrorFor(-32603, "", resolveErr))
 					answered = true
 					return nil
 				}
@@ -402,9 +632,9 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 					return nil
 				}
 
-				resolved, err := h.sshCfg.ResolveConfig(ctx, params.Host)
-				if err != nil {
-					h.log.Warn("SSH config resolution degraded for direct host", "host", params.Host, "error", err)
+				resolved, resolveErr := h.sshCfg.ResolveConfig(ctx, params.Host)
+				if resolveErr != nil {
+					h.log.Warn("SSH config resolution degraded for direct host", "host", params.Host, "error", resolveErr)
 				}
 
 				user := params.User
@@ -557,6 +787,7 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		Cwd:          sess.Cwd(),
 		DesiredMode:  desiredModeForAck(cfg.Remote),
 		Parent:       parentResultFor(sess),
+		Sandbox:      sess.SandboxInfo(),
 	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)
@@ -837,12 +1068,6 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		// at emit time, and a reconnect is exactly when the accumulation was
 		// made).
 		h.machine.flushFilesChanged(sid, wconn)
-
-		// Uploads (upload design §5.3): the same reasoning one step
-		// further. A transfer is bounded by its SESSION, so it runs on
-		// through a WebSocket drop and can settle with nothing attached;
-		// the outcome was retained then, and this is the attach it was
-		// retained for.
 		h.machine.flushUploadDone(sid, wconn)
 
 		// Lifecycle (ADR-0024 decision 8): a reattached frontend must resume
@@ -934,7 +1159,7 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	ordered := control.NewOrderedSubmission("session-ops", 32)
 	return []methodSpec{
 		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, installer: s.remoteInstaller, lifecycle: s.remoteLifecycle, panes: s.layoutReader(), log: s.log}
+			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, installer: s.remoteInstaller, lifecycle: s.remoteLifecycle, panes: s.layoutReader(), settings: s.settings, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
 		reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
@@ -981,12 +1206,12 @@ const maxShellPinRunes = 32
 // when present they are held to the same bounds the seam methods apply, and
 // host/user reach the ssh subprocess, so control characters are refused.
 func validateOpenRaw(raw json.RawMessage) string {
-	var p openParams
 	if len(raw) == 0 {
 		return "params are required"
 	}
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return "params must be a JSON object"
+	p, err := decodeOpenParams(raw)
+	if err != nil {
+		return "params must be a strict JSON object: " + err.Error()
 	}
 	if p.Cols == 0 {
 		return "cols is required"
@@ -1141,4 +1366,244 @@ func validateAckRaw(raw json.RawMessage) string {
 		return "sessionId " + msg
 	}
 	return ""
+}
+
+const maxSandboxPaths = 32
+
+// decodeOpenParams rejects unknown/duplicate members and trailing JSON. A
+// sandbox opt-in cannot be allowed to disappear into the zero value of a
+// permissive decoder; main's paneId and parent remain part of the same strict
+// object.
+func decodeOpenParams(data []byte) (openParams, error) {
+	var p openParams
+	dec := json.NewDecoder(bytes.NewReader(data))
+	tok, err := dec.Token()
+	if err != nil {
+		return p, fmt.Errorf("open params: %w", err)
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return p, errors.New("open params: must be an object")
+	}
+	seen := make(map[string]bool, 13)
+	for dec.More() {
+		keyTok, keyErr := dec.Token()
+		if keyErr != nil {
+			return p, fmt.Errorf("open params: %w", keyErr)
+		}
+		key, ok := keyTok.(string)
+		if !ok {
+			return p, errors.New("open params: non-string member name")
+		}
+		if seen[key] {
+			return p, fmt.Errorf("open params: duplicate member %q", key)
+		}
+		seen[key] = true
+		switch key {
+		case "cols":
+			err = dec.Decode(&p.Cols)
+		case "rows":
+			err = dec.Decode(&p.Rows)
+		case "xpixel":
+			err = dec.Decode(&p.XPixel)
+		case "ypixel":
+			err = dec.Decode(&p.YPixel)
+		case "cwd":
+			p.Cwd, err = decodeStringField(dec)
+		case "kind":
+			p.Kind, err = decodeStringField(dec)
+		case "profileId":
+			p.ProfileID, err = decodeStringField(dec)
+		case "host":
+			p.Host, err = decodeStringField(dec)
+		case "user":
+			p.User, err = decodeStringField(dec)
+		case "shell":
+			p.Shell, err = decodeStringField(dec)
+		case "paneId":
+			p.PaneID, err = decodeStringField(dec)
+		case "parent":
+			p.Parent, err = decodeOpenParent(dec)
+		case "sandbox":
+			p.Sandbox, err = decodeOpenSandbox(dec)
+		default:
+			return p, fmt.Errorf("open params: unknown member %q", key)
+		}
+		if err != nil {
+			return p, fmt.Errorf("open params %s: %w", key, err)
+		}
+	}
+	closeTok, err := dec.Token()
+	if err != nil {
+		return p, fmt.Errorf("open params: closing object: %w", err)
+	}
+	if delim, ok := closeTok.(json.Delim); !ok || delim != '}' {
+		return p, errors.New("open params: malformed closing object")
+	}
+	if _, err := dec.Token(); err != io.EOF {
+		return p, errors.New("open params: trailing data")
+	}
+	return p, nil
+}
+
+func decodeOpenParent(dec *json.Decoder) (*openParentParams, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if tok == nil {
+		return nil, errors.New("null is not a valid parent")
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return nil, errors.New("must be an object")
+	}
+	var p openParentParams
+	seen := make(map[string]bool, 3)
+	for dec.More() {
+		keyTok, keyErr := dec.Token()
+		if keyErr != nil {
+			return nil, keyErr
+		}
+		key, ok := keyTok.(string)
+		if !ok || seen[key] {
+			return nil, errors.New("parent has an invalid or duplicate member")
+		}
+		seen[key] = true
+		switch key {
+		case "sessionId":
+			p.SessionID, err = decodeStringField(dec)
+		case "instanceId":
+			p.InstanceID, err = decodeStringField(dec)
+		case "sessionEpoch":
+			err = dec.Decode(&p.SessionEpoch)
+		default:
+			return nil, fmt.Errorf("unknown member %q", key)
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	for _, key := range []string{"sessionId", "instanceId", "sessionEpoch"} {
+		if !seen[key] {
+			return nil, fmt.Errorf("%s is required", key)
+		}
+	}
+	return &p, nil
+}
+
+func decodeOpenSandbox(dec *json.Decoder) (*openSandboxParams, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, fmt.Errorf("sandbox: %w", err)
+	}
+	if tok == nil {
+		return nil, errors.New("sandbox: null is not a valid opt-in")
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '{' {
+		return nil, errors.New("sandbox: must be an object")
+	}
+	var sb openSandboxParams
+	seen := make(map[string]bool, 6)
+	for dec.More() {
+		keyTok, keyErr := dec.Token()
+		if keyErr != nil {
+			return nil, fmt.Errorf("sandbox: %w", keyErr)
+		}
+		key, ok := keyTok.(string)
+		if !ok || seen[key] {
+			return nil, errors.New("sandbox: invalid or duplicate member")
+		}
+		seen[key] = true
+		switch key {
+		case "workspace":
+			sb.Workspace, err = decodeStringField(dec)
+		case "settingsRevision":
+			var n *int
+			err = dec.Decode(&n)
+			if err == nil {
+				if n == nil || *n < 0 {
+					err = errors.New("must be a non-negative integer")
+				} else {
+					sb.SettingsRevision = *n
+				}
+			}
+		case "profileRevision":
+			var n *int64
+			err = dec.Decode(&n)
+			if err == nil {
+				if n != nil && *n < 0 {
+					err = errors.New("must be a non-negative integer or null")
+				} else {
+					sb.ProfileRevision = n
+				}
+			}
+		case "addWritable":
+			sb.AddWritable, err = decodeStringArray(dec)
+		case "removeWritable":
+			sb.RemoveWritable, err = decodeStringArray(dec)
+		case "addReadOnly":
+			sb.AddReadOnly, err = decodeStringArray(dec)
+		case "removeReadOnly":
+			sb.RemoveReadOnly, err = decodeStringArray(dec)
+		default:
+			return nil, fmt.Errorf("sandbox: unknown member %q", key)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("sandbox %s: %w", key, err)
+		}
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, fmt.Errorf("sandbox: closing object: %w", err)
+	}
+	if !seen["workspace"] || !seen["settingsRevision"] {
+		return nil, errors.New("sandbox: workspace and settingsRevision are required")
+	}
+	return &sb, nil
+}
+
+func decodeStringArray(dec *json.Decoder) ([]string, error) {
+	tok, err := dec.Token()
+	if err != nil {
+		return nil, err
+	}
+	if delim, ok := tok.(json.Delim); !ok || delim != '[' {
+		return nil, errors.New("must be a non-null array of strings")
+	}
+	out := make([]string, 0)
+	seen := make(map[string]bool)
+	for dec.More() {
+		value, valueErr := decodeStringField(dec)
+		if valueErr != nil {
+			return nil, valueErr
+		}
+		if len(out) == maxSandboxPaths {
+			return nil, fmt.Errorf("at most %d entries", maxSandboxPaths)
+		}
+		if seen[value] {
+			return nil, errors.New("duplicate entry")
+		}
+		seen[value] = true
+		out = append(out, value)
+	}
+	if _, err := dec.Token(); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func decodeStringField(dec *json.Decoder) (string, error) {
+	var value *string
+	if err := dec.Decode(&value); err != nil {
+		return "", err
+	}
+	if value == nil {
+		return "", errors.New("expected a string")
+	}
+	return *value, nil
+}
+
+func sandboxBaselines(snap settings.SettingsSnapshot) (writable, readOnly []string, err error) {
+	return settings.SandboxProfileFromSnapshot(snap)
 }

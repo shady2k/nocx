@@ -94,6 +94,7 @@
 @import './styles/surfaces/connection-notice.css';
 @import './styles/surfaces/about.css';
 @import './styles/surfaces/settings.css';
+@import './styles/surfaces/sandbox-statistics.css';
 @import './styles/surfaces/backup-restore.css';
 @import './styles/surfaces/connections.css';
 @import './styles/surfaces/secrets.css';
@@ -103,6 +104,7 @@
 @import './styles/surfaces/vault.css';
 @import './styles/surfaces/agent-policy.css';
 @import './styles/surfaces/git.css';
+@import './styles/surfaces/sandbox-permissions.css';
 
 /* ── App body row: activity bar | sidebar | panes ────────────────────── */
 

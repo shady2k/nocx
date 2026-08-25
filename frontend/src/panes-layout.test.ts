@@ -71,13 +71,25 @@ async function seededBackend({ decorate = true } = {}): Promise<
     id: 'tab-a',
     workspaceId: 'workspace:default',
     position: 0,
-    firstPane: { id: 'pane-a', cwd: '/repos/nocx', kind: 'local', endpoint: null, sizeShare: 1 },
+    firstPane: {
+      id: 'pane-a',
+      cwd: '/repos/nocx',
+      kind: 'local',
+      endpoint: null,
+      sizeShare: 1,
+    },
   })
   await backend.createTab({
     id: 'tab-b',
     workspaceId: 'workspace:default',
     position: 1,
-    firstPane: { id: 'pane-b', cwd: '/srv', kind: 'local', endpoint: null, sizeShare: 1 },
+    firstPane: {
+      id: 'pane-b',
+      cwd: '/srv',
+      kind: 'local',
+      endpoint: null,
+      sizeShare: 1,
+    },
   })
   if (decorate) {
     await backend.renameTab('tab-b', 'release')

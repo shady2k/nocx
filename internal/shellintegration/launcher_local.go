@@ -36,7 +36,7 @@ func LocalBashRcfile(opts LaunchOptions) (string, error) {
 		capabilityLiteral(bashUnsetExport, opts.Capability, opts.Recovery)), nil
 }
 
-// WriteLocalRcfile writes the rendered rcfile to a transient file whose
+// writeLocalRcfileIn writes the rendered rcfile to a transient file whose
 // name matches the template's self-delete guard (`*/nocx-bash.??????` —
 // exactly six characters after the prefix, which is the mktemp shape the
 // guard was written for; a longer random suffix would never be removed and
@@ -45,13 +45,13 @@ func LocalBashRcfile(opts LaunchOptions) (string, error) {
 // window) with O_EXCL (no symlink pre-emption), so the capability it
 // carries is never world-readable. The shell removes it once bash has read
 // it; the caller removes it on spawn failure.
-func WriteLocalRcfile(rc string) (string, error) {
+func writeLocalRcfileIn(rc, dir string) (string, error) {
 	b := make([]byte, 3)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("shellintegration: local rcfile name: %w", err)
 	}
-	path := filepath.Join(os.TempDir(), "nocx-bash."+hex.EncodeToString(b))
-	//nolint:gosec // path is os.TempDir() plus a random name minted here, and
+	path := filepath.Join(dir, "nocx-bash."+hex.EncodeToString(b))
+	//nolint:gosec // dir is a trusted private runtime directory or os.TempDir;
 	// O_EXCL with mode 0600 is precisely the defence: no pre-existing file is
 	// opened and no other user can read the capability it carries.
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
@@ -117,8 +117,8 @@ func LocalZshRcfile(opts LaunchOptions) (string, error) {
 		capabilityLiteral(zshUnsetExport, opts.Capability, opts.Recovery)), nil
 }
 
-// WriteLocalZDOTDIR writes the rendered .zshrc into a transient directory and
-// returns the directory — the value ZDOTDIR is pointed at.
+// writeLocalZDOTDIRIn writes the rendered .zshrc into a transient directory
+// and returns the directory — the value ZDOTDIR is pointed at.
 //
 // A DIRECTORY rather than a file because zsh has no --rcfile: ZDOTDIR names a
 // directory, which is why the transient directory is structural for this tier
@@ -135,19 +135,19 @@ func LocalZshRcfile(opts LaunchOptions) (string, error) {
 // carries is never readable by another user. The shell removes the whole
 // directory at the top of the .zshrc, before any user code runs; the caller
 // removes it on spawn failure.
-func WriteLocalZDOTDIR(rc string) (string, error) {
+func writeLocalZDOTDIRIn(rc, parent string) (string, error) {
 	b := make([]byte, 3)
 	if _, err := rand.Read(b); err != nil {
 		return "", fmt.Errorf("shellintegration: local zdotdir name: %w", err)
 	}
-	dir := filepath.Join(os.TempDir(), "nocx-zsh."+hex.EncodeToString(b))
+	dir := filepath.Join(parent, "nocx-zsh."+hex.EncodeToString(b))
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return "", fmt.Errorf("shellintegration: local zdotdir: %w", err)
 	}
 	path := filepath.Join(dir, ".zshrc")
-	//nolint:gosec // dir is os.TempDir() plus a random name minted here inside a
-	// 0700 directory, and O_EXCL with mode 0600 is the defence: no pre-existing
-	// file is opened and no other user can read the capability it carries.
+	//nolint:gosec // parent is a trusted private runtime directory or
+	// os.TempDir; the 0700 directory and O_EXCL 0600 file prevent pre-emption
+	// and keep the capability private.
 	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
 	if err != nil {
 		_ = os.RemoveAll(dir)
@@ -223,14 +223,19 @@ type LocalLaunch struct {
 // reads $ZDOTDIR/.zshrc ONLY when interactive — inferring it from "stdin is a
 // tty" would, on the one launch where it is not, skip our rcfile entirely and
 // leave the transient directory behind with the capability in it.
+
 func LocalEnhancedLaunch(shellPath string, kind ShellKind, opts LaunchOptions) (LocalLaunch, error) {
+	artifactDir := opts.ArtifactDir
+	if artifactDir == "" {
+		artifactDir = os.TempDir()
+	}
 	switch kind {
 	case ShellBash:
 		rc, err := LocalBashRcfile(opts)
 		if err != nil {
 			return LocalLaunch{}, err
 		}
-		path, err := WriteLocalRcfile(rc)
+		path, err := writeLocalRcfileIn(rc, artifactDir)
 		if err != nil {
 			return LocalLaunch{}, err
 		}
@@ -244,7 +249,7 @@ func LocalEnhancedLaunch(shellPath string, kind ShellKind, opts LaunchOptions) (
 		if err != nil {
 			return LocalLaunch{}, err
 		}
-		dir, err := WriteLocalZDOTDIR(rc)
+		dir, err := writeLocalZDOTDIRIn(rc, artifactDir)
 		if err != nil {
 			return LocalLaunch{}, err
 		}

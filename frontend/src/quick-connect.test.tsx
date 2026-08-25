@@ -82,7 +82,8 @@ describe('ActionsQuickConnectProvider', () => {
     const newConnection = vi.fn()
     const provider = new ActionsQuickConnectProvider(newPane, newConnection)
 
-    provider.getItems()[0].run()
+    const items = provider.getItems()
+    items[0].run()
 
     expect(newPane).toHaveBeenCalledOnce()
     expect(newConnection).not.toHaveBeenCalled()
@@ -93,10 +94,9 @@ describe('ActionsQuickConnectProvider', () => {
     const newConnection = vi.fn()
     const provider = new ActionsQuickConnectProvider(newPane, newConnection)
 
-    provider.getItems()[1].run()
+    const items = provider.getItems()
+    items[1].run()
 
-    // Not a tab: this entry used to be an unconfigured profile, and running it
-    // opened a terminal on an empty host that failed to start.
     expect(newConnection).toHaveBeenCalledOnce()
     expect(newPane).not.toHaveBeenCalled()
   })

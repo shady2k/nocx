@@ -108,4 +108,8 @@ export interface Pane {
    * This pane's share of its tab's extent. Size is a property of the MEMBER, direction a property of the set (§5).
    */
   sizeShare: number
+  /**
+   * Whether this open pane carries an immutable sandbox grant. The grant is the cause of native enforcement and of the startup sweep that makes the pane non-restorable.
+   */
+  sandboxGranted: boolean
 }

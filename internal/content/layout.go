@@ -205,6 +205,35 @@ type Pane struct {
 	SizeShare float64
 }
 
+// SandboxGrant records the immutable filesystem authority minted for one pane.
+// A pane may receive at most one grant during its lifetime.
+type SandboxGrant struct {
+	PaneID    string
+	Version   int64
+	IssuedAt  int64
+	Workspace string
+	Payload   string
+}
+
+// SandboxGrantExpectation binds grant insertion to the pane's layout
+// workspace and effective profile at issuance. A nil workspace-profile
+// revision means the workspace must still inherit the standard profile.
+type SandboxGrantExpectation struct {
+	WorkspaceID              string
+	WorkspaceProfileRevision *int64
+}
+
+// WorkspaceSandboxProfile is the durable sandbox default for one NAMED
+// workspace, stored under the `sandboxProfile` key of workspaces.payload
+// (design 2026-08-23 §3.2). Absence means fallback to the standard profile; it
+// is not an empty policy. The default workspace never materializes a profile.
+type WorkspaceSandboxProfile struct {
+	SchemaVersion int      `json:"schemaVersion"`
+	Revision      int64    `json:"revision"`
+	WritablePaths []string `json:"writablePaths"`
+	ReadOnlyPaths []string `json:"readOnlyPaths"`
+}
+
 // Replacement is the identity of the tab that appears when the last tab in
 // the APPLICATION closes (nocx-isoph.3, §4.4 of the workspaces UX design). It
 // is a parameter rather than something the backend invents for two reasons,
@@ -445,6 +474,42 @@ type LayoutRepository interface {
 	// owner of "which workspace is this in" and it cannot go out of step with
 	// a pane that was dragged elsewhere.
 	WorkspaceForPane(ctx context.Context, paneID string) (string, error)
+	// InsertSandboxGrant records the immutable authority minted for an open
+	// pane. The pane's UNIQUE grant makes a second sandbox launch fail closed.
+	InsertSandboxGrant(ctx context.Context, grant SandboxGrant) error
+	// InsertSandboxGrantIfCurrent atomically re-resolves the open pane's
+	// workspace/profile and inserts only when they still match expectation.
+	// A mismatch is ErrSandboxGrantStale and nothing is written.
+	InsertSandboxGrantIfCurrent(ctx context.Context, grant SandboxGrant, expectation SandboxGrantExpectation) error
+	// RemoveSandboxGrant rolls back a grant only when enforcement failed to
+	// start. A live sandbox grant remains immutable.
+	RemoveSandboxGrant(ctx context.Context, paneID string) error
+	// SandboxGrantExists reports whether an open pane already carries a grant.
+	// A closed or unknown pane is ErrNoSuchPane.
+	SandboxGrantExists(ctx context.Context, paneID string) (bool, error)
+	// SandboxGrantedPaneIDs returns the open panes carrying a grant.
+	SandboxGrantedPaneIDs(ctx context.Context) (map[string]struct{}, error)
+	// WorkspaceSandboxProfile returns the workspace's explicit sandbox
+	// profile, or nil when it has none (fallback to the standard profile).
+	// ErrNoSuchWorkspace for an unknown id. The default workspace never
+	// carries a profile and reads as nil.
+	WorkspaceSandboxProfile(ctx context.Context, workspaceID string) (*WorkspaceSandboxProfile, error)
+	// SetWorkspaceSandboxProfile creates or replaces the workspace's profile
+	// in one writer-serialized transaction. expectedRevision is the
+	// optimistic-concurrency token: 0 creates, the current revision updates;
+	// a mismatch is ErrSandboxProfileRevision and nothing is written. It
+	// returns the new revision and refuses the default workspace
+	// (ErrDefaultWorkspace).
+	SetWorkspaceSandboxProfile(ctx context.Context, workspaceID string, expectedRevision int64, profile WorkspaceSandboxProfile) (int64, error)
+	// DeleteWorkspaceSandboxProfile removes the workspace's profile, returning
+	// it to standard-profile inheritance. It refuses the default workspace
+	// (ErrDefaultWorkspace) and an absent profile (ErrSandboxProfileAbsent).
+	DeleteWorkspaceSandboxProfile(ctx context.Context, workspaceID string, expectedRevision int64) error
+	// SandboxGrantForPane returns an OPEN pane's immutable grant, or nil when
+	// the pane is ordinary, closed, or unknown. The payload is returned
+	// verbatim: decoding realized roots and provenance is the caller's concern
+	// (sandbox.DecodeGrantPayload).
+	SandboxGrantForPane(ctx context.Context, paneID string) (*SandboxGrant, error)
 	// Panes returns one tab's panes in id order. A pane has no stored
 	// position: §5 gives the member a SHARE and the set a direction, and
 	// nothing else. Ordering within a tab becomes a user-visible operation
@@ -462,6 +527,11 @@ type LayoutRepository interface {
 	// it — which this did until nocx-l21ib.4 — made an ordinary Cmd-W a
 	// permanent loss of that pane's history.
 	DeletePane(ctx context.Context, id string, next Replacement) error
+	// CloseSandboxPanes marks every OPEN pane carrying a sandbox grant closed
+	// in one transaction and unwinds empty tabs/workspaces without deleting
+	// pane rows. It is the startup boundary that prevents sandbox authority
+	// from being silently re-issued after a backend restart.
+	CloseSandboxPanes(ctx context.Context) error
 	// ClearWindow marks EVERY open tab and pane closed, in one transaction,
 	// and deletes the workspaces left holding no open tab. It is the clean
 	// start (settings: restore.onStartup off) and nothing else calls it: what

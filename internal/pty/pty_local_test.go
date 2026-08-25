@@ -3,17 +3,102 @@ package pty
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/sandbox"
 )
+
+func TestLocalPty_SandboxInfoReturnsDeepCopy(t *testing.T) {
+	policy := &sandbox.Policy{
+		Workspace:       "/workspace",
+		WritableRoots:   []string{"/workspace", "/runtime/home"},
+		ReadOnlyRoots:   []string{"/usr", "/runtime/ro"},
+		HomeProjections: []sandbox.HomeProjection{{HostPath: "/workspace", RelativePath: "workspace"}},
+	}
+	lp := &LocalPty{
+		prepared: &sandbox.PreparedCommand{
+			Backend: sandbox.BackendLandlock,
+			Policy:  policy,
+		},
+	}
+
+	first := lp.SandboxInfo()
+	first.WritableRoots[0] = "/mutated"
+	first.ReadOnlyRoots[0] = "/mutated-ro"
+	first.HomeProjections[0].HostPath = "/mutated-home"
+	second := lp.SandboxInfo()
+
+	if got := second.WritableRoots[0]; got != "/workspace" {
+		t.Fatalf("second SandboxInfo root = %q, want immutable policy root", got)
+	}
+	if got := second.ReadOnlyRoots[0]; got != "/usr" {
+		t.Fatalf("second SandboxInfo read-only root = %q, want immutable policy root", got)
+	}
+	if got := second.HomeProjections[0].HostPath; got != "/workspace" {
+		t.Fatalf("second SandboxInfo projection = %q, want immutable policy projection", got)
+	}
+	if got := policy.WritableRoots[0]; got != "/workspace" {
+		t.Fatalf("policy root = %q after accessor mutation", got)
+	}
+	if got := policy.ReadOnlyRoots[0]; got != "/usr" {
+		t.Fatalf("policy read-only root = %q after accessor mutation", got)
+	}
+	if got := policy.HomeProjections[0].HostPath; got != "/workspace" {
+		t.Fatalf("policy projection = %q after accessor mutation", got)
+	}
+}
 
 func TestLocalPty_ImplementsInterface(t *testing.T) {
 	var _ Pty = (*LocalPty)(nil)
+}
+
+type startFailingSandboxService struct {
+	dir string
+}
+
+func (s startFailingSandboxService) Status(context.Context) sandbox.Status {
+	return sandbox.Status{Available: true, Backend: sandbox.BackendLandlock}
+}
+
+func (s startFailingSandboxService) NewRuntimeRoot() (string, error) {
+	return sandbox.NewRuntimeRoot(s.dir)
+}
+
+func (s startFailingSandboxService) Prepare(_ context.Context, req sandbox.Request, spec sandbox.CommandSpec) (*sandbox.PreparedCommand, error) {
+	cmd := exec.Command(spec.Path, spec.Args...) //nolint:gosec // injected test seam must preserve the production command
+	cmd.Dir = s.dir
+	cmd.Env = spec.Env
+	cmd.ExtraFiles = spec.ExtraFiles
+	return &sandbox.PreparedCommand{
+		Cmd:     cmd,
+		Backend: sandbox.BackendLandlock,
+		Policy: &sandbox.Policy{
+			Workspace:       req.Workspace,
+			WritableRoots:   []string{req.Workspace},
+			HomeProjections: []sandbox.HomeProjection{},
+		},
+	}, nil
+}
+
+func TestNewLocal_SandboxStartFailureIsTyped(t *testing.T) {
+	workspace := t.TempDir()
+	_, err := NewLocal(log.NewSlogAdapter(nil), Config{
+		Cols:    80,
+		Rows:    24,
+		Sandbox: &sandbox.Request{Workspace: workspace},
+	}, WithSandboxService(startFailingSandboxService{dir: filepath.Join(t.TempDir(), "missing")}))
+	var setupErr *sandbox.SetupError
+	if !errors.As(err, &setupErr) {
+		t.Fatalf("err = %v, want sandbox SetupError", err)
+	}
 }
 
 func TestLocalPty_SpawnAndWrite(t *testing.T) {

@@ -383,6 +383,56 @@ func (s *layoutStub) WorkspaceForPane(_ context.Context, paneID string) (string,
 	return "", ErrNotImplemented
 }
 
+func (s *layoutStub) InsertSandboxGrant(_ context.Context, grant SandboxGrant) error {
+	s.log.Info("content stub: LayoutRepository.InsertSandboxGrant", "pane", grant.PaneID)
+	return ErrNotImplemented
+}
+
+func (s *layoutStub) InsertSandboxGrantIfCurrent(_ context.Context, grant SandboxGrant, _ SandboxGrantExpectation) error {
+	s.log.Info("content stub: LayoutRepository.InsertSandboxGrantIfCurrent", "pane", grant.PaneID)
+	return ErrNotImplemented
+}
+
+func (s *layoutStub) RemoveSandboxGrant(_ context.Context, paneID string) error {
+	s.log.Info("content stub: LayoutRepository.RemoveSandboxGrant", "pane", paneID)
+	return ErrNotImplemented
+}
+
+func (s *layoutStub) SandboxGrantExists(_ context.Context, paneID string) (bool, error) {
+	s.log.Info("content stub: LayoutRepository.SandboxGrantExists", "pane", paneID)
+	return false, ErrNotImplemented
+}
+
+func (s *layoutStub) SandboxGrantedPaneIDs(_ context.Context) (map[string]struct{}, error) {
+	s.log.Info("content stub: LayoutRepository.SandboxGrantedPaneIDs")
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) WorkspaceSandboxProfile(_ context.Context, workspaceID string) (*WorkspaceSandboxProfile, error) {
+	s.log.Info("content stub: LayoutRepository.WorkspaceSandboxProfile", "workspace", workspaceID)
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) SetWorkspaceSandboxProfile(_ context.Context, workspaceID string, expectedRevision int64, profile WorkspaceSandboxProfile) (int64, error) {
+	s.log.Info("content stub: LayoutRepository.SetWorkspaceSandboxProfile", "workspace", workspaceID, "expectedRevision", expectedRevision)
+	return 0, ErrNotImplemented
+}
+
+func (s *layoutStub) DeleteWorkspaceSandboxProfile(_ context.Context, workspaceID string, expectedRevision int64) error {
+	s.log.Info("content stub: LayoutRepository.DeleteWorkspaceSandboxProfile", "workspace", workspaceID, "expectedRevision", expectedRevision)
+	return ErrNotImplemented
+}
+
+func (s *layoutStub) SandboxGrantForPane(_ context.Context, paneID string) (*SandboxGrant, error) {
+	s.log.Info("content stub: LayoutRepository.SandboxGrantForPane", "pane", paneID)
+	return nil, ErrNotImplemented
+}
+
+func (s *layoutStub) CloseSandboxPanes(_ context.Context) error {
+	s.log.Info("content stub: LayoutRepository.CloseSandboxPanes")
+	return ErrNotImplemented
+}
+
 func (s *layoutStub) ClearWindow(_ context.Context) error {
 	s.log.Info("content stub: LayoutRepository.ClearWindow")
 	return ErrNotImplemented

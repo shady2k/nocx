@@ -1553,10 +1553,17 @@ __nocx_snap_real="$__nocx_snap_file"
 __nocx_snap_file="${TMPDIR:-/tmp}/nocx-snap-never-appears.snap"
 ` + zshPrecmdCycle + `printf '\nFIRST_PROMPT_RETURNED\n'
 __nocx_snap_file="$__nocx_snap_real"
-` + zshPrecmdCycle
+# Wait on the producer's published file, not on an assumed machine speed,
+# then drive the first prompt boundary that can consume it.
+for __nocx_test_i in {1..750}; do
+    for f in $precmd_functions; do $f; done
+    (( __nocx_snapshot_done )) && break
+    zselect -t 2 2>/dev/null
+done
+`
 
 	started := time.Now()
-	out := runShellProgEnv(t, zsh, prog, script, "NOCX_SNAPSHOT_WAIT_MS=250")
+	out := runShellProgEnv(t, zsh, prog, script, "TMPDIR="+t.TempDir(), "NOCX_SNAPSHOT_WAIT_MS=250")
 	elapsed := time.Since(started)
 
 	first := strings.Index(out, "FIRST_PROMPT_RETURNED")

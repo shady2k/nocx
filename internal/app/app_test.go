@@ -472,7 +472,7 @@ func TestLocalEnhancedSessionEstablishesThroughProductionWiring(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	open := jsonrpcCall(t, conn, "open", map[string]any{
-		"cols": 80, "rows": 24, "enhanced": true,
+		"cols": 80, "rows": 24,
 	})
 	if open.Error != nil {
 		t.Fatalf("open: %+v", open.Error)

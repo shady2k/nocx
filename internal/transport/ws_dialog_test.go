@@ -482,3 +482,21 @@ func TestDialogCapability_QueuesRatherThanRefusingBehindItsOwnTail(t *testing.T)
 		t.Fatalf("the queued request answered %s, want the adapter's path", resp)
 	}
 }
+
+func TestDialogOpenDirectoryUsesTheSharedNativePickerSeam(t *testing.T) {
+	h := newInventoryHarness(t)
+	h.ws.SetDialogService(&fakeDialogService{dir: "/home/dev/projects/nocx"})
+	resp := jsonrpcCall(t, h.conn, "dialog.openDirectory", map[string]any{})
+	var result struct {
+		Result struct {
+			Path string `json:"path"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &result); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if result.Error != nil || result.Result.Path != "/home/dev/projects/nocx" {
+		t.Fatalf("dialog.openDirectory = %+v, want selected directory", result)
+	}
+}

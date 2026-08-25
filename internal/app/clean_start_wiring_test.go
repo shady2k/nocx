@@ -9,6 +9,7 @@ package app
 import (
 	"bytes"
 	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
@@ -31,12 +32,18 @@ func (p *clearWindowProbe) APIRuns() content.APIRunRepository { return nil }
 
 type clearWindowLayout struct {
 	content.LayoutRepository
-	calls int
-	err   error
+	calls        int
+	sandboxCalls int
+	err          error
 }
 
 func (l *clearWindowLayout) ClearWindow(context.Context) error {
 	l.calls++
+	return l.err
+}
+
+func (l *clearWindowLayout) CloseSandboxPanes(context.Context) error {
+	l.sandboxCalls++
 	return l.err
 }
 
@@ -104,5 +111,29 @@ func TestCleanStartSurvivesAStoreThatRefusesTheSweep(t *testing.T) {
 	}
 	if !strings.Contains(logged.String(), "clean start") {
 		t.Fatalf("log after a refused sweep = %q, want the failure named", logged.String())
+	}
+}
+
+func TestStartupSandboxSweepFailsClosedOnRefusal(t *testing.T) {
+	probe := newClearWindowProbe(content.ErrNotImplemented)
+
+	err := closeSandboxPanesOnStartup(context.Background(), probe, slog.Default())
+
+	if probe.layout.sandboxCalls != 1 {
+		t.Fatalf("CloseSandboxPanes calls = %d, want 1", probe.layout.sandboxCalls)
+	}
+	if !errors.Is(err, content.ErrNotImplemented) {
+		t.Fatalf("a refused sandbox sweep err = %v, want it to carry ErrNotImplemented so startup fails closed", err)
+	}
+}
+
+func TestStartupSandboxSweepSucceedsWhenTheStoreAccepts(t *testing.T) {
+	probe := newClearWindowProbe(nil)
+
+	if err := closeSandboxPanesOnStartup(context.Background(), probe, slog.Default()); err != nil {
+		t.Fatalf("a store that accepted the sweep returned an error: %v", err)
+	}
+	if probe.layout.sandboxCalls != 1 {
+		t.Fatalf("CloseSandboxPanes calls = %d, want 1", probe.layout.sandboxCalls)
 	}
 }

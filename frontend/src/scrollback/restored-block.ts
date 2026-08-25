@@ -152,8 +152,12 @@ export function restoredBlock(
     store,
     facts.author,
   )
+  if (facts.entryId !== undefined) el.dataset.entryId = facts.entryId
   el.dataset.restored = 'true'
-  if (facts.entryId) el.dataset.entryId = facts.entryId
+  // The raw body rides along so a SECOND capture (sandbox conversion
+  // re-capture) reads the stored SGR, not the text the paint already
+  // stripped of colour. Null means evicted: nothing to carry.
+  if (facts.body !== null) el.dataset.sgr = facts.body
   // The EVICTED SENTENCE. A COMMAND says it whenever its body is gone; a
   // TURN says it only when the RUN's prose fact says so — never from
   // `body === null` alone, because a turn that never streamed a word has

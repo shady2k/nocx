@@ -18,6 +18,8 @@ import type { AgentClient } from './agent'
 import type { SnippetsStore } from './snippets/snippets-store'
 import type { EndpointClient } from './endpoints'
 import type { HistoryStatusStore } from './history-status'
+import type { AboutClient } from './about-client'
+import type { ClipboardAccess } from './clipboard'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────
 
@@ -47,10 +49,8 @@ export class SettingsContent extends SolidPaneContent {
      *  retention age and a two-number budget that govern nothing when the
      *  store never opened. */
     private readonly historyStatus?: HistoryStatusStore,
-    /** What build this is, for the About page (nocx-8bbp). */
-    private readonly aboutClient?: import('./about-client').AboutClient,
-    /** The clipboard the About page's Copy diagnostics writes through. */
-    private readonly clipboard?: import('./clipboard').ClipboardAccess,
+    private readonly aboutClient?: AboutClient,
+    private readonly clipboard?: ClipboardAccess,
     private readonly policyClient?: import('./policy-client').PolicyClient,
   ) {
     super()

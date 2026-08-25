@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sandbox.grant.get.schema.json",
+  "title": "SandboxGrantGet",
+  "description": "Result of the sandbox.grant.get JSON-RPC method: the immutable grant minted for the named pane, or null when the pane carries none (an ordinary tab). realized is the enforced policy; provenance records which profile sourced it. Paths are PrivateMetadata and appear only in this explicit result.",
+  "oneOf": [
+    { "type": "null" },
+    {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["issuedAt", "realized", "provenance"],
+      "properties": {
+        "issuedAt": {
+          "description": "Backend wall clock when the grant was minted, in Unix milliseconds.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "realized": {
+          "description": "The realized enforcement metadata surfaced to the tab.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["backend", "workspace", "writableRoots", "readOnlyRoots", "homeProjections"],
+          "properties": {
+            "backend": { "type": "string", "enum": ["landlock", "seatbelt"] },
+            "workspace": { "type": "string", "minLength": 1 },
+            "writableRoots": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "readOnlyRoots": {
+              "type": "array",
+              "items": { "type": "string", "minLength": 1 }
+            },
+            "homeProjections": {
+              "type": "array",
+              "maxItems": 129,
+              "uniqueItems": true,
+              "items": {
+                "type": "object",
+                "additionalProperties": false,
+                "required": ["hostPath", "relativePath"],
+                "properties": {
+                  "hostPath": { "type": "string", "pattern": "^/" },
+                  "relativePath": {
+                    "type": "string",
+                    "minLength": 1,
+                    "pattern": "^[^/]+(/[^/]+)*$",
+                    "not": { "pattern": "(^|/)\\.\\.?(/|$)" }
+                  }
+                }
+              }
+            }
+          }
+        },
+        "provenance": {
+          "description": "Which profile sourced this grant. profileRevision is the settings revision for a standard profile, the workspace revision for a workspace profile, and null only for a legacy grant.",
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["workspaceId", "profileSource", "profileRevision"],
+          "properties": {
+            "workspaceId": { "type": "string", "minLength": 1 },
+            "profileSource": {
+              "type": "string",
+              "enum": ["standard", "workspace", "legacy"]
+            },
+            "profileRevision": { "type": ["integer", "null"], "minimum": 0 }
+          }
+        }
+      }
+    }
+  ]
+}

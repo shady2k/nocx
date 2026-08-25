@@ -806,3 +806,18 @@
 .nocx-tab.dragging {
   opacity: 0.4;
 }
+
+.nocx-tab-sandboxed-marker {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  width: 14px;
+  height: 14px;
+  margin: 0 5px 0 0;
+  color: var(--color-accent);
+}
+
+.nocx-tab-sandboxed-marker svg {
+  width: 100%;
+  height: 100%;
+}

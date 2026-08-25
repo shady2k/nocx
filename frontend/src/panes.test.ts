@@ -2290,6 +2290,155 @@ describe('closing a workspace names what is live before anything dies (nocx-isop
   })
 })
 
+describe('sandbox marker ownership', () => {
+  it('never marks an ordinary pane as sandboxed', async () => {
+    const { manager, client } = await mountPaneManager()
+    const pane = manager.newPane()
+
+    await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
+    expect(pane.sandboxed).toBe(false)
+  })
+})
+
+describe('newSandboxedPane', () => {
+  it('copies launch deltas and exposes durable creation readiness', async () => {
+    const openSandboxedSession = vi.fn(() =>
+      Promise.resolve(
+        makeSession({
+          sandbox: {
+            backend: 'landlock',
+            workspace: '/w',
+            writableRoots: ['/w'],
+            readOnlyRoots: ['/usr', '/opt'],
+            homeProjections: [],
+          },
+        }),
+      ),
+    )
+    const client = makeClient({ openSandboxedSession })
+    const { manager } = await mountPaneManager(client)
+    const launch = {
+      settingsRevision: 1,
+      profileRevision: null,
+      addWritable: ['/a'],
+      removeWritable: ['/b'],
+      addReadOnly: ['/r1'],
+      removeReadOnly: ['/r2'],
+    }
+
+    const made = manager.newSandboxedPane('/w', launch)
+    launch.addWritable.push('/mutated')
+    launch.removeWritable.pop()
+    launch.addReadOnly.push('/mutated-ro')
+    launch.removeReadOnly.pop()
+
+    await vi.waitFor(() => expect(openSandboxedSession).toHaveBeenCalledTimes(1))
+    expect(openSandboxedSession).toHaveBeenCalledWith(
+      expect.any(Number),
+      expect.any(Number),
+      {
+        workspace: '/w',
+        settingsRevision: 1,
+        profileRevision: null,
+        addWritable: ['/a'],
+        removeWritable: ['/b'],
+        addReadOnly: ['/r1'],
+        removeReadOnly: ['/r2'],
+      },
+      { paneId: made.pane.wireId },
+    )
+    await expect(made.created).resolves.toBe(true)
+    await vi.waitFor(() => expect(made.pane.sandboxed).toBe(true))
+    expect(made.pane.descriptor.restoreDescriptor).toBeNull()
+  })
+})
+
+describe('newLocalPaneAt', () => {
+  it('creates an ordinary replacement in the verified sandbox cwd', async () => {
+    const { manager, client, backend } = await mountPaneManager()
+
+    const made = manager.newLocalPaneAt('/verified/project')
+
+    await expect(made.created).resolves.toBe(true)
+    await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
+    expect(client.openSession).toHaveBeenLastCalledWith(
+      expect.any(Number),
+      expect.any(Number),
+      expect.objectContaining({ paneId: made.pane.wireId, cwd: '/verified/project' }),
+    )
+    expect(backend.rows().panes.find((row) => row.id === made.pane.wireId)?.cwd).toBe(
+      '/verified/project',
+    )
+    expect(made.pane.sandboxed).toBe(false)
+  })
+})
+
+describe('conversion transcript handoff', () => {
+  it('restores the unsent draft and a visible shell boundary before closing the source', async () => {
+    const { manager } = await mountPaneManager()
+    const source = manager.activeTerminalContent()
+    if (!source) throw new Error('missing active terminal')
+    source.installConversionTranscript(
+      {
+        blocks: [],
+        liveBody: '',
+        draft: 'unsent draft',
+        selection: { from: 12, to: 12 },
+        editorScrollTop: 0,
+        alternateScreenOmitted: false,
+      },
+      'Seed',
+    )
+    const transcript = source.captureConversionTranscript()
+    transcript.liveBody = 'previous output'
+
+    const made = manager.newLocalPaneAt('/verified/project')
+    await expect(made.created).resolves.toBe(true)
+    await expect(
+      manager.installConversionTranscript(made.pane.id, transcript, 'Sandbox removed — new shell'),
+    ).resolves.toBe(true)
+
+    expect(manager.captureConversionTranscript(made.pane.id)?.draft).toBe('unsent draft')
+    expect(made.pane.pane.querySelector('[data-restore-boundary]')?.textContent).toBe(
+      'Sandbox removed — new shell',
+    )
+    const secondTranscript = manager.captureConversionTranscript(made.pane.id)
+    expect(secondTranscript?.blocks.some((block) => block.body.includes('previous output'))).toBe(
+      true,
+    )
+  })
+
+  it('preserves restored-block SGR colour across a second capture', async () => {
+    const { manager } = await mountPaneManager()
+    const source = manager.activeTerminalContent()
+    if (!source) throw new Error('missing active terminal')
+    source.installConversionTranscript(
+      {
+        blocks: [
+          {
+            command: 'echo green',
+            cwd: '/repo',
+            location: '',
+            durationMs: 0,
+            exitCode: 0,
+            status: 'success',
+            body: '\u001b[32mgreen\u001b[0m',
+          },
+        ],
+        liveBody: '',
+        draft: '',
+        selection: { from: 0, to: 0 },
+        editorScrollTop: 0,
+        alternateScreenOmitted: false,
+      },
+      'Seed',
+    )
+
+    const second = source.captureConversionTranscript()
+    expect(second.blocks.some((block) => block.body.includes('\u001b[32m'))).toBe(true)
+  })
+})
+
 describe('anyLocalSession — a live answer, never a latch', () => {
   it('answers a local pane that is open, and null once it is gone', async () => {
     const { manager, client } = await mountPaneManager()

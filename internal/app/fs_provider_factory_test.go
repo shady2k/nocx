@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/sandbox"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/transfer"
@@ -40,17 +41,18 @@ func (s factorySession) WorkspaceID() workspace.ID { return workspace.Default }
 // blocks.
 func (s factorySession) OpenedAt() time.Time { return time.Time{} }
 
-func (s factorySession) Kind() session.Kind              { return s.kind }
-func (s factorySession) PaneID() string                  { return "" }
-func (s factorySession) Host() string                    { return "" }
-func (s factorySession) Cwd() string                     { return "/" }
-func (s factorySession) ProfileID() string               { return "" }
-func (s factorySession) CredentialID() string            { return "" }
-func (s factorySession) Write([]byte) (int, error)       { return 0, nil }
-func (s factorySession) EnqueueWrite([]byte) bool        { return true }
-func (s factorySession) Close() error                    { return nil }
-func (s factorySession) Done() <-chan struct{}           { return make(chan struct{}) }
-func (s factorySession) SSHOptions() []ssh.ConnectOption { return nil }
+func (s factorySession) Kind() session.Kind                { return s.kind }
+func (s factorySession) PaneID() string                    { return "" }
+func (s factorySession) Host() string                      { return "" }
+func (s factorySession) Cwd() string                       { return "/" }
+func (s factorySession) ProfileID() string                 { return "" }
+func (s factorySession) CredentialID() string              { return "" }
+func (s factorySession) SandboxInfo() *sandbox.SessionInfo { return nil }
+func (s factorySession) Write([]byte) (int, error)         { return 0, nil }
+func (s factorySession) EnqueueWrite([]byte) bool          { return true }
+func (s factorySession) Close() error                      { return nil }
+func (s factorySession) Done() <-chan struct{}             { return make(chan struct{}) }
+func (s factorySession) SSHOptions() []ssh.ConnectOption   { return nil }
 func (s factorySession) Resize(context.Context, uint16, uint16, uint16, uint16) error {
 	return nil
 }

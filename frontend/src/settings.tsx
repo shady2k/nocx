@@ -28,6 +28,8 @@ import { ConnectionsView } from './connections'
 import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
 import { SnippetsSection } from './snippets/snippets-settings'
+import { classConflict } from './sandbox-path-classes'
+import { SANDBOX_READ_ONLY_PATHS_KEY, SANDBOX_WRITABLE_PATHS_KEY } from './sandbox-open'
 import type { SnippetsStore } from './snippets/snippets-store'
 import { RolesSection } from './roles-section'
 import { AgentPolicySection } from './agent-policy-section'
@@ -79,6 +81,7 @@ import {
   type GroupedRailItem,
   IconButton,
   StatusCard,
+  EditableRowList,
   CodeBlock,
   Section,
 } from './ui'
@@ -102,10 +105,6 @@ const INSTRUCTIONS_SECTION = 'Instructions'
  *  make every future section-level fact a schema change. */
 const HISTORY_SECTION = 'History'
 
-/** The clipboard an embedding without one hands the About page. It refuses
- *  rather than resolving: a Copy button that reports success while nothing was
- *  written is the silent degrade AGENTS.md forbids, and the page already
- *  surfaces a refusal. */
 const unavailableClipboard: ClipboardAccess = {
   readText: () => Promise.reject(new Error('no clipboard in this window')),
   writeText: () => Promise.reject(new Error('no clipboard in this window')),
@@ -222,13 +221,7 @@ export interface SettingsComponentProps {
    *  exist survives a release. Absent in an embedding with no backend; the
    *  section then makes no claim either way. */
   historyStatus?: HistoryStatusStore
-  /** Reads what build this is, for the About page (nocx-8bbp). Absent in an
-   *  embedding with no backend; the page then says it could not read the
-   *  build rather than drawing rows of nothing. */
   aboutClient?: AboutClient
-  /** The clipboard the About page's Copy diagnostics writes through. Injected
-   *  rather than reached for, because the platform seam is what a test
-   *  substitutes and what refuses in a non-secure context. */
   clipboard?: ClipboardAccess
   /** The agent policy client (ADR-0020 §7 as amended). Absent in
    *  embeddings that never configure the agent; the page then says so. */
@@ -628,10 +621,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
       title: 'About',
       groupId: 'application',
       scrollMode: 'page',
-      // Registered unconditionally, like the pages above it: a surface that
-      // appears only once some other state exists is how a feature ships
-      // unreachable. Without a client it says so, which is a state the page
-      // already has for an unreachable backend.
       renderContent: () => (
         <AboutSection
           load={() =>
@@ -837,6 +826,40 @@ export function SettingsComponent(props: SettingsComponentProps) {
     }
   }
 
+  async function addPath(decl: Declaration): Promise<void> {
+    if (!props.dialogClient) return
+    try {
+      const picked = await props.dialogClient.openDirectoryDialog()
+      if (!picked.path) return
+      // The two-class rule is stated once, in sandbox-path-classes, and the
+      // backend is still the authority. This surface used to compare exact
+      // strings in both directions, which refused a writable folder inside a
+      // read-only one — the exception ADR-0039 exists for — and accepted a
+      // read-only folder inside a writable one, which the backend then
+      // refused in different words (nocx-61alt).
+      const conflict = sandboxClassConflictFor(decl.key, picked.path)
+      if (conflict !== null) {
+        setErrors(decl.key, conflict)
+        return
+      }
+      setErrors(decl.key, undefined as never)
+      const current = pathsValue(decl.key)
+      await saveSetting(
+        decl.key,
+        current.includes(picked.path) ? current : [...current, picked.path],
+      )
+    } catch (err) {
+      setErrors(decl.key, (err as Error).message)
+    }
+  }
+
+  async function removePath(decl: Declaration, index: number): Promise<void> {
+    await saveSetting(
+      decl.key,
+      pathsValue(decl.key).filter((_, itemIndex) => itemIndex !== index),
+    )
+  }
+
   async function resetSetting(key: string): Promise<void> {
     setErrors(key, undefined as never)
     try {
@@ -1034,6 +1057,34 @@ export function SettingsComponent(props: SettingsComponentProps) {
     return values[key]
   }
 
+  function pathsValue(key: string): string[] {
+    const value = effectiveValue(key)
+    return Array.isArray(value)
+      ? value.filter((item): item is string => typeof item === 'string')
+      : []
+  }
+
+  /** The class a sandbox path list grants, or null for any other setting.
+   *  Keyed by declaration id because that is what the wire carries; moving it
+   *  onto the declaration itself is nocx-lt8su. */
+  function sandboxPathClass(key: string): 'readOnly' | 'readWrite' | null {
+    if (key === SANDBOX_WRITABLE_PATHS_KEY) return 'readWrite'
+    if (key === SANDBOX_READ_ONLY_PATHS_KEY) return 'readOnly'
+    return null
+  }
+
+  /** What this surface may say about a pick, before the backend decides. */
+  function sandboxClassConflictFor(key: string, path: string): string | null {
+    const target = sandboxPathClass(key)
+    if (target === null) return null
+    return classConflict(
+      target,
+      path,
+      pathsValue(SANDBOX_READ_ONLY_PATHS_KEY),
+      pathsValue(SANDBOX_WRITABLE_PATHS_KEY),
+    )
+  }
+
   /**
    * Has the user actually changed this setting away from its default?
    *
@@ -1162,6 +1213,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
     // there: displayValue warns when it can find neither a usable value nor
     // a usable default, which is what a boolean looks like to it.
     const textValue = () => (decl.control === 'text' ? displayValue(eff(), decl) : '')
+    const err = () => errors[decl.key]
     const showBreadcrumb = () => isSearching() && sectionFilter() === null
 
     return (
@@ -1205,87 +1257,110 @@ export function SettingsComponent(props: SettingsComponentProps) {
           {/* One line: the control and its reset affordance, side by side. The
               wrapper is the surface's own, so the reset sits level with the
               control without the surface reaching into Field's column. */}
-          <div class="ui-settings-control-line">
-            <Show when={decl.control === 'toggle'}>
-              <Checkbox
-                variant="switch"
-                checked={!!eff()}
-                ariaLabel={decl.label}
-                onChange={(c) => void saveSetting(decl.key, c)}
-              />
-            </Show>
+          <Show when={decl.control !== 'paths'}>
+            <div class="ui-settings-control-line">
+              <Show when={decl.control === 'toggle'}>
+                <Checkbox
+                  variant="switch"
+                  checked={!!eff()}
+                  ariaLabel={decl.label}
+                  onChange={(c) => void saveSetting(decl.key, c)}
+                />
+              </Show>
 
-            <Show when={decl.control === 'text'}>
-              {/* multiline is a VARIANT of the same kit component, declared
+              <Show when={decl.control === 'text'}>
+                {/* multiline is a VARIANT of the same kit component, declared
                   by the setting (Declaration.multiline) — the kit answers
                   "a paragraph rather than a value" with a prop and has no
                   second component, so neither does this. The caption is the
                   declared bound, permanently on screen: the criterion is
                   that a length limit is stated, never discovered by losing
                   text to it. */}
-              <TextField
-                multiline={decl.multiline === true}
-                // A setting's paragraph is always prose. The kit's default
-                // is verbatim because its first caller pastes a private
-                // key; nothing on this screen ever does — a secret-class
-                // setting is a `secret` control, not a text one.
-                wrap
-                value={textValue()}
-                caption={textLengthCaption(decl, textValue())}
-                captionAlign="end"
-                error={textLengthError(decl, textValue())}
-                onInput={(v) => void saveSetting(decl.key, v)}
-              />
-            </Show>
+                <TextField
+                  multiline={decl.multiline === true}
+                  // A setting's paragraph is always prose. The kit's default
+                  // is verbatim because its first caller pastes a private
+                  // key; nothing on this screen ever does — a secret-class
+                  // setting is a `secret` control, not a text one.
+                  wrap
+                  value={textValue()}
+                  caption={textLengthCaption(decl, textValue())}
+                  captionAlign="end"
+                  error={textLengthError(decl, textValue())}
+                  onInput={(v) => void saveSetting(decl.key, v)}
+                />
+              </Show>
 
-            <Show when={decl.control === 'number'}>
-              <TextField
-                type="number"
-                value={displayValue(eff(), decl)}
-                min={decl.min}
-                max={decl.max}
-                unit={decl.unit}
-                caption={numberRangeCaption(decl, numeric())}
-                captionAlign="end"
-                error={numberRangeError(decl, numeric())}
-                onInput={(v) => {
-                  const n = Number(v)
-                  void saveSetting(decl.key, isNaN(n) ? Number(displayValue(eff(), decl)) : n)
-                }}
-              />
-            </Show>
-
-            <Show when={decl.control === 'select'}>
-              <Select
-                value={displayValue(eff(), decl)}
-                onChange={(v) => void saveSetting(decl.key, v)}
-                options={decl.options ?? []}
-              />
-            </Show>
-
-            <Show when={decl.control === 'secret'}>
-              <div class="ui-settings-secret">
-                <span class="ui-settings-secret-status">
-                  {secretStates[decl.key] ? 'Configured' : 'Not configured'}
-                </span>
-                <Button
-                  variant="default"
-                  onClick={() => {
-                    const value = prompt('Enter new value for "' + decl.label + '":')
-                    if (value === null) return
-                    void saveSecret(decl.key, value)
+              <Show when={decl.control === 'number'}>
+                <TextField
+                  type="number"
+                  value={displayValue(eff(), decl)}
+                  min={decl.min}
+                  max={decl.max}
+                  unit={decl.unit}
+                  caption={numberRangeCaption(decl, numeric())}
+                  captionAlign="end"
+                  error={numberRangeError(decl, numeric())}
+                  onInput={(v) => {
+                    const n = Number(v)
+                    void saveSetting(decl.key, isNaN(n) ? Number(displayValue(eff(), decl)) : n)
                   }}
-                >
-                  Replace
-                </Button>
-                <Button variant="danger" onClick={() => void deleteSecret(decl.key)}>
-                  Clear
-                </Button>
-              </div>
-            </Show>
+                />
+              </Show>
 
-            <ProvenanceBadge decl={decl} />
-          </div>
+              <Show when={decl.control === 'select'}>
+                <Select
+                  value={displayValue(eff(), decl)}
+                  onChange={(v) => void saveSetting(decl.key, v)}
+                  options={decl.options ?? []}
+                />
+              </Show>
+
+              <Show when={decl.control === 'secret'}>
+                <div class="ui-settings-secret">
+                  <span class="ui-settings-secret-status">
+                    {secretStates[decl.key] ? 'Configured' : 'Not configured'}
+                  </span>
+                  <Button
+                    variant="default"
+                    onClick={() => {
+                      const value = prompt('Enter new value for "' + decl.label + '":')
+                      if (value === null) return
+                      void saveSecret(decl.key, value)
+                    }}
+                  >
+                    Replace
+                  </Button>
+                  <Button variant="danger" onClick={() => void deleteSecret(decl.key)}>
+                    Clear
+                  </Button>
+                </div>
+              </Show>
+
+              <ProvenanceBadge decl={decl} />
+            </div>
+          </Show>
+
+          <Show when={decl.control === 'paths'}>
+            <div class="ui-settings-paths">
+              <EditableRowList
+                rows={pathsValue(decl.key)}
+                ariaLabel={decl.label}
+                addLabel="Add folder"
+                emptyLabel="No folders — the sandboxed pane is limited to its workspace."
+                removeLabel={(index) => `Remove folder ${index + 1}`}
+                onRemove={(index) => void removePath(decl, index)}
+                onAdd={() => void addPath(decl)}
+                renderRow={(path) => <span class="ui-settings-paths-row">{path()}</span>}
+                error={err()}
+              />
+              <ProvenanceBadge decl={decl} />
+            </div>
+          </Show>
+
+          <Show when={fieldSaveError(decl, numeric(), err())}>
+            <div class="ui-settings-error">{err()}</div>
+          </Show>
         </Field>
       </div>
     )

@@ -88,6 +88,18 @@ var (
 	// ErrNoSuchPane: a move naming a pane no row carries. Reported rather
 	// than treated as a no-op, so a move never half-applies.
 	ErrNoSuchPane = errors.New("content: no such pane")
+	// ErrSandboxGrantExists means the pane already carries the immutable
+	// authority for a sandbox incarnation.
+	ErrSandboxGrantExists = errors.New("content: sandbox grant already exists")
+	// ErrSandboxGrantStale means pane workspace/profile changed between
+	// permission confirmation and issuance; no grant was inserted.
+	ErrSandboxGrantStale = errors.New("content: sandbox grant context is stale")
+	// ErrSandboxProfileRevision means a workspace-profile write carried a
+	// stale optimistic-concurrency token; nothing is written.
+	ErrSandboxProfileRevision = errors.New("content: sandbox profile revision mismatch")
+	// ErrSandboxProfileAbsent means a delete named a workspace with no
+	// explicit profile.
+	ErrSandboxProfileAbsent = errors.New("content: sandbox profile is absent")
 	// ErrCrossWorkspaceMove: whether a pane may be dragged between
 	// workspaces is open (design §12 q. 5) and the atomicity model for a
 	// subtree move is undesigned; the inherited requirement is that a
@@ -470,6 +482,61 @@ func dissolveWorkspaceIfEmpty(ctx context.Context, tx *sql.Tx, workspaceID strin
 	}
 	_, err := tx.ExecContext(ctx, `DELETE FROM workspaces WHERE id = ?`, workspaceID)
 	return err
+}
+
+// CloseSandboxPanes is the startup sweep for panes whose authority may not be
+// silently re-issued. It marks rows rather than deleting them so ledger entries
+// keep their durable pane anchor, then unwinds any tab/workspace left empty.
+func (s *sqliteContent) CloseSandboxPanes(ctx context.Context) error {
+	return s.run(ctx, func(ctx context.Context) error {
+		return s.inTx(ctx, func(tx *sql.Tx) error {
+			rows, err := tx.QueryContext(ctx,
+				`SELECT id, tab_id FROM panes
+				  WHERE closed_at IS NULL
+				    AND id IN (SELECT pane_id FROM sandbox_grants)`)
+			if err != nil {
+				return err
+			}
+			var paneIDs, tabIDs []string
+			for rows.Next() {
+				var paneID, tabID string
+				if err := rows.Scan(&paneID, &tabID); err != nil {
+					_ = rows.Close()
+					return err
+				}
+				paneIDs = append(paneIDs, paneID)
+				tabIDs = append(tabIDs, tabID)
+			}
+			if err := rows.Err(); err != nil {
+				_ = rows.Close()
+				return err
+			}
+			if err := rows.Close(); err != nil {
+				return err
+			}
+
+			at := closedNow()
+			for _, paneID := range paneIDs {
+				if _, err := tx.ExecContext(ctx,
+					`UPDATE panes SET closed_at = ?
+					  WHERE id = ? AND closed_at IS NULL`,
+					at, paneID); err != nil {
+					return err
+				}
+			}
+			seenTabs := make(map[string]struct{}, len(tabIDs))
+			for _, tabID := range tabIDs {
+				if _, seen := seenTabs[tabID]; seen {
+					continue
+				}
+				seenTabs[tabID] = struct{}{}
+				if err := dissolveTabIfEmpty(ctx, tx, tabID); err != nil {
+					return err
+				}
+			}
+			return nil
+		})
+	})
 }
 
 // ClearWindow is the CLEAN START (restore.onStartup off): everything the last
@@ -1190,6 +1257,339 @@ func (s *sqliteContent) WorkspaceForPane(ctx context.Context, paneID string) (st
 		return "", fmt.Errorf("%w: %s", ErrNoSuchPane, paneID)
 	}
 	return workspaceID, err
+}
+
+func (s *sqliteContent) InsertSandboxGrant(ctx context.Context, grant SandboxGrant) error {
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	return s.run(ctx, func(ctx context.Context) error {
+		var exists int
+		if err := s.db.QueryRowContext(ctx,
+			`SELECT EXISTS(SELECT 1 FROM sandbox_grants WHERE pane_id = ?)`,
+			grant.PaneID,
+		).Scan(&exists); err != nil {
+			return err
+		}
+		if exists != 0 {
+			return fmt.Errorf("%w: %s", ErrSandboxGrantExists, grant.PaneID)
+		}
+		result, err := s.db.ExecContext(ctx,
+			`INSERT INTO sandbox_grants (pane_id, version, issued_at, workspace, payload)
+			 SELECT ?, ?, ?, ?, ? FROM panes WHERE id = ? AND closed_at IS NULL`,
+			grant.PaneID, grant.Version, grant.IssuedAt, grant.Workspace, grant.Payload, grant.PaneID)
+		if err != nil {
+			return err
+		}
+		n, err := result.RowsAffected()
+		if err != nil {
+			return err
+		}
+		if n == 0 {
+			return fmt.Errorf("%w: %s", ErrNoSuchPane, grant.PaneID)
+		}
+		return nil
+	})
+}
+
+func (s *sqliteContent) InsertSandboxGrantIfCurrent(
+	ctx context.Context,
+	grant SandboxGrant,
+	expectation SandboxGrantExpectation,
+) error {
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	return s.run(ctx, func(ctx context.Context) error {
+		return s.inTx(ctx, func(tx *sql.Tx) error {
+			var workspaceID, payload string
+			err := tx.QueryRowContext(ctx,
+				`SELECT t.workspace_id, w.payload
+				   FROM panes p
+				   JOIN tabs t ON t.id = p.tab_id
+				   JOIN workspaces w ON w.id = t.workspace_id
+				  WHERE p.id = ? AND p.closed_at IS NULL AND t.closed_at IS NULL`,
+				grant.PaneID,
+			).Scan(&workspaceID, &payload)
+			if errors.Is(err, sql.ErrNoRows) {
+				return fmt.Errorf("%w: %s", ErrNoSuchPane, grant.PaneID)
+			}
+			if err != nil {
+				return err
+			}
+			if workspaceID != expectation.WorkspaceID {
+				return fmt.Errorf("%w: workspace changed", ErrSandboxGrantStale)
+			}
+			decoded, err := decodeWorkspacePayload(payload)
+			if err != nil {
+				return err
+			}
+			profile, err := workspaceSandboxProfileFrom(decoded)
+			if err != nil {
+				return err
+			}
+			if expectation.WorkspaceProfileRevision == nil {
+				if profile != nil {
+					return fmt.Errorf("%w: profile source changed", ErrSandboxGrantStale)
+				}
+			} else if profile == nil || profile.Revision != *expectation.WorkspaceProfileRevision {
+				return fmt.Errorf("%w: profile revision changed", ErrSandboxGrantStale)
+			}
+			var exists int
+			if existsErr := tx.QueryRowContext(ctx,
+				`SELECT EXISTS(SELECT 1 FROM sandbox_grants WHERE pane_id = ?)`,
+				grant.PaneID,
+			).Scan(&exists); existsErr != nil {
+				return existsErr
+			}
+			if exists != 0 {
+				return fmt.Errorf("%w: %s", ErrSandboxGrantExists, grant.PaneID)
+			}
+			_, err = tx.ExecContext(ctx,
+				`INSERT INTO sandbox_grants (pane_id, version, issued_at, workspace, payload)
+				 VALUES (?, ?, ?, ?, ?)`,
+				grant.PaneID, grant.Version, grant.IssuedAt, grant.Workspace, grant.Payload,
+			)
+			return err
+		})
+	})
+}
+
+func (s *sqliteContent) RemoveSandboxGrant(ctx context.Context, paneID string) error {
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	return s.run(ctx, func(ctx context.Context) error {
+		_, err := s.db.ExecContext(ctx, `DELETE FROM sandbox_grants WHERE pane_id = ?`, paneID)
+		return err
+	})
+}
+
+func (s *sqliteContent) SandboxGrantExists(ctx context.Context, paneID string) (bool, error) {
+	if s.closed.Load() {
+		return false, ErrClosed
+	}
+	// ONE statement, so open-ness and granted-ness are read from the same
+	// snapshot: a pane closed or a grant inserted between two separate
+	// queries could otherwise answer "granted" about a pane that just
+	// closed, or "not granted" about one that was just granted.
+	var open, granted int
+	err := s.db.QueryRowContext(ctx,
+		`SELECT
+		   EXISTS(SELECT 1 FROM panes WHERE id = ? AND closed_at IS NULL),
+		   EXISTS(
+		     SELECT 1 FROM panes p LEFT JOIN sandbox_grants g ON g.pane_id = p.id
+		      WHERE p.id = ? AND p.closed_at IS NULL AND g.pane_id IS NOT NULL
+		   )`, paneID, paneID).Scan(&open, &granted)
+	if err != nil {
+		return false, err
+	}
+	if open == 0 {
+		return false, fmt.Errorf("%w: %s", ErrNoSuchPane, paneID)
+	}
+	return granted != 0, nil
+}
+
+func (s *sqliteContent) SandboxGrantedPaneIDs(ctx context.Context) (map[string]struct{}, error) {
+	if s.closed.Load() {
+		return nil, ErrClosed
+	}
+	rows, err := s.db.QueryContext(ctx,
+		`SELECT g.pane_id FROM sandbox_grants g JOIN panes p ON p.id = g.pane_id
+		  WHERE p.closed_at IS NULL`)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = rows.Close() }()
+	out := make(map[string]struct{})
+	for rows.Next() {
+		var paneID string
+		if err := rows.Scan(&paneID); err != nil {
+			return nil, err
+		}
+		out[paneID] = struct{}{}
+	}
+	return out, rows.Err()
+}
+
+// ── workspace sandbox profiles ────────────────────────────────────────────
+//
+// A profile is a durable default, not authority: it lives under the
+// `sandboxProfile` key of workspaces.payload and never mutates a running
+// grant. Reads may use the pool; every mutation runs through the single
+// writer goroutine and one transaction so the read-modify-write is atomic
+// (design 2026-08-23 §8). The payload is round-tripped through a JSON map so
+// unrelated keys survive every profile write.
+
+const workspaceSandboxProfileSchemaVersion = 1
+
+// decodeWorkspacePayload decodes workspaces.payload as a JSON object,
+// preserving unrelated keys verbatim. An empty payload is the absent object.
+func decodeWorkspacePayload(raw string) (map[string]json.RawMessage, error) {
+	out := make(map[string]json.RawMessage)
+	if raw == "" {
+		return out, nil
+	}
+	if err := json.Unmarshal([]byte(raw), &out); err != nil {
+		return nil, fmt.Errorf("content: workspaces.payload is not a JSON object: %w", err)
+	}
+	return out, nil
+}
+
+// workspaceSandboxProfileFrom decodes the `sandboxProfile` member of a decoded
+// payload, or returns nil (not an error) when the key is absent.
+func workspaceSandboxProfileFrom(m map[string]json.RawMessage) (*WorkspaceSandboxProfile, error) {
+	raw, ok := m["sandboxProfile"]
+	if !ok {
+		return nil, nil
+	}
+	var profile WorkspaceSandboxProfile
+	if err := json.Unmarshal(raw, &profile); err != nil {
+		return nil, fmt.Errorf("content: workspace sandboxProfile is malformed: %w", err)
+	}
+	if profile.SchemaVersion != workspaceSandboxProfileSchemaVersion {
+		return nil, fmt.Errorf("content: workspace sandboxProfile schema version %d is unsupported", profile.SchemaVersion)
+	}
+	return &profile, nil
+}
+
+// workspacePayloadFor reads a workspace's payload inside the caller's
+// transaction. ErrNoSuchWorkspace when the row is gone.
+func workspacePayloadFor(ctx context.Context, tx *sql.Tx, workspaceID string) (string, error) {
+	var raw string
+	err := tx.QueryRowContext(ctx, `SELECT payload FROM workspaces WHERE id = ?`, workspaceID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", fmt.Errorf("%w: %s", ErrNoSuchWorkspace, workspaceID)
+	}
+	return raw, err
+}
+
+func (s *sqliteContent) WorkspaceSandboxProfile(ctx context.Context, workspaceID string) (*WorkspaceSandboxProfile, error) {
+	if s.closed.Load() {
+		return nil, ErrClosed
+	}
+	var raw string
+	err := s.db.QueryRowContext(ctx, `SELECT payload FROM workspaces WHERE id = ?`, workspaceID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("%w: %s", ErrNoSuchWorkspace, workspaceID)
+	}
+	if err != nil {
+		return nil, err
+	}
+	m, err := decodeWorkspacePayload(raw)
+	if err != nil {
+		return nil, err
+	}
+	return workspaceSandboxProfileFrom(m)
+}
+
+func (s *sqliteContent) SetWorkspaceSandboxProfile(ctx context.Context, workspaceID string, expectedRevision int64, profile WorkspaceSandboxProfile) (int64, error) {
+	if workspaceID == DefaultWorkspaceID {
+		return 0, ErrDefaultWorkspace
+	}
+	if s.closed.Load() {
+		return 0, ErrClosed
+	}
+	var newRevision int64
+	err := s.run(ctx, func(ctx context.Context) error {
+		return s.inTx(ctx, func(tx *sql.Tx) error {
+			raw, err := workspacePayloadFor(ctx, tx, workspaceID)
+			if err != nil {
+				return err
+			}
+			m, err := decodeWorkspacePayload(raw)
+			if err != nil {
+				return err
+			}
+			current, err := workspaceSandboxProfileFrom(m)
+			if err != nil {
+				return err
+			}
+			var currentRevision int64
+			if current != nil {
+				currentRevision = current.Revision
+			}
+			if currentRevision != expectedRevision {
+				return fmt.Errorf("%w: %s", ErrSandboxProfileRevision, workspaceID)
+			}
+			newRevision = currentRevision + 1
+			profile.SchemaVersion = workspaceSandboxProfileSchemaVersion
+			profile.Revision = newRevision
+			encoded, err := json.Marshal(profile)
+			if err != nil {
+				return err
+			}
+			m["sandboxProfile"] = encoded
+			full, err := json.Marshal(m)
+			if err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, `UPDATE workspaces SET payload = ? WHERE id = ?`, string(full), workspaceID)
+			return err
+		})
+	})
+	if err != nil {
+		return 0, err
+	}
+	return newRevision, nil
+}
+
+func (s *sqliteContent) DeleteWorkspaceSandboxProfile(ctx context.Context, workspaceID string, expectedRevision int64) error {
+	if workspaceID == DefaultWorkspaceID {
+		return ErrDefaultWorkspace
+	}
+	if s.closed.Load() {
+		return ErrClosed
+	}
+	return s.run(ctx, func(ctx context.Context) error {
+		return s.inTx(ctx, func(tx *sql.Tx) error {
+			raw, err := workspacePayloadFor(ctx, tx, workspaceID)
+			if err != nil {
+				return err
+			}
+			m, err := decodeWorkspacePayload(raw)
+			if err != nil {
+				return err
+			}
+			current, err := workspaceSandboxProfileFrom(m)
+			if err != nil {
+				return err
+			}
+			if current == nil {
+				return fmt.Errorf("%w: %s", ErrSandboxProfileAbsent, workspaceID)
+			}
+			if current.Revision != expectedRevision {
+				return fmt.Errorf("%w: %s", ErrSandboxProfileRevision, workspaceID)
+			}
+			delete(m, "sandboxProfile")
+			full, err := json.Marshal(m)
+			if err != nil {
+				return err
+			}
+			_, err = tx.ExecContext(ctx, `UPDATE workspaces SET payload = ? WHERE id = ?`, string(full), workspaceID)
+			return err
+		})
+	})
+}
+
+func (s *sqliteContent) SandboxGrantForPane(ctx context.Context, paneID string) (*SandboxGrant, error) {
+	if s.closed.Load() {
+		return nil, ErrClosed
+	}
+	var grant SandboxGrant
+	err := s.db.QueryRowContext(ctx,
+		`SELECT g.pane_id, g.version, g.issued_at, g.workspace, g.payload
+		   FROM sandbox_grants g JOIN panes p ON p.id = g.pane_id
+		  WHERE g.pane_id = ? AND p.closed_at IS NULL`,
+		paneID,
+	).Scan(&grant.PaneID, &grant.Version, &grant.IssuedAt, &grant.Workspace, &grant.Payload)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &grant, nil
 }
 
 // ── row readers ──────────────────────────────────────────────────────────

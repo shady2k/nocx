@@ -301,3 +301,108 @@ func TestClearWindowClosesEveryLeftoverAndKeepsWhatComesAfter(t *testing.T) {
 		t.Fatalf("tabs after the restart = %+v, want tab-3 alone — the leftovers came back", back.Tabs)
 	}
 }
+
+func TestSandboxGrantRollbackAllowsRetryAfterLaunchFailure(t *testing.T) {
+	ctx := t.Context()
+	db, _, _ := newLedgerAt(t)
+	layout := db.Layout()
+
+	if _, err := layout.CreateWorkspace(ctx,
+		content.Workspace{ID: "ws-sandbox-retry", Name: "sandbox retry"},
+		aTab("tab-sandbox-retry", "ws-sandbox-retry"),
+		aPane("pane-sandbox-retry", "tab-sandbox-retry", "/workspace")); err != nil {
+		t.Fatalf("CreateWorkspace: %v", err)
+	}
+	grant := content.SandboxGrant{
+		PaneID: "pane-sandbox-retry", Version: 1, IssuedAt: 42,
+		Workspace: "/workspace", Payload: `{}`,
+	}
+	if err := layout.InsertSandboxGrant(ctx, grant); err != nil {
+		t.Fatalf("InsertSandboxGrant: %v", err)
+	}
+	if err := layout.InsertSandboxGrant(ctx, grant); !errors.Is(err, content.ErrSandboxGrantExists) {
+		t.Fatalf("duplicate InsertSandboxGrant error = %v, want ErrSandboxGrantExists", err)
+	}
+	if err := layout.RemoveSandboxGrant(ctx, grant.PaneID); err != nil {
+		t.Fatalf("RemoveSandboxGrant: %v", err)
+	}
+	if granted, err := layout.SandboxGrantExists(ctx, grant.PaneID); err != nil || granted {
+		t.Fatalf("SandboxGrantExists after rollback = %v, %v; want false, nil", granted, err)
+	}
+	if err := layout.InsertSandboxGrant(ctx, grant); err != nil {
+		t.Fatalf("retry InsertSandboxGrant: %v", err)
+	}
+}
+
+// A granted pane is recorded so its blocks and workspace provenance have a
+// durable anchor while it is alive, but its authority cannot be silently
+// re-issued in the next backend incarnation.
+func TestCloseSandboxPanesLeavesOnlyRestorablePanesInTheWindow(t *testing.T) {
+	ctx := context.Background()
+	db, led, path := newLedgerAt(t)
+	layout := db.Layout()
+
+	if _, err := layout.CreateWorkspace(ctx,
+		content.Workspace{ID: "ws-sandbox", Name: "sandbox"},
+		aTab("tab-sandbox", "ws-sandbox"),
+		aPane("pane-sandbox", "tab-sandbox", "/workspace")); err != nil {
+		t.Fatalf("CreateWorkspace sandbox: %v", err)
+	}
+	if _, err := layout.CreateWorkspace(ctx,
+		content.Workspace{ID: "ws-ordinary", Name: "ordinary"},
+		aTab("tab-ordinary", "ws-ordinary"),
+		aPane("pane-ordinary", "tab-ordinary", "/repo")); err != nil {
+		t.Fatalf("CreateWorkspace ordinary: %v", err)
+	}
+	if err := layout.InsertSandboxGrant(ctx, content.SandboxGrant{
+		PaneID: "pane-sandbox", Version: 1, IssuedAt: 42,
+		Workspace: "/workspace", Payload: `{"writableRoots":["/workspace"]}`,
+	}); err != nil {
+		t.Fatalf("InsertSandboxGrant: %v", err)
+	}
+	granted, queryErr := layout.SandboxGrantExists(ctx, "pane-sandbox")
+	if queryErr != nil || !granted {
+		t.Fatalf("SandboxGrantExists(sandbox) = %v, %v; want true, nil", granted, queryErr)
+	}
+	granted, queryErr = layout.SandboxGrantExists(ctx, "pane-ordinary")
+	if queryErr != nil || granted {
+		t.Fatalf("SandboxGrantExists(ordinary) = %v, %v; want false, nil", granted, queryErr)
+	}
+
+	envReady(t, led, "local")
+	const block = "00000000-0000-7000-8000-0000000c4001"
+	aBlockIn(t, led, block, "pane-sandbox")
+
+	if closeErr := layout.CloseSandboxPanes(ctx); closeErr != nil {
+		t.Fatalf("CloseSandboxPanes: %v", closeErr)
+	}
+	snap, snapshotErr := layout.Snapshot(ctx)
+	if snapshotErr != nil {
+		t.Fatalf("Snapshot: %v", snapshotErr)
+	}
+	if len(snap.Panes) != 1 || snap.Panes[0].ID != "pane-ordinary" {
+		t.Fatalf("window panes = %+v, want pane-ordinary alone", snap.Panes)
+	}
+	if _, closedErr := layout.SandboxGrantExists(ctx, "pane-sandbox"); !errors.Is(closedErr, content.ErrNoSuchPane) {
+		t.Fatalf("SandboxGrantExists(closed sandbox) error = %v, want ErrNoSuchPane", closedErr)
+	}
+	if page := entriesForPane(t, led, "pane-sandbox"); len(page.Entries) != 1 {
+		t.Fatalf("sandbox blocks after sweep = %+v, want the anchored entry", page.Entries)
+	}
+
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("Close: %v", closeErr)
+	}
+	again, reopenErr := reopenStore(t, path)
+	if reopenErr != nil {
+		t.Fatalf("reopen: %v", reopenErr)
+	}
+	t.Cleanup(func() { _ = again.Close() })
+	back, snapshotErr := again.Layout().Snapshot(ctx)
+	if snapshotErr != nil {
+		t.Fatalf("Snapshot after reopen: %v", snapshotErr)
+	}
+	if len(back.Panes) != 1 || back.Panes[0].ID != "pane-ordinary" {
+		t.Fatalf("panes after restart = %+v, want pane-ordinary alone", back.Panes)
+	}
+}

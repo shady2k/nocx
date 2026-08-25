@@ -39,6 +39,10 @@ acceptance criteria on `nocx-szb40.2` until it is written into `docs/architectur
 in the same shape as its existing carve-out: an interval with both ends, and an explicit statement
 of what it does not license.
 
+**`internal/notify` is crossed too, and it is code rather than a document.** Its `Trust` — three
+classes stamped by the source adapter, never on the wire, enforced default-deny — already owns
+"what may reach a human, and by which channel", which §6.1 maps onto rather than restating.
+
 **ADR-0020** records authority per RUN, never per session, as an immutable grant on the run.
 **ADR-0024** decision 1 is the sharpest constraint here and is quoted in full below, because this
 design's first draft violated it; decision 2 built the authenticated channel that carries every
@@ -172,13 +176,52 @@ Backend-owned, and it holds exactly six things.
 
 ### 6.1 Evidence, by what it may decide
 
-| Class                | Source                                          | May decide wave state | May decide whether nocx types | May light the indicator | May wake your phone   |
-| -------------------- | ----------------------------------------------- | --------------------- | ----------------------------- | ----------------------- | --------------------- |
-| `known`              | our own loop (ADR-0028)                         | yes                   | yes                           | yes                     | yes                   |
-| `declared`           | the participant, over the authenticated channel | yes                   | yes                           | yes                     | yes                   |
-| `observed`           | **process exit only** (D9)                      | yes                   | yes                           | yes                     | no                    |
-| `declared-anonymous` | terminal title, OSC 0/2                         | **no**                | **no**                        | yes                     | per-agent opt-in only |
-| `inferred`           | the backend's grid (D13)                        | **no**                | yes — this is its job         | yes                     | no                    |
+**Half of this table is not this document's to write, and an earlier revision wrote it anyway.**
+"What may reach you, and by which channel" already has an owner: `internal/notify`'s `Trust`, one
+of three classes stamped by the source adapter, never carried on the wire, enforced default-deny
+against a routing table that refuses at construction to give a heuristic row a sink which leaves
+the machine (`notify.go:355`, and ADR-0029 §3 — the one titled "A program may ask; it never
+chooses", which has to be named by title because a second accepted decision also numbered 0029
+exists in `docs/decisions/`; that is `nocx-jp0h3`). The previous revision invented a parallel "may wake
+your phone" axis with its own vocabulary and its own answers — including "per-agent opt-in only",
+which the shipped model does not have and does not need. That is the second-owner defect this
+repository has paid for repeatedly, in a document whose §8 records two instances of it.
+
+So the columns are split by owner. What an evidence class may decide about the WAVE and about
+TYPING is this design's, because nothing else has those concepts. What it may reach is a mapping
+onto `Trust`, and where the two disagree, `Trust` wins, because `Trust` is enforced in code:
+
+| Class                | Source                                          | May decide wave state | May decide whether nocx types | `notify` Trust         |
+| -------------------- | ----------------------------------------------- | --------------------- | ----------------------------- | ---------------------- |
+| `known`              | our own loop (ADR-0028)                         | yes                   | yes                           | `attested`             |
+| `declared`           | the participant, over the authenticated channel | yes                   | yes                           | `attested`             |
+| `observed`           | **process exit only** (D9)                      | yes                   | yes                           | `attested` — see below |
+| `declared-anonymous` | terminal title, OSC 0/2                         | **no**                | **no**                        | `heuristic`            |
+| `inferred`           | the backend's grid (D13)                        | **no**                | yes — this is its job         | `heuristic`            |
+
+One mapping is a better answer than the one it replaces, one corrects an error this revision made
+on its way here, and one is an open question.
+
+`inferred` is "an inference from stream content", which is `heuristic` verbatim, and the machine
+boundary the old row asserted in prose is the one the routing table already refuses to cross.
+
+`declared-anonymous` looked like `programRequest` and is not, which is worth recording because the
+mistake is the natural one: a title IS a sequence the program printed. But `programRequest` is for
+a program **asking to notify you** — `KindBell` is BEL, and `ws_notify.go:173` stamps a raised
+request — whereas a title is a thing the program set for its own reasons, from which we infer
+something it never said. The shipped code settles it without ambiguity: `KindPaneWorkFinished` is
+commented "title-transition inference (heuristic)", and `ws_notify_pane_work_finished.go:24` says
+`TrustHeuristic` "is what confines the event to local attention". So the title row is `heuristic`,
+and this table has no `programRequest` row at all — correctly, because a program requesting your
+attention is not evidence about a wave, and the two axes should not be merged just because both
+end at you.
+
+**`observed` is the open one:**
+process exit originates at a backend boundary that owns the PTY, which reads as `attested`, and
+the previous revision nonetheless wrote "may wake your phone: no" with no argument for it. Either
+it is attested and may, or there is a reason it should not be, and that reason belongs in writing
+rather than encoded as a silent no. `nocx-dkawo.4` is where it gets decided, because that is where
+what reaches the human is measured rather than assumed.
 
 The `inferred` row is where this revision differs most from the last one. The previous draft
 argued that the indicator was legal _because_ AD-6 binds the backend and the renderer owns VT
@@ -187,7 +230,10 @@ title. That argument no longer holds and is not patched: the backend now keeps a
 (D13), which is a real crossing of AD-6 with a written boundary, not a loophole. What survives
 from the old argument is the _shape_ of the limit — `agent-status.ts` answers only whether
 SOMETHING is working, never WHO, so it stays on the `declared-anonymous` row by construction, and
-ordinary tabs keep using it untouched.
+ordinary tabs keep using it untouched. That module is also no longer bare: `pane-work-finished.ts`
+(`nocx-n3nfg`) already wraps it in a settle window on the `working → idle` edge and raises
+`pane.workFinished` at `trust: heuristic` — so the provenance this design asks for partly exists
+already, on the shipped model rather than on a new one.
 
 The grid earns the strongest thing it is allowed to decide, and it is not wave state: it is
 **whether nocx may type into this pane at all** (D14). That is the authority a screen reader

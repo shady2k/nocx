@@ -2,7 +2,7 @@ package apiimport
 
 // Telegram puts the bot token in the PATH — `/bot<TOKEN>/sendMessage` — so an
 // export of one carries a credential-shaped collection variable. The import
-// keeps the reference and an empty ordinary variable, reports the dropped
+// keeps the reference but omits the credential variable, reports the dropped
 // value, and writes the credential nowhere.
 
 import (
@@ -15,7 +15,7 @@ import (
 //nolint:gosec // a test fixture, and the same string the e2e export carries
 const telegramToken = "e2e-telegram-bot-token-77a1c39fbe0284d5619c"
 
-func TestImport_ATokenInThePathBecomesAnEmptyVariableAndReportsIt(t *testing.T) {
+func TestImport_ATokenInThePathBecomesAbsentAndReportsIt(t *testing.T) {
 	doc := `{
       "info": {"name": "telegram-api", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
       "variable": [
@@ -54,8 +54,8 @@ func TestImport_ATokenInThePathBecomesAnEmptyVariableAndReportsIt(t *testing.T) 
 		t.Errorf("the request's URL is not the export's:\n%s", requestText)
 	}
 	env := files["environments/default.json"]
-	if !strings.Contains(env, `"token": ""`) {
-		t.Errorf("environment does not carry an empty token variable: %s", env)
+	if strings.Contains(env, `"token"`) {
+		t.Errorf("environment writes the imported credential; token must be absent: %s", env)
 	}
 	if strings.Contains(env, `"secretVars"`) {
 		t.Errorf("environment declares a secret variable: %s", env)

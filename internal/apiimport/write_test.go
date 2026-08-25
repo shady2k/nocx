@@ -218,9 +218,10 @@ func TestImportIntoPostmanWritesTheFolder(t *testing.T) {
 			t.Fatalf("%s carries the source document's id", name)
 		}
 	}
-	// And the name IS there, because a file names a variable.
-	if !strings.Contains(files["environments/default.json"], "apiToken") {
-		t.Fatalf("the environment does not declare the variable: %s", files["environments/default.json"])
+	// The environment must not write an imported credential key, even with
+	// an empty value: absent is what makes later resolution refuse by name.
+	if strings.Contains(files["environments/default.json"], `"apiToken"`) {
+		t.Fatalf("the environment writes the imported credential: %s", files["environments/default.json"])
 	}
 }
 

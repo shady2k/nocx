@@ -119,10 +119,12 @@ func TestImportedPostmanCollectionOpensItsEnvironments(t *testing.T) {
 	if envs[0].Environment.Name != converted.Environments[0].Name {
 		t.Errorf("environment is called %q, want %q", envs[0].Environment.Name, converted.Environments[0].Name)
 	}
-	// Imported credential-shaped values become empty ordinary variables. The
-	// environment format no longer has a place to declare one at all.
-	if got := envs[0].Environment.Values["apiToken"]; got != "" {
-		t.Errorf("apiToken = %q, want empty", got)
+	// Imported credential-shaped values are ABSENT from the environment, not
+	// present and empty: apicoll treats an empty bound value as a value, so
+	// absence is what makes a later resolution refuse by name. The format also
+	// no longer has anywhere to declare a secret variable at all.
+	if _, ok := envs[0].Environment.Values["apiToken"]; ok {
+		t.Errorf("apiToken is present in the environment; an imported credential must be absent")
 	}
 }
 

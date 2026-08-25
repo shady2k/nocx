@@ -2188,11 +2188,11 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 		// s.apiFetch may be nil, and that is a build without the URL
 		// entrance rather than a broken one: the other two entrances are
 		// untouched and `url` is refused by name.
-		importOp = capability.NewAPIImportOperation(vaultGate, apiGate, lane, apiimport.NewOSFS(), s.apiFetch)
+		importOp = capability.NewAPIImportOperation(apiGate, lane, apiimport.NewOSFS(), s.apiFetch)
 	}
-	// The binding write shares the import's gates and its store: both put a
-	// value in the vault and record it in the one binding document, so they
-	// must exclude each other, and the vault gate is what makes them.
+	// The import writes only a collection folder under the api gate. It does
+	// not take charge of credential material, so it does not use the vault
+	// gate or binding store.
 	var bindOp capability.APIBindingOperation
 	if importWired {
 		bindOp = capability.NewAPIBindingOperation(vaultGate, apiGate, lane, s.apiBindings)

@@ -1042,13 +1042,10 @@ func (s *apiBindingService) BindSecret(ctx context.Context, k apibind.Key, value
 	return s.bindings.Bind(ctx, k, value)
 }
 
-// APIImportOperation is the typed operation for api.import.postman. Its
-// gates are [vault, api], in the canonical order: the import writes secret
-// VALUES through the binding store, which is the vault-backed half of
-// design §8.1, and it writes a collection folder. It is bounded work — the
-// document is capped at 16 MiB by apiimport and every write is local — so
-// holding both across it does not repeat the mistake api.request.send
-// avoids.
+// APIImportOperation is the typed operation for api.import.postman. The
+// importer writes only a collection folder under the api gate. An imported
+// document yields no secret, so it does not take charge of credential
+// material and has no vault gate to protect.
 type APIImportOperation interface {
 	Run(context.Context, func(context.Context, APIImportService) error) error
 }
@@ -1062,7 +1059,7 @@ type APIImportOperation interface {
 // then refuses by name (ErrImportURLUnavailable) and the other two
 // entrances are untouched.
 func NewAPIImportOperation(
-	vaultGate, apiGate, lane control.Admission,
+	apiGate, lane control.Admission,
 	fsys apiimport.FS,
 	fetch apifetch.Fetcher,
 ) APIImportOperation {

@@ -335,10 +335,6 @@ func (c *pmConv) readVariables(vars []pmVariable) {
 		value := c.dropSecretReferences(v.Value.String(), "variable "+clip(name))
 		if strings.EqualFold(v.Type, "secret") || headerValueIsSecret(name, value) {
 			c.ensureEnv()
-			if c.env.Values == nil {
-				c.env.Values = map[string]string{}
-			}
-			c.env.Values[name] = ""
 			c.itemise("variable "+clip(name), "imported credential material is not carried; supply the value after import")
 			continue
 		}

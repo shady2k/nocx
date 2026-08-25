@@ -144,6 +144,11 @@ const NOT_AN_EXPORT_REFUSAL =
 /** A fetch that leaves from this machine. One object rather than a literal
  *  per site, because "direct" is one state and three spellings of it is
  *  three states that agree until they do not. */
+/** How long the folder page waits for typing to stop before it writes. Long
+ *  enough that a row typed character by character is one write, short enough
+ *  that a person who types and looks up has already been saved. */
+const FOLDER_SAVE_DEBOUNCE = 400
+
 const DIRECT_ROUTE: ApiRoute = { kind: 'direct', profileId: '', insecureTls: false }
 
 /** What a REQUEST drag carries, so the drop handler can tell its own drag
@@ -508,15 +513,21 @@ export function ApiPane(props: ApiPaneProps) {
   const [envRefused, setEnvRefused] = createSignal('')
   const [envBusy, setEnvBusy] = createSignal(false)
   const [folderVariables, setFolderVariables] = createSignal<readonly ApiParam[] | null>(null)
-  const [folderSaved, setFolderSaved] = createSignal<readonly ApiParam[]>([])
-  const [folderDirty, setFolderDirty] = createSignal(false)
   const [folderBusy, setFolderBusy] = createSignal(false)
   const [folderLoading, setFolderLoading] = createSignal(false)
   const [folderVariablesRefused, setFolderVariablesRefused] = createSignal('')
   const [folderSaveRefused, setFolderSaveRefused] = createSignal('')
+  // Whether what is on screen has been written since it was last edited. It is
+  // NOT "there is nothing left to write": a folder just read has been written
+  // by nobody, and telling a person "Saved" about a file they have not touched
+  // is a claim about an act that did not happen.
+  const [folderWritten, setFolderWritten] = createSignal(false)
   let folderReadKey = ''
   createEffect(() => {
     if (view() !== 'folder') {
+      // LEAVING FLUSHES. The pending write carries its own path, so it lands on
+      // the folder it was typed into even though the page has moved on.
+      writeFolderNow()
       folderReadKey = ''
       return
     }
@@ -524,20 +535,19 @@ export function ApiPane(props: ApiPaneProps) {
     const relPath = store.activeFolder()
     const key = `${handle}:${relPath}`
     if (key === folderReadKey) return
+    writeFolderNow()
     folderReadKey = key
     setFolderLoading(true)
     setFolderVariables(null)
-    setFolderSaved([])
-    setFolderDirty(false)
     setFolderVariablesRefused('')
     setFolderSaveRefused('')
+    setFolderWritten(false)
     void store.readFolderVariables(relPath).then((result) => {
       if (folderReadKey !== key) return
       setFolderLoading(false)
       setFolderVariablesRefused(result.error)
       if (result.variables === null) return
       setFolderVariables(result.variables)
-      setFolderSaved(result.variables)
     })
   })
 
@@ -1961,27 +1971,62 @@ export function ApiPane(props: ApiPaneProps) {
       showRequest()
     })
   }
-  const setFolderRows = (variables: readonly ApiParam[]): void => {
-    setFolderVariables(variables)
-    setFolderDirty(JSON.stringify(variables) !== JSON.stringify(folderSaved()))
-  }
+  /**
+   * FOLDER VARIABLES SAVE THEMSELVES (nocx-x3cax.7).
+   *
+   * There is no Save on that page. A folder's variables are three fields in a
+   * table: nothing is composed and nothing is reviewed before committing, so a
+   * person who types a value and walks away has already said everything they
+   * mean to say.
+   *
+   * The write is COALESCED — a row typed character by character costs one — and
+   * the pending one is FLUSHED when the folder changes or the page is left.
+   * A debounce that loses the last edit because somebody clicked away would be
+   * worse than the button it replaced, so the pending write carries the path
+   * and the rows it was scheduled FOR, never whatever is current when the timer
+   * happens to fire.
+   */
+  let folderSaveTimer: ReturnType<typeof setTimeout> | undefined
+  let folderSavePending: { key: string; relPath: string; rows: readonly ApiParam[] } | null = null
 
-  const saveFolderVariables = (): void => {
-    const relPath = store.activeFolder()
-    const key = `${store.activeCollection()}:${relPath}`
-    const variables = folderVariables() ?? []
+  // A DECLARATION, not a const: the effect above calls it, and an effect body
+  // that reached a `const` before its initialiser would be a temporal-dead-zone
+  // throw the moment Solid ran effects in a different order.
+  function writeFolderNow(): void {
+    const pending = folderSavePending
+    folderSavePending = null
+    if (folderSaveTimer !== undefined) {
+      clearTimeout(folderSaveTimer)
+      folderSaveTimer = undefined
+    }
+    if (pending === null) return
     setFolderSaveRefused('')
     setFolderBusy(true)
-    void store.writeFolderVariables(relPath, variables).then((result) => {
-      if (folderReadKey !== key) return
+    void store.writeFolderVariables(pending.relPath, pending.rows).then((result) => {
+      // The answer belongs to the folder it was asked about. A person who moved
+      // on before it landed is not shown another folder's outcome.
+      if (folderReadKey !== pending.key) return
       setFolderBusy(false)
       setFolderSaveRefused(result.error)
       if (result.variables === null || result.error !== '') return
       setFolderVariables(result.variables)
-      setFolderSaved(result.variables)
-      setFolderDirty(false)
-      showToast({ level: 'success', message: 'Saved folder variables' })
+      setFolderWritten(true)
     })
+  }
+
+  const setFolderRows = (variables: readonly ApiParam[]): void => {
+    setFolderVariables(variables)
+    setFolderWritten(false)
+    folderSavePending = {
+      key: folderReadKey,
+      relPath: store.activeFolder(),
+      rows: variables,
+    }
+    if (folderSaveTimer !== undefined) clearTimeout(folderSaveTimer)
+    folderSaveTimer = setTimeout(() => {
+      folderSaveTimer = undefined
+      writeFolderNow()
+    }, FOLDER_SAVE_DEBOUNCE)
   }
 
   /**
@@ -3171,12 +3216,11 @@ export function ApiPane(props: ApiPaneProps) {
             actions={entryActions}
             variables={folderVariables()}
             loading={folderLoading()}
-            dirty={folderDirty()}
+            written={folderWritten()}
             busy={folderBusy()}
             error={folderVariablesRefused()}
             saveError={folderSaveRefused()}
             onVariables={setFolderRows}
-            onSaveVariables={saveFolderVariables}
             onNewRequest={newRequestHere}
           />
         </div>

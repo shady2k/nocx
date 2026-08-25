@@ -83,14 +83,16 @@ export interface FolderViewProps {
   /** Rows from the folder's reserved variables document. */
   variables: readonly ApiParam[] | null
   loading: boolean
-  dirty: boolean
+  /** A write is in flight. */
   busy: boolean
+  /** What is on screen has been written since it was last edited — NOT "there
+   *  is nothing to save", which is also true of a folder nobody has touched. */
+  written: boolean
   /** A refused read belongs to the on-page card. */
   error: string
   /** A refused save belongs to the notification channel. */
   saveError: string
   onVariables: (variables: readonly ApiParam[]) => void
-  onSaveVariables: () => void
   /** Make a request here — the door the empty state offers, because an empty
    *  folder is exactly where a person needs it and the trail's own plus is
    *  at the other end of the line. */
@@ -223,13 +225,19 @@ export function FolderView(props: FolderViewProps) {
             onRemove={(i) => props.onVariables(rows().filter((_, j) => j !== i))}
             onAdd={() => props.onVariables([...rows(), { name: '', value: '', enabled: true }])}
           />
-          <Button
-            variant="primary"
-            disabled={props.busy || !props.dirty}
-            onClick={props.onSaveVariables}
-          >
-            Save
-          </Button>
+          {/* NO SAVE. The rows write themselves once typing stops
+              (nocx-x3cax.7), and this is the half that keeps that honest: a
+              save nobody asked for and nobody is told about is a save a person
+              cannot trust. It says the two states that exist and stays quiet
+              about the third — a folder just opened has been written by
+              nobody, and telling them "Saved" would be a claim about an act
+              that did not happen. The refusal is a danger toast, which is the
+              surface still there when the table is not. */}
+          <Show when={props.busy || props.written}>
+            <p class="api-folder__note" aria-live="polite">
+              {props.busy ? 'Saving…' : 'Saved'}
+            </p>
+          </Show>
         </Show>
       </Show>
     </>

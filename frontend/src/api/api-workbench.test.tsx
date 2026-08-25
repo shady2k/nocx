@@ -5947,15 +5947,81 @@ describe('a folder is something you open', () => {
     fireEvent.input(field('api-folder-var-value-0'), {
       target: { value: 'https://api.example.test' },
     })
-    fireEvent.click(button('Save'))
 
+    // NOTHING IS PRESSED (nocx-x3cax.7). The rows write themselves once typing
+    // stops, and the absence of the control is the feature — so the test also
+    // says the page offers no Save to press.
+    expect(
+      [...workbench().querySelectorAll('.api-folder button')].some(
+        (b) => (b.textContent ?? '').trim() === 'Save',
+      ),
+    ).toBe(false)
     await vi.waitFor(() =>
       expect(writeFolder).toHaveBeenCalledWith(HANDLE, 'users', [
         { name: 'baseUrl', value: 'https://api.example.test', enabled: true },
       ]),
     )
+    // The outcome is said quietly, on the page, and not as a toast per
+    // keystroke-batch: a save that happened without being asked for still has
+    // to be visible, or a person cannot trust it happened.
+    await vi.waitFor(() => expect(workbench().textContent).toContain('Saved'))
+    expect(toasts().some((toast) => toast.message === 'Saved folder variables')).toBe(false)
+  })
+
+  it('two edits in a row cost one write, not two', async () => {
+    // The debounce is the reason there is no button. If it did not coalesce, a
+    // row typed character by character would be a write per character, which is
+    // the cost that makes autosave a bad idea rather than a good one.
+    const readFolder = vi.fn().mockResolvedValue({ variables: [] })
+    const writeFolder = vi.fn().mockResolvedValue({ variables: [] })
+    const disk = folderOnDisk({ readFolder, writeFolder })
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(readFolder).toHaveBeenCalledWith(HANDLE, 'users'))
+    fireEvent.click(folderTab('Variables'))
+    await vi.waitFor(() => expect(button('Add variable')).toBeTruthy())
+    fireEvent.click(button('Add variable'))
+    fireEvent.input(field('api-folder-var-name-0'), { target: { value: 'baseUrl' } })
+    fireEvent.input(field('api-folder-var-value-0'), { target: { value: 'https://one.test' } })
+
+    await vi.waitFor(() => expect(writeFolder).toHaveBeenCalled())
+    // Both edits landed inside one pause, so there is one timer and one write —
+    // and the write carries the LAST state of the table, not the first.
+    expect(writeFolder).toHaveBeenCalledTimes(1)
+    expect(writeFolder).toHaveBeenCalledWith(HANDLE, 'users', [
+      { name: 'baseUrl', value: 'https://one.test', enabled: true },
+    ])
+  })
+
+  it('a person who types and walks away still has their edit written', async () => {
+    // The failure mode a debounce buys if nobody thinks about it: the last edit
+    // is lost because somebody clicked something else before the timer fired.
+    // Leaving flushes, and the pending write carries the folder it was typed
+    // into rather than wherever the person went.
+    const readFolder = vi.fn().mockResolvedValue({ variables: [] })
+    const writeFolder = vi.fn().mockResolvedValue({ variables: [] })
+    const disk = folderOnDisk({ readFolder, writeFolder })
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(readFolder).toHaveBeenCalledWith(HANDLE, 'users'))
+    fireEvent.click(folderTab('Variables'))
+    await vi.waitFor(() => expect(button('Add variable')).toBeTruthy())
+    fireEvent.click(button('Add variable'))
+    fireEvent.input(field('api-folder-var-name-0'), { target: { value: 'walkAway' } })
+
+    // Away, at once — well inside the pause the debounce waits out.
+    fireEvent.click(row(CREATE_REL_PATH))
+
     await vi.waitFor(() =>
-      expect(toasts().some((toast) => toast.message === 'Saved folder variables')).toBe(true),
+      expect(writeFolder).toHaveBeenCalledWith(HANDLE, 'users', [
+        { name: 'walkAway', value: '', enabled: true },
+      ]),
     )
   })
 
@@ -6041,7 +6107,6 @@ describe('a folder is something you open', () => {
     fireEvent.input(field('api-folder-var-value-0'), {
       target: { value: 'https://changed.example.test' },
     })
-    fireEvent.click(button('Save'))
 
     await vi.waitFor(() => expect(writeFolder).toHaveBeenCalled())
     await vi.waitFor(() =>

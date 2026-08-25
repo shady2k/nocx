@@ -35,6 +35,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
+	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -173,7 +174,12 @@ type WSServer struct {
 	build version.BuildInfo
 	// Structured backup capability and native file saver. The operation is
 	// constructed after all options so it shares the current config gate.
-	backupService   *backup.Service
+	backupService *backup.Service
+	// paneGrid is the backend's VT grid for ENROLLED panes (nocx-szb40.2,
+	// the AD-6 amendment). Nil is the normal state: a session without one
+	// runs exactly as it did before, and the byte path never depends on it.
+	paneGrid panegrid.Observer
+
 	backupFileSaver func(string, string) (*backup.SaveResult, error)
 
 	// SSH config resolver and config path for the ssh.listAliases RPC.
@@ -2457,9 +2463,18 @@ func (s *WSServer) handleDataFrame(state *connState, data []byte) {
 // connection (AD-9). Blocks on ring.write when the ring is full and
 // nothing has been acked — that is the AD-10 backpressure seam.
 func (s *WSServer) pumpToRing(ctx context.Context, sess session.Session, ring *outputRing) {
+	// The grid is fed HERE, on the backend's own read path, and deliberately
+	// not on the subscriber path: this goroutine is started per session and
+	// lives connection-independently, so "closing the frontend does not stop
+	// it being fed" is a property of the placement rather than a promise
+	// (nocx-szb40.2). An unenrolled session drops the bytes at a map lookup.
 	err := sess.StartOutput(ctx, func(data []byte) error {
+		s.feedPaneGrid(sess.ID(), data)
 		return ring.write(data)
 	})
+	// Output is over, so no further frame can exist for this pane: close the
+	// interval. The AD-6 amendment wants both ends named, and this is the end.
+	s.withdrawPaneGrid(sess.ID())
 	if err != nil {
 		s.log.Debug("session output ended", "session_id", string(sess.ID()), "error", err)
 	}

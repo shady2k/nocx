@@ -43,6 +43,7 @@ import (
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
+	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
@@ -1474,6 +1475,11 @@ func New(opts ...Option) (*App, error) {
 		transport.WithAssistantClient(assistant.NewClient(logger)),
 		transport.WithAssistantProbeStore(assistantProbes),
 	)
+	// The backend's VT grid for ENROLLED panes (nocx-szb40.2, the AD-6
+	// amendment "A live grid for an enrolled pane"). Constructed empty and
+	// process-lifetime: nothing is observed until session.observe names a
+	// pane, which is what keeps enrolment an act rather than an inference.
+	tpOpts = append(tpOpts, transport.WithPaneGrid(panegrid.New(logger)))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
 	// The feed's change hint, bound now that the server exists: every
 	// mutation tells the attached renderers the revision moved. It carries

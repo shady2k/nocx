@@ -24,6 +24,27 @@ func TestTheIdleInputBoxAcceptsFreeText(t *testing.T) {
 	}
 }
 
+// The same idle chrome at the narrow geometry used by a side-by-side worker pane.
+func TestTheIdleInputBoxAt60ColumnsAcceptsFreeText(t *testing.T) {
+	if got := classify(t, replay(t, "claude-idle-60", 11000)); got != agentdriver.StateFreeText {
+		t.Errorf("60-column idle input box = %q, want %q", got, agentdriver.StateFreeText)
+	}
+}
+
+func TestTheIdleInputBoxAt80ColumnsAcceptsFreeText(t *testing.T) {
+	if got := classify(t, replay(t, "claude-idle-80", 11000)); got != agentdriver.StateFreeText {
+		t.Errorf("80-column idle input box = %q, want %q", got, agentdriver.StateFreeText)
+	}
+}
+
+// The approval dialog at the narrow geometry is expected to retain the same
+// cursor-anchored choice classification as the 120-column capture.
+func TestThe60ColumnToolApprovalDialogIsAPermissionChoice(t *testing.T) {
+	if got := classify(t, replay(t, "claude-permission-60", 49000)); got != agentdriver.StatePermissionChoice {
+		t.Errorf("60-column Write approval dialog = %q, want %q", got, agentdriver.StatePermissionChoice)
+	}
+}
+
 // A turn in flight. The spinner is the only chrome that says so — this
 // version prints no "esc to interrupt" anywhere in the capture.
 func TestATurnInFlightIsWorking(t *testing.T) {
@@ -136,8 +157,8 @@ func TestAFrameWithNoChromeAtAllIsUnknown(t *testing.T) {
 // taken from the screen.
 func TestEveryFrameOfEveryCaptureAnswersFromTheClosedSet(t *testing.T) {
 	captures := []string{
-		"claude-idle", "claude-working", "claude-permission",
-		"claude-modal", "claude-subagent",
+		"claude-idle", "claude-idle-60", "claude-idle-80", "claude-working",
+		"claude-permission", "claude-permission-60", "claude-modal", "claude-subagent",
 	}
 	for _, name := range captures {
 		for at := int64(0); at <= 70000; at += 1000 {

@@ -37,16 +37,21 @@ The command-line replay feeds `charmbracelet/x/vt`. The driver-test helper repla
 `internal/panegrid`, so what a test asserts on is a frame produced the way production
 produces one.
 
-| capture             | script              | what it holds                                                                       |
-| ------------------- | ------------------- | ----------------------------------------------------------------------------------- |
-| `claude-idle`       | `idle.script`       | the idle input box — nothing typed, the TUI left to settle (`11000`)                |
-| `claude-working`    | `working.script`    | a turn in flight, spinner up, then the same turn finished (`17000` and `44000`)     |
-| `claude-permission` | `permission.script` | the Write tool's approval dialog, waiting on a human (`49000`)                      |
-| `claude-modal`      | `modal.script`      | the `/model` menu, opened by the user rather than by the agent (`20000`)            |
-| `claude-subagent`   | `subagent.script`   | the main turn and a backgrounded Explore agent (`30000`, `40000`, `43000`, `70000`) |
+| capture                | script              | what it holds                                                                       |
+| ---------------------- | ------------------- | ----------------------------------------------------------------------------------- |
+| `claude-idle`          | `idle.script`       | the idle input box — nothing typed, the TUI left to settle (`11000`)                |
+| `claude-idle-60`       | `idle.script`       | the same idle input box at the narrow 60×40 geometry (`11000`)                      |
+| `claude-idle-80`       | `idle.script`       | the same idle input box at the narrow 80×40 geometry (`11000`)                      |
+| `claude-working`       | `working.script`    | a turn in flight, spinner up, then the same turn finished (`17000` and `44000`)     |
+| `claude-permission`    | `permission.script` | the Write tool's approval dialog, waiting on a human (`49000`)                      |
+| `claude-permission-60` | `permission.script` | the Write tool's approval dialog at 60×40 (`49000`)                                 |
+| `claude-modal`         | `modal.script`      | the `/model` menu, opened by the user rather than by the agent (`20000`)            |
+| `claude-subagent`      | `subagent.script`   | the main turn and a backgrounded Explore agent (`30000`, `40000`, `43000`, `70000`) |
 
-Captured against Claude Code v2.1.238 at 120×40. All five run on the ALTERNATE SCREEN, so
-`Frame.AltScreen` is true throughout and distinguishes nothing here.
+Captured against Claude Code v2.1.238: the baseline five captures are 120×40;
+narrow captures cover idle at 60×40 and 80×40, plus the approval dialog at 60×40.
+All eight run on the ALTERNATE SCREEN, so `Frame.AltScreen` is true throughout and distinguishes
+nothing here.
 
 ## Four things the captures decided, which reasoning got wrong
 
@@ -92,5 +97,6 @@ reading the agent's output through a chrome-shaped hole.
 ## What these do not cover
 
 A crashed or exited agent, which is a process fact and is deliberately not taken from the
-screen. Any agent other than Claude Code. Any width other than 120: the input box's rules
-are full-width, so a narrow pane is a geometry the driver has to be tested at separately.
+screen. Any agent other than Claude Code. At 60×40, idle and approval-dialog states are
+covered; at 80×40, idle is covered. Other states at narrow widths and other widths remain
+untested.

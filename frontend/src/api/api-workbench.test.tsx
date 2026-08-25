@@ -56,7 +56,7 @@ import {
   watchFixture,
 } from './api-test-fixtures'
 import { createSecretChip } from '../ui/secret-chip'
-import { clearToasts, toasts } from '../ui/toast'
+import { clearToasts, toasts, type Toast } from '../ui/toast'
 import { JSON_LAYOUT_LIMIT } from '../ui/format-json'
 import { malformedReason } from './malformed-reason'
 
@@ -5184,20 +5184,25 @@ describe('a request can be dragged into a folder', () => {
     return (el?.textContent ?? '').trim()
   }
 })
-// ── The import's report: whose it is, and how it ends (nocx-q2cx5) ────────
+// ── The import's report: whose it is, and how it ends (nocx-q2cx5, nocx-favvl) ──
 //
-// The "Not imported" panel is the soft degrade AGENTS.md asks to be visible
-// in the product rather than only in a log, and it stays out of the ask that
-// closes for exactly that reason. What it lacked was an OWNER and an END: it
-// sat under the tree naming no import, about none of the requests in the
-// tree in particular, until the next import replaced it.
+// What one import could not carry is the soft degrade AGENTS.md asks to be
+// visible in the product rather than only in a log, which is why it never
+// lived inside the ask that closes. It was a Section pinned under the tree;
+// it is a TOAST now — the same fact, raised where the person is already
+// looking, and gone from the sidebar the rest of the time.
+//
+// STICKY is the half that keeps the rule. A warning's default is eight
+// seconds, which for a degrade is a slower way of being invisible, so these
+// assert the duration as well as the words: the report ends when the person
+// ends it, exactly as the panel's dismiss control did.
 //
 // Every check below drives the seam a person reaches — the ask is opened by
 // its words, the line is typed, and what appears afterwards is the assertion.
 
-/** The foot panel, or null when it is not on screen. */
-function notImportedPanel(): HTMLElement | null {
-  return workbench().querySelector<HTMLElement>('.api-workbench__foot')
+/** The degrade toast, or undefined when the import carried everything. */
+function notImportedToast(): Toast | undefined {
+  return toasts().find((t) => t.level === 'warning')
 }
 
 /** Import one curl line the way a person does: the door on the request
@@ -5251,14 +5256,17 @@ describe('the import report says whose it is and can be ended', () => {
     await openWorkbench(bar)
     await convertCurl('curl -k https://h/v1/ping')
 
-    await vi.waitFor(() => expect(notImportedPanel()).not.toBeNull())
-    const text = notImportedPanel()?.textContent ?? ''
-    expect(text).toContain('Not imported')
-    // WHICH import. Without this the panel is a list about nothing a person
-    // can point at in the tree.
-    expect(text).toContain('ping')
+    await vi.waitFor(() => expect(notImportedToast()).toBeDefined())
+    const told = notImportedToast()!
+    // WHICH import. Without this the message is a list about nothing a
+    // person can point at in the tree.
+    expect(told.message).toContain('ping')
     // …and the entry itself is unchanged: the feature named, and why.
-    expect(text).toContain('--insecure')
+    expect(told.message).toContain('--insecure')
+    expect(told.message).toContain('a transport option')
+    // It ends when the person ends it. A degrade that dismisses itself while
+    // they are reading the request it is about was never told to them.
+    expect(told.duration).toBe(0)
   })
 
   it('names the folder a Postman export was imported into', async () => {
@@ -5270,11 +5278,14 @@ describe('the import report says whose it is and can be ended', () => {
     await vi.waitFor(() => expect(destSummary()).toBe(`${DEFAULT_ROOT}/acme`))
     fireEvent.click(button('Import'))
 
-    await vi.waitFor(() => expect(notImportedPanel()).not.toBeNull())
-    expect(notImportedPanel()?.textContent ?? '').toContain(`${DEFAULT_ROOT}/acme`)
+    await vi.waitFor(() => expect(notImportedToast()).toBeDefined())
+    expect(notImportedToast()?.message ?? '').toContain(`${DEFAULT_ROOT}/acme`)
+    // The success sentence is its own toast and says nothing about the
+    // degrade: one act, two facts, neither wearing the other's words.
+    expect(toastMessages().some((m) => m.startsWith('Imported into'))).toBe(true)
   })
 
-  it('a person can dismiss it, and what it was about is still in the form', async () => {
+  it('what it was about is still in the form, so the report costs the person nothing', async () => {
     const { bar } = await mountApp({
       importCurl: vi
         .fn()
@@ -5282,17 +5293,14 @@ describe('the import report says whose it is and can be ended', () => {
     })
     await openWorkbench(bar)
     await convertCurl('curl -k https://h/v1/ping')
-    await vi.waitFor(() => expect(notImportedPanel()).not.toBeNull())
+    await vi.waitFor(() => expect(notImportedToast()).toBeDefined())
 
-    fireEvent.click(button('Dismiss what was not imported'))
-
-    await vi.waitFor(() => expect(notImportedPanel()).toBeNull())
-    // Dismissing loses the REPORT and nothing else: the request the import
-    // produced is still the one in the form.
+    // The report is a sentence beside the work, never instead of it: the
+    // request the import produced is the one in the form.
     expect(crumbName()).toBe('ping')
   })
 
-  it('a later import brings its own report back', async () => {
+  it('a later import replaces the report rather than stacking a second', async () => {
     const importCurl = vi
       .fn()
       .mockResolvedValueOnce({
@@ -5306,26 +5314,24 @@ describe('the import report says whose it is and can be ended', () => {
     const { bar } = await mountApp({ importCurl })
     await openWorkbench(bar)
     await convertCurl('curl -k https://h/v1/ping')
-    await vi.waitFor(() => expect(notImportedPanel()).not.toBeNull())
-    fireEvent.click(button('Dismiss what was not imported'))
-    await vi.waitFor(() => expect(notImportedPanel()).toBeNull())
+    await vi.waitFor(() => expect(notImportedToast()?.message ?? '').toContain('ping'))
 
-    // A dismiss ends ONE import's report. The next import is a new one, and
-    // a panel that stayed dismissed would be the silent degrade the panel
-    // exists to prevent. Nothing is asked in between: the first import wrote
-    // its request into the collection as it converted, so the second is not
-    // replacing anything unsaved.
+    // ONE report at a time, which is what the panel did by being one panel.
+    // Two sticky toasts would leave the first import's list standing beside
+    // the second's for as long as nobody closed it. Nothing is asked in
+    // between: the first import wrote its request into the collection as it
+    // converted, so the second is not replacing anything unsaved.
     await convertCurl('curl --proxy http://p https://h/v1/pong')
-    await vi.waitFor(() => expect(notImportedPanel()).not.toBeNull())
-    expect(notImportedPanel()?.textContent ?? '').toContain('pong')
-    expect(notImportedPanel()?.textContent ?? '').toContain('--proxy')
+    await vi.waitFor(() => expect(notImportedToast()?.message ?? '').toContain('pong'))
+    expect(notImportedToast()?.message ?? '').toContain('--proxy')
+    expect(toasts().filter((t) => t.level === 'warning')).toHaveLength(1)
   })
 
-  it('an import that lost nothing shows no panel at all', async () => {
+  it('an import that lost nothing says nothing at all', async () => {
     // The importer's own rule (internal/apiimport/curl.go): a flag that
     // cannot change the request that is sent is not itemised, so `-sS`
-    // arrives with an EMPTY list — and an empty list is no panel, not a
-    // reassuring one.
+    // arrives with an EMPTY list — and an empty list is silence, not a
+    // reassuring sentence.
     const { bar } = await mountApp({
       importCurl: vi
         .fn()
@@ -5335,7 +5341,7 @@ describe('the import report says whose it is and can be ended', () => {
     await convertCurl('curl -sS https://h/v1/ping')
     await vi.waitFor(() => expect(crumbName()).toBe('ping'))
 
-    expect(notImportedPanel()).toBeNull()
+    expect(notImportedToast()).toBeUndefined()
   })
 })
 

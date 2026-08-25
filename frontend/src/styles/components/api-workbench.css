@@ -170,18 +170,6 @@
   min-width: 0;
 }
 
-/* What is left after the bar, the status cards and the foot. */
-.api-workbench__foot {
-  display: flex;
-  flex-direction: column;
-  gap: var(--space-3);
-  flex: 0 0 auto;
-  overflow-y: auto;
-  max-height: 45%;
-  padding-top: var(--space-2);
-  border-top: 1px solid var(--color-divider);
-}
-
 .api-workbench__request {
   grid-area: request;
   overflow-y: auto;

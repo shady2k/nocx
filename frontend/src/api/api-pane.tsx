@@ -49,7 +49,6 @@ import {
   RefreshIcon,
   TrashIcon,
 } from '../ui/icons'
-import { MarkerList } from '../ui/marker-list'
 import { ResizeHandle } from '../ui/resize-handle'
 import { ContextMenu, type ContextMenuItem } from '../ui/context-menu'
 import { Section } from '../ui/section'
@@ -59,7 +58,7 @@ import { TreeEmpty } from '../ui/tree-empty'
 import { TreeRow } from '../ui/tree-row'
 import { WatchBadge } from '../ui/watch-badge'
 import { showConfirm } from '../ui/dialog'
-import { showToast } from '../ui/toast'
+import { dismissToast, showToast } from '../ui/toast'
 import { createClipboardAccess } from '../clipboard'
 import {
   contentsOf,
@@ -230,36 +229,6 @@ function literalCredentialIn(req: ApiRequest | null): string {
     return 'Basic password'
   }
   return ''
-}
-
-/**
- * One import's report, as the foot panel names it (nocx-q2cx5).
- *
- * The panel is the import's unsupported list, and it lives OUT of the ask
- * that closes so a soft degrade is visible in the product rather than only in
- * a log. What it lacked was an owner and an end: it sat under the tree until
- * the next import replaced it, naming neither what had been imported nor
- * when, and pointing at none of the requests in the tree.
- *
- * One record for both halves, because they are one fact: a report that is
- * dismissed is a report that is gone, and `null` says so. Dismissing loses
- * the REPORT and nothing else — what could not be carried is absent from the
- * request either way, the request itself is in the form, and the next import
- * files its own.
- */
-interface ImportReport {
-  /** What was imported: the request a curl line became, or the folder an
-   *  export was written into. */
-  about: string
-  /** When, in the person's own clock — the panel's other missing half. */
-  at: string
-}
-
-/** The clock, read once per import rather than per render: a panel that
- *  restated the current time would be a report about now instead of about
- *  the act it describes. */
-function reportOf(about: string): ImportReport {
-  return { about, at: new Date().toLocaleTimeString(undefined, { timeStyle: 'short' }) }
 }
 
 /**
@@ -604,13 +573,36 @@ export function ApiPane(props: ApiPaneProps) {
    */
   const [destTyped, setDestTyped] = createSignal(false)
   const [importingBusy, setImportingBusy] = createSignal(false)
-  /** WHOSE list the foot panel is showing, and whether it is still showing
-   *  it. Set by whichever import produced the notes; cleared by the person
-   *  who has read them. It is HERE rather than beside `notes` because it is
-   *  a fact about the act this surface performed, not about the store's
-   *  state — and a report that outlived the workbench would be one nobody
-   *  could attribute. */
-  const [report, setReport] = createSignal<ImportReport | null>(null)
+  /**
+   * WHAT ONE IMPORT COULD NOT CARRY, said once, where the person is looking.
+   *
+   * This was a Section pinned under the collection tree (nocx-q2cx5). The
+   * fact it carries is a soft degrade, so it may not live only in a log and
+   * may not live inside the ask that closes — but neither of those requires
+   * a permanent corner of the sidebar for something that belongs to a
+   * moment (nocx-favvl).
+   *
+   * STICKY is what keeps the rule. A warning dismisses itself after eight
+   * seconds, which for a degrade is a slower way of being invisible;
+   * `duration: 0` ends it when the person ends it, which is what the panel's
+   * dismiss control did.
+   *
+   * ONE REPORT AT A TIME, which is what a single panel was by construction.
+   * The id of the standing one is held so the next import can end it: two
+   * sticky toasts would leave one import's list beside another's until
+   * somebody closed both.
+   */
+  let standingReport = 0
+  const tellWhatWasNotImported = (about: string): void => {
+    const notes = store.notes()
+    if (notes.length === 0) return
+    dismissToast(standingReport)
+    standingReport = showToast({
+      level: 'warning',
+      duration: 0,
+      message: `Not imported from ${about}: ${notes.map((n) => `${n.what} — ${n.why}`).join('; ')}`,
+    })
+  }
   /** Where a credential sits as TEXT in the request that is in the form —
    *  '' when there is none. See literalCredentialIn. */
   const pastedCredential = (): string => literalCredentialIn(store.draft())
@@ -1906,11 +1898,12 @@ export function ApiPane(props: ApiPaneProps) {
       // it yet (api-store.ts) — so the ask closes and the request pane is
       // where the person looks next.
       if (store.error() !== '') return
-      // WHOSE the foot panel's list is: the request this line became, named
-      // by the importer off the line itself. Set unconditionally — an import
-      // that carried everything has an empty list and therefore no panel, so
-      // there is no state where this attributes a report that is not shown.
-      setReport(reportOf(store.draft()?.name ?? 'a curl line'))
+      // WHOSE the list is: the request this line became, named by the
+      // importer off the line itself. Called unconditionally — an import
+      // that carried everything has an empty list and therefore says
+      // nothing, so there is no state where this attributes a report that
+      // was never raised.
+      tellWhatWasNotImported(store.draft()?.name ?? 'a curl line')
       setCurling(false)
       // The form is what the person looks at next, and a folder page open
       // over it would hide the request they just made.
@@ -1983,8 +1976,8 @@ export function ApiPane(props: ApiPaneProps) {
         setImportRefused(refused)
         if (refused !== '') return
         // The folder is what a person can point at afterwards, so it is what
-        // the foot panel's report is about.
-        setReport(reportOf(dest))
+        // the report is about.
+        tellWhatWasNotImported(dest)
         const notOpened = await putInTree(dest)
         setImporting(false)
         if (notOpened !== '') {
@@ -2932,57 +2925,6 @@ export function ApiPane(props: ApiPaneProps) {
               </Show>
             </div>
           </Section>
-        </Show>
-
-        {/* The foot is the whole element, not a container that empties: a
-            box with a rule above it and nothing in it is a line the surface
-            draws for no reason. */}
-        <Show when={store.notes().length > 0 && report() !== null}>
-          <div class="api-workbench__foot">
-            {/* WHAT ONE IMPORT COULD NOT CARRY. It used to live inside the
-              Import form, which is exactly where it could not be read: the
-              form closed, and the list of what was silently dropped went with
-              it. A degrade that is only visible while the control that caused
-              it is open is a degrade nobody sees (AGENTS.md). It is absent
-              when there is nothing to say — and "nothing to say" is now the
-              ordinary answer, because the importer stopped itemising flags
-              that cannot change the request that is sent (nocx-q2cx5, and
-              internal/apiimport/curl.go's disposition table states the rule
-              once, beside the flags it is about).
-
-              IT NAMES ITS IMPORT AND IT ENDS. The lead line is the report's
-              own attribution — what was imported, and when — and the control
-              on the heading is how a person who has read it says so. Both
-              are the one `report` record: dismissing sets it to null, which
-              is what "this report is over" means. The next import files its
-              own, so a dismiss can never silence the degrade after it. */}
-            <Section
-              title="Not imported"
-              actions={
-                <IconButton
-                  ariaLabel="Dismiss what was not imported"
-                  title="Dismiss"
-                  size="xs"
-                  onClick={() => setReport(null)}
-                >
-                  <CloseIcon />
-                </IconButton>
-              }
-            >
-              <MarkerList
-                items={[
-                  {
-                    tone: 'note' as const,
-                    text: `From ${report()?.about ?? ''}, ${report()?.at ?? ''}`,
-                  },
-                  ...store.notes().map((n) => ({
-                    tone: 'excluded' as const,
-                    text: `${n.what} — ${n.why}`,
-                  })),
-                ]}
-              />
-            </Section>
-          </div>
         </Show>
       </aside>
 

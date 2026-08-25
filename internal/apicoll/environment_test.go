@@ -44,15 +44,15 @@ func newEnvCollection(t *testing.T) (Collections, HandleID, string) {
 }
 
 // TestListEnvironments_ReadsTheFolder is the happy path: two environments,
-// each carrying its values, the names of its secret variables and its
-// route.
+// each carrying values and a route. A secret reference is ordinary text in
+// the value map and never a second secret column.
 func TestListEnvironments_ReadsTheFolder(t *testing.T) {
 	svc, h, root := newEnvCollection(t)
 	writeEnv(t, root, "dev.json",
 		`{"name":"dev","values":{"baseUrl":"http://localhost:3000"},"route":{"kind":"direct"}}`)
 	writeEnv(t, root, "prod.json",
-		`{"name":"prod","values":{"baseUrl":"https://api.internal"},"secretVars":["token"],`+
-			`"route":{"kind":"connection","profileId":"prod-bastion"}}`)
+		`{"name":"prod","values":{"token":"{{secret:secrow:X}}"},"route":`+
+			`{"kind":"connection","profileId":"prod-bastion"}}`)
 
 	envs, bad, err := svc.ListEnvironments(h)
 	if err != nil {
@@ -64,7 +64,6 @@ func TestListEnvironments_ReadsTheFolder(t *testing.T) {
 	if len(envs) != 2 {
 		t.Fatalf("got %d environments, want 2", len(envs))
 	}
-	// Lexical by file path, so two runs compare.
 	if envs[0].RelPath != "environments/dev.json" || envs[1].RelPath != "environments/prod.json" {
 		t.Errorf("paths = %q, %q, want them ordered lexically", envs[0].RelPath, envs[1].RelPath)
 	}
@@ -75,13 +74,8 @@ func TestListEnvironments_ReadsTheFolder(t *testing.T) {
 	if prod.Route.Kind != RouteConnection || prod.Route.ProfileID != "prod-bastion" {
 		t.Errorf("prod route = %+v, want it through prod-bastion", prod.Route)
 	}
-	if len(prod.SecretVars) != 1 || prod.SecretVars[0] != "token" {
-		t.Errorf("prod secretVars = %v, want [token]", prod.SecretVars)
-	}
-	// §6.3: the file names its secret variables and holds no values for
-	// them. This is the model's half of that claim.
-	if v, ok := prod.Value("token"); ok {
-		t.Errorf("the environment answered token = %q; a secret value is never in the file", v)
+	if got := prod.Values["token"]; got != "{{secret:secrow:X}}" {
+		t.Errorf("token value = %q, want the opaque reference", got)
 	}
 }
 

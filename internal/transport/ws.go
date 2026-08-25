@@ -165,23 +165,13 @@ type WSServer struct {
 	// VALUE (design §8.1) and additionally backs api.import.postman.
 	// api.import.curl needs none of them.
 	//
-	// apiVariables is the binding document's READ half, and it is a separate
-	// field from apiBindings because the two are separate contracts in
-	// apibind for a reason that survives here: a holder of Store can write a
-	// value and can only ever get an IDENTIFIER back, while a holder of
-	// ValueResolver can ask what a variable is worth and has no parameter
-	// through which an identifier could arrive. The send path is given only
-	// the second, so no identifier for credential material exists anywhere
-	// on the path from a collection file to a header (design §8).
-	//
-	// apiFetch is the fifth: it acquires an import document by URL, over
-	// the same route table the sender dials through. It wires separately
-	// too — a build without it still imports by path and by document, and
-	// answers the URL entrance by name rather than pretending.
+	// apiVariables is the capability-owned SecretRefs seam used by
+	// api.request.send's second resolution pass. apiBindings remains the
+	// write/import seam until the later deletion task.
 	apiCollections apicoll.Collections
 	apiSender      apisend.Sender
 	apiBindings    apibind.Store
-	apiVariables   apibind.ValueResolver
+	apiVariables   capability.SecretRefs
 	apiFetch       apifetch.Fetcher
 	// uiState owns what the app remembers without being asked (ADR-0033);
 	// it backs the uistate.* JSON-RPC methods. When nil, those return
@@ -895,21 +885,11 @@ func WithAPIBindings(store apibind.Store) WSServerOption {
 	return func(s *WSServer) { s.apiBindings = store }
 }
 
-// WithAPIVariables attaches the binding document's READ half — the one that
-// answers "what is this variable worth" and never yields an identifier.
-// api.request.send needs it because a collection file names a VARIABLE for
-// its auth (design §8) and the send is the moment that name has to become a
-// header.
-//
-// It is a second option rather than a second parameter of WithAPIBindings
-// because the two halves genuinely wire apart: a build that can import but
-// not resolve, or resolve but not import, is a coherent half of the feature
-// and says so through its own -32601 or its own unresolved-variable
-// refusal. When nil, an auth variable resolves to nothing and the send is
-// BLOCKED, naming the variable — never sent with an empty credential, which
-// is the plausible-looking request §6.5 spends a paragraph refusing.
-func WithAPIVariables(values apibind.ValueResolver) WSServerOption {
-	return func(s *WSServer) { s.apiVariables = values }
+// WithAPIVariables attaches the capability-owned SecretRefs seam. It
+// resolves {{secret:secrow:…}} references after collection variables and
+// never accepts an identifier from the transport.
+func WithAPIVariables(refs capability.SecretRefs) WSServerOption {
+	return func(s *WSServer) { s.apiVariables = refs }
 }
 
 // WithAPIImportFetcher attaches the seam that acquires an import document by

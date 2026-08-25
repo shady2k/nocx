@@ -74,68 +74,18 @@ func (e *UnresolvedError) Error() string {
 // enumerate the variables.
 func (e *UnresolvedError) Unwrap() error { return ErrUnresolvedVariable }
 
-// ErrSecretShadowed is a request-scope variable whose name the environment
-// declares SECRET.
-//
-// It is a refusal rather than a precedence rule, and the difference is §8.
-// A credential belongs in the vault; a request file goes into git. Letting a
-// row in that file answer a name the environment reserved for a stored value
-// would let a collection arriving in a pull request choose what a reader's
-// request sends — with the reader's own environment saying the value is
-// secret and the file quietly supplying a different one. The request's
-// variables win over the environment's PLAIN values, which is the whole
-// point of them; they do not win over the vault, and the one case where the
-// two meet is refused by name instead of being decided silently either way.
-//
-// Refused rather than ignored, because ignoring it is the same shape read
-// from the other side: a person editing the request would see their value in
-// the table and something else on the wire.
-var ErrSecretShadowed = errors.New("apicoll: a request variable would shadow a name this environment declares secret")
-
-type secretShadowedError struct {
-	name string
-}
-
-func (e *secretShadowedError) Error() string {
-	return fmt.Sprintf("%s: %q", ErrSecretShadowed, e.name)
-}
-
-func (e *secretShadowedError) Unwrap() error { return ErrSecretShadowed }
-
-// SecretShadowedName returns the request or folder variable name that caused
-// ErrSecretShadowed. The name is for the scope explanation only; callers must
-// still preserve the refusal sentence from the original error.
-func SecretShadowedName(err error) (string, bool) {
-	var shadow *secretShadowedError
-	if !errors.As(err, &shadow) {
-		return "", false
-	}
-	return shadow.name, true
-}
-
 // RequestLookup answers a request's own variables and its inherited folder
-// variables, refusing either scope when it would shadow an environment
-// secret. Folder rows arrive nearest-first from ReadRequest, so the existing
-// first-row-wins rule gives request → nearest folder → parent folders.
+// variables. Folder rows arrive nearest-first from ReadRequest, so the
+// existing first-row-wins rule gives request → nearest folder → parent folders.
 //
-// Disabled rows answer nothing, exactly as a disabled header sends nothing:
-// a row the user keeps and has switched off takes no part in a send, so it
-// cannot resolve a reference and cannot shadow anything either.
-//
-// env is the environment the send goes out under, and the zero value is the
-// honest argument for a send that names none — it declares nothing secret,
-// so nothing is refused and the request's own variables resolve as they
-// would anywhere else.
-func RequestLookup(r Request, env Environment) (Lookup, error) {
+// Disabled rows answer nothing, exactly as a disabled header sends nothing.
+func RequestLookup(r Request, _ Environment) (Lookup, error) {
 	values := make(map[string]string, len(r.Variables)+len(r.folderVariables))
-	add := func(rows []Param) error {
+	add := func(rows []Param) {
 		for _, v := range rows {
 			name := strings.TrimSpace(v.Name)
 			if !v.Enabled || name == "" {
 				continue
-			}
-			if env.IsSecret(name) {
-				return &secretShadowedError{name: name}
 			}
 			// FIRST ROW WINS, so a duplicate name is the one nearer the top
 			// of the table — or, for inherited rows, the nearest folder.
@@ -143,18 +93,10 @@ func RequestLookup(r Request, env Environment) (Lookup, error) {
 				values[name] = v.Value
 			}
 		}
-		return nil
 	}
-	if err := add(r.Variables); err != nil {
-		return nil, err
-	}
-	if err := add(r.folderVariables); err != nil {
-		return nil, err
-	}
+	add(r.Variables)
+	add(r.folderVariables)
 	if len(values) == 0 {
-		// Nothing to answer: a nil Lookup, which Chain skips. A closure
-		// that always answered "not found" would be the same thing at the
-		// cost of a call per reference.
 		return nil, nil
 	}
 	return func(name string) (string, bool, error) {
@@ -175,11 +117,9 @@ type Lookup func(name string) (value string, found bool, err error)
 // as one with it.
 //
 // It is a function here rather than two lines at each call site because the
-// ORDER is load-bearing and one behaviour has one owner (AGENTS.md): the
-// environment's plain values first, the binding document's secret values
-// after. A failure stops the walk — a sealed vault must never fall through
-// to a later lookup with a stale answer, because that is a request going
-// out with the wrong credential rather than not going out at all.
+// order is load-bearing and one behaviour has one owner (AGENTS.md): request
+// and folder values precede inherited environment values. A failure stops the
+// walk rather than silently choosing a later answer.
 func Chain(lookups ...Lookup) Lookup {
 	return func(name string) (string, bool, error) {
 		for _, l := range lookups {
@@ -198,31 +138,10 @@ func Chain(lookups ...Lookup) Lookup {
 	}
 }
 
-// Value answers a variable from the environment's PLAIN values.
-//
-// A variable the file declares secret is never answered here, even when the
-// file also carries a plain value under that name. The environment file
-// holds no secret values (§6.3), so such a value is either a mistake or a
-// collection arriving in a pull request choosing what the reader's request
-// sends — and the second is exactly what §8 exists to make impossible. The
-// declaration wins; the binding document answers the name.
+// Value answers a variable from the environment's values.
 func (e Environment) Value(name string) (string, bool) {
-	if e.IsSecret(name) {
-		return "", false
-	}
 	v, ok := e.Values[name]
 	return v, ok
-}
-
-// IsSecret reports whether the environment declares name as a secret
-// variable.
-func (e Environment) IsSecret(name string) bool {
-	for _, s := range e.SecretVars {
-		if s == name {
-			return true
-		}
-	}
-	return false
 }
 
 // Lookup is the environment as a Lookup, for Chain. It never fails: a file

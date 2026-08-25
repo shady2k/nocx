@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -41,6 +42,27 @@ func newAPIOperation(t *testing.T) capability.APICollectionOperation {
 		// No binding store: a secret variable resolves to nothing, which is
 		// what a build wired without one does.
 		nil,
+	)
+}
+
+type testSecretRefs struct{}
+
+func (testSecretRefs) ResolveText(_ context.Context, text string) (string, []capability.PlacedSecret, error) {
+	const ref = "{{secret:secrow:X}}"
+	const value = "header-secret"
+	if !strings.Contains(text, ref) {
+		return text, nil, nil
+	}
+	return strings.ReplaceAll(text, ref, value), []capability.PlacedSecret{{Name: "secrow:X", Value: value}}, nil
+}
+
+func newAPIOperationWithSecrets(t *testing.T) capability.APICollectionOperation {
+	t.Helper()
+	return capability.NewAPICollectionOperation(
+		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
+		capability.Gate("lane", 8, 64, 5*time.Second),
+		apicoll.NewCollections(apiPaths{root: t.TempDir()}),
+		testSecretRefs{},
 	)
 }
 
@@ -124,6 +146,51 @@ func apiFolder(t *testing.T) string {
 		t.Fatalf("write request: %v", err)
 	}
 	return root
+}
+
+func apiFolderWithSecretHeader(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, rel)), 0o700); err != nil {
+			t.Fatalf("mkdir for %s: %v", rel, err)
+		}
+		if err := os.WriteFile(filepath.Join(root, rel), []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	write(apicoll.ManifestName, `{"schemaVersion":1,"name":"acme"}`)
+	write("send.json", `{"id":"r1","name":"send","method":"GET","url":"https://example.test",`+
+		`"headers":[{"name":"X-Token","value":"{{token}}","enabled":true}],`+
+		`"variables":[{"name":"token","value":"{{secret:secrow:X}}","enabled":true}],`+
+		`"body":{"kind":"none"},"auth":{"kind":"none"}}`)
+	return root
+}
+
+func TestAPICollectionService_SnapshotResolvesVariableThenSecretWithoutEnvironment(t *testing.T) {
+	op := newAPIOperationWithSecrets(t)
+	root := apiFolderWithSecretHeader(t)
+
+	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
+		opened, err := svc.Open(root)
+		if err != nil {
+			return err
+		}
+		in, err := svc.Snapshot(context.Background(), opened.Handle, "send.json", "")
+		if err != nil {
+			return err
+		}
+		if got := in.Request.Headers[0].Value; got != "header-secret" {
+			t.Errorf("header = %q, want resolved secret value", got)
+		}
+		if len(in.Secrets) != 1 || in.Secrets[0].Value != "header-secret" {
+			t.Errorf("placed secrets = %+v, want the substituted value", in.Secrets)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
 }
 
 // A service that escapes its callback is dead on arrival. This is the whole

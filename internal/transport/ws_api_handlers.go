@@ -58,11 +58,9 @@ import (
 type apiCollectionHandlers struct {
 	op     capability.APICollectionOperation
 	sender apisend.Sender
-	// values is the binding document's read half: it answers what a
-	// variable is worth and has no parameter through which an identifier
-	// could arrive (design §8). nil is a build with no binding store, and
-	// then an auth variable resolves to nothing.
-	values apibind.ValueResolver
+	// refs is the capability-owned second pass for {{secret:secrow:…}}
+	// references. It never accepts an identifier from this handler.
+	refs capability.SecretRefs
 	// bindOp is the write half of a secret variable: the VALUE into the
 	// vault, under the binding this collection and environment own. nil is
 	// a build with no binding store, and then the method answers -32601
@@ -390,26 +388,11 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 		return
 	}
 
-	// The already-SUBSTITUTED auth text becomes a header HERE — outside the
-	// gate, and before the dial. The lookup is gone: since nocx-6hg2w.20
-	// the auth is text like every other field, resolved inside
-	// apicoll.Substitute at the snapshot, and there is exactly ONE
-	// resolver. What Apply still needs is the caller's knowledge of which
-	// auth FIELD was answered by the binding document (inputs.AuthSecrets):
-	// a variable-sourced credential reaches Send as a NAMED SECRET or it
-	// would ride the raw diagnostic in the clear (§11.2). A LITERAL the
-	// person typed places nothing and is shown — the decision recorded in
-	// nocx-tg9l8.
-	//
-	// The snapshot computed that fact field-wise, from the FILE's text
-	// against the names the binding answered — never from the resolved
-	// VALUE — so a literal that happens to equal a vault value is still not
-	// elided, which is the point of answering by construction.
-	sending, used, err := apisend.Apply(inputs.Request, inputs.AuthSecrets)
-	// The values the SUBSTITUTION placed are beside the one the auth block
-	// placed; both are handed to the sender for the same reason and end in
-	// the same place: it locates them in the text it composes and elides
-	// them, so the raw view shows a chip where a token went (§11.2).
+	// Auth text is ordinary request text: Snapshot has already resolved
+	// collection variables and vault references before the gate is released.
+	// Secret placements are appended below so diagnostics elide the bytes.
+	var authSecrets apisend.SecretSource
+	sending, used, err := apisend.Apply(inputs.Request, authSecrets)
 	if err != nil {
 		// The SAME division as the snapshot's above: an auth block that
 		// cannot become a header — a scheme chosen with an EMPTY
@@ -512,7 +495,7 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 // is the line the epic drew and this predicate keeps in one place rather
 // than at each of the two call sites.
 func composeRefusal(err error) bool {
-	return errors.Is(err, apicoll.ErrUnresolvedVariable) || errors.Is(err, apicoll.ErrSecretShadowed)
+	return errors.Is(err, apicoll.ErrUnresolvedVariable)
 }
 
 // handleCancel is api.request.cancel: stop the exchange running under this
@@ -1058,29 +1041,15 @@ type apiEnvironmentReadResponse struct {
 	Environment apiEnvironmentWire `json:"environment"`
 }
 
-// apiEnvironmentWire is ONE environment whole: what it is called, what it
-// answers, which of its variables are secret by name, and how a request
+// apiEnvironmentWire is ONE environment whole: what it is called, which
+// values it carries (including opaque secret references), and how a request
 // under it gets there.
-//
-// It carries the values that apiEnvironmentRefWire deliberately does not,
-// and the difference is the question being asked. The listing names
-// environments so a person can CHOOSE one, and a copy of every address in
-// every environment would be a second truth beside the files (§6.4). This is
-// the editor's read of ONE file, taken at the moment it is opened for
-// editing and written straight back — so the copy lives exactly as long as
-// the ask that made it.
-//
-// SecretVars holds NAMES and never values, which is §8 restated in a field
-// list: there is no field here in which a secret or an identifier for one
-// can be spelled, so the wire cannot carry one in either direction.
 type apiEnvironmentWire struct {
 	Name string `json:"name"`
-	// Values is never nil — an environment that declares none is {}, because
+	// Values is never nil — an environment with no values is {}, because
 	// the renderer's first Object.entries on a null throws.
 	Values map[string]string `json:"values"`
-	// SecretVars is never nil — none is [].
-	SecretVars []string     `json:"secretVars"`
-	Route      apiRouteWire `json:"route"`
+	Route  apiRouteWire      `json:"route"`
 }
 
 // apiRouteWire is the environment's answer to "how do I get there" (§6.5).
@@ -1129,30 +1098,22 @@ func storedRoute(w *apiRouteWire) apicoll.Route {
 }
 
 // wireEnvironment renders one environment for the renderer, filling in the
-// two collections the stored form is allowed to omit. A file may leave
-// `values` and `secretVars` out entirely — `omitempty` is right for a file —
-// and null is not what a panel can iterate.
+// collection's optional values map. A reference remains opaque text.
 func wireEnvironment(env apicoll.Environment) apiEnvironmentWire {
 	values := env.Values
 	if values == nil {
 		values = map[string]string{}
 	}
-	secrets := env.SecretVars
-	if secrets == nil {
-		secrets = []string{}
-	}
 	return apiEnvironmentWire{
-		Name:       env.Name,
-		Values:     values,
-		SecretVars: secrets,
-		Route:      wireRoute(env.Route),
+		Name:   env.Name,
+		Values: values,
+		Route:  wireRoute(env.Route),
 	}
 }
 
 // storedEnvironment is the other direction: what the file will hold. The
-// empty map and the empty slice go back to nil so the stored form is the one
-// `omitempty` produces — the same normalisation storedRequest states, and
-// for the same reason: one canonical file whoever wrote it.
+// empty map goes back to nil so the stored form is the one `omitempty`
+// produces.
 func storedEnvironment(w apiEnvironmentWire) apicoll.Environment {
 	env := apicoll.Environment{
 		Name: w.Name,
@@ -1164,9 +1125,6 @@ func storedEnvironment(w apiEnvironmentWire) apicoll.Environment {
 	}
 	if len(w.Values) > 0 {
 		env.Values = w.Values
-	}
-	if len(w.SecretVars) > 0 {
-		env.SecretVars = w.SecretVars
 	}
 	return env
 }
@@ -2007,14 +1965,6 @@ func validateAPIEnvironmentBody(e apiEnvironmentWire) string {
 			return msg
 		}
 	}
-	if len(e.SecretVars) > maxAPIRequestRows {
-		return fmt.Sprintf("environment.secretVars exceeds %d rows", maxAPIRequestRows)
-	}
-	for _, name := range e.SecretVars {
-		if msg := boundedRunes("environment.secretVars", name, maxHeaderNameRunes); msg != "" {
-			return msg
-		}
-	}
 	if !slices.Contains(apiRouteKinds, e.Route.Kind) {
 		return fmt.Sprintf("environment.route.kind must be one of %v", apiRouteKinds)
 	}
@@ -2260,7 +2210,7 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 	collAvailable := func() bool { return collWired }
 	collHandlers := func(r Responder) apiCollectionHandlers {
 		return apiCollectionHandlers{
-			op: collOp, sender: s.apiSender, values: s.apiVariables, bindOp: bindOp, r: r,
+			op: collOp, sender: s.apiSender, refs: s.apiVariables, bindOp: bindOp, r: r,
 		}
 	}
 	// The sending half additionally needs to know WHICH WINDOW is asking:

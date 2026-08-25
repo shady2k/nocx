@@ -160,13 +160,12 @@ type Route struct {
 	InsecureTLS bool `json:"insecureTls,omitempty"`
 }
 
-// Environment holds plain values, the NAMES of its secret variables, and the
-// route. It holds no secret values and no identifiers for them.
+// Environment holds plain values and the route. A value may contain a
+// {{secret:secrow:…}} reference; it never holds secret material itself.
 type Environment struct {
-	Name       string            `json:"name"`
-	Values     map[string]string `json:"values,omitempty"`
-	SecretVars []string          `json:"secretVars,omitempty"`
-	Route      Route             `json:"route"`
+	Name   string            `json:"name"`
+	Values map[string]string `json:"values,omitempty"`
+	Route  Route             `json:"route"`
 }
 
 // Collection is a folder. Requests are addressed by their path within it,

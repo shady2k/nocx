@@ -1308,3 +1308,62 @@ func TestMintSecretFallsBackToPlainStore(t *testing.T) {
 		t.Fatalf("read back failed: %v", err)
 	}
 }
+
+type failingSecretStore struct {
+	err error
+}
+
+func (f failingSecretStore) Create(context.Context, credential.Secret) (credential.SecretID, error) {
+	return "", f.err
+}
+
+func (f failingSecretStore) Get(context.Context, credential.SecretID) (credential.Secret, error) {
+	return credential.Secret{}, f.err
+}
+
+func (f failingSecretStore) Delete(context.Context, credential.SecretID) error {
+	return f.err
+}
+
+func (f failingSecretStore) Exists(context.Context, credential.SecretID) (bool, error) {
+	return false, f.err
+}
+
+func TestSecretRefs_OnlyOpaqueRowsResolveAndStoreErrorsRemainErrors(t *testing.T) {
+	vaultSeam := newFakeVault()
+	_, err := vaultSeam.CreateNamed(context.Background(), credential.NewSecret("vault-value"), vault.SecretMeta{Name: "secrow:row"})
+	if err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+	profiles := &fakeProfileRepo{}
+	groups := &fakeGroupRepo{}
+
+	refs := capability.NewSecretRefs(vaultSeam, vaultSeam, profiles, groups)
+	out, placed, err := refs.ResolveText(context.Background(), "prefix {{secret:secrow:row}} suffix")
+	if err != nil {
+		t.Fatalf("ResolveText: %v", err)
+	}
+	if out != "prefix vault-value suffix" {
+		t.Fatalf("resolved text = %q, want vault bytes", out)
+	}
+	if len(placed) != 1 || placed[0].Name != "secrow:row" || placed[0].Value != "vault-value" {
+		t.Fatalf("placed = %+v, want one opaque row", placed)
+	}
+	if _, _, err := refs.ResolveText(context.Background(), "{{secret:display name}}"); err == nil || !strings.Contains(err.Error(), "display name") {
+		t.Fatalf("display-name reference error = %v, want named refusal", err)
+	}
+	if _, _, err := refs.ResolveText(context.Background(), "{{secret:secrow:missing}}"); err == nil || !strings.Contains(err.Error(), "secrow:missing") {
+		t.Fatalf("unknown-row error = %v, want named refusal", err)
+	}
+
+	providerErr := errors.New("vault provider sealed")
+	failing := capability.NewSecretRefs(vaultSeam, failingSecretStore{err: providerErr}, profiles, groups)
+	_, _, err = failing.ResolveText(context.Background(), "{{secret:secrow:row}}")
+	if !errors.Is(err, providerErr) {
+		t.Fatalf("provider error = %v, want %v", err, providerErr)
+	}
+	var unresolved *capability.UnresolvedSecretError
+	if errors.As(err, &unresolved) {
+		t.Fatalf("provider error was classified unresolved: %v", err)
+	}
+}

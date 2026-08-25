@@ -206,6 +206,31 @@ so that a late observation from a previous attempt cannot overwrite a current on
 
 ## 7. Delivery: how the tool reaches the agent
 
+### 7.0 Two callers, one dispatcher
+
+The 2026-08-15 design's §6 has ONE dispatcher and TWO callers, differing **only in how the grant
+was sourced**: the built-in agent runs in-process with a grant minted per run, and an enrolled
+external CLI reaches the same dispatcher over a private local channel. Everything in §4 through §6
+is the dispatcher's and is therefore identical for both — the same record, the same mailbox with
+its non-consuming reads, the same evidence classes, the same per-fact deadline. What follows in
+§7.1–§7.4 is almost entirely the external caller's, and it is worth saying plainly which parts the
+built-in agent does not need, because the asymmetry is easy to mistake for two mechanisms:
+
+- **Enrolment, the alias and the launcher (§7.1, D5) do not apply.** There is no process to pin and
+  no argv to reach, because the loop is ours (ADR-0028) and the grant is minted per run. D4's
+  fail-closed still binds, in its in-process form: no grant, no spawn.
+- **The keystroke wake (D14) is not the built-in agent's route.** Typing into a pane is the general
+  mechanism precisely because it needs no cooperation from a vendor we do not control; where the
+  loop is ours, a fact is delivered into it directly, with none of the modal hazard that makes D14
+  refuse anything but `free_text`. D14 is what the general case costs, not what the mechanism is.
+- **The grid (D13) applies to a PARTICIPANT pane regardless of which caller spawned it.** It is
+  scoped to what nocx is observing, not to who asked; a built-in agent supervising an external
+  worker still needs it, and an external coordinator supervising one needs the same grid.
+
+So the invariant of §5 is the dispatcher's, and it holds for both callers by construction. The
+external caller is the harder one and the rest of §7 is written for it; nothing in it is a second
+design.
+
 ### 7.1 Alias → launcher → `exec`
 
 nocx defines the alias in the panel session it already composes — the same session that carries

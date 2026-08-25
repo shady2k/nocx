@@ -200,19 +200,6 @@ func curlImport(line string) (postmanResult, error) {
 	res.Unsupported = unsup
 
 	env := apicoll.Environment{Name: defaultEnvName, Route: apicoll.Route{Kind: apicoll.RouteDirect}}
-	sawAuth := map[string]bool{}
-	if n, ok := apicoll.ExactReference(req.Auth.Token); ok {
-		sawAuth[n] = true
-	}
-	if n, ok := apicoll.ExactReference(req.Auth.Password); ok {
-		sawAuth[n] = true
-	}
-	for n := range sawAuth {
-		if env.Values == nil {
-			env.Values = map[string]string{}
-		}
-		env.Values[n] = ""
-	}
 	res.Environments = []apicoll.Environment{env}
 	return res, nil
 }

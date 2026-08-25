@@ -2,6 +2,7 @@ package apiimport
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -261,7 +262,7 @@ func TestPostmanTemplatesSurvive(t *testing.T) {
 	}
 }
 
-func TestPostmanSecretVariableBecomesAnEmptyOrdinaryVariable(t *testing.T) {
+func TestPostmanSecretVariableIsAbsentFromEnvironment(t *testing.T) {
 	_, reqs, envs, _ := mustPostman(t, postmanFixture)
 	if len(envs) != 1 {
 		t.Fatalf("%d environments, want 1", len(envs))
@@ -270,8 +271,8 @@ func TestPostmanSecretVariableBecomesAnEmptyOrdinaryVariable(t *testing.T) {
 	if env.Route.Kind != apicoll.RouteDirect {
 		t.Fatalf("route = %+v, want direct", env.Route)
 	}
-	if got := env.Values["apiToken"]; got != "" {
-		t.Fatalf("apiToken = %q, want an empty ordinary variable", got)
+	if _, ok := env.Values["apiToken"]; ok {
+		t.Fatal("apiToken is present in the environment; an imported credential must be absent so the send refuses by name rather than sending an empty value")
 	}
 	if env.SecretVars != nil {
 		t.Fatalf("SecretVars = %v, want nil", env.SecretVars)
@@ -477,8 +478,8 @@ func TestPostmanEnvironmentExport(t *testing.T) {
 	if envs[0].Values["baseUrl"] != "https://api.acme.test" {
 		t.Fatalf("values = %+v", envs[0].Values)
 	}
-	if envs[0].Values["apiToken"] != "" {
-		t.Fatalf("apiToken = %q, want empty", envs[0].Values["apiToken"])
+	if _, ok := envs[0].Values["apiToken"]; ok {
+		t.Fatal("apiToken is present in the environment; an imported credential must be absent")
 	}
 	if envs[0].SecretVars != nil {
 		t.Fatalf("secretVars = %v, want nil", envs[0].SecretVars)
@@ -625,8 +626,8 @@ func TestPostmanUnmarkedCredentialIsDroppedAndSaidOutLoud(t *testing.T) {
 	if len(envs) != 1 {
 		t.Fatalf("envs = %+v", envs)
 	}
-	if envs[0].Values["legacyToken"] != "" {
-		t.Fatalf("legacyToken = %q, want empty", envs[0].Values["legacyToken"])
+	if _, ok := envs[0].Values["legacyToken"]; ok {
+		t.Fatalf("legacyToken is present in the environment; an imported credential must be absent")
 	}
 	if envs[0].Values["baseUrl"] != "https://api.acme.test" {
 		t.Fatalf("the ordinary variable was dropped too: %+v", envs[0].Values)
@@ -815,7 +816,7 @@ func TestImportIntoZeroRouteWritesDirect(t *testing.T) {
 	}
 }
 
-func TestImportPostmanSecretsBecomeEmptyVariablesAndReportedReferencesAreDropped(t *testing.T) {
+func TestImportPostmanSecretsBecomeAbsentAndReportedReferencesAreDropped(t *testing.T) {
 	const ref = "{{secret:whatever}}"
 	doc := `{
 	  "info": {"name": "secret refs", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
@@ -846,8 +847,8 @@ func TestImportPostmanSecretsBecomeEmptyVariablesAndReportedReferencesAreDropped
 	if !ok {
 		t.Fatalf("no default environment; have %v", keysOf(files))
 	}
-	if !strings.Contains(env, `"token": ""`) {
-		t.Fatalf("secret variable was not written as an ordinary empty variable: %s", env)
+	if strings.Contains(env, `"token"`) {
+		t.Fatalf("secret variable was written to the environment; an imported credential must be absent: %s", env)
 	}
 	if strings.Contains(env, "secretVars") {
 		t.Fatalf("secretVars was written for an imported secret variable: %s", env)
@@ -861,5 +862,27 @@ func TestImportPostmanSecretsBecomeEmptyVariablesAndReportedReferencesAreDropped
 	}
 	if named < 3 {
 		t.Fatalf("unsupported = %+v, want the URL, header, and body references named", unsupported)
+	}
+}
+
+func TestImportedSecretCredentialRefusesResolutionByName(t *testing.T) {
+	coll, reqs, envs, _ := mustPostman(t, postmanFixture)
+	if len(envs) != 1 {
+		t.Fatalf("environments = %d, want 1", len(envs))
+	}
+	req, _ := findRequest(t, coll, reqs, "Create user")
+	own, err := apicoll.RequestLookup(req, envs[0])
+	if err != nil {
+		t.Fatalf("RequestLookup: %v", err)
+	}
+	if _, err := apicoll.Substitute(req, apicoll.Chain(own, envs[0].Lookup())); err == nil {
+		t.Fatal("an imported secret resolved successfully; the send must refuse by variable name")
+	} else {
+		if !errors.Is(err, apicoll.ErrUnresolvedVariable) {
+			t.Fatalf("error = %v, want ErrUnresolvedVariable", err)
+		}
+		if !strings.Contains(err.Error(), "apiToken") {
+			t.Fatalf("error = %q, want it to name apiToken", err)
+		}
 	}
 }

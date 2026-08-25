@@ -96,7 +96,7 @@ export function SecretTextField(props: SecretTextFieldProps) {
     const current = String(props.value)
     const next = current.slice(0, from) + '@' + current.slice(to)
     props.onInput?.(next)
-    picker.onInput(next, from + 1)
+    picker.openAt(from + 1)
     queueMicrotask(() => {
       input?.focus()
       input?.setSelectionRange(from + 1, from + 1)

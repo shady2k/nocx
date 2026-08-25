@@ -15,6 +15,9 @@ export interface SecretPickerFieldController {
   /** Call on every input event. Finds the trigger word around the caret and
    * drives the panel's filter, or closes it. */
   onInput(value: string, caret: number): void
+  /** Open after an explicit menu/mark action inserted an @, regardless of
+   *  the surrounding text. */
+  openAt(caret: number): void
   /** Call on keydown. Returns true when the panel consumed the key. */
   onKeyDown(e: KeyboardEvent): boolean
   close(): void
@@ -93,6 +96,25 @@ export function createSecretPickerField(opts: {
     const needle = filter.toLowerCase()
     if (!loadedEntries.some((entry) => entry.name.toLowerCase().includes(needle))) close()
   }
+  const openPicker = (filter: string): void => {
+    if (!picker.isOpen) {
+      const openingGeneration = generation
+      void picker.open().then(() => {
+        if (openingGeneration !== generation) {
+          if (trigger === null) picker.close()
+          return
+        }
+        if (trigger === null) {
+          picker.close()
+          return
+        }
+        closeIfNoMatch(trigger.filter)
+      })
+    }
+    picker.setFilter(filter)
+    closeIfNoMatch(filter)
+  }
+
 
   const findTrigger = (value: string, caret: number): Trigger | null => {
     const end = Math.max(0, Math.min(value.length, caret))
@@ -100,6 +122,7 @@ export function createSecretPickerField(opts: {
     while (start > 0 && !/\s/.test(value[start - 1] ?? '') && value[start - 1] !== '@') start--
     if (start > 0 && value[start - 1] === '@') start--
     if (start >= end || value[start] !== '@') return null
+    if (start > 0 && !/\s/.test(value[start - 1] ?? '')) return null
     return { from: start, to: end, filter: value.slice(start + 1, end) }
   }
 
@@ -119,22 +142,13 @@ export function createSecretPickerField(opts: {
     }
 
     trigger = nextTrigger
-    if (!picker.isOpen) {
-      const openingGeneration = generation
-      void picker.open().then(() => {
-        if (openingGeneration !== generation) {
-          if (trigger === null) picker.close()
-          return
-        }
-        if (trigger === null) {
-          picker.close()
-          return
-        }
-        closeIfNoMatch(trigger.filter)
-      })
-    }
-    picker.setFilter(nextTrigger.filter)
-    closeIfNoMatch(nextTrigger.filter)
+    openPicker(nextTrigger.filter)
+  }
+
+  const openAt = (caret: number): void => {
+    trigger = { from: Math.max(0, caret - 1), to: caret, filter: '' }
+    dismissedTriggerFrom = null
+    openPicker('')
   }
 
   const onKeyDown = (e: KeyboardEvent): boolean => {
@@ -160,6 +174,7 @@ export function createSecretPickerField(opts: {
 
   return {
     onInput,
+    openAt,
     onKeyDown,
     close,
     destroy,

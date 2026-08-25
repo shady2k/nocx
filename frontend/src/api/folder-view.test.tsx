@@ -57,6 +57,31 @@ const variablesTab = (): HTMLButtonElement =>
   document.querySelector<HTMLButtonElement>('button[role="tab"]:last-child')!
 
 describe('folder variables', () => {
+  it('keeps a plain value with an embedded @ ordinary', async () => {
+    const onVariables = vi.fn()
+    const source: SecretPickerSource = {
+      ...SOURCE,
+      status: vi.fn().mockResolvedValue({ state: 'unsealed' }),
+    }
+    mount({
+      onVariables,
+      secretSource: source,
+      secretEntries: [SECRET],
+      vaultState: 'unsealed',
+    })
+    fireEvent.click(variablesTab())
+
+    const field = document.querySelector<HTMLInputElement>('#api-folder-var-value-0')!
+    field.value = 'plain@value'
+    field.setSelectionRange(field.value.length, field.value.length)
+    fireEvent.input(field)
+
+    expect(onVariables).toHaveBeenLastCalledWith([
+      { name: 'token', value: 'plain@value', enabled: true },
+    ])
+    await vi.waitFor(() => expect(document.querySelector('.ui-floating-panel__row')).toBeNull())
+  })
+
   it('lets @ insert a secret reference into a folder value', async () => {
     const onVariables = vi.fn()
     mount({ onVariables, secretSource: SOURCE, secretEntries: [SECRET], vaultState: 'unsealed' })

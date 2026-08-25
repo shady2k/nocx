@@ -85,6 +85,23 @@ describe('environment variables', () => {
         .map((cell) => cell.textContent?.trim()),
     ).toEqual(['Name', 'Value'])
   })
+  it('keeps a plain value with an embedded @ ordinary', async () => {
+    const onRows = vi.fn()
+    const source: SecretPickerSource = {
+      ...SOURCE,
+      status: vi.fn().mockResolvedValue({ state: 'unsealed' }),
+    }
+    mount({ onRows, secretSource: source, secretEntries: [SECRET], vaultState: 'unsealed' })
+
+    const field = document.querySelector<HTMLInputElement>('#api-environment-var-value-0')!
+    field.value = 'plain@value'
+    field.setSelectionRange(field.value.length, field.value.length)
+    fireEvent.input(field)
+
+    expect(onRows).toHaveBeenLastCalledWith([{ name: 'token', value: 'plain@value' }])
+    await vi.waitFor(() => expect(document.querySelector('.ui-floating-panel__row')).toBeNull())
+  })
+
 
   it('lets @ insert the opaque reference into a value cell', async () => {
     const onRows = vi.fn()

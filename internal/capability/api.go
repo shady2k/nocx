@@ -265,6 +265,12 @@ type APICollectionService interface {
 	// sender and written by nothing, so every environment in existence had
 	// been typed into a file by hand or landed by the Postman importer.
 	WriteEnvironment(h apicoll.HandleID, relPath string, env apicoll.Environment) error
+	// ReadFolderVariables reads the variables declared by one folder. Values
+	// are returned only for the folder editor, never on collection listing.
+	ReadFolderVariables(h apicoll.HandleID, relPath string) ([]apicoll.Param, error)
+	// WriteFolderVariables replaces one folder's declarations and returns the
+	// canonical rows that were persisted.
+	WriteFolderVariables(h apicoll.HandleID, relPath string, variables []apicoll.Param) ([]apicoll.Param, error)
 	// ReadRequest reads one request by its path within the collection.
 	ReadRequest(h apicoll.HandleID, relPath string) (apicoll.Request, error)
 	// WriteRequest writes one request back.
@@ -600,6 +606,26 @@ func (s *apiCollectionService) WriteEnvironment(h apicoll.HandleID, relPath stri
 		return err
 	}
 	return s.svc.WriteEnvironment(h, relPath, env)
+}
+
+func (s *apiCollectionService) ReadFolderVariables(h apicoll.HandleID, relPath string) ([]apicoll.Param, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	if err := s.stillOpen(h); err != nil {
+		return nil, err
+	}
+	return s.svc.ReadFolderVariables(h, relPath)
+}
+
+func (s *apiCollectionService) WriteFolderVariables(h apicoll.HandleID, relPath string, variables []apicoll.Param) ([]apicoll.Param, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	if err := s.stillOpen(h); err != nil {
+		return nil, err
+	}
+	return s.svc.WriteFolderVariables(h, relPath, variables)
 }
 
 func (s *apiCollectionService) ReadRequest(h apicoll.HandleID, relPath string) (apicoll.Request, error) {

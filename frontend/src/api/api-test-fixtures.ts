@@ -539,6 +539,8 @@ export function servicesFixture(over: Partial<ApiWorkbenchServices> = {}): ApiWo
     closeCollection: vi.fn().mockResolvedValue({}),
     readEnvironment: vi.fn().mockResolvedValue({ environment: ENVIRONMENT }),
     writeEnvironment: vi.fn().mockResolvedValue({}),
+    readFolder: vi.fn().mockResolvedValue({ variables: [] }),
+    writeFolder: vi.fn().mockResolvedValue({ variables: [] }),
     bindSecret: vi.fn().mockResolvedValue({}),
     deleteRequest: vi.fn().mockResolvedValue({}),
     readRequest: vi.fn().mockResolvedValue({ request: REQUEST }),

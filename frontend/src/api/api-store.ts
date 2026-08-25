@@ -75,6 +75,7 @@ import {
   type ApiFailure,
   type ApiImportNote,
   type ApiOpenCollection,
+  type ApiParam,
   type ApiRaw,
   type ApiRequest,
   type ApiResponse,
@@ -231,6 +232,10 @@ interface ApiSelection {
 export interface VariableAnswer {
   readonly scope: 'request' | 'environment' | 'secret' | 'none' | 'unknown'
   readonly value: string | null
+}
+interface ApiFolderVariablesResult {
+  readonly variables: readonly ApiParam[] | null
+  readonly error: string
 }
 
 interface EnvironmentKnowledge {
@@ -485,6 +490,11 @@ export interface ApiStore {
    *  of NONE, which is why "chosen nothing" and "chosen none" are two
    *  states here rather than one. */
   setEnvironment(relPath: string): void
+  readFolderVariables(relPath: string): Promise<ApiFolderVariablesResult>
+  writeFolderVariables(
+    relPath: string,
+    variables: readonly ApiParam[],
+  ): Promise<ApiFolderVariablesResult>
   send(): Promise<void>
   /**
    * Stop the run of the open request that is in flight.
@@ -1786,6 +1796,31 @@ export function createApiStore(
       setError(message(err))
     }
   }
+  const readFolderVariables = async (relPath: string): Promise<ApiFolderVariablesResult> => {
+    const handle = untrack(activeCollection)
+    if (handle === '') return { variables: null, error: '' }
+    try {
+      const result = await services.readFolder(handle, relPath)
+      return { variables: result.variables, error: '' }
+    } catch (err) {
+      return { variables: null, error: message(err) }
+    }
+  }
+
+  const writeFolderVariables = async (
+    relPath: string,
+    variables: readonly ApiParam[],
+  ): Promise<ApiFolderVariablesResult> => {
+    const handle = untrack(activeCollection)
+    if (handle === '') return { variables: null, error: '' }
+    try {
+      const result = await services.writeFolder(handle, relPath, [...variables])
+      await refresh()
+      return { variables: result.variables, error: '' }
+    } catch (err) {
+      return { variables: null, error: message(err) }
+    }
+  }
 
   /** The question asked before an import takes somebody's unsaved work with
    *  it. It NAMES the request, because "are you sure" is a question about
@@ -2007,6 +2042,8 @@ export function createApiStore(
     defaultRoot,
     watchMode,
     watchDegradedReason,
+    readFolderVariables,
+    writeFolderVariables,
     watchFailed,
     variableAnswer,
     bindSecret,

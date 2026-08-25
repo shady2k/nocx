@@ -85,7 +85,7 @@ import { RequestEditor, RequestLine, type SecretTarget } from './request-form'
 import { RunList } from './run-list'
 import type { ApiStore, VariableAnswer } from './api-store'
 import type { DirectoryPicker, FilePicker, ImportSource, NativeDropPort } from './api-client'
-import type { ApiOpenCollection, ApiRequest, ApiRoute } from './api-model'
+import type { ApiOpenCollection, ApiParam, ApiRequest, ApiRoute } from './api-model'
 import { findVariables } from './variable-reference'
 
 export interface ApiPaneProps {
@@ -507,6 +507,39 @@ export function ApiPane(props: ApiPaneProps) {
   })
   const [envRefused, setEnvRefused] = createSignal('')
   const [envBusy, setEnvBusy] = createSignal(false)
+  const [folderVariables, setFolderVariables] = createSignal<readonly ApiParam[] | null>(null)
+  const [folderSaved, setFolderSaved] = createSignal<readonly ApiParam[]>([])
+  const [folderDirty, setFolderDirty] = createSignal(false)
+  const [folderBusy, setFolderBusy] = createSignal(false)
+  const [folderLoading, setFolderLoading] = createSignal(false)
+  const [folderVariablesRefused, setFolderVariablesRefused] = createSignal('')
+  const [folderSaveRefused, setFolderSaveRefused] = createSignal('')
+  let folderReadKey = ''
+  createEffect(() => {
+    if (view() !== 'folder') {
+      folderReadKey = ''
+      return
+    }
+    const handle = store.activeCollection()
+    const relPath = store.activeFolder()
+    const key = `${handle}:${relPath}`
+    if (key === folderReadKey) return
+    folderReadKey = key
+    setFolderLoading(true)
+    setFolderVariables(null)
+    setFolderSaved([])
+    setFolderDirty(false)
+    setFolderVariablesRefused('')
+    setFolderSaveRefused('')
+    void store.readFolderVariables(relPath).then((result) => {
+      if (folderReadKey !== key) return
+      setFolderLoading(false)
+      setFolderVariablesRefused(result.error)
+      if (result.variables === null) return
+      setFolderVariables(result.variables)
+      setFolderSaved(result.variables)
+    })
+  })
 
   const [importing, setImporting] = createSignal(false)
   /**
@@ -1910,6 +1943,28 @@ export function ApiPane(props: ApiPaneProps) {
       showRequest()
     })
   }
+  const setFolderRows = (variables: readonly ApiParam[]): void => {
+    setFolderVariables(variables)
+    setFolderDirty(JSON.stringify(variables) !== JSON.stringify(folderSaved()))
+  }
+
+  const saveFolderVariables = (): void => {
+    const relPath = store.activeFolder()
+    const key = `${store.activeCollection()}:${relPath}`
+    const variables = folderVariables() ?? []
+    setFolderSaveRefused('')
+    setFolderBusy(true)
+    void store.writeFolderVariables(relPath, variables).then((result) => {
+      if (folderReadKey !== key) return
+      setFolderBusy(false)
+      setFolderSaveRefused(result.error)
+      if (result.variables === null || result.error !== '') return
+      setFolderVariables(result.variables)
+      setFolderSaved(result.variables)
+      setFolderDirty(false)
+      showToast({ level: 'success', message: 'Saved folder variables' })
+    })
+  }
 
   /**
    * Import an export, and OPEN what it wrote.
@@ -3096,6 +3151,14 @@ export function ApiPane(props: ApiPaneProps) {
               showRequest()
             }}
             actions={entryActions}
+            variables={folderVariables()}
+            loading={folderLoading()}
+            dirty={folderDirty()}
+            busy={folderBusy()}
+            error={folderVariablesRefused()}
+            saveError={folderSaveRefused()}
+            onVariables={setFolderRows}
+            onSaveVariables={saveFolderVariables}
             onNewRequest={newRequestHere}
           />
         </div>

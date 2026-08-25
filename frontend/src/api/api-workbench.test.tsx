@@ -5653,6 +5653,130 @@ describe('a folder is something you open', () => {
 
     await vi.waitFor(() => expect(field('api-url').value).toBe('{{baseUrl}}/users'))
   })
+  it('edits folder variables through the page and saves the rows', async () => {
+    const readFolder = vi.fn().mockResolvedValue({ variables: [] })
+    const writeFolder = vi.fn().mockResolvedValue({
+      variables: [{ name: 'baseUrl', value: 'https://api.example.test', enabled: true }],
+    })
+    const disk = folderOnDisk({ readFolder, writeFolder })
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(readFolder).toHaveBeenCalledWith(HANDLE, 'users'))
+    await vi.waitFor(() => expect(button('Add variable')).toBeTruthy())
+    fireEvent.click(button('Add variable'))
+    const table = workbench().querySelector('.ui-row-list__table')
+    expect(
+      [...(table?.querySelectorAll('thead th') ?? [])].map((cell) => cell.textContent?.trim()),
+    ).toEqual(['Send', 'Name', 'Value', 'Remove'])
+    expect(workbench().querySelector('[aria-label="Use variable 1"]')).toBeTruthy()
+    fireEvent.input(field('api-folder-var-name-0'), { target: { value: 'baseUrl' } })
+    fireEvent.input(field('api-folder-var-value-0'), {
+      target: { value: 'https://api.example.test' },
+    })
+    fireEvent.click(button('Save'))
+
+    await vi.waitFor(() =>
+      expect(writeFolder).toHaveBeenCalledWith(HANDLE, 'users', [
+        { name: 'baseUrl', value: 'https://api.example.test', enabled: true },
+      ]),
+    )
+    await vi.waitFor(() =>
+      expect(toasts().some((toast) => toast.message === 'Saved folder variables')).toBe(true),
+    )
+  })
+
+  it('shows the rows the folder read returns', async () => {
+    const readFolder = vi.fn().mockResolvedValue({
+      variables: [{ name: 'baseUrl', value: 'https://api.example.test', enabled: true }],
+    })
+    const disk = folderOnDisk({ readFolder })
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(field('api-folder-var-name-0').value).toBe('baseUrl'))
+    expect(field('api-folder-var-value-0').value).toBe('https://api.example.test')
+  })
+
+  it('keeps a refused read on the card and explains malformed files', async () => {
+    const readFolder = vi
+      .fn()
+      .mockRejectedValue(
+        new Error('apicoll: folder variables file is malformed: ".variables.json"'),
+      )
+    const disk = folderOnDisk({ readFolder })
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() =>
+      expect(workbench().querySelector('.ui-status-card__title')?.textContent).toBe(
+        'Folder variables unavailable',
+      ),
+    )
+    const card = workbench().querySelector('.ui-status-card')
+    expect(card?.textContent).toContain('.variables.json')
+    expect(card?.textContent).toContain('Correct')
+    expect(toasts().filter((toast) => toast.level === 'danger')).toHaveLength(0)
+  })
+
+  it('shows a refused request delete while its folder page is open', async () => {
+    const deleteRequest = vi.fn().mockRejectedValue(new Error('delete refused'))
+    const disk = folderOnDisk({ deleteRequest })
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(pageRows()).toContain('create'))
+    fireEvent.click(button('Delete create'))
+    await vi.waitFor(() => expect(confirmText()).toContain('create'))
+    fireEvent.click(
+      [...document.querySelectorAll<HTMLButtonElement>('dialog button')].find(
+        (candidate) => (candidate.textContent ?? '').trim() === 'Delete',
+      ) as HTMLButtonElement,
+    )
+
+    await vi.waitFor(() => expect(deleteRequest).toHaveBeenCalledWith(HANDLE, CREATE_REL_PATH))
+    await vi.waitFor(() =>
+      expect(workbench().querySelector('.ui-status-card__title')?.textContent).toBe(
+        'That did not work',
+      ),
+    )
+    expect(workbench().textContent).toContain('delete refused')
+  })
+
+  it('keeps a refused save on the table and says it in a danger toast', async () => {
+    const readFolder = vi.fn().mockResolvedValue({
+      variables: [{ name: 'baseUrl', value: 'https://api.example.test', enabled: true }],
+    })
+    const writeFolder = vi.fn().mockRejectedValue(new Error('disk went away'))
+    const disk = folderOnDisk({ readFolder, writeFolder })
+    const { bar } = await mountApp(disk.services)
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+
+    fireEvent.click(folderRow(`${HANDLE}:users`))
+    await vi.waitFor(() => expect(field('api-folder-var-name-0').value).toBe('baseUrl'))
+    fireEvent.input(field('api-folder-var-value-0'), {
+      target: { value: 'https://changed.example.test' },
+    })
+    fireEvent.click(button('Save'))
+
+    await vi.waitFor(() => expect(writeFolder).toHaveBeenCalled())
+    await vi.waitFor(() =>
+      expect(
+        toasts().some((toast) => toast.level === 'danger' && toast.message === 'disk went away'),
+      ).toBe(true),
+    )
+    expect(workbench().querySelector('.ui-row-list__table')).toBeTruthy()
+    expect(workbench().querySelector('.ui-status-card')).toBeNull()
+  })
 })
 
 describe('a request can be put down', () => {

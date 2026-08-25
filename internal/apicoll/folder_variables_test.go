@@ -191,3 +191,66 @@ func TestFolderVariables_AnOrdinaryFileResolvesOnAnOrdinaryMachine(t *testing.T)
 		t.Fatalf("url = %q, want the folder value", got.URL)
 	}
 }
+
+func TestFolderVariables_ReadWriteAndDeleteRoundTrip(t *testing.T) {
+	svc, h, root := openTestCollection(t)
+	given := []Param{{Name: "baseUrl", Value: "https://folder.example.test", Enabled: true}}
+
+	got, err := svc.ReadFolderVariables(h, "")
+	if err != nil {
+		t.Fatalf("ReadFolderVariables absent: %v", err)
+	}
+	if len(got) != 0 {
+		t.Fatalf("absent variables = %#v, want empty", got)
+	}
+	written, err := svc.WriteFolderVariables(h, "", given)
+	if err != nil {
+		t.Fatalf("WriteFolderVariables: %v", err)
+	}
+	if !reflect.DeepEqual(written, given) {
+		t.Fatalf("written = %#v, want %#v", written, given)
+	}
+	readBack, err := svc.ReadFolderVariables(h, "")
+	if err != nil {
+		t.Fatalf("ReadFolderVariables: %v", err)
+	}
+	if !reflect.DeepEqual(readBack, given) {
+		t.Fatalf("read back = %#v, want %#v", readBack, given)
+	}
+	if _, err := os.Lstat(filepath.Join(root, folderVariablesFileName)); err != nil {
+		t.Fatalf("folder variable file was not written: %v", err)
+	}
+
+	if deleted, err := svc.WriteFolderVariables(h, "", nil); err != nil {
+		t.Fatalf("WriteFolderVariables empty: %v", err)
+	} else if len(deleted) != 0 {
+		t.Fatalf("deleted result = %#v, want empty", deleted)
+	}
+	if _, err := svc.ReadFolderVariables(h, ""); err != nil {
+		t.Fatalf("ReadFolderVariables after delete: %v", err)
+	}
+	if _, err := os.Lstat(filepath.Join(root, folderVariablesFileName)); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("empty write left %s: %v", folderVariablesFileName, err)
+	}
+}
+
+func TestFolderVariables_WriterRefusesMissingFolder(t *testing.T) {
+	svc, h, _ := openTestCollection(t)
+	if _, err := svc.ReadFolderVariables(h, "missing"); !errors.Is(err, ErrFolderNotFound) {
+		t.Fatalf("ReadFolderVariables missing = %v, want ErrFolderNotFound", err)
+	}
+	if _, err := svc.WriteFolderVariables(h, "missing", []Param{{Name: "x", Value: "y", Enabled: true}}); !errors.Is(err, ErrFolderNotFound) {
+		t.Fatalf("WriteFolderVariables missing = %v, want ErrFolderNotFound", err)
+	}
+}
+
+func TestFolderVariables_WriterRefusesMalformedExistingFile(t *testing.T) {
+	svc, h, root := openTestCollection(t)
+	folderVariableFile(t, root, ".", `{"variables":[`)
+	if _, err := svc.ReadFolderVariables(h, ""); !errors.Is(err, ErrMalformedFolderVariables) {
+		t.Fatalf("ReadFolderVariables malformed = %v, want ErrMalformedFolderVariables", err)
+	}
+	if _, err := svc.WriteFolderVariables(h, "", []Param{{Name: "x", Value: "y", Enabled: true}}); !errors.Is(err, ErrMalformedFolderVariables) {
+		t.Fatalf("WriteFolderVariables malformed = %v, want ErrMalformedFolderVariables", err)
+	}
+}

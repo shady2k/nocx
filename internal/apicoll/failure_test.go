@@ -34,6 +34,20 @@ func TestWriteRequest_ReportsAFailingStore(t *testing.T) {
 	}
 }
 
+func TestWriteFolderVariables_ReportsAFailingStore(t *testing.T) {
+	svc, h, root := openTestCollection(t)
+	boom := errors.New("disk went away")
+	svc.docStoreFor = func(string) storage.DocumentStore { return failingStore{err: boom} }
+
+	_, err := svc.WriteFolderVariables(h, "", []Param{{Name: "baseUrl", Value: "https://x", Enabled: true}})
+	if !errors.Is(err, boom) {
+		t.Fatalf("WriteFolderVariables: err = %v, want the store's error", err)
+	}
+	if _, statErr := os.Stat(filepath.Join(root, folderVariablesFileName)); statErr == nil {
+		t.Error("the file exists although the write was reported as failed")
+	}
+}
+
 // The paired success: the same call against the real store writes the file.
 func TestWriteRequest_WritesTheFileOnTheHappyPath(t *testing.T) {
 	svc, h, root := openTestCollection(t)

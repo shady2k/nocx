@@ -260,6 +260,33 @@ func (h apiCollectionHandlers) handleMethod(ctx context.Context, req jsonrpcRequ
 			// itself would be the second answer this surface refuses to
 			// make.
 			_ = h.r.TryResult(req.ID, mustMarshal(apiRequestMoveResponse{RelPath: moved}))
+		case "api.folder.read":
+			var p apiFolderParams
+			if !h.decode(req, &p) {
+				return nil
+			}
+			variables, err := svc.ReadFolderVariables(apicoll.HandleID(p.Handle), p.RelPath)
+			if err != nil {
+				h.fail(req, err)
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(apiFolderReadResponse{
+				Variables: wireParams(variables),
+			}))
+		case "api.folder.write":
+			var p apiFolderWriteParams
+			if !h.decode(req, &p) {
+				return nil
+			}
+			variables, err := svc.WriteFolderVariables(
+				apicoll.HandleID(p.Handle), p.RelPath, storedParams(p.Variables))
+			if err != nil {
+				h.fail(req, err)
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(apiFolderWriteResponse{
+				Variables: wireParams(variables),
+			}))
 		}
 		return nil
 	})
@@ -2313,6 +2340,14 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 			h := apiImportHandlers{r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCurl(ctx, req) }
 		}),
+		whenAvailable(regResponder(sub, "api.folder.read", params(validateAPIFolderReadRaw), func(r Responder) handlerFunc {
+			h := collHandlers(r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}), collAvailable, apiCollectionsUnavailable),
+		whenAvailable(regResponder(sub, "api.folder.write", params(validateAPIFolderWriteRaw), func(r Responder) handlerFunc {
+			h := collHandlers(r)
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
+		}), collAvailable, apiCollectionsUnavailable),
 	}
 }
 

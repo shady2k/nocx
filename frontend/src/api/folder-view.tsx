@@ -19,11 +19,18 @@
 // the menus in api-pane.tsx that the tree's rows already open: this page is a
 // third door onto those lists and never a second copy of them.
 
-import { For, Show, type JSX } from 'solid-js'
+import { For, Show, createEffect, type JSX } from 'solid-js'
+import { showToast } from '../ui/toast'
 import { Button } from '../ui/button'
+import { Caption } from '../ui/caption'
+import { Checkbox } from '../ui/checkbox'
+import { EditableRowList } from '../ui/row-list'
 import { EmptyState } from '../ui/empty-state'
 import { RecordRow } from '../ui/record-row'
 import { FolderIcon, PlusIcon } from '../ui/icons'
+import { StatusCard } from '../ui/status-card'
+import { TextField } from '../ui/text-field'
+import type { ApiParam } from './api-model'
 
 /**
  * One line of the page — a folder or a request, in the vocabulary the row
@@ -70,6 +77,17 @@ export interface FolderViewProps {
    * says where they are drawn.
    */
   actions: (entry: FolderEntry) => JSX.Element
+  /** Rows from the folder's reserved variables document. */
+  variables: readonly ApiParam[] | null
+  loading: boolean
+  dirty: boolean
+  busy: boolean
+  /** A refused read belongs to the on-page card. */
+  error: string
+  /** A refused save belongs to the notification channel. */
+  saveError: string
+  onVariables: (variables: readonly ApiParam[]) => void
+  onSaveVariables: () => void
   /** Make a request here — the door the empty state offers, because an empty
    *  folder is exactly where a person needs it and the trail's own plus is
    *  at the other end of the line. */
@@ -77,8 +95,112 @@ export interface FolderViewProps {
 }
 
 export function FolderView(props: FolderViewProps) {
+  let lastRefused = ''
+  createEffect(() => {
+    const error = props.saveError
+    if (error === '') {
+      lastRefused = ''
+      return
+    }
+    if (error === lastRefused) return
+    lastRefused = error
+    showToast({ level: 'danger', message: error })
+  })
+
+  const rows = () => props.variables ?? []
+  const patchRow = (index: number, over: Partial<ApiParam>): void => {
+    props.onVariables(rows().map((row, i) => (i === index ? { ...row, ...over } : row)))
+  }
+
+  const readDescription = (): string => {
+    const reason = props.error || 'The folder variables file could not be read.'
+    if (reason.includes('folder variables file is malformed')) {
+      return `${reason} Correct .variables.json in this folder in an editor before this page can edit it.`
+    }
+    return reason
+  }
+
   return (
     <div class="api-folder">
+      <section aria-label="Folder variables">
+        <Caption size="context">Folder variables</Caption>
+        <p class="api-folder__note">
+          A variable here answers for every request in this folder and below it, and a request's own
+          variable wins over it.
+        </p>
+        <Show
+          when={!props.loading}
+          fallback={
+            <StatusCard
+              title="Loading folder variables"
+              description="Reading this folder's file."
+            />
+          }
+        >
+          <Show
+            when={props.variables !== null}
+            fallback={
+              <StatusCard
+                title="Folder variables unavailable"
+                description={readDescription()}
+                tone="danger"
+              />
+            }
+          >
+            <EditableRowList
+              variant="table"
+              ariaLabel="Folder variables"
+              columns={[
+                { label: 'Send', labelHidden: true },
+                { label: 'Name' },
+                { label: 'Value' },
+              ]}
+              rows={rows()}
+              addLabel="Add variable"
+              emptyLabel="No variables declared in this folder."
+              removeLabel={(i) => `Remove variable ${i + 1}`}
+              renderRow={(row, i) => (
+                <>
+                  <td>
+                    <Checkbox
+                      ariaLabel={`Use variable ${i + 1}`}
+                      checked={row().enabled}
+                      onChange={(enabled) => patchRow(i, { enabled })}
+                    />
+                  </td>
+                  <td>
+                    <TextField
+                      id={`api-folder-var-name-${i}`}
+                      ariaLabel={`Variable ${i + 1} name`}
+                      placeholder="baseUrl"
+                      value={row().name}
+                      onInput={(value) => patchRow(i, { name: value })}
+                    />
+                  </td>
+                  <td>
+                    <TextField
+                      id={`api-folder-var-value-${i}`}
+                      ariaLabel={`Variable ${i + 1} value`}
+                      placeholder="https://api.example.com"
+                      value={row().value}
+                      onInput={(value) => patchRow(i, { value })}
+                    />
+                  </td>
+                </>
+              )}
+              onRemove={(i) => props.onVariables(rows().filter((_, j) => j !== i))}
+              onAdd={() => props.onVariables([...rows(), { name: '', value: '', enabled: true }])}
+            />
+            <Button
+              variant="primary"
+              disabled={props.busy || !props.dirty}
+              onClick={props.onSaveVariables}
+            >
+              Save
+            </Button>
+          </Show>
+        </Show>
+      </section>
       <Show
         when={props.entries.length > 0}
         fallback={

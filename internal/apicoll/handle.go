@@ -33,6 +33,12 @@ type Service interface {
 	Close(h HandleID) error
 	List(h HandleID) (Collection, error)
 	ReadRequest(h HandleID, relPath string) (Request, error)
+	// ReadFolderVariables reads the variables declared by one existing folder.
+	// The collection root is named by an empty relPath.
+	ReadFolderVariables(h HandleID, relPath string) ([]Param, error)
+	// WriteFolderVariables replaces one folder's variables. An empty list
+	// removes the reserved file, leaving the folder in its absent state.
+	WriteFolderVariables(h HandleID, relPath string, variables []Param) ([]Param, error)
 	WriteRequest(h HandleID, relPath string, r Request) error
 	// DeleteRequest removes one request file. It is on Service rather than
 	// in an interface of its own because it is addressed exactly as the two

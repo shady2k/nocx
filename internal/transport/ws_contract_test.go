@@ -7179,6 +7179,7 @@ func TestAPIRequestSend_RefusedWhenNothingIsWired(t *testing.T) {
 	for _, method := range []string{
 		"api.collections.list", "api.collections.open", "api.collections.close",
 		"api.request.read", "api.request.write", "api.request.move",
+		"api.folder.read", "api.folder.write",
 		"api.request.send", "api.import.postman",
 	} {
 		resp := vaultCall(t, conn, method, map[string]any{}, 1)
@@ -7576,4 +7577,52 @@ func TestFilesDownloadDone_OverTheWireConformsToContract(t *testing.T) {
 			t.Fatalf("got %+v; want the sent outcome of %s", got, started.TransferID)
 		}
 	})
+}
+
+func TestAPIFolderReadAndWrite_DTOConformToContracts(t *testing.T) {
+	readSchema := loadSchema(t, "api.folder.read.schema.json")
+	writeSchema := loadSchema(t, "api.folder.write.schema.json")
+	rawRead, err := json.Marshal(apiFolderReadResponse{Variables: []apiParamWire{{
+		Name: "baseUrl", Value: "https://example.test", Enabled: true,
+	}}})
+	if err != nil {
+		t.Fatalf("marshal read: %v", err)
+	}
+	validateJSON(t, readSchema, rawRead, "api.folder.read DTO")
+
+	rawWrite, err := json.Marshal(apiFolderWriteResponse{Variables: []apiParamWire{{
+		Name: "baseUrl", Value: "https://example.test", Enabled: true,
+	}}})
+	if err != nil {
+		t.Fatalf("marshal write: %v", err)
+	}
+	validateJSON(t, writeSchema, rawWrite, "api.folder.write DTO")
+}
+
+func TestAPIFolderReadAndWrite_OverTheWireConformToContracts(t *testing.T) {
+	readSchema := loadSchema(t, "api.folder.read.schema.json")
+	writeSchema := loadSchema(t, "api.folder.write.schema.json")
+	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	root := apiCollectionFolder(t, "https://example.test/ping")
+	handle := openAPICollection(t, conn, root, 1)
+
+	written := vaultCall(t, conn, "api.folder.write", map[string]any{
+		"handle":  handle,
+		"relPath": "",
+		"variables": []map[string]any{{
+			"name": "baseUrl", "value": "https://example.test", "enabled": true,
+		}},
+	}, 2)
+	if written.Error != nil {
+		t.Fatalf("api.folder.write: %+v", written.Error)
+	}
+	validateJSON(t, writeSchema, written.Result, "api.folder.write result")
+
+	read := vaultCall(t, conn, "api.folder.read", map[string]any{
+		"handle": handle, "relPath": "",
+	}, 3)
+	if read.Error != nil {
+		t.Fatalf("api.folder.read: %+v", read.Error)
+	}
+	validateJSON(t, readSchema, read.Result, "api.folder.read result")
 }

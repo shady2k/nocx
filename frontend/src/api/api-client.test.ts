@@ -109,6 +109,26 @@ describe('ApiClient — one method per contract', () => {
       request: REQUEST,
     })
   })
+  it('reads folder variables by handle and folder path', async () => {
+    const { dispatcher, call } = fakeDispatcher({ variables: [] })
+    await createApiWorkbenchServices(dispatcher).readFolder('h1', 'users')
+    expect(call).toHaveBeenCalledWith('api.folder.read', {
+      handle: 'h1',
+      relPath: 'users',
+    })
+  })
+
+  it('writes folder variables by handle and folder path', async () => {
+    const { dispatcher, call } = fakeDispatcher({ variables: [] })
+    await createApiWorkbenchServices(dispatcher).writeFolder('h1', 'users', [
+      { name: 'baseUrl', value: 'https://example.test', enabled: true },
+    ])
+    expect(call).toHaveBeenCalledWith('api.folder.write', {
+      handle: 'h1',
+      relPath: 'users',
+      variables: [{ name: 'baseUrl', value: 'https://example.test', enabled: true }],
+    })
+  })
 
   it('sends the request the FILE holds — the handle, the path, the environment and the token it can be stopped by', async () => {
     const { dispatcher, call } = fakeDispatcher({ response: {} })
@@ -249,6 +269,8 @@ describe('ApiClient — one method per contract', () => {
     const s = createApiWorkbenchServices(dispatcher)
     await s.listCollections()
     await s.createCollection('orders-api')
+    await s.readFolder('h1', 'users')
+    await s.writeFolder('h1', 'users', [])
     await s.createFolder('h1', 'users', 'admin')
     await s.closeCollection('h1')
     await s.readRequest('h1', 'a.json')
@@ -268,8 +290,10 @@ describe('ApiClient — every call has a test where it fails', () => {
     [string, (s: ReturnType<typeof createApiWorkbenchServices>) => Promise<unknown>]
   > = [
     ['listCollections', (s) => s.listCollections()],
-    ['openCollection', (s) => s.openCollection('/w/x')],
     ['createCollection', (s) => s.createCollection('orders-api')],
+    ['openCollection', (s) => s.openCollection('/w/x')],
+    ['readFolder', (s) => s.readFolder('h1', 'users')],
+    ['writeFolder', (s) => s.writeFolder('h1', 'users', [])],
     ['createFolder', (s) => s.createFolder('h1', 'users', 'admin')],
     ['closeCollection', (s) => s.closeCollection('h1')],
     ['readRequest', (s) => s.readRequest('h1', 'a.json')],

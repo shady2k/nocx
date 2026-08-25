@@ -567,6 +567,12 @@
   font-size: var(--font-size-sm);
 }
 
+.api-folder__note {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
 /* The panel fills the tab box, so what is inside it can too. PLACEMENT of a
    kit component, which a surface may do — nothing here paints the panel. */
 .api-request .ui-tabs__panel {

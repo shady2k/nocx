@@ -43,8 +43,8 @@ func TestService_OpenIsTheOnlyEntryPointThatTakesARoot(t *testing.T) {
 	handleType := reflect.TypeOf(HandleID(""))
 	stringType := reflect.TypeOf("")
 
-	if got := svcType.NumMethod(); got != 8 {
-		t.Fatalf("Service has %d methods, want 8 — a new method must be checked against §13.1 "+
+	if got := svcType.NumMethod(); got != 10 {
+		t.Fatalf("Service has %d methods, want 10 — a new method must be checked against §13.1 "+
 			"before this count is raised", got)
 	}
 

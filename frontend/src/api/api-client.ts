@@ -23,6 +23,8 @@ import type { ApiCollectionsCreateResult } from '../generated/api.collections.cr
 import type { ApiCollectionsCreateFolderResult } from '../generated/api.collections.createFolder'
 import type { ApiCollectionsCloseResult } from '../generated/api.collections.close'
 import type { ApiEnvironmentReadResult } from '../generated/api.environment.read'
+import type { ApiFolderReadResult } from '../generated/api.folder.read'
+import type { ApiFolderWriteResult } from '../generated/api.folder.write'
 import type { ApiEnvironmentWriteResult } from '../generated/api.environment.write'
 import type { ApiEnvironmentBindSecretResult } from '../generated/api.environment.bindSecret'
 import type { ApiRequestDeleteResult } from '../generated/api.request.delete'
@@ -121,6 +123,25 @@ class ApiClient {
       handle,
       relPath,
       environment,
+    })
+  }
+  /** Read the folder-level facts the page edits. The collection listing only
+   * carries presence, so this call is the editor's whole read. */
+  readFolder(handle: string, relPath: string): Promise<ApiFolderReadResult> {
+    return this.dispatcher.call<ApiFolderReadResult>('api.folder.read', { handle, relPath })
+  }
+
+  /** Replace the folder-level facts and return the canonical persisted rows.
+   * An empty list is the backend's absence state. */
+  writeFolder(
+    handle: string,
+    relPath: string,
+    variables: ApiFolderWriteResult['variables'],
+  ): Promise<ApiFolderWriteResult> {
+    return this.dispatcher.call<ApiFolderWriteResult>('api.folder.write', {
+      handle,
+      relPath,
+      variables,
     })
   }
 
@@ -470,6 +491,12 @@ export interface ApiWorkbenchServices {
     relPath: string,
     environment: ApiEnvironment,
   ): Promise<ApiEnvironmentWriteResult>
+  readFolder(handle: string, relPath: string): Promise<ApiFolderReadResult>
+  writeFolder(
+    handle: string,
+    relPath: string,
+    variables: ApiFolderWriteResult['variables'],
+  ): Promise<ApiFolderWriteResult>
   /** Give a secret variable its value — the one call that carries a
    *  credential, and it carries it one way (ApiClient.bindSecret). */
   bindSecret(
@@ -593,6 +620,8 @@ export function createApiWorkbenchServices(
     readEnvironment: (handle, relPath) => client.readEnvironment(handle, relPath),
     writeEnvironment: (handle, relPath, environment) =>
       client.writeEnvironment(handle, relPath, environment),
+    readFolder: (handle, relPath) => client.readFolder(handle, relPath),
+    writeFolder: (handle, relPath, variables) => client.writeFolder(handle, relPath, variables),
     bindSecret: (handle, relPath, variable, value) =>
       client.bindSecret(handle, relPath, variable, value),
     readRequest: (handle, relPath) => client.readRequest(handle, relPath),

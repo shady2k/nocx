@@ -72,6 +72,7 @@ import type { ScrollbackController } from './scrollback/controller'
 import { pushOverlay, popOverlay } from './ui/overlay/stack'
 import { _resetThemeState } from './renderers/theme-adapter'
 import { showToast } from './ui/toast'
+import { log } from './log'
 import { BufferLine } from './scrollback/test-helpers'
 
 // Mock the XtermRenderer class before any imports use it (same as tabs.test.ts).
@@ -3558,6 +3559,26 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       renderer._fireWriteParsed()
       expect(live.querySelector('.cmd-answer-typing')).toBeNull()
     } finally {
+      teardown()
+    }
+  })
+
+  it('PTY output reaches the renderer without a desktop-shell log call per chunk (nocx-svxik)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const renderer = rendererOf(content)
+    const write = vi.spyOn(renderer, 'write')
+    const debug = vi.spyOn(log, 'debug')
+    try {
+      debug.mockClear()
+      write.mockClear()
+      for (let i = 0; i < 32; i += 1) client._sessions[0].fireData(`chunk-${i}`)
+
+      expect(write).toHaveBeenCalledTimes(32)
+      expect(debug).not.toHaveBeenCalled()
+    } finally {
+      debug.mockRestore()
+      write.mockRestore()
       teardown()
     }
   })

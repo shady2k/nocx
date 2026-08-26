@@ -2718,7 +2718,6 @@ export class TerminalContent extends BasePaneContent {
       this._settleTimer = window.setTimeout(() => this._settle(), SETTLE_BACKSTOP_MS)
 
       session.onData((data: string) => {
-        log.debug('nocx: session data received', { length: data.length })
         renderer.write(data)
         if (this._bufferType === 'normal' && Date.now() >= this.echoUntil) {
           host.requestAttention()

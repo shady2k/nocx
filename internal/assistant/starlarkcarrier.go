@@ -104,6 +104,18 @@ func newStarlarkCarrier(kernel invoker, tools []string) *starlarkCarrier {
 	return &starlarkCarrier{kernel: kernel, tools: tools, suspensions: make(chan *Suspension)}
 }
 
+// logf records one effect's outcome through the kernel's own logger when the
+// kernel has one. The carrier holds no logger of its own: there is one owner
+// of "how this process logs", and a second would be a second configuration to
+// keep in step.
+func (c *starlarkCarrier) logf(msg, tool, callID, rawArgs string, err error) {
+	k, ok := c.kernel.(grantedInvoker)
+	if !ok {
+		return
+	}
+	k.warn(msg, "tool", tool, "call", callID, "args", rawArgs, "error", err)
+}
+
 // Suspensions is where the host learns that the program stopped on a question.
 // One value per question, in the order the program asked; the host answers
 // through the approval store and calls Resume.
@@ -266,6 +278,11 @@ func (c *starlarkCarrier) effect(tool string) func(*starlark.Thread, *starlark.B
 
 		out, err := invokeParking(ctx, c.kernel, c.suspensions, tool, callID, string(raw))
 		if err != nil {
+			// EVERY effect a program asks for is recorded with its outcome,
+			// which the declared-call carrier gets for free (each call is
+			// announced) and this one had not. A program that stops on the
+			// third of five effects is otherwise one opaque sentence.
+			c.logf("agent program effect failed", tool, callID, string(raw), err)
 			return nil, err
 		}
 		return toStarlark(out), nil

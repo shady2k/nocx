@@ -167,12 +167,21 @@ func (c *programCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (s
 	if err != nil {
 		return repairable("", err)
 	}
+	// THE PROGRAM IS RECORDED BEFORE IT RUNS, and the run's outcome after
+	// it. Under the declared-call carrier every effect announces itself with
+	// its arguments and the log has the shape of the work; under this one the
+	// whole of what the model decided is one string nobody could see, and
+	// three failures in a row were diagnosed by guessing because of it.
+	c.kernel.note("agent program: running", "run", c.runID, "source", source)
 	out, err := c.runs.drive(ctx, c.runID, func() (<-chan *Suspension, func(context.Context) (string, error)) {
 		sc := newStarlarkCarrier(c.granted(), c.permittedNames())
 		return sc.Suspensions(), func(runCtx context.Context) (string, error) {
 			return sc.Run(runCtx, source)
 		}
 	})
+	if err != nil {
+		c.kernel.warn("agent program: stopped", "run", c.runID, "error", err)
+	}
 	return repairable(out, err)
 }
 
@@ -223,11 +232,16 @@ func (c *planCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (stri
 	// result the model can read and repair, not a failed run.
 	gc, err := newGraphCarrier(c.granted(), source)
 	if err != nil {
+		c.kernel.warn("agent plan: refused whole", "run", c.runID, "plan", source, "error", err)
 		return repairable("", err)
 	}
+	c.kernel.note("agent plan: running", "run", c.runID, "plan", source)
 	out, err := c.runs.drive(ctx, c.runID, func() (<-chan *Suspension, func(context.Context) (string, error)) {
 		return gc.Suspensions(), gc.Run
 	})
+	if err != nil {
+		c.kernel.warn("agent plan: stopped", "run", c.runID, "error", err)
+	}
 	return repairable(out, err)
 }
 

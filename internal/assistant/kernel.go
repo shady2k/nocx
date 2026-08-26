@@ -1413,6 +1413,22 @@ func (k *effectKernel) Declares(tool string) bool {
 	return ok
 }
 
+// note and warn are the kernel's logger with the nil check the whole package
+// needs. A client built without a logger is the ordinary shape in a test, and
+// a diagnostic that panics a run is worse than no diagnostic at all — which is
+// exactly what happened the first time these were called directly.
+func (k *effectKernel) note(msg string, args ...any) {
+	if k.log != nil {
+		k.log.Info(msg, args...)
+	}
+}
+
+func (k *effectKernel) warn(msg string, args ...any) {
+	if k.log != nil {
+		k.log.Warn(msg, args...)
+	}
+}
+
 // FrameForModel marks a result as untrusted data before a carrier puts it in
 // front of a model (agenttools.Declaration.FrameToolResult). It is a
 // projection of the declaration and decides nothing; a carrier that does not

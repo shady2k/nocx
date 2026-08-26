@@ -51,7 +51,6 @@ import (
 	einoModel "github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
-	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/masking"
@@ -293,70 +292,6 @@ type classifierFact struct {
 	// Findings are the egress gate's findings when the classifier was NOT
 	// consulted because its input carried secret-shaped material.
 	Findings []EgressFinding `json:"findings,omitempty"`
-}
-
-// proposalApproved reports whether this exact proposal already carries a
-// human's approval. The approval covers the proposal INCLUDING its
-// classification — a person approved the call as proposed — so the resumed
-// pass must not consult the classifier again: a second suspect verdict
-// would ask about a call the person just answered, forever.
-func (m *policyMiddleware) proposalApproved(toolName, callID, rawArgs string) bool {
-	if m.approvals == nil {
-		return false
-	}
-	return m.approvals.IsApproved(m.proposal(toolName, callID, rawArgs))
-}
-
-// classifyProposal runs the classifier gate over one permitted call. The
-// order is the invariant's own:
-//
-//  1. The egress gate on the INPUT (invariant 2) — the classifier is an
-//     egress point, so its arguments pass the SAME gate that screens the
-//     answering model's input: the same recognizer, the same vault
-//     comparison. A finding means the classifier CANNOT be shown the
-//     arguments — the call escalates with the findings recorded, and the
-//     material never leaves.
-//  2. The consultation. Any error — unreachable, timed out, unparseable,
-//     unresolved role — escalates with the failure sentence recorded. A
-//     verdict other than ClassifierClear escalates with the verdict, the
-//     model and the masked reason. ClassifierClear alone lets the call
-//     run.
-//
-// The returned ask is the suspension's approval request; the returned fact
-// is what the ledger records. A nil ask means the verdict was clear.
-func (m *policyMiddleware) classifyProposal(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any) (*ApprovalRequest, *classifierFact, error) {
-	findings, err := m.screenResult(ctx, rawArgs, nil)
-	if err != nil {
-		return nil, nil, err
-	}
-	if len(findings) > 0 {
-		fact := &classifierFact{
-			Findings: findings,
-			Reason:   "the classifier could not be consulted: " + findingsSentence(findings),
-		}
-		return m.request(decl, callID, rawArgs, args), fact, nil
-	}
-	classification, err := m.classifier.Classify(ctx, ClassifyInput{Tool: decl.Name, CallID: callID, Arguments: rawArgs})
-	if err != nil {
-		fact := &classifierFact{
-			Reason: maskClassifierReason("the classifier could not be consulted: " + summarizeClassifierError(err)),
-		}
-		return m.request(decl, callID, rawArgs, args), fact, nil
-	}
-	if classification.Verdict != ClassifierClear {
-		fact := &classifierFact{
-			Consulted: true,
-			Verdict:   classification.Verdict,
-			Model:     classification.Model,
-			Reason:    maskClassifierReason(classification.Reason),
-		}
-		return m.request(decl, callID, rawArgs, args), fact, nil
-	}
-	return nil, &classifierFact{
-		Consulted: true,
-		Verdict:   ClassifierClear,
-		Model:     classification.Model,
-	}, nil
 }
 
 // findingsSentence is the fact-shaped, material-free sentence that names

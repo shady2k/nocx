@@ -333,10 +333,12 @@ func dirEntries(t *testing.T, dir string) []string {
 // be caught here rather than by a person deciding their history is destroyed.
 //
 // THIS TEST IS PROBABILISTIC AND SAYS SO. Measured at sixteen connections on
-// this profile: RED IN 3 RUNS OF 6. A profile four times the size caught it 6
-// of 6, and is not affordable — under -race in the amd64 CI container it ran
-// 9m12s and was killed by the 10-minute package timeout, which guards
-// nothing. So this is a net rather than a gate, and the gate is elsewhere:
+// this profile: RED IN 5 RUNS OF 8. Bigger is not better here, and that was
+// measured too: a profile eight times the size caught it 6 of 6 but ran 9m12s
+// under -race in the CI container and was killed by the 10-minute package
+// timeout, which guards nothing at all; halving the profile from there RAISED
+// the catch rate while cutting the green run from 24s to 9s. So this is a net
+// rather than a gate, and the gate is elsewhere:
 // TestThePoolIsOneConnection (sqlite_internal_test.go) states the invariant
 // that makes the race unreachable and fails instantly if somebody raises the
 // pool. Read both before changing either.
@@ -352,8 +354,8 @@ func TestConcurrentReadersWithOneWriter(t *testing.T) {
 	hist := db.Ledger()
 
 	const (
-		rounds    = 6
-		perRound  = 1000
+		rounds    = 4
+		perRound  = 700
 		readers   = 16
 		readsEach = 300
 	)

@@ -3848,17 +3848,15 @@ export class TerminalContent extends BasePaneContent {
    *
    *  Refused unless there is something to ask about and the pane is in a
    *  state where an editor belongs: no running command (the editor is
-   *  already there, or will be), the ALTERNATE buffer (a full-screen program
-   *  owns the pane, and that is its own conversation), or the native-input
-   *  latch (the person's own one-way choice, which nothing may reverse for
-   *  them).
+   *  already there, or will be), or the native-input latch (the person's own
+   *  one-way choice, which nothing may reverse for them).
    *
    *  Returns whether it summoned, so a caller can leave the key alone. */
   private summonEditor(): boolean {
     const editor = this.editor
     if (editor === null || editor.isVisible) return false
     if (!this.hasRunningCommand()) return false
-    if (this.lifecycle.buffer !== 'normal' || this.nativeMode) return false
+    if (this.nativeMode) return false
     const targets = this.inputTargets
     const agentId = this.agentTarget?.id
     // No assistant target registered means there is nothing to ask, and a
@@ -3868,9 +3866,21 @@ export class TerminalContent extends BasePaneContent {
     this._summonRestoreTargetId = targets.active().id
     this._summoned = true
     if (targets.active().id !== agentId) targets.setActive(agentId)
+    // Set placement before showing or focusing: the visible editor must never
+    // spend a frame in the pane's flex layout while a program owns its grid.
+    this._setEditorPlacement('overlay')
     this._syncLifecycleOwnership()
     editor.focus()
     return true
+  }
+
+  /** Keep the editor's one DOM surface in either the prompt flow or the
+   *  overlay layer. The placement is presentation only; target and draft
+   *  ownership remain in the registry and editor. */
+  private _setEditorPlacement(placement: 'inline' | 'overlay'): void {
+    const root = this.editor?.root
+    if (!root) return
+    root.dataset.placement = placement
   }
 
   /** Dismiss a summoned editor: the keys go back to the process (nocx-92gfl).
@@ -3908,6 +3918,9 @@ export class TerminalContent extends BasePaneContent {
     this._summoned = false
     const restore = this._summonRestoreTargetId
     this._summonRestoreTargetId = null
+    // Clear placement before any caller reconciles visibility. This same
+    // transition owns summon state and the CSS attribute.
+    this._setEditorPlacement('inline')
     if (restore === null || this.editor === null) return
     if (this.editor.getDoc() !== '') return
     if (this.inputTargets?.active().id === restore) return
@@ -4185,14 +4198,14 @@ export class TerminalContent extends BasePaneContent {
     if (this._summoned && !this.hasRunningCommand()) this._endSummon()
     // Two ways the editor can be on screen, and the difference is who asked:
     // the LIFECYCLE says PromptReady (ADR-0024 §6, the ordinary case), or the
-    // PERSON summoned it over a running command (nocx-92gfl). The other two
-    // axes gate both alike — the buffer axis is presentation and can never
-    // restore authority, and the native latch is the person's own one-way
-    // choice — so a summon reaches neither an alternate-screen program nor a
-    // pane whose owner has opted out of the editor entirely.
+    // PERSON summoned it over a running command (nocx-92gfl). A summoned
+    // editor is an overlay even while the alternate-screen program owns the
+    // pane; the native latch still gates both because it is the person's own
+    // one-way choice.
+    const summoned = this._summoned
     const show =
-      (shouldShowEditor(this.lifecycle.state) || this._summoned) &&
-      this.lifecycle.buffer === 'normal' &&
+      (shouldShowEditor(this.lifecycle.state) || summoned) &&
+      (summoned || this.lifecycle.buffer === 'normal') &&
       !this.nativeMode
     // The grid's writability follows ownership, not the visibility
     // transition: the editor hides ITSELF at submit (the atomic handoff),
@@ -4202,19 +4215,27 @@ export class TerminalContent extends BasePaneContent {
     // stdin (read, ssh, less) hangs with no editor and no input surface
     // (nocx-u7uh.23). The invariant: editor shown ⟺ grid read-only.
     if (show) {
-      // The composer coming BACK is a displacement of its own — the prompt
-      // returns, the box re-enters the layout, and the scrollback moves by its
-      // height. It is glided; the freeze that precedes it has its own.
-      if (!editor.isVisible) {
-        const sb = this.scrollback
-        if (sb) {
-          sb.settleAround(() => {
-            editor.show()
-            // The scroller just lost the composer's height. Inside the
-            // mutation, so the glide measures the settled position once.
-            sb.scrollToBottomIfFollowing()
-          })
-        } else editor.show()
+      if (summoned) {
+        // The attribute is set before show/focus and CSS takes the editor out
+        // of flow, so this branch never settles or measures the scrollback.
+        this._setEditorPlacement('overlay')
+        if (!editor.isVisible) editor.show()
+      } else {
+        // The composer coming BACK is a displacement of its own — the prompt
+        // returns, the box re-enters the layout, and the scrollback moves by
+        // its height. It is glided; the freeze that precedes it has its own.
+        this._setEditorPlacement('inline')
+        if (!editor.isVisible) {
+          const sb = this.scrollback
+          if (sb) {
+            sb.settleAround(() => {
+              editor.show()
+              // The scroller just lost the composer's height. Inside the
+              // mutation, so the glide measures the settled position once.
+              sb.scrollToBottomIfFollowing()
+            })
+          } else editor.show()
+        }
       }
       this.renderer?.setReadOnly(true)
     } else {
@@ -4236,6 +4257,7 @@ export class TerminalContent extends BasePaneContent {
       // cancels in-flight settles before it measures. A no-op mutation would
       // therefore kill a live animation mid-flight and snap the stack, which
       // is the jitter it was meant to remove.
+      this._setEditorPlacement('inline')
       editor.hide()
       this.renderer?.setReadOnly(false)
     }
@@ -4333,6 +4355,9 @@ export class TerminalContent extends BasePaneContent {
       document.removeEventListener('keydown', this._globalKeydown)
       this._globalKeydown = null
     }
+    this._summoned = false
+    this._summonRestoreTargetId = null
+    this._setEditorPlacement('inline')
     this.session?.close()
     this.renderer?.dispose()
     this.editor?.dispose()

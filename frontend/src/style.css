@@ -168,6 +168,15 @@
   padding: 10px 14px 12px;
 }
 
+.nocx-editor[data-placement='overlay'] {
+  position: absolute;
+  left: var(--pane-inline-padding);
+  right: var(--pane-inline-padding);
+  bottom: 0;
+  z-index: 10;
+  box-sizing: border-box;
+}
+
 /* Every presentation that is not a prompt REMOVES this card and its box: the
    composer's `hide()` sets `display:none`, and the height goes back to the
    scroller. It kept its box for a while, so a submit could not move a

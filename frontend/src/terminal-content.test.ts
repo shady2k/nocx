@@ -26,6 +26,7 @@ import { resolve } from 'node:path'
 
 const srcDir = import.meta.dirname ?? resolve(new URL('.', import.meta.url).pathname)
 const STYLE_ENTRY = resolve(srcDir, 'style.css')
+const BASE_STYLE_ENTRY = resolve(srcDir, 'styles/base.css')
 
 import type { PaneIdentity } from './terminal-content'
 import { grantBlockFromElement, type GrantBlock } from './ask-entry'
@@ -2078,6 +2079,25 @@ describe('the command editor chrome pins the clock to the right edge without dis
 
     expect(chrome).not.toMatch(/justify-content\s*:\s*(space-between|space-around|space-evenly)/)
     expect(time).toMatch(/margin-left\s*:\s*auto/)
+  })
+})
+
+describe('summoned editor overlay stylesheet contract (nocx-92gfl)', () => {
+  it('shares the pane padding band and pins the overlay to its bottom edge', () => {
+    const css = stripComments(readFileSync(STYLE_ENTRY, 'utf8'))
+    const baseCss = stripComments(readFileSync(BASE_STYLE_ENTRY, 'utf8'))
+    const match = css.match(/\.nocx-editor\[data-placement=['"]overlay['"]\]\s*\{([^}]*)\}/)
+    const pane = baseCss.match(/\.pane\s*\{([^}]*)\}/)
+    expect(match).not.toBeNull()
+    expect(pane).not.toBeNull()
+    const declarations = match?.[1] ?? ''
+    const paneDeclarations = pane?.[1] ?? ''
+    expect(paneDeclarations).toMatch(/--pane-inline-padding\s*:\s*10px/)
+    expect(paneDeclarations).toMatch(/padding\s*:\s*0\s+var\(--pane-inline-padding\)/)
+    expect(declarations).toMatch(/position\s*:\s*absolute/)
+    expect(declarations).toMatch(/left\s*:\s*var\(--pane-inline-padding\)/)
+    expect(declarations).toMatch(/right\s*:\s*var\(--pane-inline-padding\)/)
+    expect(declarations).toMatch(/bottom\s*:\s*0/)
   })
 })
 
@@ -7186,7 +7206,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
   }
 
-  it('Ctrl+Enter while a command is running summons the editor, in ask mode', async () => {
+  it('Ctrl+Enter while a command is running summons the editor as an overlay without resizing the grid', async () => {
     const client = makeClient()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -7197,7 +7217,12 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       startCommand(client)
-      // The editor is gone while it runs — that is today's behaviour and it
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+      const dimensions = { cols: renderer.cols, rows: renderer.rows }
+      const resizeCalls = session.sendResize.mock.calls.length
+      session.send.mockClear()
+      // The editor is gone while it runs — that is deliberate and it
       // is the state this gesture exists for.
       expect(ed.isVisible).toBe(false)
       capturedActionFacts.length = 0
@@ -7210,9 +7235,16 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       expect(recovery?.style.display).toBe('none')
 
       expect(ed.isVisible).toBe(true)
+      expect(ed.root.dataset.placement).toBe('overlay')
       // Ask, not the shell: the summoned editor's only target. Read off the
       // indicator, which is the product's own account of where Enter goes.
       expect(targetNamed(ed)).toBe('agent')
+      // The grid remains the same size and no PTY resize was requested. The
+      // overlay is removed from layout rather than making a second viewport
+      // fit pass.
+      expect({ cols: renderer.cols, rows: renderer.rows }).toEqual(dimensions)
+      expect(session.send).not.toHaveBeenCalled()
+      expect(session.sendResize).toHaveBeenCalledTimes(resizeCalls)
       // And the grid is read-only again, which is the invariant
       // _syncLifecycleOwnership states about itself: editor shown ⟺ grid
       // read-only.
@@ -7240,6 +7272,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       escapeOn(viewOf(ed).contentDOM)
 
       expect(ed.isVisible).toBe(false)
+      expect(ed.root.dataset.placement).toBe('inline')
       expect(readOnlyOf(content)).toHaveBeenLastCalledWith(false)
       // The assertion that matters is not the flag: it is a key the PROGRAM
       // consumes arriving at the session. `q` is what quits `top`, and if
@@ -7350,6 +7383,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       expect(targetNamed(ed)).toBe('agent')
 
       finishCommand(handler)
+      expect(ed.root.dataset.placement).toBe('inline')
 
       expect(ed.isVisible).toBe(true)
       expect(targetNamed(ed)).toBe('shell')
@@ -7414,7 +7448,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     }
   })
 
-  it('the alternate buffer is untouched: the chord summons nothing there', async () => {
+  it('the alternate buffer also gets the ask overlay without changing its grid', async () => {
     const client = makeClient()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -7425,13 +7459,19 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       startCommand(client, 'htop')
-      rendererOf(content)._fireBufferChange('alternate')
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+      renderer._fireBufferChange('alternate')
+      const dimensions = { cols: renderer.cols, rows: renderer.rows }
+      const resizeCalls = session.sendResize.mock.calls.length
 
       summonChord(content)
 
-      // A full-screen program owns the pane, and that is its own
-      // conversation — the editor has no business over it.
-      expect(ed.isVisible).toBe(false)
+      expect(ed.isVisible).toBe(true)
+      expect(ed.root.dataset.placement).toBe('overlay')
+      expect(targetNamed(ed)).toBe('agent')
+      expect({ cols: renderer.cols, rows: renderer.rows }).toEqual(dimensions)
+      expect(session.sendResize).toHaveBeenCalledTimes(resizeCalls)
     } finally {
       restore()
       teardown()

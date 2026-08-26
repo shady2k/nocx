@@ -141,9 +141,20 @@ func (c *starlarkCarrier) Run(ctx context.Context, source string) (string, error
 	if _, err := starlark.ExecFileOptions(programOptions, thread, "program.star", source, c.predeclared()); err != nil {
 		var evalErr *starlark.EvalError
 		if ok := asEvalError(err, &evalErr); ok {
-			// The backtrace is the useful half: it names the line of the
-			// program that failed, which is the only thing a reader can act
-			// on when the author is a model.
+			// The backtrace is the useful half for a reader: it names the
+			// line of the program that failed, which is the only thing
+			// anybody can act on when the author is a model.
+			//
+			// The CAUSE has to survive with it, and the first version of this
+			// dropped it — the backtrace went in as a string, so the error
+			// chain ended here and every caller upstream saw an opaque
+			// sentence. That is how a sealed vault reached a live model as
+			// the words "context canceled" and had it retrying a thing no
+			// retry could fix. %w on the cause, %s for the backtrace: one
+			// error carrying both.
+			if cause := errors.Unwrap(evalErr); cause != nil {
+				return "", fmt.Errorf("program failed: %s: %w", evalErr.Backtrace(), cause)
+			}
 			return "", fmt.Errorf("program failed: %s", evalErr.Backtrace())
 		}
 		return "", fmt.Errorf("program failed: %w", err)

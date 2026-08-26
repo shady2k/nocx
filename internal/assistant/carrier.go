@@ -260,6 +260,19 @@ func repairable(out string, err error) (string, error) {
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 		return "", err
 	}
+	// AND A WITHHELD RESULT, which is the one that taught this list its third
+	// member. Egress screening failing is not a mistake in what the model
+	// wrote: the gate could not see the result, so nothing left, and it will
+	// fail identically on every retry until a PERSON acts — the vault is
+	// sealed, or screening is misconfigured. Handed back as a repairable
+	// result it made a live model retry the same call three times against a
+	// sealed vault. As an error it terminalizes the run with the sentence the
+	// person already has for it ("the result could not be screened, so it was
+	// withheld. Check the vault…"), which is addressed to whoever can fix it.
+	var withheld *EgressScreeningError
+	if errors.As(err, &withheld) {
+		return "", err
+	}
 	return "That did not work:\n" + err.Error() + "\n\nFix it and call this tool again.", nil
 }
 

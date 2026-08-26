@@ -77,13 +77,17 @@ func TestLocalPty_SignalForegroundReachesTheExecution(t *testing.T) {
 	if err := lp.SignalForeground(syscall.SIGINT); err != nil {
 		t.Fatalf("SignalForeground(SIGINT): %v", err)
 	}
-	testwait.WaitFor(t, "the execution group to end or foreground to return", func() bool {
-		if err := unix.Kill(-jobPGID, 0); errors.Is(err, unix.ESRCH) {
-			return true
-		}
-		pgid, err := lp.ForegroundProcessGroup()
-		return err == nil && pgid == lp.Pid()
-	})
+	testwait.WaitForDetail(t, "the execution group to end or foreground to return",
+		func() string {
+			return fmt.Sprintf("the execution's process group %d survived SIGINT (or the shell never resumed)", jobPGID)
+		},
+		func() bool {
+			if err := unix.Kill(-jobPGID, 0); errors.Is(err, unix.ESRCH) {
+				return true
+			}
+			pgid, err := lp.ForegroundProcessGroup()
+			return err == nil && pgid == lp.Pid()
+		})
 }
 
 func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
@@ -116,14 +120,16 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 
 	// Wait for the observable: the command's own child pid appears.
 	var pidText string
-	testwait.WaitFor(t, "the child pid file", func() bool {
-		b, err := os.ReadFile(pidFile) //nolint:gosec // the path is this test's own temp file
-		if err != nil {
-			return false
-		}
-		pidText = strings.TrimSpace(string(b))
-		return true
-	})
+	testwait.WaitForDetail(t, "the child pid file",
+		func() string { return fmt.Sprintf("the file %s never appeared", pidFile) },
+		func() bool {
+			b, err := os.ReadFile(pidFile) //nolint:gosec // the path is this test's own temp file
+			if err != nil {
+				return false
+			}
+			pidText = strings.TrimSpace(string(b))
+			return true
+		})
 	var childPID int
 	if _, err := fmt.Sscanf(pidText, "%d", &childPID); err != nil || childPID <= 0 {
 		t.Fatalf("the command never wrote a child pid (file holds %q)", pidText)
@@ -141,22 +147,28 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 	// Observable one, the receipt: the child's own trap ran — the signal
 	// reached a process that is not the shell.
 	var markerText string
-	testwait.WaitFor(t, "the child's TERM receipt marker", func() bool {
-		b, err := os.ReadFile(marker) //nolint:gosec // the path is this test's own temp file
-		if err != nil {
-			return false
-		}
-		markerText = strings.TrimSpace(string(b))
-		return true
-	})
+	testwait.WaitForDetail(t, "the child's TERM receipt marker",
+		func() string { return fmt.Sprintf("the file %s never appeared", marker) },
+		func() bool {
+			b, err := os.ReadFile(marker) //nolint:gosec // the path is this test's own temp file
+			if err != nil {
+				return false
+			}
+			markerText = strings.TrimSpace(string(b))
+			return true
+		})
 	if got := markerText; got != "reached" {
 		t.Fatalf("the child's TERM trap wrote %q, want the receipt marker", got)
 	}
 	// Observable two, the death: the trap's wait reaped the sleep, so the
 	// pid it wrote is gone — zombie-free.
-	testwait.WaitFor(t, "the execution's child to be reaped", func() bool {
-		return errors.Is(unix.Kill(childPID, 0), unix.ESRCH)
-	})
+	testwait.WaitForDetail(t, "the execution's child to be reaped",
+		func() string {
+			return fmt.Sprintf("the execution's child %d was not reaped after the group signal — cancellation reached only the shell", childPID)
+		},
+		func() bool {
+			return errors.Is(unix.Kill(childPID, 0), unix.ESRCH)
+		})
 }
 
 func TestLocalPty_SignalForegroundZeroChecksExistence(t *testing.T) {

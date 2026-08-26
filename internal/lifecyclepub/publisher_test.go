@@ -3,6 +3,7 @@ package lifecyclepub_test
 import (
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -599,24 +600,37 @@ func TestPublisherEstablishmentTimeoutRollsBack(t *testing.T) {
 	}
 	// The establishment bound expires: the domain is revoked, the lane
 	// falls to native, and the accept never goes out.
-	testwait.WaitFor(t, "establishment timeout to close the domain", func() bool {
-		d, ok := pub.Domain(h.Domain)
-		return ok && d.State == lifecycle.DomainClosed
-	})
+	testwait.WaitForDetail(t, "establishment timeout to close the domain",
+		func() string {
+			d, ok := pub.Domain(h.Domain)
+			return fmt.Sprintf("the timeout never rolled the domain back; known=%t state=%v", ok, d.State)
+		},
+		func() bool {
+			d, ok := pub.Domain(h.Domain)
+			return ok && d.State == lifecycle.DomainClosed
+		})
 	if got := port.kinds(); len(got) != 0 {
 		t.Fatalf("accept flushed after the rollback: %v", got)
 	}
 	// The rollback's native fact follows the Closed state in the same
 	// timer tick — wait for it, then assert it is the final word.
 	var last lifecyclepub.Fact
-	testwait.WaitFor(t, "rollback to publish the native state", func() bool {
-		facts := r.all()
-		if len(facts) == 0 {
-			return false
-		}
-		last = facts[len(facts)-1]
-		return last.Lifecycle == lifecyclepub.LifecycleNative
-	})
+	testwait.WaitForDetail(t, "rollback to publish the native state",
+		func() string {
+			facts := r.all()
+			if len(facts) == 0 {
+				return "the rollback published no fact at all"
+			}
+			return fmt.Sprintf("last fact = %+v", facts[len(facts)-1])
+		},
+		func() bool {
+			facts := r.all()
+			if len(facts) == 0 {
+				return false
+			}
+			last = facts[len(facts)-1]
+			return last.Lifecycle == lifecyclepub.LifecycleNative
+		})
 	if last.Domain != "" {
 		t.Fatalf("final fact = %+v, want native with no domain", last)
 	}

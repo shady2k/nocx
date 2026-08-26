@@ -3,6 +3,7 @@ package discovery
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -508,9 +509,9 @@ func TestDetector_CloseMidSample_DiscardsLateResult(t *testing.T) {
 	resCh := make(chan Sample, 1)
 	go func() { resCh <- d.Sample(context.Background()) }()
 
-	testwait.WaitFor(t, "in-flight sample to enter the probe", func() bool {
-		return len(f.commands()) >= 2
-	})
+	testwait.WaitForDetail(t, "in-flight sample to enter the probe",
+		func() string { return fmt.Sprintf("execs = %d", len(f.commands())) },
+		func() bool { return len(f.commands()) >= 2 })
 	if err := d.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -650,9 +651,9 @@ func TestDetector_OneInFlight(t *testing.T) {
 
 	// Wait until the first sample is inside the probe, then start the
 	// second — it must wait on the one-in-flight guard, not execute.
-	testwait.WaitFor(t, "first sample to enter the probe", func() bool {
-		return len(f.commands()) == 1
-	})
+	testwait.WaitForDetail(t, "first sample to enter the probe",
+		func() string { return fmt.Sprintf("execs = %d", len(f.commands())) },
+		func() bool { return len(f.commands()) == 1 })
 	secondStarted := make(chan struct{})
 	go func() {
 		close(secondStarted)

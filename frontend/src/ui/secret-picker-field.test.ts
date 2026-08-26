@@ -315,3 +315,200 @@ describe('createSecretPickerField', () => {
     expect(panel()?.dataset.open).not.toBe('true')
   })
 })
+
+// ── The lock: storing what is already in the field ───────────────────────
+// The lock inside the field opens the SAME panel '@' opens. Two inputs
+// decide what it offers: is the field empty, and is part of it selected.
+describe('createSecretPickerField: the lock', () => {
+  const labels = (): Array<string | null | undefined> =>
+    rows().map((row) => row.querySelector('.ui-collection-row__info')?.textContent)
+
+  it('an empty field offers the plain list — one panel, no store row', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id')])
+    h.value.current = ''
+    h.controller.openForStore({ start: 0, end: 0 })
+    await flush()
+
+    expect(panel()?.dataset.open).toBe('true')
+    expect(labels()).toEqual(['prod-key', 'Add a secret…'])
+  })
+
+  it('a filled field with nothing selected offers to store the whole value, above the list', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id')])
+    h.value.current = 'Bearer t.Yixxxx'
+    h.source.requestCreate.mockResolvedValue(entry('deploy', 'secrow:new'))
+    h.controller.openForStore({ start: 15, end: 15 })
+    await flush()
+
+    expect(labels()).toEqual(['Store "Bearer t.Yixxxx" in the vault…', 'prod-key', 'Add a secret…'])
+    expect(key(h.controller, { key: 'Enter' })).toBe(true)
+    expect(h.source.requestCreate).toHaveBeenCalledWith('', 'Bearer t.Yixxxx')
+    await flush()
+    expect(h.value.current).toBe('{{secret:secrow:new}}')
+  })
+
+  it('a selection stores ONLY the selection and replaces ONLY that span', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id')])
+    h.value.current = 'Bearer t.Yixxxx'
+    h.source.requestCreate.mockResolvedValue(entry('deploy', 'secrow:new'))
+    h.controller.openForStore({ start: 7, end: 15 })
+    await flush()
+
+    expect(labels()).toEqual(['Store "t.Yixxxx" in the vault…', 'prod-key', 'Add a secret…'])
+    expect(key(h.controller, { key: 'Enter' })).toBe(true)
+    expect(h.source.requestCreate).toHaveBeenCalledWith('', 't.Yixxxx')
+    await flush()
+    // The literal `Bearer ` survives as text: it was never selected.
+    expect(h.onChange).toHaveBeenCalledWith(
+      'Bearer {{secret:secrow:new}}',
+      'Bearer {{secret:secrow:new}}'.length,
+    )
+    expect(h.value.current).toBe('Bearer {{secret:secrow:new}}')
+  })
+
+  it('the list under the store row still replaces what was typed', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id')])
+    h.value.current = 'Bearer t.Yixxxx'
+    h.controller.openForStore({ start: 15, end: 15 })
+    await flush()
+
+    expect(key(h.controller, { key: 'ArrowDown' })).toBe(true)
+    expect(key(h.controller, { key: 'Enter' })).toBe(true)
+    expect(h.value.current).toBe('{{secret:secrow:prod-id}}')
+    expect(h.source.requestCreate).not.toHaveBeenCalled()
+  })
+
+  it('a value that looks nothing like a credential gets exactly the same rows', async () => {
+    const plain = setup([entry('prod-key', 'secrow:prod-id')])
+    plain.value.current = 'hello world'
+    plain.controller.openForStore({ start: 0, end: 11 })
+    await flush()
+    const plainRows = labels()
+    plain.controller.destroy()
+    document.body.replaceChildren()
+
+    const token = setup([entry('prod-key', 'secrow:prod-id')])
+    token.value.current = 'sk-live-9c1f'
+    token.controller.openForStore({ start: 0, end: 12 })
+    await flush()
+    const tokenRows = labels()
+
+    expect(plainRows).toEqual(['Store "hello world" in the vault…', 'prod-key', 'Add a secret…'])
+    expect(tokenRows).toEqual(['Store "sk-live-9c1f" in the vault…', 'prod-key', 'Add a secret…'])
+  })
+
+  it('a field changed under the open panel is not replaced', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id')])
+    h.value.current = 'Bearer t.Yixxxx'
+    let resolveCreate!: (created: SecretEntry) => void
+    h.source.requestCreate.mockImplementation(
+      () =>
+        new Promise<SecretEntry>((resolve) => {
+          resolveCreate = resolve
+        }),
+    )
+    h.controller.openForStore({ start: 7, end: 15 })
+    await flush()
+    expect(key(h.controller, { key: 'Enter' })).toBe(true)
+
+    h.value.current = 'Bearer something-else'
+    resolveCreate(entry('deploy', 'secrow:new'))
+    await flush()
+
+    expect(h.value.current).toBe('Bearer something-else')
+    expect(h.onChange).not.toHaveBeenCalled()
+  })
+
+  it('the lock re-opens over a panel the @ trigger left open', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id')])
+    h.value.current = '@'
+    h.controller.onInput('@', 1)
+    await flush()
+    expect(labels()).toEqual(['prod-key', 'Add a secret…'])
+
+    h.value.current = 'Bearer t.Yixxxx'
+    h.controller.openForStore({ start: 7, end: 15 })
+    await flush()
+    expect(document.querySelectorAll('.ui-floating-panel[data-variant="secret"]')).toHaveLength(1)
+    expect(labels()).toEqual(['Store "t.Yixxxx" in the vault…', 'prod-key', 'Add a secret…'])
+  })
+})
+
+// Criterion 1 says the empty-field panel is "the existing secrets, narrowable
+// by TYPING". The lock leaves no '@' in the field, so there is no trigger word
+// for findTrigger to find — these are the tests that say what typing does after
+// the lock, on an empty field and on a filled one.
+describe('createSecretPickerField: typing after the lock', () => {
+  const labels = (): Array<string | null | undefined> =>
+    rows().map((row) => row.querySelector('.ui-collection-row__info')?.textContent)
+
+  it('an empty field narrows as the person types', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id'), entry('github-tok', 'secrow:gh')])
+    h.value.current = ''
+    h.controller.openForStore({ start: 0, end: 0 })
+    await flush()
+    expect(labels()).toEqual(['prod-key', 'github-tok', 'Add a secret…'])
+
+    h.value.current = 'p'
+    h.controller.onInput('p', 1)
+    await flush()
+
+    expect(panel()?.dataset.open).toBe('true')
+    expect(labels()).toEqual(['prod-key', 'Add "p" to the vault…'])
+  })
+
+  it('and the row it narrowed to replaces the typed text, not just the caret', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id'), entry('github-tok', 'secrow:gh')])
+    h.value.current = ''
+    h.controller.openForStore({ start: 0, end: 0 })
+    await flush()
+    h.value.current = 'pro'
+    h.controller.onInput('pro', 3)
+    await flush()
+
+    expect(key(h.controller, { key: 'Enter' })).toBe(true)
+    expect(h.value.current).toBe('{{secret:secrow:prod-id}}')
+  })
+
+  it('a space ends the typed word and closes, exactly as it does after @', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id')])
+    h.value.current = ''
+    h.controller.openForStore({ start: 0, end: 0 })
+    await flush()
+    h.value.current = 'p '
+    h.controller.onInput('p ', 2)
+    await flush()
+
+    expect(panel()?.dataset.open).not.toBe('true')
+  })
+
+  it('an @ typed after the lock is an ordinary mention trigger, not a second anchor', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id')])
+    h.value.current = ''
+    h.controller.openForStore({ start: 0, end: 0 })
+    await flush()
+    h.value.current = '@prod'
+    h.controller.onInput('@prod', 5)
+    await flush()
+
+    expect(labels()).toEqual(['prod-key', 'Add "prod" to the vault…'])
+    expect(key(h.controller, { key: 'Enter' })).toBe(true)
+    expect(h.value.current).toBe('{{secret:secrow:prod-id}}')
+  })
+
+  it('a FILLED field closes instead: the keystroke changed the span being offered', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id')])
+    h.value.current = 'Bearer t.Yixxxx'
+    h.controller.openForStore({ start: 7, end: 15 })
+    await flush()
+    expect(labels()).toEqual(['Store "t.Yixxxx" in the vault…', 'prod-key', 'Add a secret…'])
+
+    // Typing over a selection is what a native input does: the offered text
+    // is no longer in the field at all.
+    h.value.current = 'Bearer p'
+    h.controller.onInput('Bearer p', 8)
+    await flush()
+
+    expect(panel()?.dataset.open).not.toBe('true')
+  })
+})

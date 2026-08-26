@@ -44,13 +44,18 @@ export interface SecretPickerSource {
    *  dialog is the surface now), false when setup happened silently and the
    *  list can reload. */
   requestSetup(): Promise<boolean>
-  /** The user activated "Add a secret…". Form hosts return the newly
+  /** The user activated a create row. Form hosts return the newly
    *  created row so the field can insert its opaque handle in place; hosts
    *  without a value-entry form (the terminal prompt) return `undefined`
    *  after handing the person to their existing destination. The hosts differ
    *  because a form has somewhere to type a value while a floating row over a
-   *  prompt does not. */
-  requestCreate(name: string): Promise<SecretEntry | undefined>
+   *  prompt does not.
+   *
+   *  `value` is the text the store row would keep — the whole field or the
+   *  selection, decided by the host. It is OMITTED, never passed as
+   *  `undefined`, by the plain "Add a secret…" row: that row has no value to
+   *  carry, and the two rows are different acts. */
+  requestCreate(name: string, value?: string): Promise<SecretEntry | undefined>
   /** Host logging seam for failures reading lifecycle or inventory state. */
   onError?: (message: string, error: unknown) => void
 }
@@ -91,15 +96,60 @@ export function addSecretLabel(typed: string): string {
   return typed === '' ? 'Add a secret…' : `Add "${typed}" to the vault…`
 }
 
+/** How much of the value a store row spells out. Long enough to tell one
+ *  token from another — and a selection from the whole field — at a glance,
+ *  short enough that a row stays a row. */
+export const STORE_LABEL_MAX = 32
+
+/** The store offer, naming exactly what would be kept. It NAMES the text and
+ *  reads nothing else out of it: no shape, prefix or entropy of the value
+ *  decides what the panel offers (nocx-0khco ruled out guessing at
+ *  credentials), so `hello world` and a live token get the same row. */
+export function storeSecretLabel(value: string): string {
+  // A selection can span lines; a row is one line. Collapsing whitespace is
+  // display only — the stored text is the host's, untouched.
+  const flat = value.replace(/\s+/g, ' ')
+  const shown = flat.length > STORE_LABEL_MAX ? `${flat.slice(0, STORE_LABEL_MAX)}…` : flat
+  return `Store "${shown}" in the vault…`
+}
+
 /** The synthetic last row of the list state: "Add a secret…". Not a vault
  *  entry, so it is addressed by a reserved id rather than by index alone. */
 const CREATE_ROW_ID = '\u0000create'
+
+/** The synthetic FIRST row of the list state, present only while the host
+ *  offered a value to store. */
+const STORE_ROW_ID = '\u0000store'
 
 /** Why the picker is open. 'insert' is the '@' trigger — the person is
  *  composing and wants to reach for a secret. 'resolve' is a recalled
  *  command whose credential the store removed: the panel's job there is
  *  first to say what is missing, and only then to offer the vault. */
 export type SecretPickerPurpose = 'insert' | 'resolve'
+
+/** What a store row would put in the vault, and it is an ORTHOGONAL input to
+ *  the purpose rather than a third member of it. Purpose answers "which
+ *  question is this panel answering when it has nothing to list"; this
+ *  answers "is there a value here worth keeping". They vary independently —
+ *  a panel opened to insert may or may not have one — so folding the store
+ *  context into the enum would multiply the states instead of describing
+ *  them, and every `purpose === 'resolve'` sentence in here would have to
+ *  learn about a case that has nothing to do with it. */
+export interface SecretPickerStoreOffer {
+  /** Exactly the characters that will be stored. The host owns the editor
+   *  seam, so the host decides whether that is the whole field or a
+   *  selection; the panel only names it. */
+  value: string
+}
+
+/** One row of the list state, in the order it is rendered: the store offer
+ *  (when the host gave one), then the matching entries, then the create row.
+ *  `selected` indexes THIS list — one row vocabulary, so navigation, click
+ *  and Enter cannot disagree about which row is which. */
+type ListRow =
+  | { readonly kind: 'store'; readonly value: string }
+  | { readonly kind: 'entry'; readonly entry: SecretEntry }
+  | { readonly kind: 'create' }
 
 type PickerState =
   | { readonly name: 'closed' }
@@ -118,6 +168,9 @@ type PickerState =
 export class SecretPicker {
   private state: PickerState = { name: 'closed' }
   private purpose: SecretPickerPurpose = 'insert'
+  /** The host's store offer for THIS opening; null when there is nothing to
+   *  keep (an empty field, or an '@' trigger, which is the other direction). */
+  private store: SecretPickerStoreOffer | null = null
   /** The controller's filter that arrived while the inventory was still in
    *  flight: typing `@ope` before the list lands must not render every
    *  secret unfiltered. Applied when the list renders; null when none. */
@@ -163,9 +216,13 @@ export class SecretPicker {
    *  recalled command it is the wrong answer to a different question: the
    *  key was taken out of that command, and what the person needs to know
    *  first is that it is missing and that they can simply type it back. */
-  async open(purpose: SecretPickerPurpose = 'insert'): Promise<void> {
+  async open(
+    purpose: SecretPickerPurpose = 'insert',
+    store?: SecretPickerStoreOffer,
+  ): Promise<void> {
     if (this.isOpen) return
     this.purpose = purpose
+    this.store = store ?? null
     this.createRequest++
     this.state = { name: 'loading' }
     this.render()
@@ -218,9 +275,8 @@ export class SecretPicker {
     // that keystroke takes the offer away as the user reaches for it. A
     // space still ends the trigger word (above): that is what "I am not
     // naming a secret any more" actually looks like.
-    const rows = this.matches(s.entries, filter)
-    const selected = Math.min(s.selected, rows.length)
-    this.state = { ...s, filter, selected }
+    const next = { ...s, filter }
+    this.state = { ...next, selected: Math.min(s.selected, this.listRows(next).length - 1) }
     this.render()
   }
 
@@ -262,6 +318,7 @@ export class SecretPicker {
     if (this.state.name === 'closed') return
     this.state = { name: 'closed' }
     this.pendingFilter = null
+    this.store = null
     this.panel.hide()
   }
 
@@ -280,8 +337,7 @@ export class SecretPicker {
   private move(dir: -1 | 1): void {
     const s = this.state
     if (s.name !== 'list') return
-    // One past the last entry is the "Add a secret…" row.
-    const count = this.matches(s.entries, s.filter).length + 1
+    const count = this.listRows(s).length
     const next = (s.selected + dir + count) % count
     this.state = { ...s, selected: next }
     this.render()
@@ -300,24 +356,27 @@ export class SecretPicker {
     const s = this.state
     switch (s.name) {
       case 'list': {
-        const rows = this.matches(s.entries, s.filter)
-        // The create row sits one past the last entry.
-        if (s.selected >= rows.length) {
-          const typed = s.filter
-          const request = ++this.createRequest
+        const row = this.listRows(s)[s.selected]
+        if (row === undefined) return
+        if (row.kind === 'entry') {
           this.close()
-          void Promise.resolve(this.source.requestCreate(typed))
-            .then((created) => {
-              if (request !== this.createRequest || created === undefined) return
-              this.callbacks.onInsert(created.name)
-            })
-            .catch(() => {})
+          this.callbacks.onInsert(row.entry.name)
           return
         }
-        const entry = rows[s.selected]
-        if (!entry) return
+        const typed = s.filter
+        const request = ++this.createRequest
+        // Read before close(): closing clears the store offer.
+        const created =
+          row.kind === 'store'
+            ? this.source.requestCreate(typed, row.value)
+            : this.source.requestCreate(typed)
         this.close()
-        this.callbacks.onInsert(entry.name)
+        void Promise.resolve(created)
+          .then((entry) => {
+            if (request !== this.createRequest || entry === undefined) return
+            this.callbacks.onInsert(entry.name)
+          })
+          .catch(() => {})
         return
       }
       case 'sealed':
@@ -468,31 +527,55 @@ export class SecretPicker {
       })
       return
     }
-    const rows = this.matches(s.entries, s.filter)
+    const list = this.listRows(s)
+    this.panel.show({
+      rows: list.map((row) => this.rowOf(row, s.filter)),
+      selectedIndex: Math.min(s.selected, list.length - 1),
+      footer: ['↑ ↓ to navigate', '↵ to insert', 'esc to dismiss'],
+    })
+  }
+
+  /** The rendered rows, in order — the ONE place the list's shape is
+   *  decided, so navigation, click, Enter and render cannot disagree. */
+  private listRows(s: { entries: SecretEntry[]; filter: string }): ListRow[] {
+    const rows: ListRow[] = []
+    // ABOVE the list: what the person is holding comes first, and the
+    // secrets they already have stay one arrow away — the store row must
+    // not stand between them and replacing the value with an existing one.
+    if (this.store !== null) rows.push({ kind: 'store', value: this.store.value })
+    for (const entry of this.matches(s.entries, s.filter)) rows.push({ kind: 'entry', entry })
     // "Add a secret…" is always the last row, including when the list is
     // empty: the answer to "the one I want is not here" belongs where the
     // question is asked, not in a settings page the user has to know about.
     // Its display text carries the typed filter, because that is almost
     // always the name they were reaching for.
-    const createRow: FloatingPanelRow = {
-      id: CREATE_ROW_ID,
-      displayText: addSecretLabel(s.filter),
-      matchRanges: [],
+    rows.push({ kind: 'create' })
+    return rows
+  }
+
+  private rowOf(row: ListRow, filter: string): FloatingPanelRow {
+    if (row.kind === 'store') {
+      return {
+        id: STORE_ROW_ID,
+        displayText: storeSecretLabel(row.value),
+        matchRanges: [],
+        group: GROUP_LABEL,
+      }
+    }
+    if (row.kind === 'create') {
+      return {
+        id: CREATE_ROW_ID,
+        displayText: addSecretLabel(filter),
+        matchRanges: [],
+        group: GROUP_LABEL,
+      }
+    }
+    return {
+      id: row.entry.id,
+      displayText: row.entry.name,
+      matchRanges: this.matchRange(row.entry.name, filter),
       group: GROUP_LABEL,
     }
-    this.panel.show({
-      rows: [
-        ...rows.map((entry) => ({
-          id: entry.id,
-          displayText: entry.name,
-          matchRanges: this.matchRange(entry.name, s.filter),
-          group: GROUP_LABEL,
-        })),
-        createRow,
-      ],
-      selectedIndex: Math.min(s.selected, rows.length),
-      footer: ['↑ ↓ to navigate', '↵ to insert', 'esc to dismiss'],
-    })
   }
 
   private badge(label: string): HTMLElement {
@@ -511,13 +594,13 @@ export class SecretPicker {
     return at === -1 ? [] : [{ from: at, to: at + filter.length }]
   }
 
+  /** A click is the same act as Enter on that row, and says so by BEING it:
+   *  the lock is a mouse affordance, so the store row must be clickable, and
+   *  a second dispatch here is how a click and Enter drift apart. */
   private pick(index: number): void {
     const s = this.state
     if (s.name !== 'list') return
-    const rows = this.matches(s.entries, s.filter)
-    const entry = rows[index]
-    if (!entry) return
-    this.close()
-    this.callbacks.onInsert(entry.name)
+    this.state = { ...s, selected: index }
+    this.activate()
   }
 }

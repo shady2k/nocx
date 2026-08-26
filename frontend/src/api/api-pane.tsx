@@ -367,7 +367,7 @@ export function ApiPane(props: ApiPaneProps) {
           onError: source.onError,
           requestUnseal: () => source.requestUnseal(),
           requestSetup: () => source.requestSetup(),
-          requestCreate: (name) => createSecretInPlace(name),
+          requestCreate: (name, value) => createSecretInPlace(name, value),
         }
   const refreshSecretEntries = async (): Promise<void> => {
     if (secretSource === undefined) {
@@ -431,14 +431,21 @@ export function ApiPane(props: ApiPaneProps) {
       settleSecretAsk = resolve
     })
   }
-  const createSecretInPlace = async (name: string): Promise<SecretEntry | undefined> => {
+  const createSecretInPlace = async (
+    name: string,
+    value?: string,
+  ): Promise<SecretEntry | undefined> => {
     // NO MINT SEAM, NO DEAD ROW. A workbench built without a vault client can
     // still offer the create row — it just cannot answer it here, so it hands
     // off the way it always did rather than doing nothing at all. A control
     // that silently does nothing is worse than the detour this epic removed:
     // the detour at least ended somewhere. (Found by the merged gate, which
     // is the only place the two halves of this were ever visible together.)
-    if (secretCreate === undefined) return source?.requestCreate(name)
+    if (secretCreate === undefined) {
+      // Absent, not `undefined` (secret-picker.ts): the host is being handed
+      // the same act it was handed before, plus the value when there is one.
+      return value === undefined ? source?.requestCreate(name) : source?.requestCreate(name, value)
+    }
     // The picker is reachable from the URL, a header, a parameter, the body
     // and Auth alike, so the site it can honestly name is `field` — which is
     // the rung that gives api-token. The NAME here is what the person typed
@@ -448,10 +455,14 @@ export function ApiPane(props: ApiPaneProps) {
       site: { at: 'field' },
       url: store.draft()?.url ?? '',
     })
+    // The value the person is standing on, already filled in: the store row
+    // carries what the field held, so the ask is down to naming it. The '@'
+    // create row carries none, and the ask opens with an empty value field
+    // exactly as it did.
     const created = await openSecretCreateAsk({
       name,
       kind: proposal.kind,
-      value: '',
+      value: value ?? '',
     })
     if (created === undefined) return undefined
     const entry = { id: created.handle, name: created.name }

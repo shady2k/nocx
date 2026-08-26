@@ -1396,7 +1396,25 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 	if err := k.closeAttempt(ctx, execID, content.TermCompleted, content.EntrySuccess); err != nil {
 		return "", fmt.Errorf("agent tool %q: record outcome: %w", decl.Name, err)
 	}
-	return decl.FrameToolResult(out), nil
+	// The RESULT, unframed. Marking a result as untrusted data for a model to
+	// read is a statement addressed to a model, and only a carrier that talks
+	// to one can make it — the program carrier hands this value to an
+	// interpreter, where a <tool-output> wrapper would be text to parse back
+	// off. FrameForModel below is the projection, kept here so there is still
+	// exactly one place that knows how a result is presented to a model.
+	return out, nil
+}
+
+// FrameForModel marks a result as untrusted data before a carrier puts it in
+// front of a model (agenttools.Declaration.FrameToolResult). It is a
+// projection of the declaration and decides nothing; a carrier that does not
+// feed a model never calls it.
+func (k *effectKernel) FrameForModel(tool, result string) string {
+	decl, ok := k.registry.Lookup(tool)
+	if !ok {
+		return result
+	}
+	return decl.FrameToolResult(result)
 }
 
 // The two kernel methods below live HERE and not in classifier.go, where

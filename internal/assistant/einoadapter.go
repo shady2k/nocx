@@ -83,7 +83,11 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 			tripLatch(ctx, egress)
 			return "", compose.StatefulInterrupt(ctx, egress.Request, egress.Request)
 		}
-		return out, err
+		if err != nil {
+			return "", err
+		}
+		// The model-facing frame belongs to a carrier that faces a model.
+		return m.FrameForModel(tCtx.Name, out), nil
 	}, nil
 }
 

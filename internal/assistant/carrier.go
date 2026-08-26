@@ -26,6 +26,7 @@ package assistant
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -117,7 +118,16 @@ func (c *programCarrier) Declare(permitted []agenttools.Tool) ([]tool.BaseTool, 
 	}}}, nil
 }
 
-func (c *programCarrier) FrameForModel(_, result string) string { return result }
+// FrameForModel: ALWAYS, and unconditionally. The registry frames observe
+// tools and leaves the rest alone, because there a result's provenance is the
+// tool's own row. Here it is not: everything a program hands back is derived
+// from tool output, from a file, from a screen, or from text the model itself
+// wrote, and the envelope has no row to ask. So the whole of it is marked
+// untrusted — which is also what keeps a program from being the way round the
+// marker that a declared call cannot be.
+func (c *programCarrier) FrameForModel(_, result string) string {
+	return agenttools.FrameUntrusted(result)
+}
 
 func (c *programCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (string, error) {
 	if name != programToolName {
@@ -125,14 +135,15 @@ func (c *programCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (s
 	}
 	source, err := stringArg(rawArgs, "source")
 	if err != nil {
-		return "", err
+		return repairable("", err)
 	}
-	return c.runs.drive(ctx, c.runID, func() (<-chan *Suspension, func(context.Context) (string, error)) {
+	out, err := c.runs.drive(ctx, c.runID, func() (<-chan *Suspension, func(context.Context) (string, error)) {
 		sc := newStarlarkCarrier(c.granted(), c.permittedNames())
 		return sc.Suspensions(), func(runCtx context.Context) (string, error) {
 			return sc.Run(runCtx, source)
 		}
 	})
+	return repairable(out, err)
 }
 
 // ── The plan carrier ───────────────────────────────────────────────────
@@ -153,7 +164,10 @@ func (c *planCarrier) Declare(permitted []agenttools.Tool) ([]tool.BaseTool, err
 	}}}, nil
 }
 
-func (c *planCarrier) FrameForModel(_, result string) string { return result }
+// FrameForModel: always, for the reason programCarrier's says.
+func (c *planCarrier) FrameForModel(_, result string) string {
+	return agenttools.FrameUntrusted(result)
+}
 
 func (c *planCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (string, error) {
 	if name != planToolName {
@@ -161,18 +175,51 @@ func (c *planCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (stri
 	}
 	source, err := stringArg(rawArgs, "plan")
 	if err != nil {
-		return "", err
+		return repairable("", err)
 	}
 	// Compiled BEFORE anything is driven, because a plan that cannot finish
 	// must be refused whole rather than half-run — and the refusal is a
 	// result the model can read and repair, not a failed run.
 	gc, err := newGraphCarrier(c.granted(), source)
 	if err != nil {
-		return "", err
+		return repairable("", err)
 	}
-	return c.runs.drive(ctx, c.runID, func() (<-chan *Suspension, func(context.Context) (string, error)) {
+	out, err := c.runs.drive(ctx, c.runID, func() (<-chan *Suspension, func(context.Context) (string, error)) {
 		return gc.Suspensions(), gc.Run
 	})
+	return repairable(out, err)
+}
+
+// repairable is what a composing carrier returns when the thing the model
+// wrote did not work.
+//
+// IT IS A RESULT, NOT AN ERROR, and that is the whole point. Under the
+// declared-call carrier a call the kernel refused comes back to the model as a
+// RESULT — a refusal is an answer — and the model reads it and tries something
+// else. A program that does not compile is the same event one level up: the
+// model wrote something wrong and what it needs is the diagnostic. Returning
+// it as an error made a mistyped bracket TERMINAL, which no declared call has
+// ever been: the framework wrapped it as a NodeRunError, nothing could name
+// the cause, and the person read "the model failed to answer" over a missing
+// parenthesis. Observed 2026-08-27 on a live model, first question asked.
+//
+// TWO THINGS STAY ERRORS, and they are exactly the ones the model cannot act
+// on: a SUSPENSION, because the host reads the person's question off it and a
+// swallowed one would strand the run; and a CANCELLED CONTEXT, because the run
+// is over and there is nobody left to repair anything.
+func repairable(out string, err error) (string, error) {
+	if err == nil {
+		return out, nil
+	}
+	var ask *ApprovalRequestedError
+	var egress *EgressRequestedError
+	if errors.As(err, &ask) || errors.As(err, &egress) {
+		return "", err
+	}
+	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+		return "", err
+	}
+	return "That did not work:\n" + err.Error() + "\n\nFix it and call this tool again.", nil
 }
 
 // ── Shared between the two composing carriers ──────────────────────────

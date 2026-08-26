@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -330,23 +331,27 @@ func TestDialogOpenDirectory_RefusedWhileOpenFileIsOutstanding(t *testing.T) {
 func waitDirectoryDialogFree(t *testing.T, conn *websocket.Conn, wantPath string) {
 	t.Helper()
 	var gotPath string
-	testwait.WaitForTimeout(t, "directory dialog capability to become free", 3*time.Second, func() bool {
-		resp := jsonrpcCall(t, conn, "dialog.openDirectory", map[string]any{})
-		var env struct {
-			Error  *jsonrpcErrorObj `json:"error"`
-			Result *struct {
-				Path string `json:"path"`
-			} `json:"result"`
-		}
-		if err := json.Unmarshal(resp, &env); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if env.Result == nil {
-			return false
-		}
-		gotPath = env.Result.Path
-		return true
-	})
+	var lastResp json.RawMessage
+	testwait.WaitForTimeoutDetail(t, "directory dialog capability to become free", 3*time.Second,
+		func() string { return fmt.Sprintf("last response %s", lastResp) },
+		func() bool {
+			resp := jsonrpcCall(t, conn, "dialog.openDirectory", map[string]any{})
+			lastResp = resp
+			var env struct {
+				Error  *jsonrpcErrorObj `json:"error"`
+				Result *struct {
+					Path string `json:"path"`
+				} `json:"result"`
+			}
+			if err := json.Unmarshal(resp, &env); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if env.Result == nil {
+				return false
+			}
+			gotPath = env.Result.Path
+			return true
+		})
 	if gotPath != wantPath {
 		t.Fatalf("path = %q, want %q", gotPath, wantPath)
 	}

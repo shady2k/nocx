@@ -11,6 +11,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -478,22 +479,35 @@ func TestAgentAsk_ConnectionLostMidStreamTerminalizes(t *testing.T) {
 	// dropped; the record is what a reconnect reads.
 	var terminalState *content.RunState
 	var entryErr error
-	testwait.WaitForTimeout(t, "the run to terminalize", 5*time.Second, func() bool {
-		q, err := h.db.Ledger().Entry(context.Background(), res.EntryID)
-		if err != nil {
-			entryErr = err
+	lastState, sawEntry := "<none>", false
+	testwait.WaitForTimeoutDetail(t, "the run to terminalize", 5*time.Second,
+		func() string {
+			return fmt.Sprintf("run never terminalized; state = %s (entry present=%v, err %v)",
+				lastState, sawEntry, entryErr)
+		},
+		func() bool {
+			q, err := h.db.Ledger().Entry(context.Background(), res.EntryID)
+			if err != nil {
+				entryErr = err
+				return true
+			}
+			if q == nil {
+				sawEntry = false
+				return false
+			}
+			sawEntry = true
+			st := q.Executions[0].State
+			if st == nil {
+				lastState = "<nil>"
+				return false
+			}
+			lastState = string(*st)
+			if *st == content.RunPrepared || *st == content.RunStreaming {
+				return false
+			}
+			terminalState = st
 			return true
-		}
-		if q == nil {
-			return false
-		}
-		st := q.Executions[0].State
-		if st == nil || *st == content.RunPrepared || *st == content.RunStreaming {
-			return false
-		}
-		terminalState = st
-		return true
-	})
+		})
 	if entryErr != nil {
 		t.Fatalf("question entry: %v", entryErr)
 	}

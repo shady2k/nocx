@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -50,11 +51,16 @@ func waitersOf(t *testing.T, a Admission, want int, what string) {
 	if !ok {
 		t.Fatalf("admission is %T, want *waitingSemaphore", a)
 	}
-	testwait.WaitForTimeout(t, what, 2*time.Second, func() bool {
+	// One accessor for both the condition and the failure text, so the
+	// detail closure never takes a lock the caller is already holding.
+	waiters := func() int {
 		ws.mu.Lock()
 		defer ws.mu.Unlock()
-		return ws.waiters == want
-	})
+		return ws.waiters
+	}
+	testwait.WaitForTimeoutDetail(t, what, 2*time.Second,
+		func() string { return fmt.Sprintf("waiter count = %d, want %d", waiters(), want) },
+		func() bool { return waiters() == want })
 }
 
 // TestWaitingAdmission_AwaitsConflictInsteadOfRefusing is the heart of the

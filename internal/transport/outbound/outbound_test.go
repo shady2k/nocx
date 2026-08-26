@@ -74,9 +74,9 @@ func (f *fakeSocket) got() []Frame {
 // waitWrites waits until the fake has recorded n writes.
 func waitWrites(t *testing.T, f *fakeSocket, n int) []Frame {
 	t.Helper()
-	testwait.WaitForTimeout(t, fmt.Sprintf("%d writes", n), 5*time.Second, func() bool {
-		return len(f.got()) >= n
-	})
+	testwait.WaitForTimeoutDetail(t, fmt.Sprintf("%d writes", n), 5*time.Second,
+		func() string { return fmt.Sprintf("got %d", len(f.got())) },
+		func() bool { return len(f.got()) >= n })
 	return f.got()
 }
 
@@ -145,16 +145,19 @@ func TestQueueFullMarksStalledAndDropsFrame(t *testing.T) {
 	// Unblock the pump: it must deliver the queued frames AND the stall
 	// notice through the reserved slot.
 	close(f.release)
-	testwait.WaitForTimeout(t, "stall notice and queued frames", 5*time.Second, func() bool {
-		w := f.got()
-		hasNotice := false
-		for _, fr := range w {
+	noticed := func() bool {
+		for _, fr := range f.got() {
 			if strings.Contains(string(fr.Data), "outbound.stalled") {
-				hasNotice = true
+				return true
 			}
 		}
-		return hasNotice && len(w) >= 6
-	})
+		return false
+	}
+	testwait.WaitForTimeoutDetail(t, "stall notice and queued frames", 5*time.Second,
+		func() string {
+			return fmt.Sprintf("stall notice written = %v; got %d writes", noticed(), len(f.got()))
+		},
+		func() bool { return noticed() && len(f.got()) >= 6 })
 }
 
 func TestOverflowBeyondReservedSlotCloses(t *testing.T) {

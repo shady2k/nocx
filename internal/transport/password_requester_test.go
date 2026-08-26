@@ -387,9 +387,14 @@ func TestPasswordResolved_UnknownRequestID(t *testing.T) {
 // what broadcastAsk consults — a dial that has returned is not yet a client.
 func waitForConns(t *testing.T, ws *WSServer, n int) {
 	t.Helper()
-	testwait.WaitForTimeout(t, fmt.Sprintf("server registration of %d connection(s)", n), wantWithin, func() bool {
+	registered := func() int {
 		ws.connsMu.Lock()
 		defer ws.connsMu.Unlock()
-		return len(ws.conns) >= n
-	})
+		return len(ws.conns)
+	}
+	testwait.WaitForTimeoutDetail(t, fmt.Sprintf("server registration of %d connection(s)", n), wantWithin,
+		func() string {
+			return fmt.Sprintf("server registered %d connection(s) within %s", registered(), wantWithin)
+		},
+		func() bool { return registered() >= n })
 }

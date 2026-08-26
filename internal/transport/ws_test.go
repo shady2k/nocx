@@ -778,9 +778,9 @@ func TestWSServer_ExitClearsRegistry(t *testing.T) {
 
 	// Wait for the session to exit. 30 s is a generous failsafe; the test
 	// succeeds as soon as the registry is empty, not when the clock runs out.
-	testwait.WaitForTimeout(t, "session exit to clear the registry", 30*time.Second, func() bool {
-		return len(sess.List()) == 0
-	})
+	testwait.WaitForTimeoutDetail(t, "session exit to clear the registry", 30*time.Second,
+		func() string { return fmt.Sprintf("%d session(s) still in the registry", len(sess.List())) },
+		func() bool { return len(sess.List()) == 0 })
 }
 
 // TestWSServer_CrossConnectionIsolation proves connection A cannot touch
@@ -2499,15 +2499,19 @@ func (h *replayHarness) openProfile(t *testing.T, extra map[string]any) {
 func (h *replayHarness) waitForTunnels(t *testing.T, n int) []*tunnel.Tunnel {
 	t.Helper()
 	var rows []*tunnel.Tunnel
-	testwait.WaitForTimeout(t, fmt.Sprintf("ledger to hold %d forward(s)", n), 10*time.Second, func() bool {
-		h.ws.tunnelMu.Lock()
-		defer h.ws.tunnelMu.Unlock()
-		rows = make([]*tunnel.Tunnel, 0, len(h.ws.tunnels))
-		for _, tt := range h.ws.tunnels {
-			rows = append(rows, tt)
-		}
-		return len(rows) == n
-	})
+	testwait.WaitForTimeoutDetail(t, fmt.Sprintf("ledger to hold %d forward(s)", n), 10*time.Second,
+		// rows is the last snapshot the condition took, on this goroutine and
+		// under the ledger's mutex; reading its length here takes no lock.
+		func() string { return fmt.Sprintf("ledger holds %d forward(s), want %d", len(rows), n) },
+		func() bool {
+			h.ws.tunnelMu.Lock()
+			defer h.ws.tunnelMu.Unlock()
+			rows = make([]*tunnel.Tunnel, 0, len(h.ws.tunnels))
+			for _, tt := range h.ws.tunnels {
+				rows = append(rows, tt)
+			}
+			return len(rows) == n
+		})
 	return rows
 }
 

@@ -211,16 +211,22 @@ func TestTransportDisconnect_DestroysEverythingOnTheConnection(t *testing.T) {
 	// a hang on a saving capture).
 	_ = conn.Close()
 	var dismissErr error
-	testwait.WaitForTimeout(t, "disconnect destroy to become observable", wantWithin, func() bool {
+	liveConns := func() int {
 		ws.connsMu.Lock()
-		gone := len(ws.conns) == 0
-		ws.connsMu.Unlock()
-		if !gone {
-			return false
-		}
-		dismissErr = caps.Dismiss(credential.CaptureID(captureA))
-		return true
-	})
+		defer ws.connsMu.Unlock()
+		return len(ws.conns)
+	}
+	testwait.WaitForTimeoutDetail(t, "disconnect destroy to become observable", wantWithin,
+		func() string {
+			return fmt.Sprintf("not observable within %s: %d connection(s) still registered", wantWithin, liveConns())
+		},
+		func() bool {
+			if liveConns() != 0 {
+				return false
+			}
+			dismissErr = caps.Dismiss(credential.CaptureID(captureA))
+			return true
+		})
 	if !errors.Is(dismissErr, credential.ErrCaptureUnknown) {
 		t.Fatalf("disconnect destroy error = %v, want capture unknown", dismissErr)
 	}

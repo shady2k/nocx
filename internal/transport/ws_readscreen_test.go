@@ -465,18 +465,34 @@ func TestReadScreen_DisconnectedRendererTerminalizes(t *testing.T) {
 	led := h.db.Ledger()
 	ctx := context.Background()
 	var entryErr error
-	testwait.WaitForTimeout(t, "the run to terminalize", 15*time.Second, func() bool {
-		entry, err := led.Entry(ctx, res.EntryID)
-		if err != nil {
-			entryErr = err
-			return true
-		}
-		if entry == nil || len(entry.Executions) == 0 {
-			return false
-		}
-		st := entry.Executions[0].State
-		return st != nil && *st != content.RunPrepared && *st != content.RunStreaming
-	})
+	lastState, lastExecs := "<none>", -1
+	testwait.WaitForTimeoutDetail(t, "the run to terminalize", 15*time.Second,
+		func() string {
+			return fmt.Sprintf("run %d never terminalized; last state %s (executions=%d, entry err %v)",
+				res.RunID, lastState, lastExecs, entryErr)
+		},
+		func() bool {
+			entry, err := led.Entry(ctx, res.EntryID)
+			if err != nil {
+				entryErr = err
+				return true
+			}
+			if entry == nil {
+				lastExecs = -1
+				return false
+			}
+			lastExecs = len(entry.Executions)
+			if lastExecs == 0 {
+				return false
+			}
+			st := entry.Executions[0].State
+			if st == nil {
+				lastState = "<nil>"
+				return false
+			}
+			lastState = string(*st)
+			return *st != content.RunPrepared && *st != content.RunStreaming
+		})
 	if entryErr != nil {
 		t.Fatalf("question entry: %v", entryErr)
 	}

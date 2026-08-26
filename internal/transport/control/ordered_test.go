@@ -2,6 +2,7 @@ package control
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -132,9 +133,9 @@ func TestOrderedSubmission_RefusesWhenFull(t *testing.T) {
 	close(release)
 	// All THREE admitted tasks complete — the one that occupied the worker
 	// and the two that were queued behind it. The refused one never ran.
-	testwait.WaitForTimeout(t, "all admitted tasks to complete", 5*time.Second, func() bool {
-		return atomic.LoadInt64(&n) >= 3
-	})
+	testwait.WaitForTimeoutDetail(t, "all admitted tasks to complete", 5*time.Second,
+		func() string { return fmt.Sprintf("%d of 3 ran", atomic.LoadInt64(&n)) },
+		func() bool { return atomic.LoadInt64(&n) >= 3 })
 }
 
 func TestOrderedSubmission_PropagatesTaskContext(t *testing.T) {

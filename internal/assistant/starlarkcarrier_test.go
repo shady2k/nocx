@@ -23,6 +23,13 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 )
 
+// grantedTools is the vocabulary these tests hand the carrier: the one tool
+// the chain needs. The real thing is the grant's permitted set, projected
+// once for both the model's tool list and the program's allowlist
+// (carrier.go); a test naming it explicitly says which name it expects to
+// exist.
+var grantedTools = []string{"files.read"}
+
 func TestStarlarkCarrier_ASecondEffectUsesTheFirstEffectsResult(t *testing.T) {
 	grant, dir := testDirGrant(t, autonomousMatrix())
 	// The chain: index.txt names target.txt, and only reading index.txt can
@@ -31,7 +38,7 @@ func TestStarlarkCarrier_ASecondEffectUsesTheFirstEffectsResult(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "target.txt"), "the answer is here")
 
 	k := kernelFor(t, grant, &fakeLedger{})
-	carrier := newStarlarkCarrier(k, dir)
+	carrier := newStarlarkCarrier(k, grantedTools)
 
 	out, err := carrier.Run(context.Background(), `
 name = files_read(path = "`+dir+`/index.txt")["text"].strip()
@@ -58,9 +65,9 @@ answer(files_read(path = "`+dir+`/" + name)["text"])
 // happens, and the answer is whatever it computed. The null half — without it
 // the test above cannot tell "the chain ran" from "anything at all ran".
 func TestStarlarkCarrier_APureProgramReachesNoEffect(t *testing.T) {
-	grant, dir := testDirGrant(t, autonomousMatrix())
+	grant, _ := testDirGrant(t, autonomousMatrix())
 	k := kernelFor(t, grant, &fakeLedger{})
-	carrier := newStarlarkCarrier(k, dir)
+	carrier := newStarlarkCarrier(k, grantedTools)
 
 	out, err := carrier.Run(context.Background(), `answer("nothing to do")`)
 	if err != nil {
@@ -81,9 +88,9 @@ func TestStarlarkCarrier_APureProgramReachesNoEffect(t *testing.T) {
 // because "a refusal is an answer" belongs to the kernel and every carrier
 // inherits it without copying a line (nocx-uvac6.1).
 func TestStarlarkCarrier_APathOutsideTheGrantIsRefusedByTheSameKernel(t *testing.T) {
-	grant, dir := testDirGrant(t, autonomousMatrix())
+	grant, _ := testDirGrant(t, autonomousMatrix())
 	k := kernelFor(t, grant, &fakeLedger{})
-	carrier := newStarlarkCarrier(k, dir)
+	carrier := newStarlarkCarrier(k, grantedTools)
 
 	out, err := carrier.Run(context.Background(), `answer(files_read(path = "/etc/passwd"))`)
 	if err != nil {
@@ -102,9 +109,9 @@ func TestStarlarkCarrier_APathOutsideTheGrantIsRefusedByTheSameKernel(t *testing
 // same principle Registry.ForGrant states for the declared-call carrier ("the
 // strongest refusal is the one never proposed").
 func TestStarlarkCarrier_AnUndeclaredNameDoesNotExist(t *testing.T) {
-	grant, dir := testDirGrant(t, autonomousMatrix())
+	grant, _ := testDirGrant(t, autonomousMatrix())
 	k := kernelFor(t, grant, &fakeLedger{})
-	carrier := newStarlarkCarrier(k, dir)
+	carrier := newStarlarkCarrier(k, grantedTools)
 
 	if _, err := carrier.Run(context.Background(), `answer(open("/etc/passwd").read())`); err == nil {
 		t.Fatal("a program reached a name the host never declared")
@@ -119,8 +126,8 @@ func TestStarlarkCarrier_AnUndeclaredNameDoesNotExist(t *testing.T) {
 // to come from the library's process-wide globals, which any other user of
 // the library could widen from another package.
 func TestStarlarkCarrier_TheDialectCannotLoop(t *testing.T) {
-	grant, dir := testDirGrant(t, autonomousMatrix())
-	carrier := newStarlarkCarrier(kernelFor(t, grant, &fakeLedger{}), dir)
+	grant, _ := testDirGrant(t, autonomousMatrix())
+	carrier := newStarlarkCarrier(kernelFor(t, grant, &fakeLedger{}), grantedTools)
 
 	// The WANTED text is asserted, not merely "an error". A mutation run
 	// found this test passing for the wrong reason: with `while` re-enabled
@@ -153,8 +160,8 @@ func TestStarlarkCarrier_TheDialectCannotLoop(t *testing.T) {
 // nothing about the budget at all — found by removing the budget and watching
 // the test stay green.
 func TestStarlarkCarrier_AProgramThatRunsTooLongIsCutOff(t *testing.T) {
-	grant, dir := testDirGrant(t, autonomousMatrix())
-	carrier := newStarlarkCarrier(kernelFor(t, grant, &fakeLedger{}), dir)
+	grant, _ := testDirGrant(t, autonomousMatrix())
+	carrier := newStarlarkCarrier(kernelFor(t, grant, &fakeLedger{}), grantedTools)
 
 	_, err := carrier.Run(context.Background(), `
 def burn():
@@ -194,7 +201,7 @@ func TestStarlarkCarrier_AnApprovalParksTheProgramRatherThanRestartingIt(t *test
 	writeFile(t, filepath.Join(dir, "target.txt"), "the answer is here")
 
 	approvals := NewApprovalStore()
-	carrier := newStarlarkCarrier(kernelForWithApprovals(t, grant, &fakeLedger{}, approvals), dir)
+	carrier := newStarlarkCarrier(kernelForWithApprovals(t, grant, &fakeLedger{}, approvals), grantedTools)
 
 	type outcome struct {
 		out string
@@ -238,4 +245,15 @@ answer(files_read(path = "`+dir+`/" + name)["text"])
 	if n := strings.Count(r.out, "looking"); n != 1 {
 		t.Fatalf("the sentence before the first effect appears %d times, want once — the program was replayed, not resumed", n)
 	}
+}
+
+// invocations returns the effects this carrier asked the kernel for, in the
+// order it asked. IT LIVES IN THE TEST FILE because nothing in the product
+// reads it: a run report will one day want exactly this, and until it does,
+// an accessor with no caller outside its own tests is the shape nocx-rtg0
+// shipped a dead write path behind.
+func (c *starlarkCarrier) invocations() []starlarkInvocation {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]starlarkInvocation(nil), c.calls...)
 }

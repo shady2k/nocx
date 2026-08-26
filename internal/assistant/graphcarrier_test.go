@@ -100,9 +100,48 @@ func TestGraphCarrier_APlanIsRefusedWholeOrRunWhole(t *testing.T) {
 	}
 }
 
+// WHAT A PLAN CAN REPORT THAT A PROGRAM CANNOT. When a step fails halfway,
+// the model repairing it needs to know which effects already happened — a
+// re-proposed step that already ran repeats its effect — and which never
+// started. A plan knows both as structure; a program that stopped mid-way
+// knows only where its stack was.
+func TestGraphCarrier_AFailedStepReportsWhatRanAndWhatNeverStarted(t *testing.T) {
+	grant, dir := testDirGrant(t, autonomousMatrix())
+	writeFile(t, filepath.Join(dir, "index.txt"), "no-such-file.txt\n")
+
+	carrier, err := newGraphCarrier(kernelFor(t, grant, &fakeLedger{}), planSource(dir))
+	if err != nil {
+		t.Fatalf("plan: %v", err)
+	}
+	if _, err = carrier.Run(context.Background()); err == nil {
+		t.Fatal("a step read a file that does not exist and the plan succeeded")
+	}
+	report := err.Error()
+	for _, want := range []string{
+		"index: files.read", "— ran",
+		"target: files.read", "stopped here",
+		"uses index",
+	} {
+		if !strings.Contains(report, want) {
+			t.Fatalf("the failure does not say %q:\n%s", want, report)
+		}
+	}
+}
+
 // planSource fills the fixture directory into the plan's CEL literals.
 func planSource(dir string) string {
 	return strings.Replace(
 		strings.Replace(twoStepPlan, "%q", `'`+dir+`/index.txt'`, 1),
 		"%q", `'`+dir+`/'`, 1)
+}
+
+// invocations returns the effects this carrier asked the kernel for, in the
+// order it asked. IT LIVES IN THE TEST FILE because nothing in the product
+// reads it: a run report will one day want exactly this, and until it does,
+// an accessor with no caller outside its own tests is the shape nocx-rtg0
+// shipped a dead write path behind.
+func (c *graphCarrier) invocations() []starlarkInvocation {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return append([]starlarkInvocation(nil), c.calls...)
 }

@@ -312,7 +312,7 @@ func TestMiddleware_ApprovedEgressResumeSendsRetained(t *testing.T) {
 	approvals.Retain(ap, "withheld: sk-proj-abcdefghijklmnopqrstuvwx", false)
 
 	ran := false
-	out, err := mw.runWithRetained(agenttools.Tool{Declaration: agenttools.Declaration{Name: "files.read"}}, "call_1", context.Background(), &countingCapability{called: &ran}, []byte(args))
+	out, err := mw.kernel.runWithRetained(agenttools.Tool{Declaration: agenttools.Declaration{Name: "files.read"}}, "call_1", context.Background(), &countingCapability{called: &ran}, []byte(args))
 	if err != nil {
 		t.Fatalf("runWithRetained: %v", err)
 	}

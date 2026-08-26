@@ -359,11 +359,6 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	if p.Grant != nil {
 		permitted := c.tools.ForGrant(*p.Grant)
 		if len(permitted) > 0 {
-			var err error
-			declared, err = declaredTools(permitted)
-			if err != nil {
-				return err
-			}
 			// The approval store is the client's own (process-lifetime, one
 			// per client, keyed by run id — ADR-0028: checkpoints are
 			// process-lifetime state); a caller may pass one explicitly.
@@ -380,9 +375,17 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 			if p.Classifier != nil {
 				classifier = newClassifierEngine(c.log, c.http, p.Classifier)
 			}
-			mw, err := newPolicyMiddleware(c.log, *p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.TurnEntryID, p.Requester, classifier, func(call ToolCall) error {
+			mw, err := newPolicyMiddleware(p.Carrier, c.parked, c.log, *p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.TurnEntryID, p.Requester, classifier, func(call ToolCall) error {
 				return sink(AskEvent{Kind: AskToolCall, Call: &call})
 			})
+			if err != nil {
+				return err
+			}
+			// The CARRIER decides what the model is offered, not this
+			// function: the tool set is one of the two facts the three
+			// methods differ on (carrier.go), and the other is what an
+			// invocation does. Ask knows neither.
+			declared, err = mw.Declare(permitted)
 			if err != nil {
 				return err
 			}
@@ -445,6 +448,11 @@ func (c *client) Discard(runID string) {
 		return
 	}
 	_ = c.checkpoints.Delete(context.Background(), runID)
+	// And the other kind of suspended state: a carrier that parked its
+	// continuation on a goroutine. Both stores are emptied here because both
+	// answer the same question — "is this run still in the middle of
+	// something" — and a run that has ended must leave neither behind.
+	c.parked.discard(runID)
 }
 
 // declaredTools converts the registry's assembled tools into the ADK tools

@@ -1,23 +1,24 @@
 package assistant
 
-// The DECLARED-CALL carrier's adapter (nocx-d6gn4.12).
-//
-// Everything eino knows about the tool-call pipeline is in this file, and it
-// is deliberately thin: unpack the framework's call context, hand the effect
-// to the kernel, and translate what the kernel answers back into the
-// framework's vocabulary. It decides nothing.
+// The FRAMEWORK ADAPTER (nocx-d6gn4.12): everything eino knows about the
+// tool-call pipeline is in this file, and it is deliberately thin — unpack the
+// framework's call context, hand what the model reached for to the run's
+// carrier, and translate what comes back into the framework's vocabulary. It
+// decides nothing, and it knows which carrier it is holding no more than the
+// framework does.
 //
 // TWO THINGS LIVE HERE RATHER THAN IN THE KERNEL, and both for the same
-// reason — they are facts about THIS carrier, not about effects:
+// reason — they are facts about the FRAMEWORK'"'"'s seam, not about effects:
 //
 //   - The BATCH LATCH. "Every later call in this model response stops" is a
-//     statement about a model response, which is a shape only a carrier that
-//     proposes calls in batches has. A program carrier has a program; a graph
-//     carrier has a graph. Each stops in its own way.
-//   - The INTERRUPT. compose.StatefulInterrupt is how eino suspends. The
-//     kernel says "a person must answer this" by returning
+//     statement about a model response, which is a shape only a model
+//     proposing calls in batches has. Under the composing carriers the model
+//     proposes one envelope, so the latch has nothing to latch and costs
+//     nothing.
+//   - The INTERRUPT. compose.StatefulInterrupt is how eino suspends. A
+//     carrier says "a person must answer this" by returning
 //     *ApprovalRequestedError or *EgressRequestedError; turning that into a
-//     framework interrupt is this adapter's whole job.
+//     framework interrupt is this adapter'"'"'s whole job.
 
 import (
 	"context"
@@ -33,23 +34,34 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 )
 
-// policyMiddleware is the effect kernel wearing eino's middleware interface.
+// policyMiddleware is THE RUN'S CARRIER wearing eino's middleware interface.
 // It holds no state of its own: the run's facts belong to the kernel, and
 // two owners of them is the thing this split exists to prevent.
+//
+// It is the carrier rather than the kernel because the framework's seam is
+// "the model reached for a tool", and which tools exist and what reaching for
+// one does is exactly what the three carriers differ on (carrier.go). The
+// kernel is still underneath every one of them.
 type policyMiddleware struct {
 	adk.BaseChatModelAgentMiddleware
-	*effectKernel
+	carrier
+	kernel *effectKernel
 }
 
-// newPolicyMiddleware builds the kernel for one run and dresses it as eino's
-// middleware. Every argument is the kernel's; see newEffectKernel for what
-// each one is and which may be nil.
-func newPolicyMiddleware(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, turnEntryID string, requester RendererRequester, classifier CallClassifier, onCall func(ToolCall) error) (*policyMiddleware, error) {
+// newPolicyMiddleware builds the kernel for one run, wraps it in the carrier
+// the person chose, and dresses the pair as eino's middleware. Every argument
+// after kind is the kernel's; see newEffectKernel for what each one is and
+// which may be nil.
+func newPolicyMiddleware(kind CarrierKind, runs *parkedRuns, logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, turnEntryID string, requester RendererRequester, classifier CallClassifier, onCall func(ToolCall) error) (*policyMiddleware, error) {
 	k, err := newEffectKernel(logger, grant, registry, ledger, approvals, known, runID, attempt, turnEntryID, requester, classifier, onCall)
 	if err != nil {
 		return nil, err
 	}
-	return &policyMiddleware{effectKernel: k}, nil
+	c, err := newCarrier(kind, k, runs, runID)
+	if err != nil {
+		return nil, err
+	}
+	return &policyMiddleware{carrier: c, kernel: k}, nil
 }
 
 // WrapInvokableToolCall installs the pipeline on one tool call.

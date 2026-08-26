@@ -81,11 +81,12 @@ func (s *Suspension) Resume() { close(s.resume) }
 
 type starlarkCarrier struct {
 	kernel invoker
-	// cwd is the directory a relative path in a program resolves against. The
-	// program is untrusted input; leaving relative paths to resolve against
-	// the process's working directory would make the meaning of an argument
-	// depend on where the backend happens to have been started.
-	cwd string
+	// tools is the run's vocabulary: the tools the grant permits, and nothing
+	// else. It is passed in rather than read off the kernel because the
+	// allowlist a program sees and the tool set the model was shown must be
+	// ONE projection of the grant — two derivations of "which tools" is the
+	// shape AGENTS.md spends a section on.
+	tools []string
 
 	// suspensions carries a question out to the host. UNBUFFERED on purpose:
 	// the send completes only when somebody is listening, so a program cannot
@@ -98,8 +99,8 @@ type starlarkCarrier struct {
 	nextSeq int
 }
 
-func newStarlarkCarrier(kernel invoker, cwd string) *starlarkCarrier {
-	return &starlarkCarrier{kernel: kernel, cwd: cwd, suspensions: make(chan *Suspension)}
+func newStarlarkCarrier(kernel invoker, tools []string) *starlarkCarrier {
+	return &starlarkCarrier{kernel: kernel, tools: tools, suspensions: make(chan *Suspension)}
 }
 
 // Suspensions is where the host learns that the program stopped on a question.
@@ -109,21 +110,14 @@ func (c *starlarkCarrier) Suspensions() <-chan *Suspension {
 	return c.suspensions
 }
 
-// invocations returns the effects this carrier asked the kernel for, in the
-// order it asked.
-func (c *starlarkCarrier) invocations() []starlarkInvocation {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return append([]starlarkInvocation(nil), c.calls...)
-}
-
 // Run executes one program and returns what it answered.
 //
-// The interpreter runs on THIS goroutine for now; the parking half arrives
-// with suspension, which is the next slice. A program that never calls
-// answer() returns the empty string rather than an error: saying nothing is a
-// poor answer, not a broken program, and the difference matters to whoever
-// reads the turn.
+// It runs on the caller's goroutine, and the caller is expected to be one the
+// host started for it (parkedrun.go): an effect that needs a person's answer
+// BLOCKS inside this call, so a host that ran a program inline would block
+// itself. A program that never calls answer() returns the empty string rather
+// than an error: saying nothing is a poor answer, not a broken program, and
+// the difference matters to whoever reads the turn.
 func (c *starlarkCarrier) Run(ctx context.Context, source string) (string, error) {
 	thread := &starlark.Thread{Name: "program"}
 	thread.SetMaxExecutionSteps(maxProgramSteps)
@@ -182,10 +176,14 @@ const maxProgramSteps = 10_000_000
 // not exist for the program — the allowlist IS the capability surface, and it
 // is built from the same declarations the wire tools are projected from.
 func (c *starlarkCarrier) predeclared() starlark.StringDict {
-	return starlark.StringDict{
-		"files_read": starlark.NewBuiltin("files_read", c.effect("files.read")),
-		"answer":     starlark.NewBuiltin("answer", c.recordAnswer),
+	d := starlark.StringDict{
+		"answer": starlark.NewBuiltin("answer", c.recordAnswer),
 	}
+	for _, tool := range c.tools {
+		name := intrinsicName(tool)
+		d[name] = starlark.NewBuiltin(name, c.effect(tool))
+	}
+	return d
 }
 
 // effect returns the intrinsic for one declared tool. It looks like an
@@ -236,17 +234,6 @@ func (c *starlarkCarrier) effect(tool string) func(*starlark.Thread, *starlark.B
 	}
 }
 
-// invokeParking is the kernel call plus the one thing this carrier does that
-// the declared-call carrier does not: when the kernel says a person must
-// answer first, it PARKS rather than unwinding.
-//
-// The retry after Resume is the same call — same id, same arguments — because
-// that is what the approval is bound to: a changed argument hashes differently
-// and deliberately does not resume under the old answer. One retry, never a
-// loop: if the kernel asks again about a proposal that has just been answered,
-// something is wrong that asking a person twice will not fix, and a carrier
-// that kept retrying would be the ask-forever loop the resume path exists to
-// end.
 // invokeParking is the kernel call plus the one thing a carrier that owns its
 // own control flow does that the declared-call carrier does not: when the
 // kernel says a person must answer first, it PARKS rather than unwinding.

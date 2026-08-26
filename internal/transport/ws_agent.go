@@ -489,6 +489,14 @@ type agentHandlers struct {
 	// built without it, which is what a unit test constructing the struct
 	// directly has.
 	personalInstructions func() string
+	// carrier reads the person's chosen method for composing multi-step work
+	// (settings.AssistantCarrier, nocx-d6gn4.8). A function for the same
+	// reason personalInstructions is one: it must be read WHEN the question
+	// is asked, so switching the method takes effect on the next question
+	// with no restart — which is the whole point of a switch that exists to
+	// be compared against itself. A handler built without it uses the
+	// shipped carrier.
+	carrier func() assistant.CarrierKind
 	// sessionPolicy is where "allow in this session" lands and where it
 	// dies (ws_sessionpolicy.go). Never nil: the server constructs one.
 	sessionPolicy *sessionPolicyStore
@@ -585,6 +593,32 @@ func (s *WSServer) personalInstructionsText() string {
 		return ""
 	}
 	return v
+}
+
+// chosenCarrier is the seam read, or the shipped carrier when this handler
+// was built without it — a unit test constructing agentHandlers directly,
+// never the registration builder.
+func (h agentHandlers) chosenCarrier() assistant.CarrierKind {
+	if h.carrier == nil {
+		return assistant.CarrierCalls
+	}
+	return h.carrier()
+}
+
+// assistantCarrier reads the person's chosen method out of the settings
+// registry — the document that owns it. Nil registry (a server built without
+// settings) and a rejected read are both "they have not chosen", which is the
+// shipped method: the declared-call carrier is the authority floor, and a
+// person who never opened the page must get what the product is built on.
+func (s *WSServer) assistantCarrier() assistant.CarrierKind {
+	if s.settings == nil {
+		return assistant.CarrierCalls
+	}
+	v, err := s.settings.GetSelect(settings.AssistantCarrier)
+	if err != nil {
+		return assistant.CarrierCalls
+	}
+	return assistant.CarrierKind(v)
 }
 
 // errNoEndpoint is the ask's no-endpoint refusal: a renderable condition
@@ -1027,6 +1061,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Requester:     h.requester,
 		KnownMaterial: h.knownMaterial,
 		Approvals:     h.approvals,
+		Carrier:       h.chosenCarrier(),
 		RunID:         strconv.FormatInt(rc.runID, 10),
 		Attempt:       rc.attempt,
 		// The turn every entry this run causes is joined to (nocx-h1l4o).
@@ -2181,6 +2216,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,
 			personalInstructions: s.personalInstructionsText,
+			carrier:              s.assistantCarrier,
 			sessionPolicy:        s.sessionPolicy, globalPolicy: s.agentPolicy,
 			log: s.log, state: state, clientID: connectionID(w), r: r,
 		}

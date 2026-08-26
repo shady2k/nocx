@@ -37,6 +37,7 @@ package assistant
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -213,7 +214,15 @@ func compileExpr(expr string, known map[string]bool) (cel.Program, []string, err
 	return prog, deps, nil
 }
 
-// Preview is the whole plan as a person can be shown it before it runs.
+// Preview is the whole plan as it can be shown BEFORE it runs — every effect
+// site, its tool, and which earlier steps its arguments read.
+//
+// Its consumer today is the repair path below, and that is the smaller half of
+// what it is for. The larger half — showing a person the whole plan when one
+// of its steps asks for approval — needs a field on the wire that
+// agent.approvalRequested does not have, and is nocx-d6gn4.13. Until then the
+// plan carrier can say what it is about to do only to the model, never to the
+// person, which is the honest state and not the intended one.
 func (c *graphCarrier) Preview() []PlannedEffect {
 	var out []PlannedEffect
 	for _, s := range c.steps {
@@ -232,13 +241,6 @@ func (c *graphCarrier) Preview() []PlannedEffect {
 
 // Suspensions is where the host learns the plan stopped on a question.
 func (c *graphCarrier) Suspensions() <-chan *Suspension { return c.suspensions }
-
-// invocations returns the effects this carrier asked the kernel for, in order.
-func (c *graphCarrier) invocations() []starlarkInvocation {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	return append([]starlarkInvocation(nil), c.calls...)
-}
 
 // Run walks the plan and returns what it answered.
 func (c *graphCarrier) Run(ctx context.Context) (string, error) {
@@ -272,11 +274,50 @@ func (c *graphCarrier) Run(ctx context.Context) (string, error) {
 
 		out, err := invokeParking(ctx, c.kernel, c.suspensions, s.step.Effect, callID, string(raw))
 		if err != nil {
-			return "", err
+			// A SUSPENSION IS NOT A FAILURE and must travel untouched: the
+			// host reads the request off it to ask a person, and a wrapped
+			// error would make the plan's shape more legible at the price of
+			// the question being askable at all.
+			var ask *ApprovalRequestedError
+			var egress *EgressRequestedError
+			if errors.As(err, &ask) || errors.As(err, &egress) {
+				return "", err
+			}
+			// Everything else IS a failure, and this is the one thing a plan
+			// can report that a program cannot: what had already happened
+			// when it stopped, and what was never going to happen now. A
+			// model repairing a half-run plan needs both — re-proposing a
+			// step that already ran would repeat its effect.
+			return "", fmt.Errorf("step %q failed: %w\n%s", s.step.ID, err, c.stopped(s.step.ID))
 		}
 		results[s.step.ID] = decodeResult(out)
 	}
 	return "", fmt.Errorf("plan never answers")
+}
+
+// stopped renders the plan around the step that failed: what ran, what
+// stopped, and what never started. It reads the PREVIEW rather than the
+// compiled steps, so what a failure reports and what a plan can be shown as
+// are one projection — the alternative is two renderings of one plan that
+// agree until the day they do not.
+func (c *graphCarrier) stopped(failed string) string {
+	var b strings.Builder
+	b.WriteString("the plan was:\n")
+	state := "ran"
+	for _, e := range c.Preview() {
+		if e.ID == failed {
+			state = "stopped here"
+		}
+		fmt.Fprintf(&b, "  %s: %s", e.ID, e.Tool)
+		if len(e.DependsOn) > 0 {
+			fmt.Fprintf(&b, " (uses %s)", strings.Join(e.DependsOn, ", "))
+		}
+		fmt.Fprintf(&b, " — %s\n", state)
+		if e.ID == failed {
+			state = "never started"
+		}
+	}
+	return b.String()
 }
 
 // decodeResult turns a tool's result into something an expression can read —

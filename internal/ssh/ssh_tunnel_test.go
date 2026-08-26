@@ -3,6 +3,7 @@ package ssh
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"testing"
@@ -220,7 +221,9 @@ func TestTunnelConn_ConnectionLossClosesDoneAndReclaimsPool(t *testing.T) {
 
 	// Both references release on loss: the lease's own watcher and the tab's
 	// session watcher. The dead entry is reclaimed — nothing lingers.
-	testwait.WaitForTimeout(t, "the pooled connection to be reclaimed after loss", 5*time.Second, func() bool {
+	testwait.WaitForTimeoutDetail(t, "the pooled connection to be reclaimed after loss", 5*time.Second, func() string {
+		return fmt.Sprintf("pool count after loss = %d, want 0 (dead entry reclaimed)", client.pool.Count())
+	}, func() bool {
 		return client.pool.Count() == 0
 	})
 	_ = tab.Close() // already released; must be a no-op, not a double release

@@ -188,7 +188,11 @@ func (s *testSSHServer) setMaxSessions(n int) {
 // and the count is the only thing that says it has (nocx-zlvw).
 func (s *testSSHServer) waitLiveConns(want int) {
 	s.t.Helper()
-	testwait.WaitForTimeout(s.t, "the SSH server connection count", 5*time.Second, func() bool {
+	testwait.WaitForTimeoutDetail(s.t, "the SSH server connection count", 5*time.Second, func() string {
+		s.liveMu.Lock()
+		defer s.liveMu.Unlock()
+		return fmt.Sprintf("server holds %d established connections, want %d", len(s.liveConns), want)
+	}, func() bool {
 		s.liveMu.Lock()
 		defer s.liveMu.Unlock()
 		return len(s.liveConns) == want

@@ -23,6 +23,7 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"strings"
@@ -291,7 +292,9 @@ func (e *execProbeBuf) String() string {
 // observable state change; the deadline exists only so a hang reports.
 func execProbeWaitFor(t *testing.T, out *execProbeBuf, want, what string) {
 	t.Helper()
-	testwait.WaitForTimeout(t, what, 30*time.Second, func() bool {
+	testwait.WaitForTimeoutDetail(t, what, 30*time.Second, func() string {
+		return fmt.Sprintf("never saw %q; channel carried:\n%s", want, out.String())
+	}, func() bool {
 		return strings.Contains(out.String(), want)
 	})
 }

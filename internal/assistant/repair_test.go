@@ -208,12 +208,21 @@ func TestProgramDescription_SaysTheseAreNotToolsAndShowsTheShape(t *testing.T) {
 	grant, _ := testDirGrant(t, autonomousMatrix())
 	k := kernelFor(t, grant, &fakeLedger{})
 	desc := programDescription(k.registry.ForGrant(k.grant))
+	if strings.Contains(desc, "Do the WHOLE job") {
+		t.Fatalf("the one-shot framing is back:\n%s", desc)
+	}
 
 	for _, want := range []string{
 		"NOT tools",
 		"calling one of them as a tool does nothing",
 		"Example of the shape",
 		"answer(result[\"text\"])",
+		// NOT A ONE-SHOT, and this is the assertion a live failure bought.
+		// "Do the whole job in one program" cost a model three minutes and
+		// thirty-five thousand characters of reasoning with no call emitted
+		// at all: told it had one attempt, it planned instead of acting.
+		"AS MANY TIMES AS YOU LIKE",
+		"trying to deliberating",
 	} {
 		if !strings.Contains(desc, want) {
 			t.Fatalf("the description does not say %q:\n%s", want, desc)

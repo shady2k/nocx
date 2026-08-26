@@ -380,9 +380,23 @@ func stringArg(rawArgs, name string) (string, error) {
 // cannot be forgotten here.
 func programDescription(permitted []agenttools.Tool) string {
 	var b strings.Builder
-	b.WriteString("Do the WHOLE job by writing one program and passing it as `source`. " +
+	// "DO THE WHOLE JOB IN ONE PROGRAM" was the first wording, and it cost a
+	// live model three minutes and thirty-five thousand characters of
+	// reasoning without ever emitting a call: told it had one shot, it
+	// planned instead of acting, rewriting the same program in its head. The
+	// premise was false as well as expensive — this tool may be called as
+	// many times as it likes, each call its own turn — so saying so is both
+	// more accurate and the thing that unblocks it. What the carrier is FOR
+	// still gets said, one sentence later: a chain of dependent steps belongs
+	// in ONE program, because that is the saving. The two are not in tension;
+	// the first wording just left out the half that gives permission to try.
+	b.WriteString("You act by writing a program and passing it as `source`. " +
 		"This is the only tool you have; the names below are functions inside the program, " +
 		"NOT tools — calling one of them as a tool does nothing.\n\n" +
+		"YOU MAY CALL THIS AS MANY TIMES AS YOU LIKE. Do not plan the perfect program: " +
+		"write a short one, look at what comes back, and write the next. What belongs in " +
+		"ONE program is a chain where a later step needs an earlier step's RESULT — that " +
+		"chain costs you one turn here instead of one turn per step.\n\n" +
 		"The language is Starlark, which reads like Python. A value one call returns is a " +
 		"variable the next call can use, so you never have to see an intermediate result to " +
 		"act on it. No imports, no file or network access, no unbounded loops, and nothing " +
@@ -414,8 +428,9 @@ func programDescription(permitted []agenttools.Tool) string {
 	}
 
 	b.WriteString("Every function takes its arguments BY NAME and returns the tool's result as " +
-		"a dict. Permissions are unchanged: a call the person has to approve still stops and " +
-		"asks, and the program continues from there once they answer.")
+		"a dict. If a program fails you get the error and can send another one, so prefer " +
+		"trying to deliberating. Permissions are unchanged: a call the person has to approve " +
+		"still stops and asks, and the program continues from there once they answer.")
 	return b.String()
 }
 

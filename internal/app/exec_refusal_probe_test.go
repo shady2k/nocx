@@ -228,9 +228,11 @@ LogLevel VERBOSE
 		keyPath: clientKeyPath,
 	}
 	want := fmt.Sprintf("Server listening on 127.0.0.1 port %d", port)
-	testwait.WaitForTimeout(t, "sshd listening", 20*time.Second, func() bool {
-		return strings.Contains(logBuf.String(), want)
-	})
+	testwait.WaitForTimeoutDetail(t, "sshd listening", 20*time.Second,
+		func() string { return fmt.Sprintf("log:\n%s", logBuf.String()) },
+		func() bool {
+			return strings.Contains(logBuf.String(), want)
+		})
 	return fx
 }
 
@@ -326,9 +328,13 @@ func execProbeRead(ch gossh.Channel) *lockedBuffer {
 // never on a duration: the deadline exists only so a hang reports.
 func execProbeWaitFor(t *testing.T, out *lockedBuffer, want, what string) {
 	t.Helper()
-	testwait.WaitForTimeout(t, what, 30*time.Second, func() bool {
-		return strings.Contains(out.String(), want)
-	})
+	testwait.WaitForTimeoutDetail(t, what, 30*time.Second,
+		func() string {
+			return fmt.Sprintf("never saw %q; channel output was:\n%s", want, out.String())
+		},
+		func() bool {
+			return strings.Contains(out.String(), want)
+		})
 }
 
 // ptyDeviceName is what `tty(1)` prints when its standard input IS a
@@ -347,9 +353,14 @@ var ptyDeviceName = regexp.MustCompile(`/dev/(pts/[0-9]+|ttys[0-9]+)`)
 // execProbeWaitForPTYName blocks until the buffer carries such a name.
 func execProbeWaitForPTYName(t *testing.T, out *lockedBuffer, what string) {
 	t.Helper()
-	testwait.WaitForTimeout(t, what, 30*time.Second, func() bool {
-		return ptyDeviceName.MatchString(out.String())
-	})
+	testwait.WaitForTimeoutDetail(t, what, 30*time.Second,
+		func() string {
+			return fmt.Sprintf("`tty` never named a pty device (%s); channel output was:\n%s",
+				ptyDeviceName, out.String())
+		},
+		func() bool {
+			return ptyDeviceName.MatchString(out.String())
+		})
 }
 
 // execProbeProveInteractive proves the channel carries a real interactive

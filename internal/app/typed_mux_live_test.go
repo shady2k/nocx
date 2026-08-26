@@ -18,6 +18,7 @@ package app
 
 import (
 	"errors"
+	"fmt"
 	"io"
 	"os"
 	"os/exec"
@@ -158,9 +159,13 @@ func startMuxLiveMaster(t *testing.T, fx *execProbeSshd) *muxLiveMaster {
 // a failure becomes unexplainable a second time.
 func (m *muxLiveMaster) waitReady(t *testing.T) {
 	t.Helper()
-	testwait.WaitForTimeout(t, "the master's own session to reach its prompt", 30*time.Second, func() bool {
-		return strings.Contains(m.out.String(), "NOCX_LIVE_READY")
-	})
+	testwait.WaitForTimeoutDetail(t, "the master's own session to reach its prompt", 30*time.Second,
+		func() string {
+			return fmt.Sprintf("it said:\n%s\nand ssh said:\n%s", m.out.String(), m.errOut.String())
+		},
+		func() bool {
+			return strings.Contains(m.out.String(), "NOCX_LIVE_READY")
+		})
 }
 
 // openOwned waits for the control socket to answer OUR handshake. Ownership
@@ -168,15 +173,22 @@ func (m *muxLiveMaster) waitReady(t *testing.T) {
 func (m *muxLiveMaster) openOwned(t *testing.T) *mux.Master {
 	t.Helper()
 	var master *mux.Master
-	testwait.WaitForTimeout(t, "the control socket to complete the handshake", 30*time.Second, func() bool {
-		candidate, err := mux.Open(m.controlPath)
-		if err != nil {
-			return false
-		}
-		master = candidate
-		t.Cleanup(func() { _ = master.Close() })
-		return true
-	})
+	var last error
+	testwait.WaitForTimeoutDetail(t, "the control socket to complete the handshake", 30*time.Second,
+		func() string {
+			return fmt.Sprintf("last error: %v; master said:\n%s\nand ssh said:\n%s",
+				last, m.out.String(), m.errOut.String())
+		},
+		func() bool {
+			candidate, err := mux.Open(m.controlPath)
+			if err != nil {
+				last = err
+				return false
+			}
+			master = candidate
+			t.Cleanup(func() { _ = master.Close() })
+			return true
+		})
 	return master
 }
 
@@ -187,9 +199,11 @@ func (m *muxLiveMaster) echoThrough(t *testing.T, token string) {
 	if _, err := io.WriteString(m.stdin, token+"\n"); err != nil {
 		t.Fatalf("type into the master's session: %v", err)
 	}
-	testwait.WaitForTimeout(t, "the master's session to echo "+token, 30*time.Second, func() bool {
-		return strings.Count(m.out.String(), token) >= 1
-	})
+	testwait.WaitForTimeoutDetail(t, "the master's session to echo "+token, 30*time.Second,
+		func() string { return fmt.Sprintf("it said:\n%s", m.out.String()) },
+		func() bool {
+			return strings.Count(m.out.String(), token) >= 1
+		})
 }
 
 func muxLiveConnCount(fx *execProbeSshd) int {
@@ -324,7 +338,9 @@ func TestTypedMux_NothingIsPublishedBeforeOwnershipIsProven(t *testing.T) {
 		t.Fatalf("the subsystem session is not usable: %v", err)
 	}
 
-	testwait.WaitForTimeout(t, "the server to record the subsystem session", 30*time.Second, func() bool {
-		return strings.Count(fx.log.String(), "subsystem 'sftp'") == 1
-	})
+	testwait.WaitForTimeoutDetail(t, "the server to record the subsystem session", 30*time.Second,
+		func() string { return fmt.Sprintf("log:\n%.4000s", fx.log.String()) },
+		func() bool {
+			return strings.Count(fx.log.String(), "subsystem 'sftp'") == 1
+		})
 }

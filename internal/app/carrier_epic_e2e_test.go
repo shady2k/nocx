@@ -540,10 +540,8 @@ func TestEpicE2E_ATypedSSHComesUpIntegratedAndLeaksNeitherBearer(t *testing.T) {
 	// backend now that the command carries neither bearer. The recovery
 	// fence has no such seam on this path; the canary covers it, because the
 	// canary is inside it.
-	childCap, ok := h.win.capability(t)
-	if !ok {
-		t.Fatal("frame 2 never carried a capability: the typed session's secret was never delivered")
-	}
+	childCap := h.win.capability(t,
+		"frame 2 to carry a capability: the typed session's secret was never delivered")
 	capHex := hex.EncodeToString(childCap[:])
 	probe := newCanaryProbe(t, capHex, "")
 

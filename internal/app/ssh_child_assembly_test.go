@@ -177,27 +177,44 @@ func (w *harnessWindow) Close() error {
 
 // capability returns the per-epoch capability out of the secret frame the
 // delivery wrote, waiting for it to be written.
-func (w *harnessWindow) capability(t *testing.T) (lifecycle.Capability, bool) {
+//
+// It FAILS rather than returning false, which is not what it did before the
+// sleep sweep: this returned (zero, false) and each caller owned the sentence
+// it failed with. Those sentences differ — one is about frame 2 never carrying
+// the typed session's secret, the other about the late-hello proof needing a
+// capability — so `what` stays the caller's rather than being collapsed into
+// one message here. The bytes the child did write are the same question on
+// both paths, so the detail is this function's: whether nothing arrived or
+// something malformed did is what the timeout has to answer, and nothing else
+// on this path can.
+func (w *harnessWindow) capability(t *testing.T, what string) lifecycle.Capability {
 	t.Helper()
 	var cap lifecycle.Capability
-	testwait.WaitForTimeout(t, "the child's capability frame", 60*time.Second, func() bool {
-		w.mu.Lock()
-		m := childCapRe.FindStringSubmatch(string(w.written))
-		w.mu.Unlock()
-		if m == nil {
-			return false
-		}
-		raw, err := hex.DecodeString(m[1])
-		if err != nil {
-			t.Fatalf("frame 2 capability %q does not decode: %v", m[1], err)
-		}
-		if len(raw) != len(cap) {
-			t.Fatalf("frame 2 capability is %d bytes, want %d", len(raw), len(cap))
-		}
-		copy(cap[:], raw)
-		return true
-	})
-	return cap, true
+	testwait.WaitForTimeoutDetail(t, what,
+		60*time.Second,
+		func() string {
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			return fmt.Sprintf("written=%q", string(w.written))
+		},
+		func() bool {
+			w.mu.Lock()
+			m := childCapRe.FindStringSubmatch(string(w.written))
+			w.mu.Unlock()
+			if m == nil {
+				return false
+			}
+			raw, err := hex.DecodeString(m[1])
+			if err != nil {
+				t.Fatalf("frame 2 capability %q does not decode: %v", m[1], err)
+			}
+			if len(raw) != len(cap) {
+				t.Fatalf("frame 2 capability is %d bytes, want %d", len(raw), len(cap))
+			}
+			copy(cap[:], raw)
+			return true
+		})
+	return cap
 }
 
 // harnessTerminals is the typedSessions seam: one window, for the one session
@@ -992,9 +1009,11 @@ func TestLiveSshd_SSHChildAssembly_ForwardingRefusedParentStillActivates(t *test
 	// (nocx-beib), so the report lands there — which is also what a user
 	// would see, and the refusal-leak contract for a CONVENTIONAL session
 	// is asserted separately by its own proof.
-	testwait.WaitForTimeout(t, "ssh reporting the refused reverse forward", 30*time.Second, func() bool {
-		return strings.Contains(proc.out.String(), "remote port forwarding failed")
-	})
+	testwait.WaitForTimeoutDetail(t, "ssh reporting the refused reverse forward", 30*time.Second,
+		func() string { return fmt.Sprintf("terminal:\n%s", proc.out.String()) },
+		func() bool {
+			return strings.Contains(proc.out.String(), "remote port forwarding failed")
+		})
 	// The refusal is the terminal outcome for the reverse-forward attempt.
 	// The child remains Pending in the kernel read model; no duration is
 	// needed to establish that state.
@@ -1005,9 +1024,7 @@ func TestLiveSshd_SSHChildAssembly_ForwardingRefusedParentStillActivates(t *test
 	// The refused forward can be reported before the remote loader finishes
 	// delivering frame 2. Wait for that capability frame before closing the
 	// far shell; the frame is the observable bootstrap completion.
-	if _, ok := h.win.capability(h.t); !ok {
-		h.t.Fatal("no capability was ever delivered to the far side; the late-hello proof needs one")
-	}
+	h.win.capability(h.t, "a capability delivered to the far side; the late-hello proof needs one")
 	// The user gives up on the nested session; the far shell exits and the
 	// composed line returns.
 	proc.typeExit()
@@ -1035,11 +1052,8 @@ func TestLiveSshd_SSHChildAssembly_ForwardingRefusedParentStillActivates(t *test
 // their states.
 func (h *sshChildHarness) assertLateChildHelloRejected() {
 	h.t.Helper()
-	cap, ok := h.win.capability(h.t)
-	if !ok {
-		h.t.Fatal("no capability was ever delivered to the far side; the late-hello proof needs one")
-	}
-	h.childCap = cap
+	h.childCap = h.win.capability(h.t,
+		"a capability delivered to the far side; the late-hello proof needs one")
 	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", h.childLPort))
 	if err != nil {
 		h.t.Fatalf("dial child listener: %v", err)

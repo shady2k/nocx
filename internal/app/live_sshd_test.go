@@ -387,9 +387,11 @@ LogLevel VERBOSE
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	want := fmt.Sprintf("Server listening on 127.0.0.1 port %d", port)
-	testwait.WaitForTimeout(t, "sshd listening", 10*time.Second, func() bool {
-		return strings.Contains(logBuf.String(), want)
-	})
+	testwait.WaitForTimeoutDetail(t, "sshd listening", 10*time.Second,
+		func() string { return fmt.Sprintf("log:\n%s", logBuf.String()) },
+		func() bool {
+			return strings.Contains(logBuf.String(), want)
+		})
 	return &liveSshd{
 		addr:      addr,
 		user:      userName,
@@ -921,9 +923,16 @@ func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 	// The refusal is synchronous: no domain may ever be minted. The native
 	// prompt is the observable that the bootstrap has finished and the
 	// channel is ready for ordinary terminal input.
-	testwait.WaitForTimeout(t, "native prompt after refused forwarding", 20*time.Second, func() bool {
-		return strings.Contains(out.String(), "NATIVE_PROMPT>")
-	})
+	testwait.WaitForTimeoutDetail(t, "native prompt after refused forwarding", 20*time.Second,
+		func() string {
+			kernel.mu.Lock()
+			minted := kernel.minted
+			kernel.mu.Unlock()
+			return fmt.Sprintf("minted %d domain(s); terminal:\n%s", minted, out.String())
+		},
+		func() bool {
+			return strings.Contains(out.String(), "NATIVE_PROMPT>")
+		})
 	kernel.mu.Lock()
 	minted := kernel.minted
 	kernel.mu.Unlock()

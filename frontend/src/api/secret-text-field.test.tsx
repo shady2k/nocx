@@ -141,6 +141,62 @@ describe('SecretTextField vault affordance', () => {
     await vi.waitFor(() => expect(rowText()).toEqual(['prod-key', 'Add a secret…']))
   })
 
+  // The lock is the EXPLICIT door onto the vault (secret-picker.ts header).
+  // A sealed vault is exactly when it is needed, so it is exactly when it
+  // must be there — and pressing it asks, rather than offering a row.
+  const sealed = () => ({
+    ...source(),
+    status: vi.fn(() => Promise.resolve({ state: 'sealed' as const })),
+  })
+
+  it('the lock is there while the vault is SEALED — the moment it is needed', () => {
+    const { container } = render(() => (
+      <SecretTextField id="api-sealed-visible" value="Bearer t.Yixxxx" source={sealed()} />
+    ))
+    container.querySelector<HTMLInputElement>('#api-sealed-visible')!.focus()
+
+    expect(screen.getByRole('button', { name: 'Store in vault' })).toBeTruthy()
+  })
+
+  it('clicking it on a sealed vault raises the unlock and then lists', async () => {
+    const vault = sealed()
+    const { container } = render(() => (
+      <SecretTextField id="api-sealed-value" value="Bearer t.Yixxxx" source={vault} />
+    ))
+    clickLock(container, 'api-sealed-value', { start: 7, end: 15 })
+
+    await vi.waitFor(() => expect(vault.requestUnseal).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() =>
+      expect(rowText()).toEqual(['Store "t.Yixxxx" in the vault…', 'prod-key', 'Add a secret…']),
+    )
+  })
+
+  it('a refused unlock leaves the typed value exactly where it was', async () => {
+    const vault = sealed()
+    vault.requestUnseal.mockRejectedValue(new Error('cancelled'))
+    const onInput = vi.fn()
+    const { container } = render(() => (
+      <SecretTextField
+        id="api-sealed-refused"
+        value="Bearer t.Yixxxx"
+        source={vault}
+        onInput={onInput}
+      />
+    ))
+    const input = clickLock(container, 'api-sealed-refused', { start: 7, end: 15 })
+
+    await vi.waitFor(() => expect(vault.requestUnseal).toHaveBeenCalledTimes(1))
+    await vi.waitFor(() =>
+      expect(
+        document.querySelector<HTMLElement>('.ui-floating-panel[data-variant="secret"]')?.dataset
+          .open,
+      ).not.toBe('true'),
+    )
+    expect(input.value).toBe('Bearer t.Yixxxx')
+    expect(onInput).not.toHaveBeenCalled()
+    expect(vault.list).not.toHaveBeenCalled()
+  })
+
   it('no source, no lock — a control that can do nothing is not offered', () => {
     render(() => <SecretTextField id="api-no-vault" value="Bearer t.Yixxxx" />)
     const input = document.querySelector<HTMLInputElement>('#api-no-vault')!

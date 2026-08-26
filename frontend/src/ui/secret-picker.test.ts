@@ -488,3 +488,109 @@ describe('SecretPicker: the store offer', () => {
     expect(rows(h.container).map((r) => r.text)).toEqual(['openai-key', 'Add a secret…'])
   })
 })
+
+// TWO DOORS. Everything above is the PASSIVE door — '@' offers and never
+// traps. The lock is the EXPLICIT door: a click IS a request, and answering
+// a request with an offer row is the same defect as answering it with
+// silence (secret-picker.ts header, the owner's decision of 2026-08-26).
+describe('SecretPicker: the explicit door', () => {
+  it('a sealed vault is ASKED to open — the unlock is raised, the list follows', async () => {
+    const h = setup({ ...UNSEALED, state: 'sealed' }, [entry('openai-key')])
+    await h.picker.open('insert', { value: 'v' }, 'explicit')
+    await flush()
+
+    expect(h.source.requestUnseal).toHaveBeenCalledTimes(1)
+    expect(rows(h.container).map((r) => r.text)).toEqual([
+      'Store "v" in the vault…',
+      'openai-key',
+      'Add a secret…',
+    ])
+  })
+
+  it('a cancelled unlock closes and does nothing else: no offer row, no list, no insert', async () => {
+    const h = setup({ ...UNSEALED, state: 'sealed' }, [entry('openai-key')])
+    h.source.requestUnseal.mockRejectedValue(new Error('cancelled'))
+    await h.picker.open('insert', { value: 'v' }, 'explicit')
+    await flush()
+
+    expect(h.picker.isOpen).toBe(false)
+    expect(rows(h.container)).toEqual([])
+    expect(h.source.list).not.toHaveBeenCalled()
+    expect(h.onInsert).not.toHaveBeenCalled()
+  })
+
+  it('the passive door is untouched: the same sealed vault still only offers', async () => {
+    const h = setup({ ...UNSEALED, state: 'sealed' }, [entry('openai-key')])
+    await h.picker.open()
+    await flush()
+
+    expect(h.source.requestUnseal).not.toHaveBeenCalled()
+    expect(rows(h.container).map((r) => r.text)).toEqual(['Unlock the vault to use its secrets'])
+  })
+
+  it('an uninitialized vault gets the setup surface from the explicit door', async () => {
+    const h = setup({ ...UNSEALED, state: 'uninitialized' }, [entry('openai-key')])
+    await h.picker.open('insert', undefined, 'explicit')
+    await flush()
+
+    expect(h.source.requestSetup).toHaveBeenCalledTimes(1)
+    expect(rows(h.container).map((r) => r.text)).toEqual(['openai-key', 'Add a secret…'])
+  })
+
+  it('a setup dialog that takes the surface leaves no panel behind it', async () => {
+    const h = setup({ ...UNSEALED, state: 'uninitialized' }, [entry('openai-key')])
+    h.source.requestSetup.mockResolvedValue(true)
+    await h.picker.open('insert', undefined, 'explicit')
+    await flush()
+
+    expect(h.picker.isOpen).toBe(false)
+    expect(h.source.list).not.toHaveBeenCalled()
+  })
+
+  it('a refused setup closes rather than falling back to the offer row', async () => {
+    const h = setup({ ...UNSEALED, state: 'uninitialized' }, [entry('openai-key')])
+    h.source.requestSetup.mockRejectedValue(new Error('cancelled'))
+    await h.picker.open('insert', undefined, 'explicit')
+    await flush()
+
+    expect(h.picker.isOpen).toBe(false)
+    expect(rows(h.container)).toEqual([])
+  })
+
+  it('an uninitialized vault still only OFFERS through the passive door', async () => {
+    const h = setup({ ...UNSEALED, state: 'uninitialized' }, [entry('openai-key')])
+    await h.picker.open()
+    await flush()
+
+    expect(h.source.requestSetup).not.toHaveBeenCalled()
+    expect(rows(h.container).map((r) => r.text)).toEqual(['Set up the vault to store secrets'])
+  })
+
+  it('nothing about the value decides it: no offer and a token-shaped one raise the same unlock', async () => {
+    const bare = setup({ ...UNSEALED, state: 'sealed' }, [entry('openai-key')])
+    await bare.picker.open('insert', undefined, 'explicit')
+    await flush()
+    const token = setup({ ...UNSEALED, state: 'sealed' }, [entry('openai-key')])
+    await token.picker.open('insert', { value: 'sk-live-9c1f' }, 'explicit')
+    await flush()
+
+    expect(bare.source.requestUnseal).toHaveBeenCalledTimes(1)
+    expect(token.source.requestUnseal).toHaveBeenCalledTimes(1)
+    expect(rows(bare.container).map((r) => r.text)).toEqual(['openai-key', 'Add a secret…'])
+    expect(rows(token.container).map((r) => r.text)).toEqual([
+      'Store "sk-live-9c1f" in the vault…',
+      'openai-key',
+      'Add a secret…',
+    ])
+  })
+
+  it('an unsealed vault opens identically through either door', async () => {
+    const h = setup(UNSEALED, [entry('openai-key')])
+    await h.picker.open('insert', undefined, 'explicit')
+    await flush()
+
+    expect(h.source.requestUnseal).not.toHaveBeenCalled()
+    expect(h.source.requestSetup).not.toHaveBeenCalled()
+    expect(rows(h.container).map((r) => r.text)).toEqual(['openai-key', 'Add a secret…'])
+  })
+})

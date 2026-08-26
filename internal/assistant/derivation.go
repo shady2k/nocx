@@ -34,11 +34,15 @@ import (
 // reading, and the difference is the whole point of the field.
 const derivationMethod = "verbatim-argument-in-earlier-result"
 
-// minDerivedValueLen is the shortest argument value that may stand as
-// evidence. Short values collide by accident — a state, an exit code, a
-// one-word command — and an edge drawn from a collision is worse than no
-// edge, because it inflates exactly the number the experiment turns on.
-const minDerivedValueLen = 4
+// minDerivedTokenLen is the shortest token that may stand as evidence.
+//
+// THE BIAS IS DELIBERATE AND IT IS TOWARDS MISSING EDGES. The two errors are
+// not symmetric: a missed edge understates dependency depth, while a spurious
+// one INFLATES exactly the figure the experiment is decided on, and would fund
+// a carrier on a number nobody could later reproduce. Six characters keeps file
+// names, paths and identifiers and drops the words every command line and every
+// output share — ls, cat, grep, total, exit.
+const minDerivedTokenLen = 6
 
 // derivationLog is one RUN's completed invocations and what they returned.
 // It lives for the run and is never persisted: the durable fact is the edge
@@ -118,8 +122,17 @@ func (d *derivationLog) check(rawArgs, skipArg string) (candidates, edges []stri
 	return candidates, edges
 }
 
-// derivableValues is the string arguments of one call that are long enough to
-// stand as evidence, minus the resource argument.
+// derivableValues is the TOKENS of one call's string arguments that are long
+// enough to stand as evidence, minus the resource argument.
+//
+// TOKENS AND NOT WHOLE VALUES, and this was found the hard way against a real
+// session (nocx-d6gn4.9, 2026-08-26). The first implementation compared the
+// whole argument value, which works for session.read's `id` and can never work
+// for run's `command`: a complete command line does not appear inside a
+// previous command's output. So for the one tool the experiment cares about
+// most, every edge was empty — and an instrument that cannot see a dependency
+// reports the same thing as a task that has none. Blindness and independence
+// must not look alike.
 //
 // STRINGS ONLY, and the omission is deliberate rather than an oversight: a
 // number carried out of an earlier result (a line total, an offset) is a real
@@ -132,17 +145,55 @@ func derivableValues(rawArgs, skipArg string) []string {
 		return nil
 	}
 	var values []string
+	seen := map[string]bool{}
 	for key, raw := range obj {
 		if key == skipArg {
 			continue
 		}
 		s, ok := raw.(string)
-		if !ok || len(s) < minDerivedValueLen {
+		if !ok {
 			continue
 		}
-		values = append(values, s)
+		for _, tok := range strings.FieldsFunc(s, isTokenBreak) {
+			// A flag is vocabulary, not a value: -l and --recursive say
+			// nothing about where the argument came from.
+			if strings.HasPrefix(tok, "-") {
+				continue
+			}
+			// The token AND its path segments, because the two halves of a
+			// derivation rarely agree on shape: `ls /var/log` prints base
+			// names, and the model then writes the whole path. Matching only
+			// the whole token misses every file discovered by listing its
+			// directory — which is the commonest dependent pair there is.
+			add(&values, seen, tok)
+			if strings.ContainsRune(tok, '/') {
+				for _, seg := range strings.Split(tok, "/") {
+					add(&values, seen, seg)
+				}
+			}
+		}
 	}
 	return values
+}
+
+// add keeps a token if it is long enough to be evidence and not already held.
+func add(values *[]string, seen map[string]bool, tok string) {
+	if len(tok) < minDerivedTokenLen || seen[tok] {
+		return
+	}
+	seen[tok] = true
+	*values = append(*values, tok)
+}
+
+// isTokenBreak splits an argument the way a reader would: on whitespace and on
+// the shell punctuation that joins commands, so a path stays whole while the
+// operators around it fall away.
+func isTokenBreak(r rune) bool {
+	switch r {
+	case ' ', '\t', '\n', '\r', '"', '\'', '`', '|', '&', ';', '(', ')', '<', '>', '$', '{', '}', '=', ',':
+		return true
+	}
+	return false
 }
 
 // derivationBlock is what goes onto the attempt payload. It is written on

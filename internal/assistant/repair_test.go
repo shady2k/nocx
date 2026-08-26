@@ -177,7 +177,21 @@ func TestSystemPrompt_DescribesTheCarrierThisRunActuallyUses(t *testing.T) {
 			t.Fatalf("the program-carrier prompt does not say %q:\n%s", want, program)
 		}
 	}
-	if strings.Contains(program, "You act only through the tools you are given") {
+	// NO PARAGRAPH LEFT BEHIND. The first pass fixed the two paragraphs that
+	// were obviously wrong and left "what your own TOOLS return" and "go and
+	// look at it with a TOOL" standing three lines above them — so the prompt
+	// contradicted itself, and the model went on reasoning about tools.
+	for _, leftover := range []string{
+		"what your own tools return",
+		"look at with a tool",
+		"You act only through the tools you are given",
+		"Use session.read with",
+	} {
+		if strings.Contains(program, leftover) {
+			t.Fatalf("the program-carrier prompt still says %q:\n%s", leftover, program)
+		}
+	}
+	if !strings.Contains(program, "what your own functions return") {
 		t.Fatalf("the program-carrier prompt still describes the declared-call world:\n%s", program)
 	}
 

@@ -17,7 +17,8 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { createComponent } from 'solid-js'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
-import { ProfileClient } from './profiles'
+import { SettingsObserver } from './settings-observer'
+import { ProfileClient, type RestorePreview } from './profiles'
 import { Dispatcher } from './dispatcher'
 import type { Declaration, SettingsGroup } from './settings-domain'
 import type { PaneHost } from './pane-content'
@@ -227,6 +228,98 @@ describe('SettingsContent', () => {
     const page = target.querySelector('.ui-page')
     expect(page).toBeTruthy()
     expect(page!.querySelector('.ui-page__rail')).toBeTruthy()
+  })
+
+  /**
+   * A SETTINGS CHANGE MUST NOT TAKE BACK WHAT THE PERSON JUST DID (nocx-hphhh).
+   *
+   * Every settings write broadcasts settings.changed and the observer answers
+   * it by refetching the whole snapshot, while the person goes on using the
+   * page. What a refresh must not do is rebuild that page: a chosen file lives
+   * on the input element and nowhere else, so a re-created input is a
+   * selection silently taken back, with the surface then saying "No file
+   * selected" and nothing to explain it.
+   *
+   * The property is one memo identity away from being false, which is why it
+   * is pinned here rather than trusted. `settingsPages()` builds its page
+   * objects fresh on every run, `activePage()` finds one in that array, and
+   * the body renders it through a `keyed` Show — and keying re-creates the
+   * subtree whenever the identity changes, deliberately, so that switching
+   * pages replaces the body. Today a refresh does not reach that far. Anything
+   * that makes the refresh recompute those objects would, and would look like
+   * a page that quietly resets itself while somebody is working in it.
+   *
+   * THE MOCKS HAND BACK FRESH OBJECTS ON PURPOSE. Every answer off the wire is
+   * parsed from its own JSON, so nothing the renderer stores is ever
+   * reference-equal to what it stored before. A mockResolvedValue returns one
+   * object to every call, which stops the second snapshot from propagating at
+   * all — the test then passes without ever exercising a refresh, which is
+   * what the first draft of it did.
+   */
+  it('a settings refresh does not take back the file you chose', async () => {
+    let invalidate: ((params: unknown) => void) | null = null
+    const dispatcher = {
+      subscribe: (method: string, cb: (params: unknown) => void) => {
+        if (method === 'settings.changed') invalidate = cb
+        return () => {}
+      },
+      onConnect: () => () => {},
+    }
+    const observer = new SettingsObserver(dispatcher as unknown as Dispatcher)
+    content = new SettingsContent(client, observer)
+    mockReady(client)
+    // Fresh objects per call, because that is what the wire gives: every
+    // answer is parsed from its own JSON, so no array or record the renderer
+    // stores is ever reference-equal to the one before it. A mock that hands
+    // back one object hides exactly the propagation this test is about.
+    vi.spyOn(client, 'describeSettings').mockImplementation(() =>
+      Promise.resolve({
+        declarations: TEST_DECLARATIONS.map((d) => ({ ...d })),
+        groups: TEST_GROUPS.map((g) => ({ ...g })),
+        sectionGroups: { ...TEST_SECTION_GROUPS },
+      }),
+    )
+    const snapshot = vi.spyOn(client, 'getSnapshot').mockImplementation(() =>
+      Promise.resolve({
+        values: {},
+        overridden: [],
+        revision: 0,
+      }),
+    )
+    vi.spyOn(client, 'previewBackupRestore').mockResolvedValue({
+      strategy: 'merge',
+      settings: { changed: 1, unchanged: 0 },
+      connections: {
+        profiles: { added: 0, updated: 0, unchanged: 0 },
+        groups: { added: 0, updated: 0, unchanged: 0 },
+      },
+    } as unknown as RestorePreview)
+    await content.mount(target, host, signal)
+
+    openSection(target, 'Backup & Restore')
+    const input = await vi.waitFor(() => {
+      const el = target.querySelector<HTMLInputElement>('.ui-file-input__native')
+      expect(el).toBeTruthy()
+      return el!
+    })
+
+    const file = new File(['{}'], 'backup.json', { type: 'application/json' })
+    Object.defineProperty(input, 'files', { value: [file], configurable: true })
+    fireEvent.change(input)
+    await vi.waitFor(() => {
+      expect(target.querySelector('.ui-file-input__name')!.textContent).toBe('backup.json')
+    })
+
+    // Somebody's settings write comes back — their own, a moment ago, or
+    // another window's. Either way it is news about values, not a reason to
+    // rebuild the page they are working in.
+    expect(invalidate).toBeTruthy()
+    invalidate!({ revision: 1, keys: ['tab.placement'] })
+    await vi.waitFor(() => {
+      expect(snapshot).toHaveBeenCalledTimes(2)
+    })
+
+    expect(target.querySelector('.ui-file-input__name')!.textContent).toBe('backup.json')
   })
 
   it('rail has exactly one search input', async () => {

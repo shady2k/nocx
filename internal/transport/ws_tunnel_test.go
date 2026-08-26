@@ -19,6 +19,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/tunnel"
 )
 
@@ -319,20 +320,16 @@ func TestTunnelPaneTeardown_DoesNotStopOtherPanesForward(t *testing.T) {
 	// Tab A disconnects: its forward must stop, B's must survive.
 	_ = connA.Close()
 
-	// Teardown is asynchronous (the read loop notices the close); poll until
-	// A's port refuses connections.
-	deadline := time.Now().Add(wantWithin)
-	for {
+	// Teardown is asynchronous (the read loop notices the close); wait until
+	// A's port refuses connections, the observable of the forward stopping.
+	testwait.WaitForTimeout(t, "tab A's forward to stop accepting connections", wantWithin, func() bool {
 		c, dErr := net.DialTimeout("tcp", addrA, 200*time.Millisecond)
-		if dErr != nil {
-			break // refused — A's forward is gone
+		if dErr == nil {
+			_ = c.Close()
+			return false
 		}
-		_ = c.Close()
-		if time.Now().After(deadline) {
-			t.Fatal("tab A's forward still accepts connections after its tab closed")
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+		return true
+	})
 
 	// B's forward is untouched: bytes still round-trip.
 	roundTrip(t, addrB)

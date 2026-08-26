@@ -898,7 +898,7 @@ func TestForSecretKnownIDSucceeds(t *testing.T) {
 		t.Fatal("ForSecret returned nil on success")
 	}
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
-		secret, err := svc.GetSecret(ctx, id)
+		secret, err := seam.Get(ctx, id)
 		if err != nil {
 			return err
 		}
@@ -1297,7 +1297,7 @@ func TestMintSecretFallsBackToPlainStore(t *testing.T) {
 		t.Fatalf("minted id = %q, want the plain store's minted reference", minted)
 	}
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
-		secret, err := svc.GetSecret(ctx, minted)
+		secret, err := store.Get(ctx, minted)
 		if err != nil {
 			return err
 		}

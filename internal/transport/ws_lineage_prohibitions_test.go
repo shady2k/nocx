@@ -49,6 +49,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // ── the fake channel these tests need ─────────────────────────────────────
@@ -326,7 +327,7 @@ func TestLineage_AParentMayNotCloseDriveOrObserveItsChild(t *testing.T) {
 	const legit = "echo mine\n"
 	sendInput(t, parentConn, child.SessionID, poison, parent.SessionID, 4)
 	sendInput(t, childConn, child.SessionID, legit, child.SessionID, 2)
-	waitFor(t, "the child's own input to reach its channel", wantWithin, func() bool {
+	testwait.WaitForTimeout(t, "the child's own input to reach its channel", wantWithin, func() bool {
 		return childPTY.sawInput(legit)
 	})
 	if childPTY.sawInput(poison) {
@@ -433,7 +434,7 @@ func TestLineage_ParentProcessExitLeavesItsDescendantsAlive(t *testing.T) {
 	// The real shape a local shell's exit leaves in the watcher, not a
 	// hand-built stand-in (realExitStatus, ws_exit_test.go).
 	f.nth(t, 0).exit(realExitStatus(3))
-	waitFor(t, "the parent's exit to be processed", wantWithin, func() bool {
+	testwait.WaitForTimeout(t, "the parent's exit to be processed", wantWithin, func() bool {
 		_, err := ws.registry.Get(session.ID(parent.SessionID))
 		return err != nil
 	})
@@ -447,10 +448,10 @@ func TestLineage_ParentProcessExitLeavesItsDescendantsAlive(t *testing.T) {
 	// input, on the connection that holds them.
 	sendInput(t, childConn, child.SessionID, "still here\n", child.SessionID, 3)
 	sendInput(t, childConn, grandchild.SessionID, "so am i\n", grandchild.SessionID, 4)
-	waitFor(t, "the child's input after its parent exited", wantWithin, func() bool {
+	testwait.WaitForTimeout(t, "the child's input after its parent exited", wantWithin, func() bool {
 		return childPTY.sawInput("still here")
 	})
-	waitFor(t, "the grandchild's input after its grandparent exited", wantWithin, func() bool {
+	testwait.WaitForTimeout(t, "the grandchild's input after its grandparent exited", wantWithin, func() bool {
 		return grandPTY.sawInput("so am i")
 	})
 }
@@ -472,7 +473,7 @@ func TestLineage_DroppedLinkLeavesTheParentsDescendantsAlive(t *testing.T) {
 	childPTY := f.nth(t, 1)
 
 	_ = parentConn.Close()
-	waitFor(t, "the server to notice the dropped link", wantWithin, func() bool {
+	testwait.WaitForTimeout(t, "the server to notice the dropped link", wantWithin, func() bool {
 		ws.connsMu.Lock()
 		defer ws.connsMu.Unlock()
 		return len(ws.conns) == 1
@@ -485,7 +486,7 @@ func TestLineage_DroppedLinkLeavesTheParentsDescendantsAlive(t *testing.T) {
 	}
 
 	sendInput(t, childConn, child.SessionID, "unaffected\n", child.SessionID, 2)
-	waitFor(t, "the child's input after its parent's link dropped", wantWithin, func() bool {
+	testwait.WaitForTimeout(t, "the child's input after its parent's link dropped", wantWithin, func() bool {
 		return childPTY.sawInput("unaffected")
 	})
 }
@@ -518,7 +519,7 @@ func TestLineage_ExplicitCloseOfAParentLeavesItsDescendantsAlive(t *testing.T) {
 	if env.Error != nil {
 		t.Fatalf("the holder could not close its own session: %+v", env.Error)
 	}
-	waitFor(t, "the parent's close", wantWithin, func() bool {
+	testwait.WaitForTimeout(t, "the parent's close", wantWithin, func() bool {
 		_, err := ws.registry.Get(session.ID(parent.SessionID))
 		return err != nil
 	})

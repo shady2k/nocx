@@ -10,11 +10,14 @@ package vault
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // countPrefixRe strips the composition prefix ("3 operations need the
@@ -74,25 +77,32 @@ func (f *fakeUnlockRequester) recordedReasons() []string {
 // would (correctly) raise a fresh prompt and wedge the fake's single answer.
 func waitForJoined(t *testing.T, v *Vault, n int) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	// The failure has to say how far the join got, and whether there was a
+	// prompt to join at all: "no prompt outstanding" and "three of four
+	// joined" are different defects, and a timeout that names only itself
+	// tells them apart from a starved machine either.
+	detail := func() string {
 		v.mu.Lock()
 		p := v.unlockPending
-		var joined int
-		if p != nil {
-			p.mu.Lock()
-			joined = len(p.reasons)
-			p.mu.Unlock()
-		}
 		v.mu.Unlock()
-		if joined >= n {
-			return
+		if p == nil {
+			return fmt.Sprintf("no prompt outstanding; wanted %d callers joined", n)
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("only %d of %d callers joined the outstanding prompt", joined, n)
-		}
-		time.Sleep(time.Millisecond)
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return fmt.Sprintf("only %d of %d callers joined the outstanding prompt", len(p.reasons), n)
 	}
+	testwait.WaitForDetail(t, "callers to join the outstanding prompt", detail, func() bool {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		p := v.unlockPending
+		if p == nil {
+			return false
+		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return len(p.reasons) >= n
+	})
 }
 
 // sealedVault builds a vault that is set up and sealed, with the fake
@@ -415,19 +425,11 @@ func TestEnsureUnsealed_CloseReleasesOutstandingWaiters(t *testing.T) {
 	// The prompt state is cleared by the prompt's own goroutine after the
 	// resolution fans out, so wait on the observable state rather than
 	// asserting a moment.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	testwait.WaitFor(t, "the outstanding prompt to clear after Close", func() bool {
 		v.mu.Lock()
-		p := v.unlockPending
-		v.mu.Unlock()
-		if p == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("Close left an outstanding prompt registered")
-		}
-		time.Sleep(time.Millisecond)
-	}
+		defer v.mu.Unlock()
+		return v.unlockPending == nil
+	})
 }
 
 func TestEnsureUnsealed_ResolutionRacingJoinLosesNoCaller(t *testing.T) {

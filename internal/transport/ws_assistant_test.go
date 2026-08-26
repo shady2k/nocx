@@ -122,7 +122,7 @@ func newAssistantHarnessWith(t *testing.T, stub *stubAssistantClient, script *sc
 	}
 	opts := []WSServerOption{
 		WithProfileRepository(profiles), WithGroupRepository(ps),
-		WithCredentialStore(v), WithVaultLifecycle(v),
+		WithCredentialStore(v), WithVaultUnsealer(v), WithVaultLifecycle(v),
 	}
 	if stub != nil {
 		opts = append(opts, WithAssistantClient(stub))
@@ -964,6 +964,73 @@ func TestEndpointsProbe_SealedVaultIsTheCanonicalError(t *testing.T) {
 		t.Fatalf("probe store last = %+v, want no recorded outcome for a sealed failure", last)
 	}
 	assertNoPendingAsk(t, h.ws)
+}
+
+// A credential whose secret is deleted while the unlock is in flight: the
+// Operation stance unlocks, the read then finds the secret gone, and the
+// probe must be a refused RESULT naming the state — never a generic -32603
+// toast (the review bug). The engine must not be called at all.
+func TestEndpointsProbe_DeletedCredentialAfterUnlockIsARefusedResult(t *testing.T) {
+	h := newAssistantHarness(t, &stubAssistantClient{
+		probe: func(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
+			t.Fatal("the engine must not be called for a deleted credential")
+			return assistant.ProbeResult{}, nil
+		},
+	})
+	h.setupAndUnseal()
+	created := h.createEndpoint(t, map[string]any{
+		"name":    "OpenAI",
+		"baseUrl": "http://127.0.0.1:11434/v1",
+		"schema":  "openai-compatible",
+		"key":     "sk-stored-123",
+		"models":  []map[string]any{{"name": "qwen3"}},
+	})
+
+	eps, err := h.ps.LoadEndpoints()
+	if err != nil {
+		t.Fatalf("LoadEndpoints: %v", err)
+	}
+	var ref credential.SecretID
+	for _, ep := range eps {
+		if ep.ID == created.ID {
+			ref = credential.SecretID(ep.CredentialRef)
+			break
+		}
+	}
+	if ref == "" {
+		t.Fatal("the created endpoint carries no credential reference")
+	}
+
+	h.v.Seal()
+	// The unlock succeeds AND deletes the credential before the read returns:
+	// the exact "deleted in parallel with the unlock" shape the bug describes.
+	h.v.SetUnlockRequester(unlockRequesterFunc(func(ctx context.Context, reason string) error {
+		if err := h.v.Unseal(ctx, vault.UnsealRequest{Passphrase: "test"}); err != nil {
+			return err
+		}
+		return h.v.Delete(ctx, ref)
+	}))
+
+	raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
+		"endpointId": created.ID,
+		"name":       "OpenAI",
+		"baseUrl":    "http://127.0.0.1:11434/v1",
+		"key":        "",
+		"model":      "qwen3",
+	})
+	if isErrorResponse(t, raw) {
+		t.Fatalf("a deleted credential after unlock is a probe RESULT, not an RPC error: %s", raw)
+	}
+	var result assistant.ProbeResult
+	if err := json.Unmarshal(mustResult(t, raw), &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if result.OK {
+		t.Fatalf("probe = %+v, want !OK for a deleted credential", result)
+	}
+	if last := h.probes.Last(); last == nil || last.OK {
+		t.Fatalf("a refused credential probe must be recorded, got %+v", last)
+	}
 }
 
 // An endpoint with NO credential (a local model) still probes without one.

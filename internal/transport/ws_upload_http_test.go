@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // uploadHTTPClient is deliberately given a generous timeout: it is a
@@ -313,7 +314,7 @@ func TestUploadEndpoint_SecondClaimWhileRunningIs409AndLeavesTheFirstAlone(t *te
 		t.Fatalf("write first half: %v", writeErr)
 	}
 	rt := e.ws.transfers.get(tid)
-	waitFor(t, "the first claimant to be mid-write", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the first claimant to be mid-write", 30*time.Second, func() bool {
 		_, _, n, _ := rt.snapshot()
 		return n > 0
 	})
@@ -637,7 +638,7 @@ func TestUploadEndpoint_CancellingAStalledBodyUnwindsTheTransfer(t *testing.T) {
 		t.Fatalf("write half: %v", writeErr)
 	}
 	rt := e.ws.transfers.get(tid)
-	waitFor(t, "the sink to be reading the body", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the sink to be reading the body", 30*time.Second, func() bool {
 		_, _, n, _ := rt.snapshot()
 		return n > 0
 	})
@@ -1237,7 +1238,7 @@ func TestUploadCORS_TheHeadersAreOnAConflictToo(t *testing.T) {
 		t.Fatalf("write first half: %v", err)
 	}
 	rt := e.ws.transfers.get(tid)
-	waitFor(t, "the first claimant to be mid-write", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the first claimant to be mid-write", 30*time.Second, func() bool {
 		_, _, n, _ := rt.snapshot()
 		return n > 0
 	})

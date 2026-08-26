@@ -278,23 +278,17 @@ func (rc *RealClient) addKeyboardInteractiveMethods(ctx context.Context, chain *
 	return nil
 }
 
-// lookupKeyPassphrase resolves a private-key passphrase by SecretID from the
-// SecretStore. It returns a credential.Secret so the passphrase is
-// non-serializable; callers read it through Secret.Use.
-func (rc *RealClient) lookupKeyPassphrase(ctx context.Context, store credential.SecretStore, id credential.SecretID) (credential.Secret, error) {
-	if store == nil || id == "" {
+// lookupKeyPassphrase resolves a private-key passphrase through the mandatory
+// operation stance.
+func (rc *RealClient) lookupKeyPassphrase(ctx context.Context, resolver credential.Resolver, id credential.SecretID) (credential.Secret, error) {
+	if resolver == nil || id == "" {
 		return credential.Secret{}, nil
 	}
-	return store.Get(ctx, id)
+	return resolver.Resolve(ctx, id, credential.Operation("load the key passphrase"))
 }
 
-// getSecretWithUnlock reads the stored secret. The unlock is NOT this
-// layer's: a sealed vault is a sealed-vault failure that propagates to the
-// session.open handler, which emits the canonical sealed error the renderer
-// turns into the unlock prompt; the whole open is re-sent once the vault
-// answers (ADR-0032).
 func (rc *RealClient) getSecretWithUnlock(ctx context.Context, cfg *ConnectConfig, id credential.SecretID, reason string) (credential.Secret, error) {
-	return cfg.Secrets.Get(ctx, id)
+	return cfg.Secrets.Resolve(ctx, id, credential.Operation(reason))
 }
 
 func authMethodsFromChain(chain []authChainEntry) []gossh.AuthMethod {

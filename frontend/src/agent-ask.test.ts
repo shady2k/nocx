@@ -324,6 +324,10 @@ describe('AgentInputTarget', () => {
       error: 'the model returned no text',
     })
     expect(handle.close).toHaveBeenLastCalledWith('failure', 'the model returned no text')
+
+    await target.submit('q3')
+    dispatcher.emit('agent.runState', { runId: 9, state: 'cancelled' })
+    expect(handle.close).toHaveBeenLastCalledWith('cancelled')
   })
 
   it('closes the block on a runState with NO prior delta (failure before any text)', async () => {

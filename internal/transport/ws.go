@@ -118,9 +118,21 @@ type WSServer struct {
 	// Optional profile/group stores for the connection-manager control
 	// plane (profiles.*, groups.*). When nil, those methods return a
 	// JSON-RPC error.
-	profiles    profile.ProfileRepository
-	groups      profile.GroupRepository
+	profiles profile.ProfileRepository
+	groups   profile.GroupRepository
+	// credentials is the consumer store: mutations and existence. It
+	// cannot return material — that is what SecretStore dropping Get is
+	// for — so a handler holding it cannot read a secret without a stance.
 	credentials credential.SecretStore
+	// material is the composition-only backend the Resolver is built from,
+	// and credentialResolver is the only thing in this package that may
+	// touch it: its Get takes no stance (nocx-k41yv).
+	material credential.MaterialStore
+	// unsealer raises the vault's own unlock for an operation read. Wired
+	// at the composition root, nil in a harness with no prompt carrier —
+	// never discovered from the store by a type assertion, which is how a
+	// wiring slip would have become "the unlock silently never appears".
+	unsealer credential.Unsealer
 	// Vault lifecycle for vault.* RPC methods. When nil, those methods return a
 	// JSON-RPC error.
 	vaultLifecycle VaultLifecycle
@@ -962,28 +974,39 @@ func WithGroupRepository(gr profile.GroupRepository) WSServerOption {
 }
 
 // WithCredentialStore attaches a credential store, enabling the
-// secrets.* and vault.* secret operations.
-func WithCredentialStore(cs credential.SecretStore) WSServerOption {
-	return func(s *WSServer) { s.credentials = cs }
+// secrets.* and vault.* secret operations. The backend is taken as a
+// MaterialStore because the resolver is built from it here; handlers are
+// handed the store's stanceless-read-free half instead.
+func WithCredentialStore(cs credential.MaterialStore) WSServerOption {
+	return func(s *WSServer) {
+		s.material = cs
+		s.credentials = cs
+	}
 }
 
-// credentialResolver is the STANCED read seam over the credential store
-// (nocx-k41yv): the form every handler that resolves material on a person's
-// behalf is wired with. Handlers hold this rather than the store, because
-// the store's Get takes no stance and a seam that can be bypassed is the
-// one that was — three times.
+// WithVaultUnsealer attaches the seam that raises the vault's own unlock and
+// waits for it, so an operation read can continue rather than fail. Wired at
+// the composition root with the vault itself; a server built without one
+// answers a sealed vault with the sealed error, which the renderer's replay
+// seam turns into the same dialog (ADR-0032).
+func WithVaultUnsealer(u credential.Unsealer) WSServerOption {
+	return func(s *WSServer) { s.unsealer = u }
+}
+
+// credentialResolver is the stanced read seam over the credential store.
 //
-// The sealed predicate is injected here, at the composition root, because
-// internal/credential must not import the vault (the vault imports it) and
-// because which implementation's sealed error is in play is precisely a
-// composition decision.
+// AN OPERATION READ FROM IT BLOCKS on a person answering the dialog, so no
+// caller may hold a capability admission across one: vault.unseal runs under
+// the vault gate, and an operation waiting inside that gate is a prompt whose
+// answer is refused "Control plane busy" (nocx-o3606). Handlers resolve
+// material before or after their operation, never inside it.
 func (s *WSServer) credentialResolver() credential.Resolver {
-	if s.credentials == nil {
+	if s.material == nil {
 		return nil
 	}
-	return credential.NewResolver(s.credentials, func(err error) bool {
+	return credential.NewResolver(s.material, func(err error) bool {
 		return errors.Is(err, vault.ErrVaultSealed)
-	})
+	}, s.unsealer)
 }
 
 // WithCredentialStore attaches a credential store, enabling the

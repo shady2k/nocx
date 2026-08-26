@@ -1112,6 +1112,11 @@ func New(opts ...Option) (*App, error) {
 		transport.WithBackupFileSaver(backup.SaveToFile),
 		transport.WithGroupRepository(profileStore),
 		transport.WithCredentialStore(v),
+		// The vault raises its own unlock, and it is SAID here rather than
+		// discovered from the store's method set: a resolver built without
+		// an unsealer simply never prompts, and that is too quiet a
+		// difference to leave to a type assertion (nocx-o3606).
+		transport.WithVaultUnsealer(v),
 		transport.WithVaultLifecycle(v),
 		transport.WithAgentKnownMaterial(transport.NewVaultKnownMaterial(v)),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
@@ -1676,12 +1681,9 @@ func New(opts ...Option) (*App, error) {
 	// owns "I am sealed and one unlock is already pending" (nocx-o9jdu) and
 	// the transport owns "deliver one prompt to whichever renderer is
 	// there" — this line is the only place the two meet.
-	//
-	// NOT YET LIVE FOR USERS: EnsureUnsealed has no production consumer
-	// until nocx-k41yv routes the sealed secret-access paths through it.
-	// Callers still reach RequestUnlock directly and still get one prompt
-	// each. Recorded here rather than left to a green deadcode run, which
-	// is how nocx-rtg0 shipped a write path nobody called.
+	// Every production credential resolver now reaches EnsureUnsealed through
+	// the vault's structural capability (nocx-k41yv): asks, probes, command
+	// secret expansion and SSH authentication all share this coalescing state.
 	v.SetUnlockRequester(tp)
 
 	// One resolver, one consumer family: connections.test probes and
@@ -1766,8 +1768,16 @@ func New(opts ...Option) (*App, error) {
 	ptf.noteBootstrapStage = func(sid, stage string) {
 		tp.NoteBootstrapStage(session.ID(sid), stage)
 	}
+	// The connection/SSH material seam, built from the same three
+	// ingredients the transport's is: the backend, which sealed error is in
+	// play, and who may raise the unlock. The auth ladder resolves on the
+	// dial — PHASE TWO of the open, which deliberately holds no domain gate
+	// — so waiting there cannot block the unseal that answers it.
+	credResolver := credential.NewResolver(v, func(err error) bool {
+		return errors.Is(err, vault.ErrVaultSealed)
+	}, v)
 	resolver := connection.NewResolver(
-		profileStore, profileStore, v,
+		profileStore, profileStore, credResolver,
 		connection.WithConfigResolver(sshCfgResolver),
 		connection.WithPasswordAsker(tp.RequestConnectionPassword),
 		connection.WithSecretCreator(v),

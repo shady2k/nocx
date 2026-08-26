@@ -21,8 +21,11 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 
 	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/vault"
 )
 
 // vaultResolveLineParams is the request: the line to substitute references
@@ -50,11 +53,21 @@ type vaultResolveLineResponse struct {
 	Refs []vaultResolveLineRef `json:"refs"`
 }
 
-// handleResolveLine answers vault.resolveLine. The whole reference seam
-// lives in the SecretService: the name → row handle → SecretID → value
-// resolution, the sealed-mid-flight error (actionable -32001/vault-sealed,
-// distinct from "no such secret") and the no-references identity shortcut.
-// The handler only re-shapes the refs for the wire.
+// handleResolveLine answers vault.resolveLine, in two halves with the
+// material read between them and NO GATE HELD across it.
+//
+// The name → row handle → SecretID mapping is the vault's and the config
+// store's, so it takes the operation (PlanLine). Reading the material is an
+// operation-stance read: a sealed vault raises the unlock and this waits for
+// a person to answer it — and the answer is vault.unseal, which needs the
+// vault gate this operation would otherwise still be holding (nocx-o3606).
+// So the plan comes out, the operation releases, and the reads happen here.
+//
+// A vault that is shut when the plan is built fails there, as the actionable
+// sealed error the renderer already turns into the same dialog; a vault that
+// shuts BETWEEN the halves is caught by the read, which now raises the unlock
+// and continues rather than failing the line. Either way an unresolvable
+// reference is reported, never silently substituted with nothing.
 func (h vaultSecretHandlers) handleResolveLine(ctx context.Context, req jsonrpcRequest) {
 	if h.op == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: h.notWired})
@@ -65,23 +78,72 @@ func (h vaultSecretHandlers) handleResolveLine(ctx context.Context, req jsonrpcR
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
 		return
 	}
+	var plan capability.LinePlan
+	answered := false
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.SecretService) error {
-		line, refs, err := svc.ResolveLine(ctx, p.Line)
-		if err != nil {
-			_ = h.r.TryError(req.ID, vaultSecretError(-32603, "vault.resolveLine: ", err))
+		planned, planErr := svc.PlanLine(ctx, p.Line)
+		if planErr != nil {
+			_ = h.r.TryError(req.ID, vaultSecretError(-32603, "vault.resolveLine: ", planErr))
+			answered = true
 			return nil
 		}
-		out := vaultResolveLineResponse{
-			Line: line,
-			Refs: make([]vaultResolveLineRef, 0, len(refs)),
-		}
-		for _, ref := range refs {
-			out.Refs = append(out.Refs, vaultResolveLineRef{Name: ref.Name, Resolved: ref.Resolved})
-		}
-		_ = h.r.TryResult(req.ID, mustMarshal(out))
+		plan = planned
 		return nil
 	})
 	if err != nil {
 		answerOperationRefusal(h.r, req, err)
+		return
 	}
+	if answered {
+		return
+	}
+
+	values, resolveErr := h.resolveLineMaterial(ctx, plan)
+	if resolveErr != nil {
+		_ = h.r.TryError(req.ID, vaultSecretError(-32603, "vault.resolveLine: ", resolveErr))
+		return
+	}
+	line, refs := capability.SubstituteLine(plan, values)
+	out := vaultResolveLineResponse{
+		Line: line,
+		Refs: make([]vaultResolveLineRef, 0, len(refs)),
+	}
+	for _, ref := range refs {
+		out.Refs = append(out.Refs, vaultResolveLineRef{Name: ref.Name, Resolved: ref.Resolved})
+	}
+	_ = h.r.TryResult(req.ID, mustMarshal(out))
+}
+
+// resolveLineMaterial reads every planned reference, outside the operation.
+//
+// The two failures are deliberately different. A vault that shut, or an
+// unlock the person dismissed, is an ERROR: a retry once the vault is open
+// resolves differently, so answering with an unresolved reference would be a
+// lie about what the command is going to run. Anything else — a reference
+// whose secret was deleted since the inventory was read, a store that did
+// not answer — leaves that one reference as written and reported unresolved,
+// which is what the line contract has always said.
+func (h vaultSecretHandlers) resolveLineMaterial(
+	ctx context.Context, plan capability.LinePlan,
+) (map[credential.SecretID]credential.Secret, error) {
+	values := make(map[credential.SecretID]credential.Secret, len(plan.Refs))
+	if h.secrets == nil {
+		return values, nil
+	}
+	for _, ref := range plan.Refs {
+		if ref.ID == "" {
+			continue
+		}
+		if _, done := values[ref.ID]; done {
+			continue
+		}
+		secret, err := h.secrets.Resolve(ctx, ref.ID, credential.Operation("resolve the command line"))
+		switch {
+		case err == nil:
+			values[ref.ID] = secret
+		case errors.Is(err, vault.ErrVaultSealed), errors.Is(err, ErrUnlockCancelled):
+			return nil, err
+		}
+	}
+	return values, nil
 }

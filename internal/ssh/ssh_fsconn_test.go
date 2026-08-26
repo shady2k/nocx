@@ -18,6 +18,7 @@ import (
 
 	"github.com/pkg/sftp"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/testwait"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -488,13 +489,11 @@ func fsWriteKnownHosts(t *testing.T, srv *fsTestServer, addr string) string {
 // leaves a lease's reference behind fails the test instead of hanging it.
 func waitPoolEmpty(t *testing.T, client *RealClient) {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for client.pool.Count() != 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("pool count = %d, want 0", client.pool.Count())
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	testwait.WaitForTimeoutDetail(t, "the pool to empty", 5*time.Second, func() string {
+		return fmt.Sprintf("pool count = %d, want 0", client.pool.Count())
+	}, func() bool {
+		return client.pool.Count() == 0
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -1153,16 +1152,12 @@ func TestFSConn_Close_UnblocksNonContextCalls(t *testing.T) {
 
 	// No goroutine from either lease outlives Close: the leases were the
 	// only references, so closing them reclaimed the connections and the
-	// loss watchers exited with them. The allowance of baseline+1 matches
-	// the discovery cancel test; the deadline loop tolerates the watchers'
-	// asynchronous exit.
-	deadline := time.Now().Add(5 * time.Second)
-	for runtime.NumGoroutine() > baseline+1 {
-		if time.Now().After(deadline) {
-			t.Fatalf("goroutines = %d, want <= %d (lease goroutine outlived Close)", runtime.NumGoroutine(), baseline+1)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	// loss watchers exited with them.
+	testwait.WaitForTimeoutDetail(t, "lease goroutines to exit after Close", 5*time.Second, func() string {
+		return fmt.Sprintf("goroutines = %d, want <= %d (lease goroutine outlived Close)", runtime.NumGoroutine(), baseline+1)
+	}, func() bool {
+		return runtime.NumGoroutine() <= baseline+1
+	})
 	waitPoolEmpty(t, client)
 }
 

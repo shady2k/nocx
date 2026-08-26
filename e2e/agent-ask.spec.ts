@@ -808,4 +808,59 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     expect(sealedProbe.authorization).toBe(`Bearer ${sealedKey}`)
     await expect(editDialog).toContainText(/e2e-model answered in \d+ ms/, { timeout: 15_000 })
   })
+
+  test('a sealed vault raises unlock from an ask and the same run completes', async ({ page }) => {
+    endpoint = await backend.restart()
+    await openApp(page)
+    await backToTerminal(page)
+
+    const question = `sealed ask ${nonce}`
+    const base = fake.requests().length
+    fake.setScript({ chunks: ['answered after unlock'] })
+    await askFromPrompt(page, question)
+
+    const unlock = page
+      .locator('.ui-prompt-overlay')
+      .filter({ has: page.locator('#vault-unlock-passphrase') })
+    await expect(unlock).toBeVisible({ timeout: 10_000 })
+    expect(fake.requests()).toHaveLength(base)
+    await page.locator('#vault-unlock-passphrase').fill(`vault-pass-${nonce}`)
+    await unlock.getByRole('button', { name: 'Unlock', exact: true }).click()
+    await expect(unlock).not.toBeVisible({ timeout: 10_000 })
+
+    await fake.waitForRequests(base + 1)
+    const answer = answerBlockOf(page, question)
+    await expect(answer.locator('.cmd-output[data-answer-body]')).toContainText(
+      'answered after unlock',
+      { timeout: 15_000 },
+    )
+    await expect(answer.locator('.cmd-header-exit')).toHaveText('completed', {
+      timeout: 15_000,
+    })
+  })
+
+  test('cancelling an ask unlock stops its durable run without calling the model', async ({
+    page,
+  }) => {
+    endpoint = await backend.restart()
+    await openApp(page)
+    await backToTerminal(page)
+
+    const question = `cancel sealed ask ${nonce}`
+    const base = fake.requests().length
+    await askFromPrompt(page, question)
+    const unlock = page
+      .locator('.ui-prompt-overlay')
+      .filter({ has: page.locator('#vault-unlock-passphrase') })
+    await expect(unlock).toBeVisible({ timeout: 10_000 })
+    await unlock.getByRole('button', { name: 'Cancel', exact: true }).click()
+    await expect(unlock).not.toBeVisible({ timeout: 10_000 })
+
+    const answer = answerBlockOf(page, question)
+    await expect(answer.locator('.cmd-header-exit')).toHaveText('stopped', {
+      timeout: 15_000,
+    })
+    expect(fake.requests()).toHaveLength(base)
+    await expect(answer).not.toContainText('failed')
+  })
 })

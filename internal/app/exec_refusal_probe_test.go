@@ -37,6 +37,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/testwait"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -227,15 +228,12 @@ LogLevel VERBOSE
 		keyPath: clientKeyPath,
 	}
 	want := fmt.Sprintf("Server listening on 127.0.0.1 port %d", port)
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(logBuf.String(), want) {
-			return fx
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("sshd did not report listening; log:\n%s", logBuf.String())
-	return nil
+	testwait.WaitForTimeoutDetail(t, "sshd listening", 20*time.Second,
+		func() string { return fmt.Sprintf("log:\n%s", logBuf.String()) },
+		func() bool {
+			return strings.Contains(logBuf.String(), want)
+		})
+	return fx
 }
 
 // dial opens one client connection and authenticates once.
@@ -330,14 +328,13 @@ func execProbeRead(ch gossh.Channel) *lockedBuffer {
 // never on a duration: the deadline exists only so a hang reports.
 func execProbeWaitFor(t *testing.T, out *lockedBuffer, want, what string) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(out.String(), want) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("%s: never saw %q; channel output was:\n%s", what, want, out.String())
+	testwait.WaitForTimeoutDetail(t, what, 30*time.Second,
+		func() string {
+			return fmt.Sprintf("never saw %q; channel output was:\n%s", want, out.String())
+		},
+		func() bool {
+			return strings.Contains(out.String(), want)
+		})
 }
 
 // ptyDeviceName is what `tty(1)` prints when its standard input IS a
@@ -356,15 +353,14 @@ var ptyDeviceName = regexp.MustCompile(`/dev/(pts/[0-9]+|ttys[0-9]+)`)
 // execProbeWaitForPTYName blocks until the buffer carries such a name.
 func execProbeWaitForPTYName(t *testing.T, out *lockedBuffer, what string) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if ptyDeviceName.MatchString(out.String()) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("%s: `tty` never named a pty device (%s); channel output was:\n%s",
-		what, ptyDeviceName, out.String())
+	testwait.WaitForTimeoutDetail(t, what, 30*time.Second,
+		func() string {
+			return fmt.Sprintf("`tty` never named a pty device (%s); channel output was:\n%s",
+				ptyDeviceName, out.String())
+		},
+		func() bool {
+			return ptyDeviceName.MatchString(out.String())
+		})
 }
 
 // execProbeProveInteractive proves the channel carries a real interactive

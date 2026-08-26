@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // The LOCAL zsh tier (nocx-wwz0). Every other terminal on macOS opens the
@@ -489,42 +490,28 @@ func TestLocalZshSession_IsIntegratedOnTheUsersOwnShell(t *testing.T) {
 	if _, err := ptmx.Write([]byte(probe + "\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	verdict := waitForEither(t, s, "CAP_TEXT_ONLY", "CAP_IN_ENVIRON")
+	var verdict string
+	testwait.WaitForTimeoutDetail(t, "one of the zsh capability verdicts", 20*time.Second,
+		func() string { return fmt.Sprintf("output=%q", s.output()) },
+		func() bool {
+			out := s.output()
+			ia, ib := strings.LastIndex(out, "CAP_TEXT_ONLY"), strings.LastIndex(out, "CAP_IN_ENVIRON")
+			switch {
+			case ia > ib:
+				verdict = "CAP_TEXT_ONLY"
+			case ib > ia:
+				verdict = "CAP_IN_ENVIRON"
+			default:
+				return false
+			}
+			return true
+		})
 	if verdict != "CAP_TEXT_ONLY" {
 		t.Errorf("the capability reached the session environment, where every child of the user's shell can read it: %q", s.output())
 	}
 	if !strings.Contains(s.output(), "CAP_VAR=yes") {
 		t.Errorf("the shell does not hold the capability in its non-exported variable, so the check above passed on a session that had none: %q", s.output())
 	}
-}
-
-// waitForEither blocks until one of two verdict words appears on the pty and
-// reports which. Anchoring on the shell's own answer rather than on a duration
-// is what keeps this assertion from passing because the command had not run
-// yet — the shape AGENTS.md's "wait on an observable state change" asks for.
-//
-// NEITHER word may appear in the command that is typed to produce it. The pty
-// carries the echo of that line, zsh's editor redraws it in pieces, and a
-// caller sampling mid-redraw reads a prefix — so a typed line containing both
-// words answers its own question, in whichever order it spells them. Callers
-// split the word across two quoted strings ("CAP_IN""_ENVIRON") or keep it out
-// of the typed text entirely.
-func waitForEither(t *testing.T, s *channelShell, a, b string) string {
-	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		out := s.output()
-		ia, ib := strings.LastIndex(out, a), strings.LastIndex(out, b)
-		switch {
-		case ia > ib:
-			return a
-		case ib > ia:
-			return b
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	t.Fatalf("neither %q nor %q appeared on the pty; output=%q", a, b, s.output())
-	return ""
 }
 
 // TestLocalZshSession_RestoresAUsersOwnZDOTDIR is the other half of the
@@ -648,7 +635,23 @@ func TestLocalZshSession_SurvivesAUserRcThatFails(t *testing.T) {
 	if _, err := ptmx.Write([]byte(`echo "BROKEN""_RC_STILL_USABLE"` + "\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if got := waitForEither(t, s, "BROKEN_RC_STILL_USABLE", "__NOCX_NEVER__"); got != "BROKEN_RC_STILL_USABLE" {
+	var verdict string
+	testwait.WaitForTimeoutDetail(t, "one of the broken-rc verdicts", 20*time.Second,
+		func() string { return fmt.Sprintf("output=%q", s.output()) },
+		func() bool {
+			out := s.output()
+			ia, ib := strings.LastIndex(out, "BROKEN_RC_STILL_USABLE"), strings.LastIndex(out, "__NOCX_NEVER__")
+			switch {
+			case ia > ib:
+				verdict = "BROKEN_RC_STILL_USABLE"
+			case ib > ia:
+				verdict = "__NOCX_NEVER__"
+			default:
+				return false
+			}
+			return true
+		})
+	if verdict != "BROKEN_RC_STILL_USABLE" {
 		t.Fatalf("a broken user ~/.zshrc cost the user a terminal: %q", s.output())
 	}
 	// And the transient directory is gone — the shell reached a prompt, so the
@@ -724,7 +727,23 @@ func TestLocalZshSession_KeepsAFrameworkAcceptLineWrapper(t *testing.T) {
 	if _, err := ptmx.Write([]byte(`echo "ENTER""_WORKS"` + "\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	if got := waitForEither(t, s, "ENTER_WORKS", "No such widget"); got != "ENTER_WORKS" {
+	var verdict string
+	testwait.WaitForTimeoutDetail(t, "the Enter verdict", 20*time.Second,
+		func() string { return fmt.Sprintf("output=%q", s.output()) },
+		func() bool {
+			out := s.output()
+			ia, ib := strings.LastIndex(out, "ENTER_WORKS"), strings.LastIndex(out, "No such widget")
+			switch {
+			case ia > ib:
+				verdict = "ENTER_WORKS"
+			case ib > ia:
+				verdict = "No such widget"
+			default:
+				return false
+			}
+			return true
+		})
+	if verdict != "ENTER_WORKS" {
 		t.Fatalf("pressing Enter did not run the command: %q", s.output())
 	}
 	if strings.Contains(s.output(), "No such widget") {

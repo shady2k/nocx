@@ -17,22 +17,15 @@ import "context"
 // be choosing a provider, which is routing policy, not a consumer concern.
 type SecretID string
 
-// SecretStore is the consumer contract for writing and reading secrets.
-// Implementations are responsible for the confidentiality and integrity of
-// the stored material (ADR-0011 §2).
+// SecretStore is the consumer mutation/existence capability. It deliberately
+// cannot return material: reads require Resolver and an explicit stance.
 //
-// ctx bounds how long the caller waits for an answer. It does NOT cancel
-// the effect — a storage backend (e.g. go-keyring) may take no context, so
-// a Create or Delete that timed out may still land. That is precisely why
-// the Vault journals before delegating (spec §4.2).
+// ctx bounds how long the caller waits for an answer. It does NOT cancel an
+// effect already delegated to a backend.
 type SecretStore interface {
 	// Create stores value and returns the assigned SecretID. The caller
 	// receives the id the store chose — minting is not a consumer concern.
 	Create(ctx context.Context, value Secret) (SecretID, error)
-
-	// Get retrieves the secret identified by id. Returns an empty Secret
-	// with a nil error when the id is not found.
-	Get(ctx context.Context, id SecretID) (Secret, error)
 
 	// Delete removes the secret identified by id. Deleting an absent id
 	// is not an error.
@@ -40,4 +33,12 @@ type SecretStore interface {
 
 	// Exists reports whether a secret with the given id exists.
 	Exists(ctx context.Context, id SecretID) (bool, error)
+}
+
+// MaterialStore is the composition-only backend contract used to construct a
+// Resolver. Domain consumers must receive Resolver or SecretStore, never this
+// interface: Get has no stance.
+type MaterialStore interface {
+	SecretStore
+	Get(ctx context.Context, id SecretID) (Secret, error)
 }

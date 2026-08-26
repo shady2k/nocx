@@ -48,6 +48,11 @@ func newInventoryHarness(t *testing.T, extra ...WSServerOption) *inventoryHarnes
 	opts := append([]WSServerOption{
 		WithProfileRepository(ps), WithGroupRepository(ps),
 		WithCredentialStore(v),
+		// Wired as production wires it. It only bites once a test also
+		// calls SetUnlockRequester: EnsureUnsealed with no prompt carrier
+		// answers ErrVaultSealed, which is the sealed-error path the rest
+		// of these tests assert.
+		WithVaultUnsealer(v),
 		WithVaultLifecycle(v),
 	}, extra...)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), opts...)

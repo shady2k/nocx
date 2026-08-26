@@ -3,7 +3,6 @@ package shellintegration
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/creack/pty"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // writeScriptFile materialises an embedded script to a temp file so a real
@@ -1061,40 +1060,33 @@ func TestBashSnapshotArrivesBeforeFirstPrompt(t *testing.T) {
 		// ordering (nocx-0ije).
 		"NOCX_SNAPSHOT_WAIT_MS=5000",
 	)
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		t.Fatalf("pty start: %v", err)
-	}
-	defer func() { _ = ptmx.Close() }()
+	capture := newPTYCapture(t, cmd)
 
-	done := make(chan []byte, 1)
-	go func() {
-		out, _ := io.ReadAll(ptmx)
-		done <- out
-	}()
-
-	// Let the first prompt render (hello, A, snapshot, B), then run one
-	// command — bracketed by C/D — then exit.
-	time.Sleep(300 * time.Millisecond)
-	if _, werr := ptmx.Write([]byte("true\n")); werr != nil {
+	// The first prompt and the command completion are observable PTY fences.
+	testwait.WaitForTimeout(t, "bash snapshot test first prompt", 15*time.Second, func() bool {
+		return strings.Contains(capture.output(), "\x1b]133;B")
+	})
+	if _, werr := capture.ptmx.Write([]byte("true\n")); werr != nil {
 		t.Fatalf("write command: %v", werr)
 	}
-	time.Sleep(300 * time.Millisecond)
-	if _, werr := ptmx.Write([]byte("exit\n")); werr != nil {
+	testwait.WaitForTimeout(t, "bash snapshot test command completion", 15*time.Second, func() bool {
+		return strings.Contains(capture.output(), "\x1b]133;D;0")
+	})
+	if _, werr := capture.ptmx.Write([]byte("exit\n")); werr != nil {
 		t.Fatalf("write exit: %v", werr)
 	}
-
-	var out []byte
-	select {
-	case out = <-done:
-	case <-time.After(15 * time.Second):
-		_ = cmd.Process.Kill()
-		t.Fatal("timed out waiting for the interactive session to end")
-	}
+	testwait.WaitForTimeout(t, "bash snapshot test session end", 15*time.Second, func() bool {
+		select {
+		case <-capture.done:
+			return true
+		default:
+			return false
+		}
+	})
+	output := capture.output()
 	if werr := cmd.Wait(); werr != nil {
 		t.Logf("bash exited non-zero (may be benign): %v", werr)
 	}
-	output := string(out)
 
 	ms := extractOscMarkers(output)
 	firstH, firstS, firstB := -1, -1, -1
@@ -1854,38 +1846,32 @@ func TestZshSnapshotArrivesBeforeFirstPrompt(t *testing.T) {
 		// existing (nocx-0ije).
 		"NOCX_SNAPSHOT_WAIT_MS=5000",
 	)
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		t.Fatalf("pty start: %v", err)
-	}
-	defer func() { _ = ptmx.Close() }()
+	capture := newPTYCapture(t, cmd)
 
-	done := make(chan []byte, 1)
-	go func() {
-		out, _ := io.ReadAll(ptmx)
-		done <- out
-	}()
-
-	time.Sleep(500 * time.Millisecond)
-	if _, werr := ptmx.Write([]byte("true\n")); werr != nil {
+	testwait.WaitForTimeout(t, "zsh snapshot test first prompt", 20*time.Second, func() bool {
+		return strings.Contains(capture.output(), "\x1b]133;B")
+	})
+	if _, werr := capture.ptmx.Write([]byte("true\n")); werr != nil {
 		t.Fatalf("write command: %v", werr)
 	}
-	time.Sleep(500 * time.Millisecond)
-	if _, werr := ptmx.Write([]byte("exit\n")); werr != nil {
+	testwait.WaitForTimeout(t, "zsh snapshot test command completion", 20*time.Second, func() bool {
+		return strings.Contains(capture.output(), "\x1b]133;D;0")
+	})
+	if _, werr := capture.ptmx.Write([]byte("exit\n")); werr != nil {
 		t.Fatalf("write exit: %v", werr)
 	}
-
-	var out []byte
-	select {
-	case out = <-done:
-	case <-time.After(20 * time.Second):
-		_ = cmd.Process.Kill()
-		t.Fatal("timed out waiting for the interactive session to end")
-	}
+	testwait.WaitForTimeout(t, "zsh snapshot test session end", 20*time.Second, func() bool {
+		select {
+		case <-capture.done:
+			return true
+		default:
+			return false
+		}
+	})
 	if werr := cmd.Wait(); werr != nil {
 		t.Logf("zsh exited non-zero (may be benign): %v", werr)
 	}
-	output := string(out)
+	output := capture.output()
 
 	ms := extractOscMarkers(output)
 	firstH, firstS, firstB := -1, -1, -1

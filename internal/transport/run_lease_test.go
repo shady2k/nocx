@@ -22,6 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // fakeLeaseSession is the lease's process-group seam: it records every
@@ -195,23 +196,22 @@ func TestRunLease_OutputBudgetFiresAndNamesItself(t *testing.T) {
 	// truncated silently. The writes retry so the observer's arming cannot
 	// be raced (the lease arms it in its goroutine); the OUTCOME is the
 	// observable, never a duration.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	var leaseErr error
+	testwait.WaitForTimeout(t, "output budget to fire", 5*time.Second, func() bool {
 		if err := ring.write(make([]byte, 100)); err != nil {
 			t.Fatalf("ring write: %v", err)
 		}
 		select {
-		case err := <-errCh:
-			le := leaseErrorOf(t, err)
-			if le.Reason != content.TermOutputBudget {
-				t.Fatalf("reason = %s, want output-budget", le.Reason)
-			}
-			return
+		case leaseErr = <-errCh:
+			return true
 		default:
+			return false
 		}
-		time.Sleep(5 * time.Millisecond)
+	})
+	le := leaseErrorOf(t, leaseErr)
+	if le.Reason != content.TermOutputBudget {
+		t.Fatalf("reason = %s, want output-budget", le.Reason)
 	}
-	t.Fatal("the budget never fired")
 }
 
 func TestRunLease_AwaitingTakeoverSuspendsTheLease(t *testing.T) {
@@ -233,16 +233,12 @@ func TestRunLease_AwaitingTakeoverSuspendsTheLease(t *testing.T) {
 	// the lease ends suspended — the pre-request state check covers the
 	// race — so the observable is polled, never a duration.
 	lane.note(session.ID("sid-unit"), "alternate")
-	deadline := time.Now().Add(5 * time.Second)
-	for !leaseSuspended(lease) && time.Now().Before(deadline) {
-		time.Sleep(5 * time.Millisecond)
-	}
-	if !leaseSuspended(lease) {
-		t.Fatal("the lease never suspended on the awaiting-takeover transition")
-	}
+	testwait.WaitForTimeout(t, "lease suspension on the awaiting-takeover transition", 5*time.Second, func() bool {
+		return leaseSuspended(lease)
+	})
 
-	// Wait well past every bound and assert NOTHING fired, then let the
-	// run resolve normally (the human finished; the renderer resolves).
+	// The lease exposes no expiry event; this duration crosses both configured
+	// 50 ms bounds, which is the negative behavior under test.
 	time.Sleep(120 * time.Millisecond)
 	select {
 	case err := <-errCh:

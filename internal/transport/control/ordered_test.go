@@ -2,10 +2,13 @@ package control
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // orderedSubmission preserves submission order while running off the
@@ -130,13 +133,9 @@ func TestOrderedSubmission_RefusesWhenFull(t *testing.T) {
 	close(release)
 	// All THREE admitted tasks complete — the one that occupied the worker
 	// and the two that were queued behind it. The refused one never ran.
-	deadline := time.Now().Add(5 * time.Second)
-	for atomic.LoadInt64(&n) < 3 {
-		if time.Now().After(deadline) {
-			t.Fatalf("admitted tasks never completed (%d of 3 ran)", atomic.LoadInt64(&n))
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	testwait.WaitForTimeoutDetail(t, "all admitted tasks to complete", 5*time.Second,
+		func() string { return fmt.Sprintf("%d of 3 ran", atomic.LoadInt64(&n)) },
+		func() bool { return atomic.LoadInt64(&n) >= 3 })
 }
 
 func TestOrderedSubmission_PropagatesTaskContext(t *testing.T) {

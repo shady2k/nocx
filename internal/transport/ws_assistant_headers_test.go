@@ -115,6 +115,57 @@ func TestEndpointsProbe_UnknownHeaderRowIsARefusedResultNamingIt(t *testing.T) {
 	}
 }
 
+// A secret-valued header whose secret is deleted while the unlock is in
+// flight: the Operation stance unlocks, the read then finds the secret gone,
+// and the probe must be a refused RESULT naming the header — never a generic
+// -32603 toast (the review bug). The engine must not be called at all.
+func TestEndpointsProbe_DeletedHeaderSecretAfterUnlockIsARefusedResult(t *testing.T) {
+	h := newAssistantHarness(t, &stubAssistantClient{
+		probe: func(ctx context.Context, p assistant.ProbeParams) (assistant.ProbeResult, error) {
+			t.Fatal("the engine must not be called for a deleted header secret")
+			return assistant.ProbeResult{}, nil
+		},
+	})
+	h.setupAndUnseal()
+	id, row := h.mintSecret(t, "azure key")
+
+	h.v.Seal()
+	// The unlock succeeds AND deletes the header's secret before the read
+	// returns: the exact "deleted in parallel with the unlock" shape.
+	h.v.SetUnlockRequester(unlockRequesterFunc(func(ctx context.Context, reason string) error {
+		if err := h.v.Unseal(ctx, vault.UnsealRequest{Passphrase: "test"}); err != nil {
+			return err
+		}
+		return h.v.Delete(ctx, credential.SecretID(id))
+	}))
+
+	raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
+		"name":    "Azure",
+		"baseUrl": "https://api.example.com/v1",
+		"noKey":   true,
+		"model":   "gpt-4o",
+		"headers": []map[string]any{
+			{"name": "api-key", "value": nil, "secret": row},
+		},
+	})
+	if isErrorResponse(t, raw) {
+		t.Fatalf("a deleted header secret after unlock is a probe RESULT, not an RPC error: %s", raw)
+	}
+	var result assistant.ProbeResult
+	if err := json.Unmarshal(mustResult(t, raw), &result); err != nil {
+		t.Fatalf("unmarshal result: %v", err)
+	}
+	if result.OK {
+		t.Fatalf("probe = %+v, want !OK for a deleted header secret", result)
+	}
+	if !strings.Contains(result.Error, "api-key") {
+		t.Errorf("error = %q, want it to name the header", result.Error)
+	}
+	if last := h.probes.Last(); last == nil || last.OK {
+		t.Fatalf("a refused header probe must be recorded, got %+v", last)
+	}
+}
+
 func mustResult(t *testing.T, raw []byte) json.RawMessage {
 	t.Helper()
 	var env struct {

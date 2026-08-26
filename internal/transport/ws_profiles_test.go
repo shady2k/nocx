@@ -212,7 +212,7 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 
 	// The target profile above jumps through it; nothing else to seed.
 
-	resolver := connection.NewResolver(ps, ps, cs)
+	resolver := connection.NewResolver(ps, ps, credential.NewResolver(cs, nil, nil))
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),

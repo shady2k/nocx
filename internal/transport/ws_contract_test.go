@@ -45,6 +45,7 @@ import (
 	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vaultreset"
@@ -3597,7 +3598,7 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 	bid := e.openBinding(t, sid, dir, 2)
 	w := e.watchDir(t, bid, []string{dir}, 3)
 
-	waitFor(t, "watch baseline", wantWithin, func() bool {
+	testwait.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		return w.paths[dir] != ""
@@ -3609,7 +3610,7 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "changed.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	waitFor(t, "dirty path", wantWithin, func() bool {
+	testwait.WaitForTimeout(t, "dirty path", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		_, ok := w.dirty[dir]

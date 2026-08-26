@@ -66,6 +66,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/testwait"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -386,27 +387,24 @@ LogLevel VERBOSE
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	want := fmt.Sprintf("Server listening on 127.0.0.1 port %d", port)
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(logBuf.String(), want) {
-			return &liveSshd{
-				addr:      addr,
-				user:      userName,
-				home:      home,
-				signer:    clientSigner,
-				clientRaw: clientRaw,
-				hostKey:   hostSigner.PublicKey(),
-				cmd:       cmd,
-				logBuf:    logBuf,
-				tmpRoot:   tmpRoot,
-				recDir:    recDir,
-				histFile:  histFile,
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
+	testwait.WaitForTimeoutDetail(t, "sshd listening", 10*time.Second,
+		func() string { return fmt.Sprintf("log:\n%s", logBuf.String()) },
+		func() bool {
+			return strings.Contains(logBuf.String(), want)
+		})
+	return &liveSshd{
+		addr:      addr,
+		user:      userName,
+		home:      home,
+		signer:    clientSigner,
+		clientRaw: clientRaw,
+		hostKey:   hostSigner.PublicKey(),
+		cmd:       cmd,
+		logBuf:    logBuf,
+		tmpRoot:   tmpRoot,
+		recDir:    recDir,
+		histFile:  histFile,
 	}
-	t.Fatalf("sshd did not report listening within 10s; log:\n%s", logBuf.String())
-	return nil
 }
 
 // knownHostsPath writes a known_hosts file carrying the fixture's host key
@@ -765,18 +763,6 @@ func (fx *liveSshd) connect(t *testing.T, kernel *recordingKernel, shell ssh.She
 	return ch, out
 }
 
-func waitFor(t *testing.T, what string, timeout time.Duration, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	t.Fatalf("timed out after %s waiting for %s", timeout, what)
-}
-
 // runLine types one command line into the remote shell and waits for its
 // authenticated completion, returning the completed attempt.
 func runLine(t *testing.T, ch ssh.Channel, kernel *recordingKernel, line string, wantExit int) lifecycle.ExecutionAttempt {
@@ -794,14 +780,14 @@ func runLine(t *testing.T, ch ssh.Channel, kernel *recordingKernel, line string,
 	// the kernel mints the attempt id on start, and the test needs it to
 	// follow the completion.
 	var att lifecycle.ExecutionAttempt
-	waitFor(t, "an open attempt for "+line, 15*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "an open attempt for "+line, 15*time.Second, func() bool {
 		a, ok := kernel.OpenAttempt(domain)
 		if ok {
 			att = a
 		}
 		return ok
 	})
-	waitFor(t, "completion of "+line, 15*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "completion of "+line, 15*time.Second, func() bool {
 		a, ok := kernel.Attempt(att.ID)
 		if !ok {
 			return false
@@ -831,7 +817,7 @@ func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash, shellintegration.New(log.NewSlogAdapter(nil)))
 
-	waitFor(t, "domain established", 15*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "domain established", 15*time.Second, func() bool {
 		kernel.mu.Lock()
 		defer kernel.mu.Unlock()
 		if kernel.minted != 1 {
@@ -854,7 +840,7 @@ func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 	// The render fence the kernel recorded must be the exact bytes the shell
 	// wrote to the terminal (protocol doc §8).
 	fence := fmt.Sprintf("\x1b]1337;NOCX_FENCE;%x\x07", att0.Fence)
-	waitFor(t, "sentinel output and fence", 10*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "sentinel output and fence", 10*time.Second, func() bool {
 		return strings.Contains(out.String(), "PROOF_BASH_123") &&
 			strings.Contains(out.String(), fence)
 	})
@@ -863,7 +849,7 @@ func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 	runLine(t, ch, kernel, "sh -c 'sleep 0.3; exit 1'", 1)
 
 	// The lane is back at a ready prompt for the domain.
-	waitFor(t, "lane back at PromptReady", 10*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "lane back at PromptReady", 10*time.Second, func() bool {
 		kernel.mu.Lock()
 		defer kernel.mu.Unlock()
 		st, err := kernel.State(kernel.lane)
@@ -881,7 +867,7 @@ func TestLiveSshd_BashReachesAcceptedDomain(t *testing.T) {
 	if _, err := ch.Write([]byte("exit\n")); err != nil {
 		t.Fatalf("write exit: %v", err)
 	}
-	waitFor(t, "session end after exit", 15*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "session end after exit", 15*time.Second, func() bool {
 		select {
 		case <-ch.Done():
 			return true
@@ -910,7 +896,7 @@ func TestLiveSshd_RemoteBundleRepublishReplacesManifest(t *testing.T) {
 
 	kernel := newRecordingKernel()
 	ch, _ := fx.connect(t, kernel, ssh.ShellBash, installer)
-	waitFor(t, "domain established after republish", 15*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "domain established after republish", 15*time.Second, func() bool {
 		kernel.mu.Lock()
 		defer kernel.mu.Unlock()
 		if kernel.minted != 1 {
@@ -934,8 +920,19 @@ func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash, shellintegration.New(log.NewSlogAdapter(nil)))
 
-	// The refusal is synchronous: no domain may ever be minted.
-	time.Sleep(500 * time.Millisecond)
+	// The refusal is synchronous: no domain may ever be minted. The native
+	// prompt is the observable that the bootstrap has finished and the
+	// channel is ready for ordinary terminal input.
+	testwait.WaitForTimeoutDetail(t, "native prompt after refused forwarding", 20*time.Second,
+		func() string {
+			kernel.mu.Lock()
+			minted := kernel.minted
+			kernel.mu.Unlock()
+			return fmt.Sprintf("minted %d domain(s); terminal:\n%s", minted, out.String())
+		},
+		func() bool {
+			return strings.Contains(out.String(), "NATIVE_PROMPT>")
+		})
 	kernel.mu.Lock()
 	minted := kernel.minted
 	kernel.mu.Unlock()
@@ -945,11 +942,12 @@ func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 
 	// The fixture .bashrc names the prompt NATIVE_PROMPT>; with no live
 	// channel the marker-only overlay keeps it visible (ADR-0024 decision 9).
-	// Run a command: the terminal is an ordinary usable shell.
+	// Run a command only after the bootstrap has released input: the terminal
+	// is an ordinary usable shell.
 	if _, err := ch.Write([]byte("echo CONVENTIONAL_OK\n")); err != nil {
 		t.Fatalf("write echo: %v", err)
 	}
-	waitFor(t, "a usable conventional terminal", 20*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "a usable conventional terminal", 20*time.Second, func() bool {
 		s := out.String()
 		return strings.Contains(s, "NATIVE_PROMPT>") && strings.Contains(s, "CONVENTIONAL_OK")
 	})
@@ -980,7 +978,7 @@ func TestLiveSshd_ConnectionLossRevokesDomain(t *testing.T) {
 	kernel := newRecordingKernel()
 	ch, _ := fx.connect(t, kernel, ssh.ShellBash, shellintegration.New(log.NewSlogAdapter(nil)))
 
-	waitFor(t, "domain established", 15*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "domain established", 15*time.Second, func() bool {
 		kernel.mu.Lock()
 		defer kernel.mu.Unlock()
 		if kernel.minted != 1 {
@@ -1000,7 +998,7 @@ func TestLiveSshd_ConnectionLossRevokesDomain(t *testing.T) {
 		t.Fatalf("write sleep: %v", err)
 	}
 	var att lifecycle.ExecutionAttempt
-	waitFor(t, "the sleep attempt to be open", 15*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the sleep attempt to be open", 15*time.Second, func() bool {
 		kernel.mu.Lock()
 		defer kernel.mu.Unlock()
 		a, ok := kernel.OpenAttempt(kernel.domain)
@@ -1015,13 +1013,13 @@ func TestLiveSshd_ConnectionLossRevokesDomain(t *testing.T) {
 
 	// The domain is lost and the open attempt becomes unknown — never
 	// completed, never successful.
-	waitFor(t, "domain lost", 20*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "domain lost", 20*time.Second, func() bool {
 		kernel.mu.Lock()
 		defer kernel.mu.Unlock()
 		d, ok := kernel.Domain(kernel.domain)
 		return ok && d.State == lifecycle.DomainLost
 	})
-	waitFor(t, "open attempt unknown", 20*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "open attempt unknown", 20*time.Second, func() bool {
 		kernel.mu.Lock()
 		defer kernel.mu.Unlock()
 		a, ok := kernel.Attempt(att.ID)
@@ -1049,7 +1047,7 @@ func TestLiveSshd_ZshAdapterReachesAcceptedDomain(t *testing.T) {
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellZsh, shellintegration.New(log.NewSlogAdapter(nil)))
 
-	waitFor(t, "domain established", 15*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "domain established", 15*time.Second, func() bool {
 		kernel.mu.Lock()
 		defer kernel.mu.Unlock()
 		if kernel.minted != 1 {
@@ -1061,7 +1059,7 @@ func TestLiveSshd_ZshAdapterReachesAcceptedDomain(t *testing.T) {
 
 	att := runLine(t, ch, kernel, "printf 'PROOF_ZSH_123\\n'; sleep 0.3", 0)
 	fence := fmt.Sprintf("\x1b]1337;NOCX_FENCE;%x\x07", att.Fence)
-	waitFor(t, "zsh sentinel output and fence", 10*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "zsh sentinel output and fence", 10*time.Second, func() bool {
 		return strings.Contains(out.String(), "PROOF_ZSH_123") &&
 			strings.Contains(out.String(), fence)
 	})
@@ -1074,7 +1072,7 @@ func TestLiveSshd_ZshAdapterReachesAcceptedDomain(t *testing.T) {
 	}
 	// domain_closed is best-effort (see the bash proof); assert the session
 	// ended, not a promised terminal state.
-	waitFor(t, "session end after exit", 15*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "session end after exit", 15*time.Second, func() bool {
 		select {
 		case <-ch.Done():
 			return true

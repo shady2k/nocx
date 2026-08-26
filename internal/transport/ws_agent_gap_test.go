@@ -26,6 +26,8 @@ import (
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/transport/outbound"
 )
 
@@ -211,6 +213,9 @@ func gapRunContext() askRunContext {
 		runID:    7,
 		entryID:  "turn-1",
 		question: "q",
+		// The stream resolves endpoint material up front; a keyless endpoint
+		// resolves to nothing, keeping these unit tests on the delta path.
+		endpoint: profile.Endpoint{NoKey: true},
 	}
 }
 
@@ -522,7 +527,7 @@ func TestAgentAsk_SlowConsumerBoundsTheDeltaPath(t *testing.T) {
 	// memory.
 	close(sock.released)
 	const writtenDeltas = outbound.DefaultQueueDepth + 1
-	waitFor(t, fmt.Sprintf("%d delta frames written", writtenDeltas), 10*time.Second, func() bool {
+	testwait.WaitForTimeout(t, fmt.Sprintf("%d delta frames written", writtenDeltas), 10*time.Second, func() bool {
 		return sock.deltaFrameCount() == writtenDeltas
 	})
 	if got := sock.deltaFrameCount(); got != writtenDeltas {
@@ -532,7 +537,7 @@ func TestAgentAsk_SlowConsumerBoundsTheDeltaPath(t *testing.T) {
 	// With the queue drained, the terminal runState gets through and carries
 	// the count: the drop surfaces (criterion 1).
 	close(client.release)
-	waitFor(t, "terminal runState on the wire", 10*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "terminal runState on the wire", 10*time.Second, func() bool {
 		return sock.runStateFrame() != nil
 	})
 	st := sock.runStateFrame()

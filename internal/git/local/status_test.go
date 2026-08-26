@@ -3,11 +3,14 @@ package local
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // TestStatusUnbornRealGit: an unborn branch with a staged file, through the
@@ -169,17 +172,28 @@ func TestStatusCutByWallClock(t *testing.T) {
 // TestStatusContextCancelled: a cancelled context is an error, never a
 // cut-shaped result.
 func TestStatusContextCancelled(t *testing.T) {
-	env := fakeGitEnv(t, map[string]string{"FAKE_STATUS": "sleep"})
+	marker := filepath.Join(t.TempDir(), "started")
+	env := fakeGitEnv(t, map[string]string{"FAKE_STATUS": "sleep", "FAKE_STARTED_FILE": marker})
 	repo := openRepo(t, env, t.TempDir())
 
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
 	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
+		_, err := repo.Status(ctx)
+		done <- err
 	}()
-	_, err := repo.Status(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Status returned %v, want context.Canceled", err)
+	testwait.WaitFor(t, "fake status to start", func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	})
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Status returned %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Status did not return after cancellation")
 	}
 }
 
@@ -187,18 +201,29 @@ func TestStatusContextCancelled(t *testing.T) {
 // EOF — the child ignores INT and TERM, so only KILL ends it, and Status
 // returns rather than hanging.
 func TestStatusChildIgnoresTERM(t *testing.T) {
-	env := fakeGitEnv(t, map[string]string{"FAKE_STATUS": "sleep_stubborn"})
+	marker := filepath.Join(t.TempDir(), "started")
+	env := fakeGitEnv(t, map[string]string{"FAKE_STATUS": "sleep_stubborn", "FAKE_STARTED_FILE": marker})
 	repo := openRepo(t, env, t.TempDir())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	start := time.Now()
+	done := make(chan error, 1)
 	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
+		_, err := repo.Status(ctx)
+		done <- err
 	}()
-	_, err := repo.Status(ctx)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Status returned %v, want context.Canceled", err)
+	testwait.WaitFor(t, "fake status to start", func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	})
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Status returned %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Status did not return after cancellation")
 	}
 	// INT+TERM were ignored (200ms grace each), so KILL must have done the
 	// work; the whole run should complete well under 3s and the fake git

@@ -18,6 +18,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // oneShotAdmission is the THIRD Admission implementation, defined in this
@@ -85,13 +87,12 @@ func TestThirdAdmissionDefinedInTestFileIsUsedUnchanged(t *testing.T) {
 // suite's helper — package boundaries cannot share it.
 func waitAcquirable(t *testing.T, a Admission, what string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if p, rej := a.TryAcquire(context.Background()); rej == nil {
-			p.Release()
-			return
+	testwait.WaitForTimeout(t, what, 2*time.Second, func() bool {
+		p, rej := a.TryAcquire(context.Background())
+		if rej != nil {
+			return false
 		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("%s never became acquirable", what)
+		p.Release()
+		return true
+	})
 }

@@ -501,6 +501,10 @@ func (s *memSecretStore) Get(_ context.Context, id credential.SecretID) (credent
 	return v, nil
 }
 
+func (s *memSecretStore) Resolve(ctx context.Context, id credential.SecretID, why credential.Stance) (credential.Secret, error) {
+	return credential.NewResolver(s, nil, nil).Resolve(ctx, id, why)
+}
+
 func (s *memSecretStore) Delete(_ context.Context, id credential.SecretID) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -536,6 +540,10 @@ func (s *sealedStore) Create(_ context.Context, _ credential.Secret) (credential
 
 func (s *sealedStore) Get(_ context.Context, _ credential.SecretID) (credential.Secret, error) {
 	return credential.Secret{}, vault.ErrVaultSealed
+}
+
+func (s *sealedStore) Resolve(ctx context.Context, id credential.SecretID, _ credential.Stance) (credential.Secret, error) {
+	return s.Get(ctx, id)
 }
 
 func (s *sealedStore) Delete(_ context.Context, _ credential.SecretID) error {

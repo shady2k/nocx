@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/proc"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // manualClock is the injected time source. Nothing here waits on a
@@ -98,7 +99,7 @@ func TestSupervisor_DeadlineKillsATermIgnoringGroupAndReapsIt(t *testing.T) {
 	}()
 
 	child, grandchild := f.awaitStarted(t)
-	waitFor(t, "the deadline to be armed on the injected clock", func() bool { return clock.scheduled() > 0 })
+	testwait.WaitFor(t, "the deadline to be armed on the injected clock", func() bool { return clock.scheduled() > 0 })
 
 	clock.fire()
 
@@ -203,7 +204,7 @@ func TestSupervisor_ContextCancelStopsTheGroup(t *testing.T) {
 		done <- err
 	}()
 	var pid int
-	waitFor(t, "the fixture to start", func() bool {
+	testwait.WaitFor(t, "the fixture to start", func() bool {
 		b, err := os.ReadFile(pidsFile) //nolint:gosec // a path this test built under t.TempDir()
 		if err != nil {
 			return false

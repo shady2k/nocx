@@ -143,3 +143,59 @@ the message this ADR exists to delete.
 
 **Never seal while the app runs.** Rejected on its face: auto-seal is a feature
 and the vault's whole point is that it can be shut.
+
+## Amendment — 2026-08-23: stance governs reads, including runs
+
+`nocx-k41yv` found the boundary this decision omitted: the dispatcher sees only
+errors on JSON-RPC requests. Secret access may also happen after a request has
+created a durable run, or below connection/SSH layers. Letting the carrier
+decide whether an unlock appears made transport shape stand in for intent.
+
+The decision is amended:
+
+- `credential.Resolver` is the only consumer-facing interface that returns
+  secret material. Every read supplies either `Operation(reason)` or `Report()`;
+  the zero stance is invalid. `credential.SecretStore` exposes mutations and
+  existence only, so a stanceless read does not compile.
+- An operation read calls the vault's `EnsureUnsealed`, waits for the one
+  coalesced prompt, then continues the same operation. A report read never asks
+  and maps the sealed state to `credential.ErrSealedQuiet`.
+- Waiting is allowed only outside a capability admission. The earlier
+  statement that the backend never blocks on unlock is superseded by this
+  narrower invariant: no control read loop or capability admission blocks on
+  unlock.
+
+  **The answer to the prompt is `vault.unseal`, not `vault.unlockResolved`.**
+  The renderer's dialog unseals first and reports the resolution only once
+  that succeeded, so it is `vault.unseal` — a VAULT-GATED method, capacity
+  one, a one-second wait — that has to get through. `unlockResolved` being
+  ingress-critical is necessary and was mistaken for sufficient: a read that
+  waits while holding the vault gate is a prompt whose own answer comes back
+  `-32004 Control plane busy`, and the person is shown a door with no handle.
+  Measured on exactly one path — `secrets.saveKeyPassphrase` resolving key
+  material inside its operation (`nocx-o3606`).
+
+  So the wait is lifted above the admission rather than trusted to stay out
+  of one: `internal/capability` holds no `credential.Resolver` at all, which a
+  test in that package asserts. A handler that needs material takes its
+  operation for the store reads, releases it, resolves, and takes it again to
+  write — the split `endpoints.probe` already had, and the same reason PHASE
+  TWO of `open` dials outside its domain gate.
+
+- `agent.ask` creates the durable run, answers with its backend identity, then
+  resolves endpoint material at the start of the stream task before the
+  streaming transition or any model request. Unlock therefore waits and
+  continues the same run. Dismissing it terminalizes the run as
+  `cancelled`/`user-killed`, not failed.
+- A stream resolves all endpoint material once. A later seal does not revoke
+  material already handed to the in-process client, and the stream has no
+  resolver from which it could fetch more. This is the deliberate answer to
+  the mid-run case; no re-drive is needed.
+- The renderer's sealed-error normalization and replay remain a fallback for
+  operations outside the material resolver. They no longer decide credential
+  intent.
+
+The plaintext lifetime is shorter than the request-path workaround this
+amendment replaces: endpoint key and secret-valued headers exist from the start
+of the stream task until the synchronous client call returns, never in the
+durable run, JSON-RPC payload, ledger, or logs.

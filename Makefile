@@ -60,9 +60,16 @@ endif
 # surprises. The artifacts are gitignored; a fresh checkout compiles with
 # only the committed .gitignore embedded, and Artifact answers
 # ErrArtifactsNotBuilt until this target has run. `helpers` is a
-# prerequisite of the RELEASE build and of the e2e acceptance job, and of
-# nothing else: ordinary `go build`, `make build` and `make dev` must work
-# with no artifacts present.
+# prerequisite of the RELEASE build and of nothing else: ordinary
+# `go build`, `make build` and `make dev` must work with no artifacts
+# present.
+#
+# The e2e suite needs them too and calls this target itself, from the stand's
+# bring-up (e2e/stand.ts). It is deliberately NOT a prerequisite of ci-e2e:
+# that target's whole promise is to be ci.yml's job, and ci.yml runs
+# e2e/run-in-container.sh straight after a bare checkout. A prerequisite here
+# bought the make target artifacts CI would not have had, and two SSH git
+# specs that could only ever pass locally (nocx-eoijp).
 HELPER_TARGETS := linux/amd64 linux/arm64 darwin/arm64
 HELPER_ARTIFACT_DIR := internal/helper/deploy/artifacts
 
@@ -444,7 +451,7 @@ ci-frontend:
 	@echo "=== ci-frontend: ci.yml's frontend job, on the runner's node 24 ==="
 	./scripts/ci-frontend.sh
 
-ci-e2e: helpers
+ci-e2e:
 	@echo "=== ci-e2e: ci.yml's e2e jobs, the same image and command ==="
 	@echo "    (CI runs one job per browser in parallel; this runs both in sequence)"
 	./e2e/run-in-container.sh

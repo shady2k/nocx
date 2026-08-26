@@ -92,24 +92,59 @@ describe('the extracted secret text field seam', () => {
 })
 
 describe('SecretTextField vault affordance', () => {
-  it('passes the selected range to the store callback without opening a panel', () => {
-    const onStoreSelection = vi.fn()
-    const { container } = render(() => (
-      <SecretTextField
-        id="api-header-value"
-        value="Bearer token"
-        onStoreSelection={onStoreSelection}
-      />
-    ))
-    const input = container.querySelector<HTMLInputElement>('#api-header-value')!
+  // T1 shipped this lock reporting the selection to a callback that opened
+  // nothing. It opens the one SecretPicker now — the same panel '@' opens.
+  const source = () => ({
+    status: vi.fn(() => Promise.resolve({ state: 'unsealed' as const })),
+    list: vi.fn(() => Promise.resolve([{ id: 'secrow:prod-id', name: 'prod-key' }])),
+    requestUnseal: vi.fn(() => Promise.resolve()),
+    requestSetup: vi.fn(() => Promise.resolve(false)),
+    requestCreate: vi.fn(),
+  })
+
+  const rowText = (): Array<string | null | undefined> =>
+    [...document.querySelectorAll('.ui-floating-panel__row')].map(
+      (row) => row.querySelector('.ui-collection-row__info')?.textContent,
+    )
+
+  const clickLock = (
+    container: HTMLElement,
+    id: string,
+    selection: { start: number; end: number },
+  ): HTMLInputElement => {
+    const input = container.querySelector<HTMLInputElement>(`#${id}`)!
     input.focus()
-    input.setSelectionRange(7, 12)
+    input.setSelectionRange(selection.start, selection.end)
+    fireEvent.click(screen.getByRole('button', { name: 'Store in vault' }))
+    return input
+  }
 
-    const action = screen.getByRole('button', { name: 'Store in vault' })
-    fireEvent.click(action)
+  it('the lock opens the one picker, offering to store the selection', async () => {
+    const { container } = render(() => (
+      <SecretTextField id="api-header-value" value="Bearer t.Yixxxx" source={source()} />
+    ))
+    const input = clickLock(container, 'api-header-value', { start: 7, end: 15 })
 
-    expect(onStoreSelection).toHaveBeenCalledOnce()
-    expect(onStoreSelection).toHaveBeenCalledWith({ start: 7, end: 12 })
+    await vi.waitFor(() =>
+      expect(rowText()).toEqual(['Store "t.Yixxxx" in the vault…', 'prod-key', 'Add a secret…']),
+    )
+    expect(document.querySelectorAll('.ui-floating-panel[data-variant="secret"]')).toHaveLength(1)
     expect(document.activeElement).toBe(input)
+  })
+
+  it('an empty field gets the plain list, with nothing to store', async () => {
+    const { container } = render(() => (
+      <SecretTextField id="api-empty-value" value="" source={source()} />
+    ))
+    clickLock(container, 'api-empty-value', { start: 0, end: 0 })
+
+    await vi.waitFor(() => expect(rowText()).toEqual(['prod-key', 'Add a secret…']))
+  })
+
+  it('no source, no lock — a control that can do nothing is not offered', () => {
+    render(() => <SecretTextField id="api-no-vault" value="Bearer t.Yixxxx" />)
+    const input = document.querySelector<HTMLInputElement>('#api-no-vault')!
+    input.focus()
+    expect(screen.queryByRole('button', { name: 'Store in vault' })).toBeNull()
   })
 })

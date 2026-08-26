@@ -208,6 +208,11 @@ async function main() {
       vaultController.openSetup()
       return Promise.resolve(true)
     },
+    // The NAME travels and the value does not: this is the no-mint-seam
+    // fallback, whose destination is the Secrets page, and that page owns its
+    // own value field (settings-content.ts, startNewSecret). The workbench
+    // path that CAN carry a value does — api-pane.tsx, createSecretInPlace,
+    // which is what the store row reaches whenever a vault client is wired.
     requestCreate: (name) => {
       openSettingsPane().startNewSecret(name)
       return Promise.resolve(undefined)

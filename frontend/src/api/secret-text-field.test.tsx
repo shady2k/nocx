@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { afterEach, describe, expect, it } from 'vitest'
-import { cleanup, render } from '@solidjs/testing-library'
+import { afterEach, describe, expect, it, vi } from 'vitest'
+import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
 import { For } from 'solid-js'
 import {
   SecretTextField,
@@ -88,5 +88,28 @@ describe('the extracted secret text field seam', () => {
       'Secret not on this machine',
       missingValue,
     ])
+  })
+})
+
+describe('SecretTextField vault affordance', () => {
+  it('passes the selected range to the store callback without opening a panel', () => {
+    const onStoreSelection = vi.fn()
+    const { container } = render(() => (
+      <SecretTextField
+        id="api-header-value"
+        value="Bearer token"
+        onStoreSelection={onStoreSelection}
+      />
+    ))
+    const input = container.querySelector<HTMLInputElement>('#api-header-value')!
+    input.focus()
+    input.setSelectionRange(7, 12)
+
+    const action = screen.getByRole('button', { name: 'Store in vault' })
+    fireEvent.click(action)
+
+    expect(onStoreSelection).toHaveBeenCalledOnce()
+    expect(onStoreSelection).toHaveBeenCalledWith({ start: 7, end: 12 })
+    expect(document.activeElement).toBe(input)
   })
 })

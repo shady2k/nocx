@@ -1,7 +1,13 @@
 import { onCleanup, splitProps } from 'solid-js'
 import { findReferences } from '../secret-reference'
 import { createSecretPickerField } from '../ui/secret-picker-field'
-import { TextField, type TextFieldMark, type TextFieldProps } from '../ui/text-field'
+import { LockIcon } from '../ui/icons'
+import {
+  TextField,
+  type TextFieldMark,
+  type TextFieldProps,
+  type TextFieldSelection,
+} from '../ui/text-field'
 import type { SecretEntry, SecretPickerSource } from '../ui/secret-picker'
 
 export type { SecretEntry } from '../ui/secret-picker'
@@ -55,6 +61,8 @@ export interface SecretTextFieldProps extends TextFieldProps {
   source?: SecretPickerSource
   onPickerReady?: (open: (() => void) | undefined) => void
   onSecretReference?: (handle: string, at: { x: number; y: number }, replace: () => void) => void
+  /** Reports the selected value range to the caller; this field opens nothing. */
+  onStoreSelection?: (selection: TextFieldSelection) => void
 }
 
 export function SecretTextField(props: SecretTextFieldProps) {
@@ -62,6 +70,7 @@ export function SecretTextField(props: SecretTextFieldProps) {
     'source',
     'onPickerReady',
     'onSecretReference',
+    'onStoreSelection',
   ])
   // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
   const source = pickerProps.source
@@ -117,6 +126,16 @@ export function SecretTextField(props: SecretTextFieldProps) {
   return (
     <TextField
       {...fieldProps}
+      trailingAction={
+        pickerProps.onStoreSelection
+          ? {
+              ariaLabel: 'Store in vault',
+              title: 'Store in vault',
+              onClick: pickerProps.onStoreSelection,
+              children: <LockIcon />,
+            }
+          : fieldProps.trailingAction
+      }
       onMarkClick={(mark, at) => {
         if (mark.secretHandle !== undefined && props.onSecretReference) {
           // eslint-disable-next-line solid/reactivity -- mark callback runs only on explicit user activation

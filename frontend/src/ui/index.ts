@@ -8,7 +8,13 @@ export {
   type SuggestionFieldProps,
   type SuggestionOption,
 } from './suggestion-field'
-export { TextField, type TextFieldProps } from './text-field'
+export {
+  TextField,
+  type TextFieldAction,
+  type TextFieldMark,
+  type TextFieldProps,
+  type TextFieldSelection,
+} from './text-field'
 export {
   SearchField,
   createSearchFieldDisplay,

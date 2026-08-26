@@ -2,6 +2,7 @@
 import { describe, expect, it, vi, afterEach } from 'vitest'
 import { render, screen, fireEvent, cleanup } from '@solidjs/testing-library'
 import { TextField, type TextFieldProps } from './text-field'
+import type { TextFieldAction } from './text-field'
 
 afterEach(() => cleanup())
 
@@ -440,5 +441,101 @@ describe('marks — the ink layer', () => {
       <TextField id="u" multiline value="{{a}}" marks={[{ from: 0, to: 5 }]} />
     ))
     expect(inkOf(container)).toBeNull()
+  })
+})
+
+describe('TextField trailing action', () => {
+  const action = (onClick: TextFieldAction['onClick']): TextFieldAction => ({
+    ariaLabel: 'Store in vault',
+    title: 'Store in vault',
+    onClick,
+    children: 'Store',
+  })
+
+  it('renders no action at rest and only one action for the focused row', () => {
+    const onFirst = vi.fn()
+    const onSecond = vi.fn()
+    const { container } = render(() => (
+      <>
+        <TextField id="first" value="" trailingAction={action(onFirst)} />
+        <TextField id="second" value="ordinary text" trailingAction={action(onSecond)} />
+      </>
+    ))
+    expect(container.querySelectorAll('button[aria-label="Store in vault"]')).toHaveLength(0)
+
+    const second = document.getElementById('second')!
+    fireEvent.focus(second)
+    const firstWrapper = document.getElementById('first')!.closest('.ui-text-field')!
+    const secondWrapper = second.closest('.ui-text-field')!
+    expect(container.querySelectorAll('button[aria-label="Store in vault"]')).toHaveLength(1)
+    expect(firstWrapper.querySelector('button[aria-label="Store in vault"]')).toBeNull()
+    expect(secondWrapper.querySelectorAll('button[aria-label="Store in vault"]')).toHaveLength(1)
+
+    fireEvent.blur(second)
+    expect(container.querySelectorAll('button[aria-label="Store in vault"]')).toHaveLength(0)
+
+    const first = document.getElementById('first')!
+    fireEvent.focus(first)
+    expect(container.querySelectorAll('button[aria-label="Store in vault"]')).toHaveLength(1)
+  })
+
+  it('shows the action for both empty and filled values when focused', () => {
+    const { container } = render(() => (
+      <>
+        <TextField id="empty" value="" trailingAction={action(vi.fn())} />
+        <TextField id="filled" value="not a credential" trailingAction={action(vi.fn())} />
+      </>
+    ))
+    fireEvent.focus(document.getElementById('empty')!)
+    expect(container.querySelector('button[aria-label="Store in vault"]')).toBeTruthy()
+    fireEvent.blur(document.getElementById('empty')!)
+    fireEvent.focus(document.getElementById('filled')!)
+    expect(container.querySelector('button[aria-label="Store in vault"]')).toBeTruthy()
+  })
+
+  it('keeps the action available for a focused multiline value', () => {
+    const { container } = render(() => (
+      <TextField id="body" multiline value="request body" trailingAction={action(vi.fn())} />
+    ))
+    const textarea = container.querySelector<HTMLTextAreaElement>('#body')!
+    fireEvent.focus(textarea)
+    expect(screen.getByRole('button', { name: 'Store in vault' })).toBeTruthy()
+  })
+
+  it('preserves focus and the selected range when the action is clicked', () => {
+    const onClick = vi.fn()
+    const { container } = render(() => (
+      <TextField id="value" value="Bearer token" trailingAction={action(onClick)} />
+    ))
+    const input = container.querySelector<HTMLInputElement>('#value')!
+    input.focus()
+    input.setSelectionRange(2, 8)
+
+    const button = screen.getByRole('button', { name: 'Store in vault' })
+    const mouseDown = new MouseEvent('mousedown', { bubbles: true, cancelable: true })
+    button.dispatchEvent(mouseDown)
+    expect(mouseDown.defaultPrevented).toBe(true)
+    fireEvent.click(button)
+
+    expect(onClick).toHaveBeenCalledOnce()
+    expect(onClick).toHaveBeenCalledWith({ start: 2, end: 8 })
+    expect(document.activeElement).toBe(input)
+    expect(input.selectionStart).toBe(2)
+    expect(input.selectionEnd).toBe(8)
+  })
+
+  it('is keyboard reachable, named, and does not trap Tab', () => {
+    const { container } = render(() => (
+      <TextField id="keyboard" value="token" trailingAction={action(vi.fn())} />
+    ))
+    const input = container.querySelector<HTMLInputElement>('#keyboard')!
+    input.focus()
+    const button = screen.getByRole('button', { name: 'Store in vault' })
+    expect(button.tabIndex).toBe(0)
+    button.focus()
+    expect(document.activeElement).toBe(button)
+    const tab = new KeyboardEvent('keydown', { key: 'Tab', bubbles: true, cancelable: true })
+    button.dispatchEvent(tab)
+    expect(tab.defaultPrevented).toBe(false)
   })
 })

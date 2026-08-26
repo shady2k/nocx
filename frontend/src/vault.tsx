@@ -33,6 +33,7 @@ import type { StatusCardTone, BadgeTone } from './ui'
 import { CopyIcon, LockIcon, LockOpenIcon } from './ui/icons'
 import { showToast } from './ui/toast'
 import { RpcError, VaultOperationCancelledError } from './dispatcher'
+import type { SecretPickerSource } from './ui/secret-picker'
 import type {
   VaultClient,
   VaultStatus,
@@ -164,6 +165,61 @@ export interface VaultController {
   regenerateRecovery(params: { passphrase: string }): Promise<{ recoveryCode: string }>
   /** Set the default writable provider. */
   setDefaultProvider(params: { provider: string }): Promise<void>
+}
+
+/** What a picker source built on the vault needs from its host: the vault
+ *  itself, and where a create lands. */
+export interface VaultSecretSourceDeps {
+  vaultClient: VaultClient
+  vaultController: VaultController
+  /** Where "store this" goes on a surface that cannot mint a secret itself:
+   *  Settings → Secrets, with its create form already filled in. Structural
+   *  on purpose — the vault layer must not import the Settings pane, and the
+   *  composition root is what knows how to open it. */
+  openSecretCreate: (name: string, value: string) => void
+  /** Host logging seam for failures reading lifecycle or inventory state. */
+  onError?: (message: string, error: unknown) => void
+}
+
+/** The '@' picker's source for a surface with no mint seam of its own
+ *  (nocx-3o0ed.6).
+ *
+ *  The vault layer owns the lifecycle prompts already — the picker only says
+ *  which one a state calls for — and it owns this too, so the fallback exists
+ *  once and can be driven by a test. `requestCreate` resolves `undefined`
+ *  because the secret is created on another surface: nothing can be inserted
+ *  in place here, and saying so is not the same as losing the value.
+ *
+ *  BOTH the name and the value travel. There is no path left on which a
+ *  person can press the lock and have the value silently dropped: a store row
+ *  only exists where the host passed one to `SecretPicker.open`, and every
+ *  such host either mints in place (api-pane's create ask) or comes through
+ *  here. The plain "Add a secret…" row has no value by construction — that
+ *  row is reaching for a secret that does not exist yet — and arrives with
+ *  `value` absent, which opens the form on an empty field. */
+export function createVaultSecretSource(deps: VaultSecretSourceDeps): SecretPickerSource {
+  return {
+    status: async () => ({ state: (await deps.vaultClient.status()).state }),
+    list: async () => (await deps.vaultClient.inventory()).entries,
+    requestUnseal: async () => {
+      deps.vaultController.openUnlock('use its secrets')
+      await deps.vaultClient.inventory()
+    },
+    requestSetup: () => {
+      deps.vaultController.openSetup()
+      return Promise.resolve(true)
+    },
+    requestCreate: (name, value) => {
+      // `value ?? ''`, not a branch: the destination's own default for "no
+      // value" IS the empty field, so the two rows land on the same form and
+      // differ only in what is already typed in it. Nothing here reads the
+      // value — no truncation, no guess at what kind of credential it is
+      // (nocx-0khco).
+      deps.openSecretCreate(name, value ?? '')
+      return Promise.resolve(undefined)
+    },
+    onError: deps.onError,
+  }
 }
 
 /** Create the vault reactive state for a surface. */

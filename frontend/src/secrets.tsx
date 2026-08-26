@@ -58,6 +58,13 @@ export interface SecretsSectionProps {
    *  type it a second time is the kind of friction that makes people give
    *  up on the vault. */
   addSecretName?: string
+  /** The value to prefill with it — what the field the person pressed the
+   *  lock over was holding (nocx-3o0ed.6). Empty for a request that has no
+   *  value to carry ('@' → "Add a secret…", where the value is precisely
+   *  what does not exist yet), which is the form's own default, so a caller
+   *  without one changes nothing. Nothing here reads the value: it is
+   *  carried, never inspected (nocx-0khco). */
+  addSecretValue?: string
 }
 
 type LoadState =
@@ -106,7 +113,7 @@ export function SecretsSection(props: SecretsSectionProps) {
     on(
       () => props.addSecretRequest ?? 0,
       (n) => {
-        if (n > 0) openAdd(props.addSecretName ?? '')
+        if (n > 0) openAdd(props.addSecretName ?? '', props.addSecretValue ?? '')
       },
     ),
   )
@@ -261,11 +268,15 @@ export function SecretsSection(props: SecretsSectionProps) {
     }
   })
 
-  function openAdd(prefillName = ''): void {
+  function openAdd(prefillName = '', prefillValue = ''): void {
     addValidation.reset()
     setAddName(prefillName)
     setAddKind('password')
-    setAddValue('')
+    // The value the caller is holding, or the empty field this form has
+    // always opened with. The page's own "+ Add a secret" passes neither and
+    // is unchanged; a caller with a value hands over the WHOLE of it, and
+    // the kind stays 'password' — the shape of the value decides nothing.
+    setAddValue(prefillValue)
     setAddKeyMode(DEFAULT_KEY_MODE)
     setAddKeyMaterial('')
     setAddKeyPath('')

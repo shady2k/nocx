@@ -1,0 +1,45 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.approve.schema.json",
+  "title": "AgentApprove",
+  "description": "Params of the agent.approve request (nocx-z9hj4, design §7.2): the person's decision on one exact proposal. Carries the FULL binding — run, attempt, tool, call id and the canonical-argument hash — so a yes names the exact proposal the notification showed and nothing else, plus the decision and how far it reaches. The scope travels with the answer because the BACKEND applies it: a renderer that read the matrix, edited a row and wrote it back would be a second owner of the policy document, racing the settings page.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["runId", "attempt", "tool", "callId", "argHash", "approved", "scope"],
+  "properties": {
+    "runId": {
+      "description": "The backend-minted run id — echoed from agent.approvalRequested.",
+      "type": "string",
+      "minLength": 1
+    },
+    "attempt": {
+      "description": "The run's attempt — echoed from agent.approvalRequested.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "tool": {
+      "description": "The tool name — echoed from agent.approvalRequested.",
+      "type": "string",
+      "minLength": 1
+    },
+    "callId": {
+      "description": "The model's call id — echoed from agent.approvalRequested.",
+      "type": "string",
+      "minLength": 1
+    },
+    "argHash": {
+      "description": "The canonical-argument hash — echoed from agent.approvalRequested. A changed argument hashes differently and does not resume under this approval.",
+      "type": "string",
+      "minLength": 1
+    },
+    "approved": {
+      "description": "The person's decision: yes resumes the run as a new attempt of the same entry; no terminalizes it with agent-declined.",
+      "type": "boolean"
+    },
+    "scope": {
+      "description": "How far the answer reaches: this proposal only, every call of the same effect in this terminal session, or the standing policy. 'session' and 'always' are refused for an egress question — 'always send secrets to the provider' is not a standing decision.",
+      "type": "string",
+      "enum": ["once", "session", "always"]
+    }
+  }
+}

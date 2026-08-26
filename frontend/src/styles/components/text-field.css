@@ -167,6 +167,16 @@
   field-sizing: content;
 }
 
+/* The prose variant of the textarea. `white-space: pre` above is right for
+   the material a person PASTES — a private key wrapped to the box reads as a
+   different key — and wrong for the prose a person WRITES, which has no
+   lines of its own and would otherwise sit behind a horizontal scrollbar.
+   One property, one variant, declared by the caller. */
+.ui-text-field[data-multiline='true'][data-wrap='true'] .ui-text-field__input {
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+}
+
 /* The unit suffix of a number field — inside the control, so the number and
    its unit read (and copy) as one thing. Positioned like the trailing slot;
    the input's padding comes from data-trailing. */

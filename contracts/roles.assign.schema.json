@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/roles.assign.schema.json",
+  "title": "RolesAssignResult",
+  "description": "Result of the roles.assign JSON-RPC method (bead nocx-e6kn2): the full role table AFTER the write — the same shape roles.list declares, referenced cross-file. The write upserts one role's (endpoint, model) pair, or CLEARS it when both endpointId and model are absent; the result is the single table the renderer renders from, so the row and the response can never disagree.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["roles", "default"],
+  "properties": {
+    "roles": {
+      "description": "Every role of the closed set, in product order, with the assignment just written (or cleared).",
+      "type": "array",
+      "items": { "$ref": "roles.list.schema.json#/$defs/role" }
+    },
+    "default": { "$ref": "roles.list.schema.json#/properties/default" }
+  }
+}

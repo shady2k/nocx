@@ -118,6 +118,23 @@ describe('Button', () => {
     const btn = screen.getByText('Click me')
     expect(btn.getAttribute('tabindex')).toBeNull() // natively focusable
   })
+  it('renders a secondary line beneath the label and in the accessible name', () => {
+    const { container } = subject({
+      children: 'Allow once',
+      secondary: '— this proposal only',
+    })
+    const button = screen.getByRole('button', { name: 'Allow once — this proposal only' })
+    const line = container.querySelector('.ui-button__secondary')
+
+    expect(button).toBeTruthy()
+    expect(line?.textContent).toBe('— this proposal only')
+    expect(line?.previousElementSibling?.textContent).toBe('Allow once')
+    expect(button.getAttribute('data-secondary')).toBe('true')
+    const css = readFileSync('src/styles/components/button.css', 'utf8')
+    expect(css).toContain(".ui-button[data-secondary='true']")
+    expect(css).toContain('.ui-button__secondary')
+    expect(css).toContain('font-size: var(--font-size-2xs)')
+  })
 })
 
 // Rule 1 is enforced by the type system, not by a lint rule, and this records why

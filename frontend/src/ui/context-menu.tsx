@@ -22,6 +22,7 @@
  */
 import { For, Show, createEffect, onCleanup, type Component } from 'solid-js'
 import { Portal } from 'solid-js/web'
+import { clampMenuPosition } from './menu-geometry'
 
 export interface ContextMenuItem {
   /** Stable identity for the item — keying and data-testid. */
@@ -68,9 +69,6 @@ export interface ContextMenuProps {
   'data-testid'?: string
 }
 
-/** Clearance from the viewport edge when clamping the menu on screen. */
-const EDGE_MARGIN_PX = 8
-
 export function ContextMenu(props: ContextMenuProps) {
   let element: HTMLDivElement | undefined
   /** Whoever held the keyboard when the menu took it. */
@@ -112,19 +110,18 @@ export function ContextMenu(props: ContextMenuProps) {
     if (!props.open) return
     const el = element
     if (!el) return
-    // The rect is the laid-out size; the position is clamped so a menu
-    // near the bottom or right edge flips inward instead of overflowing.
+    // The rect is the laid-out size; the position is the shared clamp
+    // (menu-geometry.ts), so a menu near the bottom or right edge flips
+    // inward instead of overflowing — the same geometry the scrollback's
+    // imperative block menu uses (nocx-vnirv.2).
     const rect = el.getBoundingClientRect()
-    const x = Math.min(
-      Math.max(props.x, EDGE_MARGIN_PX),
-      Math.max(EDGE_MARGIN_PX, window.innerWidth - rect.width - EDGE_MARGIN_PX),
+    const { left, top } = clampMenuPosition(
+      { x: props.x, y: props.y },
+      { width: rect.width, height: rect.height },
+      { width: window.innerWidth, height: window.innerHeight },
     )
-    const y = Math.min(
-      Math.max(props.y, EDGE_MARGIN_PX),
-      Math.max(EDGE_MARGIN_PX, window.innerHeight - rect.height - EDGE_MARGIN_PX),
-    )
-    el.style.left = `${x}px`
-    el.style.top = `${y}px`
+    el.style.left = `${left}px`
+    el.style.top = `${top}px`
     opener = document.activeElement instanceof HTMLElement ? document.activeElement : null
     el.querySelector<HTMLButtonElement>('[role="menuitem"]')?.focus()
   })

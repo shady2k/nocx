@@ -8,8 +8,9 @@
 // authority checks (kernel freezeBlock) run at the composition site; these
 // methods paint the attempt's verdict.
 
+import type { CommandAuthor } from '../command-ledger'
 import type { TerminalRenderer } from '../renderers/types'
-import { BlockManager, type GetLineFn } from './blocks'
+import { BlockManager, type BlockRecord, type GetLineFn, type RunningBlockActions } from './blocks'
 import type { CommandSnapshotStore } from '../command-snapshot'
 import { publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
@@ -36,6 +37,22 @@ export interface ScrollbackControllerOpts {
    *  chip's block went with the blocks, so the mode must close — a chip
    *  whose block no longer exists would be an invisible mode. */
   onClear?: () => void
+  /** Fired at the end of every visual freeze — the block's output rows are
+   *  fixed in the DOM (nocx-tjppv: the run tool's completion wait reads the
+   *  output window from the frozen block). */
+  onBlockFrozen?: (rec: BlockRecord) => void
+  /** What a session is called to a person — passed straight to the block
+   *  manager, which hands it to every tool-call line it draws (nocx-vnzek).
+   *  This controller neither derives nor caches it. */
+  sessionName?: (sessionId: string) => string | null
+  /** The durable text of one ANSWER entry — passed straight to the block
+   *  manager, which hands it to the copy menu of every answer block it
+   *  frames (nocx-v13pd). This controller neither fetches nor caches it. */
+  answerText?: (entryId: string) => Promise<string | null>
+  /** What a RUNNING block's ⋮ menu can do about the command in it — passed
+   *  straight to the block manager (nocx-92gfl, nocx-23rph). This controller
+   *  neither summons the editor nor signals a session. */
+  runningActions?: RunningBlockActions
 }
 
 export class ScrollbackController {
@@ -134,6 +151,13 @@ export class ScrollbackController {
 
     // Separator between blocks and live region — inserted before the
     // xterm container so blocks stack above it. Hidden when no blocks.
+    //
+    // THE ONLY TWO CHILDREN THIS FILE PUTS IN. They are the container's own
+    // frame: built with it, never removed, and the anchor the manager
+    // inserts against. Everything that comes and goes — a live block, an
+    // answer, the restored past and its boundary — belongs to BlockManager
+    // and enters through its `_own` (nocx-0zb1m). A second inserter here is
+    // what let `clear` miss half the scrollback.
     this.separator = document.createElement('div')
     this.separator.className = 'scrollback-separator'
     this.separator.style.display = 'none'
@@ -154,10 +178,14 @@ export class ScrollbackController {
       // DOM and settle the live region exactly like a direct freeze, since
       // freezeFromAttempt already returned.
       onDeferredFreeze: () => this._settleFrozen(),
+      onBlockFrozen: opts.onBlockFrozen,
       // Read at freeze time rather than captured at construction: a pane is
       // resized, and the provenance must say what the serializer actually
       // saw.
       dimensions: () => ({ cols: this._renderer.cols, rows: this._renderer.rows }),
+      sessionName: opts.sessionName,
+      answerText: opts.answerText,
+      runningActions: opts.runningActions,
     })
 
     // ── Frozen block cell metric (nocx-yy9g) ──────────────────────────
@@ -419,28 +447,17 @@ export class ScrollbackController {
   }
 
   /**
-   * Put blocks the STORE holds above everything the live session draws
-   * (nocx-m3fqk), and mark where the past ends.
+   * Draw the pane's past, and land the view where a terminal always lands.
    *
-   * Inserted before the first live element rather than appended, so restored
-   * blocks keep the order they are given and a session that has already
-   * printed something does not find its past underneath its present.
-   *
-   * The boundary is an element of its own rather than a class on the last
-   * restored block: ADR-0019 §3 asks for the difference to be VISIBLE, and a
-   * line saying where the previous session ended is what a person reads — a
-   * block that merely looks a little different is not an answer to "is this
-   * shell still running".
+   * The blocks and the boundary go in through the MANAGER (nocx-0zb1m):
+   * putting them in here made a second owner of this container's children,
+   * and `clear` — which asks the manager — could not see half the
+   * scrollback. What is left here is the part that is genuinely the
+   * controller's, because it is about the VIEW rather than about the blocks.
    */
   restorePast(blocks: HTMLElement[]): void {
     if (blocks.length === 0) return
-    const anchor = this.scrollbackInner.firstChild
-    for (const el of blocks) this.scrollbackInner.insertBefore(el, anchor)
-    const boundary = document.createElement('div')
-    boundary.className = 'scrollback-restore-boundary'
-    boundary.dataset.restoreBoundary = 'true'
-    boundary.textContent = 'Previous session'
-    this.scrollbackInner.insertBefore(boundary, anchor)
+    this._blockManager.restorePast(blocks)
     // AND LAND AT THE NEWEST BLOCK, which is where a terminal always puts
     // you. The insert goes ABOVE everything, so the scroller keeps the
     // offset it had — 0, on a pane that has just been built — and the person
@@ -537,8 +554,18 @@ export class ScrollbackController {
    * startLine + 1 because the shell's echo lands on the creation line
    * (nocx-4yhi). It defaults to startLine for shell-originated blocks.
    */
-  beginBlock(command: string, cwd: string, startLine: number, outputStart?: number): void {
-    this._glide(() => this.beginBlockNow(command, cwd, startLine, outputStart))
+  beginBlock(
+    command: string,
+    cwd: string,
+    startLine: number,
+    outputStart?: number,
+    /** Who submitted the command (design §3.1, nocx-iadtt): the app-owned
+     *  submit passes the minted author; a shell-originated block — the
+     *  shell's own start event, no app-owned submit — is the human's
+     *  shell and defaults to 'shell'. */
+    author: CommandAuthor = 'shell',
+  ): void {
+    this._glide(() => this.beginBlockNow(command, cwd, startLine, outputStart, author))
   }
 
   /**
@@ -555,9 +582,15 @@ export class ScrollbackController {
    * user-visible transition gets one glide, owned by whoever knows every
    * synchronous mutation in it.
    */
-  beginBlockNow(command: string, cwd: string, startLine: number, outputStart?: number): void {
+  beginBlockNow(
+    command: string,
+    cwd: string,
+    startLine: number,
+    outputStart?: number,
+    author: CommandAuthor = 'shell',
+  ): void {
     const cmd = command || '(empty)'
-    this._blockManager.startBlock(cmd, cwd, startLine, outputStart)
+    this._blockManager.startBlock(cmd, cwd, startLine, outputStart, author)
     this.setRunning()
   }
 

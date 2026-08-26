@@ -2,6 +2,10 @@
    Replaces `.st-export-backup-details`, which declared this same look on the
    export surface. See code-block.tsx. */
 
+.ui-code-block-wrap {
+  position: relative;
+}
+
 .ui-code-block {
   margin: 0;
   padding: var(--space-2) var(--space-3);
@@ -18,6 +22,17 @@
      screen. */
   max-height: 200px;
   overflow: auto;
+}
+
+.ui-code-block-wrap--copy > .ui-code-block {
+  padding-top: calc(var(--space-2) + 22px);
+}
+
+.ui-code-block-wrap > .ui-icon-button {
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-1);
+  z-index: 1;
 }
 
 /* The block that holds BYTES rather than a list of lines. A long line is

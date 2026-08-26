@@ -11,6 +11,7 @@ function fakeRecord(
     id: overrides.id,
     command: overrides.command ?? 'cmd',
     cwd: overrides.cwd ?? '/',
+    author: overrides.author ?? 'shell',
     host: overrides.host ?? '',
     status: overrides.status ?? 'success',
     exitCode: overrides.exitCode ?? 0,

@@ -12,6 +12,7 @@ import {
   setupTabBarDOM,
   makeLayoutStore,
   makeUIStateBackend,
+  FIXTURE_CWD,
   FIXTURE_DIRECTORY_LABEL,
   anchoredPane,
   type RendererMock,
@@ -270,6 +271,77 @@ describe('PaneManager', () => {
     const rows = backend.rows()
     expect(rows.tabs).toHaveLength(1)
     expect(rows.panes).toHaveLength(1)
+  })
+
+  // ── a session's name to a person (nocx-vnzek) ─────────────────────────
+
+  it('names a session with the same words the tab strip shows, and nothing for one it does not hold', async () => {
+    const { client, manager, bar } = await mountPaneManager()
+    await vi.waitFor(() => {
+      expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
+    })
+    const sessionId = client._sessions[0].sessionId
+    // ONE answer to "what is this session called": the strip renders it and
+    // this returns it. A second derivation is what the defect was.
+    const onStrip = bar.querySelector('.nocx-tab-title')?.textContent
+    expect(onStrip).toBe(FIXTURE_DIRECTORY_LABEL)
+    expect(manager.sessionDisplayName(sessionId)).toBe(onStrip)
+    // A session no pane holds cannot be named — and the id is not a
+    // fallback, because the id is what this exists to keep off the screen.
+    expect(manager.sessionDisplayName('mock-sid-does-not-exist')).toBeNull()
+  })
+
+  // ── where a session IS, in words (nocx-njn8s) ─────────────────────────
+
+  it('says where a session is — the tab it is in and the machine it talks to', async () => {
+    const { client, manager, bar } = await mountPaneManager()
+    await vi.waitFor(() => {
+      expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
+    })
+    const sessionId = client._sessions[0].sessionId
+    // The tab half is the SAME answer sessionDisplayName gives — this is
+    // that derivation asked together with the machine, never a second one.
+    expect(manager.sessionWhere(sessionId)).toEqual({
+      tab: manager.sessionDisplayName(sessionId),
+      // A local shell has no host, and '' is that fact: the surface turns
+      // it into the product's words for "here". Naming the machine is what
+      // decides whether a destructive command lands on this laptop or on a
+      // production host, so it is a fact the prompt is owed.
+      machine: '',
+      // A session opened with a cwd has one, and it is a GUESS until the
+      // shell reports OSC 7 (AD-5). Both halves travel together or the
+      // caller cannot tell them apart — see the next test.
+      cwd: FIXTURE_CWD,
+      cwdVerified: false,
+    })
+    expect(manager.sessionWhere('mock-sid-does-not-exist')).toBeNull()
+  })
+
+  // ── the directory, and whether we KNOW it (nocx-n7xha) ────────────────
+
+  it('says the working directory and whether the shell confirmed it', async () => {
+    const { client, manager, bar } = await mountPaneManager()
+    await vi.waitFor(() => {
+      expect(bar.querySelectorAll('.nocx-tab').length).toBe(1)
+    })
+    const sessionId = client._sessions[0].sessionId
+
+    // Before any OSC 7 the cwd is the one the session was opened with: a
+    // fallback question, not a claim (AD-5). An approval prompt that
+    // printed it as fact would lie at the moment lying costs most, so the
+    // flag travels WITH the value rather than being derivable from it.
+    expect(manager.sessionWhere(sessionId)).toMatchObject({
+      cwd: FIXTURE_CWD,
+      cwdVerified: false,
+    })
+
+    // The shell reports where it is. Same accessor, and now it is a claim.
+    const renderers = await getRendererMocks()
+    renderers[0]._fireCwd('', '/tmp')
+    expect(manager.sessionWhere(sessionId)).toMatchObject({
+      cwd: '/tmp',
+      cwdVerified: true,
+    })
   })
 
   // ── fallback title consistency (badge vs title after close) ───────────

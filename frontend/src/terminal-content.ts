@@ -15,7 +15,7 @@ import { LifecycleProjections } from './lifecycle/projections'
 import { CommandEditor } from './editor'
 import { machineName, remoteMachineName } from './machine-name'
 import { shellExtensions } from './shell-highlight'
-import { RecallOverlay, queryLedgerHistory, withSessionText } from './recall'
+import { RecallOverlay, queryLedgerHistory, withSessionText, type RecallQuery } from './recall'
 import { CompletionController } from './suggest/controller'
 import { createShellProviders } from './suggest/providers'
 import { CompletionDropdown } from './ui/completion-dropdown'
@@ -25,13 +25,17 @@ import type { CommandSnapshotStore } from './command-snapshot'
 import type { ShellCommandNames } from './generated/shell.commandNames'
 import { ShellInputTarget, createRegistry, type InputTargetRegistry } from './input-target'
 import { AgentInputTarget } from './agent-ask'
+import { TargetState, queryTargetHistory } from './target-state'
 import { AgentClient } from './agent'
+import { AgentReadiness, modelChipState } from './agent-readiness'
+import { MAX_RUN_OUTPUT_WINDOW_CHARS, type AgentRunCompletion } from './run-command'
 import {
   TargetIndicator,
-  chipFromSelection,
-  chipFingerprint,
-  type ReferenceChip,
+  grantBlockFromElement,
+  grantBlockFromSelection,
+  type GrantBlock,
 } from './ask-entry'
+import { GrantController } from './grant'
 import {
   submitCommand,
   planSubmit,
@@ -46,6 +50,7 @@ import { PromptVaultController } from './prompt-vault'
 import { VaultClient } from './vault-client'
 import { showToast } from './ui/toast'
 import type { SessionIntegrationChanged } from './generated/session.integrationChanged'
+import type { SessionSignal } from './generated/session.signal'
 import {
   IntegrationSilenceStore,
   integrationMessage,
@@ -56,19 +61,25 @@ import {
 import { mountIntegrationNotice } from './integration/notice'
 import { BlockReceipt } from './ui/block-receipt'
 import type { HistoryRecord } from './generated/history.record'
-import { renderRecordedCommand } from './scrollback/blocks'
+import { blockOutputText, renderRecordedCommand } from './scrollback/blocks'
 import { KIND_LABELS } from './secret-kind'
 import { NATIVE_RESTORE } from './native-mode'
 import { isInteractiveTransition, extractDestination } from './ssh-transition'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
-import type { BlockRecord } from './scrollback/blocks'
-import { CommandLedger, type CommandRecord, type CommandStatus } from './command-ledger'
+import type { AnswerToolCall, BlockRecord, RunningBlockActions } from './scrollback/blocks'
+import {
+  CommandLedger,
+  type CommandAuthor,
+  type CommandRecord,
+  type CommandStatus,
+} from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
 import { captureBlock } from './capture-client'
-import { blocksForPane, bodyForBlock } from './restore-client'
-import { restoredBlock } from './scrollback/restored-block'
+import { answerTextForEntry, arrangedByCause, blocksForPane, restoredBody } from './restore-client'
+import { restoredBlock, restoredTurn } from './scrollback/restored-block'
+import { toolCallTitle } from './scrollback/tool-call-title'
 import { fromITheme } from './scrollback/serializer'
 import { getCurrentTheme } from './renderers/theme-adapter'
 import { log, logDecision, isDecisionTracing } from './log'
@@ -86,6 +97,8 @@ import {
   type ContentViewport,
   type ActiveOrigin,
 } from './pane-content'
+import { type CapturedFrame } from './frame/types'
+import { CaptureAbortedError } from './frame/capture-identity'
 import { type ProfileClient } from './profiles'
 import { RpcError } from './dispatcher'
 import { NotifyClient } from './notify-client'
@@ -312,8 +325,22 @@ export interface TerminalContentHooks {
 
   /** A question was refused because no endpoint is configured: open the
    *  endpoint editor so the refusal comes with its repair — wired by
-   *  main.tsx to the Settings tab's Endpoints page. */
+   *  main.tsx to the Settings tab's Endpoints page. Reused, not duplicated,
+   *  by the model chip's `endpoints` destination (nocx-rikz5). */
   onCreateEndpoint?: () => void
+  /** What a session is called TO A PERSON — the pane's own display title,
+   *  the words already on the tab (nocx-vnzek). A tool-call line in an
+   *  answer names the session it touched with this instead of the session
+   *  id, which is an internal handle. Only the pane manager can answer it:
+   *  the session may be ANOTHER pane's, and a pane knows only its own.
+   *  Absent in an embedding with no pane list, and then the line names the
+   *  tool alone. */
+  sessionName?: (sessionId: string) => string | null
+  /** The model chip's other destination: the Roles page, where the model
+   *  that answers is chosen (nocx-rikz5). Beside onCreateEndpoint because
+   *  it is the same idea — a state names one page that repairs it — and
+   *  wired by main.tsx to the Settings tab's Roles page. */
+  onOpenRoles?: () => void
 }
 
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
@@ -395,7 +422,51 @@ export class TerminalContent extends BasePaneContent {
    *  target and sends nothing (nocx-4wtlh). Registration and routing ARE
    *  this slice. */
   private inputTargets: InputTargetRegistry | null = null
+  /** The editor-side per-target store (ADR-0004 §3, nocx-4ff.7): drafts
+   *  and session history keyed by the REGISTRY's target id. The draft
+   *  swap below reads and writes it on every switch; the per-target
+   *  recall corpus serves from it. A third target gets both by
+   *  registering — nothing here names a target. */
+  private targetState = new TargetState()
+  /** Per-target recall queries, keyed by target id — the same keyed-lookup
+   *  seam as the registry, never a branch on the id. The SHELL's corpus is
+   *  the persistent store (with the ledger fallback); a question is not a
+   *  command and never enters the store, so the agent — and any target
+   *  without a registration — recalls its own recorded corpus. */
+  private targetRecall = new Map<string, RecallQuery>()
+  /** The id of the target the editor currently wears — the OUTGOING side
+   *  of a switch, tracked here because the registry's change notification
+   *  names only the incoming target. */
+  private activeTargetId: string | null = null
   private agentTarget: AgentInputTarget | null = null
+  /** The editor is SUMMONED: the person asked for it over a command that is
+   *  still running (nocx-92gfl).
+   *
+   *  The hidden editor is deliberate and stays. An inline TUI on the normal
+   *  buffer needs both its ROWS and its KEYS, and nocx cannot tell `top`
+   *  from `du -Hs` without sniffing the stream, which AD-6 forbids — so any
+   *  design has to work identically for both, and hiding by default does.
+   *  What was missing was a way back IN, because asking about the command
+   *  is not running a second one: `agent.ask` travels the control plane and
+   *  never touches the pty, so a busy shell is no obstacle to it.
+   *
+   *  It is an axis of the SHOW question only, never of authority: while it
+   *  is true the editor is visible and the grid is read-only, exactly as at
+   *  a prompt, so `inputOwner()` keeps deriving from `editor.isVisible` and
+   *  the invariant `_syncLifecycleOwnership` states about itself — editor
+   *  shown ⟺ grid read-only — is untouched. It is spent the moment the
+   *  command stops running, whichever way it stops. */
+  private _summoned = false
+  /** The target the summon displaced, restored when the summon ends and the
+   *  draft is empty.
+   *
+   *  Restoring what was there rather than assuming "shell" is one line more
+   *  and one defect fewer: the ordinary case IS shell (the person submitted
+   *  a command, so the shell was active), and the case that is not is real —
+   *  the assistant's own `run` puts a pane in `running` while the person is
+   *  in Ask. Forcing shell there would undo a choice the person made and
+   *  the summon never touched. */
+  private _summonRestoreTargetId: string | null = null
   private scrollback: ScrollbackController | null = null
   private ledger: CommandLedger | null = null
   /** The vault RPC client, built over this tab's WS client (the shared
@@ -427,31 +498,49 @@ export class TerminalContent extends BasePaneContent {
    *  line, for the receipt's hover emphasis (chips carry the span; rows
    *  carry the capture id). */
   private readonly receiptChipSpans = new Map<string, { start: number; end: number }>()
+  /** The run tool's pending completions (nocx-tjppv), keyed by the block
+   *  each agent submission opened — the SAME object the freeze mutates in
+   *  place, so a freeze resolves exactly the waiter whose command finished.
+   *  The ledger id is minted at submit by the ordinary path; the waiter
+   *  resolves when the block's VISUAL freeze lands (onBlockFrozen) with
+   *  the completed run body. */
+  private readonly agentRuns = new Map<
+    BlockRecord,
+    {
+      ledgerId: number
+      resolve: (run: AgentRunCompletion) => void
+      reject: (reason: unknown) => void
+    }
+  >()
+  /** The store's entry id for an agent run's record, keyed by the renderer's
+   *  own record id: opened at the submit (only a run needs one), filled by
+   *  the history.record ack, and removed when the run resolves. `entryId` is
+   *  null until the store has answered; '' is the store's answer that it
+   *  wrote no row (nocx-9sqii). */
+  private readonly runEntryIds = new Map<
+    number,
+    { entryId: string | null; waiting: ((entryId: string) => void) | null }
+  >()
   /** The prompt's vault surfaces: the '@' picker, the composition-time
    *  candidate, and the resolve-at-submit wiring. */
   private promptVault: PromptVaultController | null = null
   private completion: CompletionController | null = null
   private recall: RecallOverlay | null = null
-  /** The reference chips in the input line (nocx-4wtlh): the frozen
-   *  regions a question carries. A selection raises one; a question sent
-   *  to Ask consumes them all; a cleared scrollback takes their blocks. The
-   *  chips ARE the ask's payload — never re-derived from DOM selection at
-   *  submit time (AD-8: selection is copy; the chip is the record). */
-  private referenceChips: ReferenceChip[] = []
-  /** Monotonic chip id source — ids are for dismissal and dedupe, never
-   *  for anything the backend sees. */
-  private _chipSeq = 0
-  /** The caret indicator (ADR-0004 §3's UI chip): renders the active
-   *  input target beside the caret and is the person's one explicit
-   *  switch. Its label is pushed from the registry's change
-   *  notification — nothing else may repaint it. */
-  private indicator: TargetIndicator | null = null
-  /** The document selectionchange listener: a selection inside a finished
-   *  block's output raises a reference chip. Removed on dispose. */
-  private readonly onSelectionChange = (): void => this.raiseChipFromSelection()
+  /** Whole blocks granted to the next question. Selection is a quote and also
+   * marks its containing block; no row coordinates or copied frame live here. */
+  private grantedBlocks: GrantBlock[] = []
+  private grantController: GrantController | null = null
+  private readonly onSelectionChange = (): void => {
+    const selection = window.getSelection()
+    if (!selection || selection.isCollapsed) return
+    const block = grantBlockFromSelection(selection)
+    if (!block || !this.scrollback?.scrollbackInner.contains(block.blockEl)) return
+    this.ensureGrant(block.blockEl)
+  }
   private lifecycle = new LifecycleKernel()
   private _lifecycleUnsub: (() => void) | null = null
   private _lifecycleChangeUnsub: (() => void) | null = null
+  private indicator: TargetIndicator | null = null
   /** Re-pushes the composed title after the projections have reconciled
    *  the ledger from a kernel change (a completion ends the running
    *  command; the ledger must already reflect it). Registered AFTER the
@@ -460,6 +549,16 @@ export class TerminalContent extends BasePaneContent {
   /** Unsubscribe from the reconnect report, which is what gives a restore
    *  that raced a dropped socket its second chance (nocx-m3fqk). */
   private _restoreRetryUnsub: (() => void) | null = null
+  /** The pane's readiness store (nocx-rikz5): the ONE holder of
+   *  agent.status in this renderer (AD-8). The ask target's refusal path
+   *  and the composer's model chip both read it; neither calls the method
+   *  itself. */
+  private readiness: AgentReadiness | null = null
+  private _readinessUnsub: (() => void) | null = null
+  /** Unsubscribe from the reconnect report for the readiness refresh — its
+   *  own registration rather than a second statement inside the restore's,
+   *  so removing either leaves the other alone. */
+  private _readinessRetryUnsub: (() => void) | null = null
   /** The pending restoration episode (ADR-0024 decision 8): the fence the
    *  shell must write to the pty and the generation to acknowledge, captured
    *  from the lost fact. Non-null from the moment the channel is declared
@@ -990,10 +1089,16 @@ export class TerminalContent extends BasePaneContent {
    *
    *  The derivation itself now lives in `machine-name.ts`, because a second
    *  surface needed the same answer: the operations list names a machine per
-   *  row and cannot ask a tab for it. This is still the only caller that
-   *  wants the EMPTY answer — `locationLine` falls back to the directory,
-   *  which "This machine" would displace. */
-  private hostLabel(): string {
+   *  row and cannot ask a tab for it. What stays here is the ACTIVE domain's
+   *  answer and the EMPTY one — `locationLine` falls back to the directory,
+   *  which "This machine" would displace.
+   *
+   *  Public since nocx-njn8s, for the third caller: the approval prompt has
+   *  to name the machine a proposed command would land on, and a hand-typed
+   *  ssh is exactly the case where the session's own binding is the wrong
+   *  answer. It reads this through PaneManager.sessionWhere rather than
+   *  deriving anything of its own — same reason as the two above. */
+  hostLabel(): string {
     return remoteMachineName(this._user, this._host)
   }
 
@@ -1173,6 +1278,15 @@ export class TerminalContent extends BasePaneContent {
       // both keyboard paths reach the ONE opener (design §10.1, AD-8).
       renderer.onSnippetChord?.(() => this.handleSnippetChord())
 
+      // The lane's interactivity report (ADR-0020 decision 3): the backend
+      // cannot see the alternate screen (AD-6 — it never sniffs the byte
+      // stream) and the renderer owns the buffer kind, so the renderer
+      // reports every buffer change and the backend decides the lane's
+      // awaiting-takeover transition from it. Before the session opens the
+      // report has no session to name — the open handler re-reports the
+      // current kind (reportLaneBufferKind).
+      renderer.onBufferChange((bufferKind) => this.reportLaneBufferKind(bufferKind))
+
       // ── DOM scrollback controller ───────────────────────────────────────
       this.scrollback = new ScrollbackController({
         pane: target,
@@ -1181,11 +1295,21 @@ export class TerminalContent extends BasePaneContent {
         // The renderer owns this tab's OSC 636 store; the scrollback's frozen
         // headers and the editor below must judge against the same instance.
         snapshotStore: renderer.snapshotStore,
-        // A `clear` took every block: the reference chips die with their
-        // blocks — a chip whose block is gone would point at nothing
+        // A `clear` took every block: the grants die with their blocks — a
+        // grant whose block is gone would point at nothing
         // (AGENTS.md: a soft degrade the UI contradicts is how a feature
         // that does not exist survives a release).
-        onClear: () => this.clearReferenceChips(),
+        onClear: () => this.clearGrants(),
+        onBlockFrozen: (rec) => this._onBlockFrozen(rec),
+        sessionName: (id) => this.hooks.sessionName?.(id) ?? null,
+        answerText: (entryId) => answerTextForEntry(this.client, entryId),
+        runningActions: {
+          isActive: (blockEl) =>
+            this.hasRunningCommand() && this.scrollback?.blockManager.runningBlock?.el === blockEl,
+          isGranted: (blockEl) => this.grantedBlocks.some((grant) => grant.blockEl === blockEl),
+          toggleGrant: (blockEl) => this.toggleGrant(blockEl),
+          stop: () => this.signalActiveCommand('stop'),
+        },
       })
 
       log.info('nocx: mounting renderer')
@@ -1284,7 +1408,45 @@ export class TerminalContent extends BasePaneContent {
       // the mode. The agent target is constructed with this tab's seams:
       // the session id is read per submit (a reconnect mints a new
       // session — the target must never capture against a stale one).
+      // The readiness store, built BEFORE the registry that reads it: one
+      // owner for agent.status in this pane (AD-8, nocx-rikz5). What used
+      // to be here was `() => new AgentClient(…).status()` handed to the
+      // ask target — a function called at refusal time, which no surface
+      // can render and nothing can repaint.
+      const agentClient = new AgentClient(this.client.dispatcher)
+      const readiness = new AgentReadiness(agentClient)
+      this.readiness = readiness
+      this._readinessUnsub = readiness.subscribe(() => this.renderModelChip())
+
       this.inputTargets = createRegistry((target) => {
+        // The per-target draft swap (nocx-4ff.7): snapshot the editor
+        // under the OUTGOING target's id, restore the INCOMING target's
+        // draft — text, selection (anchor/head) and scroll — so a round
+        // trip returns exactly what was being edited and the other mode's
+        // draft survives untouched. The editor stays passive: the host
+        // drives the store, keyed by the registry's id; a third target
+        // gets its own draft by registering.
+        const prevId = this.activeTargetId
+        if (this.editor && prevId !== null && prevId !== target.id) {
+          const sel = this.editor.getSelection()
+          this.targetState.saveDraft(prevId, {
+            text: this.editor.getDoc(),
+            from: sel.from,
+            to: sel.to,
+            scrollTop: this.editor.getScrollTop(),
+          })
+          const draft = this.targetState.draft(target.id)
+          if (draft) {
+            this.editor.replaceDoc(draft.text, draft.from, draft.to)
+            this.editor.setScrollTop(draft.scrollTop)
+          } else {
+            // No draft under the incoming id: the line is genuinely
+            // cleared — the same seam a submit uses, so the vault
+            // surfaces hold no stale findings from the other mode.
+            this.editor.clear()
+          }
+        }
+        this.activeTargetId = target.id
         // The line-start indicator renders the registry's active target
         // and nothing else repaints it: this notification IS its refresh
         // signal (ask-entry.ts). The indicator derives its own WORD from
@@ -1296,16 +1458,23 @@ export class TerminalContent extends BasePaneContent {
         // as a command with an operator in it. One authority decides
         // both — the registry — and the editor stays passive.
         this.editor?.setTargetExtensions(target.editorExtensions?.() ?? [])
+        // Entering Ask is the moment the person asks "what will answer
+        // this?", so it is a moment to ask the backend rather than to
+        // repaint a fact that may be minutes old. Leaving Ask only
+        // repaints — a Run pane pays no readiness call.
+        if (target.id === this.agentTarget?.id) this.refreshReadiness()
+        this.renderModelChip()
       })
       this.inputTargets.register(this.shellTarget)
       this.agentTarget = new AgentInputTarget({
         dispatcher: this.client.dispatcher,
+        cancel: (runId) => agentClient.cancel(runId),
         sessionId: () => this.session?.sessionId ?? '',
         cwd: () => this._cwd,
-        // The ask's payload is the reference chips in the input line —
-        // never re-derived from DOM selection at submit time (AD-8:
-        // selection is copy; the chip is the record).
-        chips: () => this.referenceChips,
+        // The ask's payload is the whole-block grants, never re-derived from
+        // DOM selection at submit time (AD-8: selection is copy; the grant is
+        // the record).
+        grants: () => this.grantedBlocks,
         // A new answer block, kept at the bottom of the view — the same
         // rule a command's output lives by, which the ask path never had:
         // nothing scrolled when a block was ADDED, so a question landed
@@ -1313,21 +1482,43 @@ export class TerminalContent extends BasePaneContent {
         // (and looked fine whenever it did not, which is why it read as
         // intermittent). The controller's scrollToBottom is a no-op while
         // the person has scrolled away to read, so this follows without
-        // ever yanking the view out from under them.
-        openAnswer: (question, cwd) => {
-          const handle = this.scrollback!.blockManager.addAnswerBlock(question, cwd)
+        openAnswer: (question, cwd, running?: RunningBlockActions) => {
+          const handle = this.scrollback!.blockManager.addAnswerBlock(question, cwd, running)
           this.scrollback?.scrollToBottom()
           // The streamed answer grows the block, and growth is the same
           // situation as arrival: stay at the bottom unless the reader has
           // gone elsewhere.
           return {
             ...handle,
-            append: (text: string) => {
-              handle.append(text)
+            append: (text: string, blockId?: string) => {
+              handle.append(text, blockId)
               this.scrollback?.scrollToBottom()
             },
-            close: (status: 'success' | 'failure', error?: string) => {
-              handle.close(status, error)
+            // A tool call and a chunk of thinking grow the block exactly as
+            // a delta does, so they follow for the same reason (nocx-shxv0,
+            // nocx-s92so). Forwarded EXPLICITLY rather than left to the
+            // spread above: the spread would carry the method and lose the
+            // follow, which is the kind of gap nobody notices until an
+            // answer stops scrolling for one of its three event kinds.
+            toolCall: (call: AnswerToolCall) => {
+              handle.toolCall(call)
+              this.scrollback?.scrollToBottom()
+            },
+            reasoning: (text: string) => {
+              handle.reasoning(text)
+              this.scrollback?.scrollToBottom()
+            },
+            // `model` is forwarded, and it was not: this wrapper took two
+            // parameters where the handle takes three, so the "answered by
+            // <model>" provenance nocx-e6kn2 added could never be painted —
+            // the value reached here and stopped. TypeScript cannot see it;
+            // a function of lower arity is assignable.
+            close: (
+              status: 'success' | 'failure' | 'cancelled',
+              error?: string,
+              model?: string,
+            ) => {
+              handle.close(status, error, model)
               this.scrollback?.scrollToBottom()
             },
           }
@@ -1338,7 +1529,11 @@ export class TerminalContent extends BasePaneContent {
         onRefusal: (message) => showToast({ level: 'warning', message }),
         // The typed readiness fact behind a refusal (agent.status), so the
         // target never has to read the reason out of the message text.
-        status: () => new AgentClient(this.client.dispatcher).status(),
+        // Through the store, not around it: a refusal is exactly when the
+        // facts are freshest and the chip most needs to catch up, and a
+        // second caller of agent.status would be a second owner of the
+        // answer (AD-8).
+        status: () => readiness.refresh(),
         // No endpoint: the toast says what is wrong and this opens where it
         // is fixed. A refusal with nowhere to go is how a person concludes
         // the feature is broken rather than unconfigured.
@@ -1352,16 +1547,16 @@ export class TerminalContent extends BasePaneContent {
         editorExtensions: () => documentLayer,
       })
       this.inputTargets.register(this.agentTarget)
+      // The registry's active target is settled (the first registered —
+      // shell). Track the id the editor wears so the next switch knows the
+      // OUTGOING side of the draft swap.
+      this.activeTargetId = this.inputTargets.active().id
       // The caret indicator + its toggle: the person's one explicit
       // switch. Clicking the chip (or ⌘/Ctrl+Enter) flips the active target;
       // the registry's notification repaints the label. Ordinary use
       // never touches it — it is the confirmation that Enter goes to the
       // shell (nocx-4wtlh).
-      this.indicator = new TargetIndicator(() => {
-        const current = this.inputTargets?.active().id
-        if (!this.inputTargets || !current) return
-        this.inputTargets.setActive(current === 'shell' ? 'agent' : 'shell')
-      })
+      this.indicator = new TargetIndicator(() => this.toggleInputTarget())
 
       this.editor = new CommandEditor(
         {
@@ -1408,16 +1603,26 @@ export class TerminalContent extends BasePaneContent {
             // keys, the flow gains no phantom running block, and no
             // attempt is opened for prose (nocx-x8s2.2).
             const active = this.inputTargets!.active()
+            // The per-target corpus (nocx-4ff.7): every submission is
+            // recorded under the ACTIVE target's id, so the shell's
+            // commands and the agent's questions never interleave. The
+            // shell's recall reads the store, not this; the agent's (and
+            // any future target's) recall serves from it. The id is the
+            // registry's own — the same seam that routed the submit.
+            this.targetState.record(active.id, {
+              doc,
+              cwd: this._cwd,
+              host: this._host,
+              at: Date.now(),
+            })
             if (!active.routesToShell) {
               // The target surfaces its own refusal (onRefusal → the
               // toast); the rethrow is for programmatic callers, so the
               // fire-and-forget path swallows it.
-              void active.submit(doc, { targetId: active.id }).catch(() => {})
-              // The chips in the line are consumed: they rode this
-              // question. The target reads them SYNCHRONOUSLY at the top of
-              // submit (before its first await), so the clear after the
-              // call can never eat them.
-              this.clearReferenceChips()
+              void active
+                .submit(doc, { targetId: active.id })
+                .then(() => this.clearGrants())
+                .catch(() => {})
               return
             }
             // The atomic handoff transfers input ownership to the grid at
@@ -1437,124 +1642,61 @@ export class TerminalContent extends BasePaneContent {
             // reordered one — measured, the letters of the next input
             // arriving at the pty ahead of the command that was going to
             // read them.
-            this.takeKeyboardToGrid()
-            this.holdRawUntilSubmitted()
-            const recordLine = plan?.recordLine ?? doc
-            // Where the command RUNS, captured before anything below can
-            // change it. Entering an environment blanks `_cwd` (we know the
-            // host, not the remote directory), and the ledger and the block
-            // both read it further down — so `ssh pi@…` was recorded with no
-            // directory and vanished from a history scoped to "this
-            // directory". The command ran here, whatever it goes on to do.
-            const submitCwd = this._cwd
-            // An empty line is a bare newline: no execution, no attempt, no
-            // ledger record (CommandLedger.open refuses empty commands) and
-            // no block. The shell still gets its newline — a conventional
-            // terminal stays conventional.
-            const write = (): void => {
-              // Detach the queue BEFORE the command goes out, flush it after.
-              //
-              // Both halves matter and the order is the whole point. The
-              // command is delivered through renderer.paste, and a paste is
-              // itself an onData — so a queue still armed here would swallow
-              // the command and put it BEHIND the keys that were waiting for
-              // it, which is the same reordering with the operands swapped
-              // (measured: a bare `\r` reaching the pty ahead of its own
-              // command line).
-              const held = this.takeHeldRaw()
-              try {
-                submitCommand(doc, {
-                  focusGrid: () => this.takeKeyboardToGrid(),
-                  sendDoc: (d) => {
-                    void active.submit(d, { targetId: active.id })
-                  },
-                })
-              } finally {
-                // In a `finally`, and fail-open: a write that threw sent
-                // nothing, and holding the keys anyway would swallow them
-                // for the rest of the session. Late at a prompt is a line
-                // the user can see and erase; silently gone is not.
-                for (const data of held) this.session?.send(data)
-              }
-            }
-            if (recordLine === '') {
-              write()
-              return
-            }
-            // SEVERED (ADR-0024): the ssh attempt binding (expected passport
-            // id, tagged A→B entry, local-D completion) and the
-            // environment-entry heuristic (docker, su, …) are deleted with
-            // the marker cycle — nothing stream-derived may activate an
-            // environment, and without a completion there is nothing to
-            // restore. The submitted line still opens a ledger record and a
-            // running block (the app-owned ordering ADR-0024 §5 keeps).
-            if (this.ledger) {
-              let markerLine: () => number | undefined = () => undefined
-              const rec = this.ledger.open(recordLine, submitCwd, this._host, () => markerLine())
-              const m = renderer.registerMarker()
-              if (m) {
-                markerLine = () => m.line()
-                this._markers.set(rec.id, m)
-                m.onDispose(() => {
-                  this.ledger?.dispose(rec.id)
-                  this._markers.delete(rec.id)
-                })
-              }
-            }
-            // The submitted line is now the running command: recompose
-            // the title immediately. The running fact arrives later over
-            // the wire, and a conventional shell may never send one.
-            this.pushTitle()
-            this.scrollback?.maybeClear(recordLine)
-            // The running block opens at the app-owned submit — before any
-            // bytes and before any fact can arrive — so the published
-            // running fact (which the backend emits BEFORE the RPC response,
-            // inside SubmitAttempt) always finds the block it binds to
-            // (ADR-0024 §5, §7). That ordering is why the block's CREATION
-            // line is the prompt line, and why its OUTPUT range starts one
-            // row later (nocx-4yhi): the bytes go out after this call, and
-            // the shell's echo of the typed command lands on the creation
-            // line itself. The header already shows the command; a body
-            // that repeats it is the defect — so the range and the
-            // creation time are two different things, and the record
-            // carries both.
-            if (this.scrollback && this.renderer) {
-              const startLine = this.renderer.cursorLine()
-              // Not `beginBlock`: this runs inside the settle the editor's
-              // commit opened around the whole transition, and a nested glide
-              // would leave two animations on one element.
-              this.scrollback.beginBlockNow(recordLine, submitCwd, startLine, startLine + 1)
-            }
-            const st = this.lifecycle.state
-            if (st.kind !== 'prompt_ready') {
-              // No live domain: nothing to attach the app-owned text to. The
-              // shell's own start (if any) opens a shell-originated attempt
-              // and the block binds to it — a conventional terminal stays
-              // conventional, and the privacy rule holds either way.
-              write()
-              return
-            }
-            // ADR-0024 decision 5: the app-owned attempt opens BEFORE the
-            // bytes that can cause the shell's own start are written to the
-            // pty; the later authenticated start attaches to it and replaces
-            // nothing. Fail-open: a refused attempt (the domain lost its
-            // prompt mid-typing) must never swallow the command — the bytes
-            // still go out and the session stays conventional.
-            void new LifecycleClient(this.client.dispatcher)
-              .submitAttempt({
-                domain: st.domain.id,
-                command: recordLine,
-                cwd: submitCwd,
-                host: this._host,
-              })
-              .then(write, write)
+            // The ONE shell submit orchestration (submitShellCommand):
+            // the keyboard handoff (a person's submit takes the grid; the
+            // agent's never does — ADR-0020 decision 1), the ledger record,
+            // the running block and the lifecycle attempt all run in one
+            // place, and this call differs from the agent's by exactly the
+            // author, the handoff and the byte route (nocx-tjppv).
+            this.submitShellCommand({
+              doc,
+              recordLine: plan?.recordLine ?? doc,
+              author: active.author,
+              takeKeys: true,
+              // The editor's commit already opened a settle around this
+              // whole transition, so the block must open WITHOUT a glide of
+              // its own — a nested one would leave two animations on one
+              // element (see beginBlockNow).
+              callerOwnsGlide: true,
+              sendLine: (d) => void active.submit(d, { targetId: active.id }),
+            })
           },
           // A bare newline: the shell gets its keystroke and answers with a
           // fresh prompt. Deliberately not routed through the submit path —
           // no attempt is opened and no ledger record is written, because
           // nothing was executed (ADR-0024 §5).
-          submitEmpty: () => this.session?.send('\r'),
-          cancel: () => this.session?.send('\x03'),
+          // BOTH OF THESE ARE SHELL BEHAVIOUR, and they run only when the
+          // submission IS a shell command (nocx-oova). The TARGET declares
+          // it — routesToShell, read through the registry, the same one
+          // authority `handoffToShell` below consults — so there is no
+          // per-mode boolean inside the editor and no second derivation of
+          // "which mode am I in".
+          //
+          // It was already the right rule and it is now load-bearing: a
+          // summoned editor is up while a command RUNS (nocx-92gfl), so the
+          // bare CR would go into that program's stdin and the ^C would
+          // kill the very command the person is composing a question about.
+          // Before the summon the editor could only be up at a prompt, where
+          // both were merely wrong rather than destructive.
+          submitEmpty: () => {
+            if (this.inputTargets?.active().routesToShell === false) return
+            this.session?.send('\r')
+          },
+          cancel: () => {
+            if (this.inputTargets?.active().routesToShell === false) return
+            // Ctrl-C at a prompt is a keystroke to the SHELL — its line
+            // editor discards the line and prints a fresh prompt — and the
+            // byte is what delivers that. Over a RUNNING command the same
+            // key is an interrupt addressed to the execution, which is the
+            // active block's business and goes through the one owner of it.
+            if (this.hasRunningCommand()) this.signalActiveCommand('interrupt')
+            else this.session?.send('\x03')
+          },
+          // A summoned editor's Escape puts it away and gives the keys back
+          // to the running process, leaving the half-typed question where it
+          // is (nocx-92gfl). Everywhere else this declines and Escape stays
+          // the draft clear it has always been.
+          onEscape: () => this.dismissSummonedEditor(),
           // A taller editor is a shorter scrollback. Keep the bottom of the
           // transcript where it belongs — just above the editor — instead of
           // letting it slide underneath.
@@ -1614,15 +1756,7 @@ export class TerminalContent extends BasePaneContent {
           // ⌘/Ctrl+Enter: the explicit switch (ADR-0004 §3) — same flip as
           // clicking the caret indicator, and the only thing the chord
           // does. Asking is plain Enter with Ask active.
-          onToggleTarget: () => {
-            const current = this.inputTargets?.active().id
-            if (!this.inputTargets || !current) return
-            this.inputTargets.setActive(current === 'shell' ? 'agent' : 'shell')
-          },
-          onDismissChip: (id) => {
-            this.referenceChips = this.referenceChips.filter((c) => c.id !== id)
-            this.editor?.setReferenceChips(this.referenceChips)
-          },
+          onToggleTarget: () => this.toggleInputTarget(),
         },
         // The language is chosen HERE, not inside the editor. CommandEditor
         // must stay language-agnostic (ADR-0010 §Decision 3): the agent target
@@ -1643,6 +1777,16 @@ export class TerminalContent extends BasePaneContent {
       )
       // The layer of the target Enter goes to right now (shell at start).
       this.editor.setTargetExtensions(this.inputTargets.active().editorExtensions?.() ?? [])
+      // The model chip's two destinations (nocx-rikz5). The endpoints one
+      // is the seam a refusal already uses — one owner for "open where an
+      // endpoint is fixed", reused rather than duplicated.
+      this.editor.onModelChipClick((page) => {
+        if (page === 'endpoints') this.hooks.onCreateEndpoint?.()
+        else this.hooks.onOpenRoles?.()
+      })
+      // Shell is active at start, so this paints the chip's absence — the
+      // state a Run pane is in, and the one the row was built for.
+      this.renderModelChip()
       this.editor.mount(target)
       this.completion.attach(this.editor, this.editor.root)
       this.promptVault = new PromptVaultController({
@@ -1653,7 +1797,6 @@ export class TerminalContent extends BasePaneContent {
         requestCreateSecret: (name) => this.hooks.onCreateSecret?.(name),
       })
       this.promptVault.mount()
-
       // ── Recall overlay (Provenance Recall, design §8.10) ────────────────
       // The history palette above the prompt. Rows are served by the store
       // over the control plane (history.query, source=store); when the
@@ -1665,19 +1808,46 @@ export class TerminalContent extends BasePaneContent {
       // and Enter TAKES the command into the line without running it — the
       // overlay never reaches a submit path (nocx-w7h.5, reversed by the
       // owner 2026-08-19; the reasoning is on the module's header comment).
+      // The SHELL's recall corpus is the persistent store — cross-session,
+      // with rungs and coverage; a question is not a command and never
+      // enters the store, so the agent recalls its own recorded corpus by
+      // default (the lookup below). Registered per target id beside the
+      // registry, exactly as the targets themselves are.
+      this.targetRecall.set('shell', async (scope, text) => {
+        try {
+          const page = await queryHistory(this.client, scope, this._cwd, this._host, text)
+          // A command run in THIS session comes back as it was run, not as
+          // the store had to keep it (nocx-xkve.4). Recall only — the
+          // completion provider above keeps reading the store, so ghost
+          // text and candidates stay masked.
+          return withSessionText(page, this.ledger)
+        } catch {
+          return queryLedgerHistory(this.ledger, scope, this._cwd, this._host, text)
+        }
+      })
       this.recall = new RecallOverlay({
         editor: this.editor,
-        query: async (scope, text) => {
-          try {
-            const page = await queryHistory(this.client, scope, this._cwd, this._host, text)
-            // A command run in THIS session comes back as it was run, not as
-            // the store had to keep it (nocx-xkve.4). Recall only — the
-            // completion provider above keeps reading the store, so ghost
-            // text and candidates stay masked.
-            return withSessionText(page, this.ledger)
-          } catch {
-            return queryLedgerHistory(this.ledger, scope, this._cwd, this._host, text)
-          }
+        // The recall corpus is the ACTIVE target's (nocx-4ff.7): the
+        // shell's commands and the agent's questions are different corpora
+        // and must not interleave. The shell's is the persistent store
+        // (with the ledger fallback), registered below; a question never
+        // enters the store, so the agent — and any target without a
+        // registration — recalls its own recorded corpus (target-state).
+        // The lookup is keyed by the registry's id, never a branch on it.
+        query: (scope, text) => {
+          const active = this.inputTargets!.active()
+          const corpus = this.targetRecall.get(active.id)
+          return corpus
+            ? corpus(scope, text)
+            : Promise.resolve(
+                queryTargetHistory(
+                  this.targetState.history(active.id),
+                  scope,
+                  this._cwd,
+                  this._host,
+                  text,
+                ),
+              )
         },
         // A recalled masked row cannot run as written (ADR-0021): the
         // overlay reports the row's redaction spans every time it places
@@ -2031,6 +2201,12 @@ export class TerminalContent extends BasePaneContent {
               const block = this.scrollback?.blockManager.blockForAttempt(attempt.id)
               this.attachRecordedAck(rec.id, block, ack)
             }
+            // What the store made of this record, for whoever is waiting on
+            // it: the entry id it minted, or '' when it wrote no row (a
+            // dropped record answers null, which is the same fact). An
+            // agent run's resolution names this id and nothing else can
+            // (nocx-9sqii).
+            this.settleStoredEntry(rec.id, ack?.entryId ?? '')
             return ack
           }),
       )
@@ -2048,6 +2224,13 @@ export class TerminalContent extends BasePaneContent {
       // connection — and restorePast is a no-op once the past is drawn.
       this._restoreRetryUnsub = this.client.onReconnectResult(() => {
         void this.restorePast()
+      })
+      // A returning socket may be a returning BACKEND, whose endpoints and
+      // roles are not the ones this pane last read. The report fires once
+      // per reconnect, after every attach has settled, so the refresh
+      // cannot race a half-open connection.
+      this._readinessRetryUnsub = this.client.onReconnectResult(() => {
+        if (this.inputTargets?.active().id === this.agentTarget?.id) this.refreshReadiness()
       })
 
       // The kernel starts Native and onChange may not fire for the initial
@@ -2091,6 +2274,17 @@ export class TerminalContent extends BasePaneContent {
       this._globalKeydown = (e: KeyboardEvent) => {
         // Read the flag the chrome set, not the class it rendered (nocx-fttm).
         if (!target.isConnected || !this._active) return
+        if (
+          (e.ctrlKey || e.metaKey) &&
+          e.shiftKey &&
+          !e.altKey &&
+          e.key.toLowerCase() === 'a' &&
+          this.grantCurrentSelection()
+        ) {
+          e.preventDefault()
+          e.stopPropagation()
+          return
+        }
         if (this.scrollback && this.scrollback.selectedBlockId !== null) {
           if (e.key.length === 1 && !e.ctrlKey && !e.metaKey && !e.altKey) {
             e.preventDefault()
@@ -2106,6 +2300,41 @@ export class TerminalContent extends BasePaneContent {
             e.preventDefault()
             return
           }
+        }
+        // ── Ctrl+C is addressed to the ACTIVE BLOCK (nocx-23rph) ────────
+        //
+        // Today the key reaches a running command only as the byte 0x03 on
+        // the data plane, which means only while the grid holds the
+        // keyboard: click a frozen block, another pane, the chrome, and the
+        // same key stops the same command no longer. The address is the
+        // pane's one execution, not whoever has focus — so this branch
+        // covers the gap and nothing else.
+        //
+        // FOUR THINGS KEEP THEIR CTRL+C, and each is somebody else's owner
+        // of the same keystroke (AGENTS.md: two surfaces may never own one
+        // input):
+        //
+        //  - a real selection anywhere: Ctrl+C is COPY, and always was;
+        //  - somebody else's text control: their copy, their interrupt;
+        //  - the editor on screen: its own handler clears the draft and
+        //    decides about the pty from the active target (see `cancel`);
+        //  - the live grid with the editor hidden: xterm is already turning
+        //    this into 0x03 and the line discipline into SIGINT. Signalling
+        //    here as well would be a second interrupt nobody asked for.
+        //
+        // With nothing running there is no addressee and the key is left
+        // alone — signalActiveCommand is the one owner of that check too.
+        if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'c' || e.key === 'C')) {
+          if (!this.hasRunningCommand()) return
+          const sel = window.getSelection()
+          if (sel && !sel.isCollapsed && sel.toString() !== '') return
+          const active = document.activeElement
+          if (isTextEntry(active)) return
+          if (this.editor?.isVisible && active && this.editor.rootContains(active)) return
+          if (active && this.scrollback?.xtermLiveContainer.contains(active) === true) return
+          e.preventDefault()
+          this.signalActiveCommand('interrupt')
+          return
         }
         // Paste (Cmd/Ctrl+V) belongs to the same rescue policy: wherever in
         // the pane the user clicked — a frozen block, the scrollback, the
@@ -2386,6 +2615,13 @@ export class TerminalContent extends BasePaneContent {
         workspace: session.workspaceId,
       })
 
+      // Re-report the CURRENT buffer kind now that the session has a
+      // backend id: a buffer change before open had no session to name,
+      // and the backend's lane starts at normal — the report brings a lane
+      // already inside a TUI (an alt screen restored by replay) up to
+      // date (ADR-0020 decision 3).
+      this.reportLaneBufferKind(renderer.activeBufferKind())
+
       // The open ack carries the resolved launch policy and the refusal
       // reason (nocx-4t37.2): the capability control starts from the
       // backend's own resolution, never from a second fetch that could
@@ -2475,7 +2711,18 @@ export class TerminalContent extends BasePaneContent {
       // frozen, and the block leapt 153px up the pane at the end of a command
       // that had already finished (2026-08-19 frame capture). Nothing else
       // could correct it, because for a fast command there is no next chunk.
-      renderer.onWriteParsed(() => this.scheduleLiveResize())
+      renderer.onWriteParsed(() => {
+        this.scheduleLiveResize()
+        // AND THE STAND-IN STANDS DOWN (nocx-vnirv.1). A running command
+        // carries the same "working, nothing written yet" indicator a turn
+        // does, in the live region where its output will appear, and the
+        // first parsed write is the moment that claim stops being true.
+        // Here rather than in `onData` below for the same reason the measure
+        // is here: `write()` parses asynchronously, so the bytes having been
+        // handed over is not the output having arrived. Idempotent — every
+        // later chunk calls it again and nothing changes.
+        this.scrollback?.blockManager.noteCommandOutput()
+      })
 
       // Keyboard → PTY: xterm.js fires onData for every keystroke when stdin
       // is enabled (setReadOnly(false)). The editor captures keys while it is
@@ -2679,12 +2926,46 @@ export class TerminalContent extends BasePaneContent {
         }
       })
 
-      this._mounted = true
-      // The reference-chip seam: a document selection inside a finished
-      // block's output raises a chip (nocx-4wtlh). Registered at the end
-      // of mount so the editor and the scrollback exist; removed on
-      // dispose.
+      // ── Summon the editor over a running command (nocx-92gfl) ──────────
+      //
+      // IN THE CAPTURE PHASE, and that is not a style choice. xterm attaches
+      // its own keydown to the hidden textarea, and by the time an event
+      // bubbles to this element xterm has already turned Ctrl+Enter into a
+      // CR and pushed it through onData — into the stdin of the very command
+      // this chord is about. Capture on an ancestor runs before the
+      // textarea's own listener, so the key is intercepted rather than
+      // undone.
+      //
+      // ⌘/Ctrl+Enter and not a new chord, because it already means "I want
+      // the assistant": at a prompt it flips the target to Ask, and here it
+      // brings the box that has that target back. One gesture, one meaning,
+      // two situations.
+      target.addEventListener(
+        'keydown',
+        (e: KeyboardEvent) => {
+          if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return
+          // The editor on screen owns this chord: it is the explicit target
+          // switch there, and the editor's own handler decides.
+          if (this.editor?.isVisible) return
+          if (!this.summonEditor()) return
+          e.preventDefault()
+          e.stopPropagation()
+        },
+        true,
+      )
+
+      this.grantController = new GrantController({
+        chip: this.editor.root.querySelector<HTMLButtonElement>('.nocx-editor-grant') ?? undefined,
+        onChange: (blocks) => {
+          this.grantedBlocks = [...blocks]
+        },
+      })
+      const chipRow = this.editor.root.querySelector<HTMLElement>('.nocx-editor-chrome-left')
+      if (chipRow) this.grantController.mount(chipRow)
+      this.editor.onGrantChipClick(() => this.grantController?.toggle())
+      this.grantController.setBlocks(this.grantedBlocks)
       document.addEventListener('selectionchange', this.onSelectionChange)
+      this._mounted = true
       this._readyResolve(true)
       log.info('nocx: terminal content ready', {
         renderer: 'xterm',
@@ -2916,11 +3197,58 @@ export class TerminalContent extends BasePaneContent {
   setVisible(visible: boolean): void {
     super.setVisible(visible)
     if (visible) this.renderer?.refreshAtlas()
+    // The pane coming back to the front is when the facts behind the model
+    // chip can have changed: an endpoint is created, a role assigned and a
+    // default set on the SETTINGS pane, which is a different pane — so the
+    // person cannot see this chip while they do it, and this is the moment
+    // it must catch up. Named triggers per write (endpoints.create,
+    // roles.assign, roles.setDefault) would each have to be installed in a
+    // surface this task does not own, and there is no backend notification
+    // for them; the show is the one seam that covers all of them at once
+    // and is not a poll. Only while Enter goes to the assistant — a Run
+    // pane has no chip to refresh, and pays no call for one.
+    if (visible && this.inputTargets?.active().id === this.agentTarget?.id) {
+      this.refreshReadiness()
+    }
     // The pane's past, drawn the first time somebody looks at it
     // (nocx-m3fqk). On first SHOW rather than at boot: eight panes at fifty
     // blocks is four hundred blocks of DOM before the first frame, and a pane
     // nobody has opened has not been read.
     if (visible) void this.restorePast()
+  }
+
+  /**
+   * Ask the readiness store for fresh facts, fire and forget.
+   *
+   * A failed read costs the refresh and never the chip: the store keeps the
+   * last fact, so the composer goes on naming the model it last knew rather
+   * than blanking on a dropped socket. The failure is a log line and not a
+   * toast on purpose — nothing the person did has been refused, and the ask
+   * path raises its own visible refusal when a question actually fails.
+   */
+  private refreshReadiness(): void {
+    const readiness = this.readiness
+    if (!readiness) return
+    void readiness.refresh().catch((err: unknown) => {
+      log.warn('nocx: the assistant readiness could not be read', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    })
+  }
+
+  /**
+   * The model chip's ONE writer in this pane: both facts it needs — which
+   * target Enter goes to, and what the readiness store holds — are read
+   * here, so no other site has to remember to combine them.
+   *
+   * No chip at all unless the assistant is what a submit reaches: a Run
+   * pane names no model, because none answers anything.
+   */
+  private renderModelChip(): void {
+    if (!this.editor) return
+    const active = this.inputTargets?.active()
+    const isAsk = active !== undefined && active.id === this.agentTarget?.id
+    this.editor.setModelChip(isAsk ? modelChipState(this.readiness?.status ?? null) : null)
   }
 
   /** One shot. A pane is shown many times — every tab switch — and its past
@@ -2988,27 +3316,172 @@ export class TerminalContent extends BasePaneContent {
     this._pastRestoring = false
     if (blocks.length === 0) return
     const snapshot = fromITheme(getCurrentTheme())
-    const els: HTMLElement[] = []
+    // Every block's body AND its causal flow, in the one round trip pair the
+    // body already cost (restore-client restoredBody). Both are needed
+    // before anything is drawn, because the relation decides WHERE a block
+    // goes and a block cannot be placed while the page is still arriving.
+    const bodies = new Map<string, Awaited<ReturnType<typeof restoredBody>>>()
     for (const b of blocks) {
-      const body = await bodyForBlock(this.client, b.entryId)
+      // What the entry HAS decides what it is: a terminal body is a
+      // command, a text-only body is an assistant turn (nocx-4em1z). One
+      // read answers both — the fetch already had to ask for the artifact
+      // list.
+      bodies.set(b.entryId, await restoredBody(this.client, b.entryId))
+    }
+    // The arrangement is the LEDGER's (nocx-h1l4o): a turn is followed by
+    // the blocks it caused, in the causal order it assigned. A missing,
+    // unreadable or dangling relation lands on plain ledger order with the
+    // command drawn as an independent agent block — arrangedByCause is the
+    // one place that decides it, and it never guesses a parent.
+    const arranged = arrangedByCause(blocks, (id) => bodies.get(id)?.caused ?? [])
+    const els: HTMLElement[] = []
+    const page = new Map(blocks.map((b) => [b.entryId, b]))
+    const container = (): HTMLElement =>
+      this.scrollback?.scrollbackInner ?? document.createElement('div')
+    const nextId = (): number => this.scrollback!.blockManager.nextRestoredId()
+    const snapshotStore = this.scrollback.snapshotStore
+    /** One page row as the facts a restored block is built from. */
+    const factsOf = (b: (typeof blocks)[number]) => ({
+      command: b.command,
+      cwd: b.cwd,
+      // The host the command ran on, not the one the pane is on now: a
+      // block keeps saying where it ran (design §7).
+      location: b.host,
+      durationMs: b.durationMs,
+      exitCode: b.exitCode,
+      status: b.status,
+      body: bodies.get(b.entryId)?.body ?? null,
+      kind: bodies.get(b.entryId)?.kind ?? ('command' as const),
+      entryId: b.entryId,
+      // Who ran it, carried from the entry's OWN source column
+      // (nocx-dc2fr; restore-client maps entries.source to the display
+      // author). The block's badge is painted from this, so a command the
+      // assistant ran still says so after a restart.
+      author: b.author,
+    })
+    // A block a TURN placed is not also drawn at its own row: the turn
+    // consumed it, and drawing it twice would be the relation costing the
+    // page a duplicate instead of a placement.
+    const placed = new Set<string>()
+    for (const b of arranged) {
+      if (placed.has(b.entryId)) continue
+      placed.add(b.entryId)
+      const restored = bodies.get(b.entryId)
+      if ((restored?.kind ?? 'command') !== 'ask') {
+        els.push(
+          restoredBlock(
+            { ...factsOf(b), id: nextId() },
+            snapshot,
+            container,
+            () => {},
+            snapshotStore,
+          ),
+        )
+        continue
+      }
+      // A TURN CARRIES THE BLOCKS IT CAUSED (ADR-0040), and the restore
+      // draws exactly that: one turn block whose `.cmd-children` hold the
+      // causal sequence — prose, tool calls, commands — in the seats the
+      // ledger stored, through the SAME builders the live path ends at.
+      //
+      // The PROSE was already fetched: `restoredBody` returned the turn's
+      // text/plain artifact, and the children ride the same `ledger.get`
+      // call as `caused`. A `text` child's body is its own artifact, read
+      // here per child exactly as a top-level block's body is read.
+      const childBody = new Map<string, string | null>()
+      for (const c of restored?.caused ?? []) {
+        if (c.kind !== 'text') continue
+        const art = await answerTextForEntry(this.client, c.entryId)
+        childBody.set(c.entryId, art)
+      }
       els.push(
-        restoredBlock(
+        ...restoredTurn(
           {
-            id: this.scrollback.blockManager.nextRestoredId(),
-            command: b.command,
-            cwd: b.cwd,
-            // The host the command ran on, not the one the pane is on now: a
-            // block keeps saying where it ran (design §7).
-            location: b.host,
-            durationMs: b.durationMs,
-            exitCode: b.exitCode,
-            status: b.status,
-            body,
+            ...factsOf(b),
+            proseEvicted: restored?.proseEvicted ?? false,
+            causes: restored?.caused ?? [],
           },
           snapshot,
-          () => this.scrollback?.scrollbackInner ?? document.createElement('div'),
+          nextId,
+          container,
           () => {},
-          this.scrollback.snapshotStore,
+          snapshotStore,
+          (cause) => {
+            // A TEXT child is drawn as the prose block it was, with its own
+            // body — or, when retention took it, as an empty block: the
+            // run's notice is the turn's, said once (proseEvicted above).
+            if (cause.kind === 'text') {
+              return restoredBlock(
+                {
+                  ...factsOf(b),
+                  id: nextId(),
+                  command: '',
+                  cwd: '',
+                  location: '',
+                  kind: 'text',
+                  body: childBody.get(cause.entryId) ?? null,
+                  // A run of the assistant's prose is the assistant's —
+                  // the child's own source says so (nocx-dc2fr).
+                  author: cause.source === 'assistant' ? 'agent' : 'shell',
+                  status: 'success',
+                  durationMs: null,
+                  exitCode: null,
+                },
+                snapshot,
+                container,
+                () => {},
+                snapshotStore,
+              )
+            }
+            // An ACTION child is a tool line — a header naming what was
+            // called and with what, never a top-level block — EXCEPT one
+            // that opened a block: the command block it opened IS the
+            // account of that call (ADR-0040), exactly as the live flow
+            // draws it, so a restored turn must not restate it.
+            if (cause.kind === 'action') {
+              if (cause.opensBlock) return null
+              return restoredBlock(
+                {
+                  ...factsOf(b),
+                  id: nextId(),
+                  command: toolCallTitle(
+                    {
+                      tool: cause.intent ?? '',
+                      args: cause.args ?? {},
+                      resource: cause.resource ?? undefined,
+                    },
+                    { sessionName: this.hooks.sessionName },
+                  ),
+                  cwd: '',
+                  kind: 'tool',
+                  body: null,
+                  // The assistant's call is the assistant's — the child's
+                  // own source says so (nocx-dc2fr).
+                  author: cause.source === 'assistant' ? 'agent' : 'shell',
+                  status: 'success',
+                  durationMs: null,
+                  exitCode: null,
+                },
+                snapshot,
+                container,
+                () => {},
+                snapshotStore,
+              )
+            }
+            // A block the turn RAN (or a person's, if the ledger
+            // mis-seated): it is already a page row, drawn where the turn
+            // holds it.
+            const caused = page.get(cause.entryId)
+            if (!caused || placed.has(cause.entryId)) return null
+            placed.add(cause.entryId)
+            return restoredBlock(
+              { ...factsOf(caused), id: nextId() },
+              snapshot,
+              container,
+              () => {},
+              snapshotStore,
+            )
+          },
         ),
       )
     }
@@ -3105,6 +3578,34 @@ export class TerminalContent extends BasePaneContent {
     this._noticeDispose()
     this._noticeDispose = null
     this.scheduleLiveResize()
+  }
+
+  /** The session id this content's terminal belongs to — the readScreen
+   *  pull's lookup key (nocx-ljfwz). The renderer answers only requests
+   *  naming ITS session; a request for any other session is answered
+   *  failed by the app-level handler. */
+  sessionId(): string {
+    return this.session?.sessionId ?? ''
+  }
+
+  /** Capture this session's live frame (the readScreen pull): the renderer
+   *  produces the frame because it owns the grid (AD-6). Rejects with
+   *  CaptureAbortedError when no renderer is mounted (yet or anymore). */
+  captureLiveFrame(region?: { start: number; end: number }): Promise<CapturedFrame> {
+    if (!this.renderer) return Promise.reject(new CaptureAbortedError())
+    return this.renderer.captureLiveFrame(region)
+  }
+
+  /** Report the lane's buffer kind to the backend (agent.laneInteractivity,
+   *  ADR-0020 decision 3): the renderer observed the buffer change, the
+   *  backend decides the awaiting-takeover transition from it. Fire-and-
+   *  forget — the backend treats a refused report (a stale session, a
+   *  closed lane) as nothing to transition; a lost report costs only a
+   *  delayed transition, and the next change re-reports. */
+  private reportLaneBufferKind(bufferKind: 'normal' | 'alternate'): void {
+    const sid = this.session?.sessionId
+    if (!sid) return
+    void this.client.call('agent.laneInteractivity', { sessionId: sid, bufferKind }).catch(() => {})
   }
 
   /** Raise the degraded-session card, unless the user has already answered
@@ -3277,6 +3778,166 @@ export class TerminalContent extends BasePaneContent {
     if (this.editor?.isVisible === true) return 'editor'
     if (this.session !== null) return 'pty'
     return 'none'
+  }
+
+  /** Whether ONE command is running in this pane right now — "the active
+   *  block", in the owner's words.
+   *
+   *  The lifecycle kernel already answers this (ADR-0024 §5: an attempt is
+   *  open from submit or authenticated start until an authenticated
+   *  same-domain completion), so nothing here re-derives it from a block's
+   *  CSS class or from the byte stream. One PTY has one foreground process
+   *  group, so "the active block" is unambiguous: this is the pane's one
+   *  execution, and it is what both the summon and the interrupt address. */
+  private hasRunningCommand(): boolean {
+    const st = this.lifecycle.state
+    // The ATTEMPT's state, not the axis's word. `running` is the kernel's
+    // name for the axis a lane is on once an attempt exists there, and it
+    // keeps that name after the attempt completes — the state carries the
+    // completed record until the next prompt fact arrives. So the axis alone
+    // would say a command is running for the whole window between its exit
+    // status and the shell's next prompt, which is exactly the window a Stop
+    // must refuse in and a summon must not open in.
+    return st.kind === 'running' && st.attempt.state === 'open'
+  }
+
+  /** Summon the editor over a running command, in ask mode (nocx-92gfl).
+   *
+   *  Two gestures land here and nowhere else: ⌘/Ctrl+Enter from the grid,
+   *  and "ask about this block" on the block's ⋮ menu. The menu item exists
+   *  because a chord nobody can see is a gesture nobody uses; it is a second
+   *  DOOR, never a second implementation.
+   *
+   *  Refused unless there is something to ask about and the pane is in a
+   *  state where an editor belongs: no running command (the editor is
+   *  already there, or will be), the ALTERNATE buffer (a full-screen program
+   *  owns the pane, and that is its own conversation), or the native-input
+   *  latch (the person's own one-way choice, which nothing may reverse for
+   *  them).
+   *
+   *  Returns whether it summoned, so a caller can leave the key alone. */
+  private summonEditor(): boolean {
+    const editor = this.editor
+    if (editor === null || editor.isVisible) return false
+    if (!this.hasRunningCommand()) return false
+    if (this.lifecycle.buffer !== 'normal' || this.nativeMode) return false
+    const targets = this.inputTargets
+    const agentId = this.agentTarget?.id
+    // No assistant target registered means there is nothing to ask, and a
+    // summoned editor whose only legal target does not exist would be a box
+    // that can do nothing at all.
+    if (!targets || !agentId) return false
+    this._summonRestoreTargetId = targets.active().id
+    this._summoned = true
+    if (targets.active().id !== agentId) targets.setActive(agentId)
+    this._syncLifecycleOwnership()
+    editor.focus()
+    return true
+  }
+
+  /** Dismiss a summoned editor: the keys go back to the process (nocx-92gfl).
+   *
+   *  The DRAFT IS LEFT ALONE, which is the one thing that distinguishes this
+   *  from the Escape the editor has always had. Escape here means "put this
+   *  away" — the person dismissed a surface, they did not cancel their
+   *  question — and a re-summon resumes it. Clearing is still Ctrl-C's, and
+   *  it still means exactly that.
+   *
+   *  Returns whether anything was dismissed, so Escape falls through to the
+   *  clear when it was not. */
+  private dismissSummonedEditor(): boolean {
+    if (!this._summoned) return false
+    // Through _endSummon, which is the ONE place a summon is unwound —
+    // dismissing it and outliving it are two exits from the same state and
+    // must leave the pane in the same condition. Clearing the flag here
+    // instead left the target on Ask after an Escape: the person put the box
+    // away, the command finished, the prompt came back wearing a mode
+    // nobody had chosen, and their next Enter went to the model. Caught by
+    // the e2e, because no unit followed a dismissal past the command's end.
+    this._endSummon()
+    this._syncLifecycleOwnership()
+    return true
+  }
+
+  /** The summon is over — dismissed by Escape, or outlived by the command
+   *  it was opened over. Both exits come through here.
+   *
+   *  The target goes back to what the summon displaced ONLY if the draft is
+   *  empty. A half-typed question re-pointed at the shell would turn the
+   *  person's next Enter into a command they never wrote — the exact reason
+   *  the dropped auto-switching design was dropped. */
+  private _endSummon(): void {
+    this._summoned = false
+    const restore = this._summonRestoreTargetId
+    this._summonRestoreTargetId = null
+    if (restore === null || this.editor === null) return
+    if (this.editor.getDoc() !== '') return
+    if (this.inputTargets?.active().id === restore) return
+    this.inputTargets?.setActive(restore)
+  }
+
+  /** The person's ONE explicit target switch: the caret indicator's click
+   *  and the ⌘/Ctrl+Enter chord are the same gesture, and were two copies
+   *  of it until this existed (AD-8 — one owner per behaviour).
+   *
+   *  It refuses the shell while the editor is summoned, and that refusal is
+   *  the whole of "a second command cannot be started over a running one":
+   *  the summoned editor's only legal target is the assistant, so there is
+   *  no state from which Enter could reach the pty. Said out loud rather
+   *  than swallowed — a deliberate gesture that does nothing in silence
+   *  reads as a broken control. */
+  private toggleInputTarget(): void {
+    const targets = this.inputTargets
+    const current = targets?.active().id
+    if (!targets || !current) return
+    const next = current === 'shell' ? 'agent' : 'shell'
+    if (next === 'shell' && this._summoned) {
+      showToast({
+        level: 'warning',
+        message:
+          'A command is running. You can ask the assistant about it, but a new command cannot be started over it.',
+      })
+      return
+    }
+    targets.setActive(next)
+  }
+
+  /** Address a signal to THE ACTIVE BLOCK — the one command running in this
+   *  pane — rather than to whatever holds focus (nocx-23rph).
+   *
+   *  ONE OWNER for both gestures: Ctrl+C from anywhere in the pane, and Stop
+   *  on the running block's ⋮ menu. The escalation policy itself belongs to
+   *  the backend, where it already lived for the agent's run lease; this
+   *  side chooses the INTENT and reports what came back.
+   *
+   *  Nothing is sent when nothing is running: there is no addressee, and the
+   *  wire method's own honest refusal covers the race where the command ends
+   *  between the gesture and the call. Every other answer is said out loud —
+   *  a Stop that quietly did nothing is worse than one that failed. */
+  private signalActiveCommand(signal: SessionSignal['signal']): void {
+    const session = this.session
+    if (session === null || !this.hasRunningCommand()) return
+    void session.signal(signal).then(
+      (result) => {
+        if (result.outcome === 'delivered') return
+        showToast({
+          level: 'warning',
+          message:
+            result.outcome === 'unsupported'
+              ? 'This command is running on the remote host, which nocx cannot signal from here.'
+              : 'Nothing is running in this pane any more, so there was nothing to stop.',
+        })
+      },
+      (err: unknown) => {
+        log.warn('nocx: session.signal failed', {
+          message: err instanceof Error ? err.message : String(err),
+        })
+        showToast({
+          level: 'danger',
+          message: 'The command could not be reached, so it may still be running.',
+        })
+      },
+    )
   }
 
   /** Insert a vault secret where the user is actually typing (nocx-fk32).
@@ -3478,8 +4139,21 @@ export class TerminalContent extends BasePaneContent {
   private _syncLifecycleOwnership(): void {
     const editor = this.editor
     if (editor === null) return
+    // A SUMMON IS SPENT the moment the command stops running, whichever way
+    // it stops — completed, lost, the integration gone. Reconciled here
+    // rather than on the completion fact alone, because this is the one
+    // place every lifecycle change already arrives, and a second place that
+    // cleared it would be a second owner of the same flag.
+    if (this._summoned && !this.hasRunningCommand()) this._endSummon()
+    // Two ways the editor can be on screen, and the difference is who asked:
+    // the LIFECYCLE says PromptReady (ADR-0024 §6, the ordinary case), or the
+    // PERSON summoned it over a running command (nocx-92gfl). The other two
+    // axes gate both alike — the buffer axis is presentation and can never
+    // restore authority, and the native latch is the person's own one-way
+    // choice — so a summon reaches neither an alternate-screen program nor a
+    // pane whose owner has opted out of the editor entirely.
     const show =
-      shouldShowEditor(this.lifecycle.state) &&
+      (shouldShowEditor(this.lifecycle.state) || this._summoned) &&
       this.lifecycle.buffer === 'normal' &&
       !this.nativeMode
     // The grid's writability follows ownership, not the visibility
@@ -3529,63 +4203,55 @@ export class TerminalContent extends BasePaneContent {
     }
   }
 
-  /** A document selection landed (or moved): if it is a real selection
-   *  inside one FINISHED block's output, freeze it into a reference chip.
-   *  Nothing else happens — the active target does not move, the shell is
-   *  not armed, the selection itself is untouched (copy keeps working).
-   *  Reselecting the identical region (same block, same rows) is a no-op;
-   *  a selection inside the editor's own draft is never a reference.
-   *  selectionchange fires on every caret move, so the guard is the
-   *  fingerprint, not the event. */
-  private raiseChipFromSelection(): void {
-    const sel = window.getSelection()
-    if (!sel || sel.isCollapsed) return
-    const anchor = sel.anchorNode
-    if (anchor && anchor.parentElement?.closest('.nocx-editor')) return
-    const chip = chipFromSelection(sel)
-    if (!chip) return
-    const existing = this.referenceChips.find((c) => chipFingerprint(c) === chipFingerprint(chip))
-    if (existing) return
-    const label = this.referenceChipLabel(chip)
-    this.referenceChips = [
-      ...this.referenceChips,
-      {
-        id: `ref-${(this._chipSeq = (this._chipSeq ?? 0) + 1)}`,
-        label,
-        blockEl: chip.blockEl,
-        rowStart: chip.rowStart,
-        rowEnd: chip.rowEnd,
-      },
-    ]
-    this.editor?.setReferenceChips(this.referenceChips)
+  /** A selection is a quote and a whole-block grant. The grant is idempotent:
+   * repeated quotes from one block keep one mark, while the menu remains the
+   * explicit toggle for removing it. */
+  private grantCurrentSelection(): boolean {
+    const selection = window.getSelection()
+    if (!selection || selection.isCollapsed) return false
+    const block = grantBlockFromSelection(selection)
+    if (!block || !this.scrollback?.scrollbackInner.contains(block.blockEl)) return false
+    this.ensureGrant(block.blockEl)
+    return true
   }
 
-  /** The chip's name: the block's command and the covered row range —
-   *  the block names itself, the rows say what part is frozen. */
-  private referenceChipLabel(chip: {
-    blockEl: HTMLElement
-    rowStart: number
-    rowEnd: number
-  }): string {
-    const header = chip.blockEl.querySelector<HTMLElement>('.cmd-header-text')
-    const name = header?.textContent?.trim() || 'block'
-    const rows =
-      chip.rowEnd - chip.rowStart === 1
-        ? `row ${chip.rowStart + 1}`
-        : `rows ${chip.rowStart + 1}–${chip.rowEnd}`
-    return `${name} · ${rows}`
+  private ensureGrant(blockEl: HTMLElement): void {
+    const grant = grantBlockFromElement(blockEl)
+    if (!grant || this.grantedBlocks.some((item) => item.itemId === grant.itemId)) return
+    this.grantedBlocks = [...this.grantedBlocks, grant]
+    this.grantController?.setBlocks(this.grantedBlocks)
   }
 
-  /** Drop every reference chip: a question sent to Ask consumed them, or
-   *  a `clear` took their blocks. The editor's strip follows. */
-  private clearReferenceChips(): void {
-    if (this.referenceChips.length === 0) return
-    this.referenceChips = []
-    this.editor?.clearReferenceChips()
+  private toggleGrant(blockEl: HTMLElement): void {
+    const grant = grantBlockFromElement(blockEl)
+    if (!grant) return
+    const index = this.grantedBlocks.findIndex((item) => item.itemId === grant.itemId)
+    this.grantedBlocks =
+      index < 0
+        ? [...this.grantedBlocks, grant]
+        : this.grantedBlocks.filter((_, candidateIndex) => candidateIndex !== index)
+    this.grantController?.setBlocks(this.grantedBlocks)
+  }
+
+  private refreshGrant(blockEl: HTMLElement): void {
+    const refreshed = grantBlockFromElement(blockEl)
+    if (!refreshed) return
+    const index = this.grantedBlocks.findIndex((grant) => grant.itemId === refreshed.itemId)
+    if (index < 0) return
+    this.grantedBlocks = this.grantedBlocks.map((grant, candidateIndex) =>
+      candidateIndex === index ? refreshed : grant,
+    )
+    this.grantController?.setBlocks(this.grantedBlocks)
+  }
+
+  private clearGrants(): void {
+    this.grantedBlocks = []
+    this.grantController?.setBlocks([])
   }
 
   dispose(): void {
     this._disposed = true
+    this._mounted = false
     this.mountAbortController?.abort()
     clearTimeout(this._settleTimer)
     this._settleTimer = undefined
@@ -3602,6 +4268,11 @@ export class TerminalContent extends BasePaneContent {
     this._titleReconcileUnsub = null
     this._restoreRetryUnsub?.()
     this._restoreRetryUnsub = null
+    this._readinessRetryUnsub?.()
+    this._readinessRetryUnsub = null
+    this._readinessUnsub?.()
+    this._readinessUnsub = null
+    this.readiness = null
     this._projections = null
     this.env?.detach()
     this.env = null
@@ -3616,7 +4287,9 @@ export class TerminalContent extends BasePaneContent {
     this.recall = null
     this.scrollback?.dispose()
     this.destroyReceipt()
-    this.clearReferenceChips()
+    this.clearGrants()
+    this.grantController?.destroy()
+    this.grantController = null
     document.removeEventListener('selectionchange', this.onSelectionChange)
     this.indicator = null
     this.promptVault?.destroy()
@@ -3749,6 +4422,308 @@ export class TerminalContent extends BasePaneContent {
     this._markers.clear()
   }
 
+  // ── the shell submit orchestration (nocx-tjppv) ────────────────────────
+
+  /** The ONE path a command takes to the pty (ADR-0004 §2's atomic handoff,
+   *  ADR-0024 §5's app-owned attempt). A human command and an agent-run
+   *  command differ by exactly three things: the author minted at submit
+   *  (design §3.1), whether the keyboard changes hands (a person's submit
+   *  takes the grid; the agent's never does — ADR-0020 decision 1: the
+   *  agent never takes the user's keys), and how the bytes are sent (the
+   *  active shell target vs the lane's own paste+CR). Everything else —
+   *  the ledger record, the running block, the lifecycle attempt, the
+   *  fail-open write — is one implementation, never two.
+   *
+   *  Returns the block the submission opened (the same object the freeze
+   *  mutates in place) and the ledger record id, both minted at submit by
+   *  the ordinary path — the agent-run wait keys on the block object. */
+  private submitShellCommand(opts: {
+    doc: string
+    recordLine: string
+    author: CommandAuthor
+    takeKeys: boolean
+    /** True when the caller's own glide already owns the whole transition,
+     *  so the running block must open WITHOUT one of its own: the editor's
+     *  commit is that caller, and a nested glide leaves two animations on
+     *  one element (scrollback/controller.ts, beginBlockNow). False for a
+     *  submission that arrives on its own — the agent's — which gets the
+     *  ordinary settle. */
+    callerOwnsGlide: boolean
+    sendLine: (d: string) => void
+  }): { block: BlockRecord | null; ledgerId: number | null } {
+    const { doc, recordLine, author, takeKeys, callerOwnsGlide, sendLine } = opts
+    if (takeKeys) {
+      this.takeKeyboardToGrid()
+      this.holdRawUntilSubmitted()
+    }
+    // Where the command RUNS, captured before anything below can change it.
+    // Entering an environment blanks `_cwd` (we know the host, not the
+    // remote directory), and the ledger and the block both read it further
+    // down — so `ssh pi@…` was recorded with no directory and vanished from
+    // a history scoped to "this directory". The command ran here, whatever
+    // it goes on to do.
+    const submitCwd = this._cwd
+    // An empty line is a bare newline: no execution, no attempt, no ledger
+    // record (CommandLedger.open refuses empty commands) and no block. The
+    // shell still gets its newline — a conventional terminal stays
+    // conventional.
+    const write = (): void => {
+      // Detach the queue BEFORE the command goes out, flush it after.
+      //
+      // Both halves matter and the order is the whole point. The command is
+      // delivered through renderer.paste, and a paste is itself an onData —
+      // so a queue still armed here would swallow the command and put it
+      // BEHIND the keys that were waiting for it, which is the same
+      // reordering with the operands swapped (measured: a bare `\r`
+      // reaching the pty ahead of its own command line).
+      const held = this.takeHeldRaw()
+      try {
+        submitCommand(doc, {
+          focusGrid: () => this.takeKeyboardToGrid(),
+          sendDoc: sendLine,
+        })
+      } finally {
+        // In a `finally`, and fail-open: a write that threw sent nothing,
+        // and holding the keys anyway would swallow them for the rest of
+        // the session. Late at a prompt is a line the user can see and
+        // erase; silently gone is not.
+        for (const data of held) this.session?.send(data)
+      }
+    }
+    if (recordLine === '') {
+      write()
+      return { block: null, ledgerId: null }
+    }
+    // SEVERED (ADR-0024): the ssh attempt binding (expected passport id,
+    // tagged A→B entry, local-D completion) and the environment-entry
+    // heuristic (docker, su, …) are deleted with the marker cycle — nothing
+    // stream-derived may activate an environment, and without a completion
+    // there is nothing to restore. The submitted line still opens a ledger
+    // record and a running block (the app-owned ordering ADR-0024 §5 keeps).
+    let ledgerId: number | null = null
+    if (this.ledger) {
+      let markerLine: () => number | undefined = () => undefined
+      const rec = this.ledger.open(recordLine, submitCwd, this._host, () => markerLine(), author)
+      ledgerId = rec.id
+      const m = this.renderer?.registerMarker() ?? null
+      if (m) {
+        markerLine = () => m.line()
+        this._markers.set(rec.id, m)
+        m.onDispose(() => {
+          this.ledger?.dispose(rec.id)
+          this._markers.delete(rec.id)
+        })
+      }
+    }
+    // The submitted line is now the running command: recompose the title
+    // immediately (nocx-n8n82 — a pane is named by what runs in it). The
+    // running fact arrives later over the wire, and a conventional shell
+    // may never send one.
+    this.pushTitle()
+    this.scrollback?.maybeClear(recordLine)
+    // The running block opens at the app-owned submit — before any bytes
+    // and before any fact can arrive — so the published running fact (which
+    // the backend emits BEFORE the RPC response, inside SubmitAttempt)
+    // always finds the block it binds to (ADR-0024 §5, §7). That ordering
+    // is why the block's CREATION line is the prompt line, and why its
+    // OUTPUT range starts one row later (nocx-4yhi): the bytes go out after
+    // this call, and the shell's echo of the typed command lands on the
+    // creation line itself. The header already shows the command; a body
+    // that repeats it is the defect — so the range and the creation time
+    // are two different things, and the record carries both.
+    let block: BlockRecord | null = null
+    if (this.scrollback && this.renderer) {
+      const startLine = this.renderer.cursorLine()
+      if (callerOwnsGlide) {
+        this.scrollback.beginBlockNow(recordLine, submitCwd, startLine, startLine + 1, author)
+      } else {
+        this.scrollback.beginBlock(recordLine, submitCwd, startLine, startLine + 1, author)
+      }
+      block = this.scrollback.blockManager.runningBlock
+    }
+    const st = this.lifecycle.state
+    if (st.kind !== 'prompt_ready') {
+      // No live domain: nothing to attach the app-owned text to. The
+      // shell's own start (if any) opens a shell-originated attempt and the
+      // block binds to it — a conventional terminal stays conventional, and
+      // the privacy rule holds either way.
+      write()
+      return { block, ledgerId }
+    }
+    // ADR-0024 decision 5: the app-owned attempt opens BEFORE the bytes
+    // that can cause the shell's own start are written to the pty; the
+    // later authenticated start attaches to it and replaces nothing.
+    // Fail-open: a refused attempt (the domain lost its prompt mid-typing)
+    // must never swallow the command — the bytes still go out and the
+    // session stays conventional.
+    void new LifecycleClient(this.client.dispatcher)
+      .submitAttempt({
+        domain: st.domain.id,
+        command: recordLine,
+        cwd: submitCwd,
+        host: this._host,
+        // The submitting target's own author, in the ledger's words — the
+        // same mapping history-client.ts makes, because both calls write
+        // one column (design §3.1, nocx-iadtt).
+        source: author === 'agent' ? 'assistant' : 'user',
+      })
+      .then(write, write)
+    return { block, ledgerId }
+  }
+
+  /** The run tool's renderer half (nocx-tjppv): submit a command through
+   *  the SAME orchestration a person's Enter runs — ledger record, running
+   *  block, lifecycle attempt, paste+CR delivery — with the agent's author
+   *  (design §3.1) and WITHOUT the keyboard handoff (ADR-0020 decision 1:
+   *  the agent never takes the user's keys; the lane is a session of its
+   *  own). The backend never writes to the PTY (design §2.1): the bytes go
+   *  out the same route a person's line takes, never a direct
+   *  session.write from the backend. Resolves when the block this
+   *  submission opened freezes, with the completed run body: the entry id
+   *  (the app-owned ledger record id, minted at submit by the ordinary
+   *  path), the exit status and a window of the output.
+   *
+   *  THE BLOCK STAYS, AND IT IS NOT A SECOND COPY OF THE ANSWER'S TOOL-CALL
+   *  LINE (nocx-shxv0). Two surfaces now show that this command happened,
+   *  so the ownership is stated rather than left to be discovered:
+   *
+   *    - This BLOCK owns the command: its text, its output, its exit
+   *      status, its ledger entry. The command really ran in the lane, the
+   *      ledger says so, and a command that ran with no block would be an
+   *      input surface with no visible record — the exact thing the module
+   *      header of run-command.ts refuses.
+   *    - The ANSWER's tool-call line owns WHEN: it says the assistant
+   *      reached for `run` at this point in its answer, and it carries no
+   *      command text and no output. It cannot drift from the block,
+   *      because it restates nothing the block holds.
+   *
+   *  What was wrong before was not that the block existed — it was that the
+   *  answer had no element for the call, so the block was the only trace
+   *  and it necessarily appended BELOW an answer that was already
+   *  streaming. Deleting the block would have hidden a real command to fix
+   *  a rendering-order defect. */
+  submitAgentCommand(command: string): Promise<AgentRunCompletion> {
+    if (command === '') {
+      return Promise.reject(new Error('run: an empty command is a bare newline, not an execution'))
+    }
+    // Promise.withResolvers needs ES2024 and this project targets ES2021,
+    // so the resolvers are captured via the executor form (the same trade
+    // host-key-controller.ts makes).
+    let resolve!: (run: AgentRunCompletion) => void
+    let reject!: (reason: unknown) => void
+    const promise = new Promise<AgentRunCompletion>((done, fail) => {
+      resolve = done
+      reject = fail
+    })
+    const { block, ledgerId } = this.submitShellCommand({
+      doc: command,
+      recordLine: command,
+      author: 'agent',
+      takeKeys: false,
+      callerOwnsGlide: false,
+      sendLine: (d) => {
+        this.renderer?.paste(d)
+        this.session?.send('\r')
+      },
+    })
+    if (block === null || ledgerId === null) {
+      reject(new Error('run: the submission could not open a block — the agent lane is not usable'))
+      return promise
+    }
+    this.agentRuns.set(block, { ledgerId, resolve, reject })
+    // The slot the store's answer lands in. Opened HERE, at the submit,
+    // because the ack can arrive before the block finishes freezing and a
+    // slot created at the freeze would miss it.
+    this.runEntryIds.set(ledgerId, { entryId: null, waiting: null })
+    return promise
+  }
+
+  /** A block's VISUAL freeze landed (onBlockFrozen): its output rows are
+   *  fixed in the DOM. Resolve the agent-run completion wait whose block
+   *  this is — the same object the submission's beginBlock returned, so a
+   *  freeze resolves exactly the waiter whose command finished. The window
+   *  contract (design §4.4): total is the block's output line count, the
+   *  renderer clamps the text to the wire bound and states how much more
+   *  the block holds — never a silent truncation. */
+  private _onBlockFrozen(rec: BlockRecord): void {
+    this.refreshGrant(rec.el)
+
+    const waiter = this.agentRuns.get(rec)
+    if (!waiter) return
+    this.agentRuns.delete(rec)
+    const all = blockOutputText(rec.el)
+    const lines = all.split('\n')
+    let end = 0
+    let chars = 0
+    for (; end < lines.length; end++) {
+      const next = chars + lines[end].length + (end > 0 ? 1 : 0)
+      if (next > MAX_RUN_OUTPUT_WINDOW_CHARS) break
+      chars = next
+    }
+    const body = {
+      exitCode: rec.exitCode,
+      status: rec.status === 'running' ? ('unknown' as const) : rec.status,
+      total: lines.length,
+      start: 0,
+      end,
+      text: lines.slice(0, end).join('\n'),
+    }
+    if (rec.status !== 'success' && rec.status !== 'failure') {
+      this.runEntryIds.delete(waiter.ledgerId)
+      waiter.resolve({ entryId: '', ...body })
+      return
+    }
+    void this.storedEntryId(waiter.ledgerId).then((entryId) => {
+      waiter.resolve({ entryId, ...body })
+    })
+  }
+
+  /**
+   * The STORE's entry id for one of this pane's own records, waited for.
+   *
+   * The renderer mints a record at submit and the STORE mints the row at the
+   * completion (history.record, ADR-0021's receipt round), so the two ids
+   * exist at different moments and only the second one means anything to
+   * anybody else. The ack may land before the visual freeze or after it —
+   * the record goes out on the authenticated completion while the freeze
+   * waits for its fence — so this is a rendezvous rather than a read.
+   *
+   * Resolves with '' when the store wrote no row: History is off, or the
+   * record was dropped. That is a real state and it is not an error — the
+   * command ran — so it is answered as "no entry" and the relation that
+   * would have hung off it is simply not written.
+   *
+   * It always settles, which is what makes the wait safe: recordCommand
+   * answers the ack or null (the outbox keeps a record it could not send and
+   * answers null now), and a socket too dead to carry the ack is one too
+   * dead to carry the resolution this feeds.
+   */
+  private storedEntryId(ledgerId: number): Promise<string> {
+    const slot = this.runEntryIds.get(ledgerId)
+    if (slot === undefined) return Promise.resolve('')
+    if (slot.entryId !== null) {
+      this.runEntryIds.delete(ledgerId)
+      return Promise.resolve(slot.entryId)
+    }
+    return new Promise<string>((done) => {
+      slot.waiting = (entryId: string) => {
+        this.runEntryIds.delete(ledgerId)
+        done(entryId)
+      }
+    })
+  }
+
+  /** The store answered for one of this pane's records: the entry id it
+   *  minted, or '' when it wrote no row. Only an agent run has a slot here
+   *  — a person's command needs no id on the wire — so this is a no-op for
+   *  every other record, which is also what keeps the map bounded. */
+  private settleStoredEntry(ledgerId: number, entryId: string): void {
+    const slot = this.runEntryIds.get(ledgerId)
+    if (slot === undefined) return
+    slot.entryId = entryId
+    slot.waiting?.(entryId)
+  }
+
   // ── the after-submit receipt (ADR-0021, the receipt round) ──────────────
 
   /** The history.record ack crossed: paint the block with what was stored
@@ -3807,6 +4782,7 @@ export class TerminalContent extends BasePaneContent {
     }
     if (ack.redactions.length > 0) {
       renderRecordedCommand(blockEl, ack.maskedCommand, ack.redactions)
+      this.refreshGrant(blockEl)
     }
     if (ack.captures.length === 0) return
     // One receipt per block: a re-recorded block replaces its own, never

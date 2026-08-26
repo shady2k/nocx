@@ -1,0 +1,110 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.approvalRequested.schema.json",
+  "title": "AgentApprovalRequested",
+  "description": "Params of the agent.approvalRequested server-to-client notification (nocx-z9hj4, design §7.2/§7.3): a question reached a person. One kind of question whether the risk was an effect coming in (a policy escalation) or a secret going out (an egress finding). Carries the full binding — run, attempt, tool, call id and the canonical-argument hash — what the person's answer on agent.approve must name, the arguments being decided about, the reason the gate asked, and the egress findings when the gate that asked was the egress gate. Findings are facts — which detector fired, the kind, where — never the secret material itself.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["runId", "attempt", "tool", "callId", "argHash", "arguments", "reason", "effect"],
+  "properties": {
+    "runId": {
+      "description": "The backend-minted run id the question belongs to — the value agent.approve echoes back.",
+      "type": "string",
+      "minLength": 1
+    },
+    "attempt": {
+      "description": "The run's attempt — part of the binding; the answer echoes it back.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "tool": {
+      "description": "The tool the model proposed calling.",
+      "type": "string",
+      "minLength": 1
+    },
+    "callId": {
+      "description": "The model's call id for the proposed call — part of the binding.",
+      "type": "string",
+      "minLength": 1
+    },
+    "argHash": {
+      "description": "The canonical-argument hash of the binding — what distinguishes one proposal from a changed one. The answer echoes it back; a changed argument never resumes under the old approval.",
+      "type": "string",
+      "minLength": 1
+    },
+    "arguments": {
+      "description": "The proposed call's arguments, as the model produced them — what the person is deciding about.",
+      "type": "string"
+    },
+    "reason": {
+      "description": "Which gate asked: the policy gate (an effect coming in) or the egress gate (a secret going out).",
+      "type": "string",
+      "enum": ["policy", "egress"]
+    },
+    "effect": {
+      "description": "The effect class the policy gate decided on — the row a standing answer writes. Sent by the backend because the renderer must never derive an effect from a tool name (ADR-0028 decision 4).",
+      "type": "string",
+      "enum": [
+        "observe",
+        "mutate-reversible",
+        "mutate-destructive",
+        "privilege-change",
+        "disclose",
+        "cross-boundary",
+        "delegate"
+      ]
+    },
+    "resource": {
+      "description": "The resource the gate matched the call against, or null when the call named none. A fact for the person reading the question; a standing answer is over the effect, never over this.",
+      "type": ["object", "null"],
+      "additionalProperties": false,
+      "required": ["kind", "id"],
+      "properties": {
+        "kind": {
+          "description": "The resource kind, from the ledger's closed set.",
+          "type": "string",
+          "enum": ["path", "session", "environment", "credential", "destination"]
+        },
+        "id": { "description": "The resource's id.", "type": "string", "minLength": 1 }
+      }
+    },
+    "wasError": {
+      "description": "Egress only: the findings are in an ERROR string the tool returned rather than in its result — the surface reads the two differently.",
+      "type": "boolean"
+    },
+    "findings": {
+      "description": "Egress only: what was found and where. Facts, never the material.",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["source", "start", "end"],
+        "properties": {
+          "source": {
+            "description": "Which detector fired: known vault material or a heuristic match.",
+            "type": "string",
+            "enum": ["known", "heuristic"]
+          },
+          "kind": {
+            "description": "The recognizer's closed kind for a heuristic finding.",
+            "type": "string"
+          },
+          "secretName": {
+            "description": "The vault catalogue name of the matched secret for a known finding (ADR-0016). Display metadata, never material.",
+            "type": "string"
+          },
+          "start": {
+            "description": "Byte offset of the match into the tool result, inclusive.",
+            "type": "integer",
+            "minimum": 0
+          },
+          "end": {
+            "description": "Byte offset of the match into the tool result, exclusive.",
+            "type": "integer",
+            "minimum": 0
+          }
+        }
+      }
+    }
+  }
+}

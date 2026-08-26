@@ -23,6 +23,8 @@ import type {
 } from './generated/endpoints.update'
 import type { EndpointsDeleteResult } from './generated/endpoints.delete'
 import type { EndpointsProbeResult } from './generated/endpoints.probe'
+import type { RolesAssignResult, Role as AssignRole } from './generated/roles.assign'
+import type { RolesListResult, Role as ListRole } from './generated/roles.list'
 
 /**
  * The stored endpoint as the wire declares it. The schema declares the
@@ -33,6 +35,16 @@ import type { EndpointsProbeResult } from './generated/endpoints.probe'
  * file consumed; the surface reads the list's.
  */
 export type Endpoint = ListEndpoint | CreatedEndpoint | UpdatedEndpoint
+
+/**
+ * The role row as the wire declares it. The schema declares the role shape
+ * once (roles.list.schema.json's $defs, referenced cross-file by
+ * roles.assign), and each generated file re-exports its own `Role` —
+ * structurally identical by construction. This union names both so the
+ * dead-export ratchet sees every generated file consumed; the surface
+ * reads the list's.
+ */
+export type WireRole = ListRole | AssignRole
 
 /**
  * The create/update params: the key is an input, never read back (ADR-0030
@@ -48,6 +60,8 @@ export type Endpoint = ListEndpoint | CreatedEndpoint | UpdatedEndpoint
 export interface EndpointWrite {
   name: string
   baseUrl: string
+  /** Explicitly declares that this endpoint needs no API key. */
+  noKey: boolean
   /** A key typed fresh: an input, sent once, minted or rotated by the
    *  backend, never read back (ADR-0030 §3). */
   key: string
@@ -61,11 +75,53 @@ export interface EndpointWrite {
   models: { name: string; alias: string | null }[]
 }
 
+/** The wire input of roles.assign: the role name plus the assigned
+ *  (endpoint, model) pair — or nulls to CLEAR the role back to its visible
+ *  unassigned state. The pair travels whole or not at all. */
+export interface RoleAssignInput {
+  role: string
+  endpointId: string | null
+  model: string | null
+}
+
 export class EndpointClient {
   constructor(private readonly dispatcher: Dispatcher) {}
 
   listEndpoints(): Promise<EndpointsListResult['endpoints']> {
     return this.dispatcher.call<EndpointsListResult>('endpoints.list', {}).then((r) => r.endpoints)
+  }
+
+  /** The role table (bead nocx-e6kn2): every role of the closed product
+   *  set with its assigned (endpointId, model) pair — null when a role has
+   *  no assignment. The wire lists EVERY role, so the "no model assigned"
+   *  failure state is a null row the surface renders, never an absent one.
+   *
+   *  Returns the WHOLE result rather than `.roles` (bead nocx-rikz5): the
+   *  table and the default arrive in one answer, and a `.then((r) => r.roles)`
+   *  here would throw the default away before the page could ever see it —
+   *  so the page would render roles from the wire and a default from
+   *  nowhere. Callers read `.roles`.
+   */
+  listRoles(): Promise<RolesListResult> {
+    return this.dispatcher.call<RolesListResult>('roles.list', {})
+  }
+
+  /** Assigns one role to an (endpoint, model) pair, or CLEARS it when both
+   *  are null. Returns the full table after the write — the single shape
+   *  the roles surface renders, default included, so load and write adopt
+   *  both fields from the same moment. */
+  assignRole(input: RoleAssignInput): Promise<RolesAssignResult> {
+    return this.dispatcher.call<RolesAssignResult>('roles.assign', input)
+  }
+
+  /** Names the ONE (endpoint, model) pair every role without an assignment
+   *  of its own resolves through (bead nocx-rikz5). Both fields empty is
+   *  the CLEAR write, which returns those roles to the visible "choose a
+   *  model" failure rather than to another model — the product never
+   *  invents a default, so the only way to have one is to have chosen it.
+   *  Returns the same table roles.list does, default included. */
+  setDefault(input: { endpointId: string; model: string }): Promise<RolesListResult> {
+    return this.dispatcher.call<RolesListResult>('roles.setDefault', input)
   }
 
   createEndpoint(input: EndpointWrite): Promise<EndpointsCreateResult['endpoint']> {
@@ -103,6 +159,7 @@ export class EndpointClient {
    */
   probeEndpoint(input: {
     name: string
+    noKey: boolean
     baseUrl: string
     key: string
     model: string

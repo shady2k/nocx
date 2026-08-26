@@ -419,6 +419,25 @@ describe('CommandEditor', () => {
     expect(onInputChange).not.toHaveBeenCalled()
   })
 
+  it('clear() empties the document through the submit seam — fires no input, announces the clear (nocx-4ff.7)', () => {
+    const onInputChange = vi.fn()
+    const onDocCleared = vi.fn()
+    const { ed, view } = setup({ onInputChange, onDocCleared })
+    ed.show()
+    ed.insertText('git status --short')
+    ed.clear()
+    expect(ed.getDoc()).toBe('')
+    // Programmatic, like a submit's clear: no input event, but the
+    // cleared-line announcement is the whole point of the seam — the
+    // host's floating surfaces must not hold stale findings over the
+    // empty line.
+    expect(onInputChange).not.toHaveBeenCalled()
+    expect(onDocCleared).toHaveBeenCalledTimes(1)
+    // And the editor still works afterwards.
+    ed.insertText('fresh')
+    expect(view.state.doc.toString()).toBe('fresh')
+  })
+
   it('constructor extensions reach the CM6 view', () => {
     const ran: string[] = []
     const ext = keymap.of([{ key: 'F8', run: () => (ran.push('F8'), true) }])
@@ -951,5 +970,154 @@ describe('command existence verdicts', () => {
     // into unresolved, even while a sibling tab is fully seeded.
     expect(liveTokens('sdfsdf', mine)).toEqual([['tok-command', 'sdfsdf']])
     expect(liveTokens('sdfsdf', other)).toEqual([['tok-command tok-unresolved', 'sdfsdf']])
+  })
+})
+
+// ───────────────────────────────────────────────────────────────────────────
+// The model chip in the chrome row (nocx-rikz5). The chip names the model
+// that will answer and IS the way to change it. Two claims the surface
+// tests cannot make: the listeners are installed ONCE and read a slot (a
+// listener per state change is how one click fires three times), and a
+// rung with nowhere to go is not a control.
+//
+// The height claim — a chip appearing must not move the chrome row —
+// deliberately lives in the Playwright spec, not here: jsdom computes no
+// layout, so getBoundingClientRect returns zeroes and such an assertion
+// passes while meaning nothing.
+describe('the model chip (nocx-rikz5)', () => {
+  const chipsOf = (ed: CommandEditor): HTMLElement[] =>
+    Array.from(ed.root.querySelectorAll<HTMLElement>('.nocx-editor-model')).filter(
+      (el) => el.style.display !== 'none',
+    )
+
+  const textsOf = (ed: CommandEditor): string[] => chipsOf(ed).map((el) => el.textContent ?? '')
+
+  it('shows nothing until a state arrives — the row grows no chip on its own', () => {
+    const { ed } = setup()
+    expect(textsOf(ed)).toEqual([])
+    ed.setModelChip(null)
+    expect(textsOf(ed)).toEqual([])
+  })
+
+  it('names the endpoint and the model, each with the full value as its title and accessible name', () => {
+    const { ed } = setup()
+    const model = 'deepseek/deepseek-v4-flash-0731-preview'
+    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model })
+    expect(textsOf(ed)).toEqual(['openrouter', model])
+    const [endpointChip, modelChip] = chipsOf(ed)
+    expect(endpointChip.title).toBe('openrouter')
+    expect(endpointChip.getAttribute('aria-label')).toBe('Answers with openrouter. Open Endpoints.')
+    expect(modelChip.title).toBe(model)
+    expect(modelChip.getAttribute('aria-label')).toBe(
+      `Answers with the model ${model}. Open Roles.`,
+    )
+  })
+
+  it('opens Endpoints from the endpoint and Roles from the model', () => {
+    const { ed } = setup()
+    const opened: string[] = []
+    ed.onModelChipClick((page) => opened.push(page))
+    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
+    const [endpointChip, modelChip] = chipsOf(ed)
+    endpointChip.click()
+    modelChip.click()
+    expect(opened).toEqual(['endpoints', 'roles'])
+  })
+
+  it('carries one rung sentence when the role does not resolve, and opens the page it names', () => {
+    const { ed } = setup()
+    const opened: string[] = []
+    ed.onModelChipClick((page) => opened.push(page))
+    ed.setModelChip({ kind: 'action', text: 'Add an endpoint first', page: 'endpoints' })
+    expect(textsOf(ed)).toEqual(['Add an endpoint first'])
+    chipsOf(ed)[0].click()
+    expect(opened).toEqual(['endpoints'])
+  })
+
+  it('a rung no page repairs is not a control — the chip is disabled and clicking it does nothing', () => {
+    const { ed } = setup()
+    const opened: string[] = []
+    ed.onModelChipClick((page) => opened.push(page))
+    ed.setModelChip({
+      kind: 'action',
+      text: 'Settings could not be read — the assistant is unavailable',
+      page: null,
+    })
+    const [chip] = chipsOf(ed)
+    expect((chip as HTMLButtonElement).disabled).toBe(true)
+    // A disabled button swallows the click in a real engine; jsdom's
+    // .click() does not, so the SLOT is what has to be empty.
+    chip.click()
+    expect(opened).toEqual([])
+  })
+
+  it('becomes a control again when the next state has somewhere to go', () => {
+    const { ed } = setup()
+    const opened: string[] = []
+    ed.onModelChipClick((page) => opened.push(page))
+    ed.setModelChip({ kind: 'action', text: 'unavailable', page: null })
+    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
+    const [endpointChip, modelChip] = chipsOf(ed)
+    expect((endpointChip as HTMLButtonElement).disabled).toBe(false)
+    expect((modelChip as HTMLButtonElement).disabled).toBe(false)
+    modelChip.click()
+    expect(opened).toEqual(['roles'])
+  })
+
+  it('one click is one call however many states the chip has worn', () => {
+    // The listener is installed once in the constructor and reads a
+    // mutable slot (recoveryChip's precedent). Re-adding it per state is
+    // how one click ends up firing three times.
+    const { ed } = setup()
+    const opened: string[] = []
+    ed.onModelChipClick((page) => opened.push(page))
+    ed.setModelChip({ kind: 'action', text: 'Choose a model', page: 'roles' })
+    ed.setModelChip({ kind: 'action', text: 'Add an endpoint first', page: 'endpoints' })
+    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
+    chipsOf(ed)[1].click()
+    expect(opened).toEqual(['roles'])
+  })
+
+  it('null takes both chips away again — a Run target has no model to name', () => {
+    const { ed } = setup()
+    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
+    expect(textsOf(ed)).toHaveLength(2)
+    ed.setModelChip(null)
+    expect(textsOf(ed)).toEqual([])
+  })
+
+  it('joins the chrome row it lives in — the same .nocx-chip vocabulary as its neighbours, no ui-badge', () => {
+    const { ed } = setup()
+    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
+    for (const chip of chipsOf(ed)) {
+      expect(chip.classList.contains('nocx-chip')).toBe(true)
+      expect(chip.classList.contains('ui-badge')).toBe(false)
+      expect(chip.closest('.nocx-editor-chrome-left')).not.toBeNull()
+    }
+  })
+})
+describe('the grant chip (nocx-wcswn)', () => {
+  it('is always present, carries typed default/chosen states, and follows model chips', () => {
+    const { ed } = setup()
+    const left = ed.root.querySelector('.nocx-editor-chrome-left')!
+    const grant = left.querySelector<HTMLElement>('.nocx-editor-grant')!
+    expect(grant.classList.contains('nocx-chip')).toBe(true)
+    expect(grant.dataset.state).toBe('default')
+    expect(grant.textContent).toContain('marked for the question')
+    expect([...left.children].indexOf(grant)).toBe(left.children.length - 1)
+
+    ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
+    ed.setGrantCount(2)
+    expect(grant.dataset.state).toBe('chosen')
+    expect(grant.textContent).toContain('2')
+    expect([...left.children].indexOf(grant)).toBe(left.children.length - 1)
+  })
+
+  it('clicking the chip reaches the host without changing the input target', () => {
+    const { ed } = setup()
+    const opened = vi.fn()
+    ed.onGrantChipClick(opened)
+    ed.root.querySelector<HTMLElement>('.nocx-editor-grant')!.click()
+    expect(opened).toHaveBeenCalledTimes(1)
   })
 })

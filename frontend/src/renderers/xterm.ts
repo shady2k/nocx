@@ -22,6 +22,14 @@ import { getCurrentTheme, subscribeThemeChanges } from './theme-adapter'
 import { WORD_SEPARATORS } from '../word-selection'
 import { decodeOsc52 } from '../clipboard'
 import { CommandSnapshotStore } from '../command-snapshot'
+import {
+  CaptureAbortedError,
+  CaptureIdentityTracker,
+  ReadScreenRangeError,
+} from '../frame/capture-identity'
+import { mintLiveFrame } from '../frame/mint'
+import type { CapturedFrame } from '../frame/types'
+import { fromITheme } from '../scrollback/serializer'
 import { isSnippetChord } from '../snippets/chord'
 import { parseOscNotification } from '../osc-notification'
 type BellCallback = () => void
@@ -282,6 +290,10 @@ export class XtermRenderer implements TerminalRenderer {
   /** Disposal subscribers — the capture fence's closing event (see
    *  onDispose). */
   private disposeSubs: Array<() => void> = []
+  /** The capture identity tracker, constructed at mount (see mount): the
+   *  generation it reports counts every mutation since the renderer was
+   *  established. */
+  private _captureTracker: CaptureIdentityTracker | null = null
   private _disposed = false
 
   async mount(container: HTMLElement): Promise<void> {
@@ -330,6 +342,14 @@ export class XtermRenderer implements TerminalRenderer {
       theme: getCurrentTheme(),
     })
     this.term = term
+
+    // The capture tracker (nocx-3j9b) lives for the renderer's whole life:
+    // its generation counts every write, buffer switch, resize, clear and
+    // reset from mount on, so a readScreen capture's identity is honest —
+    // a tracker constructed at capture time would falsely report
+    // generation 0. Subscribed to this renderer (the CaptureEventSource);
+    // dispose() rejects a pending capture through the renderer's onDispose.
+    this._captureTracker = new CaptureIdentityTracker(this)
 
     term.loadAddon(new Unicode11Addon())
     term.unicode.activeVersion = '11'
@@ -1088,6 +1108,53 @@ export class XtermRenderer implements TerminalRenderer {
     // Report the explicit clear AFTER it executed, so a subscriber reading
     // state (e.g. the frame generation) observes the post-clear buffer.
     for (const sub of this.clearSubs) sub()
+  }
+
+  /** Capture the live frame of the current buffer (nocx-ljfwz): fence the
+   *  parse queue (awaitSettled — one mint reads ONE settled state), read
+   *  the capture identity the tracker has maintained since mount, and mint
+   *  the frame over the requested row span — the visible screen by default,
+   *  a clamped absolute span when a region is given. A region entirely past
+   *  the end of the buffer is refused (ReadScreenRangeError), never lied
+   *  about; disposal mid-capture rejects with CaptureAbortedError. */
+  async captureLiveFrame(region?: { start: number; end: number }): Promise<CapturedFrame> {
+    if (!this.term) throw new CaptureAbortedError()
+    const tracker =
+      this._captureTracker ?? (this._captureTracker = new CaptureIdentityTracker(this))
+    await tracker.awaitSettled()
+    const identity = tracker.identity()
+    const buf = this.term.buffer.active
+    const bufferLen = buf.length
+    let start = buf.baseY
+    let end = Math.min(buf.baseY + this.term.rows, bufferLen)
+    if (region) {
+      start = Math.max(0, region.start)
+      end = Math.min(region.end, bufferLen)
+      if (start >= end) {
+        throw new ReadScreenRangeError(
+          `region [${region.start}, ${region.end}) is past the end of the buffer (${bufferLen} rows)`,
+        )
+      }
+    }
+    return mintLiveFrame(
+      identity,
+      { start, end },
+      {
+        getLine: (y) => this.getBufferLine(y),
+        cursor: { line: this.cursorLine(), col: this.cursorCol() },
+        snapshot: fromITheme(getCurrentTheme()),
+      },
+    )
+  }
+
+  /** The active buffer's kind right now: 'normal' | 'alternate' — the one
+   *  interactivity fact the backend cannot see for itself (AD-6). The
+   *  renderer owns the grid; this reports the capture tracker's current
+   *  identity, the same vocabulary agent.captureFrame carries. */
+  activeBufferKind(): 'normal' | 'alternate' {
+    const tracker =
+      this._captureTracker ?? (this._captureTracker = new CaptureIdentityTracker(this))
+    return tracker.identity().buffer.kind
   }
   get paneElement(): HTMLElement {
     return this.container ?? document.createElement('div')

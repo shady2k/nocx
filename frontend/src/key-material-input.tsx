@@ -52,17 +52,27 @@ const KEY_MODES: { value: KeyInputMode; label: string }[] = [
   { value: 'secret', label: 'Secret' },
 ]
 
-/** Select options for a vault-row picker: the inventory rows plus, when the
- *  bound row is missing from the inventory (vault locked, row filtered out),
- *  a fallback option carrying the opaque handle — so a bound secret is never
- *  shown as "None". The handle is a row id, not a secret reference. */
+/** Select options for a vault-row picker: the inventory rows, each named by
+ *  its secret's name, plus — when the bound row is missing from that
+ *  inventory (the secret was deleted, the vault could not answer, the row is
+ *  of another kind) — a fallback option that KEEPS the binding as its value.
+ *  Dropping it would read as "None", and the next save would clear a
+ *  credential nobody meant to clear.
+ *
+ *  Its label says the picker cannot name it. It used to be the row handle,
+ *  and that is what a person saw in the endpoint editor over a locked vault:
+ *  `secrow:dd39558499fe31b5ddce0f88a5d31320` where the name of their own API
+ *  key belongs, with nothing on screen to say why (nocx-5ratm). The handle
+ *  is a row id, not a secret reference, and it means nothing to anybody. */
+const UNLISTED_SECRET_LABEL = 'Unavailable secret'
+
 export function secretOptions(
   entries: InventoryEntry[],
   bound?: string,
 ): { value: string; label: string }[] {
   const opts = entries.map((entry) => ({ value: entry.id, label: entry.name }))
   if (bound && !opts.some((o) => o.value === bound)) {
-    opts.push({ value: bound, label: bound })
+    opts.push({ value: bound, label: UNLISTED_SECRET_LABEL })
   }
   return opts
 }

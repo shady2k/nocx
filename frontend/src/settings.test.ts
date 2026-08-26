@@ -13,6 +13,8 @@
  *   - nocx-ucxl: clicking a rail section always changes the content pane
  */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { resolve } from 'node:path'
 import { createComponent } from 'solid-js'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { ProfileClient } from './profiles'
@@ -310,6 +312,8 @@ describe('SettingsContent', () => {
     expect(labels).toEqual([
       'Connections',
       'Endpoints',
+      'Roles',
+      'Agent policy',
       'Protection',
       'Secrets',
       'Terminal',
@@ -375,6 +379,43 @@ describe('SettingsContent', () => {
       // Only terminal.fontSize (overridden, non-secret) visible.
       expect(visibleRows().length).toBe(1)
     })
+  })
+
+  // ── What is in the page, not merely what is on it ──────────────────
+
+  it('a section the person is not looking at is not in the page at all', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    openSection(target, 'Terminal')
+    await vi.waitFor(() => {
+      expect(visibleRows().length).toBe(3)
+    })
+
+    // Every row the document holds belongs to the open section. The surface
+    // already answers "is this page showing?" by unmounting for a component
+    // page; a generated section is the same question and gets the same
+    // answer, so nothing off-page is left behind the open one.
+    const rows = Array.from(target.querySelectorAll<HTMLElement>('.ui-settings-row'))
+    expect(rows.map((r) => r.dataset.key)).toEqual([
+      'terminal.fontSize',
+      'terminal.fontFamily',
+      'terminal.cursorStyle',
+    ])
+
+    // Stated as the thing the browser proof measures: the LAST row in the
+    // document is a row the person can see. It was true by accident until a
+    // section registered after Interface put a display:none row behind the
+    // open page and the e2e scroll proofs measured that one instead
+    // (nocx-avogl.4).
+    const seen = visibleRows()
+    expect(rows[rows.length - 1]).toBe(seen[seen.length - 1])
+
+    // …and the same for the section headings.
+    const headings = Array.from(target.querySelectorAll<HTMLElement>('.ui-page-section h2')).map(
+      (h) => h.textContent,
+    )
+    expect(headings).toEqual(['Terminal'])
   })
 
   // ── Section nav click (nocx-ucxl) ──────────────────────────────────
@@ -1058,5 +1099,167 @@ describe('horizontal Field gate — every settings row must use primary label', 
     } finally {
       cleanup()
     }
+  })
+})
+
+// ── The person's own paragraph (nocx-avogl.4, design §1 item 6) ────────
+//
+// Asserted as the task a person performs, not as what the component
+// renders: they open Settings, find the field on the Assistant rail, type
+// their paragraph into it, and it is written — no Save button anywhere near
+// it. Plus the bound, which the criterion requires to be ON THE SCREEN
+// rather than enforced silently.
+describe("the person's own instructions to the assistant", () => {
+  let target: HTMLDivElement
+  let client: ProfileClient
+  let content: SettingsContent
+  let host: PaneHost
+  let signal: AbortSignal
+
+  const PERSONAL: Declaration = {
+    key: 'assistant.personalInstructions',
+    section: 'Instructions',
+    label: 'Your instructions to the assistant',
+    description: 'Standing instructions added to the end of every question you ask.',
+    control: 'text',
+    dataClass: 'privateContent',
+    default: '',
+    multiline: true,
+    max: 2000,
+    unit: 'characters',
+  }
+
+  beforeEach(() => {
+    document.body.replaceChildren()
+    target = document.createElement('div')
+    document.body.append(target)
+    client = new ProfileClient(new Dispatcher())
+    content = new SettingsContent(client)
+    host = mockPaneHost()
+    signal = new AbortController().signal
+  })
+
+  async function openInstructions(): Promise<HTMLTextAreaElement> {
+    mockReady(client, {
+      declarations: [PERSONAL],
+      sectionGroups: { Instructions: 'assistant' },
+    })
+    await content.mount(target, host, signal)
+    // From the state a user starts in: the screen opens on Connections, so
+    // the rail is what takes them to the field.
+    openSection(target, 'Instructions')
+    let area: HTMLTextAreaElement | null = null
+    await vi.waitFor(() => {
+      area = target.querySelector<HTMLTextAreaElement>('textarea.ui-text-field__input')
+      expect(area).toBeTruthy()
+    })
+    return area!
+  }
+
+  it('typing a paragraph into it writes it, with no save step', async () => {
+    const save = vi.spyOn(client, 'setSetting').mockResolvedValue({ ok: true })
+    const area = await openInstructions()
+
+    fireEvent.input(area, { target: { value: 'Never suggest brew. This machine uses nix.' } })
+
+    await vi.waitFor(() => {
+      expect(save).toHaveBeenCalledWith(
+        'assistant.personalInstructions',
+        'Never suggest brew. This machine uses nix.',
+      )
+    })
+    // No Save button beside it: the row's only controls are the field and
+    // the reset affordance every settings row carries.
+    const row = document.getElementById('st-setting-assistant.personalInstructions')!
+    expect(row.querySelectorAll('button').length).toBeLessThanOrEqual(1)
+  })
+
+  it('states its length bound on the screen, and says so before anything is lost to it', async () => {
+    vi.spyOn(client, 'setSetting').mockResolvedValue({ ok: true })
+    const area = await openInstructions()
+
+    const caption = () =>
+      document
+        .getElementById('st-setting-assistant.personalInstructions')!
+        .querySelector('.ui-text-field__caption')
+    expect(caption()).toBeTruthy()
+    expect(caption()!.textContent).toContain('2000')
+    expect(caption()!.textContent).toContain('characters')
+
+    fireEvent.input(area, { target: { value: 'x'.repeat(1990) } })
+    await vi.waitFor(() => {
+      expect(caption()!.textContent).toContain('1990')
+    })
+  })
+
+  it('too long is refused visibly, in the field, rather than truncated', async () => {
+    const save = vi.spyOn(client, 'setSetting').mockResolvedValue({ ok: true })
+    const area = await openInstructions()
+
+    fireEvent.input(area, { target: { value: 'y'.repeat(2001) } })
+
+    await vi.waitFor(() => {
+      const slot = document
+        .getElementById('st-setting-assistant.personalInstructions')!
+        .querySelector('.ui-text-field__caption[data-tone="error"]')
+      expect(slot?.textContent).toBe('Must be at most 2000 characters')
+    })
+    // What the person typed is still on the screen, whole: the field never
+    // shortens their text behind them.
+    expect(area.value.length).toBe(2001)
+    // And the backend's own rejection is not printed under a field whose
+    // caption already says the same thing.
+    expect(target.querySelector('.ui-settings-error')).toBeNull()
+    expect(save).toHaveBeenCalled()
+  })
+  it('shows the full static nocx prompt above personal instructions with pane placeholders', async () => {
+    const area = await openInstructions()
+    const prompt = target.querySelector<HTMLElement>('.ui-code-block')
+    const heading = Array.from(target.querySelectorAll('h2')).find(
+      (element) => element.textContent === 'What the person added',
+    )
+    const row = document.getElementById('st-setting-assistant.personalInstructions')
+    expect(prompt).toBeTruthy()
+    expect(prompt!.getAttribute('aria-label')).toBe('nocx system prompt')
+    expect(prompt!.getAttribute('tabindex')).toBe('0')
+    expect(prompt!.textContent).toContain('<session id>')
+    expect(prompt!.textContent).toContain('<working directory>')
+    expect(prompt!.textContent).toContain('<local shell or ssh session>')
+    expect(prompt!.textContent).toContain('<host or local machine>')
+    expect(prompt!.textContent).toContain('<attached or absent>')
+    expect(prompt!.textContent).not.toContain('s-real-session')
+    expect(prompt!.textContent).not.toContain('/home/real-user/project')
+    expect(prompt!.textContent).not.toContain('real-host.example')
+    expect(prompt!.textContent).not.toContain('What the person added')
+    expect(row).toBeTruthy()
+    expect(heading).toBeTruthy()
+    expect(row!.textContent).toContain('Your instructions to the assistant')
+    expect(prompt!.compareDocumentPosition(row!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(
+      prompt!.compareDocumentPosition(heading!) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy()
+    expect(heading!.compareDocumentPosition(row!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    expect(prompt!.compareDocumentPosition(area) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+  })
+
+  it('keeps the long prompt in the kit scroll container so the personal field remains reachable', async () => {
+    await openInstructions()
+    const wrap = target.querySelector<HTMLElement>('.ui-code-block-wrap')
+    const prompt = target.querySelector<HTMLElement>('.ui-code-block')
+    const row = document.getElementById('st-setting-assistant.personalInstructions')
+
+    expect(wrap).toBeTruthy()
+    expect(prompt).toBeTruthy()
+    expect(prompt!.parentElement).toBe(wrap)
+    expect(prompt!.getAttribute('tabindex')).toBe('0')
+    expect(row).toBeTruthy()
+    expect(prompt!.compareDocumentPosition(row!) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+    const codeBlockCss = readFileSync(
+      resolve(import.meta.dirname ?? '.', 'styles/components/code-block.css'),
+      'utf8',
+    )
+    expect(codeBlockCss).toMatch(
+      /\.ui-code-block\s*\{[\s\S]*max-height:\s*200px;[\s\S]*overflow:\s*auto;/,
+    )
   })
 })

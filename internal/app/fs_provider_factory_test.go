@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/session"
@@ -31,7 +32,14 @@ func (s factorySession) Parent() (session.Ref, bool) {
 func (s factorySession) Liveness() session.LivenessState {
 	return session.LivenessState{Liveness: session.LivenessAlive, Epoch: 1}
 }
-func (s factorySession) WorkspaceID() workspace.ID       { return workspace.Default }
+func (s factorySession) WorkspaceID() workspace.ID { return workspace.Default }
+
+// OpenedAt answers the zero time for the same reason every method above it
+// answers a zero value: the factory never asks. The floor exists so "this
+// session's blocks" is expressible (session.go), and this double records no
+// blocks.
+func (s factorySession) OpenedAt() time.Time { return time.Time{} }
+
 func (s factorySession) Kind() session.Kind              { return s.kind }
 func (s factorySession) PaneID() string                  { return "" }
 func (s factorySession) Host() string                    { return "" }

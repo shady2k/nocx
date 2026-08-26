@@ -1,10 +1,13 @@
 import { describe, it, expect, vi } from 'vitest'
 import { createRegistry, type InputTarget, ShellInputTarget } from './input-target'
-
-const fake = (id: string, routesToShell = false): InputTarget => ({
+import type { CommandAuthor } from './command-ledger'
+const fake = (id: string, routesToShell = false, author: CommandAuthor = 'shell'): InputTarget => ({
   id,
   label: id,
   routesToShell,
+  // The fake's author defaults to the human's shell; a test that needs an
+  // agent-authored submission passes 'agent' explicitly.
+  author,
   submit: vi.fn(async () => {}),
 })
 
@@ -28,6 +31,10 @@ describe('InputTargetRegistry', () => {
 })
 
 describe('ShellInputTarget', () => {
+  it('the shell IS the human — its author is the entries.kind value (nocx-iadtt)', () => {
+    const t = new ShellInputTarget(vi.fn(), vi.fn())
+    expect(t.author).toBe('shell')
+  })
   it('delegates paste semantics to the renderer, then sends CR', async () => {
     const paste = vi.fn()
     const sendRaw = vi.fn()
@@ -71,12 +78,14 @@ describe('a submit is routed by InputTargetRegistry.active() — never a panel b
       id: 'shell',
       label: 'shell',
       routesToShell: true,
+      author: 'shell',
       submit: shellSubmit,
     }
     const agent: InputTarget = {
       id: 'agent',
       label: 'agent',
       routesToShell: false,
+      author: 'agent',
       submit: agentSubmit,
     }
     r.register(shell)

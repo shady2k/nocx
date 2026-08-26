@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/session.list.schema.json",
+  "title": "SessionListParams",
+  "description": "Parameters for the session.list agent tool: list the items currently addressable in one terminal session. An empty list is valid when the pane has no recorded blocks.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "minLength": 1,
+      "description": "The session whose current items are listed."
+    },
+    "limit": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 50,
+      "description": "Maximum number of newest items to return."
+    }
+  }
+}

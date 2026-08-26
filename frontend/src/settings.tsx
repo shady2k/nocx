@@ -29,6 +29,9 @@ import { SecretsSection } from './secrets'
 import { EndpointsSection } from './endpoints-section'
 import { SnippetsSection } from './snippets/snippets-settings'
 import type { SnippetsStore } from './snippets/snippets-store'
+import { RolesSection } from './roles-section'
+import { AgentPolicySection } from './agent-policy-section'
+import type { PolicyClient } from './policy-client'
 import type { FootprintClient } from './footprint-client'
 import type { AgentClient } from './agent'
 import type { EndpointClient } from './endpoints'
@@ -44,6 +47,8 @@ import {
   monotonicRevisionPolicy,
   numberRangeCaption,
   numberRangeError,
+  textLengthCaption,
+  textLengthError,
   reconnectRevisionPolicy,
   recordSaveOutcome,
   type Declaration,
@@ -74,15 +79,21 @@ import {
   type GroupedRailItem,
   IconButton,
   StatusCard,
+  CodeBlock,
+  Section,
 } from './ui'
 import { showToast } from './ui/toast'
 import { ResetIcon } from './ui/icons'
+import { systemPromptText } from './systemprompt'
 import {
   historyDiscardSentence,
   historyUnavailableSentence,
   type HistoryStatus,
   type HistoryStatusStore,
 } from './history-status'
+
+/** The generated settings page that explains the standing prompt. */
+const INSTRUCTIONS_SECTION = 'Instructions'
 
 /** The section whose controls the history degrade contradicts. It is the
  *  Go-declared section string (internal/settings/settings.go), matched here
@@ -219,6 +230,9 @@ export interface SettingsComponentProps {
    *  rather than reached for, because the platform seam is what a test
    *  substitutes and what refuses in a non-secure context. */
   clipboard?: ClipboardAccess
+  /** The agent policy client (ADR-0020 §7 as amended). Absent in
+   *  embeddings that never configure the agent; the page then says so. */
+  policyClient?: PolicyClient
   ref?: { current: SettingsComponentHandle | null }
 }
 
@@ -562,6 +576,48 @@ export function SettingsComponent(props: SettingsComponentProps) {
         </Show>
       ),
     }
+
+    const rolesPage: SettingsPage = {
+      kind: 'component',
+      id: 'roles',
+      title: 'Roles',
+      groupId: 'assistant',
+      scrollMode: 'page',
+      // Registered unconditionally for the same reason endpointsPage is: a
+      // surface that appears only once some other state exists is how a
+      // feature ships unreachable. The guard is the client being absent.
+      renderContent: () => (
+        <Show
+          when={props.endpointsClient}
+          fallback={
+            <PageSection title="Roles">Model roles are not available in this window.</PageSection>
+          }
+        >
+          <RolesSection client={props.endpointsClient} />
+        </Show>
+      ),
+    }
+
+    const policyPage: SettingsPage = {
+      kind: 'component',
+      id: 'policy',
+      title: 'Agent policy',
+      groupId: 'assistant',
+      scrollMode: 'page',
+      renderContent: () => (
+        <Show
+          when={props.policyClient}
+          fallback={
+            <PageSection title="Agent policy">
+              The agent policy is not available in this window.
+            </PageSection>
+          }
+        >
+          <AgentPolicySection client={props.policyClient!} />
+        </Show>
+      ),
+    }
+
     // LAST IN THE RAIL, and in the 'application' group with Backup and
     // Snippets. It is the page nobody navigates to on purpose until something
     // has gone wrong, which is exactly why it must be findable in the obvious
@@ -595,6 +651,8 @@ export function SettingsComponent(props: SettingsComponentProps) {
       secretsPage,
       endpointsPage,
       snippetsPage,
+      rolesPage,
+      policyPage,
       aboutPage,
     ]
   })
@@ -696,6 +754,15 @@ export function SettingsComponent(props: SettingsComponentProps) {
         return false
       }
     }
+    // The same reasoning one control over. A paragraph past its declared
+    // length carries the bound in its own caption, permanently on screen, so
+    // the backend refusing it is not news either — and `fieldSaveError` is
+    // where that judgement is made for both controls rather than here for one
+    // and there for the other.
+    if (decl && decl.control === 'text') {
+      const text = typeof value === 'string' ? value : ''
+      if (fieldSaveError(decl, 0, message, text) === undefined) return false
+    }
     return true
   }
 
@@ -714,6 +781,38 @@ export function SettingsComponent(props: SettingsComponentProps) {
   const visibleKeys: () => Set<string> = createMemo(
     () => new Set(filteredDeclarations().map((d: Declaration) => d.key)),
   )
+
+  /**
+   * The sections with something to show — the ones the body renders.
+   *
+   * A section with no visible row is not rendered at all rather than
+   * rendered and hidden. The surface already answers "is this page
+   * showing?" by unmounting: a component page's content is behind a keyed
+   * `Show`, and the whole generated block is behind another. A generated
+   * section is the same question, and answering it a second way left the
+   * open page trailed by every other section's rows at `display: none`.
+   *
+   * That is not merely waste. The rows of a page nobody is on are the tail
+   * of the scroller's content, so "the last setting row" — which is what
+   * the browser proofs of the scroll chain measure — meant whichever row
+   * happened to be declared last in the whole registry. It belonged to the
+   * open section only for as long as the last-registered section happened
+   * to be the one under test (nocx-avogl.4 registered one after it and the
+   * proofs began measuring a row nobody can see).
+   *
+   * Row-level hiding stays: within a section that IS showing, search hides
+   * individual rows, and Stack's `divided` variant is built for exactly
+   * that (`:not(.st-vis-hidden)`).
+   */
+  const visibleSections: () => string[] = createMemo(() => {
+    const shown = visibleKeys()
+    const withRows = new Set(
+      declarations()
+        .filter((d) => shown.has(d.key))
+        .map((d) => d.section),
+    )
+    return sections().filter((s) => withRows.has(s))
+  })
 
   // ── Actions ────────────────────────────────────────────────────────
 
@@ -1058,6 +1157,11 @@ export function SettingsComponent(props: SettingsComponentProps) {
     // boolean". NaN for a row that is not a number; every caller of a range
     // check treats NaN as "no opinion".
     const numeric = () => (decl.control === 'number' ? Number(displayValue(eff(), decl)) : NaN)
+    // The text this row shows, for the length caption and its error. Empty
+    // for a row that is not text, for the same reason numeric() is NaN
+    // there: displayValue warns when it can find neither a usable value nor
+    // a usable default, which is what a boolean looks like to it.
+    const textValue = () => (decl.control === 'text' ? displayValue(eff(), decl) : '')
     const showBreadcrumb = () => isSearching() && sectionFilter() === null
 
     return (
@@ -1112,8 +1216,24 @@ export function SettingsComponent(props: SettingsComponentProps) {
             </Show>
 
             <Show when={decl.control === 'text'}>
+              {/* multiline is a VARIANT of the same kit component, declared
+                  by the setting (Declaration.multiline) — the kit answers
+                  "a paragraph rather than a value" with a prop and has no
+                  second component, so neither does this. The caption is the
+                  declared bound, permanently on screen: the criterion is
+                  that a length limit is stated, never discovered by losing
+                  text to it. */}
               <TextField
-                value={displayValue(eff(), decl)}
+                multiline={decl.multiline === true}
+                // A setting's paragraph is always prose. The kit's default
+                // is verbatim because its first caller pastes a private
+                // key; nothing on this screen ever does — a secret-class
+                // setting is a `secret` control, not a text one.
+                wrap
+                value={textValue()}
+                caption={textLengthCaption(decl, textValue())}
+                captionAlign="end"
+                error={textLengthError(decl, textValue())}
                 onInput={(v) => void saveSetting(decl.key, v)}
               />
             </Show>
@@ -1253,52 +1373,73 @@ export function SettingsComponent(props: SettingsComponentProps) {
             <div class="ui-settings-status ui-settings-nomatch">No settings match your search.</div>
           </Show>
 
-          {/* Render all sections; hide non-matching rows via inline style. */}
+          {/* The sections with something to show, and no others — see
+              visibleSections. Within one of them, search still hides
+              individual rows via `st-vis-hidden`. */}
           <Show when={loadState() === 'ready'}>
-            <For each={sections()}>
+            <For each={visibleSections()}>
               {(section) => {
                 const sectionDecls = () => declarations().filter((d) => d.section === section)
-                const sectionVisible = () => sectionDecls().some((d) => visibleKeys().has(d.key))
                 return (
-                  <div classList={{ 'st-vis-hidden': !sectionVisible() }}>
-                    <PageSection
-                      id={'st-section-' + encodeURIComponent(section)}
-                      title={section}
-                      divided
+                  <PageSection
+                    id={'st-section-' + encodeURIComponent(section)}
+                    title={section}
+                    divided
+                  >
+                    {/* The prompt artifact is generated from the Go renderer and
+                        contains placeholders instead of any focused pane facts.
+                        CodeBlock owns the fixed scroll cap, so this long
+                        read-only text cannot push the person's field away. */}
+                    <Show when={section === INSTRUCTIONS_SECTION}>
+                      <CodeBlock ariaLabel="nocx system prompt">{systemPromptText}</CodeBlock>
+                    </Show>
+                    {/* The degrade notice, above the controls it
+                        contradicts. A kit StatusCard, placed and never
+                        repainted: a state plus what to do about it is
+                        exactly what it is for, and hand-rolling a
+                        coloured div here is the defect two epics spent
+                        themselves unwinding (ui/README.md). */}
+                    <Show when={section === HISTORY_SECTION && historyNotice() !== null}>
+                      <StatusCard
+                        tone="warning"
+                        title={historyNotice()!.title}
+                        description={historyNotice()!.description}
+                      />
+                    </Show>
+                    {/* The discard is `neutral`, not `warning`: nothing is
+                        wrong and there is nothing to fix — it is a thing
+                        that happened, which the person is entitled to know
+                        because an empty history after an update is
+                        otherwise indistinguishable from a fresh install.
+                        The kit has no `info` tone and does not need one;
+                        neutral is what "a fact, not a fault" already
+                        means here. */}
+                    <Show when={section === HISTORY_SECTION && discardNotice() !== null}>
+                      <StatusCard
+                        tone="neutral"
+                        title={discardNotice()!.title}
+                        description={discardNotice()!.description}
+                      />
+                    </Show>
+                    <Show
+                      when={section === INSTRUCTIONS_SECTION}
+                      fallback={
+                        <For each={sectionDecls()}>
+                          {(decl) => (
+                            <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />
+                          )}
+                        </For>
+                      }
                     >
-                      {/* The degrade notice, above the controls it
-                          contradicts. A kit StatusCard, placed and never
-                          repainted: a state plus what to do about it is
-                          exactly what it is for, and hand-rolling a
-                          coloured div here is the defect two epics spent
-                          themselves unwinding (ui/README.md). */}
-                      <Show when={section === HISTORY_SECTION && historyNotice() !== null}>
-                        <StatusCard
-                          tone="warning"
-                          title={historyNotice()!.title}
-                          description={historyNotice()!.description}
-                        />
-                      </Show>
-                      {/* The discard is `neutral`, not `warning`: nothing is
-                          wrong and there is nothing to fix — it is a thing
-                          that happened, which the person is entitled to know
-                          because an empty history after an update is
-                          otherwise indistinguishable from a fresh install.
-                          The kit has no `info` tone and does not need one;
-                          neutral is what "a fact, not a fault" already
-                          means here. */}
-                      <Show when={section === HISTORY_SECTION && discardNotice() !== null}>
-                        <StatusCard
-                          tone="neutral"
-                          title={discardNotice()!.title}
-                          description={discardNotice()!.description}
-                        />
-                      </Show>
-                      <For each={sectionDecls()}>
-                        {(decl) => <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />}
-                      </For>
-                    </PageSection>
-                  </div>
+                      <Section title="What the person added" divided>
+                        <For each={sectionDecls()}>
+                          {(decl) => (
+                            <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />
+                          )}
+                        </For>
+                      </Section>
+                    </Show>
+                  </PageSection>
                 )
               }}
             </For>

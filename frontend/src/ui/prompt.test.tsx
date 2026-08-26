@@ -370,4 +370,30 @@ describe('Prompt', () => {
     dialog.dispatchEvent(new Event('cancel', { bubbles: false, cancelable: true }))
     expect(onDialogClose).toHaveBeenCalledOnce()
   })
+
+  it('lays its actions out in one row by default', () => {
+    const { container } = render(() => (
+      <Prompt open ariaLabel="Password" onClose={() => undefined} actions={null}>
+        Secret
+      </Prompt>
+    ))
+    expect(container.querySelector('.ui-prompt__actions')!.getAttribute('data-layout')).toBe('row')
+  })
+
+  it('stacks its actions when the caller declares more answers than a line holds', () => {
+    const { container } = render(() => (
+      <Prompt
+        open
+        ariaLabel="Password"
+        onClose={() => undefined}
+        actionsLayout="stacked"
+        actions={null}
+      >
+        Secret
+      </Prompt>
+    ))
+    expect(container.querySelector('.ui-prompt__actions')!.getAttribute('data-layout')).toBe(
+      'stacked',
+    )
+  })
 })

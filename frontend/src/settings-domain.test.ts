@@ -4,6 +4,9 @@ import {
   createMirror,
   numberRangeCaption,
   numberRangeError,
+  textLengthCaption,
+  textLengthError,
+  fieldSaveError,
   recordSaveOutcome,
   canResetSetting,
   applyAcceptedSnapshot,
@@ -341,5 +344,54 @@ describe('number range caption and error (nocx-w7h.7)', () => {
     expect(numberRangeError(daysDecl, -1)).toBe('Must be at least 0 days')
     expect(numberRangeError(daysDecl, 4000)).toBe('Must be at most 3650 days')
     expect(numberRangeError(daysDecl, 30)).toBeUndefined()
+  })
+})
+
+describe("the bound on a person's own paragraph (nocx-avogl.4)", () => {
+  const personal: Declaration = {
+    key: 'assistant.personalInstructions',
+    section: 'Instructions',
+    label: 'Your instructions to the assistant',
+    description: 'Standing instructions added to every question.',
+    control: 'text',
+    dataClass: 'privateContent',
+    default: '',
+    multiline: true,
+    max: 2000,
+    unit: 'characters',
+  }
+
+  it('states how long the text is and how long it may be, before anything is lost', () => {
+    expect(textLengthCaption(personal, '')).toBe('0 / 2000 characters')
+    expect(textLengthCaption(personal, 'abc')).toBe('3 / 2000 characters')
+  })
+
+  it('an unbounded text setting has no caption to show', () => {
+    expect(textLengthCaption({ ...personal, max: undefined }, 'abc')).toBeUndefined()
+    expect(textLengthError({ ...personal, max: undefined }, 'x'.repeat(9999))).toBeUndefined()
+  })
+
+  it('past the bound is an error in the same words a number ceiling uses', () => {
+    expect(textLengthError(personal, 'x'.repeat(2000))).toBeUndefined()
+    expect(textLengthError(personal, 'x'.repeat(2001))).toBe('Must be at most 2000 characters')
+  })
+
+  // Counted the way the backend counts, or the caption states a bound the
+  // backend does not enforce. Go counts runes; JavaScript's .length counts
+  // UTF-16 code units, so 1001 astral characters would read as 2002 here and
+  // be refused on a screen the backend would have accepted.
+  it('counts characters, not UTF-16 code units', () => {
+    expect(textLengthCaption(personal, '🙂🙂')).toBe('2 / 2000 characters')
+    expect(textLengthError(personal, '🙂'.repeat(1500))).toBeUndefined()
+  })
+
+  // The backend refuses over-long text too, in its own language. Printing
+  // both puts one fact on the screen twice — the same defect the number
+  // suppression was bought by.
+  it('the backend rejection is not repeated under a field whose caption already says it', () => {
+    const backend =
+      'settings: "assistant.personalInstructions" validation failed: value is 2001 characters'
+    expect(fieldSaveError(personal, NaN, backend, 'x'.repeat(2001))).toBeUndefined()
+    expect(fieldSaveError(personal, NaN, backend, 'short')).toBe(backend)
   })
 })

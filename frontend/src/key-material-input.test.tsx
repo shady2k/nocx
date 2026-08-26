@@ -1,9 +1,48 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import { render, fireEvent } from '@solidjs/testing-library'
-import { KeyMaterialInput, publicKeyMistake } from './key-material-input'
+import { KeyMaterialInput, publicKeyMistake, secretOptions } from './key-material-input'
 import { toasts, clearToasts } from './ui/toast'
 import type { InventoryEntry } from './vault-client'
+
+function entry(overrides: Partial<InventoryEntry> = {}): InventoryEntry {
+  return {
+    id: 'secrow:aaaa',
+    name: 'prod api key',
+    kind: 'password',
+    provider: 'file',
+    ownerId: '',
+    usedBy: 0,
+    reachable: true,
+    ...overrides,
+  }
+}
+
+// A picker labels a secret with the secret's NAME. The one case where it
+// cannot — the record names a row the inventory does not list, because the
+// secret was deleted or the vault could not answer — is where the label used
+// to be the row handle itself, so a person opening their endpoint read
+// `secrow:dd39558499fe31b5ddce0f88a5d31320` where the name of their own key
+// belongs (nocx-5ratm).
+describe('secretOptions', () => {
+  it('names each row the vault listed', () => {
+    expect(secretOptions([entry()])).toEqual([{ value: 'secrow:aaaa', label: 'prod api key' }])
+  })
+
+  it('keeps a bound row that the vault did not list, and never labels it with its handle', () => {
+    const opts = secretOptions([entry()], 'secrow:gone')
+    // The binding is not silently dropped: dropping it would read as "None"
+    // and a save would then clear a credential nobody meant to clear.
+    expect(opts.map((o) => o.value)).toEqual(['secrow:aaaa', 'secrow:gone'])
+    const fallback = opts[1]
+    expect(fallback.label).not.toContain('secrow:')
+    expect(fallback.label).toBe('Unavailable secret')
+  })
+
+  it('adds nothing when the bound row is listed', () => {
+    expect(secretOptions([entry()], 'secrow:aaaa')).toHaveLength(1)
+  })
+})
 
 // Uploading `id_ed25519.pub` instead of `id_ed25519` is the mistake this
 // catches, and it is the one a user actually made: the backend answered "not a

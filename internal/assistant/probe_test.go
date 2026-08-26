@@ -7,6 +7,7 @@ package assistant
 // eino path, not of a stub.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -31,13 +32,21 @@ type fakeOpenAIServer struct {
 	lastAuth atomic.Value // string
 	lastPath atomic.Value // string
 	lastHdrs atomic.Value // map[string]string
+	requests atomic.Int64 // how many /chat/completions calls arrived
 }
 
 func newFakeOpenAI(handler func(w http.ResponseWriter, r *http.Request)) (*fakeOpenAIServer, *httptest.Server) {
 	f := &fakeOpenAIServer{handler: handler}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		f.requests.Add(1)
 		body, _ := io.ReadAll(r.Body)
 		f.lastBody.Store(string(body))
+		// Put the body BACK. Recording it here consumed it, and a handler
+		// that wants to answer differently depending on what the engine
+		// SENT — a provider that stops proposing once it sees the tool
+		// result, which is every real one — would otherwise read an empty
+		// request and behave like a provider that proposes forever.
+		r.Body = io.NopCloser(bytes.NewReader(body))
 		f.lastAuth.Store(r.Header.Get("Authorization"))
 		f.lastPath.Store(r.URL.Path)
 		hdrs := make(map[string]string)
@@ -122,7 +131,10 @@ func TestProbe_SucceedsEndToEnd(t *testing.T) {
 	f, srv := newFakeOpenAI(nil)
 	defer srv.Close()
 
-	cl := NewClient(nil)
+	cl, err := NewClient(nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 	res, err := cl.Probe(context.Background(), testProbeParams(srv.URL))
 	if err != nil {
 		t.Fatalf("Probe: %v", err)
@@ -179,7 +191,10 @@ func TestProbe_SendsCustomHeadersOnCompletion(t *testing.T) {
 		{Name: "HTTP-Referer", Value: "https://nocx.dev"},
 		{Name: "X-Title", Value: "nocx"},
 	}
-	cl := NewClient(nil)
+	cl, err := NewClient(nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 	res, err := cl.Probe(context.Background(), p)
 	if err != nil {
 		t.Fatalf("Probe: %v", err)
@@ -216,7 +231,10 @@ func TestProbe_ConnectionCheckSendsCustomHeaders(t *testing.T) {
 		{Name: "X-Tenant", Value: "tenant-7"},
 		{Name: "HTTP-Referer", Value: "https://nocx.dev"},
 	}
-	cl := NewClient(nil)
+	cl, err := NewClient(nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 	res, err := cl.Probe(context.Background(), p)
 	if err != nil {
 		t.Fatalf("Probe: %v", err)
@@ -235,7 +253,10 @@ func TestProbe_ConnectionCheckSendsCustomHeaders(t *testing.T) {
 // TestProbe_DialFailure is the mechanical failure path: an unreachable
 // address is a probe outcome (OK=false with the dial error), not a Go error.
 func TestProbe_DialFailure(t *testing.T) {
-	cl := NewClient(nil)
+	cl, err := NewClient(nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 	p := testProbeParams("http://127.0.0.1:1/v1")
 	p.BaseURL = "http://127.0.0.1:1/v1" // nothing listens on port 1
 	res, err := cl.Probe(context.Background(), p)
@@ -259,7 +280,10 @@ func TestProbe_HTTPError(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cl := NewClient(nil)
+	cl, err := NewClient(nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 	res, err := cl.Probe(context.Background(), testProbeParams(srv.URL))
 	if err != nil {
 		t.Fatalf("Probe returned a Go error %v, want a probe outcome", err)
@@ -282,7 +306,10 @@ func TestProbe_ZeroContent(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cl := NewClient(nil)
+	cl, err := NewClient(nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 	res, err := cl.Probe(context.Background(), testProbeParams(srv.URL))
 	if err != nil {
 		t.Fatalf("Probe returned a Go error %v, want a probe outcome", err)
@@ -301,7 +328,10 @@ func TestProbe_StreamingDeliversAnAnswer(t *testing.T) {
 	_, srv := newFakeOpenAI(nil)
 	defer srv.Close()
 
-	cl := NewClient(nil)
+	cl, err := NewClient(nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 	res, err := cl.Probe(context.Background(), testProbeParams(srv.URL))
 	if err != nil {
 		t.Fatalf("Probe: %v", err)
@@ -314,10 +344,13 @@ func TestProbe_StreamingDeliversAnAnswer(t *testing.T) {
 // TestProbe_InvalidParams: a probe that cannot run is a Go error, and no
 // result is produced.
 func TestProbe_InvalidParams(t *testing.T) {
-	cl := NewClient(nil)
+	cl, err := NewClient(nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 	p := testProbeParams("http://127.0.0.1:1/v1")
 	p.BaseURL = ""
-	if _, err := cl.Probe(context.Background(), p); err == nil {
+	if _, probeErr := cl.Probe(context.Background(), p); probeErr == nil {
 		t.Fatal("Probe with an empty base URL succeeded, want a refusal")
 	}
 	// An empty model is NOT a refusal any more (nocx-q27y): it is the other
@@ -349,7 +382,10 @@ func TestProbe_ContextCancelled(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	cl := NewClient(nil)
+	cl, err := NewClient(nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 	res, err := cl.Probe(ctx, testProbeParams(srv.URL))
 	if err != nil {
 		t.Fatalf("Probe returned a Go error %v, want a probe outcome", err)
@@ -368,7 +404,10 @@ func TestProbe_RedirectToPublicRefused(t *testing.T) {
 	})
 	defer srv.Close()
 
-	cl := NewClient(nil)
+	cl, err := NewClient(nil)
+	if err != nil {
+		t.Fatalf("NewClient: %v", err)
+	}
 	res, err := cl.Probe(context.Background(), testProbeParams(srv.URL))
 	if err != nil {
 		t.Fatalf("Probe returned a Go error %v, want a probe outcome", err)

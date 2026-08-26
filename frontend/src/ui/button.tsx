@@ -29,8 +29,12 @@
  * `class` is intentionally absent as a prop — appearance is locked to
  * the kit (§3.6). Layout and placement belong to a parent wrapper or
  * a typed prop.
+ *
+ * `secondary` adds a quieter second line beneath the main label. Both lines
+ * remain inside the native button, so assistive technology names the complete
+ * answer while the visual hierarchy keeps the action readable.
  */
-import { splitProps } from 'solid-js'
+import { Show, splitProps } from 'solid-js'
 import type { JSX } from 'solid-js'
 
 export type ButtonVariant = 'default' | 'primary' | 'danger' | 'ghost' | 'dashed' | 'workspace'
@@ -48,6 +52,8 @@ export interface ButtonProps {
   class?: never
   className?: never
   children: JSX.Element
+  /** Optional quieter line beneath the button's main label. */
+  secondary?: string
   onClick: (e: MouseEvent) => void
   disabled?: boolean
   title?: string
@@ -92,6 +98,7 @@ export function Button(props: ButtonAttrs) {
   const knownKeys = [
     'class',
     'className',
+    'secondary',
     'children',
     'onClick',
     'disabled',
@@ -108,6 +115,7 @@ export function Button(props: ButtonAttrs) {
     <button
       class="ui-button"
       data-variant={local.variant ?? 'default'}
+      data-secondary={local.secondary !== undefined ? 'true' : undefined}
       {...(local.size && local.size !== 'md' ? { 'data-size': local.size } : {})}
       type={local.type ?? 'button'}
       disabled={local.disabled === true}
@@ -118,7 +126,10 @@ export function Button(props: ButtonAttrs) {
       onClick={(e: MouseEvent) => local.onClick(e)}
       {...rest}
     >
-      {local.children}
+      <Show when={local.secondary !== undefined} fallback={local.children}>
+        <span class="ui-button__label">{local.children}</span>{' '}
+        <span class="ui-button__secondary">{local.secondary}</span>
+      </Show>
     </button>
   )
 }

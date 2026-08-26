@@ -10,7 +10,9 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -18,6 +20,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/log"
 )
 
 // fakeRecordHistoryDB is a real-behaving in-memory ContentDB over the LEDGER
@@ -36,6 +39,9 @@ type fakeRecordHistoryDB struct {
 	mu      sync.Mutex
 	nextID  int64
 	records []content.LedgerEntrySummary
+	// addErr makes the durable write fail, so the handler's honesty about a
+	// refusing store is exercised rather than assumed.
+	addErr error
 }
 
 func newFakeRecordHistoryDB() *fakeRecordHistoryDB {
@@ -57,6 +63,9 @@ func (f *fakeRecordHistoryDB) APIRuns() content.APIRunRepository { return nil }
 func (f *fakeRecordHistoryDB) RecordCompleted(_ context.Context, in content.CompletedCommand) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.addErr != nil {
+		return "", f.addErr
+	}
 	f.nextID++
 	id := fakeEntryID(f.nextID)
 	env := in.Env
@@ -66,14 +75,18 @@ func (f *fakeRecordHistoryDB) RecordCompleted(_ context.Context, in content.Comp
 		EnvironmentID: env.ID,
 		Environment:   &env,
 		Cwd:           in.Cwd,
-		Kind:          content.EntryShell,
-		Intent:        in.Intent,
-		Phase:         content.PhaseClosed,
-		Status:        in.Status,
-		StartedAt:     in.StartedAt,
-		EndedAt:       in.EndedAt,
-		DurationMs:    in.DurationMs,
-		Payload:       in.Payload,
+		// The SOURCE the handler was handed, not a constant: the entry's
+		// entries.source is where who-submitted lives (design §3.1,
+		// nocx-iadtt), so a fake that hardcoded `user` here could not report
+		// the source being dropped.
+		Source:     in.Source,
+		Intent:     in.Intent,
+		Phase:      content.PhaseClosed,
+		Status:     in.Status,
+		StartedAt:  in.StartedAt,
+		EndedAt:    in.EndedAt,
+		DurationMs: in.DurationMs,
+		Payload:    in.Payload,
 	})
 	return id, nil
 }
@@ -148,6 +161,7 @@ func recordParams(overrides map[string]any) map[string]any {
 		"command":   "ls -la",
 		"cwd":       "/srv/api",
 		"host":      "",
+		"source":    "user",
 		"status":    "success",
 		"exitCode":  0,
 		"startedAt": int64(1_750_000_000_000),
@@ -272,6 +286,143 @@ func TestHistoryRecord_RejectsUnknownStatus(t *testing.T) {
 	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{"status": "crashed"}), 1)
 	if resp.Error == nil || resp.Error.Code != -32602 {
 		t.Fatalf("error = %+v, want -32602", resp.Error)
+	}
+}
+
+// The author is required, and it is the entries.kind vocabulary: 'shell'
+// and 'agent' are the two command-bearing kinds. A request without an
+// author is malformed — the renderer mints it at submit (design §3.1,
+// nocx-iadtt) — and 'action' (the ledger's third kind) can never be a
+// command's author: an action has no block and no command line.
+func TestHistoryRecord_RejectsMissingOrUnknownSource(t *testing.T) {
+	ws, stop := newHistoryWSServer(t, newFakeRecordHistoryDB())
+	defer stop()
+	conn := connectWS(t, ws)
+
+	missing := recordParams(nil)
+	delete(missing, "source")
+	resp := vaultCall(t, conn, "history.record", missing, 1)
+	if resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("missing source: error = %+v, want -32602", resp.Error)
+	}
+
+	for _, src := range []string{"robot", "action", ""} {
+		resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{"source": src}), 1)
+		if resp.Error == nil || resp.Error.Code != -32602 {
+			t.Fatalf("source %q: error = %+v, want -32602", src, resp.Error)
+		}
+	}
+}
+
+// The ack carries the source the record was accepted under, over the real
+// socket: the renderer minted it at submit, and the ack's echo is how it
+// verifies the backend kept the fact — the two sides never derive the same
+// thing twice (design §3.1, nocx-iadtt).
+func TestHistoryRecord_AckCarriesTheSource(t *testing.T) {
+	db := newFakeRecordHistoryDB()
+	ws, stop := newHistoryWSServer(t, db)
+	defer stop()
+	conn := connectWS(t, ws)
+
+	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
+		"source": "assistant",
+	}), 1)
+	if resp.Error != nil {
+		t.Fatalf("record error: %+v", resp.Error)
+	}
+	var ack struct {
+		Source string `json:"source"`
+	}
+	if err := json.Unmarshal(resp.Result, &ack); err != nil {
+		t.Fatalf("decode ack: %v", err)
+	}
+	if ack.Source != "assistant" {
+		t.Fatalf("ack source = %q, want assistant", ack.Source)
+	}
+}
+
+// The handler writes the author into durable history, and a restart still
+// sees it through both the ledger projection (entries.kind) and the
+// command-history read model. That proves the wire has not outrun the store.
+func TestHistoryRecord_PersistsSourceThroughRestart(t *testing.T) {
+	dir := t.TempDir()
+	cfg := content.Config{
+		Path: filepath.Join(dir, "content.db"),
+		Key:  []byte("0123456789abcdef0123456789abcdef"),
+		Budget: content.Budget{
+			RetentionBytes:   1 << 20,
+			DiskCeilingBytes: 2 << 20,
+			CompactionFloor:  0.8,
+		},
+		Logger: log.NewSlogAdapter(nil),
+	}
+	db, err := content.Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("open content db: %v", err)
+	}
+	ws, stop := newHistoryWSServer(t, db)
+	conn := connectWS(t, ws)
+
+	for _, tc := range []struct {
+		source  string
+		command string
+	}{
+		{source: "user", command: "shell-cmd"},
+		{source: "assistant", command: "agent-cmd"},
+	} {
+		resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
+			"source":  tc.source,
+			"command": tc.command,
+		}), 1)
+		if resp.Error != nil {
+			t.Fatalf("%s record error: %+v", tc.source, resp.Error)
+		}
+	}
+
+	stop()
+	if closeErr := db.Close(); closeErr != nil {
+		t.Fatalf("close content db: %v", closeErr)
+	}
+
+	db2, err := content.Open(context.Background(), cfg)
+	if err != nil {
+		t.Fatalf("reopen content db: %v", err)
+	}
+	t.Cleanup(func() { _ = db2.Close() })
+
+	entries, err := db2.Ledger().ListEntries(context.Background(), 10)
+	if err != nil {
+		t.Fatalf("ListEntries: %v", err)
+	}
+	if len(entries) != 2 {
+		t.Fatalf("ledger entries = %d, want 2", len(entries))
+	}
+	if entries[0].Kind != content.EntryShell || entries[0].Intent != "agent-cmd" || entries[0].Source != content.SourceAssistant {
+		t.Fatalf("newest ledger entry = %+v, want agent-cmd under the assistant source", entries[0])
+	}
+	if entries[1].Kind != content.EntryShell || entries[1].Intent != "shell-cmd" || entries[1].Source != content.SourceUser {
+		t.Fatalf("older ledger entry = %+v, want shell-cmd under the user source", entries[1])
+	}
+}
+
+// The handler surfaces the store's write failure rather than pretending the
+// record landed. That keeps the wire honest when the durable home rejects.
+func TestHistoryRecord_SurfacesStoreAddError(t *testing.T) {
+	db := newFakeRecordHistoryDB()
+	db.addErr = errors.New("boom")
+	ws, stop := newHistoryWSServer(t, db)
+	defer stop()
+	conn := connectWS(t, ws)
+
+	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
+		"source":  "assistant",
+		"command": "agent-cmd",
+	}), 1)
+	if resp.Error == nil || resp.Error.Code != -32603 || !strings.Contains(resp.Error.Message, "boom") {
+		t.Fatalf("store error = %+v, want -32603 with boom", resp.Error)
+	}
+	if db.count() != 0 {
+		t.Fatalf("store count = %d, want 0", db.count())
 	}
 }
 
@@ -468,13 +619,15 @@ func TestHistoryRecord_DTOConformsToContract(t *testing.T) {
 		"nothing masked": {
 			MaskedCount:   0,
 			MaskedKinds:   []string{},
+			Source:        "user",
 			Redactions:    []redactionWire{},
 			Captures:      []captureWire{},
 			MaskedCommand: "echo hi",
 		},
 		"two kinds": {
 			MaskedCount:   2,
-			MaskedKinds:   []string{"openai", "jwt"},
+			MaskedKinds:   []string{"openai"},
+			Source:        "assistant",
 			MaskedCommand: `curl -H "Authorization: Bearer sk-p...7890" https://api`,
 			Redactions: []redactionWire{
 				{Kind: "openai", Start: 10, End: 21, Prefix: "sk-p", Suffix: "7890"},
@@ -485,6 +638,7 @@ func TestHistoryRecord_DTOConformsToContract(t *testing.T) {
 			MaskedCount:   1,
 			MaskedKinds:   []string{"openai"},
 			EntryID:       "0192f0aa-0000-7000-8000-000000000007",
+			Source:        "user",
 			MaskedCommand: `curl -H "Authorization: Bearer sk-p...7890" https://api`,
 			Redactions:    []redactionWire{{Kind: "openai", Start: 10, End: 21, Prefix: "sk-p", Suffix: "7890"}},
 			Captures: []captureWire{{
@@ -519,6 +673,7 @@ func TestHistoryRecord_OverTheWireConformsToContract(t *testing.T) {
 
 	resp := vaultCall(t, conn, "history.record", recordParams(map[string]any{
 		"command": `curl -H "Authorization: Bearer sk-proj-abcdef1234567890" https://api`,
+		"source":  "assistant",
 	}), 1)
 	if resp.Error != nil {
 		t.Fatalf("record error: %+v", resp.Error)
@@ -526,6 +681,7 @@ func TestHistoryRecord_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, resp.Result, "history.record result (real socket)")
 
 	var got struct {
+		Source        string   `json:"source"`
 		MaskedCount   int      `json:"maskedCount"`
 		MaskedKinds   []string `json:"maskedKinds"`
 		MaskedCommand string   `json:"maskedCommand"`
@@ -539,6 +695,9 @@ func TestHistoryRecord_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if got.MaskedCount != 1 || len(got.MaskedKinds) != 1 || got.MaskedKinds[0] != "openai" {
 		t.Errorf("ack facts = %d %v, want 1 [openai]", got.MaskedCount, got.MaskedKinds)
+	}
+	if got.Source != "assistant" {
+		t.Errorf("ack source = %q, want assistant — the minted fact rides the wire both ways", got.Source)
 	}
 	if got.MaskedCommand != `curl -H "Authorization: Bearer sk-p...7890" https://api` {
 		t.Errorf("maskedCommand = %q, want the masked command the row keeps", got.MaskedCommand)

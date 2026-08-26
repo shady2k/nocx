@@ -1,0 +1,65 @@
+/* Model Roles surface (nocx-e6kn2, nocx-rikz5) — placement for the default
+   control, the role rows and the role state sentence. The controls are the
+   kit's Selects and StatusDot; this file only places the surface's own
+   wrappers and paints its own text (the state sentence's tone, mirroring
+   the endpoint rows).
+
+   The default block and a role row are the same shape — a title, a
+   description and two labelled selects — so they share one set of rules
+   rather than one set of declarations written twice. A second copy is how
+   the two drift apart, and they may not: the default block IS the rung
+   above the rows and has to read as one of them. */
+
+.roles-role,
+.roles-default {
+  padding-block: var(--space-4);
+}
+
+.roles-role__title,
+.roles-default__title {
+  font-weight: 600;
+}
+
+.roles-role__description,
+.roles-default__description {
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+/* The two selects side by side; each field is a column of label + control. */
+.roles-role__controls,
+.roles-default__controls {
+  display: flex;
+  gap: var(--space-4);
+  flex-wrap: wrap;
+}
+
+.roles-role__field,
+.roles-default__field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  min-width: 16rem;
+}
+
+.roles-role__label,
+.roles-default__label {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+/* The refusal sentence: the kit's StatusDot + text, the text painted by the
+   same tone the dot carries. A sentence without its meaning is decoration.
+   It is ABSENT, not empty, whenever the role resolves — by its own pair or
+   through the default — so there is no `ok` tone here to paint. */
+.roles-role__state {
+  font-size: var(--font-size-sm);
+}
+
+.roles-role__state[data-tone='warning'] {
+  color: var(--color-warning);
+}
+
+.roles-role__state[data-tone='error'] {
+  color: var(--color-error);
+}

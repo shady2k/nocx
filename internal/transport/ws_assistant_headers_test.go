@@ -44,6 +44,7 @@ func TestEndpointsProbe_DraftHeaderRowResolvesToMaterial(t *testing.T) {
 	raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
 		"name":    "Azure",
 		"baseUrl": "https://api.example.com/v1",
+		"noKey":   true,
 		"model":   "gpt-4o",
 		"headers": []map[string]any{
 			{"name": "api-key", "value": nil, "secret": row},
@@ -81,6 +82,7 @@ func TestEndpointsProbe_UnknownHeaderRowIsARefusedResultNamingIt(t *testing.T) {
 	raw := jsonrpcCall(t, h.conn, "endpoints.probe", map[string]any{
 		"name":    "Azure",
 		"baseUrl": "https://api.example.com/v1",
+		"noKey":   true,
 		"model":   "gpt-4o",
 		"headers": []map[string]any{
 			{"name": "api-key", "value": nil, "secret": "secrow:deadbeefdeadbeefdeadbeefdeadbeef"},

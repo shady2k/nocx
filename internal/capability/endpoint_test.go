@@ -94,7 +94,7 @@ func newEndpointEnv(t *testing.T, secrets *fakeEndpointSecrets) (capability.Conf
 	store := profile.NewJSONStore(filepath.Join(dir, "profiles.json"))
 	configGate, vaultGate, _, _, _, _ := testGates()
 	op := capability.NewConfigOperation(configGate, vaultGate, testLane(),
-		store, store, store, newProfileService(t), nil, secrets, secrets)
+		store, store, store, store, newProfileService(t), nil, secrets, secrets)
 	return op, store, filepath.Join(dir, "profiles.json")
 }
 
@@ -241,7 +241,7 @@ func TestEndpointCreate_StoreWriteFails_LeavesOnlyTheMintedOrphan(t *testing.T) 
 	}
 	configGate, vaultGate, _, _, _, _ := testGates()
 	badOp := capability.NewConfigOperation(configGate, vaultGate, testLane(),
-		badStore, badStore, badStore, newProfileService(t), nil, nil, secrets)
+		badStore, badStore, badStore, badStore, newProfileService(t), nil, nil, secrets)
 
 	if err := runConfig(t, badOp, func(ctx context.Context, svc capability.ConfigService) error {
 		_, err := svc.CreateEndpoint(ctx, testEndpoint(), credential.NewSecret("sk-test"))
@@ -524,5 +524,38 @@ func TestEndpointGet_MissingIDIsANamedSentinel(t *testing.T) {
 	})
 	if !errors.Is(err, profile.ErrEndpointNotFound) {
 		t.Fatalf("GetEndpoint for a missing id = %v, want profile.ErrEndpointNotFound", err)
+	}
+}
+
+func TestEndpointUpdate_NoKeyDeclarationClearsExistingCredential(t *testing.T) {
+	secrets := &fakeEndpointSecrets{}
+	op, store, _ := newEndpointEnv(t, secrets)
+	existing := testEndpoint()
+	existing.CredentialRef = "sec:v1:existing"
+	if err := store.CreateEndpoint(existing); err != nil {
+		t.Fatalf("seed endpoint: %v", err)
+	}
+	updated := existing
+	updated.Name = "Local"
+	updated.NoKey = true
+	updated.CredentialRef = ""
+
+	var got profile.Endpoint
+	if err := runConfig(t, op, func(ctx context.Context, svc capability.ConfigService) error {
+		var err error
+		got, err = svc.UpdateEndpoint(ctx, updated, nil)
+		return err
+	}); err != nil {
+		t.Fatalf("UpdateEndpoint: %v", err)
+	}
+	if got.CredentialRef != "" {
+		t.Fatalf("updated credential reference = %q, want empty", got.CredentialRef)
+	}
+	stored, err := store.LoadEndpoints()
+	if err != nil {
+		t.Fatalf("LoadEndpoints: %v", err)
+	}
+	if len(stored) != 1 || stored[0].CredentialRef != "" || !stored[0].NoKey {
+		t.Fatalf("stored endpoint = %+v, want noKey with no credential", stored)
 	}
 }

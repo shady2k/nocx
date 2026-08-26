@@ -192,3 +192,121 @@ func TestQueryFailsWhenTheWatermarkCannotBeRead(t *testing.T) {
 		t.Fatal("QueryEntries answered with a coverage it could not read")
 	}
 }
+
+// ── the failure paths of the BODY sweep ──────────────────────────────────
+//
+// The same rule as above, one table down: the chunks and the byte accounting
+// that describes them move together or not at all. A pass that deleted the
+// chunks while its receipt write failed would leave the store holding an
+// artifact that claims bytes nothing can read — and the budget would go on
+// counting them, so the next pass would evict something else to free space
+// already freed.
+
+// bodyState is the pair the invariant is about: the bytes the store says it
+// retains, and the chunks actually behind them.
+func bodyState(t *testing.T, led content.LedgerRepository, ids ...string) (int64, int) {
+	t.Helper()
+	var bytesHeld int64
+	var chunks int
+	for _, id := range ids {
+		a := artifactOK(t, led, id)
+		bytesHeld += a.ByteLen
+		chunks += a.ChunkCount
+	}
+	return bytesHeld, chunks
+}
+
+// The chunk DELETE fails. Nothing may be freed and no receipt may be written.
+func TestBodyEvictionRollsBackWhenTheChunkDeleteFails(t *testing.T) {
+	db, led, path := newLedgerAt(t)
+	_ = db
+	_, prose := turnWithProse(t, led, 1, 100, 700)
+	beforeBytes, beforeChunks := bodyState(t, led, prose...)
+
+	if err := rawLedger(t, path, hex.EncodeToString(testKey()),
+		`CREATE TRIGGER evict_chunk_boom BEFORE DELETE ON artifact_chunks
+		 BEGIN SELECT RAISE(ABORT, 'chunk delete refused'); END`,
+	); err != nil {
+		t.Fatalf("install chunk trigger: %v", err)
+	}
+
+	if _, err := led.EvictBodies(context.Background(),
+		content.BodyEvictionRequest{KeepBytes: 0, Max: 100}); err == nil {
+		t.Fatal("EvictBodies succeeded while the chunk DELETE was refused")
+	}
+
+	afterBytes, afterChunks := bodyState(t, led, prose...)
+	if afterBytes != beforeBytes || afterChunks != beforeChunks {
+		t.Fatalf("bodies moved on a failed DELETE: %d bytes over %d chunks, want %d over %d",
+			afterBytes, afterChunks, beforeBytes, beforeChunks)
+	}
+	for _, id := range prose {
+		if artifactOK(t, led, id).Evicted {
+			t.Fatalf("%s carries an eviction receipt for a pass that removed nothing", id)
+		}
+	}
+}
+
+// The receipt write fails. The chunks must still be there: a body freed with
+// nothing recording it is the direction that actually loses the answer, since
+// a reader would then see an empty body it cannot tell from a silent command.
+func TestBodyEvictionRollsBackWhenTheReceiptWriteFails(t *testing.T) {
+	_, led, path := newLedgerAt(t)
+	_, prose := turnWithProse(t, led, 1, 100, 700)
+	beforeBytes, beforeChunks := bodyState(t, led, prose...)
+
+	if err := rawLedger(t, path, hex.EncodeToString(testKey()),
+		`CREATE TRIGGER evict_receipt_boom BEFORE UPDATE ON artifacts
+		 BEGIN SELECT RAISE(ABORT, 'receipt refused'); END`,
+	); err != nil {
+		t.Fatalf("install receipt trigger: %v", err)
+	}
+
+	if _, err := led.EvictBodies(context.Background(),
+		content.BodyEvictionRequest{KeepBytes: 0, Max: 100}); err == nil {
+		t.Fatal("EvictBodies succeeded while the receipt write was refused")
+	}
+
+	afterBytes, afterChunks := bodyState(t, led, prose...)
+	if afterChunks != beforeChunks {
+		t.Fatalf("chunks = %d after a failed receipt write, want the %d they started with — "+
+			"the bodies were freed with nothing recording it", afterChunks, beforeChunks)
+	}
+	if afterBytes != beforeBytes {
+		t.Fatalf("byte_len = %d after a failed receipt write, want %d", afterBytes, beforeBytes)
+	}
+}
+
+// The candidate SELECT fails. The sweep reads what it retains and what is
+// pinned through the artifacts table; without it there is no way to tell an
+// exempt body from an ordinary one, so the pass must refuse rather than
+// free everything.
+func TestBodyEvictionFailsWhenTheCandidateSelectFails(t *testing.T) {
+	_, led, path := newLedgerAt(t)
+	turnWithProse(t, led, 1, 100, 700)
+
+	if err := rawLedger(t, path, hex.EncodeToString(testKey()),
+		`DROP TABLE artifact_chunks`,
+		`DROP TABLE artifacts`,
+	); err != nil {
+		t.Fatalf("drop artifacts: %v", err)
+	}
+
+	if _, err := led.EvictBodies(context.Background(),
+		content.BodyEvictionRequest{KeepBytes: 0, Max: 100}); err == nil {
+		t.Fatal("EvictBodies succeeded while it could not read what it retains")
+	}
+}
+
+// The transaction cannot even begin: the store is closed.
+func TestBodyEvictionFailsOnAClosedStore(t *testing.T) {
+	db, led := newLedger(t)
+	turnWithProse(t, led, 1, 100)
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	if _, err := led.EvictBodies(context.Background(),
+		content.BodyEvictionRequest{KeepBytes: 0, Max: 100}); err == nil {
+		t.Fatal("EvictBodies succeeded on a closed store")
+	}
+}

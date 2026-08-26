@@ -51,6 +51,7 @@ export class SettingsContent extends SolidPaneContent {
     private readonly aboutClient?: import('./about-client').AboutClient,
     /** The clipboard the About page's Copy diagnostics writes through. */
     private readonly clipboard?: import('./clipboard').ClipboardAccess,
+    private readonly policyClient?: import('./policy-client').PolicyClient,
   ) {
     super()
   }
@@ -65,6 +66,7 @@ export class SettingsContent extends SolidPaneContent {
           dialogClient: this.dialogClient,
           footprintClient: this.footprintClient,
           agentClient: this.agentClient,
+          policyClient: this.policyClient,
           endpointsClient: this.endpointsClient,
           snippetsStore: this.snippetsStore,
           historyStatus: this.historyStatus,

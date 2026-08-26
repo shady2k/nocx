@@ -1,4 +1,4 @@
-# ADR-0036 — an HTTP upload route beside the WebSocket
+# ADR-0039 — an HTTP upload route beside the WebSocket
 
 - **Status:** accepted (2026-08-21)
 - **Amends:** `AD-1` (what may travel beside its two planes) —

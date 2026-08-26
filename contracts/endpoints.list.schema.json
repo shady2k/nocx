@@ -17,7 +17,7 @@
     "endpoint": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["id", "name", "baseUrl", "schema", "credential", "models", "headers"],
+      "required": ["id", "name", "baseUrl", "schema", "noKey", "credential", "models", "headers"],
       "properties": {
         "id": {
           "description": "Backend-minted identity: endpoint:custom:<slug>:<uuid>. The renderer may hold it but never mints it.",
@@ -35,6 +35,10 @@
           "description": "The wire schema, a closed enum: 'openai-compatible' is the ONE value this pass knows (design §4.5, decision 2). A select in the UI appears when the second value does.",
           "type": "string",
           "enum": ["openai-compatible"]
+        },
+        "noKey": {
+          "description": "True only when the person explicitly declared that this endpoint needs no API key. False preserves the credential-required default; this is not inferred from the URL.",
+          "type": "boolean"
         },
         "credential": {
           "description": "Row handle (secrow:...) of the endpoint's own vault secret, or null when no key is set (created without one, or the key was deleted on the Secrets page). A reference never crosses the wire.",

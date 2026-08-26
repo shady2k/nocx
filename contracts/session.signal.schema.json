@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/session.signal.schema.json",
+  "title": "SessionSignal",
+  "description": "The session.signal JSON-RPC result: what happened when a person's UI addressed a signal to the command running in one session (nocx-23rph). THE GESTURE IS ADDRESSED TO THE SESSION, NOT TO WHATEVER HOLDS FOCUS. Ctrl+C reaches a running command today only while the terminal grid has the keyboard, because it travels as the byte 0x03 on the data plane and the line discipline turns it into SIGINT; click anywhere else and the same key stops the same command. This method is the control-plane way to the same place — the pty's foreground process group, discovered from the kernel via TIOCGPGRP (AD-6: never guessed from the byte stream) — so the renderer can address the ACTIVE BLOCK regardless of focus, and can offer Stop on a running block's menu. THE RESULT SAYS WHAT HAPPENED, and it is a result rather than an error because none of the three outcomes is a caller mistake: the params were well formed and the session was real in every one of them. A signal sent to a pane with no running command must be REFUSED HONESTLY and said out loud — silence there is indistinguishable from a broken button — so the renderer reads this and tells the person, instead of inferring from the absence of an error.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["signal", "outcome"],
+  "properties": {
+    "signal": {
+      "description": "The signal that was asked for, echoed back. interrupt is ONE SIGINT — exactly what the 0x03 byte would have caused, no more — and it is what a keyboard Ctrl+C means: interrupt this, and I may press it again. stop is the ESCALATION LADDER internal/transport/run_lease.go already owns for the agent's run lease (SIGINT -> SIGTERM -> SIGKILL, waiting the per-signal grace for the execution to cooperate), and it is what a menu item called Stop promises: when this answers, the execution is gone rather than merely asked to leave. There is one owner for \"how do you stop a process\" in this codebase and this is it; the two words are two intents over that one policy, never two policies.",
+      "type": "string",
+      "enum": ["interrupt", "stop"]
+    },
+    "outcome": {
+      "description": "delivered: the foreground process group existed and the signal reached it. nothing-running: the pty's foreground group is the interactive shell's own, so the session is sitting at a prompt and there is no execution to signal — the shell itself must never be signalled here, it is not part of the job it is waiting on (internal/pty.SignalForeground). unsupported: the session is remote, the execution runs on the far host and this process has no local process group to reach; the remote reach is the remote-footprint work's, not this method's, and saying nothing-running for it would be a lie a person would act on. The set is closed because the renderer branches on it to decide what to say.",
+      "type": "string",
+      "enum": ["delivered", "nothing-running", "unsupported"]
+    }
+  }
+}

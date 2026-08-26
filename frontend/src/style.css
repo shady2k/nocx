@@ -43,11 +43,15 @@
 @import './styles/components/badge.css';
 @import './styles/components/watch-badge.css';
 @import './styles/components/secret-chip.css';
+@import './styles/components/reasoning-note.css';
+@import './styles/components/answer-markdown.css';
+@import './styles/components/mode-indicator.css';
 @import './styles/components/secret-value-field.css';
 @import './styles/components/block-receipt.css';
 @import './styles/components/empty-state.css';
 @import './styles/components/status-card.css';
 @import './styles/components/status-dot.css';
+@import './styles/components/action-group.css';
 @import './styles/components/toolbar.css';
 @import './styles/components/dialog.css';
 @import './styles/components/prompt.css';
@@ -67,6 +71,7 @@
 @import './styles/components/operation-row.css';
 @import './styles/components/progress-bar.css';
 @import './styles/components/record-row.css';
+@import './styles/components/fact-list.css';
 @import './styles/components/resize-handle.css';
 @import './styles/components/tab-strip.css';
 @import './styles/components/workspace-chip.css';
@@ -81,6 +86,7 @@
 @import './styles/components/notes.css';
 @import './styles/components/api-workbench.css';
 @import './styles/components/overview.css';
+@import './styles/components/roles.css';
 @import './styles/components/folder-picker.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/integration-notice.css';
@@ -95,6 +101,7 @@
 @import './styles/surfaces/files.css';
 @import './styles/surfaces/operations.css';
 @import './styles/surfaces/vault.css';
+@import './styles/surfaces/agent-policy.css';
 @import './styles/surfaces/git.css';
 
 /* ── App body row: activity bar | sidebar | panes ────────────────────── */
@@ -259,6 +266,55 @@
   color: var(--color-danger);
 }
 
+/* The permanent grant chip (nocx-wcswn). One chip, two typed states: the
+   count is the only changing content and the list lives in its popover. */
+.nocx-editor-grant {
+  width: 13rem;
+  cursor: pointer;
+  white-space: nowrap;
+}
+
+.nocx-editor-grant[data-state='default'] {
+  color: var(--color-text-muted);
+}
+
+.nocx-editor-grant[data-state='chosen'] {
+  color: var(--color-accent);
+}
+/* The model chip pair (nocx-rikz5): the endpoint and model that will answer
+   a question, or the one rung of the ladder that has to be climbed first.
+   A control, so it takes the pointer its neighbours do not — .nocx-chip
+   sets `cursor: default` for the chips that are only labels.
+
+   The truncation is the point of the rest. A model id is long
+   ("deepseek/deepseek-v4-flash-0731-preview") and a chip that wraps pushes
+   the chrome row to a second line, which moves the composer and the
+   scrollback hanging from it (the same 2px lesson .nocx-chip's border reset
+   records). One line, ellipsised; the whole value lives in the title and
+   the accessible name, so nothing is only in the ellipsis. */
+.nocx-editor-model {
+  cursor: pointer;
+  max-width: 16rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  /* One deviation from the rest of the row, and the reason is mechanical:
+     .nocx-chip is `inline-flex`, and `text-overflow` applies to a block
+     container's own inline content — inside a flex container the text is an
+     anonymous ITEM, so the id would hard-clip mid-glyph instead of
+     ellipsising. Safe here because the parent .nocx-editor-chrome-left is
+     itself `display: flex; align-items: center`: these chips are flex items,
+     so their display value is blockified either way and nothing about the
+     row's alignment or its single height turns on the difference. */
+  display: inline-block;
+}
+
+/* A rung no page repairs ('unavailable') is not a control: it must not
+   offer the pointer a click would answer with nothing. */
+.nocx-editor-model:disabled {
+  cursor: default;
+}
+
 .nocx-editor-input {
   width: 100%;
   background: transparent;
@@ -410,21 +466,12 @@
    reference chips a selection raises live in their own strip between the
    chrome and the input: "if you ask, this comes with you". */
 
-.nocx-editor-target-indicator {
-  /* A control, never text — and now structurally so: it is not in the
-     document at all. */
-  padding: 1px 7px;
-  font-size: var(--font-size-2xs);
-  line-height: 1.4;
-  color: var(--color-text-muted);
-  cursor: pointer;
-  border: 1px solid var(--color-surface-raised);
-}
-
 /* The gutter the token lives in: a column beside the content, never inside
    it. CM6's default gutter paints a panel and a divider — the chrome of a
    line-number rail — and this one is a sigil in the prompt, so all of it is
-   cleared and only the trailing gap remains. */
+   cleared and only the trailing gap remains. The token itself is the kit's
+   ModeIndicator (ui/mode-indicator.ts, styles/components/mode-indicator.css)
+   — placed here, never repainted. */
 .nocx-editor .cm-gutters {
   background: transparent;
   border-right: none;
@@ -435,45 +482,6 @@
   display: flex;
   align-items: center;
   padding: 0 6px 0 0;
-}
-
-.nocx-editor-target-indicator:hover {
-  color: var(--color-text);
-}
-
-/* The switched state is information, not alarm: the person chose it. */
-.nocx-editor-target-indicator[data-target='agent'] {
-  color: var(--color-accent-secondary);
-  border-color: var(--color-accent-secondary);
-}
-
-.nocx-editor-references {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: 6px;
-  margin-bottom: 6px;
-}
-
-.nocx-editor-reference-chip {
-  padding: 1px 6px;
-  font-size: var(--font-size-2xs);
-  color: var(--color-text-muted);
-}
-
-.nocx-editor-reference-chip__drop {
-  background: none;
-  border: none;
-  margin: 0;
-  padding: 0 0 0 5px;
-  font: inherit;
-  line-height: 1;
-  color: var(--color-text-dim);
-  cursor: pointer;
-}
-
-.nocx-editor-reference-chip__drop:hover {
-  color: var(--color-danger);
 }
 
 /* ── The composition-time secret candidate mark (ADR-0021) ─────────────
@@ -622,6 +630,27 @@
      the box to content + padding, so this rule stays the only place the
      number lives. */
   padding: var(--cmd-output-pad-top) 0 var(--cmd-output-pad-bottom);
+  /* The containing block for the running command's "working, nothing
+     written yet" stand-in (nocx-vnirv.1) — see the rule below. */
+  position: relative;
+}
+
+/* The RUNNING COMMAND's stand-in (nocx-vnirv.1): the live region is the
+   running block's body, so the dots stand at the top of it — exactly where
+   the first output line will be written, below the body's top padding (the
+   same padding the frozen .cmd-output wears). OUT OF FLOW, so the height
+   constraint holds by construction: the controller measures and sizes this
+   box from the grid it contains (content + the padding above), and an
+   absolutely positioned child adds no height of its own — when the first
+   byte lands and the stand-in is removed, the box does not shrink, and the
+   frozen body that replaces the region is the same box. `prefers-reduced-
+   motion` opts out of the dots' animation the same way it does in the turn
+   (the rule below), and the dots themselves stay — the report survives. */
+.xterm-live-container.live-running > .cmd-answer-typing {
+  position: absolute;
+  top: var(--cmd-output-pad-top);
+  left: 0;
+  pointer-events: none;
 }
 
 /* The flow box and this clip receive the same measured height. The separate
@@ -827,11 +856,13 @@
   white-space: nowrap;
 }
 
-/* The answer body's stand-in while the model has not sent anything yet:
-   three dots where the first words will appear. It is the same report as
-   the header chip, in the place the person is already looking — an empty
-   body under a finished question reads as a product that did nothing.
-   Replaced by the text at the first delta. */
+/* The ONE "work is happening here, nothing has been written yet" stand-in
+   (nocx-vnirv.1): three dots where the first words will appear. Two hosts,
+   one class — a turn's children while the model thinks or a tool runs, and
+   the live region while a command runs (see the live-running rule above).
+   It is the same report as the header chip, in the place the person is
+   already looking — an empty body under a finished question reads as a
+   product that did nothing. Replaced by the text at the first delta. */
 .cmd-answer-typing {
   display: inline-flex;
   align-items: center;
@@ -875,6 +906,87 @@
     opacity: 1;
     transform: translateY(-2px);
   }
+}
+
+/* The model that answered, under the answer text (nocx-e6kn2): the person
+   must be able to tell which model answered without looking it up. Muted
+   provenance — the answer is the content; this is its caption. */
+.cmd-answer-provenance {
+  margin-top: 6px;
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+/* ── A turn's children (ADR-0040) ───────────────────────────────────── */
+
+/* WHAT THIS IS. A turn is ONE block that carries the blocks it caused, in
+   order: a run of prose, a tool call, more prose, a command with its real
+   output, more prose. This is where they hang. The order is the store's and
+   nothing here rearranges it — vertical position in a terminal is a claim
+   about time, so the only job of this box is to keep the claim true. */
+.cmd-children {
+  display: flex;
+  flex-direction: column;
+  /* THE CONTAINMENT HAS TO BE VISIBLE, or a child block is a block like any
+     other and nothing says whose it is. A gutter and one rule down the left,
+     drawn once for the whole run rather than per child, so five children read
+     as one group.
+
+     The indent costs a few pixels of visible width and NOTHING ELSE: a frozen
+     `.cmd-output` is `white-space: pre` with its own `overflow-x: auto`
+     (nocx-juau), so a wide grid reaches its far end by the scroll it already
+     had and nothing re-wraps. And the live xterm is not in here at all — it
+     is a sibling of the blocks in `.scrollback-inner` — so the terminal's own
+     `cols` is untouched by any of this. */
+  margin: var(--space-1) 0;
+  padding-left: var(--space-3);
+  border-left: 1px solid var(--color-border);
+}
+
+/* A turn that did nothing has no region to draw. The region is created with
+   the block rather than at the first child, so the empty case is the ordinary
+   one and must cost nothing. */
+.cmd-children:empty {
+  display: none;
+}
+
+/* A child is a block and the turn is a block, so without this every child
+   would wear the divider that separates one TOP-LEVEL block from the next —
+   and a divider between the pieces of one answer says "these are separate
+   answers", which is the sentence the `continued` badge used to say and
+   ADR-0040 deleted. The turn's own top border still separates the turn from
+   what came before it. */
+.cmd-children > .cmd-block {
+  border-top: 0;
+}
+
+/* ONE TOOL CALL: a header and nothing else (ADR-0040). The header's bottom
+   padding is the gap between a command and what it printed, and a call
+   prints nothing here — its result belongs to the ledger's attempt, and the
+   command a `run` call opened is a block of its own beside this. */
+.cmd-block[data-block-kind='tool'] .cmd-header {
+  padding-bottom: 2px;
+}
+
+/* It reads as a MARGIN NOTE, not as content: the answer is what the person
+   came for, and a call that shouted would compete with it. Dim and one size
+   below the body — and monospace, which it inherits, because the tool name
+   and its arguments are identifiers a person compares against the same words
+   in the terminal above. */
+.cmd-block[data-block-kind='tool'] .cmd-header-text {
+  font-size: var(--font-size-sm);
+  color: var(--color-text-muted);
+}
+
+/* A call that CHANGES something must not read like a call that looked at
+   something. The variance is the BACKEND's effect class, typed on the block
+   — never derived here from the tool's name (ADR-0028 decision 4). Only the
+   two ends are painted: a reader needs "this only looked" and "this could
+   not be undone" distinguishable at a glance, and giving all seven classes a
+   colour of their own would turn the turn into a legend. */
+.cmd-block[data-block-kind='tool'][data-effect='mutate-destructive'] .cmd-header-text,
+.cmd-block[data-block-kind='tool'][data-effect='privilege-change'] .cmd-header-text {
+  color: var(--color-warning);
 }
 
 .cmd-output {
@@ -943,6 +1055,41 @@
   letter-spacing: var(--term-cell-delta, 0px);
 }
 
+/* A grant marks the whole block, never a selection-sized set of rows. */
+.cmd-block[data-granted] {
+  position: relative;
+  background: color-mix(in srgb, var(--color-accent), transparent 94%);
+  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--color-accent), transparent 35%);
+}
+
+.cmd-block[data-granted]::before {
+  content: '';
+  position: absolute;
+  inset: 0 auto 0 0;
+  width: 3px;
+  background: var(--color-accent);
+  pointer-events: none;
+}
+
+.cmd-block-grant-flash {
+  animation: cmd-block-grant-flash 700ms ease-out;
+}
+
+@keyframes cmd-block-grant-flash {
+  from {
+    background: color-mix(in srgb, var(--color-accent), transparent 72%);
+  }
+  to {
+    background: color-mix(in srgb, var(--color-accent), transparent 94%);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .cmd-block-grant-flash {
+    animation: none;
+  }
+}
+
 /* The ask kind's body (nocx-ex636): prose from a model wraps at the
    block's width. The `.cmd-output` rule above — white-space: pre,
    overflow-x: auto — is the FROZEN contract (nocx-juau) and stays for
@@ -993,6 +1140,21 @@
 .cmd-output-code {
   white-space: pre;
   overflow-x: auto;
+  position: relative;
+  padding-top: calc(var(--space-2) + 22px);
+}
+
+.cmd-output-code-copy-host {
+  position: absolute;
+  top: var(--space-1);
+  right: var(--space-1);
+  z-index: 1;
+}
+
+/* Fence delimiters are structural rows, not visible answer content. Keep them
+   in the DOM so row selection and Copy output retain the original markers. */
+.cmd-output-code > .term-line[data-fence-delim] {
+  display: none;
 }
 
 /* The SETTING's default for a command block (terminal.wrapOutput, default
@@ -1086,6 +1248,14 @@
   padding: 4px 0;
   min-width: 160px;
   box-shadow: 0 4px 16px color-mix(in srgb, black, transparent 50%);
+  /* A menu taller than the viewport must still be fully reachable
+     (nocx-vnirv.2): the geometry clamps the shell's top-left corner, and
+     this cap + scroll is the other half of the same contract — the items
+     scroll WITHIN the menu instead of running past the window's bottom
+     edge. EDGE_MARGIN_PX is 8 (ui/menu-geometry.ts), so the cap leaves the
+     same clearance the clamp enforces. */
+  max-height: calc(100vh - 16px);
+  overflow-y: auto;
 }
 
 .cmd-overflow-menu-item {

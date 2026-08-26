@@ -60,16 +60,20 @@ type ledgerEntryWire struct {
 	// Host is the environment's endpoint, "" for the local machine — and
 	// NULL when no environment row carries the entry's environment_id, which
 	// is "unknown" and must not be rendered as "local".
-	Host        *string `json:"host"`
-	Cwd         string  `json:"cwd"`
-	Kind        string  `json:"kind"`
-	Intent      string  `json:"intent"`
-	Phase       string  `json:"phase"`
-	Status      string  `json:"status"`
-	SubmittedAt int64   `json:"submittedAt"`
-	StartedAt   *int64  `json:"startedAt"`
-	EndedAt     *int64  `json:"endedAt"`
-	DurationMs  *int64  `json:"durationMs"`
+	Host *string `json:"host"`
+	Cwd  string  `json:"cwd"`
+	Kind string  `json:"kind"`
+	// Source is who submitted the content or intent this row represents —
+	// entries.source, never derived from the kind. The restore badge is
+	// painted from it (frontend/src/restore-client.ts).
+	Source      string `json:"source"`
+	Intent      string `json:"intent"`
+	Phase       string `json:"phase"`
+	Status      string `json:"status"`
+	SubmittedAt int64  `json:"submittedAt"`
+	StartedAt   *int64 `json:"startedAt"`
+	EndedAt     *int64 `json:"endedAt"`
+	DurationMs  *int64 `json:"durationMs"`
 	// ExitCode is the shell arm's fact. Null is a real value — an
 	// interrupted command has none — and is never rendered as zero.
 	ExitCode    *int            `json:"exitCode"`
@@ -142,6 +146,74 @@ type ledgerGetResponse struct {
 	Entry     ledgerEntryWire      `json:"entry"`
 	Edges     []ledgerEdgeWire     `json:"edges"`
 	Artifacts []ledgerArtifactWire `json:"artifacts"`
+	// Caused is the entry's causal flow (nocx-h1l4o): the `caused-by` edges
+	// above, resolved and ordered by the position the turn assigned. It is
+	// beside `edges` rather than instead of them because they answer
+	// different questions — `edges` is every relation touching this entry
+	// in either direction, `caused` is the ONE relation the restore draws
+	// with, joined to the rows it points at.
+	Caused []ledgerCausedWire `json:"caused"`
+	// ProseEvicted says the prose of THIS RUN is no longer kept (ADR-0040's
+	// retention rule, ADR-0019 §7): retention took the bodies of the run's
+	// `text` children as a unit, and the renderer drawing the turn has ONE
+	// sentence to say rather than one per hole. It is the detail read's
+	// fact — the page never asks it, so it is never on the query row; a
+	// command whose own terminal body was evicted says its own sentence and
+	// does not set this.
+	ProseEvicted bool `json:"proseEvicted"`
+}
+
+// ledgerCausedWire is one entry a turn caused: where it sits in the turn,
+// and what a reader draws it with. Effect and resource are an ACTION entry's
+// facts and are null on every other kind, honestly — a command a turn ran is
+// not a tool call.
+type ledgerCausedWire struct {
+	// There is no `at`, and the absence is the point (ADR-0040). It said
+	// where in the turn's ANSWER this cause happened, in UTF-16 code units
+	// (nocx-9sqii), so that the renderer could cut one stored answer back
+	// into the fragments it was drawn as. It existed only because the unit
+	// that was DRAWN and the unit that was STORED were different things;
+	// they are the same thing now — a run of prose is a `text` child with a
+	// seat of its own — so Position IS the place and there is nothing left
+	// to cut.
+	EntryID  string `json:"entryId"`
+	Position int    `json:"position"`
+	Kind     string `json:"kind"`
+	// Source is who submitted the child's content — the same entries.source
+	// fact a page row carries, so a restored turn's badge never guesses it
+	// from the child's kind.
+	Source string `json:"source"`
+	Intent string `json:"intent"`
+	// Args is what an ACTION child asked for, and null on every other kind.
+	// A restored call is named from it exactly as the live announcement was
+	// (agent.runToolCall.args): the tool and the derived resource are the
+	// same for two calls of one session-scoped tool, so without this a
+	// restore would say less than the live view did.
+	Args       map[string]any      `json:"args"`
+	Effect     *string             `json:"effect"`
+	Resource   *content.GrantScope `json:"resource"`
+	OpensBlock bool                `json:"opensBlock"`
+}
+
+// ledgerCausedWireOf maps one resolved cause to the wire. The empty effect —
+// which is what a non-action row has — becomes null rather than "": the
+// enum on the wire is closed, and an empty string is not in it.
+func ledgerCausedWireOf(c content.CausedEntry) ledgerCausedWire {
+	w := ledgerCausedWire{
+		EntryID:    c.EntryID,
+		Position:   c.Position,
+		Kind:       string(c.Kind),
+		Source:     string(c.Source),
+		Intent:     c.Intent,
+		Args:       c.Args,
+		Resource:   c.Resource,
+		OpensBlock: c.OpensBlock,
+	}
+	if c.Effect != "" {
+		effect := string(c.Effect)
+		w.Effect = &effect
+	}
+	return w
 }
 
 // ── params ────────────────────────────────────────────────────────────────
@@ -288,10 +360,31 @@ func (h ledgerReadHandlers) handleGet(ctx context.Context, req jsonrpcRequest) {
 				From: e.From, To: e.To, Rel: string(e.Rel), Payload: payload,
 			})
 		}
-		// The artifacts of every execution of this entry, flattened: they
-		// attach to the run, and the run's id rides each one, so a caller
-		// that cares which attempt produced what still can tell.
+		// EVERY body this entry has, from BOTH places one can hang
+		// (ADR-0040 decision 3): the entry's own, and each execution's.
+		//
+		// The own ones come first and they were missing entirely until
+		// nocx-dc2fr.7's end-to-end check found it. An artifact belongs to
+		// its BLOCK now and names an execution only when an attempt produced
+		// it — a run of assistant prose was printed, not attempted, so its
+		// body has no execution to hang on. This loop flattened
+		// `row.Executions` alone, so every prose body was stored, read back
+		// by the ledger into `row.Artifacts`, and then silently dropped at
+		// the wire: the live turn was right, and the restored one drew every
+		// sentence of it blank. Both unit suites were green, because the
+		// store's test asked the store and the renderer's test supplied the
+		// facts itself — the hole was exactly the seam neither crossed.
 		artifacts := []ledgerArtifactWire{}
+		for _, a := range row.Artifacts {
+			wire, err := ledgerArtifactWireOf(a)
+			if err != nil {
+				return err
+			}
+			artifacts = append(artifacts, wire)
+		}
+		// An execution's artifacts attach to the run, and the run's id rides
+		// each one, so a caller that cares which attempt produced what still
+		// can tell.
 		for _, ex := range row.Executions {
 			for _, a := range ex.Artifacts {
 				wire, err := ledgerArtifactWireOf(a)
@@ -301,7 +394,25 @@ func (h ledgerReadHandlers) handleGet(ctx context.Context, req jsonrpcRequest) {
 				artifacts = append(artifacts, wire)
 			}
 		}
-		out = ledgerGetResponse{Entry: entry, Edges: wireEdges, Artifacts: artifacts}
+		// The causal flow: the caused-by edges above, resolved and ordered
+		// by the ledger. A turn that caused nothing answers [], which is
+		// the same answer a reader gets for any entry that is not a turn.
+		// Named apart from the closure's `err` deliberately: reusing it
+		// here makes `err` live past the two loops above, and govet's
+		// shadow check then reports their own inner `err` declarations —
+		// pre-existing lines this change has no business rewriting.
+		caused, causedErr := svc.Caused(ctx, p.ID)
+		if causedErr != nil {
+			return causedErr
+		}
+		wireCaused := make([]ledgerCausedWire, 0, len(caused))
+		for _, c := range caused {
+			wireCaused = append(wireCaused, ledgerCausedWireOf(c))
+		}
+		out = ledgerGetResponse{
+			Entry: entry, Edges: wireEdges, Artifacts: artifacts, Caused: wireCaused,
+			ProseEvicted: row.ProseEvicted,
+		}
 		return nil
 	})
 	if err != nil {
@@ -439,7 +550,7 @@ func ledgerEntryWireOf(row content.LedgerEntrySummary) (ledgerEntryWire, error) 
 	}
 	return ledgerEntryWire{
 		ID: row.ID, Seq: row.IngestSeq, EnvID: row.EnvironmentID, Host: host,
-		Cwd: row.Cwd, Kind: string(row.Kind), Intent: row.Intent,
+		Cwd: row.Cwd, Kind: string(row.Kind), Source: string(row.Source), Intent: row.Intent,
 		Phase: string(row.Phase), Status: string(row.Status),
 		SubmittedAt: row.SubmittedAt, StartedAt: row.StartedAt, EndedAt: row.EndedAt,
 		DurationMs: row.DurationMs, ExitCode: exit,
@@ -466,8 +577,17 @@ func ledgerArtifactWireOf(a content.Artifact) (ledgerArtifactWire, error) {
 		v := string(*a.Stream)
 		stream = &v
 	}
+	// The wire's executionId is a plain integer, and the contract owns that
+	// shape. Every artifact reaching here came off the entry's executions,
+	// so the pointer is never nil on this path; ADR-0040 made the column
+	// nullable for a body no attempt produced (a `text` block's), and
+	// putting THAT on the wire belongs to the contracts task.
+	var execID int64
+	if a.ExecutionID != nil {
+		execID = *a.ExecutionID
+	}
 	return ledgerArtifactWire{
-		ID: a.ID, ExecutionID: a.ExecutionID, MediaType: string(a.MediaType),
+		ID: a.ID, ExecutionID: execID, MediaType: string(a.MediaType),
 		DerivedFrom: a.DerivedFrom, State: string(a.State), ByteLen: a.ByteLen,
 		ChunkCount: a.ChunkCount, Pinned: a.Pinned, Truncated: truncated,
 		CaptureMethod: string(a.CaptureMethod), CaptureVersion: a.CaptureVersion,
@@ -542,10 +662,10 @@ func ledgerQueryOf(p ledgerQueryParams) (content.LedgerQuery, string) {
 	}
 	if p.Kind != nil {
 		switch content.EntryKind(*p.Kind) {
-		case content.EntryShell, content.EntryAgent, content.EntryAction:
+		case content.EntryShell, content.EntryAsk, content.EntryAction, content.EntryFrame, content.EntryText:
 			q.Kind = content.EntryKind(*p.Kind)
 		default:
-			return q, "kind must be one of shell, agent, action"
+			return q, "kind must be one of shell, ask, action, frame, text"
 		}
 	}
 	if p.Status != nil {

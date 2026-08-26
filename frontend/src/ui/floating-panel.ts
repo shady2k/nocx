@@ -47,12 +47,13 @@ export const MIN_PANEL_WIDTH_PX: Record<FloatingPanelVariant, number> = {
   // footer (wider than the completion's glance) whose rows are short names
   // (narrower than recall's command lines).
   secret: 480,
+  grant: 360,
 }
 
 /** The surfaces that float over the editor — one shell, one layout per
- *  surface. The secret picker joined the completion dropdown and the recall
- *  overlay as the third variant. */
-export type FloatingPanelVariant = 'completion' | 'recall' | 'secret'
+ *  surface. The secret picker and grant list join the completion dropdown
+ *  and recall overlay as variants of the same primitive. */
+export type FloatingPanelVariant = 'completion' | 'recall' | 'secret' | 'grant'
 
 /** One row the kit draws. Deliberately a display subset of whatever the
  *  variant's domain object is: the variant maps candidates/entries to rows

@@ -124,6 +124,17 @@
   gap: var(--space-2);
 }
 
+/* ...and the section's description has to make that gap back. The kit pulls
+   the description UP to its heading with a negative margin sized against the
+   kit's own gap (16px), so under this surface's halved one the pull cancels
+   the gap exactly: the sentence rendered flush against the heading's rule,
+   with no air at all, while the same sentence under a collapsible Section a
+   few rows down had 24px. Placement, not paint — and the surface that halved
+   the gap is the one that owes the correction. */
+.ui-settings .ui-page-section__desc {
+  margin-block-start: var(--space-4);
+}
+
 .ui-settings section {
   margin-bottom: var(--space-8);
 }
@@ -156,6 +167,18 @@
   display: flex;
   align-items: center;
   gap: var(--space-3);
+}
+
+/* A paragraph needs the room to be one. Every other control on this screen is
+   an answer to its label and sizes itself — a switch, a 120px select, a number
+   field at one declared width — so the control column is `flex: 0 0 auto` and
+   takes what the control asks for. A bare textarea asks for its 20-column
+   default, which is not a field anybody writes several sentences into.
+   Placement only (width): the field's appearance, including whether it wraps,
+   is the kit's and is declared there. */
+.ui-settings-control-line .ui-text-field[data-multiline='true'] {
+  width: 44ch;
+  max-width: 100%;
 }
 
 /* A slot of fixed width, always present. The icon inside it comes and goes with

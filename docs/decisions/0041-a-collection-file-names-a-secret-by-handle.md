@@ -1,4 +1,4 @@
-# ADR-0039 — A collection file names a secret by handle
+# ADR-0041 — A collection file names a secret by handle
 
 - **Status:** Accepted
 - **Date:** 2026-08-26

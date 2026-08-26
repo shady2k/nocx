@@ -6332,6 +6332,14 @@ describe('secrets are doors in every request field', () => {
         expect(savedBytes).not.toContain('sk-')
       }
     },
+    // Each case MOUNTS THE WHOLE WORKBENCH — the tree, the request form and
+    // the runs pane — and then walks it. That is seconds of real work, and
+    // vitest's default budget for a test is five of them, which is a number
+    // nothing in this repo ever chose. Every wait inside is on an observable
+    // state, so this is a HANG DETECTOR and not an expectation about how fast
+    // the machine is: the cases take ~700ms each on an idle run and went over
+    // the default only once the suite grew enough to run them under load.
+    30_000,
   )
   it('uses the shared source list for every request reference verdict', async () => {
     await openSecretRequest(source, {

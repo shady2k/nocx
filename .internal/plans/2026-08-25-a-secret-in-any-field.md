@@ -327,7 +327,7 @@ export function createSecretPickerField(opts: {
 **Files:**
 
 - Create: `e2e/api-secret-in-any-field.spec.ts`
-- Create: `docs/decisions/0039-a-collection-file-names-a-secret-by-handle.md`
+- Create: `docs/decisions/0041-a-collection-file-names-a-secret-by-handle.md`
 - Modify: `docs/decisions/INDEX.md`
 
 **Acceptance criteria — the epic's DONE WHEN:**

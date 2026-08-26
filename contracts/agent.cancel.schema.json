@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.cancel.schema.json",
+  "title": "AgentCancel",
+  "description": "Result of the agent.cancel JSON-RPC method (nocx-uvac6.2): the backend closes a live agent run after a person's stop request. The cancelled flag is true only when this request closed a non-terminal run; an already-terminal or unknown run is answered with an error. The terminal state is persisted before this result is answered, and the run's already-recorded prose remains in the ledger.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["runId", "state", "cancelled"],
+  "properties": {
+    "runId": {
+      "description": "The backend-minted run id that was stopped.",
+      "type": "integer",
+      "minimum": 1
+    },
+    "state": {
+      "description": "The run state after the stop. A successful cancellation is the cancelled terminal state.",
+      "type": "string",
+      "enum": ["cancelled"]
+    },
+    "cancelled": {
+      "description": "True because this request stopped the live run.",
+      "type": "boolean",
+      "const": true
+    }
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/files.read.schema.json",
+  "title": "FilesReadParams",
+  "description": "Params of the files.read agent tool (design §4.2): read a file within the grant's paths. The model is untrusted input and gets the same check the renderer's parameters get — additionalProperties: false plus an explicit required list, and a bound on the path it may name (the grant's paths, enforced by the narrowed capability nocx-lndv constructs). Windowing of the return is the tool's return contract (design §4.4), not a parameter of this slice.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {
+    "path": {
+      "type": "string",
+      "description": "Path of the file to read, inside the grant's paths."
+    }
+  }
+}

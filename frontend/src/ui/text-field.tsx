@@ -53,6 +53,20 @@ export interface TextFieldProps {
   error?: string
   /** When true, renders a <textarea> instead of an <input>. */
   multiline?: boolean
+  /**
+   * Wrap long lines to the width of the box instead of scrolling them
+   * sideways. `multiline` only.
+   *
+   * The two kinds of content a textarea holds want opposite treatment, and
+   * neither can be inferred from the other. VERBATIM MATERIAL — a pasted
+   * private key — must stay on the lines it arrived on, because a wrapped
+   * key looks like a different key and a person checking it by eye cannot
+   * tell. PROSE — a person's own standing instructions to the assistant —
+   * has no lines of its own, and not wrapping it puts a paragraph behind a
+   * horizontal scrollbar. Default is verbatim: it is what the first caller
+   * pastes, and the safer of the two to be wrong about.
+   */
+  wrap?: boolean
   value: string | number
   /** Fires on every keystroke (input event). */
   onInput?: (value: string) => void
@@ -68,6 +82,21 @@ export interface TextFieldProps {
   /** Fires when a key reaches the input, before the surface handles it. */
   onKeyDown?: (event: KeyboardEvent) => void
   onBlur?: (value: string) => void
+  /**
+   * Fires when the person is FINISHED with the value: when focus leaves, and
+   * on Enter in a single-line field.
+   *
+   * For a field whose value is WRITTEN rather than merely validated. The
+   * Agent policy page's scope field is checked by `ParseEffectPolicy`, which
+   * rejects a non-absolute path, so writing per keystroke would be a refused
+   * write and a toast on every character of `/workspace`. Blur and Enter are
+   * one gesture — "done" — and naming it here keeps every caller from pairing
+   * `onBlur` with a hand-rolled keydown of its own.
+   *
+   * Enter does NOT commit a `multiline` field: there it inserts a newline,
+   * and only blur means done.
+   */
+  onCommit?: (value: string) => void
   type?: 'text' | 'number' | 'password'
   placeholder?: string
   min?: number
@@ -160,6 +189,23 @@ export function TextField(props: TextFieldProps) {
   const onBlur = (e: FocusEvent) => {
     const target = e.currentTarget as HTMLInputElement
     props.onBlur?.(target.value)
+    props.onCommit?.(target.value)
+  }
+
+  /** Enter commits a single-line field. Wired to the input only — in a
+   *  textarea Enter is a newline, and stealing it would make the control
+   *  unable to do the one thing multiline exists for.
+   *
+   *  The caller's handler runs FIRST and may claim the key. A field wearing
+   *  the secret picker answers Enter with "take the selected row", and the
+   *  panel says so the way it already says it to every other listener — by
+   *  calling `preventDefault` (`secret-picker.ts`, `consume`). Reading that
+   *  flag keeps one owner for "this key is spoken for"; a second channel
+   *  would be a second answer to the same question. */
+  const onKeyDown = (e: KeyboardEvent) => {
+    props.onKeyDown?.(e)
+    if (e.key !== 'Enter' || e.defaultPrevented) return
+    props.onCommit?.((e.currentTarget as HTMLInputElement).value)
   }
 
   const inputElement = () => (
@@ -196,8 +242,8 @@ export function TextField(props: TextFieldProps) {
       }}
       onFocus={props.onFocus}
       onInput={onInput}
-      onKeyDown={props.onKeyDown}
       onBlur={onBlur}
+      onKeyDown={onKeyDown}
       onScroll={followScroll}
     />
   )
@@ -359,7 +405,11 @@ export function TextField(props: TextFieldProps) {
     props.required === true
 
   return (
-    <div class="ui-text-field" data-multiline={props.multiline ? 'true' : undefined}>
+    <div
+      class="ui-text-field"
+      data-multiline={props.multiline ? 'true' : undefined}
+      data-wrap={props.multiline && props.wrap ? 'true' : undefined}
+    >
       <Show when={hasFieldContent()} fallback={input()}>
         {/* When a caption slot exists it OWNS the error (the error replaces the
             caption in that slot); Field must not render a second one. */}

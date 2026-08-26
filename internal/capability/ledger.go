@@ -53,6 +53,12 @@ type LedgerService interface {
 	// entry, in either direction. It is what makes the ledger a memory
 	// rather than a log (design §3.4).
 	Edges(ctx context.Context, entryID string) ([]content.Edge, error)
+	// Caused serves the detail read's causal flow (nocx-h1l4o): everything
+	// this entry caused, in the causal order the turn assigned, each row
+	// resolved into what a reader draws it with. The JOIN and the ORDER are
+	// the ledger's — a reader given raw edges would own the arrangement a
+	// second time, which is what AD-8 forbids.
+	Caused(ctx context.Context, entryID string) ([]content.CausedEntry, error)
 	// Artifact serves ledger.artifact: one body with its chunks, which is
 	// what a restored block's output is drawn from. Nil when no artifact
 	// carries the id — a body retention has evicted, which the caller must
@@ -141,6 +147,13 @@ func (s *ledgerService) Edges(ctx context.Context, entryID string) ([]content.Ed
 		return nil, err
 	}
 	return s.ledger.Edges(ctx, entryID)
+}
+
+func (s *ledgerService) Caused(ctx context.Context, entryID string) ([]content.CausedEntry, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	return s.ledger.Caused(ctx, entryID)
 }
 
 func (s *ledgerService) Artifact(ctx context.Context, id string) (*content.Artifact, error) {

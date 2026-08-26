@@ -4,6 +4,7 @@ import { historyOutbox } from './history-client'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
 import type { SessionLiveness } from './generated/session.liveness'
+import type { SessionSignal } from './generated/session.signal'
 import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
 
 /** The open ack's wire shape (contracts/open.schema.json): the server
@@ -297,6 +298,13 @@ export class SessionHandle {
 
   sendResize(cols: number, rows: number): void {
     this.client.sendResize(this.sessionId, cols, rows)
+  }
+
+  /** Address a signal to the command running in this session (nocx-23rph).
+   *  See WSClient.signalSession — this is the same call, spelled where a
+   *  surface that already holds the handle can reach it. */
+  signal(signal: SessionSignal['signal']): Promise<SessionSignal> {
+    return this.client.signalSession(this.sessionId, signal)
   }
 
   close(): void {
@@ -735,6 +743,24 @@ export class WSClient {
     void this.dispatcher
       .call('resize', { sessionId, cols, rows, xpixel: 0, ypixel: 0 })
       .catch(() => {})
+  }
+
+  /**
+   * Address a signal to the command running in one session (nocx-23rph).
+   *
+   * NOT fire-and-forget, unlike resize: the answer is the whole point. A
+   * signal sent to a pane sitting at a prompt is refused honestly in the
+   * RESULT (`outcome`), because it is not a caller error and there is
+   * nothing for the transport to report — and a control that silently does
+   * nothing is indistinguishable from a broken one. The caller reads the
+   * outcome and says so.
+   *
+   * A closed socket rejects rather than resolving a fiction: the renderer
+   * cannot know whether the command is still running, and a made-up
+   * "delivered" is the one answer that must never be given.
+   */
+  signalSession(sessionId: string, signal: SessionSignal['signal']): Promise<SessionSignal> {
+    return this.dispatcher.call<SessionSignal>('session.signal', { sessionId, signal })
   }
 
   closeSession(sessionId: string): void {

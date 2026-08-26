@@ -684,7 +684,7 @@ func TestLifecycleSubmitAttempt_StartAttachesAndReplacesNothing(t *testing.T) {
 	const cwd = "/srv/app"
 	const host = "build.example.com"
 	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
-		map[string]string{"domain": string(h.Domain), "command": command, "cwd": cwd, "host": host}, 41))
+		map[string]string{"domain": string(h.Domain), "command": command, "cwd": cwd, "host": host, "source": "user"}, 41))
 	if got.State != lifecyclepub.AttemptOpen || got.Origin != lifecyclepub.OriginApp {
 		t.Fatalf("result = %+v, want an open app-originated attempt", got)
 	}
@@ -718,7 +718,7 @@ func TestLifecycleSubmitAttempt_StartAttachesAndReplacesNothing(t *testing.T) {
 	// exactly one attempt per submit, and the ordering rule means there is
 	// never a second one waiting.
 	errObj := submitAttemptErr(t, e.conn, map[string]string{
-		"domain": string(h.Domain), "command": "git status", "cwd": cwd, "host": host,
+		"domain": string(h.Domain), "command": "git status", "cwd": cwd, "host": host, "source": "user",
 	}, 42)
 	if errObj.Code != -32602 {
 		t.Fatalf("second submitAttempt code = %d, want -32602", errObj.Code)
@@ -806,7 +806,7 @@ func TestLifecycleSubmitAttempt_IsScopedToTheOwningSession(t *testing.T) {
 	defer func() { _ = connB.Close() }()
 	openSessionOnConn(t, e.ws, connB, 2)
 	params := map[string]string{
-		"domain": string(h.Domain), "command": "make", "cwd": "/srv/app", "host": "build.example.com",
+		"domain": string(h.Domain), "command": "make", "cwd": "/srv/app", "host": "build.example.com", "source": "user",
 	}
 	errObj := submitAttemptErr(t, connB, params, 41)
 	if errObj.Code != -32602 {
@@ -829,7 +829,7 @@ func TestLifecycleSubmitAttempt_IsScopedToTheOwningSession(t *testing.T) {
 func TestLifecycleSubmitAttempt_NotWiredFailsClosed(t *testing.T) {
 	e := newLifecycleTestEnv(t)
 	errObj := submitAttemptErr(t, e.conn, map[string]string{
-		"domain": "dom-1", "command": "make", "cwd": "/srv/app", "host": "build.example.com",
+		"domain": "dom-1", "command": "make", "cwd": "/srv/app", "host": "build.example.com", "source": "user",
 	}, 41)
 	if errObj.Code != -32601 {
 		t.Fatalf("unwired code = %d, want -32601", errObj.Code)

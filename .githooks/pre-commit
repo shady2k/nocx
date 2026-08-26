@@ -110,7 +110,29 @@ if [ "$RUN_FE" = 1 ]; then
 fi
 
 # --- 2. gofumpt (always: one second, and it reads the whole module) ----------
-UNFMT=$(gofumpt -l . 2>&1) || true
+# THE FILE LIST COMES FROM GIT, never from a walk of the directory tree.
+# `gofumpt -l .` descends into everything on the path, and agent worktrees are
+# ON the path: Claude Code's worktree isolation checks other branches out at
+# .claude/worktrees/<id>/, inside this root. Those carry whatever formatting
+# their commit had, cannot be corrected from here, and blocked EVERY commit in
+# the repository — a docs-only change included — until somebody removed the
+# worktree (nocx-290r5).
+#
+# Go's own tooling never had this problem, which is why only this line did:
+# `./...` skips directories whose name begins with a dot, so go build, go test
+# and the golangci-lint step below have always been blind to them. prettier was
+# taught the same lesson once already, and .prettierignore says so in as many
+# words for test-results/ — "prettier walks the filesystem rather than the
+# index, so an ignored directory still failed `prettier --check .`".
+#
+# -c -o --exclude-standard is "tracked, plus untracked that .gitignore does not
+# exclude", so a .go file written and not yet added is still checked and this
+# is not a weaker gate than the walk. git does not descend into a nested
+# worktree; the pathspec then says .claude is out however it got there. -z with
+# xargs -0 because a path with a space must not become two arguments, and -0 is
+# the one xargs flag both BSD and GNU spell the same way.
+UNFMT=$(git ls-files -zco --exclude-standard -- '*.go' ':(exclude).claude/**' \
+    | xargs -0 gofumpt -l 2>&1) || true
 if [ -n "$UNFMT" ]; then
     warn "gofumpt — the following files need formatting:"
     printf "%s\n" "$UNFMT"

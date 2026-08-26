@@ -54,6 +54,7 @@ func frameDigest(in CaptureFrame) string {
 	enc := json.NewEncoder(h)
 	_ = enc.Encode(struct {
 		Client, Cwd, Source string
+		Subject             Source
 		EnvironmentID       string
 		SessionID           *string
 		Rows                []FrameRow
@@ -63,7 +64,7 @@ func frameDigest(in CaptureFrame) string {
 		SerializerVersion   *int
 	}{
 		Client: in.Client, Cwd: in.Cwd, Source: string(in.Source),
-		EnvironmentID: in.Env.ID, SessionID: in.SessionID,
+		Subject: in.Subject, EnvironmentID: in.Env.ID, SessionID: in.SessionID,
 		Rows: in.Rows, Cursor: in.Cursor, Identity: in.Identity,
 		Range: in.Range, SerializerVersion: in.SerializerVersion,
 	})
@@ -194,6 +195,16 @@ func (s *sqliteContent) CaptureFrame(ctx context.Context, in CaptureFrame) (Capt
 	if in.Client == "" {
 		return CaptureFrameResult{}, errors.New("content: capture frame: client is required — it binds the idempotency key")
 	}
+	// Empty Subject is the ask gesture — the renderer's captureFrame call,
+	// which is a person selecting blocks and asking. The readScreen pull is
+	// a different producer that stamps SourceAssistant when it ever
+	// persists; until then the honest default for a capture naming no
+	// subject is the person's. Defaulted HERE, before frameDigest, so a
+	// legacy empty-subject replay hashes identically to the normalized
+	// frame it created (the same rule Submit follows for Source).
+	if in.Subject == "" {
+		in.Subject = SourceUser
+	}
 	switch in.Source {
 	case FrameLive:
 		if in.Identity == nil {
@@ -267,11 +278,11 @@ func (s *sqliteContent) CaptureFrame(ctx context.Context, in CaptureFrame) (Capt
 			return fmt.Errorf("content: capture frame: assign ingest_seq: %w", seqErr)
 		}
 		if _, insertErr := tx.ExecContext(ctx, `INSERT INTO entries
-			(id, ingest_seq, client, digest, environment_id, session_id, cwd, kind, intent,
+			(id, ingest_seq, client, digest, environment_id, session_id, cwd, kind, source, intent,
 			 phase, status, submitted_at, capture_key, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 'agent', ?, 'closed', 'success', ?, ?, '{}')`,
+			VALUES (?, ?, ?, ?, ?, ?, ?, 'frame', ?, ?, 'closed', 'success', ?, ?, '{}')`,
 			frameID, seq, in.Client, digest, in.Env.ID, in.SessionID, in.Cwd,
-			FrameIntent, now, in.CaptureID); insertErr != nil {
+			string(in.Subject), FrameIntent, now, in.CaptureID); insertErr != nil {
 			return insertErr
 		}
 
@@ -296,11 +307,13 @@ func (s *sqliteContent) CaptureFrame(ctx context.Context, in CaptureFrame) (Capt
 			return err
 		}
 		mediaType, method, version := frameArtifactIdentity(in)
+		// The frame's body belongs to the frame BLOCK (ADR-0040); the
+		// capture execution beside it says which attempt took it.
 		if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts
-			(id, execution_id, media_type, state, byte_len, capture_method, capture_version,
+			(id, entry_id, execution_id, media_type, state, byte_len, capture_method, capture_version,
 			 terminal_cols, terminal_rows, encoding, gaps, payload)
-			VALUES (?, ?, ?, 'sealed', ?, ?, ?, ?, ?, 'utf-8', '[]', ?)`,
-			artifactID, execID, string(mediaType), len(text), string(method), version,
+			VALUES (?, ?, ?, ?, 'sealed', ?, ?, ?, ?, ?, 'utf-8', '[]', ?)`,
+			artifactID, frameID, execID, string(mediaType), len(text), string(method), version,
 			cols, rows, string(payload)); err != nil {
 			return err
 		}
@@ -400,10 +413,12 @@ func chunkBytes(b []byte) [][]byte {
 
 // ── agent.ask ─────────────────────────────────────────────────────────────
 
-// SubmitAgentAsk records ONE ask transaction atomically: the question entry
-// (kind=agent, open/pending), its pending run (the backend-minted execution
-// row, state prepared — the model is never called here) and the references
-// edges, each carrying its region. Every reference is validated INSIDE the
+// SubmitAgentAsk records ONE ask transaction atomically: the TURN
+// (kind=agent, open/pending — the question is its intent, anchored to the
+// pane it was asked in), its pending run (the backend-minted execution row,
+// state prepared — the model is never called here) with the open artifact
+// the answer will be streamed into, and the references edges, each carrying
+// its region. Every reference is validated INSIDE the
 // transaction: unknown id, non-frame id, a frame from another session or an
 // out-of-bounds region refuses the WHOLE transaction — the interval "the
 // run record exists from before the ask returns until the run terminalizes"
@@ -449,22 +464,15 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 				}
 				return runErr
 			}
-			// A replay returns the ORIGINAL answer identity too — the
-			// renderer's lost response must not orphan the answer block.
-			var answerID, artifactID string
-			if answerErr := tx.QueryRowContext(ctx,
-				`SELECT from_id FROM edges WHERE to_id = ? AND rel = 'caused-by'`,
-				in.ID).Scan(&answerID); answerErr != nil {
-				return fmt.Errorf("content: submit agent ask: replayed ask %q has no answer entry", in.ID)
-			}
-			if artifactErr := tx.QueryRowContext(ctx,
-				`SELECT a.id FROM artifacts a JOIN executions e ON a.execution_id = e.id
-				  WHERE e.entry_id = ? ORDER BY a.id LIMIT 1`, answerID).Scan(&artifactID); artifactErr != nil {
-				return fmt.Errorf("content: submit agent ask: replayed ask %q has no answer artifact", in.ID)
-			}
+			// A replay returns the ORIGINAL run and turn, and nothing else
+			// to return: the answer's body is not one artifact any more, it
+			// is whatever `text` children the run has opened so far
+			// (ADR-0040). A replay that re-drove the stream would open its
+			// prose blocks after the ones already there, which is the same
+			// answer twice and is a defect of the driver, not of this
+			// result shape.
 			out = AgentAskResult{
-				RunID: runID, QuestionID: in.ID, AnswerEntryID: answerID,
-				AnswerArtifactID: artifactID, IngestSeq: haveSeq, Replayed: true,
+				RunID: runID, EntryID: in.ID, IngestSeq: haveSeq, Replayed: true,
 			}
 			return tx.Commit()
 		case !errors.Is(err, sql.ErrNoRows):
@@ -482,11 +490,15 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 			`UPDATE ledger_sequence SET next = next + 1 WHERE id = 1 RETURNING next`).Scan(&seq); seqErr != nil {
 			return fmt.Errorf("content: submit agent ask: assign ingest_seq: %w", seqErr)
 		}
+		// The turn: the question is the entry's INTENT, which is what the
+		// block's header renders, and pane_id is the anchor that makes it
+		// restorable at all (nocx-4em1z). session_id beside it is
+		// provenance and is swept on the next Open.
 		if _, insertErr := tx.ExecContext(ctx, `INSERT INTO entries
-			(id, ingest_seq, client, digest, environment_id, session_id, cwd, kind, intent,
+			(id, ingest_seq, client, digest, environment_id, pane_id, session_id, cwd, kind, source, intent,
 			 phase, status, submitted_at, sensitivity, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 'agent', ?, 'open', 'pending', ?, 'normal', '{}')`,
-			in.ID, seq, in.Client, digest, in.Env.ID, in.SessionID, in.Cwd,
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ask', 'user', ?, 'open', 'pending', ?, 'normal', '{}')`,
+			in.ID, seq, in.Client, digest, in.Env.ID, in.PaneID, in.SessionID, in.Cwd,
 			in.Question, now); insertErr != nil {
 			return insertErr
 		}
@@ -529,73 +541,44 @@ func (s *sqliteContent) SubmitAgentAsk(ctx context.Context, in AgentAsk) (AgentA
 			}
 		}
 
-		// The answer entry: the model's streamed reply lands here — an
-		// entry in the flow, joined to the question by a caused-by edge
-		// (design §5: the answer is an entry, never a string held in a map
-		// that dies with the process). Its identity exists from before the
-		// first delta until the run terminalizes — the same span as the
-		// run: question, run, references, answer entry and artifact commit
-		// together or none does.
-		answerID := mintID()
-		artifactID := mintID()
-		// The answer gets its own ingest_seq — commit order is the
-		// counter's order (ADR-0019 §2), and a second entry means a second
-		// counter increment, never seq+1 (which the next ask would collide
-		// with).
-		var answerSeq int64
-		if answerSeqErr := tx.QueryRowContext(ctx,
-			`UPDATE ledger_sequence SET next = next + 1 WHERE id = 1 RETURNING next`).Scan(&answerSeq); answerSeqErr != nil {
-			return fmt.Errorf("content: submit agent ask: assign answer ingest_seq: %w", answerSeqErr)
-		}
-		// The entry first — its execution and artifact reference it (FK).
-		if _, answerInsertErr := tx.ExecContext(ctx, `INSERT INTO entries
-			(id, ingest_seq, client, digest, environment_id, session_id, cwd, kind, intent,
-			 phase, status, conversation_id, submitted_at, sensitivity, payload)
-			VALUES (?, ?, ?, ?, ?, ?, ?, 'agent', ?, 'open', 'pending', ?, ?, 'normal', '{}')`,
-			answerID, answerSeq, in.Client, digest, in.Env.ID, in.SessionID, in.Cwd,
-			AnswerIntent, in.ID, now); answerInsertErr != nil {
-			return answerInsertErr
-		}
-		answerExec, err := tx.ExecContext(ctx, `INSERT INTO executions
-			(entry_id, attempt, environment_obs_id, interactivity, started_at)
-			VALUES (?, 1, ?, 'none', ?)`,
-			answerID, obsID, now)
-		if err != nil {
-			return err
-		}
-		answerExecID, err := answerExec.LastInsertId()
-		if err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx, `INSERT INTO artifacts
-			(id, execution_id, media_type, state, byte_len, capture_method, capture_version,
-			 encoding, gaps, payload)
-			VALUES (?, ?, 'text/plain', 'open', 0, 'none', 1, 'utf-8', '[]', '{}')`,
-			artifactID, answerExecID); err != nil {
-			return err
-		}
-		if _, err := tx.ExecContext(ctx,
-			`INSERT INTO edges (from_id, to_id, rel, payload) VALUES (?, ?, 'caused-by', '{}')`,
-			answerID, in.ID); err != nil {
-			return err
-		}
-
+		// NO ANSWER ARTIFACT. The ask used to open one text/plain artifact
+		// on the run here, and every delta of the whole answer appended to
+		// it — which made the STORED unit the whole answer while the DRAWN
+		// unit was a run of prose between two calls, and something had to
+		// translate between them. That translation was the anchor ADR-0040
+		// deletes.
+		//
+		// The turn's body is its children now: the run opens a `text` block
+		// on the first delta after a call (OpenProse) and seals it when the
+		// next call arrives, so the boundary is a row rather than an offset.
+		// A turn that never streamed a word therefore carries no body at
+		// all, which is the honest shape — an empty artifact was a claim
+		// that something was printed.
+		//
+		// The prose blocks stay ARTIFACTS WITH PROVENANCE rather than
+		// strings in a column, which is the part of design §5 that outlives
+		// the shape it was written in (ADR-0019 §6); text/plain and never
+		// application/vt, because a turn has no terminal body and never
+		// will, and that stored fact is what a restored block picks its
+		// grammar from (prose wraps, a grid must not).
 		if err := tx.Commit(); err != nil {
 			return err
 		}
-		out = AgentAskResult{
-			RunID: runID, QuestionID: in.ID, AnswerEntryID: answerID,
-			AnswerArtifactID: artifactID, IngestSeq: seq,
-		}
+		out = AgentAskResult{RunID: runID, EntryID: in.ID, IngestSeq: seq}
 		return nil
 	})
 	return out, err
 }
 
-// TransitionRun moves the assistant run to a NON-TERMINAL state. This slice
-// knows exactly one such move — prepared → streaming — and it is the gate
-// deltas may not pass before: a delta persisted before the streaming
-// transition commits would be a delta outside the run's non-terminal span.
+// TransitionRun moves the assistant run to a NON-TERMINAL state. The machine
+// (nocx-z9hj4): prepared → streaming (the ask starts — the gate deltas may
+// not pass before: a delta persisted before the streaming transition commits
+// would be a delta outside the run's non-terminal span), streaming →
+// awaiting_approval (the policy or the egress gate suspended the run before
+// the provider was reached), and awaiting_approval → streaming (the person
+// answered and the run streams again). Terminal moves go through
+// FinishAgentRun; a move not on the machine is refused, never silently
+// applied.
 func (s *sqliteContent) TransitionRun(ctx context.Context, runID int64, to RunState) error {
 	if to.IsTerminal() {
 		return fmt.Errorf("content: transition run: %s is terminal — use FinishAgentRun", to)
@@ -620,7 +603,10 @@ func (s *sqliteContent) TransitionRun(ctx context.Context, runID int64, to RunSt
 		if cur == to {
 			return nil // idempotent: the driver may retry after a lost commit
 		}
-		if !(cur == RunPrepared && to == RunStreaming) {
+		legal := (cur == RunPrepared && to == RunStreaming) ||
+			(cur == RunStreaming && to == RunAwaitingApproval) ||
+			(cur == RunAwaitingApproval && to == RunStreaming)
+		if !legal {
 			return fmt.Errorf("content: transition run: illegal move %s → %s", cur, to)
 		}
 		if _, err := s.db.ExecContext(ctx,
@@ -631,12 +617,11 @@ func (s *sqliteContent) TransitionRun(ctx context.Context, runID int64, to RunSt
 	})
 }
 
-// FinishAgentRun closes the run and its entries in ONE transaction: the
-// run's terminal state, end and termination reason; the question entry; the
-// answer entry (found via its caused-by edge); and the answer artifact
-// (sealed) with the answer execution's end. A run is never reported
-// terminal in the run vocabulary while its entries still say otherwise —
-// both lifecycles close together, or neither does.
+// FinishAgentRun closes the run and its turn in ONE transaction: the run's
+// terminal state, end and termination reason; the turn's entry, with the
+// interval it took; and the answer body (sealed). A run is never reported
+// terminal in the run vocabulary while its entry still says otherwise — both
+// lifecycles close together, or neither does.
 func (s *sqliteContent) FinishAgentRun(ctx context.Context, runID int64, in FinishAgentRun) error {
 	if !in.State.IsTerminal() {
 		return fmt.Errorf("content: finish agent run: %s is not terminal", in.State)
@@ -649,8 +634,10 @@ func (s *sqliteContent) FinishAgentRun(ctx context.Context, runID int64, in Fini
 		defer func() { _ = tx.Rollback() }()
 
 		var entryID, payload string
+		var runStartedAt sql.NullInt64
 		err = tx.QueryRowContext(ctx,
-			`SELECT entry_id, payload FROM executions WHERE id = ?`, runID).Scan(&entryID, &payload)
+			`SELECT entry_id, payload, started_at FROM executions WHERE id = ?`, runID).
+			Scan(&entryID, &payload, &runStartedAt)
 		if errors.Is(err, sql.ErrNoRows) {
 			return ErrNoSuchRun
 		}
@@ -678,66 +665,253 @@ func (s *sqliteContent) FinishAgentRun(ctx context.Context, runID int64, in Fini
 			string(in.State), in.EndedAt, string(in.TerminationReason), payload, runID); err != nil {
 			return err
 		}
+		// The turn's terminal facts, and its duration with them (nocx-hoeq3).
+		// A shell command's duration is the RENDERER's measurement because
+		// the renderer is what timed it; nobody times a turn but this
+		// process, which opened the run at submit and is closing it now. So
+		// the two ends here are one clock, and subtracting them is asking
+		// that clock rather than differencing two (see the schema note).
+		//
+		// A run with no start — nothing writes one, but the column is
+		// nullable and a row can be older than the code reading it — leaves
+		// both the start and the duration untouched. Null is "we do not
+		// know", which is a fact the header can draw honestly; a zero would
+		// be the claim that the assistant answered instantly.
+		var startedAt, durationMs *int64
+		if runStartedAt.Valid {
+			started := runStartedAt.Int64
+			startedAt = &started
+			if d := in.EndedAt - started; d >= 0 {
+				durationMs = &d
+			}
+		}
 		if _, err := tx.ExecContext(ctx,
-			`UPDATE entries SET phase = 'closed', status = ? WHERE id = ?`, string(status), entryID); err != nil {
+			`UPDATE entries SET phase = 'closed', status = ?,
+			   started_at = COALESCE(started_at, ?),
+			   ended_at = ?,
+			   duration_ms = COALESCE(?, duration_ms)
+			 WHERE id = ?`,
+			string(status), startedAt, in.EndedAt, durationMs, entryID); err != nil {
 			return err
 		}
-		// The answer entry and its container close with the run.
-		if err := closeAnswerFor(ctx, tx, entryID, status, in.EndedAt, in.TerminationReason); err != nil {
+		// The body seals with the run: a terminal run never leaves an
+		// artifact open for deltas that can no longer arrive.
+		if err := sealTurnBody(ctx, tx, entryID); err != nil {
 			return err
 		}
 		return tx.Commit()
 	})
 }
 
-// closeAnswerFor closes the answer entry joined to questionEntryID by its
-// caused-by edge, seals its artifact and ends its container execution — the
-// terminalizers' shared step, so EVERY path that closes an ask run closes
-// the answer too (a run is never terminal while its answer entry still says
-// pending). No answer entry (a non-ask run) is a no-op.
-func closeAnswerFor(ctx context.Context, tx *sql.Tx, questionEntryID string, status EntryStatus, endedAt int64, reason TerminationReason) error {
-	var answerID string
-	err := tx.QueryRowContext(ctx,
-		`SELECT from_id FROM edges WHERE to_id = ? AND rel = 'caused-by'`, questionEntryID).Scan(&answerID)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	if _, closeErr := tx.ExecContext(ctx,
-		`UPDATE entries SET phase = 'closed', status = ? WHERE id = ?`, string(status), answerID); closeErr != nil {
-		return closeErr
-	}
-	if _, sealErr := tx.ExecContext(ctx,
+// sealTurnBody seals an ASK turn's answer body — which since ADR-0040 is
+// every `text` child the run wrote, not one artifact on the run. It is the
+// terminalizers' shared step, so EVERY path that closes an ask run closes its
+// prose too: a run is never reported terminal while a block it streamed into
+// still says open.
+//
+// The tool-call boundary seals a block as it goes (SealProse), so on the
+// ordinary path this reaches only the LAST run of prose — the one no call
+// ever followed. It is written as a set rather than as "the last one"
+// deliberately: a run that failed between opening a block and sealing it
+// leaves an open artifact this must still close, and asking for the whole set
+// costs one statement and cannot miss one.
+//
+// The entry itself is closed by the caller, in the same transaction — that
+// is the whole of what "close the turn" now means, because the turn is one
+// entry (nocx-4em1z). An entry with no prose children — an ordinary command,
+// or a turn that failed before it said anything — matches nothing and this is
+// a no-op, which is what keeps the capture path's own artifact out of it.
+func sealTurnBody(ctx context.Context, tx *sql.Tx, entryID string) error {
+	_, err := tx.ExecContext(ctx,
 		`UPDATE artifacts SET state = 'sealed'
-		  WHERE execution_id IN (SELECT id FROM executions WHERE entry_id = ?)`, answerID); sealErr != nil {
-		return sealErr
-	}
-	_, err = tx.ExecContext(ctx,
-		`UPDATE executions SET ended_at = ?, termination_reason = ?
-		  WHERE entry_id = ? AND state IS NULL`, endedAt, string(reason), answerID)
+		  WHERE entry_id IN (SELECT id FROM entries WHERE parent_id = ? AND kind = 'text')`,
+		entryID)
 	return err
 }
 
+// proseDigest is the content binding of a prose block's row. entries.digest
+// exists to bind an UNTRUSTED client-minted id to what it was submitted with;
+// a prose block has neither — its id is minted here from crypto/rand — so the
+// honest value is what identifies the row in the tree: the turn it belongs to
+// and the seat it took. Deterministic, so a row can be recognised rather than
+// merely stored.
+func proseDigest(turnID string, pos int) string {
+	h := sha256.New()
+	_, _ = fmt.Fprintf(h, "prose\x00%s\x00%d", turnID, pos)
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// OpenProse opens one run of assistant prose under a turn (ADR-0040): the
+// `text` child and its body, in ONE transaction.
+//
+// Why the two writes cannot be separate calls: a `text` entry with no
+// artifact is a block that will draw as an empty paragraph if the run dies
+// between them, and an artifact with no entry has no place in the order at
+// all. They are one fact — "there is a run of prose here, and this is where
+// its text goes" — so they are one commit.
+//
+// The seat is taken INSIDE the transaction as MAX(pos)+1 under the parent,
+// which is AddCause's rule and deliberately the same one: two writers reach
+// entries.pos, and a second definition of "the next free seat" is a second
+// answer that would agree until the day it did not. UNIQUE (parent_id, pos)
+// is the backstop under both.
+//
+// The block carries the turn's environment and cwd — the columns are NOT NULL
+// and its prose was written in the turn's context — and deliberately NO
+// pane_id and NO session_id. A prose block is drawn INSIDE its parent and
+// never at the top level, and pane_id is exactly what the pane-scoped page
+// reads (ledgerWhere): giving prose an anchor would put every paragraph of
+// every answer into the restore as a block of its own, and into the model's
+// own blocks.list beside them.
+//
+// It DOES carry the run that printed it, in the payload (ProseFacts). The run
+// is resolved in the same transaction and must be an agent-lane execution of
+// this turn: a run id from another turn would seat prose here and attribute
+// it there, which is the one way this column could make a reader worse off
+// than no column at all.
+func (s *sqliteContent) OpenProse(ctx context.Context, turnID string, runID int64) (ProseBlock, error) {
+	if turnID == "" {
+		return ProseBlock{}, errors.New("content: open prose: turn id is required — prose is somebody's child")
+	}
+	if runID <= 0 {
+		return ProseBlock{}, errors.New("content: open prose: run id is required — prose belongs to the run that printed it")
+	}
+	facts, factsErr := json.Marshal(ProseFacts{RunID: runID})
+	if factsErr != nil {
+		return ProseBlock{}, factsErr
+	}
+	var out ProseBlock
+	err := s.run(ctx, func(ctx context.Context) error {
+		tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+		if err != nil {
+			return err
+		}
+		defer func() { _ = tx.Rollback() }()
+
+		// The parent is RESOLVED, not left to the foreign key: the FK would
+		// refuse a dangling parent_id anyway, but a driver's constraint text
+		// does not say which of the entry's references was missing, and
+		// ErrNoSuchEntry is the answer this repository already gives to "that
+		// entry does not exist" (AddCause).
+		var client, envID, cwd string
+		err = tx.QueryRowContext(ctx,
+			`SELECT client, environment_id, cwd FROM entries WHERE id = ?`, turnID).
+			Scan(&client, &envID, &cwd)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("content: open prose under %s: %w", turnID, ErrNoSuchEntry)
+		}
+		if err != nil {
+			return err
+		}
+
+		// The run must be THIS turn's, and an agent-lane one: the prose it
+		// prints is assembled into this turn's message, so a run belonging
+		// to another block would put one turn's sentences into another's
+		// context. Refused by name rather than by a foreign key, which would
+		// accept any execution in the table.
+		var lane sql.NullString
+		err = tx.QueryRowContext(ctx,
+			`SELECT lane FROM executions WHERE id = ? AND entry_id = ?`, runID, turnID).Scan(&lane)
+		if errors.Is(err, sql.ErrNoRows) {
+			return fmt.Errorf("content: open prose under %s: run %d is not a run of that turn: %w",
+				turnID, runID, ErrNoSuchRun)
+		}
+		if err != nil {
+			return err
+		}
+		if lane.String != agentLane {
+			return fmt.Errorf("content: open prose under %s: execution %d is not an agent run: %w",
+				turnID, runID, ErrNoSuchRun)
+		}
+
+		var highest sql.NullInt64
+		if err = tx.QueryRowContext(ctx,
+			`SELECT MAX(pos) FROM entries WHERE parent_id = ?`, turnID).Scan(&highest); err != nil {
+			return err
+		}
+		pos := 0
+		if highest.Valid {
+			pos = int(highest.Int64) + 1
+		}
+
+		var seq int64
+		if seqErr := tx.QueryRowContext(ctx,
+			`UPDATE ledger_sequence SET next = next + 1 WHERE id = 1 RETURNING next`).Scan(&seq); seqErr != nil {
+			return fmt.Errorf("content: open prose: assign ingest_seq: %w", seqErr)
+		}
+
+		entryID := mintID()
+		// Born closed and successful, naming no intent: printing text can
+		// neither run nor fail, and the intent was the question. The CHECK on
+		// entries says exactly this, and the row is written to satisfy it
+		// rather than to be refused by it.
+		if _, err = tx.ExecContext(ctx, `INSERT INTO entries
+			(id, ingest_seq, client, digest, environment_id, parent_id, pos, cwd, kind, source, intent,
+			 phase, status, submitted_at, sensitivity, payload)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'text', 'assistant', '', 'closed', 'success', ?, 'normal', ?)`,
+			entryID, seq, client, proseDigest(turnID, pos), envID, turnID, pos, cwd,
+			time.Now().UnixMilli(), string(facts)); err != nil {
+			return err
+		}
+
+		// The body: owned by the BLOCK, with no execution — a run of prose
+		// was printed, not attempted, so there is no attempt to name as its
+		// provenance (ADR-0040 decision 3). Open until the boundary arrives.
+		artifactID := mintID()
+		if _, err = tx.ExecContext(ctx, `INSERT INTO artifacts
+			(id, entry_id, execution_id, media_type, state, byte_len, capture_method, capture_version,
+			 encoding, gaps, payload)
+			VALUES (?, ?, NULL, 'text/plain', 'open', 0, 'none', 1, 'utf-8', '[]', '{}')`,
+			artifactID, entryID); err != nil {
+			return err
+		}
+		if err = tx.Commit(); err != nil {
+			return err
+		}
+		out = ProseBlock{EntryID: entryID, ArtifactID: artifactID}
+		return nil
+	})
+	return out, err
+}
+
+// SealProse seals one prose block's body. The caller's fact is "nothing more
+// will be appended here", and it is stated by id rather than by hunting for
+// "the open one": the transport holds the block it opened, so a search would
+// be a second answer to a question the caller already has.
+//
+// A block with no body matches nothing and that is not an error — the fact
+// being recorded is about the block, and it is true whether or not a byte
+// ever arrived.
+func (s *sqliteContent) SealProse(ctx context.Context, entryID string) error {
+	if entryID == "" {
+		return errors.New("content: seal prose: entry id is required")
+	}
+	return s.run(ctx, func(ctx context.Context) error {
+		_, err := s.db.ExecContext(ctx,
+			`UPDATE artifacts SET state = 'sealed' WHERE entry_id = ?`, entryID)
+		return err
+	})
+}
+
 // validateFrameReference checks one reference against the STORED frame:
-// the id names a frame (kind=agent, intent=frame-capture), it belongs to
-// the asking session — "an ask naming a frame from another session is
-// rejected" (design §5) — and the region lies inside the frame's own rows
-// and columns. Any failure refuses the whole ask transaction.
+// the id names a frame (kind=frame — the discriminated column, never an
+// intent comparison), it belongs to the asking session — "an ask naming a
+// frame from another session is rejected" (design §5) — and the region
+// lies inside the frame's own rows and columns. Any failure refuses the
+// whole ask transaction.
 func validateFrameReference(ctx context.Context, tx *sql.Tx, in AgentAsk, ref AgentReference) error {
-	var kind, intent string
+	var kind string
 	var sessionID sql.NullString
 	err := tx.QueryRowContext(ctx,
-		`SELECT kind, intent, session_id FROM entries WHERE id = ?`, ref.FrameID).
-		Scan(&kind, &intent, &sessionID)
+		`SELECT kind, session_id FROM entries WHERE id = ?`, ref.FrameID).
+		Scan(&kind, &sessionID)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrFrameNotFound
 	}
 	if err != nil {
 		return err
 	}
-	if kind != string(EntryAgent) || intent != FrameIntent {
+	if kind != string(EntryFrame) {
 		return ErrNotAFrame
 	}
 	if !sessionID.Valid || in.SessionID == nil || sessionID.String != *in.SessionID {
@@ -746,9 +920,8 @@ func validateFrameReference(ctx context.Context, tx *sql.Tx, in AgentAsk, ref Ag
 
 	var payload string
 	err = tx.QueryRowContext(ctx,
-		`SELECT a.payload FROM artifacts a
-		   JOIN executions e ON a.execution_id = e.id
-		  WHERE e.entry_id = ? ORDER BY a.id LIMIT 1`, ref.FrameID).Scan(&payload)
+		`SELECT a.payload FROM artifacts a WHERE a.entry_id = ? ORDER BY a.id LIMIT 1`,
+		ref.FrameID).Scan(&payload)
 	if errors.Is(err, sql.ErrNoRows) {
 		return ErrFrameNotFound
 	}

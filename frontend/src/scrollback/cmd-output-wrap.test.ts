@@ -51,7 +51,19 @@ function topLevelRules(css: string): Rule[] {
   return rules
 }
 
-const RULES: Rule[] = topLevelRules(readFileSync(STYLE_ENTRY, 'utf8'))
+const RULES: Rule[] = [
+  ...topLevelRules(readFileSync(STYLE_ENTRY, 'utf8')),
+  // The Ask token's own appearance moved into the kit with the indicator
+  // (nocx-4ff.7): the base identity lives in styles/components/. The
+  // gutter that PLACES it stays in style.css — both are read here, the
+  // same way the cascade would see them.
+  ...topLevelRules(
+    readFileSync(
+      resolve(import.meta.dirname ?? '.', '..', 'styles/components/mode-indicator.css'),
+      'utf8',
+    ),
+  ),
+]
 
 /** The value the shipped cascade gives `property` for an element carrying
  *  `classes`, or null. Every matching bare-class rule contributes, later rules
@@ -154,7 +166,7 @@ describe('the Ask token is a gutter, not text in the input (nocx-ex636)', () => 
 
   it('the chip declares no trailing margin of its own, so the gap has one owner', () => {
     // The gap between the token and the text belongs to the gutter cell.
-    const indicator = RULES.find((r) => r.selectors.includes('.nocx-editor-target-indicator'))
+    const indicator = RULES.find((r) => r.selectors.includes('.ui-mode-indicator'))
     expect(indicator).toBeDefined()
     expect(indicator!.body).not.toMatch(/margin-right/)
     const cell = RULES.find((r) =>

@@ -5,7 +5,15 @@
   "description": "Result of the history.record JSON-RPC method (nocx-rtg0.13) — the write half of the history family, and the seam where a submitted credential becomes a pending capture. The ack: the request was accepted and handed to the store. It claims nothing more — whether a row appears is decided by the live History policy (history.enabled) and is answered by history.query, never by this ack. MaskedCount and MaskedKinds report what was redacted from the command text before it was handed to the store: the durable command is always the masked one, and the block can say \"3 secrets masked: openai, jwt\" from this ack alone. EntryID is the row's stable identity; Redactions are the structured segments the row keeps (kind, span, the head/tail the mask shows — never secret material); Captures is the offer list — one opaque capture id plus display metadata per detected credential, empty when there is nothing to offer.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["maskedCount", "maskedKinds", "entryId", "redactions", "captures", "maskedCommand"],
+  "required": [
+    "maskedCount",
+    "maskedKinds",
+    "entryId",
+    "source",
+    "redactions",
+    "captures",
+    "maskedCommand"
+  ],
   "properties": {
     "maskedCount": {
       "description": "How many secret-shaped regions were masked out of the command before recording. 0 when there was nothing to mask — an honest redaction that says nothing is indistinguishable from there having been nothing to redact, so the count is always carried.",
@@ -20,6 +28,10 @@
     "entryId": {
       "description": "The stable row id of the recorded entry, as history.query reports it — the address a later save rewrites by. Empty when the live History policy wrote no row (history.enabled off).",
       "type": "string"
+    },
+    "source": {
+      "description": "The IMMEDIATE subject that submitted the command, in the ledger's own vocabulary (entries.source): 'user' is the human, 'assistant' is the assistant's lane. Minted at submit by the submitting InputTarget on the renderer and carried on the request (design §3.1, nocx-iadtt); the ack echoes the source the record was accepted under, so the renderer can verify the backend kept the fact it minted — the two sides never derive the same thing twice. A block whose source is not the human is visibly marked in the flow.",
+      "enum": ["user", "assistant"]
     },
     "redactions": {
       "description": "The row's structured redaction segments, in row order. The renderer draws an unresolved chip at each segment and refuses to run the command as written; a segment the user saved to a vault reference is absent here and the reference sits in the command instead. Offsets are UTF-16 code units into maskedCommand. A segment never carries secret material — prefix/suffix are exactly the text already visible in the masked command. Never null: no redaction is [].",

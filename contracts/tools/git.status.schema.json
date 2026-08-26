@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/git.status.schema.json",
+  "title": "GitStatusParams",
+  "description": "Params of the git.status agent tool (design §4.2): show the working tree status of the repository in scope. The repository is implied by the run's context (the lane or the grant's paths), not named by the model, so the tool takes no parameters — the empty object is still a schema with additionalProperties: false and an explicit required list, because a model that invents a parameter must be refused, not silently accepted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

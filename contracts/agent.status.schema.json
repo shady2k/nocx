@@ -2,25 +2,90 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/agent.status.schema.json",
   "title": "AgentStatusResult",
-  "description": "Result of the agent.status JSON-RPC method (design §7): endpoint configured, the credential fact, last probe result. The ask surface reads it before offering an ask; a soft degrade — no endpoint, an unresolvable credential, a failed probe — is visible in the product, never only in a log. The probe result shape is declared ONCE, in endpoints.probe.schema.json, and referenced here cross-file.",
+  "description": "Result of the agent.status JSON-RPC method (design §7): whether the ANSWERING ROLE resolves to an (endpoint, model) pair, the credential fact of the endpoint that resolution named, and the last probe result. Readiness is a fact about the ROLE, never about endpoint existence (nocx-rikz5): an endpoint with a valid key and no model chosen is not ready, and said so here rather than at the person's first question. The ask surface reads it before offering an ask; a soft degrade — no endpoint, no model chosen, an unresolvable credential, a failed probe — is visible in the product, never only in a log. The probe result shape is declared ONCE, in endpoints.probe.schema.json, and referenced here cross-file.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["endpointConfigured", "credential", "lastProbe"],
+  "required": ["endpointConfigured", "credential", "lastProbe", "answering"],
   "properties": {
     "endpointConfigured": {
-      "description": "At least one AI endpoint is stored (design §7: 'endpoint configured').",
+      "description": "At least one AI endpoint is stored. Endpoint EXISTENCE, and nothing more: it is not readiness and must not be read as readiness — that is `answering`. Kept because the Endpoints page's own empty state is a different question from the ask surface's.",
       "type": "boolean"
     },
     "credential": {
-      "description": "The one credential fact (ADR-0032): which of the distinguishable states is true, so each gets its own sentence instead of all three reading 'the vault may be locked'. Null only when no endpoint is configured — there is nothing to ask about. 'resolvable' means at least one stored endpoint's credential the vault can currently resolve; 'sealed' means the vault cannot answer right now (the unlock offer); 'deleted' means the referenced secret is gone; 'none' means the endpoint has no reference at all; 'unavailable' is the honest fallback for a store failure that is none of those.",
+      "description": "The one credential fact (ADR-0032) of the endpoint the answering role RESOLVED to, and of no other. Null whenever the role does not resolve. 'resolvable' means the vault can resolve the endpoint credential; 'not-required' means the endpoint explicitly declares that it needs no credential; 'sealed' means the vault cannot answer right now; 'deleted' means the referenced secret is gone; 'none' means a credential is required but no reference exists; 'unavailable' is the honest fallback for a store failure that is none of those.",
       "anyOf": [
-        { "enum": ["resolvable", "none", "deleted", "sealed", "unavailable"], "type": "string" },
-        { "type": "null" }
+        {
+          "enum": ["resolvable", "not-required", "none", "deleted", "sealed", "unavailable"],
+          "type": "string"
+        },
+        {
+          "type": "null"
+        }
       ]
     },
     "lastProbe": {
-      "description": "The last endpoints.probe outcome, or null when none has run in this process lifetime. Process-lifetime by design: a probe's meaning expires with the endpoint that produced it.",
-      "anyOf": [{ "$ref": "endpoints.probe.schema.json" }, { "type": "null" }]
+      "description": "The last endpoints.probe outcome, or null when none has run in this process lifetime, or when the one that ran does not describe the CURRENT resolution — a probe names one endpoint and one model, and 'Last test ok' about a different model is a lie the person cannot see through. Process-lifetime by design: a probe's meaning expires with the endpoint that produced it.",
+      "anyOf": [
+        {
+          "$ref": "endpoints.probe.schema.json"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "answering": {
+      "description": "The resolution of the role the ask will use (profile.RoleAnswering). Never absent: readiness is the question the ask surface asks, so every status carries either a resolution or the reason there is none, and the reason is the rung of the ladder the person is on.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ready", "reason", "endpoint", "model"],
+      "properties": {
+        "ready": {
+          "description": "True when the answering role resolves to an (endpoint, model) pair. This — not endpointConfigured — is what the ask surface gates on.",
+          "type": "boolean"
+        },
+        "reason": {
+          "description": "Why it does not resolve, null when it does. 'no-endpoints': nothing is configured, and sending a person to choose from an empty list is the one answer worse than saying nothing. 'no-models': an endpoint exists and offers zero models, so 'choose a model' would open an empty picker. 'unassigned': the role has no assignment and no default — the person has a model to choose and has not chosen it. 'endpoint-gone' / 'model-gone': what was chosen no longer exists, and the role is never silently re-pointed at a neighbour. 'unavailable': a store could not answer — a reported rung, never an RPC error, because an error toast leaves a person with nothing to do next.",
+          "anyOf": [
+            {
+              "enum": [
+                "no-endpoints",
+                "no-models",
+                "unassigned",
+                "endpoint-gone",
+                "model-gone",
+                "unavailable"
+              ],
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "endpoint": {
+          "description": "Display name of the endpoint that will answer, null when the role does not resolve. The name, not the id: it is shown to a person.",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "model": {
+          "description": "Model id that will answer, null when the role does not resolve.",
+          "anyOf": [
+            {
+              "type": "string"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        }
+      }
     }
   }
 }

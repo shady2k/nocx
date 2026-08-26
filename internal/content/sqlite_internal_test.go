@@ -417,6 +417,12 @@ func aRecordedCommand(intent string) CompletedCommand {
 		Cwd:    "/srv",
 		Intent: intent,
 		Status: EntrySuccess,
+		// This factory stands in for a person's command: the
+		// store refuses to derive an unnamed one (provenance must
+		// never silently become a person), so the caller names it —
+		// the ordinary is the person, and loads only where the test is
+		// actually about the assistant set SourceAssistant.
+		Source: SourceUser,
 	}
 }
 

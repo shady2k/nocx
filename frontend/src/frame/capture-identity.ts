@@ -34,6 +34,18 @@ export class CaptureAbortedError extends Error {
   }
 }
 
+/** Thrown by a live capture when the requested region is entirely past the
+ *  end of the buffer: the renderer refuses rather than minting a frame over
+ *  rows that do not exist (a frame never lies about gaps — mintLiveFrame's
+ *  promise). The pull handler answers such a request with the failed
+ *  outcome, honestly. */
+export class ReadScreenRangeError extends Error {
+  constructor(message: string) {
+    super('readScreen: ' + message)
+    this.name = 'ReadScreenRangeError'
+  }
+}
+
 export class CaptureIdentityTracker {
   private _generation = 0
   private _buffer: { kind: 'normal' } | { kind: 'alternate'; altSession: number } = {

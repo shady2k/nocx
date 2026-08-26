@@ -60,6 +60,43 @@ export function numberRangeError(decl: Declaration, value: number): string | und
 }
 
 /**
+ * How many characters a value is, counted the way the backend counts them:
+ * runes, not UTF-16 code units. `"🙂".length` is 2 in JavaScript and 1 in
+ * Go, and a bound whose two ends count differently is a bound the screen
+ * states wrongly — it would refuse text the caption said was inside the
+ * limit, or the other way round.
+ */
+function textLength(value: string): number {
+  return [...value].length
+}
+
+/**
+ * The permanent caption under a bounded text field: how long the text is
+ * now, and how long it may be. Both halves, always — the criterion is that
+ * the bound is STATED rather than enforced silently, and a limit that only
+ * appears once you have crossed it is one you discover by losing text to it.
+ *
+ * Undefined for a text setting that declares no bound, which is every other
+ * one today.
+ */
+export function textLengthCaption(decl: Declaration, value: string): string | undefined {
+  if (decl.max === undefined) return undefined
+  const suffix = decl.unit !== undefined ? ' ' + decl.unit : ''
+  return `${textLength(value)} / ${decl.max}${suffix}`
+}
+
+/**
+ * The over-length error, in the same words numberRangeError uses for a
+ * ceiling — one vocabulary for one kind of refusal. The field keeps showing
+ * what the person typed: it is refused, never shortened behind them.
+ */
+export function textLengthError(decl: Declaration, value: string): string | undefined {
+  if (decl.max === undefined || textLength(value) <= decl.max) return undefined
+  const suffix = decl.unit !== undefined ? ' ' + decl.unit : ''
+  return `Must be at most ${decl.max}${suffix}`
+}
+
+/**
  * The save error a field should show BENEATH itself — undefined when the
  * field's own caption slot already carries the same fact.
  *
@@ -81,9 +118,11 @@ export function fieldSaveError(
   decl: Declaration,
   value: number,
   saveError: string | undefined,
+  text = '',
 ): string | undefined {
   if (saveError === undefined) return undefined
   if (decl.control === 'number' && numberRangeError(decl, value) !== undefined) return undefined
+  if (decl.control === 'text' && textLengthError(decl, text) !== undefined) return undefined
   return saveError
 }
 

@@ -12,6 +12,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -220,6 +221,22 @@ type Session interface {
 	// the renderer from restating it per event on the envelope — which would
 	// be two surfaces owning one input.
 	PaneID() string
+	// OpenedAt is the moment this session's pipe was opened, on the
+	// backend's wall clock. Immutable, and it exists for one question the
+	// ledger cannot answer on its own: WHICH of a pane's recorded blocks
+	// belong to THIS session. A block is anchored to the pane, not to the
+	// session — entries.session_id is deliberately NULL for a command
+	// (ws_ledger.go) because the pane is what outlives the pipe — so a pane
+	// that has been through a restart, or a second session, carries the
+	// blocks of both. The agent's block tools are granted one session
+	// (ADR-0020 decision 5), and this is the floor that makes "this
+	// session's blocks" expressible: entries recorded before the pipe
+	// existed are somebody else's.
+	//
+	// It is here rather than beside the block tools because nothing else in
+	// the process knows it — a copy kept by whoever asked first would be a
+	// second owner of a fact the session is born with.
+	OpenedAt() time.Time
 	// There is deliberately NO WorkspaceID here (nocx-isoph.2). The field
 	// nocx-fraus put on the session was the intermediate step, not the
 	// destination: since tabs-panes-and-blocks §4.5 the workspace is a
@@ -488,6 +505,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 
 	s := &realSession{
 		id:           id,
+		openedAt:     time.Now(),
 		identity:     Identity{InstanceID: r.instanceID, Epoch: epoch},
 		parent:       cfg.Parent,
 		kind:         cfg.Kind,
@@ -698,7 +716,8 @@ type realSession struct {
 	kind         Kind
 	host         string // empty for local sessions; the remote hostname for SSH
 	cwd          string
-	paneID       string // the pane this session is the pipe of; empty for none. Written once, at construction
+	paneID       string    // the pane this session is the pipe of; empty for none. Written once, at construction
+	openedAt     time.Time // when the pipe was opened. Written once, at construction; see Session.OpenedAt
 	profileID    string
 	credentialID string
 	sshOpts      []ssh.ConnectOption // the options the SSH connection was opened with; nil for local
@@ -763,6 +782,7 @@ func (s *realSession) Identity() Identity              { return s.identity }
 func (s *realSession) Parent() (Ref, bool)             { return s.parent, !s.parent.Zero() }
 func (s *realSession) Kind() Kind                      { return s.kind }
 func (s *realSession) PaneID() string                  { return s.paneID }
+func (s *realSession) OpenedAt() time.Time             { return s.openedAt }
 func (s *realSession) Host() string                    { return s.host }
 func (s *realSession) Cwd() string                     { return s.cwd }
 func (s *realSession) ProfileID() string               { return s.profileID }
@@ -972,4 +992,24 @@ func (s *realSession) readPump(ctx context.Context) {
 			return
 		}
 	}
+}
+
+// SignalForeground sends sig to the foreground process group of the
+// session's terminal — the execution's own process group, created by the
+// interactive shell's job control — so cancellation reaches the command's
+// children rather than only the shell (ADR-0020 decision 2: cancellation
+// escalates INT → TERM → KILL against the execution's group). The local
+// pty channel implements it; a remote channel (the execution runs on the
+// far host, unreachable from here) and the stub have no local process
+// group and report pty.ErrNoForeground — the lease's escalation treats
+// that as "nothing to cancel" and terminalizes the run without a kill,
+// which is the honest answer for a host this process cannot signal.
+func (s *realSession) SignalForeground(sig syscall.Signal) error {
+	sg, ok := s.ch.(interface {
+		SignalForeground(sig syscall.Signal) error
+	})
+	if !ok {
+		return pty.ErrNoForeground
+	}
+	return sg.SignalForeground(sig)
 }

@@ -144,6 +144,20 @@ async function openEndpointEditor(page: Page): Promise<void> {
   await expect(dialog).toBeVisible({ timeout: 10_000 })
 }
 
+/** Open the editor over a LOCKED vault and decline the unlock it raises.
+ *  This endpoint's key IS a vault row, so the form opens on "Use existing
+ *  secret" with a picker on screen — and a picker renders secret NAMES,
+ *  which is a request for vault data (ADR-0032, nocx-5ratm). The test below
+ *  owns the assertion that it asks; here the point is to get past it, so
+ *  what follows measures the Test button and nothing else. */
+async function openEndpointEditorDecliningTheUnlock(page: Page): Promise<void> {
+  await openEndpointEditor(page)
+  const unlock = unlockSheet(page)
+  await expect(unlock).toBeVisible({ timeout: 10_000 })
+  await unlock.getByRole('button', { name: 'Cancel', exact: true }).click()
+  await expect(unlock).not.toBeVisible({ timeout: 10_000 })
+}
+
 test('a sealed vault raises the unlock and the probe completes after unlocking', async ({
   page,
 }) => {
@@ -158,7 +172,7 @@ test('a sealed vault raises the unlock and the probe completes after unlocking',
   // "vault is sealed".
   await lockVault(page)
   await openAIEndpoints(page)
-  await openEndpointEditor(page)
+  await openEndpointEditorDecliningTheUnlock(page)
   await page.getByRole('button', { name: 'Test endpoint', exact: true }).click()
 
   const unlock = unlockSheet(page)
@@ -173,12 +187,45 @@ test('a sealed vault raises the unlock and the probe completes after unlocking',
   await expect(dialog).toContainText('e2e-model answered in', { timeout: 15_000 })
 })
 
+test('a bound key asks the vault as the editor opens, and is then named (nocx-5ratm)', async ({
+  page,
+}) => {
+  await openApp(page)
+  await openAIEndpoints(page)
+  await lockVault(page)
+  await openAIEndpoints(page)
+
+  // The picker itself asks: it has to render the NAME of a secret, which
+  // only the vault can answer, and this endpoint's key is a bound row so the
+  // form opens with the picker already on screen. Before this, the editor
+  // read the vault's state, decided not to ask, and showed the person the
+  // row handle — `secrow:` plus 32 hex — where the name of their own key
+  // belongs, with no way to tell why.
+  await openEndpointEditor(page)
+  const unlock = unlockSheet(page)
+  await expect(unlock).toBeVisible({ timeout: 10_000 })
+
+  await page.locator('#vault-unlock-passphrase').fill(passphrase)
+  await unlock.getByRole('button', { name: 'Unlock', exact: true }).click()
+  await expect(unlock).not.toBeVisible({ timeout: 10_000 })
+
+  // The endpoint was saved with a typed key, so the vault holds it under the
+  // name the mint gave it (capability/config.go endpointKeyName), and the
+  // editor opens on "Use existing secret" with that row bound.
+  const dialog = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
+  const picker = dialog.locator('select').first()
+  await expect(picker).toHaveValue(/^secrow:/)
+  await expect(picker.locator('option:checked')).toHaveText(`${endpointName} API key`, {
+    timeout: 10_000,
+  })
+})
+
 test('dismissing the unlock fails the call cleanly — no failure is painted', async ({ page }) => {
   await openApp(page)
   await openAIEndpoints(page)
   await lockVault(page)
   await openAIEndpoints(page)
-  await openEndpointEditor(page)
+  await openEndpointEditorDecliningTheUnlock(page)
 
   await page.getByRole('button', { name: 'Test endpoint', exact: true }).click()
   const unlock = unlockSheet(page)

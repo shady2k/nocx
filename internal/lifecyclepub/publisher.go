@@ -358,6 +358,12 @@ type Emitter interface {
 	PublishLifecycle(f Fact)
 }
 
+// ProjectionEmitter receives lifecycle facts that must update server-owned
+// projections without creating a duplicate renderer notification.
+type ProjectionEmitter interface {
+	PublishLifecycleProjection(f Fact)
+}
+
 // Publisher wraps the kernel, forwards every mutation, and projects the
 // affected lane into a Fact on each change. It is safe for concurrent use:
 // per-lane serialization comes from the kernel (and from the single adapter
@@ -503,7 +509,20 @@ func (p *Publisher) buildAndDeliverGrant(out lifecycle.Outbound) {
 // restores authority and visible-prompt behaviour, grants no suppression
 // authority, and delaying it behind frontend publication can only prolong a
 // desynchronization.
+func (p *Publisher) shouldPublishStartedAttempt(env lifecycle.Envelope) bool {
+	if env.Event.Kind != lifecycle.KindStart || env.Event.Start == nil || env.Event.Start.AttemptID != nil {
+		return false
+	}
+	before, ok := p.derive(env.Lane)
+	if !ok || before.Attempt == nil {
+		return false
+	}
+	attempt, ok := p.kernel.Attempt(lifecycle.AttemptID(before.Attempt.ID))
+	return ok && !attempt.Started
+}
+
 func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) error {
+	forceStartedProjection := p.shouldPublishStartedAttempt(env)
 	outs, err := p.kernel.Ingest(t, env)
 	if err != nil {
 		p.publishLane(env.Lane)
@@ -524,6 +543,9 @@ func (p *Publisher) Ingest(t lifecycle.TransportID, env lifecycle.Envelope) erro
 			// the child.
 			p.buildAndDeliverGrant(out)
 		}
+	}
+	if forceStartedProjection {
+		p.publishLaneProjection(env.Lane)
 	}
 	p.publishLane(env.Lane)
 	for _, out := range outs {
@@ -703,6 +725,25 @@ func (p *Publisher) TransportLost(t lifecycle.TransportID) error {
 	// Cancel every pending establishment whose domain rides the lost
 	// transport: an accept for a dead domain must never flush (decision 9).
 	p.mu.Lock()
+	lanes := make([]lifecycle.LaneID, 0, len(p.known))
+	for l := range p.known {
+		lanes = append(lanes, l)
+	}
+	p.mu.Unlock()
+	attempts := make(map[lifecycle.LaneID]lifecycle.AttemptID)
+	for _, l := range lanes {
+		st, err := p.kernel.State(l)
+		if err != nil || st.Attempt == "" || st.Domain == "" {
+			continue
+		}
+		d, exists := p.kernel.Domain(st.Domain)
+		if exists && d.Transport == t {
+			attempts[l] = st.Attempt
+		}
+	}
+	// Cancel every pending establishment whose domain rides the lost
+	// transport: an accept for a dead domain must never flush (decision 9).
+	p.mu.Lock()
 	for key, pend := range p.pending {
 		d, ok := p.kernel.Domain(key.domain)
 		if !ok || d.Transport != t {
@@ -714,17 +755,14 @@ func (p *Publisher) TransportLost(t lifecycle.TransportID) error {
 		delete(p.pending, key)
 	}
 	p.mu.Unlock()
-	err := p.kernel.TransportLost(t)
-	if err != nil {
+	if err := p.kernel.TransportLost(t); err != nil {
 		return err
 	}
-	p.mu.Lock()
-	lanes := make([]lifecycle.LaneID, 0, len(p.known))
-	for l := range p.known {
-		lanes = append(lanes, l)
-	}
-	p.mu.Unlock()
 	for _, l := range lanes {
+		if attemptID, ok := attempts[l]; ok {
+			p.publishLostLane(l, attemptID)
+			continue
+		}
 		p.publishLane(l)
 	}
 	return nil
@@ -793,6 +831,20 @@ func (p *Publisher) ReplayLane(lane lifecycle.LaneID) {
 
 // publishLane derives the lane's fact and emits it when it changed since the
 // last emission for that lane. Derivation runs in the caller's goroutine,
+func (p *Publisher) publishLaneProjection(lane lifecycle.LaneID) {
+	f, ok := p.derive(lane)
+	if !ok {
+		return
+	}
+	p.mu.Lock()
+	p.stampGenLocked(lane, &f)
+	e := p.emitter
+	p.mu.Unlock()
+	if pe, ok := e.(ProjectionEmitter); ok {
+		pe.PublishLifecycleProjection(f)
+	}
+}
+
 // immediately after the mutation that triggered it; the emitter call happens
 // outside the publisher's lock so a slow WebSocket write cannot stall another
 // lane's bookkeeping.
@@ -815,7 +867,26 @@ func (p *Publisher) publishLane(lane lifecycle.LaneID) {
 	}
 }
 
-// stampGenLocked attaches the lane's current establishment generation to a
+func (p *Publisher) publishLostLane(lane lifecycle.LaneID, attemptID lifecycle.AttemptID) {
+	f, ok := p.derive(lane)
+	if !ok {
+		return
+	}
+	attempt, ok := p.kernel.Attempt(attemptID)
+	if !ok {
+		p.publishLane(lane)
+		return
+	}
+	f.Attempt = attemptFact(attempt)
+	p.mu.Lock()
+	p.stampGenLocked(lane, &f)
+	p.mu.Unlock()
+	if pe, ok := p.emitter.(ProjectionEmitter); ok {
+		pe.PublishLifecycleProjection(f)
+	}
+	p.publishLane(lane)
+}
+
 // fact naming a domain. A reconnect hello mints a fresh generation, so the
 // replayed fact differs from the previous one and the dedupe lets it out —
 // that replay is what carries the fresh generation to the renderer for the

@@ -343,10 +343,11 @@ func (h ledgerHandlers) command(e ledgerEnvelopeWire, target content.Phase) (led
 	// the second durable writer of the same product object, so it masks
 	// through the SAME owner rather than growing a second policy. A detection
 	// failure fails CLOSED — the raw text must not reach a row.
-	masked, findings, segs, err := maskCommandSafe(e.Intent)
+	maskedResult, err := maskLedgerCommand(e.Intent)
 	if err != nil {
 		return ledgerCommand{}, "intent could not be screened for secrets; not recorded"
 	}
+	masked, findings, segs := maskedResult.text, maskedResult.findings, maskedResult.segments
 
 	// And keep the RECEIPT, which this method used to throw away
 	// (`masked, _, _, err`): how many secrets were taken out, of which kinds,
@@ -629,9 +630,9 @@ func validateLedgerEnvelope(e ledgerEnvelopeWire) string {
 		return "envelope.cwd is required and bounded"
 	}
 	switch content.EntryKind(e.Kind) {
-	case content.EntryShell, content.EntryAgent, content.EntryAction:
+	case content.EntryShell, content.EntryAsk, content.EntryAction, content.EntryText, content.EntryFrame:
 	default:
-		return "envelope.kind must be one of shell, agent, action"
+		return "envelope.kind must be one of shell, ask, action, text, frame"
 	}
 	// Intent may be EMPTY and that is a product state, not a defect: an
 	// orphan OSC 133 C is an entry with no intent (design §4.4), and refusing

@@ -236,7 +236,7 @@ func TestLedgerQuery_FiltersExcludeOverTheWire(t *testing.T) {
 	openEntryIn(t, conn, sid, "decoy-shell", "/repo", "shell", "1000-and-done", 21)
 	openEntryIn(t, conn, sid, "here-shell", "/repo", "shell", "make test", 2)
 	openEntryIn(t, conn, sid, "there-shell", "/other", "shell", "make lint", 3)
-	openEntryIn(t, conn, sid, "here-agent", "/repo", "agent", "why did it fail", 4)
+	openEntryIn(t, conn, sid, "here-ask", "/repo", "ask", "why did it fail", 4)
 	closeEntryOverWire(t, conn, sid, "here-shell", "failure", 2, 5)
 
 	t.Run("directory excludes another directory", func(t *testing.T) {
@@ -246,8 +246,8 @@ func TestLedgerQuery_FiltersExcludeOverTheWire(t *testing.T) {
 		wantQueried(t, page, "there-shell")
 	})
 	t.Run("kind excludes another kind", func(t *testing.T) {
-		page := queryCall(t, conn, map[string]any{"scope": "everywhere", "kind": "agent"}, 11)
-		wantQueried(t, page, "here-agent")
+		page := queryCall(t, conn, map[string]any{"scope": "everywhere", "kind": "ask"}, 11)
+		wantQueried(t, page, "here-ask")
 	})
 	t.Run("status excludes another status", func(t *testing.T) {
 		page := queryCall(t, conn, map[string]any{"scope": "everywhere", "status": "failure"}, 12)
@@ -265,7 +265,7 @@ func TestLedgerQuery_FiltersExcludeOverTheWire(t *testing.T) {
 	})
 	t.Run("limit bounds the page and says it is not exhausted", func(t *testing.T) {
 		page := queryCall(t, conn, map[string]any{"scope": "everywhere", "limit": 1}, 13)
-		wantQueried(t, page, "here-agent")
+		wantQueried(t, page, "here-ask")
 		if page.Exhausted {
 			t.Fatal("a page with two further entries behind it says it is exhausted")
 		}
@@ -505,7 +505,8 @@ func TestLedgerGet_ReturnsEdgesAndArtifactMetadataWithoutTheBytes(t *testing.T) 
 	}
 	const body = "the-output-bytes-nobody-asked-for"
 	if _, err := led.AppendArtifact(ctx, content.AppendArtifact{
-		ExecutionID: row.Executions[0].ID, ID: "artifact-1", MediaType: content.MediaText,
+		EntryID: row.ID, ExecutionID: &row.Executions[0].ID,
+		ID: "artifact-1", MediaType: content.MediaText,
 		CaptureMethod: content.CaptureRawOutput, CaptureVersion: 1, Encoding: "utf-8",
 	}); err != nil {
 		t.Fatalf("AppendArtifact: %v", err)
@@ -564,6 +565,230 @@ func TestLedgerGet_UnknownIDIsAnErrorNotAnEmptySuccess(t *testing.T) {
 	}
 	if missing := vaultCall(t, conn, "ledger.get", map[string]any{}, 3); missing.Error == nil {
 		t.Fatalf("ledger.get with no id answered %s", missing.Result)
+	}
+}
+
+// The evicted-prose fact reaches the renderer off the REAL socket
+// (nocx-dc2fr.4): a turn whose `text` children retention stripped answers
+// ledger.get with proseEvicted true, and a turn whose prose is whole answers
+// false. Both are validated against the schema — a fixture-built payload
+// could not show a field the handler never sends (AGENTS.md rule 5).
+func TestLedgerGet_ProseEvictedOverTheWire(t *testing.T) {
+	db := newLedgerStore(t)
+	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	defer stop()
+	conn := connectWS(t, ws)
+	openLocalSession(t, conn)
+	ctx := context.Background()
+	led := db.Ledger()
+	envID := localEnvironmentID()
+	if err := led.EnsureEnvironment(ctx, content.Environment{ID: envID, Kind: content.EnvLocal}); err != nil {
+		t.Fatalf("EnsureEnvironment: %v", err)
+	}
+	if _, err := led.RecordObservation(ctx, content.Observation{
+		EnvironmentID: envID, Criticality: content.CriticalityRoutine, Payload: `{}`,
+	}); err != nil {
+		t.Fatalf("RecordObservation: %v", err)
+	}
+
+	// One WHOLE turn: the question, a `text` child under it with a body,
+	// the run closed. The SECOND turn's body is PINNED, so the sweep takes
+	// the first turn's prose and leaves the second — the paired positive.
+	makeTurn := func(id, artifactID string, pinned bool) {
+		if _, err := led.Submit(ctx, content.SubmitEntry{
+			ID: id, Client: "test-client", EnvironmentID: envID, Cwd: "/repo",
+			Kind: content.EntryAsk, Intent: "how big is it?", Payload: "{}",
+		}); err != nil {
+			t.Fatalf("submit the turn: %v", err)
+		}
+		execID, err := led.StartExecution(ctx, content.StartExecution{EntryID: id})
+		if err != nil {
+			t.Fatalf("start the turn's run: %v", err)
+		}
+		zero := 0
+		payload := content.ShellPayloadJSON(&zero)
+		if err = led.FinishExecution(ctx, execID, content.FinishExecution{
+			EndedAt: 2_000_000_000_000, TerminationReason: content.TermCompleted,
+			Status: content.EntrySuccess, Payload: &payload,
+		}); err != nil {
+			t.Fatalf("close the turn: %v", err)
+		}
+		pos := 0
+		child := id + "-txt"
+		if _, err = led.Submit(ctx, content.SubmitEntry{
+			ID: child, Client: "test-client", EnvironmentID: envID, Cwd: "/repo",
+			ParentID: &id, Pos: &pos, Kind: content.EntryText, Intent: "", Payload: "{}",
+		}); err != nil {
+			t.Fatalf("seat the prose block: %v", err)
+		}
+		aid, err := led.AppendArtifact(ctx, content.AppendArtifact{
+			ID: artifactID, EntryID: child, MediaType: content.MediaText, Pinned: pinned,
+		})
+		if err != nil {
+			t.Fatalf("append the prose artifact: %v", err)
+		}
+		if err := led.AppendChunk(ctx, aid, 1, []byte("the answer the model wrote")); err != nil {
+			t.Fatalf("append the prose body: %v", err)
+		}
+		if _, err := led.EvictBodies(ctx, content.BodyEvictionRequest{KeepBytes: 0, Max: 10}); err != nil {
+			t.Fatalf("evict bodies: %v", err)
+		}
+	}
+
+	schema := loadSchema(t, "ledger.get.schema.json")
+	makeTurn("turn-evicted", "art-aaa", false)
+	got := vaultCall(t, conn, "ledger.get", map[string]any{"id": "turn-evicted"}, 20)
+	if got.Error != nil {
+		t.Fatalf("ledger.get (evicted): %+v", got.Error)
+	}
+	validateJSON(t, schema, got.Result, "ledger.get result (prose evicted)")
+	var evicted struct {
+		ProseEvicted bool `json:"proseEvicted"`
+	}
+	if err := json.Unmarshal(got.Result, &evicted); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if !evicted.ProseEvicted {
+		t.Fatalf("proseEvicted off the socket = false, want true after the sweep took the body")
+	}
+
+	makeTurn("turn-kept", "art-bbb", true)
+	kept := vaultCall(t, conn, "ledger.get", map[string]any{"id": "turn-kept"}, 21)
+	if kept.Error != nil {
+		t.Fatalf("ledger.get (kept): %+v", kept.Error)
+	}
+	validateJSON(t, schema, kept.Result, "ledger.get result (prose kept)")
+	var intact struct {
+		ProseEvicted bool `json:"proseEvicted"`
+	}
+	if err := json.Unmarshal(kept.Result, &intact); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if intact.ProseEvicted {
+		t.Fatalf("proseEvicted off the socket = true for a turn whose prose is whole")
+	}
+}
+
+// A PROSE BLOCK'S BODY REACHES THE RENDERER (nocx-dc2fr.7, and it did not).
+//
+// An artifact belongs to its BLOCK and names an execution only when an
+// attempt produced it (ADR-0040 decision 3). A run of assistant prose was
+// printed, not attempted, so its body hangs on the entry alone — and
+// handleGet flattened `row.Executions` only. Every prose body was therefore
+// stored, read back by the ledger, and dropped at the wire: the live turn was
+// right and the restored one drew every sentence of it BLANK.
+//
+// Both unit suites were green while that was true, which is the part worth
+// remembering. The store's test asked the store, and the renderer's test
+// supplied the facts itself, so the defect sat in the one seam neither
+// crossed — the socket. That is why this test is over the real wire and why
+// AGENTS.md rule 5 insists on the difference: it took the epic's end-to-end
+// check to find it at all.
+//
+// Both halves are asserted together, because the pair is the point: an
+// entry's OWN body and an execution's body must both come back, and a fix
+// that swapped one loop for the other would pass half of this.
+func TestLedgerGet_AProseBodyAndACommandBodyBothReachTheWire(t *testing.T) {
+	db := newLedgerStore(t)
+	ws, stop := newLedgerWSServer(t, log.NewSlogAdapter(nil), db)
+	defer stop()
+	conn := connectWS(t, ws)
+	openLocalSession(t, conn)
+	ctx := context.Background()
+	led := db.Ledger()
+	envID := localEnvironmentID()
+	if err := led.EnsureEnvironment(ctx, content.Environment{ID: envID, Kind: content.EnvLocal}); err != nil {
+		t.Fatalf("EnsureEnvironment: %v", err)
+	}
+	if _, err := led.RecordObservation(ctx, content.Observation{
+		EnvironmentID: envID, Criticality: content.CriticalityRoutine,
+	}); err != nil {
+		t.Fatalf("RecordObservation: %v", err)
+	}
+
+	// The turn, one run of prose seated under it, and the prose's own body:
+	// no execution, because nothing was attempted.
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: "wire-turn", Client: "test-client", EnvironmentID: envID, Cwd: "/repo",
+		Kind: content.EntryAsk, Intent: "what went wrong?", Payload: "{}",
+	}); err != nil {
+		t.Fatalf("submit the turn: %v", err)
+	}
+	pos := 0
+	turnID := "wire-turn"
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: "wire-prose", Client: "test-client", EnvironmentID: envID, Cwd: "/repo",
+		ParentID: &turnID, Pos: &pos, Kind: content.EntryText, Intent: "", Payload: "{}",
+	}); err != nil {
+		t.Fatalf("seat the prose block: %v", err)
+	}
+	proseArtifact, err := led.AppendArtifact(ctx, content.AppendArtifact{
+		ID: "art-prose", EntryID: "wire-prose", MediaType: content.MediaText,
+	})
+	if err != nil {
+		t.Fatalf("append the prose artifact: %v", err)
+	}
+	if err = led.AppendChunk(ctx, proseArtifact, 1, []byte("line 3 is wrong")); err != nil {
+		t.Fatalf("append the prose body: %v", err)
+	}
+
+	got := vaultCall(t, conn, "ledger.get", map[string]any{"id": "wire-prose"}, 30)
+	if got.Error != nil {
+		t.Fatalf("ledger.get on the prose block: %+v", got.Error)
+	}
+	validateJSON(t, loadSchema(t, "ledger.get.schema.json"), got.Result, "ledger.get result (prose block)")
+	var body struct {
+		Artifacts []struct {
+			ID          string `json:"id"`
+			MediaType   string `json:"mediaType"`
+			ExecutionID *int64 `json:"executionId"`
+		} `json:"artifacts"`
+	}
+	if err = json.Unmarshal(got.Result, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Artifacts) != 1 || body.Artifacts[0].ID != "art-prose" {
+		t.Fatalf("the prose block's artifacts off the socket = %+v, want the one body it owns", body.Artifacts)
+	}
+	if body.Artifacts[0].MediaType != string(content.MediaText) {
+		t.Fatalf("the prose body's media type = %q, want %q",
+			body.Artifacts[0].MediaType, content.MediaText)
+	}
+
+	// The paired half: a command's body hangs on the ATTEMPT that produced
+	// it, and still comes back. Without this the fix could have moved the
+	// loop rather than added one.
+	if _, err = led.Submit(ctx, content.SubmitEntry{
+		ID: "wire-cmd", Client: "test-client", EnvironmentID: envID, Cwd: "/repo",
+		Kind: content.EntryShell, Intent: "cat -n a.txt", Payload: "{}",
+	}); err != nil {
+		t.Fatalf("submit the command: %v", err)
+	}
+	execID, err := led.StartExecution(ctx, content.StartExecution{EntryID: "wire-cmd"})
+	if err != nil {
+		t.Fatalf("start the command's execution: %v", err)
+	}
+	if _, err = led.AppendArtifact(ctx, content.AppendArtifact{
+		ID: "art-cmd", EntryID: "wire-cmd", ExecutionID: &execID,
+		MediaType: content.MediaVT,
+	}); err != nil {
+		t.Fatalf("append the command artifact: %v", err)
+	}
+	cmd := vaultCall(t, conn, "ledger.get", map[string]any{"id": "wire-cmd"}, 31)
+	if cmd.Error != nil {
+		t.Fatalf("ledger.get on the command: %+v", cmd.Error)
+	}
+	var cmdBody struct {
+		Artifacts []struct {
+			ID string `json:"id"`
+		} `json:"artifacts"`
+	}
+	if err = json.Unmarshal(cmd.Result, &cmdBody); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(cmdBody.Artifacts) != 1 || cmdBody.Artifacts[0].ID != "art-cmd" {
+		t.Fatalf("the command's artifacts off the socket = %+v, want the body its attempt produced",
+			cmdBody.Artifacts)
 	}
 }
 
@@ -728,6 +953,7 @@ func recordInPane(t *testing.T, db content.ContentDB, paneID, intent string) {
 		Cwd:    "/repo",
 		Intent: intent,
 		Status: content.EntrySuccess,
+		Source: content.SourceUser,
 	}); err != nil {
 		t.Fatalf("RecordCompleted(%q): %v", intent, err)
 	}

@@ -341,3 +341,48 @@ func TestOpenFailsWhenTheDeadSessionSweepIsRefused(t *testing.T) {
 		t.Fatalf("sessionId after recovery = %v, want nil — the sweep ran this time", *got.SessionID)
 	}
 }
+
+// A TURN has the same anchor as a command, and for the same reason
+// (nocx-4em1z). The owner watched a restored tab lose every question and
+// answer it held; this is the first end of that, measured at the store.
+//
+// A turn IS a block — the question is its intent and the answer is its body,
+// exactly as a command line and its output are — so the restore read, which
+// is `pane_id = ?`, must find it. It could not: SubmitAgentAsk wrote
+// session_id and no pane_id, anchoring the turn to the one thing D5
+// guarantees is gone by the time a restore runs.
+//
+// The restart is not decoration. Reading the column back in the process that
+// wrote it cannot see this: the session row is still there, and only after
+// Open sweeps it does the row's remaining anchor become the whole answer.
+func TestATurnIsFoundByItsPaneAfterARestart(t *testing.T) {
+	ctx := context.Background()
+	db, led, path := newLedgerAt(t)
+	aPaneUnder(t, db, "ws-1", "tab-1", "pane-1")
+	envReady(t, led, "local")
+
+	const sessionID = "session-the-question-was-asked-in"
+	if err := led.CreateSession(ctx, content.Session{ID: sessionID, WorkspaceID: "ws-1"}); err != nil {
+		t.Fatalf("CreateSession: %v", err)
+	}
+	ask := askIn(t, led, sessionID, "pane-1")
+
+	if err := db.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+	again, err := reopenStore(t, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = again.Close() }()
+
+	page := entriesForPane(t, again.Ledger(), "pane-1")
+	if len(page.Entries) != 1 || page.Entries[0].ID != ask.EntryID {
+		t.Fatalf("blocks for pane-1 after restart = %+v, want the one turn %s",
+			page.Entries, ask.EntryID)
+	}
+	// And the pane filter is a filter, not a coincidence of a small store.
+	if other := entriesForPane(t, again.Ledger(), "pane-nobody"); len(other.Entries) != 0 {
+		t.Fatalf("blocks for a pane that asked nothing = %+v, want none", other.Entries)
+	}
+}

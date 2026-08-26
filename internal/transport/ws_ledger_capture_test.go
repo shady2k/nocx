@@ -38,6 +38,7 @@ func aRecordedCommand(t *testing.T, db content.ContentDB, intent string) string 
 		Cwd:    "/repo",
 		Intent: intent,
 		Status: content.EntrySuccess,
+		Source: content.SourceUser,
 	})
 	if err != nil {
 		t.Fatalf("RecordCompleted: %v", err)

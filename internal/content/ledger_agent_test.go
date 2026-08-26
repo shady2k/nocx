@@ -112,8 +112,29 @@ func askOne(t *testing.T, led content.LedgerRepository, sessionID string, refs .
 	if res.RunID == 0 {
 		t.Fatal("SubmitAgentAsk returned run id 0")
 	}
-	if res.QuestionID == "" {
-		t.Fatal("SubmitAgentAsk returned an empty question id")
+	if res.EntryID == "" {
+		t.Fatal("SubmitAgentAsk returned an empty entry id")
+	}
+	return res
+}
+
+// askIn records one ask ANCHORED TO A PANE — the shape every block has
+// (nocx-4em1z). askOne above is the same call without one, kept for the tests
+// that are about the run rather than about restore.
+func askIn(t *testing.T, led content.LedgerRepository, sessionID, paneID string, refs ...content.AgentReference) content.AgentAskResult {
+	t.Helper()
+	res, err := led.SubmitAgentAsk(context.Background(), content.AgentAsk{
+		ID:         nextAskID(),
+		Client:     "test-client",
+		Env:        content.Environment{ID: "local", Kind: content.EnvLocal},
+		SessionID:  new(sessionID),
+		PaneID:     new(paneID),
+		Cwd:        "/repo",
+		Question:   "what does this screen mean?",
+		References: refs,
+	})
+	if err != nil {
+		t.Fatalf("SubmitAgentAsk in pane %q: %v", paneID, err)
 	}
 	return res
 }
@@ -139,8 +160,8 @@ func TestCaptureFrame_LandsAsEntryWithArtifactAndProvenance(t *testing.T) {
 	if e == nil {
 		t.Fatal("the frame entry does not exist")
 	}
-	if e.Kind != content.EntryAgent {
-		t.Errorf("frame entry kind = %q, want %q", e.Kind, content.EntryAgent)
+	if e.Kind != content.EntryFrame {
+		t.Errorf("frame entry kind = %q, want %q", e.Kind, content.EntryFrame)
 	}
 	if e.Intent != content.FrameIntent {
 		t.Errorf("frame entry intent = %q, want %q", e.Intent, content.FrameIntent)
@@ -151,6 +172,14 @@ func TestCaptureFrame_LandsAsEntryWithArtifactAndProvenance(t *testing.T) {
 	}
 	if e.SessionID == nil || *e.SessionID != "session-a" {
 		t.Errorf("frame entry session = %v, want session-a", e.SessionID)
+	}
+	// CRITERION 5 — a captured frame is kind='frame' AND its source is the
+	// immediate subject that asked for it: the renderer's captureFrame is a
+	// person selecting blocks, so a live frame lands as the person's
+	// capture (SourceUser), never conflated into "author". The kind says
+	// WHAT the row is; the source says WHO asked.
+	if e.Source != content.SourceUser {
+		t.Errorf("frame entry source = %q, want user (the ask gesture), not conflated into an author", e.Source)
 	}
 
 	if len(e.Executions) != 1 {
@@ -277,6 +306,40 @@ func TestCaptureFrame_FrozenSourceRecordsItsOwnProvenance(t *testing.T) {
 	}
 }
 
+// CRITERION 5 — the frame's source is the immediate asker: a person's
+// capture is user; a readScreen capture is assistant (the renderer's read
+// tool is a different producer whose durable frames stamp SourceAssistant).
+// The two must never conflate into one "author".
+func TestLedgerFrame_ReadScreenSourceIsTheAssistant(t *testing.T) {
+	_, led := newLedger(t)
+	ctx := context.Background()
+	// The readScreen tool's frame: the same frozen shape (rows, no cursor)
+	id, err := led.CaptureFrame(ctx, content.CaptureFrame{
+		CaptureID:         "readScreen-1",
+		Client:            "test-client",
+		Env:               content.Environment{ID: "local", Kind: content.EnvLocal},
+		SessionID:         new("session-a"),
+		Cwd:               "/repo",
+		Source:            content.FrameFrozen,
+		Subject:           content.SourceAssistant, // the read tool's answers stamp assistant
+		Rows:              []content.FrameRow{{Kind: "text", Text: "line one"}},
+		SerializerVersion: new(1),
+	})
+	if err != nil {
+		t.Fatalf("CaptureFrame: %v", err)
+	}
+	e, err := led.Entry(ctx, id.FrameID)
+	if err != nil || e == nil {
+		t.Fatalf("Entry: %v (nil=%v)", err, e == nil)
+	}
+	if e.Kind != content.EntryFrame {
+		t.Fatalf("kind = %q, want frame", e.Kind)
+	}
+	if e.Source != content.SourceAssistant {
+		t.Fatalf("source = %q, want assistant — readScreen's capture is the assistant's, never the person's", e.Source)
+	}
+}
+
 // ── captureFrame idempotency ─────────────────────────────────────────────
 
 // A replay of the same capture returns the original backend-minted id and
@@ -334,15 +397,15 @@ func TestSubmitAgentAsk_RecordsQuestionReferencesAndPendingRun(t *testing.T) {
 	res := askOne(t, led, "session-a", content.AgentReference{FrameID: frameID, Region: fullRegion()})
 
 	// The question is an entry of kind=agent with the question as its intent.
-	q, err := led.Entry(ctx, res.QuestionID)
+	q, err := led.Entry(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Entry: %v", err)
 	}
 	if q == nil {
 		t.Fatal("the question entry does not exist")
 	}
-	if q.Kind != content.EntryAgent {
-		t.Errorf("question kind = %q, want agent", q.Kind)
+	if q.Kind != content.EntryAsk {
+		t.Errorf("question kind = %q, want ask", q.Kind)
 	}
 	if q.Intent != "what does this screen mean?" {
 		t.Errorf("question intent = %q, want the question text", q.Intent)
@@ -367,26 +430,24 @@ func TestSubmitAgentAsk_RecordsQuestionReferencesAndPendingRun(t *testing.T) {
 		t.Errorf("run lane = %v, want agent", run.Lane)
 	}
 
-	// Two edges: the references edge (question → frame, region carried) and
-	// the caused-by edge from the answer entry (design §5 — the answer is
-	// an entry joined to the question, streamed in).
-	edges, err := led.Edges(ctx, res.QuestionID)
+	// One edge: the references edge (question → frame, region carried).
+	// Design §5 had a second — a caused-by from an answer entry of its own —
+	// and there is no such entry (nocx-4em1z) and no such relation
+	// (ADR-0040): containment is a column now.
+	edges, err := led.Edges(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Edges: %v", err)
 	}
-	var ref, caused *content.Edge
+	var ref *content.Edge
 	for i := range edges {
-		switch edges[i].Rel {
-		case content.RelReferences:
+		if edges[i].Rel == content.RelReferences {
 			ref = &edges[i]
-		case content.RelCausedBy:
-			caused = &edges[i]
 		}
 	}
 	if ref == nil {
 		t.Fatalf("edges = %+v, want a references edge", edges)
 	}
-	if ref.From != res.QuestionID || ref.To != frameID {
+	if ref.From != res.EntryID || ref.To != frameID {
 		t.Errorf("references edge = %+v, want question → frame", ref)
 	}
 	var region content.FrameRegion
@@ -396,36 +457,46 @@ func TestSubmitAgentAsk_RecordsQuestionReferencesAndPendingRun(t *testing.T) {
 	if region.RowStart != 0 || region.RowEnd != 2 {
 		t.Errorf("region = %+v, want rows [0,2)", region)
 	}
-	if caused == nil {
-		t.Fatalf("edges = %+v, want a caused-by edge from the answer", edges)
+	// NOTHING CONTAINS THE TURN, because there is no second entry it could
+	// be the answer of: a turn is ONE entry whose body is its CHILDREN
+	// (nocx-4em1z as amended by ADR-0040). The tree is free for what actually
+	// needs it — an action, a command, a run of prose, each drawn inside its
+	// turn.
+	//
+	// AND THE ASK OPENS NO BODY. It used to open one text/plain artifact on
+	// the run, which made the stored unit the whole answer while the drawn
+	// unit was a run of prose; the run opens a `text` child per piece now, so
+	// a turn that has not streamed a word carries nothing at all. An empty
+	// artifact here would be the claim that something was printed.
+	turn, err := led.Entry(ctx, res.EntryID)
+	if err != nil || turn == nil {
+		t.Fatalf("turn entry: %v (err %v)", turn, err)
 	}
-	if caused.To != res.QuestionID {
-		t.Errorf("caused-by edge = %+v, want → the question", caused)
+	if turn.Phase != content.PhaseOpen || turn.Status != content.EntryPending {
+		t.Errorf("turn phase/status = %q/%q, want open/pending", turn.Phase, turn.Status)
 	}
-
-	// The answer entry exists: an entry in the flow, with its container
-	// execution (not a run) and the empty, open answer artifact.
-	ans, err := led.Entry(ctx, res.AnswerEntryID)
-	if err != nil || ans == nil {
-		t.Fatalf("answer entry: %v (err %v)", ans, err)
+	if len(turn.Executions) != 1 {
+		t.Fatalf("turn executions = %d, want the one run", len(turn.Executions))
 	}
-	if ans.Kind != content.EntryAgent || ans.Intent != content.AnswerIntent {
-		t.Errorf("answer entry kind/intent = %q/%q, want agent/answer", ans.Kind, ans.Intent)
+	if turn.Executions[0].State == nil {
+		t.Errorf("the turn's execution has no run state — it IS the run")
 	}
-	if ans.Phase != content.PhaseOpen || ans.Status != content.EntryPending {
-		t.Errorf("answer entry phase/status = %q/%q, want open/pending", ans.Phase, ans.Status)
+	if len(turn.Executions[0].Artifacts) != 0 {
+		t.Fatalf("the ask opened %d artifacts, want none — the answer's body is its `text` children (ADR-0040): %+v",
+			len(turn.Executions[0].Artifacts), turn.Executions[0].Artifacts)
 	}
-	if len(ans.Executions) != 1 {
-		t.Fatalf("answer executions = %d, want 1", len(ans.Executions))
+	// The paired success, so "none" is not passing because the read is
+	// broken: a run of prose opened under this turn IS there, with a body.
+	prose, err := led.OpenProse(ctx, res.EntryID, res.RunID)
+	if err != nil {
+		t.Fatalf("OpenProse under the fresh turn: %v", err)
 	}
-	if ans.Executions[0].State != nil {
-		t.Errorf("answer execution state = %v, want nil (not a run)", ans.Executions[0].State)
+	body, err := led.Artifact(ctx, prose.ArtifactID)
+	if err != nil || body == nil {
+		t.Fatalf("the prose block's body: %v (nil=%v)", err, body == nil)
 	}
-	if len(ans.Executions[0].Artifacts) != 1 {
-		t.Fatalf("answer artifacts = %d, want 1", len(ans.Executions[0].Artifacts))
-	}
-	if ans.Executions[0].Artifacts[0].ID != res.AnswerArtifactID {
-		t.Errorf("answer artifact id = %q, want %q", ans.Executions[0].Artifacts[0].ID, res.AnswerArtifactID)
+	if body.EntryID != prose.EntryID {
+		t.Errorf("the prose body belongs to %q, want the block %q", body.EntryID, prose.EntryID)
 	}
 }
 
@@ -457,8 +528,8 @@ func TestSubmitAgentAsk_ReplayReturnsOriginalRun(t *testing.T) {
 	if res2.RunID != res1.RunID {
 		t.Errorf("replay run id = %d, want %d", res2.RunID, res1.RunID)
 	}
-	if res2.QuestionID != res1.QuestionID {
-		t.Errorf("replay question id = %q, want %q", res2.QuestionID, res1.QuestionID)
+	if res2.EntryID != res1.EntryID {
+		t.Errorf("replay entry id = %q, want %q", res2.EntryID, res1.EntryID)
 	}
 	if !res2.Replayed {
 		t.Error("replay did not report Replayed")
@@ -628,7 +699,7 @@ func TestStartupSweep_InterruptsNonTerminalRuns(t *testing.T) {
 
 	// First end of the interval: immediately after the ask, the run is
 	// durable and prepared — the model has not been called.
-	q, err := led.Entry(ctx, res.QuestionID)
+	q, err := led.Entry(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Entry: %v", err)
 	}
@@ -647,7 +718,7 @@ func TestStartupSweep_InterruptsNonTerminalRuns(t *testing.T) {
 	defer func() { _ = db2.Close() }()
 	led2 := db2.Ledger()
 
-	q2, err := led2.Entry(ctx, res.QuestionID)
+	q2, err := led2.Entry(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Entry after reopen: %v", err)
 	}
@@ -708,7 +779,7 @@ func TestStartupSweep_LeavesTerminalRunsAndShellEntriesAlone(t *testing.T) {
 	defer func() { _ = db2.Close() }()
 	led2 := db2.Ledger()
 
-	q2, err := led2.Entry(ctx, res.QuestionID)
+	q2, err := led2.Entry(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Entry: %v", err)
 	}
@@ -740,12 +811,14 @@ func TestFinishExecution_MapsTerminationToRunState(t *testing.T) {
 		want   content.RunState
 	}{
 		{content.TermCompleted, content.RunCompleted},
-		{content.TermUserKilled, content.RunCancelled},
 		{content.TermInterrupted, content.RunInterrupted},
+		{content.TermUserKilled, content.RunCancelled},
 		{content.TermFailed, content.RunFailed},
 		{content.TermTimeout, content.RunFailed},
 		{content.TermTransportGone, content.RunFailed},
 		{content.TermAgentDeclined, content.RunFailed},
+		{content.TermInactivity, content.RunFailed},
+		{content.TermOutputBudget, content.RunFailed},
 	}
 	for i, tc := range cases {
 		res := askOne(t, led, "session-a", content.AgentReference{FrameID: frameID, Region: fullRegion()})
@@ -756,7 +829,7 @@ func TestFinishExecution_MapsTerminationToRunState(t *testing.T) {
 		}); err != nil {
 			t.Fatalf("FinishExecution(%s): %v", tc.reason, err)
 		}
-		q, err := led.Entry(ctx, res.QuestionID)
+		q, err := led.Entry(ctx, res.EntryID)
 		if err != nil {
 			t.Fatalf("Entry: %v", err)
 		}
@@ -856,7 +929,7 @@ func TestSubmitAgentAsk_GeneralQuestionWithoutReferences(t *testing.T) {
 	res := askOne(t, led, "session-a")
 
 	ctx := context.Background()
-	edges, err := led.Edges(ctx, res.QuestionID)
+	edges, err := led.Edges(ctx, res.EntryID)
 	if err != nil {
 		t.Fatalf("Edges: %v", err)
 	}
@@ -866,21 +939,262 @@ func TestSubmitAgentAsk_GeneralQuestionWithoutReferences(t *testing.T) {
 		}
 	}
 	// The run still exists (the question is recorded and answerable): the
-	// question carries a prepared run, and the ANSWER entry carries the
-	// artifact the streamed deltas will land in — the same shape as a
-	// referenced ask, minus the edges.
-	q, err := led.Entry(ctx, res.QuestionID)
+	// turn carries a prepared run and no body at all — the same shape as a
+	// referenced ask, minus the edges. The deltas will land in the `text`
+	// children the run opens as it writes them (ADR-0040), so there is
+	// nothing to carry here yet.
+	q, err := led.Entry(ctx, res.EntryID)
 	if err != nil || q == nil {
-		t.Fatalf("question entry: %v (err %v)", q, err)
+		t.Fatalf("turn entry: %v (err %v)", q, err)
 	}
 	if len(q.Executions) != 1 || q.Executions[0].State == nil || *q.Executions[0].State != content.RunPrepared {
-		t.Fatalf("question run = %+v, want one prepared execution", q.Executions)
+		t.Fatalf("turn run = %+v, want one prepared execution", q.Executions)
 	}
-	ans, err := led.Entry(ctx, res.AnswerEntryID)
-	if err != nil || ans == nil {
-		t.Fatalf("answer entry: %v (err %v)", ans, err)
+	if len(q.Executions[0].Artifacts) != 0 {
+		t.Fatalf("turn artifacts = %+v, want none — the ask opens no body", q.Executions[0].Artifacts)
 	}
-	if len(ans.Executions) != 1 || len(ans.Executions[0].Artifacts) != 1 {
-		t.Fatalf("answer executions = %+v, want one artifact", ans.Executions)
+	// The paired success on the same store: the run's first piece of prose
+	// opens under this turn perfectly well.
+	if _, err := led.OpenProse(ctx, res.EntryID, res.RunID); err != nil {
+		t.Fatalf("OpenProse under a general question: %v", err)
+	}
+}
+
+// ── the approval moves (nocx-z9hj4 link 3) ────────────────────────────────
+
+// The run state machine knows three non-terminal moves: prepared → streaming
+// (the ask starts), streaming → awaiting_approval (the policy or the egress
+// gate suspended the run BEFORE the provider was reached), and
+// awaiting_approval → streaming (the person answered and the run streams
+// again). The state a reconnecting renderer reads must be able to say a
+// question is outstanding — a suspended run must never rest in streaming,
+// indistinguishable from a run mid-answer.
+func TestTransitionRun_ApprovalMoves(t *testing.T) {
+	_, led := newLedger(t)
+	ctx := context.Background()
+	res := askOne(t, led, "session-a")
+
+	if err := led.TransitionRun(ctx, res.RunID, content.RunStreaming); err != nil {
+		t.Fatalf("prepared → streaming refused: %v", err)
+	}
+	if err := led.TransitionRun(ctx, res.RunID, content.RunAwaitingApproval); err != nil {
+		t.Fatalf("streaming → awaiting_approval refused: %v", err)
+	}
+	st, err := led.RunState(ctx, res.RunID)
+	if err != nil || st == nil || *st != content.RunAwaitingApproval {
+		t.Fatalf("RunState = %v (err %v), want awaiting_approval", st, err)
+	}
+	// The resume: the person answered, the run streams again.
+	if err := led.TransitionRun(ctx, res.RunID, content.RunStreaming); err != nil {
+		t.Fatalf("awaiting_approval → streaming refused: %v", err)
+	}
+	// Terminal moves still belong to FinishAgentRun — a transition to a
+	// terminal state via TransitionRun stays refused from any state.
+	if err := led.TransitionRun(ctx, res.RunID, content.RunCompleted); err == nil {
+		t.Fatal("awaiting_approval → completed via TransitionRun accepted — terminal moves belong to FinishAgentRun")
+	}
+	if err := led.FinishAgentRun(ctx, res.RunID, content.FinishAgentRun{
+		State: content.RunCompleted, TerminationReason: content.TermCompleted, EndedAt: 1,
+	}); err != nil {
+		t.Fatalf("FinishAgentRun from awaiting_approval: %v", err)
+	}
+}
+
+// prepared → awaiting_approval is NOT a move: a run that never streamed has
+// nothing to suspend — the machine only suspends a streaming run.
+func TestTransitionRun_SkipToApprovalRefused(t *testing.T) {
+	_, led := newLedger(t)
+	res := askOne(t, led, "session-a")
+	if err := led.TransitionRun(context.Background(), res.RunID, content.RunAwaitingApproval); err == nil {
+		t.Fatal("prepared → awaiting_approval accepted — the machine only suspends a streaming run")
+	}
+}
+
+// ── one turn, one entry (nocx-4em1z) ──────────────────────────────────────
+
+// A TURN IS A BLOCK, and a block is ONE entry: the question is its intent and
+// the answer is its body, exactly as a command line and its output are.
+//
+// Before this it was two entries joined by a caused-by edge (assistant design
+// §5), and nothing depended on the second one except its id being a routing
+// address — which the turn's own id serves. Two rows for one block cost the
+// restore path a fold it should never have had to do: the question entry had
+// no body of its own to draw, and the answer entry had no question in its
+// header.
+//
+// §5's stated reason is untouched by this and is asserted below: the answer is
+// an ARTIFACT with provenance, not a string in a column (ADR-0019 §6).
+//
+// ADR-0040 amends the OTHER half. "One entry" stays true of the turn's
+// IDENTITY — one row routes the deltas, carries the grant and is what a
+// restore reads back — and what is dropped is "its own body is the answer".
+// The turn's body is its `text` CHILDREN now, one per run of prose, so the
+// ask writes one entry and NO artifact, and the bodies below are the ones the
+// run opened rather than one the ask handed it.
+func TestAnAskIsOneEntryWhoseBodyIsItsProseChildren(t *testing.T) {
+	ctx := context.Background()
+	db, led, _ := newLedgerAt(t)
+	aPaneUnder(t, db, "ws-1", "tab-1", "pane-1")
+	envReady(t, led, "local")
+
+	before, err := led.ListEntries(ctx, 100)
+	if err != nil {
+		t.Fatalf("ListEntries before: %v", err)
+	}
+	ask := askIn(t, led, "session-1", "pane-1")
+
+	after, err := led.ListEntries(ctx, 100)
+	if err != nil {
+		t.Fatalf("ListEntries after: %v", err)
+	}
+	if len(after)-len(before) != 1 {
+		t.Fatalf("one ask wrote %d entries, want exactly 1: %+v", len(after)-len(before), after)
+	}
+
+	turn, err := led.Entry(ctx, ask.EntryID)
+	if err != nil || turn == nil {
+		t.Fatalf("Entry(%s) = %+v, %v", ask.EntryID, turn, err)
+	}
+	// The question is the entry's own intent — the header of the block a
+	// person reads, not a row of its own.
+	if turn.Intent != "what does this screen mean?" {
+		t.Errorf("the turn's intent = %q, want the question", turn.Intent)
+	}
+	// The ask opened NO body. The run opens one per piece of prose; a turn
+	// that has not streamed a word has printed nothing, and an empty artifact
+	// would say otherwise.
+	var runBodies []content.Artifact
+	for _, ex := range turn.Executions {
+		runBodies = append(runBodies, ex.Artifacts...)
+	}
+	if len(runBodies) != 0 {
+		t.Fatalf("the ask left %d artifacts on the run, want none (ADR-0040): %+v", len(runBodies), runBodies)
+	}
+
+	// The paired success, and it is the assertion §5's reason survives in: a
+	// run of prose is an ARTIFACT with provenance, text/plain and never
+	// application/vt, which is exactly what tells a restored block to render
+	// prose rather than a grid.
+	prose, err := led.OpenProse(ctx, ask.EntryID, ask.RunID)
+	if err != nil {
+		t.Fatalf("OpenProse: %v", err)
+	}
+	body, err := led.Artifact(ctx, prose.ArtifactID)
+	if err != nil || body == nil {
+		t.Fatalf("Artifact(prose) = %+v, %v", body, err)
+	}
+	if body.MediaType != content.MediaText {
+		t.Errorf("the prose body's media type = %q, want %q", body.MediaType, content.MediaText)
+	}
+	if body.ExecutionID != nil {
+		t.Errorf("the prose body names execution %d — prose was printed, not attempted", *body.ExecutionID)
+	}
+	// And the block it belongs to is a `text` child of this turn, seated.
+	kids, err := led.Caused(ctx, ask.EntryID)
+	if err != nil || len(kids) != 1 {
+		t.Fatalf("the turn's children = %+v (%v), want the one run of prose", kids, err)
+	}
+	if kids[0].EntryID != prose.EntryID || kids[0].Kind != content.EntryText || kids[0].Position != 0 {
+		t.Fatalf("the prose child = %+v, want %s as text at seat 0", kids[0], prose.EntryID)
+	}
+	// Nothing anywhere under this turn carries a terminal body: a turn has no
+	// grid and never will.
+	for _, ex := range turn.Executions {
+		for _, a := range ex.Artifacts {
+			if a.MediaType == content.MediaVT {
+				t.Errorf("a turn carries a terminal body (%q) — nothing may write one", a.ID)
+			}
+		}
+	}
+	if body.MediaType == content.MediaVT {
+		t.Errorf("a run of prose carries a terminal body — nothing may write one")
+	}
+}
+
+// ── the turn's duration is a fact the CLOSE holds (nocx-hoeq3) ────────────
+
+// A restored turn draws a duration chip, and the only clock that can fill it
+// is this one: the renderer measures a shell command because the backend may
+// not read the stream (AD-6), but a turn's whole lifecycle is the backend's —
+// the run's start is written at submit and its end arrives here. Nothing else
+// can answer "how long did the assistant take".
+//
+// Before this the close wrote neither the entry's end nor its duration, so
+// every restored turn came off the wire with `durationMs: null`. That was
+// invisible while a turn drew no duration chip at all; the chip made it a
+// visible "0ms" (nocx-hoeq3), which is a different fact from "unknown" and a
+// wrong one — the duration WAS known and was being dropped.
+func TestFinishAgentRun_RecordsTheTurnsDuration(t *testing.T) {
+	ctx := context.Background()
+	db, led, _ := newLedgerAt(t)
+	aPaneUnder(t, db, "ws-1", "tab-1", "pane-1")
+	envReady(t, led, "local")
+	ask := askIn(t, led, "session-1", "pane-1")
+
+	// The interval OPENS at submit: the run row carries the start, and it is
+	// the start the close must measure from — not the moment of the close.
+	open, err := led.Entry(ctx, ask.EntryID)
+	if err != nil || open == nil {
+		t.Fatalf("Entry(%s) = %+v, %v", ask.EntryID, open, err)
+	}
+	var startedAt int64
+	for _, ex := range open.Executions {
+		if ex.State != nil && ex.StartedAt != nil {
+			startedAt = *ex.StartedAt
+		}
+	}
+	if startedAt == 0 {
+		t.Fatalf("the pending run carries no start: %+v", open.Executions)
+	}
+
+	err = led.FinishAgentRun(ctx, ask.RunID, content.FinishAgentRun{
+		State:             content.RunCompleted,
+		TerminationReason: content.TermCompleted,
+		EndedAt:           startedAt + 1500,
+	})
+	if err != nil {
+		t.Fatalf("FinishAgentRun: %v", err)
+	}
+
+	turn, err := led.Entry(ctx, ask.EntryID)
+	if err != nil || turn == nil {
+		t.Fatalf("Entry(%s) after close = %+v, %v", ask.EntryID, turn, err)
+	}
+	if turn.DurationMs == nil {
+		t.Fatalf("the closed turn carries no duration — a restored turn can only read 'unknown' for a time the ledger held all along")
+	}
+	if *turn.DurationMs != 1500 {
+		t.Errorf("the turn's duration = %dms, want 1500ms (end − the run's own start)", *turn.DurationMs)
+	}
+	// And its ends, so the row is self-consistent: a duration whose interval
+	// has no start and no finish is a number nothing can be checked against.
+	if turn.StartedAt == nil || *turn.StartedAt != startedAt {
+		t.Errorf("the turn's start = %v, want the run's own start %d", turn.StartedAt, startedAt)
+	}
+	if turn.EndedAt == nil || *turn.EndedAt != startedAt+1500 {
+		t.Errorf("the turn's end = %v, want %d", turn.EndedAt, startedAt+1500)
+	}
+
+	// And through the read the RESTORE actually makes: ledger.query pages
+	// this statement, and a duration the entry holds but the page drops
+	// would reach the renderer as the same null the bug wrote.
+	page, err := led.QueryEntries(ctx, content.LedgerQuery{
+		Scope: content.ScopeEverywhere, PaneID: "pane-1", Limit: 10,
+	})
+	if err != nil {
+		t.Fatalf("QueryEntries: %v", err)
+	}
+	var found bool
+	for _, row := range page.Entries {
+		if row.ID != ask.EntryID {
+			continue
+		}
+		found = true
+		if row.DurationMs == nil || *row.DurationMs != 1500 {
+			t.Errorf("the paged turn's duration = %v, want 1500ms", row.DurationMs)
+		}
+	}
+	if !found {
+		t.Fatalf("the turn is not in its own pane's page: %+v", page.Entries)
 	}
 }

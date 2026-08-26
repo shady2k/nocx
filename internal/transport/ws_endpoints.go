@@ -131,10 +131,14 @@ func (h endpointHandlers) handleMethod(ctx context.Context, req jsonrpcRequest) 
 // endpointMethodErrorCode maps the endpoint store's sentinel errors to
 // transport codes, mirroring profileMethodErrorCode: an existing or missing
 // record is a conflict/not-found (-32602 family), everything else internal.
+// A model the endpoint does not offer is the same class one step further in
+// — the params named something that is not there — so roles.setDefault
+// answers it with the same code as an endpoint id that names nothing.
 func endpointMethodErrorCode(err error) int {
 	switch {
 	case errors.Is(err, profile.ErrEndpointExists),
-		errors.Is(err, profile.ErrEndpointNotFound):
+		errors.Is(err, profile.ErrEndpointNotFound),
+		errors.Is(err, profile.ErrEndpointModelNotFound):
 		return -32602
 	default:
 		return -32603
@@ -164,6 +168,7 @@ type endpointCreateParams struct {
 	Name    string                 `json:"name"`
 	BaseURL string                 `json:"baseUrl"`
 	Schema  profile.EndpointSchema `json:"schema"`
+	NoKey   bool                   `json:"noKey"`
 	Key     string                 `json:"key"`
 	Models  []endpointModelInput   `json:"models"`
 	// Credential is the renderer's row handle when the form chose "use an
@@ -197,6 +202,7 @@ func (p endpointCreateParams) toEndpoint() profile.Endpoint {
 		Name:          p.Name,
 		BaseURL:       p.BaseURL,
 		Schema:        resolveEndpointSchema(p.Schema),
+		NoKey:         p.NoKey,
 		CredentialRef: p.Credential,
 		Models:        wireModelsToStored(p.Models),
 		Headers:       wireHeadersToStored(p.Headers),
@@ -224,6 +230,7 @@ type endpointUpdateParams struct {
 	ID         string                 `json:"id"`
 	Name       string                 `json:"name"`
 	BaseURL    string                 `json:"baseUrl"`
+	NoKey      bool                   `json:"noKey"`
 	Schema     profile.EndpointSchema `json:"schema"`
 	Key        string                 `json:"key"`
 	Credential string                 `json:"credential"`
@@ -237,6 +244,7 @@ func (p endpointUpdateParams) toEndpoint() profile.Endpoint {
 		Name:          p.Name,
 		BaseURL:       p.BaseURL,
 		Schema:        resolveEndpointSchema(p.Schema),
+		NoKey:         p.NoKey,
 		CredentialRef: p.Credential,
 		Models:        wireModelsToStored(p.Models),
 		Headers:       wireHeadersToStored(p.Headers),
@@ -275,6 +283,7 @@ func wireEndpoint(e profile.Endpoint) profile.EndpointDTO {
 		Name:    e.Name,
 		BaseURL: e.BaseURL,
 		Schema:  e.Schema,
+		NoKey:   e.NoKey,
 		Models:  wireModelsToDTO(e.Models),
 		Headers: make([]profile.EndpointHeaderDTO, 0, len(e.Headers)),
 	}

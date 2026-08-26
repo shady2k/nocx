@@ -26,7 +26,11 @@ function seedSharedHalf(store: CommandSnapshotStore): void {
   store.applySharedNames({ state: 'ready', names: [], ageMs: 0, reason: '', truncated: false })
 }
 import type { OscNotification } from '../osc-notification'
-import { CaptureAbortedError, CaptureIdentityTracker } from '../frame/capture-identity'
+import {
+  CaptureAbortedError,
+  CaptureIdentityTracker,
+  ReadScreenRangeError,
+} from '../frame/capture-identity'
 import { getCurrentTheme } from './theme-adapter'
 
 const stubBrowser = () => {
@@ -1189,6 +1193,59 @@ describe('XtermRenderer frame capture surface (nocx-3j9b)', () => {
     // nothing pending, so awaitSettled resolves immediately.
     await tracker.awaitSettled()
     expect(r.hasUnsettledWrite()).toBe(false)
+    r.dispose()
+  })
+
+  it('captureLiveFrame mints the visible screen through the real renderer (nocx-ljfwz)', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    r.write('hi')
+    await vi.waitFor(() => expect(r.hasUnsettledWrite()).toBe(false))
+    const frame = await r.captureLiveFrame()
+    expect(frame.provenance.source).toBe('live')
+    if (frame.provenance.source !== 'live') throw new Error('expected a live provenance')
+    expect(frame.provenance.identity.cols).toBe(r.cols)
+    expect(frame.rows).toHaveLength(r.rows)
+    // The first row carries the written text: the mint reads the buffer the
+    // renderer owns — the same code the push path would use.
+    const first = frame.rows[0]
+    if (first.kind !== 'cells') throw new Error('expected a cells row')
+    const text = first.cells
+      .slice(0, 2)
+      .map((c) => c.char)
+      .join('')
+    expect(text).toBe('hi')
+    r.dispose()
+  })
+
+  it('captureLiveFrame clamps a region to the buffer and refuses one past the end (nocx-ljfwz)', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    r.write('x')
+    await vi.waitFor(() => expect(r.hasUnsettledWrite()).toBe(false))
+
+    // A region beyond the current buffer clamps: rows are minted for the
+    // overlap, the frame states the actual span.
+    const clamped = await r.captureLiveFrame({ start: 0, end: 10_000 })
+    if (clamped.provenance.source !== 'live') throw new Error('expected a live provenance')
+    expect(clamped.provenance.range.end - clamped.provenance.range.start).toBe(clamped.rows.length)
+    expect(clamped.provenance.range.end).toBeLessThanOrEqual(10_000)
+
+    // A region entirely past the end is refused — the renderer never lies
+    // about gaps.
+    await expect(r.captureLiveFrame({ start: 1_000_000, end: 1_000_001 })).rejects.toThrow(
+      ReadScreenRangeError,
+    )
     r.dispose()
   })
 })

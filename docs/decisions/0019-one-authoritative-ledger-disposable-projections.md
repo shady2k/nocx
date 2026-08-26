@@ -122,8 +122,16 @@ overwrite-on-quit lifecycle that makes only the last session restorable, and no 
 "restore" to "search" even though both read the same events.
 
 **A separate agent transcript.** Rejected on the thesis above. Kept as a _projection_: a
-conversation view is a filter over `kind='agent'` plus `conversation_id`, which is cheap and
-throws nothing away.
+conversation view is a filter over `kind='agent'` and the tree beneath each turn, which is
+cheap and throws nothing away.
+
+> **Amended 2026-08-23 by [ADR-0040](0040-a-block-is-a-node-in-an-ordered-tree.md).** This
+> line named a `conversation_id` column, which is dropped: it was threaded from a
+> `SubmitEntry` field no caller ever set, so every row carried NULL and no projection could
+> ever have used it. What replaces it is stronger than what was described — a turn's prose,
+> its tool calls and the commands it ran are its CHILDREN, in order, so the conversation
+> view reads a turn whole rather than filtering a flat table for rows that might belong
+> together.
 
 **Keeping the session out of the schema entirely (the design as written).** Rejected: it
 makes "reopen that tab" unimplementable without inventing a second identity for the same

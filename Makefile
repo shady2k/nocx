@@ -17,6 +17,7 @@ PKG_CONFIG ?= pkg-config
 # empty and v3's GTK4 default is used.
 HOST_GOOS ?= $(shell $(GO) env GOOS)
 WAILS_PLATFORM_TAGS := $(shell if [ "$(HOST_GOOS)" = "linux" ] && $(PKG_CONFIG) --exists webkit2gtk-4.1 2>/dev/null; then printf gtk3; fi)
+GOLANGCI_BUILD_TAGS := $(if $(WAILS_PLATFORM_TAGS),--build-tags=$(WAILS_PLATFORM_TAGS))
 
 # v3 dropped the `wails build` wrapper: the project builds with plain go
 # build. Wails v2 used to run the frontend build (wails.json frontend:build);
@@ -426,7 +427,7 @@ lint-ci:
 	@test -z "$$($(GOFUMPT) -l .)" || (echo "FAIL: files need formatting" && exit 1)
 	@echo ""
 	@echo "=== golangci-lint ==="
-	$(GOLANGCI_LINT) run $(if $(WAILS_PLATFORM_TAGS),--build-tags "$(WAILS_PLATFORM_TAGS)") ./...
+	$(GOLANGCI_LINT) run $(GOLANGCI_BUILD_TAGS) ./...
 
 test-ci:
 	@echo "=== go test -race ==="

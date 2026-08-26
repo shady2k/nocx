@@ -6,7 +6,7 @@ import {
   ReportHealthy,
 } from '../bindings/github.com/shady2k/nocx/wailsapp'
 import { render } from 'solid-js/web'
-import { Show, createSignal } from 'solid-js'
+import { Show, createSignal, untrack } from 'solid-js'
 import App from './App'
 import { log } from './log'
 import { hasWailsWebview, installBrowserTransport } from './wails-runtime'
@@ -25,6 +25,9 @@ import { DialogClient } from './dialog-client'
 import { createVaultState, SetupDialog, UnlockDialog } from './vault'
 import { ConnectionPasswordPrompt } from './connection-password-prompt'
 import type { ConnectionsPasswordRequest } from './generated/connections.passwordRequest'
+import { AgentApprovalPrompt } from './agent-approval-prompt'
+import type { AgentApprove } from './generated/agent.approve'
+import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import type { FilesDropped } from './generated/files.dropped'
 import { VaultObserver } from './vault-observer'
 import { Dispatcher } from './dispatcher'
@@ -32,6 +35,7 @@ import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './setting
 import { HistoryStatusStore } from './history-status'
 import { FootprintClient } from './footprint-client'
 import { EndpointClient } from './endpoints'
+import { PolicyClient } from './policy-client'
 import { AgentClient } from './agent'
 import { HorizontalTabStrip, VerticalTabStrip } from './tab-strip'
 import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
@@ -42,6 +46,8 @@ import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
 import { PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
+import { mountReadScreenHandler } from './read-screen'
+import { mountRunCommandHandler } from './run-command'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
 import {
@@ -84,6 +90,7 @@ import {
 } from './sidebar-width'
 import { UIStateClient } from './uistate-client'
 import { OUTPUT_WRAP_DEFAULT, OUTPUT_WRAP_KEY, applyOutputWrap } from './output-wrap'
+import { REASONING_EXPANDED_KEY, applyReasoningExpanded } from './reasoning-expanded'
 import { applyOutputCap, OUTPUT_CAP_KEY } from './output-cap'
 import { applyRestoreOnStartup, RESTORE_ON_STARTUP_KEY } from './restore-setting'
 import type { TunnelOpenResult } from './generated/tunnel.open'
@@ -182,6 +189,7 @@ async function main() {
   // wire, a writer re-reads). Constructed with the other clients because
   // the Settings tab's factory below closes over it.
   const snippetsStore = new SnippetsStore(new SnippetsClient(dispatcher))
+  const policyClient = new PolicyClient(dispatcher)
   const vaultObserver = new VaultObserver(dispatcher)
   const vaultController = createVaultState(vaultClient)
   vaultObserver.start(() => {
@@ -229,6 +237,65 @@ async function main() {
     if (!p || !p.requestId) return
     setPendingConnectionPassword(p)
   })
+
+  // ── Backend-initiated approval questions (nocx-z9hj4) ──────────────
+  // A run suspended — the policy gate or the egress gate asked a person a
+  // question. ONE surface for both (design §7.3): the prompt renders the
+  // question and the decision names the exact binding. Questions are
+  // QUEUED keyed by runId: two runs can escalate while a person is deciding
+  // the first, and no run may be stranded unanswered — the next question
+  // shows when the current one is decided.
+  const pendingApprovals = new Map<string, AgentApprovalRequested>()
+  const [activeApproval, setActiveApproval] = createSignal<AgentApprovalRequested | null>(null)
+  const [approvalBusy, setApprovalBusy] = createSignal(false)
+  dispatcher.subscribe('agent.approvalRequested', (params) => {
+    const p = params as AgentApprovalRequested
+    if (!p || !p.runId || !p.argHash) return
+    if (pendingApprovals.has(p.runId)) return // the same run's question is already open
+    pendingApprovals.set(p.runId, p)
+    // One-shot guard: only the FIRST unanswered question is shown; the
+    // rest wait in the queue. The read is deliberately untracked — this is
+    // an event handler, not a reactive scope.
+    if (!untrack(() => activeApproval())) setActiveApproval(p)
+  })
+  const nextApproval = () => {
+    const first = pendingApprovals.values().next().value
+    setActiveApproval(first ?? null)
+  }
+  const decideApproval = async (approved: boolean, scope: AgentApprove['scope']) => {
+    const ask = activeApproval()
+    if (!ask || approvalBusy()) return
+    setApprovalBusy(true)
+    try {
+      await dispatcher.call('agent.approve', {
+        runId: ask.runId,
+        attempt: ask.attempt,
+        tool: ask.tool,
+        callId: ask.callId,
+        argHash: ask.argHash,
+        approved,
+        // How far the answer reaches, as the person chose it in the prompt.
+        // It travels with the decision because the BACKEND applies it: a
+        // renderer that read the matrix, edited a row and wrote it back would
+        // be a second owner of the policy document, racing the settings page
+        // (nocx-gycwo, design §"Three wire changes").
+        scope,
+      } satisfies AgentApprove)
+      // Only a RECORDED decision closes the question. A refusal (a stale
+      // binding — the question was already answered) keeps the prompt up:
+      // the person sees the honest refusal and can answer anew or deny.
+      pendingApprovals.delete(ask.runId)
+      nextApproval()
+    } catch (err) {
+      showToast({
+        level: 'danger',
+        message: `Could not record the decision: ${err instanceof Error ? err.message : String(err)}`,
+        duration: 0,
+      })
+    } finally {
+      setApprovalBusy(false)
+    }
+  }
 
   // Open-time host-key decisions share the same consent surface as
   // Connections → Test. Requests are queued because restored tabs can fail
@@ -311,6 +378,10 @@ async function main() {
     // The default wrap for a command block's output — one attribute on the
     // root, read by the CSS; the per-block ⋮ override is not touched by it.
     applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
+    // Whether an answer's thinking note opens by itself (nocx-y9e88), beside
+    // the wrap for the same reason: it decides what the surface does before
+    // anything is drawn on it.
+    applyReasoningExpanded(snap.values[REASONING_EXPANDED_KEY])
     // How much of one command's output is kept. Applied here beside the wrap
     // for the same reason: the renderer is where it is enforced, so it has to
     // know before the first block freezes.
@@ -355,7 +426,28 @@ async function main() {
   // problem, this opens where it is fixed — Settings → Endpoints with the
   // editor already up on a blank one.
   tm.onCreateEndpoint = () => openSettingsPane().startNewEndpoint()
+  // The composer's model chip names the model that will answer and IS the
+  // way to change it (nocx-rikz5): the Roles page is where that choice is
+  // made. Beside onCreateEndpoint because it is the same idea — a state
+  // names the one page that repairs it — and it reuses that seam for the
+  // endpoints destination rather than growing a second one.
+  tm.onOpenRoles = () => openSettingsPane().openPage('roles')
   tm.onActivity = reportActivity
+
+  // ── Backend-initiated readScreen requests (nocx-ljfwz) ─────────────
+  // The broker's pull: the backend asks the renderer to produce a session's
+  // frame (the readScreen tool). The handler resolves the session to the
+  // pane that owns its grid; a request for a session no pane holds is
+  // answered failed, honestly — never a hang.
+  mountReadScreenHandler(dispatcher, (sessionId) => tm.terminalContentForSession(sessionId))
+
+  // ── Backend-initiated run requests (nocx-tjppv) ─────────────────────
+  // The broker's pull for the headline tool: the backend asks the renderer
+  // to run a command through the same submit path a person uses, in the
+  // lane session the grant permitted. The handler resolves the session to
+  // the pane that owns it; a request for a session no pane holds is answered
+  // failed, honestly — never a hang.
+  mountRunCommandHandler(dispatcher, (sessionId) => tm.terminalContentForSession(sessionId))
 
   // ── The workspace overview (nocx-edhcu) ──────────────────────────────
   // Every workspace and every pane at once, as text cards. The controller
@@ -393,6 +485,7 @@ async function main() {
         historyStatusStore,
         aboutClient,
         clipboard,
+        policyClient,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
@@ -815,6 +908,10 @@ async function main() {
         // has overridden, in place, with no restart and no reflow of the
         // blocks that carry their own answer.
         applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
+        // Live in the same sense: flipping it opens or shuts the thinking
+        // notes ALREADY on screen, so the setting is never contradicted by
+        // the answers a person is looking at.
+        applyReasoningExpanded(snap.values[REASONING_EXPANDED_KEY])
         // The cap is live too: a block frozen after the change is captured
         // under the new number, and blocks already stored keep what they got.
         applyOutputCap(snap.values[OUTPUT_CAP_KEY])
@@ -1338,6 +1435,23 @@ async function main() {
               onDone={() => {
                 setPendingConnectionPassword(null)
               }}
+            />
+          )}
+        </Show>
+        <Show when={activeApproval()} keyed>
+          {(ask) => (
+            <AgentApprovalPrompt
+              open
+              ask={ask}
+              busy={approvalBusy()}
+              copy={(text) => clipboard.writeText(text)}
+              onDecide={(approved, scope) => void decideApproval(approved, scope)}
+              // A session in the question is named by the pane that holds
+              // it, through the tab strip's own derivation (nocx-vnzek) —
+              // the same one the answer's tool-call lines read — together
+              // with the machine that pane is talking to (nocx-njn8s), so
+              // the question says where a command would actually land.
+              sessionWhere={(id) => tm.sessionWhere(id)}
             />
           )}
         </Show>

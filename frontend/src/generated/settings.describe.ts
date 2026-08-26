@@ -53,9 +53,16 @@ export interface Declaration {
     label: string
   }[]
   min?: number
+  /**
+   * The declared ceiling: a number setting's largest allowed value, or — on control "text" — the longest allowed text, counted in characters. Which it is is never ambiguous, because a text control has no numeric value; unit names what the number counts. Text past it is REFUSED, never truncated, and the screen states the bound rather than letting it be discovered by losing text to it.
+   */
   max?: number
   unit?: string
   zeroLabel?: string
+  /**
+   * The text control's paragraph variant; present only for control: text. The screen renders the kit's multiline TextField, where Enter inserts a newline instead of committing. A variant rather than a sixth control kind, matching the kit: TextField takes a multiline prop and there is no second component.
+   */
+  multiline?: boolean
 }
 export interface SettingsGroup {
   /**

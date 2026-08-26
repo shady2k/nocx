@@ -4622,7 +4622,7 @@ func TestLifecycleSubmitAttempt_OverTheWireConformsToContract(t *testing.T) {
 	ackEstablishmentFrom(t, pub, lane, h, e.conn)
 
 	resp := jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt", map[string]string{
-		"domain": string(h.Domain), "command": "make", "cwd": "/srv/app", "host": "build.example.com",
+		"domain": string(h.Domain), "command": "make", "cwd": "/srv/app", "host": "build.example.com", "source": "user",
 	}, 41)
 	var envelope struct {
 		Result json.RawMessage  `json:"result"`
@@ -5220,54 +5220,17 @@ func TestNotesWithoutAServiceRefuseRatherThanAnswerEmpty(t *testing.T) {
 	}
 }
 
-// ── agent.captureFrame / agent.ask (nocx-f4s5, design §7) ────────────────
-
-// The DTOs' own conformance: field tags, omitempty behaviour, whether the
-// enum spells what the schema says.
-func TestAgentCaptureFrame_DTOConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "agent.captureFrame.schema.json")
-	raw, err := json.Marshal(captureFrameResponse{FrameID: "0123456789abcdef0123456789abcdef"})
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
-	}
-	validateJSON(t, schema, raw, "agent.captureFrame DTO")
-}
-
 func TestAgentAsk_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.ask.schema.json")
 	raw, err := json.Marshal(agentAskResponse{
-		RunID: 7, QuestionID: "ask-1", AnswerEntryID: "answer-1",
+		RunID: 7, EntryID: "ask-1",
 		State: string(content.RunPrepared), IngestSeq: 3, Replayed: false,
+		Model: "qwen3",
 	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
 	validateJSON(t, schema, raw, "agent.ask DTO")
-}
-
-// The real methods through the real socket — the assertion that would have
-// caught a field nobody sends. Nothing here names a field, so nothing here
-// can omit one.
-func TestAgentCaptureFrame_OverTheWireConformsToContract(t *testing.T) {
-	schema := loadSchema(t, "agent.captureFrame.schema.json")
-	ws, _, stop := newAgentWSServer(t)
-	defer stop()
-	conn := connectWS(t, ws)
-	defer conn.Close() //nolint:errcheck
-	sid := openLocalSession(t, conn)
-
-	resp := jsonrpcCallWithID(t, conn, "agent.captureFrame", frameParams(sid, "cap-contract"), 1)
-	var env struct {
-		Result json.RawMessage  `json:"result"`
-		Error  *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(resp, &env); err != nil {
-		t.Fatalf("decode: %v", err)
-	}
-	if env.Error != nil {
-		t.Fatalf("captureFrame error: %+v", env.Error)
-	}
-	validateJSON(t, schema, env.Result, "agent.captureFrame result")
 }
 
 func TestAgentAsk_OverTheWireConformsToContract(t *testing.T) {
@@ -5276,14 +5239,10 @@ func TestAgentAsk_OverTheWireConformsToContract(t *testing.T) {
 	h.createEndpoint()
 	conn := h.conn
 	sid := openLocalSession(t, conn)
-	frameID, errObj := captureFrameOverWire(t, conn, frameParams(sid, "cap-contract"), 1)
-	if errObj != nil {
-		t.Fatalf("captureFrame: %+v", errObj)
-	}
 
 	resp := jsonrpcCallWithID(t, conn, "agent.ask", map[string]any{
 		"askId": "ask-contract", "sessionId": sid, "question": "q", "cwd": "/repo",
-		"references": []any{map[string]any{"frameId": frameID, "region": map[string]any{"rowStart": 0, "rowEnd": 2}}},
+		"attachedContent": []any{},
 	}, 2)
 	var env struct {
 		Result json.RawMessage  `json:"result"`
@@ -5298,12 +5257,203 @@ func TestAgentAsk_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, env.Result, "agent.ask result")
 }
 
+// ── agent.readScreenRequest / agent.readScreenResolved (nocx-ljfwz) ──────
+
+// The request notification is SERVER-built, so its contract check is the
+// real payload off the real socket: the broker's request params (requestId
+// + sessionId, the narrowing already applied) must satisfy the schema the
+// renderer's generated type was declared from.
+func TestAgentReadScreenRequest_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.readScreenRequest.schema.json")
+	ws, _, stop := newAgentWSServer(t)
+	defer stop()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+	sid := openLocalSession(t, conn)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := ws.RequestScreen(t.Context(), sid, nil)
+		done <- err
+	}()
+	raw := readNotification(t, conn, "agent.readScreenRequest", 5*time.Second)
+	validateJSON(t, schema, raw, "agent.readScreenRequest notification params")
+
+	// Settle the request so the goroutine above exits: a failed outcome is
+	// the honest terminal answer for a test that only wants the params.
+	var req struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("requestId decode: %v", err)
+	}
+	resp := jsonrpcCall(t, conn, "agent.readScreenResolved", map[string]any{
+		"requestId": req.RequestID,
+		"outcome":   "failed",
+		"error":     "contract test",
+	})
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("resolution refused: %+v", env.Error)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "could not capture the screen") {
+			t.Fatalf("RequestScreen returned %v, want the failed-outcome error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RequestScreen never settled")
+	}
+}
+
+func TestAgentReadScreenResolved_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.readScreenResolved.schema.json")
+	body, err := json.Marshal(readScreenResolvedParams{
+		Outcome: "frame",
+		Rows: []frameRowWire{{
+			Kind: "cells",
+			Cells: []frameCellWire{
+				{Char: "h", Attrs: frameAttrsWire{}},
+				{Char: "i", Attrs: frameAttrsWire{}},
+			},
+		}},
+		Cursor: &frameCursorWire{Line: 0, Col: 0},
+		Identity: &frameIdentityWire{
+			Buffer: frameBufferWire{Kind: "normal"},
+			Cols:   2, Rows: 1, Generation: 1,
+		},
+		Range: &frameRangeWire{Start: 0, End: 1},
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// The wire envelope carries the broker-minted requestId beside the
+	// resolution body — the renderer echoes it back (the broker correlates
+	// on it before the kind's shape check runs).
+	var wire map[string]any
+	if wireErr := json.Unmarshal(body, &wire); wireErr != nil {
+		t.Fatalf("decode body: %v", wireErr)
+	}
+	wire["requestId"] = "0123456789abcdef"
+	raw, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("marshal wire: %v", err)
+	}
+	validateJSON(t, schema, raw, "agent.readScreenResolved DTO")
+}
+
+// ── agent.runRequest / agent.runResolved (nocx-tjppv) ─────────────────────
+
+// The run request notification is SERVER-built, so its contract check is the
+// real payload off the real socket: the broker's request params (requestId +
+// sessionId + command) must satisfy the schema the renderer's generated type
+// was declared from.
+func TestAgentRunRequest_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.runRequest.schema.json")
+	ws, _, stop := newAgentWSServer(t)
+	defer stop()
+	conn := connectWS(t, ws)
+	defer conn.Close() //nolint:errcheck
+	sid := openLocalSession(t, conn)
+
+	done := make(chan error, 1)
+	go func() {
+		_, err := ws.RequestRun(t.Context(), sid, "ls -la")
+		done <- err
+	}()
+	raw := readNotification(t, conn, "agent.runRequest", 5*time.Second)
+	validateJSON(t, schema, raw, "agent.runRequest notification params")
+
+	// Settle the request so the goroutine above exits: a failed outcome is
+	// the honest terminal answer for a test that only wants the params.
+	var req struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal(raw, &req); err != nil {
+		t.Fatalf("requestId decode: %v", err)
+	}
+	resp := jsonrpcCall(t, conn, "agent.runResolved", map[string]any{
+		"requestId": req.RequestID,
+		"outcome":   "failed",
+		"error":     "contract test",
+	})
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("resolution refused: %+v", env.Error)
+	}
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "could not run the command") {
+			t.Fatalf("RequestRun returned %v, want the failed-outcome error", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("RequestRun never settled")
+	}
+}
+
+func TestAgentRunResolved_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.runResolved.schema.json")
+	body, err := json.Marshal(runResolvedParams{
+		Outcome:  "completed",
+		EntryID:  "entry-7",
+		ExitCode: new(0),
+		Status:   "success",
+		Total:    2,
+		Start:    0,
+		End:      2,
+		Text:     "file1\nfile2",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	// The wire envelope carries the broker-minted requestId beside the
+	// resolution body — the renderer echoes it back (the broker correlates
+	// on it before the kind's shape check runs).
+	var wire map[string]any
+	if wireErr := json.Unmarshal(body, &wire); wireErr != nil {
+		t.Fatalf("decode body: %v", wireErr)
+	}
+	wire["requestId"] = "0123456789abcdef"
+	raw, err := json.Marshal(wire)
+	if err != nil {
+		t.Fatalf("marshal wire: %v", err)
+	}
+	validateJSON(t, schema, raw, "agent.runResolved DTO")
+}
+
+// The failed outcome's shape: no run body, only the requestId and the
+// failure sentence.
+func TestAgentRunResolved_FailedDTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "agent.runResolved.schema.json")
+	raw, err := json.Marshal(map[string]any{
+		"requestId": "0123456789abcdef",
+		"outcome":   "failed",
+		"error":     "the agent lane is not prompt-ready",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "agent.runResolved failed DTO")
+}
+
 // ── agent.runDelta / agent.runState notifications (nocx-x8s2.2, design §7) ─
 
 // The DTOs' conformance: field tags and enum spelling.
 func TestAgentRunNotifications_DTOsConformToContract(t *testing.T) {
 	deltaSchema := loadSchema(t, "agent.runDelta.schema.json")
-	raw, err := json.Marshal(agentRunDelta{RunID: 7, EntryID: "answer-1", Seq: 0, Text: "hello"})
+	raw, err := json.Marshal(agentRunDelta{
+		RunID: 7, EntryID: "answer-1", BlockID: "answer-1/text-1", Seq: 0, Text: "hello",
+	})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
 	}
@@ -5333,13 +5483,9 @@ func TestAgentRunNotifications_OverTheWireConformToContract(t *testing.T) {
 	h.createEndpoint()
 	conn := h.conn
 	sid := openLocalSession(t, conn)
-	frameID, errObj := captureFrameOverWire(t, conn, frozenWireFrame(sid, "frame-1"), 1)
-	if errObj != nil {
-		t.Fatalf("captureFrame: %+v", errObj)
-	}
-	_, errObj = askOverWire(t, conn, map[string]any{
+	_, errObj := askOverWire(t, conn, map[string]any{
 		"askId": "ask-1", "sessionId": sid, "question": "q", "cwd": "/repo",
-		"references": []any{map[string]any{"frameId": frameID, "region": map[string]any{"rowStart": 0, "rowEnd": 2}}},
+		"attachedContent": []any{},
 	}, 2)
 	if errObj != nil {
 		t.Fatalf("ask: %+v", errObj)
@@ -5431,6 +5577,92 @@ func TestExit_DTOStatusRulesAreExact(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ── policy.get / policy.set ──────────────────────────────────────────────
+
+// The DTO's own conformance for policy.get: the matrix's wire form — seven
+// rows, effective decisions for unstated rows, non-null scopes arrays — must
+// satisfy the schema exactly (additionalProperties false on the result AND on
+// every row AND every scope, so nothing extra can ride along).
+func TestPolicyGet_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.get.schema.json")
+
+	askOnMutate := content.EffectPolicy{Observe: content.EffectRow{Decision: content.DecisionPermit}}
+	raw, err := json.Marshal(policyResult{Policy: askOnMutate})
+	if err != nil {
+		t.Fatalf("marshal ask-on-mutate: %v", err)
+	}
+	validateJSON(t, schema, raw, "policy.get ask-on-mutate DTO")
+
+	var finer content.EffectPolicy
+	finer.Observe = content.EffectRow{
+		Decision: content.DecisionPermit,
+		Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}},
+	}
+	finer.MutateDestructive = content.EffectRow{Decision: content.DecisionRefuse}
+	rawFiner, err := json.Marshal(policyResult{Policy: finer})
+	if err != nil {
+		t.Fatalf("marshal finer: %v", err)
+	}
+	validateJSON(t, schema, rawFiner, "policy.get finer-than-presets DTO")
+}
+
+// The real result off the real socket: the handler's response — not a test
+// payload — must satisfy the contract, with the scope and decisions the store
+// actually holds (the third row of the contracts README's table).
+func TestPolicyGet_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.get.schema.json")
+	h, store := newPolicyHarness(t)
+	var p content.EffectPolicy
+	p.Observe = content.EffectRow{
+		Decision: content.DecisionPermit,
+		Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}},
+	}
+	p.Delegate = content.EffectRow{Decision: content.DecisionRefuse}
+	if err := store.SetPolicy(p); err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+
+	resp := jsonrpcCall(t, h.conn, "policy.get", nil)
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.get: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "policy.get result (real socket)")
+}
+
+// The policy.set result's conformance: {ok: true}, asserted off the real
+// socket after a set the validator accepted.
+func TestPolicySet_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "policy.set.schema.json")
+	h, _ := newPolicyHarness(t)
+
+	resp := jsonrpcCall(t, h.conn, "policy.set", map[string]any{
+		"policy": map[string]any{
+			"observe": map[string]any{
+				"decision": "permit",
+				"scopes":   []any{map[string]any{"kind": "path", "id": "/workspace"}},
+			},
+		},
+	})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(resp))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.set: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "policy.set result (real socket)")
 }
 
 // ── ledger.open / ledger.bind / ledger.close ─────────────────────────────
@@ -5550,7 +5782,7 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 	exit := 2
 	entry := ledgerEntryWire{
 		ID: "01924f9c-0000-7000-8000-000000000001", Seq: 7,
-		EnvID: "3f1a", Host: &host, Cwd: "/repo", Kind: "shell",
+		EnvID: "3f1a", Host: &host, Cwd: "/repo", Kind: "shell", Source: "user",
 		Intent: "make deploy", Phase: "closed", Status: "failure",
 		SubmittedAt: started, StartedAt: &started, EndedAt: &ended,
 		DurationMs: &duration, ExitCode: &exit, MaskedCount: 1,
@@ -5562,7 +5794,7 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 	// The row a live command produces: no end, no exit code, no host row.
 	running := ledgerEntryWire{
 		ID: "01924f9c-0000-7000-8000-000000000002", Seq: 8,
-		EnvID: "3f1a", Host: nil, Cwd: "/repo", Kind: "shell",
+		EnvID: "3f1a", Host: nil, Cwd: "/repo", Kind: "shell", Source: "user",
 		Intent: "make watch", Phase: "bound", Status: "running",
 		SubmittedAt: started, MaskedKinds: []string{}, Redactions: []redactionWire{},
 	}
@@ -5592,6 +5824,7 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 	stream := "combined"
 	truncated := "cap"
 	offset, end := int64(0), int64(4096)
+	effect := "observe"
 	getCases := map[string]ledgerGetResponse{
 		"populated": {
 			Entry: entry,
@@ -5599,6 +5832,20 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 				From: entry.ID, To: running.ID, Rel: "rerun-of",
 				Payload: json.RawMessage(`{"note":"anything"}`),
 			}},
+			// The causal flow, both kinds it can hold: a tool call, whose
+			// effect and resource are its own, and a command the turn ran,
+			// which has neither and says so with nulls (nocx-h1l4o).
+			Caused: []ledgerCausedWire{
+				{
+					EntryID: "01924f9c-0000-7000-8000-00000000000a", Position: 0,
+					Kind: "action", Source: "assistant", Intent: "files.read", Effect: &effect,
+					Resource: &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/go.mod"},
+				},
+				{
+					EntryID: running.ID, Position: 1, Kind: "shell", Source: "assistant",
+					Intent: "make watch", Effect: nil, Resource: nil,
+				},
+			},
 			Artifacts: []ledgerArtifactWire{{
 				ID: "artifact-1", ExecutionID: 3, MediaType: "text/plain",
 				DerivedFrom: nil, State: "sealed", ByteLen: 4096, ChunkCount: 2,
@@ -5608,9 +5855,11 @@ func TestLedgerReads_DTOsConformToContract(t *testing.T) {
 				Gaps:    []ledgerGapWire{{Start: 10, End: 20, Reason: "dropped"}},
 				Payload: json.RawMessage(`{}`),
 			}},
+			ProseEvicted: true,
 		},
 		"an entry with no relations and no captures": {
 			Entry: running, Edges: []ledgerEdgeWire{}, Artifacts: []ledgerArtifactWire{},
+			Caused: []ledgerCausedWire{}, ProseEvicted: false,
 		},
 	}
 	getSchema := loadSchema(t, "ledger.get.schema.json")
@@ -5676,6 +5925,154 @@ func TestLedgerReads_OverTheWireConformToContract(t *testing.T) {
 		t.Fatalf("ledger.get: %+v", got.Error)
 	}
 	validateJSON(t, getSchema, got.Result, "ledger.get result (a closed entry)")
+
+	// And an entry that CAUSED something (nocx-h1l4o). The relation is
+	// written through the store's own seam because no JSON-RPC method
+	// writes one — the backend does, from a fact the renderer never sends
+	// — but the read under test is the real handler answering off the real
+	// socket, which is the row that matters in contracts/README.md.
+	led := db.Ledger()
+	action := content.SubmitEntry{
+		ID: "01924f9c-0000-7000-8000-0000000000aa", Client: "agent",
+		EnvironmentID: localEnvironmentID(), Cwd: "/", Kind: content.EntryAction,
+		Intent: "files.read",
+		Payload: `{"tool":"files.read","effect":"observe","opensBlock":true,` +
+			`"resource":{"kind":"path","id":"/repo/go.mod"}}`,
+	}
+	if _, err := led.Submit(context.Background(), action); err != nil {
+		t.Fatalf("submit the action entry: %v", err)
+	}
+	for _, caused := range []string{action.ID, "wire-2"} {
+		if _, err := led.AddCause(context.Background(), "wire-1", caused); err != nil {
+			t.Fatalf("AddCause(%s): %v", caused, err)
+		}
+	}
+	withCauses := vaultCall(t, conn, "ledger.get", map[string]any{"id": "wire-1"}, 12)
+	if withCauses.Error != nil {
+		t.Fatalf("ledger.get with causes: %+v", withCauses.Error)
+	}
+	validateJSON(t, getSchema, withCauses.Result, "ledger.get result (an entry that caused two others)")
+	var body struct {
+		Caused []struct {
+			EntryID    string `json:"entryId"`
+			Position   int    `json:"position"`
+			Kind       string `json:"kind"`
+			OpensBlock bool   `json:"opensBlock"`
+			Effect     *string
+			Resource   *content.GrantScope
+		} `json:"caused"`
+	}
+	if err := json.Unmarshal(withCauses.Result, &body); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if len(body.Caused) != 2 {
+		t.Fatalf("caused off the socket = %+v, want both", body.Caused)
+	}
+	if body.Caused[0].EntryID != action.ID || body.Caused[0].Position != 0 ||
+		body.Caused[0].Kind != "action" {
+		t.Fatalf("the first cause off the socket = %+v", body.Caused[0])
+	}
+	if body.Caused[0].Effect == nil || *body.Caused[0].Effect != "observe" {
+		t.Fatalf("the action's effect off the socket = %v, want observe", body.Caused[0].Effect)
+	}
+	if body.Caused[0].Resource == nil || body.Caused[0].Resource.ID != "/repo/go.mod" {
+		t.Fatalf("the action's resource off the socket = %+v", body.Caused[0].Resource)
+	}
+	// The command the turn ran is not a tool call: both are null, and the
+	// renderer draws it as the block it is.
+	if body.Caused[1].EntryID != "wire-2" || body.Caused[1].Position != 1 {
+		t.Fatalf("the second cause off the socket = %+v", body.Caused[1])
+	}
+	if body.Caused[1].Effect != nil || body.Caused[1].Resource != nil {
+		t.Fatalf("a command came back with tool facts: %+v", body.Caused[1])
+	}
+	if !body.Caused[0].OpensBlock {
+		t.Fatalf("the action's opensBlock off the socket = false, want the stored true")
+	}
+	if body.Caused[1].OpensBlock {
+		t.Fatalf("a command came back saying it opened a block: %+v", body.Caused[1])
+	}
+}
+
+// The negative for the causal flow: the schema refuses what it must, or the
+// `caused` list is a shape nobody is holding to anything.
+func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
+	schema := loadSchema(t, "ledger.get.schema.json")
+	entry := `{"id":"a","seq":1,"environmentId":"e","host":null,"cwd":"/","kind":"ask","source":"user",` +
+		`"intent":"x","phase":"closed","status":"success","submittedAt":1,"startedAt":null,` +
+		`"endedAt":null,"durationMs":null,"exitCode":null,"maskedCount":0,"maskedKinds":[],` +
+		`"redactions":[]}`
+	body := func(caused string) string {
+		return `{"entry":` + entry + `,"edges":[],"artifacts":[],"proseEvicted":false,"caused":` + caused + `}`
+	}
+	// And the shape itself: the schema refuses a ledger.get result that
+	// will not say whether the prose of the run is gone — absent and false
+	// must not be the same wire state for the one fact a turn's reader
+	// cannot re-derive.
+	if err := validateJSONErr(schema, []byte(
+		`{"entry":`+entry+`,"edges":[],"artifacts":[],"caused":[]}`,
+	)); err == nil {
+		t.Fatal("the schema accepted a ledger.get result that omits proseEvicted")
+	}
+	bad := map[string]string{
+		"caused as null": body(`null`),
+		"a cause with no position": body(
+			`[{"entryId":"b","kind":"shell","intent":"ls","effect":null,"resource":null}]`),
+		"a negative position": body(
+			`[{"entryId":"b","position":-1,"kind":"shell","intent":"ls","effect":null,"resource":null}]`),
+		"an effect nobody named": body(
+			`[{"entryId":"b","position":0,"kind":"action","intent":"x","effect":"rummage","resource":null}]`),
+		"a half-named resource": body(
+			`[{"entryId":"b","position":0,"kind":"action","intent":"x","effect":"observe","resource":{"kind":"path"}}]`),
+		"an undeclared field on a cause": body(
+			`[{"entryId":"b","position":0,"kind":"shell","intent":"ls","effect":null,"resource":null,"parent":"a"}]`),
+		// THE ANCHOR IS GONE FROM THE CONTRACT (ADR-0040), so it is refused
+		// like any other field nobody declared — additionalProperties does
+		// that, and this is the assertion that it really is off the schema
+		// rather than merely unset by the server.
+		"a cause still carrying the anchor": body(
+			`[{"entryId":"b","position":0,"at":0,"kind":"shell","intent":"ls","effect":null,"resource":null,"opensBlock":false}]`),
+		// The block fact is required for the reason the position is: a cause
+		// that will not say whether it opened a block is one a restored turn
+		// cannot draw, and "absent" and "false" must not be the same thing on
+		// the wire.
+		"a cause that will not say whether it opened a block": body(
+			`[{"entryId":"b","position":0,"kind":"shell","intent":"ls","effect":null,"resource":null}]`),
+		// The arguments are required for the reason the resource is: two
+		// calls of one session-scoped tool have the same tool and the same
+		// resource, and a cause that will not say what it ASKED FOR is one a
+		// restored turn cannot tell from its neighbour (ADR-0040). A shell
+		// child says `null` — it asked for nothing — and that is still
+		// saying it.
+		"a cause that will not say what it asked for": body(
+			`[{"entryId":"b","position":0,"kind":"shell","intent":"ls","effect":null,"resource":null,"opensBlock":false}]`),
+		"arguments that are not an object": body(
+			`[{"entryId":"b","position":0,"kind":"action","intent":"x","args":"{\"a\":1}","effect":"observe","resource":null,"opensBlock":false}]`),
+	}
+	for name, raw := range bad {
+		t.Run(name, func(t *testing.T) {
+			if err := validateJSONErr(schema, []byte(raw)); err == nil {
+				t.Fatalf("the schema accepted %s — additionalProperties/required is not doing its job", name)
+			}
+		})
+	}
+	// And the shape it must ACCEPT, so the refusals above are a contract
+	// and not an accident of a schema that refuses everything.
+	ok := body(`[{"entryId":"b","position":0,"kind":"action","source":"assistant","intent":"files.read",` +
+		`"args":{"path":"/repo/go.mod"},` +
+		`"effect":"observe","resource":{"kind":"path","id":"/repo/go.mod"},"opensBlock":false}]`)
+	if err := validateJSONErr(schema, []byte(ok)); err != nil {
+		t.Fatalf("the schema refused a well-formed cause: %v", err)
+	}
+	// And a run of prose, which is a child like any other since ADR-0040: it
+	// names no intent, has no effect and no resource, and opens no block. The
+	// server sends these now, so a schema that could not express one would be
+	// a contract the wire cannot keep.
+	prose := body(`[{"entryId":"t","position":1,"kind":"text","source":"assistant","intent":"","args":null,` +
+		`"effect":null,"resource":null,"opensBlock":false}]`)
+	if err := validateJSONErr(schema, []byte(prose)); err != nil {
+		t.Fatalf("the schema refused a run of prose: %v", err)
+	}
 }
 
 // And the negative: the schema REFUSES a page that is missing a required
@@ -5701,6 +6098,101 @@ func TestLedgerQuery_ContractRefusesWhatItMustRefuse(t *testing.T) {
 			}
 		})
 	}
+}
+
+// ── session.signal ─────────────────────────────────────────────────────────
+
+// The DTO's own conformance: the two enums' spelling and the tags. Every
+// (signal, outcome) pair the handler can produce, because the field the
+// renderer branches on is the outcome and a word it has never seen is a
+// branch it does not have.
+func TestSessionSignal_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "session.signal.schema.json")
+	for _, sig := range []string{signalInterrupt, signalStop} {
+		for _, outcome := range []string{
+			string(foregroundDelivered), string(foregroundNothingRunning), "unsupported",
+		} {
+			raw, err := json.Marshal(signalResult{Signal: sig, Outcome: outcome})
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, fmt.Sprintf("session.signal DTO (%s/%s)", sig, outcome))
+		}
+	}
+}
+
+// And the negative, which is what makes the pair above evidence: the schema
+// REFUSES an outcome nobody declared, a missing field and an undeclared one.
+func TestSessionSignal_ContractRefusesWhatItMustRefuse(t *testing.T) {
+	schema := loadSchema(t, "session.signal.schema.json")
+	bad := map[string]string{
+		"an outcome nobody named": `{"signal":"stop","outcome":"maybe"}`,
+		"a signal nobody named":   `{"signal":"sighup","outcome":"delivered"}`,
+		"the outcome missing":     `{"signal":"stop"}`,
+		"the signal missing":      `{"outcome":"delivered"}`,
+		"an undeclared field":     `{"signal":"stop","outcome":"delivered","pid":4242}`,
+	}
+	for name, raw := range bad {
+		t.Run(name, func(t *testing.T) {
+			if err := validateJSONErr(schema, []byte(raw)); err == nil {
+				t.Fatalf("the contract accepted %s: %s", name, raw)
+			}
+		})
+	}
+}
+
+// THE REAL RESULT OFF THE REAL SOCKET — the row contracts/README.md says is
+// the reason the directory exists. A payload this test built would prove the
+// struct is well-formed; only driving the method through the socket proves
+// the handler sends it.
+//
+// Both outcomes a local session can produce are driven here, in one
+// connection, because a contract satisfied by only the happy shape is a
+// contract with an untested half: the refusal is the one a person meets when
+// their command has just finished, and it travels in the result rather than
+// as an error precisely so the renderer can read it.
+func TestSessionSignal_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "session.signal.schema.json")
+	conn, tap := signalServer(t)
+	sid := openSessionTapped(t, conn, tap)
+
+	// At a prompt: nothing to signal. The shell echoing its own output is
+	// what says the prompt is there — never a sleep.
+	submitCommand(t, conn, sid, "printf %s%s CONTRACT -PROMPT")
+	tapDataFor(t, tap, sid, "CONTRACT-PROMPT", 20*time.Second)
+	atPrompt := tapCall(t, conn, tap, 21, "session.signal", map[string]any{
+		"sessionId": sid, "signal": signalInterrupt,
+	})
+	validateJSON(t, schema, resultOf(t, atPrompt), "session.signal result at a prompt (real socket)")
+
+	// And with a job in the foreground: delivered.
+	submitCommand(t, conn, sid, "sh -c 'printf %s%s CONTRACT -RUNNING; sleep 300'")
+	tapDataFor(t, tap, sid, "CONTRACT-RUNNING", 20*time.Second)
+	running := tapCall(t, conn, tap, 22, "session.signal", map[string]any{
+		"sessionId": sid, "signal": signalStop,
+	})
+	validateJSON(t, schema, resultOf(t, running), "session.signal result over a running command (real socket)")
+}
+
+// resultOf pulls the `result` out of a JSON-RPC response envelope, failing
+// on an error object — so a schema assertion can never silently validate
+// nothing.
+func resultOf(t *testing.T, raw json.RawMessage) json.RawMessage {
+	t.Helper()
+	var env struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal response: %v\nraw: %s", err, raw)
+	}
+	if env.Error != nil {
+		t.Fatalf("the method answered an error: %+v", env.Error)
+	}
+	if len(env.Result) == 0 {
+		t.Fatalf("the method answered no result: %s", raw)
+	}
+	return env.Result
 }
 
 // ── api.* (the API-testing collection) ──────────────────────────────────

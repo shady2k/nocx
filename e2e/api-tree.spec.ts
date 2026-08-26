@@ -367,15 +367,12 @@ test.describe('the collections tree: folders, a row’s acts, and the mark that 
     // act finish where a person expects to carry on working.
     await expect(page.locator('.api-crumbs__name')).toHaveText(ZEN_COPY)
 
-    // ── The header's ⋮ offers the SAME list ───────────────────────────────
+    // ── The header's ⋮ owns the panel-only acts ────────────────────────────
     //
-    // Compared against the row menu of the OPEN request rather than the one
-    // captured above. "Two doors, one list" is a claim about ONE request seen
-    // through two surfaces, and the list captured earlier was aimed at a
-    // different one — so comparing them would now assert that two doors
-    // pointing at two requests offer the same acts, which is not the promise
-    // and is not true. Aimed at the copy, both doors carry `Close request`,
-    // because for this request there is something to close.
+    // The tree-row menu stays limited to acts on the aimed-at file. The
+    // header's menu is the explicit door for caret-dependent insertion, so
+    // the two lists intentionally differ even when they target the same
+    // request.
     await copy.click({ button: 'right' })
     const fromTheOpenRow = await menuLabels(requestMenu)
     expect(fromTheOpenRow).toEqual([
@@ -388,7 +385,13 @@ test.describe('the collections tree: folders, a row’s acts, and the mark that 
     await expect(requestMenu).toBeHidden()
 
     await page.locator('#api-request-menu').click()
-    expect(await menuLabels(requestMenu)).toEqual(fromTheOpenRow)
+    expect(await menuLabels(requestMenu)).toEqual([
+      'Insert a secret…',
+      'Duplicate',
+      'Move to folder…',
+      'Close request',
+      'Delete request…',
+    ])
     await page.keyboard.press('Escape')
     await expect(requestMenu).toBeHidden()
 

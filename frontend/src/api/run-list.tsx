@@ -68,6 +68,8 @@ export interface RunListProps {
    *  the id — that is the backend's fact — and the name belongs to whoever
    *  owns connections (AD-8), so the surface hands the translation in. */
   connectionName: (profileId: string) => string
+  /** Translate an opaque secret row handle into its human-facing name. */
+  secretName: (handle: string) => string
 }
 
 export function RunList(props: RunListProps) {
@@ -83,7 +85,14 @@ export function RunList(props: RunListProps) {
         }
       >
         <For each={props.runs}>
-          {(run) => <Run run={run} onView={props.onView} connectionName={props.connectionName} />}
+          {(run) => (
+            <Run
+              run={run}
+              onView={props.onView}
+              connectionName={props.connectionName}
+              secretName={props.secretName}
+            />
+          )}
         </For>
       </Show>
     </div>
@@ -94,6 +103,7 @@ function Run(props: {
   run: ApiRun
   onView: (id: number, view: ApiRunView) => void
   connectionName: (profileId: string) => string
+  secretName: (handle: string) => string
 }) {
   const run = () => props.run
   const response = () => props.run.response
@@ -204,6 +214,7 @@ function Run(props: {
           <RawExchange
             request={request}
             response={res?.raw ?? null}
+            secretName={props.secretName}
             connection={connectionRawText({
               remoteAddr: run().remoteAddr,
               dnsAddresses: run().dnsAddresses,
@@ -420,12 +431,11 @@ function RawExchange(props: {
   request: ApiRaw
   /** The response side, or null when nothing answered. Two props rather than
    *  one pair, because they are known at two different times: the request is
-   *  composed before the dial and the response exists only if there was one
-   *  (api-model.ts). */
+   *  on the exchange before the dial, while the response is only present
+   *  after an answer. */
   response: ApiRaw | null
+  secretName: (handle: string) => string
   connection: string
-  /** How the elapsed time was spent — drawn, because five numbers in a row
-   *  make the reader do the subtraction that answers "where did it go". */
   timings: ApiTimings
   certificates: readonly ApiCertificate[]
 }) {
@@ -441,7 +451,7 @@ function RawExchange(props: {
           a block that shows it whole. */}
       <Caption>── request ──</Caption>
       <CodeBlock ariaLabel="Raw request" wrap={false}>
-        <For each={rawSegments(props.request)}>{(seg) => rawSegment(seg)}</For>
+        <For each={rawSegments(props.request)}>{(seg) => rawSegment(seg, props.secretName)}</For>
       </CodeBlock>
       <Caption>── connection ──</Caption>
       <Show when={props.connection !== ''}>
@@ -471,7 +481,7 @@ function RawExchange(props: {
           <>
             <Caption>── response ──</Caption>
             <CodeBlock ariaLabel="Raw response" wrap={false}>
-              <For each={rawSegments(raw())}>{(seg) => rawSegment(seg)}</For>
+              <For each={rawSegments(raw())}>{(seg) => rawSegment(seg, props.secretName)}</For>
             </CodeBlock>
           </>
         )}
@@ -492,12 +502,12 @@ function RawExchange(props: {
  * `text` mutually exclusive — which is the property the chips depend on: there
  * is no branch in which a value could be reached, because no shape carries one.
  */
-function rawSegment(seg: ApiRawSegment): JSX.Element {
+function rawSegment(seg: ApiRawSegment, secretName: (handle: string) => string): JSX.Element {
   switch (seg.kind) {
     case 'secret':
-      return createSecretChip(seg.name)
+      return createSecretChip(secretName(seg.name))
     case 'secret-damaged':
-      return createSecretChipDamaged(seg.name, seg.damage)
+      return createSecretChipDamaged(secretName(seg.name), seg.damage)
     case 'text':
       return <span>{seg.text}</span>
   }

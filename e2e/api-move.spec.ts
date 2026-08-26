@@ -146,17 +146,18 @@ test.describe('a request can be moved into a folder, and stays open', () => {
     // A folder inside the collection is depth 2 (the collection is 1).
     await expect(folderRow.locator('.ui-tree-row')).toHaveAttribute('aria-level', '2')
 
-    // ── THE MOVE, through the request row's right-button menu ─────────────
+    // ── THE MOVE, through the request panel's menu ────────────────────────
     //
-    // The gesture nocx-8aczn.2 added beside Duplicate and Delete. The
-    // chooser is a dialog whose radios are the collection's folders and its
-    // root; this spec picks the folder it just made.
+    // The row menu is limited to acts on the aimed-at file. This request is
+    // already open, so the panel's explicit menu is the door that also offers
+    // caret-dependent secret insertion.
     const requestMenu = page.getByTestId('api-request-row-menu')
-    await treeRow(page, workbench, ZEN).click({ button: 'right' })
+    await workbench.locator('#api-request-menu').click()
     // The menu's list is read in full here: the move item's presence is the
     // product offering the act, and a menu missing it is the door not being
     // there.
     expect(await requestMenu.locator('.ui-context-menu__label').allTextContents()).toEqual([
+      'Insert a secret…',
       'Duplicate',
       'Move to folder…',
       // The act nocx-8aczn.10 added: a request can be put down, not only

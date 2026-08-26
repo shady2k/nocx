@@ -215,10 +215,34 @@ test.describe('a secret in the path: the value crosses to the server and never t
     // and the token is not in it.
     await expect(workbench.locator('#api-url')).toHaveValue('{{baseUrl}}/bot{{token}}/sendMessage')
     const urlField = workbench.locator('#api-url')
-    await urlField.fill('{{baseUrl}}/bot@token/sendMessage')
     const picker = page.getByRole('listbox', { name: 'vault secrets' })
+    const placeCaretBeforePath = async (): Promise<void> => {
+      await urlField.evaluate((el) => {
+        const input = el as HTMLInputElement
+        const pos = input.value.indexOf('/sendMessage')
+        if (pos < 0) throw new Error('the test URL has no /sendMessage suffix')
+        input.focus()
+        input.setSelectionRange(pos, pos)
+      })
+    }
+
+    // `@token` is inside a word in this URL path, so the passive picker
+    // deliberately does not open. The request panel's explicit door is the
+    // product path for this case.
+    await urlField.fill('{{baseUrl}}/bot@token/sendMessage')
+    await expect(picker).not.toBeVisible()
+
+    // Create the token through the same explicit door, but start at a
+    // whitespace boundary so the picker can accept the requested name.
+    await urlField.fill('{{baseUrl}}/bot ')
+    await workbench.getByRole('button', { name: 'More actions for this request' }).click()
+    const requestMenu = page.getByTestId('api-request-row-menu')
+    await requestMenu.getByRole('menuitem', { name: 'Insert a secret…' }).click()
+    await urlField.pressSequentially('token')
     await expect(picker).toBeVisible()
-    await picker.getByRole('option', { name: /Add "token"/ }).click()
+    await expect(picker.getByRole('option', { name: /Add "token"/ })).toBeVisible()
+    await urlField.press('Enter')
+
     const addSecret = page.getByRole('dialog').filter({ hasText: 'Add secret' })
     await expect(addSecret).toBeVisible()
     await addSecret.locator('#sr-add-name').fill('token')
@@ -227,12 +251,17 @@ test.describe('a secret in the path: the value crosses to the server and never t
     await expect(addSecret).not.toBeVisible()
 
     // Creating a record hands the surface to Settings. Return to the
-    // workbench, ask for the same name again, and accept the real row.
+    // workbench, use the explicit door at the middle-word caret, and accept
+    // the real row.
     await page.locator('.activity-bar button[data-action="api"]').click()
     await expect(workbench).toBeVisible()
-    await urlField.fill('{{baseUrl}}/bot@token/sendMessage')
+    await urlField.fill('{{baseUrl}}/bot/sendMessage')
+    await placeCaretBeforePath()
+    await workbench.getByRole('button', { name: 'More actions for this request' }).click()
+    await requestMenu.getByRole('menuitem', { name: 'Insert a secret…' }).click()
     await expect(picker).toBeVisible()
-    await picker.getByRole('option', { name: 'token', exact: true }).click()
+    await expect(picker.getByRole('option', { name: 'token', exact: true })).toBeVisible()
+    await urlField.press('Enter')
     await expect(urlField).toHaveValue(/\{\{secret:[^}]+\}\}/)
 
     await workbench.getByRole('button', { name: 'Send', exact: true }).click()

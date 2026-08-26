@@ -321,7 +321,7 @@ export function ApiPane(props: ApiPaneProps) {
   // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
   const nativeDrop = props.nativeDrop
   // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
-  const secretSource = props.secretSource
+  const source = props.secretSource
   // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
   const openSecrets = props.openSecrets
   // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
@@ -332,6 +332,24 @@ export function ApiPane(props: ApiPaneProps) {
   const [vaultState, setVaultState] = createSignal<
     'uninitialized' | 'sealed' | 'unsealed' | 'unknown'
   >('unknown')
+  // Keep the API pane's display-only name map in step with every picker list
+  // request. The picker owns the list interaction; this wrapper only records
+  // the same rows so raw run chips can name a handle without owning a second
+  // inventory fetch.
+  const secretSource: SecretPickerSource | undefined =
+    source === undefined
+      ? undefined
+      : {
+          status: () => source.status(),
+          list: async () => {
+            const entries = await source.list()
+            setSecretEntries(entries)
+            return entries
+          },
+          requestUnseal: () => source.requestUnseal(),
+          requestSetup: () => source.requestSetup(),
+          requestCreate: (name) => source.requestCreate(name),
+        }
   const refreshSecretEntries = async (): Promise<void> => {
     if (secretSource === undefined) {
       setVaultState('unknown')
@@ -493,6 +511,8 @@ export function ApiPane(props: ApiPaneProps) {
    * signal.
    */
   let requestMenuTarget: RequestTarget | null = null
+  /** Which door opened the request menu; panel-only acts stay off tree rows. */
+  let requestMenuDoor: 'row' | 'panel' = 'row'
   /** Where a malformed file's menu hangs — its own menu, because what a file
    *  can do is not what a folder can do: Delete and Copy Absolute Path,
    *  the two acts that need no decoded request (api.request.delete never
@@ -2202,6 +2222,7 @@ export function ApiPane(props: ApiPaneProps) {
    *  has not been saved is still the name a person would be asked about. */
   const openRequestMenu = (e: MouseEvent): void => {
     const open = store.selected()
+    requestMenuDoor = 'panel'
     if (open === null) return
     const box = (e.currentTarget as HTMLElement).getBoundingClientRect()
     aimRequestMenu(open.handle, open.relPath, store.draft()?.name ?? '')
@@ -2209,12 +2230,9 @@ export function ApiPane(props: ApiPaneProps) {
   }
 
   /**
-   * WHAT A REQUEST CAN BE — one list, built once, reached by two doors: the
-   * right button on its row in the tree, and the ⋮ over the one in the form.
-   *
-   * Two hand-written lists would be this repo's most recurrent defect with a
-   * menu as the thing the two owners disagreed about — they would agree for
-   * as long as anyone looked, and diverge the day an act was added to one.
+   * WHAT A REQUEST CAN BE — shared acts built once for both doors. The panel
+   * door also gets caret-dependent secret insertion; a tree row does not,
+   * because it is not the request currently held in the form.
    *
    * Every item reads `requestMenuTarget` when it FIRES rather than when it is
    * built: the kit closes the menu before calling `onSelect`, so anything
@@ -2245,10 +2263,7 @@ export function ApiPane(props: ApiPaneProps) {
   const askToDelete = (target: RequestTarget): void => {
     // "are you sure" lives in this product. A delete removes a file from a
     // folder somebody shares through git, and the only undo is a working
-    // tree they may not have committed. The question NAMES what goes,
-    // because "are you sure" is a question about nothing — and it names the
-    // row that was AIMED AT, which is the whole reason the target is not the
-    // open request any more.
+    // tree they may not have committed. The question NAMES what goes.
     void showConfirm(
       `Delete ${target.name}? The file is removed from the collection folder.`,
       'Delete',
@@ -2258,15 +2273,23 @@ export function ApiPane(props: ApiPaneProps) {
   }
 
   const requestMenuItems = (): ContextMenuItem[] => {
+    const open = store.selected()
+    const aimed = requestMenuTarget
+    const requestIsOpen =
+      open !== null &&
+      aimed !== null &&
+      open.handle === aimed.handle &&
+      open.relPath === aimed.relPath
     const items: ContextMenuItem[] = [
-      ...(secretSource !== undefined
+      ...(requestMenuDoor === 'panel' && secretSource !== undefined
         ? [
             {
               id: 'api-insert-secret',
               label: 'Insert a secret…',
               icon: PlusIcon,
               onSelect: () => {
-                openRequestSecretPicker?.()
+                const picker = openRequestSecretPicker
+                if (picker !== undefined) picker()
                 setRequestMenu(null)
               },
             },
@@ -2300,24 +2323,7 @@ export function ApiPane(props: ApiPaneProps) {
         },
       },
     ]
-    // CLOSE IS ABOUT THE REQUEST IN THE FORM, and only about that one. The
-    // list is reached by two doors and the other one aims at a ROW, which
-    // may be any request in any open collection — a row nobody has opened
-    // has nothing to close, and an item that did nothing there would be a
-    // control that swallows the press.
-    //
-    // It exists at all because there was no way to put the form down: every
-    // other client closes a tab, and this surface has one form by design
-    // (one draft, one selection), so the act is one item rather than a strip
-    // (nocx-8aczn.9).
-    const open = store.selected()
-    const aimed = requestMenuTarget
-    if (
-      open !== null &&
-      aimed !== null &&
-      open.handle === aimed.handle &&
-      open.relPath === aimed.relPath
-    ) {
+    if (requestIsOpen) {
       items.splice(items.length - 1, 0, {
         id: 'api-row-close',
         label: 'Close request',
@@ -2559,13 +2565,10 @@ export function ApiPane(props: ApiPaneProps) {
             },
           ]}
         />
-        {/* What a REQUEST can be — one menu, mounted once, opened by either
-            door: the right button on a row, or the ⋮ over the open one. It
-            is one element rather than one per door for the same reason it is
-            one item list: two would be two surfaces owning one popover, and
-            the second to open would close the first from under the pointer.
-            Deleting is a menu item rather than a control because it takes
-            something away, so it has to be read and chosen. */}
+        {/* What a REQUEST can be — one popover mounted once, opened by either
+            door. Shared request acts are available from both; the panel door
+            also gets caret-dependent secret insertion, while a tree row does
+            not. */}
         <ContextMenu
           open={requestMenu() !== null}
           x={requestMenu()?.x ?? 0}
@@ -2888,6 +2891,7 @@ export function ApiPane(props: ApiPaneProps) {
                       onContextMenu={(e: MouseEvent) => {
                         if (row.kind === 'request') {
                           e.preventDefault()
+                          requestMenuDoor = 'row'
                           aimRequestMenu(row.handle, row.relPath, row.name)
                           setRequestMenu({ x: e.clientX, y: e.clientY })
                           return
@@ -3390,6 +3394,9 @@ export function ApiPane(props: ApiPaneProps) {
               runs={store.runs()}
               onView={(id, at) => store.setRunView(id, at)}
               connectionName={connectionName}
+              secretName={(handle) =>
+                secretEntries().find((entry) => entry.id === handle)?.name ?? handle
+              }
             />
           </section>
         </Show>

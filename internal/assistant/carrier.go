@@ -359,7 +359,13 @@ func programDescription(permitted []agenttools.Tool) string {
 		"The language is Starlark, which reads like Python. A value one call returns is a " +
 		"variable the next call can use, so you never have to see an intermediate result to " +
 		"act on it. No imports, no file or network access, no unbounded loops, and nothing " +
-		"exists except the functions below and `answer`.\n\n")
+		"exists except the functions below and `answer`.\n\n" +
+		"Two ways it is NOT Python, and a live model got both wrong:\n" +
+		"  - There are no f-strings. \"{x} here\" is that text literally. Build a string " +
+		"with + or with \"{} here\".format(x).\n" +
+		"  - print(...) does not reach the person. It comes back to YOU as the program's " +
+		"notes, which makes it useful for working something out; the person is told only " +
+		"what you pass to answer(...).\n\n")
 
 	b.WriteString("Functions:\n")
 	for _, t := range permitted {

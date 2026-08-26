@@ -96,6 +96,7 @@ type starlarkCarrier struct {
 	mu      sync.Mutex
 	calls   []starlarkInvocation
 	answer  string
+	printed []string
 	nextSeq int
 }
 
@@ -121,6 +122,18 @@ func (c *starlarkCarrier) Suspensions() <-chan *Suspension {
 func (c *starlarkCarrier) Run(ctx context.Context, source string) (string, error) {
 	thread := &starlark.Thread{Name: "program"}
 	thread.SetMaxExecutionSteps(maxProgramSteps)
+	// print() IS IN THE LANGUAGE and there is no taking it out, so the only
+	// question is where its output goes. Left alone it goes to the library's
+	// default writer, which is nowhere anybody can read — and a live model
+	// wrote print(output) where it meant answer(output), so the run
+	// succeeded and the person was told nothing at all. Captured, it becomes
+	// what it actually is: the program's working notes, addressed to the
+	// model that wrote them.
+	thread.Print = func(_ *starlark.Thread, msg string) {
+		c.mu.Lock()
+		defer c.mu.Unlock()
+		c.printed = append(c.printed, msg)
+	}
 	// The context travels on the thread rather than in a closure so that
 	// every intrinsic sees the same cancellation, including ones added later.
 	thread.SetLocal(ctxLocal, ctx)
@@ -137,7 +150,21 @@ func (c *starlarkCarrier) Run(ctx context.Context, source string) (string, error
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.answer, nil
+	switch {
+	case c.answer == "" && len(c.printed) > 0:
+		// The commonest way to write a program that does nothing: everything
+		// worked and the person was told nothing. Say so in the words that
+		// name the fix, rather than returning an empty answer that looks like
+		// a successful run.
+		return "", fmt.Errorf("the program ran and printed this, but it never called answer(...), "+
+			"so the person has been told nothing:\n%s\n\nCall answer(...) with what they should be told",
+			strings.Join(c.printed, "\n"))
+	case len(c.printed) > 0:
+		return c.answer + "\n\n(the program also printed, for you and not for the person:\n" +
+			strings.Join(c.printed, "\n") + "\n)", nil
+	default:
+		return c.answer, nil
+	}
 }
 
 // ctxLocal is the thread-local key the request context travels under.

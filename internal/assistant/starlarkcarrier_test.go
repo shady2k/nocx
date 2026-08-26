@@ -257,3 +257,44 @@ func (c *starlarkCarrier) invocations() []starlarkInvocation {
 	defer c.mu.Unlock()
 	return append([]starlarkInvocation(nil), c.calls...)
 }
+
+// A PROGRAM THAT PRINTS AND NEVER ANSWERS TOLD THE PERSON NOTHING, and the
+// run looked like a success. Seen on a live model, which wrote print(output)
+// where it meant answer(output) — the natural mistake, since print is in the
+// language and the model is writing what looks like a script.
+func TestStarlarkCarrier_PrintingIsNotAnswering(t *testing.T) {
+	grant, dir := testDirGrant(t, autonomousMatrix())
+	writeFile(t, filepath.Join(dir, "index.txt"), "target.txt\n")
+	carrier := newStarlarkCarrier(kernelFor(t, grant, &fakeLedger{}), grantedTools)
+
+	out, err := carrier.Run(context.Background(),
+		`print(files_read(path = "`+dir+`/index.txt")["text"])`)
+	if err == nil {
+		t.Fatalf("a program that told the person nothing reported success: %q", out)
+	}
+	// The words that name the fix, and the printed text with them — the model
+	// already did the work, and only the last line is missing.
+	for _, want := range []string{"never called answer", "target.txt", "Call answer(...)"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("the failure does not say %q:\n%s", want, err)
+		}
+	}
+}
+
+// And when it DOES answer, what it printed comes back too — addressed to the
+// model, marked as not being for the person.
+func TestStarlarkCarrier_WhatAProgramPrintsComesBackToTheModel(t *testing.T) {
+	grant, _ := testDirGrant(t, autonomousMatrix())
+	carrier := newStarlarkCarrier(kernelFor(t, grant, &fakeLedger{}), grantedTools)
+
+	out, err := carrier.Run(context.Background(), "print(\"working it out\")\nanswer(\"done\")")
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if !strings.HasPrefix(out, "done") {
+		t.Fatalf("the answer is not what the person is told first: %q", out)
+	}
+	if !strings.Contains(out, "working it out") || !strings.Contains(out, "not for the person") {
+		t.Fatalf("the program's notes did not come back marked: %q", out)
+	}
+}

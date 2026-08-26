@@ -26,6 +26,7 @@ import type {
   GroupImpactResponse,
   AuthMode,
 } from './profiles'
+import { chooseBoundSuggestion } from './secret-source-test-helpers'
 
 const MOCK_PROFILES: SSHProfile[] = [
   {
@@ -518,14 +519,19 @@ describe('bound password secret', () => {
     // that AuthMethodEditor drew alongside this one, so the editor showed the
     // control twice (nocx-azxe.6). The copy is gone; the row is still named,
     // by the picker, which is the surface that owns the choice.
+    // The chooser is the kit's bound combobox now, so the handle is no longer
+    // its DOM value — it shows the row's NAME and commits the handle. The row
+    // named here is 'secrow:prod-pass' and no other in MOCK_SECRET_ROWS, so
+    // the name identifies the binding exactly as the old value did. That the
+    // handle reaches the WRITE is proved by 'selecting a row in the secret
+    // picker binds it on save' in this same file; this test is about what the
+    // reopened editor SHOWS, and adding a save here asserted nothing extra —
+    // an untouched editor is not dirty, so nothing is patched at all.
+    const picker = container.querySelector<HTMLInputElement>('#profile-auth-secret')
+    expect(picker, 'password picker not found').toBeTruthy()
     await vi.waitFor(() => {
-      expect(container.textContent).toContain('Password for prod-web')
+      expect(picker!.value).toBe('Password for prod-web')
     })
-    const picker = container
-      .querySelector('label[for="profile-auth-secret"]')!
-      .closest('.ui-field')!
-      .querySelector('.ui-select') as HTMLSelectElement
-    expect(picker.value).toBe('secrow:prod-pass')
   })
 })
 
@@ -971,13 +977,14 @@ describe('password binding persists at the mint', () => {
 
     // The bound row is the picker's current value (passwordMode starts on
     // 'secret' because the reopened profile carries a binding).
+    // The bound row reads as its NAME in the combobox — see the note in
+    // 'shows the bound secret under the Password method in the editor'. The
+    // subject here is that the binding SURVIVED the reopen, and the row shown
+    // is the one that was persisted.
+    const picker = second.container.querySelector<HTMLInputElement>('#profile-auth-secret')
+    expect(picker, 'password picker not found').toBeTruthy()
     await vi.waitFor(() => {
-      const picker = second.container
-        .querySelector('label[for="profile-auth-secret"]')!
-        .closest('.ui-field')!
-        .querySelector('.ui-select') as HTMLSelectElement
-      expect(picker, 'password picker not found').toBeTruthy()
-      expect(picker.value).toBe('secrow:prod-pass')
+      expect(picker!.value).toBe('Password for prod-web')
     })
     expect(second.container.textContent).not.toContain('No password set')
   })
@@ -1715,16 +1722,17 @@ describe('four-way key input — connection editor', () => {
     // one, or pick an existing secret. Pick the existing-secret side.
     clickSegmentedOption(container, 'Use existing secret')
 
-    // Pick an existing password row.
+    // Pick an existing password row, the way a person does: the chooser is
+    // the kit's bound combobox now, narrowed by typing (nocx-7mfwb.5). What
+    // is asserted below is unchanged — the handle reaches the patch — because
+    // the combobox shows the row's NAME and commits its handle, so the
+    // binding is observable at the write seam and nowhere in the input.
     const picker = await vi.waitFor(() => {
-      const el = container
-        .querySelector('label[for="profile-auth-secret"]')!
-        .closest('.ui-field')!
-        .querySelector('.ui-select') as HTMLSelectElement
+      const el = container.querySelector<HTMLInputElement>('#profile-auth-secret')
       expect(el, 'password picker not found').toBeTruthy()
-      return el
+      return el!
     })
-    fireEvent.change(picker, { target: { value: 'secrow:prod-pass' } })
+    await chooseBoundSuggestion(picker, 'Password for prod-web', container)
 
     const dialog = findDialogByTitleContaining(container, 'prod-web')!
     const saveBtn = Array.from(dialog.querySelectorAll('.ui-button')).find(

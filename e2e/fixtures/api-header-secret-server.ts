@@ -12,6 +12,7 @@ import type { AddressInfo } from 'node:net'
 export interface HeaderSecretServer {
   readonly baseUrl: string
   headerValues(): readonly string[]
+  authorizationValues(): readonly string[]
   stop(): Promise<void>
 }
 
@@ -20,13 +21,19 @@ export async function startHeaderSecretServer(opts: {
   expectedValue: string
 }): Promise<HeaderSecretServer> {
   const values: string[] = []
+  const authorizationValues: string[] = []
   const expectedPath = '/header-secret'
   const headerName = opts.expectedHeader.toLowerCase()
 
   const server: Server = createServer((req: IncomingMessage, res: ServerResponse) => {
     const received = req.headers[headerName]
     const value = Array.isArray(received) ? received.join(', ') : (received ?? '')
+    const receivedAuthorization = req.headers.authorization
+    const authorization = Array.isArray(receivedAuthorization)
+      ? receivedAuthorization.join(', ')
+      : (receivedAuthorization ?? '')
     values.push(value)
+    authorizationValues.push(authorization)
 
     if (req.method !== 'GET' || req.url !== expectedPath || value !== opts.expectedValue) {
       res.writeHead(401, { 'content-type': 'application/json' })
@@ -47,6 +54,7 @@ export async function startHeaderSecretServer(opts: {
   return {
     baseUrl: `http://127.0.0.1:${port}`,
     headerValues: () => values,
+    authorizationValues: () => authorizationValues,
     stop: () =>
       new Promise<void>((resolve) => {
         server.closeAllConnections()

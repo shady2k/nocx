@@ -232,6 +232,39 @@ describe('createSecretPickerField', () => {
     expect(h.source.requestCreate).toHaveBeenCalledWith('brand-new')
     expect(h.onChange).not.toHaveBeenCalled()
   })
+  it('maps an in-place create result before inserting its opaque handle', async () => {
+    const h = setup()
+    h.value.current = '@brand-new'
+    h.controller.onInput(h.value.current, h.value.current.length)
+    await flush()
+    h.source.requestCreate.mockResolvedValue(entry('brand-new', 'secrow:new'))
+    expect(key(h.controller, { key: 'Enter' })).toBe(true)
+    await flush()
+    expect(h.onChange).toHaveBeenCalledWith('{{secret:secrow:new}}', '{{secret:secrow:new}}'.length)
+  })
+
+  it('does not insert a create result into a newer trigger range', async () => {
+    let resolveCreate!: (created: SecretEntry) => void
+    const h = setup()
+    h.source.requestCreate.mockImplementation(
+      () =>
+        new Promise<SecretEntry>((resolve) => {
+          resolveCreate = resolve
+        }),
+    )
+    h.value.current = '@brand-new'
+    h.controller.onInput(h.value.current, h.value.current.length)
+    await flush()
+    expect(key(h.controller, { key: 'Enter' })).toBe(true)
+
+    h.value.current = '@different'
+    h.controller.onInput(h.value.current, h.value.current.length)
+    resolveCreate(entry('brand-new', 'secrow:new'))
+    await flush()
+
+    expect(h.value.current).toBe('@different')
+    expect(h.onChange).not.toHaveBeenCalled()
+  })
 
   it('preserves an existing reference byte-for-byte when inserting a second one elsewhere', async () => {
     const h = setup([entry('second', 'secrow:second-id')])

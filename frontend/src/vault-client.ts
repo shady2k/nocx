@@ -29,6 +29,11 @@ import type { SecretsCaptureDismiss } from './generated/secrets.captureDismiss'
 /** The vault's lifecycle state, as the schema's enum spells it. */
 export type VaultState = VaultStatus['state']
 
+/** The vault's closed kind vocabulary, as the schema's enum spells it — the
+ *  same set internal/vault/meta.go owns. One alias, because a second name for
+ *  it in a surface is a second list waiting to drift. */
+export type VaultSecretKind = InventoryEntry['kind']
+
 export interface VaultSetupParams {
   passphrase?: string
 }

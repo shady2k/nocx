@@ -21,6 +21,7 @@ function mount(over: Partial<Parameters<typeof SecretValueField>[0]> = {}) {
       onSubmit={over.onSubmit ?? vi.fn().mockResolvedValue(undefined)}
       disabled={over.disabled}
       actionLabel={over.actionLabel}
+      initialValue={over.initialValue}
     />
   ))
 }
@@ -45,6 +46,26 @@ describe('the field a secret value is typed into', () => {
     // …and no byte of it is left anywhere in the markup either: a value can
     // ride an attribute no text assertion would look at.
     expect(document.body.innerHTML).not.toContain(VALUE)
+  })
+  it('seeds the initial value, submits it, and clears after success', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined)
+    mount({ onSubmit, initialValue: VALUE })
+
+    expect(input().value).toBe(VALUE)
+    fireEvent.click(action())
+
+    await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith(VALUE))
+    await vi.waitFor(() => expect(input().value).toBe(''))
+  })
+
+  it('keeps a seeded value when the write is refused', async () => {
+    const onSubmit = vi.fn().mockRejectedValue(new Error('sealed'))
+    const { container } = mount({ onSubmit, initialValue: VALUE })
+
+    fireEvent.click(action())
+
+    await vi.waitFor(() => expect(container.textContent).toContain('sealed'))
+    expect(input().value).toBe(VALUE)
   })
 
   it('is a password field, because somebody may be looking at the screen', () => {

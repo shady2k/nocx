@@ -19,6 +19,7 @@
 import type { Dispatcher } from '../dispatcher'
 import type { SecretPickerSource } from '../ui/secret-picker'
 import type { InventoryEntry } from '../vault-client'
+import type { SecretCreateVault } from '../secret-create-ask'
 import type { ApiCollectionsListResult } from '../generated/api.collections.list'
 import type { ApiCollectionsOpenResult } from '../generated/api.collections.open'
 import type { ApiCollectionsCreateResult } from '../generated/api.collections.create'
@@ -575,6 +576,10 @@ export interface ApiWorkbenchServices {
   secretInventory?: () => Promise<InventoryEntry[]>
   /** Navigate to the vault's Secrets page from a reference menu. */
   openSecrets?: () => void
+  /** Where a secret is MINTED from inside the workbench (nocx-7mfwb): the
+   *  vault's own create seam, so both doors put a value in the vault
+   *  without the person leaving the request they were editing. */
+  secretCreate?: SecretCreateVault
 }
 
 /** One connection an environment may route through: the id the route
@@ -602,6 +607,7 @@ export function createApiWorkbenchServices(
   secretSource?: SecretPickerSource,
   secretInventory?: () => Promise<InventoryEntry[]>,
   openSecrets?: () => void,
+  secretCreate?: SecretCreateVault,
 ): ApiWorkbenchServices {
   const client = new ApiClient(dispatcher)
   return {
@@ -613,6 +619,7 @@ export function createApiWorkbenchServices(
     ...(secretSource ? { secretSource } : {}),
     ...(secretInventory ? { secretInventory } : {}),
     ...(openSecrets ? { openSecrets } : {}),
+    ...(secretCreate ? { secretCreate } : {}),
     listCollections: () => client.listCollections(),
     openCollection: (path) => client.openCollection(path),
     createCollection: (name) => client.createCollection(name),

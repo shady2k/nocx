@@ -10,12 +10,18 @@
  *
  * The contract:
  *
- * - FREE TEXT always. A suggestion is an addition, never a gate: a value
+ * - FREE TEXT by default. A suggestion is an addition, never a gate: a value
  *   the list does not contain is typeable and submitted exactly as one the
  *   list offers. The endpoint's models are discovered from the endpoint,
  *   and an endpoint that lists none — GET /models is not universally
  *   implemented — must stay configurable by hand. The list only ever
  *   narrows what is offered; it never refuses a value.
+ * - BOUND is the opt-in variance for choices such as a stored secret. It
+ *   takes `{value, label}` options, shows the chosen option's label, and
+ *   emits only the chosen option's value. Text narrowing is the only bound
+ *   filter: labels use the secret picker's case-insensitive substring rule,
+ *   and every offered kind remains visible — there is no kind filter or
+ *   ranking.
  * - The list floats: it is portalled out of the field's flow so no
  *   ancestor's overflow can clip it (nocx-0plm6 — the endpoint dialog
  *   scrolled and cut the old list at four and a half rows), anchored to
@@ -29,10 +35,9 @@
  *   (`role="combobox"` + `aria-expanded`/`aria-controls`/
  *   `aria-activedescendant` on the input, `listbox`/`option` on the list).
  * - The list is the caller's to fill, the component's to filter: a prefix
- *   match on the current value (empty value offers everything), so the
- *   caller passes the discovered set and the component decides what to
- *   show. The first match follows the typed value, so Enter takes what the
- *   user is looking at.
+ *   match on the current value (empty value offers everything) in FREE mode,
+ *   and the bound option label's substring match in BOUND mode. The first
+ *   match follows the typed value, so Enter takes what the user is looking at.
  *
  * Composes Field for label/description/error/required exactly like
  * TextField; the input wears its own identity (`ui-suggestion-field__input`)
@@ -45,26 +50,35 @@ import { Portal } from 'solid-js/web'
 import { Field } from './field'
 import { mirrorControlledValue } from './controlled-value'
 
+export interface SuggestionOption {
+  value: string
+  label: string
+}
+
 export interface SuggestionFieldProps {
   id?: string
   label?: string
   description?: string
   error?: string
+  /** In free mode this is the displayed text; in bound mode it is the chosen option value. */
   value: string
-  /** Fires on every keystroke AND when a suggestion is taken. */
+  /** Fires on every free-mode keystroke and when either mode commits a suggestion. */
   onInput?: (value: string) => void
-  /** Fires when focus leaves the input, with the current value. */
+  /** Fires when focus leaves the input, with free text or the bound option value. */
   onBlur?: (value: string) => void
   /** Fires when the control takes focus. Suggestions are DISCOVERED rather
    *  than known: focus is the moment a person is about to need them, and the
    *  cheapest honest place to go and look. */
   onFocus?: () => void
   /**
-   * The values to OFFER. The component filters them by the current value
-   * (prefix match); passing the raw discovered set is the whole API. Free
-   * text still: the list narrows what is offered, never what is accepted.
+   * The values to OFFER. Free mode accepts strings and filters by prefix;
+   * bound mode accepts `{value, label}` options and filters labels by
+   * case-insensitive substring. Passing the raw discovered set is the whole
+   * API; bound mode never filters or ranks options by kind.
    */
-  suggestions?: readonly string[]
+  suggestions?: readonly (string | SuggestionOption)[]
+  /** `free` keeps the original free-text contract; `bound` commits options only. */
+  variant?: 'free' | 'bound'
   placeholder?: string
   disabled?: boolean
   required?: boolean
@@ -80,6 +94,8 @@ export function SuggestionField(props: SuggestionFieldProps) {
   const [open, setOpen] = createSignal(false)
   const [focused, setFocused] = createSignal(false)
   const [active, setActive] = createSignal(-1)
+  const [boundDisplay, setBoundDisplay] = createSignal<string | undefined>()
+  const [boundFilter, setBoundFilter] = createSignal('')
 
   // The portalled list's anchor and its mount. Plain DOM refs: the
   // component reads them imperatively, never reactively.
@@ -95,16 +111,48 @@ export function SuggestionField(props: SuggestionFieldProps) {
    * on document.body, floating above the page like the context menu.
    */
   const portalMount = () => inputElement?.closest('dialog') ?? document.body
-  /** Prefix match on the typed value; an empty value offers everything. */
+  const isBound = () => props.variant === 'bound'
+  const allSuggestions = () => props.suggestions ?? []
+  const optionLabel = (suggestion: string | SuggestionOption): string =>
+    typeof suggestion === 'string' ? suggestion : suggestion.label
+  const optionValue = (suggestion: string | SuggestionOption): string =>
+    typeof suggestion === 'string' ? suggestion : suggestion.value
+  const selectedOption = () => {
+    if (!isBound()) return undefined
+    return allSuggestions().find((suggestion) => optionValue(suggestion) === props.value)
+  }
+  const displayValue = () => {
+    if (!isBound()) return String(props.value)
+    const selected = selectedOption()
+    return boundDisplay() ?? (selected ? optionLabel(selected) : '')
+  }
   const filtered = () => {
+    const all = allSuggestions()
+    if (isBound()) {
+      const q = boundFilter().toLowerCase()
+      if (q === '') return all
+      return all.filter((suggestion) => optionLabel(suggestion).toLowerCase().includes(q))
+    }
     const q = String(props.value).trim().toLowerCase()
-    const all = props.suggestions ?? []
     if (q === '') return all
-    return all.filter((s) => s.toLowerCase().startsWith(q))
+    return all.filter((suggestion) => optionLabel(suggestion).toLowerCase().startsWith(q))
   }
 
   /** The popup is expanded only when there is something to show. */
   const expanded = () => open() && filtered().length > 0
+
+  /** A new external bound value replaces any uncommitted local query. */
+  createEffect(
+    on(
+      () => props.value,
+      () => {
+        if (isBound() && !focused()) {
+          setBoundDisplay(undefined)
+          setBoundFilter('')
+        }
+      },
+    ),
+  )
 
   /**
    * Suggestions can arrive AFTER focus — the caller discovers them over the
@@ -127,13 +175,13 @@ export function SuggestionField(props: SuggestionFieldProps) {
   /**
    * The first match follows the typed value: Enter takes what the user is
    * looking at, and a filter that matches nothing clears the highlight.
-   * Tracked on the VALUE (the filter's source), never on open/active: merely
-   * opening the list highlights nothing — the user has not chosen yet — and
-   * an explicit close is not undone.
+   * Tracked on the filter source, never on open/active: merely opening the
+   * list highlights nothing — the user has not chosen yet — and an explicit
+   * close is not undone.
    */
   createEffect(
     on(
-      () => String(props.value),
+      () => (isBound() ? boundFilter() : String(props.value)),
       () => {
         if (!expanded()) return
         const n = filtered().length
@@ -218,7 +266,12 @@ export function SuggestionField(props: SuggestionFieldProps) {
 
   const onInput = (e: Event) => {
     const value = (e.currentTarget as HTMLInputElement).value
-    props.onInput?.(value)
+    if (isBound()) {
+      setBoundDisplay(value)
+      setBoundFilter(value)
+    } else {
+      props.onInput?.(value)
+    }
     // Typing never closes the list — it re-filters it. This is the exact
     // defect being replaced: the datalist shut itself on the keystroke.
     setOpen(true)
@@ -274,10 +327,15 @@ export function SuggestionField(props: SuggestionFieldProps) {
     }
   }
 
-  /** Take a suggestion through the SAME channel as typing — onInput — so
-   *  the caller treats a pick exactly like the value it replaced. */
-  const take = (value: string) => {
-    props.onInput?.(value)
+  /** Take a suggestion through the same callback channel as a committed value. */
+  const take = (suggestion: string | SuggestionOption) => {
+    if (isBound()) {
+      setBoundDisplay(optionLabel(suggestion))
+      setBoundFilter(optionLabel(suggestion))
+      props.onInput?.(optionValue(suggestion))
+    } else {
+      props.onInput?.(optionValue(suggestion))
+    }
     setOpen(false)
     setActive(-1)
   }
@@ -286,13 +344,19 @@ export function SuggestionField(props: SuggestionFieldProps) {
     setFocused(false)
     setOpen(false)
     setActive(-1)
-    props.onBlur?.((e.currentTarget as HTMLInputElement).value)
+    if (isBound()) {
+      setBoundDisplay(undefined)
+      setBoundFilter('')
+      props.onBlur?.(props.value)
+    } else {
+      props.onBlur?.((e.currentTarget as HTMLInputElement).value)
+    }
   }
 
   const optionId = (index: number) => `${listId()}-option-${index}`
 
   return (
-    <div class="ui-suggestion-field">
+    <div class="ui-suggestion-field" data-variant={props.variant ?? 'free'}>
       <Field
         for={inputId()}
         label={props.label}
@@ -316,17 +380,14 @@ export function SuggestionField(props: SuggestionFieldProps) {
             required={props.required === true}
             ref={(element) => {
               inputElement = element
-              // mirrorControlledValue reads the accessor inside its own
-              // createEffect (a tracked scope); the gate cannot see across
-              // that helper boundary.
-              // eslint-disable-next-line solid/reactivity -- helper-boundary contract
-              mirrorControlledValue(element, () => props.value)
+              mirrorControlledValue(element, displayValue)
             }}
             onInput={onInput}
             onKeyDown={onKeyDown}
             onFocus={() => {
               setFocused(true)
-              setOpen((props.suggestions?.length ?? 0) > 0)
+              if (isBound()) setBoundFilter('')
+              setOpen(allSuggestions().length > 0)
               props.onFocus?.()
             }}
             onBlur={onBlur}
@@ -342,17 +403,17 @@ export function SuggestionField(props: SuggestionFieldProps) {
               }}
             >
               <For each={filtered()}>
-                {(s, i) => (
+                {(suggestion, i) => (
                   <li
                     id={optionId(i())}
                     role="option"
                     aria-selected={active() === i()}
                     class="ui-suggestion-field__option"
                     onMouseDown={(e) => e.preventDefault()}
-                    onClick={() => take(s)}
+                    onClick={() => take(suggestion)}
                     onMouseEnter={() => setActive(i())}
                   >
-                    {s}
+                    {optionLabel(suggestion)}
                   </li>
                 )}
               </For>

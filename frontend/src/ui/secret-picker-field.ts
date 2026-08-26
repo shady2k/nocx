@@ -55,7 +55,19 @@ export function createSecretPickerField(opts: {
     },
     requestUnseal: () => opts.source.requestUnseal(),
     requestSetup: () => opts.source.requestSetup(),
-    requestCreate: (name) => opts.source.requestCreate(name),
+    requestCreate: async (name) => {
+      const requestedGeneration = generation
+      const created = await opts.source.requestCreate(name)
+      // The dialog may close after the field changed or was removed. Do not
+      // make a late row addressable or let it replace a newer @ trigger.
+      if (created === undefined || requestedGeneration !== generation || trigger === null) {
+        return undefined
+      }
+      // The create result is not in the list snapshot that populated this
+      // map. Add it before SecretPicker asks onInsert to replace the trigger.
+      idsByName.set(created.name, created.id)
+      return created
+    },
   }
 
   const picker = new SecretPicker(source, {
@@ -134,11 +146,15 @@ export function createSecretPickerField(opts: {
       dismissedTriggerFrom = null
     }
 
+    generation++
+    // A changed trigger is a new replacement target. This invalidates any
+    // create dialog result that belongs to the previous range.
     trigger = nextTrigger
     openPicker(nextTrigger.filter)
   }
 
   const openAt = (caret: number): void => {
+    generation++
     trigger = { from: Math.max(0, caret - 1), to: caret, filter: '' }
     dismissedTriggerFrom = null
     openPicker('')
@@ -147,7 +163,7 @@ export function createSecretPickerField(opts: {
   const onKeyDown = (e: KeyboardEvent): boolean => {
     const wasOpen = picker.isOpen
     const consumed = picker.handleKey(e)
-    if (consumed && wasOpen && !picker.isOpen) {
+    if (consumed && wasOpen && !picker.isOpen && e.key === 'Escape') {
       // SecretPicker closes synchronously for Escape and accepted rows.
       // Row selection clears trigger in onInsert; Escape needs this adapter
       // state reset because it intentionally leaves the literal @ in place.

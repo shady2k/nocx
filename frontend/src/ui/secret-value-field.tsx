@@ -45,6 +45,14 @@ export interface SecretValueFieldProps {
    *  goes, because only the surface knows either. */
   title: string
   /**
+   * The value carried from the act that opened this field. It seeds the
+   * internal signal once at construction and is never read again; this does
+   * not break IT KEEPS NOTHING because the value was typed one act earlier in
+   * the same act, and this field is where it lands rather than a second place
+   * it lives.
+   */
+  initialValue?: string
+  /**
    * Refused for a reason OUTSIDE the field — a variable with no name to
    * store it under. The field still takes the text: what is refused is the
    * write, and a person who has already pasted a token should not lose it to
@@ -57,7 +65,7 @@ export interface SecretValueFieldProps {
 }
 
 export function SecretValueField(props: SecretValueFieldProps) {
-  const [value, setValue] = createSignal('')
+  const [value, setValue] = createSignal(props.initialValue ?? '')
   const [busy, setBusy] = createSignal(false)
   const [refused, setRefused] = createSignal('')
 

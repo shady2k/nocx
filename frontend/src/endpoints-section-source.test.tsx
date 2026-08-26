@@ -14,6 +14,7 @@ import { EndpointClient, type Endpoint, type EndpointWrite } from './endpoints'
 import { Dispatcher } from './dispatcher'
 import { VaultOperationCancelledError, createVaultState, type VaultController } from './vault'
 import type { VaultClient, InventoryEntry } from './vault-client'
+import { chooseBoundSuggestion } from './secret-source-test-helpers'
 
 afterEach(cleanup)
 
@@ -192,12 +193,10 @@ function clickSegment(scope: HTMLElement, label: string) {
   fireEvent.click(segment!)
 }
 
-/** Wait until the given select offers the vault rows, then pick one. */
-async function pickSecret(select: HTMLSelectElement, row: string, name: string) {
-  await waitFor(() => {
-    expect(Array.from(select.options).map((o) => o.text)).toContain(name)
-  })
-  fireEvent.change(select, { target: { value: row } })
+/** Focus the bound picker, narrow to a visible row, and commit it. */
+async function pickSecret(input: HTMLInputElement, name: string, scope: ParentNode) {
+  await chooseBoundSuggestion(input, name, scope)
+  expect(input.value).toBe(name)
 }
 
 describe('the endpoint key source control (nocx-rzjw)', () => {
@@ -219,9 +218,9 @@ describe('the endpoint key source control (nocx-rzjw)', () => {
     await waitFor(() => {
       expect(inventory).toHaveBeenCalled()
     })
-    const picker = dialog.querySelector('select') as HTMLSelectElement
+    const picker = dialog.querySelector<HTMLInputElement>('#endpoint-key-secret')
     expect(picker).toBeTruthy()
-    await pickSecret(picker, 'secrow:aaaaaaaa', 'prod api key')
+    await pickSecret(picker!, 'prod api key', dialog)
 
     fillModelAndBase(container, dialog)
     clickButton(dialog, 'Create Endpoint')
@@ -282,8 +281,9 @@ describe('custom header rows (nocx-lyyk)', () => {
     )
     expect(row2Source, 'header value source control missing').toBeTruthy()
     fireEvent.click(row2Source!)
-    const picker = row2.querySelector('select') as HTMLSelectElement
-    await pickSecret(picker, 'secrow:aaaaaaaa', 'prod api key')
+    const picker = row2.querySelector<HTMLInputElement>('#endpoint-header-1-secret')
+    expect(picker).toBeTruthy()
+    await pickSecret(picker!, 'prod api key', dialog)
 
     fillModelAndBase(container, dialog)
     clickButton(dialog, 'Create Endpoint')
@@ -306,14 +306,19 @@ describe('custom header rows (nocx-lyyk)', () => {
 
     const row = dialog.querySelector('.ui-row-list__row') as HTMLElement
     clickSegment(row, 'Use existing secret')
-    const picker = row.querySelector('select') as HTMLSelectElement
-    // The placeholder is a JS string, so it must arrive through an
-    // expression: as a JSX string attribute the escapes are never
-    // interpreted and the person reads the source code of a dash.
+    const picker = row.querySelector<HTMLInputElement>('#endpoint-header-0-secret')
+    expect(picker).toBeTruthy()
+    picker!.focus()
     await waitFor(() => {
-      expect(Array.from(picker.options).map((o) => o.text)).toContain('\u2014 None \u2014')
+      expect(
+        Array.from(dialog.querySelectorAll<HTMLElement>('[role="option"]')).map((o) =>
+          o.textContent?.trim(),
+        ),
+      ).toEqual(['prod api key'])
+      expect(picker!.placeholder).toBe('\u2014 None \u2014')
     })
-    expect(picker.textContent).not.toContain('u2014')
+    expect(picker!.value).toBe('')
+    expect(picker!.placeholder).not.toContain('u2014')
   })
 
   it("a saved endpoint's header rows reopen with their sources intact", async () => {
@@ -334,15 +339,16 @@ describe('custom header rows (nocx-lyyk)', () => {
     const dialog = findDialogByTitle(container, 'Edit Endpoint') as HTMLElement
     expect(dialog).toBeTruthy()
 
-    // The literal row's value is visible; the secret row's picker is bound
-    // to the stored row handle — a reference, never material.
     expect((dialog.querySelector('#endpoint-header-0-value') as HTMLInputElement).value).toBe(
       'nocx',
     )
-    const picker = dialog.querySelector('select') as HTMLSelectElement
-    expect(picker.value).toBe('secrow:aaaaaaaa')
+    const picker = dialog.querySelector<HTMLInputElement>('#endpoint-header-1-secret')
+    expect(picker).toBeTruthy()
+    await waitFor(() => {
+      expect(picker!.value).toBe('prod api key')
+    })
 
-    // Saving without touching them re-sends the same rows through update.
+    // Saving without touching them re-sends the restored source through update.
     clickButton(dialog, 'Save Endpoint')
     await waitFor(() => {
       expect(updateEndpoint).toHaveBeenCalledTimes(1)
@@ -421,7 +427,7 @@ describe('the picker asks the vault (nocx-5ratm, ADR-0032)', () => {
 
   it('asks on open when the key IS a bound row, and names it — never its handle', async () => {
     const vault = sealedVault(PASSWORD_ROWS)
-    const { container, ctrl, status, inventory } = mount(
+    const { container, ctrl, status, inventory, updateEndpoint } = mount(
       [ep({ name: 'provider', credential: 'secrow:aaaaaaaa' })],
       vault,
     )
@@ -436,20 +442,28 @@ describe('the picker asks the vault (nocx-5ratm, ADR-0032)', () => {
       expect(inventory).toHaveBeenCalled()
     })
 
-    // The unlock resolves: the vault is open and the rows arrive.
+    // The person unlocks the vault; the picker receives the row's name.
     status.mockResolvedValue(UNSEALED_STATUS)
     await ctrl.refresh()
 
-    const picker = dialog.querySelector('select') as HTMLSelectElement
+    const picker = dialog.querySelector<HTMLInputElement>('#endpoint-key-secret')
+    expect(picker).toBeTruthy()
     await waitFor(() => {
-      expect(Array.from(picker.options).map((o) => o.text)).toContain('prod api key')
+      const offered = Array.from(dialog.querySelectorAll<HTMLElement>('[role="option"]')).map((o) =>
+        o.textContent?.trim(),
+      )
+      expect(offered).toContain('prod api key')
+      expect(offered).not.toContain('secrow:aaaaaaaa')
+      expect(picker!.value).toBe('prod api key')
     })
-    // The bound row reads as what it IS. A picker labelling it
-    // `secrow:aaaaaaaa` shows the person an opaque id where the name of
-    // their own secret belongs.
-    expect(picker.value).toBe('secrow:aaaaaaaa')
-    expect(picker.selectedOptions[0].text).toBe('prod api key')
-    expect(Array.from(picker.options).map((o) => o.text)).not.toContain('secrow:aaaaaaaa')
+
+    // The restored binding is observable at the surface's write seam, not
+    // through the label-valued input.
+    clickButton(dialog, 'Save Endpoint')
+    await waitFor(() => {
+      expect(updateEndpoint).toHaveBeenCalledTimes(1)
+    })
+    expect(updateEndpoint.mock.calls[0][1].credential).toBe('secrow:aaaaaaaa')
   })
 
   it('does not ask an UNINITIALIZED vault: there is nothing to unlock', async () => {
@@ -475,9 +489,6 @@ describe('the picker asks the vault (nocx-5ratm, ADR-0032)', () => {
     )
     await ctrl.refresh()
     await waitForRows(container, 1)
-
-    // The person chose not to unlock: the deferred call rejects with the
-    // cancellation the vault layer speaks.
     inventory.mockRejectedValueOnce(new VaultOperationCancelledError())
     const dialog = openEdit(container, 'provider')
     await waitFor(() => {
@@ -487,8 +498,14 @@ describe('the picker asks the vault (nocx-5ratm, ADR-0032)', () => {
     // The editor still works — a dismissal is a choice, not a failure.
     fillField(container, 'endpoint-name', 'renamed')
     expect((container.querySelector('#endpoint-name') as HTMLInputElement).value).toBe('renamed')
-    const picker = dialog.querySelector('select') as HTMLSelectElement
-    expect(Array.from(picker.options).map((o) => o.text)).not.toContain('prod api key')
+    const picker = dialog.querySelector<HTMLInputElement>('#endpoint-key-secret')
+    expect(
+      Array.from(dialog.querySelectorAll<HTMLElement>('[role="option"]')).map((o) =>
+        o.textContent?.trim(),
+      ),
+    ).toContain('Unavailable secret')
+    expect(picker!.value).toBe('Unavailable secret')
+    expect(picker!.value).not.toBe('secrow:aaaaaaaa')
 
     // And the refusal is not remembered as a store failure: unsealing the
     // vault later loads the rows the list needs for its credential state.

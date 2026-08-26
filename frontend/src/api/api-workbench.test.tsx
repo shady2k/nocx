@@ -14,6 +14,7 @@
 // lifecycle, Solid root, kit components — is the real code.
 import { readFileSync } from 'node:fs'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import { createSignal } from 'solid-js'
 import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { mountSidebar, type SidebarHandle } from '../sidebar'
 import { SurfaceRegistry, SURFACE_ID_API } from '../surface-registry'
@@ -26,6 +27,7 @@ import { RpcError } from '../dispatcher'
 import type { ApiRequestScopeResult } from '../generated/api.request.scope'
 import type { PaneHost } from '../pane-content'
 import type { ApiEnvironmentRef, ApiRequest } from './api-model'
+import { RequestEditor } from './request-form'
 import {
   COLLECTION_PATH,
   CREATED_HANDLE,
@@ -60,6 +62,7 @@ import { createSecretChip } from '../ui/secret-chip'
 import { clearToasts, toasts, type Toast } from '../ui/toast'
 import { JSON_LAYOUT_LIMIT } from '../ui/format-json'
 import { malformedReason } from './malformed-reason'
+import { chooseBoundSuggestion } from '../secret-source-test-helpers'
 
 vi.mock('../renderers/xterm', () => ({
   XtermRenderer: vi.fn(createRendererMock),
@@ -3298,12 +3301,11 @@ describe('Auth uses the shared SecretSource control', () => {
     fireEvent.change(control('auth-kind'), { target: { value: 'bearer' } })
     await vi.waitFor(() => expect(source.list).toHaveBeenCalled())
     fireEvent.click(button('Use existing secret'))
-    const select = workbench().querySelector<HTMLSelectElement>('#api-auth-secret')
-    if (!select) throw new Error('no existing-secret selector')
-    fireEvent.change(select, { target: { value: inventory[0].id } })
-    await vi.waitFor(() => expect(select.value).toBe(inventory[0].id))
+    const picker = workbench().querySelector<HTMLInputElement>('#api-auth-secret')
+    if (!picker) throw new Error('no existing-secret combobox')
+    await chooseBoundSuggestion(picker, 'Deploy token')
+    expect(picker.value).toBe('Deploy token')
     expect(workbench().textContent).not.toContain(inventory[0].provider)
-    expect(workbench().textContent).toContain('Deploy token')
     fireEvent.click(button('Send'))
     await vi.waitFor(() => expect(writeRequest).toHaveBeenCalled())
     const saved = writeRequest.mock.calls[writeRequest.mock.calls.length - 1]?.[2] as ApiRequest
@@ -3322,6 +3324,251 @@ describe('Auth uses the shared SecretSource control', () => {
     fireEvent.click(button('Send'))
     await vi.waitFor(() => expect(sendRequest).toHaveBeenCalled())
     expect(workbench().textContent).not.toContain('Deploy token')
+  })
+})
+describe('Auth can store a typed value in the vault', () => {
+  const request = unauthenticated()
+
+  async function openWithCreate(over: Partial<ApiWorkbenchServices> = {}) {
+    const vault = {
+      list: vi.fn().mockResolvedValue([]),
+      createSecret: vi.fn().mockResolvedValue({ name: 'create token' }),
+    }
+    const opened = await openAuth([], {
+      readRequest: vi.fn().mockResolvedValue({ request }),
+      secretCreate: vault,
+      ...over,
+    })
+    fireEvent.change(control('auth-kind'), { target: { value: 'bearer' } })
+    return { ...opened, vault }
+  }
+  function directAuthEditor(
+    authRequest: ApiRequest,
+    scopeVariables: ApiRequestScopeResult['variables'],
+    folder: string,
+  ) {
+    const onCreateSecret = vi.fn().mockResolvedValue(undefined)
+    const [draft, setDraft] = createSignal(authRequest)
+    const onEdit = vi.fn((next: ApiRequest) => setDraft(next))
+    const { container } = render(() => (
+      <RequestEditor
+        request={draft()}
+        scopeVariables={scopeVariables}
+        folder={() => folder}
+        onEdit={onEdit}
+        onCreateSecret={onCreateSecret}
+      />
+    ))
+    const authTab = buttonIn(container, 'Auth')
+    if (!authTab) throw new Error('no Auth tab')
+    fireEvent.click(authTab)
+    const scheme = container.querySelector<HTMLSelectElement>('[data-api-field="auth-kind"] select')
+    if (!scheme) throw new Error('no Auth scheme')
+    fireEvent.change(scheme, { target: { value: 'bearer' } })
+    const value = container.querySelector<HTMLInputElement>('#api-auth-var')
+    if (!value) throw new Error('no Auth value field')
+    fireEvent.input(value, { target: { value: 'typed-value' } })
+    const store = buttonIn(container, 'Store')
+    if (!store) throw new Error('no Auth store action')
+    fireEvent.click(store)
+    return { container, onCreateSecret }
+  }
+
+  it('offers the action from a typed Bearer value with its proposed metadata', async () => {
+    const { vault } = await openWithCreate()
+    fireEvent.input(field('api-auth-var'), { target: { value: 'hello' } })
+
+    const store = button('Store')
+    expect(store.disabled).toBe(false)
+    fireEvent.click(store)
+
+    await vi.waitFor(() => expect(field('secret-create-value').value).toBe('hello'))
+    expect(field('secret-create-name').value).toBe('users token')
+    expect(workbench().querySelector<HTMLSelectElement>('#secret-create-kind')?.value).toBe(
+      'api-token',
+    )
+    expect(vault.createSecret).not.toHaveBeenCalled()
+  })
+
+  it('keeps the action disabled for empty input but enables it for arbitrary text', async () => {
+    await openWithCreate()
+    expect(button('Store').disabled).toBe(true)
+
+    fireEvent.input(field('api-auth-var'), { target: { value: 'not a credential' } })
+    expect(button('Store').disabled).toBe(false)
+  })
+
+  it('leaves a typed value and new mode untouched until the person stores it', async () => {
+    await openWithCreate()
+    const token = field('api-auth-var')
+    fireEvent.input(token, { target: { value: 'leave-me-here' } })
+
+    expect(token.value).toBe('leave-me-here')
+    expect(button('Type a new one').getAttribute('aria-checked')).toBe('true')
+    expect(workbench().querySelector('#secret-create-value')).toBeNull()
+  })
+
+  it('changes the request to the existing-secret control after a successful store', async () => {
+    const handle = 'secrow:created'
+    const entry = {
+      id: handle,
+      name: 'create token',
+      kind: 'api-token' as const,
+      provider: 'sec:v1:created',
+      ownerId: '',
+      usedBy: 0,
+      reachable: true,
+    }
+    const list = vi.fn().mockResolvedValueOnce([]).mockResolvedValueOnce([entry])
+    const createSecret = vi.fn().mockResolvedValue({ name: entry.name })
+    const writeRequest = vi.fn().mockResolvedValue({})
+    const source = {
+      status: vi.fn().mockResolvedValue({ state: 'unsealed' as const }),
+      list: vi.fn().mockResolvedValue([entry]),
+      requestUnseal: vi.fn().mockResolvedValue(undefined),
+      requestSetup: vi.fn().mockResolvedValue(false),
+      requestCreate: vi.fn(),
+    }
+    await openWithCreate({
+      secretCreate: { list, createSecret },
+      secretSource: source,
+      secretInventory: vi.fn().mockResolvedValue([entry]),
+      writeRequest,
+    })
+    fireEvent.input(field('api-auth-var'), { target: { value: 'stored-value' } })
+    fireEvent.click(button('Store'))
+    await vi.waitFor(() => expect(button('Save to vault')).toBeTruthy())
+    fireEvent.click(button('Save to vault'))
+    await vi.waitFor(() =>
+      expect(createSecret).toHaveBeenCalledWith({
+        name: 'users token',
+        kind: 'api-token',
+        value: 'stored-value',
+        resolve: true,
+      }),
+    )
+
+    await vi.waitFor(() =>
+      expect(
+        writeRequest.mock.calls.some(
+          (call) => (call[2] as ApiRequest).auth.token === `{{secret:${handle}}}`,
+        ),
+      ).toBe(true),
+    )
+    expect(button('Use existing secret').getAttribute('aria-checked')).toBe('true')
+    expect(field('api-auth-secret').value).toBe(entry.name)
+    expect(workbench().querySelector('.ui-suggestion-field[data-variant="bound"]')).not.toBeNull()
+  })
+
+  it('leaves the value and mode unchanged when the create ask is cancelled', async () => {
+    await openWithCreate()
+    const token = field('api-auth-var')
+    fireEvent.input(token, { target: { value: 'cancel-me' } })
+    fireEvent.click(button('Store'))
+    await vi.waitFor(() => expect(button('Cancel')).toBeTruthy())
+    fireEvent.click(button('Cancel'))
+
+    expect(token.value).toBe('cancel-me')
+    expect(button('Type a new one').getAttribute('aria-checked')).toBe('true')
+  })
+
+  it("offers Basic's Password field with the proposed password kind", async () => {
+    await openWithCreate()
+    fireEvent.change(control('auth-kind'), { target: { value: 'basic' } })
+    fireEvent.input(field('api-auth-var'), { target: { value: 'password text' } })
+    fireEvent.click(button('Store'))
+
+    await vi.waitFor(() => expect(field('secret-create-value').value).toBe('password text'))
+    expect(field('secret-create-name').value).toBe('users password')
+    expect(workbench().querySelector<HTMLSelectElement>('#secret-create-kind')?.value).toBe(
+      'password',
+    )
+  })
+
+  it('uses a resolved URL host for the proposed name', async () => {
+    const { onCreateSecret } = directAuthEditor(
+      { ...request, url: '{{baseUrl}}/v1/x' },
+      [
+        {
+          name: 'baseUrl',
+          value: 'stale.example.test',
+          scope: 'environment',
+          from: '',
+          overridden: true,
+          refused: '',
+          secret: false,
+        },
+        {
+          name: 'baseUrl',
+          value: 'api.example.test',
+          scope: 'environment',
+          from: '',
+          overridden: false,
+          refused: '',
+          secret: false,
+        },
+      ],
+      'tinkoff',
+    )
+
+    await vi.waitFor(() =>
+      expect(onCreateSecret).toHaveBeenCalledWith({
+        value: 'typed-value',
+        name: 'api.example.test token',
+        kind: 'api-token',
+      }),
+    )
+  })
+
+  it('uses the active folder when the URL host variable is unresolved', async () => {
+    const { onCreateSecret } = directAuthEditor(
+      { ...request, url: '{{baseUrl}}/v1/x' },
+      [],
+      'tinkoff',
+    )
+
+    await vi.waitFor(() =>
+      expect(onCreateSecret).toHaveBeenCalledWith({
+        value: 'typed-value',
+        name: 'tinkoff token',
+        kind: 'api-token',
+      }),
+    )
+  })
+
+  it('passes the draft folder to the Auth secret proposal on the real pane path', async () => {
+    const createSecret = vi.fn().mockResolvedValue({ name: 'users token' })
+    const { bar } = await mountApp({
+      readRequest: vi.fn().mockResolvedValue({
+        request: { ...unauthenticated(), url: '{{baseUrl}}/v1/x' },
+      }),
+      requestScope: vi.fn().mockResolvedValue({ variables: [] }),
+      secretCreate: {
+        list: vi.fn().mockResolvedValue([]),
+        createSecret,
+      },
+    })
+    await openWorkbench(bar)
+    await vi.waitFor(() => row(CREATE_REL_PATH))
+    fireEvent.click(row(CREATE_REL_PATH))
+    await vi.waitFor(() => expect(field('api-url').value).toBe('{{baseUrl}}/v1/x'))
+    fireEvent.click(button('Auth'))
+    fireEvent.change(control('auth-kind'), { target: { value: 'bearer' } })
+    fireEvent.input(field('api-auth-var'), { target: { value: 'typed-value' } })
+    fireEvent.click(button('Store'))
+
+    await vi.waitFor(() => expect(field('secret-create-name').value).toBe('users token'))
+    expect(createSecret).not.toHaveBeenCalled()
+  })
+
+  it('does not render a store action when the host cannot mint secrets', async () => {
+    await openAuth([], {
+      readRequest: vi.fn().mockResolvedValue({ request }),
+    })
+    fireEvent.change(control('auth-kind'), { target: { value: 'bearer' } })
+    fireEvent.input(field('api-auth-var'), { target: { value: 'typed' } })
+
+    expect(buttonNames()).not.toContain('Store')
   })
 })
 

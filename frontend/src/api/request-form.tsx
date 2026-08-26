@@ -69,6 +69,8 @@ import {
 } from './secret-text-field'
 import type { InventoryEntry } from '../vault-client'
 import { SecretSource, type SecretSourceMode } from '../secret-source'
+import type { SecretCreateAsk } from '../secret-create-ask'
+import { proposeSecret } from '../secret-name-proposal'
 import type { ApiHeader, ApiParam, ApiRequest } from './api-model'
 import type { ApiScopeVariable } from './api-store'
 
@@ -336,6 +338,8 @@ export function RequestLine(props: RequestLineProps) {
 export interface RequestEditorProps {
   request: ApiRequest | null
   scopeVariables: readonly ApiScopeVariable[] | null
+  /** The folder the person is standing in while this request is open. */
+  folder?: () => string
   onEdit: (next: ApiRequest) => void
   /** Vault-backed source shared by every request text field. */
   secretSource?: SecretPickerSource
@@ -344,6 +348,15 @@ export interface RequestEditorProps {
   vaultState?: () => VaultState
   onSecretReference?: (handle: string, at: { x: number; y: number }, replace: () => void) => void
   onPickerReady?: (open: (() => void) | undefined) => void
+  /**
+   * Mint a secret without leaving the request (nocx-7mfwb). The workbench
+   * owns the one create ask; this editor only says what is already known —
+   * the value the person typed, and the name and kind proposed from where
+   * they are standing. Resolves with the handle when it landed and with
+   * `undefined` when the person cancelled. Absent means the host cannot
+   * mint, and the offer is not rendered at all.
+   */
+  onCreateSecret?: (ask: SecretCreateAsk) => Promise<{ handle: string; name: string } | undefined>
 }
 
 /** The editor: the four parts of a request, one at a time. */
@@ -398,6 +411,40 @@ export function RequestEditor(props: RequestEditorProps) {
   createEffect(() => {
     setAuthMode(authReference() === undefined ? 'new' : 'secret')
   })
+  const resolveVariable = (name: string): string | undefined =>
+    props.scopeVariables?.find((variable) => variable.name === name && !variable.overridden)?.value
+  const setAuthReference = (handle: string): void => {
+    const current = request()
+    if (current === null) return
+    const value = `{{secret:${handle}}}`
+    patch({
+      auth:
+        current.auth.kind === 'basic'
+          ? { ...current.auth, password: value }
+          : { ...current.auth, token: value },
+    })
+    setAuthMode('secret')
+  }
+
+  const saveAuthSecret = async (): Promise<void> => {
+    const current = request()
+    const onCreateSecret = props.onCreateSecret
+    if (current === null || onCreateSecret === undefined) return
+    const scheme = current.auth.kind
+    if (scheme !== 'bearer' && scheme !== 'basic') return
+    const value = authValue()
+    if (value === '') return
+
+    const proposal = proposeSecret({
+      site: { at: 'auth', scheme },
+      url: current.url,
+      resolveVariable,
+      folder: props.folder?.(),
+      request: current.name,
+    })
+    const created = await onCreateSecret({ ...proposal, value })
+    if (created !== undefined) setAuthReference(created.handle)
+  }
 
   /**
    * Lay the body out, or say why not and change nothing.
@@ -796,32 +843,40 @@ export function RequestEditor(props: RequestEditorProps) {
                         secretLabel="Use existing secret"
                         ariaLabel="Authentication value source"
                         newControl={
-                          <TextField
-                            id="api-auth-var"
-                            label={req().auth.kind === 'basic' ? 'Password' : 'Token'}
-                            value={authValue()}
-                            onInput={(v) =>
-                              patch({
-                                auth:
-                                  req().auth.kind === 'basic'
-                                    ? { ...req().auth, password: v }
-                                    : { ...req().auth, token: v },
-                              })
-                            }
-                          />
+                          <div class="api-request__controls">
+                            <TextField
+                              id="api-auth-var"
+                              label={req().auth.kind === 'basic' ? 'Password' : 'Token'}
+                              value={authValue()}
+                              onInput={(v) =>
+                                patch({
+                                  auth:
+                                    req().auth.kind === 'basic'
+                                      ? { ...req().auth, password: v }
+                                      : { ...req().auth, token: v },
+                                })
+                              }
+                            />
+                            <Show
+                              when={
+                                props.onCreateSecret !== undefined &&
+                                (req().auth.kind === 'bearer' || req().auth.kind === 'basic')
+                              }
+                            >
+                              <Button
+                                disabled={authValue() === ''}
+                                title="Store authentication value in vault"
+                                onClick={() => void saveAuthSecret()}
+                              >
+                                Store
+                              </Button>
+                            </Show>
+                          </div>
                         }
                         secrets={[...(props.secretInventory?.() ?? [])]}
                         value={authReference()}
                         onValueChange={(handle) => {
-                          if (handle === undefined) return
-                          const value = `{{secret:${handle}}}`
-                          patch({
-                            auth:
-                              req().auth.kind === 'basic'
-                                ? { ...req().auth, password: value }
-                                : { ...req().auth, token: value },
-                          })
-                          setAuthMode('secret')
+                          if (handle !== undefined) setAuthReference(handle)
                         }}
                       />
                     </Show>

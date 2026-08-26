@@ -17,7 +17,7 @@
 import { Show, type Component, type JSX } from 'solid-js'
 import { Field } from './ui/field'
 import { SegmentedControl } from './ui/segmented-control'
-import { Select } from './ui/select'
+import { SuggestionField } from './ui/suggestion-field'
 import { secretOptions } from './key-material-input'
 import type { InventoryEntry } from './vault-client'
 
@@ -66,15 +66,15 @@ export const SecretSource: Component<SecretSourceProps> = (props) => {
       </Field>
       <Show when={props.mode === 'new'}>{props.newControl}</Show>
       <Show when={props.mode === 'secret'}>
-        <Field for={`${props.id}-secret`} label="Existing secret">
-          <Select
-            id={`${props.id}-secret`}
-            value={props.value ?? ''}
-            onChange={(value) => props.onValueChange(value || undefined)}
-            options={secretOptions(props.secrets, props.value)}
-            placeholder={props.placeholder ?? '\u2014 None \u2014'}
-          />
-        </Field>
+        <SuggestionField
+          id={`${props.id}-secret`}
+          label="Existing secret"
+          value={props.value ?? ''}
+          onInput={(value) => props.onValueChange(value || undefined)}
+          suggestions={secretOptions(props.secrets, props.value)}
+          variant="bound"
+          placeholder={props.placeholder ?? '\u2014 None \u2014'}
+        />
       </Show>
     </>
   )

@@ -208,7 +208,10 @@ async function main() {
       vaultController.openSetup()
       return Promise.resolve(true)
     },
-    requestCreate: (name) => openSettingsPane().startNewSecret(name),
+    requestCreate: (name) => {
+      openSettingsPane().startNewSecret(name)
+      return Promise.resolve(undefined)
+    },
   }
 
   // ── Backend-initiated unlock requests ──────────────────────────────
@@ -717,6 +720,13 @@ async function main() {
       apiSecretSource,
       () => vaultClient.inventory().then((inventory) => inventory.entries),
       () => openSettingsPane().openPage('secrets'),
+      // Minting, bound HERE for the same reason as the inventory above: the
+      // vault client is the composition root's, and the workbench mints a
+      // secret without learning to speak that domain (AD-8, nocx-7mfwb).
+      {
+        list: () => vaultClient.inventory().then((inventory) => inventory.entries),
+        createSecret: (params) => vaultClient.createSecret(params),
+      },
     ),
   )
 

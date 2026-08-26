@@ -44,13 +44,13 @@ export interface SecretPickerSource {
    *  dialog is the surface now), false when setup happened silently and the
    *  list can reload. */
   requestSetup(): Promise<boolean>
-  /** The user activated "Add a secret…": the host opens the vault's own
-   *  create dialog, which owns the surface from there. The panel closes —
-   *  a secret needs a name AND a value, and a floating row over the prompt
-   *  is not where a value gets typed. `name` is what was typed after '@',
-   *  which is almost always the name they were reaching for; asking them
-   *  to type it again is how a feature goes unused. */
-  requestCreate(name: string): void
+  /** The user activated "Add a secret…". Form hosts return the newly
+   *  created row so the field can insert its opaque handle in place; hosts
+   *  without a value-entry form (the terminal prompt) return `undefined`
+   *  after handing the person to their existing destination. The hosts differ
+   *  because a form has somewhere to type a value while a floating row over a
+   *  prompt does not. */
+  requestCreate(name: string): Promise<SecretEntry | undefined>
 }
 
 export interface SecretPickerCallbacks {
@@ -117,6 +117,8 @@ export class SecretPicker {
    *  flight: typing `@ope` before the list lands must not render every
    *  secret unfiltered. Applied when the list renders; null when none. */
   private pendingFilter: string | null = null
+  /** Invalidates a pending create result when the picker opens again. */
+  private createRequest = 0
   private readonly panel: FloatingPanel
 
   constructor(
@@ -159,6 +161,7 @@ export class SecretPicker {
   async open(purpose: SecretPickerPurpose = 'insert'): Promise<void> {
     if (this.isOpen) return
     this.purpose = purpose
+    this.createRequest++
     this.state = { name: 'loading' }
     this.render()
     try {
@@ -291,8 +294,14 @@ export class SecretPicker {
         // The create row sits one past the last entry.
         if (s.selected >= rows.length) {
           const typed = s.filter
+          const request = ++this.createRequest
           this.close()
-          this.source.requestCreate(typed)
+          void Promise.resolve(this.source.requestCreate(typed))
+            .then((created) => {
+              if (request !== this.createRequest || created === undefined) return
+              this.callbacks.onInsert(created.name)
+            })
+            .catch(() => {})
           return
         }
         const entry = rows[s.selected]

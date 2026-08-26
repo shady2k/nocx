@@ -82,6 +82,12 @@ import { API_IMPORT_DROP_TARGET, CurlImportDialog, PostmanImportDialog } from '.
 import { RequestCrumbs } from './request-crumbs'
 import { MoveToFolderDialog } from './move-dialog'
 import { RequestEditor, RequestLine } from './request-form'
+import {
+  SecretCreateDialog,
+  type SecretCreateAsk,
+  type SecretCreateVault,
+} from '../secret-create-ask'
+import { proposeSecret } from '../secret-name-proposal'
 import { RunList } from './run-list'
 import type { ApiStore, VariableAnswer } from './api-store'
 import type { DirectoryPicker, FilePicker, ImportSource, NativeDropPort } from './api-client'
@@ -126,6 +132,16 @@ export interface ApiPaneProps {
   /** Full vault inventory used by Auth's existing-secret selector. */
   secretInventory?: () => Promise<InventoryEntry[]>
   secretSource?: SecretPickerSource
+  /**
+   * Where a secret is MINTED from inside the workbench (nocx-7mfwb). The
+   * workbench could use a secret everywhere and mint one nowhere: creating
+   * one threw the person out to Settings and back, which is the detour the
+   * owner's decision of 2026-08-23 forbids — if the product will not push
+   * people into the vault, the vault must be the easier path from where they
+   * stand, not a longer one. Absent means the host cannot mint (no vault
+   * client), and both doors are then simply not offered.
+   */
+  secretCreate?: SecretCreateVault
   /** Opens the existing Secrets settings page from a reference menu. */
   openSecrets?: () => void
 }
@@ -326,6 +342,8 @@ export function ApiPane(props: ApiPaneProps) {
   const openSecrets = props.openSecrets
   // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
   const secretInventory = props.secretInventory
+  // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
+  const secretCreate = props.secretCreate
   let openRequestSecretPicker: (() => void) | undefined
   const [secretEntries, setSecretEntries] = createSignal<SecretEntry[]>([])
   const [secretInventoryEntries, setSecretInventoryEntries] = createSignal<InventoryEntry[]>([])
@@ -348,7 +366,7 @@ export function ApiPane(props: ApiPaneProps) {
           },
           requestUnseal: () => source.requestUnseal(),
           requestSetup: () => source.requestSetup(),
-          requestCreate: (name) => source.requestCreate(name),
+          requestCreate: (name) => createSecretInPlace(name),
         }
   const refreshSecretEntries = async (): Promise<void> => {
     if (secretSource === undefined) {
@@ -381,6 +399,66 @@ export function ApiPane(props: ApiPaneProps) {
   onMount(() => {
     void refreshSecretEntries()
   })
+
+  // ── Minting a secret WHERE THE PERSON IS STANDING ────────────────────
+  // ONE create ask, reached from two doors — the Auth tab's save action and
+  // the '@' picker's create row — differing only in what is already known
+  // (nocx-7mfwb). It is mounted once, here, because two mounts of one ask is
+  // the "two vocabularies for one act" defect the epic exists to undo; the
+  // doors call `openSecretCreateAsk` and await the handle.
+  //
+  // The promise resolves with the handle on success and with `undefined` on
+  // cancel, so a door can tell "the person chose not to" from "it landed"
+  // without either door owning the dialog's state.
+  const [secretAsk, setSecretAsk] = createSignal<SecretCreateAsk | null>(null)
+  let settleSecretAsk: ((created: { handle: string; name: string } | undefined) => void) | undefined
+  const closeSecretCreateAsk = (created?: { handle: string; name: string }): void => {
+    setSecretAsk(null)
+    const settle = settleSecretAsk
+    settleSecretAsk = undefined
+    settle?.(created)
+  }
+  const openSecretCreateAsk = (
+    ask: SecretCreateAsk,
+  ): Promise<{ handle: string; name: string } | undefined> => {
+    if (secretCreate === undefined) return Promise.resolve(undefined)
+    // A second ask while one is up would strand the first door's promise
+    // for ever. The one on screen wins; the newcomer is answered at once.
+    if (settleSecretAsk !== undefined) return Promise.resolve(undefined)
+    setSecretAsk(ask)
+    return new Promise((resolve) => {
+      settleSecretAsk = resolve
+    })
+  }
+  const createSecretInPlace = async (name: string): Promise<SecretEntry | undefined> => {
+    // NO MINT SEAM, NO DEAD ROW. A workbench built without a vault client can
+    // still offer the create row — it just cannot answer it here, so it hands
+    // off the way it always did rather than doing nothing at all. A control
+    // that silently does nothing is worse than the detour this epic removed:
+    // the detour at least ended somewhere. (Found by the merged gate, which
+    // is the only place the two halves of this were ever visible together.)
+    if (secretCreate === undefined) return source?.requestCreate(name)
+    // The picker is reachable from the URL, a header, a parameter, the body
+    // and Auth alike, so the site it can honestly name is `field` — which is
+    // the rung that gives api-token. The NAME here is what the person typed
+    // after the '@', which is almost always what they were reaching for; only
+    // the kind is derived.
+    const proposal = proposeSecret({
+      site: { at: 'field' },
+      url: store.draft()?.url ?? '',
+    })
+    const created = await openSecretCreateAsk({
+      name,
+      kind: proposal.kind,
+      value: '',
+    })
+    if (created === undefined) return undefined
+    const entry = { id: created.handle, name: created.name }
+    setSecretEntries((entries) =>
+      entries.some((existing) => existing.id === entry.id) ? entries : [...entries, entry],
+    )
+    return entry
+  }
   // The clipboard a copied path lands on (AD-8). The composition root
   // injects one into the surfaces whose copy was designed with it; the
   // workbench predates that seam, so it makes its own through the same
@@ -2625,6 +2703,25 @@ export function ApiPane(props: ApiPaneProps) {
           onClose={() => setVarMenu(null)}
           items={variableMenuItems()}
         />
+        {/* The create ask, mounted once for both doors. It renders nothing
+            while `ask` is null — the value input is a password field and must
+            not sit in the DOM of a workbench nobody is minting from. */}
+        <Show when={secretCreate}>
+          {(vault) => (
+            <SecretCreateDialog
+              ask={secretAsk()}
+              vault={vault()}
+              onClose={() => closeSecretCreateAsk()}
+              onCreated={(created) => {
+                closeSecretCreateAsk(created)
+                // The row the person just minted must be in the inventory the
+                // chips and the picker read, or the field they land on shows a
+                // reference to a secret "not on this machine".
+                void refreshSecretEntries()
+              }}
+            />
+          )}
+        </Show>
         <CollectionDialog
           open={naming()}
           title="New collection"
@@ -3361,6 +3458,13 @@ export function ApiPane(props: ApiPaneProps) {
               onPickerReady={(open) => {
                 openRequestSecretPicker = open
               }}
+              onCreateSecret={secretCreate === undefined ? undefined : openSecretCreateAsk}
+              // WHERE THE PERSON IS STANDING, for the proposed name's folder
+              // rung (nocx-7mfwb.2). `activeFolder` and not `draftFolder`:
+              // this is the place they walked to, which opening a request
+              // moves, and the proposal is about where they are — not about
+              // where a file with no home yet would be written.
+              folder={() => store.activeFolder()}
             />
           </section>
 

@@ -1,21 +1,22 @@
 /**
- * e2e: a person creates a vault secret from a header field with no
- * environment selected, sends the request, and keeps the value out of the
- * collection file (the secret-in-any-field epic's DONE WHEN).
+ * e2e: a person creates a vault secret from both the Auth tab and a header
+ * field, sends the request, and keeps both values out of the collection file
+ * (the secret-in-any-field epic's DONE WHEN).
  *
- * The two assertions that decide the feature pull in opposite directions:
+ * The two assertions that decide each journey pull in opposite directions:
  *
  *   1. THE SERVER RECEIVED THE VALUE. Its route answers 200 only when the
  *      expected header carries the real value, so a literal `@` or
- *      `{{secret:...}}` cannot satisfy the run.
+ *      `{{secret:...}}` cannot satisfy the run. The Auth journey separately
+ *      asserts that the Authorization header carried its real value.
  *   2. AND THE REQUEST FILE HOLDS NEITHER VALUE NOR DISPLAY NAME. The bytes
- *      on disk must contain only the opaque `secrow:` handle.
+ *      on disk must contain only the opaque `secrow:` handles.
  *
  * The walk starts by explicitly selecting "No environment". That state is
  * load-bearing: before this epic it had no way to address a secret at all.
  * Every wait is on a UI or filesystem state, never a duration.
  */
-import { test as base, expect } from '@playwright/test'
+import { test as base, expect, type Page } from '@playwright/test'
 import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -28,12 +29,24 @@ import {
 import { readStand } from './stand'
 
 const test = base
+interface SettingsAbsenceGuard {
+  readonly isVisible: () => boolean
+  readonly observer: MutationObserver
+  readonly state: { violated: boolean }
+}
+
+declare global {
+  interface Window {
+    __nocxSettingsAbsenceGuard?: SettingsAbsenceGuard
+  }
+}
 
 const COLLECTION_NAME = 'header-secret-api'
 const REQUEST_NAME = 'send header secret'
 const HEADER_NAME = 'X-E2E-Secret'
-const SECRET_DISPLAY_NAME = 'e2e header token'
+const SECRET_DISPLAY_NAME = 'e2e-header-token'
 const SECRET_VALUE = 'e2e-header-secret-value-9f4c7a2d'
+const AUTH_SECRET_VALUE = 'e2e-auth-bearer-value-6b1d8e3f'
 const VAULT_PASSPHRASE = 'api-secret-any-field-e2e-master-pass'
 
 /** Lazily: the stand is started by globalSetup, after this file is collected. */
@@ -84,7 +97,78 @@ function collectionExport(baseUrl: string): string {
   )
 }
 
-test.describe('a vault secret in a header with no environment', () => {
+/**
+ * Settings is allowed during vault setup, but not while either request is
+ * being edited or sent. The observer catches a transient visible mount that a
+ * final one-time locator assertion would miss; the final visibility check also
+ * catches a mounted pane whose visibility changed without a DOM mutation.
+ */
+async function installSettingsAbsenceGuard(page: Page): Promise<void> {
+  await page.evaluate(() => {
+    const isVisible = (): boolean => {
+      const root = document.querySelector<HTMLElement>('.ui-settings')
+      if (root === null) return false
+      const style = window.getComputedStyle(root)
+      return (
+        style.display !== 'none' &&
+        style.visibility !== 'hidden' &&
+        root.getClientRects().length > 0
+      )
+    }
+
+    const state = { violated: false }
+    const inspect = (): void => {
+      if (isVisible()) state.violated = true
+    }
+    const observer = new MutationObserver(inspect)
+    observer.observe(document.body, {
+      subtree: true,
+      childList: true,
+      attributes: true,
+      attributeFilter: ['aria-hidden', 'class', 'hidden', 'style'],
+    })
+    inspect()
+    Object.defineProperty(window, '__nocxSettingsAbsenceGuard', {
+      configurable: true,
+      value: { isVisible, observer, state },
+    })
+  })
+}
+
+async function settingsWereVisible(page: Page): Promise<boolean> {
+  return page.evaluate(() => {
+    const guard = window.__nocxSettingsAbsenceGuard
+    return guard?.state.violated === true || guard?.isVisible() === true
+  })
+}
+
+function requestFile(collectionRoot: string): string {
+  const savedFiles = walk(collectionRoot)
+  expect(savedFiles.length, 'the collection wrote no files').toBeGreaterThan(0)
+  const file = savedFiles.find((candidate) =>
+    readFileSync(candidate, 'utf8').includes(`"name": "${REQUEST_NAME}"`),
+  )
+  if (file === undefined) throw new Error('imported request file was not found')
+  return file
+}
+
+async function assertRequestFileContainsOnlyHandles(
+  collectionRoot: string,
+  forbiddenValues: readonly string[],
+  expectedHandleCount: number,
+): Promise<void> {
+  await expect
+    .poll(() => existsSync(collectionRoot), {
+      message: `the import never produced ${collectionRoot}`,
+      timeout: 15_000,
+    })
+    .toBe(true)
+  const requestText = readFileSync(requestFile(collectionRoot), 'utf8')
+  expect(requestText.match(/\{\{secret:secrow:[^}]+\}\}/g) ?? []).toHaveLength(expectedHandleCount)
+  for (const value of forbiddenValues) expect(requestText).not.toContain(value)
+}
+
+test.describe('vault secrets in Auth and header fields with no environment', () => {
   test.use({ viewport: { width: 1400, height: 900 } })
 
   let disposable: DisposableRoot
@@ -107,7 +191,7 @@ test.describe('a vault secret in a header with no environment', () => {
     await server?.stop()
   })
 
-  test('creates and sends a header secret without writing its value to the request file', async ({
+  test('creates and sends secrets from Auth and header fields without writing values to the request file', async ({
     page,
   }) => {
     const endpoint = await backend.start()
@@ -115,7 +199,7 @@ test.describe('a vault secret in a header with no environment', () => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
 
-    // The vault must be real: the picker-created secret goes through the
+    // The vault must be real: the picker-created secrets go through the
     // product's own setup and create paths, never through RPC state seeding.
     await page.keyboard.press('Meta+,')
     await settingsReady(page)
@@ -134,6 +218,7 @@ test.describe('a vault secret in a header with no environment', () => {
     await page.locator('.activity-bar button[data-action="api"]').click()
     const workbench = page.locator('.api-workbench')
     await expect(workbench).toBeVisible({ timeout: 15_000 })
+    await installSettingsAbsenceGuard(page)
 
     await workbench.locator('#api-collections-menu').click()
     await page.getByRole('menuitem', { name: 'Import collection…' }).click()
@@ -149,7 +234,7 @@ test.describe('a vault secret in a header with no environment', () => {
     await requestRow.click()
 
     // Do not rely on the default. The explicit selected row is the proof that
-    // the scenario starts from the once-dead No environment state.
+    // both journeys start from the once-dead No environment state.
     const environmentRail = workbench.locator('.api-environments-rail')
     const noEnvironment = environmentRail.getByRole('button', {
       name: 'No environment',
@@ -159,64 +244,89 @@ test.describe('a vault secret in a header with no environment', () => {
     await noEnvironment.click()
     await expect(noEnvironment).toHaveAttribute('aria-selected', 'true')
 
+    // ── HEADER TAB DOOR ────────────────────────────────────────────────────
     await workbench.getByRole('tab', { name: /^Headers\b/ }).click()
     const headerValue = workbench.locator('#api-header-value-0')
-    await headerValue.fill('@')
+    await headerValue.fill(`@${SECRET_DISPLAY_NAME}`)
     const picker = page.getByRole('listbox', { name: 'vault secrets' })
     await expect(picker).toBeVisible()
-    const addSecret = picker.getByRole('option').filter({ hasText: 'Add a secret' })
+    const addSecret = picker.getByRole('option', { name: /Add .* to the vault/ })
     await expect(addSecret).toBeVisible()
     // The selected row is the only row in an empty vault. Pressing Enter is
     // the person's keyboard activation and avoids relying on the floating
     // panel being scrollable inside the narrow header column.
     await headerValue.press('Enter')
 
-    const addDialog = page.getByRole('dialog').filter({ hasText: 'Add secret' })
+    const addDialog = page.getByRole('dialog').filter({ hasText: 'Create secret' })
     await expect(addDialog).toBeVisible()
-    await addDialog.locator('#sr-add-name').fill(SECRET_DISPLAY_NAME)
-    await addDialog.locator('#sr-add-value').fill(SECRET_VALUE)
-    await addDialog.getByRole('button', { name: 'Add secret', exact: true }).click()
+    // The typed @ word is the proposed name; accepting it proves the dialog
+    // opened over the request rather than navigating to Settings.
+    await expect(addDialog.locator('#secret-create-name')).toHaveValue(SECRET_DISPLAY_NAME)
+    await addDialog.locator('#secret-create-value').fill(SECRET_VALUE)
+    await addDialog.getByRole('button', { name: 'Save to vault', exact: true }).click()
     await expect(addDialog).not.toBeVisible()
-
-    // The create handoff returns to Settings. Come back to the request, ask
-    // for the new row, and assert the field now holds the opaque reference.
-    await page.locator('.activity-bar button[data-action="api"]').click()
-    await expect(workbench).toBeVisible()
-    await headerValue.fill('')
-    await headerValue.fill('@')
-    await expect(picker).toBeVisible()
-    const createdSecret = picker.getByRole('option', { name: SECRET_DISPLAY_NAME, exact: true })
-    await expect(createdSecret).toBeVisible()
-    await expect(createdSecret).toHaveAttribute('aria-selected', 'true')
-    // The created record is the first vault row, so Enter accepts this
-    // selected option without clicking a floating panel outside the viewport.
-    await headerValue.press('Enter')
     await expect(headerValue).toHaveValue(/\{\{secret:secrow:[^}]+\}\}/)
 
     await workbench.getByRole('button', { name: 'Send', exact: true }).click()
-    const run = workbench.locator('.api-run').first()
-    await expect(run).toHaveAttribute('data-outcome', 'answered', { timeout: 20_000 })
-    await expect(run.locator('.api-run__stats')).toContainText('HTTP status 200')
-
-    // ── 1. THE SERVER RECEIVED THE REAL VALUE ─────────────────────────────
+    const headerRun = workbench.locator('.api-run').first()
+    await expect(headerRun).toHaveAttribute('data-outcome', 'answered', { timeout: 20_000 })
+    await expect(headerRun.locator('.api-run__stats')).toContainText('HTTP status 200')
     expect(server.headerValues()).toEqual([SECRET_VALUE])
-
-    // ── 2. THE FILE HOLDS ONLY THE OPAQUE HANDLE ──────────────────────────
-    await expect
-      .poll(() => existsSync(collectionRoot), {
-        message: `the import never produced ${collectionRoot}`,
-        timeout: 15_000,
-      })
-      .toBe(true)
-    const savedFiles = walk(collectionRoot)
-    expect(savedFiles.length, 'the collection wrote no files').toBeGreaterThan(0)
-    const requestFile = savedFiles.find((file) =>
-      readFileSync(file, 'utf8').includes(`"name": "${REQUEST_NAME}"`),
+    await assertRequestFileContainsOnlyHandles(
+      collectionRoot,
+      [SECRET_VALUE, SECRET_DISPLAY_NAME],
+      1,
     )
-    if (requestFile === undefined) throw new Error('imported request file was not found')
-    const requestText = readFileSync(requestFile, 'utf8')
-    expect(requestText).toContain('{{secret:secrow:')
-    expect(requestText).not.toContain(SECRET_VALUE)
-    expect(requestText).not.toContain(SECRET_DISPLAY_NAME)
+    expect(await settingsWereVisible(page)).toBe(false)
+
+    // ── AUTH TAB DOOR ──────────────────────────────────────────────────────
+    await workbench.getByRole('tab', { name: /^Auth\b/ }).click()
+    const authKind = workbench.locator('[data-api-field="auth-kind"] select')
+    await authKind.selectOption('bearer')
+    await expect(authKind).toHaveValue('bearer')
+    const authSource = workbench.getByRole('radiogroup', {
+      name: 'Authentication value source',
+    })
+    const newAuth = authSource.getByRole('radio', { name: 'Type a new one', exact: true })
+    await newAuth.click()
+    await expect(newAuth).toHaveAttribute('aria-checked', 'true')
+    const authToken = workbench.locator('#api-auth-var')
+    await authToken.fill(AUTH_SECRET_VALUE)
+    const storeAuth = workbench.getByRole('button', { name: 'Store', exact: true })
+    await expect(storeAuth).toBeEnabled()
+    await storeAuth.click()
+
+    const authDialog = page.getByRole('dialog').filter({ hasText: 'Create secret' })
+    await expect(authDialog).toBeVisible()
+    const authNameField = authDialog.locator('#secret-create-name')
+    await expect(authNameField).toHaveValue(/.+/)
+    const proposedAuthName = await authNameField.inputValue()
+    expect(proposedAuthName).not.toContain(AUTH_SECRET_VALUE)
+    await authDialog.locator('#secret-create-value').fill(AUTH_SECRET_VALUE)
+    await authDialog.getByRole('button', { name: 'Save to vault', exact: true }).click()
+    await expect(authDialog).not.toBeVisible()
+    const existingAuth = authSource.getByRole('radio', {
+      name: 'Use existing secret',
+      exact: true,
+    })
+    await expect(existingAuth).toHaveAttribute('aria-checked', 'true')
+    await expect(workbench.locator('#api-auth-secret')).toHaveValue(proposedAuthName)
+
+    await workbench.getByRole('button', { name: 'Send', exact: true }).click()
+    const authRun = workbench.locator('.api-run').first()
+    await expect(authRun).toHaveAttribute('data-outcome', 'answered', { timeout: 20_000 })
+    await expect(authRun.locator('.api-run__stats')).toContainText('HTTP status 200')
+
+    // ── THE SERVER RECEIVED BOTH REAL VALUES ───────────────────────────────
+    expect(server.headerValues()).toEqual([SECRET_VALUE, SECRET_VALUE])
+    expect(server.authorizationValues()).toEqual(['', `Bearer ${AUTH_SECRET_VALUE}`])
+
+    // ── THE FILE HOLDS ONLY THE OPAQUE HANDLES ─────────────────────────────
+    await assertRequestFileContainsOnlyHandles(
+      collectionRoot,
+      [SECRET_VALUE, SECRET_DISPLAY_NAME, AUTH_SECRET_VALUE, proposedAuthName],
+      2,
+    )
+    expect(await settingsWereVisible(page)).toBe(false)
   })
 })

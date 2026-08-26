@@ -218,6 +218,17 @@ describe('SecretPicker: the passive filter', () => {
     key(h.picker, { key: 'Enter' })
     expect(h.source.requestCreate).toHaveBeenCalledTimes(1)
   })
+  it('inserts the row returned by an in-place create', async () => {
+    const h = setup(UNSEALED, [entry('openai-key')])
+    h.source.requestCreate.mockResolvedValue(entry('brand-new', 'secrow:new'))
+    await h.picker.open()
+    await flush()
+    h.picker.setFilter('brand-new')
+    key(h.picker, { key: 'Enter' })
+    await flush()
+    expect(h.onInsert).toHaveBeenCalledWith('brand-new')
+    expect(h.picker.isOpen).toBe(false)
+  })
 
   it('a space in the filter closes (the trigger word ended)', async () => {
     const h = setup(UNSEALED, [entry('openai-key')])

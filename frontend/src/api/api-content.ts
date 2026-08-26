@@ -16,6 +16,7 @@ import { render } from 'solid-js/web'
 import { SolidPaneContent, type PaneHost } from '../solid-pane-content'
 import type { SingletonKey, SurfaceType } from '../pane-content'
 import { ApiPane } from './api-pane'
+import type { SecretCreateVault } from '../secret-create-ask'
 import { createApiStore, type ApiStore } from './api-store'
 import type {
   ApiWorkbenchServices,
@@ -56,6 +57,7 @@ export class ApiContent extends SolidPaneContent {
   private readonly secretSource?: SecretPickerSource
   private readonly secretInventory?: () => Promise<InventoryEntry[]>
   private readonly openSecrets?: () => void
+  private readonly secretCreate?: SecretCreateVault
 
   constructor(services: ApiWorkbenchServices) {
     super()
@@ -66,6 +68,7 @@ export class ApiContent extends SolidPaneContent {
     this.secretSource = services.secretSource
     this.secretInventory = services.secretInventory
     this.openSecrets = services.openSecrets
+    this.secretCreate = services.secretCreate
   }
 
   renderContent(root: HTMLElement): () => void {
@@ -79,6 +82,7 @@ export class ApiContent extends SolidPaneContent {
           secretSource: this.secretSource,
           openSecrets: this.openSecrets,
           secretInventory: this.secretInventory,
+          secretCreate: this.secretCreate,
         }),
       root,
     )

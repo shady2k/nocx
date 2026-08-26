@@ -252,7 +252,12 @@ type policyMiddleware struct {
 	// recorded with no relation rather than with a guessed one — the same
 	// rule the run id already follows on the attempt payload.
 	turnEntryID string
-	requester   RendererRequester
+	// derivation is this RUN's completed invocations and what they returned,
+	// so a later call's arguments can be checked against them for the
+	// envelope's derivation edge (nocx-d6gn4.9). Per-run and never
+	// persisted: the durable fact is the edge on the attempt.
+	derivation *derivationLog
+	requester  RendererRequester
 	// classifier is the second model that judges permitted proposals (bead
 	// nocx-kpy23). Nil = not wired for this run: permitted calls run
 	// exactly as they do without one. Consulted ONLY where the policy says
@@ -312,6 +317,7 @@ func newPolicyMiddleware(logger log.Logger, grant content.Grant, registry agentt
 		runID:       runID,
 		attempt:     attempt,
 		turnEntryID: turnEntryID,
+		derivation:  &derivationLog{},
 		requester:   requester,
 		classifier:  classifier,
 		onCall:      onCall,
@@ -618,7 +624,14 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 		if err := m.closeAttempt(ctx, execID, content.TermCompleted, content.EntrySuccess); err != nil {
 			return "", fmt.Errorf("agent tool %q: record outcome: %w", decl.Name, err)
 		}
-		return decl.FrameToolResult(out), nil
+		// The envelope's derivation edge (nocx-d6gn4.9) is drawn against
+		// what the MODEL was given back, which is the framed result and not
+		// the tool's raw return: text the model never saw cannot be evidence
+		// of what the model then did. Recorded only for a call that
+		// COMPLETED — a failed call returned nothing to copy from.
+		framed := decl.FrameToolResult(out)
+		m.derivation.record(entryID, framed)
+		return framed, nil
 	}, nil
 }
 
@@ -1086,6 +1099,13 @@ func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.T
 	if resource != nil {
 		payloadBody["resource"] = resource
 	}
+	// The envelope's derivation edge (nocx-d6gn4.9): which earlier
+	// invocation of this run this call's arguments came out of. Written
+	// on every attempt, empty edges included — "we looked and found
+	// nothing" and "this record predates the field" are different facts,
+	// and a reader that cannot tell them apart reads the second as the
+	// first. See derivation.go for what the evidence is and is not.
+	payloadBody["derivedFrom"] = newDerivationBlock(m.derivation.edgesFor(rawArgs, decl.ResourceArg))
 	// The classifier block (bead nocx-kpy23, criterion 6): when this
 	// escalation was caused by the classifier — suspect, failed, or an
 	// input the gate withheld — the reason lives on the PROPOSAL, so "why
@@ -1207,6 +1227,13 @@ func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool
 		if decl.OpensBlock {
 			payloadBody["opensBlock"] = true
 		}
+		// The envelope's derivation edge (nocx-d6gn4.9): which earlier
+		// invocation of this run this call's arguments came out of. Written
+		// on every attempt, empty edges included — "we looked and found
+		// nothing" and "this record predates the field" are different facts,
+		// and a reader that cannot tell them apart reads the second as the
+		// first. See derivation.go for what the evidence is and is not.
+		payloadBody["derivedFrom"] = newDerivationBlock(m.derivation.edgesFor(rawArgs, decl.ResourceArg))
 		// The classifier block (bead nocx-kpy23, criterion 6): when the
 		// classifier was consulted and cleared the call, the attempt's own
 		// record carries the verdict and the model, so the audit shows

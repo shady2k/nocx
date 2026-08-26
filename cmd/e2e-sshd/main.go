@@ -903,13 +903,48 @@ func startPipeCommand(ch gossh.Channel, st *sessionState, command string) {
 	//nolint:gosec // dev-only fixture: the command string is this binary's own contract.
 	cmd := exec.Command(bash, "-c", command)
 	cmd.Env = sessionEnv(bash)
-	cmd.Stdin = ch
+	// STDIN THROUGH AN os.Pipe, NOT THE CHANNEL ITSELF, and the indirection is
+	// the whole point. os/exec only hands a descriptor straight to the child
+	// when Stdin is an *os.File; for anything else it copies on a goroutine
+	// and — its own words — "Wait will not return until the goroutine copying
+	// to the process's stdin has completed". That goroutine reads the ssh
+	// channel, so Wait waited for the CLIENT to close its stdin rather than
+	// for the command to exit, and exit-status and the channel close waited
+	// with it.
+	//
+	// Which deadlocked every client that keeps stdin open, and nocx's mux
+	// client is exactly that: internal/ssh/mux hands the master a socketpair
+	// it holds for the life of the session. `echo $HOME` finished in
+	// microseconds while its caller read stdout for an EOF that could not
+	// arrive until the connection died 48 s later — and by then the mux
+	// master was gone, so the SFTP publish that follows found no control
+	// socket and the far side never integrated (nocx-eoijp).
+	//
+	// A real sshd reaps the child and reports the status then. So does this,
+	// now: the child gets a real descriptor, Wait waits for the child alone,
+	// and the copier below is nobody's dependency — it ends when ch.Close()
+	// below makes its read return.
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "e2e-sshd: stdin pipe:", err)
+		return
+	}
+	cmd.Stdin = inR
 	cmd.Stdout = ch
 	cmd.Stderr = ch.Stderr()
 	if err := cmd.Start(); err != nil {
+		_ = inR.Close()
+		_ = inW.Close()
 		fmt.Fprintln(os.Stderr, "e2e-sshd: spawn:", err)
 		return
 	}
+	// The child holds its own copy; ours would keep the read end open and
+	// hide a closed writer from it.
+	_ = inR.Close()
+	go func() {
+		_, _ = io.Copy(inW, ch)
+		_ = inW.Close()
+	}()
 
 	go func() {
 		_ = cmd.Wait()

@@ -349,6 +349,73 @@ func TestExec_RunsToCompletionWhenTheClientHalfClosesItsStdin(t *testing.T) {
 	}
 }
 
+// And the case the test above cannot see, which is the one the product is in.
+// `Output` gives the session an empty stdin, so the client sends EOF at once
+// and the fixture's stdin copier finishes with it. nocx's mux client does the
+// opposite: internal/ssh/mux hands the master a socketpair for stdin and holds
+// its end open for the life of the session, because the session is a stream it
+// may still write to. Every caller of an auxiliary channel is that shape.
+//
+// The fixture then never finishes. `cmd.Stdin = ch` is not an *os.File, so
+// os/exec copies it on a goroutine, and its Wait "will not return until the
+// goroutine copying to the process's stdin has completed" — a goroutine
+// reading a channel the client is deliberately keeping open. So `echo $HOME`
+// exits in microseconds and its exit-status and channel close never leave,
+// which leaves the CLIENT reading stdout for an EOF that is waiting on it.
+// Both sides wait for the other, and the deadlock breaks only when the whole
+// connection dies: measured at 48.2 s in e2e/nocxify-journey.spec.ts, by which
+// time the mux master is gone and the SFTP publish that should have followed
+// finds no control socket at all (nocx-eoijp).
+//
+// A real sshd reaps the child and reports its status then and there; it does
+// not hold the exit hostage to the client's stdin. The deadline below is a
+// bound on a hang, not a measurement — the assertion is that EOF ARRIVES, and
+// the timer only turns "never" into a failure instead of a hung test.
+func TestExec_ReportsItsExitWhileTheClientHoldsStdinOpen(t *testing.T) {
+	client := dialFixture(t)
+
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	// Stdin that never ends and is never closed — the mux client's socketpair,
+	// spelled with the cheapest thing that has the same behaviour.
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+	sess.Stdin = pr
+
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	if err := sess.Start("echo $HOME"); err != nil {
+		t.Fatalf("Start(echo $HOME): %v", err)
+	}
+
+	type read struct {
+		out []byte
+		err error
+	}
+	done := make(chan read, 1)
+	go func() {
+		b, rErr := io.ReadAll(stdout)
+		done <- read{b, rErr}
+	}()
+
+	select {
+	case r := <-done:
+		if strings.TrimSpace(string(r.out)) == "" {
+			t.Errorf("stdout = %q, want the remote home", r.out)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("stdout never reached EOF while the client held its stdin open: " +
+			"the fixture is holding the command's exit until a stdin the client will not close, " +
+			"which is the deadlock that leaves nocx's SFTP publish with a dead control socket")
+	}
+}
+
 // And the paired failure: a command that exits non-zero reports THAT status,
 // not the 255 a signalled child reports. Without this the test above passes
 // against a fixture that answers 0 for everything.

@@ -23,6 +23,21 @@
 // decision): sealed offers to unseal, uninitialized offers to set up — both
 // from inside the panel, without leaving the prompt. Empty (unsealed, no
 // secrets) is the honest empty state.
+//
+// TWO DOORS, and the difference between them is deliberate (the owner's
+// decision, 2026-08-26). Everything above belongs to the PASSIVE door:
+// typing '@' is not a request to open the vault, so raising a passphrase
+// prompt over someone who is composing a line would trap them — the same
+// reason a no-match '@' never becomes a mode. The field's lock is the
+// EXPLICIT door: the click IS the request, and answering a request with an
+// offer row is the same defect as answering it with silence (which is why
+// Tab and '@' already differ above). So an explicit open raises the real
+// surface — requestUnseal for a sealed vault, requestSetup for an
+// uninitialized one — and lands on the list the person asked for.
+//
+// The seal state and which door was used are the WHOLE input. Nothing about
+// the value being held decides any of it (nocx-0khco ruled out reading the
+// value), and neither door weakens the other: '@' still only ever offers.
 import { FloatingPanel, type FloatingPanelRow } from './floating-panel'
 
 // The kit must not depend back on the app (no-restricted-imports), so the
@@ -121,6 +136,13 @@ const CREATE_ROW_ID = '\u0000create'
  *  offered a value to store. */
 const STORE_ROW_ID = '\u0000store'
 
+/** WHICH DOOR opened the panel, and the only thing that decides whether a
+ *  locked vault is OFFERED a row or ASKED to open. 'passive' is the '@'
+ *  trigger and every host that merely watches the document; 'explicit' is a
+ *  control the person pressed to reach the vault — today the field's lock.
+ *  See the header for why one panel serves both. */
+export type SecretPickerDoor = 'passive' | 'explicit'
+
 /** Why the picker is open. 'insert' is the '@' trigger — the person is
  *  composing and wants to reach for a secret. 'resolve' is a recalled
  *  command whose credential the store removed: the panel's job there is
@@ -177,6 +199,10 @@ export class SecretPicker {
   private pendingFilter: string | null = null
   /** Invalidates a pending create result when the picker opens again. */
   private createRequest = 0
+  /** Invalidates an in-flight EXPLICIT door — an unlock prompt or a setup
+   *  run — when the panel closes or opens again underneath it. A cancelled
+   *  prompt must not render into a panel that is no longer this one. */
+  private session = 0
   private readonly panel: FloatingPanel
 
   constructor(
@@ -219,21 +245,31 @@ export class SecretPicker {
   async open(
     purpose: SecretPickerPurpose = 'insert',
     store?: SecretPickerStoreOffer,
+    door: SecretPickerDoor = 'passive',
   ): Promise<void> {
     if (this.isOpen) return
     this.purpose = purpose
     this.store = store ?? null
     this.createRequest++
+    const session = ++this.session
     this.state = { name: 'loading' }
     this.render()
     try {
       const status = await this.source.status()
       if (status.state === 'sealed') {
+        if (door === 'explicit') {
+          await this.raiseUnseal(session)
+          return
+        }
         this.state = { name: 'sealed' }
         this.render()
         return
       }
       if (status.state === 'uninitialized') {
+        if (door === 'explicit') {
+          await this.raiseSetup(session)
+          return
+        }
         this.state = { name: 'uninitialized' }
         this.render()
         return
@@ -316,6 +352,7 @@ export class SecretPicker {
 
   close(): void {
     if (this.state.name === 'closed') return
+    this.session++
     this.state = { name: 'closed' }
     this.pendingFilter = null
     this.store = null
@@ -406,6 +443,46 @@ export class SecretPicker {
       default:
         return
     }
+  }
+
+  /** The explicit door onto a sealed vault: ask, do not offer. Failures are
+   *  swallowed here rather than reaching open()'s catch, because a cancelled
+   *  prompt is not a refused read and must not become a 'could not read the
+   *  vault' row. */
+  private async raiseUnseal(session: number): Promise<void> {
+    try {
+      await this.source.requestUnseal()
+    } catch {
+      // Cancelled or refused. They asked and then said no; putting the same
+      // unlock back up as an offer row would be asking a second time. Close
+      // and change nothing — the host's value is untouched either way,
+      // because only an accepted row ever calls onInsert.
+      if (session === this.session) this.close()
+      return
+    }
+    if (session !== this.session) return
+    await this.loadList('')
+  }
+
+  /** The same door onto an uninitialized vault. The owner decided the click
+   *  may raise setup for the reason it may raise the unlock: it is the same
+   *  request, and only the vault's state differs. */
+  private async raiseSetup(session: number): Promise<void> {
+    let dialogTookOver: boolean
+    try {
+      dialogTookOver = await this.source.requestSetup()
+    } catch {
+      if (session === this.session) this.close()
+      return
+    }
+    if (session !== this.session) return
+    if (dialogTookOver) {
+      // The setup dialog owns the surface now — the same rule the offer
+      // row's path follows: nothing stays up behind it.
+      this.close()
+      return
+    }
+    await this.loadList('')
   }
 
   private async loadList(filter: string): Promise<void> {

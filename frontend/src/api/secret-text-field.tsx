@@ -122,6 +122,11 @@ export function SecretTextField(props: SecretTextFieldProps) {
       // no vault behind it is a control that silently does nothing, which is
       // worse than not offering it (AGENTS.md: a soft degrade the UI
       // contradicts).
+      //
+      // The vault's STATE is not one of its conditions: a sealed vault is
+      // precisely when this door is needed, so hiding it there would remove
+      // the only way to ask. Pressing it asks — SecretPicker's explicit door
+      // raises the unlock, or setup, rather than an offer row.
       trailingAction={
         picker !== null
           ? {

@@ -512,3 +512,92 @@ describe('createSecretPickerField: typing after the lock', () => {
     expect(panel()?.dataset.open).not.toBe('true')
   })
 })
+
+// The lock is an EXPLICIT request, and the '@' beside it is still passive.
+// The two doors differ on purpose: see the header of secret-picker.ts.
+describe('createSecretPickerField: the lock asks, the @ offers', () => {
+  const labels = (): Array<string | null | undefined> =>
+    rows().map((row) => row.querySelector('.ui-collection-row__info')?.textContent)
+
+  it('a sealed vault is asked to unlock, and the store row survives it', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id')], 'sealed')
+    h.value.current = 'Bearer t.Yixxxx'
+    h.controller.openForStore({ start: 7, end: 15 })
+    await flush()
+    await flush()
+
+    expect(h.source.requestUnseal).toHaveBeenCalledTimes(1)
+    expect(labels()).toEqual(['Store "t.Yixxxx" in the vault…', 'prod-key', 'Add a secret…'])
+  })
+
+  it('a cancelled unlock loses nothing — the field keeps every character', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id')], 'sealed')
+    h.source.requestUnseal.mockRejectedValue(new Error('cancelled'))
+    h.value.current = 'Bearer t.Yixxxx'
+    h.controller.openForStore({ start: 7, end: 15 })
+    await flush()
+    await flush()
+
+    expect(h.value.current).toBe('Bearer t.Yixxxx')
+    expect(h.onChange).not.toHaveBeenCalled()
+    expect(panel()?.dataset.open).not.toBe('true')
+  })
+
+  it('and the keystroke after that refusal does not re-raise the prompt', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id')], 'sealed')
+    h.source.requestUnseal.mockRejectedValue(new Error('cancelled'))
+    h.value.current = ''
+    h.controller.openForStore({ start: 0, end: 0 })
+    await flush()
+    await flush()
+
+    h.value.current = 'p'
+    h.controller.onInput('p', 1)
+    await flush()
+
+    expect(h.source.requestUnseal).toHaveBeenCalledTimes(1)
+    expect(panel()?.dataset.open).not.toBe('true')
+    expect(h.value.current).toBe('p')
+  })
+
+  it('a bare @ over the same sealed vault still only offers', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id')], 'sealed')
+    h.value.current = '@'
+    h.controller.onInput('@', 1)
+    await flush()
+    await flush()
+
+    expect(h.source.requestUnseal).not.toHaveBeenCalled()
+    expect(labels()).toEqual(['Unlock the vault to use its secrets'])
+  })
+
+  it('an uninitialized vault gets setup from the lock, an offer row from @', async () => {
+    const asked = setup([entry('prod-key', 'secrow:prod-id')], 'uninitialized')
+    asked.value.current = 'Bearer t.Yixxxx'
+    asked.controller.openForStore({ start: 7, end: 15 })
+    await flush()
+    await flush()
+    expect(asked.source.requestSetup).toHaveBeenCalledTimes(1)
+    expect(labels()).toEqual(['Store "t.Yixxxx" in the vault…', 'prod-key', 'Add a secret…'])
+    asked.controller.destroy()
+
+    const offered = setup([entry('prod-key', 'secrow:prod-id')], 'uninitialized')
+    offered.value.current = '@'
+    offered.controller.onInput('@', 1)
+    await flush()
+    await flush()
+    expect(offered.source.requestSetup).not.toHaveBeenCalled()
+    expect(labels()).toEqual(['Set up the vault to store secrets'])
+  })
+
+  it('nothing about the value decides it: an empty field asks to unlock too', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id')], 'sealed')
+    h.value.current = ''
+    h.controller.openForStore({ start: 0, end: 0 })
+    await flush()
+    await flush()
+
+    expect(h.source.requestUnseal).toHaveBeenCalledTimes(1)
+    expect(labels()).toEqual(['prod-key', 'Add a secret…'])
+  })
+})

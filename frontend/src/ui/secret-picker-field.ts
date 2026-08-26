@@ -9,7 +9,12 @@
 // The adapter owns only the field's trigger span and replacement. SecretPicker
 // remains the one owner of the passive panel, lifecycle offers, filtering, and
 // keyboard acceptance rules.
-import { SecretPicker, type SecretPickerSource, type SecretPickerStoreOffer } from './secret-picker'
+import {
+  SecretPicker,
+  type SecretPickerDoor,
+  type SecretPickerSource,
+  type SecretPickerStoreOffer,
+} from './secret-picker'
 
 export interface SecretPickerFieldController {
   /** Call on every input event. Finds the trigger word around the caret and
@@ -23,7 +28,12 @@ export interface SecretPickerFieldController {
    *  decide what that is, and nothing else does — is the field empty, and is
    *  part of it selected. A selection stores and replaces only that span; no
    *  selection means the whole value; an empty field has nothing to store, so
-   *  the panel is exactly the '@' panel. */
+   *  the panel is exactly the '@' panel.
+   *
+   *  It is the EXPLICIT door (secret-picker.ts, SecretPickerDoor): pressing
+   *  the lock is a request to reach the vault, so a sealed one is asked to
+   *  unlock and an uninitialized one is asked to set up, rather than being
+   *  offered a row. '@' through onInput keeps the offer. */
   openForStore(selection: { start: number; end: number }): void
   /** Call on keydown. Returns true when the panel consumed the key. */
   onKeyDown(e: KeyboardEvent): boolean
@@ -135,10 +145,14 @@ export function createSecretPickerField(opts: {
   // This adapter serves the insert purpose. SecretPicker keeps its create row
   // visible for a name no vault entry matches; the resolve purpose may close
   // silently, but a plain field has something to offer here.
-  const openPicker = (filter: string, store?: SecretPickerStoreOffer): void => {
+  const openPicker = (
+    filter: string,
+    store?: SecretPickerStoreOffer,
+    door: SecretPickerDoor = 'passive',
+  ): void => {
     if (!picker.isOpen) {
       const openingGeneration = generation
-      void picker.open('insert', store).then(() => {
+      void picker.open('insert', store, door).then(() => {
         if (openingGeneration !== generation) {
           if (trigger === null) picker.close()
           return
@@ -146,6 +160,15 @@ export function createSecretPickerField(opts: {
         if (trigger === null) {
           picker.close()
           return
+        }
+        if (!picker.isOpen) {
+          // The explicit door can settle CLOSED — a cancelled unlock, or a
+          // setup dialog that took the surface. The span this panel was
+          // opened over went with it, so the adapter drops it too: an anchor
+          // left behind would re-open the panel on the very next keystroke,
+          // which is the person being asked again after they said no.
+          trigger = null
+          lockAnchor = null
         }
       })
     }
@@ -253,7 +276,7 @@ export function createSecretPickerField(opts: {
     //   compares the span against `expected`), which is a control that looks
     //   alive and silently does nothing. Closing says it at the keystroke.
     lockAnchor = stored === '' ? from : null
-    openPicker('', stored === '' ? undefined : { value: stored })
+    openPicker('', stored === '' ? undefined : { value: stored }, 'explicit')
   }
 
   const onKeyDown = (e: KeyboardEvent): boolean => {

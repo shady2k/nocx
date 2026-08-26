@@ -191,6 +191,13 @@ The decision is amended:
   material already handed to the in-process client, and the stream has no
   resolver from which it could fetch more. This is the deliberate answer to
   the mid-run case; no re-drive is needed.
+
+- If egress screening meets a sealed vault mid-stream, the run waits for the
+  vault-owned unlock and continues with the same withheld tool result. It does
+  not re-drive the model or tool call: the tool has already run, so re-driving
+  could repeat an external effect or produce a different result, while the
+  existing result can be screened deterministically once material is
+  available. Approval then resumes from the original egress request.
 - The renderer's sealed-error normalization and replay remain a fallback for
   operations outside the material resolver. They no longer decide credential
   intent.

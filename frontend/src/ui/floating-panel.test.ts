@@ -214,6 +214,61 @@ describe('FloatingPanel', () => {
     expect(panel.root.dataset.open).toBe('false')
     expect(panel.root.querySelectorAll('.ui-floating-panel__row')).toHaveLength(0)
   })
+  it('supports optional dismissal without affecting unconfigured panels', () => {
+    const container = document.createElement('div')
+    const boundary = document.createElement('button')
+    container.appendChild(boundary)
+    document.body.appendChild(container)
+    const onDismiss = vi.fn()
+    const panel = new FloatingPanel({
+      variant: 'grant',
+      role: 'listbox',
+      ariaLabel: 'test',
+      dismissBoundary: boundary,
+      callbacks: { onDismiss },
+    })
+    panel.mount(container)
+    const unconfigured = new FloatingPanel({
+      variant: 'completion',
+      role: 'listbox',
+      ariaLabel: 'unconfigured',
+    })
+    unconfigured.mount(container)
+    unconfigured.show({ rows: [row({ id: 'unconfigured' })], selectedIndex: 0 })
+
+    const unconfiguredEscape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    })
+    document.dispatchEvent(unconfiguredEscape)
+    expect(unconfiguredEscape.defaultPrevented).toBe(false)
+    unconfigured.hide()
+
+    panel.show({ rows: [row({ id: 'a' })], selectedIndex: 0 })
+
+    const escape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    })
+    document.dispatchEvent(escape)
+    expect(escape.defaultPrevented).toBe(true)
+    expect(onDismiss).toHaveBeenLastCalledWith('escape')
+
+    boundary.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    panel.root.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    expect(onDismiss).toHaveBeenCalledTimes(1)
+
+    document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    expect(onDismiss).toHaveBeenLastCalledWith('outside')
+    expect(onDismiss).toHaveBeenCalledTimes(2)
+
+    panel.hide()
+    document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', bubbles: true }))
+    document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    expect(onDismiss).toHaveBeenCalledTimes(2)
+  })
 
   it('reports hover and pick with the row index', () => {
     const { panel, onHover, onPick } = mount()

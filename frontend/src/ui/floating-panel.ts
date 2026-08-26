@@ -93,6 +93,8 @@ export interface FloatingPanelCallbacks {
   onHover?(index: number): void
   /** A row was clicked — the variant accepts it. */
   onPick?(index: number): void
+  /** The panel was dismissed by one of the optional document gestures. */
+  onDismiss?(reason: 'escape' | 'outside'): void
 }
 
 export interface FloatingPanelShow {
@@ -131,15 +133,36 @@ export class FloatingPanel {
   private rowsSignature = ''
   /** Which surface this is — the width floor is read from it. */
   private readonly variant: FloatingPanelVariant
+  /** The element that opens/owns this panel, kept inside the dismissal boundary. */
+  private readonly dismissBoundary: HTMLElement | undefined
+  private dismissListenersAttached = false
+  private readonly onDocumentKeydown = (event: KeyboardEvent): void => {
+    if (!this._open || event.key !== 'Escape') return
+    event.preventDefault()
+    event.stopPropagation()
+    this.callbacks.onDismiss?.('escape')
+  }
+  private readonly onDocumentPointerdown = (event: PointerEvent): void => {
+    if (!this._open) return
+    const target = event.target
+    if (
+      target instanceof Node &&
+      (this.root.contains(target) || this.dismissBoundary?.contains(target) === true)
+    )
+      return
+    this.callbacks.onDismiss?.('outside')
+  }
 
   constructor(opts: {
     variant: FloatingPanelVariant
     role: string
     ariaLabel: string
     callbacks?: FloatingPanelCallbacks
+    dismissBoundary?: HTMLElement
   }) {
     this.callbacks = opts.callbacks ?? {}
     this.variant = opts.variant
+    this.dismissBoundary = opts.dismissBoundary
     this.root = document.createElement('div')
     this.root.className = 'ui-floating-panel'
     this.root.dataset.variant = opts.variant
@@ -173,6 +196,7 @@ export class FloatingPanel {
   show(opts: FloatingPanelShow): void {
     this._open = true
     this.root.dataset.open = 'true'
+    this.attachDismissListeners()
     this.root.replaceChildren()
 
     for (const el of opts.before ?? []) this.root.appendChild(el)
@@ -222,6 +246,7 @@ export class FloatingPanel {
   showEmpty(message: string, anchorLeft?: number | null): void {
     this._open = true
     this.root.dataset.open = 'true'
+    this.attachDismissListeners()
     this.root.replaceChildren()
 
     const list = document.createElement('div')
@@ -246,6 +271,7 @@ export class FloatingPanel {
   /** Close the panel and drop its rows. The width cache dies with the
    *  list — the next open list measures fresh. */
   hide(): void {
+    this.detachDismissListeners()
     this._open = false
     this.root.dataset.open = 'false'
     this.root.replaceChildren()
@@ -362,6 +388,19 @@ export class FloatingPanel {
       footer.appendChild(span)
     }
     return footer
+  }
+  private attachDismissListeners(): void {
+    if (!this.callbacks.onDismiss || this.dismissListenersAttached) return
+    document.addEventListener('keydown', this.onDocumentKeydown, true)
+    document.addEventListener('pointerdown', this.onDocumentPointerdown, true)
+    this.dismissListenersAttached = true
+  }
+
+  private detachDismissListeners(): void {
+    if (!this.dismissListenersAttached) return
+    document.removeEventListener('keydown', this.onDocumentKeydown, true)
+    document.removeEventListener('pointerdown', this.onDocumentPointerdown, true)
+    this.dismissListenersAttached = false
   }
 
   /** The actions' text, for the width cache key (a badge can widen a row). */

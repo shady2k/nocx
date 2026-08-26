@@ -40,6 +40,7 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/transport/control"
+	"github.com/shady2k/nocx/internal/vault"
 )
 
 // ── ingress bounds (design §7: "this domain validates params and bounds
@@ -67,6 +68,11 @@ const (
 	maxIDRunes = 128
 	// maxCwdRunes bounds the renderer-supplied cwd.
 	maxCwdRunes = 4_096
+	// maxAttachedWindowLines mirrors contracts/tools/session.read.schema.json:
+	// session.read permits any nonnegative start but caps count at 2000.
+	// Therefore only count is bounded here; start has no ceiling, and the
+	// check below rejects integer overflow.
+	maxAttachedWindowLines = 2_000
 	// maxCellRunes bounds one cell's character (a wide glyph is one or two
 	// runes; anything more is not a terminal cell).
 	maxCellRunes = 8
@@ -132,6 +138,8 @@ type agentAttachedContentWire struct {
 	ItemID  string `json:"itemId"`
 	Command string `json:"command"`
 	State   string `json:"state"`
+	Start   *int   `json:"start,omitempty"`
+	Count   *int   `json:"count,omitempty"`
 }
 type agentCancelParams struct {
 	RunID int64 `json:"runId"`
@@ -171,26 +179,52 @@ type agentAskResponse struct {
 }
 
 type agentRunControl struct {
-	mu           sync.Mutex
-	eventsMu     sync.Mutex
-	cancelFn     context.CancelFunc
-	cancelled    bool
-	terminalized bool
+	mu             sync.Mutex
+	eventsMu       sync.Mutex
+	cancelFn       context.CancelFunc
+	cancelled      bool
+	terminalized   bool
+	cancelState    content.RunState
+	cancelReason   content.TerminationReason
+	cancelSentence string
+	cancelDone     chan struct{}
 }
 
 func (c *agentRunControl) beginCancel() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.terminalized {
+	if c.terminalized || c.cancelled {
 		return false
 	}
-	if !c.cancelled {
-		c.cancelled = true
-		if c.cancelFn != nil {
-			c.cancelFn()
-		}
-	}
+	c.cancelled = true
 	return true
+}
+
+func (c *agentRunControl) cancelContext() {
+	c.mu.Lock()
+	cancel := c.cancelFn
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (c *agentRunControl) finishCancel(state content.RunState, reason content.TerminationReason, sentence string) {
+	c.mu.Lock()
+	c.cancelState = state
+	c.cancelReason = reason
+	c.cancelSentence = sentence
+	close(c.cancelDone)
+	c.mu.Unlock()
+}
+
+func (c *agentRunControl) cancelOutcome() (content.RunState, content.TerminationReason, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancelState == "" {
+		return content.RunCancelled, content.TermUserKilled, "the person stopped this answer"
+	}
+	return c.cancelState, c.cancelReason, c.cancelSentence
 }
 
 func (c *agentRunControl) beginEvent() func() {
@@ -399,6 +433,10 @@ type agentApproveResponse struct {
 // Responder; never the *WSServer.
 type agentHandlers struct {
 	op capability.AgentOperation // nil → content store not wired
+	// stopForeground is the parent-cancel seam. It resolves a connection-owned
+	// session and runs the shared stop ladder without holding the content
+	// queue or pending-runs mutex.
+	stopForeground func(session.ID) foregroundOutcome
 	// configOp resolves the endpoint the run uses (the ONE config operation,
 	// shared with the config handlers — AD-8). nil → no endpoint store.
 	configOp capability.ConfigOperation
@@ -693,7 +731,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// submit (the stream capacity is exhausted) terminalizes the run
 	// failed with a renderable reason; the run is never left prepared.
 	runCtx, runCancel := context.WithCancel(ctx)
-	runControl := &agentRunControl{cancelFn: runCancel}
+	runControl := &agentRunControl{cancelFn: runCancel, cancelDone: make(chan struct{})}
 	rc := askRunContext{
 		runID:    askRes.RunID,
 		control:  runControl,
@@ -1180,7 +1218,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			h.suspendForApproval(ctx, rc, r, dropped, seq, prose, nil, egErr.Request)
 			return
 		}
-		reason, sentence := classifyAskFailure(err)
+		reason, sentence := classifyAskFailure(err, rc.model)
 		// This is the boundary that catches the framework's error, so this
 		// is where its text is kept — once, with the run id, and nowhere
 		// else (nocx-avogl.3). The wire carries the sentence; the log
@@ -1296,9 +1334,9 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 }
 
 // handleCancel stops one prepared, streaming or awaiting-approval run. The
-// run context is cancelled first, then the terminal ledger write is completed
-// before the result is answered, so no stream event can overtake the person's
-// stop decision.
+// foreground escalation completes before the run context is cancelled and the
+// terminal ledger write is completed before the result is answered, so no
+// stream event can overtake the person's stop decision.
 func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 	if h.op == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "method not found: content store not wired"})
@@ -1319,8 +1357,27 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 		})
 		return
 	}
-	h.terminalize(ctx, rc, rc.droppedBefore, content.RunCancelled, content.TermUserKilled,
-		"the person stopped this answer", h.r)
+	state := content.RunCancelled
+	reason := content.TermUserKilled
+	sentence := "the person stopped this answer"
+	outcome := foregroundNothingRunning
+	if h.stopForeground != nil {
+		// Foreground escalation completes before cancellation lets the stream
+		// terminalize. The callback runs without pendingRunsMu or the content
+		// operation queue held.
+		outcome = h.stopForeground(rc.sessionID)
+	}
+	if outcome == foregroundUnsupported {
+		// The assistant turn is cancelled, but the command on a remote host
+		// may still be alive. Keep that distinction visible in the terminal
+		// state instead of claiming the command was stopped.
+		sentence = "the person stopped this answer, but its command could not be stopped on the host"
+		h.log.Warn("agent cancel: foreground command could not be stopped",
+			"run", rc.runID, "session", rc.sessionID)
+	}
+	rc.control.finishCancel(state, reason, sentence)
+	rc.control.cancelContext()
+	h.terminalize(ctx, rc, rc.droppedBefore, state, reason, sentence, h.r)
 	_ = h.r.TryResult(req.ID, mustMarshal(agentCancelResponse{
 		RunID:     p.RunID,
 		State:     string(content.RunCancelled),
@@ -1664,9 +1721,10 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, droppe
 		defer releaseTerminal()
 	}
 	if cancelled {
-		state = content.RunCancelled
-		reason = content.TermUserKilled
-		sentence = "the person stopped this answer"
+		if rc.control.cancelDone != nil {
+			<-rc.control.cancelDone
+		}
+		state, reason, sentence = rc.control.cancelOutcome()
 	}
 	// The run is closing: nothing may resume it. Drop the stored stream
 	// context so a late agent.approve finds no pending question — and the
@@ -1730,7 +1788,7 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, droppe
 // string match against the framework's text — the typed chain survives eino.
 // A REFUSAL has no arm here: since nocx-uvac6.1 a refusal is the call's
 // result, not an error, so it never reaches this function at all.
-func classifyAskFailure(err error) (content.TerminationReason, string) {
+func classifyAskFailure(err error, model string) (content.TerminationReason, string) {
 	// The engine's own failure sentence: the endpoint answered, and did not
 	// answer (a StreamError is nocx's type, never the framework's). It is
 	// the FIRST arm because it is the most specific thing Ask can return
@@ -1738,6 +1796,13 @@ func classifyAskFailure(err error) (content.TerminationReason, string) {
 	var se *assistant.StreamError
 	if errors.As(err, &se) {
 		return content.TermFailed, se.Message
+	}
+	// The endpoint returned a complete textual tool-call envelope instead of
+	// a native call. The stream itself succeeded, so this belongs here as a
+	// typed semantic failure rather than in the transport-error arms below.
+	var envelopeErr *assistant.UnexecutedToolCallError
+	if errors.As(err, &envelopeErr) {
+		return content.TermFailed, assistant.UnexecutedToolCallSentence
 	}
 	// The run lease (ADR-0020 decision 2) fired: the sentence names WHICH
 	// bound ended the run, so the block says why — the ledger already
@@ -1761,6 +1826,28 @@ func classifyAskFailure(err error) (content.TerminationReason, string) {
 	if errors.As(err, &toolErr) {
 		return content.TermFailed, "the assistant's " + toolErr.Tool + " call did not finish: " + toolErr.Message()
 	}
+	// Cause 1c: the egress gate could not inspect a tool result, so the
+	// policy withheld it and failed the run closed. This arm follows the
+	// tool-failure arm because both happen after execution, but it must name
+	// the screening failure rather than expose eino's wrapper. The sealed
+	// vault case is checked by its sentinel, not by error text, so only that
+	// repair sends the person to unlock the vault.
+	//
+	// The credential path stopped needing this arm when nocx-k41yv gave
+	// resolution a stance: an Operation read raises the unlock and WAITS, so
+	// a sealed vault never reaches this classifier from there. The egress
+	// gate is not on that seam yet (nocx-1mf3v.2 puts it there), and even
+	// once it is, a headless backend with no renderer to ask still answers
+	// ErrVaultSealed — so this arm keeps its sentinel rather than assuming
+	// the prompt is always reachable.
+	var screeningErr *assistant.EgressScreeningError
+	if errors.As(err, &screeningErr) {
+		if errors.Is(err, vault.ErrVaultSealed) {
+			return content.TermFailed, "the vault is sealed. Unlock it in Settings → Vault, then ask again."
+		}
+		return content.TermFailed, assistant.EgressScreeningFailureSentence
+	}
+
 	// Cause 2: the model produced a tool call the engine cannot act on — a
 	// name that is not a tool, or arguments the schema it was shown does not
 	// allow. NOT a refusal: there was nothing to refuse.
@@ -1781,6 +1868,9 @@ func classifyAskFailure(err error) (content.TerminationReason, string) {
 	case errors.Is(err, context.DeadlineExceeded):
 		return content.TermTimeout, "the model did not answer in time"
 	}
+	if sentence, ok := assistant.EndpointErrorSentence(err, model); ok {
+		return content.TermFailed, sentence
+	}
 	// Cause 3: the request to the model endpoint never completed — a dial
 	// that failed, a TLS handshake that did not, a connection that dropped
 	// mid-request. Checked AFTER context.Canceled and context.DeadlineExceeded
@@ -1794,7 +1884,7 @@ func classifyAskFailure(err error) (content.TerminationReason, string) {
 	}
 	// Anything else. It still says nothing eino wrote: the trace is in the
 	// log, named there so a person can find it.
-	return content.TermFailed, "the model failed to answer. The details are in nocx's log."
+	return content.TermFailed, assistant.UnexplainedFailureSentence
 }
 
 // runLeaseSentence is the human-readable statement of one lease bound, for
@@ -1946,8 +2036,18 @@ func validateAgentAsk(p agentAskParams) (content.AgentAsk, []assistant.AttachedC
 		default:
 			return empty(fmt.Sprintf("attachedContent[%d].state must be running or exited", i))
 		}
+		if (grant.Start == nil) != (grant.Count == nil) {
+			return empty(fmt.Sprintf("attachedContent[%d] requires both start and count", i))
+		}
+		if grant.Start != nil {
+			if *grant.Start < 0 || *grant.Count <= 0 || *grant.Count > maxAttachedWindowLines ||
+				*grant.Start > int(^uint(0)>>1)-*grant.Count {
+				return empty(fmt.Sprintf("attachedContent[%d] start/count is out of bounds", i))
+			}
+		}
 		attached = append(attached, assistant.AttachedContentItem{
 			ItemID: grant.ItemID, Command: grant.Command, State: grant.State,
+			Start: grant.Start, Count: grant.Count,
 		})
 	}
 	in := content.AgentAsk{
@@ -1993,6 +2093,11 @@ func (h agentHandlers) priorTurn(ctx context.Context, rc askRunContext) (*conten
 // model's own context, because that is who reads this message.
 const proseGoneNotice = "[the text of this answer is no longer stored: retention evicted it]"
 
+// proseUnexecutedToolCallNotice replaces a stored envelope in the next
+// question's context. Showing the provider markup again would invite the
+// model to treat an unexecuted request as an earlier assistant turn.
+const proseUnexecutedToolCallNotice = "[this answer was not usable: the model asked for a tool in a form nocx could not act on]"
+
 // proseCutShortNotice marks a partial answer AS partial. Which it is — a real
 // message or an unfinished attempt — is a fact about the run's state and never
 // about how much text there is: an interrupted run leaves exactly the rows a
@@ -2013,6 +2118,13 @@ const proseCutShortNotice = "[this answer was cut short: the run did not finish]
 //     answer that was never written has no text to miss, and a marker there
 //     would claim one was.
 func priorAnswerMessage(p content.TurnProse) (string, bool) {
+	if p.Text != "" && assistant.IsUnexecutedToolCallEnvelope(p.Text) {
+		// The envelope predicate leads because replay safety does not depend
+		// on the recorded state: any state can carry stored prose, and this
+		// prose is never a usable assistant answer. State only chooses the
+		// wording for ordinary non-completed prose below.
+		return proseUnexecutedToolCallNotice, true
+	}
 	if p.Evicted {
 		return proseGoneNotice, true
 	}
@@ -2051,6 +2163,17 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		// idempotency to the connection (a reconnect mints a new one), never
 		// to a renderer-minted tab.
 		return agentHandlers{
+			stopForeground: func(sid session.ID) foregroundOutcome {
+				sess, owned := state.get(sid)
+				if !owned || sess == nil || sess.Kind() == session.KindRemote {
+					return foregroundUnsupported
+				}
+				leaseSess, ok := sess.(runLeaseSession)
+				if !ok {
+					return foregroundUnsupported
+				}
+				return stopForeground(s.log, sid, leaseSess, s.effectiveRunLease().SignalGrace)
+			},
 			op: agentOp, configOp: configOp, endpointWired: endpointWired,
 			credentials: credentials, client: client, askSub: askSub,
 			attemptLedger: attemptLedger, grantFor: s.runGrantFor,

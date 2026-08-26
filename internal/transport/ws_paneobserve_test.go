@@ -13,6 +13,7 @@ import (
 	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 func newObservedWS(t *testing.T) (*WSServer, *panegrid.Store, *paneobserve.Watcher, *feedablePTY) {
@@ -117,7 +118,7 @@ func TestAnUnwatchedPaneSendsNoObservation(t *testing.T) {
 
 	// The grid proves the bytes really arrived, so the silence below is the
 	// observation's and not the pane's.
-	waitFor(t, "the chrome to reach the grid", wantWithin, func() bool {
+	testwait.WaitForTimeout(t, "the chrome to reach the grid", wantWithin, func() bool {
 		f, err := store.Frame(sid)
 		return err == nil && strings.HasPrefix(strings.TrimLeft(f.Text(8), " "), "❯")
 	})
@@ -213,7 +214,7 @@ func TestStopEndsThePaneObservationSweep(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = term.Close() })
 
-	waitFor(t, "the coalescer to run at least once", wantWithin, func() bool {
+	testwait.WaitForTimeout(t, "the coalescer to run at least once", wantWithin, func() bool {
 		return obs.count() > 0
 	})
 

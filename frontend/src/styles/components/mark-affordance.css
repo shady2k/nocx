@@ -1,0 +1,6 @@
+/* The floating Mark button's surface-owned wrapper. Placement is the
+   affordance module's responsibility; the kit Button owns all control paint. */
+.mark-affordance {
+  position: fixed;
+  z-index: 200;
+}

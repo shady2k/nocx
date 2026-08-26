@@ -19,9 +19,10 @@
  *   block carries (scrollback/blocks.ts createCommandBlock; answer blocks
  *   carry none). It raises the ask chip, anchors the block visually, and
  *   activates the agent input target (terminal-content.ts activateAsk).
- * - What a selection LEAVES BEHIND is one whole-block GRANT (nocx-wcswn):
- *   the block is marked where it stands (`data-granted`) and the input
- *   line's chip counts the marks. The chip is a count and never a second
+ * - What a selection LEAVES BEHIND is an OFFER, and pressing it leaves one
+ *   whole-block GRANT (nocx-wcswn, nocx-a7mw7.4): the block is marked where
+ *   it stands (`data-granted`) and the input line's chip counts the marks.
+ *   Selecting alone marks nothing — reading output is not asking about it. The chip is a count and never a second
  *   list of command names; the names live in its popover, and the block
  *   itself is where a person reads them. The per-block Ask control, and the
  *   receipt that used to carry a chip inside the block, are both gone.
@@ -262,12 +263,19 @@ async function runCommand(
   return { block }
 }
 
-/** THE GESTURE, as shipped (nocx-4wtlh, nocx-wcswn): select a region of a
- *  finished block's output and its WHOLE BLOCK is marked for the next
- *  question — "if you ask, this comes with you". A selection is a quote and
- *  a grant, never a row range: the payload is the block, so the mark is on
- *  the block. Nothing else moves — the active target is untouched, so plain
- *  Enter still runs the line as a command.
+/** THE GESTURE (nocx-4wtlh, nocx-wcswn, nocx-a7mw7.4): select a region of a
+ *  finished block's output and the product OFFERS to mark it; pressing the
+ *  offer marks the WHOLE BLOCK for the next question — "if you ask, this
+ *  comes with you". A selection is a quote and a grant, never a row range:
+ *  the payload is the block, so the mark is on the block. Nothing else
+ *  moves — the active target is untouched, so plain Enter still runs the
+ *  line as a command.
+ *
+ *  THE SELECTION ALONE MARKS NOTHING, and that is the point of the second
+ *  half of this helper (nocx-a7mw7.4). Selecting output to read it, or to
+ *  copy it, used to mark it, with nothing confirmed; the button is the
+ *  confirmation, and a spec that skipped it would go on passing after the
+ *  offer stopped being offered.
  *
  *  The selection is made through a real DOM Range over the block's rows and
  *  announced with the `selectionchange` event the product listens for,
@@ -289,6 +297,11 @@ async function pointAt(block: Locator): Promise<void> {
     sel?.addRange(range)
     document.dispatchEvent(new Event('selectionchange'))
   })
+  // The offer, then the confirmation. `.mark-affordance` is the surface's
+  // wrapper and `.ui-button` inside it is the kit control a person presses.
+  const offer = block.page().locator('.mark-affordance .ui-button')
+  await expect(offer).toBeVisible({ timeout: 10_000 })
+  await offer.click()
 }
 
 /** Send the drafted line to the ASSISTANT: ⌘/Ctrl+Enter flips where Enter

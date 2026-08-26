@@ -112,6 +112,11 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
   // A second fence after intervening prose gets a fresh container, so the
   // order fence → prose → fence survives.
   let partial: HTMLSpanElement | null = null
+  // Leading blank rows are not answer content. Keep the decision at the
+  // completed-line boundary so a partial row can span chunks without
+  // accidentally dropping the first real line. Once content starts, blank
+  // rows are ordinary paragraph spacing and must remain visible.
+  let started = false
   let inFence = false
   /** Delimiters remain in the DOM for answer Copy output and selection, but
    * the fence button copies only code rows — never markers, info, or prose. */
@@ -167,6 +172,11 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
           const row = partial
           const line = partial.textContent
           partial = null
+          if (!started && line.trim() === '') {
+            row.remove()
+            continue
+          }
+          started = true
           if (FENCE_MARKER.test(line)) {
             const opening = !inFence
             row.dataset.fenceDelim = opening ? 'open' : 'close'
@@ -206,12 +216,16 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
           // The final segment stays partial — the next chunk continues it.
           if (!partial) partial = makeRow()
           partial.textContent += part
+          if (!started && part.trim() !== '') started = true
         }
       }
     },
 
     insert(node: HTMLElement): void {
       onContent?.()
+      const hadContent = partial !== null && partial.textContent.trim() !== ''
+      if (hadContent) started = true
+      if (!started && partial) partial.remove()
       partial = null
       outputEl.appendChild(node)
     },

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -13,6 +14,10 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 )
+
+// A real assistant run owns the renderer request until the renderer resolves
+// it. These tests use the real local session behind that request so stopping
+// the parent can be distinguished from merely cancelling the model stream.
 
 type cancelBlockingClient struct {
 	started chan struct{}
@@ -144,6 +149,159 @@ func TestAgentCancel_StopsStreamingRunAndKeepsReceivedProse(t *testing.T) {
 	if secondEnv.Error == nil || !strings.Contains(secondEnv.Error.Message, "not active") {
 		t.Fatalf("repeated cancel = %s, want an honest not-active error", second)
 	}
+}
+
+// TestAgentRun_StopReachesTheForegroundCommand proves the renderer's Stop
+// gesture against a real assistant run: the run request names the pane,
+// the renderer submits the command into that same session, and session.signal
+// must kill the command's foreground process group rather than the shell.
+func TestAgentRun_StopReachesTheForegroundCommand(t *testing.T) {
+	h := newRunLeaseHarness(t, RunLeaseConfig{
+		WallClock:   time.Minute,
+		Inactivity:  time.Minute,
+		SignalGrace: 100 * time.Millisecond,
+	})
+	h.createEndpointAt()
+	sid := openLocalSession(t, h.conn)
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	pidTmp := pidFile + ".tmp"
+	cmd := "sh -c 'printf %s $$ > " + pidTmp + "; mv " + pidTmp + " " + pidFile + "; exec sleep 100'"
+	h.askRunsTool(sid, cmd)
+	tap := newSocketTap(h.conn)
+	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
+	requestID, requestSession, requestCommand := decodeRunRequest(t, raw)
+	if requestSession != sid || requestCommand != cmd {
+		t.Fatalf("run request = session %q command %q, want session %q command %q", requestSession, requestCommand, sid, cmd)
+	}
+	submitCommand(t, h.conn, sid, cmd)
+	pid := readPidFile(t, pidFile)
+	waitChildAlive(t, pid)
+
+	raw = tapCall(t, h.conn, tap, 2, "session.signal", map[string]any{
+		"sessionId": sid,
+		"signal":    signalStop,
+	})
+	var env struct {
+		Result signalResult     `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("decode session.signal: %v\nraw: %s", err, raw)
+	}
+	if env.Error != nil || env.Result.Outcome != string(foregroundDelivered) {
+		t.Fatalf("session.signal = %s, want stop/delivered", raw)
+	}
+	waitChildDead(t, pid)
+
+	reply := tapCall(t, h.conn, tap, 3, "agent.runResolved",
+		runResolvedWire(requestID, "entry-stop", 130, "failure", 0, 0, 0, ""))
+	var replyEnv struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(reply, &replyEnv); err != nil {
+		t.Fatalf("decode agent.runResolved: %v\nraw: %s", err, reply)
+	}
+	if replyEnv.Error != nil {
+		t.Fatalf("agent.runResolved: %+v", replyEnv.Error)
+	}
+	waitForRunState(t, tap, "completed")
+}
+
+func tapCancelCall(t *testing.T, conn *websocket.Conn, tap *socketTap, id int, runID int64, params any) (json.RawMessage, agentRunState) {
+	t.Helper()
+	req, err := json.Marshal(map[string]any{
+		"jsonrpc": "2.0", "id": id, "method": "agent.cancel", "params": params,
+	})
+	if err != nil {
+		t.Fatalf("marshal agent.cancel: %v", err)
+	}
+	if err := conn.WriteMessage(websocket.TextMessage, req); err != nil {
+		t.Fatalf("write agent.cancel: %v", err)
+	}
+	var state agentRunState
+	wantID := fmt.Sprint(id)
+	deadline := time.Now().Add(15 * time.Second)
+	for time.Now().Before(deadline) {
+		select {
+		case msg, ok := <-tap.msgs:
+			if !ok {
+				t.Fatal("socket closed before agent.cancel answered")
+			}
+			var envelope struct {
+				ID     *json.RawMessage `json:"id"`
+				Method string           `json:"method"`
+				Params json.RawMessage  `json:"params"`
+			}
+			if json.Unmarshal(msg, &envelope) != nil {
+				continue
+			}
+			if envelope.ID == nil {
+				if envelope.Method == "agent.runState" {
+					var candidate agentRunState
+					if json.Unmarshal(envelope.Params, &candidate) == nil && candidate.RunID == runID {
+						state = candidate
+					}
+				}
+				continue
+			}
+			if string(*envelope.ID) == wantID {
+				return msg, state
+			}
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
+	t.Fatal("agent.cancel never answered")
+	return nil, state
+}
+
+// TestAgentCancel_StopsRendererRunCommand proves parent cancellation reaches
+// the renderer-executed command before the turn is terminalized.
+func TestAgentCancel_StopsRendererRunCommand(t *testing.T) {
+	h := newRunLeaseHarness(t, RunLeaseConfig{
+		WallClock:   time.Minute,
+		Inactivity:  time.Minute,
+		SignalGrace: 100 * time.Millisecond,
+	})
+	h.createEndpointAt()
+	sid := openLocalSession(t, h.conn)
+	pidFile := filepath.Join(t.TempDir(), "child.pid")
+	pidTmp := pidFile + ".tmp"
+	cmd := "sh -c 'printf %s $$ > " + pidTmp + "; mv " + pidTmp + " " + pidFile + "; exec sleep 100'"
+	res := h.askRunsTool(sid, cmd)
+	tap := newSocketTap(h.conn)
+	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
+	_, requestSession, requestCommand := decodeRunRequest(t, raw)
+	if requestSession != sid || requestCommand != cmd {
+		t.Fatalf("run request = session %q command %q, want session %q command %q", requestSession, requestCommand, sid, cmd)
+	}
+	submitCommand(t, h.conn, sid, cmd)
+	pid := readPidFile(t, pidFile)
+	waitChildAlive(t, pid)
+
+	raw, state := tapCancelCall(t, h.conn, tap, 2, res.RunID, map[string]any{"runId": res.RunID})
+	var env struct {
+		Result agentCancelResponse `json:"result"`
+		Error  *jsonrpcErrorObj    `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("decode agent.cancel: %v\nraw: %s", err, raw)
+	}
+	if env.Error != nil || !env.Result.Cancelled || env.Result.State != string(content.RunCancelled) {
+		t.Fatalf("agent.cancel = %s, want cancelled result", raw)
+	}
+	if state.State == "" {
+		stateRaw := tapNotify(t, tap, "agent.runState", time.Second)
+		if err := json.Unmarshal(stateRaw, &state); err != nil {
+			t.Fatalf("decode cancelled runState: %v\nraw: %s", err, stateRaw)
+		}
+	}
+	if state.RunID != res.RunID || state.State != string(content.RunCancelled) {
+		t.Fatalf("runState = %+v, want cancelled run %d", state, res.RunID)
+	}
+	if !strings.Contains(strings.ToLower(state.Error), "stop") {
+		t.Fatalf("runState error = %q, want a stop sentence", state.Error)
+	}
+	waitChildDead(t, pid)
 }
 
 func TestAgentCancel_SuspendedApprovalClosesQuestion(t *testing.T) {

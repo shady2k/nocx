@@ -1097,19 +1097,18 @@ describe('the model chip (nocx-rikz5)', () => {
   })
 })
 describe('the grant chip (nocx-wcswn)', () => {
-  it('is always present, carries typed default/chosen states, and follows model chips', () => {
+  // The editor owns the chip's ELEMENT and its place in the row; GrantController
+  // owns everything it SAYS (nocx-5u3oz.13). So this asserts identity and
+  // position only — the label, the aria-label, the title and the typed state
+  // are grant.test.ts's, and asserting them here is what made two owners.
+  it('is the last chip in the row, and carries the kit identity', () => {
     const { ed } = setup()
     const left = ed.root.querySelector('.nocx-editor-chrome-left')!
     const grant = left.querySelector<HTMLElement>('.nocx-editor-grant')!
     expect(grant.classList.contains('nocx-chip')).toBe(true)
-    expect(grant.dataset.state).toBe('default')
-    expect(grant.textContent).toContain('marked for the question')
     expect([...left.children].indexOf(grant)).toBe(left.children.length - 1)
 
     ed.setModelChip({ kind: 'ready', endpoint: 'openrouter', model: 'm-a' })
-    ed.setGrantCount(2)
-    expect(grant.dataset.state).toBe('chosen')
-    expect(grant.textContent).toContain('2')
     expect([...left.children].indexOf(grant)).toBe(left.children.length - 1)
   })
 

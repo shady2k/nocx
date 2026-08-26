@@ -109,6 +109,28 @@ func (e *ToolFailedError) Message() string {
 	return e.Err.Error()
 }
 
+// EgressScreeningError marks a result withheld because the egress gate could
+// not inspect it. Tool identifies which tool produced the withheld result;
+// Gate identifies the gate that made it unavailable; Err preserves the
+// detector's typed cause for classification and retry guidance. It is
+// distinct from ToolFailedError: the tool may have completed, but its result
+// was not safe to release.
+type EgressScreeningError struct {
+	Tool string
+	Gate string
+	Err  error
+}
+
+func (e *EgressScreeningError) Error() string {
+	prefix := fmt.Sprintf("agent tool %q: egress screening failed", e.Tool)
+	if e.Err == nil {
+		return prefix + " — the result was withheld"
+	}
+	return fmt.Sprintf("%s — the result was withheld: %v", prefix, e.Err)
+}
+
+func (e *EgressScreeningError) Unwrap() error { return e.Err }
+
 // ErrMalformedModelOutput marks a tool call that corresponds to no declared
 // tool or whose arguments do not match the schema the model was shown. Not a
 // refusal — there is nothing to call; the model produced output the engine
@@ -525,7 +547,7 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 			// the masking service's fail-closed contract, and the gate's:
 			// nothing leaves when the gate cannot see.
 			_ = m.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
-			return "", fmt.Errorf("agent tool %q: egress screening failed — the result was withheld: %w", decl.Name, screenErr)
+			return "", &EgressScreeningError{Tool: decl.Name, Gate: "egress", Err: screenErr}
 		}
 		if len(egress) > 0 {
 			ap := m.proposal(decl.Name, tCtx.CallID, rawArgs)

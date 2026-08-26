@@ -32,6 +32,14 @@ func TestSettingsSystemPromptArtifactMatchesPrompt(t *testing.T) {
 			t.Errorf("settings prompt lacks placeholder %q:\n%s", placeholder, got)
 		}
 	}
+	for _, example := range []string{
+		"- id: <item id>; command: <command>; state: <running or exited>",
+		"- id: <row item id>; command: <row command>; state: <running or exited>; start: 2; count: 4",
+	} {
+		if !strings.Contains(got, example) {
+			t.Errorf("settings prompt lacks mark example %q:\n%s", example, got)
+		}
+	}
 	if strings.Contains(got, "What the person added") {
 		t.Fatal("settings prompt includes the person's private instructions section")
 	}

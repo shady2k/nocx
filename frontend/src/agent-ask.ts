@@ -34,7 +34,13 @@ interface AskParams {
   sessionId: string
   question: string
   cwd: string
-  attachedContent: { itemId: string; command: string; state: GrantBlock['state'] }[]
+  attachedContent: {
+    itemId: string
+    command: string
+    state: GrantBlock['state']
+    start?: number
+    count?: number
+  }[]
 }
 
 export class AgentInputTarget implements InputTarget {
@@ -65,10 +71,11 @@ export class AgentInputTarget implements InputTarget {
     this.ensureSubscribed()
     const sessionId = this.seams.sessionId()
     const cwd = this.seams.cwd()
-    const attachedContent = this.seams.grants().map(({ itemId, command, state }) => ({
+    const attachedContent = this.seams.grants().map(({ itemId, command, state, start, count }) => ({
       itemId,
       command,
       state,
+      ...(start !== undefined && count !== undefined ? { start, count } : {}),
     }))
     const askParams: AskParams = {
       askId: crypto.randomUUID(),

@@ -49,6 +49,10 @@ const (
 	// foregroundNothingRunning — the pty's foreground group is the
 	// interactive shell's own, so there is no execution to signal.
 	foregroundNothingRunning foregroundOutcome = "nothing-running"
+	// foregroundUnsupported means the session has no local process group the
+	// backend can signal, notably a remote host. It is distinct from
+	// foregroundNothingRunning so a caller cannot claim a command was stopped.
+	foregroundUnsupported foregroundOutcome = "unsupported"
 )
 
 // interruptForeground sends one SIGINT to the session's foreground process

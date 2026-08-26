@@ -2610,7 +2610,7 @@ describe('the projections consume the kernel through the composition root (ADR-0
       const grant = menuItems.find((item) => item.dataset.action === 'grant')
       const stop = menuItems.find((item) => item.dataset.action === 'stop')
       expect(grant).toBeDefined()
-      expect(grant?.textContent).toBe('ask about this block')
+      expect(grant?.textContent).toBe('Ask about this block')
       grant!.click()
       const grantsBeforeAck = (content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks
       expect(grantsBeforeAck[0]?.command).toBe('echo sk-proj-abcdef')
@@ -4941,7 +4941,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       const mark = document.querySelector<HTMLButtonElement>(
         '.cmd-overflow-menu-item[data-action="grant"]',
       )
-      expect(mark?.textContent).toBe('ask about this block')
+      expect(mark?.textContent).toBe('Ask about this block')
       mark?.click()
 
       const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')
@@ -4961,8 +4961,46 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       teardown()
     }
   })
+  it('keeps an Ask mark and its count through a Run round trip', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const block = frozenBlockOf(content, 'git status', ['clean'])
 
-  it('marks the same whole block once from a selection and from its menu', async () => {
+      submitKey(ed, { metaKey: true })
+      expect(activeLabel(content)).toBe('Agent')
+      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      document
+        .querySelector<HTMLButtonElement>('.cmd-overflow-menu-item[data-action="grant"]')!
+        .click()
+
+      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      expect(chip.textContent).toContain('1')
+      expect(block.dataset.granted).toBe('true')
+
+      submitKey(ed, { metaKey: true })
+      expect(activeLabel(content)).toBe('Shell')
+      expect(chip.style.display).toBe('none')
+      expect(block.dataset.granted).toBe('true')
+
+      submitKey(ed, { metaKey: true })
+      expect(activeLabel(content)).toBe('Agent')
+      expect(chip.style.display).toBe('')
+      expect(chip.textContent).toContain('1')
+      expect(block.dataset.granted).toBe('true')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('offers selected rows, marks only when the button is used, and unmarks from its menu', async () => {
     const { client } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -4974,24 +5012,36 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       _resetThemeState()
       ed.show()
       const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
-      selectRows(block, 0, 2)
+      selectRows(block, 0, 1)
       const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      expect(chip.dataset.state).toBe('default')
+      expect(chip.textContent).toContain('0')
+      expect(block.dataset.granted).toBeUndefined()
+      expect(block.querySelector('.term-line[data-granted]')).toBeNull()
+
+      const offer = document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')!
+      expect(offer.textContent).toBe('Mark 1 line')
+      offer.click()
       expect(chip.dataset.state).toBe('chosen')
       expect(chip.textContent).toContain('1')
+      expect(block.dataset.granted).toBeUndefined()
+      expect(block.querySelector<HTMLElement>('.term-line')?.dataset.granted).toBe('true')
+      expect(block.querySelectorAll<HTMLElement>('.term-line[data-granted]')).toHaveLength(1)
 
       block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
       const unmark = document.querySelector<HTMLButtonElement>(
         '.cmd-overflow-menu-item[data-action="grant"]',
       )
-      expect(unmark?.textContent).toBe('unmark')
+      expect(unmark?.textContent).toBe('Unmark')
       unmark?.click()
       expect(chip.textContent).toContain('0')
       expect(block.dataset.granted).toBeUndefined()
+      expect(block.querySelector('.term-line[data-granted]')).toBeNull()
     } finally {
       teardown()
     }
   })
-  it('sends marked block ids on a real question without capturing or leaking another block', async () => {
+  it('marks a whole block from its menu without carrying a line range', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -5002,25 +5052,25 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       content.setVisible(true)
       _resetThemeState()
       ed.show()
-      const marked = frozenBlockOf(content, 'git status', ['clean'])
-      frozenBlockOf(content, 'npm test', ['passed'])
-
-      marked.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
       document
         .querySelector<HTMLButtonElement>('.cmd-overflow-menu-item[data-action="grant"]')!
         .click()
+      expect(block.dataset.granted).toBe('true')
+      expect(block.querySelector('.term-line[data-granted]')).toBeNull()
       typeAndAsk(ed, content, 'what happened?')
       await vi.waitFor(() => {
         expect(dispatcherCalls.filter((call) => call.method === 'agent.ask')).toHaveLength(1)
       })
-
-      const ask = dispatcherCalls.find((call) => call.method === 'agent.ask')!
-      expect(ask.params).toMatchObject({
-        question: 'what happened?',
-        attachedContent: [
-          { itemId: marked.dataset.entryId, command: 'git status', state: 'exited' },
-        ],
+      const params = recordedParams(dispatcherCalls, 'agent.ask')
+      expect(params).toMatchObject({
+        attachedContent: [{ itemId: block.dataset.entryId, command: 'ls', state: 'exited' }],
       })
+      const attached = params.attachedContent
+      if (!Array.isArray(attached)) throw new Error('ask payload missing attachedContent')
+      expect(attached[0]).not.toHaveProperty('start')
+      expect(attached[0]).not.toHaveProperty('count')
     } finally {
       teardown()
     }
@@ -6141,6 +6191,181 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     }
   })
 
+  it('the menu and selection offer produce the same block grant, but selection alone marks nothing', async () => {
+    const client = storeWith([entry()], 'output')
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      ed.show()
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelector('[data-restored="true"]')).not.toBeNull()
+      })
+      const block = inner.querySelector<HTMLElement>('[data-restored="true"]')!
+      expect(block.dataset.entryId).toBe('e-1')
+
+      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      const mark = document.querySelector<HTMLButtonElement>(
+        '.cmd-overflow-menu-item[data-action="grant"]',
+      )
+      expect(mark?.textContent).toBe('Ask about this block')
+      mark?.click()
+
+      const grantState = content as unknown as { grantedBlocks: GrantBlock[] }
+      const viaMenu = grantState.grantedBlocks[0]
+      expect(viaMenu?.itemId).toBe('e-1')
+      expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.textContent).toContain(
+        '1',
+      )
+
+      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      const unmark = document.querySelector<HTMLButtonElement>(
+        '.cmd-overflow-menu-item[data-action="grant"]',
+      )
+      expect(unmark?.textContent).toBe('Unmark')
+      unmark?.click()
+      expect(grantState.grantedBlocks).toEqual([])
+
+      const output = block.querySelector<HTMLElement>('.cmd-output')!
+      const selection = window.getSelection()!
+      const range = document.createRange()
+      range.selectNodeContents(output)
+      range.getClientRects = () => [new DOMRect(100, 200, 200, 20)] as unknown as DOMRectList
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.dispatchEvent(new Event('selectionchange'))
+
+      expect(grantState.grantedBlocks).toEqual([])
+      const offer = document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')
+      expect(offer?.textContent).toBe('Mark block')
+      offer?.click()
+      expect(grantState.grantedBlocks).toEqual([viaMenu])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('clearing or collapsing a selection dismisses the mark offer without marking', async () => {
+    const client = storeWith([entry()], 'output')
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      ed.show()
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelector('[data-restored="true"]')).not.toBeNull()
+      })
+      const block = inner.querySelector<HTMLElement>('[data-restored="true"]')!
+      const output = block.querySelector<HTMLElement>('.cmd-output')!
+      const selection = window.getSelection()!
+      const range = document.createRange()
+      range.selectNodeContents(output)
+      range.getClientRects = () => [new DOMRect(100, 200, 200, 20)] as unknown as DOMRectList
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.dispatchEvent(new Event('selectionchange'))
+      expect(document.querySelector('.mark-affordance .ui-button')).not.toBeNull()
+
+      selection.removeAllRanges()
+      document.dispatchEvent(new Event('selectionchange'))
+      expect(document.querySelector<HTMLElement>('.mark-affordance')?.style.display).toBe('none')
+      expect((content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks).toEqual([])
+    } finally {
+      teardown()
+    }
+  })
+
+  it('marks and unmarks a restored block from its menu, using the durable entry id', async () => {
+    const client = storeWith([entry()], 'output')
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      ed.show()
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelector('[data-restored="true"]')).not.toBeNull()
+      })
+      const block = inner.querySelector<HTMLElement>('[data-restored="true"]')!
+      expect(block.dataset.entryId).toBe('e-1')
+
+      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      const mark = document.querySelector<HTMLButtonElement>(
+        '.cmd-overflow-menu-item[data-action="grant"]',
+      )
+      expect(mark?.textContent).toBe('Ask about this block')
+      mark?.click()
+
+      const grantState = content as unknown as { grantedBlocks: GrantBlock[] }
+      expect(grantState.grantedBlocks[0]?.itemId).toBe('e-1')
+      expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.textContent).toContain(
+        '1',
+      )
+      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      chip.click()
+      expect(
+        ed.root.querySelector<HTMLElement>('.ui-floating-panel[data-variant="grant"]')?.textContent,
+      ).toContain('make test')
+
+      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      const unmark = document.querySelector<HTMLButtonElement>(
+        '.cmd-overflow-menu-item[data-action="grant"]',
+      )
+      expect(unmark?.textContent).toBe('Unmark')
+      unmark?.click()
+      expect(chip.textContent).toContain('0')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('does not mark a restored block when its output is selected', async () => {
+    const client = storeWith([entry()], 'output')
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      ed.show()
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelector('[data-restored="true"]')).not.toBeNull()
+      })
+      const block = inner.querySelector<HTMLElement>('[data-restored="true"]')!
+      const output = block.querySelector<HTMLElement>('.cmd-output')!
+      const selection = window.getSelection()!
+      const range = document.createRange()
+      range.selectNodeContents(output)
+      range.getClientRects = () => [new DOMRect(100, 200, 200, 20)] as unknown as DOMRectList
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.dispatchEvent(new Event('selectionchange'))
+
+      const grantState = content as unknown as { grantedBlocks: GrantBlock[] }
+      expect(grantState.grantedBlocks).toEqual([])
+      expect(document.querySelector('.mark-affordance .ui-button')).not.toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
   // ── a duration nobody recorded is not a duration of zero (nocx-hoeq3) ──
   //
   // Off the wire `durationMs` is nullable, and null is what the ledger sends
@@ -6645,6 +6870,44 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
       await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
       switchToAsk(content) // the switch is a toggle
       expect(chipsOf(content)).toEqual([])
+    } finally {
+      teardown()
+    }
+  })
+  it('shows the grant chip only while the target is Ask', async () => {
+    const { client } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const grant = editorOf(content).root.querySelector<HTMLElement>('.nocx-editor-grant')!
+      expect(grant.style.display).toBe('none')
+
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+      expect(grant.style.display).toBe('')
+
+      switchToAsk(content)
+      expect(grant.style.display).toBe('none')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps the visible Ask chips ordered with the grant last', async () => {
+    const { client } = statusClient(READY_ANSWERING)
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      switchToAsk(content)
+      await vi.waitFor(() => expect(chipsOf(content)).toEqual(['openrouter', 'm-a']))
+      const left = editorOf(content).root.querySelector<HTMLElement>('.nocx-editor-chrome-left')!
+      const children = [...left.children]
+      const grant = left.querySelector<HTMLElement>('.nocx-editor-grant')!
+      const visibleModels = chipEls(content)
+      expect(visibleModels).toHaveLength(2)
+      expect(visibleModels.every((chip) => children.indexOf(chip) < children.indexOf(grant))).toBe(
+        true,
+      )
+      const chips = children.filter((child) => child.classList.contains('nocx-chip'))
+      expect(chips[chips.length - 1]).toBe(grant)
     } finally {
       teardown()
     }
@@ -7424,7 +7687,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       expect(ed.isVisible).toBe(false)
 
       const grant = itemNamed(runningBlockMenu(content), 'grant')
-      expect(grant?.textContent).toBe('ask about this block')
+      expect(grant?.textContent).toBe('Ask about this block')
       grant?.click()
 
       const block = paneOf(content).querySelector<HTMLElement>('.cmd-block-running')
@@ -7432,6 +7695,29 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.dataset.state).toBe(
         'chosen',
       )
+    } finally {
+      restore()
+      teardown()
+      document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+    }
+  })
+
+  it('Stop remains available for an assistant command before lifecycle facts arrive', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      void content.submitAgentCommand('sleep 300')
+      await Promise.resolve()
+      const stop = itemNamed(runningBlockMenu(content), 'stop')
+      expect(stop, 'an assistant command has no Stop before lifecycle facts').toBeDefined()
+      stop!.click()
+      expect(signalsSent(content)).toEqual(['stop'])
     } finally {
       restore()
       teardown()

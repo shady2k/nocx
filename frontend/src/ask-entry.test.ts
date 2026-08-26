@@ -28,6 +28,20 @@ describe('whole-block grants', () => {
       state: 'running',
     })
   })
+  it('uses the ask question when an empty recorded command is present', () => {
+    const { block } = blockOf('answer-1', 'what does this do?')
+    block.dataset.blockKind = 'ask'
+    block.dataset.recordedCommand = ''
+
+    expect(grantBlockFromElement(block)?.command).toBe('what does this do?')
+  })
+
+  it('gives an empty command an explicit label', () => {
+    const { block } = blockOf('empty-1', '')
+    block.dataset.recordedCommand = ''
+
+    expect(grantBlockFromElement(block)?.command).toBe('(empty command)')
+  })
   it('does not treat a renderer-local block counter as a grant identity', () => {
     const { block } = blockOf('entry-ignored', 'git status')
     delete block.dataset.entryId
@@ -49,6 +63,65 @@ describe('whole-block grants', () => {
     expect(grant?.itemId).toBe('item-8')
     expect(grant?.blockEl).toBe(block)
     expect(Object.keys(grant ?? {}).sort()).toEqual(['blockEl', 'command', 'itemId', 'state'])
+  })
+  it('carries the selected output row window instead of a whole-block mark', () => {
+    const { output } = blockOf('item-10', 'npm test')
+    output.replaceChildren()
+    for (const text of ['first', 'second', 'third']) {
+      const row = document.createElement('span')
+      row.className = 'term-line'
+      row.textContent = text
+      output.appendChild(row)
+    }
+    const rows = output.querySelectorAll<HTMLElement>('.term-line')
+    const range = document.createRange()
+    range.setStart(rows[0].firstChild!, 0)
+    range.setEnd(rows[1].firstChild!, rows[1].textContent.length)
+    const selection = window.getSelection()!
+    selection.removeAllRanges()
+    selection.addRange(range)
+
+    expect(grantBlockFromSelection(selection)).toMatchObject({
+      itemId: 'item-10',
+      start: 0,
+      count: 2,
+    })
+    expect(grantBlockFromSelection(selection)).not.toHaveProperty('rowStart')
+    expect(grantBlockFromSelection(selection)).not.toHaveProperty('rowEnd')
+  })
+
+  it('collapses a selection covering every output row into a whole-block mark', () => {
+    // One movement across the whole output IS the block (nocx-5u3oz.16). A
+    // window is a window only when it is a genuine subset; otherwise "select
+    // everything" and "select the block" would be different things behind the
+    // same gesture.
+    const { block, output } = blockOf('item-12', 'npm test')
+    output.replaceChildren()
+    for (const text of ['first', 'second', 'third']) {
+      const row = document.createElement('span')
+      row.className = 'term-line'
+      row.textContent = text
+      output.appendChild(row)
+    }
+    const rows = output.querySelectorAll<HTMLElement>('.term-line')
+    const range = document.createRange()
+    range.setStart(rows[0].firstChild!, 0)
+    range.setEnd(rows[2].firstChild!, rows[2].textContent.length)
+    const selection = window.getSelection()!
+    selection.removeAllRanges()
+    selection.addRange(range)
+
+    const grant = grantBlockFromSelection(selection)
+    expect(grant?.blockEl).toBe(block)
+    expect(Object.keys(grant ?? {}).sort()).toEqual(['blockEl', 'command', 'itemId', 'state'])
+  })
+
+  it('keeps the whole-block mark without a line window', () => {
+    const { block } = blockOf('item-11', 'pwd')
+    const grant = grantBlockFromElement(block)
+
+    expect(grant).not.toHaveProperty('start')
+    expect(grant).not.toHaveProperty('count')
   })
 
   it('marks one block when selection crosses answer prose into a nested fenced row', () => {

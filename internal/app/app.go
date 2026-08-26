@@ -872,6 +872,12 @@ func New(opts ...Option) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("vault init: %w", err)
 	}
+	// One stanced material resolver serves both endpoint connections and the
+	// egress gate. Its unsealer is the vault itself; the requester is attached
+	// to the vault below once the transport exists.
+	credResolver := credential.NewResolver(v, func(err error) bool {
+		return errors.Is(err, vault.ErrVaultSealed)
+	}, v)
 
 	settingsRegistry := settings.New(docStore, v)
 
@@ -1113,12 +1119,14 @@ func New(opts ...Option) (*App, error) {
 		transport.WithGroupRepository(profileStore),
 		transport.WithCredentialStore(v),
 		// The vault raises its own unlock, and it is SAID here rather than
-		// discovered from the store's method set: a resolver built without
-		// an unsealer simply never prompts, and that is too quiet a
-		// difference to leave to a type assertion (nocx-o3606).
+		// discovered from the store's method set: a resolver built without an
+		// unsealer simply never prompts, and that is too quiet a difference to
+		// leave to a type assertion (nocx-o3606). The same stanced resolver
+		// serves endpoint material and egress screening, so both operations
+		// share the vault's unlock semantics.
 		transport.WithVaultUnsealer(v),
 		transport.WithVaultLifecycle(v),
-		transport.WithAgentKnownMaterial(transport.NewVaultKnownMaterial(v)),
+		transport.WithAgentKnownMaterial(transport.NewVaultKnownMaterial(v, credResolver, v)),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
 		transport.WithAgentPolicy(policyStore),
 		// Which of that policy's seven rows govern anything at all: the
@@ -1768,14 +1776,10 @@ func New(opts ...Option) (*App, error) {
 	ptf.noteBootstrapStage = func(sid, stage string) {
 		tp.NoteBootstrapStage(session.ID(sid), stage)
 	}
-	// The connection/SSH material seam, built from the same three
-	// ingredients the transport's is: the backend, which sealed error is in
-	// play, and who may raise the unlock. The auth ladder resolves on the
-	// dial — PHASE TWO of the open, which deliberately holds no domain gate
-	// — so waiting there cannot block the unseal that answers it.
-	credResolver := credential.NewResolver(v, func(err error) bool {
-		return errors.Is(err, vault.ErrVaultSealed)
-	}, v)
+	// The connection/SSH material seam uses the same resolver as the egress
+	// gate. The auth ladder resolves on the dial — PHASE TWO of the open,
+	// which deliberately holds no domain gate — so waiting there cannot block
+	// the unseal that answers it.
 	resolver := connection.NewResolver(
 		profileStore, profileStore, credResolver,
 		connection.WithConfigResolver(sshCfgResolver),

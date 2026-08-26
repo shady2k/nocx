@@ -10,10 +10,12 @@ package transport
 // unscreened material leave for a provider.
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/vault"
 )
 
@@ -23,16 +25,31 @@ import (
 // passed where a grant-carrying run may execute tools — the middleware
 // fails closed on nil (assistant.newPolicyMiddleware), and that rule is
 // deliberately not weakened here.
-func NewVaultKnownMaterial(v *vault.Vault) assistant.KnownMaterial {
-	return &vaultKnownMaterial{v: v}
+//
+// resolver is the stanced material-read seam. unsealer is the matching
+// operation-unlock seam needed before the metadata inventory can be read.
+// Both are explicit so a headless resolver remains headless.
+func NewVaultKnownMaterial(
+	v *vault.Vault, resolver credential.Resolver, unsealer credential.Unsealer,
+) assistant.KnownMaterial {
+	return &vaultKnownMaterial{v: v, resolver: resolver, unsealer: unsealer}
 }
 
 // vaultKnownMaterial is the adapter. It reads the vault's catalogue fresh on
 // every call: a secret replaced mid-run must be visible to the next
 // screening, and nothing here is cached long enough to go stale.
 type vaultKnownMaterial struct {
-	v *vault.Vault
+	v        *vault.Vault
+	resolver credential.Resolver
+	unsealer credential.Unsealer
 }
+
+// Material screening is an operation: if the vault is sealed, the person must
+// be able to unlock it before the result can be compared. This call is outside
+// any capability admission — the assistant stream task owns the only
+// admission, and it is not held while the middleware runs a tool or screens
+// its result (ADR-0032 amendment).
+const knownMaterialReason = "screen the tool result"
 
 // FindKnown reports the byte spans of text that match a secret the vault
 // holds, with the catalogue name of each matched secret. Errors — a sealed
@@ -41,6 +58,14 @@ type vaultKnownMaterial struct {
 // is a secret the gate cannot see, and a miss off-machine is invisible and
 // permanent.
 func (k *vaultKnownMaterial) FindKnown(ctx context.Context, text string) ([]assistant.KnownMatch, error) {
+	if k.v == nil || k.resolver == nil {
+		return nil, errors.New("known material: stanced vault resolver is not wired")
+	}
+	if k.unsealer != nil {
+		if err := k.unsealer.EnsureUnsealed(ctx, knownMaterialReason); err != nil {
+			return nil, err
+		}
+	}
 	inventory, err := k.v.BuildInventory(ctx, nil)
 	if err != nil {
 		return nil, err
@@ -55,7 +80,7 @@ func (k *vaultKnownMaterial) FindKnown(ctx context.Context, text string) ([]assi
 			// was not.
 			return nil, fmt.Errorf("known material: inventory row %q does not resolve — the listed secret could not be compared", entry.ID)
 		}
-		sec, err := k.v.Get(ctx, id)
+		sec, err := k.resolver.Resolve(ctx, id, credential.Operation(knownMaterialReason))
 		if err != nil {
 			return nil, err
 		}

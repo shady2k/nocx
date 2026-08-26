@@ -38,11 +38,16 @@ class FakeDispatcher {
   }
 }
 
-function grant(itemId: string, command: string, state: GrantBlock['state'] = 'exited'): GrantBlock {
+function grant(
+  itemId: string,
+  command: string,
+  state: GrantBlock['state'] = 'exited',
+  window?: { start: number; count: number },
+): GrantBlock {
   const blockEl = document.createElement('div')
   blockEl.className = state === 'running' ? 'cmd-block cmd-block-running' : 'cmd-block'
   blockEl.dataset.entryId = itemId
-  return { itemId, blockEl, command, state }
+  return { itemId, blockEl, command, state, ...window }
 }
 
 function makeTarget(grants: GrantBlock[] = []) {
@@ -71,10 +76,10 @@ function makeTarget(grants: GrantBlock[] = []) {
 }
 
 describe('AgentInputTarget', () => {
-  it('sends whole-block grant facts and never captures or inlines output', async () => {
+  it('sends whole-block and row-window grant facts on the ask payload', async () => {
     const { dispatcher, handle, target } = makeTarget([
       grant('item-1', 'git status', 'running'),
-      grant('item-2', 'npm test'),
+      grant('item-2', 'npm test', 'exited', { start: 4, count: 3 }),
     ])
     await target.submit('what does this screen mean?')
 
@@ -82,12 +87,18 @@ describe('AgentInputTarget', () => {
     const ask = dispatcher.calls.find((call) => call.method === 'agent.ask')
     const params = ask!.params as {
       question: string
-      attachedContent: { itemId: string; command: string; state: string }[]
+      attachedContent: {
+        itemId: string
+        command: string
+        state: string
+        start?: number
+        count?: number
+      }[]
     }
     expect(params.question).toBe('what does this screen mean?')
     expect(params.attachedContent).toEqual([
       { itemId: 'item-1', command: 'git status', state: 'running' },
-      { itemId: 'item-2', command: 'npm test', state: 'exited' },
+      { itemId: 'item-2', command: 'npm test', state: 'exited', start: 4, count: 3 },
     ])
     expect(ask!.params).not.toHaveProperty('rows')
     expect(handle.el.dataset.entryId).toBe('answer-1')

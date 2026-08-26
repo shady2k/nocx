@@ -16,6 +16,7 @@ import {
   createCommandBlock,
   type BlockKind,
   type FrozenStatus,
+  type RunningBlockActions,
 } from './blocks'
 import { createAnswerBody } from './answer-body'
 import type { CommandAuthor } from '../command-ledger'
@@ -112,6 +113,7 @@ export function restoredBlock(
   getContainer: () => HTMLElement,
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
+  menuActions?: RunningBlockActions,
 ): HTMLElement {
   // A TURN's body is prose and is drawn by the answer body's own renderer —
   // the one the live stream draws through (nocx-4em1z). A `text` CHILD's
@@ -151,6 +153,9 @@ export function restoredBlock(
     onSelect,
     store,
     facts.author,
+    undefined,
+    menuActions,
+    facts.entryId,
   )
   el.dataset.restored = 'true'
   if (facts.entryId) el.dataset.entryId = facts.entryId
@@ -243,8 +248,16 @@ export function restoredTurn(
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
   drawCaused: (cause: RestoredCause) => HTMLElement | null,
+  menuActions?: RunningBlockActions,
 ): HTMLElement[] {
-  const el = restoredBlock({ ...facts, id: nextId() }, snapshot, getContainer, onSelect, store)
+  const el = restoredBlock(
+    { ...facts, id: nextId() },
+    snapshot,
+    getContainer,
+    onSelect,
+    store,
+    menuActions,
+  )
   // The turn's prose, when the run still had it, is drawn by the block
   // builder's own answer-body path; when it is GONE the block says the
   // sentence once, in the same words a command says for its output — the

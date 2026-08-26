@@ -291,8 +291,13 @@ func TestProbe_HTTPError(t *testing.T) {
 	if res.OK {
 		t.Fatalf("Probe = %+v, want !OK for a 401", res)
 	}
-	if !strings.Contains(res.Error, "401") && !strings.Contains(res.Error, "Incorrect API key") {
-		t.Fatalf("Error = %q, want the HTTP error", res.Error)
+	if !strings.Contains(res.Error, "credential") {
+		t.Fatalf("Error = %q, want the credential sentence", res.Error)
+	}
+	for _, frameworkWord := range []string{"NodeRunError", "node path", "ToolNode"} {
+		if strings.Contains(res.Error, frameworkWord) {
+			t.Fatalf("Error = %q contains framework text %q", res.Error, frameworkWord)
+		}
 	}
 }
 

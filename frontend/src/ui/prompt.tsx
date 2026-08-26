@@ -13,6 +13,8 @@ export interface PromptProps {
   title?: string
   ariaLabel: string
   placement?: 'floating' | 'top-sheet'
+  /** Compact rhythm for dense decision panels; the default keeps modal spacing. */
+  density?: 'default' | 'compact'
   onClose: () => void
   /**
    * The prompt's affirmative action, fired by Enter in a single-line field.
@@ -142,6 +144,7 @@ export function Prompt(props: PromptProps) {
       <section
         class="ui-prompt"
         data-placement={props.placement ?? 'floating'}
+        data-density={props.density === 'compact' ? 'compact' : undefined}
         role="dialog"
         aria-modal="true"
         aria-label={props.ariaLabel}

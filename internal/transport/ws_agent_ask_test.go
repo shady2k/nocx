@@ -133,7 +133,7 @@ func newAskHarnessWithOpts(t *testing.T, client assistant.Client, extra ...WSSer
 	opts := []WSServerOption{
 		WithProfileRepository(ps), WithGroupRepository(ps),
 		WithCredentialStore(v), WithVaultUnsealer(v), WithVaultLifecycle(v),
-		WithAgentKnownMaterial(NewVaultKnownMaterial(v)),
+		WithAgentKnownMaterial(adapterKnownMaterial(v)),
 		WithContentDB(db),
 		WithAssistantClient(client),
 		WithAssistantProbeStore(assistant.NewProbeStore()),

@@ -49,6 +49,9 @@ import (
 // back what the caller must hand to whoever proposed it.
 type invoker interface {
 	Invoke(ctx context.Context, name, callID, rawArgs string) (string, error)
+	// Declares answers whether a tool exists, for a carrier that validates
+	// before it runs.
+	Declares(tool string) bool
 }
 
 // starlarkInvocation is what the carrier remembers about one effect it
@@ -225,7 +228,7 @@ func (c *starlarkCarrier) effect(tool string) func(*starlark.Thread, *starlark.B
 		c.calls = append(c.calls, starlarkInvocation{tool: tool, callID: callID, rawArgs: string(raw)})
 		c.mu.Unlock()
 
-		out, err := c.invokeParking(ctx, tool, callID, string(raw))
+		out, err := invokeParking(ctx, c.kernel, c.suspensions, tool, callID, string(raw))
 		if err != nil {
 			return nil, err
 		}
@@ -244,8 +247,24 @@ func (c *starlarkCarrier) effect(tool string) func(*starlark.Thread, *starlark.B
 // something is wrong that asking a person twice will not fix, and a carrier
 // that kept retrying would be the ask-forever loop the resume path exists to
 // end.
-func (c *starlarkCarrier) invokeParking(ctx context.Context, tool, callID, rawArgs string) (string, error) {
-	out, err := c.kernel.Invoke(ctx, tool, callID, rawArgs)
+// invokeParking is the kernel call plus the one thing a carrier that owns its
+// own control flow does that the declared-call carrier does not: when the
+// kernel says a person must answer first, it PARKS rather than unwinding.
+//
+// SHARED BY EVERY SUCH CARRIER, deliberately. Suspension is not a property of
+// Starlark or of a plan walker; it is what any carrier does with the kernel's
+// "ask first". Two copies would be two things to keep in step, which AD-8
+// spends a paragraph on.
+//
+// The retry after Resume is the same call — same id, same arguments — because
+// that is what the approval is bound to: a changed argument hashes differently
+// and deliberately does not resume under the old answer. One retry, never a
+// loop: if the kernel asks again about a proposal that has just been answered,
+// something is wrong that asking a person twice will not fix, and a carrier
+// that kept retrying would be the ask-forever loop the resume path exists to
+// end.
+func invokeParking(ctx context.Context, kernel invoker, suspensions chan *Suspension, tool, callID, rawArgs string) (string, error) {
+	out, err := kernel.Invoke(ctx, tool, callID, rawArgs)
 	var ask *ApprovalRequestedError
 	if !errors.As(err, &ask) {
 		return out, err
@@ -253,7 +272,7 @@ func (c *starlarkCarrier) invokeParking(ctx context.Context, tool, callID, rawAr
 
 	s := &Suspension{Request: ask.Request, resume: make(chan struct{})}
 	select {
-	case c.suspensions <- s:
+	case suspensions <- s:
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
@@ -262,7 +281,7 @@ func (c *starlarkCarrier) invokeParking(ctx context.Context, tool, callID, rawAr
 	case <-ctx.Done():
 		return "", ctx.Err()
 	}
-	return c.kernel.Invoke(ctx, tool, callID, rawArgs)
+	return kernel.Invoke(ctx, tool, callID, rawArgs)
 }
 
 // recordAnswer is what the program says to the person. Called more than once,

@@ -1405,6 +1405,14 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 	return out, nil
 }
 
+// Declares reports whether a tool exists at all. A carrier that validates a
+// plan before running it needs this, and must not keep its own list: two
+// answers to "which tools exist" disagree the day one is added.
+func (k *effectKernel) Declares(tool string) bool {
+	_, ok := k.registry.Lookup(tool)
+	return ok
+}
+
 // FrameForModel marks a result as untrusted data before a carrier puts it in
 // front of a model (agenttools.Declaration.FrameToolResult). It is a
 // projection of the declaration and decides nothing; a carrier that does not

@@ -285,19 +285,13 @@ func TestContentDBChild(t *testing.T) {
 	}
 }
 
-// newChild re-execs this test binary in the given role against the given
-// database. Shared by every cross-process test here so the re-exec pattern
-// has one implementation: the role and the path are the whole interface.
-func newChild(t *testing.T, role, path string) *exec.Cmd {
-	t.Helper()
-	cmd, _ := newChildReporting(t, role, path)
-	return cmd
-}
-
-// newChildReporting is newChild plus the child's stdout, for a caller that
-// must wait until the child has actually DONE something rather than until
-// some number of milliseconds has passed. AGENTS.md: a test may not depend on
-// timing — wait on an observable state change, never on a duration.
+// newChildReporting re-execs this test binary in the given role against the
+// given database, and hands back the child's stdout. Shared by every
+// cross-process test here so the re-exec pattern has one implementation: the
+// role and the path are the whole interface. The stdout is not optional — a
+// parent must wait until the child has actually DONE something rather than
+// until some number of milliseconds has passed. AGENTS.md: a test may not
+// depend on timing — wait on an observable state change, never on a duration.
 func newChildReporting(t *testing.T, role, path string) (*exec.Cmd, io.Reader) {
 	t.Helper()
 	cmd := exec.Command(os.Args[0], "-test.run=TestContentDBChild") //nolint:gosec // standard Go test re-exec pattern
@@ -313,7 +307,27 @@ func newChildReporting(t *testing.T, role, path string) (*exec.Cmd, io.Reader) {
 	if startErr := cmd.Start(); startErr != nil {
 		t.Fatalf("start %s child: %v", role, startErr)
 	}
+	// These children loop forever by design, so a parent that dies before its
+	// own kill — any t.Fatalf between here and there — would leave one
+	// spinning on a shared machine until somebody noticed. Killing an already
+	// dead process is the ordinary case and its error is not interesting.
+	t.Cleanup(func() {
+		_ = cmd.Process.Signal(syscall.SIGKILL)
+		_, _ = cmd.Process.Wait()
+	})
 	return cmd, out
+}
+
+// awaitAcks reads n acknowledgement bytes from a child's stdout. The read
+// blocks until the child has actually done that much work, however long this
+// machine takes over it — which is what makes the same assertion true on a
+// developer's host and inside the container (AGENTS.md: wait on an observable
+// state change, never on a duration).
+func awaitAcks(t *testing.T, acks io.Reader, n int, what string) {
+	t.Helper()
+	if _, err := io.ReadFull(acks, make([]byte, n)); err != nil {
+		t.Fatalf("waiting for %d %s: %v", n, what, err)
+	}
 }
 
 func childWriter(t *testing.T) {
@@ -328,6 +342,14 @@ func childWriter(t *testing.T) {
 		if _, err := hist.RecordCompleted(ctx, aRecordedCommand(fmt.Sprintf("child-row-%d", i))); err != nil {
 			os.Exit(4)
 		}
+		// One byte per committed row — the child's only way of saying a write
+		// has landed, and what the parent kills on. See childEvictor for the
+		// same idiom: a fixed delay asks the machine to run at a particular
+		// speed, which the container does not (AGENTS.md: a test may not
+		// depend on timing).
+		if _, err := os.Stdout.Write([]byte{'.'}); err != nil {
+			os.Exit(6)
+		}
 		time.Sleep(2 * time.Millisecond)
 	}
 }
@@ -339,6 +361,10 @@ func childCheckpointer(t *testing.T) {
 		if _, err := conn.Exec("PRAGMA wal_checkpoint(TRUNCATE)"); err != nil {
 			os.Exit(5)
 		}
+		// One byte per truncation, for the same reason as childWriter's.
+		if _, err := os.Stdout.Write([]byte{'.'}); err != nil {
+			os.Exit(7)
+		}
 		time.Sleep(2 * time.Millisecond)
 	}
 }
@@ -349,16 +375,25 @@ func TestTwoProcessesShareDatabase(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "content.db")
 
-	writer := newChild(t, "writer", path)
-	checkpointer := newChild(t, "checkpointer", path)
+	writer, writes := newChildReporting(t, "writer", path)
+	checkpointer, checkpoints := newChildReporting(t, "checkpointer", path)
 
-	// Let both processes work on the shared database, then kill the
-	// checkpointer mid-checkpoint and the writer mid-write.
-	time.Sleep(800 * time.Millisecond)
+	// Both processes must have committed real work against the shared database
+	// before either is killed: rows from the writer, WAL truncations from the
+	// checkpointer underneath them. Their acknowledgements are what establishes
+	// that. An 800ms sleep established it only on a machine fast enough to fit
+	// two re-execs and two opens of an encrypted store inside it, and the
+	// container is not one: it reopened to an empty table, reproducibly
+	// (nocx-796iq).
+	awaitAcks(t, writes, 8, "committed rows")
+	awaitAcks(t, checkpoints, 3, "WAL checkpoints")
+
 	if err := checkpointer.Process.Signal(syscall.SIGKILL); err != nil {
 		t.Fatalf("kill checkpointer: %v", err)
 	}
-	time.Sleep(150 * time.Millisecond)
+	// The writer goes on committing with the checkpointer gone, which is the
+	// state we want it killed in: mid-write, and with nobody truncating.
+	awaitAcks(t, writes, 8, "committed rows after the checkpointer died")
 	if err := writer.Process.Signal(syscall.SIGKILL); err != nil {
 		t.Fatalf("kill writer: %v", err)
 	}

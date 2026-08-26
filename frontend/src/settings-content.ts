@@ -97,9 +97,9 @@ export class SettingsContent extends SolidPaneContent {
       this.handle.newConnection()
     }
     if (this.pendingNewSecret !== null) {
-      const name = this.pendingNewSecret
+      const queued = this.pendingNewSecret
       this.pendingNewSecret = null
-      this.handle.newSecret(name)
+      this.handle.newSecret(queued.name, queued.value)
     }
     if (this.pendingNewEndpoint) {
       this.pendingNewEndpoint = false
@@ -147,14 +147,20 @@ export class SettingsContent extends SolidPaneContent {
   }
 
   /** Open the Secrets page with the add dialog up — the prompt's '@' picker
-   *  offering to create the secret it could not find. Queued before mount
-   *  for the same reason as startNewConnection. */
-  startNewSecret(name = ''): void {
+   *  offering to create the secret it could not find, or a value field whose
+   *  lock offers to store what it is holding. Queued before mount for the
+   *  same reason as startNewConnection.
+   *
+   *  `value` is what that field held (nocx-3o0ed.6): this page owns the only
+   *  create form on the fallback path, so a value that stops here is a value
+   *  the person has to fetch back by hand. A caller with none omits it and
+   *  the form opens empty, which is what it always did. */
+  startNewSecret(name = '', value = ''): void {
     if (this.handle) {
-      this.handle.newSecret(name)
+      this.handle.newSecret(name, value)
       return
     }
-    this.pendingNewSecret = name
+    this.pendingNewSecret = { name, value }
   }
 
   /** Open the Endpoints page with the editor up on a blank endpoint — the
@@ -184,9 +190,10 @@ export class SettingsContent extends SolidPaneContent {
   }
 
   private pendingNewConnection = false
-  /** The queued request's prefilled name, or null when nothing is queued.
-   *  A string (including '') means "asked"; null means "nobody asked". */
-  private pendingNewSecret: string | null = null
+  /** The queued request's prefilled name and value, or null when nothing is
+   *  queued. An object (with either field '') means "asked"; null means
+   *  "nobody asked". */
+  private pendingNewSecret: { name: string; value: string } | null = null
   private pendingNewEndpoint = false
   /** The queued page id, or null when nobody asked. */
   private pendingPage: string | null = null

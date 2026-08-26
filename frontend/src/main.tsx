@@ -22,7 +22,7 @@ import { ProfileClient } from './profiles'
 import { VaultClient } from './vault-client'
 import type { SecretPickerSource } from './ui/secret-picker'
 import { DialogClient } from './dialog-client'
-import { createVaultState, SetupDialog, UnlockDialog } from './vault'
+import { createVaultState, createVaultSecretSource, SetupDialog, UnlockDialog } from './vault'
 import { ConnectionPasswordPrompt } from './connection-password-prompt'
 import type { ConnectionsPasswordRequest } from './generated/connections.passwordRequest'
 import { AgentApprovalPrompt } from './agent-approval-prompt'
@@ -197,33 +197,25 @@ async function main() {
   })
   void vaultController.refresh()
 
-  const apiSecretSource: SecretPickerSource = {
-    status: async () => ({ state: (await vaultClient.status()).state }),
-    list: async () => (await vaultClient.inventory()).entries,
-    requestUnseal: async () => {
-      vaultController.openUnlock('use its secrets')
-      await vaultClient.inventory()
-    },
-    requestSetup: () => {
-      vaultController.openSetup()
-      return Promise.resolve(true)
-    },
-    // The NAME travels and the value does not: this is the no-mint-seam
-    // fallback, whose destination is the Secrets page, and that page owns its
-    // own value field (settings-content.ts, startNewSecret). The workbench
-    // path that CAN carry a value does — api-pane.tsx, createSecretInPlace,
-    // which is what the store row reaches whenever a vault client is wired.
-    requestCreate: (name) => {
-      openSettingsPane().startNewSecret(name)
-      return Promise.resolve(undefined)
-    },
+  // The no-mint-seam fallback: this surface has no create ask of its own, so
+  // a store row lands on the Secrets page's create form — with the NAME AND
+  // THE VALUE both filled in (nocx-3o0ed.6). It was the name alone, and a
+  // person who pressed the lock over a filled field arrived at an empty one
+  // and had to go back for their own text; that detour is what this epic
+  // removes. The workbench path that can mint in place still does —
+  // api-pane.tsx, createSecretInPlace — which is what a store row reaches
+  // wherever a vault client is wired.
+  const apiSecretSource: SecretPickerSource = createVaultSecretSource({
+    vaultClient,
+    vaultController,
+    openSecretCreate: (name, value) => openSettingsPane().startNewSecret(name, value),
     onError: (message, error) => {
       log.error('nocx: secret picker status failed', {
         message,
         error: error instanceof Error ? error.message : String(error),
       })
     },
-  }
+  })
 
   // ── Backend-initiated unlock requests ──────────────────────────────
   // The dispatcher's onVaultSealed handles renderer-initiated calls.

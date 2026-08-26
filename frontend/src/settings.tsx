@@ -177,9 +177,13 @@ export interface SettingsComponentHandle {
   newConnection(): void
   /**
    * Show the Secrets page with the add dialog open — the prompt's '@'
-   * picker offering to create a secret when the one you want is not there.
+   * picker offering to create a secret when the one you want is not there,
+   * or a value field whose lock offers to store what it is holding.
+   *
+   * `value` is that held value (nocx-3o0ed.6). A caller with none omits it
+   * and the form opens on an empty value field exactly as before.
    */
-  newSecret(name?: string): void
+  newSecret(name?: string, value?: string): void
   /**
    * Show the Endpoints page with the editor open on a blank endpoint — the
    * ask surface's repair for "no endpoint configured".
@@ -259,6 +263,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
   const [newSecretRequest, setNewSecretRequest] = createSignal(0)
   const [newEndpointRequest, setNewEndpointRequest] = createSignal(0)
   const [newSecretName, setNewSecretName] = createSignal('')
+  const [newSecretValue, setNewSecretValue] = createSignal('')
   const [sectionFilter, setSectionFilter] = createSignal<string | null>(null)
   // The rail's group catalogue and the section→group mapping, straight from
   // the settings.describe snapshot. The rail renders from these; there is no
@@ -501,6 +506,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
             profileClient={props.profileClient}
             addSecretRequest={newSecretRequest()}
             addSecretName={newSecretName()}
+            addSecretValue={newSecretValue()}
           />
         </Show>
       ),
@@ -973,15 +979,19 @@ export function SettingsComponent(props: SettingsComponentProps) {
       setActiveComponentPage('connections')
       setNewConnectionRequest((n) => n + 1)
     },
-    newSecret(name?: string): void {
+    newSecret(name?: string, value?: string): void {
       // Same reason as newConnection: an active search hides the page the
       // request is addressed to.
       setSearchQuery('')
       setSectionFilter(null)
       setActiveComponentPage('secrets')
-      // The name BEFORE the counter: the effect that opens the dialog runs
-      // on the counter and reads the name as it stands then.
+      // The name and the value BEFORE the counter: the effect that opens the
+      // dialog runs on the counter and reads both as they stand then.
       setNewSecretName(name ?? '')
+      // A caller without a value clears the last one rather than leaving it
+      // to be picked up by a request that never carried it — the previous
+      // person's secret must not appear in this person's form.
+      setNewSecretValue(value ?? '')
       setNewSecretRequest((n) => n + 1)
     },
     newEndpoint(): void {

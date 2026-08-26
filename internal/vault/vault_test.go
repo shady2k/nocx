@@ -28,8 +28,7 @@ type testProvider struct {
 	mu           sync.Mutex
 	data         map[credential.SecretID]credential.Secret
 	fail         error
-	delay        time.Duration
-	putStartHook func() // fires when Put begins, before injected latency
+	putStartHook func() // fires when Put begins, before storage
 	putHook      func() // fires on each Put before storage
 	getHook      func() // fires on each Get
 }
@@ -66,11 +65,6 @@ func (p *testProvider) Put(ctx context.Context, id credential.SecretID, s creden
 	if p.putStartHook != nil {
 		p.putStartHook()
 	}
-	if p.delay > 0 {
-		// Simulate provider latency; this is controlled fake latency, not a
-		// test synchronization mechanism.
-		time.Sleep(p.delay)
-	}
 	if p.putHook != nil {
 		p.putHook()
 	}
@@ -86,10 +80,6 @@ func (p *testProvider) Put(ctx context.Context, id credential.SecretID, s creden
 }
 
 func (p *testProvider) Delete(_ context.Context, id credential.SecretID) error {
-	if p.delay > 0 {
-		// Simulate provider latency; this is pacing for the controlled fake.
-		time.Sleep(p.delay)
-	}
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	if p.fail != nil {
@@ -101,31 +91,73 @@ func (p *testProvider) Delete(_ context.Context, id credential.SecretID) error {
 
 var _ WritableProvider = (*testProvider)(nil)
 
+// fakeAutoSealClock records every timer the auto-seal loop arms, in order.
+//
+// It is the whole observable these tests need, and it is authoritative rather
+// than a copy: the factory call *is* the arming and fakeAutoSealTimer.Stop
+// *is* the disarming, both made by the loop itself. A flag kept beside the
+// timer would be a second owner of the same fact, true only between the two
+// moments the loop updates it.
 type fakeAutoSealClock struct {
 	mu     sync.Mutex
 	timers []*fakeAutoSealTimer
+	// hold, when non-nil, parks the loop inside Stop until it is closed. Set
+	// once at construction and never written afterwards, so the loop reads it
+	// without a lock. See useHeldFakeAutoSealTimer.
+	hold chan struct{}
 }
 
 func (c *fakeAutoSealClock) newTimer(time.Duration) autoSealTimer {
-	timer := &fakeAutoSealTimer{ch: make(chan time.Time, 1)}
+	timer := &fakeAutoSealTimer{ch: make(chan time.Time, 1), hold: c.hold}
 	c.mu.Lock()
 	c.timers = append(c.timers, timer)
 	c.mu.Unlock()
 	return timer
 }
 
-func (c *fakeAutoSealClock) lastTimer() *fakeAutoSealTimer {
+// armedCount is how many timers the loop has armed so far.
+func (c *fakeAutoSealClock) armedCount() int {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	return c.timers[len(c.timers)-1]
+	return len(c.timers)
+}
+
+// armed blocks until the loop has armed its nth timer (1-based) and returns
+// it, so a test fires or inspects exactly the arming it caused. Ordinals, not
+// "the current timer": every arming here is caused by a named event, and
+// waiting for the nth is also the barrier proving the loop consumed the wake
+// that event sent — the wake channel is buffered(1), so a test that woke the
+// loop twice without waiting would have had the second wake dropped.
+func (c *fakeAutoSealClock) armed(t *testing.T, n int) *fakeAutoSealTimer {
+	t.Helper()
+	testwait.WaitForDetail(t, fmt.Sprintf("the auto-seal loop to arm timer #%d", n),
+		func() string { return fmt.Sprintf("armed=%d", c.armedCount()) },
+		func() bool { return c.armedCount() >= n },
+	)
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.timers[n-1]
+}
+
+// waitTimerStopped closes the interval an arming opened: the loop stopped
+// this timer, so nothing it might have carried can still fire.
+func waitTimerStopped(t *testing.T, timer *fakeAutoSealTimer, what string) {
+	t.Helper()
+	testwait.WaitFor(t, what, timer.WasStopped)
 }
 
 type fakeAutoSealTimer struct {
-	ch      chan time.Time
-	stopped atomic.Bool
+	ch          chan time.Time
+	stopped     atomic.Bool
+	stopEntered atomic.Bool
+	hold        chan struct{}
 }
 
 func (t *fakeAutoSealTimer) Stop() bool {
+	t.stopEntered.Store(true)
+	if t.hold != nil {
+		<-t.hold
+	}
 	return !t.stopped.Swap(true)
 }
 
@@ -147,6 +179,23 @@ func useFakeAutoSealTimer(v *Vault) *fakeAutoSealClock {
 	v.autoSealTimerFactory = clock.newTimer
 	v.mu.Unlock()
 	return clock
+}
+
+// useHeldFakeAutoSealTimer is useFakeAutoSealTimer whose timers park the loop
+// inside Stop until the returned release is called. It exists so a test can
+// hold the goroutine somewhere it has provably not exited yet and ask what
+// Close is doing meanwhile — the only way to observe the join rather than its
+// aftermath. The release is registered as cleanup as well, so a failing test
+// cannot leave the loop parked and wedge the vault's own Close.
+func useHeldFakeAutoSealTimer(t *testing.T, v *Vault) (*fakeAutoSealClock, func()) {
+	t.Helper()
+	clock := &fakeAutoSealClock{hold: make(chan struct{})}
+	v.mu.Lock()
+	v.autoSealTimerFactory = clock.newTimer
+	v.mu.Unlock()
+	release := sync.OnceFunc(func() { close(clock.hold) })
+	t.Cleanup(release)
+	return clock, release
 }
 
 type panickingProvider struct{ *testProvider }
@@ -503,9 +552,16 @@ func TestSeal_RejectsSlowPut(t *testing.T) {
 	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	slowProv := newTestProvider(ProviderFile)
-	slowProv.delay = 100 * time.Millisecond
+	// The Put is held open by a gate, not by a sleep: the test has to seal
+	// while the provider call is in flight, and a fake latency long enough to
+	// make that likely is still only likely. Same shape as the getHook/getGate
+	// pair the Get-after-seal tests use.
 	var putStarted atomic.Bool
-	slowProv.putStartHook = func() { putStarted.Store(true) }
+	putGate := make(chan struct{})
+	slowProv.putStartHook = func() {
+		putStarted.Store(true)
+		<-putGate
+	}
 	v, _, _ := testVault(t, sys, slowProv)
 	mustSetup(t, v, "")
 
@@ -523,6 +579,7 @@ func TestSeal_RejectsSlowPut(t *testing.T) {
 
 	testwait.WaitFor(t, "the slow provider Put to start", putStarted.Load)
 	v.Seal()
+	close(putGate)
 
 	err := <-crCh
 	if err != ErrVaultSealed {
@@ -2049,27 +2106,32 @@ func TestActivity_EpochIncrement(t *testing.T) {
 	}
 }
 
+// setupAndDrainAutoSeal sets the vault up and waits for the arming Setup
+// itself causes: Setup unseals, which wakes the loop, and a fresh vault
+// carries the 15-minute factory default. Waiting for that timer is what makes
+// the next arming the test's own — and it drains the wake channel, so the
+// wake the test sends next cannot be dropped as a duplicate.
+func setupAndDrainAutoSeal(t *testing.T, v *Vault, clock *fakeAutoSealClock, passphrase string) {
+	t.Helper()
+	mustSetup(t, v, passphrase)
+	clock.armed(t, 1)
+}
+
 func TestAutoSeal_TimerFiresAndSeals(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
 	clock := useFakeAutoSealTimer(v)
-	mustSetup(t, v, "pass")
+	setupAndDrainAutoSeal(t, v, clock, "pass")
 
 	v.mu.Lock()
 	v.doc.AutoSealMinutes = 1
 	v.autoSealEpoch++
-	armEpoch := v.autoSealEpoch
 	v.mu.Unlock()
 
-	// Wake the goroutine to arm the timer.
+	// Wake the goroutine to arm the timer, then fire the one it armed.
 	v.wakeAutoSeal()
-	testwait.WaitFor(t, "auto-seal timer to arm", func() bool {
-		v.mu.Lock()
-		defer v.mu.Unlock()
-		return v.autoSealTimerArmed && v.autoSealArmEpoch == armEpoch
-	})
+	clock.armed(t, 2).Fire()
 
-	clock.lastTimer().Fire()
 	testwait.WaitFor(t, "auto-seal timer to seal the vault", func() bool {
 		return v.State() == StateSealed
 	})
@@ -2079,34 +2141,21 @@ func TestAutoSeal_ActivityPreventsSeal(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
 	clock := useFakeAutoSealTimer(v)
-	mustSetup(t, v, "pass")
+	setupAndDrainAutoSeal(t, v, clock, "pass")
 
 	v.mu.Lock()
 	v.doc.AutoSealMinutes = 1
 	v.autoSealEpoch++
-	initialArmEpoch := v.autoSealEpoch
 	v.mu.Unlock()
 
-	// Wake to arm the timer, then wait on the arm observable.
 	v.wakeAutoSeal()
-	testwait.WaitFor(t, "initial auto-seal timer to arm", func() bool {
-		v.mu.Lock()
-		defer v.mu.Unlock()
-		return v.autoSealTimerArmed && v.autoSealArmEpoch == initialArmEpoch
-	})
-	initialTimer := clock.lastTimer()
+	initialTimer := clock.armed(t, 2)
 
-	// Activity resets the timer and increments the epoch. Waiting for the
-	// new arm epoch proves the old armed interval closed before the fresh one.
+	// Activity resets the timer and increments the epoch. The fresh arming is
+	// the observable, and it closes the interval the first one opened: the
+	// loop stops the old timer in the same iteration, before arming again.
 	v.Activity()
-	v.mu.Lock()
-	resetArmEpoch := v.autoSealEpoch
-	v.mu.Unlock()
-	testwait.WaitFor(t, "reset auto-seal timer to arm", func() bool {
-		v.mu.Lock()
-		defer v.mu.Unlock()
-		return v.autoSealTimerArmed && v.autoSealArmEpoch == resetArmEpoch
-	})
+	clock.armed(t, 3)
 
 	if !initialTimer.WasStopped() {
 		t.Fatal("activity did not stop the previous auto-seal timer")
@@ -2115,7 +2164,7 @@ func TestAutoSeal_ActivityPreventsSeal(t *testing.T) {
 		t.Fatal("vault was sealed after activity reset — activity should restart the timer")
 	}
 
-	clock.lastTimer().Fire()
+	clock.armed(t, 3).Fire()
 	testwait.WaitFor(t, "reset auto-seal timer to seal the vault", func() bool {
 		return v.State() == StateSealed
 	})
@@ -2125,32 +2174,18 @@ func TestAutoSeal_SealStopsTimer(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
 	clock := useFakeAutoSealTimer(v)
-	mustSetup(t, v, "pass")
+	setupAndDrainAutoSeal(t, v, clock, "pass")
 
 	v.mu.Lock()
 	v.doc.AutoSealMinutes = 1
 	v.autoSealEpoch++
-	armEpoch := v.autoSealEpoch
 	v.mu.Unlock()
 	v.wakeAutoSeal()
+	timer := clock.armed(t, 2)
 
-	testwait.WaitFor(t, "auto-seal timer to arm before manual seal", func() bool {
-		v.mu.Lock()
-		defer v.mu.Unlock()
-		return v.autoSealTimerArmed && v.autoSealArmEpoch == armEpoch
-	})
-	timer := clock.lastTimer()
 	v.Seal()
 
-	testwait.WaitFor(t, "manual seal to stop the auto-seal timer", func() bool {
-		v.mu.Lock()
-		defer v.mu.Unlock()
-		return !v.autoSealTimerArmed
-	})
-
-	if !timer.WasStopped() {
-		t.Fatal("manual seal did not stop the auto-seal timer")
-	}
+	waitTimerStopped(t, timer, "manual seal to stop the auto-seal timer")
 	if v.State() != StateSealed {
 		t.Fatal("vault is not sealed after manual seal")
 	}
@@ -2160,21 +2195,15 @@ func TestAutoSeal_GenGuardAndEpochGuard(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
 	clock := useFakeAutoSealTimer(v)
-	mustSetup(t, v, "pass")
+	setupAndDrainAutoSeal(t, v, clock, "pass")
 
 	v.mu.Lock()
 	v.doc.AutoSealMinutes = 5
-	wantArmEpoch := v.autoSealEpoch
 	v.mu.Unlock()
 
 	// Wake to arm, capturing gen + epoch.
 	v.wakeAutoSeal()
-	testwait.WaitFor(t, "auto-seal timer to arm for guard test", func() bool {
-		v.mu.Lock()
-		defer v.mu.Unlock()
-		return v.autoSealTimerArmed && v.autoSealArmEpoch == wantArmEpoch
-	})
-	timer := clock.lastTimer()
+	timer := clock.armed(t, 2)
 
 	v.mu.Lock()
 	genAtArm := v.gen
@@ -2182,14 +2211,12 @@ func TestAutoSeal_GenGuardAndEpochGuard(t *testing.T) {
 	v.mu.Unlock()
 
 	// Seal changes gen. A stale timer event while sealed must not unseal or
-	// otherwise alter the sealed state.
+	// otherwise alter the sealed state. Firing races the seal's own wake on
+	// purpose: whichever the loop reaches first, the timer ends up stopped and
+	// the vault stays sealed.
 	v.Seal()
 	timer.Fire()
-	testwait.WaitFor(t, "sealed auto-seal timer to stop", func() bool {
-		v.mu.Lock()
-		defer v.mu.Unlock()
-		return !v.autoSealTimerArmed
-	})
+	waitTimerStopped(t, timer, "the seal to stop the stale auto-seal timer")
 
 	v.mu.Lock()
 	if v.gen <= genAtArm {
@@ -2208,11 +2235,7 @@ func TestAutoSeal_GenGuardAndEpochGuard(t *testing.T) {
 	if epochAfter <= epochAtArm {
 		t.Fatal("epoch did not increment after unseal")
 	}
-	testwait.WaitFor(t, "fresh auto-seal timer to arm after unseal", func() bool {
-		v.mu.Lock()
-		defer v.mu.Unlock()
-		return v.autoSealTimerArmed && v.autoSealArmEpoch == epochAfter
-	})
+	clock.armed(t, 3)
 
 	v.mu.Lock()
 	isSealed := v.rootKey == nil
@@ -2234,33 +2257,33 @@ func TestAutoSeal_GenGuardAndEpochGuard(t *testing.T) {
 func TestAutoSeal_OffDoesNotArm(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
-	useFakeAutoSealTimer(v)
-	mustSetup(t, v, "pass")
+	clock := useFakeAutoSealTimer(v)
+	setupAndDrainAutoSeal(t, v, clock, "pass")
 
 	ctx := context.Background()
 	if err := v.SetAutoSeal(ctx, 5); err != nil {
 		t.Fatalf("SetAutoSeal(5): %v", err)
 	}
-	v.mu.Lock()
-	armEpoch := v.autoSealEpoch
-	v.mu.Unlock()
-	testwait.WaitFor(t, "enabled auto-seal timer to arm", func() bool {
-		v.mu.Lock()
-		defer v.mu.Unlock()
-		return v.autoSealTimerArmed && v.autoSealArmEpoch == armEpoch
-	})
+	enabled := clock.armed(t, 2)
 
 	if err := v.SetAutoSeal(ctx, 0); err != nil {
 		t.Fatalf("SetAutoSeal(0): %v", err)
 	}
-	testwait.WaitFor(t, "disabled auto-seal timer to stop", func() bool {
-		v.mu.Lock()
-		defer v.mu.Unlock()
-		return !v.autoSealTimerArmed
-	})
+	waitTimerStopped(t, enabled, "disabling auto-seal to stop the armed timer")
 
 	if v.State() != StateUnsealed {
 		t.Fatal("vault was sealed despite auto-seal being off")
+	}
+
+	// "Armed nothing" is a negative, and the stop does not prove it: the loop
+	// stops the old timer and then decides whether to arm, both inside one
+	// iteration, so a wrong arming is still ahead of us here. Close is the
+	// barrier that has no ahead — it waits for the loop to exit, so every
+	// iteration it will ever run is finished — and it arms nothing itself,
+	// because it seals before the wake it sends is read.
+	v.Close()
+	if n := clock.armedCount(); n != 2 {
+		t.Fatalf("auto-seal armed %d timers, want 2 — turning auto-seal off armed one", n)
 	}
 }
 

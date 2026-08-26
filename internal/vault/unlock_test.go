@@ -10,6 +10,7 @@ package vault
 import (
 	"context"
 	"errors"
+	"fmt"
 	"regexp"
 	"strings"
 	"sync"
@@ -76,7 +77,22 @@ func (f *fakeUnlockRequester) recordedReasons() []string {
 // would (correctly) raise a fresh prompt and wedge the fake's single answer.
 func waitForJoined(t *testing.T, v *Vault, n int) {
 	t.Helper()
-	testwait.WaitFor(t, "callers to join the outstanding prompt", func() bool {
+	// The failure has to say how far the join got, and whether there was a
+	// prompt to join at all: "no prompt outstanding" and "three of four
+	// joined" are different defects, and a timeout that names only itself
+	// tells them apart from a starved machine either.
+	detail := func() string {
+		v.mu.Lock()
+		p := v.unlockPending
+		v.mu.Unlock()
+		if p == nil {
+			return fmt.Sprintf("no prompt outstanding; wanted %d callers joined", n)
+		}
+		p.mu.Lock()
+		defer p.mu.Unlock()
+		return fmt.Sprintf("only %d of %d callers joined the outstanding prompt", len(p.reasons), n)
+	}
+	testwait.WaitForDetail(t, "callers to join the outstanding prompt", detail, func() bool {
 		v.mu.Lock()
 		defer v.mu.Unlock()
 		p := v.unlockPending

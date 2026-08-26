@@ -83,17 +83,18 @@ type Vault struct {
 	logger       *slog.Logger
 	initializing bool // guards concurrent Setup (defect 7)
 
-	autoSealWake         chan struct{} // buffered(1), wakes the auto-seal goroutine
-	autoSealQuit         chan struct{} // closed by Close to stop the goroutine
-	autoSealDone         chan struct{} // closed when the goroutine exits
+	autoSealWake chan struct{} // buffered(1), wakes the auto-seal goroutine
+	autoSealQuit chan struct{} // closed by Close to stop the goroutine
+	// autoSealWG is the other end of the goroutine's lifetime: New adds to it
+	// before starting the loop and Close waits on it. A WaitGroup rather than a
+	// "done" channel because its zero value is already the truth about a Vault
+	// that never started one — Wait returns — where a nil channel would park
+	// the caller forever, and the goroutine is what Close exists to own.
+	autoSealWG           sync.WaitGroup
 	closeOnce            sync.Once
 	autoSealEpoch        uint64                  // incremented on each Activity/SetAutoSeal
 	autoSealDurationFn   func(int) time.Duration // minutes→duration; overridden by tests
 	autoSealTimerFactory func(time.Duration) autoSealTimer
-	// autoSealTimerArmed and autoSealArmEpoch expose timer lifecycle state to
-	// package tests so they can synchronize without sleeping.
-	autoSealTimerArmed bool
-	autoSealArmEpoch   uint64
 
 	// unlockReq carries a sealed vault's raise-unlock prompt to a renderer.
 	// nil until the composition root attaches it (unlock.go); a vault without
@@ -135,7 +136,6 @@ func New(docs storage.DocumentStore, reg *Registry, logger *slog.Logger) (*Vault
 		logger:               logger,
 		autoSealWake:         make(chan struct{}, 1),
 		autoSealQuit:         make(chan struct{}),
-		autoSealDone:         make(chan struct{}),
 		autoSealDurationFn:   defaultAutoSealDuration,
 		autoSealTimerFactory: newAutoSealTimer,
 	}
@@ -158,7 +158,9 @@ func New(docs storage.DocumentStore, reg *Registry, logger *slog.Logger) (*Vault
 	}
 
 	// Start auto-seal goroutine after all initialization succeeds so a
-	// construction error does not leak it.
+	// construction error does not leak it. The Add pairs with the Done the
+	// loop defers, and with the Wait in Close.
+	v.autoSealWG.Add(1)
 	go v.autoSealLoop()
 
 	return v, nil
@@ -750,7 +752,7 @@ func (v *Vault) Close() {
 		}
 	})
 	v.Seal()
-	<-v.autoSealDone
+	v.autoSealWG.Wait()
 }
 
 // autoSealLoop is the background goroutine that manages the auto-seal timer.
@@ -761,17 +763,15 @@ func (v *Vault) Close() {
 // are unchanged before calling Seal — ensuring an activity or configuration
 // change that arrives near-simultaneously with an expiry wins.
 func (v *Vault) autoSealLoop() {
+	defer v.autoSealWG.Done()
+
 	var t autoSealTimer
-	defer close(v.autoSealDone)
 	var c <-chan time.Time
 	var armEpoch uint64
 
 	for {
 		select {
 		case <-v.autoSealQuit:
-			v.mu.Lock()
-			v.autoSealTimerArmed = false
-			v.mu.Unlock()
 			if t != nil {
 				t.Stop()
 			}
@@ -789,23 +789,17 @@ func (v *Vault) autoSealLoop() {
 			timerFactory := v.autoSealTimerFactory
 			isSealed := v.rootKey == nil
 			armEpoch = v.autoSealEpoch
-			v.autoSealTimerArmed = false
 			v.mu.Unlock()
 
 			if !isSealed && mins > 0 {
 				t = timerFactory(durFn(mins))
 				c = t.Chan()
-				v.mu.Lock()
-				v.autoSealTimerArmed = true
-				v.autoSealArmEpoch = armEpoch
-				v.mu.Unlock()
 			}
 
 		case <-c:
 			c = nil
 
 			v.mu.Lock()
-			v.autoSealTimerArmed = false
 			isSealed := v.rootKey == nil
 			epoch := v.autoSealEpoch
 			v.mu.Unlock()

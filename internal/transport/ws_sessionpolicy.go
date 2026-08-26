@@ -33,14 +33,25 @@ func newSessionPolicyStore() *sessionPolicyStore {
 	return &sessionPolicyStore{by: make(map[session.ID]content.SessionOverrides)}
 }
 
-// Set records one answer for one session.
+// Set records one effect answer for one session.
 func (s *sessionPolicyStore) Set(sid session.ID, e content.Effect, d content.Decision) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if s.by[sid] == nil {
-		s.by[sid] = make(content.SessionOverrides, 1)
+	overrides := s.by[sid]
+	if overrides.Decisions == nil {
+		overrides.Decisions = make(map[content.Effect]content.Decision, 1)
 	}
-	s.by[sid][e] = d
+	overrides.Decisions[e] = d
+	s.by[sid] = overrides
+}
+
+// SetRule records one invocation-specific answer for one session.
+func (s *sessionPolicyStore) SetRule(sid session.ID, rule content.InvocationRule) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	overrides := s.by[sid]
+	overrides.Rules = append(overrides.Rules, rule)
+	s.by[sid] = overrides
 }
 
 // For returns a COPY of one session's overlay. A copy because the resolver
@@ -52,9 +63,13 @@ func (s *sessionPolicyStore) For(sid session.ID) content.SessionOverrides {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 	src := s.by[sid]
-	out := make(content.SessionOverrides, len(src))
-	for k, v := range src {
-		out[k] = v
+	out := content.SessionOverrides{
+		Decisions: make(map[content.Effect]content.Decision, len(src.Decisions)),
+		Rules:     make([]content.InvocationRule, len(src.Rules)),
+	}
+	copy(out.Rules, src.Rules)
+	for k, v := range src.Decisions {
+		out.Decisions[k] = v
 	}
 	return out
 }

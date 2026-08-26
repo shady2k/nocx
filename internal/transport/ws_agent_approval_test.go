@@ -107,8 +107,9 @@ func policySuspension(tool, callID, args, argHash string) func(runID string) err
 		return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
 			RunID: runID, Attempt: 1, Tool: tool, CallID: callID,
 			Arguments: args, ArgHash: argHash,
-			Effect:   content.EffectObserve,
-			Resource: &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/a.txt"},
+			Effect:     content.EffectObserve,
+			Resource:   &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/a.txt"},
+			Invocation: content.Invocation{Parsed: true},
 		}}
 	}
 }

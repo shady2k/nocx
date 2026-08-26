@@ -258,10 +258,10 @@ func TestResolvePolicyStatedOrderOnce(t *testing.T) {
 	global := presetAutonomous()
 	workspace := presetAskEveryTime()
 
-	if got := content.ResolvePolicy(global, nil, nil); got.DecisionFor(content.EffectObserve) != content.DecisionPermit {
+	if got := content.ResolvePolicy(global, nil, content.SessionOverrides{}); got.DecisionFor(content.EffectObserve) != content.DecisionPermit {
 		t.Fatal("nil workspace must resolve the global default")
 	}
-	if got := content.ResolvePolicy(global, &workspace, nil); got.DecisionFor(content.EffectObserve) != content.DecisionAsk {
+	if got := content.ResolvePolicy(global, &workspace, content.SessionOverrides{}); got.DecisionFor(content.EffectObserve) != content.DecisionAsk {
 		t.Fatal("a workspace policy must override the global default")
 	}
 }
@@ -271,7 +271,9 @@ func TestResolvePolicy_SessionOverrideChangesOneRowOnly(t *testing.T) {
 		Observe:           content.EffectRow{Decision: content.DecisionAsk, Scopes: []content.GrantScope{{Kind: content.ResourcePath, ID: "/w"}}},
 		MutateDestructive: content.EffectRow{Decision: content.DecisionAsk},
 	}
-	got := content.ResolvePolicy(global, nil, content.SessionOverrides{content.EffectObserve: content.DecisionPermit})
+	got := content.ResolvePolicy(global, nil, content.SessionOverrides{
+		Decisions: map[content.Effect]content.Decision{content.EffectObserve: content.DecisionPermit},
+	})
 
 	if d := got.DecisionFor(content.EffectObserve); d != content.DecisionPermit {
 		t.Fatalf("observe: got %q, want permit", d)
@@ -290,7 +292,7 @@ func TestResolvePolicy_NoSessionOverridesIsTheOldBehaviour(t *testing.T) {
 	global := content.EffectPolicy{Observe: content.EffectRow{Decision: content.DecisionPermit}}
 	ws := &content.EffectPolicy{Observe: content.EffectRow{Decision: content.DecisionRefuse}}
 
-	if d := content.ResolvePolicy(global, nil, nil).DecisionFor(content.EffectObserve); d != content.DecisionPermit {
+	if d := content.ResolvePolicy(global, nil, content.SessionOverrides{}).DecisionFor(content.EffectObserve); d != content.DecisionPermit {
 		t.Fatalf("nil overrides, no workspace: got %q, want permit", d)
 	}
 	if d := content.ResolvePolicy(global, ws, content.SessionOverrides{}).DecisionFor(content.EffectObserve); d != content.DecisionRefuse {
@@ -302,7 +304,9 @@ func TestResolvePolicy_SessionOverlaysOnTopOfTheWorkspace(t *testing.T) {
 	global := content.EffectPolicy{Observe: content.EffectRow{Decision: content.DecisionRefuse}}
 	ws := &content.EffectPolicy{Observe: content.EffectRow{Decision: content.DecisionAsk}}
 
-	got := content.ResolvePolicy(global, ws, content.SessionOverrides{content.EffectObserve: content.DecisionPermit})
+	got := content.ResolvePolicy(global, ws, content.SessionOverrides{
+		Decisions: map[content.Effect]content.Decision{content.EffectObserve: content.DecisionPermit},
+	})
 	if d := got.DecisionFor(content.EffectObserve); d != content.DecisionPermit {
 		t.Fatalf("session over workspace: got %q, want permit", d)
 	}
@@ -339,7 +343,9 @@ func TestSetRowDecision_IgnoresADecisionOutsideTheEnum(t *testing.T) {
 func TestResolvePolicy_InvalidSessionDecisionIsIgnored(t *testing.T) {
 	// Fail toward asking: a value outside the enum must never widen a row.
 	global := content.EffectPolicy{Observe: content.EffectRow{Decision: content.DecisionAsk}}
-	got := content.ResolvePolicy(global, nil, content.SessionOverrides{content.EffectObserve: content.Decision("yes-please")})
+	got := content.ResolvePolicy(global, nil, content.SessionOverrides{
+		Decisions: map[content.Effect]content.Decision{content.EffectObserve: content.Decision("yes-please")},
+	})
 	if d := got.DecisionFor(content.EffectObserve); d != content.DecisionAsk {
 		t.Fatalf("invalid override: got %q, want the untouched ask", d)
 	}

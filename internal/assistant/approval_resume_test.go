@@ -165,7 +165,7 @@ func TestAsk_ASessionAnswerStopsTheNextProposalAsking(t *testing.T) {
 		t.Fatal("the exact proposal the middleware asked about was not pending")
 	}
 	answered := content.ResolvePolicy(askEveryTimeMatrix(), nil, content.SessionOverrides{
-		content.EffectObserve: content.DecisionPermit,
+		Decisions: map[content.Effect]content.Decision{content.EffectObserve: content.DecisionPermit},
 	}).AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: dir}})
 
 	// The resume, under the re-minted grant: the restored call runs, the

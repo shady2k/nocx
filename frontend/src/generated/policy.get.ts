@@ -33,6 +33,10 @@ export interface PolicyGet {
     disclose: Row4
     'cross-boundary': Row5
     delegate: Row6
+    /**
+     * Invocation-specific standing answers. Rules never name tools and match the canonical command invocation.
+     */
+    rules?: Rule[]
   }
 }
 /**
@@ -135,4 +139,11 @@ export interface Row6 {
    * The resource scopes the decision applies within: a call naming a resource outside the row's scopes is refused. The rule that survives any amount of flexibility: no scope may name a TOOL — the policy is over resources and effects, never over tool names (ADR-0028 decision 4).
    */
   scopes: Scope[]
+}
+export interface Rule {
+  /**
+   * @minItems 1
+   */
+  pattern: [[string, ...string[]], ...[string, ...string[]][]]
+  decision: 'permit' | 'ask' | 'refuse'
 }

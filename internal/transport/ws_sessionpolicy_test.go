@@ -14,10 +14,10 @@ func TestSessionPolicyStore_ScopedToOneSession(t *testing.T) {
 	s := newSessionPolicyStore()
 	s.Set(session.ID("a"), content.EffectObserve, content.DecisionPermit)
 
-	if got := s.For(session.ID("a"))[content.EffectObserve]; got != content.DecisionPermit {
+	if got := s.For(session.ID("a")).Decisions[content.EffectObserve]; got != content.DecisionPermit {
 		t.Fatalf("session a: got %q, want permit", got)
 	}
-	if _, ok := s.For(session.ID("b"))[content.EffectObserve]; ok {
+	if _, ok := s.For(session.ID("b")).Decisions[content.EffectObserve]; ok {
 		t.Fatal("session b saw session a's answer")
 	}
 }
@@ -28,7 +28,7 @@ func TestSessionPolicyStore_DropClearsTheSession(t *testing.T) {
 	s.Set(session.ID("a"), content.EffectMutateDestructive, content.DecisionRefuse)
 	s.Drop(session.ID("a"))
 
-	if got := s.For(session.ID("a")); len(got) != 0 {
+	if got := s.For(session.ID("a")); len(got.Decisions) != 0 || len(got.Rules) != 0 {
 		t.Fatalf("after drop: got %+v, want empty", got)
 	}
 }
@@ -43,14 +43,14 @@ func TestSessionPolicyStore_ForHandsOutACopy(t *testing.T) {
 	s.Set(session.ID("a"), content.EffectObserve, content.DecisionPermit)
 
 	got := s.For(session.ID("a"))
-	got[content.EffectMutateDestructive] = content.DecisionPermit
-	delete(got, content.EffectObserve)
+	got.Decisions[content.EffectMutateDestructive] = content.DecisionPermit
+	delete(got.Decisions, content.EffectObserve)
 
 	live := s.For(session.ID("a"))
-	if d := live[content.EffectObserve]; d != content.DecisionPermit {
+	if d := live.Decisions[content.EffectObserve]; d != content.DecisionPermit {
 		t.Fatalf("observe: got %q, want permit — the caller's edit reached the store", d)
 	}
-	if _, widened := live[content.EffectMutateDestructive]; widened {
+	if _, widened := live.Decisions[content.EffectMutateDestructive]; widened {
 		t.Fatal("mutate-destructive: the caller's insert reached the store")
 	}
 }
@@ -62,10 +62,10 @@ func TestSessionPolicyStore_UnknownSessionIsEmptyNotNil(t *testing.T) {
 	s := newSessionPolicyStore()
 
 	got := s.For(session.ID("never-seen"))
-	if got == nil {
-		t.Fatal("got nil, want an empty overlay")
+	if got.Decisions == nil || got.Rules == nil {
+		t.Fatal("got nil overlay members, want initialized empty overlay")
 	}
-	if len(got) != 0 {
+	if len(got.Decisions) != 0 || len(got.Rules) != 0 {
 		t.Fatalf("got %+v, want empty", got)
 	}
 }
@@ -125,13 +125,13 @@ func assertDroppedBy(t *testing.T, teardown func(s *WSServer, sess session.Sessi
 	sid := sess.ID()
 
 	s.sessionPolicy.Set(sid, content.EffectObserve, content.DecisionPermit)
-	if got := s.sessionPolicy.For(sid)[content.EffectObserve]; got != content.DecisionPermit {
+	if got := s.sessionPolicy.For(sid).Decisions[content.EffectObserve]; got != content.DecisionPermit {
 		t.Fatalf("precondition: got %q, want permit before teardown", got)
 	}
 
 	teardown(s, sess, fake)
 
-	if got := s.sessionPolicy.For(sid); len(got) != 0 {
+	if got := s.sessionPolicy.For(sid); len(got.Decisions) != 0 || len(got.Rules) != 0 {
 		t.Fatalf("after teardown: got %+v, want empty — this path leaks the permission past its session", got)
 	}
 }
@@ -178,12 +178,12 @@ func TestSessionPolicy_PendingAskDiesWithItsSession(t *testing.T) {
 	s.sessionPolicy.Set(sid, content.EffectObserve, content.DecisionPermit)
 	s.closeSession(sid, sess)
 
-	if got := s.sessionPolicy.For(sid); len(got) != 0 {
+	if got := s.sessionPolicy.For(sid); len(got.Decisions) != 0 || len(got.Rules) != 0 {
 		t.Fatalf("after close: got %+v, want empty", got)
 	}
 	// And the run grant minted for that id afterwards carries no trace of the
 	// answer: the overlay is what "this session" meant, and it is gone.
-	if got := s.sessionPolicy.For(sid)[content.EffectObserve]; got != "" {
+	if got := s.sessionPolicy.For(sid).Decisions[content.EffectObserve]; got != "" {
 		t.Fatalf("observe: got %q, want no override", got)
 	}
 }

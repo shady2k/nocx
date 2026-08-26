@@ -175,11 +175,6 @@
     },
     {
       "kind": "exports",
-      "file": "src/suggest/providers.ts",
-      "symbol": "shellCompleteProvider"
-    },
-    {
-      "kind": "exports",
       "file": "src/ui/icons/index.ts",
       "symbol": "PauseIcon"
     },
@@ -202,26 +197,6 @@
       "kind": "exports",
       "file": "src/unresolved-redactions.ts",
       "symbol": "hasUnresolved"
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/files.download.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/files.downloadCancel.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/files.downloadDone.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/files.downloadProgress.ts",
-      "symbol": ""
     },
     {
       "kind": "files",
@@ -427,6 +402,11 @@
       "kind": "types",
       "file": "src/generated/panes.setCwd.ts",
       "symbol": "Pane"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/policy.get.ts",
+      "symbol": "Rule"
     },
     {
       "kind": "types",

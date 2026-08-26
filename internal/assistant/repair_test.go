@@ -100,3 +100,109 @@ func TestAsk_WhatAProgramAnswersReachesTheModelMarkedUntrusted(t *testing.T) {
 		t.Fatalf("a file's contents reached the model unmarked:\n%s", body)
 	}
 }
+
+// THE FAILURE A LIVE MODEL ACTUALLY PRODUCED, first question asked through
+// the program carrier (2026-08-27): the description lists the functions a
+// program may call, and the model called one of them AS A TOOL. eino cannot
+// resolve a name it was never given —
+//
+//	[NodeRunError] tool run not found in toolsNode indexes
+//
+// — and it fails the node before any middleware of ours is reached, so the
+// run died and the person read "the model failed to answer".
+//
+// A model reaching for a name that does not exist is the most ordinary
+// mistake there is, and under every carrier it must be a RESULT it can read
+// and correct.
+func TestAsk_AToolTheModelInventedIsAnsweredRatherThanFatal(t *testing.T) {
+	for _, tc := range []struct {
+		carrier  CarrierKind
+		invented string
+		wants    []string
+	}{
+		{CarrierProgram, "run", []string{"run_program"}},
+		{CarrierGraph, "session_read", []string{"run_plan"}},
+		{CarrierCalls, "definitely.not.a.tool", []string{"no such tool"}},
+	} {
+		t.Run(string(tc.carrier), func(t *testing.T) {
+			grant, _ := testDirGrant(t, autonomousMatrix())
+			f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{
+				name: tc.invented,
+				args: `{"command":"ls"}`,
+			}))
+			defer srv.Close()
+
+			cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+			if clErr != nil {
+				t.Fatalf("newClient: %v", clErr)
+			}
+			p := askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore())
+			p.Carrier = tc.carrier
+			if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
+				t.Fatalf("an invented tool name killed the run: %v", err)
+			}
+			body, _ := f.lastBody.Load().(string)
+			for _, want := range tc.wants {
+				if !strings.Contains(body, want) {
+					t.Fatalf("the model was not told how to recover (%q missing):\n%s", want, body)
+				}
+			}
+		})
+	}
+}
+
+// THE CAUSE, not the symptom. The prompt used to tell every run "pass that
+// string as the sessionId argument of every TOOL that takes one" and "you act
+// only through the TOOLS you are given" — true under the declared-call
+// carrier, false under a composing one, where there is a single tool that
+// takes no sessionId and the things the model reaches for are lines of a
+// program. The model did what the prompt said and the run died.
+func TestSystemPrompt_DescribesTheCarrierThisRunActuallyUses(t *testing.T) {
+	facts := func(k CarrierKind) SystemPromptFacts {
+		return SystemPromptFacts{SessionID: "sess-1", Cwd: "/x", OS: "linux", Carrier: k}
+	}
+
+	calls := SystemPrompt(facts(CarrierCalls))
+	if !strings.Contains(calls, "You act only through the tools you are given") {
+		t.Fatalf("the shipped prompt changed:\n%s", calls)
+	}
+
+	program := SystemPrompt(facts(CarrierProgram))
+	for _, want := range []string{
+		"ONE tool, run_program",
+		"they are not tools and calling one directly does nothing",
+		"sessionId argument of every function",
+	} {
+		if !strings.Contains(program, want) {
+			t.Fatalf("the program-carrier prompt does not say %q:\n%s", want, program)
+		}
+	}
+	if strings.Contains(program, "You act only through the tools you are given") {
+		t.Fatalf("the program-carrier prompt still describes the declared-call world:\n%s", program)
+	}
+
+	plan := SystemPrompt(facts(CarrierGraph))
+	if !strings.Contains(plan, "ONE tool, run_plan") || !strings.Contains(plan, "every effect that takes one") {
+		t.Fatalf("the plan-carrier prompt does not describe a plan:\n%s", plan)
+	}
+}
+
+// And the tool's own description says the same thing in the place the model
+// reads it, with a worked example — told only the rules, a live model called
+// one of the listed functions as a tool.
+func TestProgramDescription_SaysTheseAreNotToolsAndShowsTheShape(t *testing.T) {
+	grant, _ := testDirGrant(t, autonomousMatrix())
+	k := kernelFor(t, grant, &fakeLedger{})
+	desc := programDescription(k.registry.ForGrant(k.grant))
+
+	for _, want := range []string{
+		"NOT tools",
+		"calling one of them as a tool does nothing",
+		"Example of the shape",
+		"answer(result[\"text\"])",
+	} {
+		if !strings.Contains(desc, want) {
+			t.Fatalf("the description does not say %q:\n%s", want, desc)
+		}
+	}
+}

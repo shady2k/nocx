@@ -78,7 +78,7 @@ func buildModel(httpClient *http.Client, key credential.Secret, baseURL, model s
 // Every error this returns is a stream failure the caller maps into a probe
 // outcome or a terminal run state; a nil return means a response was
 // received in full.
-func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, headers []Header, msgs []*schema.Message, tools []tool.BaseTool, handlers []adk.ChatModelAgentMiddleware, checkpoints *runCheckpoints, checkpointID string, onEvent func(AskEvent) error) error {
+func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, headers []Header, msgs []*schema.Message, tools []tool.BaseTool, unknownTool func(ctx context.Context, name, rawArgs string) (string, error), handlers []adk.ChatModelAgentMiddleware, checkpoints *runCheckpoints, checkpointID string, onEvent func(AskEvent) error) error {
 	cm, err := buildModel(httpClient, key, baseURL, model)
 	if err != nil {
 		return err
@@ -100,8 +100,20 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 		// means in order, NOT stop on failure — sequentialRunToolCall loops
 		// every task and never inspects tasks[i].err, so the latch is what
 		// makes a refused call stop the ones after it.
+		//
+		// UnknownToolsHandler is the framework's seam for a name we never
+		// declared, and without it the node FAILS: eino resolves the call
+		// before any middleware of ours runs, so a model reaching for a tool
+		// that does not exist ended the run with a framework error nothing
+		// could name — over the most ordinary mistake a model makes. The
+		// carrier answers it, because what to say depends on which one is
+		// driving (carrier.go's UnknownTool).
 		cfg.ToolsConfig = adk.ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: tools, ExecuteSequentially: true},
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools:               tools,
+				ExecuteSequentially: true,
+				UnknownToolsHandler: unknownTool,
+			},
 		}
 	}
 	// The policy middleware (nocx-lndv): the run's grant decides what the
@@ -355,6 +367,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	}
 
 	var declared []tool.BaseTool
+	var unknownTool func(ctx context.Context, name, rawArgs string) (string, error)
 	var handlers []adk.ChatModelAgentMiddleware
 	if p.Grant != nil {
 		permitted := c.tools.ForGrant(*p.Grant)
@@ -389,6 +402,9 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 			if err != nil {
 				return err
 			}
+			unknownTool = func(_ context.Context, name, rawArgs string) (string, error) {
+				return mw.UnknownTool(name, rawArgs)
+			}
 			// FIRST, so it is the outermost user wrapper: its Stream runs
 			// before the policy middleware's and before the framework's
 			// event sender forwards the response, which is what puts every
@@ -405,7 +421,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	// So an Ask whose run has a live checkpoint IS the resume of it —
 	// there is no second flag to keep in step with the store, and no way
 	// to ask for a resume of a run that is not suspended.
-	err := streamModelAnswer(ctx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, declared, handlers, c.checkpoints, p.RunID, sink)
+	err := streamModelAnswer(ctx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, declared, unknownTool, handlers, c.checkpoints, p.RunID, sink)
 	if err != nil {
 		// A suspension is the ONE outcome that keeps the checkpoint: the
 		// run is not over, and the checkpoint is the only thing that can

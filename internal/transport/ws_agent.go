@@ -554,13 +554,19 @@ func environmentForSession(sess session.Session) content.Environment {
 //     the request path, and handed in — the prompt function never looks a
 //     setting up. Read fresh per ask, so a change on the settings screen
 //     governs the next question with no restart and nothing to invalidate.
-func systemPromptFactsFor(sessionID, cwd string, env content.Environment, attached []assistant.AttachedContentItem, personal string) assistant.SystemPromptFacts {
+//   - The CARRIER is read here for the same reason the paragraph is: it has
+//     an owner, and the owner is the settings document. The prompt describes
+//     how the model acts, and under a composing carrier "the tools you are
+//     given" is not how it acts — so the fact travels with the ask rather
+//     than being assumed by the prompt.
+func systemPromptFactsFor(sessionID, cwd string, env content.Environment, attached []assistant.AttachedContentItem, personal string, carrier assistant.CarrierKind) assistant.SystemPromptFacts {
 	f := assistant.SystemPromptFacts{
 		SessionID:            sessionID,
 		Cwd:                  cwd,
 		Env:                  env,
 		AttachedContent:      attached,
 		PersonalInstructions: personal,
+		Carrier:              carrier,
 	}
 	if env.Kind != content.EnvSSH {
 		f.OS = runtime.GOOS
@@ -789,7 +795,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		// carried and the ledger recorded with it, the pane's environment
 		// as environmentForSession already derived it, and the person's
 		// own paragraph as the settings document holds it right now.
-		promptFacts: systemPromptFactsFor(p.SessionID, in.Cwd, in.Env, attached, h.personalParagraph()),
+		promptFacts: systemPromptFactsFor(p.SessionID, in.Cwd, in.Env, attached, h.personalParagraph(), h.chosenCarrier()),
 	}
 	h.pendingRunsMu.Lock()
 	h.pendingRuns[rc.runID] = rc

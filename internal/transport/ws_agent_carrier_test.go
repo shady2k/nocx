@@ -11,6 +11,7 @@ package transport
 // two methods against each other in one sitting.
 
 import (
+	"strings"
 	"testing"
 	"time"
 
@@ -27,7 +28,7 @@ func TestAgentAsk_ThePersonsChosenCarrierDrivesTheNextQuestion(t *testing.T) {
 	h.createEndpoint()
 	sid := openLocalSession(t, h.conn)
 
-	askOnce := func(askID string, id int) assistant.CarrierKind {
+	askOnce := func(askID string, id int) (assistant.CarrierKind, string) {
 		t.Helper()
 		if _, errObj := askOverWire(t, h.conn, map[string]any{
 			"askId": askID, "sessionId": sid, "question": "what is here?",
@@ -38,12 +39,20 @@ func TestAgentAsk_ThePersonsChosenCarrierDrivesTheNextQuestion(t *testing.T) {
 		for range client.deltaCount() {
 			readNotification(t, h.conn, "agent.runDelta", 5*time.Second)
 		}
-		return client.receivedParams.Carrier
+		sys := systemMessages(client.messages())
+		if len(sys) != 1 {
+			t.Fatalf("engine received %d system messages, want exactly one", len(sys))
+		}
+		return client.receivedParams.Carrier, sys[0].Content
 	}
 
 	// Nobody has chosen: the shipped method, which is the authority floor.
-	if got := askOnce("ask-carrier-1", 2); got != assistant.CarrierCalls {
+	got, prompt := askOnce("ask-carrier-1", 2)
+	if got != assistant.CarrierCalls {
 		t.Fatalf("carrier before any choice = %q, want %q", got, assistant.CarrierCalls)
+	}
+	if !strings.Contains(prompt, "You act only through the tools you are given") {
+		t.Fatalf("the shipped prompt is not what an unswitched run sends:\n%s", prompt)
 	}
 
 	// The person chooses the program carrier on the settings screen.
@@ -52,8 +61,17 @@ func TestAgentAsk_ThePersonsChosenCarrierDrivesTheNextQuestion(t *testing.T) {
 	}); isErrorResponse(t, resp) {
 		t.Fatalf("settings.set refused the carrier: %s", resp)
 	}
-	if got := askOnce("ask-carrier-2", 3); got != assistant.CarrierProgram {
+	got, prompt = askOnce("ask-carrier-2", 3)
+	if got != assistant.CarrierProgram {
 		t.Fatalf("carrier after choosing %q = %q", assistant.CarrierProgram, got)
+	}
+	// AND THE PROMPT SAYS SO. Carrying the choice in AskParams while telling
+	// the model it acts "through the tools you are given" is the exact state
+	// that killed the first live run: the model believed the prompt, called
+	// one of the program's functions as a tool, and the run died on a name
+	// the framework could not resolve.
+	if !strings.Contains(prompt, "ONE tool, run_program") {
+		t.Fatalf("the model was told to compose with a program and the prompt never says so:\n%s", prompt)
 	}
 
 	// AND BACK. One direction is a default that happens to match; two is a
@@ -63,8 +81,12 @@ func TestAgentAsk_ThePersonsChosenCarrierDrivesTheNextQuestion(t *testing.T) {
 	}); isErrorResponse(t, resp) {
 		t.Fatalf("settings.set refused the carrier: %s", resp)
 	}
-	if got := askOnce("ask-carrier-3", 4); got != assistant.CarrierCalls {
+	got, prompt = askOnce("ask-carrier-3", 4)
+	if got != assistant.CarrierCalls {
 		t.Fatalf("carrier after switching back = %q, want %q", got, assistant.CarrierCalls)
+	}
+	if strings.Contains(prompt, "run_program") {
+		t.Fatalf("the prompt still describes the program carrier after switching back:\n%s", prompt)
 	}
 }
 

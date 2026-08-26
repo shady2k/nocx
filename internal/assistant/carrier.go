@@ -64,6 +64,16 @@ type carrier interface {
 	// FrameForModel marks a result as untrusted data on its way back to the
 	// model.
 	FrameForModel(tool, result string) string
+	// UnknownTool is what the model is told when it reached for a name this
+	// carrier never offered it.
+	//
+	// IT IS ON THE CARRIER because the answer differs per carrier and is
+	// useless if it does not: under the declared-call carrier the model
+	// invented a tool, and under a composing carrier it most likely reached
+	// for one of the functions the envelope's description names — which is
+	// not a mistake about what exists, but about WHERE to write the call.
+	// Saying "no such tool" to that would be true and would not help.
+	UnknownTool(name, rawArgs string) (string, error)
 }
 
 // newCarrier builds the one this run uses. An unknown kind is an ERROR and
@@ -92,6 +102,11 @@ type callsCarrier struct{ *effectKernel }
 
 func (c *callsCarrier) Declare(permitted []agenttools.Tool) ([]tool.BaseTool, error) {
 	return declaredTools(permitted)
+}
+
+func (c *callsCarrier) UnknownTool(name, _ string) (string, error) {
+	return fmt.Sprintf("There is no such tool %q. The tools you may call are the ones you were given and no others: %s.",
+		name, strings.Join(permittedNames(c.effectKernel), ", ")), nil
 }
 
 // ── The program carrier ────────────────────────────────────────────────
@@ -127,6 +142,21 @@ func (c *programCarrier) Declare(permitted []agenttools.Tool) ([]tool.BaseTool, 
 // marker that a declared call cannot be.
 func (c *programCarrier) FrameForModel(_, result string) string {
 	return agenttools.FrameUntrusted(result)
+}
+
+// UnknownTool: almost always the model calling one of the program's own
+// functions directly, which is what a live model did the first time it was
+// offered this carrier. So it is answered as the misplacement it is, with the
+// call it just tried rewritten into the shape that would have worked.
+func (c *programCarrier) UnknownTool(name, rawArgs string) (string, error) {
+	return fmt.Sprintf(
+		"%q is not a tool — it is a function you may call INSIDE a program. "+
+			"Do not call it directly. Call %s with a program that calls it, like this:\n\n"+
+			"%s(source = ...) where the program is:\n"+
+			"  result = %s(...)   # the arguments you just tried: %s\n"+
+			"  answer(result[\"text\"])\n\n"+
+			"The only tool this run has is %s.",
+		name, programToolName, programToolName, name, rawArgs, programToolName), nil
 }
 
 func (c *programCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (string, error) {
@@ -167,6 +197,17 @@ func (c *planCarrier) Declare(permitted []agenttools.Tool) ([]tool.BaseTool, err
 // FrameForModel: always, for the reason programCarrier's says.
 func (c *planCarrier) FrameForModel(_, result string) string {
 	return agenttools.FrameUntrusted(result)
+}
+
+// UnknownTool: as the program carrier's, one shape further out — a step of a
+// plan rather than a line of a program.
+func (c *planCarrier) UnknownTool(name, rawArgs string) (string, error) {
+	return fmt.Sprintf(
+		"%q is not a tool — it is an effect you may name in a PLAN STEP. "+
+			"Do not call it directly. Call %s with a plan that uses it, like this:\n\n"+
+			`  {"steps":[{"id":"one","effect":%q,"args":{...}},{"answer":"one.text"}]}`+
+			"\n\nThe arguments you just tried were: %s. The only tool this run has is %s.",
+		name, planToolName, name, rawArgs, planToolName), nil
 }
 
 func (c *planCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (string, error) {
@@ -312,19 +353,36 @@ func stringArg(rawArgs, name string) (string, error) {
 // cannot be forgotten here.
 func programDescription(permitted []agenttools.Tool) string {
 	var b strings.Builder
-	b.WriteString("Run one small program that does the whole job in a single step. " +
-		"Write it in Starlark (Python-like). The program's own variables carry each " +
-		"result into the next call, so you never have to see an intermediate value to " +
-		"use it. There are no loops without a bound, no imports, no file or network " +
-		"access, and nothing exists except the functions below.\n\n" +
-		"Call answer(text) with what the person should be told; call it more than once " +
-		"to say several things in order.\n\nAvailable functions:\n")
+	b.WriteString("Do the WHOLE job by writing one program and passing it as `source`. " +
+		"This is the only tool you have; the names below are functions inside the program, " +
+		"NOT tools — calling one of them as a tool does nothing.\n\n" +
+		"The language is Starlark, which reads like Python. A value one call returns is a " +
+		"variable the next call can use, so you never have to see an intermediate result to " +
+		"act on it. No imports, no file or network access, no unbounded loops, and nothing " +
+		"exists except the functions below and `answer`.\n\n")
+
+	b.WriteString("Functions:\n")
 	for _, t := range permitted {
 		fmt.Fprintf(&b, "  %s(...) — %s\n", intrinsicName(t.Name), t.Description)
 	}
-	b.WriteString("\nEvery function takes its arguments by name and returns the tool's " +
-		"result as a dict. Permissions are unchanged: a call the person has to approve " +
-		"still stops and asks.")
+	b.WriteString("  answer(text) — what the person is told. Call it more than once to say " +
+		"several things in order.\n\n")
+
+	// A WORKED EXAMPLE, and it is not decoration. Told only the rules, a live
+	// model called one of the functions above as a tool — which is what the
+	// rest of its prompt had trained it to do. An example is the shortest
+	// unambiguous statement of "this is program text, and here is its shape".
+	// It is built from a real permitted tool rather than written out, so it
+	// cannot name something this run does not have.
+	if len(permitted) > 0 {
+		fmt.Fprintf(&b, "Example of the shape (not of what to do):\n"+
+			"  result = %s(argument = \"value\")\n"+
+			"  answer(result[\"text\"])\n\n", intrinsicName(permitted[0].Name))
+	}
+
+	b.WriteString("Every function takes its arguments BY NAME and returns the tool's result as " +
+		"a dict. Permissions are unchanged: a call the person has to approve still stops and " +
+		"asks, and the program continues from there once they answer.")
 	return b.String()
 }
 

@@ -63,7 +63,11 @@ func newGuardedHTTPClientWithResolver(logger log.Logger, resolve func(ctx contex
 	})
 	tr := &guardedTransport{Transport: pt, inner: pt.Inner, proxy: pt.Proxy}
 	return &http.Client{
-		Transport:     tr,
+		// The wire tap is OUTSIDE the guard, so what it records is what the
+		// guard let through — the bytes that actually left. Inside it, it
+		// would record what we hoped to send (wiretap.go; off unless
+		// NOCX_WIRE_LOG names a file).
+		Transport:     newWireTap(tr),
 		CheckRedirect: pt.CheckRedirect,
 	}
 }

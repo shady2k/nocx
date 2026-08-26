@@ -32,6 +32,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclecodec"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 const (
@@ -763,7 +764,9 @@ func TestZshNestedChildStillborn(t *testing.T) {
 	// on the CHANNEL. One transport cannot speak for the other, so wait for
 	// the sentinel itself (channelShell.run carries the long note) — and do
 	// it before taking the kernel mutex, so nothing waits while holding it.
-	waitForOutput(t, s, "STILLBORN-SUDO-RAN", 15*time.Second)
+	testwait.WaitForTimeout(t, "the STILLBORN-SUDO-RAN sentinel", 15*time.Second, func() bool {
+		return strings.Contains(s.output(), "STILLBORN-SUDO-RAN")
+	})
 
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -912,7 +915,9 @@ func TestZshNestedChildStillbornSu(t *testing.T) {
 	// The sentinel is written to the PTY; k.parentActivated was observed on
 	// the CHANNEL. One transport cannot speak for the other — wait for the
 	// sentinel itself (channelShell.run carries the long note).
-	waitForOutput(t, s, "su: Authentication failure", 15*time.Second)
+	testwait.WaitForTimeout(t, "the sudo authentication failure sentinel", 15*time.Second, func() bool {
+		return strings.Contains(s.output(), "su: Authentication failure")
+	})
 
 	// A late frame from the never-established child: inject a hello with
 	// the child's full tuple after the parent restored, and assert the
@@ -1001,7 +1006,9 @@ func TestBashNestedChildDomainSuFallback(t *testing.T) {
 	k.mu.Unlock()
 
 	// PTY sentinel after a CHANNEL wait: wait for the sentinel itself.
-	waitForOutput(t, s, "FALLBACK-CHILD-RAN", 15*time.Second)
+	testwait.WaitForTimeout(t, "the FALLBACK-CHILD-RAN sentinel", 15*time.Second, func() bool {
+		return strings.Contains(s.output(), "FALLBACK-CHILD-RAN")
+	})
 
 	// A late frame from the never-established child is rejected and
 	// counted.

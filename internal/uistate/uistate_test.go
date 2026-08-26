@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // ── Fingerprint ────────────────────────────────────────────────────────
@@ -711,7 +712,7 @@ func TestRestoreAndWatchWaitsForAWindowThatIsNotReadyYet(t *testing.T) {
 	// Waited on the state changing, never on a duration: the tick is an
 	// implementation detail and a test that slept for one would be a test about
 	// this machine's speed.
-	waitFor(t, "the window to be placed once it can answer", func() bool {
+	testwait.WaitFor(t, "the window to be placed once it can answer", func() bool {
 		return placer.calls() > 0
 	})
 
@@ -744,11 +745,11 @@ func TestRestoreAndWatchRecordsAfterAnUnreadyStart(t *testing.T) {
 	defer cancel()
 	go s.RestoreAndWatch(ctx, probe, &fakePlacer{}, time.Millisecond)
 
-	waitFor(t, "the moved window to reach the document", func() bool {
+	testwait.WaitFor(t, "the moved window to reach the document", func() bool {
 		w := s.Window()
 		return w.Width == 1280 && w.Height == 800 && w.X == 40 && w.Y == 20
 	})
-	waitFor(t, "the document to be written", func() bool { return rec.writes() > 0 })
+	testwait.WaitFor(t, "the document to be written", func() bool { return rec.writes() > 0 })
 }
 
 // A window that never becomes readable must not spin forever, and must let go
@@ -764,29 +765,13 @@ func TestRestoreAndWatchStopsWhenTheContextIsCancelled(t *testing.T) {
 		close(done)
 	}()
 
-	waitFor(t, "the probe to be asked at least once", func() bool { return probe.asked() > 0 })
+	testwait.WaitFor(t, "the probe to be asked at least once", func() bool { return probe.asked() > 0 })
 	cancel()
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
 		t.Fatal("RestoreAndWatch outlived its context")
 	}
-}
-
-// waitFor blocks until cond holds, failing with what it was waiting for rather
-// than with a bare timeout. Polling a condition is what keeps these tests
-// independent of how fast the machine is (AGENTS.md: a test may not depend on
-// timing).
-func waitFor(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
 }
 
 // lateProbe answers `ok=false` for its first `silentFor` calls, which is what

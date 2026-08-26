@@ -27,6 +27,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/transfer"
 )
 
@@ -158,7 +159,7 @@ func dropSubscriber(t *testing.T, e *filesTestEnv, sid string) {
 		t.Fatalf("no rx for session %s", sid)
 	}
 	_ = e.conn.Close()
-	waitFor(t, "the server to observe the drop", wantWithin, func() bool {
+	testwait.WaitForTimeout(t, "the server to observe the drop", wantWithin, func() bool {
 		c, _ := rx.getSubscriber()
 		return c == nil
 	})
@@ -286,7 +287,7 @@ func TestUploadDone_RetentionIsClearedOnDelivery(t *testing.T) {
 	// A second reattach must be told nothing: the outcome was consumed by
 	// the first one.
 	_ = connB.Close()
-	waitFor(t, "the server to observe the second drop", wantWithin, func() bool {
+	testwait.WaitForTimeout(t, "the server to observe the second drop", wantWithin, func() bool {
 		c, _ := e.ws.getRx(session.ID(sid)).getSubscriber()
 		return c == nil
 	})

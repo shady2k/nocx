@@ -32,6 +32,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // TestLiveSshd_CarrierBootstrapReachesAcceptedDomain is the happy path of the
@@ -42,7 +43,7 @@ func TestLiveSshd_CarrierBootstrapReachesAcceptedDomain(t *testing.T) {
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash, installer)
 
-	waitFor(t, "domain established", 20*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "domain established", 20*time.Second, func() bool {
 		kernel.mu.Lock()
 		defer kernel.mu.Unlock()
 		if kernel.minted != 1 {
@@ -59,7 +60,7 @@ func TestLiveSshd_CarrierBootstrapReachesAcceptedDomain(t *testing.T) {
 	// unlinked descriptor.
 	att := runLine(t, ch, kernel, "printf 'CARRIER_PROOF\\n'; sleep 0.3", 0)
 	fence := fmt.Sprintf("\x1b]1337;NOCX_FENCE;%x\x07", att.Fence)
-	waitFor(t, "the command's output and its fence", 15*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the command's output and its fence", 15*time.Second, func() bool {
 		return strings.Contains(out.String(), "CARRIER_PROOF") &&
 			strings.Contains(out.String(), fence)
 	})
@@ -77,7 +78,7 @@ func TestLiveSshd_CarrierBootstrapReachesAcceptedDomain(t *testing.T) {
 	if _, err := ch.Write([]byte("exit\n")); err != nil {
 		t.Fatalf("write exit: %v", err)
 	}
-	waitFor(t, "session end after exit", 20*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "session end after exit", 20*time.Second, func() bool {
 		select {
 		case <-ch.Done():
 			return true
@@ -103,7 +104,7 @@ func TestLiveSshd_WithNothingPublishedTheSessionStillReachesAPrompt(t *testing.T
 	ch, out := fx.connect(t, kernel, ssh.ShellBash)
 
 	// The prompt arrives without a domain: this session is conventional.
-	waitFor(t, "a usable prompt with nothing installed", 20*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "a usable prompt with nothing installed", 20*time.Second, func() bool {
 		if _, err := ch.Write([]byte("printf 'NO_BUNDLE%s\\n' _OK\n")); err != nil {
 			return false
 		}
@@ -153,7 +154,7 @@ func TestLiveSshd_InputIsRefusedUntilTheTerminalOutcome(t *testing.T) {
 
 	// The refused keystroke was DROPPED, not queued: it must not appear
 	// later, and the session must still work.
-	waitFor(t, "a usable prompt after the outcome", 20*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "a usable prompt after the outcome", 20*time.Second, func() bool {
 		if _, err := ch.Write([]byte("printf 'AFTER%s\\n' _OUTCOME\n")); err != nil {
 			return false
 		}
@@ -182,7 +183,7 @@ func TestLiveSshd_ForwardingRefusedStillReachesAConventionalPrompt(t *testing.T)
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash, installer)
 
-	waitFor(t, "a usable conventional terminal", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "a usable conventional terminal", 30*time.Second, func() bool {
 		if _, err := ch.Write([]byte("printf 'CONVENTIONAL%s\\n' _OK\n")); err != nil {
 			return false
 		}
@@ -210,7 +211,7 @@ func TestLiveSshd_ConnectionLossRevokesTheBootstrappedDomain(t *testing.T) {
 	kernel := newRecordingKernel()
 	ch, _ := fx.connect(t, kernel, ssh.ShellBash, installer)
 
-	waitFor(t, "domain established", 20*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "domain established", 20*time.Second, func() bool {
 		kernel.mu.Lock()
 		defer kernel.mu.Unlock()
 		if kernel.minted != 1 {
@@ -223,7 +224,7 @@ func TestLiveSshd_ConnectionLossRevokesTheBootstrappedDomain(t *testing.T) {
 		t.Fatalf("write sleep: %v", err)
 	}
 	var att lifecycle.ExecutionAttempt
-	waitFor(t, "the sleep attempt to be open", 20*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the sleep attempt to be open", 20*time.Second, func() bool {
 		kernel.mu.Lock()
 		defer kernel.mu.Unlock()
 		a, ok := kernel.OpenAttempt(kernel.domain)
@@ -235,13 +236,13 @@ func TestLiveSshd_ConnectionLossRevokesTheBootstrappedDomain(t *testing.T) {
 	if err := fx.client.Close(); err != nil {
 		t.Fatalf("close pooled client: %v", err)
 	}
-	waitFor(t, "domain lost", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "domain lost", 30*time.Second, func() bool {
 		kernel.mu.Lock()
 		defer kernel.mu.Unlock()
 		d, ok := kernel.Domain(kernel.domain)
 		return ok && d.State == lifecycle.DomainLost
 	})
-	waitFor(t, "open attempt unknown", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "open attempt unknown", 30*time.Second, func() bool {
 		kernel.mu.Lock()
 		defer kernel.mu.Unlock()
 		a, ok := kernel.Attempt(att.ID)

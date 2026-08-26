@@ -50,6 +50,7 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/testwait"
 	gosshagent "golang.org/x/crypto/ssh/agent"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -599,7 +600,7 @@ func (h *sshChildHarness) requestChild(host string, port int, user string) {
 // a shell-originated start is admitted from (kernel decision 5).
 func (h *sshChildHarness) promptReadyParent() {
 	h.send(lifecycle.Event{Kind: lifecycle.KindPromptReady, PromptReady: &lifecycle.PromptReady{}})
-	waitFor(h.t, "parent at a ready prompt", 10*time.Second, func() bool {
+	testwait.WaitForTimeout(h.t, "parent at a ready prompt", 10*time.Second, func() bool {
 		return h.laneSnapshot().Lifecycle == lifecycle.LifecyclePromptReady
 	})
 }
@@ -612,7 +613,7 @@ func (h *sshChildHarness) startParentAttempt(id, command string) lifecycle.Attem
 		Kind:  lifecycle.KindStart,
 		Start: &lifecycle.Start{AttemptID: &att, Command: command},
 	})
-	waitFor(h.t, "the parent's attempt opened", 10*time.Second, func() bool {
+	testwait.WaitForTimeout(h.t, "the parent's attempt opened", 10*time.Second, func() bool {
 		a, ok := h.kernel.Attempt(att)
 		return ok && a.State == lifecycle.AttemptOpen
 	})
@@ -774,7 +775,7 @@ func TestLiveSshd_SSHChildAssembly_ChildEstablishesOverComposedLine(t *testing.T
 
 	h.suspendParent()
 	// The suspend frame is processed by the listener's pump; wait for it.
-	waitFor(t, "parent Suspended", 10*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "parent Suspended", 10*time.Second, func() bool {
 		return h.domainState(h.parent) == lifecycle.DomainSuspended
 	})
 	if ls := h.laneSnapshot(); ls.Domain != "" {
@@ -795,11 +796,11 @@ func TestLiveSshd_SSHChildAssembly_ChildEstablishesOverComposedLine(t *testing.T
 	})
 
 	// The child establishes through the far shell's hello on the -R'd port.
-	waitFor(t, "child domain Established via its own hello", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "child domain Established via its own hello", 30*time.Second, func() bool {
 		return h.domainState(h.child) == lifecycle.DomainEstablished
 	})
 	// The lane is owned by the child for the whole interval.
-	waitFor(t, "lane owned by the child", 10*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "lane owned by the child", 10*time.Second, func() bool {
 		ls := h.laneSnapshot()
 		return ls.Domain == h.child && ls.Lifecycle == lifecycle.LifecyclePromptReady
 	})
@@ -811,7 +812,7 @@ func TestLiveSshd_SSHChildAssembly_ChildEstablishesOverComposedLine(t *testing.T
 	// The user finishes the nested session: exit at the far shell, through
 	// the composed line's cat → ssh → far pty. The child's speaker leaves.
 	proc.typeExit()
-	waitFor(t, "child ended and left the stack", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "child ended and left the stack", 30*time.Second, func() bool {
 		st := h.domainState(h.child)
 		return st == lifecycle.DomainClosed || st == lifecycle.DomainLost
 	})
@@ -828,7 +829,7 @@ func TestLiveSshd_SSHChildAssembly_ChildEstablishesOverComposedLine(t *testing.T
 	// Activation is the ONLY way back: the authenticated domain_activated
 	// frame restores the parent to the lane.
 	h.activateParent()
-	waitFor(t, "parent re-established and owning the lane", 10*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "parent re-established and owning the lane", 10*time.Second, func() bool {
 		if st := h.domainState(h.parent); st != lifecycle.DomainEstablished {
 			return false
 		}
@@ -861,7 +862,7 @@ func TestLiveSshd_SSHChildAssembly_ExitFreezesTheChildBlockAndCompletesTheParent
 
 	h.requestChild("127.0.0.1", fx.fixturePort(), fx.user)
 	h.suspendParent()
-	waitFor(t, "parent Suspended", 10*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "parent Suspended", 10*time.Second, func() bool {
 		return h.domainState(h.parent) == lifecycle.DomainSuspended
 	})
 	// Suspension is not completion: the parent's block is still open, and it
@@ -880,7 +881,7 @@ func TestLiveSshd_SSHChildAssembly_ExitFreezesTheChildBlockAndCompletesTheParent
 			t.Logf("child attempts published: %v", h.facts.commands(h.child))
 		}
 	})
-	waitFor(t, "child domain Established via its own hello", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "child domain Established via its own hello", 30*time.Second, func() bool {
 		return h.domainState(h.child) == lifecycle.DomainEstablished
 	})
 
@@ -902,7 +903,7 @@ func TestLiveSshd_SSHChildAssembly_ExitFreezesTheChildBlockAndCompletesTheParent
 		t.Fatalf("type far command: %v", err)
 	}
 	var farAtt lifecycle.AttemptID
-	waitFor(t, "the far command completed on the child domain", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the far command completed on the child domain", 30*time.Second, func() bool {
 		id, ok := h.facts.attemptFor(h.child, "printf nocx-far")
 		if !ok {
 			return false
@@ -919,7 +920,7 @@ func TestLiveSshd_SSHChildAssembly_ExitFreezesTheChildBlockAndCompletesTheParent
 	// own completion. Its block can never receive one — but it must still
 	// END, with a stated unknown rather than a running dot that never stops.
 	proc.typeExit()
-	waitFor(t, "child ended and left the stack", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "child ended and left the stack", 30*time.Second, func() bool {
 		st := h.domainState(h.child)
 		return st == lifecycle.DomainClosed || st == lifecycle.DomainLost
 	})
@@ -957,14 +958,14 @@ func TestLiveSshd_SSHChildAssembly_ExitFreezesTheChildBlockAndCompletesTheParent
 	// ssh client really exited with — the local D of the ssh line, which the
 	// child's departure neither supplies nor invalidates.
 	h.activateParent()
-	waitFor(t, "parent re-established and owning the lane", 10*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "parent re-established and owning the lane", 10*time.Second, func() bool {
 		if st := h.domainState(h.parent); st != lifecycle.DomainEstablished {
 			return false
 		}
 		return h.laneSnapshot().Domain == h.parent
 	})
 	h.completeParentAttempt(parentAtt, 0)
-	waitFor(t, "the parent's ssh block froze with its real status", 10*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the parent's ssh block froze with its real status", 10*time.Second, func() bool {
 		a, ok := h.kernel.Attempt(parentAtt)
 		return ok && a.State == lifecycle.AttemptCompleted && a.ExitCode != nil && *a.ExitCode == 0
 	})
@@ -972,7 +973,7 @@ func TestLiveSshd_SSHChildAssembly_ExitFreezesTheChildBlockAndCompletesTheParent
 	// command — a second `ssh` starts from a clean block, not from whatever
 	// the pane was left holding.
 	h.send(lifecycle.Event{Kind: lifecycle.KindPromptReady, PromptReady: &lifecycle.PromptReady{}})
-	waitFor(t, "lane back at the parent's ready prompt", 10*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "lane back at the parent's ready prompt", 10*time.Second, func() bool {
 		ls := h.laneSnapshot()
 		return ls.Domain == h.parent && ls.Lifecycle == lifecycle.LifecyclePromptReady
 	})
@@ -1027,7 +1028,7 @@ func TestLiveSshd_SSHChildAssembly_ForwardingRefusedParentStillActivates(t *test
 
 	// The parent still activates at its next prompt boundary.
 	h.activateParent()
-	waitFor(t, "parent re-established after the stillborn child", 10*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "parent re-established after the stillborn child", 10*time.Second, func() bool {
 		if st := h.domainState(h.parent); st != lifecycle.DomainEstablished {
 			return false
 		}

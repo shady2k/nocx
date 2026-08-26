@@ -32,6 +32,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/shady2k/nocx/internal/bootstrapprogress"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // progressLog records the stages the reader reports, in order.
@@ -176,7 +177,21 @@ func TestBashBootstrapProgress_AUserRcThatTakesTheShellStopsAtStartupEntered(t *
 
 	// The wrapper is up, so the exec has happened and no further byte can ever
 	// reach the progress descriptor from our rcfile.
-	if got := waitForEither(t, s.shell, "FOREIGN_WRAPPER_UP", "__NOCX_NEVER__"); got != "FOREIGN_WRAPPER_UP" {
+	var verdict string
+	testwait.WaitForTimeout(t, "the foreign wrapper verdict", 20*time.Second, func() bool {
+		out := s.shell.output()
+		ia, ib := strings.LastIndex(out, "FOREIGN_WRAPPER_UP"), strings.LastIndex(out, "__NOCX_NEVER__")
+		if ia == ib {
+			return false
+		}
+		if ia > ib {
+			verdict = "FOREIGN_WRAPPER_UP"
+		} else {
+			verdict = "__NOCX_NEVER__"
+		}
+		return true
+	})
+	if verdict != "FOREIGN_WRAPPER_UP" {
 		t.Fatalf("the fixture's wrapper never took the shell: %q", s.shell.output())
 	}
 	s.progress.waitForStage(t, bootstrapprogress.StageStartupEntered)
@@ -245,7 +260,21 @@ func TestZshBootstrapProgress_AUserRcThatTakesTheShellStopsAtStartupEntered(t *t
 
 	s := startProgressSession(t, zsh, home)
 
-	if got := waitForEither(t, s.shell, "FOREIGN_WRAPPER_UP", "__NOCX_NEVER__"); got != "FOREIGN_WRAPPER_UP" {
+	var verdict string
+	testwait.WaitForTimeout(t, "the foreign wrapper verdict", 20*time.Second, func() bool {
+		out := s.shell.output()
+		ia, ib := strings.LastIndex(out, "FOREIGN_WRAPPER_UP"), strings.LastIndex(out, "__NOCX_NEVER__")
+		if ia == ib {
+			return false
+		}
+		if ia > ib {
+			verdict = "FOREIGN_WRAPPER_UP"
+		} else {
+			verdict = "__NOCX_NEVER__"
+		}
+		return true
+	})
+	if verdict != "FOREIGN_WRAPPER_UP" {
 		t.Fatalf("the fixture's wrapper never took the shell: %q", s.shell.output())
 	}
 	s.progress.waitForStage(t, bootstrapprogress.StageStartupEntered)
@@ -423,7 +452,21 @@ func TestBootstrapProgress_AClosedDescriptorCostsNoTerminal(t *testing.T) {
 
 			// The premise first, on the shell's own word: a descriptor that
 			// IS open would make everything below vacuous.
-			if got := waitForEither(t, s, "NOCX_FD4_CLOSED", "NOCX_FD4_OPEN"); got != "NOCX_FD4_CLOSED" {
+			var verdict string
+			testwait.WaitForTimeout(t, "the fd 4 descriptor verdict", 20*time.Second, func() bool {
+				out := s.output()
+				ia, ib := strings.LastIndex(out, "NOCX_FD4_CLOSED"), strings.LastIndex(out, "NOCX_FD4_OPEN")
+				if ia == ib {
+					return false
+				}
+				if ia > ib {
+					verdict = "NOCX_FD4_CLOSED"
+				} else {
+					verdict = "NOCX_FD4_OPEN"
+				}
+				return true
+			})
+			if verdict != "NOCX_FD4_CLOSED" {
 				t.Fatalf("fd 4 is open in the shell, so this test never exercised a closed descriptor: "+
 					"the fixture leaked one; output=%q", s.output())
 			}

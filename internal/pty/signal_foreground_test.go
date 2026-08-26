@@ -16,6 +16,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/testwait"
 	"golang.org/x/sys/unix"
 )
 
@@ -35,22 +36,6 @@ func waitForeground(t testing.TB, lp *LocalPty) int {
 	}
 	t.Fatal("the pty never reported a foreground process group")
 	return 0
-}
-
-// waitForFile polls until path exists — the observable a child process
-// itself produces (a pid file, a trap's receipt marker) — and returns its
-// trimmed content. The wait is on the observable, never on a duration.
-func waitForFile(t testing.TB, path string) string {
-	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if b, err := os.ReadFile(path); err == nil { //nolint:gosec // the file is the test's own temp file, written by the command under test
-			return strings.TrimSpace(string(b))
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("the file %s never appeared", path)
-	return ""
 }
 
 func TestLocalPty_SignalForegroundAtPromptIsNoop(t *testing.T) {
@@ -140,7 +125,15 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 	}
 
 	// Wait for the observable: the command's own child pid appears.
-	pidText := waitForFile(t, pidFile)
+	var pidText string
+	testwait.WaitFor(t, "the child pid file", func() bool {
+		b, err := os.ReadFile(pidFile) //nolint:gosec // the path is this test's own temp file
+		if err != nil {
+			return false
+		}
+		pidText = strings.TrimSpace(string(b))
+		return true
+	})
 	var childPID int
 	if _, err := fmt.Sscanf(pidText, "%d", &childPID); err != nil || childPID <= 0 {
 		t.Fatalf("the command never wrote a child pid (file holds %q)", pidText)
@@ -157,7 +150,16 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 
 	// Observable one, the receipt: the child's own trap ran — the signal
 	// reached a process that is not the shell.
-	if got := waitForFile(t, marker); got != "reached" {
+	var markerText string
+	testwait.WaitFor(t, "the child's TERM receipt marker", func() bool {
+		b, err := os.ReadFile(marker) //nolint:gosec // the path is this test's own temp file
+		if err != nil {
+			return false
+		}
+		markerText = strings.TrimSpace(string(b))
+		return true
+	})
+	if got := markerText; got != "reached" {
 		t.Fatalf("the child's TERM trap wrote %q, want the receipt marker", got)
 	}
 	// Observable two, the death: the trap's wait reaped the sleep, so the

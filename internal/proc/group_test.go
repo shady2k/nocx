@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/proc"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // TestMain makes this binary the reaper of its own orphans before any test
@@ -51,19 +52,6 @@ func TestMain(m *testing.M) {
 // test or the code under test produces, and the ceiling exists only so a
 // broken build fails instead of hanging.
 const waitCeiling = 20 * time.Second
-
-// waitFor polls pred until it holds or waitCeiling elapses.
-func waitFor(t *testing.T, what string, pred func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(waitCeiling)
-	for time.Now().Before(deadline) {
-		if pred() {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("never observed: %s", what)
-}
 
 // gone reports whether pid names no process at all — not merely a dead one.
 //
@@ -186,7 +174,7 @@ read line < "` + blocker + `"
 func (f fixture) awaitStarted(t *testing.T) (child, grandchild int) {
 	t.Helper()
 	var pids []int
-	waitFor(t, "the fixture to report both pids and the grandchild to install its trap", func() bool {
+	testwait.WaitForTimeout(t, "the fixture to report both pids and the grandchild to install its trap", waitCeiling, func() bool {
 		if _, err := os.Stat(f.readyFile); err != nil {
 			return false
 		}
@@ -235,7 +223,7 @@ func TestKillGroup_KillsATermIgnoringDescendantAndReapsTheChild(t *testing.T) {
 	// The direct child is reaped by the Wait above; without it the process
 	// would linger as a zombie of THIS process for the life of the test
 	// binary, which is the second half of assertion 34.
-	waitFor(t, "the direct child to be reaped", func() bool {
+	testwait.WaitForTimeout(t, "the direct child to be reaped", waitCeiling, func() bool {
 		select {
 		case <-done:
 			return true

@@ -29,6 +29,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 const (
@@ -788,7 +789,9 @@ func testBashChannel_AnswersRefreshWithSnapshot(t *testing.T, shell string) {
 	// the CHANNEL. Waiting for the second says nothing about the first, so
 	// wait for the answer itself (see run's note on the two transports).
 	s.waitForAccepted("complete")
-	waitForOutput(t, s, `PS1=[\w`, 15*time.Second)
+	testwait.WaitForTimeout(t, "pty output PS1=[\\w", 15*time.Second, func() bool {
+		return strings.Contains(s.output(), `PS1=[\w`)
+	})
 	if !strings.Contains(s.output(), `PS1=[\w`) {
 		t.Errorf("visible prompt not restored after desync; output=%q", s.output())
 	}
@@ -1607,8 +1610,9 @@ func testBashNestedRefusedSSHGrantRunsTheCommand(t *testing.T, shell string) {
 	if _, err := s.ptmx.Write([]byte("ssh refused.example.com\n")); err != nil {
 		t.Fatalf("write the ssh line: %v", err)
 	}
-	waitForCount(t, func() int { return k.count("prompt_ready") },
-		promptsBefore+1, "the prompt after the refused nested ssh", s, 15*time.Second)
+	testwait.WaitForTimeout(t, "the prompt after the refused nested ssh", 15*time.Second, func() bool {
+		return k.count("prompt_ready") >= promptsBefore+1
+	})
 
 	out := s.output()
 	if n := strings.Count(out, "STUB-SSH-RAN"); n != 1 {
@@ -1649,8 +1653,9 @@ func testBashNestedAcceptedSSHGrantRunsBootstrap(t *testing.T, shell string) {
 	if _, err := s.ptmx.Write([]byte("ssh granted.example.com\n")); err != nil {
 		t.Fatalf("write the ssh line: %v", err)
 	}
-	waitForCount(t, func() int { return k.count("prompt_ready") },
-		promptsBefore+1, "the prompt after the granted nested ssh", s, 15*time.Second)
+	testwait.WaitForTimeout(t, "the prompt after the granted nested ssh", 15*time.Second, func() bool {
+		return k.count("prompt_ready") >= promptsBefore+1
+	})
 
 	out := s.output()
 	if n := strings.Count(out, "BOOTSTRAP-RAN"); n != 1 {
@@ -1689,8 +1694,9 @@ func TestZshNested_ARefusedSSHGrantStillRunsTheUsersCommandExactlyOnce(t *testin
 	if _, err := s.ptmx.Write([]byte("ssh refused.example.com\n")); err != nil {
 		t.Fatalf("write the ssh line: %v", err)
 	}
-	waitForCount(t, func() int { return k.count("prompt_ready") },
-		promptsBefore+1, "the prompt after the refused nested ssh", s, 15*time.Second)
+	testwait.WaitForTimeout(t, "the prompt after the refused nested ssh", 15*time.Second, func() bool {
+		return k.count("prompt_ready") >= promptsBefore+1
+	})
 
 	out := s.output()
 	if n := strings.Count(out, "STUB-SSH-RAN"); n != 1 {

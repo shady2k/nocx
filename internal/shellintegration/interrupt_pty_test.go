@@ -4,6 +4,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // Ctrl-C at a prompt, watched from BOTH sides at once: the pty (what the
@@ -48,7 +50,9 @@ func TestBashInterruptAnnouncesNoPhantomCommand(t *testing.T) {
 	// line was echoed by the tty driver, the interrupt landed before readline
 	// existed, and the test then failed for its own race while reading
 	// exactly like the product defect it was written for.
-	waitForOutput(t, s, "\x1b]133;B", 15*time.Second)
+	testwait.WaitForTimeout(t, "pty output \x1b]133;B", 15*time.Second, func() bool {
+		return strings.Contains(s.output(), "\x1b]133;B")
+	})
 
 	promptsBefore := strings.Count(s.output(), "\x1b]133;A")
 	cBefore := strings.Count(s.output(), "\x1b]133;C")
@@ -65,7 +69,9 @@ func TestBashInterruptAnnouncesNoPhantomCommand(t *testing.T) {
 	// The line has to reach readline before the interrupt does, or the two
 	// race and the test sometimes interrupts an empty prompt instead — a
 	// weaker case than the one under test.
-	waitForOutput(t, s, "echo abandoned", 10*time.Second)
+	testwait.WaitForTimeout(t, "pty output echo abandoned", 10*time.Second, func() bool {
+		return strings.Contains(s.output(), "echo abandoned")
+	})
 
 	// The interrupt, and then the fresh prompt it must leave behind: the
 	// shell is alive and back at readline. Anchoring on that (rather than on
@@ -74,8 +80,9 @@ func TestBashInterruptAnnouncesNoPhantomCommand(t *testing.T) {
 	// sides. Why the helper re-sends rather than waits longer is its own
 	// comment, and it is the whole of nocx-yjen.
 	interruptUntilPrompt(t, s, promptsBefore)
-	waitForCount(t, func() int { return s.kernel.count("prompt_ready") },
-		promptReadyBefore+1, "prompt_ready after the interrupt", s, 15*time.Second)
+	testwait.WaitForTimeout(t, "prompt_ready after the interrupt", 15*time.Second, func() bool {
+		return s.kernel.count("prompt_ready") >= promptReadyBefore+1
+	})
 
 	if got := strings.Count(s.output(), "\x1b]133;C") - cBefore; got != 0 {
 		t.Errorf("the interrupt emitted %d OSC 133 C marker(s) — a command start for a command the user never ran\noutput: %q",
@@ -166,32 +173,4 @@ func interruptUntilPrompt(t *testing.T, s *channelShell, promptsBefore int) {
 		// smoothing away.
 		t.Logf("the shell took no prompt from the interrupt; sending it again")
 	}
-}
-
-// waitForOutput blocks until substr appears on the pty.
-func waitForOutput(t *testing.T, s *channelShell, substr string, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if strings.Contains(s.output(), substr) {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %q on the pty; output: %q", substr, s.output())
-}
-
-// waitForCount blocks until get() reaches want, then reports what it was
-// waiting for rather than a bare timeout.
-func waitForCount(t *testing.T, get func() int, want int, what string, s *channelShell, timeout time.Duration) {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if get() >= want {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s (want %d, have %d); accepted=%v output=%q",
-		what, want, get(), s.kernel.events(), s.output())
 }

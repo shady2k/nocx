@@ -15,6 +15,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclecodec"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // seqRand yields 1, 2, 3, … (wrapping to 1 after 255) — never a zero byte,
@@ -124,18 +125,6 @@ type refusingTunnel struct{ fakeTunnel }
 
 func (r *refusingTunnel) Listen(addr string) (net.Listener, error) {
 	return nil, errors.New("ssh: tcpip-forward denied")
-}
-
-func waitFor(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
 }
 
 // shellConn is one candidate connection speaking the protocol, the way the
@@ -287,7 +276,7 @@ func TestConfigCarriesPortAndCapability(t *testing.T) {
 	// accepted; the handshake completes over the wire.
 	s := establish(t, a, cfg, cfg.Domain, cfg.Epoch, cfg.Capability)
 	defer s.close()
-	waitFor(t, "domain established", func() bool {
+	testwait.WaitFor(t, "domain established", func() bool {
 		d, ok := k.Domain(cfg.Domain)
 		return ok && d.State == lifecycle.DomainEstablished
 	})
@@ -311,7 +300,7 @@ func TestUnauthenticatedCandidateCannotRevokeOrPreempt(t *testing.T) {
 	// The real shell establishes.
 	sh := establish(t, a, cfg, cfg.Domain, cfg.Epoch, cfg.Capability)
 	defer sh.close()
-	waitFor(t, "domain established", func() bool {
+	testwait.WaitFor(t, "domain established", func() bool {
 		d, ok := k.Domain(cfg.Domain)
 		return ok && d.State == lifecycle.DomainEstablished
 	})
@@ -325,7 +314,7 @@ func TestUnauthenticatedCandidateCannotRevokeOrPreempt(t *testing.T) {
 	}
 	_, _ = attacker.Write([]byte("\x00\x00\x00\xffgarbage-not-a-frame"))
 	time.Sleep(100 * time.Millisecond) // give the adapter time to misbehave
-	waitFor(t, "domain still established", func() bool {
+	testwait.WaitFor(t, "domain still established", func() bool {
 		d, ok := k.Domain(cfg.Domain)
 		return ok && d.State == lifecycle.DomainEstablished
 	})
@@ -354,7 +343,7 @@ func TestUnauthenticatedCandidateCannotRevokeOrPreempt(t *testing.T) {
 	if _, err := bad.conn.Read(make([]byte, 1)); err == nil {
 		t.Fatal("rejected candidate connection must be closed by the adapter")
 	}
-	waitFor(t, "domain untouched", func() bool {
+	testwait.WaitFor(t, "domain untouched", func() bool {
 		d, ok := k.Domain(cfg.Domain)
 		return ok && d.State == lifecycle.DomainEstablished
 	})
@@ -369,7 +358,7 @@ func TestUnauthenticatedCandidateCannotRevokeOrPreempt(t *testing.T) {
 	}
 	sh.start(att.ID, "echo hi")
 	sh.complete(att.ID, 0)
-	waitFor(t, "attempt completed", func() bool {
+	testwait.WaitFor(t, "attempt completed", func() bool {
 		got, ok := k.Attempt(att.ID)
 		return ok && got.State == lifecycle.AttemptCompleted
 	})
@@ -422,7 +411,7 @@ func TestTunnelConnDoneRevokesDomainUnknownsAttempt(t *testing.T) {
 
 	sh := establish(t, a, cfg, cfg.Domain, cfg.Epoch, cfg.Capability)
 	defer sh.close()
-	waitFor(t, "domain established", func() bool {
+	testwait.WaitFor(t, "domain established", func() bool {
 		d, ok := k.Domain(cfg.Domain)
 		return ok && d.State == lifecycle.DomainEstablished
 	})
@@ -442,7 +431,7 @@ func TestTunnelConnDoneRevokesDomainUnknownsAttempt(t *testing.T) {
 	// the kernel stops refusing. A refusal creates no attempt, so retrying
 	// cannot leave a spare one behind.
 	var att lifecycle.ExecutionAttempt
-	waitFor(t, "domain past accept", func() bool {
+	testwait.WaitFor(t, "domain past accept", func() bool {
 		a, err := k.SubmitAttempt(cfg.Domain, "sleep 100", "/home/dev", "local")
 		if err != nil {
 			return false
@@ -459,7 +448,7 @@ func TestTunnelConnDoneRevokesDomainUnknownsAttempt(t *testing.T) {
 	// loss path is a no-op instead of a double close.
 	_ = tunnel.Close()
 
-	waitFor(t, "domain lost", func() bool {
+	testwait.WaitFor(t, "domain lost", func() bool {
 		d, ok := k.Domain(cfg.Domain)
 		return ok && d.State == lifecycle.DomainLost
 	})
@@ -489,13 +478,13 @@ func TestTunnelConnDoneStopsServing(t *testing.T) {
 	defer func() { _ = a.Close() }()
 	sh := establish(t, a, cfg, cfg.Domain, cfg.Epoch, cfg.Capability)
 	defer sh.close()
-	waitFor(t, "domain established", func() bool {
+	testwait.WaitFor(t, "domain established", func() bool {
 		d, ok := k.Domain(cfg.Domain)
 		return ok && d.State == lifecycle.DomainEstablished
 	})
 
 	_ = tunnel.Close()
-	waitFor(t, "adapter closed after loss", func() bool {
+	testwait.WaitFor(t, "adapter closed after loss", func() bool {
 		return errors.Is(a.Send(lifecycle.Envelope{}), ErrClosed)
 	})
 	// The listener is gone: a new candidate cannot connect at all. This
@@ -504,7 +493,7 @@ func TestTunnelConnDoneStopsServing(t *testing.T) {
 	// listener after releasing it, so Send refuses FIRST and a dial in
 	// that window still connects. Asserting one state after waiting for
 	// the other is how this read as a product defect on a loaded box.
-	waitFor(t, "listener closed after loss", func() bool {
+	testwait.WaitFor(t, "listener closed after loss", func() bool {
 		c, derr := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(cfg.Port))
 		if derr == nil {
 			_ = c.Close()
@@ -514,7 +503,7 @@ func TestTunnelConnDoneStopsServing(t *testing.T) {
 	})
 	// The kernel stays authoritative: the domain is lost, and the old
 	// capability authenticates nothing further.
-	waitFor(t, "domain lost", func() bool {
+	testwait.WaitFor(t, "domain lost", func() bool {
 		d, ok := k.Domain(cfg.Domain)
 		return ok && d.State == lifecycle.DomainLost
 	})
@@ -539,7 +528,7 @@ func TestCloseRevokesMintedDomainAndReleasesLease(t *testing.T) {
 	if err := a.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
-	waitFor(t, "minted domain revoked on close", func() bool {
+	testwait.WaitFor(t, "minted domain revoked on close", func() bool {
 		d, ok := k.Domain(cfg.Domain)
 		return ok && d.State == lifecycle.DomainLost
 	})
@@ -550,7 +539,7 @@ func TestCloseRevokesMintedDomainAndReleasesLease(t *testing.T) {
 	if err := a.Send(lifecycle.Envelope{}); !errors.Is(err, ErrClosed) {
 		t.Fatalf("Send after close = %v, want ErrClosed", err)
 	}
-	waitFor(t, "tunnel lease released", func() bool { return tunnel.isClosed() })
+	testwait.WaitFor(t, "tunnel lease released", func() bool { return tunnel.isClosed() })
 	// A new candidate cannot be served: the listener is gone.
 	if c, derr := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(cfg.Port)); derr == nil {
 		_ = c.Close()
@@ -653,7 +642,7 @@ func TestOneLaneSeveralDomainsNoCurrentDomain(t *testing.T) {
 	// the right claimant.
 	root := establish(t, a, cfg, cfg.Domain, cfg.Epoch, cfg.Capability)
 	defer root.close()
-	waitFor(t, "root established", func() bool {
+	testwait.WaitFor(t, "root established", func() bool {
 		d, ok := k.Domain(cfg.Domain)
 		return ok && d.State == lifecycle.DomainEstablished
 	})
@@ -667,7 +656,7 @@ func TestOneLaneSeveralDomainsNoCurrentDomain(t *testing.T) {
 	// time; on a CI runner with few cores the child's hello got there
 	// first and was rejected, so the test read EOF instead of an accept
 	// (nocx-x8ol). Synchronise on the observable state, not on luck.
-	waitFor(t, "root suspended", func() bool {
+	testwait.WaitFor(t, "root suspended", func() bool {
 		d, ok := k.Domain(cfg.Domain)
 		return ok && d.State == lifecycle.DomainSuspended
 	})
@@ -678,7 +667,7 @@ func TestOneLaneSeveralDomainsNoCurrentDomain(t *testing.T) {
 	childCap := hex.EncodeToString(child.Capability[:])
 	childShell := establish(t, a, cfg, child.Domain, child.Epoch, childCap)
 	defer childShell.close()
-	waitFor(t, "child established", func() bool {
+	testwait.WaitFor(t, "child established", func() bool {
 		d, ok := k.Domain(child.Domain)
 		return ok && d.State == lifecycle.DomainEstablished
 	})

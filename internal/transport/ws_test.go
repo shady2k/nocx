@@ -19,6 +19,7 @@ import (
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/tunnel"
 )
 
@@ -116,7 +117,7 @@ func openSessionOnConn(t *testing.T, ws *WSServer, conn *websocket.Conn, id int)
 // lookup reads. See openSessionOnConn for why the tail outlives the response.
 func awaitSubscriber(t *testing.T, ws *WSServer, sid session.ID) {
 	t.Helper()
-	waitFor(t, "the open's subscriber install", wantWithin, func() bool {
+	testwait.WaitForTimeout(t, "the open's subscriber install", wantWithin, func() bool {
 		rx := ws.getRx(sid)
 		if rx == nil {
 			return false

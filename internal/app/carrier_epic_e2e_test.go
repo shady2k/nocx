@@ -72,6 +72,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/testwait"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -432,7 +433,7 @@ func TestEpicE2E_ASavedConnectionComesUpIntegratedAndLeaksNeitherBearer(t *testi
 	// §0 clause 1: an INTEGRATED prompt. The domain is established, and a
 	// line typed at that prompt runs there and reports its own fence — which
 	// is what makes it integrated rather than merely connected.
-	waitFor(t, "the saved connection's domain established", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the saved connection's domain established", 30*time.Second, func() bool {
 		kernel.mu.Lock()
 		defer kernel.mu.Unlock()
 		if kernel.minted != 1 {
@@ -443,7 +444,7 @@ func TestEpicE2E_ASavedConnectionComesUpIntegratedAndLeaksNeitherBearer(t *testi
 	})
 	att := runLine(t, ch, kernel, "printf 'P8_SAVED_PROMPT\\n'; sleep 0.3", 0)
 	fence := fmt.Sprintf("\x1b]1337;NOCX_FENCE;%x\x07", att.Fence)
-	waitFor(t, "the typed line's output and its fence", 20*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the typed line's output and its fence", 20*time.Second, func() bool {
 		return strings.Contains(out.String(), "P8_SAVED_PROMPT") && strings.Contains(out.String(), fence)
 	})
 
@@ -462,7 +463,7 @@ func TestEpicE2E_ASavedConnectionComesUpIntegratedAndLeaksNeitherBearer(t *testi
 	if _, err := ch.Write([]byte("exit\n")); err != nil {
 		t.Fatalf("write exit: %v", err)
 	}
-	waitFor(t, "session end after exit", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "session end after exit", 30*time.Second, func() bool {
 		select {
 		case <-ch.Done():
 			return true
@@ -490,7 +491,7 @@ func TestEpicE2E_ATypedSSHComesUpIntegratedAndLeaksNeitherBearer(t *testing.T) {
 	// opaque line to run.
 	h.requestChild("127.0.0.1", fx.fixturePort(), fx.user)
 	h.suspendParent()
-	waitFor(t, "the parent suspended under the nested session", 15*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the parent suspended under the nested session", 15*time.Second, func() bool {
 		return h.domainState(h.parent) == lifecycle.DomainSuspended
 	})
 
@@ -510,10 +511,10 @@ func TestEpicE2E_ATypedSSHComesUpIntegratedAndLeaksNeitherBearer(t *testing.T) {
 	// establishes over its own transport, owns the lane at a ready prompt,
 	// and a command typed there runs on the far host and completes on the
 	// child domain.
-	waitFor(t, "the typed session's child domain established", 60*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the typed session's child domain established", 60*time.Second, func() bool {
 		return h.domainState(h.child) == lifecycle.DomainEstablished
 	})
-	waitFor(t, "the lane owned by the child at a ready prompt", 20*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the lane owned by the child at a ready prompt", 20*time.Second, func() bool {
 		ls := h.laneSnapshot()
 		return ls.Domain == h.child && ls.Lifecycle == lifecycle.LifecyclePromptReady
 	})
@@ -521,7 +522,7 @@ func TestEpicE2E_ATypedSSHComesUpIntegratedAndLeaksNeitherBearer(t *testing.T) {
 	if _, err := proc.ptmx.Write([]byte(farLine + "\n")); err != nil {
 		t.Fatalf("type at the far prompt: %v", err)
 	}
-	waitFor(t, "the far command completed on the child domain", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the far command completed on the child domain", 30*time.Second, func() bool {
 		id, ok := h.facts.attemptFor(h.child, farLine)
 		if !ok {
 			return false
@@ -530,7 +531,7 @@ func TestEpicE2E_ATypedSSHComesUpIntegratedAndLeaksNeitherBearer(t *testing.T) {
 		return ok && a.State == lifecycle.AttemptCompleted &&
 			a.ExitCode != nil && *a.ExitCode == 0
 	})
-	waitFor(t, "the far command's output on the terminal", 20*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the far command's output on the terminal", 20*time.Second, func() bool {
 		return strings.Contains(proc.out.String(), "P8_TYPED_PROMPT")
 	})
 
@@ -551,7 +552,7 @@ func TestEpicE2E_ATypedSSHComesUpIntegratedAndLeaksNeitherBearer(t *testing.T) {
 		"env; cat /proc/$$/environ | tr '\\000' '\\n'; printf 'P8_TYPED_ENV_DONE\\n'\n")); err != nil {
 		t.Fatalf("dump the far environment: %v", err)
 	}
-	waitFor(t, "the far environment on the terminal", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the far environment on the terminal", 30*time.Second, func() bool {
 		return strings.Contains(proc.out.String(), "P8_TYPED_ENV_DONE")
 	})
 
@@ -581,7 +582,7 @@ func TestEpicE2E_ATypedSSHComesUpIntegratedAndLeaksNeitherBearer(t *testing.T) {
 	if _, err := proc.ptmx.Write([]byte("exit\n")); err != nil {
 		t.Fatalf("type exit at the far prompt: %v", err)
 	}
-	waitFor(t, "the far shell to exit and flush its history", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the far shell to exit and flush its history", 30*time.Second, func() bool {
 		_, statErr := os.Stat(fx.histFile)
 		return statErr == nil
 	})
@@ -590,7 +591,7 @@ func TestEpicE2E_ATypedSSHComesUpIntegratedAndLeaksNeitherBearer(t *testing.T) {
 	// connection to it, so waiting on the client to exit is waiting on an
 	// interval this test does not own.
 	proc.kill()
-	waitFor(t, "the child left the stack", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the child left the stack", 30*time.Second, func() bool {
 		st := h.domainState(h.child)
 		return st == lifecycle.DomainClosed || st == lifecycle.DomainLost
 	})
@@ -618,7 +619,7 @@ func dumpFarEnvironment(t *testing.T, ch ssh.Channel, out *outputBuffer, marker 
 	if _, err := ch.Write([]byte(line)); err != nil {
 		t.Fatalf("dump the far environment: %v", err)
 	}
-	waitFor(t, "the far environment on the terminal", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "the far environment on the terminal", 30*time.Second, func() bool {
 		return strings.Contains(out.String(), marker)
 	})
 }
@@ -689,7 +690,7 @@ func TestEpicE2E_MaxSessions1LeavesAWorkingUnintegratedPrompt(t *testing.T) {
 		h.establishParent()
 		h.requestChild("127.0.0.1", fx.fixturePort(), fx.user)
 		h.suspendParent()
-		waitFor(t, "the parent suspended", 15*time.Second, func() bool {
+		testwait.WaitForTimeout(t, "the parent suspended", 15*time.Second, func() bool {
 			return h.domainState(h.parent) == lifecycle.DomainSuspended
 		})
 
@@ -714,7 +715,7 @@ func TestEpicE2E_MaxSessions1LeavesAWorkingUnintegratedPrompt(t *testing.T) {
 		// state change that says the bootstrap finished; a native prompt
 		// string is not, because the loader execs a LOGIN shell and a login
 		// shell does not read the fixture's .bashrc.
-		waitFor(t, "the far side to name its terminal outcome", 90*time.Second, func() bool {
+		testwait.WaitForTimeout(t, "the far side to name its terminal outcome", 90*time.Second, func() bool {
 			return strings.Contains(proc.out.String(), shellintegration.OutcomePrefix)
 		})
 		assertNamedRefusal(t, proc.out.String())
@@ -725,7 +726,7 @@ func TestEpicE2E_MaxSessions1LeavesAWorkingUnintegratedPrompt(t *testing.T) {
 		if _, err := proc.ptmx.Write([]byte("printf P8_MAXSESS\"\"_TYPED_OK\\n\n")); err != nil {
 			t.Fatalf("type at the far prompt: %v", err)
 		}
-		waitFor(t, "the far prompt running a typed line", 60*time.Second, func() bool {
+		testwait.WaitForTimeout(t, "the far prompt running a typed line", 60*time.Second, func() bool {
 			return strings.Contains(proc.out.String(), "P8_MAXSESS_TYPED_OK")
 		})
 		if st := h.domainState(h.child); st == lifecycle.DomainEstablished {
@@ -786,11 +787,11 @@ func TestEpicE2E_MaxSessions1LeavesAWorkingUnintegratedPrompt(t *testing.T) {
 		// bootstrap still owns the input (the quarantine), so the write is
 		// retried until it is ACCEPTED once — and then the answer is waited
 		// for, never re-typed.
-		waitFor(t, "the session's input to leave the bootstrap quarantine", 90*time.Second, func() bool {
+		testwait.WaitForTimeout(t, "the session's input to leave the bootstrap quarantine", 90*time.Second, func() bool {
 			_, err := ch.Write([]byte("printf 'P8_MAXSESS%s\\n' _SAVED_OK\n"))
 			return err == nil
 		})
-		waitFor(t, "a working prompt over the saved connection", 60*time.Second, func() bool {
+		testwait.WaitForTimeout(t, "a working prompt over the saved connection", 60*time.Second, func() bool {
 			return strings.Contains(out.String(), "P8_MAXSESS_SAVED_OK")
 		})
 

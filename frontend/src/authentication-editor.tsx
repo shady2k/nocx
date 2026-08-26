@@ -7,23 +7,31 @@
  * inline user/method the user types here. There is no Credential control —
  * the credential aggregate is gone, and the word never appears (ADR-0017 §4).
  *
- * The parent owns the minting flows (password dialog, key input with its
- * file picker and passphrase prompt) and passes their JSX into the method
- * slots, exactly as the editor's previous incarnation did. What the editor
- * adds is the secret picker: under Password, the vault's password rows,
- * with the bound one shown as the current value.
+ * The parent owns the minting flows (key input with its file picker and
+ * passphrase prompt) and passes their JSX into the method slots, exactly as
+ * the editor's previous incarnation did.
+ *
+ * ONE CONTROL FOR THE PASSWORD (nocx-3o0ed.4). ADR-0017 §1 gave "where does
+ * this secret come from" to a segmented control, SecretSource, which asked a
+ * person to declare a mode before they had done anything and then drew the
+ * word "Password" twice — once on its own Field and once on the input inside
+ * it. That control is gone. Under Password there is one SecretTextField: type
+ * a password and press its lock to store it, or press the lock and take one
+ * the vault already holds. What the field HOLDS is the answer — a whole
+ * `{{secret:secrow:…}}` reference means the connection authenticates with
+ * that row — so nothing has to be declared in advance, and there is no second
+ * vocabulary beside the one every other value field in the product uses.
  */
-import { Show, createMemo, createSignal, untrack, type Component, type JSX } from 'solid-js'
+import { Show, createMemo, type Component, type JSX } from 'solid-js'
 import { AUTH_SEGMENTS } from './auth-methods'
-import type { InventoryEntry } from './vault-client'
 import type { AuthMode } from './profiles'
-import { secretOptions } from './key-material-input'
+import { boundSecret, secretReference } from './secret-reference'
+import { SecretTextField, secretMarks, type VaultState } from './api/secret-text-field'
+import type { SecretEntry, SecretPickerSource } from './ui/secret-picker'
 import { Field } from './ui/field'
 import { SegmentedControl } from './ui/segmented-control'
-import { Select, type SelectOption } from './ui/select'
 import { Stack } from './ui/stack'
 import { TextField } from './ui/text-field'
-import { SecretSource, type SecretSourceMode } from './secret-source'
 
 const INHERIT_AUTH = '__inherit__'
 
@@ -34,15 +42,35 @@ export interface AuthenticationEditorProps {
   auth?: AuthMode
   onAuthChange: (value: AuthMode | undefined) => void
   inherit?: boolean
-  passwordAction?: JSX.Element
   publicKeyAction?: JSX.Element
   authSuffix?: JSX.Element
-  /** The vault's password rows, for the picker under the Password method.
-   *  Empty when the vault is locked — the picker then offers nothing. */
-  passwordSecrets: InventoryEntry[]
+  /** Every password secret this editor can NAME — the vault's rows, plus any
+   *  minted in this session that the inventory has not caught up with. Used
+   *  for the chip over a bound value: a field showing `secrow:…` where a name
+   *  belongs is the regression this control exists to prevent. */
+  passwordEntries: SecretEntry[]
+  /** The vault's lifecycle state, so a locked vault says so on the chip
+   *  rather than claiming the secret is missing. */
+  vaultState?: VaultState
+  /** The picker behind the password field's lock. Absent in the dev-web
+   *  harness and bare embeds; the field then has no lock, and a bound
+   *  password still names its secret. */
+  passwordSource?: SecretPickerSource
   /** The bound password secret's row handle (ADR-0017 §1). */
   passwordSecret?: string
   onPasswordSecretChange: (value: string | undefined) => void
+  /** A sentence under the password field, for a surface whose store writes
+   *  the binding at once. The connections editor's does — the mint patches
+   *  the profile the moment it lands, so cancelling the editor afterwards
+   *  will not undo it, and a person is owed that before they press the lock
+   *  rather than after. A group default has no such write and passes none. */
+  passwordDescription?: string
+  /** The literal a person is typing before they store it. Held by the parent
+   *  because the parent is what mints it — the lock's store row hands the
+   *  text back to the connections editor, which calls `savePassword` and
+   *  binds the row it gets (nocx-3o0ed.4). */
+  passwordDraft?: string
+  onPasswordDraftChange?: (value: string) => void
 }
 
 export interface AuthMethodEditorProps {
@@ -78,41 +106,12 @@ export const AuthMethodEditor: Component<AuthMethodEditorProps> = (props) => {
         />
       </Field>
       {props.suffix}
-      {/* No password action here. AuthenticationEditor owns it, under the
-          "type a new one / use existing secret" choice — the newer surface,
-          and the only one that can offer a stored row. Drawing it here as
-          well put two identical "Set Password" buttons under two "Password"
-          labels in front of the user (nocx-azxe.6). */}
+      {/* No password control here. AuthenticationEditor owns it — one field,
+          drawn once, under the Password method. Drawing it here as well put
+          two identical "Set Password" buttons under two "Password" labels in
+          front of the user (nocx-azxe.6). */}
       <Show when={props.auth === 'publicKey'}>{props.publicKeyAction}</Show>
     </>
-  )
-}
-
-/** SecretPicker — one vault row kind as a Select. The bound row, when it is
- *  in the inventory, is the current value: an empty credential is visible
- *  before Connect is pressed (b5bu). */
-export const SecretPicker: Component<{
-  id: string
-  label: string
-  secrets: InventoryEntry[]
-  value?: string
-  onChange: (value: string | undefined) => void
-  placeholder?: string
-}> = (props) => {
-  // The bound row, when it is in the inventory, is the current value: an
-  // empty credential is visible before Connect is pressed (b5bu). When the
-  // row is missing from the inventory (vault locked), a fallback option
-  // carries the opaque handle so the bound secret is never shown as "None".
-  const options = createMemo((): SelectOption[] => secretOptions(props.secrets, props.value))
-  return (
-    <Field for={`${props.id}-secret`} label={props.label}>
-      <Select
-        value={props.value ?? ''}
-        onChange={(value) => props.onChange(value || undefined)}
-        options={options()}
-        placeholder={props.placeholder ?? '\u2014 None \u2014'}
-      />
-    </Field>
   )
 }
 
@@ -124,14 +123,28 @@ export const SecretPicker: Component<{
  * never with an invisible object (ADR-0017).
  */
 export const AuthenticationEditor: Component<AuthenticationEditorProps> = (props) => {
-  // The password method offers the same two-way choice the key method's
-  // four segments do: type a new one, or use a secret the vault already
-  // holds. The choice is SecretSource — the SAME control the endpoint's key
-  // field and header value rows use, so "where does this secret come from"
-  // has one vocabulary everywhere (nocx-rzjw).
-  const [passwordMode, setPasswordMode] = createSignal<SecretSourceMode>(
-    untrack(() => (props.passwordSecret ? 'secret' : 'new')),
-  )
+  /** What the password field holds. A bound profile holds its reference; an
+   *  unbound one holds whatever the person has typed so far. The binding is
+   *  the parent's state and the literal is the parent's draft, so there is no
+   *  third copy here to fall out of step with either. */
+  const passwordText = (): string =>
+    props.passwordSecret ? secretReference(props.passwordSecret) : (props.passwordDraft ?? '')
+
+  /** THE WRITE SEAM, and the whole of what the segmented control used to
+   *  decide. A value that is exactly one reference binds the profile to that
+   *  row; anything else is a literal the person has not stored yet, and
+   *  typing over a bound value unbinds it — which is what editing a
+   *  credential looks like when nobody has to declare a mode first. */
+  const onPasswordInput = (value: string): void => {
+    const handle = boundSecret(value)
+    if (handle !== undefined) {
+      props.onPasswordDraftChange?.('')
+      props.onPasswordSecretChange(handle)
+      return
+    }
+    if (props.passwordSecret !== undefined) props.onPasswordSecretChange(undefined)
+    props.onPasswordDraftChange?.(value)
+  }
 
   return (
     <Stack>
@@ -153,18 +166,20 @@ export const AuthenticationEditor: Component<AuthenticationEditorProps> = (props
         suffix={props.authSuffix}
       />
       <Show when={props.auth === 'password'}>
-        <SecretSource
-          id={props.id}
+        <SecretTextField
+          id={`${props.id}-password`}
           label="Password"
-          mode={passwordMode()}
-          onModeChange={setPasswordMode}
-          newLabel="Type a new one"
-          secretLabel="Use existing secret"
-          ariaLabel="Password source"
-          newControl={props.passwordAction}
-          secrets={props.passwordSecrets}
-          value={props.passwordSecret}
-          onValueChange={props.onPasswordSecretChange}
+          // Masked while it holds a password, plain once it holds a
+          // reference. A typed password is material and belongs behind dots
+          // — the dialog this replaced masked it too — while a reference is
+          // not material, and masking it would hide the chip that names the
+          // secret (endpoints-section.tsx says the same thing at its key).
+          type={props.passwordSecret === undefined ? 'password' : 'text'}
+          value={passwordText()}
+          onInput={onPasswordInput}
+          description={props.passwordDescription}
+          source={props.passwordSource}
+          marks={secretMarks(passwordText(), props.passwordEntries, props.vaultState ?? 'unknown')}
           placeholder={props.inherit ? '\u2014 Not set (inherit) \u2014' : '\u2014 None \u2014'}
         />
       </Show>

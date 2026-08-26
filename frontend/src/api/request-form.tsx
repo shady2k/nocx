@@ -18,9 +18,13 @@
 // here is the literal it is, and the binding from a name to a stored value
 // lives in the binding document, nowhere in this folder.
 //
-// The Auth tab uses SecretSource for the wholly-credential choice. In `secret`
-// mode it stores the same `{{secret:secrow:…}}` reference as every other
-// text field; in `new` mode it leaves literal input untouched.
+// The Auth tab places the SAME field as every other value on this surface
+// (nocx-3o0ed.4). There is no "where does this come from" control in front of
+// it any more: a person types a literal, or presses the field's lock and
+// stores it, or takes a secret the vault already holds — and the value it
+// holds afterwards says which of those happened, because a bound value IS the
+// `{{secret:secrow:…}}` reference. ADR-0017 §1 gave that choice to a segmented
+// control called SecretSource; the control is gone and the field owns it.
 //
 // A DISABLED ROW IS A ROW THE USER KEEPS. Header and query rows carry
 // `enabled`, and turning one off is a checkbox rather than deleting it:
@@ -59,7 +63,6 @@ import { layOutJSON } from '../ui/format-json'
 import { showToast } from '../ui/toast'
 import { applyTypedUrl, urlWithParams } from './api-url'
 import { findVariables } from './variable-reference'
-import { findReferences } from '../secret-reference'
 import type { SecretPickerSource } from '../ui/secret-picker'
 import {
   SecretTextField,
@@ -68,7 +71,6 @@ import {
   type VaultState,
 } from './secret-text-field'
 import type { InventoryEntry } from '../vault-client'
-import { SecretSource, type SecretSourceMode } from '../secret-source'
 import type { SecretCreateAsk } from '../secret-create-ask'
 import { proposeSecret } from '../secret-name-proposal'
 import type { ApiHeader, ApiParam, ApiRequest } from './api-model'
@@ -400,50 +402,71 @@ export function RequestEditor(props: RequestEditorProps) {
     if (current === undefined || current.kind === 'none') return ''
     return current.kind === 'basic' ? current.password : current.token
   }
-  const authReference = (): string | undefined => {
-    const value = authValue()
-    const reference = findReferences(value)[0]
-    return reference !== undefined && reference.from === 0 && reference.to === value.length
-      ? reference.name
-      : undefined
-  }
-  const [authMode, setAuthMode] = createSignal<SecretSourceMode>('new')
-  createEffect(() => {
-    setAuthMode(authReference() === undefined ? 'new' : 'secret')
-  })
   const resolveVariable = (name: string): string | undefined =>
     props.scopeVariables?.find((variable) => variable.name === name && !variable.overridden)?.value
-  const setAuthReference = (handle: string): void => {
+  const setAuthValue = (value: string): void => {
     const current = request()
     if (current === null) return
-    const value = `{{secret:${handle}}}`
     patch({
       auth:
         current.auth.kind === 'basic'
           ? { ...current.auth, password: value }
           : { ...current.auth, token: value },
     })
-    setAuthMode('secret')
   }
 
-  const saveAuthSecret = async (): Promise<void> => {
-    const current = request()
-    const onCreateSecret = props.onCreateSecret
-    if (current === null || onCreateSecret === undefined) return
-    const scheme = current.auth.kind
-    if (scheme !== 'bearer' && scheme !== 'basic') return
-    const value = authValue()
-    if (value === '') return
-
-    const proposal = proposeSecret({
-      site: { at: 'auth', scheme },
-      url: current.url,
-      resolveVariable,
-      folder: props.folder?.(),
-      request: current.name,
-    })
-    const created = await onCreateSecret({ ...proposal, value })
-    if (created !== undefined) setAuthReference(created.handle)
+  /**
+   * The Auth field's own picker source — the shared one, with a better answer
+   * to a single question: what a stored value should be CALLED.
+   *
+   * Everywhere else on this surface the panel can honestly say only "a secret
+   * from a field" (api-pane.tsx, createSecretInPlace). Here the scheme and the
+   * URL name the credential — "users token", "users password" — which is what
+   * the standalone Store button used to know and the reason it existed at all.
+   * The button is gone (nocx-3o0ed.4: the lock is the one door), so its
+   * knowledge moves onto the lock's own store row rather than being lost with
+   * it. Everything else — the list, the lifecycle offers, the '@' create row —
+   * is the shared source's, untouched.
+   *
+   * A typed name wins over the proposal: the panel's filter is what the person
+   * wrote, and a proposal is an offer, never a correction.
+   */
+  const authSecretSource = (): SecretPickerSource | undefined => {
+    const base = props.secretSource
+    if (base === undefined) return undefined
+    const mint = props.onCreateSecret
+    if (mint === undefined) return base
+    return {
+      ...base,
+      requestCreate: async (name, value) => {
+        const current = request()
+        // No value is the plain "Add a secret…" row: nothing to keep, so
+        // nothing to propose a name for — the shared source answers it.
+        if (value === undefined || current === null) return base.requestCreate(name)
+        const proposal = proposeSecret({
+          site:
+            current.auth.kind === 'bearer' || current.auth.kind === 'basic'
+              ? { at: 'auth', scheme: current.auth.kind }
+              : { at: 'field' },
+          url: current.url,
+          resolveVariable,
+          folder: props.folder?.(),
+          request: current.name,
+        })
+        const created = await mint({
+          name: name.trim() === '' ? proposal.name : name.trim(),
+          kind: proposal.kind,
+          value,
+        })
+        if (created === undefined) return undefined
+        // The row the ask just wrote is not in the snapshot the marks read,
+        // so the chip would name the brand-new secret "not on this machine"
+        // for as long as nothing else asked. One re-list, off the shared
+        // source, whose own `list` is what keeps that snapshot (api-pane.tsx).
+        void base.list()
+        return { id: created.handle, name: created.name }
+      },
+    }
   }
 
   /**
@@ -823,61 +846,19 @@ export function RequestEditor(props: RequestEditorProps) {
                           onInput={(v) => patch({ auth: { ...req().auth, user: v } })}
                         />
                       </Show>
-                      <SecretSource
-                        id="api-auth"
+                      {/* ONE control, and its label is on it. The tab used
+                          to draw a Field labelled "Token" around a segmented
+                          control and then a TextField labelled "Token" inside
+                          it — the same word twice, one above the other, for
+                          one value (nocx-3o0ed.4). */}
+                      <SecretTextField
+                        id="api-auth-var"
                         label={req().auth.kind === 'basic' ? 'Password' : 'Token'}
-                        mode={authMode()}
-                        onModeChange={(mode) => {
-                          setAuthMode(mode)
-                          if (mode === 'new' && authReference() !== undefined) {
-                            const value = ''
-                            patch({
-                              auth:
-                                req().auth.kind === 'basic'
-                                  ? { ...req().auth, password: value }
-                                  : { ...req().auth, token: value },
-                            })
-                          }
-                        }}
-                        newLabel="Type a new one"
-                        secretLabel="Use existing secret"
-                        ariaLabel="Authentication value source"
-                        newControl={
-                          <div class="api-request__controls">
-                            <TextField
-                              id="api-auth-var"
-                              label={req().auth.kind === 'basic' ? 'Password' : 'Token'}
-                              value={authValue()}
-                              onInput={(v) =>
-                                patch({
-                                  auth:
-                                    req().auth.kind === 'basic'
-                                      ? { ...req().auth, password: v }
-                                      : { ...req().auth, token: v },
-                                })
-                              }
-                            />
-                            <Show
-                              when={
-                                props.onCreateSecret !== undefined &&
-                                (req().auth.kind === 'bearer' || req().auth.kind === 'basic')
-                              }
-                            >
-                              <Button
-                                disabled={authValue() === ''}
-                                title="Store authentication value in vault"
-                                onClick={() => void saveAuthSecret()}
-                              >
-                                Store
-                              </Button>
-                            </Show>
-                          </div>
-                        }
-                        secrets={[...(props.secretInventory?.() ?? [])]}
-                        value={authReference()}
-                        onValueChange={(handle) => {
-                          if (handle !== undefined) setAuthReference(handle)
-                        }}
+                        value={authValue()}
+                        onInput={setAuthValue}
+                        source={authSecretSource()}
+                        onSecretReference={props.onSecretReference}
+                        marks={fieldMarks(authValue())}
                       />
                     </Show>
                   </>

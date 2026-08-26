@@ -347,6 +347,39 @@ describe('createSecretPickerField: the lock', () => {
     expect(h.value.current).toBe('{{secret:secrow:new}}')
   })
 
+  // THE PANEL CLOSES WHEN THE ROW IS TAKEN, and the ask answers afterwards
+  // (secret-picker.ts, activate). Meanwhile the promise `open()` returned is
+  // still in flight, and its guard asks "did this door settle closed?" — a
+  // question whose honest answer here is no: the person chose. Before
+  // nocx-3o0ed.4 the guard read the closed panel as a refusal and dropped the
+  // span, so a create ask that took more than a tick — a dialog, which is
+  // every real one — came back with a row that replaced nothing at all.
+  it('a store row taken the instant it appears still lands, though the open settles after it', async () => {
+    const h = setup([entry('prod-key', 'secrow:prod-id')])
+    h.value.current = 'Bearer t.Yixxxx'
+    let settle!: (created: SecretEntry) => void
+    h.source.requestCreate.mockImplementation(
+      () =>
+        new Promise<SecretEntry>((resolve) => {
+          settle = resolve
+        }),
+    )
+    h.controller.openForStore({ start: 15, end: 15 })
+    // Act the moment the row is on screen, which is what a click does and
+    // what the open promise has not caught up with yet.
+    const storeRow = 'Store "Bearer t.Yixxxx" in the vault\u2026'
+    for (let i = 0; i < 20 && labels()[0] !== storeRow; i++) await Promise.resolve()
+    expect(labels()[0]).toBe(storeRow)
+    expect(key(h.controller, { key: 'Enter' })).toBe(true)
+
+    // A dialog's worth of ticks passes, and the guard resolves inside them.
+    await flush()
+    settle(entry('deploy', 'secrow:new'))
+    await flush()
+
+    expect(h.value.current).toBe('{{secret:secrow:new}}')
+  })
+
   it('a selection stores ONLY the selection and replaces ONLY that span', async () => {
     const h = setup([entry('prod-key', 'secrow:prod-id')])
     h.value.current = 'Bearer t.Yixxxx'

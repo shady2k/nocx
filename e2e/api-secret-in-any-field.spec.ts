@@ -27,6 +27,7 @@ import {
   type HeaderSecretServer,
 } from './fixtures/api-header-secret-server'
 import { readStand } from './stand'
+import { fieldChip, storeFieldValue } from './secret-field'
 
 const test = base
 interface SettingsAbsenceGuard {
@@ -284,17 +285,21 @@ test.describe('vault secrets in Auth and header fields with no environment', () 
     const authKind = workbench.locator('[data-api-field="auth-kind"] select')
     await authKind.selectOption('bearer')
     await expect(authKind).toHaveValue('bearer')
-    const authSource = workbench.getByRole('radiogroup', {
-      name: 'Authentication value source',
-    })
-    const newAuth = authSource.getByRole('radio', { name: 'Type a new one', exact: true })
-    await newAuth.click()
-    await expect(newAuth).toHaveAttribute('aria-checked', 'true')
+    // The Auth tab is the SAME field as every other value on this surface
+    // (nocx-3o0ed.4): no source to declare first, and no standalone "Store"
+    // button beside it. The value is typed and its own lock offers to keep
+    // it — one door, the same one the header value above used.
+    //
+    // The tab shows its label ONCE. It used to draw a Field labelled "Token"
+    // around the segmented control and a TextField labelled "Token" inside
+    // it, which is the duplication the owner photographed.
+    await expect(
+      workbench.getByRole('radiogroup', { name: 'Authentication value source' }),
+    ).toHaveCount(0)
+    await expect(workbench.getByLabel('Token', { exact: true })).toHaveCount(1)
     const authToken = workbench.locator('#api-auth-var')
     await authToken.fill(AUTH_SECRET_VALUE)
-    const storeAuth = workbench.getByRole('button', { name: 'Store', exact: true })
-    await expect(storeAuth).toBeEnabled()
-    await storeAuth.click()
+    await storeFieldValue(page, authToken, AUTH_SECRET_VALUE)
 
     const authDialog = page.getByRole('dialog').filter({ hasText: 'Create secret' })
     await expect(authDialog).toBeVisible()
@@ -305,12 +310,11 @@ test.describe('vault secrets in Auth and header fields with no environment', () 
     await authDialog.locator('#secret-create-value').fill(AUTH_SECRET_VALUE)
     await authDialog.getByRole('button', { name: 'Save to vault', exact: true }).click()
     await expect(authDialog).not.toBeVisible()
-    const existingAuth = authSource.getByRole('radio', {
-      name: 'Use existing secret',
-      exact: true,
-    })
-    await expect(existingAuth).toHaveAttribute('aria-checked', 'true')
-    await expect(workbench.locator('#api-auth-secret')).toHaveValue(proposedAuthName)
+    // BOUND, and that is the whole of what "the existing-secret segment is
+    // selected" asserted: the field holds the opaque reference and the chip
+    // over it names the secret the store just created.
+    await expect(authToken).toHaveValue(/^\{\{secret:secrow:[^}]+\}\}$/)
+    await expect(fieldChip(authToken)).toHaveText(proposedAuthName)
 
     await workbench.getByRole('button', { name: 'Send', exact: true }).click()
     const authRun = workbench.locator('.api-run').first()

@@ -17,6 +17,7 @@ import { mkdtempSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { VaultBackend, bindEndpoint, settingsReady, type DisposableRoot } from './harness'
+import { addSecretFromLock, pressLock } from './secret-field'
 import { readStand } from './stand'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
@@ -114,29 +115,21 @@ async function setupVaultAndSavePassword(
       .getByRole('radio', { name: 'Password' }),
   ).toHaveAttribute('aria-checked', 'true', { timeout: 3000 })
 
-  // Click "Set Password".
-  await page
-    .locator('.cm-form')
-    .getByRole('button', { name: /Set Password/i })
-    .click()
-  // The PasswordEditor's own field, by id: closing it opens a setup sheet that
-  // holds two password fields of its own, so a bare
-  // `[role="dialog"] input[type="password"]` stops being unique right here.
-  const pwInput = page.locator('#password-value')
-  await expect(pwInput).toBeVisible({ timeout: 3000 })
-  await pwInput.fill('test-password-123')
-  await page.getByRole('button', { name: 'OK' }).click()
-  await expect(pwInput).not.toBeVisible({ timeout: 3000 })
-
-  // ── Vault setup dialog ──────────────────────────────────────────────
-  // It follows the password dialog directly: minting the secret is what needs
-  // the vault. This used to click "Create Connection" first, on the older
-  // arrangement where the save attempted the write and the setup came out of
-  // its failure — which now aims at a button the sheet is already covering.
+  // ── The lock, and the vault setup it raises ─────────────────────────
+  // There is no "Set Password" button any more (nocx-3o0ed.4): the password is
+  // ONE field and its lock is the door onto the vault. Pressing it is an
+  // explicit request, so an uninitialized vault answers with the real setup
+  // surface — which is why the sheet comes FIRST here and the password dialog
+  // after it. This backend is started with no Secret Service, so the setup
+  // cannot be silent and the sheet is the honest answer.
   //
   // Scoped to the prompt overlay, because the connection form is itself a
   // role="dialog" and the sheet opens inside it: both hasText and has: match
   // the ancestor as well.
+  const pwField = page.locator('#profile-auth-password')
+  await expect(pwField).toBeVisible({ timeout: 3000 })
+  await pressLock(pwField)
+
   const setupDialog = page
     .locator('.ui-prompt-overlay')
     .filter({ has: page.locator('#vault-setup-passphrase') })
@@ -158,8 +151,24 @@ async function setupVaultAndSavePassword(
   expect(code).not.toBeNull()
   expect((code ?? '').length).toBeGreaterThan(10)
 
-  // Click "Done" to close setup. The password is minted and bound.
+  // Click "Done" to close setup. The vault is open; nothing is minted yet.
   await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+
+  // Now the password. The sheet took the surface, so the panel closed with it
+  // and the lock is pressed again — onto an OPEN, empty vault, whose create
+  // row raises the generator "Set Password" used to raise directly, and whose
+  // result is minted and bound by the same call.
+  await addSecretFromLock(page, pwField)
+  // The PasswordEditor's own field, by id: the setup sheet holds two password
+  // fields of its own, so a bare `[role="dialog"] input[type="password"]`
+  // stops being unique around here.
+  const pwInput = page.locator('#password-value')
+  await expect(pwInput).toBeVisible({ timeout: 3000 })
+  await pwInput.fill('test-password-123')
+  await page.getByRole('button', { name: 'OK' }).click()
+  await expect(pwInput).not.toBeVisible({ timeout: 3000 })
+  // The binding this helper's name promises, now visible on the field itself.
+  await expect(pwField).toHaveValue(/^\{\{secret:.+\}\}$/, { timeout: 10_000 })
 
   // Save the connection.
   await page.getByRole('button', { name: 'Create Connection', exact: true }).click()

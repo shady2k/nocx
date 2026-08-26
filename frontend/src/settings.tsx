@@ -207,6 +207,10 @@ export interface SettingsComponentProps {
   onConnect?: (profile: SSHProfile) => void
   vaultController?: import('./vault').VaultController
   vaultClient?: import('./vault-client').VaultClient
+  /** The one secret picker source (nocx-3o0ed.4) — the panel behind every
+   *  value field's lock, on this pane's Connections and Endpoints pages as
+   *  much as in the API workbench. */
+  secretSource?: import('./ui/secret-picker').SecretPickerSource
   dialogClient?: DialogClient
   /** Remote footprint (nocx-mlm7 P10) for the Connections page. Absent in
    *  the dev-web harness; the section then renders nothing. */
@@ -476,6 +480,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
           client={props.profileClient}
           vaultController={props.vaultController}
           vaultClient={props.vaultClient}
+          secretSource={props.secretSource}
           dialogClient={props.dialogClient}
           footprintClient={props.footprintClient}
           onConnect={props.onConnect}
@@ -556,6 +561,7 @@ export function SettingsComponent(props: SettingsComponentProps) {
             agentClient={props.agentClient}
             vaultController={props.vaultController}
             vaultClient={props.vaultClient}
+            secretSource={props.secretSource}
             addEndpointRequest={newEndpointRequest()}
           />
         </Show>

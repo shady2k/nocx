@@ -20,11 +20,11 @@ import { clearToasts, toasts } from './ui'
 import {
   SetupDialog,
   VaultOperationCancelledError,
+  createVaultSecretSource,
   createVaultState,
   type VaultController,
 } from './vault'
 import type { InventoryEntry, VaultClient } from './vault-client'
-import { chooseBoundSuggestion } from './secret-source-test-helpers'
 
 /** One stored endpoint as the wire declares it. */
 function ep(overrides: Partial<Endpoint> = {}): Endpoint {
@@ -285,6 +285,11 @@ function mountWithVault(initial: Endpoint[] = [], vault: VaultHarness = vaultHar
           client={harness.client}
           vaultController={vault.ctrl}
           vaultClient={vault.client}
+          secretSource={createVaultSecretSource({
+            vaultClient: vault.client,
+            vaultController: vault.ctrl,
+            openSecretCreate: () => undefined,
+          })}
         />
         <SetupDialog
           open={vault.ctrl.showSetup()}
@@ -508,27 +513,31 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     await waitForRows(container, 1)
 
     const dialog = openEdit(container, 'provider')
-    // The source control is the key field's owner (nocx-rzjw): a saved
-    // credential opens on "Use existing secret" with the bound row — the
-    // material never crosses back, and keeping the key is a visible choice.
-    const existing = dialog.querySelector<HTMLInputElement>('#endpoint-key-secret')
-    expect(existing).toBeTruthy()
-    await chooseBoundSuggestion(existing!, 'saved API key', dialog)
-    expect(existing!.value).toBe('saved API key')
-    // No password input is drawn in this mode: there is no key to type.
-    expect(dialog.querySelector('#endpoint-key')).toBeNull()
-
-    // Switching to "Type a new one" reveals the EMPTY password field — an
-    // input, never a stored value. The segmented control is the dialog's
-    // first (the key source; header rows come below), and its first segment
-    // is "Type a new one".
-    const newSegment = dialog.querySelector('.ui-segmented-control [role="radio"]')
-    expect(newSegment).toBeTruthy()
-    fireEvent.click(newSegment!)
+    // ONE field owns the key (nocx-rzjw, nocx-3o0ed.4): a saved credential
+    // opens as the reference it is, drawn as a chip naming the secret — the
+    // material never crosses back, and keeping the key is a visible choice
+    // because the reference is visibly there.
     const keyInput = dialog.querySelector('#endpoint-key') as HTMLInputElement
     expect(keyInput).toBeTruthy()
-    expect(keyInput.type).toBe('password')
+    await vi.waitFor(() => {
+      expect(
+        keyInput.closest('.ui-text-field__control')?.querySelector('.ui-text-field__mark')
+          ?.textContent,
+      ).toBe('saved API key')
+    })
+    expect(keyInput.value).toBe('{{secret:secrow:9}}')
+
+    // A bound field is PLAIN, so the chip can be read.
+    expect(keyInput.type).toBe('text')
+
+    // Typing over it is what "type a new one" is now: the reference goes, and
+    // what is left is an input — never a stored value, which the record could
+    // not hand back in any case — masked again, exactly as the old "Type a
+    // new one" field was.
+    fireEvent.input(keyInput, { target: { value: '' } })
     expect(keyInput.value).toBe('')
+    expect(dialog.querySelector('.ui-text-field__mark')).toBeNull()
+    expect((dialog.querySelector('#endpoint-key') as HTMLInputElement).type).toBe('password')
   })
 
   it('edits an endpoint through endpoints.update with the unchanged id', async () => {
@@ -773,13 +782,17 @@ describe('AI endpoints surface — real surface, real client seam', () => {
     await waitForRows(container, 1)
 
     const dialog = openEdit(container, 'provider')
-    // The key SOURCE is pre-selected to the bound row (the material never
-    // crosses back, ADR-0030 §3); the input shows the row's label and the
-    // choice is committed through the bound combobox.
-    const existing = dialog.querySelector<HTMLInputElement>('#endpoint-key-secret')
+    // The key field opens holding the bound row's reference (the material
+    // never crosses back, ADR-0030 §3) and reads as the row's name.
+    const existing = dialog.querySelector<HTMLInputElement>('#endpoint-key')
     expect(existing).toBeTruthy()
-    await chooseBoundSuggestion(existing!, 'saved endpoint key', dialog)
-    expect(existing!.value).toBe('saved endpoint key')
+    expect(existing!.value).toBe('{{secret:secrow:0123456789abcdef}}')
+    await vi.waitFor(() => {
+      expect(
+        existing!.closest('.ui-text-field__control')?.querySelector('.ui-text-field__mark')
+          ?.textContent,
+      ).toBe('saved endpoint key')
+    })
 
     clickButton(dialog, 'Test endpoint')
 

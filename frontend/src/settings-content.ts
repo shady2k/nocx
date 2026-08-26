@@ -52,6 +52,12 @@ export class SettingsContent extends SolidPaneContent {
     /** The clipboard the About page's Copy diagnostics writes through. */
     private readonly clipboard?: import('./clipboard').ClipboardAccess,
     private readonly policyClient?: import('./policy-client').PolicyClient,
+    /** The ONE secret picker source (nocx-3o0ed.4). Built by the composition
+     *  root, not here: the Connections and Endpoints pages place the same
+     *  field the API workbench does, and a second source assembled beside
+     *  main.tsx's would be the same wiring written twice — agreeing until the
+     *  day one of them changed. */
+    private readonly secretSource?: import('./ui/secret-picker').SecretPickerSource,
   ) {
     super()
   }
@@ -63,6 +69,7 @@ export class SettingsContent extends SolidPaneContent {
           profileClient: this.profileClient,
           vaultController: this.vaultController,
           vaultClient: this.vaultClient,
+          secretSource: this.secretSource,
           dialogClient: this.dialogClient,
           footprintClient: this.footprintClient,
           agentClient: this.agentClient,

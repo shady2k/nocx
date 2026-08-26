@@ -65,6 +65,8 @@ import { ProfileClient, buildGroupTree, parseQuickConnect } from './profiles'
 import { RpcError } from './dispatcher'
 import { HostKeyDialog } from './host-key-dialog'
 import { PasswordEditor } from './password-editor'
+import type { VaultState } from './api/secret-text-field'
+import type { SecretEntry, SecretPickerSource } from './ui/secret-picker'
 import { AuthenticationEditor } from './authentication-editor'
 import { log } from './log'
 import { showToast } from './ui/toast'
@@ -271,6 +273,11 @@ export interface ConnectionsViewProps {
   /** Vault inventory for the secret pickers. Optional: the dev-web harness
    *  has no vault, and the pickers then offer nothing. */
   vaultClient?: VaultClient
+  /** The one secret picker source (nocx-3o0ed.4) — the panel behind the
+   *  password field's lock, the same one the endpoints page and the API
+   *  workbench place. Absent in the dev-web harness and bare embeds; the
+   *  field then has no lock, and a bound password still names its secret. */
+  secretSource?: SecretPickerSource
   onConnect?: (profile: SSHProfile) => void
   /**
    * Monotonic counter — every increment opens a blank profile for editing, the
@@ -324,7 +331,12 @@ export function ConnectionsView(props: ConnectionsViewProps) {
   const [editing, setEditing] = createSignal<SSHProfile | null>(null)
   const [dialogOpen, setDialogOpen] = createSignal(false)
   const [profilePasswordOpen, setProfilePasswordOpen] = createSignal(false)
+  /** The literal a person has typed into a password field and not yet stored.
+   *  Two fields, two drafts: the profile editor's and the group defaults'.
+   *  A stored value stops being a draft the moment its row is bound — the
+   *  field then holds the reference instead (authentication-editor.tsx). */
   const [profilePasswordValue, setProfilePasswordValue] = createSignal('')
+  const [groupPasswordDraft, setGroupPasswordDraft] = createSignal('')
   /** An in-flight password mint (W8). A Save pressed while it is resolving
    *  waits for the mint's bind, which persists the binding and updates the
    *  draft — the save must write the state that carries the binding. */
@@ -495,6 +507,198 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       rows = []
     }
     setSecretRows(rows)
+  }
+
+  /** Every password secret the auth editor can NAME. The inventory is the
+   *  first word, but a row minted in THIS editor session is not in it until
+   *  the post-mint reload lands — the binding made a moment ago must not read
+   *  as an unknown secret in the meantime (W3). The minted name is
+   *  authoritative: the backend stores the requested name unchanged
+   *  (ADR-0016). */
+  const passwordEntries = createMemo((): SecretEntry[] => {
+    const rows = vaultOffersSecrets() ? secretRows().filter((e) => e.kind === 'password') : []
+    const entries: SecretEntry[] = rows.map((e) => ({ id: e.id, name: e.name }))
+    for (const [id, name] of mintedPasswordNames()) {
+      if (!entries.some((e) => e.id === id)) entries.push({ id, name })
+    }
+    return entries
+  })
+  const vaultState = (): VaultState => props.vaultController?.status()?.state ?? 'unknown'
+
+  /**
+   * Mint a connection password and bind it, at the action moment (ADR-0017,
+   * W8): the secret is stored AND the binding is written to the stored
+   * profile when the person commits it — not when the profile is saved. So
+   * there is no window in which a secret exists bound to nothing, and a later
+   * Cancel of the editor will not undo the write.
+   *
+   * ONE mint, TWO doors (nocx-3o0ed.4). The field's lock offers to store what
+   * the person typed; its "Add a secret…" row opens the generator. Both land
+   * here, because two implementations of "store this password and bind it"
+   * would agree everywhere anyone looked and disagree on the partial-failure
+   * paths below, which are the ones nobody looks at.
+   *
+   * Resolves with the row when it landed, and with `undefined` when the vault
+   * refused or the person cancelled — the field then keeps what it was
+   * holding rather than showing a reference to a secret that does not exist.
+   */
+  async function mintProfilePassword(password: string): Promise<SecretEntry | undefined> {
+    const current = editing()
+    if (!current) return undefined
+    const generatedName = secretNameFor(
+      'password',
+      loginLabel(current.options.user, current.options.host),
+    )
+    let minted: { row: string } | null = null
+    const run = async (): Promise<void> => {
+      minted = await props.client.savePassword(password, generatedName)
+    }
+    const bind = async (): Promise<void> => {
+      if (!minted) return
+      const mintedRow: { row: string } = minted
+      // Merge into the LIVE draft, not the commit-moment snapshot: the mint
+      // runs behind a vault prompt and the person may have edited other
+      // fields in the meantime (W8).
+      setEditing((prev) =>
+        prev ? { ...prev, options: { ...prev.options, passwordSecret: mintedRow.row } } : prev,
+      )
+      setDirtyFields((prev) => new Set(prev).add('passwordSecret'))
+      setMintedPasswordNames((prev) => {
+        const next = new Map(prev)
+        next.set(mintedRow.row, generatedName)
+        return next
+      })
+      setProfilePasswordValue('')
+      // The inventory does not know about this row yet — reload it so the
+      // pickers and any later read see the mint. The chip already names the
+      // secret from mintedPasswordNames, so the display never depends on the
+      // reload landing.
+      void loadSecretRows()
+      // The stored profile must carry the pair the editor always keeps
+      // together: a password secret is only ever offered under the Password
+      // method (authentication-editor.tsx), so auth travels with the binding,
+      // or a mint-then-cancel on a profile without a method would store an
+      // invisible secret.
+      const isNew = !current.id || !profiles().some((p) => p.id === current.id)
+      if (!isNew) {
+        try {
+          await props.client.patchProfile({
+            id: current.id,
+            set: {
+              'options.auth': 'password',
+              'options.passwordSecret': mintedRow.row,
+            },
+          })
+        } catch (err) {
+          // The secret was minted, so the failure is the binding: name the
+          // split out loud, or the half-done state reads as a silent success
+          // (AGENTS.md: a soft degrade must be visible in the product). The
+          // draft keeps the binding, so Save Connection retries the write.
+          const message = (err as Error).message
+          log.error('Failed to persist the password binding', { message })
+          showToast({
+            level: 'danger',
+            message: `The password was stored but this connection was not updated to use it: ${message}. Save Connection to retry.`,
+          })
+        }
+      }
+    }
+    const fail = (err: unknown): void => {
+      if (err instanceof VaultOperationCancelledError) {
+        // A cancelled vault prompt leaves the password unsaved with nothing
+        // on screen to say why. Silence here reads as success (AGENTS.md: a
+        // soft degrade must be visible in the product).
+        log.warn('Password save cancelled: the vault prompt was closed', {})
+        showToast({
+          level: 'warning',
+          message: 'Password was not saved — the vault prompt was cancelled.',
+        })
+        return
+      }
+      const message = (err as Error).message
+      log.error('Failed to save password', { message })
+      showToast({ level: 'danger', message: `Could not save the password: ${message}` })
+    }
+    const mint = (async (): Promise<SecretEntry | undefined> => {
+      try {
+        if (props.vaultController) {
+          await props.vaultController.saveSecretWithVault(run, 'save this password')
+        } else {
+          await run()
+        }
+        await bind()
+      } catch (err) {
+        fail(err)
+        return undefined
+      }
+      return minted === null
+        ? undefined
+        : { id: (minted as { row: string }).row, name: generatedName }
+    })()
+    // A Save pressed while the mint is still resolving must wait for the
+    // bind: the save must write a profile that carries the binding (W8 — the
+    // save that landed before the bind produced the auth-without-secret
+    // profile on disk).
+    const settled = mint.then(() => undefined)
+    mintInFlight = settled
+    void settled.finally(() => {
+      mintInFlight = null
+    })
+    return mint
+  }
+
+  /** The generator door: the panel's "Add a secret…" row raises PasswordEditor
+   *  and resolves with the row it minted, so the field replaces the word the
+   *  person typed with the reference — exactly as taking an existing row
+   *  does. */
+  let settlePasswordAsk: ((entry: SecretEntry | undefined) => void) | undefined
+  function openPasswordAsk(): Promise<SecretEntry | undefined> {
+    // A second ask while one is up would strand the first door's promise for
+    // ever. The one on screen wins; the newcomer is answered at once.
+    if (settlePasswordAsk !== undefined) return Promise.resolve(undefined)
+    setProfilePasswordValue('')
+    setProfilePasswordOpen(true)
+    return new Promise((resolve) => {
+      settlePasswordAsk = resolve
+    })
+  }
+  function closePasswordAsk(entry?: SecretEntry): void {
+    setProfilePasswordOpen(false)
+    const settle = settlePasswordAsk
+    settlePasswordAsk = undefined
+    settle?.(entry)
+  }
+
+  /** The composition root's panel, listing the rows a PASSWORD field may bind
+   *  to. The filter is the one the pickers always had — a connection password
+   *  is a password-kind secret (ADR-0017) — and it is applied here, once, by
+   *  answering `list` from this surface's own inventory read rather than from
+   *  a second one (AD-8). A row minted a moment ago is in it before the
+   *  inventory catches up, for the reason W3 gives. */
+  const passwordListSource = (): SecretPickerSource | undefined => {
+    const base = props.secretSource
+    if (base === undefined) return undefined
+    return {
+      ...base,
+      list: async () => {
+        await loadSecretRows()
+        return passwordEntries()
+      },
+    }
+  }
+
+  /** The profile editor's password field: the list above, with the two CREATE
+   *  doors answered where the binding lives. A store row carries the text the
+   *  person typed, so it mints that; the plain "Add a secret…" row carries
+   *  none, so it raises the generator. */
+  const profilePasswordSource = (): SecretPickerSource | undefined => {
+    const base = passwordListSource()
+    if (base === undefined) return undefined
+    return {
+      ...base,
+      requestCreate: (_name, value) =>
+        value === undefined || value === '' ? openPasswordAsk() : mintProfilePassword(value),
+    }
   }
 
   // ── Import ────────────────────────────────────────────────────────────
@@ -1114,9 +1318,17 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             onUsernameChange={(value) => setGroupDefaultsField('user', value)}
             auth={auth() === undefined ? undefined : (auth() as AuthMode)}
             onAuthChange={(value) => setGroupDefaultsField('auth', value)}
-            passwordSecrets={
-              vaultOffersSecrets() ? secretRows().filter((e) => e.kind === 'password') : []
-            }
+            passwordEntries={passwordEntries()}
+            vaultState={vaultState()}
+            // The SHARED source, unmodified. A group default has no
+            // mint-and-bind of its own — it never had one — so a store row
+            // here takes the composition root's fallback: the Secrets page,
+            // with the name and the value already filled in (nocx-3o0ed.6).
+            // Adding a second binding path for a surface that has never asked
+            // for one is the "two answers to one question" this epic unwinds.
+            passwordSource={passwordListSource()}
+            passwordDraft={groupPasswordDraft()}
+            onPasswordDraftChange={setGroupPasswordDraft}
             passwordSecret={(gv('passwordSecret') as string | undefined) || undefined}
             onPasswordSecretChange={(value) => setGroupDefaultsField('passwordSecret', value)}
             publicKeyAction={
@@ -2125,18 +2337,6 @@ export function ConnectionsView(props: ConnectionsViewProps) {
       setOption('keySecret', undefined)
     }
 
-    /** The bound password secret's display name, for the Password action.
-     *  The inventory is the first word, but a row minted in THIS editor
-     *  session is not in it until the post-mint reload lands — the binding
-     *  made a moment ago must not read as "No password set" in the meantime
-     *  (W3). The minted name is authoritative: the backend stores the
-     *  requested name unchanged (ADR-0016). */
-    const boundPasswordName = createMemo(() => {
-      const row = fvStr('passwordSecret')
-      if (!row) return undefined
-      return secretRows().find((e) => e.id === row)?.name ?? mintedPasswordNames().get(row)
-    })
-
     const isSaved = () => !!profile().id && profiles().some((x) => x.id === profile().id)
     function fvStr(key: string): string {
       const v = fieldValue(key)
@@ -2256,36 +2456,20 @@ export function ConnectionsView(props: ConnectionsViewProps) {
                     onUsernameChange={(value) => setOption('user', value)}
                     auth={fvStr('auth') as AuthMode}
                     onAuthChange={(value) => setOption('auth', value)}
-                    passwordSecrets={
-                      vaultOffersSecrets() ? secretRows().filter((e) => e.kind === 'password') : []
-                    }
+                    passwordEntries={passwordEntries()}
+                    vaultState={vaultState()}
+                    passwordSource={profilePasswordSource()}
+                    passwordDescription="Storing a password saves it to the connection immediately — closing this editor afterwards won't undo it."
+                    passwordDraft={profilePasswordValue()}
+                    onPasswordDraftChange={setProfilePasswordValue}
                     passwordSecret={fvStr('passwordSecret') || undefined}
                     onPasswordSecretChange={(value) => {
                       setOption('passwordSecret', value)
-                      // A picked secret replaces any typed-new draft: a later
-                      // "Set Password" must not silently override the pick.
-                      setProfilePasswordValue('')
+                      // A bound secret replaces any typed-but-unstored draft:
+                      // the field is holding the reference now, and a literal
+                      // left behind it would come back on the next unbind.
+                      if (value !== undefined) setProfilePasswordValue('')
                     }}
-                    passwordAction={
-                      <Field for="profile-password-action" label="Password">
-                        <div class="secret-action">
-                          <span class="secret-description">
-                            {boundPasswordName()
-                              ? `Password: ${boundPasswordName()}`
-                              : 'No password set'}
-                          </span>
-                          <div class="secret-actions">
-                            <Button variant="default" onClick={() => setProfilePasswordOpen(true)}>
-                              {boundPasswordName() ? 'Change Password' : 'Set Password'}
-                            </Button>
-                          </div>
-                        </div>
-                        <p class="cm-hint">
-                          Setting a password saves it to the connection immediately — closing this
-                          editor afterwards won't undo it.
-                        </p>
-                      </Field>
-                    }
                     publicKeyAction={
                       <Field
                         for="profile-key"
@@ -2612,125 +2796,24 @@ export function ConnectionsView(props: ConnectionsViewProps) {
             }
           >
             {renderProfileForm(profile)}
+            {/* The password GENERATOR, reached from the field's panel rather
+                than from a button beside it (nocx-3o0ed.4). The lock's plain
+                "Add a secret…" row means "I want a new one here", and on a
+                connection's password field a new one is a password — so that
+                row opens this, and what it generates or the person types is
+                minted and bound by the same call the store row uses. There is
+                no "Set Password" action any more: a second control offering
+                the same act beside a field that can do it is the vocabulary
+                this epic removes. */}
             <PasswordEditor
               open={profilePasswordOpen()}
               value={profilePasswordValue()}
               prompt={`Password for ${
                 editing()?.options.user || editing()?.options.host || 'connection'
               }`}
-              onClose={() => setProfilePasswordOpen(false)}
+              onClose={() => closePasswordAsk()}
               onSave={(password) => {
-                // Mint-and-bind at the action moment (ADR-0017, W8): the
-                // secret is stored AND the binding is written to the stored
-                // profile when the user presses OK — not when the profile is
-                // saved. The editor closes immediately; the mint continues in
-                // the background and its bind persists the binding, so there
-                // is no window in which a secret exists bound to nothing, and
-                // a later Cancel of the editor will not undo the write (the
-                // action row says so). A new profile has nothing to bind to
-                // yet: the binding rides the draft and creation persists both
-                // halves.
-                const current = profile()
-                const generatedName = secretNameFor(
-                  'password',
-                  loginLabel(current.options.user, current.options.host),
-                )
-                const savePw = () => props.client.savePassword(password, generatedName)
-                let row: { row: string } | null = null
-                const run = async () => {
-                  row = await savePw()
-                }
-                const bind = async () => {
-                  if (!row) return
-                  const mintedRow = row
-                  // Merge into the LIVE draft, not the OK-press snapshot: the
-                  // mint runs behind a vault prompt and the user may have
-                  // edited other fields in the meantime (W8).
-                  setEditing((prev) =>
-                    prev
-                      ? { ...prev, options: { ...prev.options, passwordSecret: mintedRow.row } }
-                      : prev,
-                  )
-                  setDirtyFields((prev) => new Set(prev).add('passwordSecret'))
-                  setMintedPasswordNames((prev) => {
-                    const next = new Map(prev)
-                    next.set(mintedRow.row, generatedName)
-                    return next
-                  })
-                  setProfilePasswordValue('')
-                  // The inventory does not know about this row yet — reload it
-                  // so the pickers and any later read see the mint. The action
-                  // row already names the secret from mintedPasswordNames, so
-                  // the display never depends on the reload landing.
-                  void loadSecretRows()
-                  // The stored profile must carry the pair the editor always
-                  // keeps together: a password secret is only ever offered
-                  // under the Password method (authentication-editor.tsx), so
-                  // auth travels with the binding, or a mint-then-cancel on a
-                  // profile without a method would store an invisible secret.
-                  const isNew = !current.id || !profiles().some((p) => p.id === current.id)
-                  if (!isNew) {
-                    try {
-                      await props.client.patchProfile({
-                        id: current.id,
-                        set: {
-                          'options.auth': 'password',
-                          'options.passwordSecret': mintedRow.row,
-                        },
-                      })
-                    } catch (err) {
-                      // The secret was minted, so the failure is the binding:
-                      // name the split out loud, or the half-done state reads
-                      // as a silent success (AGENTS.md: a soft degrade must be
-                      // visible in the product). The draft keeps the binding,
-                      // so Save Connection retries the write.
-                      const message = (err as Error).message
-                      log.error('Failed to persist the password binding', { message })
-                      showToast({
-                        level: 'danger',
-                        message: `The password was stored but this connection was not updated to use it: ${message}. Save Connection to retry.`,
-                      })
-                    }
-                  }
-                }
-                const fail = (err: unknown) => {
-                  if (err instanceof VaultOperationCancelledError) {
-                    // The editor closed on OK, so the mint kept running in the
-                    // background; a cancelled vault prompt leaves the password
-                    // unsaved with nothing on screen to say why. Silence here
-                    // reads as success (AGENTS.md: a soft degrade must be
-                    // visible in the product).
-                    log.warn('Password save cancelled: the vault prompt was closed', {})
-                    showToast({
-                      level: 'warning',
-                      message: 'Password was not saved — the vault prompt was cancelled.',
-                    })
-                    return
-                  }
-                  const message = (err as Error).message
-                  log.error('Failed to save password', { message })
-                  showToast({ level: 'danger', message: `Could not save the password: ${message}` })
-                }
-                const mint = (async () => {
-                  try {
-                    if (props.vaultController) {
-                      await props.vaultController.saveSecretWithVault(run, 'save this password')
-                    } else {
-                      await run()
-                    }
-                    await bind()
-                  } catch (err) {
-                    fail(err)
-                  }
-                })()
-                // A Save pressed while the mint is still resolving must wait
-                // for the bind: the save must write a profile that carries
-                // the binding (W8 — the save that landed before the bind
-                // produced the auth-without-secret profile on disk).
-                mintInFlight = mint
-                void mint.finally(() => {
-                  mintInFlight = null
-                })
+                void mintProfilePassword(password).then((entry) => closePasswordAsk(entry))
               }}
             />
           </Dialog>

@@ -191,6 +191,25 @@ wrappers. pi-permission-system layers Bash patterns with most-restrictive-wins
 and resolves an unparseable command to `ask`. These are evidence for the
 conditions above, not authority for the product's policy.
 
+## Amendment (accepted 2026-08-26) — decision 4: the path fence is the accessible filesystem
+
+**Accepted by the owner, 2026-08-26.** It amends decision 4's path-boundary
+treatment; the narrowing mechanism itself stands.
+
+Decision 4 remains the rule: the middleware resolves the run's grant into a
+scoped capability, and the tool holds only that capability — never a full
+filesystem handle. For PATH resources, however, the run grant's path scope is
+now the whole accessible filesystem (`/`). The policy matrix is the narrowing
+surface: its effect-row decisions and scopes decide whether a particular read
+is permitted, asked about or refused. A narrower per-run path fence would be a
+second, weaker place to express the same policy.
+
+The consequence is deliberate and explicit: when a person sets `observe` to
+`permit`, they have granted the assistant access to every readable file on the
+machine. The default remains `ask` for `observe`, so nothing opens up silently;
+path-specific narrowing belongs in the matrix rather than in another run-grant
+fence.
+
 **5. The ledger stays ours, and the framework's state is a projection.** eino owns run
 mechanics; ADR-0019 owns the record. Its checkpoints, message history and retries are
 implementation detail of a run, never the authoritative transcript, and nothing in the

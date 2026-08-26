@@ -50,6 +50,9 @@ func TestToolDescription_IsTheDeclarationsSentence(t *testing.T) {
 	}
 	want := map[string]string{}
 	for _, tl := range reg.All() {
+		if tl.Narrow == nil {
+			continue
+		}
 		want[tl.Name] = tl.Description
 	}
 

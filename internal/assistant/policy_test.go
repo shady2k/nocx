@@ -1236,20 +1236,34 @@ func TestMiddleware_RunCommandClassifiesTheCallEffect(t *testing.T) {
 }
 
 // TestAsk_EscalationWithoutAResourceArgCarriesNoResource is the null half:
-// a tool that names no resource in its parameters (git.status's repository
-// IS the grant's path scope) escalates with an effect and NO resource. Null
-// is a fact, not a gap — and the wire says so.
+// an executable declaration whose parameters name no resource escalates with
+// an effect and NO resource. Null is a fact, not a gap — and the wire says so.
 func TestAsk_EscalationWithoutAResourceArgCarriesNoResource(t *testing.T) {
-	grant, _ := testDirGrant(t, askEveryTimeMatrix())
+	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	// Use the real session.list executor and schema, but remove only its
+	// ResourceArg in this synthetic registry. This keeps the test on a tool
+	// that can actually run while exercising the no-resource policy branch.
+	var found bool
+	for i, tool := range reg.All() {
+		if tool.Name == "session.list" {
+			reg.All()[i].ResourceArg = ""
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("session.list declaration not found")
+	}
+	grant := sessionGrant("session-a", askEveryTimeMatrix())
 
-	_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "git.status", args: `{}`}))
+	_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "session.list", args: `{"sessionId":"session-a"}`}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
-	if clErr != nil {
-		t.Fatalf("newClient: %v", clErr)
-	}
-	err := cl.Ask(context.Background(), askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(AskEvent) error { return nil })
+	cl := newClientWithRegistry(nil, reg)
+	err = cl.Ask(context.Background(), askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(AskEvent) error { return nil })
 	var want *ApprovalRequestedError
 	if !errors.As(err, &want) || want.Request == nil {
 		t.Fatalf("Ask error = %v, want the approval-requested suspension", err)
@@ -1258,7 +1272,7 @@ func TestAsk_EscalationWithoutAResourceArgCarriesNoResource(t *testing.T) {
 		t.Fatalf("effect = %q, want %q", want.Request.Effect, content.EffectObserve)
 	}
 	if want.Request.Resource != nil {
-		t.Fatalf("resource = %+v, want nil — git.status names no resource in its parameters", want.Request.Resource)
+		t.Fatalf("resource = %+v, want nil — session.list names no resource in this synthetic declaration", want.Request.Resource)
 	}
 }
 

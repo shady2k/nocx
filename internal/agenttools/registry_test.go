@@ -270,9 +270,9 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 
 	observePath := grant([]content.Effect{content.EffectObserve}, content.ResourcePath)
 	got := toolNames(reg.ForGrant(observePath))
-	want := []string{"files.read", "git.status"}
+	want := []string{"files.read"}
 	if len(got) != len(want) {
-		t.Fatalf("ForGrant(observe+path) = %v, want exactly %v", got, want)
+		t.Fatalf("ForGrant(observe+path) = %v, want exactly %v (git.status is declared but not executable)", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
@@ -308,6 +308,40 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	}
 }
 
+func TestForGrant_ExcludesDeclarationsWithoutCapability(t *testing.T) {
+	reg, err := assemble(schemaFS(t, map[string]string{
+		"files.read.schema.json": filesReadSchema,
+	}), []Declaration{
+		{
+			Name:        "wired",
+			Description: "a wired observe tool",
+			Effect:      content.EffectObserve,
+			Resources:   []content.ResourceKind{content.ResourcePath},
+			Executes:    InGo,
+			Params:      "files.read.schema.json",
+			Narrow: func(content.Grant) (Capability, error) {
+				return nil, nil
+			},
+		},
+		{
+			Name:        "unwired",
+			Description: "an unwired observe tool",
+			Effect:      content.EffectObserve,
+			Resources:   []content.ResourceKind{content.ResourcePath},
+			Executes:    InGo,
+			Params:      "files.read.schema.json",
+		},
+	})
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+
+	got := toolNames(reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourcePath)))
+	if want := []string{"wired"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ForGrant = %v, want %v", got, want)
+	}
+}
+
 func containsName(tools []Tool, name string) bool {
 	for _, t := range tools {
 		if t.Name == name {
@@ -335,8 +369,8 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 	}
 
 	set := reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourcePath))
-	if len(set) != 2 {
-		t.Fatalf("ForGrant = %d tools, want 2", len(set))
+	if len(set) != 1 {
+		t.Fatalf("ForGrant = %d tools, want 1 (git.status is declared but not executable)", len(set))
 	}
 	for _, tool := range set {
 		if len(tool.ParamsSchema) == 0 {

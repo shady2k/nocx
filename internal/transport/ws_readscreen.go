@@ -222,10 +222,12 @@ func (s *WSServer) brokerSpecs(immediate control.ImmediateSubmission) []methodSp
 // is the matrix of the amended §7, resolved by content.ResolvePolicy — the
 // ONE place the order is stated: the workspace override when nocx-mp2vd
 // lands, the global default now (the store the composition root wired).
-// The mint adds the run's OWN session as the base scope of every row — a run
-// can touch the lane it lives in, and nothing else unless the policy says
-// so — and the matrix derives the grant's effects and the declaration
-// filter's scope union (EffectPolicy.AsGrant).
+// The mint adds the run's OWN session as a base scope of every row and the
+// whole accessible local filesystem as its path scope. The path fence is wide
+// on purpose: the policy matrix is the narrowing surface, so a row can still
+// refuse or ask for a path without a second, weaker per-run path rule. The
+// matrix derives the grant's effects and the declaration filter's scope union
+// (EffectPolicy.AsGrant).
 //
 // This is the workspace's default grant: the workspace concept (which
 // sessions read as one story) is not wired yet, so the single-session
@@ -245,6 +247,9 @@ func (s *WSServer) runGrantFor(sessionID string) *content.Grant {
 	// scope is already this session, so the overlay carries no scope of its
 	// own: the run cannot reach outside its session anyway.
 	p := content.ResolvePolicy(s.agentPolicy.Policy(), nil, s.sessionPolicy.For(session.ID(sessionID)))
-	g := p.AsGrant([]content.GrantScope{{Kind: content.ResourceSession, ID: sessionID}})
+	g := p.AsGrant([]content.GrantScope{
+		{Kind: content.ResourceSession, ID: sessionID},
+		{Kind: content.ResourcePath, ID: "/"},
+	})
 	return &g
 }

@@ -18,13 +18,17 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/contracts/tools"
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/storage"
 )
 
@@ -52,6 +56,49 @@ func autonomousMatrixForTests() content.EffectPolicy {
 		Observe: r, MutateReversible: r, MutateDestructive: r,
 		PrivilegeChange: r, Disclose: r, CrossBoundary: r, Delegate: r,
 	}
+}
+
+func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	policy := assistant.NewGlobalPolicyStore(storage.NewDocumentStore(t.TempDir()), "agent-policy.json")
+	server := NewWSServer(logger, newRegWithStub(logger), WithAgentPolicy(policy))
+	const sid = "session-a"
+
+	grant := server.runGrantFor(sid)
+	if grant == nil {
+		t.Fatal("runGrantFor returned nil grant")
+	}
+	if !hasGrantScope(grant.Scopes, content.ResourcePath, "/") {
+		t.Fatalf("grant scopes = %+v, want the whole filesystem path scope", grant.Scopes)
+	}
+	if !hasGrantScope(grant.Scopes, content.ResourceSession, sid) {
+		t.Fatalf("grant scopes = %+v, want the run's session scope", grant.Scopes)
+	}
+	if len(grant.Scopes) != 2 {
+		t.Fatalf("grant scopes = %+v, want exactly one path and one session scope", grant.Scopes)
+	}
+
+	reg, err := agenttools.Assemble(tools.Schemas)
+	if err != nil {
+		t.Fatalf("assemble tool registry: %v", err)
+	}
+	var names []string
+	for _, tool := range reg.ForGrant(*grant) {
+		names = append(names, tool.Name)
+	}
+	want := []string{"files.read", "session.list", "session.read", "run"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("tools offered by the product-minted grant = %v, want %v", names, want)
+	}
+}
+
+func hasGrantScope(scopes []content.GrantScope, kind content.ResourceKind, id string) bool {
+	for _, scope := range scopes {
+		if scope.Kind == kind && scope.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 type toolCallingServer struct {

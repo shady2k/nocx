@@ -262,12 +262,13 @@ func joinProblems(problems []string) error {
 	return errors.New("tools not assembled: " + strings.Join(problems, "; "))
 }
 
-// ForGrant returns exactly the tools the grant permits: every declared tool
-// whose effect the grant allows AND whose resource kinds the grant covers.
-// Nothing is returned "for later filtering" — a tool the grant forbids is
-// absent from the set, because the strongest refusal is the one never
-// proposed. The result is in table order. The grant is the ledger's type
-// (content.Grant): one grant model, owned by the ledger that records it.
+// ForGrant returns exactly the executable tools the grant permits: every
+// declared tool with a capability constructor whose effect the grant allows
+// AND whose resource kinds the grant covers. Nothing is returned "for later
+// filtering" — a tool the grant forbids, or one that cannot execute, is absent
+// from the set, because the strongest refusal is the one never proposed. The
+// result is in table order. The grant is the ledger's type (content.Grant):
+// one grant model, owned by the ledger that records it.
 func (r Registry) ForGrant(g content.Grant) []Tool {
 	effectPermitted := make(map[content.Effect]bool, len(g.Effects))
 	for _, e := range g.Effects {
@@ -280,6 +281,13 @@ func (r Registry) ForGrant(g content.Grant) []Tool {
 
 	var out []Tool
 	for _, t := range r.tools {
+		// A declaration with no capability constructor cannot execute. Omitting
+		// it here is the refusal we can make before the model spends a call;
+		// the declaration stays in the table because its row remains the
+		// source of truth about the tool.
+		if t.Narrow == nil {
+			continue
+		}
 		if !effectPermitted[t.Effect] {
 			continue
 		}

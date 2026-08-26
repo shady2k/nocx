@@ -51,6 +51,30 @@
   display: flex;
 }
 
+/* The anchored variance: a panel that belongs to a plain input rather than
+   to the command editor. A field has no positioned root to hang inside and
+   its row is inside scrolling panes and a <dialog> with overflow: hidden, so
+   the panel is mounted outside the field — and then `bottom: 100%` resolves
+   against the INITIAL containing block, which put the panel's bottom edge at
+   y=0 and the whole panel above the top of the window (nocx-vzdna: every
+   field's panel had always opened out of sight). Fixed placement makes the
+   viewport the frame, and floating-panel.ts computes top and left from the
+   field's own rect — the vertical axis the component now owns the way it
+   already owned the horizontal one. The offsets are the component's; these
+   declarations only hand it the axis, which is why `bottom` and the margin
+   are turned OFF rather than left to fight the inline `top`. */
+.ui-floating-panel[data-anchor='viewport'] {
+  position: fixed;
+  top: 0;
+  bottom: auto;
+  margin-bottom: 0;
+  /* Above the surfaces a field can sit under (context menus at 30, the mark
+     affordance at 200) and below the toast at 300, which must cover
+     everything. Inside a modal <dialog> the top layer decides instead, and
+     the component moves the panel there. */
+  z-index: 250;
+}
+
 .ui-floating-panel__list {
   overflow-y: auto;
   max-height: calc(40vh - 2rem);

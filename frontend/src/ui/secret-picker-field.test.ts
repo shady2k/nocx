@@ -634,3 +634,67 @@ describe('createSecretPickerField: the lock asks, the @ offers', () => {
     expect(labels()).toEqual(['prod-key', 'Add a secret…'])
   })
 })
+
+describe('the panel is placed against the field (nocx-vzdna)', () => {
+  /** The adapter mounts the panel on the body, so nothing in the DOM says
+   *  where the field is. The anchor is what says it — without one the panel
+   *  resolves `bottom: 100%` against the initial containing block and opens
+   *  above the top of the window, which is exactly the reported defect. */
+  const setupWithAnchor = (rect: { top: number; bottom: number; left: number }) => {
+    const field = document.createElement('input')
+    document.body.appendChild(field)
+    field.getBoundingClientRect = () =>
+      ({
+        top: rect.top,
+        bottom: rect.bottom,
+        left: rect.left,
+        height: rect.bottom - rect.top,
+      }) as DOMRect
+    const source = {
+      status: vi.fn(() => Promise.resolve({ state: 'unsealed' as const })),
+      list: vi.fn(() => Promise.resolve([entry('prod-key', 'secrow:prod-id')])),
+      requestUnseal: vi.fn(() => Promise.resolve()),
+      requestSetup: vi.fn(() => Promise.resolve(false)),
+      requestCreate: vi.fn(),
+    } satisfies SecretPickerSource
+    const value = { current: '' }
+    const controller = createSecretPickerField({
+      source,
+      value: () => value.current,
+      onChange: vi.fn(),
+      anchor: () => field,
+    })
+    return { controller, field }
+  }
+
+  it('hands the field through to the panel, which opens beside it', async () => {
+    const proto = HTMLElement.prototype
+    Object.defineProperty(proto, 'offsetHeight', { configurable: true, get: () => 120 })
+    Object.defineProperty(proto, 'offsetWidth', { configurable: true, get: () => 480 })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 768 })
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 })
+    try {
+      const { controller } = setupWithAnchor({ top: 500, bottom: 524, left: 200 })
+      controller.openAt(1)
+      await flush()
+      const el = panel()!
+      expect(el.dataset.anchor).toBe('viewport')
+      // 500 - 6 - 120: on screen, and next to the field rather than at the
+      // top of the document.
+      expect(el.style.top).toBe('374px')
+      expect(el.style.left).toBe('200px')
+      controller.destroy()
+    } finally {
+      delete (proto as { offsetHeight?: number }).offsetHeight
+      delete (proto as { offsetWidth?: number }).offsetWidth
+    }
+  })
+
+  it('without an anchor the panel keeps the kit default — the hosts that have no element', async () => {
+    const { controller } = setup()
+    controller.openAt(1)
+    await flush()
+    expect(panel()!.dataset.anchor).toBeUndefined()
+    controller.destroy()
+  })
+})

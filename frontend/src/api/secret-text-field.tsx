@@ -68,20 +68,29 @@ export function SecretTextField(props: SecretTextFieldProps) {
   const source = pickerProps.source
   // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
   const onPickerReady = pickerProps.onPickerReady
+  /** This field's input element, by the id the surface gave it — the same
+   *  lookup the caret and focus paths already do. */
+  const inputEl = (): HTMLInputElement | HTMLTextAreaElement | null =>
+    props.id
+      ? (document.getElementById(props.id) as HTMLInputElement | HTMLTextAreaElement | null)
+      : null
+
   const picker =
     source === undefined
       ? null
       : createSecretPickerField({
           source,
+          // The panel is mounted on the body and would otherwise have no idea
+          // where this field is; handing the input back is what puts the
+          // panel beside it instead of above the top of the window
+          // (nocx-vzdna).
+          anchor: inputEl,
           value: () => String(props.value),
           onChange: (next, caret) => {
             props.onInput?.(next)
             // eslint-disable-next-line solid/reactivity -- queued DOM focus callback for this field
             queueMicrotask(() => {
-              const input = props.id
-                ? (document.getElementById(props.id) as
-                    HTMLInputElement | HTMLTextAreaElement | null)
-                : null
+              const input = inputEl()
               input?.focus()
               input?.setSelectionRange(caret, caret)
             })
@@ -94,9 +103,7 @@ export function SecretTextField(props: SecretTextFieldProps) {
 
   const openAt = (from: number, to: number): void => {
     if (picker === null) return
-    const input = props.id
-      ? (document.getElementById(props.id) as HTMLInputElement | HTMLTextAreaElement | null)
-      : null
+    const input = inputEl()
     const current = String(props.value)
     const next = current.slice(0, from) + '@' + current.slice(to)
     props.onInput?.(next)
@@ -107,9 +114,7 @@ export function SecretTextField(props: SecretTextFieldProps) {
     })
   }
   const open = (): void => {
-    const input = props.id
-      ? (document.getElementById(props.id) as HTMLInputElement | HTMLTextAreaElement | null)
-      : null
+    const input = inputEl()
     const current = String(props.value)
     const caret = input?.selectionStart ?? current.length
     openAt(caret, caret)
@@ -150,10 +155,7 @@ export function SecretTextField(props: SecretTextFieldProps) {
         onPickerReady?.(open)
       }}
       onInput={(value) => {
-        const input = props.id
-          ? (document.getElementById(props.id) as HTMLInputElement | HTMLTextAreaElement | null)
-          : null
-        const caret = input?.selectionStart ?? value.length
+        const caret = inputEl()?.selectionStart ?? value.length
         props.onInput?.(value)
         picker?.onInput(value, caret)
       }}

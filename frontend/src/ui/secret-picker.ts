@@ -208,6 +208,13 @@ export class SecretPicker {
   constructor(
     private readonly source: SecretPickerSource,
     private readonly callbacks: SecretPickerCallbacks,
+    /** The field this picker opens against, for a host that mounts the panel
+     *  outside it (the plain-input adapter mounts on the body). Absent is the
+     *  terminal: the prompt mounts the panel INTO the editor root, whose
+     *  positioning is what places it, and passing an anchor there would
+     *  replace a correct placement with a computed one. See FloatingPanel's
+     *  `anchor`. */
+    opts?: { anchor?: () => HTMLElement | null },
   ) {
     this.panel = new FloatingPanel({
       variant: 'secret',
@@ -217,6 +224,7 @@ export class SecretPicker {
         onHover: (index) => this.hover(index),
         onPick: (index) => this.pick(index),
       },
+      ...(opts?.anchor !== undefined ? { anchor: opts.anchor } : {}),
     })
   }
 

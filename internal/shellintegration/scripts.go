@@ -228,7 +228,7 @@ var (
 // environment (ADR-0024 decision 2): a child process can reach the descriptor
 // and cannot authenticate on it. A refusal is printed in the pane and the agent
 // still runs, unorchestrated.
-const version = "42"
+const version = "43"
 
 // ScriptVersion is the integration script version other packages may read.
 // Command discovery puts it in its cache key (internal/commandnames): the

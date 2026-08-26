@@ -2072,3 +2072,55 @@ builtin printf '%s' "$__nocx_lc_json_unescaped"
 		t.Errorf("unescaped bootstrap mismatch:\n got %q\nwant %q", out, payload)
 	}
 }
+
+// TestBashNestedJsonUnescape is the zsh test's missing twin, and it exists
+// because the two decoders are one idea written twice and they drifted.
+// zsh's `(g:o:)` reads `\NNN` — three digits, no leading zero — so %03o is
+// the whole answer there. bash's `printf %b` reads `\0NNN`: a zero and then
+// UP TO three octal digits, so an escape written without the zero eats the
+// character after it whenever that character is an octal digit. Go's JSON
+// encoder escapes `<`, `>` and `&` by default, so the shell text that
+// travels here is full of them, and `2>&1` is the shape that bites: `&`
+// becomes \u0026, the decoder wrote \046, and `%b` read `\0461` as octal
+// 461 — 305, truncated to the byte 0x31, which IS the digit `1`. The
+// ampersand vanished silently and the remote loader ran `exec 2>1`, writing
+// its stderr to a file called `1` instead of onto stdout.
+//
+// The zsh side already carries this reasoning in a comment ending "bash's
+// twin has always used %03o; this is the zsh side catching up" — true about
+// the format verb and false about the outcome, because it read one decoder's
+// grammar onto the other. So the payload below is not generic: it pins the
+// adjacency cases specifically, and every one of them is a real fragment of
+// the carrier loader that shipped broken (nocx-eoijp).
+func TestBashNestedJsonUnescape(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	// Every escaped byte here is followed by an octal digit — the ONLY
+	// arrangement that fails, and the one a generic payload misses.
+	payload := "R(){ exec 2>&1 9<&-;}\nx>0 && y<1\na&&b\n\x01" + "7z\n"
+	b, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	frame := []byte(`{"v":1,"lane":"L","dom":"D","epoch":1,"seq":9,"cap":"abc","evt":"domain_grant","request":"r-1","env":"sudo","bootstrap":` + string(b) + `}`)
+	framePath := filepath.Join(t.TempDir(), "frame")
+	if err := os.WriteFile(framePath, frame, 0o600); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+
+	prog := `
+export NOCX_SHELL_INTEGRATION=1
+source "$1" >/dev/null 2>&1
+frame=$(cat "$NOCX_TEST_FRAME_PATH")
+bootstrap="${frame##*\"bootstrap\":\"}"
+bootstrap="${bootstrap%?}"
+bootstrap="${bootstrap%\"}"
+__nocx_lc_json_unescape "$bootstrap"
+builtin printf '%s' "$__nocx_lc_json_unescaped"
+`
+	out := runShellProgEnv(t, bash, prog, script, "NOCX_TEST_FRAME_PATH="+framePath)
+	if out != payload {
+		t.Errorf("unescaped bootstrap mismatch:\n got %q\nwant %q", out, payload)
+	}
+}

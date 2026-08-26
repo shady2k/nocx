@@ -80,13 +80,22 @@ import (
 // carrier — the per-epoch capability lives in these scripts' text and nowhere
 // else, so nothing outside them can ask.
 //
-// The CALL counts did not move on any of the five occasions —
+// 2026-08-26, sixth move (nocx-eoijp): 73,089 -> 73,090, ONE byte, and it
+// is a leading zero. bash's printf %b reads \0 and then up to three octal
+// digits, so the JSON decoder's escapes had to grow from \NNN to \0NNN or
+// go on eating the character after them whenever it was an octal digit —
+// which is what turned the carrier loader's `exec 2>&1` into `exec 2>1`.
+// Recorded rather than absorbed because the smallest move in this list is
+// also the one that fixed the most: a byte is not a proxy for a change's
+// weight, which is the assumption a size ratchet quietly invites.
+//
+// The CALL counts did not move on any of the six occasions —
 // 57/17/49/58/58/63 on every path — so N = 90 is untouched: the bundle
 // changed size, not the work. B = 256 KiB still holds, now at 3.51x
 // headroom.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 73089
+	measuredMaxPublishBytes = 73090
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

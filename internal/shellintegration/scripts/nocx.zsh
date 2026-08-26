@@ -372,8 +372,15 @@ __nocx_lc_json_unescape() {
         # 0xF0. Measured exactly that: a payload's `select(...)>0` reached the
         # child as `select(...)\xF0 ? 0 : 1` and perl refused to parse it
         # (nocx-aupk). `2>&1` corrupts the same way — & gives \46, and
-        # `&1` reads as \461. bash's twin has always used %03o; this is the
-        # zsh side catching up.
+        # `&1` reads as \461.
+        #
+        # The bash twin needs the same padding AND a leading zero, because
+        # printf %b reads \0NNN where (g:o:) reads \NNN. This comment used
+        # to end "bash's twin has always used %03o; this is the zsh side
+        # catching up" — true about the verb, false about the outcome, and
+        # bash went on corrupting every `2>&1` in the carrier loader for as
+        # long as that sentence stood (nocx-eoijp). Two grammars, one idea:
+        # read the other side's decoder before believing it agrees.
         octc=$(( [##8] 16#$hexc ))
         octc="${(l:3::0:)octc}"
         s="${s//${bs}"u"$hexc/${bs}${octc}}"

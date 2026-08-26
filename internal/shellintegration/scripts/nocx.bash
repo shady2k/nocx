@@ -514,10 +514,27 @@ __nocx_lc_json_unescape_native() {
     s="${s//\\\//\/}"
     # \uXXXX is rare in the rcfile (printable ASCII dominates); convert it
     # to octal so one printf %b pass below decodes it with the rest.
+    #
+    # `\0` AND THREE DIGITS, and both halves are load-bearing. bash's
+    # printf %b reads \0 followed by UP TO three octal digits, so the escape
+    # must be exactly four characters or it eats the character after it
+    # whenever that character is itself an octal digit. Go's JSON encoder
+    # escapes <, > and & by default, so this text is full of them and the
+    # adjacency is ordinary rather than exotic: the carrier loader's
+    # `exec 2>&1` arrived as `exec 2>1`, because & came in as \u0026, was
+    # written here as \046, and %b then read `\0461` as octal 461 — 305,
+    # truncated to the byte 0x31, which is the digit 1. The remote loader
+    # ran with its stderr redirected to a FILE named `1`, the far side never
+    # integrated, and the only visible trace was a stray file in the
+    # repository root (nocx-eoijp, nocx-tgl0k).
+    #
+    # The zsh twin needs the padding and NOT the zero: `(g:o:)` reads \NNN,
+    # exactly three digits. Same idea, two grammars — which is precisely how
+    # this survived, so do not copy one side's fix onto the other by eye.
     while [[ "$s" =~ \\u([0-9a-fA-F]{4}) ]]; do
         hex="${BASH_REMATCH[1]}"
         printf -v oct '%03o' "$((16#$hex))"
-        s="${s//\\u$hex/\\$oct}"
+        s="${s//\\u$hex/\\0$oct}"
     done
     printf -v s '%b' "$s"
     s="${s//__NOCX_BS_${__nocx_lc_dom}__/\\}"

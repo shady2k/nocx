@@ -136,6 +136,20 @@
   flex: 0 0 auto;
 }
 
+/* Grant marks are an attention menu, not a page-like list: match the
+   overflow menu's row box and keep the footer from adding a second gap. */
+.ui-floating-panel[data-variant='grant'] .ui-floating-panel__list {
+  padding: 0;
+}
+
+.ui-floating-panel[data-variant='grant'] .ui-floating-panel__row {
+  padding: 6px 12px;
+}
+
+.ui-floating-panel[data-variant='grant'] .ui-floating-panel__footer {
+  padding: 6px 12px;
+}
+
 /* ── recall variant: header, detail pane, search row ────────────────────
    These parts belong to the recall layout only; the completion variant
    renders none of them. They stay in this family's file (ADR-0013 §1). */

@@ -8,6 +8,7 @@ import {
   type RestoredCause,
   type RestoredTurnFacts,
 } from './restored-block'
+import type { RunningBlockActions } from './blocks'
 import { DEFAULT_SNAPSHOT, serializeRange, serializeRangeSGR } from './serializer'
 import { BufferLine, lineWith, XTERM_CM_P16 } from './test-helpers'
 import { CommandSnapshotStore } from '../command-snapshot'
@@ -49,6 +50,40 @@ describe('a block built from the store', () => {
     expect(el.dataset.restored).toBe('true')
     expect(el.classList.contains('cmd-block')).toBe(true)
     expect(el.dataset.entryId).toBe('entry-1')
+  })
+
+  it('offers mark and unmark for a restored block using its durable entry id', () => {
+    let granted = false
+    const toggleGrant = vi.fn(() => {
+      granted = !granted
+    })
+    const actions: RunningBlockActions = {
+      stop: vi.fn(),
+      isActive: () => false,
+      isGranted: () => granted,
+      toggleGrant,
+    }
+    const el = restoredBlock(facts(), S, container, () => {}, store(), actions)
+    document.body.append(el)
+    try {
+      el.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      const mark = document.querySelector<HTMLButtonElement>(
+        '.cmd-overflow-menu-item[data-action="grant"]',
+      )
+      expect(mark?.textContent).toBe('Ask about this block')
+      mark?.click()
+      expect(toggleGrant).toHaveBeenCalledWith(el)
+      expect(el.dataset.entryId).toBe('entry-1')
+
+      el.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      const unmark = document.querySelector<HTMLButtonElement>(
+        '.cmd-overflow-menu-item[data-action="grant"]',
+      )
+      expect(unmark?.textContent).toBe('Unmark')
+    } finally {
+      document.querySelectorAll('.cmd-overflow-menu').forEach((menu) => menu.remove())
+      el.remove()
+    }
   })
 
   it('carries the command, the directory and the outcome', () => {

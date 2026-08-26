@@ -25,6 +25,10 @@ func (s *credStub) Create(_ context.Context, value credential.Secret) (credentia
 func (s *credStub) Get(_ context.Context, _ credential.SecretID) (credential.Secret, error) {
 	return credential.NewSecret(s.pw), nil
 }
+
+func (s *credStub) Resolve(ctx context.Context, id credential.SecretID, _ credential.Stance) (credential.Secret, error) {
+	return s.Get(ctx, id)
+}
 func (s *credStub) Delete(_ context.Context, _ credential.SecretID) error         { return nil }
 func (s *credStub) Exists(_ context.Context, _ credential.SecretID) (bool, error) { return true, nil }
 

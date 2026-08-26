@@ -582,8 +582,29 @@ describe('AgentApprovalPrompt', () => {
       [false, 'always'],
     ])
   })
+  it('each answer says its own scope, and carries no second line', () => {
+    // The owner's correction, 2026-08-26: the scope belongs IN the button's
+    // text. What came off is the per-button description line, not the word a
+    // person needs in order to tell the six answers apart — a column heading
+    // is one more thing to look up while deciding.
+    const { container } = renderPrompt()
+    const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>('.ui-button'))
+    expect(buttons.map((button) => button.textContent)).toEqual([
+      'Allow once',
+      'Allow in this session',
+      'Allow always',
+      'Deny once',
+      'Deny in this session',
+      'Deny always',
+    ])
+    expect(buttons.every((button) => !button.querySelector('.ui-button__secondary'))).toBe(true)
+    expect(buttons[0]?.getAttribute('aria-label')).toBe('Allow once — this proposal only')
+    expect(buttons[2]?.getAttribute('aria-label')).toBe(
+      'Allow always — every read and inspect call, in every session, from now on',
+    )
+  })
 
-  it('groups the allowances apart from the refusals, and leads each group with once', () => {
+  it('groups allowances and refusals into two rows of three', () => {
     const { container } = renderPrompt()
     const groups = Array.from(container.querySelectorAll('.ui-action-group'))
     expect(groups).toHaveLength(2)
@@ -591,16 +612,8 @@ describe('AgentApprovalPrompt', () => {
       Array.from(g.querySelectorAll('.ui-button')).map((b) => b.textContent),
     )
     expect(names).toEqual([
-      [
-        'Allow once — this proposal only',
-        'Allow in this session — every read and inspect call in this session',
-        'Allow always — every read and inspect call, in every session, from now on',
-      ],
-      [
-        'Deny once — this proposal only',
-        'Deny in this session — every read and inspect call in this session',
-        'Deny always — every read and inspect call, in every session, from now on',
-      ],
+      ['Allow once', 'Allow in this session', 'Allow always'],
+      ['Deny once', 'Deny in this session', 'Deny always'],
     ])
   })
 

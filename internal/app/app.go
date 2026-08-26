@@ -697,10 +697,17 @@ func New(opts ...Option) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("vault init: %w", err)
 	}
+	// One stanced material resolver serves both endpoint connections and the
+	// egress gate. Its unsealer is the vault itself; the requester is attached
+	// to the vault below once the transport exists.
+	credResolver := credential.NewResolver(v, func(err error) bool {
+		return errors.Is(err, vault.ErrVaultSealed)
+	}, v)
+
 	// API requests resolve only opaque secrow handles through the capability
 	// seam. The terminal's ResolveLine remains name-based; this adapter is
 	// deliberately restricted to collection-file references.
-	apiSecretRefs := capability.NewSecretRefs(v, v, profileStore, profileStore)
+	apiSecretRefs := capability.NewSecretRefs(v, apiSecretMaterial{credResolver}, profileStore, profileStore)
 
 	settingsRegistry := settings.New(docStore, v)
 
@@ -919,8 +926,15 @@ func New(opts ...Option) (*App, error) {
 		transport.WithBackupFileSaver(backup.SaveToFile),
 		transport.WithGroupRepository(profileStore),
 		transport.WithCredentialStore(v),
+		// The vault raises its own unlock, and it is SAID here rather than
+		// discovered from the store's method set: a resolver built without an
+		// unsealer simply never prompts, and that is too quiet a difference to
+		// leave to a type assertion (nocx-o3606). The same stanced resolver
+		// serves endpoint material and egress screening, so both operations
+		// share the vault's unlock semantics.
+		transport.WithVaultUnsealer(v),
 		transport.WithVaultLifecycle(v),
-		transport.WithAgentKnownMaterial(transport.NewVaultKnownMaterial(v)),
+		transport.WithAgentKnownMaterial(transport.NewVaultKnownMaterial(v, credResolver, v)),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
 		transport.WithAgentPolicy(policyStore),
 		// Which of that policy's seven rows govern anything at all: the
@@ -1224,12 +1238,9 @@ func New(opts ...Option) (*App, error) {
 	// owns "I am sealed and one unlock is already pending" (nocx-o9jdu) and
 	// the transport owns "deliver one prompt to whichever renderer is
 	// there" — this line is the only place the two meet.
-	//
-	// NOT YET LIVE FOR USERS: EnsureUnsealed has no production consumer
-	// until nocx-k41yv routes the sealed secret-access paths through it.
-	// Callers still reach RequestUnlock directly and still get one prompt
-	// each. Recorded here rather than left to a green deadcode run, which
-	// is how nocx-rtg0 shipped a write path nobody called.
+	// Every production credential resolver now reaches EnsureUnsealed through
+	// the vault's structural capability (nocx-k41yv): asks, probes, command
+	// secret expansion and SSH authentication all share this coalescing state.
 	v.SetUnlockRequester(tp)
 
 	// One resolver, one consumer family: connections.test probes and
@@ -1314,8 +1325,12 @@ func New(opts ...Option) (*App, error) {
 	ptf.noteBootstrapStage = func(sid, stage string) {
 		tp.NoteBootstrapStage(session.ID(sid), stage)
 	}
+	// The connection/SSH material seam uses the same resolver as the egress
+	// gate. The auth ladder resolves on the dial — PHASE TWO of the open,
+	// which deliberately holds no domain gate — so waiting there cannot block
+	// the unseal that answers it.
 	resolver := connection.NewResolver(
-		profileStore, profileStore, v,
+		profileStore, profileStore, credResolver,
 		connection.WithConfigResolver(sshCfgResolver),
 		connection.WithPasswordAsker(tp.RequestConnectionPassword),
 		connection.WithSecretCreator(v),
@@ -2536,4 +2551,27 @@ func (l *apiRouteLeaser) LeaseForProfile(ctx context.Context, profileID string) 
 	// does (ws_tunnel.go): credentials, jump route and authorized endpoints
 	// together, so the lease is pool-keyed and authorized like a tab.
 	return l.client.TunnelConn(ctx, host, func(dst *ssh.ConnectConfig) { *dst = *cfg })
+}
+
+// apiSecretMaterial is the composition root's join between the capability's
+// reference grammar and the credential package's stanced read.
+//
+// IT EXISTS RATHER THAN THE CAPABILITY HOLDING THE RESOLVER because a
+// capability may not (nocx-o3606): an operation-stance read blocks until a
+// person answers the vault's unlock, and vault.unseal needs the lane an
+// operation holds. The transport calls the reference pass after its operation
+// has released that lane, and by then this adapter may block for as long as
+// the dialog takes.
+//
+// THE STANCE IS AN OPERATION, deliberately. Report() would never raise the
+// prompt, so a sealed vault would turn a perfectly good request into an
+// unresolved reference and tell the person their collection was wrong. The
+// reason is what the vault's own dialog shows.
+type apiSecretMaterial struct{ resolver credential.Resolver }
+
+func (m apiSecretMaterial) Material(ctx context.Context, id credential.SecretID) (credential.Secret, error) {
+	if m.resolver == nil {
+		return credential.Secret{}, vault.ErrVaultSealed
+	}
+	return m.resolver.Resolve(ctx, id, credential.Operation("send an API request"))
 }

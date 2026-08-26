@@ -135,11 +135,32 @@ type SendInputs struct {
 }
 
 // SecretRefs resolves vault references in text a request is about to send.
-// It is narrowed to the one call Snapshot makes: there is no parameter through
+// It is narrowed to the one call the send makes: there is no parameter through
 // which an identifier travels outward and no method that takes one from
 // outside (ADR-0011).
+//
+// IT IS NOT CALLED FROM INSIDE AN OPERATION, and that is structural rather
+// than incidental (nocx-o3606). Resolving material with an operation stance
+// blocks on a person answering the unlock, and an API operation holds the
+// lane that vault.unseal itself needs to run — so a send that resolved its
+// own secrets would wait for a dialog whose answer it was preventing. The
+// caller resolves, after Snapshot and before the send: see
+// ResolveSnapshotSecrets.
 type SecretRefs interface {
 	ResolveText(ctx context.Context, text string) (out string, placed []PlacedSecret, err error)
+}
+
+// SecretMaterial hands back the bytes behind one already-resolved secret id.
+//
+// This package owns the reference GRAMMAR — the {{secret:…}} scan, the row
+// lookup, the inventory and the refusal — and deliberately does not own the
+// READ. A read of material must declare a stance, the seam that carries one
+// lives in the credential package, and a capability may not hold it (see
+// SecretRefs above, and TestCapabilityHoldsNoMaterialResolver, which enforces
+// the absence by scanning this file). So the read is a seam the transport
+// satisfies, where that stanced seam legitimately lives.
+type SecretMaterial interface {
+	Material(ctx context.Context, id credential.SecretID) (credential.Secret, error)
 }
 
 // UnresolvedSecretError blocks a request whose secret reference has no answer.
@@ -162,16 +183,16 @@ func (e *UnresolvedSecretError) Unwrap() error { return apicoll.ErrUnresolvedVar
 // file may spell only an opaque secrow: handle.
 func NewSecretRefs(
 	v SecretVault,
-	store credential.SecretStore,
+	material SecretMaterial,
 	profiles profile.ProfileRepository,
 	groups profile.GroupRepository,
 ) SecretRefs {
-	return &secretRefs{vault: v, store: store, profiles: profiles, groups: groups}
+	return &secretRefs{vault: v, material: material, profiles: profiles, groups: groups}
 }
 
 type secretRefs struct {
 	vault    SecretVault
-	store    credential.SecretStore
+	material SecretMaterial
 	profiles profile.ProfileRepository
 	groups   profile.GroupRepository
 }
@@ -181,7 +202,7 @@ func (s *secretRefs) ResolveText(ctx context.Context, text string) (string, []Pl
 	if len(locs) == 0 {
 		return text, []PlacedSecret{}, nil
 	}
-	if s.vault == nil || s.store == nil {
+	if s.vault == nil || s.material == nil {
 		return "", nil, &UnresolvedSecretError{Reference: text[locs[0][0]:locs[0][1]]}
 	}
 	inputs, err := s.inventoryInputs()
@@ -201,7 +222,7 @@ func (s *secretRefs) ResolveText(ctx context.Context, text string) (string, []Pl
 		if !ok {
 			return "", nil, &UnresolvedSecretError{Reference: ref}
 		}
-		secret, err := s.store.Get(ctx, id)
+		secret, err := s.material.Material(ctx, id)
 		if err != nil {
 			return "", nil, err
 		}
@@ -394,25 +415,22 @@ type APICollectionOperation interface {
 // substitution. It is a parameter rather than a field set afterwards because
 // the snapshot needs it on the first call; a build wired without one leaves
 // references unresolved and refuses the send.
-func NewAPICollectionOperation(apiGate, lane control.Admission, svc apicoll.Collections, refs SecretRefs) APICollectionOperation {
+func NewAPICollectionOperation(apiGate, lane control.Admission, svc apicoll.Collections) APICollectionOperation {
 	g := &guard{}
 	return newOperation[APICollectionService](
 		control.NewComposite(apiGate, lane),
 		g,
-		newAPICollectionService(g, svc, refs),
+		newAPICollectionService(g, svc),
 	)
 }
 
-func newAPICollectionService(g *guard, svc apicoll.Collections, refs SecretRefs) *apiCollectionService {
-	return &apiCollectionService{guard: g, svc: svc, refs: refs}
+func newAPICollectionService(g *guard, svc apicoll.Collections) *apiCollectionService {
+	return &apiCollectionService{guard: g, svc: svc}
 }
 
 type apiCollectionService struct {
 	guard *guard
 	svc   apicoll.Collections
-	// refs resolves the vault-reference pass after collection variables.
-	// nil is a build with no vault resolver; a reference then blocks the send.
-	refs SecretRefs
 
 	// mu guards the opened-folder list. The api gate already serialises
 	// every caller at capacity 1, so this is the lock that keeps the list
@@ -788,31 +806,53 @@ func (s *apiCollectionService) Snapshot(ctx context.Context, h apicoll.HandleID,
 	if err != nil {
 		return inputs, err
 	}
-	resolved, placed, err := s.resolveRequestSecrets(ctx, resolved)
+	// SECRETS ARE NOT RESOLVED HERE, and the omission is the point. This
+	// runs inside the operation's admission, and resolving material with an
+	// operation stance blocks until a person answers the unlock — which they
+	// cannot, because vault.unseal needs the lane this is holding
+	// (nocx-o3606, ws.go's credentialResolver). The caller resolves what
+	// comes back, outside the admission, with ResolveSnapshotSecrets.
+	inputs.Request = resolved
+	inputs.Secrets = []PlacedSecret{}
+	return inputs, nil
+}
+
+// ResolveSnapshotSecrets fills in the vault references a Snapshot left alone.
+//
+// IT IS A FREE FUNCTION ON PURPOSE: it takes no guard, holds no admission and
+// belongs to no operation, because it is the half of the send that must run
+// OUTSIDE one. The caller holds the stanced resolver and calls this between
+// Snapshot and the send.
+//
+// A nil refs is a build with no vault resolver at all: a request carrying no
+// reference still goes out, and one that carries a reference is refused by
+// name rather than sent with the text in it.
+func ResolveSnapshotSecrets(ctx context.Context, inputs SendInputs, refs SecretRefs) (SendInputs, error) {
+	resolved, placed, err := resolveRequestSecrets(ctx, refs, inputs.Request)
 	if err != nil {
-		return inputs, err
+		return SendInputs{}, err
 	}
 	inputs.Request = resolved
 	inputs.Secrets = placed
 	return inputs, nil
 }
 
-func (s *apiCollectionService) resolveRequestSecrets(ctx context.Context, req apicoll.Request) (apicoll.Request, []PlacedSecret, error) {
+func resolveRequestSecrets(ctx context.Context, refs SecretRefs, req apicoll.Request) (apicoll.Request, []PlacedSecret, error) {
 	out := req
 	placed := make([]PlacedSecret, 0)
 	resolve := func(text string) (string, error) {
-		if s.refs == nil && resolveLineRefRE.MatchString(text) {
+		if refs == nil && resolveLineRefRE.MatchString(text) {
 			loc := resolveLineRefRE.FindStringIndex(text)
 			return "", &UnresolvedSecretError{Reference: text[loc[0]:loc[1]]}
 		}
-		if s.refs == nil {
+		if refs == nil {
 			return text, nil
 		}
-		resolved, refs, err := s.refs.ResolveText(ctx, text)
+		resolved, found, err := refs.ResolveText(ctx, text)
 		if err != nil {
 			return "", err
 		}
-		placed = appendUniquePlaced(placed, refs...)
+		placed = appendUniquePlaced(placed, found...)
 		return resolved, nil
 	}
 	var err error

@@ -57,22 +57,87 @@ type SecretService interface {
 	// ResolveRow maps a row handle to the SecretID behind it. False for
 	// an unknown row.
 	ResolveRow(row string) (credential.SecretID, bool)
-	// GetSecret resolves id and reads the secret. The value is only ever
-	// used inside Secret.Use; the handler hands the resolved bytes to a
-	// PTY write and nowhere else.
-	GetSecret(ctx context.Context, id credential.SecretID) (credential.Secret, error)
 	// Usage answers the profiles that use the secret behind a row
 	// (ADR-0017). An unknown row or an unused secret answers an empty
 	// list.
 	Usage(ctx context.Context, row string) ([]profile.ProfileRef, error)
-	// ResolveLine substitutes every {{secret:NAME}} reference in a line
-	// with its resolved value (vault.resolveLine). The value goes to the
-	// caller for the PTY write and nowhere else. Refs reports each
-	// reference and whether it resolved; an unresolved name is never
-	// silently left as literal text. A vault that sealed mid-flight is an
-	// error, not an unresolved ref — a retry after unsealing resolves
-	// differently, and answering would be a lie.
-	ResolveLine(ctx context.Context, line string) (string, []ResolvedLineRef, error)
+	// PlanLine finds every {{secret:NAME}} reference in a line and maps
+	// each name to the SecretID behind it (vault.resolveLine). It reads no
+	// material: that read waits for a person and would hold this
+	// operation's gates while it did, so it belongs to the caller, after
+	// the operation has released them (nocx-o3606). SubstituteLine then
+	// puts the two halves together.
+	PlanLine(ctx context.Context, line string) (LinePlan, error)
+}
+
+// LinePlan is everything a line substitution needs from the config and vault
+// stores and nothing that needs a secret read: the line as it arrived, and
+// each reference with the id behind it.
+type LinePlan struct {
+	// Line is the line exactly as the caller sent it.
+	Line string
+	// Refs are the references in order of appearance. Empty means the line
+	// carries none and is its own answer.
+	Refs []PlannedLineRef
+}
+
+// PlannedLineRef is one {{secret:NAME}} reference and what it points at.
+type PlannedLineRef struct {
+	// Name is the reference as written, between the braces.
+	Name string
+	// Start and End bound the whole {{secret:NAME}} token in Line.
+	Start, End int
+	// ID is the secret the name resolves to. Empty when the vault holds no
+	// secret with that name — the reference is then left as written and
+	// reported unresolved, never silently dropped.
+	ID credential.SecretID
+}
+
+// SubstituteLine puts the plan and the material the caller resolved back
+// together. Pure: no store, no vault, no gate — which is what lets the read
+// between the two halves happen outside the operation.
+//
+// A reference whose id resolved to nothing usable is left exactly as written
+// and reported unresolved: a retry after unsealing resolves differently, so
+// quietly dropping it would be a lie about what the command will run.
+func SubstituteLine(plan LinePlan, values map[credential.SecretID]credential.Secret) (string, []ResolvedLineRef) {
+	refs := make([]ResolvedLineRef, 0, len(plan.Refs))
+	out := make([]byte, 0, len(plan.Line))
+	cursor := 0
+	for _, ref := range plan.Refs {
+		out = append(out, plan.Line[cursor:ref.Start]...)
+		value, ok := lineMaterial(values, ref.ID)
+		refs = append(refs, ResolvedLineRef{Name: ref.Name, Resolved: ok})
+		if ok {
+			out = append(out, value...)
+		} else {
+			out = append(out, plan.Line[ref.Start:ref.End]...)
+		}
+		cursor = ref.End
+	}
+	out = append(out, plan.Line[cursor:]...)
+	return string(out), refs
+}
+
+// lineMaterial reads one resolved secret through Secret.Use — the only way
+// the bytes are ever readable — and reports whether there was anything to
+// substitute.
+func lineMaterial(values map[credential.SecretID]credential.Secret, id credential.SecretID) (string, bool) {
+	if id == "" {
+		return "", false
+	}
+	secret, ok := values[id]
+	if !ok || secret.IsEmpty() {
+		return "", false
+	}
+	var val string
+	if err := secret.Use(func(b []byte) error {
+		val = string(b)
+		return nil
+	}); err != nil {
+		return "", false
+	}
+	return val, true
 }
 
 // ResolvedLineRef is one reference in a resolved line (vault.resolveLine).
@@ -281,13 +346,6 @@ func (s *secretService) ResolveRow(row string) (credential.SecretID, bool) {
 	return s.vault.ResolveRow(row, inputs)
 }
 
-func (s *secretService) GetSecret(ctx context.Context, id credential.SecretID) (credential.Secret, error) {
-	if err := s.guard.check(); err != nil {
-		return credential.Secret{}, err
-	}
-	return s.store.Get(ctx, id)
-}
-
 func (s *secretService) Usage(ctx context.Context, row string) ([]profile.ProfileRef, error) {
 	if err := s.guard.check(); err != nil {
 		return nil, err
@@ -313,22 +371,27 @@ func (s *secretService) Usage(ctx context.Context, row string) ([]profile.Profil
 // grammar is deliberately permissive.
 var resolveLineRefRE = regexp.MustCompile(`\{\{secret:(.+?)\}\}`)
 
-func (s *secretService) ResolveLine(ctx context.Context, line string) (string, []ResolvedLineRef, error) {
+func (s *secretService) PlanLine(ctx context.Context, line string) (LinePlan, error) {
 	if err := s.guard.check(); err != nil {
-		return "", nil, err
+		return LinePlan{}, err
 	}
+	plan := LinePlan{Line: line, Refs: []PlannedLineRef{}}
 	locs := resolveLineRefRE.FindAllStringSubmatchIndex(line, -1)
 	if len(locs) == 0 {
-		return line, []ResolvedLineRef{}, nil
+		return plan, nil
 	}
 	profiles, groups, err := s.loadConfig()
 	if err != nil {
-		return "", nil, err
+		return LinePlan{}, err
 	}
 	inputs := inventoryInputs(profiles, groups)
+	// A sealed or uninitialized vault fails HERE, before any reference is
+	// planned: the inventory is the vault's own read and it refuses while
+	// shut. That failure is the actionable one the caller answers with —
+	// distinct from "no such secret", and reached without holding anyone up.
 	entries, err := s.vault.BuildInventory(ctx, inputs)
 	if err != nil {
-		return "", nil, err
+		return LinePlan{}, err
 	}
 	nameToRow := make(map[string]string, len(entries))
 	for _, e := range entries {
@@ -336,62 +399,18 @@ func (s *secretService) ResolveLine(ctx context.Context, line string) (string, [
 			nameToRow[e.Name] = e.ID
 		}
 	}
-
-	refs := make([]ResolvedLineRef, 0, len(locs))
-	out := make([]byte, 0, len(line))
-	out = append(out, line[:locs[0][0]]...)
-	for i, loc := range locs {
+	plan.Refs = make([]PlannedLineRef, 0, len(locs))
+	for _, loc := range locs {
 		name := line[loc[2]:loc[3]]
-		value, resolved, sealed := s.resolveVaultSecret(ctx, name, nameToRow, inputs)
-		if sealed {
-			return "", nil, vault.ErrVaultSealed
+		ref := PlannedLineRef{Name: name, Start: loc[0], End: loc[1]}
+		if row, ok := nameToRow[name]; ok {
+			if id, ok := s.vault.ResolveRow(row, inputs); ok {
+				ref.ID = id
+			}
 		}
-		refs = append(refs, ResolvedLineRef{Name: name, Resolved: resolved})
-		if resolved {
-			out = append(out, value...)
-		} else {
-			out = append(out, line[loc[0]:loc[1]]...)
-		}
-		if i+1 < len(locs) {
-			out = append(out, line[loc[1]:locs[i+1][0]]...)
-		} else {
-			out = append(out, line[loc[1]:]...)
-		}
+		plan.Refs = append(plan.Refs, ref)
 	}
-	return string(out), refs, nil
-}
-
-// resolveVaultSecret maps name → row handle → SecretID → value. sealed is
-// true only when the vault sealed mid-flight (an actionable state, distinct
-// from "no such secret"); resolved is false for an unknown name or a store
-// that did not answer.
-func (s *secretService) resolveVaultSecret(ctx context.Context, name string, nameToRow map[string]string, inputs []vault.CredentialInventory) (value string, resolved bool, sealed bool) {
-	row, ok := nameToRow[name]
-	if !ok {
-		return "", false, false
-	}
-	id, ok := s.vault.ResolveRow(row, inputs)
-	if !ok {
-		return "", false, false
-	}
-	secret, err := s.store.Get(ctx, id)
-	if err != nil {
-		if err == vault.ErrVaultSealed {
-			return "", false, true
-		}
-		return "", false, false
-	}
-	if secret.IsEmpty() {
-		return "", false, false
-	}
-	var val string
-	if err := secret.Use(func(b []byte) error {
-		val = string(b)
-		return nil
-	}); err != nil {
-		return "", false, false
-	}
-	return val, true, false
+	return plan, nil
 }
 
 // loadConfig reads the profile/group stores for the inventory projection.

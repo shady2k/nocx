@@ -371,6 +371,32 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 		return
 	}
 
+	// THE VAULT REFERENCES ARE RESOLVED HERE, OUTSIDE THE OPERATION, and the
+	// position is the whole point (nocx-o3606). Reading material declares an
+	// operation stance, which blocks until a person answers the vault's
+	// unlock — and vault.unseal runs on the lane this handler's operation was
+	// holding a moment ago, so resolving inside the callback would wait for a
+	// dialog whose answer it was itself refusing ("Control plane busy"). The
+	// gate is released, then the material is asked for.
+	if h.refs != nil {
+		resolvedInputs, resolveErr := capability.ResolveSnapshotSecrets(sendCtx, inputs, h.refs)
+		if resolveErr != nil {
+			// The same division the auth block below draws: a reference with
+			// no answer is a thing that happened to somebody who pressed
+			// Send, so it is a run at `compose` naming the reference. Any
+			// other failure is the caller's to fix and stays an error.
+			if composeRefusal(resolveErr) {
+				_ = h.r.TryResult(req.ID, mustMarshal(wireExchange(
+					apisend.Unsent(inputs.Request, apisend.PhaseCompose, resolveErr),
+					inputs.Environment, inputs.Route)))
+				return
+			}
+			_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(resolveErr), Message: resolveErr.Error()})
+			return
+		}
+		inputs = resolvedInputs
+	}
+
 	// The route comes off the environment the snapshot read, in the same
 	// record as the address it substituted (§6.5) — so a request cannot go
 	// out at the production address around its bastion. A route this build
@@ -382,9 +408,10 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 		return
 	}
 
-	// Auth text is ordinary request text: Snapshot has already resolved
-	// collection variables and vault references before the gate is released.
-	// Secret placements are appended below so diagnostics elide the bytes.
+	// Auth text is ordinary request text: the snapshot resolved collection
+	// variables under the gate and the pass above resolved vault references
+	// after it. Secret placements are appended below so diagnostics elide
+	// the bytes.
 	var authSecrets apisend.SecretSource
 	sending, used, err := apisend.Apply(inputs.Request, authSecrets)
 	if err != nil {
@@ -2034,7 +2061,7 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate control.Admission) [
 
 	var collOp capability.APICollectionOperation
 	if collWired {
-		collOp = capability.NewAPICollectionOperation(apiGate, lane, s.apiCollections, s.apiSecretRefs)
+		collOp = capability.NewAPICollectionOperation(apiGate, lane, s.apiCollections)
 	}
 	importOp := capability.NewAPIImportOperation(apiGate, lane, apiimport.NewOSFS(), s.apiFetch)
 

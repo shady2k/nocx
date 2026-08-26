@@ -32,9 +32,6 @@ func newAPIOperation(t *testing.T) capability.APICollectionOperation {
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apicoll.NewCollections(apiPaths{root: t.TempDir()}),
-		// No binding store: a secret variable resolves to nothing, which is
-		// what a build wired without one does.
-		nil,
 	)
 }
 
@@ -55,7 +52,6 @@ func newAPIOperationWithSecrets(t *testing.T) capability.APICollectionOperation 
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apicoll.NewCollections(apiPaths{root: t.TempDir()}),
-		testSecretRefs{},
 	)
 }
 
@@ -70,7 +66,6 @@ func TestAPICollectionService_DefaultRootIsWhereACreatedCollectionLands(t *testi
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apicoll.NewCollections(apiPaths{root: root}),
-		nil,
 	)
 
 	var got string
@@ -106,7 +101,6 @@ func TestAPICollectionService_DefaultRootIsWhereACreatedCollectionLands(t *testi
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apicoll.NewCollections(nil),
-		nil,
 	)
 	if err := none.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
 		where, err := svc.DefaultRoot()
@@ -161,10 +155,21 @@ func apiFolderWithSecretHeader(t *testing.T) string {
 	return root
 }
 
+// A header takes a request variable, that variable holds a secret reference,
+// and the send resolves both — with no environment named at all.
+//
+// IT IS TWO STEPS, and the split is the subject as much as the values are
+// (nocx-o3606). Snapshot runs INSIDE the operation and leaves the reference
+// alone; the caller resolves it OUTSIDE, because an operation-stance read
+// blocks on the unlock while holding the lane vault.unseal needs. The
+// assertions below are deliberately placed on either side of that line: the
+// snapshot still carries the reference, and only the resolved result has the
+// value.
 func TestAPICollectionService_SnapshotResolvesVariableThenSecretWithoutEnvironment(t *testing.T) {
 	op := newAPIOperationWithSecrets(t)
 	root := apiFolderWithSecretHeader(t)
 
+	var snapshot capability.SendInputs
 	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
 		opened, err := svc.Open(root)
 		if err != nil {
@@ -174,15 +179,31 @@ func TestAPICollectionService_SnapshotResolvesVariableThenSecretWithoutEnvironme
 		if err != nil {
 			return err
 		}
-		if got := in.Request.Headers[0].Value; got != "header-secret" {
-			t.Errorf("header = %q, want resolved secret value", got)
+		// The plain variable IS substituted here — that pass needs the
+		// folder and the environment, which is what the gate is held for.
+		// The secret reference is what survives it.
+		if got := in.Request.Headers[0].Value; got != "{{secret:secrow:X}}" {
+			t.Errorf("header inside the operation = %q, want the reference still unresolved", got)
 		}
-		if len(in.Secrets) != 1 || in.Secrets[0].Value != "header-secret" {
-			t.Errorf("placed secrets = %+v, want the substituted value", in.Secrets)
+		if len(in.Secrets) != 0 {
+			t.Errorf("secrets inside the operation = %+v, want none placed yet", in.Secrets)
 		}
+		snapshot = in
 		return nil
 	}); err != nil {
 		t.Fatalf("Run: %v", err)
+	}
+
+	// Outside the admission, where the material may be asked for.
+	resolved, err := capability.ResolveSnapshotSecrets(context.Background(), snapshot, testSecretRefs{})
+	if err != nil {
+		t.Fatalf("ResolveSnapshotSecrets: %v", err)
+	}
+	if got := resolved.Request.Headers[0].Value; got != "header-secret" {
+		t.Errorf("header = %q, want resolved secret value", got)
+	}
+	if len(resolved.Secrets) != 1 || resolved.Secrets[0].Value != "header-secret" {
+		t.Errorf("placed secrets = %+v, want the substituted value", resolved.Secrets)
 	}
 }
 

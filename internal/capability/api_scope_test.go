@@ -37,7 +37,6 @@ func TestAPICollectionService_RequestScopeReturnsTheResolvedChain(t *testing.T) 
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apicoll.NewCollections(apiPaths{root: root}),
-		nil,
 	)
 
 	opened, err := openScopeCollection(op, root)
@@ -99,7 +98,6 @@ func TestAPICollectionService_RequestScopeMarksSecretReferencesAndOverrides(t *t
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apicoll.NewCollections(apiPaths{root: root}),
-		nil,
 	)
 	opened, err := openScopeCollection(op, root)
 	if err != nil {

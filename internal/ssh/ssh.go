@@ -535,11 +535,10 @@ type ConnectConfig struct {
 	// resolved through ~/.ssh/config independently of the target.
 	JumpAuthorizedEndpoint string
 
-	// Secrets, when set, enables late-bind of stored passwords from the
-	// SecretStore by SecretID. The store is the seam between the profile
-	// manager (clear data) and the secret store — never call it directly
-	// from frontend code.
-	Secrets  credential.SecretStore
+	// Secrets, when set, is the stanced material resolver for the target.
+	// Every read declares an operation; raw SecretStore.Get never reaches
+	// the SSH layer.
+	Secrets  credential.Resolver
 	SecretID credential.SecretID
 	// ConnectionName is the saved profile's display name, carried so a
 	// password prompt can name which connection it is asking about
@@ -566,10 +565,8 @@ type ConnectConfig struct {
 	// a file. The bytes never touch disk.
 	KeySecretID credential.SecretID
 
-	// JumpSecrets, when set, enables late-bind of the jump host's
-	// password from the SecretStore. Separate from the target's Secrets
-	// so each hop resolves independently.
-	JumpSecrets  credential.SecretStore
+	// JumpSecrets is the independent stanced resolver for the jump host.
+	JumpSecrets  credential.Resolver
 	JumpSecretID credential.SecretID
 	// JumpPassphraseSecretID is the opaque reference to the jump host's key
 	// passphrase in the SecretStore.
@@ -763,11 +760,10 @@ func WithJumpHost(host string, port int, user, authMode string) ConnectOption {
 	}
 }
 
-// WithJumpCredentials injects a SecretStore for late-bind of the jump
-// host's password by SecretID. Mirrors WithCredentials but for the jump hop.
-func WithJumpCredentials(store credential.SecretStore, id credential.SecretID) ConnectOption {
+// WithJumpCredentials injects the stanced resolver for the jump host.
+func WithJumpCredentials(resolver credential.Resolver, id credential.SecretID) ConnectOption {
 	return func(c *ConnectConfig) {
-		c.JumpSecrets = store
+		c.JumpSecrets = resolver
 		c.JumpSecretID = id
 	}
 }
@@ -793,12 +789,10 @@ func WithJumpPassphraseSecretID(id credential.SecretID) ConnectOption {
 	return func(c *ConnectConfig) { c.JumpPassphraseSecretID = id }
 }
 
-// WithCredentials injects a SecretStore for late-bind of stored
-// passwords by SecretID. The store is the seam between the profile manager
-// and the secret store.
-func WithCredentials(store credential.SecretStore, id credential.SecretID) ConnectOption {
+// WithCredentials injects the stanced resolver for target credentials.
+func WithCredentials(resolver credential.Resolver, id credential.SecretID) ConnectOption {
 	return func(c *ConnectConfig) {
-		c.Secrets = store
+		c.Secrets = resolver
 		c.SecretID = id
 	}
 }

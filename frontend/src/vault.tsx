@@ -32,7 +32,7 @@ import { PageSection, Select, Field, StatusCard, StatusDot, Badge, Checkbox } fr
 import type { StatusCardTone, BadgeTone } from './ui'
 import { CopyIcon, LockIcon, LockOpenIcon } from './ui/icons'
 import { showToast } from './ui/toast'
-import { RpcError } from './dispatcher'
+import { RpcError, VaultOperationCancelledError } from './dispatcher'
 import type {
   VaultClient,
   VaultStatus,
@@ -41,20 +41,7 @@ import type {
   ResidueEntry,
 } from './vault-client'
 
-/**
- * Thrown when the user cancels the vault prompt that was deferring a save.
- *
- * saveSecretWithVault rejects the caller's promise with this when its dialog
- * is cancelled before the deferred save ran. A caller that treated cancel as
- * success continued as if the save had happened — the profile was created
- * while the secret was never stored, a two-step save silently halved.
- */
-export class VaultOperationCancelledError extends Error {
-  constructor() {
-    super('Vault operation cancelled')
-    this.name = 'VaultOperationCancelledError'
-  }
-}
+export { VaultOperationCancelledError } from './dispatcher'
 
 const REASON_MESSAGES: Record<string, string> = {
   'no-service': 'No system keyring available. Use a passphrase to unlock.',

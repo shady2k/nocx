@@ -678,6 +678,48 @@ describe('BlockManager', () => {
       snapshotStore: freshStore(),
     })
   })
+  afterEach(() => {
+    manager.dispose()
+    inner.remove()
+  })
+
+  it('shows and advances a live duration without repainting the block', () => {
+    vi.useFakeTimers()
+    try {
+      const rec = manager.startBlock('find /', '~', 10)
+      const duration = rec.el.querySelector<HTMLElement>('.cmd-header-duration')
+      expect(duration?.textContent).toBe('0s')
+
+      fixedNow = 66_250
+      vi.advanceTimersByTime(1000)
+
+      expect(duration?.textContent).toBe('1m 5s')
+      expect(rec.el).toBe(inner.children[0])
+      expect(inner.children).toHaveLength(2)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('stops the live duration timer when the block settles and when the pane is disposed', () => {
+    vi.useFakeTimers()
+    try {
+      manager.startBlock('sleep 5', '~', 10)
+      expect(vi.getTimerCount()).toBe(1)
+
+      fixedNow = 2_250
+      const frozen = manager.freezeBlock(() => undefined, 10, 0)
+      expect(frozen?.durationMs).toBe(1_250)
+      expect(vi.getTimerCount()).toBe(0)
+
+      manager.startBlock('sleep 10', '~', 20)
+      expect(vi.getTimerCount()).toBe(1)
+      manager.dispose()
+      expect(vi.getTimerCount()).toBe(0)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
 
   it('starts a running block', () => {
     const rec = manager.startBlock('ls -la', '~', 10)
@@ -3297,14 +3339,14 @@ describe('the block grant menu action', () => {
     document.body.append(running, finished)
     try {
       const runningGrant = menuItems(running).find((item) => item.dataset.action === 'grant')
-      expect(runningGrant?.textContent).toBe('ask about this block')
+      expect(runningGrant?.textContent).toBe('Ask about this block')
       isActive.mockClear()
       runningGrant?.click()
       expect(toggleGrant).toHaveBeenCalledWith(running)
       expect(isActive).not.toHaveBeenCalled()
 
       const finishedGrant = menuItems(finished).find((item) => item.dataset.action === 'grant')
-      expect(finishedGrant?.textContent).toBe('ask about this block')
+      expect(finishedGrant?.textContent).toBe('Ask about this block')
       isActive.mockClear()
       finishedGrant?.click()
       expect(toggleGrant).toHaveBeenCalledWith(finished)
@@ -3342,7 +3384,7 @@ describe('the block grant menu action', () => {
     document.body.append(el)
     try {
       const grant = menuItems(el).find((item) => item.dataset.action === 'grant')
-      expect(grant?.textContent).toBe('unmark')
+      expect(grant?.textContent).toBe('Unmark')
     } finally {
       el.remove()
     }

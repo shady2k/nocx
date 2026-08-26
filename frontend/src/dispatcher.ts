@@ -35,6 +35,14 @@ export class RpcError extends Error {
   }
 }
 
+/** A vault prompt was dismissed by the person who initiated the operation. */
+export class VaultOperationCancelledError extends Error {
+  constructor() {
+    super('Vault operation cancelled')
+    this.name = 'VaultOperationCancelledError'
+  }
+}
+
 /**
  * One visible saturation toast per episode, not one per refusal. The bounded
  * executor refuses a burst of requests while the control plane is saturated;
@@ -342,6 +350,15 @@ export class Dispatcher {
               p.reject(e instanceof Error ? e : new Error(String(e)))
             },
           )
+          return
+        }
+        if (
+          msg.error.data &&
+          typeof msg.error.data === 'object' &&
+          'reason' in msg.error.data &&
+          msg.error.data.reason === 'vault-operation-cancelled'
+        ) {
+          p.reject(new VaultOperationCancelledError())
           return
         }
         this.handleSaturationData(msg.error.data)

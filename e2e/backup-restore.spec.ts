@@ -42,8 +42,20 @@ test.describe('Backup & Restore', () => {
 
     // Go back to Backup & Restore, load the backup file and preview.
     await page.locator('.ui-grouped-nav__item[data-item="backup"] button').click()
+    // The section is on screen before the file goes into it — the same wait
+    // the first visit above already does. Without it this step races the
+    // navigation, which is the family of spec defects nocx-rv53x cleared out.
+    await expect(page.getByRole('heading', { name: 'Restore backup' })).toBeVisible()
 
     await page.locator('.ui-file-input__native').setInputFiles(backupPath)
+    // THE APP'S OWN RECORD THAT IT TOOK THE FILE, asserted before the preview
+    // that file is supposed to trigger (nocx-hphhh). This failed once on
+    // webkit at the preview heading two steps below, and the trace said the
+    // file had never been read at all: the surface still said "No file
+    // selected" and the backend was never asked for a preview. An assertion
+    // that far downstream reported the wrong step as the broken one, which is
+    // most of what made that failure expensive to read.
+    await expect(page.locator('.ui-file-input__name')).toHaveText('backup.json')
     await expect(page.getByRole('heading', { name: /Preview — merge/ })).toBeVisible({
       timeout: 10_000,
     })

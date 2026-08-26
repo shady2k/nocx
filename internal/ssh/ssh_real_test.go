@@ -1246,8 +1246,8 @@ func withPassphraseSecretID(id credential.SecretID) ConnectOption {
 	return func(c *ConnectConfig) { c.PassphraseSecretID = id }
 }
 
-func withStore(store credential.SecretStore) ConnectOption {
-	return func(c *ConnectConfig) { c.Secrets = store }
+func withStore(store credential.MaterialStore) ConnectOption {
+	return func(c *ConnectConfig) { c.Secrets = credential.NewResolver(store, nil, nil) }
 }
 
 // ---------------------------------------------------------------------------

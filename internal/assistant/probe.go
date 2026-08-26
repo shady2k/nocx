@@ -8,6 +8,7 @@ package assistant
 
 import (
 	"context"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -78,7 +79,16 @@ func (c *client) Probe(ctx context.Context, p ProbeParams) (ProbeResult, error) 
 	switch {
 	case streamErr != nil:
 		res.OK = false
-		res.Error = streamErr.Error()
+		if sentence, ok := EndpointErrorSentence(streamErr, p.Model); ok {
+			res.Error = sentence
+		} else {
+			var streamFailure *StreamError
+			if errors.As(streamErr, &streamFailure) {
+				res.Error = streamFailure.Message
+			} else {
+				res.Error = UnexplainedFailureSentence
+			}
+		}
 	case sb.Len() == 0:
 		// A completed stream that produced no text: the model replied with
 		// nothing (or with a hallucinated tool call, which in explain mode

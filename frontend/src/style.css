@@ -88,6 +88,7 @@
 @import './styles/components/overview.css';
 @import './styles/components/roles.css';
 @import './styles/components/folder-picker.css';
+@import './styles/components/mark-affordance.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/integration-notice.css';
 @import './styles/surfaces/update-notice.css';
@@ -1055,20 +1056,16 @@
   letter-spacing: var(--term-cell-delta, 0px);
 }
 
-/* A grant marks the whole block, never a selection-sized set of rows. */
+/* A whole-block grant fills the block; a row grant fills only its selected
+   output rows. Neither mark owns a rail — the editor's accent border is the
+   composer's identity. */
 .cmd-block[data-granted] {
-  position: relative;
-  background: color-mix(in srgb, var(--color-accent), transparent 94%);
-  box-shadow: inset 3px 0 0 color-mix(in srgb, var(--color-accent), transparent 35%);
+  background: color-mix(in srgb, var(--color-accent), transparent 86%);
 }
 
-.cmd-block[data-granted]::before {
-  content: '';
-  position: absolute;
-  inset: 0 auto 0 0;
-  width: 3px;
-  background: var(--color-accent);
-  pointer-events: none;
+.cmd-block .term-line[data-granted] {
+  background: color-mix(in srgb, var(--color-accent), transparent 86%);
+  border-radius: 2px;
 }
 
 .cmd-block-grant-flash {

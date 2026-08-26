@@ -7,10 +7,13 @@ package transport
 // prove it finds the material when it is there.
 
 import (
+	"context"
+	"errors"
 	"log/slog"
 	"strings"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/vault"
@@ -47,6 +50,36 @@ func createSecret(t *testing.T, v *vault.Vault, name, value string) {
 	}
 }
 
+func adapterKnownMaterial(v *vault.Vault) assistant.KnownMaterial {
+	resolver := credential.NewResolver(v, func(err error) bool {
+		return errors.Is(err, vault.ErrVaultSealed)
+	}, v)
+	return NewVaultKnownMaterial(v, resolver, v)
+}
+
+type failingMaterialResolver struct {
+	err error
+}
+
+func (r failingMaterialResolver) Resolve(context.Context, credential.SecretID, credential.Stance) (credential.Secret, error) {
+	return credential.Secret{}, r.err
+}
+
+func TestVaultKnownMaterial_ResolverFailureFailsClosed(t *testing.T) {
+	v := adapterVault(t)
+	createSecret(t, v, "github-token", "correct-horse-battery-9")
+	wantErr := errors.New("resolver unavailable")
+	k := NewVaultKnownMaterial(v, failingMaterialResolver{err: wantErr}, nil)
+
+	matches, err := k.FindKnown(t.Context(), "deploy key: correct-horse-battery-9")
+	if !errors.Is(err, wantErr) {
+		t.Fatalf("FindKnown error = %v, want %v", err, wantErr)
+	}
+	if matches != nil {
+		t.Fatalf("FindKnown matches = %+v, want nil on resolver failure", matches)
+	}
+}
+
 // TestVaultKnownMaterial_FindsValueAtItsSpan is the heart of the adapter:
 // a tool result containing a value the vault holds comes back as one match
 // at the value's exact byte span, named with the vault's catalogue name
@@ -56,7 +89,7 @@ func TestVaultKnownMaterial_FindsValueAtItsSpan(t *testing.T) {
 	v := adapterVault(t)
 	createSecret(t, v, "github-token", "correct-horse-battery-9")
 
-	k := NewVaultKnownMaterial(v)
+	k := adapterKnownMaterial(v)
 	const text = "deploy key: correct-horse-battery-9 end"
 	matches, err := k.FindKnown(t.Context(), text)
 	if err != nil {
@@ -84,7 +117,7 @@ func TestVaultKnownMaterial_AllOccurrencesReported(t *testing.T) {
 	v := adapterVault(t)
 	createSecret(t, v, "staging-key", "shh-secret-42")
 
-	k := NewVaultKnownMaterial(v)
+	k := adapterKnownMaterial(v)
 	const text = "a shh-secret-42 then shh-secret-42 again"
 	matches, err := k.FindKnown(t.Context(), text)
 	if err != nil {
@@ -104,7 +137,7 @@ func TestVaultKnownMaterial_CleanTextHasNoMatches(t *testing.T) {
 	v := adapterVault(t)
 	createSecret(t, v, "github-token", "correct-horse-battery-9")
 
-	k := NewVaultKnownMaterial(v)
+	k := adapterKnownMaterial(v)
 	matches, err := k.FindKnown(t.Context(), "the file's contents, nothing else")
 	if err != nil {
 		t.Fatalf("FindKnown: %v", err)
@@ -118,7 +151,7 @@ func TestVaultKnownMaterial_CleanTextHasNoMatches(t *testing.T) {
 // the adapter does not fail a run for an empty catalogue.
 func TestVaultKnownMaterial_EmptyVaultReportsNothing(t *testing.T) {
 	v := adapterVault(t)
-	k := NewVaultKnownMaterial(v)
+	k := adapterKnownMaterial(v)
 	matches, err := k.FindKnown(t.Context(), "any text")
 	if err != nil {
 		t.Fatalf("FindKnown on an empty vault: %v", err)
@@ -137,7 +170,7 @@ func TestVaultKnownMaterial_SealedVaultFailsClosed(t *testing.T) {
 	createSecret(t, v, "github-token", "correct-horse-battery-9")
 	v.Seal()
 
-	k := NewVaultKnownMaterial(v)
+	k := adapterKnownMaterial(v)
 	if _, err := k.FindKnown(t.Context(), "deploy key: correct-horse-battery-9"); err == nil {
 		t.Fatal("sealed vault: FindKnown succeeded — the gate would have screened against nothing")
 	}

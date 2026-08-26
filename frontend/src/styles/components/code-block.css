@@ -28,6 +28,13 @@
   padding-top: calc(var(--space-2) + 22px);
 }
 
+/* Compact approval prompts keep the copy affordance in the block's corner
+   without reserving a second line above a one-line command. */
+.ui-prompt[data-density='compact'] .ui-code-block-wrap--copy > .ui-code-block {
+  padding-top: var(--space-2);
+  padding-right: calc(var(--space-3) + 22px);
+}
+
 .ui-code-block-wrap > .ui-icon-button {
   position: absolute;
   top: var(--space-1);

@@ -124,6 +124,11 @@ type BuiltStatus = Exclude<HeaderStatus, 'running'>
  *  third kind, it is a `command`, because that is what it is. */
 export type BlockKind = 'command' | 'ask' | 'text' | 'tool'
 
+function nonEmptyLabel(value: string | null | undefined, fallback: string): string {
+  if (value === undefined || value === null || value.trim() === '') return fallback
+  return value
+}
+
 /** The rules the owner named — highlighting, wrapping, the status
  *  vocabulary — read from ONE table, keyed by the kind the block declared.
  *  No call site checks "is this an answer", and no builder defaults to the
@@ -152,6 +157,11 @@ export interface BlockKindRules {
    *  nobody can check. Handing such a block output is a loud failure, not a
    *  silent guess at which class to use. */
   readonly outputClass: string | null
+  /** The human-readable label used when this block appears in a marked-block
+   *  row. Empty text is not a label: the row is the only thing identifying
+   *  the block a person is about to dismiss, so every kind owns a fallback. */
+  readonly label: (blockEl: HTMLElement) => string
+
   /** The header's status vocabulary. The command kind has none — its
    *  header states are the record's and render structurally (spinner,
    *  duration, exit chips). The ask kind names its lifecycle with words:
@@ -236,6 +246,14 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
     header: true,
     highlightHeader: true,
     outputClass: 'cmd-output',
+    label: (blockEl) =>
+      nonEmptyLabel(
+        blockEl.dataset.recordedCommand,
+        nonEmptyLabel(
+          blockEl.querySelector<HTMLElement>('.cmd-header-text')?.textContent,
+          '(empty command)',
+        ),
+      ),
     statusChips: null,
     headerRight: {
       chips: ['duration', 'terminal'],
@@ -252,6 +270,11 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
     header: true,
     highlightHeader: false,
     outputClass: 'cmd-output cmd-output-ask',
+    label: (blockEl) =>
+      nonEmptyLabel(
+        blockEl.querySelector<HTMLElement>('.cmd-header-text')?.textContent,
+        '(empty question)',
+      ),
     statusChips: ASK_STATUS_CHIPS,
     headerRight: {
       chips: ['duration', 'terminal'],
@@ -276,6 +299,8 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
     header: false,
     highlightHeader: false,
     outputClass: 'cmd-output cmd-output-ask',
+    label: (blockEl) =>
+      nonEmptyLabel(blockEl.querySelector('.cmd-output')?.textContent, '(empty answer)'),
     statusChips: null,
     headerRight: { chips: [], terminal: () => null },
   },
@@ -293,6 +318,11 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
     header: true,
     highlightHeader: false,
     outputClass: null,
+    label: (blockEl) =>
+      nonEmptyLabel(
+        blockEl.querySelector<HTMLElement>('.cmd-header-text')?.textContent,
+        '(unnamed tool call)',
+      ),
     statusChips: null,
     headerRight: { chips: [], terminal: () => null },
   },
@@ -1001,7 +1031,7 @@ function buildOverflowMenu(
       const grant = document.createElement('button')
       grant.className = 'cmd-overflow-menu-item'
       grant.dataset.action = 'grant'
-      grant.textContent = running.isGranted?.(blockEl) ? 'unmark' : 'ask about this block'
+      grant.textContent = running.isGranted?.(blockEl) ? 'Unmark' : 'Ask about this block'
       grant.addEventListener('click', (ev) => {
         ev.stopPropagation()
         running.toggleGrant?.(blockEl)

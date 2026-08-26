@@ -24,6 +24,7 @@ import (
 	"net/http"
 	"strings"
 	"sync"
+	"sync/atomic"
 
 	openai "github.com/cloudwego/eino-ext/components/model/openai"
 	"github.com/cloudwego/eino/adk"
@@ -335,6 +336,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	// goroutine while emit is not held, and taking emitMu here would make
 	// the tally block the stream.
 	var answerMu sync.Mutex
+	var toolCalls atomic.Int64
 	var text strings.Builder
 	// The one callback both producers emit through: the engine's stream
 	// drain, the answer-order middleware's drain (answer_order.go), and the
@@ -345,6 +347,9 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 			answerMu.Lock()
 			text.WriteString(e.Text)
 			answerMu.Unlock()
+		}
+		if e.Kind == AskToolCall {
+			toolCalls.Add(1)
 		}
 		return emit(e)
 	}
@@ -376,7 +381,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 				classifier = newClassifierEngine(c.log, c.http, p.Classifier)
 			}
 			mw, err := newPolicyMiddleware(c.log, *p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.TurnEntryID, p.Requester, classifier, func(call ToolCall) error {
-				return emit(AskEvent{Kind: AskToolCall, Call: &call})
+				return sink(AskEvent{Kind: AskToolCall, Call: &call})
 			})
 			if err != nil {
 				return err
@@ -417,6 +422,14 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	c.Discard(p.RunID)
 	if text.Len() == 0 {
 		return &StreamError{Message: "the model returned no text"}
+	}
+	// A non-empty declared set means the model was offered tools. If no real
+	// tool call crossed the policy seam and the complete answer is only a
+	// textual envelope, the stream succeeded mechanically but not
+	// semantically. Return a typed failure so the transport does not settle
+	// the run as completed or replay the envelope as an answer.
+	if len(declared) > 0 && toolCalls.Load() == 0 && IsUnexecutedToolCallEnvelope(text.String()) {
+		return &UnexecutedToolCallError{}
 	}
 	return nil
 }

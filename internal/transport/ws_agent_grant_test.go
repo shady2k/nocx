@@ -94,6 +94,51 @@ func TestAgentAsk_GrantsAreNamedWithoutInlining_OverTheWire(t *testing.T) {
 	}
 }
 
+func TestAgentAskAttachedContentWindowValidation(t *testing.T) {
+	base := func(window string) agentAskParams {
+		return agentAskParams{
+			AskID:           "ask-window",
+			SessionID:       "session-a",
+			Question:        "q",
+			Cwd:             "/repo",
+			AttachedContent: json.RawMessage(`[{"itemId":"item-1","command":"git status","state":"exited",` + window + `}]`),
+		}
+	}
+
+	valid, attached, reason := validateAgentAsk(base(`"start":2,"count":4`))
+	if reason != "" || len(attached) != 1 || attached[0].Start == nil || *attached[0].Start != 2 ||
+		attached[0].Count == nil || *attached[0].Count != 4 {
+		t.Fatalf("valid row window = %+v, reason %q", attached, reason)
+	}
+	if valid.ID == "" {
+		t.Fatal("valid ask was not returned")
+	}
+	deep, deepAttached, deepReason := validateAgentAsk(base(`"start":5000,"count":10`))
+	if deepReason != "" || deep.ID == "" || len(deepAttached) != 1 {
+		t.Fatalf("deep row window = %+v, reason %q", deepAttached, deepReason)
+	}
+	if deepAttached[0].Start == nil || *deepAttached[0].Start != 5000 ||
+		deepAttached[0].Count == nil || *deepAttached[0].Count != 10 {
+		t.Fatalf("deep row window metadata = %+v", deepAttached[0])
+	}
+
+	for _, tc := range []struct {
+		name   string
+		window string
+	}{
+		{name: "negative start", window: `"start":-1,"count":4`},
+		{name: "zero count", window: `"start":2,"count":0`},
+		{name: "oversized count", window: `"start":2,"count":1000001`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			_, _, reason := validateAgentAsk(base(tc.window))
+			if reason == "" || !strings.Contains(reason, "attachedContent[0]") {
+				t.Fatalf("reason = %q, want attached window refusal", reason)
+			}
+		})
+	}
+}
+
 func TestAgentAsk_RejectsMalformedAttachedContent(t *testing.T) {
 	cases := []struct {
 		name string

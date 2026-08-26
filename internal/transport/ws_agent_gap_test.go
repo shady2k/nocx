@@ -26,6 +26,7 @@ import (
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/transport/outbound"
 )
 
@@ -211,6 +212,9 @@ func gapRunContext() askRunContext {
 		runID:    7,
 		entryID:  "turn-1",
 		question: "q",
+		// The stream resolves endpoint material up front; a keyless endpoint
+		// resolves to nothing, keeping these unit tests on the delta path.
+		endpoint: profile.Endpoint{NoKey: true},
 	}
 }
 

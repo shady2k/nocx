@@ -93,3 +93,41 @@
      read as two answers rather than as one six-cell grid. */
   gap: var(--space-3);
 }
+
+/* Dense decision panels keep the reader's attention on the question. This is
+   opt-in: password and vault prompts retain the ordinary top-sheet rhythm. */
+.ui-prompt[data-density='compact'] {
+  padding: var(--space-3);
+}
+
+.ui-prompt[data-density='compact'] .ui-prompt__title {
+  margin-bottom: var(--space-2);
+}
+
+.ui-prompt[data-density='compact'] .ui-prompt__body {
+  gap: var(--space-2);
+}
+
+.ui-prompt[data-density='compact'] .ui-prompt__body p {
+  margin: 0;
+}
+
+.ui-prompt[data-density='compact'] .ui-prompt__actions {
+  margin-top: var(--space-2);
+}
+
+/* The three answers in a row share the width evenly, so "Allow in this
+   session" and "Allow once" read as one set of choices rather than as
+   controls of different weight. Each button carries its own scope, which is
+   why there is no column heading to align to. */
+.ui-prompt[data-density='compact'] .ui-prompt__actions > .ui-action-group {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.ui-prompt[data-density='compact'] .ui-prompt__actions > .ui-action-group > .ui-button {
+  width: 100%;
+  min-width: 0;
+}

@@ -24,7 +24,7 @@ import (
 type Resolver struct {
 	profiles profile.ProfileRepository
 	groups   profile.GroupRepository
-	secrets  credential.SecretStore
+	secrets  credential.Resolver
 	// configResolver resolves ~/.ssh/config directives using ssh -G.
 	// Injected at the composition root, shared with the RealClient so both
 	// sides of the authorization comparison go through the same resolution.
@@ -77,9 +77,13 @@ func WithConfigResolver(resolver ssh.ConfigResolver) ResolverOption {
 	return func(r *Resolver) { r.configResolver = resolver }
 }
 
-// NewResolver creates a Resolver backed by the given stores.
-func NewResolver(pr profile.ProfileRepository, gr profile.GroupRepository, ss credential.SecretStore, opts ...ResolverOption) *Resolver {
-	r := &Resolver{profiles: pr, groups: gr, secrets: ss}
+// NewResolver creates a profile resolver with one stanced credential seam.
+func NewResolver(pr profile.ProfileRepository, gr profile.GroupRepository, secrets credential.Resolver, opts ...ResolverOption) *Resolver {
+	r := &Resolver{
+		profiles: pr,
+		groups:   gr,
+		secrets:  secrets,
+	}
 	for _, o := range opts {
 		o(r)
 	}
@@ -214,9 +218,7 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 		cfg.AuthorizedEndpoint = net.JoinHostPort(authHost, strconv.Itoa(cfg.Port))
 	}
 
-	// Wire SecretStore for late-bound password/passphrase/key resolution via
-	// opaque SecretID references (ADR-0011 §2). The bindings live on the
-	// effective profile, one per auth method (ADR-0017 §1).
+	// Wire the stanced resolver for late-bound password/passphrase/key reads.
 
 	// The connection-password ask (the prompt rung): wired whenever the
 	// transport ask is available, so the auth ladder for a password-capable

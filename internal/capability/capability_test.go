@@ -381,6 +381,13 @@ func (f *fakeVaultSeam) Get(_ context.Context, id credential.SecretID) (credenti
 	return credential.NewSecret(v), nil
 }
 
+// Material is the capability.SecretMaterial seam. In the product it is the
+// transport's stanced resolver; here the fake answers it the same way it
+// answers a store read, because what this double is for is the VALUE.
+func (f *fakeVaultSeam) Material(ctx context.Context, id credential.SecretID) (credential.Secret, error) {
+	return f.Get(ctx, id)
+}
+
 func (f *fakeVaultSeam) Delete(_ context.Context, id credential.SecretID) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -905,7 +912,7 @@ func TestForSecretKnownIDSucceeds(t *testing.T) {
 		t.Fatal("ForSecret returned nil on success")
 	}
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
-		secret, err := svc.GetSecret(ctx, id)
+		secret, err := seam.Get(ctx, id)
 		if err != nil {
 			return err
 		}
@@ -1304,7 +1311,7 @@ func TestMintSecretFallsBackToPlainStore(t *testing.T) {
 		t.Fatalf("minted id = %q, want the plain store's minted reference", minted)
 	}
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.SecretService) error {
-		secret, err := svc.GetSecret(ctx, minted)
+		secret, err := store.Get(ctx, minted)
 		if err != nil {
 			return err
 		}
@@ -1329,6 +1336,12 @@ func (f failingSecretStore) Create(context.Context, credential.Secret) (credenti
 
 func (f failingSecretStore) Get(context.Context, credential.SecretID) (credential.Secret, error) {
 	return credential.Secret{}, f.err
+}
+
+// Material is the capability.SecretMaterial seam: the same failure, reached
+// the way the send reaches it.
+func (f failingSecretStore) Material(ctx context.Context, id credential.SecretID) (credential.Secret, error) {
+	return f.Get(ctx, id)
 }
 
 func (f failingSecretStore) Delete(context.Context, credential.SecretID) error {

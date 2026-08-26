@@ -367,7 +367,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           <Button
             variant={scope === 'once' ? variant : 'default'}
             disabled={props.busy}
-            secondary={`— ${approvalScopeCoverage(scope, ask().effect)}`}
+            ariaLabel={`${verb} ${label} — ${approvalScopeCoverage(scope, ask().effect)}`}
             onClick={() => props.onDecide(approved, scope)}
           >
             {`${verb} ${label}`}
@@ -386,6 +386,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
       ariaLabel={TITLE[ask().reason]}
       placement="top-sheet"
       title={TITLE[ask().reason]}
+      density="compact"
       actionsLayout={ask().reason === 'egress' ? 'row' : 'stacked'}
       actions={
         <Show
@@ -395,7 +396,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
               <Button
                 variant="primary"
                 disabled={props.busy}
-                secondary={`— ${approvalScopeCoverage('once', ask().effect)}`}
+                ariaLabel={`Allow once — ${approvalScopeCoverage('once', ask().effect)}`}
                 onClick={() => props.onDecide(true, 'once')}
               >
                 Allow once
@@ -403,7 +404,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
               <Button
                 variant="danger"
                 disabled={props.busy}
-                secondary={`— ${approvalScopeCoverage('once', ask().effect)}`}
+                ariaLabel={`Deny once — ${approvalScopeCoverage('once', ask().effect)}`}
                 onClick={() => props.onDecide(false, 'once')}
               >
                 Deny once
@@ -411,8 +412,10 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
             </>
           }
         >
-          {group(true, 'Allow', 'primary')}
-          {group(false, 'Deny', 'danger')}
+          <>
+            {group(true, 'Allow', 'primary')}
+            {group(false, 'Deny', 'danger')}
+          </>
         </Show>
       }
     >

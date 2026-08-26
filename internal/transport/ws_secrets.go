@@ -120,7 +120,11 @@ type secretsHandlers struct {
 	r           Responder
 	vaultWired  bool // vaultLifecycle != nil at construction
 	configWired bool // profiles != nil && groups != nil at construction
-	storeWired  bool // credentials != nil at construction
+	// secrets is the stanced material seam, held by the HANDLER rather
+	// than reached through the operation's service: an operation-stance
+	// read blocks on the unlock, and no admission may be held across that
+	// wait (nocx-o3606). nil when no store is wired.
+	secrets credential.Resolver
 }
 
 // secretsUsageParams is the wire format for secrets.usage: one row handle.
@@ -265,58 +269,95 @@ func (h secretsHandlers) handleMint(ctx context.Context, req jsonrpcRequest) {
 			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "no vault: cannot resolve a secret row"})
 			return
 		}
-		err := h.op.Run(ctx, func(ctx context.Context, svc capability.SecretService) error {
-			keyID, ok := svc.ResolveRow(params.KeyRow)
-			if !ok {
-				_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: fmt.Sprintf("unknown secret row %q", params.KeyRow)})
-				return nil
-			}
-			if keyID == "" {
-				_ = h.r.TryError(req.ID, RPCError{
-					Code:    -32603,
-					Message: "no stored key to verify against",
-					Data:    &vaultErrorData{Reason: "invalid-key-passphrase"},
-				})
-				return nil
-			}
-			if !h.storeWired {
-				_ = h.r.TryError(req.ID, RPCError{
-					Code:    -32603,
-					Message: "secret store not available",
-					Data:    &vaultErrorData{Reason: "invalid-key-passphrase"},
-				})
-				return nil
-			}
-			secret, err := svc.GetSecret(ctx, keyID)
-			if err != nil {
-				_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "store passphrase: ", fmt.Errorf("load key material: %w", err)))
-				return nil
-			}
-			if verr := verifyPassphraseSecret(secret, []byte(params.Passphrase)); verr != nil {
-				var invalidPass *errInvalidKeyPassphrase
-				if errors.As(verr, &invalidPass) {
-					_ = h.r.TryError(req.ID, RPCError{
-						Code:    -32603,
-						Message: verr.Error(),
-						Data:    &vaultErrorData{Reason: "invalid-key-passphrase"},
-					})
-					return nil
-				}
-				_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "store passphrase: ", verr))
-				return nil
-			}
-			id, err := svc.MintSecret(ctx, credential.NewSecret(params.Passphrase),
-				vault.SecretMeta{Name: params.Name, Kind: vault.KindKeyPassphrase})
-			if err != nil {
-				_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "store passphrase: ", err))
-				return nil
-			}
-			_ = h.r.TryResult(req.ID, mustMarshal(secretMintResult{Row: vault.RowFor(id)}))
-			return nil
-		})
-		if err != nil {
-			answerOperationRefusal(h.r, req, err)
+		h.handleSaveKeyPassphrase(ctx, req, params)
+	}
+}
+
+// handleSaveKeyPassphrase stores a key passphrase once it has been verified
+// against the key material it is supposed to open (nocx-dze3).
+//
+// IT IS THREE PHASES, AND THE MIDDLE ONE HOLDS NO GATE. Reading the key
+// material is an operation-stance read: a sealed vault raises the unlock and
+// the read WAITS for the person to answer it. The answer is vault.unseal,
+// which runs under the vault gate — so a read done inside this operation
+// holds the gate its own prompt needs, and the dialog comes back "Control
+// plane busy" no matter what the person types (nocx-o3606). The row lookup
+// and the mint each take the operation for as long as they need it; the wait
+// happens between them, holding nothing.
+//
+// It is the same split endpoints.probe has, and the same reason PHASE TWO of
+// the open dials outside its domain gate.
+func (h secretsHandlers) handleSaveKeyPassphrase(ctx context.Context, req jsonrpcRequest, params secretsSaveKeyPassphraseParams) {
+	var keyID credential.SecretID
+	answered := false
+	err := h.op.Run(ctx, func(_ context.Context, svc capability.SecretService) error {
+		id, ok := svc.ResolveRow(params.KeyRow)
+		switch {
+		case !ok:
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: fmt.Sprintf("unknown secret row %q", params.KeyRow)})
+			answered = true
+		case id == "":
+			_ = h.r.TryError(req.ID, RPCError{
+				Code:    -32603,
+				Message: "no stored key to verify against",
+				Data:    &vaultErrorData{Reason: "invalid-key-passphrase"},
+			})
+			answered = true
+		default:
+			keyID = id
 		}
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req, err)
+		return
+	}
+	if answered {
+		return
+	}
+	if h.secrets == nil {
+		_ = h.r.TryError(req.ID, RPCError{
+			Code:    -32603,
+			Message: "secret store not available",
+			Data:    &vaultErrorData{Reason: "invalid-key-passphrase"},
+		})
+		return
+	}
+
+	// No gate is held here. A sealed vault raises one coalesced unlock and
+	// this read continues when it is answered; a dismissed one comes back as
+	// the cancellation, not as a failure to find the key.
+	secret, err := h.secrets.Resolve(ctx, keyID, credential.Operation("verify the key passphrase"))
+	if err != nil {
+		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "store passphrase: ", fmt.Errorf("load key material: %w", err)))
+		return
+	}
+	if verr := verifyPassphraseSecret(secret, []byte(params.Passphrase)); verr != nil {
+		var invalidPass *errInvalidKeyPassphrase
+		if errors.As(verr, &invalidPass) {
+			_ = h.r.TryError(req.ID, RPCError{
+				Code:    -32603,
+				Message: verr.Error(),
+				Data:    &vaultErrorData{Reason: "invalid-key-passphrase"},
+			})
+			return
+		}
+		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "store passphrase: ", verr))
+		return
+	}
+
+	err = h.op.Run(ctx, func(ctx context.Context, svc capability.SecretService) error {
+		id, mintErr := svc.MintSecret(ctx, credential.NewSecret(params.Passphrase),
+			vault.SecretMeta{Name: params.Name, Kind: vault.KindKeyPassphrase})
+		if mintErr != nil {
+			_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "store passphrase: ", mintErr))
+			return nil
+		}
+		_ = h.r.TryResult(req.ID, mustMarshal(secretMintResult{Row: vault.RowFor(id)}))
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req, err)
 	}
 }
 
@@ -498,10 +539,10 @@ func validateSecretsCaptureDismissRaw(raw json.RawMessage) string {
 // unwired answers.
 func (s *WSServer) secretSpecs(lane control.Admission, configGate, vaultGate, contentGate control.Admission) []methodSpec {
 	secretOp := capability.NewSecretOperation(configGate, vaultGate, lane, s.profiles, s.groups, s.vaultLifecycle, s.credentials)
+	secretResolver := s.credentialResolver()
 	captureOp := capability.NewCaptureSaveOperation(vaultGate, contentGate, lane, s.vaultLifecycle, s.contentDB)
 	vaultWired := s.vaultLifecycle != nil
 	configWired := s.profiles != nil && s.groups != nil
-	storeWired := s.credentials != nil
 	contentWired := s.contentDB != nil
 	secretSub := s.operationQueue("secrets")
 	// captureSub is ORDERED, not the ordinary bounded queue: captureSave and
@@ -513,19 +554,19 @@ func (s *WSServer) secretSpecs(lane control.Admission, configGate, vaultGate, co
 	captureSub := control.NewOrderedSubmission("capture", s.domainQueueDepth)
 	return []methodSpec{
 		whenAvailable(regResponder(secretSub, "secrets.usage", params(validateSecretsUsageRaw), func(r Responder) handlerFunc {
-			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, storeWired: storeWired}
+			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, secrets: secretResolver}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleUsage(ctx, req) }
 		}), func() bool { return vaultWired && configWired }, "secrets.usage not available"),
 		whenAvailable(regResponder(secretSub, "secrets.savePassword", params(validateSecretsSavePasswordRaw), func(r Responder) handlerFunc {
-			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, storeWired: storeWired}
+			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, secrets: secretResolver}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMint(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
 		whenAvailable(regResponder(secretSub, "secrets.saveKeyMaterial", params(validateSecretsSaveKeyMaterialRaw), func(r Responder) handlerFunc {
-			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, storeWired: storeWired}
+			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, secrets: secretResolver}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMint(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
 		whenAvailable(regResponder(secretSub, "secrets.saveKeyPassphrase", params(validateSecretsSaveKeyPassphraseRaw), func(r Responder) handlerFunc {
-			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, storeWired: storeWired}
+			h := secretsHandlers{op: secretOp, r: r, vaultWired: vaultWired, configWired: configWired, secrets: secretResolver}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMint(ctx, req) }
 		}), func() bool { return secretOp != nil }, "vault not available"),
 		regResponder(s.lane, "secrets.detect", params(validateSecretsDetectRaw), func(r Responder) handlerFunc {

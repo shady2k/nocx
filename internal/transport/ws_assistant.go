@@ -242,7 +242,7 @@ func (h assistantStatusHandlers) credentialStateFor(ctx context.Context, ep prof
 	if ref == "" || h.secrets == nil {
 		return credNone
 	}
-	secret, err := h.secrets.Resolve(ctx, credential.SecretID(ref), credential.ToReport)
+	secret, err := h.secrets.Resolve(ctx, credential.SecretID(ref), credential.Report())
 	if err != nil {
 		switch {
 		case errors.Is(err, credential.ErrSealedQuiet):
@@ -323,7 +323,7 @@ func (h assistantProbeHandlers) handleEndpointProbe(ctx context.Context, req jso
 		// The renderer named a record that does not exist (deleted
 		// meanwhile): a caller error, exactly as connections.test surfaces
 		// a profile that does not resolve — never a fabricated verdict.
-		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: resolveErr.Error()})
+		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "", resolveErr))
 		return
 	}
 	if refused != nil {
@@ -342,7 +342,7 @@ func (h assistantProbeHandlers) handleEndpointProbe(ctx context.Context, req jso
 	if headerErr != nil {
 		// An unknown row is a caller error, the same shape as the record
 		// above; the sealed vault keeps its dispatcher seam (ADR-0032).
-		_ = h.r.TryError(req.ID, RPCError{Code: -32603, Message: headerErr.Error()})
+		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "", headerErr))
 		return
 	}
 	if refusedHeaders != nil {
@@ -429,12 +429,18 @@ func (h assistantProbeHandlers) resolveProbeHeaders(ctx context.Context, params 
 	material := make(map[string]string, len(rows))
 	for i, ref := range refs {
 		secret, getErr := h.secrets.Resolve(
-			ctx, credential.SecretID(ref), credential.ForOperation)
+			ctx, credential.SecretID(ref), credential.Operation("test the endpoint"))
 		if getErr != nil {
 			if errors.Is(getErr, vault.ErrVaultSealed) {
 				return nil, nil, vault.ErrVaultSealed
 			}
-			return nil, refusedProbeHeadersResult(params, params.Headers), nil
+			if errors.Is(getErr, vault.ErrSecretNotFound) {
+				// The unlock succeeded but the referenced secret was deleted
+				// meanwhile: a refused probe RESULT naming the header, never
+				// a generic -32603 toast.
+				return nil, refusedProbeHeadersResult(params, params.Headers), nil
+			}
+			return nil, nil, getErr
 		}
 		if secret.IsEmpty() {
 			return nil, refusedProbeHeadersResult(params, params.Headers), nil
@@ -521,14 +527,23 @@ func (h assistantProbeHandlers) resolveProbeCredential(ctx context.Context, para
 		// credential, so it stays a refused result with the honest sentence.
 		return credential.Secret{}, refusedProbeResult(params), nil
 	}
-	secret, err := h.secrets.Resolve(ctx, credential.SecretID(endpoint.CredentialRef), credential.ForOperation)
+	secret, err := h.secrets.Resolve(ctx, credential.SecretID(endpoint.CredentialRef), credential.Operation("discover endpoint models"))
 	if err != nil {
 		if errors.Is(err, vault.ErrVaultSealed) {
 			// The dispatcher normalizes this into the canonical unlock
 			// request; the probe is retried once the vault answers.
 			return credential.Secret{}, nil, vault.ErrVaultSealed
 		}
-		return credential.Secret{}, refusedProbeResult(params), nil
+		if errors.Is(err, vault.ErrSecretNotFound) {
+			// The unlock succeeded but the referenced secret was deleted
+			// meanwhile: a refused probe RESULT naming the state, never a
+			// generic -32603 toast and never a no-key dial.
+			return credential.Secret{}, refusedProbeResult(params), nil
+		}
+		// Real infrastructure failures (provider unavailable, generation
+		// change, a dismissed unlock) stay honest RPC errors, never a
+		// fabricated probe verdict.
+		return credential.Secret{}, nil, err
 	}
 	if secret.IsEmpty() {
 		return credential.Secret{}, refusedProbeResult(params), nil

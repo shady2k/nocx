@@ -68,6 +68,11 @@ const (
 	maxIDRunes = 128
 	// maxCwdRunes bounds the renderer-supplied cwd.
 	maxCwdRunes = 4_096
+	// maxAttachedWindowLines mirrors contracts/tools/session.read.schema.json:
+	// session.read permits any nonnegative start but caps count at 2000.
+	// Therefore only count is bounded here; start has no ceiling, and the
+	// check below rejects integer overflow.
+	maxAttachedWindowLines = 2_000
 	// maxCellRunes bounds one cell's character (a wide glyph is one or two
 	// runes; anything more is not a terminal cell).
 	maxCellRunes = 8
@@ -133,6 +138,8 @@ type agentAttachedContentWire struct {
 	ItemID  string `json:"itemId"`
 	Command string `json:"command"`
 	State   string `json:"state"`
+	Start   *int   `json:"start,omitempty"`
+	Count   *int   `json:"count,omitempty"`
 }
 type agentCancelParams struct {
 	RunID int64 `json:"runId"`
@@ -172,26 +179,52 @@ type agentAskResponse struct {
 }
 
 type agentRunControl struct {
-	mu           sync.Mutex
-	eventsMu     sync.Mutex
-	cancelFn     context.CancelFunc
-	cancelled    bool
-	terminalized bool
+	mu             sync.Mutex
+	eventsMu       sync.Mutex
+	cancelFn       context.CancelFunc
+	cancelled      bool
+	terminalized   bool
+	cancelState    content.RunState
+	cancelReason   content.TerminationReason
+	cancelSentence string
+	cancelDone     chan struct{}
 }
 
 func (c *agentRunControl) beginCancel() bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.terminalized {
+	if c.terminalized || c.cancelled {
 		return false
 	}
-	if !c.cancelled {
-		c.cancelled = true
-		if c.cancelFn != nil {
-			c.cancelFn()
-		}
-	}
+	c.cancelled = true
 	return true
+}
+
+func (c *agentRunControl) cancelContext() {
+	c.mu.Lock()
+	cancel := c.cancelFn
+	c.mu.Unlock()
+	if cancel != nil {
+		cancel()
+	}
+}
+
+func (c *agentRunControl) finishCancel(state content.RunState, reason content.TerminationReason, sentence string) {
+	c.mu.Lock()
+	c.cancelState = state
+	c.cancelReason = reason
+	c.cancelSentence = sentence
+	close(c.cancelDone)
+	c.mu.Unlock()
+}
+
+func (c *agentRunControl) cancelOutcome() (content.RunState, content.TerminationReason, string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancelState == "" {
+		return content.RunCancelled, content.TermUserKilled, "the person stopped this answer"
+	}
+	return c.cancelState, c.cancelReason, c.cancelSentence
 }
 
 func (c *agentRunControl) beginEvent() func() {
@@ -400,6 +433,10 @@ type agentApproveResponse struct {
 // Responder; never the *WSServer.
 type agentHandlers struct {
 	op capability.AgentOperation // nil → content store not wired
+	// stopForeground is the parent-cancel seam. It resolves a connection-owned
+	// session and runs the shared stop ladder without holding the content
+	// queue or pending-runs mutex.
+	stopForeground func(session.ID) foregroundOutcome
 	// configOp resolves the endpoint the run uses (the ONE config operation,
 	// shared with the config handlers — AD-8). nil → no endpoint store.
 	configOp capability.ConfigOperation
@@ -660,33 +697,16 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	}
 	in.Facts = facts
 
-	// THE CREDENTIAL IS RESOLVED HERE, while we are still answering the
-	// agent.ask REQUEST — before the run exists (nocx-k41yv).
+	// Endpoint material (the credential and secret-valued headers) is NOT
+	// resolved here: it resolves inside the stream task (runAskStream), so
+	// plaintext never sits in the durable pending-run record and a resume
+	// re-resolves it from the endpoint the run was pinned to. A sealed vault
+	// therefore waits inside the stream task — the Operation stance raises
+	// one coalesced unlock and continues this same durable run — instead of
+	// failing the request after its response was already sent, which is the
+	// dead end that sent the person hunting for a door the surface could not
+	// open.
 	//
-	// It used to be resolved at stream time, and that is what put the ask
-	// outside the vault's own seam: by then the response had been sent, so
-	// a sealed vault could only travel as a run-state notification, which
-	// sealedNormalizer cannot see and the renderer's dispatcher cannot act
-	// on. All the product could do was print a sentence naming a door the
-	// person had to go find. Resolved here, a sealed vault is an ordinary
-	// error on a request: the normalizer rewrites it, the renderer raises
-	// the unlock, and the SAME ask is re-sent when the vault answers. No
-	// new mechanism, and no call site that has to remember any of this.
-	//
-	// The cost, stated rather than slid past: the material is resolved
-	// earlier and therefore held in memory longer — from here until the
-	// stream ends, instead of from the stream's start. It is the same
-	// process and the same secret; what changes is the span.
-	//
-	// NOT covered by this: a vault that seals MID-RUN, after this point.
-	// That is the wait-and-continue question nocx-k41yv sequences after
-	// this move, together with the ADR-0032 amendment.
-	secret, headers, credErr := h.resolveEndpointMaterial(ctx, endpoint)
-	if credErr != nil {
-		_ = h.r.TryError(req.ID, rpcErrorFor(-32603, "", credErr))
-		return
-	}
-
 	// The transaction records the turn + run + body + edges in ONE commit,
 	// and the response is sent with the turn's identity BEFORE the stream
 	// starts — the renderer places the block from the response, then
@@ -711,10 +731,8 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// submit (the stream capacity is exhausted) terminalizes the run
 	// failed with a renderable reason; the run is never left prepared.
 	runCtx, runCancel := context.WithCancel(ctx)
-	runControl := &agentRunControl{cancelFn: runCancel}
+	runControl := &agentRunControl{cancelFn: runCancel, cancelDone: make(chan struct{})}
 	rc := askRunContext{
-		secret:   secret,
-		headers:  headers,
 		runID:    askRes.RunID,
 		control:  runControl,
 		entryID:  askRes.EntryID,
@@ -764,18 +782,10 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	}
 }
 
-// resolveEndpointMaterial resolves everything the stream will need from the
-// vault — the endpoint's credential and its secret-valued headers — as ONE
-// step on the request path, so a sealed vault is a failure of the REQUEST
-// and reaches the person as the unlock prompt (nocx-k41yv, ADR-0032).
-//
-// The errors are deliberately three different facts, never the one sentence
-// they used to collapse into: a sealed vault is returned as-is so the seam
-// can recognize it (rpcErrorFor maps it to the canonical shape and the
-// renderer raises the unlock), while a missing credential and a header that
-// references a missing secret each keep their own words and name what is
-// missing. Nothing here writes a sentence about unlocking: the seam owns
-// that, and a second copy of it in prose is what this change removes.
+// resolveEndpointMaterial resolves everything the stream needs: the endpoint
+// credential and secret-valued headers. Operation stance makes the vault raise
+// one coalesced unlock, wait, and continue independently of the wire carrier.
+// Missing credentials and headers remain distinct, renderable failures.
 func (h agentHandlers) resolveEndpointMaterial(
 	ctx context.Context,
 	endpoint profile.Endpoint,
@@ -786,12 +796,13 @@ func (h agentHandlers) resolveEndpointMaterial(
 			return credential.Secret{}, nil, errors.New("the endpoint's credential is missing")
 		}
 		resolved, err := h.credentials.Resolve(
-			ctx, credential.SecretID(endpoint.CredentialRef), credential.ForOperation)
+			ctx, credential.SecretID(endpoint.CredentialRef), credential.Operation("answer the ask"))
 		if err != nil {
-			if errors.Is(err, vault.ErrVaultSealed) {
-				return credential.Secret{}, nil, err
-			}
-			return credential.Secret{}, nil, errors.New("the endpoint's credential is missing")
+			// A sealed vault (headless), a dismissed unlock and a deleted
+			// secret are terminalized by runAskStream, which owns the mapping
+			// to the run's state; collapsing them into one "missing" sentence
+			// here would hide a cancellation from the caller.
+			return credential.Secret{}, nil, err
 		}
 		if resolved.IsEmpty() {
 			return credential.Secret{}, nil, errors.New("the endpoint's credential is missing")
@@ -810,11 +821,11 @@ func (h agentHandlers) resolveEndpointMaterial(
 				fmt.Errorf("the header %q references a missing secret", hd.Name)
 		}
 		hSecret, hErr := h.credentials.Resolve(
-			ctx, credential.SecretID(hd.ValueRef), credential.ForOperation)
-		if hErr != nil && errors.Is(hErr, vault.ErrVaultSealed) {
+			ctx, credential.SecretID(hd.ValueRef), credential.Operation("answer the ask"))
+		if hErr != nil {
 			return credential.Secret{}, nil, hErr
 		}
-		if hErr != nil || hSecret.IsEmpty() {
+		if hSecret.IsEmpty() {
 			return credential.Secret{}, nil,
 				fmt.Errorf("the header %q references a missing secret", hd.Name)
 		}
@@ -828,17 +839,9 @@ func (h agentHandlers) resolveEndpointMaterial(
 	return secret, headers, nil
 }
 
-// askRunContext is everything the stream task needs — the run's identities
-// (backend-minted), the question, the references and the resolved endpoint.
-// Constructed in the handler from the transaction's result; the task holds
-// nothing it was not given.
+// askRunContext is the durable run identity and non-secret input handed to the
+// stream task. Secret material is resolved by that task and never persisted.
 type askRunContext struct {
-	// The endpoint's material, resolved before the run was created (see
-	// handleAsk): the stream is handed what it needs and never reaches for
-	// the vault itself, which is what keeps a sealed vault on the request
-	// path where the unlock seam lives.
-	secret  credential.Secret
-	headers []assistant.Header
 	runID   int64
 	control *agentRunControl
 	entryID string
@@ -925,13 +928,23 @@ type askRunContext struct {
 	pendingReason string
 }
 
-// runAskStream drives the prepared run to completion: persist streaming,
-// resolve the credential, assemble the context (question + referenced
-// frames as labelled data — design §6.2), stream the model's answer — each
-// delta persisted BEFORE it is emitted (the ledger is the record) — and
-// terminalize. Every store touch goes through the operation (short
-// acquisitions); the gate is never held for the stream's duration.
+// runAskStream drives the prepared run to completion. Secret material resolves
+// first, outside a capability admission and before any external request. A
+// sealed vault therefore waits and continues this same durable run.
 func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Responder) {
+	// Secret material resolves first, outside a capability admission and
+	// before any external request. A sealed vault therefore waits and
+	// continues this same durable run, and a dismissed unlock cancels it.
+	secret, headers, materialErr := h.resolveEndpointMaterial(ctx, rc.endpoint)
+	if materialErr != nil {
+		if errors.Is(materialErr, ErrUnlockCancelled) {
+			h.terminalize(ctx, rc, rc.droppedBefore, content.RunCancelled, content.TermUserKilled, "", r)
+			return
+		}
+		h.terminalize(ctx, rc, rc.droppedBefore, content.RunFailed, content.TermFailed, materialErr.Error(), r)
+		return
+	}
+
 	// dropped counts the deltas the wire refused while THIS stream ran. It
 	// is declared before the context assembly because the reference-failure
 	// path terminalizes below it. The stream is re-driven by a resume with
@@ -950,10 +963,8 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		return
 	}
 
-	// No credential resolution here: the endpoint's material was resolved
-	// on the request path, before this run existed (handleAsk). The stream
-	// never reaches for the vault, so it can never fail in a way the unlock
-	// seam cannot see.
+	// Resolution is complete before the streaming transition. The stream
+	// never reaches for the vault again, so a later seal cannot strand it.
 
 	// Context assembly. The standing prompt (design §1) rides EVERY ask —
 	// it is what tells the model where it is, and without it a tool call
@@ -1006,10 +1017,10 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// tool call: the first delta then opens the next block.
 	prose := rc.prose
 	err := h.client.Ask(ctx, assistant.AskParams{
-		Key:           rc.secret,
+		Key:           secret,
 		BaseURL:       rc.endpoint.BaseURL,
 		Model:         rc.model,
-		Headers:       rc.headers,
+		Headers:       headers,
 		Messages:      msgs,
 		Grant:         rc.grant,
 		AttemptLedger: h.attemptLedger,
@@ -1207,7 +1218,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			h.suspendForApproval(ctx, rc, r, dropped, seq, prose, nil, egErr.Request)
 			return
 		}
-		reason, sentence := classifyAskFailure(err)
+		reason, sentence := classifyAskFailure(err, rc.model)
 		// This is the boundary that catches the framework's error, so this
 		// is where its text is kept — once, with the run id, and nowhere
 		// else (nocx-avogl.3). The wire carries the sentence; the log
@@ -1323,9 +1334,9 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 }
 
 // handleCancel stops one prepared, streaming or awaiting-approval run. The
-// run context is cancelled first, then the terminal ledger write is completed
-// before the result is answered, so no stream event can overtake the person's
-// stop decision.
+// foreground escalation completes before the run context is cancelled and the
+// terminal ledger write is completed before the result is answered, so no
+// stream event can overtake the person's stop decision.
 func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 	if h.op == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "method not found: content store not wired"})
@@ -1346,8 +1357,27 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 		})
 		return
 	}
-	h.terminalize(ctx, rc, rc.droppedBefore, content.RunCancelled, content.TermUserKilled,
-		"the person stopped this answer", h.r)
+	state := content.RunCancelled
+	reason := content.TermUserKilled
+	sentence := "the person stopped this answer"
+	outcome := foregroundNothingRunning
+	if h.stopForeground != nil {
+		// Foreground escalation completes before cancellation lets the stream
+		// terminalize. The callback runs without pendingRunsMu or the content
+		// operation queue held.
+		outcome = h.stopForeground(rc.sessionID)
+	}
+	if outcome == foregroundUnsupported {
+		// The assistant turn is cancelled, but the command on a remote host
+		// may still be alive. Keep that distinction visible in the terminal
+		// state instead of claiming the command was stopped.
+		sentence = "the person stopped this answer, but its command could not be stopped on the host"
+		h.log.Warn("agent cancel: foreground command could not be stopped",
+			"run", rc.runID, "session", rc.sessionID)
+	}
+	rc.control.finishCancel(state, reason, sentence)
+	rc.control.cancelContext()
+	h.terminalize(ctx, rc, rc.droppedBefore, state, reason, sentence, h.r)
 	_ = h.r.TryResult(req.ID, mustMarshal(agentCancelResponse{
 		RunID:     p.RunID,
 		State:     string(content.RunCancelled),
@@ -1691,9 +1721,10 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, droppe
 		defer releaseTerminal()
 	}
 	if cancelled {
-		state = content.RunCancelled
-		reason = content.TermUserKilled
-		sentence = "the person stopped this answer"
+		if rc.control.cancelDone != nil {
+			<-rc.control.cancelDone
+		}
+		state, reason, sentence = rc.control.cancelOutcome()
 	}
 	// The run is closing: nothing may resume it. Drop the stored stream
 	// context so a late agent.approve finds no pending question — and the
@@ -1757,7 +1788,7 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, droppe
 // string match against the framework's text — the typed chain survives eino.
 // A REFUSAL has no arm here: since nocx-uvac6.1 a refusal is the call's
 // result, not an error, so it never reaches this function at all.
-func classifyAskFailure(err error) (content.TerminationReason, string) {
+func classifyAskFailure(err error, model string) (content.TerminationReason, string) {
 	// The engine's own failure sentence: the endpoint answered, and did not
 	// answer (a StreamError is nocx's type, never the framework's). It is
 	// the FIRST arm because it is the most specific thing Ask can return
@@ -1765,6 +1796,13 @@ func classifyAskFailure(err error) (content.TerminationReason, string) {
 	var se *assistant.StreamError
 	if errors.As(err, &se) {
 		return content.TermFailed, se.Message
+	}
+	// The endpoint returned a complete textual tool-call envelope instead of
+	// a native call. The stream itself succeeded, so this belongs here as a
+	// typed semantic failure rather than in the transport-error arms below.
+	var envelopeErr *assistant.UnexecutedToolCallError
+	if errors.As(err, &envelopeErr) {
+		return content.TermFailed, assistant.UnexecutedToolCallSentence
 	}
 	// The run lease (ADR-0020 decision 2) fired: the sentence names WHICH
 	// bound ended the run, so the block says why — the ledger already
@@ -1788,6 +1826,28 @@ func classifyAskFailure(err error) (content.TerminationReason, string) {
 	if errors.As(err, &toolErr) {
 		return content.TermFailed, "the assistant's " + toolErr.Tool + " call did not finish: " + toolErr.Message()
 	}
+	// Cause 1c: the egress gate could not inspect a tool result, so the
+	// policy withheld it and failed the run closed. This arm follows the
+	// tool-failure arm because both happen after execution, but it must name
+	// the screening failure rather than expose eino's wrapper. The sealed
+	// vault case is checked by its sentinel, not by error text, so only that
+	// repair sends the person to unlock the vault.
+	//
+	// The credential path stopped needing this arm when nocx-k41yv gave
+	// resolution a stance: an Operation read raises the unlock and WAITS, so
+	// a sealed vault never reaches this classifier from there. The egress
+	// gate is not on that seam yet (nocx-1mf3v.2 puts it there), and even
+	// once it is, a headless backend with no renderer to ask still answers
+	// ErrVaultSealed — so this arm keeps its sentinel rather than assuming
+	// the prompt is always reachable.
+	var screeningErr *assistant.EgressScreeningError
+	if errors.As(err, &screeningErr) {
+		if errors.Is(err, vault.ErrVaultSealed) {
+			return content.TermFailed, "the vault is sealed. Unlock it in Settings → Vault, then ask again."
+		}
+		return content.TermFailed, assistant.EgressScreeningFailureSentence
+	}
+
 	// Cause 2: the model produced a tool call the engine cannot act on — a
 	// name that is not a tool, or arguments the schema it was shown does not
 	// allow. NOT a refusal: there was nothing to refuse.
@@ -1808,6 +1868,9 @@ func classifyAskFailure(err error) (content.TerminationReason, string) {
 	case errors.Is(err, context.DeadlineExceeded):
 		return content.TermTimeout, "the model did not answer in time"
 	}
+	if sentence, ok := assistant.EndpointErrorSentence(err, model); ok {
+		return content.TermFailed, sentence
+	}
 	// Cause 3: the request to the model endpoint never completed — a dial
 	// that failed, a TLS handshake that did not, a connection that dropped
 	// mid-request. Checked AFTER context.Canceled and context.DeadlineExceeded
@@ -1821,7 +1884,7 @@ func classifyAskFailure(err error) (content.TerminationReason, string) {
 	}
 	// Anything else. It still says nothing eino wrote: the trace is in the
 	// log, named there so a person can find it.
-	return content.TermFailed, "the model failed to answer. The details are in nocx's log."
+	return content.TermFailed, assistant.UnexplainedFailureSentence
 }
 
 // runLeaseSentence is the human-readable statement of one lease bound, for
@@ -1973,8 +2036,18 @@ func validateAgentAsk(p agentAskParams) (content.AgentAsk, []assistant.AttachedC
 		default:
 			return empty(fmt.Sprintf("attachedContent[%d].state must be running or exited", i))
 		}
+		if (grant.Start == nil) != (grant.Count == nil) {
+			return empty(fmt.Sprintf("attachedContent[%d] requires both start and count", i))
+		}
+		if grant.Start != nil {
+			if *grant.Start < 0 || *grant.Count <= 0 || *grant.Count > maxAttachedWindowLines ||
+				*grant.Start > int(^uint(0)>>1)-*grant.Count {
+				return empty(fmt.Sprintf("attachedContent[%d] start/count is out of bounds", i))
+			}
+		}
 		attached = append(attached, assistant.AttachedContentItem{
 			ItemID: grant.ItemID, Command: grant.Command, State: grant.State,
+			Start: grant.Start, Count: grant.Count,
 		})
 	}
 	in := content.AgentAsk{
@@ -2020,6 +2093,11 @@ func (h agentHandlers) priorTurn(ctx context.Context, rc askRunContext) (*conten
 // model's own context, because that is who reads this message.
 const proseGoneNotice = "[the text of this answer is no longer stored: retention evicted it]"
 
+// proseUnexecutedToolCallNotice replaces a stored envelope in the next
+// question's context. Showing the provider markup again would invite the
+// model to treat an unexecuted request as an earlier assistant turn.
+const proseUnexecutedToolCallNotice = "[this answer was not usable: the model asked for a tool in a form nocx could not act on]"
+
 // proseCutShortNotice marks a partial answer AS partial. Which it is — a real
 // message or an unfinished attempt — is a fact about the run's state and never
 // about how much text there is: an interrupted run leaves exactly the rows a
@@ -2040,6 +2118,13 @@ const proseCutShortNotice = "[this answer was cut short: the run did not finish]
 //     answer that was never written has no text to miss, and a marker there
 //     would claim one was.
 func priorAnswerMessage(p content.TurnProse) (string, bool) {
+	if p.Text != "" && assistant.IsUnexecutedToolCallEnvelope(p.Text) {
+		// The envelope predicate leads because replay safety does not depend
+		// on the recorded state: any state can carry stored prose, and this
+		// prose is never a usable assistant answer. State only chooses the
+		// wording for ordinary non-completed prose below.
+		return proseUnexecutedToolCallNotice, true
+	}
 	if p.Evicted {
 		return proseGoneNotice, true
 	}
@@ -2078,6 +2163,17 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		// idempotency to the connection (a reconnect mints a new one), never
 		// to a renderer-minted tab.
 		return agentHandlers{
+			stopForeground: func(sid session.ID) foregroundOutcome {
+				sess, owned := state.get(sid)
+				if !owned || sess == nil || sess.Kind() == session.KindRemote {
+					return foregroundUnsupported
+				}
+				leaseSess, ok := sess.(runLeaseSession)
+				if !ok {
+					return foregroundUnsupported
+				}
+				return stopForeground(s.log, sid, leaseSess, s.effectiveRunLease().SignalGrace)
+			},
 			op: agentOp, configOp: configOp, endpointWired: endpointWired,
 			credentials: credentials, client: client, askSub: askSub,
 			attemptLedger: attemptLedger, grantFor: s.runGrantFor,

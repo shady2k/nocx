@@ -36,6 +36,7 @@ import {
   type GrantBlock,
 } from './ask-entry'
 import { GrantController } from './grant'
+import { createMarkAffordance, type MarkAffordance } from './mark-affordance'
 import {
   submitCommand,
   planSubmit,
@@ -526,16 +527,46 @@ export class TerminalContent extends BasePaneContent {
   private promptVault: PromptVaultController | null = null
   private completion: CompletionController | null = null
   private recall: RecallOverlay | null = null
-  /** Whole blocks granted to the next question. Selection is a quote and also
-   * marks its containing block; no row coordinates or copied frame live here. */
+  /** Marks are either whole-block grants or row windows selected by gesture.
+   *  The absent window is the explicit whole-block form. */
   private grantedBlocks: GrantBlock[] = []
   private grantController: GrantController | null = null
+  /** A selection offers a grant; only the body-level control confirms it. */
+  private markAffordance: MarkAffordance | null = null
+  private readonly runningActions: RunningBlockActions = {
+    isActive: (blockEl) =>
+      this.hasRunningCommand() && this.scrollback?.blockManager.runningBlock?.el === blockEl,
+    isGranted: (blockEl) => this.grantedBlocks.some((grant) => grant.blockEl === blockEl),
+    toggleGrant: (blockEl) => this.toggleGrant(blockEl),
+    stop: () => this.signalActiveCommand('stop'),
+  }
   private readonly onSelectionChange = (): void => {
     const selection = window.getSelection()
-    if (!selection || selection.isCollapsed) return
-    const block = grantBlockFromSelection(selection)
-    if (!block || !this.scrollback?.scrollbackInner.contains(block.blockEl)) return
-    this.ensureGrant(block.blockEl)
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+      this.markAffordance?.hide()
+      return
+    }
+    const range = selection.getRangeAt(0)
+    const grant = grantBlockFromSelection(selection)
+    if (!grant || !this.scrollback?.scrollbackInner.contains(grant.blockEl)) {
+      this.markAffordance?.hide()
+      return
+    }
+    const rects = Array.from(range.getClientRects())
+    const rect = rects[rects.length - 1]
+    if (!rect) {
+      this.markAffordance?.hide()
+      return
+    }
+    this.markAffordance?.show(
+      {
+        left: rect.left,
+        top: rect.top,
+        right: rect.right,
+        bottom: rect.bottom,
+      },
+      grant,
+    )
   }
   private lifecycle = new LifecycleKernel()
   private _lifecycleUnsub: (() => void) | null = null
@@ -1303,13 +1334,7 @@ export class TerminalContent extends BasePaneContent {
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
         sessionName: (id) => this.hooks.sessionName?.(id) ?? null,
         answerText: (entryId) => answerTextForEntry(this.client, entryId),
-        runningActions: {
-          isActive: (blockEl) =>
-            this.hasRunningCommand() && this.scrollback?.blockManager.runningBlock?.el === blockEl,
-          isGranted: (blockEl) => this.grantedBlocks.some((grant) => grant.blockEl === blockEl),
-          toggleGrant: (blockEl) => this.toggleGrant(blockEl),
-          stop: () => this.signalActiveCommand('stop'),
-        },
+        runningActions: this.runningActions,
       })
 
       log.info('nocx: mounting renderer')
@@ -1416,7 +1441,7 @@ export class TerminalContent extends BasePaneContent {
       const agentClient = new AgentClient(this.client.dispatcher)
       const readiness = new AgentReadiness(agentClient)
       this.readiness = readiness
-      this._readinessUnsub = readiness.subscribe(() => this.renderModelChip())
+      this._readinessUnsub = readiness.subscribe(() => this.renderTargetChips())
 
       this.inputTargets = createRegistry((target) => {
         // The per-target draft swap (nocx-4ff.7): snapshot the editor
@@ -1463,7 +1488,7 @@ export class TerminalContent extends BasePaneContent {
         // repaint a fact that may be minutes old. Leaving Ask only
         // repaints — a Run pane pays no readiness call.
         if (target.id === this.agentTarget?.id) this.refreshReadiness()
-        this.renderModelChip()
+        this.renderTargetChips()
       })
       this.inputTargets.register(this.shellTarget)
       this.agentTarget = new AgentInputTarget({
@@ -1786,7 +1811,7 @@ export class TerminalContent extends BasePaneContent {
       })
       // Shell is active at start, so this paints the chip's absence — the
       // state a Run pane is in, and the one the row was built for.
-      this.renderModelChip()
+      this.renderTargetChips()
       this.editor.mount(target)
       this.completion.attach(this.editor, this.editor.root)
       this.promptVault = new PromptVaultController({
@@ -2964,6 +2989,10 @@ export class TerminalContent extends BasePaneContent {
       if (chipRow) this.grantController.mount(chipRow)
       this.editor.onGrantChipClick(() => this.grantController?.toggle())
       this.grantController.setBlocks(this.grantedBlocks)
+      this.markAffordance = createMarkAffordance((grant) => {
+        this.ensureGrant(grant)
+        this.markAffordance?.hide()
+      })
       document.addEventListener('selectionchange', this.onSelectionChange)
       this._mounted = true
       this._readyResolve(true)
@@ -3237,17 +3266,22 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /**
-   * The model chip's ONE writer in this pane: both facts it needs — which
-   * target Enter goes to, and what the readiness store holds — are read
-   * here, so no other site has to remember to combine them.
+   * The ONE writer in this pane for every chip that depends on which target
+   * Enter reaches. Both the model chip and the grant chip are meaningful only
+   * when a submit reaches the assistant — a Run pane names no model, because
+   * none answers anything, and marks no blocks, because there is no question
+   * for them to be about — so both read `isAsk` here rather than each site
+   * remembering to combine the target with the readiness store.
    *
-   * No chip at all unless the assistant is what a submit reaches: a Run
-   * pane names no model, because none answers anything.
+   * Presentation only. The grant's LIST stays owned by GrantController and is
+   * untouched by this: marks made in Ask survive a flip to Run and are on
+   * screen again on return, which is the criterion a careless fix breaks.
    */
-  private renderModelChip(): void {
+  private renderTargetChips(): void {
     if (!this.editor) return
     const active = this.inputTargets?.active()
     const isAsk = active !== undefined && active.id === this.agentTarget?.id
+    this.editor.setGrantChipVisible(isAsk)
     this.editor.setModelChip(isAsk ? modelChipState(this.readiness?.status ?? null) : null)
   }
 
@@ -3375,6 +3409,7 @@ export class TerminalContent extends BasePaneContent {
             container,
             () => {},
             snapshotStore,
+            this.runningActions,
           ),
         )
         continue
@@ -3431,6 +3466,7 @@ export class TerminalContent extends BasePaneContent {
                 container,
                 () => {},
                 snapshotStore,
+                this.runningActions,
               )
             }
             // An ACTION child is a tool line — a header naming what was
@@ -3466,6 +3502,7 @@ export class TerminalContent extends BasePaneContent {
                 container,
                 () => {},
                 snapshotStore,
+                this.runningActions,
               )
             }
             // A block the turn RAN (or a person's, if the ledger
@@ -3480,8 +3517,10 @@ export class TerminalContent extends BasePaneContent {
               container,
               () => {},
               snapshotStore,
+              this.runningActions,
             )
           },
+          this.runningActions,
         ),
       )
     }
@@ -3788,17 +3827,18 @@ export class TerminalContent extends BasePaneContent {
    *  same-domain completion), so nothing here re-derives it from a block's
    *  CSS class or from the byte stream. One PTY has one foreground process
    *  group, so "the active block" is unambiguous: this is the pane's one
-   *  execution, and it is what both the summon and the interrupt address. */
+   *  execution, and it is what both the summon and the interrupt address.
+   *
+   *  An assistant run has one additional authoritative local fact while its
+   *  lifecycle submit is in flight: the agent-run waiter is armed only after
+   *  the ordinary command path has opened its block. Include that interval so
+   *  Stop cannot lose the command between block creation and the lifecycle
+   *  acknowledgement. */
   private hasRunningCommand(): boolean {
     const st = this.lifecycle.state
-    // The ATTEMPT's state, not the axis's word. `running` is the kernel's
-    // name for the axis a lane is on once an attempt exists there, and it
-    // keeps that name after the attempt completes — the state carries the
-    // completed record until the next prompt fact arrives. So the axis alone
-    // would say a command is running for the whole window between its exit
-    // status and the shell's next prompt, which is exactly the window a Stop
-    // must refuse in and a summon must not open in.
-    return st.kind === 'running' && st.attempt.state === 'open'
+    if (st.kind === 'running' && st.attempt.state === 'open') return true
+    const running = this.scrollback?.blockManager.runningBlock
+    return running !== null && running !== undefined && this.agentRuns.has(running)
   }
 
   /** Summon the editor over a running command, in ask mode (nocx-92gfl).
@@ -4203,22 +4243,26 @@ export class TerminalContent extends BasePaneContent {
     }
   }
 
-  /** A selection is a quote and a whole-block grant. The grant is idempotent:
-   * repeated quotes from one block keep one mark, while the menu remains the
-   * explicit toggle for removing it. */
+  /** A selection is a quote and a grant whose window follows the selected
+   *  rows. Repeating a quote replaces that item's mark so the newest gesture
+   *  owns its granularity; the menu remains the explicit whole-block toggle. */
   private grantCurrentSelection(): boolean {
     const selection = window.getSelection()
     if (!selection || selection.isCollapsed) return false
-    const block = grantBlockFromSelection(selection)
-    if (!block || !this.scrollback?.scrollbackInner.contains(block.blockEl)) return false
-    this.ensureGrant(block.blockEl)
+    const grant = grantBlockFromSelection(selection)
+    if (!grant || !this.scrollback?.scrollbackInner.contains(grant.blockEl)) return false
+    this.ensureGrant(grant)
     return true
   }
 
-  private ensureGrant(blockEl: HTMLElement): void {
-    const grant = grantBlockFromElement(blockEl)
-    if (!grant || this.grantedBlocks.some((item) => item.itemId === grant.itemId)) return
-    this.grantedBlocks = [...this.grantedBlocks, grant]
+  private ensureGrant(grant: GrantBlock): void {
+    const index = this.grantedBlocks.findIndex((item) => item.itemId === grant.itemId)
+    this.grantedBlocks =
+      index < 0
+        ? [...this.grantedBlocks, grant]
+        : this.grantedBlocks.map((item, candidateIndex) =>
+            candidateIndex === index ? grant : item,
+          )
     this.grantController?.setBlocks(this.grantedBlocks)
   }
 
@@ -4238,9 +4282,12 @@ export class TerminalContent extends BasePaneContent {
     if (!refreshed) return
     const index = this.grantedBlocks.findIndex((grant) => grant.itemId === refreshed.itemId)
     if (index < 0) return
-    this.grantedBlocks = this.grantedBlocks.map((grant, candidateIndex) =>
-      candidateIndex === index ? refreshed : grant,
-    )
+    this.grantedBlocks = this.grantedBlocks.map((grant, candidateIndex) => {
+      if (candidateIndex !== index) return grant
+      return grant.start !== undefined && grant.count !== undefined
+        ? { ...refreshed, start: grant.start, count: grant.count }
+        : refreshed
+    })
     this.grantController?.setBlocks(this.grantedBlocks)
   }
 
@@ -4290,6 +4337,8 @@ export class TerminalContent extends BasePaneContent {
     this.clearGrants()
     this.grantController?.destroy()
     this.grantController = null
+    this.markAffordance?.dispose()
+    this.markAffordance = null
     document.removeEventListener('selectionchange', this.onSelectionChange)
     this.indicator = null
     this.promptVault?.destroy()

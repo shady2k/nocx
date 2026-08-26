@@ -66,7 +66,7 @@ func TestResolveRequestSecretsCoversEverySendableFieldAndBodyKind(t *testing.T) 
 			refs := &resolverTestRefs{value: func(int) string { return "resolved" }}
 			request := apicoll.Request{}
 			tc.set(&request, resolverTestReference)
-			resolved, placed, err := (&apiCollectionService{refs: refs}).resolveRequestSecrets(context.Background(), request)
+			resolved, placed, err := resolveRequestSecrets(context.Background(), refs, request)
 			if err != nil {
 				t.Fatalf("resolveRequestSecrets: %v", err)
 			}
@@ -79,7 +79,7 @@ func TestResolveRequestSecretsCoversEverySendableFieldAndBodyKind(t *testing.T) 
 
 			request = apicoll.Request{}
 			tc.set(&request, "{{secret:display name}}")
-			_, _, err = (&apiCollectionService{refs: refs}).resolveRequestSecrets(context.Background(), request)
+			_, _, err = resolveRequestSecrets(context.Background(), refs, request)
 			if err == nil || !strings.Contains(err.Error(), "display name") {
 				t.Fatalf("display-name error = %v, want named refusal", err)
 			}
@@ -98,7 +98,7 @@ func TestResolveRequestSecretsKeepsDistinctValuesForOneHandle(t *testing.T) {
 		URL:     resolverTestReference,
 		Headers: []apicoll.Header{{Name: "X-Token", Value: resolverTestReference, Enabled: true}},
 	}
-	_, placed, err := (&apiCollectionService{refs: refs}).resolveRequestSecrets(context.Background(), request)
+	_, placed, err := resolveRequestSecrets(context.Background(), refs, request)
 	if err != nil {
 		t.Fatalf("resolveRequestSecrets: %v", err)
 	}
@@ -120,9 +120,8 @@ func TestResolveRequestSecretsFollowsEveryBodyKind(t *testing.T) {
 	} {
 		t.Run(tc.kind, func(t *testing.T) {
 			request := apicoll.Request{Body: apicoll.Body{Kind: tc.kind, Text: resolverTestReference}}
-			resolved, _, err := (&apiCollectionService{
-				refs: &resolverTestRefs{value: func(int) string { return "resolved" }},
-			}).resolveRequestSecrets(context.Background(), request)
+			resolved, _, err := resolveRequestSecrets(context.Background(),
+				&resolverTestRefs{value: func(int) string { return "resolved" }}, request)
 			if err != nil {
 				t.Fatalf("resolveRequestSecrets: %v", err)
 			}

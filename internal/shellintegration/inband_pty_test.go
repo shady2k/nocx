@@ -174,9 +174,11 @@ func (s *ptySession) snapshot() string {
 // timeout elapses, then fails the test.
 func (s *ptySession) waitFor(substr string, timeout time.Duration) {
 	s.t.Helper()
-	testwait.WaitForTimeout(s.t, fmt.Sprintf("pty output %q", substr), timeout, func() bool {
-		return strings.Contains(s.snapshot(), substr)
-	})
+	testwait.WaitForTimeoutDetail(s.t, fmt.Sprintf("pty output %q", substr), timeout,
+		func() string { return fmt.Sprintf("output so far: %q", s.snapshot()) },
+		func() bool {
+			return strings.Contains(s.snapshot(), substr)
+		})
 }
 
 // type lets the shell answer a command; fails if the answer does not come.
@@ -326,19 +328,23 @@ func (s *ptySession) termios() unix.Termios {
 // the shell's mode change and misreport the wrapper's restore.
 func (s *ptySession) settleUntilReadline(want unix.Termios, timeout time.Duration) {
 	s.t.Helper()
-	testwait.WaitForTimeout(s.t, "shell prompt termios", timeout, func() bool {
-		ts := s.termios()
-		return ts.Iflag == want.Iflag && ts.Lflag == want.Lflag && ts.Cflag == want.Cflag
-	})
+	testwait.WaitForTimeoutDetail(s.t, "shell prompt termios", timeout,
+		func() string { return fmt.Sprintf("got %+v want %+v", s.termios(), want) },
+		func() bool {
+			ts := s.termios()
+			return ts.Iflag == want.Iflag && ts.Lflag == want.Lflag && ts.Cflag == want.Cflag
+		})
 }
 
 // waitForPromptAgain waits until the visible native prompt has appeared at
 // least twice — the shell left the wrapper and is back at readline.
 func (s *ptySession) waitForPromptAgain(timeout time.Duration) {
 	s.t.Helper()
-	testwait.WaitForTimeout(s.t, "native prompt after wrapper", timeout, func() bool {
-		return strings.Count(s.snapshot(), inBandTestPrompt) >= 2
-	})
+	testwait.WaitForTimeoutDetail(s.t, "native prompt after wrapper", timeout,
+		func() string { return fmt.Sprintf("output so far: %q", s.snapshot()) },
+		func() bool {
+			return strings.Count(s.snapshot(), inBandTestPrompt) >= 2
+		})
 }
 
 // plan builds the in-band plan for the test.

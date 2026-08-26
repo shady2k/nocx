@@ -491,19 +491,21 @@ func TestLocalZshSession_IsIntegratedOnTheUsersOwnShell(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	var verdict string
-	testwait.WaitForTimeout(t, "one of the zsh capability verdicts", 20*time.Second, func() bool {
-		out := s.output()
-		ia, ib := strings.LastIndex(out, "CAP_TEXT_ONLY"), strings.LastIndex(out, "CAP_IN_ENVIRON")
-		switch {
-		case ia > ib:
-			verdict = "CAP_TEXT_ONLY"
-		case ib > ia:
-			verdict = "CAP_IN_ENVIRON"
-		default:
-			return false
-		}
-		return true
-	})
+	testwait.WaitForTimeoutDetail(t, "one of the zsh capability verdicts", 20*time.Second,
+		func() string { return fmt.Sprintf("output=%q", s.output()) },
+		func() bool {
+			out := s.output()
+			ia, ib := strings.LastIndex(out, "CAP_TEXT_ONLY"), strings.LastIndex(out, "CAP_IN_ENVIRON")
+			switch {
+			case ia > ib:
+				verdict = "CAP_TEXT_ONLY"
+			case ib > ia:
+				verdict = "CAP_IN_ENVIRON"
+			default:
+				return false
+			}
+			return true
+		})
 	if verdict != "CAP_TEXT_ONLY" {
 		t.Errorf("the capability reached the session environment, where every child of the user's shell can read it: %q", s.output())
 	}
@@ -634,19 +636,21 @@ func TestLocalZshSession_SurvivesAUserRcThatFails(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	var verdict string
-	testwait.WaitForTimeout(t, "one of the broken-rc verdicts", 20*time.Second, func() bool {
-		out := s.output()
-		ia, ib := strings.LastIndex(out, "BROKEN_RC_STILL_USABLE"), strings.LastIndex(out, "__NOCX_NEVER__")
-		switch {
-		case ia > ib:
-			verdict = "BROKEN_RC_STILL_USABLE"
-		case ib > ia:
-			verdict = "__NOCX_NEVER__"
-		default:
-			return false
-		}
-		return true
-	})
+	testwait.WaitForTimeoutDetail(t, "one of the broken-rc verdicts", 20*time.Second,
+		func() string { return fmt.Sprintf("output=%q", s.output()) },
+		func() bool {
+			out := s.output()
+			ia, ib := strings.LastIndex(out, "BROKEN_RC_STILL_USABLE"), strings.LastIndex(out, "__NOCX_NEVER__")
+			switch {
+			case ia > ib:
+				verdict = "BROKEN_RC_STILL_USABLE"
+			case ib > ia:
+				verdict = "__NOCX_NEVER__"
+			default:
+				return false
+			}
+			return true
+		})
 	if verdict != "BROKEN_RC_STILL_USABLE" {
 		t.Fatalf("a broken user ~/.zshrc cost the user a terminal: %q", s.output())
 	}
@@ -724,19 +728,21 @@ func TestLocalZshSession_KeepsAFrameworkAcceptLineWrapper(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	var verdict string
-	testwait.WaitForTimeout(t, "the Enter verdict", 20*time.Second, func() bool {
-		out := s.output()
-		ia, ib := strings.LastIndex(out, "ENTER_WORKS"), strings.LastIndex(out, "No such widget")
-		switch {
-		case ia > ib:
-			verdict = "ENTER_WORKS"
-		case ib > ia:
-			verdict = "No such widget"
-		default:
-			return false
-		}
-		return true
-	})
+	testwait.WaitForTimeoutDetail(t, "the Enter verdict", 20*time.Second,
+		func() string { return fmt.Sprintf("output=%q", s.output()) },
+		func() bool {
+			out := s.output()
+			ia, ib := strings.LastIndex(out, "ENTER_WORKS"), strings.LastIndex(out, "No such widget")
+			switch {
+			case ia > ib:
+				verdict = "ENTER_WORKS"
+			case ib > ia:
+				verdict = "No such widget"
+			default:
+				return false
+			}
+			return true
+		})
 	if verdict != "ENTER_WORKS" {
 		t.Fatalf("pressing Enter did not run the command: %q", s.output())
 	}

@@ -1,6 +1,7 @@
 package shellintegration
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -50,9 +51,11 @@ func TestBashInterruptAnnouncesNoPhantomCommand(t *testing.T) {
 	// line was echoed by the tty driver, the interrupt landed before readline
 	// existed, and the test then failed for its own race while reading
 	// exactly like the product defect it was written for.
-	testwait.WaitForTimeout(t, "pty output \x1b]133;B", 15*time.Second, func() bool {
-		return strings.Contains(s.output(), "\x1b]133;B")
-	})
+	testwait.WaitForTimeoutDetail(t, "pty output \x1b]133;B", 15*time.Second,
+		func() string { return fmt.Sprintf("output: %q", s.output()) },
+		func() bool {
+			return strings.Contains(s.output(), "\x1b]133;B")
+		})
 
 	promptsBefore := strings.Count(s.output(), "\x1b]133;A")
 	cBefore := strings.Count(s.output(), "\x1b]133;C")
@@ -69,9 +72,11 @@ func TestBashInterruptAnnouncesNoPhantomCommand(t *testing.T) {
 	// The line has to reach readline before the interrupt does, or the two
 	// race and the test sometimes interrupts an empty prompt instead — a
 	// weaker case than the one under test.
-	testwait.WaitForTimeout(t, "pty output echo abandoned", 10*time.Second, func() bool {
-		return strings.Contains(s.output(), "echo abandoned")
-	})
+	testwait.WaitForTimeoutDetail(t, "pty output echo abandoned", 10*time.Second,
+		func() string { return fmt.Sprintf("output: %q", s.output()) },
+		func() bool {
+			return strings.Contains(s.output(), "echo abandoned")
+		})
 
 	// The interrupt, and then the fresh prompt it must leave behind: the
 	// shell is alive and back at readline. Anchoring on that (rather than on
@@ -80,9 +85,14 @@ func TestBashInterruptAnnouncesNoPhantomCommand(t *testing.T) {
 	// sides. Why the helper re-sends rather than waits longer is its own
 	// comment, and it is the whole of nocx-yjen.
 	interruptUntilPrompt(t, s, promptsBefore)
-	testwait.WaitForTimeout(t, "prompt_ready after the interrupt", 15*time.Second, func() bool {
-		return s.kernel.count("prompt_ready") >= promptReadyBefore+1
-	})
+	testwait.WaitForTimeoutDetail(t, "prompt_ready after the interrupt", 15*time.Second,
+		func() string {
+			return fmt.Sprintf("want %d, have %d; accepted=%v output=%q",
+				promptReadyBefore+1, s.kernel.count("prompt_ready"), s.kernel.events(), s.output())
+		},
+		func() bool {
+			return s.kernel.count("prompt_ready") >= promptReadyBefore+1
+		})
 
 	if got := strings.Count(s.output(), "\x1b]133;C") - cBefore; got != 0 {
 		t.Errorf("the interrupt emitted %d OSC 133 C marker(s) — a command start for a command the user never ran\noutput: %q",
@@ -152,17 +162,22 @@ func interruptUntilPrompt(t *testing.T, s *channelShell, promptsBefore int) {
 		t.Fatalf("write interrupt: %v", err)
 	}
 	nextRetry := time.Now().Add(3 * time.Second)
-	testwait.WaitForTimeout(t, "prompt after repeated interrupts", 15*time.Second, func() bool {
-		if strings.Count(s.output(), "\x1b]133;A") > promptsBefore {
-			return true
-		}
-		if time.Now().After(nextRetry) {
-			if _, err := s.ptmx.Write([]byte("\x03")); err != nil {
-				t.Fatalf("write retry interrupt: %v", err)
+	testwait.WaitForTimeoutDetail(t, "prompt after repeated interrupts", 15*time.Second,
+		func() string {
+			return fmt.Sprintf("OSC 133 A still %d; accepted=%v output=%q",
+				strings.Count(s.output(), "\x1b]133;A"), s.kernel.events(), s.output())
+		},
+		func() bool {
+			if strings.Count(s.output(), "\x1b]133;A") > promptsBefore {
+				return true
 			}
-			t.Logf("the shell took no prompt from the interrupt; sending it again")
-			nextRetry = time.Now().Add(3 * time.Second)
-		}
-		return false
-	})
+			if time.Now().After(nextRetry) {
+				if _, err := s.ptmx.Write([]byte("\x03")); err != nil {
+					t.Fatalf("write retry interrupt: %v", err)
+				}
+				t.Logf("the shell took no prompt from the interrupt; sending it again")
+				nextRetry = time.Now().Add(3 * time.Second)
+			}
+			return false
+		})
 }

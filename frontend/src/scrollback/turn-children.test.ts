@@ -147,43 +147,6 @@ describe('a turn draws the blocks it caused, in order', () => {
     ])
   })
 
-  it("marks the COMMAND BLOCK when a run call was built on an earlier call's result", () => {
-    const { manager } = newManager()
-    const turn = manager.addAnswerBlock(QUESTION, '/repo')
-    // The shape the owner actually ran (2026-08-26): `ls -S *.txt` prints a
-    // path, and the next command is that path. `run` is the ONE tool that
-    // opens a block, so the call draws no child of its own and the mark has
-    // to reach the block the command opened — the first version put it on
-    // the child-drawing branch, which run never takes, so every dependency
-    // in the tool that matters most was invisible.
-    turn.toolCall({ callId: 'c1', tool: 'run', effect: 'mutate-destructive', opensBlock: true })
-    const first = manager.startBlock('ls -S /home/dev/*.txt', '/repo', 0, 0, 'agent')
-    turn.toolCall({
-      callId: 'c2',
-      tool: 'run',
-      effect: 'mutate-destructive',
-      opensBlock: true,
-      derivedFrom: ['c1'],
-    })
-    const second = manager.startBlock('head -n 10 /home/dev/log.txt', '/repo', 0, 0, 'agent')
-
-    expect(second.el.dataset.derived).toBe('1')
-    expect(second.el.title).toContain('appear')
-
-    // AND IT SURVIVES THE FREEZE. A running block is REPLACED by a frozen
-    // one when the command finishes, so a mark set on the running element is
-    // gone by the time anybody reads the turn — which is why the owner's
-    // screenshot showed no mark while every test passed: no test had ever
-    // let the block finish (2026-08-26).
-    const frozen = manager.freezeBlock(() => undefined, 1, 0)
-    expect(frozen).not.toBeNull()
-    expect(frozen!.el.dataset.derived).toBe('1')
-    expect(frozen!.el.title).toContain('appear')
-    // And the first block carries nothing: nothing preceded it, so a mark
-    // there would be the surface inventing a dependency.
-    expect(first.el.dataset.derived).toBeUndefined()
-  })
-
   // ── acceptance 3 ────────────────────────────────────────────────────────
   it("the run's command block is a child of its turn and keeps everything a block has", () => {
     const { inner, manager } = newManager()

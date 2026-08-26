@@ -13,8 +13,7 @@
     "args",
     "effect",
     "opensBlock",
-    "actionEntryId",
-    "derivedFrom"
+    "actionEntryId"
   ],
   "properties": {
     "runId": {
@@ -58,11 +57,6 @@
     "opensBlock": {
       "description": "Whether this call's work becomes a TOP-LEVEL BLOCK of its own (nocx-9sqii) — true for `run` alone, which submits a command through the same orchestration a person's line takes. It decides WHAT the call is drawn as: a call that opens a block IS that block, standing in its own seat among the turn's children, and no announcement is drawn beside it — a second child restating the command, the output and the exit status the block already owns is the empty half of two positions one command used to occupy. A call that opens none is drawn as a child of its own, named by its tool and its arguments, which is then the only thing that says it occurred. Sent by the backend for the reason the effect is (ADR-0028 decision 4): it is a fact of the tool table (internal/agenttools Declaration.OpensBlock), and a renderer holding its own list of which tools open blocks would be a second copy of that table, disagreeing the day a tool is added.",
       "type": "boolean"
-    },
-    "derivedFrom": {
-      "description": "The EARLIER calls of this run whose results this call's arguments appear to have come out of, as their callIds, in the order those calls completed (nocx-d6gn4.9). It exists so a surface can say why a call looks the way it does, and so the experiment that decides whether the assistant should compose work as a program can measure how DEEP real dependent chains are — a figure nothing recorded before. IT IS EVIDENCE AND NOT A FACT, and a surface drawing it owes the reader that distinction: the model authors the arguments, so 'I used the id I just read' exists only inside the model, and asking it directly was rejected because the question would alter the very behaviour being measured. What the backend can see is that a value of this call appears verbatim in an earlier result, with short tokens and the granted resource excluded so an accident cannot pass as a derivation. Always present, and `[]` when nothing matched — for the reason `args` is always present: absent and empty are the same sentence about a call, and a reader should not have to tell them apart. Empty never means 'not looked for'.",
-      "type": "array",
-      "items": { "type": "string", "minLength": 1 }
     },
     "actionEntryId": {
       "description": "The LEDGER action entry the attempt was recorded under (design §6.4). The thread joining question, run, attempt and answer — and the handle a later 'show me what it returned' reaches through, rather than a second copy of the bytes.",

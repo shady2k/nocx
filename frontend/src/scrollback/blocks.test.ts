@@ -1986,38 +1986,6 @@ describe('BlockManager.addAnswerBlock', () => {
     expect(flowOf(h)).toEqual(['call:files.read'])
   })
 
-  it('marks a call that was built on an earlier one, and leaves an independent call unmarked', () => {
-    const { manager } = newManager()
-    const h = manager.addAnswerBlock('q', '/')
-    // Four calls in a row look identical whether each stood on its own or
-    // each fed the next, so the chain is exactly what a reader cannot
-    // recover from the order. The mark is what says which of the two this
-    // was (nocx-d6gn4.9).
-    h.toolCall({
-      callId: 'call_list',
-      tool: 'session.list',
-      effect: 'observe',
-      opensBlock: false,
-      derivedFrom: [],
-    })
-    h.toolCall({
-      callId: 'call_read',
-      tool: 'session.read',
-      effect: 'observe',
-      opensBlock: false,
-      derivedFrom: ['call_list'],
-    })
-    const marked = h.el.querySelectorAll('.cmd-block[data-block-kind="tool"][data-derived]')
-    expect(marked.length).toBe(1)
-    // And it is the SECOND one: a marker on the first would be the surface
-    // inventing a dependency that could not exist, since nothing preceded it.
-    expect((marked[0] as HTMLElement).dataset.tool).toBe('session.read')
-    // The hover text carries the hedge the mark cannot. The backend saw a
-    // value appear in an earlier result; it did not see the model reuse it,
-    // and the surface must not claim otherwise.
-    expect((marked[0] as HTMLElement).title).toContain('appear')
-  })
-
   it('renders two calls when BOTH lack an id — an empty key is not an identity', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')

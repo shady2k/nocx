@@ -166,18 +166,6 @@ type ToolCall struct {
 	// the renderer would be a second copy of the tool table — the reason
 	// Effect rides here too (ADR-0028 decision 4).
 	OpensBlock bool
-	// DerivedFrom names the EARLIER calls of this run whose results this
-	// call's arguments appear to have come out of, in the model's own call
-	// ids because that is what the renderer keys its rows on (nocx-d6gn4.9).
-	//
-	// IT IS EVIDENCE AND NOT A FACT, and any surface drawing it owes the
-	// reader that distinction. The model authors the arguments, so the exact
-	// answer lives only inside it; what the host can see is that a value in
-	// this call appears verbatim in an earlier result. Asking the model
-	// instead was rejected on validity: the question would alter the very
-	// behaviour the experiment measures. Empty is the ordinary case and
-	// means "nothing matched", never "not looked for".
-	DerivedFrom []string
 }
 
 // Message is one turn of the conversation, in this package's own

@@ -420,15 +420,6 @@ export interface AnswerToolCall {
    *  the effect beside it is sent rather than inferred (ADR-0028 decision
    *  4). */
   opensBlock: boolean
-  /** The EARLIER calls of this run whose results this call's arguments
-   *  appear to have come out of, as their callIds (nocx-d6gn4.9).
-   *
-   *  EVIDENCE, NOT FACT, and the surface must say so rather than assert a
-   *  causal claim it cannot support: the model authors the arguments, so
-   *  only it knows what it reused, and what the backend can see is a value
-   *  of this call appearing verbatim in an earlier result. Empty is the
-   *  ordinary case and means "nothing matched", never "not looked for". */
-  derivedFrom?: string[]
 }
 
 /** One answer block's bookkeeping (nocx-x8s2.2): the question it answers
@@ -1248,23 +1239,6 @@ function wireBlockSelection(
  * The block DECLARES its kind (nocx-ex636); the rendering rules —
  * highlighting, wrapping, the status vocabulary — are read from it.
  */
-/** Mark a block whose call was built on an earlier call's result
- *  (nocx-d6gn4.9). ONE owner of the attribute and of the sentence, because
- *  the mark has to reach two different elements: the child a non-block call
- *  draws, and the command block a `run` call opens — and two copies would be
- *  two hedges, drifting apart.
- *
- *  The hover text carries what the mark cannot. The backend saw a value of
- *  this call appear verbatim in an earlier result; it did not see the model
- *  reuse it, and the surface must not claim otherwise. */
-function markDerived(el: HTMLElement, count: number): void {
-  el.dataset.derived = String(count)
-  el.title =
-    count === 1
-      ? 'The arguments of this call appear in the result of an earlier call in this answer.'
-      : `The arguments of this call appear in the results of ${count} earlier calls in this answer.`
-}
-
 export function createCommandBlock(
   kind: BlockKind,
   id: number,
@@ -1502,21 +1476,6 @@ export function freezeBlock(
     menuActions,
     entryId,
   )
-  // The derivation mark travels with the block (nocx-d6gn4.9). It is set on
-  // the RUNNING element, because that is what exists when the call is
-  // announced, and the freeze builds a new element rather than mutating the
-  // old one — so without this the mark is correct for as long as the command
-  // is running and gone the moment anybody reads the turn. That is exactly
-  // how it reached a screenshot with every test green: no test had ever let
-  // the block finish.
-  //
-  // Here rather than at the two call sites, for the reason _reown exists at
-  // all: this function owns the swap, and a fact that must survive it belongs
-  // where the swap is.
-  if (el.dataset.derived) {
-    newEl.dataset.derived = el.dataset.derived
-    newEl.title = el.title
-  }
   if (el.parentNode) {
     el.parentNode.replaceChild(newEl, el)
   }
@@ -1708,12 +1667,6 @@ export class BlockManager {
    *  the moment it is used, and the turn drops it at its close, so a `run`
    *  that never reached a command cannot adopt an unrelated block later. */
   private _claimedBy: HTMLElement | null = null
-  /** The derivation of the call that claimed the next seat, held until the
-   *  block it opened exists. A `run` call draws no child of its own — the
-   *  block IS the account of it (ADR-0040) — and the block is created after
-   *  the announcement, so the mark cannot be applied when it is learned.
-   *  Cleared with the claim, so a block nobody claimed never inherits it. */
-  private _claimedDerived: number = 0
 
   constructor(scrollbackInner: HTMLElement, xtermContainer: HTMLElement, opts: BlockManagerOpts) {
     this._scrollbackInner = scrollbackInner
@@ -1748,10 +1701,7 @@ export class BlockManager {
    *  defect with a third thing to keep in step). */
   private _ownNext(el: HTMLElement): void {
     const claim = this._claimedBy
-    const derived = this._claimedDerived
     this._claimedBy = null
-    this._claimedDerived = 0
-    if (derived > 0) markDerived(el, derived)
     if (!claim) {
       this._own(el, this._xtermContainer)
       return
@@ -2408,9 +2358,8 @@ export class BlockManager {
     }
     /** Claim the next block the ordinary submit path opens for this turn's
      *  region — the seam the `run` tool's command block arrives through. */
-    const claim = (region: HTMLElement | null, derived = 0): void => {
+    const claim = (region: HTMLElement | null): void => {
       this._claimedBy = region
-      this._claimedDerived = derived
     }
     const claimedBy = (): HTMLElement | null => this._claimedBy
     const store = this._snapshotStore
@@ -2545,7 +2494,7 @@ export class BlockManager {
           // its exit status, its ⋮ — stands exactly where the call happened.
           // A child beside it restating the command would be the empty half
           // of the two positions one command used to occupy.
-          claim(children, call.derivedFrom?.length ?? 0)
+          claim(children)
           return
         }
         // A call that opened no block: its own child, named by the tool and
@@ -2579,17 +2528,6 @@ export class BlockManager {
         // an effect from a tool name (ADR-0028 decision 4).
         cel.dataset.effect = call.effect
         cel.dataset.tool = call.tool
-        // A call whose arguments look like they came out of an earlier
-        // call's result is MARKED, so a person reading the turn can see the
-        // chain rather than infer it from the order (nocx-d6gn4.9). A typed
-        // data attribute, like the effect above, so the styling lives in the
-        // component's CSS and this surface paints nothing itself.
-        //
-        // The hover text carries the hedge the marker cannot: this is what
-        // the backend OBSERVED, not what the model said it did.
-        if (call.derivedFrom && call.derivedFrom.length > 0) {
-          markDerived(cel, call.derivedFrom.length)
-        }
         children.appendChild(cel)
         own(cel)
       },

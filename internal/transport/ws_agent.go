@@ -320,26 +320,6 @@ type agentRunToolCall struct {
 	// fact of the tool table, like the effect beside it (ADR-0028 decision
 	// 4).
 	OpensBlock bool `json:"opensBlock"`
-	// DerivedFrom names the earlier calls of this run whose results this
-	// call's arguments appear to have come out of (nocx-d6gn4.9), in the
-	// model's call ids because that is the key the renderer already draws
-	// rows on. EVIDENCE, not fact: the model authors the arguments, so the
-	// exact answer lives only inside it and what the host sees is a value
-	// appearing verbatim in an earlier result. Always sent, `[]` when
-	// nothing matched — absent and empty would be the same sentence about a
-	// call, and a reader should not have to tell them apart (the argument
-	// `args` already makes on this wire).
-	DerivedFrom []string `json:"derivedFrom"`
-}
-
-// derivedFromOf is the announcement's copy of the call's provenance, never
-// nil: the contract requires the field, and `[]` says "nothing matched" where
-// a missing key would say nothing at all.
-func derivedFromOf(call *assistant.ToolCall) []string {
-	if call == nil || call.DerivedFrom == nil {
-		return []string{}
-	}
-	return call.DerivedFrom
 }
 
 // agentRunReasoning is the agent.runReasoning notification (nocx-s92so): one
@@ -1129,7 +1109,6 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 				ActionEntryID: ev.Call.EntryID,
 				Resource:      ev.Call.Resource,
 				OpensBlock:    ev.Call.OpensBlock,
-				DerivedFrom:   derivedFromOf(ev.Call),
 			})); err != nil {
 				// Counted with the delta drops, and into the SAME counter,
 				// because it is the same fact about the live view: a call

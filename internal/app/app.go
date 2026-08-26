@@ -94,12 +94,6 @@ type App struct {
 	Updater          update.Updater
 	Profiles         profile.ProfileRepository
 	Credentials      credential.SecretStore
-	// content is the ledger this root composed, retained so the dev
-	// measurement read (nocx-d6gn4.9) goes through the SAME store and the
-	// SAME query the product uses. A second opener would risk running
-	// Open's rebuild and retention against the user's own history, and a
-	// second SQL path would be a second owner of what an entry is.
-	content content.ContentDB
 
 	// vaultCloser releases the vault's background worker and seals it at
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
@@ -1388,7 +1382,6 @@ func New(opts ...Option) (*App, error) {
 		procs:            procs,
 		attentionHost:    attentionHost,
 		UIState:          uiStateStore,
-		content:          contentDB,
 		slogger:          slogger,
 	}
 

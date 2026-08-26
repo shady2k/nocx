@@ -169,10 +169,6 @@ export class AgentInputTarget implements InputTarget {
         // It is what tells the turn to let that block take the next seat
         // instead of drawing a child that restates it.
         opensBlock: c.opensBlock,
-        // Which earlier calls this one appears to have been built from. The
-        // wire always sends the field, `[]` when nothing matched, so there
-        // is no absent/empty distinction to invent here.
-        derivedFrom: c.derivedFrom,
       })
     })
     // The model's thinking, into its own note and never into the answer

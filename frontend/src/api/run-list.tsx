@@ -436,6 +436,8 @@ function RawExchange(props: {
   response: ApiRaw | null
   secretName: (handle: string) => string
   connection: string
+  /** How the elapsed time was spent — drawn, because five numbers in a row
+   *  make the reader do the subtraction that answers "where did it go". */
   timings: ApiTimings
   certificates: readonly ApiCertificate[]
 }) {

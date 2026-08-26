@@ -438,6 +438,7 @@ func (s *channelShell) readPump() {
 		n, err := s.ptmx.Read(buf)
 		if n > 0 {
 			if ptyPumpLag > 0 {
+				// Test-only pacing widens the pump scheduling window.
 				time.Sleep(ptyPumpLag)
 			}
 			s.mu.Lock()
@@ -461,14 +462,9 @@ func (s *channelShell) output() string {
 // ready prompt. Event-driven, so the shell's first prompt is never raced.
 func (s *channelShell) waitForHandshake() {
 	s.t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if s.kernel.count("hello") > 0 && s.kernel.count("prompt_ready") > 0 {
-			return
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	s.t.Fatalf("handshake never completed; accepted=%v output=%q", s.kernel.events(), s.output())
+	testwait.WaitForTimeout(s.t, "lifecycle handshake (hello and prompt_ready)", 10*time.Second, func() bool {
+		return s.kernel.count("hello") > 0 && s.kernel.count("prompt_ready") > 0
+	})
 }
 
 // run types one command line and returns when the command is finished on
@@ -541,18 +537,13 @@ func (s *channelShell) waitForRenderedThroughPrompt() {
 		s.t.Fatalf("no accepted complete carried a render fence; accepted=%v", s.kernel.events())
 	}
 	marker := "\x1b]1337;NOCX_FENCE;" + fence
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	testwait.WaitForTimeout(s.t, "the render fence followed by its prompt", 10*time.Second, func() bool {
 		out := s.output()
 		if i := strings.Index(out, marker); i >= 0 {
-			if strings.Contains(out[i:], "\x1b]133;A") {
-				return
-			}
+			return strings.Contains(out[i:], "\x1b]133;A")
 		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	s.t.Fatalf("the command's render never reached the pty (fence %s and the prompt after it); accepted=%v output=%q",
-		fence, s.kernel.events(), s.output())
+		return false
+	})
 }
 
 // waitForPromptAfterComplete blocks until a prompt_ready is accepted with a
@@ -560,43 +551,40 @@ func (s *channelShell) waitForRenderedThroughPrompt() {
 // goes on to assert, rather than a proxy for it.
 func (s *channelShell) waitForPromptAfterComplete() {
 	s.t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	testwait.WaitForTimeout(s.t, "prompt_ready after complete", 10*time.Second, func() bool {
 		var lastComplete uint64
 		for _, e := range s.kernel.events() {
 			if e.Evt == "complete" {
 				lastComplete = e.Seq
 			}
 		}
-		if lastComplete > 0 {
-			for _, e := range s.kernel.events() {
-				if e.Evt == "prompt_ready" && e.Seq > lastComplete {
-					return
-				}
+		if lastComplete == 0 {
+			return false
+		}
+		for _, e := range s.kernel.events() {
+			if e.Evt == "prompt_ready" && e.Seq > lastComplete {
+				return true
 			}
 		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	s.t.Fatalf("no prompt_ready followed the complete; accepted=%v output=%q", s.kernel.events(), s.output())
+		return false
+	})
 }
 
 func (s *channelShell) waitForAccepted(evt string) {
 	s.t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	testwait.WaitForTimeout(s.t, fmt.Sprintf("accepted %q event", evt), 10*time.Second, func() bool {
 		for _, e := range s.kernel.events() {
 			if e.Evt == evt {
-				return
+				return true
 			}
 		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	s.t.Fatalf("kernel never accepted %q; accepted=%v output=%q", evt, s.kernel.events(), s.output())
+		return false
+	})
 }
 
 func (s *channelShell) close() {
 	_, _ = s.ptmx.Write([]byte("exit\n"))
-	time.Sleep(300 * time.Millisecond)
+	_ = s.cmd.Wait()
 	_ = s.ptmx.Close()
 	_ = s.cmd.Process.Kill()
 	_ = s.listener.Close()
@@ -831,19 +819,15 @@ func testBashChannel_CapabilityNeverInAnyEnvironment(t *testing.T, shell string)
 	if _, err := s.ptmx.Write([]byte("bash -c 'echo CHILD_PID=$$; echo CHILD_ENV_HAS_CAP=$(env | grep -c " + testCap + "); sleep 30' &\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
+	testwait.WaitForTimeout(s.t, "capability environment results", 8*time.Second, func() bool {
 		// Wait for the RESULT lines, not the echoed command text (the typed
 		// line itself contains the capability literal).
 		o := s.output()
-		if strings.Contains(o, "SHELL_ENV_HAS_CAP=0") &&
+		return strings.Contains(o, "SHELL_ENV_HAS_CAP=0") &&
 			strings.Contains(o, "SHELL_VAR_HAS_CAP=yes") &&
 			childEnvAnswer.MatchString(o) &&
-			strings.Contains(o, "CHILD_PID="+strconv.Itoa(parsePidOrZero(o))) {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+			strings.Contains(o, "CHILD_PID="+strconv.Itoa(parsePidOrZero(o)))
+	})
 	out := s.output()
 	childPID := parseLastPID(t, out, "CHILD_PID=")
 	defer func() {
@@ -930,14 +914,10 @@ func testBashChannel_ChildProcessCannotReadTheCapability(t *testing.T, shell str
 	if _, err := s.ptmx.Write([]byte("echo CHILD_CAP_READ=$(bash -c 'env | grep -c " + testCap + "')\n")); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
+	testwait.WaitForTimeout(s.t, "child capability result", 8*time.Second, func() bool {
 		o := s.output()
-		if strings.Contains(o, "CHILD_CAP_READ=0") || strings.Contains(o, "CHILD_CAP_READ=1") {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+		return strings.Contains(o, "CHILD_CAP_READ=0") || strings.Contains(o, "CHILD_CAP_READ=1")
+	})
 	if !strings.Contains(s.output(), "CHILD_CAP_READ=0") {
 		t.Errorf("a child of the shell could read the capability:\n%s", s.output())
 	}
@@ -977,7 +957,9 @@ func testBashChannel_ChildFrameWithoutCapabilityProducesNoAcceptedEvent(t *testi
 		t.Fatalf("write bad frame: %v", err)
 	}
 	_ = conn.Close()
-	time.Sleep(300 * time.Millisecond)
+	testwait.WaitForTimeout(s.t, "rejected capability-less frame", 10*time.Second, func() bool {
+		return s.kernel.rejectedCount() > 0
+	})
 
 	if s.kernel.count("start") != 0 {
 		t.Fatalf("the capability-less frame was accepted as a start: %v", s.kernel.events())
@@ -985,7 +967,6 @@ func testBashChannel_ChildFrameWithoutCapabilityProducesNoAcceptedEvent(t *testi
 	if s.kernel.rejectedCount() == 0 {
 		t.Errorf("the capability-less frame was not counted as rejected")
 	}
-
 	// The live domain is untouched: the shell's next command completes.
 	s.run("echo STILL-LIVE")
 	if s.kernel.count("start") != 1 {
@@ -1080,17 +1061,9 @@ func assertNoTransportFailsOpen(t *testing.T, shell, scriptName, script, sentine
 	}
 	// The prompt must become visible on its own — no accept exists to gate
 	// it on, and the shell must not wait for one.
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(snapshot(), sentinel) {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	if !strings.Contains(snapshot(), sentinel) {
-		_ = cmd.Process.Kill()
-		t.Fatalf("native prompt %q never appeared without a transport; output=%q", sentinel, snapshot())
-	}
+	testwait.WaitForTimeout(t, fmt.Sprintf("native prompt %q without transport", sentinel), 10*time.Second, func() bool {
+		return strings.Contains(snapshot(), sentinel)
+	})
 	if _, err := ptmx.Write([]byte("exit\n")); err != nil {
 		t.Fatalf("write exit: %v", err)
 	}
@@ -1174,13 +1147,9 @@ func testBashChannelLocalDescriptorTransport(t *testing.T, shell string) {
 	go s.readPump()
 	defer func() { _ = ptmx.Close(); _ = cmd.Process.Kill() }()
 
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if k.count("hello") > 0 && k.count("prompt_ready") > 0 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	testwait.WaitForTimeout(t, "inherited-descriptor lifecycle handshake", 10*time.Second, func() bool {
+		return k.count("hello") > 0 && k.count("prompt_ready") > 0
+	})
 	if k.count("hello") == 0 {
 		t.Fatalf("no hello over the inherited descriptor; output=%q", s.output())
 	}
@@ -1397,25 +1366,17 @@ func TestInBand_AuthenticatedChannelFromStreamedCapability(t *testing.T) {
 
 	// Wait for the native prompt, then type the wrapper (the way the
 	// frontend would).
-	deadline := time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(s.output(), "IBPROMPT>") {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
+	testwait.WaitForTimeout(s.t, "the streamed bootstrap native prompt", 8*time.Second, func() bool {
+		return strings.Contains(s.output(), "IBPROMPT>")
+	})
 	if _, err := ptmx.Write([]byte(plan.Wrapper + "\r")); err != nil {
 		t.Fatalf("write wrapper: %v", err)
 	}
 	// READY means raw mode is on; the backend then writes the capability
 	// line, the payload and the terminator.
-	deadline = time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(s.output(), "NOCX_IB_READY") {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
+	testwait.WaitForTimeout(s.t, "the in-band READY marker", 8*time.Second, func() bool {
+		return strings.Contains(s.output(), "NOCX_IB_READY")
+	})
 	stream := testCap + "\n" + plan.Payload + plan.Terminator + "\n"
 	if _, err := ptmx.Write([]byte(stream)); err != nil {
 		t.Fatalf("write cap+payload: %v", err)
@@ -1452,13 +1413,9 @@ func TestInBand_AuthenticatedChannelFromStreamedCapability(t *testing.T) {
 			t.Fatalf("write: %v", err)
 		}
 	}
-	deadline = time.Now().Add(8 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(s.output(), "IB_CAP_SET=") {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	testwait.WaitForTimeout(s.t, "the streamed capability result", 8*time.Second, func() bool {
+		return strings.Contains(s.output(), "IB_CAP_SET=")
+	})
 	out := s.output()
 	if !strings.Contains(out, "IB_CAP_SET=yes") {
 		t.Errorf("streamed capability not held in the shell variable:\n%s", out)
@@ -1489,13 +1446,9 @@ func tcpPort(t *testing.T, ln net.Listener) int {
 // assertion is on what a person sees, not on the absence of a hang.
 func assertConventionalAfterHandshakeFault(t *testing.T, s *channelShell, sentinel string) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(s.output(), sentinel) {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
+	testwait.WaitForTimeout(t, fmt.Sprintf("native prompt %q after handshake fault", sentinel), 10*time.Second, func() bool {
+		return strings.Contains(s.output(), sentinel)
+	})
 	if !strings.Contains(s.output(), sentinel) {
 		t.Fatalf("native prompt %q never became visible after the handshake fault; output=%q", sentinel, s.output())
 	}

@@ -14,7 +14,6 @@ import (
 	"strings"
 	"syscall"
 	"testing"
-	"time"
 
 	"github.com/shady2k/nocx/internal/testwait"
 	"golang.org/x/sys/unix"
@@ -26,16 +25,16 @@ import (
 // the assertion is on the observable state, never on a duration.
 func waitForeground(t testing.TB, lp *LocalPty) int {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		pgid, err := lp.ForegroundProcessGroup()
-		if err == nil && pgid > 0 {
-			return pgid
+	var pgid int
+	testwait.WaitFor(t, "the pty to report a foreground process group", func() bool {
+		got, err := lp.ForegroundProcessGroup()
+		if err == nil && got > 0 {
+			pgid = got
+			return true
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatal("the pty never reported a foreground process group")
-	return 0
+		return false
+	})
+	return pgid
 }
 
 func TestLocalPty_SignalForegroundAtPromptIsNoop(t *testing.T) {
@@ -64,36 +63,27 @@ func TestLocalPty_SignalForegroundReachesTheExecution(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 	var jobPGID int
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	testwait.WaitFor(t, "the foreground group to leave the shell", func() bool {
 		pgid, err := lp.ForegroundProcessGroup()
 		if err == nil && pgid > 0 && pgid != lp.Pid() {
 			jobPGID = pgid
-			break
+			return true
 		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	if jobPGID == 0 {
-		t.Fatal("the foreground group never left the shell — the job did not start")
-	}
+		return false
+	})
 
 	// The signal must reach the execution: SIGINT ends it, and the kernel
 	// returns the foreground to the shell.
 	if err := lp.SignalForeground(syscall.SIGINT); err != nil {
 		t.Fatalf("SignalForeground(SIGINT): %v", err)
 	}
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	testwait.WaitFor(t, "the execution group to end or foreground to return", func() bool {
 		if err := unix.Kill(-jobPGID, 0); errors.Is(err, unix.ESRCH) {
-			return
+			return true
 		}
 		pgid, err := lp.ForegroundProcessGroup()
-		if err == nil && pgid == lp.Pid() {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("the execution's process group %d survived SIGINT (or the shell never resumed)", jobPGID)
+		return err == nil && pgid == lp.Pid()
+	})
 }
 
 func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
@@ -164,14 +154,9 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 	}
 	// Observable two, the death: the trap's wait reaped the sleep, so the
 	// pid it wrote is gone — zombie-free.
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := unix.Kill(childPID, 0); errors.Is(err, unix.ESRCH) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("the execution's child %d was not reaped after the group signal — cancellation reached only the shell", childPID)
+	testwait.WaitFor(t, "the execution's child to be reaped", func() bool {
+		return errors.Is(unix.Kill(childPID, 0), unix.ESRCH)
+	})
 }
 
 func TestLocalPty_SignalForegroundZeroChecksExistence(t *testing.T) {
@@ -181,17 +166,12 @@ func TestLocalPty_SignalForegroundZeroChecksExistence(t *testing.T) {
 	if _, err := lp.Write([]byte("sleep 30\n")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
+	testwait.WaitFor(t, "the execution foreground group to start", func() bool {
 		pgid, err := lp.ForegroundProcessGroup()
-		if err == nil && pgid > 0 && pgid != lp.Pid() {
-			// Signal 0 is the existence check: a live group answers nil.
-			if serr := lp.SignalForeground(0); serr != nil {
-				t.Fatalf("SignalForeground(0) on a live execution = %v, want nil", serr)
-			}
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+		return err == nil && pgid > 0 && pgid != lp.Pid()
+	})
+	// Signal 0 is the existence check: a live group answers nil.
+	if err := lp.SignalForeground(0); err != nil {
+		t.Fatalf("SignalForeground(0) on a live execution = %v, want nil", err)
 	}
-	t.Fatal("the job never started")
 }

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/testwait"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -219,13 +220,9 @@ func TestTunnelConn_ConnectionLossClosesDoneAndReclaimsPool(t *testing.T) {
 
 	// Both references release on loss: the lease's own watcher and the tab's
 	// session watcher. The dead entry is reclaimed — nothing lingers.
-	deadline := time.Now().Add(5 * time.Second)
-	for client.pool.Count() != 0 {
-		if time.Now().After(deadline) {
-			t.Fatalf("pool count after loss = %d, want 0 (dead entry reclaimed)", client.pool.Count())
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+	testwait.WaitForTimeout(t, "the pooled connection to be reclaimed after loss", 5*time.Second, func() bool {
+		return client.pool.Count() == 0
+	})
 	_ = tab.Close() // already released; must be a no-op, not a double release
 
 	// A fresh lease dials a NEW connection rather than the dead entry, and

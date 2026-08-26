@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // ── connection-password ask, server → client ────────────────────────────
@@ -385,15 +387,9 @@ func TestPasswordResolved_UnknownRequestID(t *testing.T) {
 // what broadcastAsk consults — a dial that has returned is not yet a client.
 func waitForConns(t *testing.T, ws *WSServer, n int) {
 	t.Helper()
-	deadline := time.Now().Add(wantWithin)
-	for time.Now().Before(deadline) {
+	testwait.WaitForTimeout(t, fmt.Sprintf("server registration of %d connection(s)", n), wantWithin, func() bool {
 		ws.connsMu.Lock()
-		got := len(ws.conns)
-		ws.connsMu.Unlock()
-		if got >= n {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("server registered no connection within %s", wantWithin)
+		defer ws.connsMu.Unlock()
+		return len(ws.conns) >= n
+	})
 }

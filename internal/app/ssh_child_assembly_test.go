@@ -179,26 +179,25 @@ func (w *harnessWindow) Close() error {
 // delivery wrote, waiting for it to be written.
 func (w *harnessWindow) capability(t *testing.T) (lifecycle.Capability, bool) {
 	t.Helper()
-	deadline := time.Now().Add(60 * time.Second)
-	for time.Now().Before(deadline) {
+	var cap lifecycle.Capability
+	testwait.WaitForTimeout(t, "the child's capability frame", 60*time.Second, func() bool {
 		w.mu.Lock()
 		m := childCapRe.FindStringSubmatch(string(w.written))
 		w.mu.Unlock()
-		if m != nil {
-			raw, err := hex.DecodeString(m[1])
-			if err != nil {
-				t.Fatalf("frame 2 capability %q does not decode: %v", m[1], err)
-			}
-			var cap lifecycle.Capability
-			if len(raw) != len(cap) {
-				t.Fatalf("frame 2 capability is %d bytes, want %d", len(raw), len(cap))
-			}
-			copy(cap[:], raw)
-			return cap, true
+		if m == nil {
+			return false
 		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	return lifecycle.Capability{}, false
+		raw, err := hex.DecodeString(m[1])
+		if err != nil {
+			t.Fatalf("frame 2 capability %q does not decode: %v", m[1], err)
+		}
+		if len(raw) != len(cap) {
+			t.Fatalf("frame 2 capability is %d bytes, want %d", len(raw), len(cap))
+		}
+		copy(cap[:], raw)
+		return true
+	})
+	return cap, true
 }
 
 // harnessTerminals is the typedSessions seam: one window, for the one session
@@ -311,22 +310,6 @@ func installSSHWrapper(t *testing.T, fx *liveSshd) string {
 // shellQuoteForSh single-quotes a path for the POSIX wrapper script.
 func shellQuoteForSh(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
-}
-
-// waitForResult polls cond until it is true or the timeout elapses,
-// returning whether the condition was met (unlike waitFor, which fails the
-// test). Used where the failure path must inspect the buffer that caused the
-// timeout.
-func waitForResult(t *testing.T, what string, timeout time.Duration, cond func() bool) bool {
-	t.Helper()
-	deadline := time.Now().Add(timeout)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return true
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
-	return false
 }
 
 // sshChildHarness wires the PRODUCTION grant composition (the same
@@ -1009,19 +992,22 @@ func TestLiveSshd_SSHChildAssembly_ForwardingRefusedParentStillActivates(t *test
 	// (nocx-beib), so the report lands there — which is also what a user
 	// would see, and the refusal-leak contract for a CONVENTIONAL session
 	// is asserted separately by its own proof.
-	refused := waitForResult(t, "ssh reporting the refused reverse forward", 30*time.Second, func() bool {
+	testwait.WaitForTimeout(t, "ssh reporting the refused reverse forward", 30*time.Second, func() bool {
 		return strings.Contains(proc.out.String(), "remote port forwarding failed")
 	})
-	if !refused {
-		t.Fatalf("ssh never reported the refused -R; terminal:\n%s", proc.out.String())
-	}
-	// The stillborn child never establishes: give the far side time to have
-	// tried the in-band connect to the refused port and failed open.
-	time.Sleep(2 * time.Second)
+	// The refusal is the terminal outcome for the reverse-forward attempt.
+	// The child remains Pending in the kernel read model; no duration is
+	// needed to establish that state.
 	if st := h.domainState(h.child); st != lifecycle.DomainPending {
 		t.Fatalf("stillborn child = %d, want Pending (never established)", st)
 	}
 
+	// The refused forward can be reported before the remote loader finishes
+	// delivering frame 2. Wait for that capability frame before closing the
+	// far shell; the frame is the observable bootstrap completion.
+	if _, ok := h.win.capability(h.t); !ok {
+		h.t.Fatal("no capability was ever delivered to the far side; the late-hello proof needs one")
+	}
 	// The user gives up on the nested session; the far shell exits and the
 	// composed line returns.
 	proc.typeExit()

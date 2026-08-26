@@ -251,7 +251,11 @@ func TestFilesChanged_ReachesNewConnectionAfterReattach(t *testing.T) {
 	// its side of the socket when it observes the drop, so the emit's
 	// write fails and the path accumulates dirty instead of being lost.
 	_ = e.conn.Close()
-	time.Sleep(200 * time.Millisecond)
+	testwait.WaitForTimeout(t, "server to observe the dropped files connection", wantWithin, func() bool {
+		e.ws.connsMu.Lock()
+		defer e.ws.connsMu.Unlock()
+		return len(e.ws.conns) == 0
+	})
 	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
@@ -797,9 +801,13 @@ func TestFilesClose_DoesNotWaitOnABlockedNotificationWrite(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "x.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	// Let the poll loop reach the blocked write (several intervals at
-	// 20 ms), so the close below races a genuinely parked loop.
-	time.Sleep(100 * time.Millisecond)
+	// Let the poll loop reach the blocked write; wait for its explicit entry
+	// signal rather than assuming several poll intervals have elapsed.
+	select {
+	case <-wedge.started:
+	case <-time.After(wantWithin):
+		t.Fatal("watcher never reached the blocked notification write")
+	}
 
 	req, err := json.Marshal(map[string]any{
 		"jsonrpc": "2.0", "id": 4, "method": "files.close",

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // TestClose_EndsAnInteractiveShell is the closing end of a session's lifetime,
@@ -72,22 +73,14 @@ func TestClose_EndsAnInteractiveShell(t *testing.T) {
 			// line carries the marker too, so the answer is its second
 			// occurrence.
 			const marker = "NOCX_PTY_ALIVE"
-			deadline := time.Now().Add(30 * time.Second)
-			alive := false
-			for time.Now().Before(deadline) && !alive {
-				if _, werr := lp.Write([]byte("echo " + marker + "\n")); werr != nil {
-					t.Fatalf("write to pty: %v", werr)
-				}
-				for i := 0; i < 8 && !alive; i++ {
-					time.Sleep(125 * time.Millisecond)
-					mu.Lock()
-					alive = strings.Count(seen.String(), marker) >= 2
-					mu.Unlock()
-				}
+			if _, werr := lp.Write([]byte("echo " + marker + "\n")); werr != nil {
+				t.Fatalf("write to pty: %v", werr)
 			}
-			if !alive {
-				t.Fatal("the shell never reached a prompt")
-			}
+			testwait.WaitFor(t, "the shell to reach a prompt", func() bool {
+				mu.Lock()
+				defer mu.Unlock()
+				return strings.Count(seen.String(), marker) >= 2
+			})
 
 			if cerr := lp.Close(); cerr != nil && !strings.Contains(cerr.Error(), "file already closed") {
 				t.Fatalf("Close: %v", cerr)

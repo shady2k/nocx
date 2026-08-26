@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net"
 	"net/url"
 	"path/filepath"
@@ -777,14 +778,9 @@ func TestWSServer_ExitClearsRegistry(t *testing.T) {
 
 	// Wait for the session to exit. 30 s is a generous failsafe; the test
 	// succeeds as soon as the registry is empty, not when the clock runs out.
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if len(sess.List()) == 0 {
-			return
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatalf("session still in registry after exit: %d sessions", len(sess.List()))
+	testwait.WaitForTimeout(t, "session exit to clear the registry", 30*time.Second, func() bool {
+		return len(sess.List()) == 0
+	})
 }
 
 // TestWSServer_CrossConnectionIsolation proves connection A cannot touch
@@ -1034,8 +1030,11 @@ func TestWSServer_DisconnectSurvivesSession(t *testing.T) {
 	}
 
 	_ = conn.Close()
-
-	time.Sleep(200 * time.Millisecond)
+	testwait.WaitForTimeout(t, "server to observe the disconnect", wantWithin, func() bool {
+		ws.connsMu.Lock()
+		defer ws.connsMu.Unlock()
+		return len(ws.conns) == 0
+	})
 
 	if len(sess.List()) != 1 {
 		t.Fatalf("expected 1 session after disconnect (survives per AD-9), got %d", len(sess.List()))
@@ -1097,9 +1096,14 @@ loopA:
 		}
 	}
 
-	// Disconnect connA — session survives.
+	// Disconnect connA — session survives; wait for its socket teardown before
+	// writing detached output so the old pump cannot consume the replay bytes.
 	_ = connA.Close()
-	time.Sleep(200 * time.Millisecond)
+	testwait.WaitForTimeout(t, "server to observe connA's disconnect", wantWithin, func() bool {
+		ws.connsMu.Lock()
+		defer ws.connsMu.Unlock()
+		return len(ws.conns) == 0
+	})
 
 	// Send more output while detached (connA is gone, output still buffered).
 	connMid := connectWS(t, ws)
@@ -1112,8 +1116,11 @@ loopA:
 	}
 	_, _ = sessObj.Write([]byte("echo detached\n"))
 	_ = connMid.Close()
-
-	time.Sleep(500 * time.Millisecond)
+	testwait.WaitForTimeout(t, "server to observe connMid's disconnect", wantWithin, func() bool {
+		ws.connsMu.Lock()
+		defer ws.connsMu.Unlock()
+		return len(ws.conns) == 0
+	})
 
 	// Reattach on connB at the offset we recorded.
 	connB := connectWS(t, ws)
@@ -1207,7 +1214,6 @@ func TestWSServer_AttachWithStaleOffsetReturnsReset(t *testing.T) {
 		"params":  map[string]any{"sessionId": sid, "offset": total},
 	})
 	_ = conn.WriteMessage(websocket.TextMessage, ackReq)
-	time.Sleep(100 * time.Millisecond)
 
 	_ = conn.Close()
 
@@ -1278,8 +1284,8 @@ func TestWSServer_AckTrimsRing(t *testing.T) {
 	if err := conn.WriteMessage(websocket.TextMessage, ackAhead); err != nil {
 		t.Fatalf("write ahead ack: %v", err)
 	}
-
-	time.Sleep(100 * time.Millisecond)
+	// The next request on this socket is ordered after the bogus ack, so no
+	// duration is needed to prove the connection remains usable.
 
 	// Connection must still be usable.
 	resp2 := jsonrpcCallWithID(t, conn, "open", map[string]uint16{
@@ -1337,7 +1343,6 @@ func TestWSServer_TwoSessionsIndependentRings(t *testing.T) {
 	if err := conn.WriteMessage(websocket.TextMessage, ackA); err != nil {
 		t.Fatalf("write ack A: %v", err)
 	}
-	time.Sleep(50 * time.Millisecond)
 
 	// Bogus ack for B must not affect A.
 	ackBogus, _ := json.Marshal(map[string]any{
@@ -1346,8 +1351,6 @@ func TestWSServer_TwoSessionsIndependentRings(t *testing.T) {
 		"params":  map[string]any{"sessionId": rb.Result.SessionID, "offset": uint64(999999)},
 	})
 	_ = conn.WriteMessage(websocket.TextMessage, ackBogus)
-
-	time.Sleep(100 * time.Millisecond)
 
 	// Both connections still usable.
 	resp3 := jsonrpcCallWithID(t, conn, "close", map[string]string{
@@ -1801,17 +1804,20 @@ func TestWSServer_RingToConnExitsOnDisconnect(t *testing.T) {
 	sid := r.Result.SessionID
 
 	// Disconnect connA. The old ringToConn goroutine must exit, not stay
-	// parked in waitForData. We wait briefly then write to the session
-	// directly via the registry.
+	// parked in waitForData. Wait for the server's teardown observable before
+	// writing to the session directly via the registry.
 	_ = connA.Close()
-	time.Sleep(200 * time.Millisecond)
+	testwait.WaitForTimeout(t, "server to observe connA's disconnect", wantWithin, func() bool {
+		ws.connsMu.Lock()
+		defer ws.connsMu.Unlock()
+		return len(ws.conns) == 0
+	})
 
 	sess, err := reg.Get(session.ID(sid))
 	if err != nil {
 		t.Fatalf("get session: %v", err)
 	}
 	_, _ = sess.Write([]byte("echo after-disconnect\n"))
-	time.Sleep(500 * time.Millisecond)
 
 	// Reattach and read output. If the old ringToConn was still running
 	// and consuming ring data, we'd miss bytes here.
@@ -2492,22 +2498,17 @@ func (h *replayHarness) openProfile(t *testing.T, extra map[string]any) {
 // effect rather than assuming it.
 func (h *replayHarness) waitForTunnels(t *testing.T, n int) []*tunnel.Tunnel {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for {
+	var rows []*tunnel.Tunnel
+	testwait.WaitForTimeout(t, fmt.Sprintf("ledger to hold %d forward(s)", n), 10*time.Second, func() bool {
 		h.ws.tunnelMu.Lock()
-		rows := make([]*tunnel.Tunnel, 0, len(h.ws.tunnels))
+		defer h.ws.tunnelMu.Unlock()
+		rows = make([]*tunnel.Tunnel, 0, len(h.ws.tunnels))
 		for _, tt := range h.ws.tunnels {
 			rows = append(rows, tt)
 		}
-		h.ws.tunnelMu.Unlock()
-		if len(rows) == n {
-			return rows
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("ledger holds %d forward(s) after 10s, want %d", len(rows), n)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return len(rows) == n
+	})
+	return rows
 }
 
 func bindAddr(b tunnel.Bind) string {

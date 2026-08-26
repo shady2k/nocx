@@ -27,6 +27,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vault/file"
 )
@@ -475,23 +476,29 @@ func TestAgentAsk_ConnectionLostMidStreamTerminalizes(t *testing.T) {
 	// The run terminalizes failed with the renderable reason. Poll the
 	// ledger — the runState notification goes to a dead socket and is
 	// dropped; the record is what a reconnect reads.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	var terminalState *content.RunState
+	var entryErr error
+	testwait.WaitForTimeout(t, "the run to terminalize", 5*time.Second, func() bool {
 		q, err := h.db.Ledger().Entry(context.Background(), res.EntryID)
-		if err != nil || q == nil {
-			t.Fatalf("question entry: %v (err %v)", q, err)
+		if err != nil {
+			entryErr = err
+			return true
+		}
+		if q == nil {
+			return false
 		}
 		st := q.Executions[0].State
-		if st != nil && *st != content.RunPrepared && *st != content.RunStreaming {
-			if *st != content.RunFailed {
-				t.Fatalf("run state = %v, want failed", *st)
-			}
-			break
+		if st == nil || *st == content.RunPrepared || *st == content.RunStreaming {
+			return false
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("run never terminalized; state = %v", st)
-		}
-		time.Sleep(20 * time.Millisecond)
+		terminalState = st
+		return true
+	})
+	if entryErr != nil {
+		t.Fatalf("question entry: %v", entryErr)
+	}
+	if *terminalState != content.RunFailed {
+		t.Fatalf("run state = %v, want failed", *terminalState)
 	}
 	// The failure sentence is recorded on the run's payload — the ledger is
 	// the record, and the reconnect reads the reason there.

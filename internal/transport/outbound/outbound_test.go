@@ -4,11 +4,14 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // fakeSocket is the Socket seam for tests. When block is true, WriteMessage
@@ -71,16 +74,10 @@ func (f *fakeSocket) got() []Frame {
 // waitWrites waits until the fake has recorded n writes.
 func waitWrites(t *testing.T, f *fakeSocket, n int) []Frame {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		if w := f.got(); len(w) >= n {
-			return w
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %d writes; got %d", n, len(f.got()))
-		}
-		time.Sleep(time.Millisecond)
-	}
+	testwait.WaitForTimeout(t, fmt.Sprintf("%d writes", n), 5*time.Second, func() bool {
+		return len(f.got()) >= n
+	})
+	return f.got()
 }
 
 // fillQueue builds a Conn on a blocking fake socket, then fills its queue
@@ -148,8 +145,7 @@ func TestQueueFullMarksStalledAndDropsFrame(t *testing.T) {
 	// Unblock the pump: it must deliver the queued frames AND the stall
 	// notice through the reserved slot.
 	close(f.release)
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	testwait.WaitForTimeout(t, "stall notice and queued frames", 5*time.Second, func() bool {
 		w := f.got()
 		hasNotice := false
 		for _, fr := range w {
@@ -157,14 +153,8 @@ func TestQueueFullMarksStalledAndDropsFrame(t *testing.T) {
 				hasNotice = true
 			}
 		}
-		if hasNotice && len(w) >= 6 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("stall notice never written; got %d writes", len(w))
-		}
-		time.Sleep(time.Millisecond)
-	}
+		return hasNotice && len(w) >= 6
+	})
 }
 
 func TestOverflowBeyondReservedSlotCloses(t *testing.T) {

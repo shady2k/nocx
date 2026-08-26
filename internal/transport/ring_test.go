@@ -22,6 +22,8 @@ func TestOutputRing_CancellableWaitForData(t *testing.T) {
 		close(done)
 	}()
 
+	// No observable exposes that the waiter has parked; this pacing gives the
+	// goroutine a chance to enter waitForData before cancellation.
 	time.Sleep(20 * time.Millisecond)
 	cancel()
 
@@ -81,12 +83,16 @@ func TestOutputRing_WakeBroadcasts(t *testing.T) {
 		close(done)
 	}()
 
+	// No observable exposes that the waiter has parked; this pacing gives the
+	// goroutine a chance to enter waitForData before wake.
 	time.Sleep(20 * time.Millisecond)
 
 	// Calling wake from outside should unblock the waiter so it can
 	// re-check its conditions (including ctx cancellation).
 	ring.wake()
 
+	// No observable exposes whether wake was consumed before cancellation; this
+	// pacing gives the waiter a chance to re-check after wake.
 	time.Sleep(20 * time.Millisecond)
 	cancel()
 

@@ -148,29 +148,21 @@ func TestBashInterruptAnnouncesNoPhantomCommand(t *testing.T) {
 // the property a duration-based wait could never have.
 func interruptUntilPrompt(t *testing.T, s *channelShell, promptsBefore int) {
 	t.Helper()
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		if _, err := s.ptmx.Write([]byte("\x03")); err != nil {
-			t.Fatalf("write interrupt: %v", err)
-		}
-		// Long enough that a prompt cycle on a starved machine is not
-		// mistaken for an absorbed interrupt; short enough that the bound
-		// above allows several tries. Neither end is a correctness
-		// parameter — a retry costs nothing and the exit is observable.
-		retry := time.Now().Add(3 * time.Second)
-		for time.Now().Before(retry) {
-			if strings.Count(s.output(), "\x1b]133;A") > promptsBefore {
-				return
-			}
-			if time.Now().After(deadline) {
-				t.Fatalf("no prompt after repeated interrupts (OSC 133 A still %d); accepted=%v output=%q",
-					strings.Count(s.output(), "\x1b]133;A"), s.kernel.events(), s.output())
-			}
-			time.Sleep(25 * time.Millisecond)
-		}
-		// Logged rather than silent: when this line appears in a run, the
-		// shell absorbed an interrupt, and that is worth seeing rather than
-		// smoothing away.
-		t.Logf("the shell took no prompt from the interrupt; sending it again")
+	if _, err := s.ptmx.Write([]byte("\x03")); err != nil {
+		t.Fatalf("write interrupt: %v", err)
 	}
+	nextRetry := time.Now().Add(3 * time.Second)
+	testwait.WaitForTimeout(t, "prompt after repeated interrupts", 15*time.Second, func() bool {
+		if strings.Count(s.output(), "\x1b]133;A") > promptsBefore {
+			return true
+		}
+		if time.Now().After(nextRetry) {
+			if _, err := s.ptmx.Write([]byte("\x03")); err != nil {
+				t.Fatalf("write retry interrupt: %v", err)
+			}
+			t.Logf("the shell took no prompt from the interrupt; sending it again")
+			nextRetry = time.Now().Add(3 * time.Second)
+		}
+		return false
+	})
 }

@@ -58,6 +58,17 @@ type UnsealRequest struct {
 	UseOSKey     bool
 }
 
+type autoSealTimer interface {
+	Stop() bool
+	Chan() <-chan time.Time
+}
+
+type realAutoSealTimer struct{ timer *time.Timer }
+
+func (t realAutoSealTimer) Stop() bool               { return t.timer.Stop() }
+func (t realAutoSealTimer) Chan() <-chan time.Time   { return t.timer.C }
+func newAutoSealTimer(d time.Duration) autoSealTimer { return realAutoSealTimer{time.NewTimer(d)} }
+
 // Vault owns the seal lifecycle, generation counter, provider routing and the
 // credential.SecretStore interface. It serialises mutations with a single
 // mutex (spec §4.5) but releases it before calling any provider method, then
@@ -72,11 +83,17 @@ type Vault struct {
 	logger       *slog.Logger
 	initializing bool // guards concurrent Setup (defect 7)
 
-	autoSealWake       chan struct{} // buffered(1), wakes the auto-seal goroutine
-	autoSealQuit       chan struct{} // closed by Close to stop the goroutine
-	closeOnce          sync.Once
-	autoSealEpoch      uint64                  // incremented on each Activity/SetAutoSeal
-	autoSealDurationFn func(int) time.Duration // minutes→duration; overridden by tests
+	autoSealWake         chan struct{} // buffered(1), wakes the auto-seal goroutine
+	autoSealQuit         chan struct{} // closed by Close to stop the goroutine
+	autoSealDone         chan struct{} // closed when the goroutine exits
+	closeOnce            sync.Once
+	autoSealEpoch        uint64                  // incremented on each Activity/SetAutoSeal
+	autoSealDurationFn   func(int) time.Duration // minutes→duration; overridden by tests
+	autoSealTimerFactory func(time.Duration) autoSealTimer
+	// autoSealTimerArmed and autoSealArmEpoch expose timer lifecycle state to
+	// package tests so they can synchronize without sleeping.
+	autoSealTimerArmed bool
+	autoSealArmEpoch   uint64
 
 	// unlockReq carries a sealed vault's raise-unlock prompt to a renderer.
 	// nil until the composition root attaches it (unlock.go); a vault without
@@ -112,13 +129,15 @@ func New(docs storage.DocumentStore, reg *Registry, logger *slog.Logger) (*Vault
 		return nil, err
 	}
 	v := &Vault{
-		store:              docs,
-		reg:                reg,
-		doc:                doc,
-		logger:             logger,
-		autoSealWake:       make(chan struct{}, 1),
-		autoSealQuit:       make(chan struct{}),
-		autoSealDurationFn: defaultAutoSealDuration,
+		store:                docs,
+		reg:                  reg,
+		doc:                  doc,
+		logger:               logger,
+		autoSealWake:         make(chan struct{}, 1),
+		autoSealQuit:         make(chan struct{}),
+		autoSealDone:         make(chan struct{}),
+		autoSealDurationFn:   defaultAutoSealDuration,
+		autoSealTimerFactory: newAutoSealTimer,
 	}
 	v.promptCtx, v.promptCancel = context.WithCancel(context.Background())
 	if found {
@@ -709,6 +728,7 @@ func (v *Vault) wakeAutoSeal() {
 }
 
 // Close stops the auto-seal goroutine and seals the vault.
+// It waits for that goroutine to exit before returning.
 //
 // It is safe to call more than once and safe to call on a vault that was never
 // unsealed. Owning the goroutine's lifetime is the point: without it every
@@ -730,6 +750,7 @@ func (v *Vault) Close() {
 		}
 	})
 	v.Seal()
+	<-v.autoSealDone
 }
 
 // autoSealLoop is the background goroutine that manages the auto-seal timer.
@@ -740,13 +761,17 @@ func (v *Vault) Close() {
 // are unchanged before calling Seal — ensuring an activity or configuration
 // change that arrives near-simultaneously with an expiry wins.
 func (v *Vault) autoSealLoop() {
-	var t *time.Timer
+	var t autoSealTimer
+	defer close(v.autoSealDone)
 	var c <-chan time.Time
 	var armEpoch uint64
 
 	for {
 		select {
 		case <-v.autoSealQuit:
+			v.mu.Lock()
+			v.autoSealTimerArmed = false
+			v.mu.Unlock()
 			if t != nil {
 				t.Stop()
 			}
@@ -761,19 +786,26 @@ func (v *Vault) autoSealLoop() {
 			v.mu.Lock()
 			mins := v.doc.AutoSealMinutes
 			durFn := v.autoSealDurationFn
+			timerFactory := v.autoSealTimerFactory
 			isSealed := v.rootKey == nil
 			armEpoch = v.autoSealEpoch
+			v.autoSealTimerArmed = false
 			v.mu.Unlock()
 
 			if !isSealed && mins > 0 {
-				t = time.NewTimer(durFn(mins))
-				c = t.C
+				t = timerFactory(durFn(mins))
+				c = t.Chan()
+				v.mu.Lock()
+				v.autoSealTimerArmed = true
+				v.autoSealArmEpoch = armEpoch
+				v.mu.Unlock()
 			}
 
 		case <-c:
 			c = nil
 
 			v.mu.Lock()
+			v.autoSealTimerArmed = false
 			isSealed := v.rootKey == nil
 			epoch := v.autoSealEpoch
 			v.mu.Unlock()

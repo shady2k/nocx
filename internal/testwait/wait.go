@@ -28,7 +28,29 @@ func WaitForTimeout(t testing.TB, what string, timeout time.Duration, cond func(
 	waitFor(t, what, timeout, cond)
 }
 
+// WaitForDetail is WaitFor with state attached to the failure. detail is
+// called only when the wait times out, so the failure can say what the system
+// was actually doing and not merely what it was waiting for — the accepted
+// events, the output so far, the stages that did arrive. A timeout that names
+// only its own description cannot be told apart from a starved machine, which
+// is the judgement this suite has to make on every red container run.
+func WaitForDetail(t testing.TB, what string, detail func() string, cond func() bool) {
+	t.Helper()
+	waitForDetail(t, what, DefaultTimeout, detail, cond)
+}
+
+// WaitForTimeoutDetail is WaitForDetail with an explicit ceiling.
+func WaitForTimeoutDetail(t testing.TB, what string, timeout time.Duration, detail func() string, cond func() bool) {
+	t.Helper()
+	waitForDetail(t, what, timeout, detail, cond)
+}
+
 func waitFor(t testing.TB, what string, timeout time.Duration, cond func() bool) {
+	t.Helper()
+	waitForDetail(t, what, timeout, nil, cond)
+}
+
+func waitForDetail(t testing.TB, what string, timeout time.Duration, detail func() string, cond func() bool) {
 	// Without this the timeout is reported against this file rather than the
 	// caller's line, which would defeat the whole point of naming `what`.
 	t.Helper()
@@ -38,6 +60,9 @@ func waitFor(t testing.TB, what string, timeout time.Duration, cond func() bool)
 			return
 		}
 		if timeout <= 0 || !time.Now().Before(deadline) {
+			if detail != nil {
+				t.Fatalf("timed out waiting for %s; %s", what, detail())
+			}
 			t.Fatalf("timed out waiting for %s", what)
 			return
 		}

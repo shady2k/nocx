@@ -5,6 +5,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // The waiting admission is the gate behind the domain-conflict fix: a
@@ -48,19 +50,11 @@ func waitersOf(t *testing.T, a Admission, want int, what string) {
 	if !ok {
 		t.Fatalf("admission is %T, want *waitingSemaphore", a)
 	}
-	deadline := time.Now().Add(2 * time.Second)
-	for {
+	testwait.WaitForTimeout(t, what, 2*time.Second, func() bool {
 		ws.mu.Lock()
-		n := ws.waiters
-		ws.mu.Unlock()
-		if n == want {
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("%s: waiter count = %d, want %d", what, n, want)
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+		defer ws.mu.Unlock()
+		return ws.waiters == want
+	})
 }
 
 // TestWaitingAdmission_AwaitsConflictInsteadOfRefusing is the heart of the

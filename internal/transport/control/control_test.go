@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
@@ -20,15 +21,14 @@ import (
 // proving the admission has capacity again. Used to observe a permit release.
 func waitAcquirable(t *testing.T, a control.Admission, what string) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		if p, rej := a.TryAcquire(context.Background()); rej == nil {
-			p.Release()
-			return
+	testwait.WaitForTimeout(t, what, 2*time.Second, func() bool {
+		p, rej := a.TryAcquire(context.Background())
+		if rej != nil {
+			return false
 		}
-		time.Sleep(time.Millisecond)
-	}
-	t.Fatalf("%s never became acquirable", what)
+		p.Release()
+		return true
+	})
 }
 
 // mustNotAcquire asserts the admission currently has no capacity — the

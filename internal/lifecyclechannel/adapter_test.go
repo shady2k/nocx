@@ -266,7 +266,11 @@ func TestShellExitClosesDomain(t *testing.T) {
 	})
 	_ = child.Close() // the shell's end closes after the event
 
-	time.Sleep(50 * time.Millisecond) // let the pump see EOF
+	testwait.WaitFor(t, "pump to observe EOF", func() bool {
+		a.mu.Lock()
+		defer a.mu.Unlock()
+		return a.closed
+	})
 	d, ok := k.Domain(a.domain)
 	if !ok || d.State != lifecycle.DomainClosed {
 		t.Fatalf("want the clean close preserved (Closed), got %+v", d)

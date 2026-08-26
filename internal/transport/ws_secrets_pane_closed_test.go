@@ -24,6 +24,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // recordOnPane records one command from one pane over the socket and decodes
@@ -209,18 +210,19 @@ func TestTransportDisconnect_DestroysEverythingOnTheConnection(t *testing.T) {
 	// and a live probe dismisses the capture (a loud failure below, never
 	// a hang on a saving capture).
 	_ = conn.Close()
-	deadline := time.Now().Add(wantWithin)
-	for {
+	var dismissErr error
+	testwait.WaitForTimeout(t, "disconnect destroy to become observable", wantWithin, func() bool {
 		ws.connsMu.Lock()
 		gone := len(ws.conns) == 0
 		ws.connsMu.Unlock()
-		if gone && errors.Is(caps.Dismiss(credential.CaptureID(captureA)), credential.ErrCaptureUnknown) {
-			break
+		if !gone {
+			return false
 		}
-		if time.Now().After(deadline) {
-			t.Fatalf("disconnect destroy not observable within %s", wantWithin)
-		}
-		time.Sleep(2 * time.Millisecond)
+		dismissErr = caps.Dismiss(credential.CaptureID(captureA))
+		return true
+	})
+	if !errors.Is(dismissErr, credential.ErrCaptureUnknown) {
+		t.Fatalf("disconnect destroy error = %v, want capture unknown", dismissErr)
 	}
 
 	for _, c := range []struct {

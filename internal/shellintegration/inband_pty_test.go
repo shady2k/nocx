@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
+	"github.com/shady2k/nocx/internal/testwait"
 	"golang.org/x/sys/unix"
 )
 
@@ -149,6 +150,7 @@ func (s *ptySession) pump() {
 			// The same fault-injection window channelShell.readPump opens;
 			// see ptyPumpLag for what it is for.
 			if ptyPumpLag > 0 {
+				// Test-only pacing widens the pump scheduling window.
 				time.Sleep(ptyPumpLag)
 			}
 			s.mu.Lock()
@@ -172,16 +174,9 @@ func (s *ptySession) snapshot() string {
 // timeout elapses, then fails the test.
 func (s *ptySession) waitFor(substr string, timeout time.Duration) {
 	s.t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		if strings.Contains(s.snapshot(), substr) {
-			return
-		}
-		if time.Now().After(deadline) {
-			s.t.Fatalf("timed out waiting for %q; output so far: %q", substr, s.snapshot())
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	testwait.WaitForTimeout(s.t, fmt.Sprintf("pty output %q", substr), timeout, func() bool {
+		return strings.Contains(s.snapshot(), substr)
+	})
 }
 
 // type lets the shell answer a command; fails if the answer does not come.
@@ -194,10 +189,11 @@ func (s *ptySession) typeAndWait(line, expected string, timeout time.Duration) {
 }
 
 // assertNoIntegrationMarkers fails if any OSC 133/636 marker appeared in the
-// accumulated output — an unintegrated shell must not emit them.
+// accumulated output — an unintegrated shell must not emit them. Callers
+// establish a prompt boundary first; the single PTY pump preserves byte order,
+// so a duration cannot strengthen this negative assertion.
 func (s *ptySession) assertNoIntegrationMarkers() {
 	s.t.Helper()
-	time.Sleep(400 * time.Millisecond)
 	got := s.snapshot()
 	for _, marker := range []string{"\x1b]133;", "\x1b]636;"} {
 		if strings.Contains(got, marker) {
@@ -330,33 +326,19 @@ func (s *ptySession) termios() unix.Termios {
 // the shell's mode change and misreport the wrapper's restore.
 func (s *ptySession) settleUntilReadline(want unix.Termios, timeout time.Duration) {
 	s.t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
+	testwait.WaitForTimeout(s.t, "shell prompt termios", timeout, func() bool {
 		ts := s.termios()
-		if ts.Iflag == want.Iflag && ts.Lflag == want.Lflag && ts.Cflag == want.Cflag {
-			return
-		}
-		if time.Now().After(deadline) {
-			s.t.Fatalf("shell did not return to the prompt termios: got %+v want %+v", ts, want)
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
+		return ts.Iflag == want.Iflag && ts.Lflag == want.Lflag && ts.Cflag == want.Cflag
+	})
 }
 
 // waitForPromptAgain waits until the visible native prompt has appeared at
 // least twice — the shell left the wrapper and is back at readline.
 func (s *ptySession) waitForPromptAgain(timeout time.Duration) {
 	s.t.Helper()
-	deadline := time.Now().Add(timeout)
-	for {
-		if strings.Count(s.snapshot(), inBandTestPrompt) >= 2 {
-			return
-		}
-		if time.Now().After(deadline) {
-			s.t.Fatalf("native prompt did not return; output so far: %q", s.snapshot())
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
+	testwait.WaitForTimeout(s.t, "native prompt after wrapper", timeout, func() bool {
+		return strings.Count(s.snapshot(), inBandTestPrompt) >= 2
+	})
 }
 
 // plan builds the in-band plan for the test.
@@ -431,6 +413,9 @@ func TestInBandBootstrap_RealBashCancelRestores(t *testing.T) {
 	}
 	s.waitForPromptAgain(15 * time.Second)
 	s.typeAndWait("echo CANCEL_OK\r", "CANCEL_OK", 15*time.Second)
+	testwait.WaitForTimeout(t, "native prompt after CANCEL_OK", 15*time.Second, func() bool {
+		return strings.Count(s.snapshot(), inBandTestPrompt) >= 3
+	})
 	s.assertNoIntegrationMarkers()
 	after := s.termios()
 	if before != after {

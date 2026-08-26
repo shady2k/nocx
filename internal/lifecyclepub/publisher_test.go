@@ -10,6 +10,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // noopPort swallows outbound envelopes (accept, refresh_request). The shell
@@ -598,34 +599,24 @@ func TestPublisherEstablishmentTimeoutRollsBack(t *testing.T) {
 	}
 	// The establishment bound expires: the domain is revoked, the lane
 	// falls to native, and the accept never goes out.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
+	testwait.WaitFor(t, "establishment timeout to close the domain", func() bool {
 		d, ok := pub.Domain(h.Domain)
-		if ok && d.State == lifecycle.DomainClosed {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("establishment timeout never rolled the domain back; state=%v", d.State)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return ok && d.State == lifecycle.DomainClosed
+	})
 	if got := port.kinds(); len(got) != 0 {
 		t.Fatalf("accept flushed after the rollback: %v", got)
 	}
 	// The rollback's native fact follows the Closed state in the same
 	// timer tick — wait for it, then assert it is the final word.
 	var last lifecyclepub.Fact
-	for {
+	testwait.WaitFor(t, "rollback to publish the native state", func() bool {
 		facts := r.all()
+		if len(facts) == 0 {
+			return false
+		}
 		last = facts[len(facts)-1]
-		if last.Lifecycle == lifecyclepub.LifecycleNative {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("rollback never published the native state; last fact = %+v", last)
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		return last.Lifecycle == lifecyclepub.LifecycleNative
+	})
 	if last.Domain != "" {
 		t.Fatalf("final fact = %+v, want native with no domain", last)
 	}

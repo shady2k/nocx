@@ -313,7 +313,10 @@ func TestUnauthenticatedCandidateCannotRevokeOrPreempt(t *testing.T) {
 		t.Fatalf("attacker dial: %v", err)
 	}
 	_, _ = attacker.Write([]byte("\x00\x00\x00\xffgarbage-not-a-frame"))
-	time.Sleep(100 * time.Millisecond) // give the adapter time to misbehave
+	// The adapter exposes no candidate-rejected event, and the domain was
+	// already established; retain this bounded window for the negative
+	// assertion that garbage cannot mutate it.
+	time.Sleep(100 * time.Millisecond)
 	testwait.WaitFor(t, "domain still established", func() bool {
 		d, ok := k.Domain(cfg.Domain)
 		return ok && d.State == lifecycle.DomainEstablished

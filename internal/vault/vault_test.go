@@ -16,6 +16,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/testwait"
 )
 
 // ---------------------------------------------------------------------------
@@ -23,13 +24,14 @@ import (
 // ---------------------------------------------------------------------------
 
 type testProvider struct {
-	id      ProviderID
-	mu      sync.Mutex
-	data    map[credential.SecretID]credential.Secret
-	fail    error
-	delay   time.Duration
-	putHook func() // fires on each Put
-	getHook func() // fires on each Get
+	id           ProviderID
+	mu           sync.Mutex
+	data         map[credential.SecretID]credential.Secret
+	fail         error
+	delay        time.Duration
+	putStartHook func() // fires when Put begins, before injected latency
+	putHook      func() // fires on each Put before storage
+	getHook      func() // fires on each Get
 }
 
 func newTestProvider(id ProviderID) *testProvider {
@@ -61,7 +63,12 @@ func (p *testProvider) Put(ctx context.Context, id credential.SecretID, s creden
 		// that is the pre-commit cancellation path the interval documents.
 		return err
 	}
+	if p.putStartHook != nil {
+		p.putStartHook()
+	}
 	if p.delay > 0 {
+		// Simulate provider latency; this is controlled fake latency, not a
+		// test synchronization mechanism.
 		time.Sleep(p.delay)
 	}
 	if p.putHook != nil {
@@ -80,6 +87,7 @@ func (p *testProvider) Put(ctx context.Context, id credential.SecretID, s creden
 
 func (p *testProvider) Delete(_ context.Context, id credential.SecretID) error {
 	if p.delay > 0 {
+		// Simulate provider latency; this is pacing for the controlled fake.
 		time.Sleep(p.delay)
 	}
 	p.mu.Lock()
@@ -92,6 +100,54 @@ func (p *testProvider) Delete(_ context.Context, id credential.SecretID) error {
 }
 
 var _ WritableProvider = (*testProvider)(nil)
+
+type fakeAutoSealClock struct {
+	mu     sync.Mutex
+	timers []*fakeAutoSealTimer
+}
+
+func (c *fakeAutoSealClock) newTimer(time.Duration) autoSealTimer {
+	timer := &fakeAutoSealTimer{ch: make(chan time.Time, 1)}
+	c.mu.Lock()
+	c.timers = append(c.timers, timer)
+	c.mu.Unlock()
+	return timer
+}
+
+func (c *fakeAutoSealClock) lastTimer() *fakeAutoSealTimer {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.timers[len(c.timers)-1]
+}
+
+type fakeAutoSealTimer struct {
+	ch      chan time.Time
+	stopped atomic.Bool
+}
+
+func (t *fakeAutoSealTimer) Stop() bool {
+	return !t.stopped.Swap(true)
+}
+
+func (t *fakeAutoSealTimer) Chan() <-chan time.Time { return t.ch }
+
+func (t *fakeAutoSealTimer) Fire() {
+	if !t.stopped.Load() {
+		t.ch <- time.Time{}
+	}
+}
+
+func (t *fakeAutoSealTimer) WasStopped() bool {
+	return t.stopped.Load()
+}
+
+func useFakeAutoSealTimer(v *Vault) *fakeAutoSealClock {
+	clock := &fakeAutoSealClock{}
+	v.mu.Lock()
+	v.autoSealTimerFactory = clock.newTimer
+	v.mu.Unlock()
+	return clock
+}
 
 type panickingProvider struct{ *testProvider }
 
@@ -448,6 +504,8 @@ func TestSeal_RejectsSlowPut(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	slowProv := newTestProvider(ProviderFile)
 	slowProv.delay = 100 * time.Millisecond
+	var putStarted atomic.Bool
+	slowProv.putStartHook = func() { putStarted.Store(true) }
 	v, _, _ := testVault(t, sys, slowProv)
 	mustSetup(t, v, "")
 
@@ -463,7 +521,7 @@ func TestSeal_RejectsSlowPut(t *testing.T) {
 		crCh <- err
 	}()
 
-	time.Sleep(10 * time.Millisecond)
+	testwait.WaitFor(t, "the slow provider Put to start", putStarted.Load)
 	v.Seal()
 
 	err := <-crCh
@@ -943,9 +1001,7 @@ func TestGet_RejectsResultAfterSeal(t *testing.T) {
 		_, goErr = v.Get(ctx, id)
 		got <- goErr
 	}()
-	for !getStarted.Load() {
-		time.Sleep(time.Millisecond)
-	}
+	testwait.WaitFor(t, "the Get provider call to start", getStarted.Load)
 
 	v.Seal()
 	close(getGate)
@@ -1326,9 +1382,7 @@ func TestExists_RejectsResultAfterSeal(t *testing.T) {
 		got <- goErr
 	}()
 
-	for !getStarted.Load() {
-		time.Sleep(time.Millisecond)
-	}
+	testwait.WaitFor(t, "the Exists provider call to start", getStarted.Load)
 
 	v.Seal()
 	close(getGate)
@@ -1998,137 +2052,168 @@ func TestActivity_EpochIncrement(t *testing.T) {
 func TestAutoSeal_TimerFiresAndSeals(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
+	clock := useFakeAutoSealTimer(v)
 	mustSetup(t, v, "pass")
 
-	// Override the duration function to use milliseconds for testing.
 	v.mu.Lock()
-	v.autoSealDurationFn = func(int) time.Duration { return 10 * time.Millisecond }
-	v.doc.AutoSealMinutes = 1 // any non-zero value; the function returns 10ms regardless
-	v.autoSealEpoch++         // ensure epoch is tracked
+	v.doc.AutoSealMinutes = 1
+	v.autoSealEpoch++
+	armEpoch := v.autoSealEpoch
 	v.mu.Unlock()
 
 	// Wake the goroutine to arm the timer.
 	v.wakeAutoSeal()
+	testwait.WaitFor(t, "auto-seal timer to arm", func() bool {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		return v.autoSealTimerArmed && v.autoSealArmEpoch == armEpoch
+	})
 
-	// Wait for the timer to fire and seal.
-	time.Sleep(50 * time.Millisecond)
-
-	if v.State() != StateSealed {
-		t.Fatal("auto-seal timer did not seal the vault")
-	}
+	clock.lastTimer().Fire()
+	testwait.WaitFor(t, "auto-seal timer to seal the vault", func() bool {
+		return v.State() == StateSealed
+	})
 }
 
 func TestAutoSeal_ActivityPreventsSeal(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
+	clock := useFakeAutoSealTimer(v)
 	mustSetup(t, v, "pass")
 
 	v.mu.Lock()
-	v.autoSealDurationFn = func(int) time.Duration { return 50 * time.Millisecond }
 	v.doc.AutoSealMinutes = 1
 	v.autoSealEpoch++
+	initialArmEpoch := v.autoSealEpoch
 	v.mu.Unlock()
 
-	// Wake to arm the 50ms timer.
+	// Wake to arm the timer, then wait on the arm observable.
 	v.wakeAutoSeal()
-	time.Sleep(20 * time.Millisecond)
+	testwait.WaitFor(t, "initial auto-seal timer to arm", func() bool {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		return v.autoSealTimerArmed && v.autoSealArmEpoch == initialArmEpoch
+	})
+	initialTimer := clock.lastTimer()
 
-	// Activity resets the timer and increments the epoch.
+	// Activity resets the timer and increments the epoch. Waiting for the
+	// new arm epoch proves the old armed interval closed before the fresh one.
 	v.Activity()
+	v.mu.Lock()
+	resetArmEpoch := v.autoSealEpoch
+	v.mu.Unlock()
+	testwait.WaitFor(t, "reset auto-seal timer to arm", func() bool {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		return v.autoSealTimerArmed && v.autoSealArmEpoch == resetArmEpoch
+	})
 
-	// Wait less than the original timer's remaining 30ms so the
-	// original timer would have fired, but the reset should have
-	// started a fresh 50ms timer.
-	time.Sleep(20 * time.Millisecond)
-
+	if !initialTimer.WasStopped() {
+		t.Fatal("activity did not stop the previous auto-seal timer")
+	}
 	if v.State() == StateSealed {
 		t.Fatal("vault was sealed after activity reset — activity should restart the timer")
 	}
 
-	// Wait for the fresh 50ms timer to fire.
-	time.Sleep(60 * time.Millisecond)
-
-	if v.State() != StateSealed {
-		t.Fatal("vault should have sealed after the reset timer expired")
-	}
+	clock.lastTimer().Fire()
+	testwait.WaitFor(t, "reset auto-seal timer to seal the vault", func() bool {
+		return v.State() == StateSealed
+	})
 }
 
 func TestAutoSeal_SealStopsTimer(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
+	clock := useFakeAutoSealTimer(v)
 	mustSetup(t, v, "pass")
 
 	v.mu.Lock()
-	v.autoSealDurationFn = func(int) time.Duration { return 10 * time.Millisecond }
 	v.doc.AutoSealMinutes = 1
 	v.autoSealEpoch++
+	armEpoch := v.autoSealEpoch
 	v.mu.Unlock()
 	v.wakeAutoSeal()
 
-	// Manual seal before timer fires.
-	time.Sleep(5 * time.Millisecond)
+	testwait.WaitFor(t, "auto-seal timer to arm before manual seal", func() bool {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		return v.autoSealTimerArmed && v.autoSealArmEpoch == armEpoch
+	})
+	timer := clock.lastTimer()
 	v.Seal()
 
-	// Wait for the original timer to fire.
-	time.Sleep(50 * time.Millisecond)
+	testwait.WaitFor(t, "manual seal to stop the auto-seal timer", func() bool {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		return !v.autoSealTimerArmed
+	})
 
-	// Vault should remain sealed (no spurious re-seal needed; the point is
-	// that the timer did not cause a double-seal or panic).
+	if !timer.WasStopped() {
+		t.Fatal("manual seal did not stop the auto-seal timer")
+	}
 	if v.State() != StateSealed {
-		t.Fatal("vault is not sealed after manual seal + timer expiry")
+		t.Fatal("vault is not sealed after manual seal")
 	}
 }
 
 func TestAutoSeal_GenGuardAndEpochGuard(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
+	clock := useFakeAutoSealTimer(v)
 	mustSetup(t, v, "pass")
 
-	// Use a long interval so no real timer fires during the test.
 	v.mu.Lock()
-	v.autoSealDurationFn = func(int) time.Duration { return 10 * time.Minute }
 	v.doc.AutoSealMinutes = 5
+	wantArmEpoch := v.autoSealEpoch
 	v.mu.Unlock()
 
 	// Wake to arm, capturing gen + epoch.
 	v.wakeAutoSeal()
-	time.Sleep(50 * time.Millisecond)
+	testwait.WaitFor(t, "auto-seal timer to arm for guard test", func() bool {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		return v.autoSealTimerArmed && v.autoSealArmEpoch == wantArmEpoch
+	})
+	timer := clock.lastTimer()
 
 	v.mu.Lock()
 	genAtArm := v.gen
 	epochAtArm := v.autoSealEpoch
 	v.mu.Unlock()
 
-	// Seal changes gen. After this, a stale timer armed before the seal
-	// should be rejected because gen changed.
+	// Seal changes gen. A stale timer event while sealed must not unseal or
+	// otherwise alter the sealed state.
 	v.Seal()
+	timer.Fire()
+	testwait.WaitFor(t, "sealed auto-seal timer to stop", func() bool {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		return !v.autoSealTimerArmed
+	})
 
-	// Verify gen changed.
 	v.mu.Lock()
 	if v.gen <= genAtArm {
 		t.Fatal("seal did not increment gen")
 	}
 	v.mu.Unlock()
 
-	// Unseal. The goroutine is woken and re-arms with fresh gen.
+	// Unseal. The goroutine is woken and re-arms with a fresh epoch.
 	if err := v.Unseal(context.Background(), UnsealRequest{Passphrase: "pass"}); err != nil {
 		t.Fatalf("Unseal: %v", err)
 	}
 
-	// Verify epoch changed (Unseal increments it).
 	v.mu.Lock()
 	epochAfter := v.autoSealEpoch
 	v.mu.Unlock()
-
 	if epochAfter <= epochAtArm {
 		t.Fatal("epoch did not increment after unseal")
 	}
+	testwait.WaitFor(t, "fresh auto-seal timer to arm after unseal", func() bool {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		return v.autoSealTimerArmed && v.autoSealArmEpoch == epochAfter
+	})
 
-	// Now verify the guard logic by deduction: if a stale timer armed at
-	// (genAtArm, epochAtArm) fires now, neither gen nor epoch matches.
-	// The goroutine's check (!isSealed && epoch == armEpoch) would fail on
-	// epoch mismatch. This proves the guard works without relying on timer
-	// timing.
 	v.mu.Lock()
 	isSealed := v.rootKey == nil
 	genNow := v.gen
@@ -2147,19 +2232,32 @@ func TestAutoSeal_GenGuardAndEpochGuard(t *testing.T) {
 }
 
 func TestAutoSeal_OffDoesNotArm(t *testing.T) {
+	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderFile))
+	useFakeAutoSealTimer(v)
 	mustSetup(t, v, "pass")
 
-	// Set to 0 (off) and ensure the goroutine does not arm a timer.
-	if err := v.SetAutoSeal(context.Background(), 0); err != nil {
+	ctx := context.Background()
+	if err := v.SetAutoSeal(ctx, 5); err != nil {
+		t.Fatalf("SetAutoSeal(5): %v", err)
+	}
+	v.mu.Lock()
+	armEpoch := v.autoSealEpoch
+	v.mu.Unlock()
+	testwait.WaitFor(t, "enabled auto-seal timer to arm", func() bool {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		return v.autoSealTimerArmed && v.autoSealArmEpoch == armEpoch
+	})
+
+	if err := v.SetAutoSeal(ctx, 0); err != nil {
 		t.Fatalf("SetAutoSeal(0): %v", err)
 	}
-
-	// Verify the epoch was incremented but no timer is running (can't
-	// directly observe the timer, but we can check the goroutine didn't
-	// seal after a wake).
-	v.wakeAutoSeal()
-	time.Sleep(10 * time.Millisecond)
+	testwait.WaitFor(t, "disabled auto-seal timer to stop", func() bool {
+		v.mu.Lock()
+		defer v.mu.Unlock()
+		return !v.autoSealTimerArmed
+	})
 
 	if v.State() != StateUnsealed {
 		t.Fatal("vault was sealed despite auto-seal being off")

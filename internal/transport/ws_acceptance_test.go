@@ -607,15 +607,12 @@ func TestConflictingMutationsSameProtectionOneAndTwoSockets(t *testing.T) {
 		t.Fatal("resolve never started")
 	}
 
-	// A conflicting config mutation from the SAME socket WAITS: with the
-	// resolve holding the gates, it cannot run until the dial releases, and
-	// with the waiting gates it is not refused. Give the task a moment to
-	// reach the gate, then prove it has not landed.
+	// resolveStarted is the gate-held observable. The queued mutations are
+	// checked immediately and their responses are checked after release.
 	sendControl(t, connA, "profiles.create", map[string]any{
 		"id": "ssh:p:2", "name": "b", "type": "ssh",
 		"options": map[string]any{"host": "b.example.com"},
 	}, 2)
-	time.Sleep(150 * time.Millisecond)
 	if hasProfile(t, ps, "ssh:p:2") {
 		t.Fatal("same-socket conflicting mutation landed while the gate was held: it must wait")
 	}
@@ -628,7 +625,6 @@ func TestConflictingMutationsSameProtectionOneAndTwoSockets(t *testing.T) {
 		"id": "ssh:p:3", "name": "c", "type": "ssh",
 		"options": map[string]any{"host": "c.example.com"},
 	}, 3)
-	time.Sleep(150 * time.Millisecond)
 	if hasProfile(t, ps, "ssh:p:3") {
 		t.Fatal("cross-socket conflicting mutation landed while the gate was held: it must wait")
 	}

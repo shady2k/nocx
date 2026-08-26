@@ -34,8 +34,8 @@ func TestSaturatedNotifyLimiter_RefreshesAfterInterval(t *testing.T) {
 	if l.allow("session", "control") {
 		t.Fatal("inside the interval must be refused")
 	}
-	// Sleep with a wide margin over the 30 ms interval so a slow CI machine
-	// cannot flake the refresh assertion.
+	// The limiter exposes no clock-control or expiry event; this duration is
+	// the behavior under test, so wait beyond its configured 30 ms interval.
 	time.Sleep(150 * time.Millisecond)
 	if !l.allow("session", "control") {
 		t.Fatal("after the interval a new notification must be allowed")

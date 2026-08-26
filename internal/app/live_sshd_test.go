@@ -387,27 +387,22 @@ LogLevel VERBOSE
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	want := fmt.Sprintf("Server listening on 127.0.0.1 port %d", port)
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(logBuf.String(), want) {
-			return &liveSshd{
-				addr:      addr,
-				user:      userName,
-				home:      home,
-				signer:    clientSigner,
-				clientRaw: clientRaw,
-				hostKey:   hostSigner.PublicKey(),
-				cmd:       cmd,
-				logBuf:    logBuf,
-				tmpRoot:   tmpRoot,
-				recDir:    recDir,
-				histFile:  histFile,
-			}
-		}
-		time.Sleep(50 * time.Millisecond)
+	testwait.WaitForTimeout(t, "sshd listening", 10*time.Second, func() bool {
+		return strings.Contains(logBuf.String(), want)
+	})
+	return &liveSshd{
+		addr:      addr,
+		user:      userName,
+		home:      home,
+		signer:    clientSigner,
+		clientRaw: clientRaw,
+		hostKey:   hostSigner.PublicKey(),
+		cmd:       cmd,
+		logBuf:    logBuf,
+		tmpRoot:   tmpRoot,
+		recDir:    recDir,
+		histFile:  histFile,
 	}
-	t.Fatalf("sshd did not report listening within 10s; log:\n%s", logBuf.String())
-	return nil
 }
 
 // knownHostsPath writes a known_hosts file carrying the fixture's host key
@@ -923,8 +918,12 @@ func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellBash, shellintegration.New(log.NewSlogAdapter(nil)))
 
-	// The refusal is synchronous: no domain may ever be minted.
-	time.Sleep(500 * time.Millisecond)
+	// The refusal is synchronous: no domain may ever be minted. The native
+	// prompt is the observable that the bootstrap has finished and the
+	// channel is ready for ordinary terminal input.
+	testwait.WaitForTimeout(t, "native prompt after refused forwarding", 20*time.Second, func() bool {
+		return strings.Contains(out.String(), "NATIVE_PROMPT>")
+	})
 	kernel.mu.Lock()
 	minted := kernel.minted
 	kernel.mu.Unlock()
@@ -934,7 +933,8 @@ func TestLiveSshd_ForwardingRefusedStaysConventional(t *testing.T) {
 
 	// The fixture .bashrc names the prompt NATIVE_PROMPT>; with no live
 	// channel the marker-only overlay keeps it visible (ADR-0024 decision 9).
-	// Run a command: the terminal is an ordinary usable shell.
+	// Run a command only after the bootstrap has released input: the terminal
+	// is an ordinary usable shell.
 	if _, err := ch.Write([]byte("echo CONVENTIONAL_OK\n")); err != nil {
 		t.Fatalf("write echo: %v", err)
 	}

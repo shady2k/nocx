@@ -30,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/testwait"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -290,14 +291,9 @@ func (e *execProbeBuf) String() string {
 // observable state change; the deadline exists only so a hang reports.
 func execProbeWaitFor(t *testing.T, out *execProbeBuf, want, what string) {
 	t.Helper()
-	deadline := time.Now().Add(30 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(out.String(), want) {
-			return
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	t.Fatalf("%s: never saw %q; channel carried:\n%s", what, want, out.String())
+	testwait.WaitForTimeout(t, what, 30*time.Second, func() bool {
+		return strings.Contains(out.String(), want)
+	})
 }
 
 // ---------------------------------------------------------------------------

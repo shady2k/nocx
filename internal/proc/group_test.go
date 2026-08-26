@@ -82,17 +82,14 @@ func reapOrphan(pid int) {
 // has become ours. The failure message is built when the wait fails, not
 // before it starts, so it reports the state the pid is actually stuck in.
 func waitGone(t *testing.T, role string, pid int) {
-	t.Helper()
-	deadline := time.Now().Add(waitCeiling)
-	for time.Now().Before(deadline) {
-		reapOrphan(pid)
-		if gone(pid) {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("%s (pid %d) never reached ESRCH: it is in state %q with ppid %q — a member of the killed group is still a process",
-		role, pid, procField(pid, 0), procField(pid, 1))
+	testwait.WaitForTimeoutDetail(t, role+" process to be reaped", waitCeiling,
+		func() string {
+			return fmt.Sprintf("pid %d state=%q ppid=%s", pid, procField(pid, 0), procField(pid, 1))
+		},
+		func() bool {
+			reapOrphan(pid)
+			return gone(pid)
+		})
 }
 
 // procField reads one field of a pid's /proc/<pid>/stat, counting from the

@@ -887,17 +887,17 @@ func (r *reasonRecorder) record(_ string, reason ssh.RefusalReason) {
 // in `starting` reports rather than hangs.
 func (r *reasonRecorder) await(t *testing.T) (ssh.RefusalReason, bool) {
 	t.Helper()
-	deadline := time.Now().Add(90 * time.Second)
-	for time.Now().Before(deadline) {
+	var reason ssh.RefusalReason
+	testwait.WaitForTimeout(t, "the bootstrap outcome", 90*time.Second, func() bool {
 		r.mu.Lock()
-		got, reason := r.got, r.reason
-		r.mu.Unlock()
-		if got {
-			return reason, true
+		defer r.mu.Unlock()
+		if !r.got {
+			return false
 		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	return "", false
+		reason = r.reason
+		return true
+	})
+	return reason, true
 }
 
 // recordingInstaller is the production installer with its first far-side call

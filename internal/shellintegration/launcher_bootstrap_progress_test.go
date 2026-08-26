@@ -21,6 +21,7 @@ package shellintegration
 // asserted where it is produced, over the real socket, in internal/transport.
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -67,14 +68,9 @@ func (p *progressLog) saw(want bootstrapprogress.Stage) bool {
 // something better than a hung test.
 func (p *progressLog) waitForStage(t *testing.T, want bootstrapprogress.Stage) {
 	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		if p.saw(want) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
-	t.Fatalf("bootstrap stage %q never arrived; stages=%v", want, p.all())
+	testwait.WaitForTimeout(t, fmt.Sprintf("bootstrap stage %q", want), 20*time.Second, func() bool {
+		return p.saw(want)
+	})
 }
 
 // foreignTerminalWrapper writes the shape a second shell integration installs

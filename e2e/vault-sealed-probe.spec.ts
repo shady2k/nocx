@@ -259,3 +259,23 @@ test('dismissing the unlock fails the call cleanly — no failure is painted', a
   // The editor still responds: the dismissal did not wedge the surface.
   await dialog.locator('#endpoint-name').fill(`${endpointName} (edited)`)
 })
+
+test('typing a bare @ in a sealed header value shows the unlock offer', async ({ page }) => {
+  await openApp(page)
+  await page.locator('.activity-bar button[data-action="api"]').click()
+  const workbench = page.locator('.api-workbench')
+  await expect(workbench).toBeVisible({ timeout: 15_000 })
+  const requestRow = workbench.locator('.api-tree__row').filter({ hasText: 'Zen' })
+  await expect(requestRow).toBeVisible({ timeout: 15_000 })
+  await requestRow.click()
+  await workbench.getByRole('tab', { name: /^Headers\b/ }).click()
+  await workbench.getByRole('button', { name: 'Add header', exact: true }).click()
+  const headerValue = workbench.locator('#api-header-value-0')
+  await headerValue.press('@')
+
+  const picker = page.getByRole('listbox', { name: 'vault secrets' })
+  await expect(picker).toBeVisible({ timeout: 10_000 })
+  await expect(
+    picker.getByRole('option', { name: 'Unlock the vault to use its secrets' }),
+  ).toBeVisible()
+})

@@ -51,12 +51,16 @@ export interface SecretPickerSource {
    *  because a form has somewhere to type a value while a floating row over a
    *  prompt does not. */
   requestCreate(name: string): Promise<SecretEntry | undefined>
+  /** Host logging seam for failures reading lifecycle or inventory state. */
+  onError?: (message: string, error: unknown) => void
 }
 
 export interface SecretPickerCallbacks {
   /** Insert `{{secret:NAME}}` over the trigger word; the host owns the
    *  editor seam and the replacement range. */
   onInsert(name: string): void
+  /** Report a refused picker read through the host's logger. */
+  onError?(message: string, error: unknown): void
 }
 
 /** The one fact about a secret row the panel reads: its name (the vault's
@@ -102,6 +106,7 @@ type PickerState =
   | { readonly name: 'loading' }
   | { readonly name: 'sealed' }
   | { readonly name: 'uninitialized' }
+  | { readonly name: 'refused'; readonly message: string }
   | { readonly name: 'empty' }
   | {
       readonly name: 'list'
@@ -177,8 +182,13 @@ export class SecretPicker {
         return
       }
       await this.loadList('')
-    } catch {
-      this.close()
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      this.callbacks.onError?.(message, err)
+      if (this.state.name === 'loading') {
+        this.state = { name: 'refused', message }
+        this.render()
+      }
     }
   }
 
@@ -367,11 +377,17 @@ export class SecretPicker {
       this.pendingFilter = null
       this.state = { name: 'list', entries, filter: initialFilter, selected: 0 }
       this.render()
-    } catch {
-      // Sealed mid-flight: the dispatcher seam may have raised the unlock
-      // prompt; stay open rather than vanishing behind it.
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      this.callbacks.onError?.(message, err)
       if (this.state.name === 'loading') {
-        this.state = { name: 'sealed' }
+        const data = typeof err === 'object' && err !== null && 'data' in err ? err.data : null
+        const sealed =
+          typeof data === 'object' &&
+          data !== null &&
+          'reason' in data &&
+          data.reason === 'vault-sealed'
+        this.state = sealed ? { name: 'sealed' } : { name: 'refused', message }
         this.render()
       }
     }
@@ -396,6 +412,20 @@ export class SecretPicker {
           ? 'the key was removed from this command — type it here, or save one to the vault to reuse it'
           : 'no secrets yet',
       )
+      return
+    }
+    if (s.name === 'refused') {
+      const row: FloatingPanelRow = {
+        id: 'status-refused',
+        displayText: `Could not read vault secrets: ${s.message}`,
+        matchRanges: [],
+        group: GROUP_LABEL,
+        actions: [this.badge('unavailable')],
+      }
+      this.panel.show({
+        rows: [row],
+        selectedIndex: -1,
+      })
       return
     }
     if (s.name === 'sealed') {

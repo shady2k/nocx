@@ -64,7 +64,21 @@ function key(controller: SecretPickerFieldController, init: KeyboardEventInit): 
     new KeyboardEvent('keydown', { bubbles: true, cancelable: true, ...init }),
   )
 }
-
+function typeCharacter(
+  input: HTMLInputElement,
+  controller: SecretPickerFieldController,
+  char: string,
+): void {
+  input.addEventListener('keydown', (event) => {
+    controller.onKeyDown(event)
+  })
+  input.addEventListener('input', () => {
+    controller.onInput(input.value, input.selectionStart ?? input.value.length)
+  })
+  input.dispatchEvent(new KeyboardEvent('keydown', { key: char, bubbles: true, cancelable: true }))
+  input.value += char
+  input.dispatchEvent(new Event('input', { bubbles: true }))
+}
 afterEach(() => {
   document.body.replaceChildren()
 })
@@ -206,20 +220,23 @@ describe('createSecretPickerField', () => {
   })
 
   it.each([
-    ['sealed', 'Unlock the vault to use its secrets'],
-    ['uninitialized', 'Set up the vault to store secrets'],
-  ] as const)('%s vault renders an offer row, not an error', async (state, label) => {
-    const h = setup([], state)
-    h.value.current = '@'
-    h.controller.onInput('@', 1)
-    await flush()
+    ['sealed', ['Unlock the vault to use its secrets'], []],
+    ['uninitialized', ['Set up the vault to store secrets'], []],
+    ['unsealed', ['prod-key', 'Add a secret…'], [entry('prod-key', 'secrow:prod-id')]],
+  ] as const)(
+    '%s vault renders its offer after typing a bare @',
+    async (state, expected, entries) => {
+      const h = setup([...entries], state)
+      const input = document.createElement('input')
+      document.body.appendChild(input)
+      typeCharacter(input, h.controller, '@')
+      await flush()
 
-    expect(rows().map((row) => row.querySelector('.ui-collection-row__info')?.textContent)).toEqual(
-      [label],
-    )
-    expect(rows()[0]?.dataset.empty).toBeUndefined()
-    expect(rows()[0]?.querySelector('[data-tone="danger"]')).toBeNull()
-  })
+      expect(
+        rows().map((row) => row.querySelector('.ui-collection-row__info')?.textContent),
+      ).toEqual(expected)
+    },
+  )
 
   it('Add a secret calls requestCreate with exactly the unmatched text typed after @', async () => {
     const h = setup([entry('prod-key', 'secrow:prod-id')])

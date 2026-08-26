@@ -212,6 +212,12 @@ async function main() {
       openSettingsPane().startNewSecret(name)
       return Promise.resolve(undefined)
     },
+    onError: (message, error) => {
+      log.error('nocx: secret picker status failed', {
+        message,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    },
   }
 
   // ── Backend-initiated unlock requests ──────────────────────────────

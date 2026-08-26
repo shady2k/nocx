@@ -53,6 +53,7 @@ export function createSecretPickerField(opts: {
       for (const entry of entries) idsByName.set(entry.name, entry.id)
       return entries
     },
+    onError: opts.source.onError,
     requestUnseal: () => opts.source.requestUnseal(),
     requestSetup: () => opts.source.requestSetup(),
     requestCreate: async (name) => {
@@ -92,6 +93,7 @@ export function createSecretPickerField(opts: {
       generation++
       opts.onChange(next, nextCaret)
     },
+    onError: opts.source.onError,
   })
   picker.mount(document.body)
 

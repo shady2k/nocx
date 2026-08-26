@@ -41,6 +41,7 @@ interface Harness {
     requestSetup: ReturnType<typeof vi.fn>
   }
   onInsert: ReturnType<typeof vi.fn>
+  onError: (message: string, error: unknown) => unknown
   container: HTMLElement
 }
 
@@ -53,12 +54,13 @@ function setup(status: VaultStatus = UNSEALED, entries: InventoryEntry[] = []): 
     requestSetup: vi.fn(() => Promise.resolve(false)),
   } satisfies SecretPickerSource
   const onInsert = vi.fn()
-  const callbacks: SecretPickerCallbacks = { onInsert }
+  const onError = vi.fn()
+  const callbacks: SecretPickerCallbacks = { onInsert, onError }
   const picker = new SecretPicker(source, callbacks)
   const container = document.createElement('div')
   document.body.appendChild(container)
   picker.mount(container)
-  return { picker, source, onInsert, container }
+  return { picker, source, onInsert, onError, container }
 }
 
 const flush = async (): Promise<void> => {
@@ -315,5 +317,43 @@ describe('SecretPicker: vault lifecycle states are OFFERS', () => {
     key(h.picker, { key: 'Enter' })
     await flush()
     expect(rows(h.container).map((r) => r.text)).toEqual(['Unlock the vault to use its secrets'])
+  })
+  it('keeps a visible refusal row and logs when vault status is refused', async () => {
+    const h = setup()
+    const refusal = new Error('vault status unavailable')
+    h.source.status.mockRejectedValue(refusal)
+    await h.picker.open()
+    await flush()
+    expect(h.picker.isOpen).toBe(true)
+    expect(
+      h.container.querySelector<HTMLElement>('.ui-floating-panel__row')?.dataset.empty,
+    ).toBeUndefined()
+    expect(rows(h.container).map((r) => r.text)).toEqual([
+      'Could not read vault secrets: vault status unavailable',
+    ])
+    expect(h.onError).toHaveBeenCalledWith('vault status unavailable', refusal)
+  })
+  it('keeps a visible refusal row and logs when inventory listing is refused', async () => {
+    const h = setup()
+    const refusal = new Error('inventory unavailable')
+    h.source.list.mockRejectedValue(refusal)
+    await h.picker.open()
+    await flush()
+    expect(h.picker.isOpen).toBe(true)
+    expect(rows(h.container).map((r) => r.text)).toEqual([
+      'Could not read vault secrets: inventory unavailable',
+    ])
+    expect(h.onError).toHaveBeenCalledWith('inventory unavailable', refusal)
+  })
+  it('keeps the sealed offer and logs when inventory reports the vault sealed', async () => {
+    const h = setup()
+    const refusal = Object.assign(new Error('vault is sealed'), {
+      data: { reason: 'vault-sealed' },
+    })
+    h.source.list.mockRejectedValue(refusal)
+    await h.picker.open()
+    await flush()
+    expect(rows(h.container).map((r) => r.text)).toEqual(['Unlock the vault to use its secrets'])
+    expect(h.onError).toHaveBeenCalledWith('vault is sealed', refusal)
   })
 })

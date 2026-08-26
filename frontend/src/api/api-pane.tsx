@@ -364,6 +364,7 @@ export function ApiPane(props: ApiPaneProps) {
             setSecretEntries(entries)
             return entries
           },
+          onError: source.onError,
           requestUnseal: () => source.requestUnseal(),
           requestSetup: () => source.requestSetup(),
           requestCreate: (name) => createSecretInPlace(name),

@@ -197,6 +197,55 @@ describe('SecretTextField vault affordance', () => {
     expect(vault.list).not.toHaveBeenCalled()
   })
 
+  // nocx-vzdna: the panel is mounted on the body, so it can only be placed
+  // beside the field if this component hands its own input across. Two
+  // fields on one page prove it is EACH field's own — jsdom lays nothing
+  // out, so the assertion is on the computed offsets, never on visibility.
+  it('opens each panel beside the field it belongs to', async () => {
+    const proto = HTMLElement.prototype
+    Object.defineProperty(proto, 'offsetHeight', { configurable: true, get: () => 100 })
+    Object.defineProperty(proto, 'offsetWidth', { configurable: true, get: () => 480 })
+    Object.defineProperty(window, 'innerHeight', { configurable: true, value: 768 })
+    Object.defineProperty(window, 'innerWidth', { configurable: true, value: 1024 })
+    try {
+      const { container } = render(() => (
+        <>
+          <SecretTextField id="api-top-value" value="" source={source()} />
+          <SecretTextField id="api-bottom-value" value="" source={source()} />
+        </>
+      ))
+      const rect = (id: string, top: number): void => {
+        const input = container.querySelector<HTMLInputElement>(`#${id}`)!
+        input.getBoundingClientRect = () =>
+          ({ top, bottom: top + 24, left: 40, height: 24 }) as DOMRect
+      }
+      rect('api-top-value', 120)
+      rect('api-bottom-value', 640)
+
+      // Each field owns a panel of its own; they stand in field order.
+      const panelOf = (index: number): HTMLElement =>
+        document.querySelectorAll<HTMLElement>('.ui-floating-panel[data-variant="secret"]')[index]
+
+      clickLock(container, 'api-top-value', { start: 0, end: 0 })
+      await vi.waitFor(() => expect(rowText()).toEqual(['prod-key', 'Add a secret…']))
+      // 120 - 6 - 100 = 14: on screen, above its own field.
+      expect(panelOf(0).style.top).toBe('14px')
+
+      clickLock(container, 'api-bottom-value', { start: 0, end: 0 })
+      // 640 - 6 - 100 = 534: the second panel goes to the SECOND field, not
+      // to the top of the document with the first.
+      await vi.waitFor(() => expect(panelOf(1).style.top).toBe('534px'))
+      for (const index of [0, 1]) {
+        const top = Number.parseFloat(panelOf(index).style.top)
+        expect(top).toBeGreaterThanOrEqual(0)
+        expect(top + 100).toBeLessThanOrEqual(768)
+      }
+    } finally {
+      delete (proto as { offsetHeight?: number }).offsetHeight
+      delete (proto as { offsetWidth?: number }).offsetWidth
+    }
+  })
+
   it('no source, no lock — a control that can do nothing is not offered', () => {
     render(() => <SecretTextField id="api-no-vault" value="Bearer t.Yixxxx" />)
     const input = document.querySelector<HTMLInputElement>('#api-no-vault')!

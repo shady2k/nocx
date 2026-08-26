@@ -48,6 +48,21 @@ export function createSecretPickerField(opts: {
   source: SecretPickerSource
   value: () => string
   onChange: (next: string, caret: number) => void
+  /** The field's own element, read afresh each time the panel is placed.
+   *
+   *  The panel is mounted on the body rather than inside the field (a plain
+   *  input has no positioned root, and a form row is inside scrolling panes
+   *  and a dialog that would clip it), so the body mount is what makes the
+   *  panel float — and it is also what took the field's position away from
+   *  it. Before this, the panel resolved its `bottom: 100%` against the
+   *  initial containing block and opened above the top of the window, on
+   *  every field there is (nocx-vzdna). Handing the element back is what
+   *  lets FloatingPanel put the panel next to the field it belongs to.
+   *
+   *  A host with no element to give gets the old body-relative placement;
+   *  no such host exists today, and this stays optional only so the kit
+   *  never demands a DOM handle from a host that has none. */
+  anchor?: () => HTMLElement | null
 }): SecretPickerFieldController {
   interface Trigger {
     from: number
@@ -122,31 +137,37 @@ export function createSecretPickerField(opts: {
     },
   }
 
-  const picker = new SecretPicker(source, {
-    onInsert: (name) => {
-      const currentTrigger = trigger
-      const id = idsByName.get(name)
-      if (currentTrigger === null || id === undefined) return
+  const picker = new SecretPicker(
+    source,
+    {
+      onInsert: (name) => {
+        const currentTrigger = trigger
+        const id = idsByName.get(name)
+        if (currentTrigger === null || id === undefined) return
 
-      const current = opts.value()
-      if (current.slice(currentTrigger.from, currentTrigger.to) !== currentTrigger.expected) {
+        const current = opts.value()
+        if (current.slice(currentTrigger.from, currentTrigger.to) !== currentTrigger.expected) {
+          trigger = null
+          lockAnchor = null
+          picker.close()
+          return
+        }
+
+        const reference = `{{secret:${id}}}`
+        const next =
+          current.slice(0, currentTrigger.from) + reference + current.slice(currentTrigger.to)
+        const nextCaret = currentTrigger.from + reference.length
         trigger = null
         lockAnchor = null
-        picker.close()
-        return
-      }
-
-      const reference = `{{secret:${id}}}`
-      const next =
-        current.slice(0, currentTrigger.from) + reference + current.slice(currentTrigger.to)
-      const nextCaret = currentTrigger.from + reference.length
-      trigger = null
-      lockAnchor = null
-      generation++
-      opts.onChange(next, nextCaret)
+        generation++
+        opts.onChange(next, nextCaret)
+      },
+      onError: opts.source.onError,
     },
-    onError: opts.source.onError,
-  })
+    // The panel lives on the body; the anchor is how it finds its way back
+    // to the field it belongs to (see `anchor` above).
+    ...(opts.anchor !== undefined ? [{ anchor: opts.anchor }] : []),
+  )
   picker.mount(document.body)
 
   const close = (): void => {

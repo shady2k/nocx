@@ -18,6 +18,7 @@ import (
 	"sort"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/ncruces/go-sqlite3"
 	"github.com/ncruces/go-sqlite3/driver"
@@ -1829,5 +1830,41 @@ func TestLedgerReadsAfterCloseReportTheFailure(t *testing.T) {
 	}
 	if page != nil {
 		t.Fatalf("ListEntries after Close returned %d rows alongside its error", len(page))
+	}
+}
+
+// A block's detail answers whatever the pool is sized to (nocx-4p3l2).
+//
+// This is a DEADLOCK guard, and it is written with a deadline because that is
+// the only way this defect reports itself: the read does not fail, it stops.
+// executionsFor and artifactsFor each used to hold an open cursor while going
+// back to the pool for the observation, the grant and the artifact bodies,
+// which is survivable exactly while the pool has a connection to spare. When
+// maxOpenConns became 1 — to close the encrypted-WAL read race — every caller
+// of Entry hung until the package's own 10-minute timeout killed it, which is
+// a failure that names nothing. A deadline here names it in seconds.
+func TestEntryDoesNotDeadlockOnASingleConnection(t *testing.T) {
+	db, _ := newTestStore(t)
+	ctx := context.Background()
+
+	entryID, err := db.Ledger().RecordCompleted(ctx, aCompletedCommand("read me back"))
+	if err != nil {
+		t.Fatalf("RecordCompleted: %v", err)
+	}
+
+	// Generous enough that a slow machine is not the thing under test, short
+	// enough that a deadlock is reported rather than waited out.
+	deadline, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+
+	entry, err := db.Ledger().Entry(deadline, entryID)
+	if err != nil {
+		t.Fatalf("Entry: %v (a context deadline here means the read deadlocked against its own pool)", err)
+	}
+	if entry == nil {
+		t.Fatal("Entry returned no entry for an id RecordCompleted just minted")
+	}
+	if len(entry.Executions) == 0 {
+		t.Fatal("a recorded command has an execution; without one this test would pass on a read that never reaches executionsFor")
 	}
 }

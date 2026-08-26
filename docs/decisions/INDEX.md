@@ -67,6 +67,7 @@ When a collision is cited by number alone, disambiguate by filename.
 | 0039 | [An assistant turn is one ledger entry](0039-an-assistant-turn-is-one-entry.md)                                                   | Accepted (2026-08-23)                |
 | 0040 | [A block is a node in an ordered tree](0040-a-block-is-a-node-in-an-ordered-tree.md)                                              | Accepted (2026-08-23)                |
 | 0041 | [A collection file names a secret by handle](0041-a-collection-file-names-a-secret-by-handle.md)                                  | Accepted (2026-08-26)                |
+| 0042 | [One connection to the encrypted store](0042-one-connection-to-the-encrypted-store.md)                                            | Accepted (2026-08-26)                |
 
 ## Adding one
 

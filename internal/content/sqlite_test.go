@@ -319,52 +319,89 @@ func dirEntries(t *testing.T, dir string) []string {
 
 // ── concurrency: one writer, many readers, no lost rows ──────────────────
 
+// A read of your history answers while a command is being recorded into it.
+// It does not report the database as corrupt.
+//
+// WHAT IT GUARDS (nocx-4p3l2, ADR-0042). The store is encrypted through a VFS
+// that enciphers whole 4096-byte blocks. SQLite's write-ahead log is framed at
+// 24+page_size, so its frames never align to those blocks, and appending one
+// rewrites the block holding the tail of the frame before it — a frame a
+// reader on another connection is entitled to be reading. A torn read of a
+// wide-block cipher does not lose a few bytes, it garbles the whole block,
+// and the reader is told the database image is malformed. Nothing on disk is
+// damaged and the same read succeeds afterwards, which is exactly why it must
+// be caught here rather than by a person deciding their history is destroyed.
+//
+// THIS TEST IS PROBABILISTIC AND SAYS SO. Measured at sixteen connections on
+// this profile: RED IN 3 RUNS OF 6. A profile four times the size caught it 6
+// of 6, and is not affordable — under -race in the amd64 CI container it ran
+// 9m12s and was killed by the 10-minute package timeout, which guards
+// nothing. So this is a net rather than a gate, and the gate is elsewhere:
+// TestThePoolIsOneConnection (sqlite_internal_test.go) states the invariant
+// that makes the race unreachable and fails instantly if somebody raises the
+// pool. Read both before changing either.
+//
+// The shape still matters. SIXTEEN readers, because that is what saturates a
+// pool; SEVERAL ROUNDS against ONE store, because the failure needs a
+// database with some history behind it; and an error REPORTED rather than
+// retried. The original — four readers, one round, a fresh store — caught
+// this about once in fifty runs, which is how it stayed undiagnosed.
 func TestConcurrentReadersWithOneWriter(t *testing.T) {
 	db, _ := newTestStore(t)
 	ctx := context.Background()
 	hist := db.Ledger()
 
-	const total = 1000
-	var wg sync.WaitGroup
-	errCh := make(chan error, 16)
+	const (
+		rounds    = 6
+		perRound  = 1000
+		readers   = 16
+		readsEach = 300
+	)
+	written := 0
 
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		for i := range total {
-			if _, err := hist.RecordCompleted(ctx, aCompletedCommand(fmt.Sprintf("cmd-%d", i))); err != nil {
-				errCh <- fmt.Errorf("writer: %w", err)
-				return
-			}
-		}
-	}()
+	for round := range rounds {
+		var wg sync.WaitGroup
+		errCh := make(chan error, readers+1)
 
-	for range 4 {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			for range 100 {
-				page, err := hist.QueryEntries(ctx, content.LedgerQuery{Scope: content.ScopeEverywhere, Limit: 10})
-				if err != nil {
-					errCh <- fmt.Errorf("reader: %w", err)
+			for i := range perRound {
+				if _, err := hist.RecordCompleted(ctx, aCompletedCommand(fmt.Sprintf("cmd-%d-%d", round, i))); err != nil {
+					errCh <- fmt.Errorf("round %d writer: %w", round, err)
 					return
 				}
-				_, _ = page, page.Exhausted
 			}
 		}()
-	}
-	wg.Wait()
-	close(errCh)
-	for err := range errCh {
-		t.Fatal(err)
+
+		for range readers {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				for range readsEach {
+					page, err := hist.QueryEntries(ctx, content.LedgerQuery{Scope: content.ScopeEverywhere, Limit: 10})
+					if err != nil {
+						errCh <- fmt.Errorf("round %d reader: %w", round, err)
+						return
+					}
+					_, _ = page, page.Exhausted
+				}
+			}()
+		}
+		wg.Wait()
+		close(errCh)
+		for err := range errCh {
+			t.Fatal(err)
+		}
+		written += perRound
 	}
 
-	recs, err := hist.ListEntries(ctx, total+1)
+	recs, err := hist.ListEntries(ctx, written+1)
 	if err != nil {
 		t.Fatalf("List: %v", err)
 	}
-	if len(recs) != total {
-		t.Fatalf("got %d rows, want %d (no rows lost)", len(recs), total)
+	if len(recs) != written {
+		t.Fatalf("got %d rows, want %d (no rows lost)", len(recs), written)
 	}
 }
 

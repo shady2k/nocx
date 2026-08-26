@@ -19,6 +19,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/content"
 )
 
 func TestStarlarkCarrier_ASecondEffectUsesTheFirstEffectsResult(t *testing.T) {
@@ -171,5 +173,69 @@ answer(str(burn()))
 	}
 	if n := len(carrier.invocations()); n != 0 {
 		t.Fatalf("invocations = %d, want none — it never reached an effect", n)
+	}
+}
+
+// SUSPENSION WITHOUT REPLAY (nocx-d6gn4.6). A program asks for an effect the
+// policy says a person must answer for. The program does not fail and does not
+// start again: the goroutine running the interpreter PARKS inside the
+// intrinsic, the host is handed the question, and when it is answered the same
+// call is made again and the program carries on with every local it already
+// had.
+//
+// THE ANTI-REPLAY ASSERTION IS THE `answer("looking")` LINE. Under the
+// Temporal-style replay the bead originally proposed, everything before the
+// suspended effect runs again on resume, so that sentence would appear twice.
+// It appears once. That is the whole reason the parked goroutine was chosen
+// over replay, stated as something a test can see rather than as an argument.
+func TestStarlarkCarrier_AnApprovalParksTheProgramRatherThanRestartingIt(t *testing.T) {
+	grant, dir := testDirGrant(t, content.EffectPolicy{}) // the zero matrix asks for everything
+	writeFile(t, filepath.Join(dir, "index.txt"), "target.txt\n")
+	writeFile(t, filepath.Join(dir, "target.txt"), "the answer is here")
+
+	approvals := NewApprovalStore()
+	carrier := newStarlarkCarrier(kernelForWithApprovals(t, grant, &fakeLedger{}, approvals), dir)
+
+	type outcome struct {
+		out string
+		err error
+	}
+	done := make(chan outcome, 1)
+	go func() {
+		out, err := carrier.Run(context.Background(), `
+answer("looking")
+name = files_read(path = "`+dir+`/index.txt")["text"].strip()
+answer(files_read(path = "`+dir+`/" + name)["text"])
+`)
+		done <- outcome{out, err}
+	}()
+
+	// Two effects, so two questions. Each is answered and released, and the
+	// program continues from exactly where it stopped.
+	for i := 0; i < 2; i++ {
+		select {
+		case s := <-carrier.Suspensions():
+			req := s.Request
+			if !approvals.Approve(Approval{
+				RunID: req.RunID, Attempt: req.Attempt, Tool: req.Tool,
+				CallID: req.CallID, ArgHash: req.ArgHash,
+			}) {
+				t.Fatalf("suspension %d: the proposal was not pending", i+1)
+			}
+			s.Resume()
+		case r := <-done:
+			t.Fatalf("the program finished without asking (%d asks seen): out=%q err=%v", i, r.out, r.err)
+		}
+	}
+
+	r := <-done
+	if r.err != nil {
+		t.Fatalf("Run: %v", r.err)
+	}
+	if !strings.Contains(r.out, "the answer is here") {
+		t.Fatalf("answer = %q, want the second file's contents", r.out)
+	}
+	if n := strings.Count(r.out, "looking"); n != 1 {
+		t.Fatalf("the sentence before the first effect appears %d times, want once — the program was replayed, not resumed", n)
 	}
 }

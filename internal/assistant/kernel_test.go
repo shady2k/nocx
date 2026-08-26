@@ -43,6 +43,21 @@ func kernelFor(t *testing.T, grant content.Grant, ledger AttemptLedger) *effectK
 	return k
 }
 
+// kernelForWithApprovals is kernelFor with an approval store — the pipeline a
+// carrier that must SUSPEND drives.
+func kernelForWithApprovals(t *testing.T, grant content.Grant, ledger AttemptLedger, approvals *ApprovalStore) *effectKernel {
+	t.Helper()
+	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	k, err := newEffectKernel(nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, "run-1", 1, "turn-entry", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("newEffectKernel: %v", err)
+	}
+	return k
+}
+
 // A caller that is not the framework proposes an effect and gets the same
 // pipeline: validation, policy, the attempt written before the call, the
 // narrowed capability, the execution, the outcome recorded.

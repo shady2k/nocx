@@ -36,6 +36,7 @@ package assistant
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -59,6 +60,22 @@ type starlarkInvocation struct {
 	rawArgs string
 }
 
+// Suspension is one question the program stopped on. The interpreter's
+// goroutine is parked inside the intrinsic that raised it and holds every
+// local the program had; Resume lets it make the same call again, which is
+// what an approval is for — the kernel re-decides with the person's answer in
+// the store, and the run continues rather than restarts.
+//
+// Resume is safe to call once. A second call is a programming error in the
+// host, not a state the program can reach, so it is not defended against here.
+type Suspension struct {
+	Request *ApprovalRequest
+	resume  chan struct{}
+}
+
+// Resume releases the parked program.
+func (s *Suspension) Resume() { close(s.resume) }
+
 type starlarkCarrier struct {
 	kernel invoker
 	// cwd is the directory a relative path in a program resolves against. The
@@ -67,6 +84,11 @@ type starlarkCarrier struct {
 	// depend on where the backend happens to have been started.
 	cwd string
 
+	// suspensions carries a question out to the host. UNBUFFERED on purpose:
+	// the send completes only when somebody is listening, so a program cannot
+	// park on a question nobody will ever see.
+	suspensions chan *Suspension
+
 	mu      sync.Mutex
 	calls   []starlarkInvocation
 	answer  string
@@ -74,7 +96,14 @@ type starlarkCarrier struct {
 }
 
 func newStarlarkCarrier(kernel invoker, cwd string) *starlarkCarrier {
-	return &starlarkCarrier{kernel: kernel, cwd: cwd}
+	return &starlarkCarrier{kernel: kernel, cwd: cwd, suspensions: make(chan *Suspension)}
+}
+
+// Suspensions is where the host learns that the program stopped on a question.
+// One value per question, in the order the program asked; the host answers
+// through the approval store and calls Resume.
+func (c *starlarkCarrier) Suspensions() <-chan *Suspension {
+	return c.suspensions
 }
 
 // invocations returns the effects this carrier asked the kernel for, in the
@@ -196,12 +225,44 @@ func (c *starlarkCarrier) effect(tool string) func(*starlark.Thread, *starlark.B
 		c.calls = append(c.calls, starlarkInvocation{tool: tool, callID: callID, rawArgs: string(raw)})
 		c.mu.Unlock()
 
-		out, err := c.kernel.Invoke(ctx, tool, callID, string(raw))
+		out, err := c.invokeParking(ctx, tool, callID, string(raw))
 		if err != nil {
 			return nil, err
 		}
 		return toStarlark(out), nil
 	}
+}
+
+// invokeParking is the kernel call plus the one thing this carrier does that
+// the declared-call carrier does not: when the kernel says a person must
+// answer first, it PARKS rather than unwinding.
+//
+// The retry after Resume is the same call — same id, same arguments — because
+// that is what the approval is bound to: a changed argument hashes differently
+// and deliberately does not resume under the old answer. One retry, never a
+// loop: if the kernel asks again about a proposal that has just been answered,
+// something is wrong that asking a person twice will not fix, and a carrier
+// that kept retrying would be the ask-forever loop the resume path exists to
+// end.
+func (c *starlarkCarrier) invokeParking(ctx context.Context, tool, callID, rawArgs string) (string, error) {
+	out, err := c.kernel.Invoke(ctx, tool, callID, rawArgs)
+	var ask *ApprovalRequestedError
+	if !errors.As(err, &ask) {
+		return out, err
+	}
+
+	s := &Suspension{Request: ask.Request, resume: make(chan struct{})}
+	select {
+	case c.suspensions <- s:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	select {
+	case <-s.resume:
+	case <-ctx.Done():
+		return "", ctx.Err()
+	}
+	return c.kernel.Invoke(ctx, tool, callID, rawArgs)
 }
 
 // recordAnswer is what the program says to the person. Called more than once,

@@ -995,13 +995,19 @@
    the order alone: four calls in a row look identical whether each stood on
    its own or each fed the next.
 
+   It is NOT scoped to the tool block. `run` is the one tool that opens a
+   block of its own, so a rule that named data-block-kind='tool' would have
+   left every dependency in the tool that matters most invisible — which is
+   exactly what the first version did, and what the owner's screenshot of
+   `ls -S *.txt` then `head /home/dev/log.txt` showed.
+
    It is deliberately a hairline glyph and not a colour. What the backend has
    is EVIDENCE — a value of this call appearing verbatim in an earlier
    result, which is the most it can see while the model is the one writing
    the arguments — and a surface that painted evidence the way it paints the
    effect class would be asserting a causal claim nobody verified. The hover
    text carries the hedge; the mark only says "look here". */
-.cmd-block[data-block-kind='tool'][data-derived] .cmd-header-text::before {
+.cmd-block[data-derived] .cmd-header-text::before {
   content: '\21B3\00A0';
   color: var(--color-text-subtle, var(--color-text-muted));
 }

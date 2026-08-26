@@ -1248,6 +1248,23 @@ function wireBlockSelection(
  * The block DECLARES its kind (nocx-ex636); the rendering rules —
  * highlighting, wrapping, the status vocabulary — are read from it.
  */
+/** Mark a block whose call was built on an earlier call's result
+ *  (nocx-d6gn4.9). ONE owner of the attribute and of the sentence, because
+ *  the mark has to reach two different elements: the child a non-block call
+ *  draws, and the command block a `run` call opens — and two copies would be
+ *  two hedges, drifting apart.
+ *
+ *  The hover text carries what the mark cannot. The backend saw a value of
+ *  this call appear verbatim in an earlier result; it did not see the model
+ *  reuse it, and the surface must not claim otherwise. */
+function markDerived(el: HTMLElement, count: number): void {
+  el.dataset.derived = String(count)
+  el.title =
+    count === 1
+      ? 'The arguments of this call appear in the result of an earlier call in this answer.'
+      : `The arguments of this call appear in the results of ${count} earlier calls in this answer.`
+}
+
 export function createCommandBlock(
   kind: BlockKind,
   id: number,
@@ -1676,6 +1693,12 @@ export class BlockManager {
    *  the moment it is used, and the turn drops it at its close, so a `run`
    *  that never reached a command cannot adopt an unrelated block later. */
   private _claimedBy: HTMLElement | null = null
+  /** The derivation of the call that claimed the next seat, held until the
+   *  block it opened exists. A `run` call draws no child of its own — the
+   *  block IS the account of it (ADR-0040) — and the block is created after
+   *  the announcement, so the mark cannot be applied when it is learned.
+   *  Cleared with the claim, so a block nobody claimed never inherits it. */
+  private _claimedDerived: number = 0
 
   constructor(scrollbackInner: HTMLElement, xtermContainer: HTMLElement, opts: BlockManagerOpts) {
     this._scrollbackInner = scrollbackInner
@@ -1710,7 +1733,10 @@ export class BlockManager {
    *  defect with a third thing to keep in step). */
   private _ownNext(el: HTMLElement): void {
     const claim = this._claimedBy
+    const derived = this._claimedDerived
     this._claimedBy = null
+    this._claimedDerived = 0
+    if (derived > 0) markDerived(el, derived)
     if (!claim) {
       this._own(el, this._xtermContainer)
       return
@@ -2367,8 +2393,9 @@ export class BlockManager {
     }
     /** Claim the next block the ordinary submit path opens for this turn's
      *  region — the seam the `run` tool's command block arrives through. */
-    const claim = (region: HTMLElement | null): void => {
+    const claim = (region: HTMLElement | null, derived = 0): void => {
       this._claimedBy = region
+      this._claimedDerived = derived
     }
     const claimedBy = (): HTMLElement | null => this._claimedBy
     const store = this._snapshotStore
@@ -2503,7 +2530,7 @@ export class BlockManager {
           // its exit status, its ⋮ — stands exactly where the call happened.
           // A child beside it restating the command would be the empty half
           // of the two positions one command used to occupy.
-          claim(children)
+          claim(children, call.derivedFrom?.length ?? 0)
           return
         }
         // A call that opened no block: its own child, named by the tool and
@@ -2546,11 +2573,7 @@ export class BlockManager {
         // The hover text carries the hedge the marker cannot: this is what
         // the backend OBSERVED, not what the model said it did.
         if (call.derivedFrom && call.derivedFrom.length > 0) {
-          cel.dataset.derived = String(call.derivedFrom.length)
-          cel.title =
-            call.derivedFrom.length === 1
-              ? 'The arguments of this call appear in the result of an earlier call in this answer.'
-              : `The arguments of this call appear in the results of ${call.derivedFrom.length} earlier calls in this answer.`
+          markDerived(cel, call.derivedFrom.length)
         }
         children.appendChild(cel)
         own(cel)

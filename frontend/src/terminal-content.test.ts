@@ -15,7 +15,7 @@
 // takes. The editor is reached through the same private-field escape hatch
 // editor.test.ts uses, and the selection is seeded through the CM6 view —
 // the same transaction a mouse drag produces.
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 // node builtins are untyped here (@types/node is not installed), so the
 // imports sit behind @ts-expect-error and the calls behind a contained
 // no-unsafe disable — the same trade theme-catalogue.test.ts makes at file
@@ -74,6 +74,8 @@ import type { ScrollbackController } from './scrollback/controller'
 import { pushOverlay, popOverlay } from './ui/overlay/stack'
 import { _resetThemeState } from './renderers/theme-adapter'
 import { showToast } from './ui/toast'
+import type { CapturedFrame } from './frame/types'
+import { emptyAttrs } from './scrollback/serializer'
 import { BufferLine } from './scrollback/test-helpers'
 
 const capturedActionFacts = vi.hoisted(() => [] as ActionFacts[])
@@ -7151,9 +7153,40 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     return el?.dataset.target ?? null
   }
 
+  function defaultPinnedFrame(): CapturedFrame {
+    const text = 'pinned frame'
+    return {
+      rows: [
+        {
+          kind: 'cells',
+          cells: Array.from({ length: 80 }, (_, index) => ({
+            char: text[index] ?? ' ',
+            attrs: emptyAttrs(),
+          })),
+        },
+      ],
+      cursor: { line: 0, col: text.length },
+      provenance: {
+        source: 'live',
+        identity: {
+          buffer: { kind: 'normal' },
+          cols: 80,
+          rows: 24,
+          generation: 0,
+        },
+        range: { start: 0, end: 1 },
+        scrollbackCapLines: 10000,
+      },
+    }
+  }
+
   /** ⌘/Ctrl+Enter, dispatched where a person's keystroke lands while the
    *  grid owns input: on the live grid, so it travels the same path. */
-  function summonChord(content: TerminalContent): void {
+  async function summonChord(content: TerminalContent): Promise<void> {
+    const renderer = rendererOf(content)
+    if (typeof renderer.captureLiveFrame !== 'function') {
+      renderer.captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+    }
     gridOf(content).dispatchEvent(
       new KeyboardEvent('keydown', {
         key: 'Enter',
@@ -7162,6 +7195,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         cancelable: true,
       }),
     )
+    await Promise.resolve()
   }
 
   function escapeOn(el: HTMLElement): void {
@@ -7227,7 +7261,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       expect(ed.isVisible).toBe(false)
       capturedActionFacts.length = 0
 
-      summonChord(content)
+      await summonChord(content)
 
       const summonedFacts = capturedActionFacts[capturedActionFacts.length - 1]
       expect(summonedFacts).toEqual(expect.objectContaining({ presentation: 'editor' }))
@@ -7239,6 +7273,10 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       // Ask, not the shell: the summoned editor's only target. Read off the
       // indicator, which is the product's own account of where Enter goes.
       expect(targetNamed(ed)).toBe('agent')
+      const frozen = ed.root.querySelector<HTMLElement>('[role="status"]')
+      expect(frozen?.textContent).toBe('Screen frozen while you ask')
+      expect(content.pinnedFrame()?.provenance.source).toBe('live')
+      expect(gridOf(content).parentElement?.parentElement?.textContent).toContain('pinned frame')
       // The grid remains the same size and no PTY resize was requested. The
       // overlay is removed from layout rather than making a second viewport
       // fit pass.
@@ -7249,6 +7287,103 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       // _syncLifecycleOwnership states about itself: editor shown ⟺ grid
       // read-only.
       expect(readOnlyOf(content)).toHaveBeenLastCalledWith(true)
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('disposal removes the freeze presentation and restores the live host', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      const frameHost = gridOf(content)
+      frameHost.style.position = 'sticky'
+
+      await summonChord(content)
+
+      const frame = frameHost.querySelector('.nocx-freeze-frame')
+      const marker = ed.root.querySelector('[role="status"]')
+      expect(ed.root.dataset.placement).toBe('overlay')
+      expect(frameHost.style.position).toBe('relative')
+      expect(frame).not.toBeNull()
+      expect(marker).not.toBeNull()
+
+      content.dispose()
+
+      expect(ed.root.dataset.placement).toBe('inline')
+      expect(content.pinnedFrame()).toBeNull()
+      expect(frame?.isConnected).toBe(false)
+      expect(marker?.isConnected).toBe(false)
+      expect(frameHost.style.position).toBe('sticky')
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('waits for the pinned frame before showing the editor or marker', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    let release!: (frame: CapturedFrame) => void
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      const renderer = rendererOf(content)
+      renderer.captureLiveFrame = vi.fn(
+        () =>
+          new Promise<CapturedFrame>((resolve) => {
+            release = resolve
+          }),
+      )
+
+      await summonChord(content)
+      expect(ed.isVisible).toBe(false)
+      expect(content.pinnedFrame()).toBeNull()
+      expect(ed.root.querySelector('[role="status"]')).toBeNull()
+
+      release(defaultPinnedFrame())
+      await vi.waitFor(() => expect(ed.isVisible).toBe(true))
+      expect(content.pinnedFrame()).not.toBeNull()
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('refused capture leaves the live pane untouched', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      rendererOf(content).captureLiveFrame = vi.fn().mockRejectedValue(new Error('capture refused'))
+
+      await summonChord(content)
+      expect(ed.isVisible).toBe(false)
+      expect(ed.root.dataset.placement).toBe('inline')
+      expect(content.pinnedFrame()).toBeNull()
+      expect(ed.root.querySelector('[role="status"]')).toBeNull()
+      expect(
+        gridOf(content).parentElement?.parentElement?.querySelector('.nocx-freeze-frame'),
+      ).toBeNull()
     } finally {
       restore()
       teardown()
@@ -7266,8 +7401,20 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       startCommand(client, 'top')
-      summonChord(content)
+      await summonChord(content)
       expect(ed.isVisible).toBe(true)
+      const renderer = rendererOf(content)
+      const write = Object.getOwnPropertyDescriptor(renderer, 'write')?.value as Mock<
+        (data: string) => void
+      >
+      const liveOutput = document.createElement('span')
+      gridOf(content).appendChild(liveOutput)
+      write.mockImplementation((data: string) => {
+        liveOutput.textContent += data
+      })
+      write.mockClear()
+      sessionOf(content).fireData('during freeze\n')
+      expect(write).toHaveBeenCalledWith('during freeze\n')
 
       escapeOn(viewOf(ed).contentDOM)
 
@@ -7275,6 +7422,12 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       expect(ed.root.dataset.placement).toBe('inline')
       expect(readOnlyOf(content)).toHaveBeenLastCalledWith(false)
       // The assertion that matters is not the flag: it is a key the PROGRAM
+      expect(content.pinnedFrame()).toBeNull()
+      expect(gridOf(content).textContent).toContain('during freeze\n')
+      expect(
+        gridOf(content).parentElement?.parentElement?.querySelector('.nocx-freeze-frame'),
+      ).toBeNull()
+      expect(ed.root.querySelector('[role="status"]')).toBeNull()
       // consumes arriving at the session. `q` is what quits `top`, and if
       // the editor still owned input it would be a letter in a draft.
       const session = sessionOf(content)
@@ -7303,13 +7456,13 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       startCommand(client)
-      summonChord(content)
+      await summonChord(content)
       ed.insertText('why is this slow')
 
       escapeOn(viewOf(ed).contentDOM)
       expect(ed.isVisible).toBe(false)
 
-      summonChord(content)
+      await summonChord(content)
       // Escape here means "put this away", not "throw it away": the person
       // dismissed a surface, they did not cancel their question.
       expect(ed.getDoc()).toBe('why is this slow')
@@ -7334,7 +7487,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       startCommand(client)
-      summonChord(content)
+      await summonChord(content)
       expect(targetNamed(ed)).toBe('agent')
 
       // The chord is now the editor's own — the explicit target switch. It
@@ -7379,7 +7532,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       const handler = startCommand(client)
-      summonChord(content)
+      await summonChord(content)
       expect(targetNamed(ed)).toBe('agent')
 
       finishCommand(handler)
@@ -7404,7 +7557,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       const handler = startCommand(client)
-      summonChord(content)
+      await summonChord(content)
       ed.insertText('what did that do')
 
       finishCommand(handler)
@@ -7465,7 +7618,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       const dimensions = { cols: renderer.cols, rows: renderer.rows }
       const resizeCalls = session.sendResize.mock.calls.length
 
-      summonChord(content)
+      await summonChord(content)
 
       expect(ed.isVisible).toBe(true)
       expect(ed.root.dataset.placement).toBe('overlay')
@@ -7611,7 +7764,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       startCommand(client)
-      summonChord(content)
+      await summonChord(content)
       ed.insertText('what is it waiting on')
       const session = sessionOf(content)
       session.send.mockClear()
@@ -7649,7 +7802,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       startCommand(client)
-      summonChord(content)
+      await summonChord(content)
       const session = sessionOf(content)
       session.send.mockClear()
 
@@ -7744,10 +7897,12 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         attempt: { id: 'att-run', state: 'open', origin: 'app', command: 'sleep 300' },
       })
       expect(ed.isVisible).toBe(false)
+      rendererOf(content).captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
 
       const grant = itemNamed(runningBlockMenu(content), 'grant')
       expect(grant?.textContent).toBe('Ask about this block')
       grant?.click()
+      await vi.waitFor(() => expect(ed.isVisible).toBe(true))
 
       const block = paneOf(content).querySelector<HTMLElement>('.cmd-block-running')
       expect(block?.dataset.granted).toBe('true')

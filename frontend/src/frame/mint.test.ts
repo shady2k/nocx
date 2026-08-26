@@ -1,3 +1,4 @@
+import { createCapturedFrameView } from './display'
 // @vitest-environment jsdom
 // Frame minting acceptance tests (bead nocx-3j9b, spec §2.2).
 //
@@ -164,5 +165,21 @@ describe('the capture fence', () => {
     if (frame.provenance.source === 'live') {
       expect(frame.provenance.identity.generation).toBeGreaterThan(before.generation)
     }
+  })
+})
+
+describe('captured frame display', () => {
+  it('renders the captured rows and cell attributes without reading a live buffer', () => {
+    const source = seedSource(['before', 'still here'])
+    const tracker = new CaptureIdentityTracker(source)
+    const frame = mintLiveFrame(tracker.identity(), { start: 0, end: 2 }, seamFor(source))
+
+    const view = createCapturedFrameView(frame)
+
+    expect(view.className).toBe('nocx-freeze-frame')
+    expect(view.textContent).toContain('before')
+    expect(view.textContent).toContain('still here')
+    expect(view.querySelectorAll('.nocx-freeze-frame__row')).toHaveLength(2)
+    expect(view.querySelectorAll('.nocx-freeze-frame__cell')).toHaveLength(2 * source.cols)
   })
 })

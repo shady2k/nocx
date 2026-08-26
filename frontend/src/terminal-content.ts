@@ -100,6 +100,7 @@ import {
 } from './pane-content'
 import { type CapturedFrame } from './frame/types'
 import { CaptureAbortedError } from './frame/capture-identity'
+import { createCapturedFrameView, createFreezeMarker } from './frame/display'
 import { type ProfileClient } from './profiles'
 import { RpcError } from './dispatcher'
 import { NotifyClient } from './notify-client'
@@ -457,6 +458,16 @@ export class TerminalContent extends BasePaneContent {
    *  the invariant `_syncLifecycleOwnership` states about itself — editor
    *  shown ⟺ grid read-only — is untouched. It is spent the moment the
    *  command stops running, whichever way it stops. */
+  /** The one live frame displayed while the summoned editor is open. The
+   *  renderer keeps parsing underneath it; this is presentation state only. */
+  private _pinnedFrame: CapturedFrame | null = null
+  private _freezeFrameView: HTMLElement | null = null
+  /** Inline position is temporarily set because alternate/fullscreen live
+   *  containers do not otherwise establish the frame view's containing block. */
+  private _freezeFrameParentPosition: string | null = null
+  private _freezeMarker: HTMLElement | null = null
+  /** Prevent two concurrent capture transactions from both summoning. */
+  private _summonPending = false
   private _summoned = false
   /** The target the summon displaced, restored when the summon ends and the
    *  draft is empty.
@@ -2971,9 +2982,13 @@ export class TerminalContent extends BasePaneContent {
           // The editor on screen owns this chord: it is the explicit target
           // switch there, and the editor's own handler decides.
           if (this.editor?.isVisible) return
-          if (!this.summonEditor()) return
+          if (!this.canSummonEditor()) return
+          // Consume the chord before capture awaits the parse fence. If the
+          // capture is refused, no editor or marker appears, but the chord
+          // still cannot become a CR in the running program.
           e.preventDefault()
           e.stopPropagation()
+          void this.summonEditor()
         },
         true,
       )
@@ -3634,6 +3649,13 @@ export class TerminalContent extends BasePaneContent {
     return this.renderer.captureLiveFrame(region)
   }
 
+  /** The frame pinned by the active summoned editor, or null otherwise.
+   *  The next bead's session.read consumer reads this seam; it does not
+   *  reach into the renderer or create a second frame representation. */
+  pinnedFrame(): CapturedFrame | null {
+    return this._pinnedFrame
+  }
+
   /** Report the lane's buffer kind to the backend (agent.laneInteractivity,
    *  ADR-0020 decision 3): the renderer observed the buffer change, the
    *  backend decides the awaiting-takeover transition from it. Fire-and-
@@ -3839,39 +3861,88 @@ export class TerminalContent extends BasePaneContent {
     return running !== null && running !== undefined && this.agentRuns.has(running)
   }
 
-  /** Summon the editor over a running command, in ask mode (nocx-92gfl).
-   *
-   *  Two gestures reach this same summon path and nowhere else: ⌘/Ctrl+Enter
-   *  from the grid, and "ask about this block" on the block's ⋮ menu. The
-   *  menu delegates marking to `toggleGrant`, which invokes this path for the
-   *  running block. The menu is a second DOOR, never a second implementation.
-   *
-   *  Refused unless there is something to ask about and the pane is in a
-   *  state where an editor belongs: no running command (the editor is
-   *  already there, or will be), or the native-input latch (the person's own
-   *  one-way choice, which nothing may reverse for them).
-   *
-   *  Returns whether it summoned, so a caller can leave the key alone. */
-  private summonEditor(): boolean {
+  /** Whether the editor can begin a capture transaction. No presentation
+   *  state changes here: the frame and marker are installed only after the
+   *  renderer has produced a settled snapshot. */
+  private canSummonEditor(): boolean {
     const editor = this.editor
-    if (editor === null || editor.isVisible) return false
-    if (!this.hasRunningCommand()) return false
-    if (this.nativeMode) return false
+    if (editor === null || editor.isVisible || this._summonPending) return false
+    if (!this.hasRunningCommand() || this.nativeMode) return false
     const targets = this.inputTargets
     const agentId = this.agentTarget?.id
-    // No assistant target registered means there is nothing to ask, and a
-    // summoned editor whose only legal target does not exist would be a box
-    // that can do nothing at all.
-    if (!targets || !agentId) return false
-    this._summonRestoreTargetId = targets.active().id
-    this._summoned = true
-    if (targets.active().id !== agentId) targets.setActive(agentId)
-    // Set placement before showing or focusing: the visible editor must never
-    // spend a frame in the pane's flex layout while a program owns its grid.
-    this._setEditorPlacement('overlay')
-    this._syncLifecycleOwnership()
-    editor.focus()
-    return true
+    return (
+      targets !== null &&
+      agentId !== undefined &&
+      this.scrollback?.xtermLiveContainer !== undefined &&
+      editor.root.querySelector('.nocx-editor-chrome-left') !== null
+    )
+  }
+
+  /** Summon the editor over a running command, in ask mode (nocx-92gfl).
+   *
+   *  The renderer is the one owner of the grid (AD-6). Capture therefore
+   *  happens before this transaction changes editor visibility or target
+   *  state. The live renderer keeps receiving and parsing bytes while the
+   *  captured DOM view is shown over it.
+   *
+   *  Returns whether it summoned, so a caller can consume a successful
+   *  gesture without creating a second input path. */
+  private async summonEditor(): Promise<boolean> {
+    if (!this.canSummonEditor()) return false
+    const editor = this.editor
+    const targets = this.inputTargets
+    const agentId = this.agentTarget?.id
+    if (editor === null || targets === null || agentId === undefined) return false
+
+    this._summonPending = true
+    try {
+      const frame = await this.captureLiveFrame()
+      // The command may have finished, the tab may have closed, or another
+      // path may have shown the editor while capture was in flight. All are
+      // refusals: no stale frame, marker, placement or target mutation.
+      if (
+        this._disposed ||
+        this.editor !== editor ||
+        editor.isVisible ||
+        !this.hasRunningCommand() ||
+        this.nativeMode ||
+        this.scrollback?.xtermLiveContainer === undefined
+      ) {
+        return false
+      }
+
+      const markerHost = editor.root.querySelector<HTMLElement>('.nocx-editor-chrome-left')
+      const frameHost = this.scrollback?.xtermLiveContainer
+      if (markerHost === null || frameHost === undefined) return false
+
+      const view = createCapturedFrameView(frame)
+      this._freezeFrameParentPosition = frameHost.style.position
+      frameHost.style.position = 'relative'
+      frameHost.appendChild(view)
+      this._pinnedFrame = frame
+      this._freezeFrameView = view
+
+      const marker = createFreezeMarker()
+      markerHost.appendChild(marker)
+      this._freezeMarker = marker
+
+      this._summonRestoreTargetId = targets.active().id
+      this._summoned = true
+      targets.setActive(agentId)
+      // Set placement before showing or focusing: the visible editor must
+      // never spend a frame in the pane's flex layout.
+      this._setEditorPlacement('overlay')
+      this._syncLifecycleOwnership()
+      editor.focus()
+      return true
+    } catch {
+      // CaptureAbortedError and renderer refusal both leave the pane exactly
+      // as it was. In particular, no display marker is a claim about a frame
+      // that was never captured.
+      return false
+    } finally {
+      this._summonPending = false
+    }
   }
 
   /** Keep the editor's one DOM surface in either the prompt flow or the
@@ -3914,17 +3985,31 @@ export class TerminalContent extends BasePaneContent {
    *  empty. A half-typed question re-pointed at the shell would turn the
    *  person's next Enter into a command they never wrote — the exact reason
    *  the dropped auto-switching design was dropped. */
+
   private _endSummon(): void {
     this._summoned = false
     const restore = this._summonRestoreTargetId
     this._summonRestoreTargetId = null
-    // Clear placement before any caller reconciles visibility. This same
-    // transition owns summon state and the CSS attribute.
-    this._setEditorPlacement('inline')
+    this._clearFreezePresentation()
     if (restore === null || this.editor === null) return
     if (this.editor.getDoc() !== '') return
     if (this.inputTargets?.active().id === restore) return
     this.inputTargets?.setActive(restore)
+  }
+
+  /** Remove the static frame, marker, and temporary containing-block style. */
+  private _clearFreezePresentation(): void {
+    this._setEditorPlacement('inline')
+    const frameParent = this._freezeFrameView?.parentElement
+    if (frameParent && this._freezeFrameParentPosition !== null) {
+      frameParent.style.position = this._freezeFrameParentPosition
+    }
+    this._freezeFrameParentPosition = null
+    this._freezeFrameView?.remove()
+    this._freezeFrameView = null
+    this._pinnedFrame = null
+    this._freezeMarker?.remove()
+    this._freezeMarker = null
   }
 
   /** The person's ONE explicit target switch: the caret indicator's click
@@ -4302,7 +4387,7 @@ export class TerminalContent extends BasePaneContent {
     this.grantController?.setBlocks(this.grantedBlocks)
     // The menu's Ask action is the mouse door to the same summon path as
     // Ctrl+Enter. Unmarking remains a pure toggle and never summons.
-    if (adding && isRunningBlock) this.summonEditor()
+    if (adding && isRunningBlock) void this.summonEditor()
   }
 
   private refreshGrant(blockEl: HTMLElement): void {
@@ -4357,7 +4442,7 @@ export class TerminalContent extends BasePaneContent {
     }
     this._summoned = false
     this._summonRestoreTargetId = null
-    this._setEditorPlacement('inline')
+    this._clearFreezePresentation()
     this.session?.close()
     this.renderer?.dispose()
     this.editor?.dispose()

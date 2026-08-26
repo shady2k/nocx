@@ -216,53 +216,42 @@ test.describe('a secret in the path: the value crosses to the server and never t
     await expect(workbench.locator('#api-url')).toHaveValue('{{baseUrl}}/bot{{token}}/sendMessage')
     const urlField = workbench.locator('#api-url')
     const picker = page.getByRole('listbox', { name: 'vault secrets' })
-    const placeCaretBeforePath = async (): Promise<void> => {
-      await urlField.evaluate((el) => {
-        const input = el as HTMLInputElement
-        const pos = input.value.indexOf('/sendMessage')
-        if (pos < 0) throw new Error('the test URL has no /sendMessage suffix')
-        input.focus()
-        input.setSelectionRange(pos, pos)
-      })
-    }
 
     // `@token` is inside a word in this URL path, so the passive picker
-    // deliberately does not open. The request panel's explicit door is the
-    // product path for this case.
+    // deliberately does not open. The create journey below starts at a word
+    // boundary, then removes only that separator after insertion.
     await urlField.fill('{{baseUrl}}/bot@token/sendMessage')
     await expect(picker).not.toBeVisible()
 
-    // Create the token through the same explicit door, but start at a
-    // whitespace boundary so the picker can accept the requested name.
-    await urlField.fill('{{baseUrl}}/bot ')
-    await workbench.getByRole('button', { name: 'More actions for this request' }).click()
-    const requestMenu = page.getByTestId('api-request-row-menu')
-    await requestMenu.getByRole('menuitem', { name: 'Insert a secret…' }).click()
-    await urlField.pressSequentially('token')
+    // Type the requested name after a word-start `@`; the picker offers its
+    // create row in place and carries the typed name into the dialog.
+    await urlField.fill('{{baseUrl}}/bot @token')
     await expect(picker).toBeVisible()
     await expect(picker.getByRole('option', { name: /Add "token"/ })).toBeVisible()
     await urlField.press('Enter')
 
-    const addSecret = page.getByRole('dialog').filter({ hasText: 'Add secret' })
-    await expect(addSecret).toBeVisible()
-    await addSecret.locator('#sr-add-name').fill('token')
-    await addSecret.locator('#sr-add-value').fill(TELEGRAM_BOT_TOKEN)
-    await addSecret.getByRole('button', { name: 'Add secret', exact: true }).click()
-    await expect(addSecret).not.toBeVisible()
-
-    // Creating a record hands the surface to Settings. Return to the
-    // workbench, use the explicit door at the middle-word caret, and accept
-    // the real row.
-    await page.locator('.activity-bar button[data-action="api"]').click()
-    await expect(workbench).toBeVisible()
-    await urlField.fill('{{baseUrl}}/bot/sendMessage')
-    await placeCaretBeforePath()
-    await workbench.getByRole('button', { name: 'More actions for this request' }).click()
-    await requestMenu.getByRole('menuitem', { name: 'Insert a secret…' }).click()
-    await expect(picker).toBeVisible()
-    await expect(picker.getByRole('option', { name: 'token', exact: true })).toBeVisible()
-    await urlField.press('Enter')
+    const createSecret = page.getByRole('dialog').filter({ hasText: 'Create secret' })
+    await expect(createSecret).toBeVisible()
+    await expect(createSecret.locator('#secret-create-name')).toHaveValue('token')
+    await expect(createSecret.locator('#secret-create-kind')).toHaveValue('api-token')
+    await createSecret.locator('#secret-create-value').fill(TELEGRAM_BOT_TOKEN)
+    await createSecret.getByRole('button', { name: 'Save to vault', exact: true }).click()
+    await expect(createSecret).not.toBeVisible()
     await expect(urlField).toHaveValue(/\{\{secret:[^}]+\}\}/)
+    await urlField.click()
+    await urlField.press('End')
+    await urlField.pressSequentially('/sendMessage')
+    // The picker requires a word boundary before `@`; remove that separator
+    // as the person finishes placing the secret inside the path segment.
+    await urlField.evaluate((el) => {
+      const input = el as HTMLInputElement
+      const separator = input.value.indexOf(' {{secret:')
+      if (separator < 0) throw new Error('created secret has no path separator')
+      input.focus()
+      input.setSelectionRange(separator, separator + 1)
+    })
+    await urlField.press('Backspace')
+    await expect(urlField).toHaveValue(/\{\{baseUrl\}\}\/bot\{\{secret:[^}]+\}\}\/sendMessage/)
 
     await workbench.getByRole('button', { name: 'Send', exact: true }).click()
 

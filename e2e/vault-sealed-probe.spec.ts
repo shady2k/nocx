@@ -213,11 +213,30 @@ test('a bound key asks the vault as the editor opens, and is then named (nocx-5r
   // name the mint gave it (capability/config.go endpointKeyName), and the
   // editor opens on "Use existing secret" with that row bound.
   const dialog = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
-  const picker = dialog.locator('select').first()
-  await expect(picker).toHaveValue(/^secrow:/)
-  await expect(picker.locator('option:checked')).toHaveText(`${endpointName} API key`, {
-    timeout: 10_000,
-  })
+  await expect(dialog).toBeVisible()
+  const picker = dialog.getByRole('combobox', { name: 'Existing secret' })
+  await expect(picker).toHaveValue(`${endpointName} API key`, { timeout: 10_000 })
+  await expect(picker).not.toHaveValue(/secrow:/)
+  // The picker no longer exposes the opaque handle, so the probe is the
+  // surviving proof that the named row still resolves to the endpoint key.
+  const probeBase = fake.requests().length
+  const testButton = dialog.getByRole('button', { name: 'Test endpoint', exact: true })
+  await expect(testButton).toBeEnabled()
+  await testButton.click()
+  await expect
+    .poll(() =>
+      fake
+        .requests()
+        .slice(probeBase)
+        .find((request) => request.body.includes('"model":"e2e-model"')),
+    )
+    .toBeDefined()
+  const probeRequest = fake
+    .requests()
+    .slice(probeBase)
+    .find((request) => request.body.includes('"model":"e2e-model"'))
+  expect(probeRequest?.authorization).toBe(`Bearer e2e-key-${nonce}`)
+  await expect(dialog).toContainText(/e2e-model answered in \d+ ms/, { timeout: 15_000 })
 })
 
 test('dismissing the unlock fails the call cleanly — no failure is painted', async ({ page }) => {

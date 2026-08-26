@@ -691,9 +691,9 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await page.getByRole('button', { name: `Edit ${name}` }).click()
     const editDialog = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
     await expect(editDialog).toBeVisible()
-    const picker = editDialog.locator('select')
-    await expect(picker).toBeVisible()
-    await expect(picker).toHaveValue(/^secrow:/)
+    const picker = editDialog.getByRole('combobox', { name: 'Existing secret' })
+    await expect(picker).toHaveValue(`${name} API key`)
+    await expect(picker).not.toHaveValue(/secrow:/)
     // The button must be ENABLED before the click: it is disabled while a
     // probe is in flight (testDisabled = probing()), and a click on a
     // disabled button is silently swallowed — leaving the dialog without a
@@ -711,9 +711,8 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // The probe succeeded end to end — a streamed answer through the real
     // backend, not merely a request that arrived.
     await expect(editDialog).toContainText(/e2e-model answered in \d+ ms/, { timeout: 15_000 })
-    // The material was never sent back to the renderer: the source is still
-    // the bound row after a probe that resolved the stored material.
-    await expect(picker).toHaveValue(/^secrow:/)
+    await expect(picker).toHaveValue(`${name} API key`)
+    await expect(picker).not.toHaveValue(/secrow:/)
 
     // ── A key typed into the form WINS over the stored one ──────────────
     const typedKey = `typed-key-${nonce}`

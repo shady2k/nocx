@@ -1337,6 +1337,9 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 		RunID: n.RunID, Attempt: n.Attempt, Tool: n.Tool, CallID: n.CallID, ArgHash: n.ArgHash,
 		Effect: content.Effect(n.Effect),
 	}
+	if ap != nil {
+		proposal.Invocation = ap.Invocation
+	}
 	if !h.approvals.IsPending(proposal) {
 		if ap != nil {
 			proposal.EntryID = ap.EntryID
@@ -1550,49 +1553,58 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 }
 
 // applyStandingAnswer records the part of a decision that outlives the
-// proposal it was given on: "in this session" writes the run's session's
-// overlay, "always" writes ONE row of the global matrix. "once" writes
-// nothing anywhere, which is the behaviour every answer had before this
-// existed. The row is the one the BACKEND classified the proposal under —
-// never anything the wire named, so no answer can express a rule over a tool
-// name (ADR-0028 decision 4).
-//
-// It returns the sentence to report when the standing part could not be
-// recorded, and empty when there was nothing to record or it was recorded.
-// A failure here never refuses the call: the person said yes, and punishing
-// them for a store problem is the wrong end to fail toward. The run resumes,
-// or the decline stands, and the result says the standing part did not
-// stick.
+// proposal it was given on: "in this session" writes an invocation rule to
+// the run's session overlay, "always" writes the same rule to the global
+// policy. "once" writes nothing anywhere.
 func (h agentHandlers) applyStandingAnswer(p approveParams, ap assistant.Approval, sid session.ID) string {
 	if p.Scope == approveScopeOnce {
 		return ""
 	}
-	effect, ok := h.approvals.EffectFor(ap)
-	if !ok {
-		// No row was recorded for this proposal, so there is no row to
-		// write. Fail toward asking: the answer covers this call, and the
-		// next call of the same kind asks again.
-		h.log.Warn("agent.approve: the proposal names no effect class; the standing part of the answer was not recorded",
+	invocation, hasInvocation := h.approvals.InvocationFor(ap)
+	if !hasInvocation {
+		h.log.Warn("agent.approve: the proposal has no canonical invocation; the standing answer was not recorded",
 			"run", p.RunID, "tool", p.Tool, "scope", p.Scope)
-		return "the decision was applied to this call, but could not be saved as a standing answer: the question named no effect class"
+		return "the decision was applied to this call, but could not be saved as a standing answer: the question named no canonical invocation"
 	}
 	d := content.DecisionRefuse
 	if p.Approved {
 		d = content.DecisionPermit
 	}
+	// Tools without a command argument retain the old effect-matrix standing
+	// behavior. Command tools must have a sound canonical invocation before
+	// they can create a rule; an unparseable command has no standing escape.
+	if len(invocation.Commands) == 0 {
+		effect, ok := h.approvals.EffectFor(ap)
+		if !ok {
+			return "the decision was applied to this call, but could not be saved as a standing answer: the question named no effect class"
+		}
+		if p.Scope == approveScopeSession {
+			h.sessionPolicy.Set(sid, effect, d)
+			return ""
+		}
+		if h.globalPolicy == nil {
+			return "the decision was applied to this call, but there is no policy store to save it as a standing answer in"
+		}
+		next := h.globalPolicy.Policy().SetRowDecision(effect, d)
+		if err := h.globalPolicy.SetPolicy(next); err != nil {
+			return "the decision was applied to this call, but could not be saved as a standing answer: " + err.Error()
+		}
+		return ""
+	}
+	rule, err := content.LiteralInvocationRule(invocation, d)
+	if err != nil {
+		h.log.Warn("agent.approve: the standing answer was not recorded",
+			"run", p.RunID, "tool", p.Tool, "scope", p.Scope, "error", err)
+		return "the decision was applied to this call, but could not be saved as a standing answer: " + err.Error()
+	}
 	if p.Scope == approveScopeSession {
-		h.sessionPolicy.Set(sid, effect, d)
+		h.sessionPolicy.SetRule(sid, rule)
 		return ""
 	}
 	if h.globalPolicy == nil {
 		return "the decision was applied to this call, but there is no policy store to save it as a standing answer in"
 	}
-	// SetRowDecision replaces the row's DECISION and keeps its scopes: a
-	// standing answer changes what happens, never what the row is bound to.
-	// The write goes through the store the settings page writes through, so
-	// the two surfaces are one owner of one document rather than a
-	// read-modify-write race between them.
-	next := h.globalPolicy.Policy().SetRowDecision(effect, d)
+	next := h.globalPolicy.Policy().WithRule(rule)
 	if err := h.globalPolicy.SetPolicy(next); err != nil {
 		return "the decision was applied to this call, but could not be saved as a standing answer: " + err.Error()
 	}

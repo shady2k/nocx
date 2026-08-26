@@ -170,19 +170,19 @@ type ApprovalRequest struct {
 	// the backend computes it once, and a changed argument must not resume
 	// under the old approval.
 	ArgHash string `json:"argHash"`
-	// Effect is the effect class the gate decided on — the row a standing
-	// answer writes. It is SENT rather than derived, because deriving it in
-	// the renderer would be a rule keyed by a tool name in everything but
-	// storage, which ADR-0028 decision 4 forbids.
+	// Effect is the effect class the gate decided on. It remains on the wire
+	// as a fact for the prompt; command-bearing standing answers use the
+	// internal canonical invocation below rather than granting this row.
 	Effect content.Effect `json:"effect"`
 	// Resource is what the gate matched the call against, or nil when the
-	// call named none. A fact for the person reading the question; a
-	// standing answer is over the effect, never over this.
+	// call named none. It is a fact for the person reading the question.
 	Resource *content.GrantScope `json:"resource,omitempty"`
 	// EntryID is the ledger entry that recorded the proposal — what the
-	// approved call runs as a SUBSEQUENT attempt of (ADR-0020 decision 4).
-	// A carrier for the resume, never displayed.
+	// approved call runs as a SUBSEQUENT attempt of.
 	EntryID string `json:"-"`
+	// Invocation is the parser result used by the effect and rule gates. It
+	// is internal checkpoint state, not renderer input.
+	Invocation content.Invocation `json:"-"`
 }
 
 func init() {
@@ -389,8 +389,15 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 		// The mechanical call classifier is deliberately after validation and
 		// before every policy/approval/ledger path. Unlike the model classifier
 		// below, it may lower a declared worst case: CommandEffect retains that
-		// worst case for every disqualified command.
-		decl = classifyCall(decl, args)
+		// worst case for every disqualified command. The returned invocation is
+		// the parser result reused by rule matching; it is never re-tokenized.
+		var invocation content.Invocation
+		decl, invocation = classifyCall(decl, args)
+		if decl.CommandArg == "" {
+			// Non-command tools have no invocation rules, but their existing
+			// matrix path remains unchanged.
+			invocation.Parsed = true
+		}
 
 		// 3. Policy — permit / ask / refuse over the ADR-0020 lattice.
 		//    FIRST, the person's own no (nocx-uvac6.1): the resume re-runs
@@ -404,15 +411,17 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 			if kind, declined := m.approvals.DeclinedKind(m.proposal(decl.Name, tCtx.CallID, rawArgs)); declined {
 				return refusalResult(decl.Name, RefusedByPerson, kind), nil
 			}
-			// A STANDING no also answers any later call of the same effect
-			// class in this run: "deny in this session" / "deny always"
-			// said "this kind of call", so a retry of the same kind —
-			// which mints a new call id and therefore misses the exact
-			if kind, standing := m.approvals.DeclinedEffect(m.runID, decl.Effect); standing {
+			if decl.CommandArg == "" {
+				if kind, standing := m.approvals.DeclinedEffect(m.runID, decl.Effect); standing {
+					return refusalResult(decl.Name, RefusedByPerson, kind), nil
+				}
+			} else if kind, standing := m.approvals.DeclinedInvocation(m.runID, invocation); standing {
+				// A command standing no matches only the canonical
+				// invocation that the person answered about.
 				return refusalResult(decl.Name, RefusedByPerson, kind), nil
 			}
 		}
-		outcome, refusal := m.decide(decl, args)
+		outcome, refusal := m.decideInvocation(decl, args, invocation)
 		switch outcome {
 		case policyRefuse:
 			// (nocx-uvac6.1) The refusal IS the call's result: a tool
@@ -434,8 +443,7 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 			if m.approvals != nil && m.approvals.IsApproved(ap) {
 				break // the exact proposal was approved; execute it
 			}
-			tripLatch(ctx, &ApprovalRequestedError{Request: m.request(decl, tCtx.CallID, rawArgs, args)})
-			return "", m.escalate(ctx, decl, tCtx.CallID, rawArgs, args)
+			return "", m.escalate(ctx, decl, tCtx.CallID, rawArgs, args, invocation)
 		}
 
 		// 3b. The classifier (bead nocx-kpy23): a second, cheaper model
@@ -458,11 +466,11 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 				// nothing leaves for the classifier — the run fails with a
 				// terminal error, exactly as the result gate fails the run
 				// when IT cannot see (step 7's screenErr path).
-				return "", fmt.Errorf("agent tool %q: classifier gate: %w", decl.Name, err)
+				return "", fmt.Errorf("agent tool %q: classifier gate: %w", decl.Name, classifyErr)
 			}
 			if ask != nil {
 				tripLatch(ctx, &ApprovalRequestedError{Request: ask})
-				return "", m.escalateClassifier(ctx, decl, tCtx.CallID, rawArgs, ask, fact)
+				return "", m.escalateClassifier(ctx, decl, tCtx.CallID, rawArgs, ask, fact, invocation)
 			}
 			classifierFact = fact
 		}
@@ -650,17 +658,19 @@ func (m *policyMiddleware) validate(decl agenttools.Tool, raw string) (map[strin
 // classifyCall is the one proposal-to-effect conversion. A declaration may
 // name the validated argument carrying a shell command; every other tool keeps
 // its declared effect. The registry owns which tools carry commands, so this
-// path does not grow a second tool-name table.
-func classifyCall(decl agenttools.Tool, args map[string]any) agenttools.Tool {
+// path does not grow a second tool-name table. The returned invocation is the
+// canonical parser result consumed by the policy rules.
+func classifyCall(decl agenttools.Tool, args map[string]any) (agenttools.Tool, content.Invocation) {
 	if decl.CommandArg == "" {
-		return decl
+		return decl, content.Invocation{}
 	}
 	command, ok := args[decl.CommandArg].(string)
 	if !ok {
-		return decl
+		return decl, content.Invocation{}
 	}
-	decl.Effect = CommandEffect(command, decl.Effect)
-	return decl
+	invocation := parseCanonicalInvocation(command)
+	decl.Effect = commandEffect(invocation, decl.Effect)
+	return decl, invocation
 }
 
 // ── policy ────────────────────────────────────────────────────────────────
@@ -673,39 +683,24 @@ const (
 	policyRefuse
 )
 
-// decide is the permit/ask/refuse function over the ADR-0020 lattice
-// (decision 6) as amended (2026-08-16, amendment pending owner approval):
-// the grant's policy MATRIX carries one decision per effect class, and two
-// rules hold under any matrix — a call naming a resource outside the
-// SELECTED EFFECT's row scopes is refused (the tool's contract is "within
-// the grant's paths"; widening the grant is a NEW grant on a NEW attempt,
-// never a mid-run question), and an effect the matrix refuses is refused
-// (the tool should never have been declared under this grant — ForGrant
-// filters — and this is the defense that holds if the declaration path is
-// bypassed).
-//
-// The second return value is meaningful ONLY for policyRefuse: it is the
-// reason, and it exists because the product must tell a person WHY a call did
-// not run. It is returned from here rather than re-derived at the transport —
-// the two branches below are the whole of "why", and a second derivation of
-// one question is the defect AGENTS.md spends a section on.
+// decide is the compatibility seam used by non-command tests and tools. A
+// command call uses decideInvocation so its canonical parser result is reused.
 func (m *policyMiddleware) decide(t agenttools.Tool, args map[string]any) (policyOutcome, PolicyRefusalReason) {
-	if m.grant.Policy.DecisionFor(t.Effect) == content.DecisionRefuse {
+	return m.decideInvocation(t, args, content.Invocation{Parsed: true})
+}
+
+func (m *policyMiddleware) decideInvocation(t agenttools.Tool, args map[string]any, invocation content.Invocation) (policyOutcome, PolicyRefusalReason) {
+	decision := m.grant.Policy.DecisionForInvocation(t.Effect, invocation)
+	if decision == content.DecisionRefuse {
 		return policyRefuse, RefusedByDecision
 	}
 	if !m.inScope(t, args) {
 		return policyRefuse, RefusedOutOfScope
 	}
-	switch m.grant.Policy.DecisionFor(t.Effect) {
-	case content.DecisionPermit:
+	if decision == content.DecisionPermit {
 		return policyPermit, ""
-	default:
-		// Unstated rows, and a grant without a matrix, decide ASK: the
-		// fail-toward-asking default (an empty matrix is a policy that
-		// asks), and a silent permit is how a feature that was never
-		// configured survives a release.
-		return policyAsk, ""
 	}
+	return policyAsk, ""
 }
 
 // inScope is the policy's scope check: the resource the call names must be
@@ -811,29 +806,22 @@ func pathUnder(path, scope string) bool {
 // escalate suspends the run BEFORE next — the call that is asking has not
 // run, and no call after it in this model response will. The escalation is
 // RECORDED, not only held in memory (nocx-5dldy): the proposal put to a
-// person is an action entry in the ledger with its own interrupted attempt —
-// "the proposal, the decision, the attempt and the result are one readable
-// thread" — and the approved call runs as a SUBSEQUENT attempt of that same
-// entry (ADR-0020 decision 4: a retry after approval is an execution of the
-// same intent, never a new intent). The persisted interrupt state is the
-// proposal itself: the resume re-runs the pipeline and the approval record
-// decides whether the exact proposal may execute.
-func (m *policyMiddleware) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any) error {
-	ap := m.proposal(decl.Name, callID, rawArgs)
+// person is an action entry in the ledger with its own interrupted attempt.
+func (m *policyMiddleware) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, invocation content.Invocation) error {
+	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
 	var entryID string
 	if m.ledger != nil {
 		id, err := m.recordProposal(ctx, decl, rawArgs, matchedResource(decl, args), ap, nil)
 		if err != nil {
-			// The proposal could not be recorded: the run fails rather than
-			// asking a question whose answer would resume nothing — a
-			// question with no thread is the hole the epic names.
 			return err
 		}
 		entryID = id
 	}
 	req := m.request(decl, callID, rawArgs, args)
+	req.Invocation = cloneInvocation(invocation)
 	req.ArgHash = ap.ArgHash
 	req.EntryID = entryID
+	tripLatch(ctx, &ApprovalRequestedError{Request: req})
 	if m.approvals != nil {
 		ap.EntryID = entryID
 		m.approvals.Request(ap)
@@ -841,21 +829,11 @@ func (m *policyMiddleware) escalate(ctx context.Context, decl agenttools.Tool, c
 	return compose.StatefulInterrupt(ctx, req, req)
 }
 
-// escalateClassifier is escalate with the classifier's ledger fact: the
-// ask the classifier caused — suspect, failed, or its input withheld by
-// the egress gate — suspends the run BEFORE next, is RECORDED with the
-// classifier block on the proposal (criterion 6: "why was this asked" is
-// answerable from the ledger), and resumes through the SAME approval
-// machinery as a policy ask: the person's yes covers the proposal
-// INCLUDING its classification, and the resume skips a second
-// consultation (the loop property).
-func (m *policyMiddleware) escalateClassifier(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, ask *ApprovalRequest, fact *classifierFact) error {
-	ap := m.proposal(decl.Name, callID, rawArgs)
+// escalateClassifier is escalate with the classifier's ledger fact.
+func (m *policyMiddleware) escalateClassifier(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, ask *ApprovalRequest, fact *classifierFact, invocation content.Invocation) error {
+	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
 	var entryID string
 	if m.ledger != nil {
-		// The classifier arm's ask already carries the SAME derivation
-		// (request() built it with matchedResource), so the record takes it
-		// off the ask rather than deriving it a second time.
 		id, err := m.recordProposal(ctx, decl, rawArgs, ask.Resource, ap, fact)
 		if err != nil {
 			return err
@@ -863,6 +841,7 @@ func (m *policyMiddleware) escalateClassifier(ctx context.Context, decl agenttoo
 		entryID = id
 	}
 	ask.ArgHash = ap.ArgHash
+	ask.Invocation = cloneInvocation(invocation)
 	ask.EntryID = entryID
 	if m.approvals != nil {
 		ap.EntryID = entryID
@@ -896,6 +875,12 @@ func (m *policyMiddleware) proposal(toolName, callID, rawArgs string) Approval {
 		CallID:  callID,
 		ArgHash: canonicalArgHash(rawArgs),
 	}
+}
+
+func (m *policyMiddleware) proposalWithInvocation(toolName, callID, rawArgs string, invocation content.Invocation) Approval {
+	ap := m.proposal(toolName, callID, rawArgs)
+	ap.Invocation = cloneInvocation(invocation)
+	return ap
 }
 
 // screenResult runs the egress gate (design §7.1) over one tool's return —

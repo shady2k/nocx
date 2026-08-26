@@ -49,6 +49,23 @@ func suspendedRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarness {
 	return suspendedRunWith(t, policy, client)
 }
 
+func suspendedCommandRun(t *testing.T, policy assistant.GlobalPolicy, invocation content.Invocation) *scopeHarness {
+	t.Helper()
+	client := &scriptedApprovalClient{script: []approvalScriptStep{
+		{suspend: func(runID string) error {
+			return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
+				RunID: runID, Attempt: 1, Tool: "files.read", CallID: "call_1",
+				Arguments: `{"path":"/repo/a.txt"}`, ArgHash: "hash-a",
+				Effect:     content.EffectObserve,
+				Resource:   &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/a.txt"},
+				Invocation: invocation,
+			}}
+		}},
+		{deltas: []string{"done"}},
+	}}
+	return suspendedRunWith(t, policy, client)
+}
+
 // suspendedEgressRun is the same run suspended by the EGRESS gate: the
 // question a standing answer may never be given to.
 func suspendedEgressRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarness {
@@ -151,7 +168,7 @@ func TestAgentApprove_ScopeOnce_WritesNothing(t *testing.T) {
 		t.Fatalf("approve state = %q, want streaming", got.State)
 	}
 
-	if got := h.overlay(); len(got) != 0 {
+	if got := h.overlay(); len(got.Decisions) != 0 || len(got.Rules) != 0 {
 		t.Fatalf("session overlay = %+v, want empty — once writes nothing", got)
 	}
 	if d := h.policy.Policy().DecisionFor(content.EffectObserve); d != content.DecisionAsk {
@@ -166,10 +183,10 @@ func TestAgentApprove_ScopeSession_PermitsTheEffectForThatSessionOnly(t *testing
 
 	h.approve(t, "session")
 
-	if got := h.overlay()[content.EffectObserve]; got != content.DecisionPermit {
+	if got := h.overlay().Decisions[content.EffectObserve]; got != content.DecisionPermit {
 		t.Fatalf("this session's observe = %q, want permit", got)
 	}
-	if _, ok := h.ws.sessionPolicy.For(session.ID("some-other"))[content.EffectObserve]; ok {
+	if _, ok := h.ws.sessionPolicy.For(session.ID("some-other")).Decisions[content.EffectObserve]; ok {
 		t.Fatal("another session inherited the answer")
 	}
 	// A session answer is not a standing one.
@@ -183,11 +200,47 @@ func TestAgentApprove_ScopeSession_DenyRefusesTheEffectForThatSession(t *testing
 
 	h.deny(t, "session")
 
-	if got := h.overlay()[content.EffectObserve]; got != content.DecisionRefuse {
+	if got := h.overlay().Decisions[content.EffectObserve]; got != content.DecisionRefuse {
 		t.Fatalf("this session's observe = %q, want refuse", got)
 	}
 	if d := h.policy.Policy().DecisionFor(content.EffectObserve); d != content.DecisionAsk {
 		t.Fatalf("global policy observe = %q, want the untouched ask", d)
+	}
+}
+
+func TestAgentApprove_CommandLiteralWildcardIsNotSavedAsStandingRule(t *testing.T) {
+	invocation := content.Invocation{
+		Commands: [][]string{{"rm", "*"}},
+		Parsed:   true,
+	}
+	differentInvocation := content.Invocation{
+		Commands: [][]string{{"rm", "/etc"}},
+		Parsed:   true,
+	}
+
+	for _, scope := range []string{"session", "always"} {
+		t.Run(scope, func(t *testing.T) {
+			h := suspendedCommandRun(t, askPolicyStore(t), invocation)
+			got := h.approve(t, scope)
+			if !strings.Contains(got.Warning, `the token "*"`) {
+				t.Fatalf("warning = %q, want the person's literal token", got.Warning)
+			}
+			if !strings.Contains(got.Warning, "saved exactly as shown") ||
+				!strings.Contains(got.Warning, "cover more than the command you were shown") {
+				t.Fatalf("warning = %q, want the exact-command reason", got.Warning)
+			}
+
+			overlaid := content.ResolvePolicy(h.policy.Policy(), nil, h.overlay())
+			if got := overlaid.DecisionForInvocation(content.EffectObserve, differentInvocation); got != content.DecisionAsk {
+				t.Fatalf("different invocation decision = %q, want ask", got)
+			}
+			if len(h.overlay().Rules) != 0 {
+				t.Fatalf("session rules = %+v, want none", h.overlay().Rules)
+			}
+			if len(h.policy.Policy().Rules) != 0 {
+				t.Fatalf("global rules = %+v, want none", h.policy.Policy().Rules)
+			}
+		})
 	}
 }
 
@@ -215,7 +268,7 @@ func TestAgentApprove_ScopeAlways_WritesTheRowIntoTheGlobalPolicy(t *testing.T) 
 	}
 	// And a standing answer is not a session one: nothing was written to the
 	// overlay that would die with the session.
-	if got := h.overlay(); len(got) != 0 {
+	if got := h.overlay(); len(got.Decisions) != 0 || len(got.Rules) != 0 {
 		t.Fatalf("session overlay = %+v, want empty — always is the standing row", got)
 	}
 }
@@ -315,7 +368,7 @@ func TestAgentApprove_EgressRefusesAnythingButOnce(t *testing.T) {
 			t.Fatalf("egress scope %q: got %+v, want -32602", scope, errObj)
 		}
 		// The refusal wrote nothing either.
-		if got := h.overlay(); len(got) != 0 {
+		if got := h.overlay(); len(got.Decisions) != 0 || len(got.Rules) != 0 {
 			t.Fatalf("egress scope %q wrote a session overlay: %+v", scope, got)
 		}
 		if d := h.policy.Policy().DecisionFor(content.EffectObserve); d != content.DecisionAsk {
@@ -436,7 +489,7 @@ func TestAgentApprove_ScopeAlways_RealEscalationWritesTheGatesRow(t *testing.T) 
 // The model proposes `run` with `df -h`; the gate must present observe, not
 // the tool's declared destructive worst case. The stored destructive row
 // starts at ask and must remain ask after "allow always".
-func TestAgentApprove_ScopeAlways_RealRunClassificationWritesTheObserveRow(t *testing.T) {
+func TestAgentApprove_ScopeAlways_RealRunClassificationWritesAnInvocationRule(t *testing.T) {
 	fake, srv := newRunToolCallingServer("")
 	defer srv.Close()
 	client, err := assistant.NewClient(nil)
@@ -485,20 +538,25 @@ func TestAgentApprove_ScopeAlways_RealRunClassificationWritesTheObserveRow(t *te
 	if got.Warning != "" {
 		t.Fatalf("warning = %q, want none — the row was there to write", got.Warning)
 	}
-	if d := policy.Policy().DecisionFor(content.EffectObserve); d != content.DecisionPermit {
-		t.Fatalf("observe = %q, want permit — allow always writes the call's row", d)
+	if got := policy.Policy().Rules; len(got) != 1 {
+		t.Fatalf("rules = %+v, want one exact invocation rule", got)
 	}
-	if d := policy.Policy().DecisionFor(content.EffectMutateDestructive); d != content.DecisionAsk {
-		t.Fatalf("mutate-destructive = %q, want untouched ask — df must not grant destructive calls", d)
+	want := content.Invocation{Commands: [][]string{{"df", "-h"}}, Parsed: true}
+	if d := policy.Policy().DecisionForInvocation(content.EffectObserve, want); d != content.DecisionPermit {
+		t.Fatalf("df invocation = %q, want permit", d)
+	}
+	other := content.Invocation{Commands: [][]string{{"rm", "-rf", "/"}}, Parsed: true}
+	if d := policy.Policy().DecisionForInvocation(content.EffectMutateDestructive, other); d != content.DecisionAsk {
+		t.Fatalf("rm invocation = %q, want untouched ask", d)
 	}
 }
 
-// TestAgentApprove_ScopeAlways_RealRunClassificationReadsTheObserveGrantBeforeDestructiveEscalation
+// TestAgentApprove_ScopeAlways_RealRunClassificationReadsTheInvocationRuleBeforeDestructiveEscalation
 // holds the READ half of the standing answer. It uses the same run tool twice:
 // after "allow always" for `df -h`, the next destructive proposal must reach
-// the wire as approvalRequested instead of executing. The row assertion above
-// proves only the WRITE landed in the observe row; it does not prove that the
-// policy read consults that row without widening the answer.
+// the wire as approvalRequested instead of executing. The rule assertion above
+// proves the exact invocation was saved; this test proves a differently-shaped
+// destructive call is not widened by it.
 func TestAgentApprove_ScopeAlways_RealRunClassificationReadsTheObserveGrantBeforeDestructiveEscalation(t *testing.T) {
 	var sid string
 	var requests atomic.Int64

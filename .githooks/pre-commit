@@ -179,7 +179,21 @@ fi
 # ADRs — while a syntactically invalid e2e spec passed every gate in this file
 # (nocx-yv37, nocx-pvjj). The root run includes frontend/ as a subdirectory, so
 # this is one checker widened, not a second one added.
-host_gate "prettier --check" npm run format:check
+# SCOPED TO WHAT IS STAGED, and that is not a weakening — it is the same
+# checker on the same files, minus the twenty seconds spent re-reading the
+# other few thousand. prettier walks the filesystem (the reason
+# .prettierignore has to name test-results/ in as many words), so a
+# whole-tree run also re-checks everything every collaborator already
+# checked. --ignore-unknown lets the list carry files prettier has no parser
+# for; the deletion filter is `--diff-filter=d`, because a deleted file
+# cannot be formatted and its absence is not a failure.
+PRETTIER_FILES=$(git diff --cached --name-only --diff-filter=d 2>/dev/null || true)
+if [ -n "$PRETTIER_FILES" ]; then
+    # shellcheck disable=SC2086
+    host_gate "prettier --check (staged)" npx prettier --check --ignore-unknown $PRETTIER_FILES
+else
+    host_gate "prettier --check" npm run format:check
+fi
 
 # The ROOT eslint, and always, for the same reason and with the same history as
 # the prettier line above. The frontend gate below is `cd frontend && npm run

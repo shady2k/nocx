@@ -1502,6 +1502,21 @@ export function freezeBlock(
     menuActions,
     entryId,
   )
+  // The derivation mark travels with the block (nocx-d6gn4.9). It is set on
+  // the RUNNING element, because that is what exists when the call is
+  // announced, and the freeze builds a new element rather than mutating the
+  // old one — so without this the mark is correct for as long as the command
+  // is running and gone the moment anybody reads the turn. That is exactly
+  // how it reached a screenshot with every test green: no test had ever let
+  // the block finish.
+  //
+  // Here rather than at the two call sites, for the reason _reown exists at
+  // all: this function owns the swap, and a fact that must survive it belongs
+  // where the swap is.
+  if (el.dataset.derived) {
+    newEl.dataset.derived = el.dataset.derived
+    newEl.title = el.title
+  }
   if (el.parentNode) {
     el.parentNode.replaceChild(newEl, el)
   }

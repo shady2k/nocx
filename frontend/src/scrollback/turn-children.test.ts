@@ -169,6 +169,16 @@ describe('a turn draws the blocks it caused, in order', () => {
 
     expect(second.el.dataset.derived).toBe('1')
     expect(second.el.title).toContain('appear')
+
+    // AND IT SURVIVES THE FREEZE. A running block is REPLACED by a frozen
+    // one when the command finishes, so a mark set on the running element is
+    // gone by the time anybody reads the turn — which is why the owner's
+    // screenshot showed no mark while every test passed: no test had ever
+    // let the block finish (2026-08-26).
+    const frozen = manager.freezeBlock(() => undefined, 1, 0)
+    expect(frozen).not.toBeNull()
+    expect(frozen!.el.dataset.derived).toBe('1')
+    expect(frozen!.el.title).toContain('appear')
     // And the first block carries nothing: nothing preceded it, so a mark
     // there would be the surface inventing a dependency.
     expect(first.el.dataset.derived).toBeUndefined()

@@ -317,3 +317,66 @@ func candidatesOf(t *testing.T, payload string) []string {
 	}
 	return body.DerivedFrom.Candidates
 }
+
+// TestAsk_TwoRunCallsRecordTheChainBetweenThem reproduces the run the owner
+// drove on 2026-08-26: a find that prints a path, then a command that IS that
+// path. `run` is the tool the whole experiment turns on and no end-to-end test
+// had ever exercised the derivation through it — the earlier ones all used
+// session.list and session.read, which is how two defects in a row reached a
+// screenshot instead of a test.
+func TestAsk_TwoRunCallsRecordTheChainBetweenThem(t *testing.T) {
+	runner := &recordingRunner{
+		body: runResolvedBody("entry-find", new(0), "success", 1, 0, 1, "122919 ./log.txt"),
+	}
+	var turn int
+	_, srv := newFakeOpenAI(func(w http.ResponseWriter, _ *http.Request) {
+		turn++
+		switch turn {
+		case 1:
+			streamToolCalls(w, toolCallSpec{
+				name: "run",
+				args: `{"sessionId":"session-a","command":"find . -maxdepth 1 -type f -printf '%s %p\n' | sort -rn | head -1"}`,
+				id:   "call_find",
+			})
+		case 2:
+			// The path came out of the first command's OUTPUT.
+			streamToolCalls(w, toolCallSpec{
+				name: "run",
+				args: `{"sessionId":"session-a","command":"head -n 10 ./log.txt"}`,
+				id:   "call_head",
+			})
+		default:
+			streamAnswer(w, "done")
+		}
+	})
+	defer srv.Close()
+
+	ledger := &fakeLedger{}
+	p := askParams(srv.URL, ptrGrant(sessionGrant("session-a", autonomousMatrix())), ledger, nil)
+	p.Requester = runner
+	p.Messages = []Message{{Role: "user", Content: "what is the biggest text file, and its first lines?"}}
+
+	cl, err := newClient(nil, toolsDirFS(t))
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	var calls []ToolCall
+	if err = cl.Ask(context.Background(), p, func(ev AskEvent) error {
+		if ev.Kind == AskToolCall && ev.Call != nil {
+			calls = append(calls, *ev.Call)
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+
+	if len(calls) != 2 {
+		t.Fatalf("announced %d calls, want 2", len(calls))
+	}
+	if len(calls[0].DerivedFrom) != 0 {
+		t.Errorf("the FIRST run announced %v; nothing preceded it", calls[0].DerivedFrom)
+	}
+	if len(calls[1].DerivedFrom) != 1 || calls[1].DerivedFrom[0] != "call_find" {
+		t.Fatalf("the second run announced %v, want [call_find]: ./log.txt came out of the first command's output", calls[1].DerivedFrom)
+	}
+}

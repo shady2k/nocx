@@ -76,15 +76,51 @@ func finished(t *testing.T, led content.LedgerRepository, runID int64, state con
 	}
 }
 
-// priorTo is the read under test, with the error handling every call site
-// would otherwise repeat.
+// priorTo is the latest turn from the plural read, with the error handling
+// every call site would otherwise repeat.
 func priorTo(t *testing.T, led content.LedgerRepository, paneID, entryID string) *content.PriorTurn {
 	t.Helper()
-	prior, err := led.PriorTurn(context.Background(), paneID, entryID)
+	turns, err := led.PriorTurns(context.Background(), paneID, entryID)
 	if err != nil {
-		t.Fatalf("PriorTurn(%s, before %s): %v", paneID, entryID, err)
+		t.Fatalf("PriorTurns(%s, before %s): %v", paneID, entryID, err)
 	}
-	return prior
+	if len(turns) == 0 {
+		return nil
+	}
+	return &turns[len(turns)-1]
+}
+
+func priorTurnsTo(t *testing.T, led content.LedgerRepository, paneID, entryID string) []content.PriorTurn {
+	t.Helper()
+	turns, err := led.PriorTurns(context.Background(), paneID, entryID)
+	if err != nil {
+		t.Fatalf("PriorTurns(%s, before %s): %v", paneID, entryID, err)
+	}
+	return turns
+}
+
+func TestPriorTurns_ReturnsEveryEarlierTurnOldestFirst(t *testing.T) {
+	led := conversationPane(t)
+	first := askIn(t, led, "session-1", "pane-conv")
+	saying(t, led, first.EntryID, first.RunID, "first answer")
+	finished(t, led, first.RunID, content.RunCompleted, content.TermCompleted)
+	second := askIn(t, led, "session-1", "pane-conv")
+	saying(t, led, second.EntryID, second.RunID, "second answer")
+	finished(t, led, second.RunID, content.RunCompleted, content.TermCompleted)
+	third := askIn(t, led, "session-1", "pane-conv")
+
+	got := priorTurnsTo(t, led, "pane-conv", third.EntryID)
+	if len(got) != 2 {
+		t.Fatalf("PriorTurns returned %d turns, want 2: %+v", len(got), got)
+	}
+	if got[0].EntryID != first.EntryID || got[1].EntryID != second.EntryID {
+		t.Fatalf("PriorTurns order = %q, %q, want %q, %q",
+			got[0].EntryID, got[1].EntryID, first.EntryID, second.EntryID)
+	}
+	if got[0].Question != "what does this screen mean?" || got[1].Question != "what does this screen mean?" {
+		t.Fatalf("PriorTurns questions = %q, %q, want both recorded questions",
+			got[0].Question, got[1].Question)
+	}
 }
 
 // ── acceptance 1: the prose of a turn that interleaved is sent WHOLE ─────
@@ -421,7 +457,7 @@ func TestPriorTurn_RefusesACursorNoRowCarriesAndAcceptsOneThatDoes(t *testing.T)
 	saying(t, led, first.EntryID, first.RunID, "an answer.")
 	second := askIn(t, led, "session-1", "pane-conv")
 
-	if _, err := led.PriorTurn(context.Background(), "pane-conv", "no-such-entry"); err == nil {
+	if _, err := led.PriorTurns(context.Background(), "pane-conv", "no-such-entry"); err == nil {
 		t.Fatal("a cursor naming no row was answered instead of refused")
 	}
 	if prior := priorTo(t, led, "pane-conv", second.EntryID); prior == nil {

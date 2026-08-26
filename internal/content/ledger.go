@@ -968,7 +968,13 @@ type PriorTurn struct {
 	// Question is its intent: what was asked, exactly as it was recorded.
 	Question string
 	// Prose is what the run answered, already arranged (see TurnProse).
-	Prose TurnProse
+	// ToolLines is one ledger-derived factual summary per action the turn
+	// caused. It rides with the turn's assistant message rather than inventing
+	// a fourth Message role or an OpenAI tool-call shape the engine does not
+	// have. The line names the call, its terminal outcome and result size; it
+	// never carries the result body.
+	ToolLines []string
+	Prose     TurnProse
 }
 
 // The ask's reference-validation failures — reachable from the renderer (an
@@ -1706,31 +1712,27 @@ type LedgerRepository interface {
 	// children and for an id no row carries: "what is inside this" has an
 	// honest answer either way.
 	Caused(ctx context.Context, entryID string) ([]CausedEntry, error)
-	// PriorTurn returns the agent turn that precedes beforeEntryID in paneID
-	// — the question that was asked and the prose of the run that answered
-	// it, already arranged (PriorTurn, TurnProse). Nil, and no error, when
-	// nothing precedes it: "there is no earlier turn in this pane" is an
-	// honest answer, and the caller's next question ("so send no history")
-	// is answered by it.
+	// PriorTurns returns every agent turn before beforeEntryID in paneID,
+	// oldest first. Each turn carries its question, arranged prose and
+	// ledger-derived tool lines. The empty slice for an empty pane means
+	// there is no thread for that pane, not that a thread was found and
+	// happened to be empty. A missing cursor is refused, and an unknown
+	// non-empty cursor returns ErrNoSuchEntry.
 	//
 	// THE JOIN IS HERE, and that is the point (AD-8). It is three questions —
-	// which turn came before this one, which of its runs is the one that
-	// stands, and what that run printed in what order — and each of them has
-	// exactly one right answer. A caller that stitched them from a children
-	// read would be a second owner of the arrangement, in the surface with
-	// the least idea what it means, which is the defect ADR-0040 exists to
-	// remove.
+	// which turns came before this one, which of each turn's runs is the one
+	// that stands, and what those runs printed in what order — and each of
+	// them has exactly one right answer. A caller that stitched them from a
+	// children read would be a second owner of the arrangement, in the surface
+	// with the least idea what it means, which is the defect ADR-0040 exists
+	// to remove.
 	//
 	// beforeEntryID names the turn to look BEFORE, and it is resolved to that
 	// row's ingest_seq inside the read — the same rule LedgerQuery.BeforeID
 	// states, and for the same reason: a UUIDv7 sorts by the moment a client
 	// minted it, which is not the moment the backend accepted it. An id no
 	// row carries is refused with ErrNoSuchEntry rather than answered with
-	// the newest turn in the pane, which would be a different turn's answer
+	// the newest turns in the pane, which would be different turns' answers
 	// presented as this one's context.
-	//
-	// An empty paneID answers nil: a session that is the pipe of no recorded
-	// pane has no thread to read, and inventing one out of every pane's turns
-	// would put another tab's conversation into this one.
-	PriorTurn(ctx context.Context, paneID, beforeEntryID string) (*PriorTurn, error)
+	PriorTurns(ctx context.Context, paneID, beforeEntryID string) ([]PriorTurn, error)
 }

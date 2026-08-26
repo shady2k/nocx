@@ -48,27 +48,34 @@ import (
 // human's shell execution, which carry no lane at all.
 const agentLane = "agent"
 
-// PriorTurn returns the agent turn preceding beforeEntryID in paneID, with the
-// prose of the run that answered it. See the interface for the contract.
-func (s *sqliteContent) PriorTurn(ctx context.Context, paneID, beforeEntryID string) (*PriorTurn, error) {
+// PriorTurns returns the pane's complete thread before beforeEntryID, oldest
+// first. The cursor and pane semantics live with the shared conversation read.
+func (s *sqliteContent) PriorTurns(ctx context.Context, paneID, beforeEntryID string) ([]PriorTurn, error) {
+	return s.priorTurns(ctx, paneID, beforeEntryID)
+}
+
+func (s *sqliteContent) priorTurns(ctx context.Context, paneID, beforeEntryID string) ([]PriorTurn, error) {
 	if beforeEntryID == "" {
-		return nil, errors.New("content: prior turn: the turn to look before is required")
+		return nil, errors.New("content: prior turns: the turn to look before is required")
 	}
 	// No pane, no thread. A session that is the pipe of no recorded pane has
 	// no conversation to read, and answering from every pane's turns would be
-	// another tab's conversation presented as this one's.
+	// another tab's conversation presented as this one's. The caller receives
+	// an empty slice, which means this pane has no thread, not an empty thread.
 	if paneID == "" {
-		return nil, nil
+		return []PriorTurn{}, nil
 	}
+
 	// The cursor is a POSITION RESOLVED THROUGH A ROW, never a comparison of
-	// ids — LedgerQuery.BeforeID's rule, and for its reason: a UUIDv7 sorts by
+	// ids — LedgerQuery's BeforeID rule, and for its reason: a UUIDv7 sorts by
 	// the moment a client minted it, which is not the moment the backend
 	// accepted it.
 	var seq int64
+
 	err := s.db.QueryRowContext(ctx,
 		`SELECT ingest_seq FROM entries WHERE id = ?`, beforeEntryID).Scan(&seq)
 	if errors.Is(err, sql.ErrNoRows) {
-		return nil, fmt.Errorf("content: prior turn before %s: %w", beforeEntryID, ErrNoSuchEntry)
+		return nil, fmt.Errorf("content: prior turns before %s: %w", beforeEntryID, ErrNoSuchEntry)
 	}
 	if err != nil {
 		return nil, err
@@ -80,25 +87,144 @@ func (s *sqliteContent) PriorTurn(ctx context.Context, paneID, beforeEntryID str
 	// with no lane. Asking for the run rather than matching on the frame's
 	// intent string means the two are told apart by the thing that actually
 	// differs, not by a literal two packages would both have to hold.
-	var out PriorTurn
-	err = s.db.QueryRowContext(ctx, `SELECT e.id, e.intent FROM entries e
+	rows, err := s.db.QueryContext(ctx, `SELECT e.id, e.intent
+		 FROM entries e
 		 WHERE e.pane_id = ? AND e.kind = 'ask' AND e.ingest_seq < ?
 		   AND EXISTS (SELECT 1 FROM executions x
 		                WHERE x.entry_id = e.id AND x.lane = ?)
-		 ORDER BY e.ingest_seq DESC LIMIT 1`, paneID, seq, agentLane).
-		Scan(&out.EntryID, &out.Question)
-	if errors.Is(err, sql.ErrNoRows) {
-		return nil, nil
-	}
+		 ORDER BY e.ingest_seq ASC`, paneID, seq, agentLane)
 	if err != nil {
 		return nil, err
 	}
-	prose, err := s.turnProse(ctx, out.EntryID)
+	var turns []PriorTurn
+	for rows.Next() {
+		var turn PriorTurn
+		if scanErr := rows.Scan(&turn.EntryID, &turn.Question); scanErr != nil {
+			_ = rows.Close()
+			return nil, scanErr
+		}
+		turns = append(turns, turn)
+	}
+	if rowsErr := rows.Err(); rowsErr != nil {
+		_ = rows.Close()
+		return nil, rowsErr
+	}
+	if closeErr := rows.Close(); closeErr != nil {
+		return nil, closeErr
+	}
+	for i := range turns {
+		turns[i].Prose, err = s.turnProse(ctx, turns[i].EntryID)
+		if err != nil {
+			return nil, err
+		}
+		turns[i].ToolLines, err = s.turnToolLines(ctx, turns[i].EntryID)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if turns == nil {
+		return []PriorTurn{}, nil
+	}
+	return turns, nil
+}
+
+// turnToolLines is the ledger's factual projection of action children. It
+// never reads or formats a result body into the line. A run action's result
+// is the next shell block it opened; only its stored artifact metadata is
+// consulted for the line count.
+func (s *sqliteContent) turnToolLines(ctx context.Context, turnID string) ([]string, error) {
+	children, err := s.Caused(ctx, turnID)
 	if err != nil {
 		return nil, err
 	}
-	out.Prose = prose
-	return &out, nil
+	var lines []string
+	for i, child := range children {
+		if child.Kind != EntryAction {
+			continue
+		}
+		action, err := s.Entry(ctx, child.EntryID)
+		if err != nil {
+			return nil, err
+		}
+		term, known, resultLines, err := s.actionResultLines(ctx, action)
+		if err != nil {
+			return nil, err
+		}
+		if !known && child.OpensBlock {
+			for _, opened := range children[i+1:] {
+				if opened.Kind == EntryAction {
+					break
+				}
+				if opened.Kind != EntryShell {
+					continue
+				}
+				block, blockErr := s.Entry(ctx, opened.EntryID)
+				if blockErr != nil {
+					return nil, blockErr
+				}
+				term, known, resultLines, err = s.actionResultLines(ctx, block)
+				if err != nil {
+					return nil, err
+				}
+				break
+			}
+		}
+		call := child.Intent
+		if command, ok := child.Args["command"].(string); ok && command != "" {
+			call = command
+		}
+		lines = append(lines, formatToolLine(call, term, known, resultLines))
+	}
+	return lines, nil
+}
+
+func (s *sqliteContent) actionResultLines(ctx context.Context, entry *LedgerEntry) (TerminationReason, bool, int, error) {
+	if entry == nil || len(entry.Executions) == 0 {
+		return "", false, 0, nil
+	}
+	exec := entry.Executions[len(entry.Executions)-1]
+	var term TerminationReason
+	if exec.TerminationReason != nil {
+		term = *exec.TerminationReason
+	}
+	if len(exec.Artifacts) == 0 {
+		return term, false, 0, nil
+	}
+	lines := 0
+	for _, artifact := range exec.Artifacts {
+		if artifact.Evicted {
+			return term, false, 0, nil
+		}
+		text, err := s.artifactText(ctx, artifact.ID)
+		if err != nil {
+			return "", false, 0, err
+		}
+		if text != "" {
+			lines += strings.Count(text, "\n")
+			if !strings.HasSuffix(text, "\n") {
+				lines++
+			}
+		}
+	}
+	return term, true, lines, nil
+}
+
+func formatToolLine(call string, term TerminationReason, known bool, resultLines int) string {
+	switch term {
+	case TermAgentDeclined:
+		return "declined by the person"
+	case TermCompleted:
+		if known {
+			return fmt.Sprintf("ran %s → %d lines", call, resultLines)
+		}
+		return fmt.Sprintf("ran %s → result size unavailable", call)
+	case TermInterrupted:
+		return fmt.Sprintf("interrupted %s", call)
+	case "":
+		return fmt.Sprintf("not run %s", call)
+	default:
+		return fmt.Sprintf("failed %s", call)
+	}
 }
 
 // turnProse is one turn's answer: the prose of the run that stands, in seat

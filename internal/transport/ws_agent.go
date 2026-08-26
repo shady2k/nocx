@@ -973,36 +973,58 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// pinned when the ask arrived, and never stored: the same run resumed
 	// after an approval rebuilds the same text from the same facts.
 	promptFacts := rc.promptFacts
-	msgs := make([]assistant.Message, 0, 4)
-	//
+	msgs := make([]assistant.Message, 0, 8)
 	msgs = append(msgs, assistant.Message{
 		Role:    "system",
 		Content: assistant.SystemPrompt(promptFacts),
 	})
-	// THE CONVERSATION, and it is read from the ledger rather than remembered
-	// in this process (ADR-0040's closing consequence). The turn before this
-	// one in this pane is what "what did we just say" means: its question, and
-	// the prose of the run that answered it, in seat order and as ONE message.
-	//
-	// It is one turn and not the whole thread on purpose — the whole
-	// conversation assembled from the ledger is nocx-0s2gh.2, and it is the
-	// same read at a larger scale rather than a second one. What this must not
-	// do is grow a second assembler beside that; the arrangement stays in the
-	// ledger (PriorTurn), and what happens here is only the mapping from a
-	// stored turn to two Messages.
-	//
-	// A FAILED READ of the previous turn is not fatal: it is context the
-	// backend added, so losing it degrades the answer instead of invalidating
-	// the question. It is logged rather than swallowed — a conversation that
-	// silently stopped being multi-turn is the failure that would take
-	// longest to notice.
-	if prior, priorErr := h.priorTurn(ctx, rc); priorErr != nil {
-		h.log.Warn("the previous turn could not be read; answering without it",
+
+	// The conversation is a pane-scoped thread owned by the ledger. A
+	// tool line rides the assistant message for its turn: Message deliberately
+	// has only the three engine roles, so inventing a tool role or synthetic
+	// OpenAI tool_calls would create a second wire contract. The line is still
+	// separate from prose inside that message, and is never the tool output.
+	const conversationBudget = 12000
+	priorTurns, priorErr := h.priorTurns(ctx, rc)
+	if priorErr != nil {
+		h.log.Warn("the previous conversation could not be read; answering without it",
 			"run", rc.runID, "entry", rc.entryID, "error", priorErr)
-	} else if prior != nil {
-		msgs = append(msgs, assistant.Message{Role: "user", Content: prior.Question})
-		if answer, ok := priorAnswerMessage(prior.Prose); ok {
-			msgs = append(msgs, assistant.Message{Role: "assistant", Content: answer})
+	} else {
+		turnMessages := make([][]assistant.Message, len(priorTurns))
+		total := 0
+		for i, prior := range priorTurns {
+			turnMessages[i] = append(turnMessages[i],
+				assistant.Message{Role: "user", Content: prior.Question})
+			if answer, ok := priorAnswerMessage(prior.Prose); ok {
+				content := answer
+				if len(prior.ToolLines) > 0 {
+					content += "\n\n" + strings.Join(prior.ToolLines, "\n")
+				}
+				turnMessages[i] = append(turnMessages[i],
+					assistant.Message{Role: "assistant", Content: content})
+			} else if len(prior.ToolLines) > 0 {
+				turnMessages[i] = append(turnMessages[i],
+					assistant.Message{Role: "assistant", Content: strings.Join(prior.ToolLines, "\n")})
+			}
+			for _, message := range turnMessages[i] {
+				total += len(message.Content)
+			}
+		}
+		trimmed := false
+		for len(turnMessages) > 0 && total > conversationBudget {
+			for _, message := range turnMessages[0] {
+				total -= len(message.Content)
+			}
+			turnMessages = turnMessages[1:]
+			trimmed = true
+		}
+		if trimmed {
+			msgs = append(msgs, assistant.Message{
+				Role: "system", Content: "[older turns of this conversation are not included]",
+			})
+		}
+		for _, turn := range turnMessages {
+			msgs = append(msgs, turn...)
 		}
 	}
 	msgs = append(msgs, assistant.Message{Role: "user", Content: rc.question})
@@ -2060,23 +2082,18 @@ func validateAgentAsk(p agentAskParams) (content.AgentAsk, []assistant.AttachedC
 	return in, attached, ""
 }
 
-// priorTurn reads the turn before this one in this run's pane — the
-// conversation the follow-up question is a follow-up TO. Nil, and no error,
-// when there is nothing before it, and nil when the session is the pipe of no
-// recorded pane: a turn with no anchor has no thread, and answering from every
-// pane's turns would put another tab's conversation into this one.
-//
-// The read goes through the operation like every other store touch on this
-// path — one short acquisition, the gate never held across the stream.
-func (h agentHandlers) priorTurn(ctx context.Context, rc askRunContext) (*content.PriorTurn, error) {
+// priorTurns reads the pane's thread before this run, oldest first. The
+// ledger owns the complete read and its ordering; transport only crosses the
+// capability seam once and returns that projection to context assembly.
+func (h agentHandlers) priorTurns(ctx context.Context, rc askRunContext) ([]content.PriorTurn, error) {
 	if rc.paneID == nil || *rc.paneID == "" {
 		return nil, nil
 	}
-	var prior *content.PriorTurn
+	var prior []content.PriorTurn
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
-		var e error
-		prior, e = svc.PriorTurn(ctx, *rc.paneID, rc.entryID)
-		return e
+		var err error
+		prior, err = svc.PriorTurns(ctx, *rc.paneID, rc.entryID)
+		return err
 	})
 	if err != nil {
 		return nil, err

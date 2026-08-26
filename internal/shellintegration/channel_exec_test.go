@@ -1052,6 +1052,14 @@ func assertNoTransportFailsOpen(t *testing.T, shell, scriptName, script, sentine
 		t.Fatalf("pty start: %v", err)
 	}
 	defer func() { _ = ptmx.Close() }()
+	// Both failure paths below leave a live interactive shell behind, and one
+	// of them cannot kill it at the call site: the wait fatals from inside
+	// testwait, so a Kill written after it would never run. Registering the
+	// kill once covers both, and any path added later. Measured on Linux the
+	// deferred ptmx.Close() does hang the shell up on its own — but "the pty
+	// master probably sends SIGHUP" is exactly what the explicit Kill existed
+	// to replace, and the platform this test fails on is not the one measured.
+	t.Cleanup(func() { _ = cmd.Process.Kill() })
 	var mu sync.Mutex
 	out := make([]byte, 0, 65536)
 	done := make(chan bool, 1)
@@ -1088,7 +1096,6 @@ func assertNoTransportFailsOpen(t *testing.T, shell, scriptName, script, sentine
 	select {
 	case <-done:
 	case <-time.After(10 * time.Second):
-		_ = cmd.Process.Kill()
 		t.Fatal("shell hung on a refused transport; fail-open requires an immediate conventional terminal")
 	}
 	_ = cmd.Wait()

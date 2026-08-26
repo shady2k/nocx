@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/shady2k/nocx/internal/app"
@@ -47,5 +48,40 @@ func main() {
 	c := make(chan os.Signal, 1)
 	signal.Notify(c, os.Interrupt, syscall.SIGTERM)
 	<-c
+	// The envelope measurement (nocx-d6gn4.9), printed on the way out so a
+	// dev stand can be driven by hand — ask the assistant things, then stop
+	// it and read what the ledger says about how DEEP the dependent chains
+	// were. Off unless asked for: an ordinary e2e run has no use for it.
+	if os.Getenv("NOCX_ENVELOPE_REPORT") == "1" {
+		printEnvelopeReport(ctx, a)
+	}
 	a.Shutdown(ctx)
+}
+
+// printEnvelopeReport writes one line per assistant run, in the same
+// grep-friendly shape as the WSPORT/WSTOKEN lines above. Depth is the figure
+// the program-carrier experiment turns on: it is the LONGEST CHAIN of
+// dependent calls, never the call count, and a run of six independent calls
+// is a depth of one.
+func printEnvelopeReport(ctx context.Context, a *app.App) {
+	runs, truncated, err := a.MeasureAgentRuns(ctx)
+	if err != nil {
+		fmt.Printf("ENVELOPE_ERROR=%v\n", err)
+		return
+	}
+	if len(runs) == 0 {
+		// Said explicitly: "nothing recorded" and "recorded nothing to
+		// report" are different, and a silent exit reads as the second.
+		fmt.Println("ENVELOPE_RUNS=0 (no assistant tool calls carrying an envelope are recorded)")
+		return
+	}
+	for _, r := range runs {
+		fmt.Printf("ENVELOPE run=%s invocations=%d depth=%d edges=%d candidates=%d approvals=%d descriptors=%s\n",
+			r.RunID, r.Invocations, r.MaxDependencyDepth, r.Edges, r.Candidates,
+			r.ApprovalsAsked, strings.Join(r.Descriptors, ","))
+	}
+	if truncated {
+		fmt.Println("ENVELOPE_TRUNCATED=1 (the read hit its limit; these are the most recent entries, not all of them)")
+	}
+	_ = os.Stdout.Sync()
 }

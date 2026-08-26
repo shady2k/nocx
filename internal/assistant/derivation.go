@@ -69,10 +69,18 @@ func (d *derivationLog) record(entryID, text string) {
 	d.results = append(d.results, recordedResult{entryID: entryID, text: text})
 }
 
-// edgesFor reads the arguments of an invocation about to run and returns the
-// earlier invocations whose results contain one of those values verbatim, in
-// the order those invocations completed. Distinct: an argument matching two
-// values of one earlier result is still one edge.
+// check reads the arguments of an invocation about to run and returns two
+// things: every earlier invocation of this run whose result was AVAILABLE to be
+// copied from (the candidates), and the subset whose result actually contains
+// one of those argument values verbatim (the edges), each in the order those
+// invocations completed. Distinct: an argument matching two values of one
+// earlier result is still one edge.
+//
+// The candidates are recorded because "no edge" is two different facts. A run
+// with one call has no dependency because there was nothing to depend on; a run
+// with six calls and no edges is a genuinely flat run. A reader given only the
+// edges reads the first as the second, and the number nocx-d6gn4.10 is gated on
+// is exactly that distinction.
 //
 // skipArg is the declaration's ResourceArg and is excluded on purpose. The
 // resource is what the GRANT scoped and what the run was told; the model
@@ -80,32 +88,34 @@ func (d *derivationLog) record(entryID, text string) {
 // derivation — and because a result commonly echoes the resource it was asked
 // about, including it would draw an edge from almost every call to almost
 // every earlier one.
-func (d *derivationLog) edgesFor(rawArgs, skipArg string) []string {
+func (d *derivationLog) check(rawArgs, skipArg string) (candidates, edges []string) {
 	if d == nil {
-		return nil
+		return nil, nil
 	}
 	values := derivableValues(rawArgs, skipArg)
-	if len(values) == 0 {
-		return nil
-	}
+
 	d.mu.Lock()
 	defer d.mu.Unlock()
 
-	var edges []string
-	seen := make(map[string]bool, len(d.results))
+	matched := make(map[string]bool, len(d.results))
+	listed := make(map[string]bool, len(d.results))
 	for _, prior := range d.results {
-		if seen[prior.entryID] {
+		if !listed[prior.entryID] {
+			listed[prior.entryID] = true
+			candidates = append(candidates, prior.entryID)
+		}
+		if matched[prior.entryID] {
 			continue
 		}
 		for _, v := range values {
 			if strings.Contains(prior.text, v) {
-				seen[prior.entryID] = true
+				matched[prior.entryID] = true
 				edges = append(edges, prior.entryID)
 				break
 			}
 		}
 	}
-	return edges
+	return candidates, edges
 }
 
 // derivableValues is the string arguments of one call that are long enough to
@@ -140,13 +150,20 @@ func derivableValues(rawArgs, skipArg string) []string {
 // nothing" and "this record predates the field" are different facts, and a
 // reader that cannot tell them apart will read the second as the first.
 type derivationBlock struct {
-	Method string   `json:"method"`
-	Edges  []string `json:"edges"`
+	Method string `json:"method"`
+	// Candidates is every earlier invocation of this run whose result the
+	// model could have copied from — an exact upper bound on what this call
+	// may derive from, and the denominator that makes Edges readable.
+	Candidates []string `json:"candidates"`
+	Edges      []string `json:"edges"`
 }
 
-func newDerivationBlock(edges []string) derivationBlock {
+func newDerivationBlock(candidates, edges []string) derivationBlock {
+	if candidates == nil {
+		candidates = []string{}
+	}
 	if edges == nil {
 		edges = []string{}
 	}
-	return derivationBlock{Method: derivationMethod, Edges: edges}
+	return derivationBlock{Method: derivationMethod, Candidates: candidates, Edges: edges}
 }

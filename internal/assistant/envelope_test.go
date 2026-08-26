@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"net/http"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/agenttools"
 )
 
 // The invocation envelope's derivation edge (nocx-d6gn4.9).
@@ -179,4 +181,139 @@ func intentsOf(l *fakeLedger) string {
 		names = append(names, s.intent)
 	}
 	return fmt.Sprintf("%v", names)
+}
+
+// TestAsk_TheEnvelopeNamesTheToolVersionTheCallWasMadeAgainst: the record says
+// WHICH descriptor the model was working from. Two cohorts measured across a
+// description change are not one measurement, and without this the break is
+// invisible in the data.
+func TestAsk_TheEnvelopeNamesTheToolVersionTheCallWasMadeAgainst(t *testing.T) {
+	src := &fakeBlocks{items: SessionItems{Items: []SessionItem{{
+		ID: "blk-df", Command: "df -h", State: "exited", Lines: 3,
+	}}}}
+	_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{
+		name: "session.list", args: `{"sessionId":"session-a"}`, id: "call_list",
+	}))
+	defer srv.Close()
+
+	ledger := &fakeLedger{}
+	p := askParams(srv.URL, ptrGrant(sessionGrant("session-a", autonomousMatrix())), ledger, nil)
+	p.Requester = &blocksOnlyRequester{blocks: src}
+	p.Messages = []Message{{Role: "user", Content: "what ran here?"}}
+
+	cl, err := newClient(nil, toolsDirFS(t))
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	if err = cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+
+	payload, ok := submissionFor(ledger, "session.list")
+	if !ok {
+		t.Fatalf("no session.list attempt recorded; intents = %v", intentsOf(ledger))
+	}
+	var body struct {
+		Descriptor string `json:"descriptor"`
+	}
+	if err = json.Unmarshal([]byte(payload), &body); err != nil {
+		t.Fatalf("attempt payload: %v", err)
+	}
+
+	registry, err := agenttools.Assemble(toolsDirFS(t))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	tool, ok := registry.Lookup("session.list")
+	if !ok {
+		t.Fatal("session.list is not in the registry")
+	}
+	if body.Descriptor != tool.DescriptorDigest() {
+		t.Fatalf("recorded descriptor = %q, want the registry's %q", body.Descriptor, tool.DescriptorDigest())
+	}
+}
+
+// TestAsk_TheDerivationRecordsWhatItComparedAgainst: "no edge" is two different
+// facts — nothing to compare against, or several candidates and none matched —
+// and a reader that cannot separate them will read a run with one call as a run
+// with no dependencies. So the candidate set is recorded beside the edges.
+func TestAsk_TheDerivationRecordsWhatItComparedAgainst(t *testing.T) {
+	src := &fakeBlocks{
+		items: SessionItems{Items: []SessionItem{{
+			ID: "blk-df", Command: "df -h", State: "exited", Lines: 3,
+		}}},
+		item: SessionItemRead{
+			Command: "df -h", State: "exited", Total: 3, Start: 0, End: 3,
+			Text: "alpha\nbeta\ngamma",
+		},
+	}
+	var turn int
+	_, srv := newFakeOpenAI(func(w http.ResponseWriter, _ *http.Request) {
+		turn++
+		switch turn {
+		case 1:
+			streamToolCalls(w, toolCallSpec{
+				name: "session.read",
+				args: `{"sessionId":"session-a","id":"blk-df","start":0,"count":3}`,
+				id:   "call_read",
+			})
+		case 2:
+			streamToolCalls(w, toolCallSpec{name: "session.list", args: `{"sessionId":"session-a"}`, id: "call_list"})
+		default:
+			streamAnswer(w, "done")
+		}
+	})
+	defer srv.Close()
+
+	ledger := &fakeLedger{}
+	p := askParams(srv.URL, ptrGrant(sessionGrant("session-a", autonomousMatrix())), ledger, nil)
+	p.Requester = &blocksOnlyRequester{blocks: src}
+	p.Messages = []Message{{Role: "user", Content: "what is going on?"}}
+
+	cl, err := newClient(nil, toolsDirFS(t))
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+
+	// The FIRST call had nothing to compare against.
+	first, ok := submissionFor(ledger, "session.read")
+	if !ok {
+		t.Fatalf("no session.read attempt; intents = %v", intentsOf(ledger))
+	}
+	if got := candidatesOf(t, first); len(got) != 0 {
+		t.Errorf("first call compared against %v; there was nothing before it", got)
+	}
+
+	// The SECOND had one candidate and matched none of it.
+	second, ok := submissionFor(ledger, "session.list")
+	if !ok {
+		t.Fatalf("no session.list attempt; intents = %v", intentsOf(ledger))
+	}
+	cands := candidatesOf(t, second)
+	if len(cands) != 1 || cands[0] != "entry-session.read" {
+		t.Fatalf("second call candidates = %v, want exactly [entry-session.read]", cands)
+	}
+	if _, edges := derivationOf(t, second); len(edges) != 0 {
+		t.Fatalf("edges = %v, want none: a candidate considered is not a candidate matched", edges)
+	}
+}
+
+// candidatesOf reads the prior invocations a derivation was checked against.
+func candidatesOf(t *testing.T, payload string) []string {
+	t.Helper()
+	var body struct {
+		DerivedFrom *struct {
+			Candidates []string `json:"candidates"`
+		} `json:"derivedFrom"`
+	}
+	if err := json.Unmarshal([]byte(payload), &body); err != nil {
+		t.Fatalf("attempt payload: %v", err)
+	}
+	if body.DerivedFrom == nil {
+		return nil
+	}
+	return body.DerivedFrom.Candidates
 }

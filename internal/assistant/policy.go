@@ -1105,7 +1105,8 @@ func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.T
 	// nothing" and "this record predates the field" are different facts,
 	// and a reader that cannot tell them apart reads the second as the
 	// first. See derivation.go for what the evidence is and is not.
-	payloadBody["derivedFrom"] = newDerivationBlock(m.derivation.edgesFor(rawArgs, decl.ResourceArg))
+	payloadBody["derivedFrom"] = newDerivationBlock(m.derivation.check(rawArgs, decl.ResourceArg))
+	payloadBody["descriptor"] = decl.DescriptorDigest()
 	// The classifier block (bead nocx-kpy23, criterion 6): when this
 	// escalation was caused by the classifier — suspect, failed, or an
 	// input the gate withheld — the reason lives on the PROPOSAL, so "why
@@ -1233,7 +1234,8 @@ func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool
 		// nothing" and "this record predates the field" are different facts,
 		// and a reader that cannot tell them apart reads the second as the
 		// first. See derivation.go for what the evidence is and is not.
-		payloadBody["derivedFrom"] = newDerivationBlock(m.derivation.edgesFor(rawArgs, decl.ResourceArg))
+		payloadBody["derivedFrom"] = newDerivationBlock(m.derivation.check(rawArgs, decl.ResourceArg))
+		payloadBody["descriptor"] = decl.DescriptorDigest()
 		// The classifier block (bead nocx-kpy23, criterion 6): when the
 		// classifier was consulted and cleared the call, the attempt's own
 		// record carries the verdict and the model, so the audit shows

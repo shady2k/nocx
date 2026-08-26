@@ -248,8 +248,8 @@ printf "\nAll checks passed.\n"
 # has and the test cache intact, where CI runs Ubuntu, setup-go, two keyring
 # variants, 4 cores and -count=1. A release attempt and its follow-up PR both
 # came back red from a job the old hook had just called green (nocx-cn86).
-printf "  NOT covered here: the test suites themselves  — pre-push, or make ci\n"
-printf "                    macOS (bash 3.2, no /proc, Darwin PTY) — CI's `ci-mac` job\n"
+printf "  NOT covered here: the test suites themselves  — pre-push, or \`make ci\`\n"
+printf "                    macOS (bash 3.2, no /proc, Darwin PTY) — CI's \`ci-mac\` job\n"
 printf "                    Ubuntu + both keyring variants — scripts/ci-linux.sh\n"
 printf "                    the e2e suite itself           — e2e/run-in-container.sh\n"
-printf "                    the dead-code ratchet          — CI's `ci-mac` and `ci-linux` jobs\n"
+printf "                    the dead-code ratchet          — CI's \`ci-mac\` and \`ci-linux\` jobs\n"

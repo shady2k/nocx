@@ -119,16 +119,16 @@ func readScreenKind() RequestKind {
 func resolveReadScreen(raw json.RawMessage) (json.RawMessage, error) {
 	var p readScreenResolvedParams
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return nil, fmt.Errorf("readScreen: resolution: %w", err)
+		return nil, fmt.Errorf("resolution: %w", err)
 	}
 	if p.Outcome == "failed" {
-		return nil, fmt.Errorf("readScreen: the renderer could not capture the screen: %s", p.Error)
+		return nil, fmt.Errorf("the renderer could not capture the screen: %s", p.Error)
 	}
 	body, err := json.Marshal(readScreenFrameBody{
 		Rows: p.Rows, Cursor: p.Cursor, Identity: p.Identity, Range: p.Range,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("readScreen: frame body: %w", err)
+		return nil, fmt.Errorf("frame body: %w", err)
 	}
 	return body, nil
 }
@@ -180,7 +180,7 @@ func validateReadScreenResolvedRaw(raw json.RawMessage) string {
 // the death of the renderers if none answers.
 func (s *WSServer) RequestScreen(ctx context.Context, sessionID string, region *assistant.FrameRegion) (json.RawMessage, error) {
 	if s.broker == nil {
-		return nil, errors.New("readScreen: no renderer request broker is wired")
+		return nil, errors.New("no renderer request broker is wired")
 	}
 	params := readScreenRequestParams{SessionID: sessionID}
 	if region != nil {
@@ -188,7 +188,7 @@ func (s *WSServer) RequestScreen(ctx context.Context, sessionID string, region *
 	}
 	var body json.RawMessage
 	if err := s.broker.Request(ctx, readScreenKind(), params, &body); err != nil {
-		return nil, fmt.Errorf("readScreen: %w", err)
+		return nil, err
 	}
 	return body, nil
 }

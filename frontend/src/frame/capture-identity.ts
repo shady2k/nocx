@@ -41,7 +41,7 @@ export class CaptureAbortedError extends Error {
  *  outcome, honestly. */
 export class ReadScreenRangeError extends Error {
   constructor(message: string) {
-    super('readScreen: ' + message)
+    super(message)
     this.name = 'ReadScreenRangeError'
   }
 }

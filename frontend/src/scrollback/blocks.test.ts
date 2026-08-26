@@ -2046,6 +2046,25 @@ describe('BlockManager.addAnswerBlock', () => {
     expect(flowOf(h)).toEqual(['text:hello world'])
   })
 
+  it('leaves no empty seat across an escalated decline and resumed prose', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('what is on disk?', '/repo')
+
+    h.append('Давайте проверю, что на самом деле находится в системе:', 'text-before')
+    // The declined proposal has no agent.runToolCall notification: the call
+    // never happened. The resumed stream may still expose a fresh text piece
+    // whose only first chunk is whitespace before the answer continues.
+    h.append(' \t', 'text-resume')
+    h.append('Проверю наличие файла напрямую:', 'text-after')
+    h.close('success')
+
+    expect(flowOf(h)).toEqual([
+      'text:Давайте проверю, что на самом деле находится в системе:',
+      'text:Проверю наличие файла напрямую:',
+    ])
+    expect(h.el.querySelectorAll('.cmd-block[data-block-kind="text"]')).toHaveLength(2)
+  })
+
   it('a call in flight returns the stand-in where the answer will be written', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')

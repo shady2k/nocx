@@ -2114,7 +2114,6 @@ export class TerminalContent extends BasePaneContent {
       })
       this._lifecycleChangeUnsub = this.lifecycle.onChange(() => {
         this._syncLifecycleOwnership()
-        this._updateCapability()
         // A conventional terminal stays unstructured: the scrollback-block
         // model never takes over (ADR-0024 §4). Conventional means no live
         // authenticated domain — Native, Lost, and a Desynchronized domain
@@ -3748,7 +3747,6 @@ export class TerminalContent extends BasePaneContent {
     // The kernel is the authority; the sync shows the editor because the
     // axis says PromptReady — and the user's own escape latch is now off.
     this._syncLifecycleOwnership()
-    this._updateCapability()
   }
 
   /** The current input presentation, exposed for context menu and palette
@@ -3843,10 +3841,10 @@ export class TerminalContent extends BasePaneContent {
 
   /** Summon the editor over a running command, in ask mode (nocx-92gfl).
    *
-   *  Two gestures land here and nowhere else: ⌘/Ctrl+Enter from the grid,
-   *  and "ask about this block" on the block's ⋮ menu. The menu item exists
-   *  because a chord nobody can see is a gesture nobody uses; it is a second
-   *  DOOR, never a second implementation.
+   *  Two gestures reach this same summon path and nowhere else: ⌘/Ctrl+Enter
+   *  from the grid, and "ask about this block" on the block's ⋮ menu. The
+   *  menu delegates marking to `toggleGrant`, which invokes this path for the
+   *  running block. The menu is a second DOOR, never a second implementation.
    *
    *  Refused unless there is something to ask about and the pane is in a
    *  state where an editor belongs: no running command (the editor is
@@ -4241,6 +4239,10 @@ export class TerminalContent extends BasePaneContent {
       editor.hide()
       this.renderer?.setReadOnly(false)
     }
+    // Visibility is the presentation axis; refresh it after the ownership
+    // projection has shown or hidden the editor so recovery actions cannot
+    // describe the state from before this reconciliation.
+    this._updateCapability()
   }
 
   /** A selection is a quote and a grant whose window follows the selected
@@ -4270,11 +4272,15 @@ export class TerminalContent extends BasePaneContent {
     const grant = grantBlockFromElement(blockEl)
     if (!grant) return
     const index = this.grantedBlocks.findIndex((item) => item.itemId === grant.itemId)
-    this.grantedBlocks =
-      index < 0
-        ? [...this.grantedBlocks, grant]
-        : this.grantedBlocks.filter((_, candidateIndex) => candidateIndex !== index)
+    const adding = index < 0
+    const isRunningBlock = this.scrollback?.blockManager.runningBlock?.el === blockEl
+    this.grantedBlocks = adding
+      ? [...this.grantedBlocks, grant]
+      : this.grantedBlocks.filter((_, candidateIndex) => candidateIndex !== index)
     this.grantController?.setBlocks(this.grantedBlocks)
+    // The menu's Ask action is the mouse door to the same summon path as
+    // Ctrl+Enter. Unmarking remains a pure toggle and never summons.
+    if (adding && isRunningBlock) this.summonEditor()
   }
 
   private refreshGrant(blockEl: HTMLElement): void {

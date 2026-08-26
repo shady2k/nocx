@@ -168,6 +168,50 @@ func readScreenFrameWire(t *testing.T, rid string, texts ...string) map[string]a
 	}
 }
 
+func TestReadScreen_ErrorSentences(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "resolution decode",
+			raw:  `{`,
+			want: "resolution: unexpected end of JSON input",
+		},
+		{
+			name: "failed capture",
+			raw:  `{"outcome":"failed","error":"no such session: gone-session"}`,
+			want: "the renderer could not capture the screen: no such session: gone-session",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := resolveReadScreen(json.RawMessage(tt.raw))
+			if err == nil {
+				t.Fatal("resolveReadScreen returned nil error")
+			}
+			if err.Error() != tt.want {
+				t.Fatalf("resolveReadScreen error = %q, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRequestScreen_ErrorSentences(t *testing.T) {
+	_, err := (&WSServer{}).RequestScreen(context.Background(), "sid", nil)
+	if err == nil || err.Error() != "no renderer request broker is wired" {
+		t.Fatalf("unwired RequestScreen error = %v, want %q", err, "no renderer request broker is wired")
+	}
+
+	ws, _, stop := newAgentWSServer(t)
+	defer stop()
+	_, err = ws.RequestScreen(context.Background(), "sid", nil)
+	if err == nil || err.Error() != "no renderer connected to read the screen" {
+		t.Fatalf("no-client RequestScreen error = %v, want %q", err, "no renderer connected to read the screen")
+	}
+}
+
 // createEndpointAt points the ask run at the given provider URL (the
 // harness's own createEndpoint hardcodes the loopback URL; the readScreen
 // test needs the fake provider).
@@ -397,8 +441,9 @@ func TestReadScreen_FailedCaptureAnswersHonestly(t *testing.T) {
 	if st.State != "failed" {
 		t.Fatalf("runState = %q, want failed (the renderer's failed outcome is a terminal tool error)", st.State)
 	}
-	if !strings.Contains(st.Error, "could not capture the screen") {
-		t.Fatalf("runState error = %q, want the renderer's failure sentence", st.Error)
+	want := "the assistant's session.read call did not finish: the renderer could not capture the screen: no such session: gone-session"
+	if st.Error != want {
+		t.Fatalf("runState error = %q, want %q", st.Error, want)
 	}
 }
 

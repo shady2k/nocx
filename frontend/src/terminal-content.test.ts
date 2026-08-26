@@ -67,12 +67,25 @@ import { Dispatcher, RpcError } from './dispatcher'
 import type { WSClient } from './ipc'
 import { createCommandBlock } from './scrollback/blocks'
 import { CommandSnapshotStore } from './command-snapshot'
-import type { DesiredMode } from './capability'
+import type { ActionFacts, DesiredMode } from './capability'
+import type * as Capability from './capability'
 import type { ScrollbackController } from './scrollback/controller'
 import { pushOverlay, popOverlay } from './ui/overlay/stack'
 import { _resetThemeState } from './renderers/theme-adapter'
 import { showToast } from './ui/toast'
 import { BufferLine } from './scrollback/test-helpers'
+
+const capturedActionFacts = vi.hoisted(() => [] as ActionFacts[])
+vi.mock('./capability', async () => {
+  const actual = await vi.importActual<typeof Capability>('./capability')
+  return {
+    ...actual,
+    deriveActions: (facts: ActionFacts) => {
+      capturedActionFacts.push(facts)
+      return actual.deriveActions(facts)
+    },
+  }
+})
 
 // Mock the XtermRenderer class before any imports use it (same as tabs.test.ts).
 // The shared fixture mock implements the full TerminalRenderer surface,
@@ -7187,8 +7200,14 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       // The editor is gone while it runs — that is today's behaviour and it
       // is the state this gesture exists for.
       expect(ed.isVisible).toBe(false)
+      capturedActionFacts.length = 0
 
       summonChord(content)
+
+      const summonedFacts = capturedActionFacts[capturedActionFacts.length - 1]
+      expect(summonedFacts).toEqual(expect.objectContaining({ presentation: 'editor' }))
+      const recovery = ed.root.querySelector<HTMLElement>('.nocx-editor-recovery')
+      expect(recovery?.style.display).toBe('none')
 
       expect(ed.isVisible).toBe(true)
       // Ask, not the shell: the summoned editor's only target. Read off the
@@ -7661,7 +7680,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     return items.find((el) => el.dataset.action === action)
   }
 
-  it('the running block’s ⋮ menu offers the same whole-block grant as a finished block', async () => {
+  it('the running block’s ⋮ menu grants it and summons the editor, like a finished block', async () => {
     const client = makeClient()
     const { view, ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -7695,6 +7714,20 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.dataset.state).toBe(
         'chosen',
       )
+      expect(ed.isVisible).toBe(true)
+      expect(targetNamed(ed)).toBe('agent')
+      expect(document.activeElement).toBe(view.contentDOM)
+
+      escapeOn(view.contentDOM)
+      expect(ed.isVisible).toBe(false)
+      expect(targetNamed(ed)).toBe('shell')
+
+      const unmark = itemNamed(runningBlockMenu(content), 'grant')
+      expect(unmark?.textContent).toBe('Unmark')
+      unmark?.click()
+      expect(block?.dataset.granted).toBeUndefined()
+      expect(ed.isVisible).toBe(false)
+      expect(targetNamed(ed)).toBe('shell')
     } finally {
       restore()
       teardown()

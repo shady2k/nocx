@@ -26,6 +26,23 @@ describe('createAnswerBody leading rows', () => {
   it('drops leading blank rows split across chunks', () => {
     expect(renderRows(['\n', '\nПривет!'])).toEqual(['Привет!'])
   })
+  it('removes a whitespace-only prose body when a call boundary finishes it', () => {
+    const parent = document.createElement('div')
+    parent.className = 'cmd-block'
+    parent.dataset.blockKind = 'text'
+    const output = document.createElement('div')
+    parent.appendChild(output)
+    document.body.appendChild(parent)
+    const body = createAnswerBody(output, { store: new CommandSnapshotStore() })
+
+    body.append(' \t')
+    body.finish()
+
+    expect(parent.isConnected).toBe(false)
+  })
+  it('trims a whitespace-only trailing row but preserves interior spacing', () => {
+    expect(renderRows(['before\n\nafter\n \t'])).toEqual(['before', '', 'after'])
+  })
   it('preserves spacing after an element interrupts the first open row', () => {
     const output = document.createElement('div')
     const body = createAnswerBody(output, { store: new CommandSnapshotStore() })

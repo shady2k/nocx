@@ -157,6 +157,13 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
     return span
   }
 
+  const removeEmptyTextBlock = (): void => {
+    if (outputEl.hasChildNodes()) return
+    const block = outputEl.parentElement
+    if (block?.dataset.blockKind !== 'text') return
+    block.remove()
+  }
+
   return {
     append(text: string): void {
       if (text === '') return
@@ -234,14 +241,17 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
       partial = null
       for (;;) {
         const last = outputEl.lastElementChild
-        if (!last) return
-        if (last.classList.contains('term-line') && last.textContent === '') {
+        if (!last) {
+          removeEmptyTextBlock()
+          return
+        }
+        if (last.classList.contains('term-line') && last.textContent?.trim() === '') {
           last.remove()
           continue
         }
         if (last.classList.contains('cmd-output-code')) {
           const row = last.lastElementChild
-          if (row?.classList.contains('term-line') && row.textContent === '') {
+          if (row?.classList.contains('term-line') && row.textContent?.trim() === '') {
             row.remove()
             continue
           }

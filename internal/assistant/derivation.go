@@ -58,19 +58,32 @@ type derivationLog struct {
 // be evidence of what the model did.
 type recordedResult struct {
 	entryID string
-	text    string
+	// callID is the MODEL's id for the invocation. The ledger joins on the
+	// entry id; the renderer keys its rows on the call id, so both are kept
+	// rather than resolved twice from one of them.
+	callID string
+	text   string
+}
+
+// Derivation is one invocation's provenance, in both vocabularies at once:
+// entry ids for the ledger record, call ids for the surface that draws it.
+type Derivation struct {
+	CandidateEntries []string
+	Edges            []string
+	// EdgeCalls is Edges in the renderer's vocabulary, same order.
+	EdgeCalls []string
 }
 
 // record notes what one invocation returned. An empty entry id (an un-bound
 // caller causes entries that belong to no turn) is not recorded: an edge
 // pointing at nothing is a worse answer than no edge.
-func (d *derivationLog) record(entryID, text string) {
+func (d *derivationLog) record(entryID, callID, text string) {
 	if d == nil || entryID == "" || text == "" {
 		return
 	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	d.results = append(d.results, recordedResult{entryID: entryID, text: text})
+	d.results = append(d.results, recordedResult{entryID: entryID, callID: callID, text: text})
 }
 
 // check reads the arguments of an invocation about to run and returns two
@@ -92,9 +105,10 @@ func (d *derivationLog) record(entryID, text string) {
 // derivation — and because a result commonly echoes the resource it was asked
 // about, including it would draw an edge from almost every call to almost
 // every earlier one.
-func (d *derivationLog) check(rawArgs, skipArg string) (candidates, edges []string) {
+func (d *derivationLog) check(rawArgs, skipArg string) Derivation {
+	var out Derivation
 	if d == nil {
-		return nil, nil
+		return out
 	}
 	values := derivableValues(rawArgs, skipArg)
 
@@ -106,7 +120,7 @@ func (d *derivationLog) check(rawArgs, skipArg string) (candidates, edges []stri
 	for _, prior := range d.results {
 		if !listed[prior.entryID] {
 			listed[prior.entryID] = true
-			candidates = append(candidates, prior.entryID)
+			out.CandidateEntries = append(out.CandidateEntries, prior.entryID)
 		}
 		if matched[prior.entryID] {
 			continue
@@ -114,12 +128,13 @@ func (d *derivationLog) check(rawArgs, skipArg string) (candidates, edges []stri
 		for _, v := range values {
 			if strings.Contains(prior.text, v) {
 				matched[prior.entryID] = true
-				edges = append(edges, prior.entryID)
+				out.Edges = append(out.Edges, prior.entryID)
+				out.EdgeCalls = append(out.EdgeCalls, prior.callID)
 				break
 			}
 		}
 	}
-	return candidates, edges
+	return out
 }
 
 // derivableValues is the TOKENS of one call's string arguments that are long
@@ -209,7 +224,8 @@ type derivationBlock struct {
 	Edges      []string `json:"edges"`
 }
 
-func newDerivationBlock(candidates, edges []string) derivationBlock {
+func newDerivationBlock(d Derivation) derivationBlock {
+	candidates, edges := d.CandidateEntries, d.Edges
 	if candidates == nil {
 		candidates = []string{}
 	}

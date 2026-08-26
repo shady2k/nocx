@@ -420,6 +420,15 @@ export interface AnswerToolCall {
    *  the effect beside it is sent rather than inferred (ADR-0028 decision
    *  4). */
   opensBlock: boolean
+  /** The EARLIER calls of this run whose results this call's arguments
+   *  appear to have come out of, as their callIds (nocx-d6gn4.9).
+   *
+   *  EVIDENCE, NOT FACT, and the surface must say so rather than assert a
+   *  causal claim it cannot support: the model authors the arguments, so
+   *  only it knows what it reused, and what the backend can see is a value
+   *  of this call appearing verbatim in an earlier result. Empty is the
+   *  ordinary case and means "nothing matched", never "not looked for". */
+  derivedFrom?: string[]
 }
 
 /** One answer block's bookkeeping (nocx-x8s2.2): the question it answers
@@ -2528,6 +2537,21 @@ export class BlockManager {
         // an effect from a tool name (ADR-0028 decision 4).
         cel.dataset.effect = call.effect
         cel.dataset.tool = call.tool
+        // A call whose arguments look like they came out of an earlier
+        // call's result is MARKED, so a person reading the turn can see the
+        // chain rather than infer it from the order (nocx-d6gn4.9). A typed
+        // data attribute, like the effect above, so the styling lives in the
+        // component's CSS and this surface paints nothing itself.
+        //
+        // The hover text carries the hedge the marker cannot: this is what
+        // the backend OBSERVED, not what the model said it did.
+        if (call.derivedFrom && call.derivedFrom.length > 0) {
+          cel.dataset.derived = String(call.derivedFrom.length)
+          cel.title =
+            call.derivedFrom.length === 1
+              ? 'The arguments of this call appear in the result of an earlier call in this answer.'
+              : `The arguments of this call appear in the results of ${call.derivedFrom.length} earlier calls in this answer.`
+        }
         children.appendChild(cel)
         own(cel)
       },

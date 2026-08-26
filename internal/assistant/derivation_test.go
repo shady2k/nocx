@@ -15,9 +15,10 @@ import "testing"
 
 func TestDerivation_APathDiscoveredInAnEarlierResultIsAnEdge(t *testing.T) {
 	d := &derivationLog{}
-	d.record("entry-ls", "total 4\n-rw-r--r-- 1 dev users 12 Aug 26 17:05 nocx-2026.log\n")
+	d.record("entry-ls", "call-ls", "total 4\n-rw-r--r-- 1 dev users 12 Aug 26 17:05 nocx-2026.log\n")
 
-	_, edges := d.check(`{"sessionId":"session-a","command":"tail -n 5 /var/log/nocx-2026.log"}`, "sessionId")
+	derived := d.check(`{"sessionId":"session-a","command":"tail -n 5 /var/log/nocx-2026.log"}`, "sessionId")
+	edges := derived.Edges
 	if len(edges) != 1 || edges[0] != "entry-ls" {
 		t.Fatalf("edges = %v, want [entry-ls]: the file name came out of the listing", edges)
 	}
@@ -31,9 +32,10 @@ func TestDerivation_APathDiscoveredInAnEarlierResultIsAnEdge(t *testing.T) {
 // the experiment is trying to measure.
 func TestDerivation_ANameTheUserSuppliedIsNotAnEdge(t *testing.T) {
 	d := &derivationLog{}
-	d.record("entry-echo", `{"exitCode":0,"output":""}`)
+	d.record("entry-echo", "call-echo", `{"exitCode":0,"output":""}`)
 
-	_, edges := d.check(`{"sessionId":"session-a","command":"ls -l test2.txt && cat test2.txt"}`, "sessionId")
+	derived := d.check(`{"sessionId":"session-a","command":"ls -l test2.txt && cat test2.txt"}`, "sessionId")
+	edges := derived.Edges
 	if len(edges) != 0 {
 		t.Fatalf("edges = %v, want none: both names came from the person, not from a result", edges)
 	}
@@ -42,9 +44,10 @@ func TestDerivation_ANameTheUserSuppliedIsNotAnEdge(t *testing.T) {
 func TestDerivation_ShortTokensDoNotCollideIntoEdges(t *testing.T) {
 	d := &derivationLog{}
 	// "ls" and "-l" and "5" are everywhere; none of them may draw an edge.
-	d.record("entry-noise", "total 5\ndrwxr-xr-x 2 dev users 4096 Aug 26 17:05 ls\n")
+	d.record("entry-noise", "call-noise", "total 5\ndrwxr-xr-x 2 dev users 4096 Aug 26 17:05 ls\n")
 
-	_, edges := d.check(`{"sessionId":"session-a","command":"ls -l"}`, "sessionId")
+	derived := d.check(`{"sessionId":"session-a","command":"ls -l"}`, "sessionId")
+	edges := derived.Edges
 	if len(edges) != 0 {
 		t.Fatalf("edges = %v, want none: short tokens are collisions, not evidence", edges)
 	}
@@ -53,9 +56,10 @@ func TestDerivation_ShortTokensDoNotCollideIntoEdges(t *testing.T) {
 func TestDerivation_TheResourceArgumentIsNeverEvidence(t *testing.T) {
 	d := &derivationLog{}
 	// A session.list result echoes the session id it was asked about.
-	d.record("entry-list", `{"sessionId":"session-a","items":[]}`)
+	d.record("entry-list", "call-list", `{"sessionId":"session-a","items":[]}`)
 
-	_, edges := d.check(`{"sessionId":"session-a","command":"echo hello"}`, "sessionId")
+	derived := d.check(`{"sessionId":"session-a","command":"echo hello"}`, "sessionId")
+	edges := derived.Edges
 	if len(edges) != 0 {
 		t.Fatalf("edges = %v, want none: the resource was granted and told, never derived", edges)
 	}

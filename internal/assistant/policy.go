@@ -477,7 +477,11 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 		// capability is constructed, next is not called, and the run fails
 		// with a terminal infrastructure error — an interrupted run can
 		// never be told "this may already have happened" when it cannot.
-		execID, entryID, err := m.openAttempt(ctx, decl, tCtx.CallID, rawArgs, matchedResource(decl, args), classifierFact)
+		// Computed ONCE, before the attempt is written, and used for both
+		// the record and the announcement. Two computations either side of
+		// the same call would agree today and are two owners of one fact.
+		derivation := m.derivation.check(rawArgs, decl.ResourceArg)
+		execID, entryID, err := m.openAttempt(ctx, decl, tCtx.CallID, rawArgs, matchedResource(decl, args), classifierFact, derivation)
 		if err != nil {
 			return "", fmt.Errorf("agent tool %q: record attempt: %w", decl.Name, err)
 		}
@@ -517,13 +521,14 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 		// renders one call.
 		if m.onCall != nil {
 			if err := m.onCall(ToolCall{
-				Tool:       decl.Name,
-				CallID:     tCtx.CallID,
-				Args:       args,
-				EntryID:    entryID,
-				Effect:     decl.Effect,
-				Resource:   matchedResource(decl, args),
-				OpensBlock: decl.OpensBlock,
+				Tool:        decl.Name,
+				CallID:      tCtx.CallID,
+				Args:        args,
+				EntryID:     entryID,
+				Effect:      decl.Effect,
+				Resource:    matchedResource(decl, args),
+				OpensBlock:  decl.OpensBlock,
+				DerivedFrom: derivation.EdgeCalls,
 			}); err != nil {
 				// The caller refused the write, which is the one thing that
 				// stops a run: the same contract onEvent has for a delta.
@@ -630,7 +635,7 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 		// of what the model then did. Recorded only for a call that
 		// COMPLETED — a failed call returned nothing to copy from.
 		framed := decl.FrameToolResult(out)
-		m.derivation.record(entryID, framed)
+		m.derivation.record(entryID, tCtx.CallID, framed)
 		return framed, nil
 	}, nil
 }
@@ -1174,7 +1179,7 @@ func (m *policyMiddleware) recordProposal(ctx context.Context, decl agenttools.T
 // nocx-5dldy) — the entry the escalation recorded, found through the
 // approval store. The returned entryID is what the egress gate's request
 // carries into the store, so the same rule holds for a finding's approval.
-func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, resource *content.GrantScope, classifierFact *classifierFact) (int64, string, error) {
+func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, resource *content.GrantScope, classifierFact *classifierFact, derivation Derivation) (int64, string, error) {
 	if m.ledger == nil {
 		return 0, "", errors.New("no attempt ledger wired — a tool call may not run without a durable attempt (design §6.4)")
 	}
@@ -1234,7 +1239,7 @@ func (m *policyMiddleware) openAttempt(ctx context.Context, decl agenttools.Tool
 		// nothing" and "this record predates the field" are different facts,
 		// and a reader that cannot tell them apart reads the second as the
 		// first. See derivation.go for what the evidence is and is not.
-		payloadBody["derivedFrom"] = newDerivationBlock(m.derivation.check(rawArgs, decl.ResourceArg))
+		payloadBody["derivedFrom"] = newDerivationBlock(derivation)
 		payloadBody["descriptor"] = decl.DescriptorDigest()
 		// The classifier block (bead nocx-kpy23, criterion 6): when the
 		// classifier was consulted and cleared the call, the attempt's own

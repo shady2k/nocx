@@ -51,6 +51,10 @@ export interface AgentRunToolCall {
    */
   opensBlock: boolean
   /**
+   * The EARLIER calls of this run whose results this call's arguments appear to have come out of, as their callIds, in the order those calls completed (nocx-d6gn4.9). It exists so a surface can say why a call looks the way it does, and so the experiment that decides whether the assistant should compose work as a program can measure how DEEP real dependent chains are — a figure nothing recorded before. IT IS EVIDENCE AND NOT A FACT, and a surface drawing it owes the reader that distinction: the model authors the arguments, so 'I used the id I just read' exists only inside the model, and asking it directly was rejected because the question would alter the very behaviour being measured. What the backend can see is that a value of this call appears verbatim in an earlier result, with short tokens and the granted resource excluded so an accident cannot pass as a derivation. Always present, and `[]` when nothing matched — for the reason `args` is always present: absent and empty are the same sentence about a call, and a reader should not have to tell them apart. Empty never means 'not looked for'.
+   */
+  derivedFrom: string[]
+  /**
    * The LEDGER action entry the attempt was recorded under (design §6.4). The thread joining question, run, attempt and answer — and the handle a later 'show me what it returned' reaches through, rather than a second copy of the bytes.
    */
   actionEntryId: string

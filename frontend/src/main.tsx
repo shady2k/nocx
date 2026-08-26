@@ -205,7 +205,7 @@ async function main() {
   // removes. The workbench path that can mint in place still does —
   // api-pane.tsx, createSecretInPlace — which is what a store row reaches
   // wherever a vault client is wired.
-  const apiSecretSource: SecretPickerSource = createVaultSecretSource({
+  const secretSource: SecretPickerSource = createVaultSecretSource({
     vaultClient,
     vaultController,
     openSecretCreate: (name, value) => openSettingsPane().startNewSecret(name, value),
@@ -492,6 +492,9 @@ async function main() {
         aboutClient,
         clipboard,
         policyClient,
+        // The same source the workbench takes below: one panel, one
+        // fallback, one place a store row can land (nocx-3o0ed.4).
+        secretSource,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
@@ -720,7 +723,7 @@ async function main() {
               uploadSurface.services.subscribeDropped(handler),
           }
         : undefined,
-      apiSecretSource,
+      secretSource,
       () => vaultClient.inventory().then((inventory) => inventory.entries),
       () => openSettingsPane().openPage('secrets'),
       // Minting, bound HERE for the same reason as the inventory above: the

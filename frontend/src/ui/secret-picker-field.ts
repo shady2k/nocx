@@ -75,6 +75,16 @@ export function createSecretPickerField(opts: {
    *  Null whenever the panel is not in that state — and deliberately null for
    *  a lock over a FILLED field: see onInput. */
   let lockAnchor: number | null = null
+  /** How many create/store asks this adapter is waiting on.
+   *
+   *  SecretPicker CLOSES the panel the moment such a row is activated and
+   *  answers the ask afterwards (secret-picker.ts, activate). That close is
+   *  not the "settled closed" the open-guard below is written for — it is the
+   *  person having chosen — so the span must survive it, or the reference the
+   *  ask returns replaces nothing and the store silently does not happen. The
+   *  window is exactly as long as the ask: a create dialog is many ticks, and
+   *  the guard's promise can resolve inside it (nocx-3o0ed.4). */
+  let asksInFlight = 0
   const idsByName = new Map<string, string>()
 
   const source: SecretPickerSource = {
@@ -90,12 +100,16 @@ export function createSecretPickerField(opts: {
     requestSetup: () => opts.source.requestSetup(),
     requestCreate: async (name, value) => {
       const requestedGeneration = generation
+      asksInFlight++
       // Absent, not `undefined`: the plain create row has no value to carry
       // (secret-picker.ts, SecretPickerSource.requestCreate).
-      const created =
+      const created = await (
         value === undefined
-          ? await opts.source.requestCreate(name)
-          : await opts.source.requestCreate(name, value)
+          ? opts.source.requestCreate(name)
+          : opts.source.requestCreate(name, value)
+      ).finally(() => {
+        asksInFlight--
+      })
       // The dialog may close after the field changed or was removed. Do not
       // make a late row addressable or let it replace a newer @ trigger.
       if (created === undefined || requestedGeneration !== generation || trigger === null) {
@@ -161,12 +175,16 @@ export function createSecretPickerField(opts: {
           picker.close()
           return
         }
-        if (!picker.isOpen) {
+        if (!picker.isOpen && asksInFlight === 0) {
           // The explicit door can settle CLOSED — a cancelled unlock, or a
           // setup dialog that took the surface. The span this panel was
           // opened over went with it, so the adapter drops it too: an anchor
           // left behind would re-open the panel on the very next keystroke,
           // which is the person being asked again after they said no.
+          //
+          // A pending ask is the OTHER way this panel is closed and not
+          // refused (asksInFlight): the row was taken and its answer is still
+          // coming, so the span is still wanted.
           trigger = null
           lockAnchor = null
         }

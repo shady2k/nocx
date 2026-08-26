@@ -25,11 +25,6 @@
     },
     {
       "kind": "exports",
-      "file": "src/authentication-editor.tsx",
-      "symbol": "SecretPicker"
-    },
-    {
-      "kind": "exports",
       "file": "src/connections.tsx",
       "symbol": "sourceLabel"
     },
@@ -175,11 +170,6 @@
     },
     {
       "kind": "exports",
-      "file": "src/suggest/providers.ts",
-      "symbol": "shellCompleteProvider"
-    },
-    {
-      "kind": "exports",
       "file": "src/ui/icons/index.ts",
       "symbol": "PauseIcon"
     },
@@ -202,26 +192,6 @@
       "kind": "exports",
       "file": "src/unresolved-redactions.ts",
       "symbol": "hasUnresolved"
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/files.download.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/files.downloadCancel.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/files.downloadDone.ts",
-      "symbol": ""
-    },
-    {
-      "kind": "files",
-      "file": "src/generated/files.downloadProgress.ts",
-      "symbol": ""
     },
     {
       "kind": "files",

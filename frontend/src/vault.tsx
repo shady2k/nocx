@@ -205,9 +205,42 @@ export function createVaultSecretSource(deps: VaultSecretSourceDeps): SecretPick
       deps.vaultController.openUnlock('use its secrets')
       await deps.vaultClient.inventory()
     },
-    requestSetup: () => {
+    requestSetup: async () => {
+      // THE CONTRACT, HONOURED (secret-picker.ts, SecretPickerSource):
+      // silent when the OS key can carry the vault, the dialog otherwise —
+      // and `false` says nothing took the surface, so the panel reloads its
+      // list where the person is standing instead of handing them a sheet.
+      //
+      // This used to open the dialog unconditionally, which nothing noticed
+      // while the only door onto an uninitialized vault was the API
+      // workbench's. The connections editor's password field is the other
+      // one now (nocx-3o0ed.4), and there the silent path is a shipped
+      // behaviour with a spec on it: on a machine with a keyring, setting a
+      // connection password has never raised a sheet (e2e/vault.spec.ts case
+      // 3), because saveSecretWithVault does exactly this test before it
+      // asks. Two doors onto one act must not disagree about whether it needs
+      // a dialog.
+      let capable = false
+      try {
+        capable = (await deps.vaultClient.status()).osKeyCapable
+      } catch (err) {
+        // The status read is what decides the remedy, so failing it means
+        // there is no silent remedy to choose — ask.
+        deps.onError?.('secret picker could not read the vault status', err)
+      }
+      if (capable) {
+        try {
+          await deps.vaultClient.setup({})
+          await deps.vaultController.refresh()
+          return false
+        } catch (err) {
+          // A silent setup that failed is not a reason to say nothing: fall
+          // through to the sheet, which is the surface that can report it.
+          deps.onError?.('secret picker silent vault setup failed', err)
+        }
+      }
       deps.vaultController.openSetup()
-      return Promise.resolve(true)
+      return true
     },
     requestCreate: (name, value) => {
       // `value ?? ''`, not a branch: the destination's own default for "no

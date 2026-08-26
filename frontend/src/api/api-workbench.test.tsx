@@ -62,7 +62,12 @@ import { createSecretChip } from '../ui/secret-chip'
 import { clearToasts, toasts, type Toast } from '../ui/toast'
 import { JSON_LAYOUT_LIMIT } from '../ui/format-json'
 import { malformedReason } from './malformed-reason'
-import { chooseBoundSuggestion } from '../secret-source-test-helpers'
+import {
+  bindSecretFromLock,
+  offeredSecretRows,
+  pressLock,
+  takePanelRow,
+} from '../secret-field-test-helpers'
 
 vi.mock('../renderers/xterm', () => ({
   XtermRenderer: vi.fn(createRendererMock),
@@ -3270,7 +3275,7 @@ async function openAuth(
   return { writeRequest, writeEnvironment, sendRequest }
 }
 
-describe('Auth uses the shared SecretSource control', () => {
+describe('Auth places the same secret field as every other value (nocx-3o0ed.4)', () => {
   const inventory = [
     {
       id: 'secrow:auth123',
@@ -3290,7 +3295,22 @@ describe('Auth uses the shared SecretSource control', () => {
     requestCreate: vi.fn(),
   }
 
-  it('selecting an existing secret stores its opaque reference in Auth', async () => {
+  it('the tab shows the value label exactly once', async () => {
+    await openAuth([], { secretSource: source, secretInventory: () => Promise.resolve(inventory) })
+    fireEvent.change(control('auth-kind'), { target: { value: 'bearer' } })
+    // The tab used to draw a Field labelled "Token" around a segmented
+    // control and a TextField labelled "Token" inside it — the same word
+    // twice, one above the other, for one value. Asserted on the rendered
+    // text, not by eye.
+    expect(
+      Array.from(workbench().querySelectorAll('label')).filter(
+        (l) => l.textContent?.trim() === 'Token',
+      ),
+    ).toHaveLength(1)
+    expect(workbench().querySelectorAll('[role="radio"]')).toHaveLength(0)
+  })
+
+  it('taking an existing secret stores its opaque reference in Auth', async () => {
     const writeRequest = vi.fn().mockResolvedValue({})
     await openAuth([], {
       secretSource: source,
@@ -3300,11 +3320,14 @@ describe('Auth uses the shared SecretSource control', () => {
     })
     fireEvent.change(control('auth-kind'), { target: { value: 'bearer' } })
     await vi.waitFor(() => expect(source.list).toHaveBeenCalled())
-    fireEvent.click(button('Use existing secret'))
-    const picker = workbench().querySelector<HTMLInputElement>('#api-auth-secret')
-    if (!picker) throw new Error('no existing-secret combobox')
-    await chooseBoundSuggestion(picker, 'Deploy token')
-    expect(picker.value).toBe('Deploy token')
+    const token = field('api-auth-var')
+    await bindSecretFromLock(token, 'Deploy token')
+    expect(token.value).toBe('{{secret:secrow:auth123}}')
+    // What a person READS is the name; the provider string is nobody's
+    // business and the handle is not a label.
+    expect(
+      token.closest('.ui-text-field__control')?.querySelector('.ui-text-field__mark')?.textContent,
+    ).toBe('Deploy token')
     expect(workbench().textContent).not.toContain(inventory[0].provider)
     fireEvent.click(button('Send'))
     await vi.waitFor(() => expect(writeRequest).toHaveBeenCalled())
@@ -3312,7 +3335,7 @@ describe('Auth uses the shared SecretSource control', () => {
     expect(saved.auth.token).toBe('{{secret:secrow:auth123}}')
   })
 
-  it('new mode leaves a literal token untouched', async () => {
+  it('a literal token is left untouched', async () => {
     const { sendRequest } = await openAuth(undefined, {
       secretSource: source,
       secretInventory: () => Promise.resolve(inventory),
@@ -3329,6 +3352,17 @@ describe('Auth uses the shared SecretSource control', () => {
 describe('Auth can store a typed value in the vault', () => {
   const request = unauthenticated()
 
+  /** The panel behind the lock. The lock exists exactly where a picker does
+   *  (secret-text-field.tsx), so a host that can mint wires both — as the
+   *  composition root always does (main.tsx). */
+  const mintlessSource = () => ({
+    status: vi.fn().mockResolvedValue({ state: 'unsealed' as const }),
+    list: vi.fn().mockResolvedValue([]),
+    requestUnseal: vi.fn().mockResolvedValue(undefined),
+    requestSetup: vi.fn().mockResolvedValue(false),
+    requestCreate: vi.fn().mockResolvedValue(undefined),
+  })
+
   async function openWithCreate(over: Partial<ApiWorkbenchServices> = {}) {
     const vault = {
       list: vi.fn().mockResolvedValue([]),
@@ -3337,12 +3371,21 @@ describe('Auth can store a typed value in the vault', () => {
     const opened = await openAuth([], {
       readRequest: vi.fn().mockResolvedValue({ request }),
       secretCreate: vault,
+      secretSource: mintlessSource(),
       ...over,
     })
     fireEvent.change(control('auth-kind'), { target: { value: 'bearer' } })
     return { ...opened, vault }
   }
-  function directAuthEditor(
+
+  /** Press the Auth field's lock and take the row offering to keep what it
+   *  holds. This is what the standalone "Store" button was — the same ask,
+   *  the same proposal, reached through the field's own door (nocx-3o0ed.4). */
+  async function storeAuthValue(value: string): Promise<void> {
+    pressLock(field('api-auth-var'))
+    await takePanelRow(`Store "${value}" in the vault\u2026`)
+  }
+  async function directAuthEditor(
     authRequest: ApiRequest,
     scopeVariables: ApiRequestScopeResult['variables'],
     folder: string,
@@ -3356,6 +3399,7 @@ describe('Auth can store a typed value in the vault', () => {
         scopeVariables={scopeVariables}
         folder={() => folder}
         onEdit={onEdit}
+        secretSource={mintlessSource()}
         onCreateSecret={onCreateSecret}
       />
     ))
@@ -3368,19 +3412,16 @@ describe('Auth can store a typed value in the vault', () => {
     const value = container.querySelector<HTMLInputElement>('#api-auth-var')
     if (!value) throw new Error('no Auth value field')
     fireEvent.input(value, { target: { value: 'typed-value' } })
-    const store = buttonIn(container, 'Store')
-    if (!store) throw new Error('no Auth store action')
-    fireEvent.click(store)
+    pressLock(value)
+    await takePanelRow('Store "typed-value" in the vault\u2026')
     return { container, onCreateSecret }
   }
 
-  it('offers the action from a typed Bearer value with its proposed metadata', async () => {
+  it('offers the store row from a typed Bearer value with its proposed metadata', async () => {
     const { vault } = await openWithCreate()
     fireEvent.input(field('api-auth-var'), { target: { value: 'hello' } })
 
-    const store = button('Store')
-    expect(store.disabled).toBe(false)
-    fireEvent.click(store)
+    await storeAuthValue('hello')
 
     await vi.waitFor(() => expect(field('secret-create-value').value).toBe('hello'))
     expect(field('secret-create-name').value).toBe('users token')
@@ -3390,25 +3431,41 @@ describe('Auth can store a typed value in the vault', () => {
     expect(vault.createSecret).not.toHaveBeenCalled()
   })
 
-  it('keeps the action disabled for empty input but enables it for arbitrary text', async () => {
+  it('offers no store row for empty input but offers one for arbitrary text', async () => {
+    // The disabled Store button said this; the panel says it by construction
+    // — an empty field has nothing to keep, so the lock opens the plain list
+    // (secret-picker-field.ts). And what IS offered is offered for any text:
+    // no shape or entropy of the value decides it (nocx-0khco).
     await openWithCreate()
-    expect(button('Store').disabled).toBe(true)
+    pressLock(field('api-auth-var'))
+    await vi.waitFor(() => expect(offeredSecretRows()).toEqual(['Add a secret\u2026']))
 
     fireEvent.input(field('api-auth-var'), { target: { value: 'not a credential' } })
-    expect(button('Store').disabled).toBe(false)
+    pressLock(field('api-auth-var'))
+    await vi.waitFor(() =>
+      expect(offeredSecretRows()).toEqual([
+        'Store "not a credential" in the vault\u2026',
+        'Add a secret\u2026',
+      ]),
+    )
   })
 
-  it('leaves a typed value and new mode untouched until the person stores it', async () => {
+  it('leaves a typed value untouched and unbound until the person stores it', async () => {
     await openWithCreate()
     const token = field('api-auth-var')
     fireEvent.input(token, { target: { value: 'leave-me-here' } })
 
     expect(token.value).toBe('leave-me-here')
-    expect(button('Type a new one').getAttribute('aria-checked')).toBe('true')
+    // Unbound: no reference, and no chip over it. This is what "new mode is
+    // still selected" asserted, said about the value rather than a control.
+    expect(token.value).not.toContain('{{secret:')
+    expect(
+      token.closest('.ui-text-field__control')?.querySelector('.ui-text-field__mark'),
+    ).toBeNull()
     expect(workbench().querySelector('#secret-create-value')).toBeNull()
   })
 
-  it('changes the request to the existing-secret control after a successful store', async () => {
+  it('binds the request to the stored secret after a successful store', async () => {
     const handle = 'secrow:created'
     const entry = {
       id: handle,
@@ -3436,7 +3493,7 @@ describe('Auth can store a typed value in the vault', () => {
       writeRequest,
     })
     fireEvent.input(field('api-auth-var'), { target: { value: 'stored-value' } })
-    fireEvent.click(button('Store'))
+    await storeAuthValue('stored-value')
     await vi.waitFor(() => expect(button('Save to vault')).toBeTruthy())
     fireEvent.click(button('Save to vault'))
     await vi.waitFor(() =>
@@ -3455,28 +3512,36 @@ describe('Auth can store a typed value in the vault', () => {
         ),
       ).toBe(true),
     )
-    expect(button('Use existing secret').getAttribute('aria-checked')).toBe('true')
-    expect(field('api-auth-secret').value).toBe(entry.name)
-    expect(workbench().querySelector('.ui-suggestion-field[data-variant="bound"]')).not.toBeNull()
+    // The field is BOUND now, and that is the whole of what "the existing-
+    // secret control is selected" used to assert: the value is the opaque
+    // reference and the chip over it names the secret.
+    const token = field('api-auth-var')
+    await vi.waitFor(() => expect(token.value).toBe(`{{secret:${handle}}}`))
+    await vi.waitFor(() =>
+      expect(
+        token.closest('.ui-text-field__control')?.querySelector('.ui-text-field__mark')
+          ?.textContent,
+      ).toBe(entry.name),
+    )
   })
 
-  it('leaves the value and mode unchanged when the create ask is cancelled', async () => {
+  it('leaves the value unchanged and unbound when the create ask is cancelled', async () => {
     await openWithCreate()
     const token = field('api-auth-var')
     fireEvent.input(token, { target: { value: 'cancel-me' } })
-    fireEvent.click(button('Store'))
+    await storeAuthValue('cancel-me')
     await vi.waitFor(() => expect(button('Cancel')).toBeTruthy())
     fireEvent.click(button('Cancel'))
 
-    expect(token.value).toBe('cancel-me')
-    expect(button('Type a new one').getAttribute('aria-checked')).toBe('true')
+    expect(field('api-auth-var').value).toBe('cancel-me')
+    expect(field('api-auth-var').value).not.toContain('{{secret:')
   })
 
   it("offers Basic's Password field with the proposed password kind", async () => {
     await openWithCreate()
     fireEvent.change(control('auth-kind'), { target: { value: 'basic' } })
     fireEvent.input(field('api-auth-var'), { target: { value: 'password text' } })
-    fireEvent.click(button('Store'))
+    await storeAuthValue('password text')
 
     await vi.waitFor(() => expect(field('secret-create-value').value).toBe('password text'))
     expect(field('secret-create-name').value).toBe('users password')
@@ -3486,7 +3551,7 @@ describe('Auth can store a typed value in the vault', () => {
   })
 
   it('uses a resolved URL host for the proposed name', async () => {
-    const { onCreateSecret } = directAuthEditor(
+    const { onCreateSecret } = await directAuthEditor(
       { ...request, url: '{{baseUrl}}/v1/x' },
       [
         {
@@ -3521,7 +3586,7 @@ describe('Auth can store a typed value in the vault', () => {
   })
 
   it('uses the active folder when the URL host variable is unresolved', async () => {
-    const { onCreateSecret } = directAuthEditor(
+    const { onCreateSecret } = await directAuthEditor(
       { ...request, url: '{{baseUrl}}/v1/x' },
       [],
       'tinkoff',
@@ -3547,6 +3612,7 @@ describe('Auth can store a typed value in the vault', () => {
         list: vi.fn().mockResolvedValue([]),
         createSecret,
       },
+      secretSource: mintlessSource(),
     })
     await openWorkbench(bar)
     await vi.waitFor(() => row(CREATE_REL_PATH))
@@ -3555,20 +3621,45 @@ describe('Auth can store a typed value in the vault', () => {
     fireEvent.click(button('Auth'))
     fireEvent.change(control('auth-kind'), { target: { value: 'bearer' } })
     fireEvent.input(field('api-auth-var'), { target: { value: 'typed-value' } })
-    fireEvent.click(button('Store'))
+    await storeAuthValue('typed-value')
 
     await vi.waitFor(() => expect(field('secret-create-name').value).toBe('users token'))
     expect(createSecret).not.toHaveBeenCalled()
   })
 
-  it('does not render a store action when the host cannot mint secrets', async () => {
+  it('renders no lock at all when the host has no picker to open', async () => {
+    // The lock exists exactly where the panel does (secret-text-field.tsx): a
+    // lock over no vault is a control that silently does nothing, which is
+    // worse than not offering it. This is what "no Store action without a
+    // mint seam" asserted, now stated about the door rather than the button.
     await openAuth([], {
       readRequest: vi.fn().mockResolvedValue({ request }),
     })
     fireEvent.change(control('auth-kind'), { target: { value: 'bearer' } })
     fireEvent.input(field('api-auth-var'), { target: { value: 'typed' } })
+    field('api-auth-var').focus()
 
     expect(buttonNames()).not.toContain('Store')
+    expect(workbench().querySelector('[aria-label="Store in vault"]')).toBeNull()
+  })
+
+  it('hands a store row off to the host when it has a picker but no mint seam of its own', async () => {
+    // NO MINT SEAM, NO DEAD ROW (api-pane.tsx). The row is still offered and
+    // still ends somewhere: the host's own source answers it — which is the
+    // Secrets page, with the name and value filled in (nocx-3o0ed.6).
+    const source = mintlessSource()
+    await openAuth([], {
+      readRequest: vi.fn().mockResolvedValue({ request }),
+      secretSource: source,
+    })
+    fireEvent.change(control('auth-kind'), { target: { value: 'bearer' } })
+    fireEvent.input(field('api-auth-var'), { target: { value: 'handed-off' } })
+    pressLock(field('api-auth-var'))
+    await takePanelRow('Store "handed-off" in the vault\u2026')
+
+    await vi.waitFor(() => expect(source.requestCreate).toHaveBeenCalledWith('', 'handed-off'))
+    // Nothing was bound here, because nothing was created here.
+    expect(field('api-auth-var').value).toBe('handed-off')
   })
 })
 

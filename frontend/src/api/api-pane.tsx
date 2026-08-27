@@ -446,21 +446,19 @@ export function ApiPane(props: ApiPaneProps) {
       // the same act it was handed before, plus the value when there is one.
       return value === undefined ? source?.requestCreate(name) : source?.requestCreate(name, value)
     }
-    // The picker is reachable from the URL, a header, a parameter, the body
-    // and Auth alike, so the site it can honestly name is `field` — which is
-    // the rung that gives api-token. The NAME here is what the person typed
-    // after the '@', which is almost always what they were reaching for; only
-    // the kind is derived.
+    // The picker has two create doors, and `value` is their explicit
+    // boundary: the passive '@' row omits it and passes the typed filter as
+    // `name`; preserve that name. The explicit lock/store row includes the
+    // value and passes an empty filter, so its name comes from the shared
+    // proposal instead.
     const proposal = proposeSecret({
       site: { at: 'field' },
       url: store.draft()?.url ?? '',
     })
-    // The value the person is standing on, already filled in: the store row
-    // carries what the field held, so the ask is down to naming it. The '@'
-    // create row carries none, and the ask opens with an empty value field
-    // exactly as it did.
+    const fromStoreDoor = value !== undefined
+    const askName = fromStoreDoor && name.trim() === '' ? proposal.name : name
     const created = await openSecretCreateAsk({
-      name,
+      name: askName,
       kind: proposal.kind,
       value: value ?? '',
     })

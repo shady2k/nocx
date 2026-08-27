@@ -1644,7 +1644,7 @@ func New(opts ...Option) (*App, error) {
 	// (nocx-jtz3q): an assistant whose registry assembled empty would offer
 	// no tools to any run and fail silently — the composition root refuses
 	// to start with a broken registry instead.
-	assistantClient, err := assistant.NewClientWithWireRecorder(logger, &ledgerWireRecorder{ledger: contentDB.Ledger()})
+	assistantClient, err := assistant.NewClient(logger, &ledgerWireRecorder{ledger: contentDB.Ledger()})
 	if err != nil {
 		return nil, err
 	}

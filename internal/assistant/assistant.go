@@ -357,42 +357,27 @@ type ProbeResult struct {
 	At time.Time `json:"at"`
 }
 
-// NewClient builds the engine client with no product recorder.
-func NewClient(logger log.Logger) (Client, error) {
-	return newClient(logger, tools.Schemas)
+// NewClient builds the engine client. The recorder is optional; when non-nil,
+// it persists provider bytes under each turn.
+func NewClient(logger log.Logger, recorder WireRecorder) (Client, error) {
+	return newClient(logger, tools.Schemas, recorder)
 }
 
-// NewClientWithWireRecorder builds the engine client with the recorder that
-// persists provider bytes under each turn. The recorder is optional for tests
-// and for callers that only need the model client.
-func NewClientWithWireRecorder(logger log.Logger, recorder WireRecorder) (Client, error) {
-	return newClientWithRecorder(logger, tools.Schemas, recorder)
-}
-
-func newClient(logger log.Logger, toolsFS fs.FS) (Client, error) {
-	return newClientWithRecorder(logger, toolsFS, nil)
-}
-
-func newClientWithRecorder(logger log.Logger, toolsFS fs.FS, recorder WireRecorder) (Client, error) {
+func newClient(logger log.Logger, toolsFS fs.FS, recorder WireRecorder) (Client, error) {
 	reg, err := agenttools.Assemble(toolsFS)
 	if err != nil {
 		return nil, fmt.Errorf("assistant: tool registry: %w", err)
 	}
 	if len(reg.All()) == 0 {
-		return nil, errors.New("assistant: tool registry assembled EMPTY — the tool schemas did not reach the binary; a model would be offered no tools")
+		return nil, errors.New("assistant: tool registry assembled EMPTY — the tool schemas did not reach the binary; a model would be offered no tools and fails silently")
 	}
-	return newClientWithRegistryAndRecorder(logger, reg, recorder), nil
+	return newClientWithRegistry(logger, reg, recorder), nil
 }
 
-// Deprecated internal construction seam retained for package tests.
-func newClientWithRegistry(logger log.Logger, reg agenttools.Registry) Client {
-	return newClientWithRegistryAndRecorder(logger, reg, nil)
-}
-
-func newClientWithRegistryAndRecorder(logger log.Logger, reg agenttools.Registry, recorder WireRecorder) Client {
+func newClientWithRegistry(logger log.Logger, reg agenttools.Registry, recorder WireRecorder) Client {
 	return &client{
 		log:         logger,
-		http:        newGuardedHTTPClientWithResolverAndRecorder(logger, nil, recorder),
+		http:        newGuardedHTTPClient(logger, nil, recorder),
 		tools:       reg,
 		approvals:   NewApprovalStore(),
 		checkpoints: newRunCheckpoints(),

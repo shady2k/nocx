@@ -32,7 +32,7 @@ func TestWireTap_RecordsBothHalvesAndNeverTheKey(t *testing.T) {
 		args: string(args),
 	}))
 	defer srv.Close()
-	cl, _ := newClient(nil, os.DirFS(realToolsFS))
+	cl, _ := newClient(nil, os.DirFS(realToolsFS), nil)
 	p := askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore())
 	if askErr := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); askErr != nil {
 		t.Fatalf("Ask: %v", askErr)

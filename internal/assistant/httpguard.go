@@ -44,15 +44,7 @@ type guardedTransport struct {
 
 // newGuardedHTTPClient builds the http.Client every model call goes through.
 // logger may be nil (tests).
-func newGuardedHTTPClient(logger log.Logger) *http.Client {
-	return newGuardedHTTPClientWithResolverAndRecorder(logger, nil, nil)
-}
-
-func newGuardedHTTPClientWithResolver(logger log.Logger, resolve func(ctx context.Context, host string) ([]net.IP, error)) *http.Client {
-	return newGuardedHTTPClientWithResolverAndRecorder(logger, resolve, nil)
-}
-
-func newGuardedHTTPClientWithResolverAndRecorder(logger log.Logger, resolve func(ctx context.Context, host string) ([]net.IP, error), recorder WireRecorder) *http.Client {
+func newGuardedHTTPClient(logger log.Logger, resolve func(ctx context.Context, host string) ([]net.IP, error), recorder WireRecorder) *http.Client {
 	resolver := httppolicy.SystemResolver()
 	if resolve != nil {
 		resolver = httppolicy.ResolverFunc(resolve)

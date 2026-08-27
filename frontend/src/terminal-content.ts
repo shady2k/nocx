@@ -586,8 +586,44 @@ export class TerminalContent extends BasePaneContent {
     // selecting agree with it. Nothing is lost by it: the first character
     // typed goes back into the prompt through the global keydown rescue,
     // exactly as it does after a click on a block.
+    //
+    // AND THE RELEASE MUST NOT TAKE THE SELECTION WITH IT. Blurring an
+    // editing host is itself a selection change on some engines: WebKit
+    // empties the document selection along with the host that held it —
+    // measured, rangeCount goes 1 to 0 synchronously inside blur(), and the
+    // selectionchange announcing it arrives a frame later — while Chromium
+    // leaves the selection where it was. Left alone, this handler's own blur
+    // came back to it as a collapsed selection and it hid the offer it had
+    // just shown. So the claim is RE-ASSERTED here rather than assumed to
+    // have survived, and the event the blur provokes then finds the range
+    // already back in place and re-shows this same offer instead of hiding
+    // it. The condition is on what the selection actually holds afterwards,
+    // never on which engine is running, so neither is the special case; and
+    // re-asserting is what a claim of ownership means — the surface that
+    // takes the focus keeps the selection it took it for, so the highlight a
+    // person made stays under the offer they are being made.
     const active = document.activeElement
-    if (active instanceof HTMLElement && this.editor?.rootContains(active) === true) active.blur()
+    if (active instanceof HTMLElement && this.editor?.rootContains(active) === true) {
+      const startNode = range.startContainer
+      const startOffset = range.startOffset
+      const endNode = range.endContainer
+      const endOffset = range.endOffset
+      active.blur()
+      const held = window.getSelection()
+      const heldRange = held !== null && held.rangeCount > 0 ? held.getRangeAt(0) : null
+      const survived =
+        heldRange !== null &&
+        heldRange.startContainer === startNode &&
+        heldRange.startOffset === startOffset &&
+        heldRange.endContainer === endNode &&
+        heldRange.endOffset === endOffset
+      if (!survived && held !== null) {
+        range.setStart(startNode, startOffset)
+        range.setEnd(endNode, endOffset)
+        held.removeAllRanges()
+        held.addRange(range)
+      }
+    }
     this.markAffordance?.show(
       {
         left: rect.left,

@@ -528,6 +528,16 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
     expect(covers).toBeGreaterThan(facts)
     expect(lasts).toBeGreaterThan(covers)
   })
+
+  it('names the effect row a standing answer covers in product words', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...POLICY_ASK,
+        standing: { available: true, rule: 'read and inspect', reason: '' },
+      },
+    })
+    expect(container.textContent ?? '').toContain('is a standing answer for read and inspect')
+  })
 })
 
 describe('AgentApprovalPrompt', () => {

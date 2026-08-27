@@ -98,6 +98,9 @@
    opt-in: password and vault prompts retain the ordinary top-sheet rhythm. */
 .ui-prompt[data-density='compact'] {
   padding: var(--space-3);
+  /* Approval geometry is checked immediately after the sheet opens. Its
+     compact action grid must have one stable box while the person reads it. */
+  animation: none;
 }
 
 .ui-prompt[data-density='compact'] .ui-prompt__title {

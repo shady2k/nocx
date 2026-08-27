@@ -98,18 +98,17 @@ func (s *scriptedApprovalClient) askCount() int {
 	return s.count
 }
 
-// policySuspension builds the exported policy-gate suspension for a run. It
-// carries an effect because the real gate always does: agent.approvalRequested
-// REQUIRES the field, so a stand-in that omitted it would model a middleware
-// that cannot exist — and the notification it produced would not validate.
+// policySuspension builds the exported policy-gate suspension for a
+// non-command tool. It carries an effect because the real gate always does:
+// agent.approvalRequested REQUIRES the field, while the absent invocation
+// carrier is what distinguishes this effect-row standing answer.
 func policySuspension(tool, callID, args, argHash string) func(runID string) error {
 	return func(runID string) error {
 		return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
 			RunID: runID, Attempt: 1, Tool: tool, CallID: callID,
 			Arguments: args, ArgHash: argHash,
-			Effect:     content.EffectObserve,
-			Resource:   &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/a.txt"},
-			Invocation: content.Invocation{Parsed: true},
+			Effect:   content.EffectObserve,
+			Resource: &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/a.txt"},
 		}}
 	}
 }

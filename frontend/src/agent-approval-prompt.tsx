@@ -500,8 +500,8 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           <p>
             An answer in this session lasts until this terminal session ends; restarting the shell
             starts a new one and the question comes back. An answer of always is a standing answer
-            for the exact invocation named on its controls, which you can change on the Agent policy
-            page.
+            for {ask().standing.rule}, in every session, from now on, which you can change on the
+            Agent policy page.
           </p>
         </Show>
       </Stack>

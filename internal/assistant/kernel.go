@@ -212,6 +212,9 @@ type ApprovalRequest struct {
 	// Invocation is the parser result used by the effect and rule gates. It
 	// is internal checkpoint state, not renderer input.
 	Invocation content.Invocation `json:"-"`
+	// CommandInvocation preserves command-vs-non-command provenance for the
+	// approval surface, including malformed command parses.
+	CommandInvocation bool `json:"-"`
 }
 
 func init() {
@@ -618,6 +621,7 @@ func pathUnder(path, scope string) bool {
 // decides whether the exact proposal may execute.
 func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, invocation content.Invocation) error {
 	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
+	ap.CommandInvocation = decl.CommandArg != ""
 	var entryID string
 	if m.ledger != nil {
 		id, err := m.recordProposal(ctx, decl, rawArgs, matchedResource(decl, args), ap, nil)
@@ -627,6 +631,7 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 		entryID = id
 	}
 	req := m.request(decl, callID, rawArgs, args)
+	req.CommandInvocation = decl.CommandArg != ""
 	req.Invocation = cloneInvocation(invocation)
 	req.ArgHash = ap.ArgHash
 	req.EntryID = entryID
@@ -648,6 +653,7 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 // consultation (the loop property).
 func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, ask *ApprovalRequest, fact *classifierFact, invocation content.Invocation) error {
 	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
+	ap.CommandInvocation = decl.CommandArg != ""
 	var entryID string
 	if m.ledger != nil {
 		id, err := m.recordProposal(ctx, decl, rawArgs, ask.Resource, ap, fact)
@@ -657,6 +663,7 @@ func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.T
 		entryID = id
 	}
 	ask.ArgHash = ap.ArgHash
+	ask.CommandInvocation = decl.CommandArg != ""
 	ask.Invocation = cloneInvocation(invocation)
 	ask.EntryID = entryID
 	if m.approvals != nil {

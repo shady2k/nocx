@@ -50,6 +50,44 @@ func suspendedRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarness {
 	return suspendedRunWith(t, policy, client)
 }
 
+// suspendedNonCommandRun leaves a non-command tool without an invocation
+// carrier. Its standing answer must name the classified effect row instead.
+func suspendedNonCommandRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarness {
+	t.Helper()
+	client := &scriptedApprovalClient{script: []approvalScriptStep{
+		{suspend: func(runID string) error {
+			return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
+				RunID: runID, Attempt: 1, Tool: "session.read", CallID: "call_1",
+				Arguments: `{"sessionId":"session-a"}`, ArgHash: "hash-a",
+				Effect:   content.EffectObserve,
+				Resource: &content.GrantScope{Kind: content.ResourceSession, ID: "session-a"},
+			}}
+		}},
+		{deltas: []string{"done"}},
+	}}
+	return suspendedRunWith(t, policy, client)
+}
+
+// suspendedUnshowableRun carries a malformed command invocation. This is still
+// a run-shaped proposal, so its standing answer must remain unavailable.
+func suspendedUnshowableRun(t *testing.T, policy assistant.GlobalPolicy) *scopeHarness {
+	t.Helper()
+	client := &scriptedApprovalClient{script: []approvalScriptStep{
+		{suspend: func(runID string) error {
+			return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
+				RunID: runID, Attempt: 1, Tool: "run", CallID: "call_1",
+				Arguments: `{"command":"echo hi"}`, ArgHash: "hash-a",
+				Effect:            content.EffectObserve,
+				Resource:          &content.GrantScope{Kind: content.ResourceSession, ID: "session-a"},
+				Invocation:        content.Invocation{Parsed: false},
+				CommandInvocation: true,
+			}}
+		}},
+		{deltas: []string{"done"}},
+	}}
+	return suspendedRunWith(t, policy, client)
+}
+
 func suspendedCommandRun(t *testing.T, policy assistant.GlobalPolicy, invocation content.Invocation) *scopeHarness {
 	t.Helper()
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
@@ -111,8 +149,8 @@ func suspendedRunWith(t *testing.T, policy assistant.GlobalPolicy, client *scrip
 // answer is the renderer's literal payload for this run's proposal.
 func (s *scopeHarness) answer(approved bool, scope string) map[string]any {
 	return map[string]any{
-		"runId": strconv.FormatInt(s.runID, 10), "attempt": 1, "tool": "files.read",
-		"callId": "call_1", "argHash": "hash-a", "approved": approved, "scope": scope,
+		"runId": s.asked.RunID, "attempt": s.asked.Attempt, "tool": s.asked.Tool,
+		"callId": s.asked.CallID, "argHash": s.asked.ArgHash, "approved": approved, "scope": scope,
 	}
 }
 
@@ -264,6 +302,35 @@ func TestAgentApprove_ScopeAlways_CompoundInvocationIsNotSavedAsStandingRule(t *
 	}
 	if len(h.policy.Policy().Rules) != 0 {
 		t.Fatalf("global rules = %+v, want none", h.policy.Policy().Rules)
+	}
+}
+
+func TestAgentApprovalRequested_NonCommandOffersEffectStandingAnswer(t *testing.T) {
+	h := suspendedNonCommandRun(t, askPolicyStore(t))
+
+	if !h.asked.Standing.Available || h.asked.Standing.Rule != "read and inspect" || h.asked.Standing.Reason != "" {
+		t.Fatalf("standing offer = %+v, want the observe effect row in product words", h.asked.Standing)
+	}
+	if got := h.approve(t, "always"); got.Warning != "" {
+		t.Fatalf("warning = %q, want none — the effect-row standing answer was saved", got.Warning)
+	}
+	if got := h.policy.Policy().DecisionFor(content.EffectObserve); got != content.DecisionPermit {
+		t.Fatalf("observe = %q, want permit from the non-command standing answer", got)
+	}
+}
+
+func TestAgentApprove_RunWithUnshowableInvocationStillRejectsStandingAnswer(t *testing.T) {
+	h := suspendedUnshowableRun(t, askPolicyStore(t))
+
+	if h.asked.Standing.Available || !strings.Contains(h.asked.Standing.Reason, "could not be parsed safely") {
+		t.Fatalf("standing offer = %+v, want the canonical-invocation refusal", h.asked.Standing)
+	}
+	got := h.approve(t, "always")
+	if !strings.Contains(got.Warning, "could not be parsed safely") {
+		t.Fatalf("warning = %q, want the same canonical-invocation refusal", got.Warning)
+	}
+	if got := h.policy.Policy().DecisionFor(content.EffectObserve); got != content.DecisionAsk {
+		t.Fatalf("observe = %q, want ask — unshowable run must not write an effect-row rule", got)
 	}
 }
 

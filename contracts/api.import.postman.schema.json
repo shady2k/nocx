@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/api.import.postman.schema.json",
   "title": "ApiImportPostmanResult",
-  "description": "Result of the api.import.postman JSON-RPC method, and it is ONE result for both routes in: the export is named either by `path`, a file on the machine running nocx, or by `document`, the export's bytes carried inline (the route for a backend that is not the person's own machine). Either way the collection folder has arrived at the destination as one atomic write, and this is the list of what the import did NOT carry over. The list is a RESULT rather than a log line because a soft degrade must be visible in the product; an import that silently dropped a pre-request script would be a feature that does not exist surviving a release.",
+  "description": "Result of the api.import.postman JSON-RPC method, and it is ONE result for both routes in: the export is named either by `path`, a file on the machine running nocx, or by `document`, the export's bytes carried inline (the route for a backend that is not the person's own machine). Either way the collection folder has arrived at the destination as one atomic write, and this is the list of what the import did NOT carry over. The list is a RESULT rather than a log line because a soft degrade must be visible in the product; an import that silently dropped a pre-request script would be a feature that does not exist surviving a release. An ARCHIVE import additionally returns one named report per collection or environment it writes, for the same reason the list itself exists: many degrades reported as a total is a total, not a report.",
   "type": "object",
   "additionalProperties": false,
   "required": ["unsupported"],
@@ -11,6 +11,11 @@
       "description": "Never null — an import that carried everything over is [].",
       "type": "array",
       "items": { "$ref": "#/$defs/unsupported" }
+    },
+    "documents": {
+      "description": "Present only for an archive import; one report per collection or environment written, in archive-path order.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/archiveDocument" }
     }
   },
   "$defs": {
@@ -24,6 +29,22 @@
           "type": "string"
         },
         "why": { "type": "string" }
+      }
+    },
+    "archiveDocument": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "name", "unsupported"],
+      "properties": {
+        "kind": {
+          "type": "string",
+          "enum": ["collection", "environment"]
+        },
+        "name": { "type": "string" },
+        "unsupported": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/unsupported" }
+        }
       }
     }
   }

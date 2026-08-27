@@ -38,7 +38,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
+	"strings"
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/apicoll"
@@ -584,7 +586,6 @@ func (h apiImportHandlers) handlePostman(ctx context.Context, req jsonrpcRequest
 		}
 		// One import, three ways in, and the choice is already made: the
 		// validator refused several-and-none, so exactly one of these is
-		// set and there is no precedence rule here to disagree with it.
 		var (
 			unsup []apiimport.Unsupported
 			err   error
@@ -594,6 +595,17 @@ func (h apiImportHandlers) handlePostman(ctx context.Context, req jsonrpcRequest
 			unsup, err = svc.ImportPostmanURL(ctx, p.URL, storedRoute(p.Route), p.Dest)
 		case p.Document != "":
 			unsup, err = svc.ImportPostmanDocument(ctx, p.Document, p.Dest)
+		case p.Path != "" && strings.HasSuffix(strings.ToLower(p.Path), ".zip"):
+			results, importErr := svc.ImportPostmanArchive(ctx, p.Path, p.Dest)
+			if importErr != nil {
+				_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(importErr), Message: importErr.Error()})
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(apiImportPostmanResponse{
+				Unsupported: []apiUnsupportedWire{},
+				Documents:   wireArchiveImportResults(results),
+			}))
+			return nil
 		default:
 			unsup, err = svc.ImportPostman(ctx, p.Path, p.Dest)
 		}
@@ -659,7 +671,8 @@ func apiMethodErrorCode(err error) int {
 		errors.Is(err, apicoll.ErrFolderExists),
 		errors.Is(err, apicoll.ErrFolderNotFound),
 		errors.Is(err, apicoll.ErrRequestExists),
-		errors.Is(err, capability.ErrImportNotAFile):
+		errors.Is(err, capability.ErrImportNotAFile),
+		errors.Is(err, os.ErrNotExist):
 		return -32602
 	default:
 		return -32603
@@ -1288,6 +1301,13 @@ type apiTimingsWire struct {
 }
 
 type apiImportPostmanResponse struct {
+	Unsupported []apiUnsupportedWire                  `json:"unsupported"`
+	Documents   []apiImportPostmanArchiveDocumentWire `json:"documents,omitempty"`
+}
+
+type apiImportPostmanArchiveDocumentWire struct {
+	Kind        string               `json:"kind"`
+	Name        string               `json:"name"`
 	Unsupported []apiUnsupportedWire `json:"unsupported"`
 }
 
@@ -1620,6 +1640,7 @@ const (
 	// of the refusal — its tokenizer caps the line at 1 MiB — and this is
 	// the wire-cost ceiling before the parse, at the same order of
 	// magnitude so nothing legitimate sits between them.
+
 	maxAPICurlLineRunes = 1 << 20
 	// maxAPIImportDocumentRunes bounds a Postman export carried INLINE, as
 	// the `document` parameter of api.import.postman. It is deliberately
@@ -1650,6 +1671,18 @@ const (
 	// which is the other half of the per-call work bound.
 	maxAPIRequestRows = 512
 )
+
+func wireArchiveImportResults(results []apiimport.ArchiveImportResult) []apiImportPostmanArchiveDocumentWire {
+	out := make([]apiImportPostmanArchiveDocumentWire, 0, len(results))
+	for _, result := range results {
+		out = append(out, apiImportPostmanArchiveDocumentWire{
+			Kind:        string(result.Kind),
+			Name:        result.Name,
+			Unsupported: wireUnsupported(result.Unsupported),
+		})
+	}
+	return out
+}
 
 // decodeAPIParams decodes an api.* params object STRICTLY: a field this
 // method does not declare is REFUSED, not ignored.

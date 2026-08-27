@@ -252,6 +252,7 @@ func parsePostman(r io.Reader, route apicoll.Route) (postmanResult, error) {
 		if name == "" {
 			name = defaultEnvName
 		}
+		c.res.Collection.Name = name
 		c.env = &apicoll.Environment{Name: name, Route: c.arrivalRoute()}
 		c.readVariables(doc.Values)
 		c.res.Environments = append(c.res.Environments, *c.env)

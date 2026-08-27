@@ -956,13 +956,16 @@ var ErrImportURLUnavailable = errors.New("capability: this build cannot fetch an
 // parse behind whatever the api domain happened to be doing.
 type APIImportService interface {
 	// ImportPostman reads the export at srcPath and writes the collection
-	// to dest as one atomic arrival. It is the second and last method on this
-	// surface that accepts a path (§13.1) — and it accepts two, because an
-	// import names both what to read and where to put it.
+	// to dest as one atomic arrival. It is one of the path-based entrances
+	// on this surface (§13.1): an import names both what to read and where
+	// to put it.
 	// srcPath is a path on the machine running THIS process, which is the
 	// person's machine only when the desktop app is what is calling. It is
 	// therefore the NARROW route; ImportPostmanDocument is the general one.
 	ImportPostman(ctx context.Context, srcPath, dest string) ([]apiimport.Unsupported, error)
+	// ImportPostmanArchive reads a Postman workspace archive and writes each
+	// named document below dest, rolling the fan-out back if one arrival fails.
+	ImportPostmanArchive(ctx context.Context, srcPath, dest string) ([]apiimport.ArchiveImportResult, error)
 
 	// ImportPostmanDocument writes the same collection from the export's
 	// BYTES, which the caller already holds. It is not a second import: the
@@ -1042,6 +1045,25 @@ func (s *apiImportService) ImportPostman(ctx context.Context, srcPath, dest stri
 	}
 	defer func() { _ = f.Close() }()
 	return apiimport.ImportInto(ctx, s.fsys, dest, f, apicoll.Route{Kind: apicoll.RouteDirect})
+}
+
+func (s *apiImportService) ImportPostmanArchive(ctx context.Context, srcPath, dest string) ([]apiimport.ArchiveImportResult, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	fi, err := os.Lstat(srcPath)
+	if err != nil {
+		return nil, fmt.Errorf("capability: read the Postman archive: %w", err)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %s", ErrImportNotAFile, srcPath)
+	}
+	f, err := os.Open(srcPath) //nolint:gosec // the archive path is chosen by the user and was Lstat-checked above
+	if err != nil {
+		return nil, fmt.Errorf("capability: read the Postman archive: %w", err)
+	}
+	defer func() { _ = f.Close() }()
+	return apiimport.ImportPostmanArchive(ctx, s.fsys, dest, f, apicoll.Route{Kind: apicoll.RouteDirect})
 }
 
 // ImportPostmanDocument runs the same import over the bytes it was given.

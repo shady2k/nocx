@@ -967,12 +967,12 @@ type PriorTurn struct {
 	EntryID string
 	// Question is its intent: what was asked, exactly as it was recorded.
 	Question string
-	// Prose is what the run answered, already arranged (see TurnProse).
 	// ToolLines is one ledger-derived factual summary per action the turn
 	// caused. It rides with the turn's assistant message rather than inventing
 	// a fourth Message role or an OpenAI tool-call shape the engine does not
-	// have. The line names the call, its terminal outcome and result size; it
-	// never carries the result body.
+	// have. The line names the call, its terminal outcome, and whether its
+	// output was retained, evicted, or never recorded; it never carries the
+	// result body.
 	ToolLines []string
 	Prose     TurnProse
 }

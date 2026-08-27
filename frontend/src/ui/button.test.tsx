@@ -134,6 +134,7 @@ describe('Button', () => {
     expect(css).toContain(".ui-button[data-secondary='true']")
     expect(css).toContain('.ui-button__secondary')
     expect(css).toContain('font-size: var(--font-size-2xs)')
+    expect(css).toMatch(/\.ui-button__secondary\s*\{[\s\S]*white-space: normal/)
   })
 })
 

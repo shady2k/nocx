@@ -268,8 +268,9 @@
   color: var(--color-text);
 }
 
-/* ── Secondary line — a quieter explanation under the action ──────────── */
-
+/* ── Secondary line — a quieter explanation under the action ────────────
+   The secondary line is allowed to wrap inside a constrained action cell;
+   coverage must stay readable rather than overflow or disappear. */
 .ui-button[data-secondary='true'] {
   flex-direction: column;
   align-items: flex-start;
@@ -290,5 +291,6 @@
   font-weight: 400;
   line-height: 1.2;
   opacity: 0.8;
-  white-space: nowrap;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }

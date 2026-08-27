@@ -593,18 +593,31 @@ describe('AgentApprovalPrompt', () => {
       [false, 'always'],
     ])
   })
-  it('each answer says its own scope, and carries no second line', () => {
+  it('keeps the scope on the primary line and carries coverage on a readable second line', () => {
     const { container } = renderPrompt({ ask: STANDING_ASK })
     const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>('.ui-button'))
     expect(buttons.map((button) => button.textContent)).toEqual([
-      'Allow once',
+      'Allow once — this proposal only',
       'Allow in this session — df -h — until this terminal session ends',
       'Allow always — df -h — in every session, from now on',
-      'Deny once',
+      'Deny once — this proposal only',
       'Deny in this session — df -h — until this terminal session ends',
       'Deny always — df -h — in every session, from now on',
     ])
-    expect(buttons.every((button) => !button.querySelector('.ui-button__secondary'))).toBe(true)
+    expect(
+      buttons.map((button) => [
+        button.querySelector('.ui-button__label')?.textContent,
+        button.querySelector('.ui-button__secondary')?.textContent,
+      ]),
+    ).toEqual([
+      ['Allow once', '— this proposal only'],
+      ['Allow in this session', '— df -h — until this terminal session ends'],
+      ['Allow always', '— df -h — in every session, from now on'],
+      ['Deny once', '— this proposal only'],
+      ['Deny in this session', '— df -h — until this terminal session ends'],
+      ['Deny always', '— df -h — in every session, from now on'],
+    ])
+    expect(buttons.every((button) => button.querySelector('.ui-button__secondary'))).toBe(true)
     expect(buttons[0]?.getAttribute('aria-label')).toBe('Allow once — this proposal only')
     expect(buttons[1]?.getAttribute('aria-label')).toBe(
       'Allow in this session — df -h — until this terminal session ends',
@@ -623,12 +636,12 @@ describe('AgentApprovalPrompt', () => {
     )
     expect(names).toEqual([
       [
-        'Allow once',
+        'Allow once — this proposal only',
         'Allow in this session — df -h — until this terminal session ends',
         'Allow always — df -h — in every session, from now on',
       ],
       [
-        'Deny once',
+        'Deny once — this proposal only',
         'Deny in this session — df -h — until this terminal session ends',
         'Deny always — df -h — in every session, from now on',
       ],

@@ -102,7 +102,14 @@ nothing sits in front of a file read.
    **static** gate: format, lint, types, ratchets, contracts. It runs no tests
    and starts no container (`nocx-hzsiv`), so a green commit says nothing about
    whether the code works. Run the tests for the files you changed yourself.
-5. Update the bead; record any non-obvious decision as an ADR in `docs/decisions/`.
+5. Keep it green. **The gate is split by what it costs.** `pre-commit` is static and
+   takes seconds — formatting, linting, the ratchets, the wire contracts, the type
+   checkers — so committing in small steps stays cheap. `pre-push` runs the two
+   containerized suites (the Go module under `-race`, the whole vitest suite), once
+   per push instead of once per commit, scoped to what the push actually changes.
+   CI is still the source of truth, and `make ci-full` on the merged tree is still
+   whoever integrates.
+6. Update the bead; record any non-obvious decision as an ADR in `docs/decisions/`.
 
 ## Testing: five rules, each bought by a green suite over a broken product
 

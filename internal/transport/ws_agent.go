@@ -507,6 +507,14 @@ type agentHandlers struct {
 	// built without it, which is what a unit test constructing the struct
 	// directly has.
 	personalInstructions func() string
+	// carrier reads the person's chosen method for composing multi-step work
+	// (settings.AssistantCarrier, nocx-d6gn4.8). A function for the same
+	// reason personalInstructions is one: it must be read WHEN the question
+	// is asked, so switching the method takes effect on the next question
+	// with no restart — which is the whole point of a switch that exists to
+	// be compared against itself. A handler built without it uses the
+	// shipped carrier.
+	carrier func() assistant.CarrierKind
 	// sessionPolicy is where "allow in this session" lands and where it
 	// dies (ws_sessionpolicy.go). Never nil: the server constructs one.
 	sessionPolicy *sessionPolicyStore
@@ -564,13 +572,19 @@ func environmentForSession(sess session.Session) content.Environment {
 //     the request path, and handed in — the prompt function never looks a
 //     setting up. Read fresh per ask, so a change on the settings screen
 //     governs the next question with no restart and nothing to invalidate.
-func systemPromptFactsFor(sessionID, cwd string, env content.Environment, attached []assistant.AttachedContentItem, personal string) assistant.SystemPromptFacts {
+//   - The CARRIER is read here for the same reason the paragraph is: it has
+//     an owner, and the owner is the settings document. The prompt describes
+//     how the model acts, and under a composing carrier "the tools you are
+//     given" is not how it acts — so the fact travels with the ask rather
+//     than being assumed by the prompt.
+func systemPromptFactsFor(sessionID, cwd string, env content.Environment, attached []assistant.AttachedContentItem, personal string, carrier assistant.CarrierKind) assistant.SystemPromptFacts {
 	f := assistant.SystemPromptFacts{
 		SessionID:            sessionID,
 		Cwd:                  cwd,
 		Env:                  env,
 		AttachedContent:      attached,
 		PersonalInstructions: personal,
+		Carrier:              carrier,
 	}
 	if env.Kind != content.EnvSSH {
 		f.OS = runtime.GOOS
@@ -603,6 +617,32 @@ func (s *WSServer) personalInstructionsText() string {
 		return ""
 	}
 	return v
+}
+
+// chosenCarrier is the seam read, or the shipped carrier when this handler
+// was built without it — a unit test constructing agentHandlers directly,
+// never the registration builder.
+func (h agentHandlers) chosenCarrier() assistant.CarrierKind {
+	if h.carrier == nil {
+		return assistant.CarrierCalls
+	}
+	return h.carrier()
+}
+
+// assistantCarrier reads the person's chosen method out of the settings
+// registry — the document that owns it. Nil registry (a server built without
+// settings) and a rejected read are both "they have not chosen", which is the
+// shipped method: the declared-call carrier is the authority floor, and a
+// person who never opened the page must get what the product is built on.
+func (s *WSServer) assistantCarrier() assistant.CarrierKind {
+	if s.settings == nil {
+		return assistant.CarrierCalls
+	}
+	v, err := s.settings.GetSelect(settings.AssistantCarrier)
+	if err != nil {
+		return assistant.CarrierCalls
+	}
+	return assistant.CarrierKind(v)
 }
 
 // errNoEndpoint is the ask's no-endpoint refusal: a renderable condition
@@ -748,7 +788,11 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// terminalizes — a refused socket write never wedges it. A refused
 	// submit (the stream capacity is exhausted) terminalizes the run
 	// failed with a renderable reason; the run is never left prepared.
-	runCtx, runCancel := context.WithCancel(ctx)
+	// The EXCHANGE names itself for everything downstream: this ask, the
+	// approval that suspends it, the resume that finishes it and every
+	// effect any of them run all log under one trace, across the several
+	// wire frames it takes (internal/log).
+	runCtx, runCancel := context.WithCancel(log.WithTraceID(ctx, runTrace(askRes.RunID)))
 	runControl := &agentRunControl{cancelFn: runCancel, cancelDone: make(chan struct{})}
 	rc := askRunContext{
 		runID:    askRes.RunID,
@@ -773,7 +817,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		// carried and the ledger recorded with it, the pane's environment
 		// as environmentForSession already derived it, and the person's
 		// own paragraph as the settings document holds it right now.
-		promptFacts: systemPromptFactsFor(p.SessionID, in.Cwd, in.Env, attached, h.personalParagraph()),
+		promptFacts: systemPromptFactsFor(p.SessionID, in.Cwd, in.Env, attached, h.personalParagraph(), h.chosenCarrier()),
 	}
 	h.pendingRunsMu.Lock()
 	h.pendingRuns[rc.runID] = rc
@@ -970,6 +1014,16 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// attempt recorded — the visible gap describes the whole answer, never
 	// just the last Ask invocation.
 	dropped := rc.droppedBefore
+	// WHAT THE RUN SPENT ITSELF ON (nocx-d6gn4.8.1). A run that thinks for
+	// four minutes and emits nothing logs NOTHING today — the lines below
+	// are written when a program runs or when the run dies, so the owner
+	// watched a spinner and the log had no word for it. These three counters
+	// and the pair of lines around the stream make "it went off into
+	// reasoning" a number instead of an impression.
+	var reasoningChars, answerChars, toolCalls int
+	streamStarted := time.Now()
+	h.log.Info("agent ask: streaming", "run", rc.runID, "model", rc.model,
+		"carrier", string(h.chosenCarrier()), "question", len(rc.question))
 	// The gate deltas may not pass before: a delta persisted before the
 	// streaming transition commits would be a delta outside the run's
 	// non-terminal span.
@@ -1067,6 +1121,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Requester:     h.requester,
 		KnownMaterial: h.knownMaterial,
 		Approvals:     h.approvals,
+		Carrier:       h.chosenCarrier(),
 		RunID:         strconv.FormatInt(rc.runID, 10),
 		Attempt:       rc.attempt,
 		// The turn every entry this run causes is joined to (nocx-h1l4o).
@@ -1094,6 +1149,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// delivers what this callback emits in the order it emits it.
 		switch ev.Kind {
 		case assistant.AskToolCall:
+			toolCalls++
 			// NOT PERSISTED AS PROSE, and that is not an omission: the
 			// durable account of a tool call is the LEDGER's action entry,
 			// which the middleware wrote before the call ran and whose id
@@ -1160,6 +1216,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			}
 			return nil
 		case assistant.AskReasoning:
+			reasoningChars += len(ev.Text)
 			// Also not persisted, and for the stronger reason: the durable
 			// answer is the ANSWER, and appending the thinking to the open
 			// prose block would put it back inside the answer by another
@@ -1177,6 +1234,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			return nil
 		}
 		text := ev.Text
+		answerChars += len(text)
 		// The other half of the boundary: the FIRST delta after a call opens
 		// the next run of prose — a `text` child of the turn at the next free
 		// seat, with a body of its own (ADR-0040). Opened lazily and never up
@@ -1242,6 +1300,10 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		seq++
 		return nil
 	})
+	h.log.Info("agent ask: the stream ended", "run", rc.runID,
+		"elapsed", time.Since(streamStarted).Round(time.Millisecond).String(),
+		"reasoning", reasoningChars, "answer", answerChars, "calls", toolCalls,
+		"outcome", askOutcome(err))
 	if err != nil {
 		// A suspension is NOT a failure (criterion 1): the policy or the
 		// egress gate asked a person a question, the run moves to
@@ -1392,6 +1454,7 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
 		return
 	}
+	ctx = log.WithTraceID(ctx, runTrace(p.RunID))
 	h.pendingRunsMu.Lock()
 	rc, ok := h.pendingRuns[p.RunID]
 	h.pendingRunsMu.Unlock()
@@ -1467,6 +1530,9 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: runId must be the backend-minted run id"})
 		return
 	}
+	// The person's answer belongs to the run's exchange, not to a new one:
+	// the resume and everything it drives log under the ask's trace.
+	ctx = log.WithTraceID(ctx, runTrace(runID))
 	h.pendingRunsMu.Lock()
 	rc, ok := h.pendingRuns[runID]
 	h.pendingRunsMu.Unlock()
@@ -1921,6 +1987,15 @@ func classifyAskFailure(err error, model string) (content.TerminationReason, str
 	if errors.Is(err, assistant.ErrMalformedModelOutput) {
 		return content.TermFailed, "the model asked for a tool call nocx could not act on: it did not match any tool the model was offered. Ask again — a different model may handle tools better."
 	}
+	// A cancellation this process CAUSED says which one it was. Checked
+	// before the context.Canceled arm below, and the arm is what that one
+	// could never be: context.Canceled cannot tell "the socket went away"
+	// from "we killed the program on purpose", and it answered the first
+	// for both — a run ended by an approval resume told the person their
+	// connection had dropped (nocx-d6gn4.8.1).
+	if sentence, ok := assistant.ProgramEndedSentence(err); ok {
+		return content.TermFailed, sentence
+	}
 	switch {
 	case errors.Is(err, context.Canceled):
 		return content.TermTransportGone, "the connection was lost while the answer was streaming"
@@ -2235,6 +2310,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,
 			personalInstructions: s.personalInstructionsText,
+			carrier:              s.assistantCarrier,
 			sessionPolicy:        s.sessionPolicy, globalPolicy: s.agentPolicy,
 			log: s.log, state: state, clientID: connectionID(w), r: r,
 		}
@@ -2253,4 +2329,24 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleApprove(ctx, req) }
 		}),
 	}
+}
+
+// runTrace is the id of one agent exchange — the run — as every log line
+// belonging to it names it. One derivation, so the ask, the approval and
+// the resume cannot disagree about which exchange they are part of.
+func runTrace(runID int64) string { return "run-" + strconv.FormatInt(runID, 10) }
+
+// askOutcome names how a stream ended in one word, so the line that carries
+// the counters says which of the three it was without a reader matching an
+// error string.
+func askOutcome(err error) string {
+	if err == nil {
+		return "answered"
+	}
+	var apErr *assistant.ApprovalRequestedError
+	var egErr *assistant.EgressRequestedError
+	if errors.As(err, &apErr) || errors.As(err, &egErr) {
+		return "suspended"
+	}
+	return "failed"
 }

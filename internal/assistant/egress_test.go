@@ -211,7 +211,7 @@ func TestMiddleware_EgressNoFindingReturnsByteForByte(t *testing.T) {
 
 	// The reference is the executor's own bytes, untouched by the egress gate;
 	// the model-facing return adds the registry-derived frame exactly once.
-	decl, ok := mw.registry.Lookup("files.read")
+	decl, ok := mw.kernel.registry.Lookup("files.read")
 	if !ok {
 		t.Fatal("files.read not in the registry")
 	}
@@ -345,7 +345,7 @@ func TestMiddleware_NewPolicyFailsClosedWithoutKnownMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	if _, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), nil, "run-1", 1, "", nil, nil, nil); err == nil {
+	if _, err := newPolicyMiddleware(CarrierCalls, newParkedRuns(nil), nil, grant, reg, &fakeLedger{}, NewApprovalStore(), nil, "run-1", 1, "", nil, nil, nil); err == nil {
 		t.Fatal("newPolicyMiddleware accepted a run with no egress vault comparison")
 	}
 }

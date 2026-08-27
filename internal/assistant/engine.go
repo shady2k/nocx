@@ -78,7 +78,7 @@ func buildModel(httpClient *http.Client, key credential.Secret, baseURL, model s
 // Every error this returns is a stream failure the caller maps into a probe
 // outcome or a terminal run state; a nil return means a response was
 // received in full.
-func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, headers []Header, msgs []*schema.Message, tools []tool.BaseTool, handlers []adk.ChatModelAgentMiddleware, checkpoints *runCheckpoints, checkpointID string, onEvent func(AskEvent) error) error {
+func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, headers []Header, msgs []*schema.Message, tools []tool.BaseTool, unknownTool func(ctx context.Context, name, rawArgs string) (string, error), handlers []adk.ChatModelAgentMiddleware, checkpoints *runCheckpoints, checkpointID string, onEvent func(AskEvent) error) error {
 	cm, err := buildModel(httpClient, key, baseURL, model)
 	if err != nil {
 		return err
@@ -100,8 +100,20 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 		// means in order, NOT stop on failure — sequentialRunToolCall loops
 		// every task and never inspects tasks[i].err, so the latch is what
 		// makes a refused call stop the ones after it.
+		//
+		// UnknownToolsHandler is the framework's seam for a name we never
+		// declared, and without it the node FAILS: eino resolves the call
+		// before any middleware of ours runs, so a model reaching for a tool
+		// that does not exist ended the run with a framework error nothing
+		// could name — over the most ordinary mistake a model makes. The
+		// carrier answers it, because what to say depends on which one is
+		// driving (carrier.go's UnknownTool).
 		cfg.ToolsConfig = adk.ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: tools, ExecuteSequentially: true},
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools:               tools,
+				ExecuteSequentially: true,
+				UnknownToolsHandler: unknownTool,
+			},
 		}
 	}
 	// The policy middleware (nocx-lndv): the run's grant decides what the
@@ -293,6 +305,15 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 // StreamError — the endpoint answered; it did not answer. Reasoning alone
 // does not count: a model that only thought did not reply.
 func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) error) error {
+	// The chain the transport put in the context becomes the chain
+	// everything under this ask logs with — the kernel, the carriers, the
+	// program — because they are all handed THIS logger. Binding it once
+	// here is what makes an effect three layers down say which run and
+	// which wire frame it belongs to without being told either.
+	askLog := c.log
+	if askLog != nil {
+		askLog = askLog.WithContext(ctx)
+	}
 	if strings.TrimSpace(p.BaseURL) == "" {
 		return fmt.Errorf("ask: base URL is required")
 	}
@@ -355,15 +376,11 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	}
 
 	var declared []tool.BaseTool
+	var unknownTool func(ctx context.Context, name, rawArgs string) (string, error)
 	var handlers []adk.ChatModelAgentMiddleware
 	if p.Grant != nil {
 		permitted := c.tools.ForGrant(*p.Grant)
 		if len(permitted) > 0 {
-			var err error
-			declared, err = declaredTools(permitted)
-			if err != nil {
-				return err
-			}
 			// The approval store is the client's own (process-lifetime, one
 			// per client, keyed by run id — ADR-0028: checkpoints are
 			// process-lifetime state); a caller may pass one explicitly.
@@ -378,13 +395,24 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 			// has an owner); nil without a resolver is the feature off.
 			var classifier CallClassifier
 			if p.Classifier != nil {
-				classifier = newClassifierEngine(c.log, c.http, p.Classifier)
+				classifier = newClassifierEngine(askLog, c.http, p.Classifier)
 			}
-			mw, err := newPolicyMiddleware(c.log, *p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.TurnEntryID, p.Requester, classifier, func(call ToolCall) error {
+			mw, err := newPolicyMiddleware(p.Carrier, c.parked, askLog, *p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.TurnEntryID, p.Requester, classifier, func(call ToolCall) error {
 				return sink(AskEvent{Kind: AskToolCall, Call: &call})
 			})
 			if err != nil {
 				return err
+			}
+			// The CARRIER decides what the model is offered, not this
+			// function: the tool set is one of the two facts the three
+			// methods differ on (carrier.go), and the other is what an
+			// invocation does. Ask knows neither.
+			declared, err = mw.Declare(permitted)
+			if err != nil {
+				return err
+			}
+			unknownTool = func(_ context.Context, name, rawArgs string) (string, error) {
+				return mw.UnknownTool(name, rawArgs)
 			}
 			// FIRST, so it is the outermost user wrapper: its Stream runs
 			// before the policy middleware's and before the framework's
@@ -402,7 +430,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	// So an Ask whose run has a live checkpoint IS the resume of it —
 	// there is no second flag to keep in step with the store, and no way
 	// to ask for a resume of a run that is not suspended.
-	err := streamModelAnswer(ctx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, declared, handlers, c.checkpoints, p.RunID, sink)
+	err := streamModelAnswer(ctx, askLog, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, declared, unknownTool, handlers, c.checkpoints, p.RunID, sink)
 	if err != nil {
 		// A suspension is the ONE outcome that keeps the checkpoint: the
 		// run is not over, and the checkpoint is the only thing that can
@@ -445,6 +473,11 @@ func (c *client) Discard(runID string) {
 		return
 	}
 	_ = c.checkpoints.Delete(context.Background(), runID)
+	// And the other kind of suspended state: a carrier that parked its
+	// continuation on a goroutine. Both stores are emptied here because both
+	// answer the same question — "is this run still in the middle of
+	// something" — and a run that has ended must leave neither behind.
+	c.parked.discard(runID)
 }
 
 // declaredTools converts the registry's assembled tools into the ADK tools

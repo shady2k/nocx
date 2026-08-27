@@ -11,5 +11,52 @@
       "type": "string",
       "description": "Path of the file to read, inside the grant's paths."
     }
+  },
+  "$defs": {
+    "result": {
+      "title": "FilesReadResult",
+      "description": "What files.read hands back. Binary content is REPORTED, never pasted: binary is true and text is absent, so a model asking for an image gets a fact rather than a screenful of bytes.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["path", "total", "window", "returned"],
+      "properties": {
+        "path": {
+          "type": "string",
+          "description": "The file that was read."
+        },
+        "total": {
+          "type": "integer",
+          "description": "The file's size in bytes."
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start", "end"],
+          "properties": {
+            "start": {
+              "type": "integer",
+              "description": "First line of the window returned, in bytes, counting from 0."
+            },
+            "end": {
+              "type": "integer",
+              "description": "One past the last line of the window returned, in bytes."
+            }
+          },
+          "description": "The byte span returned: [0, size of the window)."
+        },
+        "returned": {
+          "type": "integer",
+          "description": "Bytes actually returned. Less than total means the file is longer than the window."
+        },
+        "binary": {
+          "type": "boolean",
+          "description": "True when the content is binary. Absent means false."
+        },
+        "text": {
+          "type": "string",
+          "description": "The text of the returned window. Absent for binary content and for an empty file."
+        }
+      }
+    }
   }
 }

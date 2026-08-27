@@ -154,6 +154,40 @@ test.describe('the secret panel opens where a person can reach it', () => {
     expect(m.rowOwnsItsPoint, `hit target was ${m.hitTarget}`).toBe(true)
   })
 
+  test('a row still activates from the panel portion hanging past the dialog', async ({ page }) => {
+    const dialog = await openEndpointDialog(page)
+    const panel = await triggerPanel(page, dialog.locator('#endpoint-key'))
+    const row = panel.locator('.ui-floating-panel__row').first()
+
+    // The panel is re-homed into the dialog so it can paint in the top layer.
+    // Keep this assertion: without the DOM relationship, this test would not
+    // prove the dialog's bubbling light-dismiss path.
+    expect(await panel.evaluate((el) => el.closest('dialog') !== null)).toBe(true)
+
+    const rowBox = await row.boundingBox()
+    const dialogPanelBox = await dialog.locator('.nocx-dialog__panel').boundingBox()
+    expect(rowBox).not.toBeNull()
+    expect(dialogPanelBox).not.toBeNull()
+    if (rowBox === null || dialogPanelBox === null) throw new Error('missing geometry')
+
+    // Use the intersection of the row and the region immediately past the
+    // dialog panel's right boundary, rather than a viewport constant. This
+    // point is inside the row but outside the dialog panel.
+    const dialogRight = dialogPanelBox.x + dialogPanelBox.width
+    const hangingLeft = Math.max(rowBox.x, dialogRight)
+    const hangingRight = rowBox.x + rowBox.width
+    expect(hangingRight).toBeGreaterThan(hangingLeft)
+    const x = hangingLeft + (hangingRight - hangingLeft) / 2
+    const y = rowBox.y + rowBox.height / 2
+
+    await page.mouse.click(x, y)
+
+    // The clicked offer row opens the vault setup surface. The endpoint
+    // dialog must remain open underneath it; a light-dismiss would discard it.
+    await expect(dialog).toBeVisible()
+    await expect(page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })).toBeVisible()
+  })
+
   test('a field further down the form opens its panel at ITS OWN offset', async ({ page }) => {
     const dialog = await openEndpointDialog(page)
     // The second field FIRST, while nothing floats over the dialog: the

@@ -336,6 +336,10 @@ export const Dialog: Component<DialogProps> = (props) => {
     // it — the user cancels "which passphrase?" and loses the connection they
     // were editing, which is the defect light-dismiss exists to avoid.
     if ((e.target as Element | null)?.closest('.ui-prompt-overlay')) return
+    // An anchored field picker re-homes into this dialog's top-layer subtree,
+    // so its visible rows are outside the panel box but still belong to the
+    // interaction that opened it.
+    if ((e.target as Element | null)?.closest('.ui-floating-panel')) return
     const panel = d.querySelector('.nocx-dialog__panel')
     if (!panel) return
     const r = panel.getBoundingClientRect()

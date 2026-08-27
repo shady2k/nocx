@@ -5,6 +5,7 @@
 // ceiling (measured once per list, never per selection change), max-height
 // and scrolling, the row list, the group caption, the footer of key hints,
 // the match highlight, and row overflow (ellipsis, never a clipped glyph).
+import { readFileSync } from 'node:fs'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   FloatingPanel,
@@ -579,6 +580,25 @@ describe('FloatingPanel anchored to a field (nocx-vzdna)', () => {
     dialog.removeAttribute('open')
     withSize(480, 100, () => panel.show({ rows: [row({ id: 'a' })], selectedIndex: 0 }))
     expect(panel.root.parentElement).toBe(body)
+  })
+
+  it('states its own interactivity, because the layer it moves into does not', () => {
+    // The top layer decides painting order and nothing about inheritance: a
+    // panel re-homed into a modal <dialog> inherits that dialog's
+    // `pointer-events`, and these dialogs live inside panes where an
+    // inactive one is `pointer-events: none` (base.css). The panel was then
+    // painted, visible, stable — and not hit-testable, and the click fell
+    // through to the document element. jsdom cannot hit-test, so what is
+    // asserted here is that the declaration is present; the browser proof is
+    // e2e/secret-panel-position.spec.ts, which reads elementFromPoint.
+    //
+    // Read from the SHIPPED stylesheet, not from the block this file injects:
+    // jsdom loads no project CSS, so asserting a computed style here would
+    // only assert the test's own fixture — green while the real rule was
+    // missing, which is the shape of defect this whole bead is about.
+    const css = readFileSync('src/styles/components/floating-panel.css', 'utf8')
+    const anchored = css.slice(css.indexOf(".ui-floating-panel[data-anchor='viewport']"))
+    expect(anchored.slice(0, anchored.indexOf('}'))).toMatch(/pointer-events:\s*auto/)
   })
 
   it('leaves the editor-mounted panel entirely to CSS — the terminal path is untouched', () => {

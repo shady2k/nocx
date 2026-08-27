@@ -505,6 +505,11 @@ export class TerminalContent extends BasePaneContent {
    *  in Ask. Forcing shell there would undo a choice the person made and
    *  the summon never touched. */
   private _summonRestoreTargetId: string | null = null
+  /** The answer view opened by a summon. It stays a view over the running
+   *  command until that command reaches a terminal state, then the same DOM
+   *  node takes the next scrollback seat. */
+  private _summonedAnswer: HTMLElement | null = null
+  private _summonedCommand: BlockRecord | null = null
   private scrollback: ScrollbackController | null = null
   private ledger: CommandLedger | null = null
   /** The vault RPC client, built over this tab's WS client (the shared
@@ -1537,6 +1542,12 @@ export class TerminalContent extends BasePaneContent {
         // DOM selection at submit time (AD-8: selection is copy; the grant is
         // the record).
         grants: () => this.grantedBlocks,
+        onTurnAccepted: () => {
+          // Agent asks keep the editor visible by default. A summoned answer
+          // is the one accepted case where the submitted question must give
+          // the overlay to its answer without exposing it to a refusal.
+          if (this._summoned && this._summonedAnswer !== null) this.editor?.hide()
+        },
         // A new answer block, kept at the bottom of the view — the same
         // rule a command's output lives by, which the ask path never had:
         // nothing scrolled when a block was ADDED, so a question landed
@@ -1546,6 +1557,14 @@ export class TerminalContent extends BasePaneContent {
         // the person has scrolled away to read, so this follows without
         openAnswer: (question, cwd, running?: RunningBlockActions) => {
           const handle = this.scrollback!.blockManager.addAnswerBlock(question, cwd, running)
+          if (this._summoned && this._summonedCommand !== null) {
+            // The editor hides itself when the question submits. Keep the
+            // answer readable in the summon overlay rather than putting it
+            // above the command it describes.
+            handle.el.classList.add('nocx-answer-overlay')
+            this._paneTarget?.appendChild(handle.el)
+            this._summonedAnswer = handle.el
+          }
           this.scrollback?.scrollToBottom()
           // The streamed answer grows the block, and growth is the same
           // situation as arrival: stay at the bottom unless the reader has
@@ -2418,6 +2437,19 @@ export class TerminalContent extends BasePaneContent {
             this.scrollback?.deselectBlocks()
             this.editor.focus()
           }
+          return
+        }
+        // Once an accepted summoned answer owns the overlay, the editor is
+        // intentionally hidden so the answer is readable. Escape still
+        // dismisses the summon through the document path: the answer remains
+        // a view over the live screen and keeps receiving deltas until the
+        // running command ends, when it takes its scrollback seat.
+        if (e.key === 'Escape' && this._summoned && this._summonedAnswer !== null) {
+          const active = document.activeElement
+          if (active && isTextEntry(active) && !this.editor?.rootContains(active)) return
+          if (hasOpenOverlays()) return
+          if (document.querySelector('.cmd-overflow-menu')) return
+          if (this.dismissSummonedEditor()) e.preventDefault()
           return
         }
         // Escape with the editor on screen but out of focus: the editor's
@@ -4007,6 +4039,7 @@ export class TerminalContent extends BasePaneContent {
       const marker = createFreezeMarker()
       markerHost.appendChild(marker)
       this._freezeMarker = marker
+      this._summonedCommand = this.scrollback?.blockManager.runningBlock ?? null
 
       this._summonRestoreTargetId = targets.active().id
       this._summoned = true
@@ -4058,6 +4091,21 @@ export class TerminalContent extends BasePaneContent {
     this._endSummon()
     this._syncLifecycleOwnership()
     return true
+  }
+
+  /** Move the existing turn node from the answer overlay to the seat directly
+   *  after the command it describes. Reparenting, rather than rebuilding,
+   *  keeps the streaming AnswerBody and ledger identity intact. */
+  private _seatSummonedAnswer(): void {
+    const answer = this._summonedAnswer
+    const command = this._summonedCommand
+    if (answer === null || command === null) return
+    const parent = command.el.parentElement
+    if (parent === null) return
+    parent.insertBefore(answer, command.el.nextSibling)
+    answer.classList.remove('nocx-answer-overlay')
+    this._summonedAnswer = null
+    this._summonedCommand = null
   }
 
   /** The summon is over — dismissed by Escape, or outlived by the command
@@ -4363,7 +4411,10 @@ export class TerminalContent extends BasePaneContent {
     // rather than on the completion fact alone, because this is the one
     // place every lifecycle change already arrives, and a second place that
     // cleared it would be a second owner of the same flag.
-    if (this._summoned && !this.hasRunningCommand()) this._endSummon()
+    if (!this.hasRunningCommand()) {
+      this._seatSummonedAnswer()
+      if (this._summoned) this._endSummon()
+    }
     // Two ways the editor can be on screen, and the difference is who asked:
     // the LIFECYCLE says PromptReady (ADR-0024 §6, the ordinary case), or the
     // PERSON summoned it over a running command (nocx-92gfl). A summoned
@@ -4382,12 +4433,14 @@ export class TerminalContent extends BasePaneContent {
     // stays read-only, typed input is dropped, and a program waiting on
     // stdin (read, ssh, less) hangs with no editor and no input surface
     // (nocx-u7uh.23). The invariant: editor shown ⟺ grid read-only.
+    const answerInSummon = this._summoned && this._summonedAnswer !== null
     if (show) {
       if (summoned) {
         // The attribute is set before show/focus and CSS takes the editor out
         // of flow, so this branch never settles or measures the scrollback.
         this._setEditorPlacement('overlay')
-        if (!editor.isVisible) editor.show()
+        if (answerInSummon) editor.hide()
+        else if (!editor.isVisible) editor.show()
       } else {
         // The composer coming BACK is a displacement of its own — the prompt
         // returns, the box re-enters the layout, and the scrollback moves by
@@ -4526,6 +4579,9 @@ export class TerminalContent extends BasePaneContent {
     }
     this._summoned = false
     this._summonRestoreTargetId = null
+    this._summonedAnswer?.remove()
+    this._summonedAnswer = null
+    this._summonedCommand = null
     this._clearFreezePresentation()
     this.session?.close()
     this.renderer?.dispose()

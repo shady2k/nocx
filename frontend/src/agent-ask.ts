@@ -24,6 +24,9 @@ export interface AgentAskSeams {
   cwd: () => string
   openAnswer: (question: string, cwd: string, running?: RunningBlockActions) => AnswerBlockHandle
   onRefusal: (message: string) => void
+  /** Called only after the backend accepts the turn, so a speculative
+   *  overlay can change presentation without hiding itself on refusal. */
+  onTurnAccepted?: (askId: string) => void
   onTurnStart?: (askId: string) => void
   onTurnEnd?: (askId: string) => void
   onNoEndpoint?: () => void
@@ -114,6 +117,7 @@ export class AgentInputTarget implements InputTarget {
         void this.offerEndpointRepair()
         throw err
       })
+    this.seams.onTurnAccepted?.(askId)
     runId = ask.runId
     handle.el.dataset.entryId = ask.entryId
     handle.el.dataset.answeredBy = ask.model

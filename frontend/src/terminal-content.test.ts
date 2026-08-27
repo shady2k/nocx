@@ -8549,3 +8549,244 @@ describe('summoning answers instead of vanishing (nocx-og42r)', () => {
     }
   })
 })
+describe('the summoned answer takes its seat after the program (nocx-7l4ex.4)', () => {
+  const commandFence = 'd'.repeat(64)
+
+  function startCommand(client: ClientFake): (params: unknown) => void {
+    const handler = lifecycleHandler(client)
+    handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+    handler({
+      lane: 'lane-1',
+      lifecycle: 'running',
+      domain: 'd1',
+      epoch: 1,
+      attempt: { id: 'att-run', state: 'open', origin: 'app', command: 'top' },
+    })
+    return handler
+  }
+
+  async function summon(content: TerminalContent): Promise<void> {
+    const renderer = rendererOf(content)
+    renderer.captureLiveFrame = vi.fn().mockResolvedValue({
+      rows: [],
+      cursor: { line: 0, col: 0 },
+      provenance: {
+        source: 'live',
+        identity: {
+          buffer: { kind: 'normal' },
+          cols: renderer.cols,
+          rows: renderer.rows,
+          generation: 0,
+        },
+        range: { start: 0, end: 0 },
+        scrollbackCapLines: 10000,
+      },
+    } satisfies CapturedFrame)
+    const grid = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      .xtermLiveContainer
+    grid.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    await vi.waitFor(() => expect(editorOf(content).isVisible).toBe(true))
+  }
+
+  async function submitQuestion(
+    content: TerminalContent,
+    client: ClientFake,
+    question: string,
+  ): Promise<HTMLElement> {
+    const editor = editorOf(content)
+    editor.insertText(question)
+    viewOf(editor).contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    )
+    await vi.waitFor(() =>
+      expect(client.dispatcher.call.mock.calls.some(([method]) => method === 'agent.ask')).toBe(
+        true,
+      ),
+    )
+    const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
+    const answer = pane.querySelector<HTMLElement>('.cmd-block[data-block-kind="ask"]')
+    expect(answer).not.toBeNull()
+    return answer!
+  }
+
+  it('streams readable prose in the summoned overlay', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'what is on screen?')
+
+      const delta = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runDelta',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(delta).toBeDefined()
+      delta!({ runId: 42, entryId: 'entry-42', text: '## The answer\n' })
+
+      expect(answer.classList.contains('nocx-answer-overlay')).toBe(true)
+      expect(answer.querySelector('.cmd-header-text')?.textContent).toBe('what is on screen?')
+      expect(answer.querySelector('[data-answer-body]')).not.toBeNull()
+      expect(editorOf(content).isVisible).toBe(false)
+      expect(answer.querySelector('[data-md="h2"]')?.textContent).toBe('The answer')
+      expect(answer.dataset.entryId).toBe('entry-42')
+
+      const askCall = client.dispatcher.call.mock.calls.find(([method]) => method === 'agent.ask')
+      const askCalls = client.dispatcher.call.mock.calls.filter(
+        ([method]) => method === 'agent.ask',
+      )
+      expect(askCalls).toHaveLength(1)
+      const askParams = askCall?.[1] as { askId?: unknown; question?: unknown }
+      expect(typeof askParams.askId).toBe('string')
+      expect(askParams.question).toBe('what is on screen?')
+      expect(askCall?.[1]).not.toHaveProperty('placement')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('moves the streaming turn after command completion without duplication', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      const handler = startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'why is it changing?')
+      const delta = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runDelta',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(delta).toBeDefined()
+      delta!({ runId: 42, entryId: 'entry-42', text: 'before the program ends' })
+      const answerBody = answer.querySelector('[data-answer-body]')
+      expect(answerBody?.textContent).toContain('before the program ends')
+
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-run',
+          state: 'completed',
+          exitCode: 0,
+          fence: commandFence,
+          completedAt: '2026-08-27T12:00:00Z',
+        },
+      })
+      rendererOf(content)._fireRenderFence({
+        hex: commandFence,
+        line: 3,
+        buffer: 'normal',
+      })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      const command = inner.querySelector<HTMLElement>('.cmd-block[data-block-kind="command"]')
+      expect(command).not.toBeNull()
+      expect(answer.parentElement).toBe(inner)
+      expect(answer.isConnected).toBe(true)
+      expect(Array.from(inner.children).indexOf(command!)).toBeLessThan(
+        Array.from(inner.children).indexOf(answer),
+      )
+
+      delta!({ runId: 42, entryId: 'entry-42', text: ' after it ends' })
+      expect(answerBody).toBe(answer.querySelector('[data-answer-body]'))
+      expect(answerBody?.textContent).toContain('before the program ends after it ends')
+      expect(inner.querySelectorAll('.cmd-block[data-block-kind="ask"]')).toHaveLength(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('Escape after acceptance thaws the live screen and keeps the answer streaming', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'can I leave this view?')
+      const delta = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runDelta',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(delta).toBeDefined()
+      delta!({ runId: 42, entryId: 'entry-42', text: 'still running' })
+
+      const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
+      expect(pane.querySelector('.nocx-freeze-frame')).not.toBeNull()
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+
+      expect(content.pinnedFrame()).toBeNull()
+      expect(pane.querySelector('.nocx-freeze-frame')).toBeNull()
+      expect(editorOf(content).isVisible).toBe(false)
+      const session = sessionOf(content)
+      session.send.mockClear()
+      rendererOf(content)._fireData('q')
+      expect(session.send).toHaveBeenCalledWith('q')
+      // After Escape the turn remains a view over the live screen: it stays
+      // in the pane overlay until the command ends, then takes its seat.
+      expect(answer.parentElement).toBe(pane)
+      expect(answer.classList.contains('nocx-answer-overlay')).toBe(true)
+
+      delta!({ runId: 42, entryId: 'entry-42', text: ' after Escape' })
+      expect(answer.querySelector('[data-answer-body]')?.textContent).toContain(
+        'still running after Escape',
+      )
+    } finally {
+      teardown()
+    }
+  })
+})

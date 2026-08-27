@@ -177,6 +177,19 @@
   box-sizing: border-box;
 }
 
+/* An answer asked over a running program stays visible after the editor
+   submits. It is a view until the command ends, then the same node is moved
+   into the scrollback by the terminal content owner (nocx-7l4ex.4). */
+.nocx-answer-overlay {
+  position: absolute;
+  left: var(--pane-inline-padding);
+  right: var(--pane-inline-padding);
+  bottom: 0;
+  z-index: 9;
+  max-height: min(50vh, calc(36em + 6px));
+  overflow-y: auto;
+}
+
 /* Every presentation that is not a prompt REMOVES this card and its box: the
    composer's `hide()` sets `display:none`, and the height goes back to the
    scroller. It kept its box for a while, so a submit could not move a

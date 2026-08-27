@@ -277,6 +277,19 @@ describe('SecretPicker: vault lifecycle states are OFFERS', () => {
     await flush()
     expect(rows(h.container).map((r) => r.text)).toEqual(['openai-key', 'Add a secret…'])
   })
+  it('a mouse press activates the uninitialized setup offer', async () => {
+    const h = setup({ ...UNSEALED, state: 'uninitialized' }, [entry('openai-key')])
+    await h.picker.open()
+    await flush()
+
+    const row = h.container.querySelector<HTMLElement>('.ui-floating-panel__row')
+    expect(row).not.toBeNull()
+    row!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+
+    expect(h.source.requestSetup).toHaveBeenCalledTimes(1)
+    await flush()
+    expect(rows(h.container).map((r) => r.text)).toEqual(['openai-key', 'Add a secret…'])
+  })
 
   // An empty vault is not a dead end when you are reaching for a secret —
   // it is exactly the moment to make one, and sending the user off to find

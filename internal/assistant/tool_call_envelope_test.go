@@ -92,7 +92,7 @@ func TestAsk_OfferedToolsAndWholeEnvelopeReturnTypedFailure(t *testing.T) {
 	defer srv.Close()
 
 	grant, _ := testDirGrant(t, autonomousMatrix())
-	cl, err := newClient(nil, os.DirFS(realToolsFS))
+	cl, err := newClient(nil, os.DirFS(realToolsFS), nil)
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -112,7 +112,7 @@ func TestAsk_OrdinaryAnswerWithToolMarkupQuotedStillCompletes(t *testing.T) {
 	defer srv.Close()
 
 	grant, _ := testDirGrant(t, autonomousMatrix())
-	cl, err := newClient(nil, os.DirFS(realToolsFS))
+	cl, err := newClient(nil, os.DirFS(realToolsFS), nil)
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}

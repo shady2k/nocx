@@ -564,7 +564,7 @@ func TestAgentApprove_ParamsWithScopeConformToContract(t *testing.T) {
 func TestAgentApprove_ScopeAlways_RealEscalationWritesTheGatesRow(t *testing.T) {
 	fake, srv := newToolCallingServer("")
 	defer srv.Close()
-	client, err := assistant.NewClient(nil)
+	client, err := assistant.NewClient(nil, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -612,7 +612,7 @@ func TestAgentApprove_ScopeAlways_RealEscalationWritesTheGatesRow(t *testing.T) 
 func TestAgentApprove_ScopeAlways_RealRunClassificationWritesAnInvocationRule(t *testing.T) {
 	fake, srv := newRunToolCallingServer("")
 	defer srv.Close()
-	client, err := assistant.NewClient(nil)
+	client, err := assistant.NewClient(nil, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -705,7 +705,7 @@ func TestAgentApprove_ScopeAlways_RealRunClassificationReadsTheObserveGrantBefor
 	}))
 	defer srv.Close()
 
-	client, err := assistant.NewClient(nil)
+	client, err := assistant.NewClient(nil, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

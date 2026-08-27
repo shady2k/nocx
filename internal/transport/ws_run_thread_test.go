@@ -112,7 +112,7 @@ func driveOneCompletedRunResolvingWith(t *testing.T, entryIDFor func(h *askHarne
 	fake, srv := newRunToolCallingServer("")
 	t.Cleanup(srv.Close)
 
-	client, err := assistant.NewClient(nil)
+	client, err := assistant.NewClient(nil, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -217,7 +217,7 @@ type approvalBinding struct {
 // result and the streamed answer text.
 func driveOneAuthorisedRun(t *testing.T) (*askHarness, askWireResult, string, approvalBinding) {
 	t.Helper()
-	client, err := assistant.NewClient(nil)
+	client, err := assistant.NewClient(nil, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -671,7 +671,7 @@ func TestRun_RefusedExchangeReadsBackFromTheLedger(t *testing.T) {
 	fake, srv := newRunToolCallingServer(`{"sessionId":"foreign-session","command":"rm -rf /"}`)
 	t.Cleanup(srv.Close)
 
-	client, err := assistant.NewClient(nil)
+	client, err := assistant.NewClient(nil, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

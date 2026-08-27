@@ -1033,11 +1033,10 @@ describe('the running live region follows its written rows', () => {
     expect(controller.xtermLiveViewport.style.height).toBe('57px')
   })
 
-  it('leaves the CSS fallback in charge only while the renderer cannot measure', () => {
-    // NULL, not zero. Zero is a grid nobody has written to — which is every
-    // command between the keypress and its first byte of output, and sizing
-    // the region to the fallback there opened a 140px box that collapsed on
-    // the first row: a bounce at the start of every command (nocx-i4h04.2).
+  it('keeps the CSS fallback visible while the empty command waits', () => {
+    // Zero is a grid nobody has written to yet. The running command's
+    // stand-in is already mounted, so collapsing the live box to body padding
+    // would clip the dots at the bottom of the pane.
     const renderer = makeRenderer()
     ;(renderer.liveContentHeight as LiveContentHeightSpy).mockReturnValue(null)
     const pane = document.createElement('div')
@@ -1077,8 +1076,10 @@ describe('the running live region follows its written rows', () => {
 
     controller.beginBlock('ls', '~', 0, 1)
 
-    expect(controller.xtermLiveContainer.style.height).toBe('8px')
-    expect(controller.xtermLiveViewport.style.height).toBe('0px')
+    // The waiting stand-in keeps the CSS fallback box until output retires it.
+    expect(controller.xtermLiveContainer.style.height).toBe('')
+    expect(controller.xtermLiveViewport.style.height).toBe('')
+    expect(controller.xtermLiveContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
     pane.remove()
   })
 })

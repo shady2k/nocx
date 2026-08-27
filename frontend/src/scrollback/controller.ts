@@ -357,9 +357,16 @@ export class ScrollbackController {
     // leaves the box size unchanged still releases the shift.
     this._applyEchoShift()
     // Null is the renderer saying it cannot measure; the class's fallback
-    // height stands. Zero is a grid nobody has written to, and it sizes the
-    // region like any other measurement — to nothing but the body's padding.
+    // height stands. Zero is a grid nobody has written to yet. While the
+    // running block still owns its waiting stand-in, keep that fallback:
+    // the indicator is absolutely positioned and the padding-only,
+    // border-box-sized live region would clip it before the editor's next
+    // layout pass. Once output retires the stand-in, zero may size the
+    // region to the body's padding again.
     if (px === null) return
+    if (px === 0 && this.xtermLiveContainer.querySelector(':scope > .cmd-answer-typing') !== null) {
+      return
+    }
     const max = this.runningLiveCap
     if (max === null) return
     const pad = this._bodyPaddingPx()

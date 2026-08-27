@@ -2259,41 +2259,70 @@ describe('BlockManager.addAnswerBlock', () => {
 // cancellation. The owner's words: "вообще поведение должно быть
 // одинаковое" — the behavior should be the same.
 describe('the working stand-in (nocx-vnirv.1)', () => {
+  it('shows a running command indicator immediately', () => {
+    const { xtermContainer, inner, manager } = newManager()
+    manager.startBlock('make', '~', 0)
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
+    manager.dispose()
+    inner.remove()
+  })
+
   it('the turn and the running command wear the SAME indicator — one class, one owner', () => {
     const { inner, xtermContainer, manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
     manager.startBlock('make', '~', 0)
+    expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
+
     const turn = h.el.querySelector('.cmd-answer-typing')
     const command = xtermContainer.querySelector('.cmd-answer-typing')
-    expect(turn).not.toBeNull()
     expect(command).not.toBeNull()
     // AD-8: NOT two indicators that merely look alike — the same class.
     expect(command!.className).toBe(turn!.className)
+    manager.dispose()
     inner.remove()
   })
 
-  it('a running command shows the stand-in in the live region until the first byte', () => {
-    const { xtermContainer, manager } = newManager()
+  it('a running command shows the stand-in immediately until the first byte', () => {
+    const { xtermContainer, inner, manager } = newManager()
     manager.startBlock('sleep 5', '~', 0)
     expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
+
     // The seam: the first parsed output byte stands it down. Idempotent —
     // every later chunk calls the seam again and nothing changes.
     manager.noteCommandOutput()
     expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
     manager.noteCommandOutput()
     expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.dispose()
+    inner.remove()
   })
 
-  it('a terminal freeze removes the stand-in — no dots type a command that ended', () => {
-    const { xtermContainer, manager } = newManager()
+  it('a command that completes with no output leaves no dots behind', () => {
+    const { xtermContainer, inner, manager } = newManager()
+    manager.startBlock('true', '~', 0)
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
+    manager.freezeBlock(() => undefined, 2, 0)
+
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.dispose()
+    inner.remove()
+  })
+
+  it('a terminal freeze removes an indicator after output has started', () => {
+    const { xtermContainer, inner, manager } = newManager()
     manager.startBlock('sleep 5', '~', 0)
     expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
     manager.freezeBlock(() => undefined, 2, 0)
     expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.dispose()
+    inner.remove()
   })
 
   it('an abandoned command removes the stand-in too — cancellation is a close', () => {
-    const { xtermContainer, manager } = newManager()
+    const { xtermContainer, inner, manager } = newManager()
     manager.startBlock('ssh host', '~', 0)
     manager.bindAttempt('att-1')
     manager.abandonAttempt(
@@ -2302,25 +2331,31 @@ describe('the working stand-in (nocx-vnirv.1)', () => {
       6,
     )
     expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.dispose()
+    inner.remove()
   })
 
   it('clearAll removes the stand-in with everything else', () => {
-    const { xtermContainer, manager } = newManager()
+    const { xtermContainer, inner, manager } = newManager()
     manager.startBlock('make', '~', 0)
-    expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
     manager.clearAll()
     expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.dispose()
+    inner.remove()
   })
 
-  it('a second command replaces the stand-in rather than stacking a second one', () => {
-    const { xtermContainer, manager } = newManager()
+  it('a second command replaces the first stand-in rather than reviving it', () => {
+    const { xtermContainer, inner, manager } = newManager()
     manager.startBlock('one', '~', 0)
     manager.startBlock('two', '~', 1)
+
     expect(xtermContainer.querySelectorAll('.cmd-answer-typing').length).toBe(1)
+    manager.dispose()
+    inner.remove()
   })
 
   it('a turn shows the stand-in at open, loses it at a delta, regains it during a call, loses it at the next delta', () => {
-    const { manager } = newManager()
+    const { inner, manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
     expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
     h.append('let me look')
@@ -2331,10 +2366,12 @@ describe('the working stand-in (nocx-vnirv.1)', () => {
     expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
     h.append('line 3 is wrong')
     expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.dispose()
+    inner.remove()
   })
 
-  it('a run call\u2019s command block lands ABOVE the stand-in, which keeps the tail', () => {
-    const { manager } = newManager()
+  it('a run call’s command block lands ABOVE the stand-in, which keeps the tail', () => {
+    const { inner, manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
     h.toolCall({ callId: 'c1', tool: 'run', effect: 'mutate-destructive', opensBlock: true })
     manager.startBlock('make', '/repo', 0, 0, 'agent')
@@ -2343,20 +2380,26 @@ describe('the working stand-in (nocx-vnirv.1)', () => {
     // the call opened, never pushed aside by it.
     expect(children.lastElementChild?.classList.contains('cmd-answer-typing')).toBe(true)
     expect(children.querySelector('.cmd-block-running')).not.toBeNull()
+    manager.dispose()
+    inner.remove()
   })
 
   it('a failing turn with no output leaves no dots typing an answer that will never arrive', () => {
-    const { manager } = newManager()
+    const { inner, manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
     h.close('failure', 'the model returned no text')
     expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.dispose()
+    inner.remove()
   })
 
   it('reasoning is content: it stands the stand-in down', () => {
-    const { manager } = newManager()
+    const { inner, manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
     h.reasoning('weighing the two options')
     expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.dispose()
+    inner.remove()
   })
 
   it('the live-region stand-in is OUT OF FLOW — the height constraint holds by construction', () => {

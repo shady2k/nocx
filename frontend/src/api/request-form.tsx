@@ -443,6 +443,16 @@ export function RequestEditor(props: RequestEditorProps) {
         // No value is the plain "Add a secret…" row: nothing to keep, so
         // nothing to propose a name for — the shared source answers it.
         if (value === undefined || current === null) return base.requestCreate(name)
+        const trimmedName = name.trim()
+        let occupiedNames: readonly string[] | undefined
+        if (trimmedName === '') {
+          try {
+            occupiedNames = (await base.list()).map((entry) => entry.name)
+          } catch {
+            // A stale inventory must not prevent the ask from opening. Its
+            // submit path performs the authoritative duplicate check.
+          }
+        }
         const proposal = proposeSecret({
           site:
             current.auth.kind === 'bearer' || current.auth.kind === 'basic'
@@ -452,9 +462,10 @@ export function RequestEditor(props: RequestEditorProps) {
           resolveVariable,
           folder: props.folder?.(),
           request: current.name,
+          occupiedNames,
         })
         const created = await mint({
-          name: name.trim() === '' ? proposal.name : name.trim(),
+          name: trimmedName === '' ? proposal.name : trimmedName,
           kind: proposal.kind,
           value,
         })

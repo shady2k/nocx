@@ -450,17 +450,29 @@ export function ApiPane(props: ApiPaneProps) {
     // and Auth alike, so the site it can honestly name is `field` — which is
     // the rung that gives api-token. The NAME here is what the person typed
     // after the '@', which is almost always what they were reaching for; only
-    // the kind is derived.
+    // the kind is derived. A stored value with no typed name gets the first
+    // available proposal instead, so opening the ask never invites a collision.
+    const trimmedName = name.trim()
+    let entries: InventoryEntry[] | undefined
+    if (value !== undefined && trimmedName === '') {
+      try {
+        entries = await secretCreate.list()
+      } catch {
+        // A stale inventory must not prevent the ask from opening. Its submit
+        // path performs the authoritative duplicate check.
+      }
+    }
     const proposal = proposeSecret({
       site: { at: 'field' },
       url: store.draft()?.url ?? '',
+      occupiedNames: entries?.map((entry) => entry.name),
     })
     // The value the person is standing on, already filled in: the store row
     // carries what the field held, so the ask is down to naming it. The '@'
     // create row carries none, and the ask opens with an empty value field
     // exactly as it did.
     const created = await openSecretCreateAsk({
-      name,
+      name: trimmedName === '' && value !== undefined ? proposal.name : name,
       kind: proposal.kind,
       value: value ?? '',
     })

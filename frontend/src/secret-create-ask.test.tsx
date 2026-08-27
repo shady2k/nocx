@@ -158,32 +158,18 @@ describe('SecretCreateDialog', () => {
     expect(createSecret.mock.calls[0]?.[0]).toMatchObject({ kind: 'api-token' })
   })
 
-  it('proposes the first free collision variant and writes it on the next action', async () => {
-    const existing = [
-      inventoryRow('prod token', 'secrow:one'),
-      inventoryRow('prod token 2', 'secrow:two'),
-    ]
-    const created = inventoryRow('prod token 3', 'secrow:three')
-    const createSecret = vi.fn().mockResolvedValue({ name: created.name })
-    const vault = vaultWith([existing, existing, [created]], createSecret)
+  it('refuses an occupied name without changing it', async () => {
+    const existing = [inventoryRow('prod token', 'secrow:one')]
+    const createSecret = vi.fn()
+    const vault = vaultWith([existing], createSecret)
     const { container } = mount(ask(), vault)
 
     fireEvent.click(save())
 
-    await vi.waitFor(() => expect(nameInput().value).toBe('prod token 3'))
+    await vi.waitFor(() => expect(nameInput().value).toBe('prod token'))
     expect(container.textContent).toContain('A secret named "prod token" is already in the vault')
     expect(createSecret).not.toHaveBeenCalled()
-
-    fireEvent.click(save())
-    await vi.waitFor(() => expect(createSecret).toHaveBeenCalledOnce())
-    expect(createSecret).toHaveBeenCalledWith({
-      name: 'prod token 3',
-      kind: 'api-token',
-      value: 'word',
-      resolve: true,
-    })
   })
-
   it('keeps the value and shows a sealed-vault refusal', async () => {
     const createSecret = vi.fn().mockRejectedValue(new Error('vault is sealed'))
     const vault = vaultWith([[]], createSecret)

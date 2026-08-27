@@ -197,14 +197,17 @@ test.describe('the secret panel opens where a person can reach it', () => {
     // The panel is re-homed into the dialog so it can paint in the top layer.
     // Keep this assertion: without the DOM relationship, this test would not
     // prove the dialog's bubbling light-dismiss path.
-    expect(await panel.evaluate((el) => el.closest('dialog') !== null)).toBe(true)
+    expect(
+      await panel.evaluate((el) => el.closest('dialog') !== null),
+      'secret picker panel was not re-homed into the connection dialog',
+    ).toBe(true)
 
     const rowBox = await row.boundingBox()
     const dialogPanel = dialog.locator('.nocx-dialog__panel')
     const dialogPanelBox = await dialogPanel.boundingBox()
     const dialogSize = await dialogPanel.getAttribute('data-size')
-    expect(rowBox).not.toBeNull()
-    expect(dialogPanelBox).not.toBeNull()
+    expect(rowBox, 'secret picker row has no measurable bounding box').not.toBeNull()
+    expect(dialogPanelBox, 'connection dialog panel has no measurable bounding box').not.toBeNull()
     if (rowBox === null || dialogPanelBox === null) throw new Error('missing geometry')
 
     // Use the intersection of the row and the region immediately past the
@@ -229,11 +232,17 @@ test.describe('the secret panel opens where a person can reach it', () => {
 
     // The clicked offer row opens the vault setup surface. The connection
     // dialog must remain open underneath it; a light-dismiss would discard it.
-    await expect(dialog).toBeVisible()
+    await expect(
+      dialog,
+      'activating the overhanging row dismissed the connection dialog',
+    ).toBeVisible()
     const setupSheet = page
       .locator('.ui-prompt-overlay')
       .filter({ has: page.locator('#vault-setup-passphrase') })
-    await expect(setupSheet).toBeVisible()
+    await expect(
+      setupSheet,
+      'activating the overhanging row did not open the vault setup sheet',
+    ).toBeVisible()
   })
 
   test('a field further down the form opens its panel at ITS OWN offset', async ({ page }) => {

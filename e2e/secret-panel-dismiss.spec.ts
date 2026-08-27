@@ -22,10 +22,16 @@ async function openHeaderField(
 ): Promise<{ workbench: Locator; field: Locator }> {
   const workbench = await openWorkbench(page, backend)
   await treeRow(page, workbench, ZEN).click()
-  await workbench.getByRole('tab', { name: 'Headers', exact: true }).click()
+  const headers = workbench.getByRole('tab', { name: /^Headers(?: \d+)?$/ })
+  await expect(headers, 'Zen request did not expose a Headers tab').toBeVisible({
+    timeout: 10_000,
+  })
+  await headers.click()
   await workbench.getByRole('button', { name: 'Add header', exact: true }).click()
-  const field = workbench.locator('#api-header-value-0')
-  await expect(field).toBeVisible({ timeout: 10_000 })
+  const field = workbench.locator('input[id^="api-header-value-"]').last()
+  await expect(field, 'newly added header value field did not appear').toBeVisible({
+    timeout: 10_000,
+  })
   return { workbench, field }
 }
 

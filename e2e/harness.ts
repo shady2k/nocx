@@ -118,7 +118,7 @@ export async function clickIntoEditor(
 // the second entry point this arrangement removed.
 //
 // A spec that needs its OWN backend overrides this afterwards with
-// bindEndpoint(); init scripts apply in order, so the later one wins.
+// bindEndpoint(); its accessor wins whether the page shim runs before or after it.
 async function injectWailsShim(page: Page): Promise<void> {
   const stand = readStand()
   await page.addInitScript(
@@ -528,8 +528,7 @@ export function collectionsDir(isolatedHome: string, name: string): string {
 export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promise<void> {
   await page.context().addInitScript(
     (opts: { p: number; t: string }) => {
-      const w = window as unknown as { go?: Record<string, unknown> }
-      w.go = {
+      const workbenchGo = {
         main: {
           WailsApp: {
             GetWSPort: () => Promise.resolve(opts.p),
@@ -540,6 +539,15 @@ export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promi
           },
         },
       }
+      // The fixture installs its default shim at page scope. The relative
+      // order of page- and context-init scripts is unspecified; a no-op setter
+      // prevents the default assignment from winning when it runs later.
+      Object.defineProperty(window, 'go', {
+        configurable: true,
+        enumerable: true,
+        get: () => workbenchGo,
+        set: () => undefined,
+      })
     },
     { p: endpoint.port, t: endpoint.token },
   )

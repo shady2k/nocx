@@ -461,6 +461,11 @@ export class TerminalContent extends BasePaneContent {
   /** The one live frame displayed while the summoned editor is open. The
    *  renderer keeps parsing underneath it; this is presentation state only. */
   private _pinnedFrame: CapturedFrame | null = null
+  /** A captured frame waiting for the ask submit seam to mint its askId.
+   *  This is distinct from the display pin: Escape ends the display, but
+   *  cannot end a turn that is already answering. */
+  private _pendingReadFrame: CapturedFrame | null = null
+  private _readPinnedFrame: { askId: string; frame: CapturedFrame } | null = null
   private _freezeFrameView: HTMLElement | null = null
   /** Inline position is temporarily set because alternate/fullscreen live
    *  containers do not otherwise establish the frame view's containing block. */
@@ -1563,6 +1568,8 @@ export class TerminalContent extends BasePaneContent {
         // a log (AGENTS.md: a soft degrade the UI contradicts is how a
         // feature that does not exist survives a release).
         onRefusal: (message) => showToast({ level: 'warning', message }),
+        onTurnStart: (askId) => this.bindReadTurn(askId),
+        onTurnEnd: (askId) => this.endReadTurn(askId),
         // The typed readiness fact behind a refusal (agent.status), so the
         // target never has to read the reason out of the message text.
         // Through the store, not around it: a refusal is exactly when the
@@ -3642,18 +3649,36 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /** Capture this session's live frame (the readScreen pull): the renderer
-   *  produces the frame because it owns the grid (AD-6). Rejects with
+   *  produces the frame because it owns the grid (AD-6). A whole-screen read
+   *  in an active ask turn returns that turn's frame, even if its summoned
+   *  editor has since been dismissed; before the ask is submitted, the
+   *  display pin is the equivalent fallback. Neither path waits on the live
+   *  capture fence or describes a later repaint. Region reads remain live so
+   *  their requested bounds keep their existing meaning. Rejects with
    *  CaptureAbortedError when no renderer is mounted (yet or anymore). */
   captureLiveFrame(region?: { start: number; end: number }): Promise<CapturedFrame> {
+    if (region === undefined) {
+      if (this._readPinnedFrame !== null) return Promise.resolve(this._readPinnedFrame.frame)
+      if (this._pinnedFrame !== null) return Promise.resolve(this._pinnedFrame)
+    }
     if (!this.renderer) return Promise.reject(new CaptureAbortedError())
     return this.renderer.captureLiveFrame(region)
   }
 
-  /** The frame pinned by the active summoned editor, or null otherwise.
-   *  The next bead's session.read consumer reads this seam; it does not
-   *  reach into the renderer or create a second frame representation. */
+  /** The frame displayed by the active summoned editor, or null otherwise.
+   *  This display seam ends with the overlay; the read-turn pin is separate so
+   *  session.read can keep describing the same turn after Escape. */
   pinnedFrame(): CapturedFrame | null {
     return this._pinnedFrame
+  }
+  private bindReadTurn(askId: string): void {
+    const frame = this._pendingReadFrame
+    this._pendingReadFrame = null
+    this._readPinnedFrame = frame === null ? null : { askId, frame }
+  }
+
+  private endReadTurn(askId: string): void {
+    if (this._readPinnedFrame?.askId === askId) this._readPinnedFrame = null
   }
 
   /** Report the lane's buffer kind to the backend (agent.laneInteractivity,
@@ -3920,6 +3945,7 @@ export class TerminalContent extends BasePaneContent {
       frameHost.style.position = 'relative'
       frameHost.appendChild(view)
       this._pinnedFrame = frame
+      this._pendingReadFrame = frame
       this._freezeFrameView = view
 
       const marker = createFreezeMarker()
@@ -3990,6 +4016,7 @@ export class TerminalContent extends BasePaneContent {
     this._summoned = false
     const restore = this._summonRestoreTargetId
     this._summonRestoreTargetId = null
+    this._pendingReadFrame = null
     this._clearFreezePresentation()
     if (restore === null || this.editor === null) return
     if (this.editor.getDoc() !== '') return
@@ -4411,6 +4438,8 @@ export class TerminalContent extends BasePaneContent {
 
   dispose(): void {
     this._disposed = true
+    this._pendingReadFrame = null
+    this._readPinnedFrame = null
     this._mounted = false
     this.mountAbortController?.abort()
     clearTimeout(this._settleTimer)

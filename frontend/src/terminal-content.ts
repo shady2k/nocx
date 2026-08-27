@@ -564,6 +564,30 @@ export class TerminalContent extends BasePaneContent {
       this.markAffordance?.hide()
       return
     }
+    // ── THE SELECTION HAS ONE OWNER, AND IT IS THIS SURFACE (nocx-45vkz) ─
+    //
+    // The scrollback is about to offer a grant over this selection, so it
+    // must also hold the focus that decides who may move it. CodeMirror
+    // restores the DOM selection into its own document whenever it holds
+    // focus and the selection is anchored outside it — correct behaviour for
+    // a focused editor, whose caret IS the DOM selection — and it did so
+    // about 50ms after a selection made in the scrollback WITHOUT the mouse
+    // drag that would have moved focus first. The guard at the top of this
+    // handler then saw a collapsed selection and hid an offer nobody had had
+    // time to press. Both surfaces owned one input and the composer won by
+    // evaluation order; the loser went on advertising a grant it could no
+    // longer deliver (AGENTS.md).
+    //
+    // Released here rather than taught to the editor, because "do not
+    // restore a selection anchored outside my root" leaves the composer
+    // focused with a caret the document selection no longer shows — two live
+    // claims still, just neither of them visible. A real mouse drag already
+    // ends with the focus off the composer; this makes every other way of
+    // selecting agree with it. Nothing is lost by it: the first character
+    // typed goes back into the prompt through the global keydown rescue,
+    // exactly as it does after a click on a block.
+    const active = document.activeElement
+    if (active instanceof HTMLElement && this.editor?.rootContains(active) === true) active.blur()
     this.markAffordance?.show(
       {
         left: rect.left,

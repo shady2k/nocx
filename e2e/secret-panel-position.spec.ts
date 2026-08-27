@@ -37,8 +37,8 @@
  * are ones only a browser can answer.
  *
  * NO VAULT NEEDED, deliberately. The panel opens on '@' in every vault state
- * — an offer row when the vault is uninitialized or sealed, the list when it
- * is open — and this spec is about WHERE it opens, not what it lists.
+ * — an offer row when the vault is uninitialized or sealed, the list when
+ * it is open — and this spec is about WHERE it opens, not what it lists.
  *
  * NO Escape ANYWHERE, also deliberately. `ui/overlay/stack.ts` installs its
  * Escape handler on `document` in the CAPTURE phase, so Escape reaches the
@@ -51,6 +51,7 @@ import type { Locator } from '@playwright/test'
 import { test, expect, settingsReady, type Page } from './harness'
 
 const SETTINGS_ENDPOINTS_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
+const SETTINGS_CONNECTIONS_NAV = '.ui-grouped-nav__item[data-item="connections"]'
 const OPEN_PANEL = '.ui-floating-panel[data-variant="secret"][data-open="true"]'
 
 /** The New Endpoint dialog with its header row already added, so both fields
@@ -64,6 +65,38 @@ async function openEndpointDialog(page: Page): Promise<Locator> {
   await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
   await page.getByRole('button', { name: '+ New endpoint' }).first().click()
   const dialog = page.getByRole('dialog').filter({ hasText: 'New Endpoint' })
+  await expect(dialog).toBeVisible({ timeout: 10_000 })
+  return dialog
+}
+
+/** The ordinary connection editor with its password field visible. */
+async function openConnectionDialog(page: Page): Promise<Locator> {
+  await page.goto('/')
+  await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
+  await page.keyboard.press('Meta+,')
+  await settingsReady(page)
+  await page.locator(SETTINGS_CONNECTIONS_NAV).click()
+  await expect(page.locator('.cm-root')).toBeVisible({ timeout: 10_000 })
+  await page.locator('[role="toolbar"]').getByRole('button', { name: '+ New connection' }).click()
+
+  const quickConnect = page.getByRole('dialog').filter({ hasText: 'New Connection' })
+  await expect(quickConnect).toBeVisible({ timeout: 10_000 })
+  await quickConnect.getByLabel('Host or connection string').fill('localhost')
+  await quickConnect.getByRole('button', { name: 'Next', exact: true }).click()
+  await expect(page.locator('.cm-form')).toBeAttached({ timeout: 10_000 })
+
+  await page.locator('#profile-name').fill('Panel position test')
+  await page.locator('#profile-host').fill('localhost')
+  await page.locator('.cm-form').getByRole('tab', { name: 'Authentication' }).click()
+  await page.locator('#profile-auth-user').fill('test-user')
+  await page
+    .getByRole('radiogroup', { name: 'Authentication method' })
+    .getByRole('radio', { name: 'Password' })
+    .click()
+
+  const dialog = page
+    .locator('dialog.nocx-dialog')
+    .filter({ has: page.locator('#profile-auth-password') })
   await expect(dialog).toBeVisible({ timeout: 10_000 })
   return dialog
 }
@@ -155,8 +188,9 @@ test.describe('the secret panel opens where a person can reach it', () => {
   })
 
   test('a row still activates from the panel portion hanging past the dialog', async ({ page }) => {
-    const dialog = await openEndpointDialog(page)
-    const panel = await triggerPanel(page, dialog.locator('#endpoint-key'))
+    const dialog = await openConnectionDialog(page)
+    const field = dialog.locator('#profile-auth-password')
+    const panel = await triggerPanel(page, field)
     const row = panel.locator('.ui-floating-panel__row').first()
 
     // The panel is re-homed into the dialog so it can paint in the top layer.
@@ -165,7 +199,9 @@ test.describe('the secret panel opens where a person can reach it', () => {
     expect(await panel.evaluate((el) => el.closest('dialog') !== null)).toBe(true)
 
     const rowBox = await row.boundingBox()
-    const dialogPanelBox = await dialog.locator('.nocx-dialog__panel').boundingBox()
+    const dialogPanel = dialog.locator('.nocx-dialog__panel')
+    const dialogPanelBox = await dialogPanel.boundingBox()
+    const dialogSize = await dialogPanel.getAttribute('data-size')
     expect(rowBox).not.toBeNull()
     expect(dialogPanelBox).not.toBeNull()
     if (rowBox === null || dialogPanelBox === null) throw new Error('missing geometry')
@@ -176,13 +212,21 @@ test.describe('the secret panel opens where a person can reach it', () => {
     const dialogRight = dialogPanelBox.x + dialogPanelBox.width
     const hangingLeft = Math.max(rowBox.x, dialogRight)
     const hangingRight = rowBox.x + rowBox.width
-    expect(hangingRight).toBeGreaterThan(hangingLeft)
+    const diagnostic = [
+      'the password picker row has no panel overhang',
+      `viewport=${await page.evaluate(() => `${window.innerWidth}x${window.innerHeight}`)}`,
+      `dialog data-size=${dialogSize ?? 'missing'}`,
+      `dialog=${dialogPanelBox.x}..${dialogRight} (${dialogPanelBox.width}px)`,
+      `row=${rowBox.x}..${hangingRight} (${rowBox.width}px)`,
+      'expected ordinary dialog width 480px and secret panel min-width 480px',
+    ].join('; ')
+    expect(hangingRight, diagnostic).toBeGreaterThan(hangingLeft)
     const x = hangingLeft + (hangingRight - hangingLeft) / 2
     const y = rowBox.y + rowBox.height / 2
 
     await page.mouse.click(x, y)
 
-    // The clicked offer row opens the vault setup surface. The endpoint
+    // The clicked offer row opens the vault setup surface. The connection
     // dialog must remain open underneath it; a light-dismiss would discard it.
     await expect(dialog).toBeVisible()
     await expect(page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })).toBeVisible()

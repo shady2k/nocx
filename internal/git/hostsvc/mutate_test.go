@@ -166,19 +166,87 @@ func TestMutationStatusListsMarshalAsArrays(t *testing.T) {
 	}
 }
 
+// gitInRepo runs one git plumbing command in dir and returns its trimmed
+// output. It is the ground truth these comparisons are set up and checked
+// against: neither implementation under test may also be the thing that
+// prepares or verifies the comparison.
+func gitInRepo(t *testing.T, dir string, args ...string) string {
+	t.Helper()
+	gitBin, env := repoTooling(t)
+	cmd := exec.Command(gitBin, args...) // #nosec G204 — gitBin is LookPath-resolved; args are test literals
+	cmd.Dir = dir
+	cmd.Env = env
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		t.Fatalf("git %v: %v: %s", args, err, out)
+	}
+	return strings.TrimSpace(string(out))
+}
+
+// resetIndex puts the index back to HEAD, leaving the working tree alone —
+// the fixture's dirty state exactly as the first implementation found it.
+func resetIndex(t *testing.T, dir string) {
+	t.Helper()
+	gitInRepo(t, dir, "reset", "-q")
+}
+
+// resetToCommit puts HEAD, the index and the working tree back to commit and
+// re-dirties the fixture's file, so the second commit is made from the same
+// parent, over the same change, as the first.
+func resetToCommit(t *testing.T, dir, commit string) {
+	t.Helper()
+	gitInRepo(t, dir, "reset", "-q", "--hard", commit)
+	writeFile(t, filepath.Join(dir, "file.txt"), "two\n")
+}
+
+// headsOf reads the repository's current head in the two shapes the domain
+// types carry it: git.CommitOutcome.Head is rev-parse --short, and
+// git.Status.Head is the first seven hex digits of the full oid.
+func headsOf(t *testing.T, dir string) (outcomeHead, statusHead string) {
+	t.Helper()
+	full := gitInRepo(t, dir, "rev-parse", "HEAD")
+	if len(full) < 7 {
+		t.Fatalf("rev-parse HEAD returned %q", full)
+	}
+	return gitInRepo(t, dir, "rev-parse", "--short", "HEAD"), full[:7]
+}
+
 // TestStageMatchesLocal and TestCommitMatchesLocal are the mutation half
 // of the one contract: the panel must say the same thing on both machines,
 // so a mutation through the service is only correct if it agrees with the
 // local implementation on the same repository — field by field.
+//
+// "On the same repository" is load-bearing, and for a while the fixture did
+// not deliver it (nocx-8j7b5): each test built a repository per side and
+// compared the two results with reflect.DeepEqual. A commit hash covers the
+// author and committer timestamps at one-second granularity, so two
+// fixtures with byte-identical content agree on Head only while both their
+// initial commits land inside one second. On an idle machine they always
+// do; under the load of a full package run they sometimes do not, and the
+// pair failed on backend-linux with every field equal but the hash. So both
+// implementations now run against ONE repository, each from the same
+// starting state, restored in between by git itself — which makes every
+// field including Head legitimately comparable, and keeps DeepEqual's teeth
+// rather than loosening the assertion to accommodate a fixture defect. One
+// factory serves both sides for the same reason, matching
+// TestServiceStatusMatchesLocal: the environment git runs in is then also
+// shared, so the only variable left is the service against local.
 func TestStageMatchesLocal(t *testing.T) {
-	dirSvc := fixtureRepo(t, true)
-	dirLocal := fixtureRepo(t, true)
-	svc := newService(t)
-	id := openThroughService(t, svc, dirSvc)
+	dir := fixtureRepo(t, true)
+	factory := localgit.NewFactory()
+	defer factory.Stop()
+	svc := hostsvc.New(factory)
+
+	id := openThroughService(t, svc, dir)
 	want := stageThroughService(t, svc, id.BindingID, []string{"file.txt"})
 
-	local := localgit.NewFactory()
-	repoLocal, outcome, err := local.Open(context.Background(), dirLocal)
+	// The local side must perform the same mutation, not observe one
+	// already performed — so the index goes back to where the service
+	// found it. Nothing here moves HEAD, so both statuses report the one
+	// head this repository has.
+	resetIndex(t, dir)
+
+	repoLocal, outcome, err := factory.Open(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("local open: %v", err)
 	}
@@ -196,17 +264,27 @@ func TestStageMatchesLocal(t *testing.T) {
 }
 
 func TestCommitMatchesLocal(t *testing.T) {
-	dirSvc := fixtureRepo(t, true)
-	dirLocal := fixtureRepo(t, true)
-	svc := newService(t)
-	withIdentity(t, dirSvc)
-	withIdentity(t, dirLocal)
-	id := openThroughService(t, svc, dirSvc)
-	stageThroughService(t, svc, id.BindingID, []string{"file.txt"})
-	want := commitThroughService(t, svc, id.BindingID, "same subject\n\nsame body", false)
+	const msg = "same subject\n\nsame body"
 
-	local := localgit.NewFactory()
-	repoLocal, outcome, err := local.Open(context.Background(), dirLocal)
+	dir := fixtureRepo(t, true)
+	withIdentity(t, dir)
+	base := gitInRepo(t, dir, "rev-parse", "HEAD")
+
+	factory := localgit.NewFactory()
+	defer factory.Stop()
+	svc := hostsvc.New(factory)
+
+	id := openThroughService(t, svc, dir)
+	stageThroughService(t, svc, id.BindingID, []string{"file.txt"})
+	want := commitThroughService(t, svc, id.BindingID, msg, false)
+	wantHead, wantStatusHead := headsOf(t, dir)
+
+	// Back to the parent, with the same change to commit again: the local
+	// side's commit has the same parent, the same tree and the same
+	// message as the service's.
+	resetToCommit(t, dir, base)
+
+	repoLocal, outcome, err := factory.Open(context.Background(), dir)
 	if err != nil {
 		t.Fatalf("local open: %v", err)
 	}
@@ -217,18 +295,42 @@ func TestCommitMatchesLocal(t *testing.T) {
 	if _, err = repoLocal.Stage(context.Background(), []string{"file.txt"}); err != nil {
 		t.Fatalf("local stage: %v", err)
 	}
-	got, err := repoLocal.Commit(context.Background(), "same subject\n\nsame body", false)
+	got, err := repoLocal.Commit(context.Background(), msg, false)
 	if err != nil {
 		t.Fatalf("local commit: %v", err)
 	}
-	// The two commits are made moments apart, so the head hashes may
-	// differ; the state, the staleness flag and the fresh status are the
-	// panel's truth and must agree.
-	if want.State != got.State || want.StatusStale != got.StatusStale || !reflect.DeepEqual(want.Status, got.Status) {
-		t.Fatalf("service commit disagrees with local:\nwant: %+v\ngot:  %+v", want, got)
+	gotHead, gotStatusHead := headsOf(t, dir)
+
+	// The two head fields are the only ones one repository cannot make
+	// comparable, and the reason is permanent rather than a fixture
+	// accident: a commit hash covers the commit's OWN author and committer
+	// timestamps, so two commits made at two moments differ even with an
+	// identical parent, tree and message. The seam that would pin them —
+	// GIT_AUTHOR_DATE through local.WithEnv — is declared in that package's
+	// options_test.go and therefore does not exist outside it. So each side
+	// asserts its head against the repository's real HEAD after its own
+	// commit: the field is excluded from the cross-check, never from the
+	// test, and "" would fail both assertions.
+	if want.Head != wantHead {
+		t.Fatalf("service commit head = %q, the repository's is %q", want.Head, wantHead)
 	}
-	if want.Head == "" || got.Head == "" {
-		t.Fatalf("a successful commit must carry a head: service %q, local %q", want.Head, got.Head)
+	if want.Status.Head != wantStatusHead {
+		t.Fatalf("service post-commit status head = %q, the repository's is %q", want.Status.Head, wantStatusHead)
+	}
+	if got.Head != gotHead {
+		t.Fatalf("local commit head = %q, the repository's is %q", got.Head, gotHead)
+	}
+	if got.Status.Head != gotStatusHead {
+		t.Fatalf("local post-commit status head = %q, the repository's is %q", got.Status.Head, gotStatusHead)
+	}
+
+	// Everything else — the state, the staleness flag, the output and every
+	// field of the fresh status — is the panel's truth and must agree.
+	wantRest, gotRest := want, got
+	wantRest.Head, gotRest.Head = "", ""
+	wantRest.Status.Head, gotRest.Status.Head = "", ""
+	if !reflect.DeepEqual(wantRest, gotRest) {
+		t.Fatalf("service commit disagrees with local, head aside:\nwant: %+v\ngot:  %+v", wantRest, gotRest)
 	}
 }
 

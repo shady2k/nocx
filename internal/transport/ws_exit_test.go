@@ -148,6 +148,25 @@ func openExitSession(t *testing.T, ws *WSServer) (sid string, conn *websocket.Co
 	if env.Error != nil {
 		t.Fatalf("open: %+v", env.Error)
 	}
+	// The open RESULT is not the moment this session can be observed.
+	// handleOpen answers first and installs the connection as the session's
+	// subscriber only afterwards, deliberately (AD-7), and every
+	// session-scoped notification these callers provoke — exit, and
+	// session.liveness — resolves its destination at emit time from that
+	// slot. Provoking one before the install drops it at Debug and the
+	// reader then waits out its whole window, which is what
+	// TestLiveness_UnknownReachesTheRendererOverTheWire did under load.
+	//
+	// awaitSubscriber is the package's existing answer to this (ws_test.go);
+	// openSessionOnConn has waited on it since nocx-2h08 and this opener is
+	// simply the one that never did. It is NOT the app package's
+	// notification-shaped wait: a session opened here comes off a fake pty
+	// factory, so nothing registers it on the integration axis and no
+	// session.integrationChanged is ever emitted to wait for. The slot
+	// itself is read instead, through the same accessor the emit path uses,
+	// and polling it touches no socket — so the read-deadline hazard that
+	// rules internal/testwait out over there does not arise here.
+	awaitSubscriber(t, ws, session.ID(env.Result.SessionID))
 	return env.Result.SessionID, conn
 }
 

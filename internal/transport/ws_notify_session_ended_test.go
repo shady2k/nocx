@@ -175,7 +175,6 @@ func TestSessionEndIsRaisedWithNoRendererAttached(t *testing.T) {
 	raiser := &fakeNotifyRaiser{}
 	ws, _ := newSessionEndedServer(t, fake, raiser)
 	sid, conn := openExitSession(t, ws)
-	awaitSubscriber(t, ws, session.ID(sid))
 
 	_ = conn.Close()
 	testwait.WaitForTimeout(t, "the disconnect to clear the subscriber slot", wantWithin, func() bool {

@@ -137,6 +137,13 @@ export function createSecretPickerField(opts: {
     },
   }
 
+  const onPickerDismiss = (reason: 'escape' | 'outside'): void => {
+    if (reason === 'escape') dismissedTriggerFrom = trigger?.from ?? null
+    else dismissedTriggerFrom = null
+    generation++
+    trigger = null
+    lockAnchor = null
+  }
   const picker = new SecretPicker(
     source,
     {
@@ -163,6 +170,7 @@ export function createSecretPickerField(opts: {
         opts.onChange(next, nextCaret)
       },
       onError: opts.source.onError,
+      onDismiss: onPickerDismiss,
     },
     // The panel lives on the body; the anchor is how it finds its way back
     // to the field it belongs to (see `anchor` above).
@@ -322,13 +330,9 @@ export function createSecretPickerField(opts: {
     const wasOpen = picker.isOpen
     const consumed = picker.handleKey(e)
     if (consumed && wasOpen && !picker.isOpen && e.key === 'Escape') {
-      // SecretPicker closes synchronously for Escape and accepted rows.
-      // Row selection clears trigger in onInsert; Escape needs this adapter
-      // state reset because it intentionally leaves the literal @ in place.
-      dismissedTriggerFrom = trigger?.from ?? null
-      generation++
-      trigger = null
-      lockAnchor = null
+      // SecretPicker closes synchronously; this path keeps the same adapter
+      // reset as the document-owned dismissal while leaving @ as text.
+      onPickerDismiss('escape')
     }
     return consumed
   }

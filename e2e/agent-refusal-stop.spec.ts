@@ -202,7 +202,14 @@ function answerFromRefusal(
   ]
 }
 
-const LEARN = `Are you there, ${nonce}?`
+// EVERY question in this file is unique, and that is load-bearing rather than
+// tidy. Blocks are addressed by their text (`answerBlock`), the file runs
+// serial against ONE backend, and a fresh page restores the scrollback the
+// earlier journeys left. Two journeys asking the same thing therefore make the
+// locator resolve to two elements and one journey fails for another journey's
+// reason — which is exactly what happened (nocx-3xjou). So the learn question
+// carries the journey's own name.
+const learn = (journey: string) => `Are you there, ${nonce} ${journey}?`
 
 test.describe('a refusal is an answer, and a turn can be stopped (nocx-uvac6.7)', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
@@ -216,6 +223,7 @@ test.describe('a refusal is an answer, and a turn can be stopped (nocx-uvac6.7)'
 
     // Learn the authoritative session id from a completed content-only ask.
     fake.setScript({ chunks: ['Ready.'] })
+    const LEARN = learn('deny-once')
     await askFromPrompt(page, LEARN)
     await answerState(page, LEARN, 'completed')
     await expect.poll(() => asks.length, { timeout: 15_000 }).toBeGreaterThan(0)
@@ -269,8 +277,10 @@ test.describe('a refusal is an answer, and a turn can be stopped (nocx-uvac6.7)'
     await backToTerminal(page)
 
     // Learn the authoritative session id from a completed content-only ask,
-    // as the first journey does.
+    // as the first journey does — under this journey's own name, so the two
+    // learn blocks never collide in a restored scrollback.
     fake.setScript({ chunks: ['Ready.'] })
+    const LEARN = learn('deny-always')
     await askFromPrompt(page, LEARN)
     await answerState(page, LEARN, 'completed')
     await expect.poll(() => asks.length, { timeout: 15_000 }).toBeGreaterThan(0)

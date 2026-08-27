@@ -67,6 +67,7 @@ import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import type { WSClient } from './ipc'
 import { createCommandBlock } from './scrollback/blocks'
+import { mountReadScreenHandler } from './read-screen'
 import { CommandSnapshotStore } from './command-snapshot'
 import type { ActionFacts, DesiredMode } from './capability'
 import type * as Capability from './capability'
@@ -7988,6 +7989,444 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       restore()
       teardown()
       document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+    }
+  })
+})
+describe('session.read serves the frame the question is about (nocx-7l4ex.3)', () => {
+  type ReadCall = { method: string; params: unknown }
+  type ReadCell = { char: string }
+  type ReadRow = { cells?: ReadCell[] }
+  type ReadResolution = {
+    requestId: string
+    outcome: string
+    rows?: ReadRow[]
+    cursor?: unknown
+    identity?: unknown
+    range?: unknown
+    error?: string
+  }
+  type ReadCallFunction = (method: string, params: unknown) => Promise<undefined>
+  type ReadDispatcher = {
+    handlers: Map<string, (params: unknown) => void>
+    calls: ReadCall[]
+    subscribe: (method: string, handler: (params: unknown) => void) => () => void
+    call: ReadCallFunction
+  }
+
+  function readDispatcher(): ReadDispatcher {
+    const handlers = new Map<string, (params: unknown) => void>()
+    const calls: ReadCall[] = []
+    const subscribe = (method: string, handler: (params: unknown) => void): (() => void) => {
+      handlers.set(method, handler)
+      return () => handlers.delete(method)
+    }
+    const call = vi.fn((method: string, params: unknown) => {
+      calls.push({ method, params })
+      return Promise.resolve(undefined)
+    })
+    return { handlers, calls, subscribe, call }
+  }
+
+  function frame(text: string): CapturedFrame {
+    return {
+      rows: [
+        {
+          kind: 'cells',
+          cells: Array.from({ length: 80 }, (_, index) => ({
+            char: text[index] ?? ' ',
+            attrs: emptyAttrs(),
+          })),
+        },
+      ],
+      cursor: { line: 0, col: text.length },
+      provenance: {
+        source: 'live',
+        identity: {
+          buffer: { kind: 'alternate', altSession: 1 },
+          cols: 80,
+          rows: 24,
+          generation: 11,
+        },
+        range: { start: 0, end: 1 },
+        scrollbackCapLines: 10000,
+      },
+    }
+  }
+
+  function wireText(params: unknown): string {
+    const resolution = params as ReadResolution
+    const rows = resolution.rows ?? []
+    return rows.map((row) => (row.cells ?? []).map((cell) => cell.char).join('')).join('\n')
+  }
+
+  function startRunning(client: ClientFake, command = 'top'): void {
+    const handler = lifecycleHandler(client)
+    handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+    handler({
+      lane: 'lane-1',
+      lifecycle: 'running',
+      domain: 'd1',
+      epoch: 1,
+      attempt: { id: 'att-run', state: 'open', origin: 'app', command },
+    })
+  }
+
+  function gridOf(content: TerminalContent): HTMLElement {
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    return withScrollback.scrollback.xtermLiveContainer
+  }
+
+  async function summon(content: TerminalContent): Promise<void> {
+    gridOf(content).dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    await vi.waitFor(() => expect(editorOf(content).isVisible).toBe(true))
+  }
+
+  function readCurrent(
+    dispatcher: ReadDispatcher,
+    content: TerminalContent,
+    requestId: string,
+  ): void {
+    mountReadScreenHandler(dispatcher as unknown as Dispatcher, (sessionId) =>
+      sessionId === content.sessionId() ? content : null,
+    )
+    dispatcher.handlers.get('agent.readScreenRequest')!({
+      requestId,
+      sessionId: content.sessionId(),
+    })
+  }
+
+  it('returns the pinned frame for both reads in one question turn', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      const pinned = frame('top: load 1.00')
+      const renderer = rendererOf(content)
+      const capture = vi.fn().mockResolvedValue(pinned)
+      renderer.captureLiveFrame = capture
+      await summon(content)
+      capture.mockClear()
+
+      const dispatcher = readDispatcher()
+      readCurrent(dispatcher, content, 'read-1')
+      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(1))
+      readCurrent(dispatcher, content, 'read-2')
+      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(2))
+
+      const first = dispatcher.calls[0].params as ReadResolution
+      const second = dispatcher.calls[1].params as ReadResolution
+      expect(first).toMatchObject({ requestId: 'read-1', outcome: 'frame' })
+      expect(second).toMatchObject({ requestId: 'read-2', outcome: 'frame' })
+      expect(wireText(first)).toContain('top: load 1.00')
+      expect(second.rows).toEqual(first.rows)
+      expect(second.cursor).toEqual(first.cursor)
+      expect(second.identity).toEqual(first.identity)
+      expect(second.range).toEqual(first.range)
+      expect(capture).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('uses the live renderer again after the overlay closes', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      const pinned = frame('pinned top frame')
+      const renderer = rendererOf(content)
+      const capture = vi.fn().mockResolvedValue(pinned)
+      renderer.captureLiveFrame = capture
+      await summon(content)
+
+      const editorWithView = editorOf(content) as unknown as { view: EditorView }
+      const view = editorWithView.view
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      expect(content.pinnedFrame()).toBeNull()
+
+      const live = frame('live after next question')
+      capture.mockResolvedValue(live)
+      const result = await content.captureLiveFrame()
+      expect(result).toBe(live)
+      expect(capture).toHaveBeenCalledTimes(2)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('answers a repainting top without waiting on the live capture fence', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client, 'top')
+      const pinned = frame('top: pinned while repainting')
+      const renderer = rendererOf(content)
+      const capture = vi.fn().mockResolvedValue(pinned)
+      renderer.captureLiveFrame = capture
+      await summon(content)
+
+      let liveCaptureStarted = false
+      const blockedCapture = vi.fn(
+        () =>
+          new Promise<CapturedFrame>(() => {
+            liveCaptureStarted = true
+          }),
+      )
+      renderer.captureLiveFrame = blockedCapture
+
+      await expect(content.captureLiveFrame()).resolves.toBe(pinned)
+      expect(liveCaptureStarted).toBe(false)
+      expect(blockedCapture).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps region reads live while the whole-screen read is pinned', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      const pinned = frame('pinned whole screen')
+      const renderer = rendererOf(content)
+      const capture = vi.fn().mockResolvedValue(pinned)
+      renderer.captureLiveFrame = capture
+      await summon(content)
+
+      const live = frame('live selected rows')
+      capture.mockResolvedValue(live)
+      const result = await content.captureLiveFrame({ start: 3, end: 5 })
+
+      expect(result).toBe(live)
+      expect(capture).toHaveBeenLastCalledWith({ start: 3, end: 5 })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps the renderer failed outcome when no frame can be produced', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      rendererOf(content).captureLiveFrame = vi.fn().mockRejectedValue(new Error('capture refused'))
+
+      const dispatcher = readDispatcher()
+      readCurrent(dispatcher, content, 'read-failed')
+      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(1))
+
+      expect(dispatcher.calls[0].params).toMatchObject({
+        requestId: 'read-failed',
+        outcome: 'failed',
+        error: 'capture refused',
+      })
+    } finally {
+      teardown()
+    }
+  })
+  it('keeps the read pin through Escape until the same ask turn ends', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      const pinned = frame('pinned while the answer streams')
+      const live = frame('live after the answer ends')
+      const renderer = rendererOf(content)
+      const capture = vi.fn().mockResolvedValue(pinned)
+      renderer.captureLiveFrame = capture
+      client.dispatcher.call.mockImplementation((method: string) => {
+        if (method === 'agent.ask') {
+          return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        }
+        return Promise.resolve({
+          id: 'att-0',
+          domain: 'd1',
+          state: 'open',
+          command: '',
+          cwd: '',
+          host: '',
+          origin: 'app',
+          startedAt: '2026-08-08T12:00:00Z',
+        })
+      })
+
+      await summon(content)
+      capture.mockClear()
+      const ed = editorOf(content)
+      ed.insertText('why is this screen changing?')
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(client.dispatcher.call.mock.calls.some(([method]) => method === 'agent.ask')).toBe(
+          true,
+        ),
+      )
+
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      expect(content.pinnedFrame()).toBeNull()
+
+      const dispatcher = readDispatcher()
+      readCurrent(dispatcher, content, 'read-after-escape-1')
+      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(1))
+      readCurrent(dispatcher, content, 'read-after-escape-2')
+      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(2))
+      const first = dispatcher.calls[0].params as ReadResolution
+      const second = dispatcher.calls[1].params as ReadResolution
+      expect(wireText(first)).toContain('pinned while the answer streams')
+      expect(second.rows).toEqual(first.rows)
+      expect(capture).not.toHaveBeenCalled()
+
+      const runState = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )
+      expect(runState).toBeDefined()
+      ;(runState![1] as (params: unknown) => void)({ runId: 42, state: 'completed' })
+
+      capture.mockResolvedValue(live)
+      readCurrent(dispatcher, content, 'read-after-turn')
+      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(3))
+      expect(wireText(dispatcher.calls[2].params)).toContain('live after the answer ends')
+      expect(capture).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
+    }
+  })
+  it('clears an unsettled turn pin when the next question starts without a summon', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      const pinned = frame('stale first-turn frame')
+      const live = frame('live second-turn frame')
+      const renderer = rendererOf(content)
+      const capture = vi.fn().mockResolvedValue(pinned)
+      renderer.captureLiveFrame = capture
+      let nextRun = 42
+      client.dispatcher.call.mockImplementation((method: string) => {
+        if (method === 'agent.status') {
+          return Promise.resolve({
+            endpointConfigured: true,
+            credential: 'resolvable',
+            lastProbe: null,
+            answering: { ready: true, reason: null, endpoint: 'openrouter', model: 'test-model' },
+          })
+        }
+        if (method === 'agent.ask') {
+          nextRun += 1
+          return Promise.resolve({
+            runId: nextRun,
+            entryId: `entry-${nextRun}`,
+            model: 'test-model',
+          })
+        }
+        return Promise.resolve({
+          id: 'att-0',
+          domain: 'd1',
+          state: 'open',
+          command: '',
+          cwd: '',
+          host: '',
+          origin: 'app',
+          startedAt: '2026-08-08T12:00:00Z',
+        })
+      })
+
+      await summon(content)
+      capture.mockClear()
+      const ed = editorOf(content)
+      ed.insertText('what is this first screen?')
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(client.dispatcher.call.mock.calls.some(([method]) => method === 'agent.ask')).toBe(
+          true,
+        ),
+      )
+
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      lifecycleHandler(client)({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd1',
+        epoch: 1,
+      })
+      ed.show()
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      ed.insertText('what is this second screen?')
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(
+          client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.ask'),
+        ).toHaveLength(2),
+      )
+
+      capture.mockResolvedValue(live)
+      const dispatcher = readDispatcher()
+      readCurrent(dispatcher, content, 'read-second-turn')
+      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(1))
+      expect(wireText(dispatcher.calls[0].params)).toContain('live second-turn frame')
+      expect(capture).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
     }
   })
 })

@@ -387,7 +387,17 @@ type agentApprovalStanding struct {
 	Reason    string `json:"reason"`
 }
 
-func standingOffer(inv content.Invocation) agentApprovalStanding {
+func standingOffer(inv content.Invocation, hasInvocation, commandInvocation bool, effect content.Effect) agentApprovalStanding {
+	if !commandInvocation {
+		if effect == "" {
+			return agentApprovalStanding{Reason: "the question named no effect class"}
+		}
+		return agentApprovalStanding{Available: true}
+	}
+	if !hasInvocation {
+		_, reason := content.StandingRule(inv)
+		return agentApprovalStanding{Reason: reason}
+	}
 	rule, reason := content.StandingRule(inv)
 	if reason != "" {
 		return agentApprovalStanding{Reason: reason}
@@ -1344,7 +1354,6 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	if ap != nil {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = ap.RunID, ap.Attempt, ap.Tool, ap.CallID, ap.ArgHash, ap.Arguments
 		n.Effect, n.Resource = string(ap.Effect), ap.Resource
-		n.Standing = standingOffer(ap.Invocation)
 	} else {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = eg.RunID, eg.Attempt, eg.Tool, eg.CallID, eg.ArgHash, eg.Arguments
 		n.Reason, n.WasError, n.Findings = "egress", eg.WasError, eg.Findings
@@ -1382,6 +1391,7 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	}
 	if ap != nil {
 		proposal.Invocation = ap.Invocation
+		proposal.CommandInvocation = ap.CommandInvocation
 	}
 	if !h.approvals.IsPending(proposal) {
 		if ap != nil {
@@ -1398,6 +1408,10 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	// scripted-suspension test exercises and missing in the real one, which
 	// is a green suite over an "always" that writes no row.
 	h.approvals.NoteEffect(proposal)
+	if ap != nil {
+		invocation, hasInvocation, commandInvocation := h.approvals.InvocationFor(proposal)
+		n.Standing = standingOffer(invocation, hasInvocation, commandInvocation, proposal.Effect)
+	}
 	_ = r.TryNotify("agent.approvalRequested", mustMarshal(n))
 }
 
@@ -1600,27 +1614,20 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 }
 
 // applyStandingAnswer records the part of a decision that outlives the
-// proposal it was given on: "in this session" writes an invocation rule to
-// the run's session overlay, "always" writes the same rule to the global
-// policy. "once" writes nothing anywhere.
+// proposal it was given on: command proposals save an invocation rule, while
+// non-command proposals save the classified effect row. "in this session"
+// writes to the run's session overlay, "always" writes to the global policy,
+// and "once" writes nothing anywhere.
 func (h agentHandlers) applyStandingAnswer(p approveParams, ap assistant.Approval, sid session.ID) string {
 	if p.Scope == approveScopeOnce {
 		return ""
 	}
-	invocation, hasInvocation := h.approvals.InvocationFor(ap)
-	if !hasInvocation {
-		h.log.Warn("agent.approve: the proposal has no canonical invocation; the standing answer was not recorded",
-			"run", p.RunID, "tool", p.Tool, "scope", p.Scope)
-		return "the decision was applied to this call, but could not be saved as a standing answer: the question named no canonical invocation"
-	}
+	invocation, _, commandInvocation := h.approvals.InvocationFor(ap)
 	d := content.DecisionRefuse
 	if p.Approved {
 		d = content.DecisionPermit
 	}
-	// Tools without a command argument retain the old effect-matrix standing
-	// behavior. Command tools must have a sound canonical invocation before
-	// they can create a rule; an unparseable command has no standing escape.
-	if len(invocation.Commands) == 0 {
+	if !commandInvocation {
 		effect, ok := h.approvals.EffectFor(ap)
 		if !ok {
 			return "the decision was applied to this call, but could not be saved as a standing answer: the question named no effect class"

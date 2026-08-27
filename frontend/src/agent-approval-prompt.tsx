@@ -11,10 +11,12 @@
  * screen was asked about the SAME screen on their next question, and the only
  * place to say "stop asking me this" was a settings page in a vocabulary they
  * had never seen. A policy question offers allow and deny at once, in this
- * session and always when the backend can show the complete canonical
- * invocation those standing answers will save. The BACKEND applies the width:
- * this surface never edits the policy matrix, which would put a second owner
- * on the document the settings page owns (design §"Three wire changes").
+ * session and always when the backend can supply the standing binding. For a
+ * command that binding is the complete canonical invocation; for a
+ * non-command proposal the effect row already carried on the wire names what
+ * the standing answer covers. The BACKEND applies the width: this surface
+ * never edits the policy matrix, which would put a second owner on the
+ * document the settings page owns (design §"Three wire changes").
  *
  * Two things it must never do. It must never derive the effect from the tool
  * name — `effect` is on the wire precisely so it does not, because a rule
@@ -155,21 +157,24 @@ const SCOPES: ReadonlyArray<{ scope: ApprovalScope; label: string }> = [
 ]
 
 /**
- * The narrow answer covers this proposal. A standing answer instead carries
- * the backend's exact canonical invocation label; the surface never derives
- * one from arguments or the tool name.
+ * The narrow answer covers this proposal. A command's standing answer carries
+ * the backend's exact canonical invocation; a non-command answer covers the
+ * effect row already sent on the wire. The surface never derives an effect
+ * from arguments or the tool name.
  */
 const approvalScopeCoverage = (
   scope: ApprovalScope,
   standing: AgentApprovalRequested['standing'],
+  effectLabel: string,
 ) => {
+  const covered = standing.rule || effectLabel
   switch (scope) {
     case 'once':
       return 'this proposal only'
     case 'session':
-      return `${standing.rule} — until this terminal session ends`
+      return `${covered} — until this terminal session ends`
     case 'always':
-      return `${standing.rule} — in every session, from now on`
+      return `${covered} — in every session, from now on`
   }
 }
 
@@ -363,9 +368,10 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   }
 
   /**
-   * A standing answer is offered only when the backend supplied the complete
-   * canonical invocation it would save. The button repeats that carried
-   * sentence; it never reconstructs one from arguments.
+   * A standing answer is offered only when the backend supplied a binding it
+   * can save: a canonical invocation for a command or an effect row for a
+   * non-command proposal. The button repeats that binding's coverage without
+   * reconstructing one from arguments.
    */
   const offeredScopes = () =>
     SCOPES.filter(({ scope }) => scope === 'once' || ask().standing.available)
@@ -374,7 +380,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
     `${verb} ${SCOPES.find((candidate) => candidate.scope === scope)?.label ?? scope}`
 
   const answerAriaLabel = (verb: string, scope: ApprovalScope) =>
-    `${answerLabel(verb, scope)} — ${approvalScopeCoverage(scope, ask().standing)}`
+    `${answerLabel(verb, scope)} — ${approvalScopeCoverage(scope, ask().standing, effectLabel())}`
 
   const group = (approved: boolean, verb: string, variant: 'primary' | 'danger') => (
     <ActionGroup ariaLabel={approved ? 'Allow this action' : 'Refuse this action'}>
@@ -382,7 +388,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
         {({ scope }) => (
           <Button
             variant={scope === 'once' ? variant : 'default'}
-            secondary={`— ${approvalScopeCoverage(scope, ask().standing)}`}
+            secondary={`— ${approvalScopeCoverage(scope, ask().standing, effectLabel())}`}
             disabled={props.busy}
             ariaLabel={answerAriaLabel(verb, scope)}
             onClick={() => props.onDecide(approved, scope)}
@@ -412,7 +418,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
             <>
               <Button
                 variant="primary"
-                secondary={`— ${approvalScopeCoverage('once', ask().standing)}`}
+                secondary={`— ${approvalScopeCoverage('once', ask().standing, effectLabel())}`}
                 disabled={props.busy}
                 ariaLabel={answerAriaLabel('Allow', 'once')}
                 onClick={() => props.onDecide(true, 'once')}
@@ -421,7 +427,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
               </Button>
               <Button
                 variant="danger"
-                secondary={`— ${approvalScopeCoverage('once', ask().standing)}`}
+                secondary={`— ${approvalScopeCoverage('once', ask().standing, effectLabel())}`}
                 disabled={props.busy}
                 ariaLabel={answerAriaLabel('Deny', 'once')}
                 onClick={() => props.onDecide(false, 'once')}
@@ -500,8 +506,8 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
           <p>
             An answer in this session lasts until this terminal session ends; restarting the shell
             starts a new one and the question comes back. An answer of always is a standing answer
-            for the exact invocation named on its controls, which you can change on the Agent policy
-            page.
+            for {ask().standing.rule || effectLabel()}, in every session, from now on, which you can
+            change on the Agent policy page.
           </p>
         </Show>
       </Stack>

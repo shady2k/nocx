@@ -41,6 +41,9 @@ type Approval struct {
 	// invocation rule for a standing answer. It is a carrier, not part of
 	// the exact-proposal key.
 	Invocation content.Invocation
+	// CommandInvocation preserves command-vs-non-command provenance even when
+	// a malformed command has no parsed invocation to carry.
+	CommandInvocation bool
 }
 
 type approvalKey struct {
@@ -52,9 +55,10 @@ type approvalKey struct {
 }
 
 type approvalEntry struct {
-	entryID    string
-	effect     content.Effect
-	invocation content.Invocation
+	entryID           string
+	effect            content.Effect
+	invocation        content.Invocation
+	commandInvocation bool
 }
 
 // DeclineKind is what a person's no means, recorded with the declined
@@ -75,10 +79,11 @@ const (
 )
 
 type declinedEntry struct {
-	runID      string
-	kind       DeclineKind
-	effect     content.Effect
-	invocation content.Invocation
+	runID             string
+	kind              DeclineKind
+	effect            content.Effect
+	invocation        content.Invocation
+	commandInvocation bool
 }
 
 // retainedValue is the withheld result of an egress finding (design §7.1):
@@ -119,6 +124,7 @@ func (s *ApprovalStore) Request(ap Approval) {
 	defer s.mu.Unlock()
 	s.pending[keyOf(ap)] = approvalEntry{
 		entryID: ap.EntryID, effect: ap.Effect, invocation: cloneInvocation(ap.Invocation),
+		commandInvocation: ap.CommandInvocation || (ap.Invocation.Parsed && ap.Invocation.Commands != nil),
 	}
 }
 
@@ -152,6 +158,7 @@ func (s *ApprovalStore) Approve(ap Approval) bool {
 	}
 	s.approved[keyOf(ap)] = approvalEntry{
 		entryID: ap.EntryID, effect: ap.Effect, invocation: cloneInvocation(ap.Invocation),
+		commandInvocation: cur.commandInvocation,
 	}
 	return true
 }
@@ -188,7 +195,8 @@ func (s *ApprovalStore) Decline(ap Approval, kind DeclineKind) bool {
 	delete(s.pending, keyOf(ap))
 	s.declined[keyOf(ap)] = declinedEntry{
 		runID: ap.RunID, kind: kind, effect: cur.effect,
-		invocation: cloneInvocation(cur.invocation),
+		invocation:        cloneInvocation(cur.invocation),
+		commandInvocation: cur.commandInvocation,
 	}
 	return true
 }
@@ -306,21 +314,23 @@ func (s *ApprovalStore) EffectFor(ap Approval) (content.Effect, bool) {
 }
 
 // InvocationFor returns the canonical invocation recorded with a pending,
-// approved or declined proposal. It is absent for non-command tools.
-func (s *ApprovalStore) InvocationFor(ap Approval) (content.Invocation, bool) {
+// approved or declined proposal, together with whether the proposal was for a
+// command tool. The second result is false for malformed command parses and
+// non-command tools; the third preserves that distinction.
+func (s *ApprovalStore) InvocationFor(ap Approval) (content.Invocation, bool, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	k := keyOf(ap)
-	if e, ok := s.pending[k]; ok && e.invocation.Parsed {
-		return cloneInvocation(e.invocation), true
+	if e, ok := s.pending[k]; ok {
+		return cloneInvocation(e.invocation), e.invocation.Parsed, e.commandInvocation
 	}
-	if e, ok := s.approved[k]; ok && e.invocation.Parsed {
-		return cloneInvocation(e.invocation), true
+	if e, ok := s.approved[k]; ok {
+		return cloneInvocation(e.invocation), e.invocation.Parsed, e.commandInvocation
 	}
-	if e, ok := s.declined[k]; ok && e.invocation.Parsed {
-		return cloneInvocation(e.invocation), true
+	if e, ok := s.declined[k]; ok {
+		return cloneInvocation(e.invocation), e.invocation.Parsed, e.commandInvocation
 	}
-	return content.Invocation{}, false
+	return content.Invocation{}, false, false
 }
 
 func cloneInvocation(inv content.Invocation) content.Invocation {

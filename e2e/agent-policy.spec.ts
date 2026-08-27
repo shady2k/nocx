@@ -211,6 +211,12 @@ async function expectApprovalActionsFit(prompt: Locator): Promise<void> {
   // `prompt` IS the sheet: Prompt puts role="dialog" on the .ui-prompt
   // section itself, so asking for a .ui-prompt inside it looks for a
   // descendant that does not exist and waits out the whole test timeout.
+  // Measure the sheet and its groups only after the opening animation has
+  // reached its observable finished state; otherwise the two boxes can come
+  // from different moments.
+  await prompt.evaluate((el) =>
+    Promise.all(el.getAnimations({ subtree: true }).map((animation) => animation.finished)),
+  )
   const sheet = await prompt.boundingBox()
   if (sheet === null) throw new Error('approval prompt sheet has no geometry')
 

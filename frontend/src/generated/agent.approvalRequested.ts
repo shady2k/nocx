@@ -53,7 +53,7 @@ export interface AgentApprovalRequested {
     | 'cross-boundary'
     | 'delegate'
   /**
-   * Whether the prompt can offer a standing answer, and the backend-owned sentence naming the exact canonical invocation that answer would save.
+   * Whether the prompt can offer a standing answer. For a command proposal, rule names the exact canonical invocation the answer would save; for a non-command proposal, rule is empty and the effect field names the policy row the answer covers.
    */
   standing: {
     available: boolean

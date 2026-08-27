@@ -315,6 +315,13 @@ test.describe('vault secrets in Auth and header fields with no environment', () 
     await expect(workbench.getByLabel('Token', { exact: true })).toHaveCount(1)
     const authToken = workbench.locator('#api-auth-var')
     await authToken.fill(AUTH_SECRET_VALUE)
+    expect(
+      await authToken.evaluate((element) => {
+        const input = element as HTMLInputElement
+        return input.selectionStart === input.selectionEnd
+      }),
+      'Auth credentials path must store the whole field with no selection',
+    ).toBe(true)
     await storeFieldValue(page, authToken, AUTH_SECRET_VALUE)
 
     const authDialog = page.getByRole('dialog').filter({ hasText: 'Create secret' })

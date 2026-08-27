@@ -45,7 +45,6 @@ declare global {
 const COLLECTION_NAME = 'header-secret-api'
 const REQUEST_NAME = 'send header secret'
 const HEADER_NAME = 'X-E2E-Secret'
-const SECRET_DISPLAY_NAME = 'e2e-header-token'
 const SECRET_VALUE = 'e2e-header-secret-value-9f4c7a2d'
 const AUTH_SECRET_VALUE = 'e2e-auth-bearer-value-6b1d8e3f'
 const VAULT_PASSPHRASE = 'api-secret-any-field-e2e-master-pass'
@@ -81,7 +80,7 @@ function collectionExport(baseUrl: string): string {
           name: REQUEST_NAME,
           request: {
             method: 'GET',
-            header: [{ key: HEADER_NAME, value: '' }],
+            header: [{ key: HEADER_NAME, value: 'Bearer ' }],
             url: {
               raw: `${baseUrl}/header-secret`,
               host: [base.hostname],
@@ -143,30 +142,34 @@ async function settingsWereVisible(page: Page): Promise<boolean> {
   })
 }
 
-function requestFile(collectionRoot: string): string {
-  const savedFiles = walk(collectionRoot)
-  expect(savedFiles.length, 'the collection wrote no files').toBeGreaterThan(0)
-  const file = savedFiles.find((candidate) =>
+function currentRequestText(collectionRoot: string): string {
+  if (!existsSync(collectionRoot)) return ''
+  const file = walk(collectionRoot).find((candidate) =>
     readFileSync(candidate, 'utf8').includes(`"name": "${REQUEST_NAME}"`),
   )
-  if (file === undefined) throw new Error('imported request file was not found')
-  return file
+  return file === undefined ? '' : readFileSync(file, 'utf8')
 }
 
 async function assertRequestFileContainsOnlyHandles(
   collectionRoot: string,
   forbiddenValues: readonly string[],
   expectedHandleCount: number,
-): Promise<void> {
+): Promise<string> {
+  const handleCount = (): number =>
+    currentRequestText(collectionRoot).match(/\{\{secret:secrow:[^}]+\}\}/g)?.length ?? 0
   await expect
-    .poll(() => existsSync(collectionRoot), {
-      message: `the import never produced ${collectionRoot}`,
+    .poll(handleCount, {
+      message: `the request file never contained ${expectedHandleCount} secret handles`,
       timeout: 15_000,
     })
-    .toBe(true)
-  const requestText = readFileSync(requestFile(collectionRoot), 'utf8')
-  expect(requestText.match(/\{\{secret:secrow:[^}]+\}\}/g) ?? []).toHaveLength(expectedHandleCount)
+    .toBe(expectedHandleCount)
+  const requestText = currentRequestText(collectionRoot)
+  expect(requestText).not.toBe('')
+  const handles = requestText.match(/\{\{secret:secrow:[^}]+\}\}/g) ?? []
+  expect(handles).toHaveLength(expectedHandleCount)
+  expect(requestText.match(/\{\{secret:[^}]+\}\}/g) ?? []).toEqual(handles)
   for (const value of forbiddenValues) expect(requestText).not.toContain(value)
+  return requestText
 }
 
 test.describe('vault secrets in Auth and header fields with no environment', () => {
@@ -181,7 +184,7 @@ test.describe('vault secrets in Auth and header fields with no environment', () 
     disposable = { root: mkdtempSync(join(tmpdir(), 'nocx-e2e-secret-any-field-')) }
     server = await startHeaderSecretServer({
       expectedHeader: HEADER_NAME,
-      expectedValue: SECRET_VALUE,
+      expectedValue: `Bearer ${SECRET_VALUE}`,
     })
     collectionRoot = join(disposable.root, COLLECTION_NAME)
     backend = new VaultBackend(devharnessBin(), disposable, true)
@@ -248,36 +251,49 @@ test.describe('vault secrets in Auth and header fields with no environment', () 
     // ── HEADER TAB DOOR ────────────────────────────────────────────────────
     await workbench.getByRole('tab', { name: /^Headers\b/ }).click()
     const headerValue = workbench.locator('#api-header-value-0')
-    await headerValue.fill(`@${SECRET_DISPLAY_NAME}`)
-    const picker = page.getByRole('listbox', { name: 'vault secrets' })
-    await expect(picker).toBeVisible()
-    const addSecret = picker.getByRole('option', { name: /Add .* to the vault/ })
-    await expect(addSecret).toBeVisible()
-    // The selected row is the only row in an empty vault. Pressing Enter is
-    // the person's keyboard activation and avoids relying on the floating
-    // panel being scrollable inside the narrow header column.
-    await headerValue.press('Enter')
+    await expect(headerValue).toHaveValue('Bearer ')
+    await headerValue.press('End')
+    await headerValue.pressSequentially(SECRET_VALUE)
+    await expect(headerValue).toHaveValue(`Bearer ${SECRET_VALUE}`)
+    await page.keyboard.down('Shift')
+    try {
+      for (let index = 0; index < SECRET_VALUE.length; index += 1) {
+        await page.keyboard.press('ArrowLeft')
+      }
+    } finally {
+      await page.keyboard.up('Shift')
+    }
+    expect(
+      await headerValue.evaluate((element) => {
+        const input = element as HTMLInputElement
+        return [input.selectionStart, input.selectionEnd]
+      }),
+    ).toEqual(['Bearer '.length, `Bearer ${SECRET_VALUE}`.length])
 
-    const addDialog = page.getByRole('dialog').filter({ hasText: 'Create secret' })
-    await expect(addDialog).toBeVisible()
-    // The typed @ word is the proposed name; accepting it proves the dialog
-    // opened over the request rather than navigating to Settings.
-    await expect(addDialog.locator('#secret-create-name')).toHaveValue(SECRET_DISPLAY_NAME)
-    await addDialog.locator('#secret-create-value').fill(SECRET_VALUE)
-    await addDialog.getByRole('button', { name: 'Save to vault', exact: true }).click()
-    await expect(addDialog).not.toBeVisible()
-    await expect(headerValue).toHaveValue(/\{\{secret:secrow:[^}]+\}\}/)
+    await storeFieldValue(page, headerValue, SECRET_VALUE)
+    const headerDialog = page.getByRole('dialog').filter({ hasText: 'Create secret' })
+    await expect(headerDialog).toBeVisible()
+    const headerNameField = headerDialog.locator('#secret-create-name')
+    await expect(headerNameField).toHaveValue(/.+/)
+    const proposedHeaderName = await headerNameField.inputValue()
+    expect(proposedHeaderName).not.toContain(SECRET_VALUE)
+    await expect(headerDialog.locator('#secret-create-value')).toHaveValue(SECRET_VALUE)
+    await headerDialog.getByRole('button', { name: 'Save to vault', exact: true }).click()
+    await expect(headerDialog).not.toBeVisible()
+    await expect(headerValue).toHaveValue(/^Bearer \{\{secret:secrow:[^}]+\}\}$/)
+    await expect(fieldChip(headerValue)).toHaveText(proposedHeaderName)
 
     await workbench.getByRole('button', { name: 'Send', exact: true }).click()
     const headerRun = workbench.locator('.api-run').first()
     await expect(headerRun).toHaveAttribute('data-outcome', 'answered', { timeout: 20_000 })
     await expect(headerRun.locator('.api-run__stats')).toContainText('HTTP status 200')
-    expect(server.headerValues()).toEqual([SECRET_VALUE])
-    await assertRequestFileContainsOnlyHandles(
+    expect(server.headerValues()).toEqual([`Bearer ${SECRET_VALUE}`])
+    const headerRequestText = await assertRequestFileContainsOnlyHandles(
       collectionRoot,
-      [SECRET_VALUE, SECRET_DISPLAY_NAME],
+      [SECRET_VALUE, proposedHeaderName],
       1,
     )
+    expect(headerRequestText).toMatch(/Bearer \{\{secret:secrow:[^}]+\}\}/)
     expect(await settingsWereVisible(page)).toBe(false)
 
     // ── AUTH TAB DOOR ──────────────────────────────────────────────────────
@@ -307,7 +323,7 @@ test.describe('vault secrets in Auth and header fields with no environment', () 
     await expect(authNameField).toHaveValue(/.+/)
     const proposedAuthName = await authNameField.inputValue()
     expect(proposedAuthName).not.toContain(AUTH_SECRET_VALUE)
-    await authDialog.locator('#secret-create-value').fill(AUTH_SECRET_VALUE)
+    await expect(authDialog.locator('#secret-create-value')).toHaveValue(AUTH_SECRET_VALUE)
     await authDialog.getByRole('button', { name: 'Save to vault', exact: true }).click()
     await expect(authDialog).not.toBeVisible()
     // BOUND, and that is the whole of what "the existing-secret segment is
@@ -322,15 +338,16 @@ test.describe('vault secrets in Auth and header fields with no environment', () 
     await expect(authRun.locator('.api-run__stats')).toContainText('HTTP status 200')
 
     // ── THE SERVER RECEIVED BOTH REAL VALUES ───────────────────────────────
-    expect(server.headerValues()).toEqual([SECRET_VALUE, SECRET_VALUE])
+    expect(server.headerValues()).toEqual([`Bearer ${SECRET_VALUE}`, `Bearer ${SECRET_VALUE}`])
     expect(server.authorizationValues()).toEqual(['', `Bearer ${AUTH_SECRET_VALUE}`])
 
     // ── THE FILE HOLDS ONLY THE OPAQUE HANDLES ─────────────────────────────
-    await assertRequestFileContainsOnlyHandles(
+    const requestText = await assertRequestFileContainsOnlyHandles(
       collectionRoot,
-      [SECRET_VALUE, SECRET_DISPLAY_NAME, AUTH_SECRET_VALUE, proposedAuthName],
+      [SECRET_VALUE, proposedHeaderName, AUTH_SECRET_VALUE, proposedAuthName],
       2,
     )
+    expect(requestText).toMatch(/Bearer \{\{secret:secrow:[^}]+\}\}/)
     expect(await settingsWereVisible(page)).toBe(false)
   })
 })

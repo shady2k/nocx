@@ -49,10 +49,18 @@ export function fieldChip(field: Locator): Locator {
  *
  * The lock renders only while the field has focus (ui/text-field.tsx), so this
  * focuses first. The button keeps that focus on mousedown, which is why
- * clicking it does not close what it just opened.
+ * clicking it does not close what it just opened. A collapsed field gets a
+ * real click so callers prove the user can reach its lock; a selected field
+ * gets focus without clicking so the selection survives until TextField reads
+ * it.
  */
 export async function pressLock(field: Locator): Promise<void> {
-  await field.click()
+  const hasSelection = await field.evaluate((element) => {
+    const input = element as HTMLInputElement | HTMLTextAreaElement
+    return input.selectionStart !== input.selectionEnd
+  })
+  if (hasSelection) await field.focus()
+  else await field.click()
   const lock = field.locator('xpath=..').getByRole('button', { name: 'Store in vault' })
   await expect(lock).toBeVisible({ timeout: 5000 })
   await lock.click()

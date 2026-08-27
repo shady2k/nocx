@@ -6365,6 +6365,94 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     }
   })
 
+  // ── AND THE RELEASE MUST NOT TAKE THE SELECTION WITH IT (nocx-45vkz) ──
+  //
+  // Blurring an editing host is itself a selection change on some engines.
+  // Measured in the e2e container on WebKit, polling the live DOM frame by
+  // frame right after the claim:
+  //
+  //   after-addRange  active=DIV.cm-content  collapsed=false rc=1  wd=none
+  //   selchange#1     active=BODY            collapsed=true  rc=0  wd=block
+  //   selchange#2     active=BODY            collapsed=true  rc=0  wd=none
+  //
+  // The blur emptied the document selection synchronously — rangeCount 1 to
+  // 0 — and the selectionchange announcing it arrived a frame later, where
+  // the guard at the top of the handler read it as "the selection is gone"
+  // and hid the offer the same handler had just shown. Chromium keeps the
+  // selection across the blur and never sent that second event, so the fix
+  // for one engine was a deterministic regression on the other.
+  //
+  // The handler therefore re-asserts its claim after releasing the focus,
+  // conditioned on what the selection actually holds. The engine that does
+  // not empty it takes the no-op branch. jsdom is a third engine again — it
+  // keeps the selection too — so the emptying is applied BY HAND from the
+  // blur event, the same way the test above applies CodeMirror's restore
+  // rule by hand, and for the same reason: the contract is what the handler
+  // must survive, not what one runtime happens to do.
+  it('a selection survives the blur that claims it, so the engine that empties it on blur cannot hide the offer', async () => {
+    const client = storeWith([entry()], 'output')
+    const { ed, view, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.focus()
+      const focused = document.activeElement as HTMLElement
+      expect(ed.rootContains(focused)).toBe(true)
+      // WebKit, by hand: the document selection belongs to the editing host,
+      // and goes when the host does.
+      focused.addEventListener(
+        'blur',
+        () => {
+          window.getSelection()?.removeAllRanges()
+        },
+        { once: true },
+      )
+
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelector('[data-restored="true"]')).not.toBeNull()
+      })
+      const block = inner.querySelector<HTMLElement>('[data-restored="true"]')!
+      const output = block.querySelector<HTMLElement>('.cmd-output')!
+      const selection = window.getSelection()!
+      const range = document.createRange()
+      range.selectNodeContents(output)
+      range.getClientRects = () => [new DOMRect(100, 200, 200, 20)] as unknown as DOMRectList
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.dispatchEvent(new Event('selectionchange'))
+
+      expect(document.querySelector<HTMLElement>('.mark-affordance')?.style.display).toBe('block')
+      expect(ed.rootContains(document.activeElement)).toBe(false)
+      // The person's highlight is still under the offer being made about it:
+      // the surface that took the focus kept the selection it took it for.
+      const held = window.getSelection()!
+      expect(held.rangeCount).toBe(1)
+      expect(held.getRangeAt(0).startContainer).toBe(output)
+      expect(held.getRangeAt(0).endContainer).toBe(output)
+      expect(held.isCollapsed).toBe(false)
+
+      // The event the blur provoked, arriving a frame late — the one that
+      // used to find an empty selection and hide the offer.
+      document.dispatchEvent(new Event('selectionchange'))
+      restoreSelectionLikeCodeMirror(view)
+
+      expect(document.querySelector<HTMLElement>('.mark-affordance')?.style.display).toBe('block')
+      const offer = document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')!
+      offer.click()
+      expect((content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks[0]?.itemId).toBe(
+        'e-1',
+      )
+    } finally {
+      teardown()
+    }
+  })
+
   it('marks and unmarks a restored block from its menu, using the durable entry id', async () => {
     const client = storeWith([entry()], 'output')
     const { ed, content, teardown } = await mountTerminal(

@@ -179,15 +179,16 @@ type agentAskResponse struct {
 }
 
 type agentRunControl struct {
-	mu             sync.Mutex
-	eventsMu       sync.Mutex
-	cancelFn       context.CancelFunc
-	cancelled      bool
-	terminalized   bool
-	cancelState    content.RunState
-	cancelReason   content.TerminationReason
-	cancelSentence string
-	cancelDone     chan struct{}
+	mu               sync.Mutex
+	eventsMu         sync.Mutex
+	cancelFn         context.CancelFunc
+	cancelled        bool
+	terminalized     bool
+	cancelState      content.RunState
+	cancelReason     content.TerminationReason
+	cancelSentence   string
+	cancelHasDetails bool
+	cancelDone       chan struct{}
 }
 
 func (c *agentRunControl) beginCancel() bool {
@@ -209,22 +210,23 @@ func (c *agentRunControl) cancelContext() {
 	}
 }
 
-func (c *agentRunControl) finishCancel(state content.RunState, reason content.TerminationReason, sentence string) {
+func (c *agentRunControl) finishCancel(state content.RunState, reason content.TerminationReason, sentence string, hasDetails bool) {
 	c.mu.Lock()
 	c.cancelState = state
 	c.cancelReason = reason
 	c.cancelSentence = sentence
+	c.cancelHasDetails = hasDetails
 	close(c.cancelDone)
 	c.mu.Unlock()
 }
 
-func (c *agentRunControl) cancelOutcome() (content.RunState, content.TerminationReason, string) {
+func (c *agentRunControl) cancelOutcome() (content.RunState, content.TerminationReason, string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.cancelState == "" {
-		return content.RunCancelled, content.TermUserKilled, "the person stopped this answer"
+		return content.RunCancelled, content.TermUserKilled, "the person stopped this answer", false
 	}
-	return c.cancelState, c.cancelReason, c.cancelSentence
+	return c.cancelState, c.cancelReason, c.cancelSentence, c.cancelHasDetails
 }
 
 func (c *agentRunControl) beginEvent() func() {
@@ -334,7 +336,8 @@ type agentRunReasoning struct {
 }
 
 // agentRunState is the agent.runState notification: the run's terminal
-// state. error is present only for failed, and it is a sentence a person
+// state. error is present for failed runs and for cancelled runs only when
+// cancellation could not stop the host command; it is a sentence a person
 // reads, never a Go error string (design §7). droppedDeltas is present only
 // when the live view is incomplete: the wire refused one or more
 // agent.runDelta frames (a full outbound queue — outbound's deliberate
@@ -1417,7 +1420,7 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 		h.log.Warn("agent cancel: foreground command could not be stopped",
 			"run", rc.runID, "session", rc.sessionID)
 	}
-	rc.control.finishCancel(state, reason, sentence)
+	rc.control.finishCancel(state, reason, sentence, outcome == foregroundUnsupported)
 	rc.control.cancelContext()
 	h.terminalize(ctx, rc, rc.droppedBefore, state, reason, sentence, h.r)
 	_ = h.r.TryResult(req.ID, mustMarshal(agentCancelResponse{
@@ -1760,6 +1763,7 @@ func declineKindForScope(scope string) assistant.DeclineKind {
 // live-view bound, never a terminal-state change — the durable answer is
 // whole, so the run still closes with the state it earned.
 func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, dropped int, state content.RunState, reason content.TerminationReason, sentence string, r Responder) {
+	wireError := state != content.RunCancelled
 	cancelled := false
 	if rc.control != nil {
 		// Declared HERE and nowhere else: outside this branch there is no
@@ -1776,7 +1780,7 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, droppe
 		if rc.control.cancelDone != nil {
 			<-rc.control.cancelDone
 		}
-		state, reason, sentence = rc.control.cancelOutcome()
+		state, reason, sentence, wireError = rc.control.cancelOutcome()
 	}
 	// The run is closing: nothing may resume it. Drop the stored stream
 	// context so a late agent.approve finds no pending question — and the
@@ -1810,12 +1814,15 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, droppe
 			"run", rc.runID, "state", string(state), "error", err)
 		return
 	}
-	_ = r.TryNotify("agent.runState", mustMarshal(agentRunState{
+	notification := agentRunState{
 		RunID:         rc.runID,
 		State:         string(state),
-		Error:         sentence,
 		DroppedDeltas: dropped,
-	}))
+	}
+	if wireError {
+		notification.Error = sentence
+	}
+	_ = r.TryNotify("agent.runState", mustMarshal(notification))
 }
 
 // classifyAskFailure turns any Ask error into the run's termination reason

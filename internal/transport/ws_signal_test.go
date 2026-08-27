@@ -13,11 +13,17 @@ package transport
 // (delivered). The pair is what makes either one evidence.
 //
 // NOTHING HERE WAITS OUT A DURATION. The synchronisation point is always an
-// observable: the marker the job prints before it sleeps says the child is
-// in the foreground, and the shell's own next output says the job is gone.
+// observable, and each one is chosen for what it PROVES rather than for when
+// it happens: the job's readiness marker says the process the signal will
+// reach is already exec'd and in the foreground (see the interrupt test —
+// a marker printed by an intermediate shell proves strictly less than that,
+// and the difference is nocx-sf4kx), and the shell's own next output says
+// the job is gone.
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -99,17 +105,37 @@ func TestSessionSignal_InterruptReachesTheRunningCommand(t *testing.T) {
 	conn, tap := signalServer(t)
 	sid := openSessionTapped(t, conn, tap)
 
-	// The marker is printed by the job ITSELF, immediately before it blocks:
-	// seeing it on the data plane is the ordering fact that the child is now
-	// the pty's foreground group. A `sleep` alone would be a bet on how fast
-	// the shell forks.
+	// THE MARKER IS NOT SPELLED IN THE COMMAND LINE AT ALL. It is the
+	// content of a file, and the job is a `tail -f` that echoes it back —
+	// which is what makes observing it mean the one thing this test needs
+	// it to mean: the process the signal is about to reach already exists.
 	//
-	// IT IS PRINTED IN TWO PIECES, and that is not decoration: the terminal
-	// ECHOES the command line, so a marker spelled whole in the command
-	// appears on the data plane the instant it is typed — before the shell
-	// has forked anything — and every wait below would pass against the
-	// echo. Joined only by printf, the string exists in the output alone.
-	submitCommand(t, conn, sid, "sh -c 'printf %s%s FOREGROUND -READY; sleep 300'")
+	// `sh -c 'printf %s%s FOREGROUND -READY; sleep 300'` could not say that
+	// (nocx-sf4kx). Its marker is printed by the INTERMEDIATE SHELL, before
+	// that shell has forked the command the signal is meant to kill, and a
+	// SIGINT arriving in the window between the printf and the fork reaches
+	// a process group whose only member is that shell. dash catches SIGINT
+	// and drops it there, then forks `sleep 300` and waits on it forever:
+	// kill(2) succeeded, session.signal honestly answered "delivered", and
+	// nothing died. Measured on a loaded machine — 2 runs in 120 at loadavg
+	// 49, /proc showing dash and sleep both alive, no signal pending, and
+	// the pty's foreground group still the job's.
+	//
+	// `tail -f` closes that window by construction rather than by timing:
+	// the marker cannot reach the data plane until the process bash placed
+	// in the foreground group has completed its execve, opened the file and
+	// written it. When the wait below returns, that process exists, is the
+	// only member of the group, and carries tail's own default disposition
+	// for SIGINT — there is nothing left that could swallow it, at any
+	// speed. It also cannot be satisfied by the terminal's ECHO of the
+	// command line, and for a stronger reason than the two-piece printf
+	// gave: the line names a path, and the marker is never in it.
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "foreground-ready")
+	if err := os.WriteFile(marker, []byte("FOREGROUND-READY\n"), 0o600); err != nil {
+		t.Fatalf("write the readiness marker: %v", err)
+	}
+	submitCommand(t, conn, sid, "tail -f '"+marker+"'")
 	tapDataFor(t, tap, sid, "FOREGROUND-READY", 20*time.Second)
 
 	got := tapSignal(t, conn, tap, 2, map[string]any{"sessionId": sid, "signal": "interrupt"})

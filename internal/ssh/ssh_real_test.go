@@ -21,8 +21,8 @@ import (
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/vault"
+	"github.com/shady2k/nocx/internal/waittest"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -188,7 +188,7 @@ func (s *testSSHServer) setMaxSessions(n int) {
 // and the count is the only thing that says it has (nocx-zlvw).
 func (s *testSSHServer) waitLiveConns(want int) {
 	s.t.Helper()
-	testwait.WaitForTimeoutDetail(s.t, "the SSH server connection count", 5*time.Second, func() string {
+	waittest.WaitForTimeoutDetail(s.t, "the SSH server connection count", 5*time.Second, func() string {
 		s.liveMu.Lock()
 		defer s.liveMu.Unlock()
 		return fmt.Sprintf("server holds %d established connections, want %d", len(s.liveConns), want)

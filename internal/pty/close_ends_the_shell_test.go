@@ -9,7 +9,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // TestClose_EndsAnInteractiveShell is the closing end of a session's lifetime,
@@ -76,7 +76,7 @@ func TestClose_EndsAnInteractiveShell(t *testing.T) {
 			if _, werr := lp.Write([]byte("echo " + marker + "\n")); werr != nil {
 				t.Fatalf("write to pty: %v", werr)
 			}
-			testwait.WaitFor(t, "the shell to reach a prompt", func() bool {
+			waittest.WaitFor(t, "the shell to reach a prompt", func() bool {
 				mu.Lock()
 				defer mu.Unlock()
 				return strings.Count(seen.String(), marker) >= 2

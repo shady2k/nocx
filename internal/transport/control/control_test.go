@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/transport/control"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // --- helpers -------------------------------------------------------------
@@ -21,7 +21,7 @@ import (
 // proving the admission has capacity again. Used to observe a permit release.
 func waitAcquirable(t *testing.T, a control.Admission, what string) {
 	t.Helper()
-	testwait.WaitForTimeout(t, what, 2*time.Second, func() bool {
+	waittest.WaitForTimeout(t, what, 2*time.Second, func() bool {
 		p, rej := a.TryAcquire(context.Background())
 		if rej != nil {
 			return false

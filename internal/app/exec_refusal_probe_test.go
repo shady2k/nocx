@@ -37,7 +37,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -228,7 +228,7 @@ LogLevel VERBOSE
 		keyPath: clientKeyPath,
 	}
 	want := fmt.Sprintf("Server listening on 127.0.0.1 port %d", port)
-	testwait.WaitForTimeoutDetail(t, "sshd listening", 20*time.Second,
+	waittest.WaitForTimeoutDetail(t, "sshd listening", 20*time.Second,
 		func() string { return fmt.Sprintf("log:\n%s", logBuf.String()) },
 		func() bool {
 			return strings.Contains(logBuf.String(), want)
@@ -328,7 +328,7 @@ func execProbeRead(ch gossh.Channel) *lockedBuffer {
 // never on a duration: the deadline exists only so a hang reports.
 func execProbeWaitFor(t *testing.T, out *lockedBuffer, want, what string) {
 	t.Helper()
-	testwait.WaitForTimeoutDetail(t, what, 30*time.Second,
+	waittest.WaitForTimeoutDetail(t, what, 30*time.Second,
 		func() string {
 			return fmt.Sprintf("never saw %q; channel output was:\n%s", want, out.String())
 		},
@@ -353,7 +353,7 @@ var ptyDeviceName = regexp.MustCompile(`/dev/(pts/[0-9]+|ttys[0-9]+)`)
 // execProbeWaitForPTYName blocks until the buffer carries such a name.
 func execProbeWaitForPTYName(t *testing.T, out *lockedBuffer, what string) {
 	t.Helper()
-	testwait.WaitForTimeoutDetail(t, what, 30*time.Second,
+	waittest.WaitForTimeoutDetail(t, what, 30*time.Second,
 		func() string {
 			return fmt.Sprintf("`tty` never named a pty device (%s); channel output was:\n%s",
 				ptyDeviceName, out.String())

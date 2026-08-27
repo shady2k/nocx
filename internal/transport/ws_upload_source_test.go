@@ -19,7 +19,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ── the source-ticket store ────────────────────────────────────────────────
@@ -718,7 +718,7 @@ func TestFilesDropped_WithNoRendererMintsNothing(t *testing.T) {
 	if err := e.conn.Close(); err != nil {
 		t.Fatalf("close: %v", err)
 	}
-	testwait.WaitForTimeout(t, "the connection to be forgotten", 5*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "the connection to be forgotten", 5*time.Second, func() bool {
 		e.ws.connsMu.Lock()
 		defer e.ws.connsMu.Unlock()
 		return len(e.ws.conns) == 0

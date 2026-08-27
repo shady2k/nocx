@@ -1,4 +1,4 @@
-package testwait
+package waittest
 
 import (
 	"fmt"

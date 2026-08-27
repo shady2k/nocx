@@ -10,7 +10,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // §6.2's loss events, and the teardown that leaves nothing running.
@@ -89,7 +89,7 @@ func TestLossReporter_TheUnderlyingTransportIsItsOwnEvent(t *testing.T) {
 	// The connection dies underneath the lease.
 	_ = tunnel.Close()
 
-	testwait.WaitFor(t, "the transport loss is reported", func() bool { return len(rec.all()) > 0 })
+	waittest.WaitFor(t, "the transport loss is reported", func() bool { return len(rec.all()) > 0 })
 	got := rec.all()
 	if got[0] != LossTransportGone {
 		t.Fatalf("cause = %q, want %q", got[0], LossTransportGone)
@@ -99,7 +99,7 @@ func TestLossReporter_TheUnderlyingTransportIsItsOwnEvent(t *testing.T) {
 	}
 	// And the teardown left nothing running: the listener is gone, so no
 	// candidate can be served and nothing is left accepting on the far host.
-	testwait.WaitFor(t, "the listener is closed", func() bool {
+	waittest.WaitFor(t, "the listener is closed", func() bool {
 		c, derr := net.Dial("tcp", "127.0.0.1:"+strconv.Itoa(cfg.Port))
 		if derr == nil {
 			_ = c.Close()
@@ -122,7 +122,7 @@ func TestLossReporter_TheHandshakeBoundNamesItself(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 	t.Cleanup(func() { _ = a.Close() })
-	testwait.WaitFor(t, "the handshake bound is reported", func() bool { return len(rec.all()) > 0 })
+	waittest.WaitFor(t, "the handshake bound is reported", func() bool { return len(rec.all()) > 0 })
 	if got := rec.all()[0]; got != LossHelloTimeout {
 		t.Errorf("cause = %q, want %q", got, LossHelloTimeout)
 	}

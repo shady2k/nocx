@@ -11,9 +11,9 @@ import (
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/storage"
-	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vault/file"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 func newClosableVault(t *testing.T) *vault.Vault {
@@ -68,7 +68,7 @@ func TestClose_StopsTheAutoSealGoroutine(t *testing.T) {
 	// runtime's list for a few instructions afterwards, and counting one of
 	// those into the floor would put the delta below permanently out of reach.
 	before := -1
-	testwait.WaitForDetail(t, "the auto-seal goroutine count to settle before the batch",
+	waittest.WaitForDetail(t, "the auto-seal goroutine count to settle before the batch",
 		func() string { return fmt.Sprintf("last count=%d", before) },
 		func() bool {
 			n := autoSealGoroutines()
@@ -84,7 +84,7 @@ func TestClose_StopsTheAutoSealGoroutine(t *testing.T) {
 	}
 
 	running := before
-	testwait.WaitForDetail(t,
+	waittest.WaitForDetail(t,
 		fmt.Sprintf("at least %d new goroutines while %d vaults are open", batch, batch),
 		func() string { return fmt.Sprintf("before=%d running=%d", before, running) },
 		func() bool { running = autoSealGoroutines(); return running-before >= batch },
@@ -95,7 +95,7 @@ func TestClose_StopsTheAutoSealGoroutine(t *testing.T) {
 	}
 
 	after := running
-	testwait.WaitForDetail(t, "the auto-seal goroutines to go away after Close",
+	waittest.WaitForDetail(t, "the auto-seal goroutines to go away after Close",
 		func() string {
 			return fmt.Sprintf("goroutines did not go away after Close: before=%d running=%d after=%d",
 				before, running, after)

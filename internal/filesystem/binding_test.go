@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/session"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // stubProvider records how the binding drives its provider. watchErrs makes
@@ -488,7 +488,7 @@ func TestRegistryConcurrentUse(t *testing.T) {
 			}
 		}(i)
 	}
-	testwait.WaitFor(t, "an acquire to reach the provider", func() bool {
+	waittest.WaitFor(t, "an acquire to reach the provider", func() bool {
 		select {
 		case <-acquired:
 			return true

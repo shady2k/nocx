@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ---------------------------------------------------------------------------
@@ -509,7 +509,7 @@ func TestDetector_CloseMidSample_DiscardsLateResult(t *testing.T) {
 	resCh := make(chan Sample, 1)
 	go func() { resCh <- d.Sample(context.Background()) }()
 
-	testwait.WaitForDetail(t, "in-flight sample to enter the probe",
+	waittest.WaitForDetail(t, "in-flight sample to enter the probe",
 		func() string { return fmt.Sprintf("execs = %d", len(f.commands())) },
 		func() bool { return len(f.commands()) >= 2 })
 	if err := d.Close(); err != nil {
@@ -651,7 +651,7 @@ func TestDetector_OneInFlight(t *testing.T) {
 
 	// Wait until the first sample is inside the probe, then start the
 	// second — it must wait on the one-in-flight guard, not execute.
-	testwait.WaitForDetail(t, "first sample to enter the probe",
+	waittest.WaitForDetail(t, "first sample to enter the probe",
 		func() string { return fmt.Sprintf("execs = %d", len(f.commands())) },
 		func() bool { return len(f.commands()) == 1 })
 	secondStarted := make(chan struct{})

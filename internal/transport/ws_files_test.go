@@ -22,8 +22,8 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
-	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/transport/outbound"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // filesLocalFactory is the composition-root shape the tests share: local
@@ -241,7 +241,7 @@ func TestFilesChanged_ReachesNewConnectionAfterReattach(t *testing.T) {
 	w := e.watchDir(t, bid, []string{dir}, 3)
 
 	// Baseline: the first poll tick lists the directory silently.
-	testwait.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		return w.paths[dir] != ""
@@ -251,7 +251,7 @@ func TestFilesChanged_ReachesNewConnectionAfterReattach(t *testing.T) {
 	// its side of the socket when it observes the drop, so the emit's
 	// write fails and the path accumulates dirty instead of being lost.
 	_ = e.conn.Close()
-	testwait.WaitForTimeout(t, "server to observe the dropped files connection", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "server to observe the dropped files connection", wantWithin, func() bool {
 		e.ws.connsMu.Lock()
 		defer e.ws.connsMu.Unlock()
 		return len(e.ws.conns) == 0
@@ -259,7 +259,7 @@ func TestFilesChanged_ReachesNewConnectionAfterReattach(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "new.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	testwait.WaitForTimeout(t, "dirty path", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "dirty path", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		_, ok := w.dirty[dir]
@@ -306,7 +306,7 @@ func TestFilesChanged_DirtyPathsDeliveredOnceOnReattach(t *testing.T) {
 	bid := e.openBinding(t, sid, dir1, 2)
 	w := e.watchDir(t, bid, []string{dir1, dir2}, 3)
 
-	testwait.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		return w.paths[dir1] != "" && w.paths[dir2] != ""
@@ -322,7 +322,7 @@ func TestFilesChanged_DirtyPathsDeliveredOnceOnReattach(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir2, "f2.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	testwait.WaitForTimeout(t, "both dirty paths", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "both dirty paths", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		_, ok1 := w.dirty[dir1]
@@ -376,7 +376,7 @@ func TestFilesWatch_EmptySetStopsTheLoop(t *testing.T) {
 	dir := t.TempDir()
 	bid := e.openBinding(t, sid, dir, 2)
 	w := e.watchDir(t, bid, []string{dir}, 3)
-	testwait.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		return w.paths[dir] != ""
@@ -784,7 +784,7 @@ func TestFilesClose_DoesNotWaitOnABlockedNotificationWrite(t *testing.T) {
 	dir := t.TempDir()
 	bid := e.openBinding(t, sid, dir, 2)
 	w := e.watchDir(t, bid, []string{dir}, 3)
-	testwait.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		return w.paths[dir] != ""

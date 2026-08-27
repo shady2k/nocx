@@ -26,7 +26,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // TestAgentApprove_SessionAnswerReachesTheRunThatAskedIt: one run, one
@@ -45,7 +45,7 @@ func TestAgentApprove_SessionAnswerReachesTheRunThatAskedIt(t *testing.T) {
 	h := suspendedRunWith(t, askPolicyStore(t), client)
 
 	h.approve(t, "session")
-	testwait.WaitForTimeout(t, "the resume to drive the engine", 5*time.Second, func() bool { return client.askCount() == 2 })
+	waittest.WaitForTimeout(t, "the resume to drive the engine", 5*time.Second, func() bool { return client.askCount() == 2 })
 
 	got := client.params()
 	if len(got) != 2 {

@@ -17,7 +17,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -223,7 +223,7 @@ func TestPoolAcquire_WaiterCancellation(t *testing.T) {
 
 	// Wait for the dial to actually start.
 	<-dialStarted
-	testwait.WaitForTimeout(t, "pool dial registration", 2*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "pool dial registration", 2*time.Second, func() bool {
 		pool.mu.Lock()
 		defer pool.mu.Unlock()
 		_, ok := pool.dialing[key]
@@ -286,7 +286,7 @@ func TestPoolAcquire_WaiterCancellationConcurrent(t *testing.T) {
 	}()
 
 	<-dialStarted
-	testwait.WaitForTimeout(t, "pool dial registration", 2*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "pool dial registration", 2*time.Second, func() bool {
 		pool.mu.Lock()
 		defer pool.mu.Unlock()
 		_, ok := pool.dialing[key]
@@ -321,7 +321,7 @@ func TestPoolAcquire_WaiterCancellationConcurrent(t *testing.T) {
 
 	// Wait for every already-cancelled waiter to report its cancellation
 	// before releasing the in-flight dial.
-	testwait.WaitForTimeout(t, "cancelled waiters to return", 2*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "cancelled waiters to return", 2*time.Second, func() bool {
 		cancelledMu.Lock()
 		defer cancelledMu.Unlock()
 		return cancelledCount == waiters/2

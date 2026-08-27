@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // countPrefixRe strips the composition prefix ("3 operations need the
@@ -92,7 +92,7 @@ func waitForJoined(t *testing.T, v *Vault, n int) {
 		defer p.mu.Unlock()
 		return fmt.Sprintf("only %d of %d callers joined the outstanding prompt", len(p.reasons), n)
 	}
-	testwait.WaitForDetail(t, "callers to join the outstanding prompt", detail, func() bool {
+	waittest.WaitForDetail(t, "callers to join the outstanding prompt", detail, func() bool {
 		v.mu.Lock()
 		defer v.mu.Unlock()
 		p := v.unlockPending
@@ -425,7 +425,7 @@ func TestEnsureUnsealed_CloseReleasesOutstandingWaiters(t *testing.T) {
 	// The prompt state is cleared by the prompt's own goroutine after the
 	// resolution fans out, so wait on the observable state rather than
 	// asserting a moment.
-	testwait.WaitFor(t, "the outstanding prompt to clear after Close", func() bool {
+	waittest.WaitFor(t, "the outstanding prompt to clear after Close", func() bool {
 		v.mu.Lock()
 		defer v.mu.Unlock()
 		return v.unlockPending == nil

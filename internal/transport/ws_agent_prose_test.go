@@ -31,7 +31,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ── reading the rows ─────────────────────────────────────────────────────
@@ -624,7 +624,7 @@ func TestAgentApprove_TheResumeContinuesTheOpenProseBlock(t *testing.T) {
 	// secret-shaped material going to the provider is never a standing answer
 	// (design §7.3), and agent.approve refuses the wider scope.
 	h.approve(t, "once")
-	testwait.WaitForTimeout(t, "the resume to drive the engine", 5*time.Second, func() bool { return client.askCount() == 2 })
+	waittest.WaitForTimeout(t, "the resume to drive the engine", 5*time.Second, func() bool { return client.askCount() == 2 })
 	readNotification(t, h.conn, "agent.runState", 5*time.Second)
 
 	after := proseUnder(t, led, turn)

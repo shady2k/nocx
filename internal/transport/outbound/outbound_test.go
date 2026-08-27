@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // fakeSocket is the Socket seam for tests. When block is true, WriteMessage
@@ -74,7 +74,7 @@ func (f *fakeSocket) got() []Frame {
 // waitWrites waits until the fake has recorded n writes.
 func waitWrites(t *testing.T, f *fakeSocket, n int) []Frame {
 	t.Helper()
-	testwait.WaitForTimeoutDetail(t, fmt.Sprintf("%d writes", n), 5*time.Second,
+	waittest.WaitForTimeoutDetail(t, fmt.Sprintf("%d writes", n), 5*time.Second,
 		func() string { return fmt.Sprintf("got %d", len(f.got())) },
 		func() bool { return len(f.got()) >= n })
 	return f.got()
@@ -153,7 +153,7 @@ func TestQueueFullMarksStalledAndDropsFrame(t *testing.T) {
 		}
 		return false
 	}
-	testwait.WaitForTimeoutDetail(t, "stall notice and queued frames", 5*time.Second,
+	waittest.WaitForTimeoutDetail(t, "stall notice and queued frames", 5*time.Second,
 		func() string {
 			return fmt.Sprintf("stall notice written = %v; got %d writes", noticed(), len(f.got()))
 		},

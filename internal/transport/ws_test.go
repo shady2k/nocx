@@ -20,8 +20,8 @@ import (
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
-	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/tunnel"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 type stubPTYFactory struct{ stub *pty.Stub }
@@ -118,7 +118,7 @@ func openSessionOnConn(t *testing.T, ws *WSServer, conn *websocket.Conn, id int)
 // lookup reads. See openSessionOnConn for why the tail outlives the response.
 func awaitSubscriber(t *testing.T, ws *WSServer, sid session.ID) {
 	t.Helper()
-	testwait.WaitForTimeout(t, "the open's subscriber install", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "the open's subscriber install", wantWithin, func() bool {
 		rx := ws.getRx(sid)
 		if rx == nil {
 			return false
@@ -778,7 +778,7 @@ func TestWSServer_ExitClearsRegistry(t *testing.T) {
 
 	// Wait for the session to exit. 30 s is a generous failsafe; the test
 	// succeeds as soon as the registry is empty, not when the clock runs out.
-	testwait.WaitForTimeoutDetail(t, "session exit to clear the registry", 30*time.Second,
+	waittest.WaitForTimeoutDetail(t, "session exit to clear the registry", 30*time.Second,
 		func() string { return fmt.Sprintf("%d session(s) still in the registry", len(sess.List())) },
 		func() bool { return len(sess.List()) == 0 })
 }
@@ -1030,7 +1030,7 @@ func TestWSServer_DisconnectSurvivesSession(t *testing.T) {
 	}
 
 	_ = conn.Close()
-	testwait.WaitForTimeout(t, "server to observe the disconnect", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "server to observe the disconnect", wantWithin, func() bool {
 		ws.connsMu.Lock()
 		defer ws.connsMu.Unlock()
 		return len(ws.conns) == 0
@@ -1099,7 +1099,7 @@ loopA:
 	// Disconnect connA — session survives; wait for its socket teardown before
 	// writing detached output so the old pump cannot consume the replay bytes.
 	_ = connA.Close()
-	testwait.WaitForTimeout(t, "server to observe connA's disconnect", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "server to observe connA's disconnect", wantWithin, func() bool {
 		ws.connsMu.Lock()
 		defer ws.connsMu.Unlock()
 		return len(ws.conns) == 0
@@ -1116,7 +1116,7 @@ loopA:
 	}
 	_, _ = sessObj.Write([]byte("echo detached\n"))
 	_ = connMid.Close()
-	testwait.WaitForTimeout(t, "server to observe connMid's disconnect", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "server to observe connMid's disconnect", wantWithin, func() bool {
 		ws.connsMu.Lock()
 		defer ws.connsMu.Unlock()
 		return len(ws.conns) == 0
@@ -1807,7 +1807,7 @@ func TestWSServer_RingToConnExitsOnDisconnect(t *testing.T) {
 	// parked in waitForData. Wait for the server's teardown observable before
 	// writing to the session directly via the registry.
 	_ = connA.Close()
-	testwait.WaitForTimeout(t, "server to observe connA's disconnect", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "server to observe connA's disconnect", wantWithin, func() bool {
 		ws.connsMu.Lock()
 		defer ws.connsMu.Unlock()
 		return len(ws.conns) == 0
@@ -2499,7 +2499,7 @@ func (h *replayHarness) openProfile(t *testing.T, extra map[string]any) {
 func (h *replayHarness) waitForTunnels(t *testing.T, n int) []*tunnel.Tunnel {
 	t.Helper()
 	var rows []*tunnel.Tunnel
-	testwait.WaitForTimeoutDetail(t, fmt.Sprintf("ledger to hold %d forward(s)", n), 10*time.Second,
+	waittest.WaitForTimeoutDetail(t, fmt.Sprintf("ledger to hold %d forward(s)", n), 10*time.Second,
 		// rows is the last snapshot the condition took, on this goroutine and
 		// under the ledger's mutex; reading its length here takes no lock.
 		func() string { return fmt.Sprintf("ledger holds %d forward(s), want %d", len(rows), n) },

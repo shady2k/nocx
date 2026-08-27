@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // The waiting admission is the gate behind the domain-conflict fix: a
@@ -58,7 +58,7 @@ func waitersOf(t *testing.T, a Admission, want int, what string) {
 		defer ws.mu.Unlock()
 		return ws.waiters
 	}
-	testwait.WaitForTimeoutDetail(t, what, 2*time.Second,
+	waittest.WaitForTimeoutDetail(t, what, 2*time.Second,
 		func() string { return fmt.Sprintf("waiter count = %d, want %d", waiters(), want) },
 		func() bool { return waiters() == want })
 }

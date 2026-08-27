@@ -24,7 +24,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // pending starts a send and does NOT read its response, so the exchange is
@@ -118,7 +118,7 @@ func TestAPIRequestCancel_StopsTheExchangeAndItComesBackStopped(t *testing.T) {
 	handle := openAPICollectionVia(t, box, root, 1)
 
 	pending(t, conn, handle, "run-1", 2)
-	testwait.WaitForTimeout(t, "the send to reach the sender", wantWithin, func() bool { return sender.count() == 1 })
+	waittest.WaitForTimeout(t, "the send to reach the sender", wantWithin, func() bool { return sender.count() == 1 })
 
 	if resp := box.call(t, "api.request.cancel", map[string]any{"token": "run-1"}, 3); resp.Error != nil {
 		t.Fatalf("api.request.cancel: %+v", resp.Error)
@@ -190,7 +190,7 @@ func TestAPIRequestCancel_TwoInFlightExchangesCancelIndependently(t *testing.T) 
 
 	pending(t, conn, handle, "run-a", 2)
 	pending(t, conn, handle, "run-b", 3)
-	testwait.WaitForTimeout(t, "both sends to reach the sender", wantWithin, func() bool { return sender.count() == 2 })
+	waittest.WaitForTimeout(t, "both sends to reach the sender", wantWithin, func() bool { return sender.count() == 2 })
 
 	if resp := box.call(t, "api.request.cancel", map[string]any{"token": "run-a"}, 4); resp.Error != nil {
 		t.Fatalf("api.request.cancel run-a: %+v", resp.Error)
@@ -225,7 +225,7 @@ func TestAPIRequestCancel_OneWindowsTokenDoesNotStopAnothersRun(t *testing.T) {
 	handle := openAPICollectionVia(t, box, root, 1)
 
 	pending(t, conn, handle, "same-name", 2)
-	testwait.WaitForTimeout(t, "the send to reach the sender", wantWithin, func() bool { return sender.count() == 1 })
+	waittest.WaitForTimeout(t, "the send to reach the sender", wantWithin, func() bool { return sender.count() == 1 })
 
 	// A second window, cancelling the same NAME.
 	other := newInbox(connectWS(t, ws))
@@ -258,7 +258,7 @@ func TestAPIRequestSend_ATokenAlreadyInFlightIsRefused(t *testing.T) {
 	handle := openAPICollectionVia(t, box, root, 1)
 
 	pending(t, conn, handle, "run-1", 2)
-	testwait.WaitForTimeout(t, "the send to reach the sender", wantWithin, func() bool { return sender.count() == 1 })
+	waittest.WaitForTimeout(t, "the send to reach the sender", wantWithin, func() bool { return sender.count() == 1 })
 
 	resp := box.call(t, "api.request.send",
 		map[string]any{"handle": handle, "relPath": "ping.json", "token": "run-1"}, 3)

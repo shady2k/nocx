@@ -30,7 +30,7 @@ import (
 
 	"github.com/pkg/sftp"
 	"github.com/shady2k/nocx/internal/ssh/mux"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // muxLiveSSHOrSkip returns the ssh client binary, skipping where absent.
@@ -159,7 +159,7 @@ func startMuxLiveMaster(t *testing.T, fx *execProbeSshd) *muxLiveMaster {
 // a failure becomes unexplainable a second time.
 func (m *muxLiveMaster) waitReady(t *testing.T) {
 	t.Helper()
-	testwait.WaitForTimeoutDetail(t, "the master's own session to reach its prompt", 30*time.Second,
+	waittest.WaitForTimeoutDetail(t, "the master's own session to reach its prompt", 30*time.Second,
 		func() string {
 			return fmt.Sprintf("it said:\n%s\nand ssh said:\n%s", m.out.String(), m.errOut.String())
 		},
@@ -174,7 +174,7 @@ func (m *muxLiveMaster) openOwned(t *testing.T) *mux.Master {
 	t.Helper()
 	var master *mux.Master
 	var last error
-	testwait.WaitForTimeoutDetail(t, "the control socket to complete the handshake", 30*time.Second,
+	waittest.WaitForTimeoutDetail(t, "the control socket to complete the handshake", 30*time.Second,
 		func() string {
 			return fmt.Sprintf("last error: %v; master said:\n%s\nand ssh said:\n%s",
 				last, m.out.String(), m.errOut.String())
@@ -199,7 +199,7 @@ func (m *muxLiveMaster) echoThrough(t *testing.T, token string) {
 	if _, err := io.WriteString(m.stdin, token+"\n"); err != nil {
 		t.Fatalf("type into the master's session: %v", err)
 	}
-	testwait.WaitForTimeoutDetail(t, "the master's session to echo "+token, 30*time.Second,
+	waittest.WaitForTimeoutDetail(t, "the master's session to echo "+token, 30*time.Second,
 		func() string { return fmt.Sprintf("it said:\n%s", m.out.String()) },
 		func() bool {
 			return strings.Count(m.out.String(), token) >= 1
@@ -338,7 +338,7 @@ func TestTypedMux_NothingIsPublishedBeforeOwnershipIsProven(t *testing.T) {
 		t.Fatalf("the subsystem session is not usable: %v", err)
 	}
 
-	testwait.WaitForTimeoutDetail(t, "the server to record the subsystem session", 30*time.Second,
+	waittest.WaitForTimeoutDetail(t, "the server to record the subsystem session", 30*time.Second,
 		func() string { return fmt.Sprintf("log:\n%.4000s", fx.log.String()) },
 		func() bool {
 			return strings.Count(fx.log.String(), "subsystem 'sftp'") == 1

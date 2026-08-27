@@ -1,5 +1,5 @@
-// Package testwait provides polling helpers for asynchronous tests.
-package testwait
+// Package waittest provides polling helpers for asynchronous tests.
+package waittest
 
 import (
 	"testing"

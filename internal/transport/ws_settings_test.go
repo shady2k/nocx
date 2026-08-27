@@ -17,7 +17,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/storage"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ── test-only declarations ─────────────────────────────────────────────
@@ -696,7 +696,7 @@ func TestSettingsChanged_DisconnectedClientNotLeaked(t *testing.T) {
 
 	// Disconnect conn2 and wait for the server to process the close.
 	_ = conn2.Close()
-	testwait.WaitForTimeout(t, "server to observe conn2's disconnect", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "server to observe conn2's disconnect", wantWithin, func() bool {
 		ws.connsMu.Lock()
 		defer ws.connsMu.Unlock()
 		return len(ws.conns) == 1

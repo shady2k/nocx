@@ -28,9 +28,9 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/storage"
-	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vault/file"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // scriptedAssistantClient is the injected engine: Ask plays back a script of
@@ -480,7 +480,7 @@ func TestAgentAsk_ConnectionLostMidStreamTerminalizes(t *testing.T) {
 	var terminalState *content.RunState
 	var entryErr error
 	lastState, sawEntry := "<none>", false
-	testwait.WaitForTimeoutDetail(t, "the run to terminalize", 5*time.Second,
+	waittest.WaitForTimeoutDetail(t, "the run to terminalize", 5*time.Second,
 		func() string {
 			return fmt.Sprintf("run never terminalized; state = %s (entry present=%v, err %v)",
 				lastState, sawEntry, entryErr)

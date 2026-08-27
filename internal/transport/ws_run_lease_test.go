@@ -38,9 +38,9 @@ import (
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/storage"
-	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vault/file"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ── socket tap: ONE reader for the whole test ──────────────────────────────
@@ -347,7 +347,7 @@ func terminationReasonOfRun(t *testing.T, h *runLeaseHarness) *content.Terminati
 // observable of the escalation having reached it.
 func waitChildDead(t *testing.T, pid int) {
 	t.Helper()
-	testwait.WaitForTimeout(t, fmt.Sprintf("child %d to exit", pid), 10*time.Second, func() bool {
+	waittest.WaitForTimeout(t, fmt.Sprintf("child %d to exit", pid), 10*time.Second, func() bool {
 		return errors.Is(unix.Kill(pid, 0), unix.ESRCH)
 	})
 }
@@ -369,7 +369,7 @@ func waitChildAlive(t *testing.T, pid int) {
 func readPidFile(t *testing.T, path string) int {
 	t.Helper()
 	var pid int
-	testwait.WaitForTimeout(t, "the command to write its pid file", 10*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "the command to write its pid file", 10*time.Second, func() bool {
 		b, err := os.ReadFile(path) //nolint:gosec // the pid file is the test's own temp file, written by the command under test
 		if err != nil {
 			return false

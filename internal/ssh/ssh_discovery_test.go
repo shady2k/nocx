@@ -10,7 +10,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ---------------------------------------------------------------------------
@@ -220,7 +220,7 @@ func TestDiscoveryConn_Exec_Cancel_NoGoroutineNoLeak(t *testing.T) {
 		t.Errorf("stdout = %q, want %q", got, "OK\n")
 	}
 
-	testwait.WaitForTimeoutDetail(t, "goroutines from canceled exec to exit", 5*time.Second, func() string {
+	waittest.WaitForTimeoutDetail(t, "goroutines from canceled exec to exit", 5*time.Second, func() string {
 		return fmt.Sprintf("goroutines = %d, want <= %d (leak after cancel)", runtime.NumGoroutine(), baseline+1)
 	}, func() bool {
 		return runtime.NumGoroutine() <= baseline+1
@@ -230,7 +230,7 @@ func TestDiscoveryConn_Exec_Cancel_NoGoroutineNoLeak(t *testing.T) {
 	// pooled connection.
 	_ = dc.Close()
 	_ = tab.Close()
-	testwait.WaitForTimeoutDetail(t, "the pooled connection to be reclaimed", 5*time.Second, func() string {
+	waittest.WaitForTimeoutDetail(t, "the pooled connection to be reclaimed", 5*time.Second, func() string {
 		return fmt.Sprintf("pool count after close = %d, want 0", client.pool.Count())
 	}, func() bool {
 		return client.pool.Count() == 0
@@ -375,7 +375,7 @@ func TestDiscoveryConn_Close_ReleasesReference(t *testing.T) {
 		t.Errorf("pool count after lease close = %d, want 1 (tab still holds it)", got)
 	}
 	_ = tab.Close()
-	testwait.WaitForTimeoutDetail(t, "the pooled connection to be reclaimed after tab close", 5*time.Second, func() string {
+	waittest.WaitForTimeoutDetail(t, "the pooled connection to be reclaimed after tab close", 5*time.Second, func() string {
 		return fmt.Sprintf("pool count after tab close = %d, want 0", client.pool.Count())
 	}, func() bool {
 		return client.pool.Count() == 0
@@ -416,7 +416,7 @@ func TestDiscoveryConn_Loss_ClosesDoneAndReclaimsPool(t *testing.T) {
 
 	// Both references release on loss: the lease watcher and the tab's
 	// session watcher. Nothing lingers.
-	testwait.WaitForTimeoutDetail(t, "the pooled connection to be reclaimed after loss", 5*time.Second, func() string {
+	waittest.WaitForTimeoutDetail(t, "the pooled connection to be reclaimed after loss", 5*time.Second, func() string {
 		return fmt.Sprintf("pool count after loss = %d, want 0 (dead entry reclaimed)", client.pool.Count())
 	}, func() bool {
 		return client.pool.Count() == 0

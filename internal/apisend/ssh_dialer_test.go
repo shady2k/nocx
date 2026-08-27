@@ -29,7 +29,7 @@ import (
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/httppolicy"
 	"github.com/shady2k/nocx/internal/ssh"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ─── a fake pooled SSH connection ──────────────────────────────────────────
@@ -276,7 +276,7 @@ func TestSSHDialer_CancellationReleasesTheCallerButCannotInterruptTheDial(t *tes
 	}()
 	// Cancel only once the remote dial is genuinely in flight — otherwise
 	// the pre-dial context check answers and the test proves nothing.
-	testwait.WaitForTimeout(t, "the remote dial to be in flight", 20*time.Second, func() bool { return lease.dialCount() == 1 })
+	waittest.WaitForTimeout(t, "the remote dial to be in flight", 20*time.Second, func() bool { return lease.dialCount() == 1 })
 	cancel()
 
 	err := <-returned
@@ -319,14 +319,14 @@ func TestSSHDialer_AConnectionArrivingAfterCancellationIsClosed(t *testing.T) {
 	}()
 	// The dial must be in flight before the cancel, or the pre-dial check
 	// answers and there is no late connection to close.
-	testwait.WaitForTimeout(t, "the remote dial to be in flight", 20*time.Second, func() bool { return lease.dialCount() == 1 })
+	waittest.WaitForTimeout(t, "the remote dial to be in flight", 20*time.Second, func() bool { return lease.dialCount() == 1 })
 	cancel()
 	<-returned
 
 	// Now let the remote dial complete. The connection it produces belongs
 	// to nobody, so the adapter closes it.
 	close(block)
-	testwait.WaitForTimeout(t, "the late connection to be closed", 20*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "the late connection to be closed", 20*time.Second, func() bool {
 		c := lease.conn()
 		return c != nil && c.closed.Load()
 	})
@@ -374,7 +374,7 @@ func TestSSHDialer_AConnectionArrivingAfterTheTimeoutIsClosed(t *testing.T) {
 		t.Fatal("DialContext succeeded, want the timeout")
 	}
 	close(block)
-	testwait.WaitForTimeout(t, "the late connection to be closed", 20*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "the late connection to be closed", 20*time.Second, func() bool {
 		c := lease.conn()
 		return c != nil && c.closed.Load()
 	})

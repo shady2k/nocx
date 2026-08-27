@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/storage"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ── Fingerprint ────────────────────────────────────────────────────────
@@ -712,7 +712,7 @@ func TestRestoreAndWatchWaitsForAWindowThatIsNotReadyYet(t *testing.T) {
 	// Waited on the state changing, never on a duration: the tick is an
 	// implementation detail and a test that slept for one would be a test about
 	// this machine's speed.
-	testwait.WaitFor(t, "the window to be placed once it can answer", func() bool {
+	waittest.WaitFor(t, "the window to be placed once it can answer", func() bool {
 		return placer.calls() > 0
 	})
 
@@ -745,11 +745,11 @@ func TestRestoreAndWatchRecordsAfterAnUnreadyStart(t *testing.T) {
 	defer cancel()
 	go s.RestoreAndWatch(ctx, probe, &fakePlacer{}, time.Millisecond)
 
-	testwait.WaitFor(t, "the moved window to reach the document", func() bool {
+	waittest.WaitFor(t, "the moved window to reach the document", func() bool {
 		w := s.Window()
 		return w.Width == 1280 && w.Height == 800 && w.X == 40 && w.Y == 20
 	})
-	testwait.WaitFor(t, "the document to be written", func() bool { return rec.writes() > 0 })
+	waittest.WaitFor(t, "the document to be written", func() bool { return rec.writes() > 0 })
 }
 
 // A window that never becomes readable must not spin forever, and must let go
@@ -765,7 +765,7 @@ func TestRestoreAndWatchStopsWhenTheContextIsCancelled(t *testing.T) {
 		close(done)
 	}()
 
-	testwait.WaitFor(t, "the probe to be asked at least once", func() bool { return probe.asked() > 0 })
+	waittest.WaitFor(t, "the probe to be asked at least once", func() bool { return probe.asked() > 0 })
 	cancel()
 	select {
 	case <-done:

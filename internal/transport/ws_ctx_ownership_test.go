@@ -34,7 +34,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // probeCallRecorder is a cooperative Prober: the first call blocks until its
@@ -222,7 +222,7 @@ loopA:
 	// Disconnect. The session and its replay ring MUST survive (AD-9): the
 	// pump runs on a server/session-owned context, never the connection's.
 	_ = connA.Close()
-	testwait.WaitForTimeout(t, "server to observe the dropped connection", 5*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "server to observe the dropped connection", 5*time.Second, func() bool {
 		ws.connsMu.Lock()
 		defer ws.connsMu.Unlock()
 		return len(ws.conns) == 0

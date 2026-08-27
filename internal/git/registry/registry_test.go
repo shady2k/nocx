@@ -9,7 +9,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/session"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // stubRepo is a Repo that records calls and can block them.
@@ -326,7 +326,7 @@ func TestMethodRefusedAfterCloseBegins(t *testing.T) {
 
 	// Poll until a new method is refused: Close's closed flag flips at its
 	// very start, so this becomes true and stays true.
-	testwait.WaitFor(t, "methods to be refused after Close began", func() bool {
+	waittest.WaitFor(t, "methods to be refused after Close began", func() bool {
 		_, err := h.Diff(ctx, "x", git.SideStaged, 100)
 		return err != nil
 	})
@@ -393,7 +393,7 @@ func TestCloseSessionClosesOnlyThatSession(t *testing.T) {
 
 func waitInflight(t *testing.T, repo *stubRepo) {
 	t.Helper()
-	testwait.WaitFor(t, "repository method to enter", func() bool {
+	waittest.WaitFor(t, "repository method to enter", func() bool {
 		return repo.inflightCount() > 0
 	})
 }

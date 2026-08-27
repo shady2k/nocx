@@ -22,7 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // fakeLeaseSession is the lease's process-group seam: it records every
@@ -197,7 +197,7 @@ func TestRunLease_OutputBudgetFiresAndNamesItself(t *testing.T) {
 	// be raced (the lease arms it in its goroutine); the OUTCOME is the
 	// observable, never a duration.
 	var leaseErr error
-	testwait.WaitForTimeout(t, "output budget to fire", 5*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "output budget to fire", 5*time.Second, func() bool {
 		if err := ring.write(make([]byte, 100)); err != nil {
 			t.Fatalf("ring write: %v", err)
 		}
@@ -233,7 +233,7 @@ func TestRunLease_AwaitingTakeoverSuspendsTheLease(t *testing.T) {
 	// the lease ends suspended — the pre-request state check covers the
 	// race — so the observable is polled, never a duration.
 	lane.note(session.ID("sid-unit"), "alternate")
-	testwait.WaitForTimeout(t, "lease suspension on the awaiting-takeover transition", 5*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "lease suspension on the awaiting-takeover transition", 5*time.Second, func() bool {
 		return leaseSuspended(lease)
 	})
 

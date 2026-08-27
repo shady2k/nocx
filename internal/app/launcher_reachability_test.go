@@ -25,8 +25,8 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
-	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/transport"
+	"github.com/shady2k/nocx/internal/waittest"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -175,7 +175,7 @@ func (s *reachSSHServer) handleSession(ch gossh.Channel, reqs <-chan *gossh.Requ
 func (s *reachSSHServer) waitForExec(t *testing.T, timeout time.Duration) string {
 	t.Helper()
 	var command string
-	testwait.WaitForTimeout(t, "the launcher's exec request", timeout, func() bool {
+	waittest.WaitForTimeout(t, "the launcher's exec request", timeout, func() bool {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		if len(s.execCmds) == 0 {

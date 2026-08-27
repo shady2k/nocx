@@ -19,8 +19,8 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
-	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/tunnel"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // tunnelRPCResult mirrors the JSON-RPC envelope for tunnel.* calls.
@@ -322,7 +322,7 @@ func TestTunnelPaneTeardown_DoesNotStopOtherPanesForward(t *testing.T) {
 
 	// Teardown is asynchronous (the read loop notices the close); wait until
 	// A's port refuses connections, the observable of the forward stopping.
-	testwait.WaitForTimeout(t, "tab A's forward to stop accepting connections", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "tab A's forward to stop accepting connections", wantWithin, func() bool {
 		c, dErr := net.DialTimeout("tcp", addrA, 200*time.Millisecond)
 		if dErr == nil {
 			_ = c.Close()

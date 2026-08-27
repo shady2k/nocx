@@ -10,7 +10,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/git"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // diffRepo builds a repo with one committed file, then one staged change and
@@ -170,7 +170,7 @@ func TestDiffContextCancelled(t *testing.T) {
 		_, err := repo.Diff(ctx, "f.txt", git.SideUnstaged, 1<<20)
 		done <- err
 	}()
-	testwait.WaitFor(t, "fake diff to start", func() bool {
+	waittest.WaitFor(t, "fake diff to start", func() bool {
 		_, err := os.Stat(marker)
 		return err == nil
 	})
@@ -199,7 +199,7 @@ func TestDiffChildIgnoresTERM(t *testing.T) {
 		_, err := repo.Diff(ctx, "f.txt", git.SideUnstaged, 1<<20)
 		done <- err
 	}()
-	testwait.WaitFor(t, "fake diff to start", func() bool {
+	waittest.WaitFor(t, "fake diff to start", func() bool {
 		_, err := os.Stat(marker)
 		return err == nil
 	})

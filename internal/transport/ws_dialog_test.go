@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // fakeDialogService returns canned paths; "" means the user cancelled. The
@@ -332,7 +332,7 @@ func waitDirectoryDialogFree(t *testing.T, conn *websocket.Conn, wantPath string
 	t.Helper()
 	var gotPath string
 	var lastResp json.RawMessage
-	testwait.WaitForTimeoutDetail(t, "directory dialog capability to become free", 3*time.Second,
+	waittest.WaitForTimeoutDetail(t, "directory dialog capability to become free", 3*time.Second,
 		func() string { return fmt.Sprintf("last response %s", lastResp) },
 		func() bool {
 			resp := jsonrpcCall(t, conn, "dialog.openDirectory", map[string]any{})

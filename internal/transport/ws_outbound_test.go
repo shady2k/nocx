@@ -8,8 +8,8 @@ import (
 
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/testwait"
 	"github.com/shady2k/nocx/internal/transport/outbound"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // waitForPendingAsk polls the ask broker until one ask is registered and
@@ -17,7 +17,7 @@ import (
 func waitForPendingAsk(t *testing.T, ws *WSServer) string {
 	t.Helper()
 	var rid string
-	testwait.WaitForTimeout(t, "ask registration", 5*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "ask registration", 5*time.Second, func() bool {
 		ws.asks.mu.Lock()
 		defer ws.asks.mu.Unlock()
 		for k := range ws.asks.pending {

@@ -15,7 +15,7 @@ import (
 	"syscall"
 	"testing"
 
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 	"golang.org/x/sys/unix"
 )
 
@@ -26,7 +26,7 @@ import (
 func waitForeground(t testing.TB, lp *LocalPty) int {
 	t.Helper()
 	var pgid int
-	testwait.WaitFor(t, "the pty to report a foreground process group", func() bool {
+	waittest.WaitFor(t, "the pty to report a foreground process group", func() bool {
 		got, err := lp.ForegroundProcessGroup()
 		if err == nil && got > 0 {
 			pgid = got
@@ -63,7 +63,7 @@ func TestLocalPty_SignalForegroundReachesTheExecution(t *testing.T) {
 		t.Fatalf("Write: %v", err)
 	}
 	var jobPGID int
-	testwait.WaitFor(t, "the foreground group to leave the shell", func() bool {
+	waittest.WaitFor(t, "the foreground group to leave the shell", func() bool {
 		pgid, err := lp.ForegroundProcessGroup()
 		if err == nil && pgid > 0 && pgid != lp.Pid() {
 			jobPGID = pgid
@@ -77,7 +77,7 @@ func TestLocalPty_SignalForegroundReachesTheExecution(t *testing.T) {
 	if err := lp.SignalForeground(syscall.SIGINT); err != nil {
 		t.Fatalf("SignalForeground(SIGINT): %v", err)
 	}
-	testwait.WaitForDetail(t, "the execution group to end or foreground to return",
+	waittest.WaitForDetail(t, "the execution group to end or foreground to return",
 		func() string {
 			return fmt.Sprintf("the execution's process group %d survived SIGINT (or the shell never resumed)", jobPGID)
 		},
@@ -120,7 +120,7 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 
 	// Wait for the observable: the command's own child pid appears.
 	var pidText string
-	testwait.WaitForDetail(t, "the child pid file",
+	waittest.WaitForDetail(t, "the child pid file",
 		func() string { return fmt.Sprintf("the file %s never appeared", pidFile) },
 		func() bool {
 			b, err := os.ReadFile(pidFile) //nolint:gosec // the path is this test's own temp file
@@ -147,7 +147,7 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 	// Observable one, the receipt: the child's own trap ran — the signal
 	// reached a process that is not the shell.
 	var markerText string
-	testwait.WaitForDetail(t, "the child's TERM receipt marker",
+	waittest.WaitForDetail(t, "the child's TERM receipt marker",
 		func() string { return fmt.Sprintf("the file %s never appeared", marker) },
 		func() bool {
 			b, err := os.ReadFile(marker) //nolint:gosec // the path is this test's own temp file
@@ -162,7 +162,7 @@ func TestLocalPty_SignalForegroundReachesAChildNotOnlyTheShell(t *testing.T) {
 	}
 	// Observable two, the death: the trap's wait reaped the sleep, so the
 	// pid it wrote is gone — zombie-free.
-	testwait.WaitForDetail(t, "the execution's child to be reaped",
+	waittest.WaitForDetail(t, "the execution's child to be reaped",
 		func() string {
 			return fmt.Sprintf("the execution's child %d was not reaped after the group signal — cancellation reached only the shell", childPID)
 		},
@@ -178,7 +178,7 @@ func TestLocalPty_SignalForegroundZeroChecksExistence(t *testing.T) {
 	if _, err := lp.Write([]byte("sleep 30\n")); err != nil {
 		t.Fatalf("Write: %v", err)
 	}
-	testwait.WaitFor(t, "the execution foreground group to start", func() bool {
+	waittest.WaitFor(t, "the execution foreground group to start", func() bool {
 		pgid, err := lp.ForegroundProcessGroup()
 		return err == nil && pgid > 0 && pgid != lp.Pid()
 	})

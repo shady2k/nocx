@@ -108,7 +108,7 @@ func TestBannerClickReachesTheRendererAsSessionFocus(t *testing.T) {
 // lane bound to the session, which only the enhanced branch has, so a session
 // that degraded would wait for a fact nobody was going to send.
 //
-// internal/testwait is not used: it polls a predicate on a timer, and the
+// internal/waittest is not used: it polls a predicate on a timer, and the
 // predicate here is a blocking socket read. Polling one would mean a read
 // deadline per attempt, and a gorilla connection is permanently failed by any
 // read error, timeout included — the first poll that expired would destroy

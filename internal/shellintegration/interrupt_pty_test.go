@@ -6,7 +6,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // Ctrl-C at a prompt, watched from BOTH sides at once: the pty (what the
@@ -51,7 +51,7 @@ func TestBashInterruptAnnouncesNoPhantomCommand(t *testing.T) {
 	// line was echoed by the tty driver, the interrupt landed before readline
 	// existed, and the test then failed for its own race while reading
 	// exactly like the product defect it was written for.
-	testwait.WaitForTimeoutDetail(t, "pty output \x1b]133;B", 15*time.Second,
+	waittest.WaitForTimeoutDetail(t, "pty output \x1b]133;B", 15*time.Second,
 		func() string { return fmt.Sprintf("output: %q", s.output()) },
 		func() bool {
 			return strings.Contains(s.output(), "\x1b]133;B")
@@ -72,7 +72,7 @@ func TestBashInterruptAnnouncesNoPhantomCommand(t *testing.T) {
 	// The line has to reach readline before the interrupt does, or the two
 	// race and the test sometimes interrupts an empty prompt instead — a
 	// weaker case than the one under test.
-	testwait.WaitForTimeoutDetail(t, "pty output echo abandoned", 10*time.Second,
+	waittest.WaitForTimeoutDetail(t, "pty output echo abandoned", 10*time.Second,
 		func() string { return fmt.Sprintf("output: %q", s.output()) },
 		func() bool {
 			return strings.Contains(s.output(), "echo abandoned")
@@ -85,7 +85,7 @@ func TestBashInterruptAnnouncesNoPhantomCommand(t *testing.T) {
 	// sides. Why the helper re-sends rather than waits longer is its own
 	// comment, and it is the whole of nocx-yjen.
 	interruptUntilPrompt(t, s, promptsBefore)
-	testwait.WaitForTimeoutDetail(t, "prompt_ready after the interrupt", 15*time.Second,
+	waittest.WaitForTimeoutDetail(t, "prompt_ready after the interrupt", 15*time.Second,
 		func() string {
 			return fmt.Sprintf("want %d, have %d; accepted=%v output=%q",
 				promptReadyBefore+1, s.kernel.count("prompt_ready"), s.kernel.events(), s.output())
@@ -162,7 +162,7 @@ func interruptUntilPrompt(t *testing.T, s *channelShell, promptsBefore int) {
 		t.Fatalf("write interrupt: %v", err)
 	}
 	nextRetry := time.Now().Add(3 * time.Second)
-	testwait.WaitForTimeoutDetail(t, "prompt after repeated interrupts", 15*time.Second,
+	waittest.WaitForTimeoutDetail(t, "prompt after repeated interrupts", 15*time.Second,
 		func() string {
 			return fmt.Sprintf("OSC 133 A still %d; accepted=%v output=%q",
 				strings.Count(s.output(), "\x1b]133;A"), s.kernel.events(), s.output())

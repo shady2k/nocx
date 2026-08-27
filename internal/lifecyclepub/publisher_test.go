@@ -11,7 +11,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // noopPort swallows outbound envelopes (accept, refresh_request). The shell
@@ -606,7 +606,7 @@ func TestPublisherEstablishmentTimeoutRollsBack(t *testing.T) {
 	}
 	// The establishment bound expires: the domain is revoked, the lane
 	// falls to native, and the accept never goes out.
-	testwait.WaitForDetail(t, "establishment timeout to close the domain",
+	waittest.WaitForDetail(t, "establishment timeout to close the domain",
 		func() string {
 			d, ok := pub.Domain(h.Domain)
 			return fmt.Sprintf("the timeout never rolled the domain back; known=%t state=%v", ok, d.State)
@@ -621,7 +621,7 @@ func TestPublisherEstablishmentTimeoutRollsBack(t *testing.T) {
 	// The rollback's native fact follows the Closed state in the same
 	// timer tick — wait for it, then assert it is the final word.
 	var last lifecyclepub.Fact
-	testwait.WaitForDetail(t, "rollback to publish the native state",
+	waittest.WaitForDetail(t, "rollback to publish the native state",
 		func() string {
 			facts := r.all()
 			if len(facts) == 0 {

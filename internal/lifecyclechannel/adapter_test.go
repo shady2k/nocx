@@ -12,7 +12,7 @@ import (
 	"github.com/shady2k/nocx/internal/lifecyclecodec"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // seqRand yields 1, 2, 3, … (wrapping to 1 after 255) — never a zero byte,
@@ -81,7 +81,7 @@ func mustEstablish(t *testing.T, a *Adapter, child *os.File) *lifecyclecodec.Dec
 	if err != nil {
 		t.Fatalf("write hello: %v", err)
 	}
-	testwait.WaitFor(t, "domain established", func() bool {
+	waittest.WaitFor(t, "domain established", func() bool {
 		d, ok := a.kernel.Domain(a.domain)
 		return ok && d.State == lifecycle.DomainEstablished
 	})
@@ -144,7 +144,7 @@ func TestGarbageBeforeHelloStillEstablishes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("write hello: %v", err)
 	}
-	testwait.WaitFor(t, "domain established past garbage", func() bool {
+	waittest.WaitFor(t, "domain established past garbage", func() bool {
 		d, ok := k.Domain(a.domain)
 		return ok && d.State == lifecycle.DomainEstablished
 	})
@@ -176,7 +176,7 @@ func TestGarbageDesyncsAndSnapshotRestores(t *testing.T) {
 		t.Fatalf("write prompt_ready: %v", err)
 	}
 
-	testwait.WaitFor(t, "domain desynchronized", func() bool {
+	waittest.WaitFor(t, "domain desynchronized", func() bool {
 		d, ok := k.Domain(a.domain)
 		return ok && d.State == lifecycle.DomainDesynchronized
 	})
@@ -208,7 +208,7 @@ func TestGarbageDesyncsAndSnapshotRestores(t *testing.T) {
 	if err != nil {
 		t.Fatalf("write snapshot: %v", err)
 	}
-	testwait.WaitFor(t, "domain restored", func() bool {
+	waittest.WaitFor(t, "domain restored", func() bool {
 		d, ok := k.Domain(a.domain)
 		return ok && d.State == lifecycle.DomainEstablished
 	})
@@ -231,7 +231,7 @@ func TestTransportLossMarksDomainLost(t *testing.T) {
 
 	_ = child.Close() // the shell end dies without saying goodbye
 
-	testwait.WaitFor(t, "domain lost", func() bool {
+	waittest.WaitFor(t, "domain lost", func() bool {
 		d, ok := k.Domain(a.domain)
 		return ok && d.State == lifecycle.DomainLost
 	})
@@ -260,13 +260,13 @@ func TestShellExitClosesDomain(t *testing.T) {
 	if err != nil {
 		t.Fatalf("write domain_closed: %v", err)
 	}
-	testwait.WaitFor(t, "domain closed", func() bool {
+	waittest.WaitFor(t, "domain closed", func() bool {
 		d, ok := k.Domain(a.domain)
 		return ok && d.State == lifecycle.DomainClosed
 	})
 	_ = child.Close() // the shell's end closes after the event
 
-	testwait.WaitFor(t, "pump to observe EOF", func() bool {
+	waittest.WaitFor(t, "pump to observe EOF", func() bool {
 		a.mu.Lock()
 		defer a.mu.Unlock()
 		return a.closed
@@ -300,13 +300,13 @@ func TestShellDiesWithoutDomainClosed(t *testing.T) {
 		}
 		seq++
 	}
-	testwait.WaitFor(t, "attempt open", func() bool {
+	waittest.WaitFor(t, "attempt open", func() bool {
 		_, ok := k.OpenAttempt(a.domain)
 		return ok
 	})
 	_ = child.Close()
 
-	testwait.WaitFor(t, "domain lost", func() bool {
+	waittest.WaitFor(t, "domain lost", func() bool {
 		d, ok := k.Domain(a.domain)
 		return ok && d.State == lifecycle.DomainLost
 	})
@@ -327,7 +327,7 @@ func TestHelloTimeoutAbandonsDomain(t *testing.T) {
 	defer func() { _ = a.Close() }()
 	defer func() { _ = child.Close() }()
 
-	testwait.WaitFor(t, "domain abandoned on hello timeout", func() bool {
+	waittest.WaitFor(t, "domain abandoned on hello timeout", func() bool {
 		d, ok := k.Domain(a.domain)
 		return ok && d.State == lifecycle.DomainLost
 	})
@@ -357,7 +357,7 @@ func TestOversizeHelloThenValidHello(t *testing.T) {
 	if err != nil {
 		t.Fatalf("write valid hello: %v", err)
 	}
-	testwait.WaitFor(t, "domain established past oversize hello", func() bool {
+	waittest.WaitFor(t, "domain established past oversize hello", func() bool {
 		d, ok := k.Domain(a.domain)
 		return ok && d.State == lifecycle.DomainEstablished
 	})
@@ -375,7 +375,7 @@ func TestCloseEndsSession(t *testing.T) {
 	mustEstablish(t, a, child)
 
 	_ = a.Close()
-	testwait.WaitFor(t, "domain lost on close", func() bool {
+	waittest.WaitFor(t, "domain lost on close", func() bool {
 		d, ok := k.Domain(a.domain)
 		return ok && d.State == lifecycle.DomainLost
 	})
@@ -418,7 +418,7 @@ func TestChildDescriptorReachesSpawnedProcess(t *testing.T) {
 		t.Fatalf("spawned hello writer: %v (%s)", err, out)
 	}
 
-	testwait.WaitFor(t, "domain established by the spawned process", func() bool {
+	waittest.WaitFor(t, "domain established by the spawned process", func() bool {
 		d, ok := k.Domain(a.domain)
 		return ok && d.State == lifecycle.DomainEstablished
 	})
@@ -489,7 +489,7 @@ func TestHelloTimeoutReportsItsCause(t *testing.T) {
 	defer func() { _ = a.Close() }()
 	defer func() { _ = child.Close() }()
 
-	testwait.WaitFor(t, "hello timeout reported as its own cause", func() bool {
+	waittest.WaitFor(t, "hello timeout reported as its own cause", func() bool {
 		c := rec.all()
 		return len(c) == 1 && c[0] == LossHelloTimeout
 	})
@@ -515,7 +515,7 @@ func TestShellClosingItsEndReportsEndOfStream(t *testing.T) {
 	// The shell goes away without saying goodbye: the domain is live, so
 	// this is a loss and not a clean end.
 	_ = child.Close()
-	testwait.WaitFor(t, "end of stream reported as its own cause", func() bool {
+	waittest.WaitFor(t, "end of stream reported as its own cause", func() bool {
 		c := rec.all()
 		return len(c) == 1 && c[0] == LossEndOfStream
 	})
@@ -534,7 +534,7 @@ func TestSessionDisposalReportsClosed(t *testing.T) {
 	// The session is closing. Distinguishable from every failure above, so
 	// the product does not paint a tab as broken on its way out.
 	_ = a.Close()
-	testwait.WaitFor(t, "disposal reported as its own cause", func() bool {
+	waittest.WaitFor(t, "disposal reported as its own cause", func() bool {
 		c := rec.all()
 		return len(c) == 1 && c[0] == LossClosed
 	})

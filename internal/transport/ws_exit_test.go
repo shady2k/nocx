@@ -165,7 +165,7 @@ func openExitSession(t *testing.T, ws *WSServer) (sid string, conn *websocket.Co
 	// session.integrationChanged is ever emitted to wait for. The slot
 	// itself is read instead, through the same accessor the emit path uses,
 	// and polling it touches no socket — so the read-deadline hazard that
-	// rules internal/testwait out over there does not arise here.
+	// rules internal/waittest out over there does not arise here.
 	awaitSubscriber(t, ws, session.ID(env.Result.SessionID))
 	return env.Result.SessionID, conn
 }

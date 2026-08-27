@@ -32,7 +32,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclecodec"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 const (
@@ -406,7 +406,7 @@ func exportBashOptsWithExtdebug(t *testing.T, s *channelShell, k *nestedKernel) 
 	t.Helper()
 	before := k.count("complete")
 	_, _ = s.ptmx.Write([]byte("export LC_ALL=C BASHOPTS\n"))
-	testwait.WaitForTimeoutDetail(t, "BASHOPTS setup completion", 10*time.Second,
+	waittest.WaitForTimeoutDetail(t, "BASHOPTS setup completion", 10*time.Second,
 		func() string { return fmt.Sprintf("output=%q", s.output()) },
 		func() bool {
 			return k.count("complete") > before
@@ -439,7 +439,7 @@ func fakeSudoWithoutPreserveFDS() string {
 func assertUnsupportedSudoRunsConventionally(t *testing.T, s *channelShell, k *nestedKernel) {
 	t.Helper()
 	_, _ = s.ptmx.Write([]byte("sudo -i\n"))
-	testwait.WaitForTimeout(t, "conventional sudo output", 10*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "conventional sudo output", 10*time.Second, func() bool {
 		return strings.Contains(s.output(), "CONVENTIONAL-SUDO:")
 	})
 	out := s.output()
@@ -549,7 +549,7 @@ func driveNestedHappyInterval(t *testing.T, s *channelShell, k *nestedKernel, en
 	}
 
 	// The child establishes its own domain and reaches a prompt.
-	testwait.WaitForTimeoutDetail(t, "child lifecycle prompt", 20*time.Second,
+	waittest.WaitForTimeoutDetail(t, "child lifecycle prompt", 20*time.Second,
 		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
 		func() bool {
 			return k.count("hello") >= 2 && childPromptReady(t, k)
@@ -559,7 +559,7 @@ func driveNestedHappyInterval(t *testing.T, s *channelShell, k *nestedKernel, en
 	// is the child DOMAIN's accepted complete — not the echo text, which
 	// readline also mirrors into the pty.
 	_, _ = s.ptmx.Write([]byte("echo CHILD-SHELL-OK\n"))
-	testwait.WaitForTimeoutDetail(t, "child command completion", 15*time.Second,
+	waittest.WaitForTimeoutDetail(t, "child command completion", 15*time.Second,
 		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
 		func() bool {
 			for _, e := range k.events() {
@@ -572,7 +572,7 @@ func driveNestedHappyInterval(t *testing.T, s *channelShell, k *nestedKernel, en
 
 	// The child closes; the parent re-activates at its next prompt.
 	_, _ = s.ptmx.Write([]byte("exit\n"))
-	testwait.WaitForTimeoutDetail(t, "parent activation after child close", 20*time.Second,
+	waittest.WaitForTimeoutDetail(t, "parent activation after child close", 20*time.Second,
 		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
 		func() bool {
 			k.mu.Lock()
@@ -584,7 +584,7 @@ func driveNestedHappyInterval(t *testing.T, s *channelShell, k *nestedKernel, en
 	// activation is the FIRST frame of the resumed boundary and the other
 	// two follow as separate writes.
 	resumed := false
-	testwait.WaitForTimeoutDetail(t, "parent lifecycle after activation", 10*time.Second,
+	waittest.WaitForTimeoutDetail(t, "parent lifecycle after activation", 10*time.Second,
 		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
 		func() bool {
 			k.mu.Lock()
@@ -772,7 +772,7 @@ func TestZshNestedChildStillborn(t *testing.T) {
 
 	// The parent still re-activates at its next prompt — the §9 stillborn
 	// interval is the expected path, not an error, and never a hang.
-	testwait.WaitForTimeoutDetail(t, "parent activation after refused child", 15*time.Second,
+	waittest.WaitForTimeoutDetail(t, "parent activation after refused child", 15*time.Second,
 		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
 		func() bool {
 			k.mu.Lock()
@@ -784,7 +784,7 @@ func TestZshNestedChildStillborn(t *testing.T) {
 	// on the CHANNEL. One transport cannot speak for the other, so wait for
 	// the sentinel itself (channelShell.run carries the long note) — and do
 	// it before taking the kernel mutex, so nothing waits while holding it.
-	testwait.WaitForTimeoutDetail(t, "the STILLBORN-SUDO-RAN sentinel", 15*time.Second,
+	waittest.WaitForTimeoutDetail(t, "the STILLBORN-SUDO-RAN sentinel", 15*time.Second,
 		func() string { return fmt.Sprintf("output=%q", s.output()) },
 		func() bool {
 			return strings.Contains(s.output(), "STILLBORN-SUDO-RAN")
@@ -907,7 +907,7 @@ func TestZshNestedChildStillbornSu(t *testing.T) {
 
 	// The parent still re-activates at its next prompt — the §9 stillborn
 	// interval is the expected path, not an error, and never a hang.
-	testwait.WaitForTimeoutDetail(t, "parent activation after authentication failure", 15*time.Second,
+	waittest.WaitForTimeoutDetail(t, "parent activation after authentication failure", 15*time.Second,
 		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
 		func() bool {
 			k.mu.Lock()
@@ -934,7 +934,7 @@ func TestZshNestedChildStillbornSu(t *testing.T) {
 	// The sentinel is written to the PTY; k.parentActivated was observed on
 	// the CHANNEL. One transport cannot speak for the other — wait for the
 	// sentinel itself (channelShell.run carries the long note).
-	testwait.WaitForTimeoutDetail(t, "the sudo authentication failure sentinel", 15*time.Second,
+	waittest.WaitForTimeoutDetail(t, "the sudo authentication failure sentinel", 15*time.Second,
 		func() string { return fmt.Sprintf("output=%q", s.output()) },
 		func() bool {
 			return strings.Contains(s.output(), "su: Authentication failure")
@@ -944,7 +944,7 @@ func TestZshNestedChildStillbornSu(t *testing.T) {
 	// the child's full tuple after the parent restored, and assert the
 	// kernel rejects it.
 	injectLateChildFrame(t, k)
-	testwait.WaitForTimeoutDetail(t, "late child frame rejection", 5*time.Second,
+	waittest.WaitForTimeoutDetail(t, "late child frame rejection", 5*time.Second,
 		func() string {
 			return fmt.Sprintf("rejected=%d order=%v", k.rejectedCount(), k.orderTrace())
 		},
@@ -998,7 +998,7 @@ func TestBashNestedChildDomainSuFallback(t *testing.T) {
 
 	// The child never establishes; the parent stillborn-activates at its
 	// next prompt.
-	testwait.WaitForTimeoutDetail(t, "parent activation after fallback child", 15*time.Second,
+	waittest.WaitForTimeoutDetail(t, "parent activation after fallback child", 15*time.Second,
 		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
 		func() bool {
 			k.mu.Lock()
@@ -1024,7 +1024,7 @@ func TestBashNestedChildDomainSuFallback(t *testing.T) {
 	}
 
 	// PTY sentinel after a CHANNEL wait: wait for the sentinel itself.
-	testwait.WaitForTimeoutDetail(t, "the FALLBACK-CHILD-RAN sentinel", 15*time.Second,
+	waittest.WaitForTimeoutDetail(t, "the FALLBACK-CHILD-RAN sentinel", 15*time.Second,
 		func() string { return fmt.Sprintf("output=%q", s.output()) },
 		func() bool {
 			return strings.Contains(s.output(), "FALLBACK-CHILD-RAN")
@@ -1033,7 +1033,7 @@ func TestBashNestedChildDomainSuFallback(t *testing.T) {
 	// A late frame from the never-established child is rejected and
 	// counted.
 	injectLateChildFrame(t, k)
-	testwait.WaitForTimeoutDetail(t, "late fallback child frame rejection", 5*time.Second,
+	waittest.WaitForTimeoutDetail(t, "late fallback child frame rejection", 5*time.Second,
 		func() string {
 			return fmt.Sprintf("rejected=%d order=%v", k.rejectedCount(), k.orderTrace())
 		},

@@ -19,7 +19,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // oneShotAdmission is the THIRD Admission implementation, defined in this
@@ -87,7 +87,7 @@ func TestThirdAdmissionDefinedInTestFileIsUsedUnchanged(t *testing.T) {
 // suite's helper — package boundaries cannot share it.
 func waitAcquirable(t *testing.T, a Admission, what string) {
 	t.Helper()
-	testwait.WaitForTimeout(t, what, 2*time.Second, func() bool {
+	waittest.WaitForTimeout(t, what, 2*time.Second, func() bool {
 		p, rej := a.TryAcquire(context.Background())
 		if rej != nil {
 			return false

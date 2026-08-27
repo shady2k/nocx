@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // writeBashFixtureHome materialises a fixture $HOME whose .bashrc sets a
@@ -131,7 +131,7 @@ func runLauncherOnPTY(t *testing.T, shPath, cmd string, env []string, lines ...s
 	// The first prompt or fixture readiness marker is the observable boundary
 	// before typing commands. Native fallback shells do not share the
 	// integrated B marker.
-	testwait.WaitForTimeout(t, "the launcher's startup prompt", 20*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "the launcher's startup prompt", 20*time.Second, func() bool {
 		select {
 		case <-capture.done:
 			return true
@@ -145,7 +145,7 @@ func runLauncherOnPTY(t *testing.T, shPath, cmd string, env []string, lines ...s
 		}
 	}
 
-	testwait.WaitForTimeout(t, "the launcher session to end", 20*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "the launcher session to end", 20*time.Second, func() bool {
 		select {
 		case <-capture.done:
 			return true

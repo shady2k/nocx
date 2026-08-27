@@ -11,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // writeScriptFile materialises an embedded script to a temp file so a real
@@ -1063,19 +1063,19 @@ func TestBashSnapshotArrivesBeforeFirstPrompt(t *testing.T) {
 	capture := newPTYCapture(t, cmd)
 
 	// The first prompt and the command completion are observable PTY fences.
-	testwait.WaitForTimeout(t, "bash snapshot test first prompt", 15*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "bash snapshot test first prompt", 15*time.Second, func() bool {
 		return strings.Contains(capture.output(), "\x1b]133;B")
 	})
 	if _, werr := capture.ptmx.Write([]byte("true\n")); werr != nil {
 		t.Fatalf("write command: %v", werr)
 	}
-	testwait.WaitForTimeout(t, "bash snapshot test command completion", 15*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "bash snapshot test command completion", 15*time.Second, func() bool {
 		return strings.Contains(capture.output(), "\x1b]133;D;0")
 	})
 	if _, werr := capture.ptmx.Write([]byte("exit\n")); werr != nil {
 		t.Fatalf("write exit: %v", werr)
 	}
-	testwait.WaitForTimeout(t, "bash snapshot test session end", 15*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "bash snapshot test session end", 15*time.Second, func() bool {
 		select {
 		case <-capture.done:
 			return true
@@ -1848,19 +1848,19 @@ func TestZshSnapshotArrivesBeforeFirstPrompt(t *testing.T) {
 	)
 	capture := newPTYCapture(t, cmd)
 
-	testwait.WaitForTimeout(t, "zsh snapshot test first prompt", 20*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "zsh snapshot test first prompt", 20*time.Second, func() bool {
 		return strings.Contains(capture.output(), "\x1b]133;B")
 	})
 	if _, werr := capture.ptmx.Write([]byte("true\n")); werr != nil {
 		t.Fatalf("write command: %v", werr)
 	}
-	testwait.WaitForTimeout(t, "zsh snapshot test command completion", 20*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "zsh snapshot test command completion", 20*time.Second, func() bool {
 		return strings.Contains(capture.output(), "\x1b]133;D;0")
 	})
 	if _, werr := capture.ptmx.Write([]byte("exit\n")); werr != nil {
 		t.Fatalf("write exit: %v", werr)
 	}
-	testwait.WaitForTimeout(t, "zsh snapshot test session end", 20*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "zsh snapshot test session end", 20*time.Second, func() bool {
 		select {
 		case <-capture.done:
 			return true

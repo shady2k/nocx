@@ -24,7 +24,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // recordOnPane records one command from one pane over the socket and decodes
@@ -216,7 +216,7 @@ func TestTransportDisconnect_DestroysEverythingOnTheConnection(t *testing.T) {
 		defer ws.connsMu.Unlock()
 		return len(ws.conns)
 	}
-	testwait.WaitForTimeoutDetail(t, "disconnect destroy to become observable", wantWithin,
+	waittest.WaitForTimeoutDetail(t, "disconnect destroy to become observable", wantWithin,
 		func() string {
 			return fmt.Sprintf("not observable within %s: %d connection(s) still registered", wantWithin, liveConns())
 		},

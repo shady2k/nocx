@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // orderedSubmission preserves submission order while running off the
@@ -133,7 +133,7 @@ func TestOrderedSubmission_RefusesWhenFull(t *testing.T) {
 	close(release)
 	// All THREE admitted tasks complete — the one that occupied the worker
 	// and the two that were queued behind it. The refused one never ran.
-	testwait.WaitForTimeoutDetail(t, "all admitted tasks to complete", 5*time.Second,
+	waittest.WaitForTimeoutDetail(t, "all admitted tasks to complete", 5*time.Second,
 		func() string { return fmt.Sprintf("%d of 3 ran", atomic.LoadInt64(&n)) },
 		func() bool { return atomic.LoadInt64(&n) >= 3 })
 }

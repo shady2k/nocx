@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // The LOCAL zsh tier (nocx-wwz0). Every other terminal on macOS opens the
@@ -491,7 +491,7 @@ func TestLocalZshSession_IsIntegratedOnTheUsersOwnShell(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	var verdict string
-	testwait.WaitForTimeoutDetail(t, "one of the zsh capability verdicts", 20*time.Second,
+	waittest.WaitForTimeoutDetail(t, "one of the zsh capability verdicts", 20*time.Second,
 		func() string { return fmt.Sprintf("output=%q", s.output()) },
 		func() bool {
 			out := s.output()
@@ -636,7 +636,7 @@ func TestLocalZshSession_SurvivesAUserRcThatFails(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	var verdict string
-	testwait.WaitForTimeoutDetail(t, "one of the broken-rc verdicts", 20*time.Second,
+	waittest.WaitForTimeoutDetail(t, "one of the broken-rc verdicts", 20*time.Second,
 		func() string { return fmt.Sprintf("output=%q", s.output()) },
 		func() bool {
 			out := s.output()
@@ -728,7 +728,7 @@ func TestLocalZshSession_KeepsAFrameworkAcceptLineWrapper(t *testing.T) {
 		t.Fatalf("write: %v", err)
 	}
 	var verdict string
-	testwait.WaitForTimeoutDetail(t, "the Enter verdict", 20*time.Second,
+	waittest.WaitForTimeoutDetail(t, "the Enter verdict", 20*time.Second,
 		func() string { return fmt.Sprintf("output=%q", s.output()) },
 		func() bool {
 			out := s.output()

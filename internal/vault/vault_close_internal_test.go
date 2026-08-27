@@ -4,7 +4,7 @@ import (
 	"sync/atomic"
 	"testing"
 
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // Close returns on a Vault whose auto-seal goroutine was never started.
@@ -30,7 +30,7 @@ func TestClose_ReturnsWhenTheAutoSealGoroutineWasNeverStarted(t *testing.T) {
 		returned.Store(true)
 	}()
 
-	testwait.WaitFor(t, "Close to return on a vault with no auto-seal goroutine", returned.Load)
+	waittest.WaitFor(t, "Close to return on a vault with no auto-seal goroutine", returned.Load)
 }
 
 // Close does not return until the auto-seal goroutine has exited.
@@ -54,12 +54,12 @@ func TestClose_WaitsForTheAutoSealGoroutineToExit(t *testing.T) {
 		returned.Store(true)
 	}()
 
-	testwait.WaitFor(t, "the auto-seal goroutine to reach the timer Stop on its way out",
+	waittest.WaitFor(t, "the auto-seal goroutine to reach the timer Stop on its way out",
 		timer.stopEntered.Load)
 	if returned.Load() {
 		t.Fatal("Close returned while its auto-seal goroutine was still inside Stop")
 	}
 
 	release()
-	testwait.WaitFor(t, "Close to return once the goroutine is released", returned.Load)
+	waittest.WaitFor(t, "Close to return once the goroutine is released", returned.Load)
 }

@@ -46,7 +46,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/apicoll"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // leasePool is the pool as the environment's route table reaches it: an
@@ -239,7 +239,7 @@ func TestSend_ABoundedDialDeadlineEndsTheRun(t *testing.T) {
 	// runs under a send — see the cancellation test below for the path on
 	// which it does not, and why.
 	unblock()
-	testwait.WaitForTimeout(t, "the late connection to be closed", 20*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "the late connection to be closed", 20*time.Second, func() bool {
 		conn := pool.lastLease().conn()
 		return conn != nil && conn.closed.Load()
 	})
@@ -307,7 +307,7 @@ func TestSend_AConnectionArrivingAfterCancellationNeverProducesARun(t *testing.T
 	// Cancel only once the remote dial is genuinely in flight; cancelling
 	// earlier would be answered by the pre-dial check and there would be no
 	// late connection for this test to be about.
-	testwait.WaitForTimeout(t, "the remote dial to be in flight", 20*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "the remote dial to be in flight", 20*time.Second, func() bool {
 		return pool.lastLease() != nil && pool.lastLease().dialCount() == 1
 	})
 	cancel()
@@ -333,7 +333,7 @@ func TestSend_AConnectionArrivingAfterCancellationNeverProducesARun(t *testing.T
 	// Response, it was dialled once and not again, and the server still says
 	// nothing arrived.
 	close(pool.block)
-	testwait.WaitForTimeout(t, "the late connection to arrive", 20*time.Second, func() bool { return pool.lastLease().conn() != nil })
+	waittest.WaitForTimeout(t, "the late connection to arrive", 20*time.Second, func() bool { return pool.lastLease().conn() != nil })
 	if n := pool.lastLease().dialCount(); n != 1 {
 		t.Errorf("the lease was dialled %d times for one cancelled run, want 1", n)
 	}

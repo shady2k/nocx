@@ -22,7 +22,7 @@ import (
 	"time"
 
 	"github.com/creack/pty"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 	"golang.org/x/sys/unix"
 )
 
@@ -174,7 +174,7 @@ func (s *ptySession) snapshot() string {
 // timeout elapses, then fails the test.
 func (s *ptySession) waitFor(substr string, timeout time.Duration) {
 	s.t.Helper()
-	testwait.WaitForTimeoutDetail(s.t, fmt.Sprintf("pty output %q", substr), timeout,
+	waittest.WaitForTimeoutDetail(s.t, fmt.Sprintf("pty output %q", substr), timeout,
 		func() string { return fmt.Sprintf("output so far: %q", s.snapshot()) },
 		func() bool {
 			return strings.Contains(s.snapshot(), substr)
@@ -328,7 +328,7 @@ func (s *ptySession) termios() unix.Termios {
 // the shell's mode change and misreport the wrapper's restore.
 func (s *ptySession) settleUntilReadline(want unix.Termios, timeout time.Duration) {
 	s.t.Helper()
-	testwait.WaitForTimeoutDetail(s.t, "shell prompt termios", timeout,
+	waittest.WaitForTimeoutDetail(s.t, "shell prompt termios", timeout,
 		func() string { return fmt.Sprintf("got %+v want %+v", s.termios(), want) },
 		func() bool {
 			ts := s.termios()
@@ -340,7 +340,7 @@ func (s *ptySession) settleUntilReadline(want unix.Termios, timeout time.Duratio
 // least twice — the shell left the wrapper and is back at readline.
 func (s *ptySession) waitForPromptAgain(timeout time.Duration) {
 	s.t.Helper()
-	testwait.WaitForTimeoutDetail(s.t, "native prompt after wrapper", timeout,
+	waittest.WaitForTimeoutDetail(s.t, "native prompt after wrapper", timeout,
 		func() string { return fmt.Sprintf("output so far: %q", s.snapshot()) },
 		func() bool {
 			return strings.Count(s.snapshot(), inBandTestPrompt) >= 2
@@ -419,7 +419,7 @@ func TestInBandBootstrap_RealBashCancelRestores(t *testing.T) {
 	}
 	s.waitForPromptAgain(15 * time.Second)
 	s.typeAndWait("echo CANCEL_OK\r", "CANCEL_OK", 15*time.Second)
-	testwait.WaitForTimeout(t, "native prompt after CANCEL_OK", 15*time.Second, func() bool {
+	waittest.WaitForTimeout(t, "native prompt after CANCEL_OK", 15*time.Second, func() bool {
 		return strings.Count(s.snapshot(), inBandTestPrompt) >= 3
 	})
 	s.assertNoIntegrationMarkers()

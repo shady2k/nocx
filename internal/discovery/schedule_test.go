@@ -10,7 +10,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/ssh"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ---------------------------------------------------------------------------
@@ -181,7 +181,7 @@ func TestScheduler_SettleSampleAfterConnectionUp(t *testing.T) {
 
 	// One sample must run once the settle delay passes — the panel that
 	// samples instantly shows an empty host (spec §4).
-	testwait.WaitFor(t, "settle sample to run", func() bool { return conn.execCount() >= 1 })
+	waittest.WaitFor(t, "settle sample to run", func() bool { return conn.execCount() >= 1 })
 	// No observable event represents the absence of a periodic sample; retain
 	// this short window to exercise the negative cadence assertion.
 	time.Sleep(60 * time.Millisecond)
@@ -201,14 +201,14 @@ func TestScheduler_PromptDebounceCoalesces(t *testing.T) {
 	conn := &fakeConnector{}
 	s := testScheduler(t, conn)
 	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
-	testwait.WaitFor(t, "settle sample", func() bool { return conn.execCount() >= 1 })
+	waittest.WaitFor(t, "settle sample", func() bool { return conn.execCount() >= 1 })
 
 	// A user hammering Enter must not queue probes: five rapid hints
 	// produce exactly ONE debounced sample.
 	for range 5 {
 		s.PromptHint("ssh:p1:1")
 	}
-	testwait.WaitFor(t, "debounced sample", func() bool { return conn.execCount() >= 2 })
+	waittest.WaitFor(t, "debounced sample", func() bool { return conn.execCount() >= 2 })
 	// No observable event represents the absence of another debounced sample;
 	// retain this short window to exercise the negative cadence assertion.
 	time.Sleep(60 * time.Millisecond)
@@ -221,7 +221,7 @@ func TestScheduler_PromptHintsWhileSamplingCoalesceToOne(t *testing.T) {
 	conn := &fakeConnector{}
 	s := testScheduler(t, conn)
 	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
-	testwait.WaitFor(t, "settle sample", func() bool { return conn.execCount() >= 1 })
+	waittest.WaitFor(t, "settle sample", func() bool { return conn.execCount() >= 1 })
 
 	f := conn.acquired()[0]
 	block := make(chan struct{})
@@ -229,7 +229,7 @@ func TestScheduler_PromptHintsWhileSamplingCoalesceToOne(t *testing.T) {
 
 	// One hint starts a debounced sample that blocks on the remote exec.
 	s.PromptHint("ssh:p1:1")
-	testwait.WaitFor(t, "blocked sample to start", func() bool { return conn.execCount() >= 2 })
+	waittest.WaitFor(t, "blocked sample to start", func() bool { return conn.execCount() >= 2 })
 
 	// More hints while the sample is in flight: at most one follow-up.
 	for range 5 {
@@ -238,7 +238,7 @@ func TestScheduler_PromptHintsWhileSamplingCoalesceToOne(t *testing.T) {
 	close(block)
 
 	// settle + blocked sample + exactly one coalesced follow-up.
-	testwait.WaitFor(t, "coalesced follow-up sample", func() bool { return conn.execCount() >= 3 })
+	waittest.WaitFor(t, "coalesced follow-up sample", func() bool { return conn.execCount() >= 3 })
 	// No observable event represents the absence of another coalesced sample;
 	// retain this short window to exercise the negative cadence assertion.
 	time.Sleep(80 * time.Millisecond)
@@ -251,7 +251,7 @@ func TestScheduler_HiddenPaneStopsPeriodicSampling(t *testing.T) {
 	conn := &fakeConnector{}
 	s := testScheduler(t, conn)
 	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
-	testwait.WaitFor(t, "settle sample", func() bool { return conn.execCount() >= 1 })
+	waittest.WaitFor(t, "settle sample", func() bool { return conn.execCount() >= 1 })
 
 	// No watcher yet: periodic sampling must NOT run — a background poll
 	// with nobody rendering it is the defect this cadence exists to avoid.
@@ -264,7 +264,7 @@ func TestScheduler_HiddenPaneStopsPeriodicSampling(t *testing.T) {
 
 	// Panel opens: periodic sampling starts.
 	s.SetVisible("ssh:p1:1", true)
-	testwait.WaitFor(t, "periodic samples", func() bool { return conn.execCount() >= 3 })
+	waittest.WaitFor(t, "periodic samples", func() bool { return conn.execCount() >= 3 })
 
 	// Panel hides: periodic sampling stops. Snapshot the count first — a
 	// timer that already fired before the hide may legitimately land one
@@ -283,7 +283,7 @@ func TestScheduler_PauseSuppressesAutomaticSamples(t *testing.T) {
 	conn := &fakeConnector{}
 	s := testScheduler(t, conn)
 	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
-	testwait.WaitFor(t, "settle sample", func() bool { return conn.execCount() >= 1 })
+	waittest.WaitFor(t, "settle sample", func() bool { return conn.execCount() >= 1 })
 
 	s.SetPaused("ssh:p1:1", true)
 
@@ -299,7 +299,7 @@ func TestScheduler_PauseSuppressesAutomaticSamples(t *testing.T) {
 
 	// Resume restores automatic sampling.
 	s.SetPaused("ssh:p1:1", false)
-	testwait.WaitFor(t, "sample after resume", func() bool { return conn.execCount() >= 2 })
+	waittest.WaitFor(t, "sample after resume", func() bool { return conn.execCount() >= 2 })
 }
 
 func TestScheduler_SampleNowActsAsRetry(t *testing.T) {
@@ -317,7 +317,7 @@ func TestScheduler_SampleNowActsAsRetry(t *testing.T) {
 	// written afterwards, once the scheduler has processed the error. Gating
 	// on the first while asserting the second read "pending" about 1% of the
 	// time (nocx-s8df).
-	testwait.WaitFor(t, "refusal recorded in state", func() bool {
+	waittest.WaitFor(t, "refusal recorded in state", func() bool {
 		return s.Status("ssh:p1:1").Sample.State == StatePermissionOrPolicyRefused
 	})
 	// And it took exactly one exec to get there — the assertion the old
@@ -330,7 +330,7 @@ func TestScheduler_SampleNowActsAsRetry(t *testing.T) {
 	// Retry) clears it and samples immediately.
 	f0.queue(sshFakeResponse{result: framedSSH(knownRow)})
 	s.SampleNow("ssh:p1:1")
-	testwait.WaitFor(t, "retry sample", func() bool {
+	waittest.WaitFor(t, "retry sample", func() bool {
 		return s.Status("ssh:p1:1").Sample.State == StateAvailable
 	})
 }
@@ -339,13 +339,13 @@ func TestScheduler_ConnectionLossMarksLostAndReconnectResamples(t *testing.T) {
 	conn := &fakeConnector{}
 	s := testScheduler(t, conn)
 	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
-	testwait.WaitFor(t, "settle sample", func() bool { return conn.execCount() >= 1 })
+	waittest.WaitFor(t, "settle sample", func() bool { return conn.execCount() >= 1 })
 
 	// Transport dies: the lease's Done channel closes (the loss watcher).
 	// A result from the old connection must never apply after reconnect.
 	f0 := conn.acquired()[0]
 	close(f0.done)
-	testwait.WaitFor(t, "conn lost", func() bool { return s.Status("ssh:p1:1").ConnLost })
+	waittest.WaitFor(t, "conn lost", func() bool { return s.Status("ssh:p1:1").ConnLost })
 
 	// No further execs are attempted on the dead lease.
 	s.PromptHint("ssh:p1:1")
@@ -365,7 +365,7 @@ func TestScheduler_ConnectionLossMarksLostAndReconnectResamples(t *testing.T) {
 	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
 	// Wait on the STATE, not the exec count: the count increments while the
 	// sample is still in flight, before the result lands in the status.
-	testwait.WaitFor(t, "post-reconnect sample", func() bool {
+	waittest.WaitFor(t, "post-reconnect sample", func() bool {
 		return s.Status("ssh:p1:1").Sample.State == StateAvailable
 	})
 	st := s.Status("ssh:p1:1")
@@ -381,13 +381,13 @@ func TestScheduler_ConnectionDownReleasesLease(t *testing.T) {
 	conn := &fakeConnector{}
 	s := testScheduler(t, conn)
 	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
-	testwait.WaitFor(t, "settle sample", func() bool { return conn.execCount() >= 1 })
+	waittest.WaitFor(t, "settle sample", func() bool { return conn.execCount() >= 1 })
 
 	// Last tab on the profile closed: the lease is released and the target
 	// is forgotten — no background poll outlives its consumer.
 	f0 := conn.acquired()[0]
 	s.ConnectionDown("ssh:p1:1")
-	testwait.WaitFor(t, "lease release", func() bool {
+	waittest.WaitFor(t, "lease release", func() bool {
 		f0.mu.Lock()
 		defer f0.mu.Unlock()
 		return f0.closed
@@ -454,7 +454,7 @@ func TestScheduler_LocalTarget_SettlesAndSamples(t *testing.T) {
 	s := testScheduler(t, conn, localTestProvider())
 	s.ConnectionUp(LocalTargetID, "machine-host")
 
-	testwait.WaitFor(t, "local settle sample", func() bool {
+	waittest.WaitFor(t, "local settle sample", func() bool {
 		st := s.Status(LocalTargetID)
 		return st.Sample.State == StateAvailable || st.Sample.State == StateAvailableLimited
 	})
@@ -477,11 +477,11 @@ func TestScheduler_LocalAndSSHTargets_RescopeIndependently(t *testing.T) {
 
 	s.ConnectionUp(LocalTargetID, "machine-host")
 	s.ConnectionUp("ssh:p1:1", "host.example", testConnectOption())
-	testwait.WaitFor(t, "local settle sample", func() bool {
+	waittest.WaitFor(t, "local settle sample", func() bool {
 		st := s.Status(LocalTargetID)
 		return st.Sample.State == StateAvailable || st.Sample.State == StateAvailableLimited
 	})
-	testwait.WaitFor(t, "ssh settle sample", func() bool {
+	waittest.WaitFor(t, "ssh settle sample", func() bool {
 		return s.Status("ssh:p1:1").Sample.State == StateAvailable
 	})
 
@@ -514,7 +514,7 @@ func TestScheduler_LocalTarget_PauseSuppressesLocalProbes(t *testing.T) {
 	conn := &fakeConnector{}
 	s := testScheduler(t, conn, localTestProvider())
 	s.ConnectionUp(LocalTargetID, "machine-host")
-	testwait.WaitFor(t, "local settle sample", func() bool {
+	waittest.WaitFor(t, "local settle sample", func() bool {
 		st := s.Status(LocalTargetID)
 		return st.Sample.State == StateAvailable || st.Sample.State == StateAvailableLimited
 	})

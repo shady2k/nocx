@@ -26,7 +26,7 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/storage"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // autonomousPolicyStore returns a store seeded with the autonomous matrix —
@@ -466,7 +466,7 @@ func TestReadScreen_DisconnectedRendererTerminalizes(t *testing.T) {
 	ctx := context.Background()
 	var entryErr error
 	lastState, lastExecs := "<none>", -1
-	testwait.WaitForTimeoutDetail(t, "the run to terminalize", 15*time.Second,
+	waittest.WaitForTimeoutDetail(t, "the run to terminalize", 15*time.Second,
 		func() string {
 			return fmt.Sprintf("run %d never terminalized; last state %s (executions=%d, entry err %v)",
 				res.RunID, lastState, lastExecs, entryErr)

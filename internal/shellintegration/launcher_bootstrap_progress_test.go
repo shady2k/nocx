@@ -33,7 +33,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/shady2k/nocx/internal/bootstrapprogress"
 	"github.com/shady2k/nocx/internal/log"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // progressLog records the stages the reader reports, in order.
@@ -68,7 +68,7 @@ func (p *progressLog) saw(want bootstrapprogress.Stage) bool {
 // something better than a hung test.
 func (p *progressLog) waitForStage(t *testing.T, want bootstrapprogress.Stage) {
 	t.Helper()
-	testwait.WaitForTimeoutDetail(t, fmt.Sprintf("bootstrap stage %q", want), 20*time.Second,
+	waittest.WaitForTimeoutDetail(t, fmt.Sprintf("bootstrap stage %q", want), 20*time.Second,
 		func() string { return fmt.Sprintf("stages=%v", p.all()) },
 		func() bool {
 			return p.saw(want)
@@ -176,7 +176,7 @@ func TestBashBootstrapProgress_AUserRcThatTakesTheShellStopsAtStartupEntered(t *
 	// The wrapper is up, so the exec has happened and no further byte can ever
 	// reach the progress descriptor from our rcfile.
 	var verdict string
-	testwait.WaitForTimeoutDetail(t, "the foreign wrapper verdict", 20*time.Second,
+	waittest.WaitForTimeoutDetail(t, "the foreign wrapper verdict", 20*time.Second,
 		func() string { return fmt.Sprintf("output=%q", s.shell.output()) },
 		func() bool {
 			out := s.shell.output()
@@ -261,7 +261,7 @@ func TestZshBootstrapProgress_AUserRcThatTakesTheShellStopsAtStartupEntered(t *t
 	s := startProgressSession(t, zsh, home)
 
 	var verdict string
-	testwait.WaitForTimeoutDetail(t, "the foreign wrapper verdict", 20*time.Second,
+	waittest.WaitForTimeoutDetail(t, "the foreign wrapper verdict", 20*time.Second,
 		func() string { return fmt.Sprintf("output=%q", s.shell.output()) },
 		func() bool {
 			out := s.shell.output()
@@ -455,7 +455,7 @@ func TestBootstrapProgress_AClosedDescriptorCostsNoTerminal(t *testing.T) {
 			// The premise first, on the shell's own word: a descriptor that
 			// IS open would make everything below vacuous.
 			var verdict string
-			testwait.WaitForTimeoutDetail(t, "the fd 4 descriptor verdict", 20*time.Second,
+			waittest.WaitForTimeoutDetail(t, "the fd 4 descriptor verdict", 20*time.Second,
 				func() string { return fmt.Sprintf("output=%q", s.output()) },
 				func() bool {
 					out := s.output()

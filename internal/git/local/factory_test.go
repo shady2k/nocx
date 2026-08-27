@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/git"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 func TestOpenResolvesRealRepository(t *testing.T) {
@@ -340,7 +340,7 @@ func TestOpenFailureNotReattemptedPerOpen(t *testing.T) {
 	defer f.Stop()
 
 	// The background attempt must have run before we count; poll its marker.
-	testwait.WaitFor(t, "the background resolution to run", func() bool {
+	waittest.WaitFor(t, "the background resolution to run", func() bool {
 		// #nosec G304 — the count path is a test TempDir.
 		b, err := os.ReadFile(count)
 		return err == nil && len(b) > 0
@@ -391,7 +391,7 @@ func TestEnvStateSettlesResolvedWithoutReopen(t *testing.T) {
 	// The background attempt is in flight (gated): the resolution cannot
 	// settle until the test releases it, so the open below is guaranteed
 	// to land in the pre-settle window.
-	testwait.WaitFor(t, "the background resolution to start", func() bool {
+	waittest.WaitFor(t, "the background resolution to start", func() bool {
 		// #nosec G304 — the marker path is a test TempDir.
 		_, err := os.Stat(started)
 		return err == nil

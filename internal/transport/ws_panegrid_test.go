@@ -12,7 +12,7 @@ import (
 	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // feedablePTY is a PTY a test can push output through. The package's own Stub
@@ -92,7 +92,7 @@ func TestTheGridKeepsBeingFedAfterTheClientDisconnects(t *testing.T) {
 	}
 
 	term.emit(t, "before")
-	testwait.WaitForTimeout(t, "the first bytes to reach the grid", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "the first bytes to reach the grid", wantWithin, func() bool {
 		f, err := store.Frame(sid)
 		return err == nil && strings.Contains(f.Text(0), "before")
 	})
@@ -101,7 +101,7 @@ func TestTheGridKeepsBeingFedAfterTheClientDisconnects(t *testing.T) {
 	_ = conn.Close()
 
 	term.emit(t, "\r\nafter")
-	testwait.WaitForTimeout(t, "bytes written while no client is attached", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "bytes written while no client is attached", wantWithin, func() bool {
 		f, err := store.Frame(sid)
 		return err == nil && strings.Contains(f.Text(1), "after")
 	})
@@ -174,7 +174,7 @@ func TestTheGridFollowsThePaneThroughAResize(t *testing.T) {
 	// And the new geometry is the one the emulator actually lays out at: at
 	// twenty columns this line would have wrapped.
 	term.emit(t, "a line longer than twenty columns")
-	testwait.WaitForTimeout(t, "the line to arrive unwrapped", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "the line to arrive unwrapped", wantWithin, func() bool {
 		f, err := store.Frame(sid)
 		return err == nil && strings.Contains(f.Text(0), "a line longer than twenty columns")
 	})
@@ -212,7 +212,7 @@ func TestTheGridIsGoneWhenTheSessionsOutputEnds(t *testing.T) {
 		t.Fatalf("enrol: %v", err)
 	}
 	term.emit(t, "watched")
-	testwait.WaitForTimeout(t, "the grid to be fed", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "the grid to be fed", wantWithin, func() bool {
 		f, err := store.Frame(sid)
 		return err == nil && strings.Contains(f.Text(0), "watched")
 	})
@@ -222,7 +222,7 @@ func TestTheGridIsGoneWhenTheSessionsOutputEnds(t *testing.T) {
 		t.Fatalf("close the pane's pty: %v", err)
 	}
 
-	testwait.WaitForTimeout(t, "the interval to close when the output ended", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "the interval to close when the output ended", wantWithin, func() bool {
 		return !store.Enrolled(sid)
 	})
 	if _, err := store.Frame(sid); err == nil {

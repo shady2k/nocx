@@ -16,7 +16,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/storage"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ---------------------------------------------------------------------------
@@ -130,7 +130,7 @@ func (c *fakeAutoSealClock) armedCount() int {
 // loop twice without waiting would have had the second wake dropped.
 func (c *fakeAutoSealClock) armed(t *testing.T, n int) *fakeAutoSealTimer {
 	t.Helper()
-	testwait.WaitForDetail(t, fmt.Sprintf("the auto-seal loop to arm timer #%d", n),
+	waittest.WaitForDetail(t, fmt.Sprintf("the auto-seal loop to arm timer #%d", n),
 		func() string { return fmt.Sprintf("armed=%d", c.armedCount()) },
 		func() bool { return c.armedCount() >= n },
 	)
@@ -143,7 +143,7 @@ func (c *fakeAutoSealClock) armed(t *testing.T, n int) *fakeAutoSealTimer {
 // this timer, so nothing it might have carried can still fire.
 func waitTimerStopped(t *testing.T, timer *fakeAutoSealTimer, what string) {
 	t.Helper()
-	testwait.WaitFor(t, what, timer.WasStopped)
+	waittest.WaitFor(t, what, timer.WasStopped)
 }
 
 type fakeAutoSealTimer struct {
@@ -577,7 +577,7 @@ func TestSeal_RejectsSlowPut(t *testing.T) {
 		crCh <- err
 	}()
 
-	testwait.WaitFor(t, "the slow provider Put to start", putStarted.Load)
+	waittest.WaitFor(t, "the slow provider Put to start", putStarted.Load)
 	v.Seal()
 	close(putGate)
 
@@ -1058,7 +1058,7 @@ func TestGet_RejectsResultAfterSeal(t *testing.T) {
 		_, goErr = v.Get(ctx, id)
 		got <- goErr
 	}()
-	testwait.WaitFor(t, "the Get provider call to start", getStarted.Load)
+	waittest.WaitFor(t, "the Get provider call to start", getStarted.Load)
 
 	v.Seal()
 	close(getGate)
@@ -1439,7 +1439,7 @@ func TestExists_RejectsResultAfterSeal(t *testing.T) {
 		got <- goErr
 	}()
 
-	testwait.WaitFor(t, "the Exists provider call to start", getStarted.Load)
+	waittest.WaitFor(t, "the Exists provider call to start", getStarted.Load)
 
 	v.Seal()
 	close(getGate)
@@ -2132,7 +2132,7 @@ func TestAutoSeal_TimerFiresAndSeals(t *testing.T) {
 	v.wakeAutoSeal()
 	clock.armed(t, 2).Fire()
 
-	testwait.WaitFor(t, "auto-seal timer to seal the vault", func() bool {
+	waittest.WaitFor(t, "auto-seal timer to seal the vault", func() bool {
 		return v.State() == StateSealed
 	})
 }
@@ -2165,7 +2165,7 @@ func TestAutoSeal_ActivityPreventsSeal(t *testing.T) {
 	}
 
 	clock.armed(t, 3).Fire()
-	testwait.WaitFor(t, "reset auto-seal timer to seal the vault", func() bool {
+	waittest.WaitFor(t, "reset auto-seal timer to seal the vault", func() bool {
 		return v.State() == StateSealed
 	})
 }

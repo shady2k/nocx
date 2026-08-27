@@ -24,7 +24,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/session"
-	"github.com/shady2k/nocx/internal/testwait"
+	"github.com/shady2k/nocx/internal/waittest"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -177,7 +177,7 @@ func TestSessionEndIsRaisedWithNoRendererAttached(t *testing.T) {
 	sid, conn := openExitSession(t, ws)
 
 	_ = conn.Close()
-	testwait.WaitForTimeout(t, "the disconnect to clear the subscriber slot", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "the disconnect to clear the subscriber slot", wantWithin, func() bool {
 		rx := ws.getRx(session.ID(sid))
 		if rx == nil {
 			return true
@@ -187,7 +187,7 @@ func TestSessionEndIsRaisedWithNoRendererAttached(t *testing.T) {
 	})
 
 	fake.recordWait(realExitStatus(3))
-	testwait.WaitForTimeout(t, "the session.ended raise", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "the session.ended raise", wantWithin, func() bool {
 		return len(raiser.captured()) == 1
 	})
 	if got := raiser.captured()[0]; got.Kind != notify.KindSessionEnded {

@@ -29,12 +29,14 @@ import (
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/vault"
 )
 
@@ -350,6 +352,118 @@ func TestAsk_RefusalCompletesTheRun(t *testing.T) {
 	}
 	assertNoFrameworkWords(t, state+" "+sentence)
 }
+
+// unknownToolThenAnswer is a provider that first proposes one tool call and
+// then answers after receiving the model-visible result. The atomic flag is
+// set only when the expected result crossed the real model boundary.
+func unknownToolThenAnswer(name, args, expected string, firstBody *atomic.Value, saw *atomic.Bool) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if firstBody.Load() == nil {
+			firstBody.Store(string(body))
+		}
+		if strings.Contains(string(body), `"role":"tool"`) {
+			if strings.Contains(string(body), expected) {
+				saw.Store(true)
+			}
+			streamOKChunks(w)
+			return
+		}
+		streamToolCallChunk(w, name, args)
+	}
+}
+
+func unknownToolRun(t *testing.T, policy *assistant.GlobalPolicyStore, name, args, expected string) (string, string, error, bool, string, bool) {
+	t.Helper()
+	saw := &atomic.Bool{}
+	var firstBody atomic.Value
+	srv := httptest.NewServer(unknownToolThenAnswer(name, args, expected, &firstBody, saw))
+	t.Cleanup(srv.Close)
+
+	rec := &recordingClient{inner: mustClient(t)}
+	h := newAskHarnessWithOpts(t, rec, WithAgentPolicy(policy))
+	h.createEndpointAt(srv.URL)
+	sid := openLocalSession(t, h.conn)
+	if _, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId":     "ask-unknown-tool",
+		"sessionId": sid,
+		"question":  "what is on the screen?",
+		"cwd":       "/repo",
+	}, 2); errObj != nil {
+		t.Fatalf("ask: %+v", errObj)
+	}
+	raw := readNotification(t, h.conn, "agent.runState", 15*time.Second)
+	var st struct {
+		State string `json:"state"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &st); err != nil {
+		t.Fatalf("runState unmarshal: %v\nraw: %s", err, raw)
+	}
+	_, approvalRequested := inboxOf(h.conn).take(isNotification("agent.approvalRequested"))
+	body, _ := firstBody.Load().(string)
+	return st.State, st.Error, rec.lastError(), saw.Load(), body, approvalRequested
+}
+
+func refusingPolicyStore(t *testing.T) *assistant.GlobalPolicyStore {
+	t.Helper()
+	refuse := content.EffectRow{Decision: content.DecisionRefuse}
+	policy := content.EffectPolicy{
+		Observe: refuse, MutateReversible: refuse, MutateDestructive: refuse,
+		PrivilegeChange: refuse, Disclose: refuse, CrossBoundary: refuse,
+		Delegate: refuse,
+	}
+	store := assistant.NewGlobalPolicyStore(storage.NewDocumentStore(t.TempDir()), "agent-policy.json")
+	if err := store.SetPolicy(policy); err != nil {
+		t.Fatalf("seed refusing policy: %v", err)
+	}
+	return store
+}
+
+// TestAsk_StandingNeverUnknownCallCompletes proves the all-refused shape:
+// ForGrant still declares no tools, but a model call for a known tool is
+// intercepted before eino's no-tools path can fail the turn. The tool is
+// neither advertised nor executed; its standing policy refusal is returned
+// to the model, which answers in words.
+func TestAsk_StandingNeverUnknownCallCompletes(t *testing.T) {
+	const expected = "this kind of action is refused by the policy this question runs under"
+	state, sentence, engineErr, saw, firstBody, approvalRequested := unknownToolRun(
+		t, refusingPolicyStore(t), "session.read", `{"sessionId":"not-this-run"}`, expected,
+	)
+	if state != "completed" || sentence != "" || engineErr != nil {
+		t.Fatalf("run = state %q, sentence %q, error %v; want completed refusal answer", state, sentence, engineErr)
+	}
+	if !saw {
+		t.Fatal("the standing-policy refusal never reached the model as a tool result")
+	}
+	if strings.Contains(firstBody, `"name":"session.read"`) ||
+		strings.Contains(firstBody, unknownToolAnchorNameForTest) {
+		t.Fatalf("Never policy advertised a refused or internal tool: %s", firstBody)
+	}
+	if approvalRequested {
+		t.Fatal("Never policy raised an approval request after the run completed")
+	}
+}
+
+// TestAsk_InventedUnknownCallCompletes proves a wholly invented name follows
+// the same model-visible result path while permitted tools remain advertised.
+func TestAsk_InventedUnknownCallCompletes(t *testing.T) {
+	const expected = "There is no such tool"
+	state, sentence, engineErr, saw, _, approvalRequested := unknownToolRun(
+		t, autonomousPolicyStore(t), "model.invented.tool", `{}`, expected,
+	)
+	if state != "completed" || sentence != "" || engineErr != nil {
+		t.Fatalf("run = state %q, sentence %q, error %v; want completed unknown-tool answer", state, sentence, engineErr)
+	}
+	if !saw {
+		t.Fatal("the invented-tool explanation never reached the model as a tool result")
+	}
+	if approvalRequested {
+		t.Fatal("invented tool raised an approval request")
+	}
+}
+
+const unknownToolAnchorNameForTest = "nocx.internal.unknown-tool-anchor"
 
 // ── cause 2: the model's tool call was malformed ─────────────────────────
 

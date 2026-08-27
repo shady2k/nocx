@@ -28,6 +28,7 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
+	"github.com/cloudwego/eino/schema"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
@@ -61,6 +62,14 @@ func newPolicyMiddleware(logger log.Logger, grant content.Grant, registry agentt
 
 // WrapInvokableToolCall installs the pipeline on one tool call.
 func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint adk.InvokableToolCallEndpoint, tCtx *adk.ToolContext) (adk.InvokableToolCallEndpoint, error) {
+	if tCtx != nil && tCtx.Name == unknownToolAnchorName {
+		return func(_ context.Context, rawArgs string, _ ...tool.Option) (string, error) {
+			// The anchor keeps ADK on its ToolsNode path when every real
+			// tool is refused. It is never offered to the model and must
+			// not execute if a model guesses its internal name.
+			return m.UnknownTool(tCtx.Name, rawArgs)
+		}, nil
+	}
 	return func(ctx context.Context, rawArgs string, _ ...tool.Option) (string, error) {
 		// The batch latch, before anything else: once a call in this model
 		// response refused or escalated, every later call returns immediately
@@ -106,6 +115,32 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 // attempt with a fresh latch.
 func (m *policyMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatModelAgentContext) (context.Context, *adk.ChatModelAgentContext, error) {
 	return withLatch(ctx, &batchLatch{}), runCtx, nil
+}
+
+// BeforeModelRewriteState hides the internal anchor from every model request.
+// The actual ToolsNode keeps it so ADK can route a tool call through
+// UnknownToolsHandler even when the grant has no permitted tools.
+func (m *policyMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, _ *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
+	if state == nil {
+		return ctx, state, nil
+	}
+	var filtered []*schema.ToolInfo
+	for i, info := range state.ToolInfos {
+		if info == nil || info.Name != unknownToolAnchorName {
+			if filtered != nil {
+				filtered = append(filtered, info)
+			}
+			continue
+		}
+		if filtered == nil {
+			filtered = make([]*schema.ToolInfo, 0, len(state.ToolInfos)-1)
+			filtered = append(filtered, state.ToolInfos[:i]...)
+		}
+	}
+	if filtered != nil {
+		state.ToolInfos = filtered
+	}
+	return ctx, state, nil
 }
 
 // deferred returns what a latched call returns: an interrupt error, so the

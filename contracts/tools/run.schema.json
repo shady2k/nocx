@@ -21,7 +21,7 @@
   "$defs": {
     "result": {
       "title": "RunResult",
-      "description": "What the run tool hands back to whoever asked for it — the model under a declared call, a program's variable under the program carrier. The command's output is `text`; there is no `output` and no `stdout` (a live model guessed both). The window contract of design §4.4 is stated here rather than in the params: the renderer clamps a long output and says which span it actually returned, so a truncation is visible instead of silent.",
+      "description": "What the run tool hands back to whoever asked for it — the model under a declared call. The command's output is `text`; there is no `output` and no `stdout` (a live model guessed both). The window contract of design §4.4 is stated here rather than in the params: the renderer clamps a long output and says which span it actually returned, so a truncation is visible instead of silent.",
       "type": "object",
       "additionalProperties": false,
       "required": [

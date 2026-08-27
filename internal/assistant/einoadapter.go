@@ -12,9 +12,9 @@ package assistant
 //
 //   - The BATCH LATCH. "Every later call in this model response stops" is a
 //     statement about a model response, which is a shape only a model
-//     proposing calls in batches has. Under the composing carriers the model
-//     proposes one envelope, so the latch has nothing to latch and costs
-//     nothing.
+//     proposing calls in batches has. The retained declared-call path
+//     proposes calls one at a time, so the latch has nothing to latch and
+//     costs nothing.
 //   - The INTERRUPT. compose.StatefulInterrupt is how eino suspends. A
 //     carrier says "a person must answer this" by returning
 //     *ApprovalRequestedError or *EgressRequestedError; turning that into a
@@ -34,34 +34,29 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 )
 
-// policyMiddleware is THE RUN'S CARRIER wearing eino's middleware interface.
-// It holds no state of its own: the run's facts belong to the kernel, and
-// two owners of them is the thing this split exists to prevent.
+// policyMiddleware is the retained declared-call carrier wearing eino's
+// middleware interface. It holds no state of its own: the run's facts belong
+// to the kernel, and two owners of them is the thing this split exists to
+// prevent.
 //
 // It is the carrier rather than the kernel because the framework's seam is
-// "the model reached for a tool", and which tools exist and what reaching for
-// one does is exactly what the three carriers differ on (carrier.go). The
-// kernel is still underneath every one of them.
+// "the model reached for a tool"; the kernel is still underneath it.
 type policyMiddleware struct {
 	adk.BaseChatModelAgentMiddleware
 	carrier
 	kernel *effectKernel
 }
 
-// newPolicyMiddleware builds the kernel for one run, wraps it in the carrier
-// the person chose, and dresses the pair as eino's middleware. Every argument
-// after kind is the kernel's; see newEffectKernel for what each one is and
-// which may be nil.
-func newPolicyMiddleware(kind CarrierKind, runs *parkedRuns, logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, turnEntryID string, requester RendererRequester, classifier CallClassifier, onCall func(ToolCall) error) (*policyMiddleware, error) {
+// newPolicyMiddleware builds the kernel for one run, wraps the declared-call
+// carrier in eino's middleware interface, and dresses the pair as eino's
+// middleware. Every argument is the kernel's; see newEffectKernel for what
+// each one is and which may be nil.
+func newPolicyMiddleware(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, turnEntryID string, requester RendererRequester, classifier CallClassifier, onCall func(ToolCall) error) (*policyMiddleware, error) {
 	k, err := newEffectKernel(logger, grant, registry, ledger, approvals, known, runID, attempt, turnEntryID, requester, classifier, onCall)
 	if err != nil {
 		return nil, err
 	}
-	c, err := newCarrier(kind, k, runs, runID)
-	if err != nil {
-		return nil, err
-	}
-	return &policyMiddleware{carrier: c, kernel: k}, nil
+	return &policyMiddleware{carrier: &callsCarrier{effectKernel: k}, kernel: k}, nil
 }
 
 // WrapInvokableToolCall installs the pipeline on one tool call.

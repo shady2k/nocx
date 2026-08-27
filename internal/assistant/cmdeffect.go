@@ -59,10 +59,6 @@ func commandEffect(inv content.Invocation, declared content.Effect) content.Effe
 	return content.EffectObserve
 }
 
-func CommandEffect(command string, declared content.Effect) content.Effect {
-	return commandEffect(parseCanonicalInvocation(command), declared)
-}
-
 type readProgramRule struct {
 	disqualifies func([]string) bool
 }

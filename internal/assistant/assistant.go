@@ -255,14 +255,6 @@ type AskParams struct {
 	// is the un-bound shape every caller has today.
 	RunID   string
 	Attempt int
-	// Carrier is HOW this run composes multi-step work (nocx-d6gn4.8): the
-	// person's choice, read off settings.AssistantCarrier by the transport
-	// and passed through so a run is driven by the method it is recorded as
-	// having used. Empty is the shipped method, CarrierCalls; a value naming
-	// no carrier is refused rather than silently replaced, because a run
-	// recorded as one method and executed as another makes every measurement
-	// the experiment takes unattributable.
-	Carrier CarrierKind
 	// TurnEntryID is the TURN's own ledger entry — the one entry a turn is
 	// since ADR-0039, and what everything this run causes is joined to by a
 	// `caused-by` edge (nocx-h1l4o).
@@ -403,7 +395,6 @@ func newClientWithRegistry(logger log.Logger, reg agenttools.Registry) Client {
 		tools:       reg,
 		approvals:   NewApprovalStore(),
 		checkpoints: newRunCheckpoints(),
-		parked:      newParkedRuns(logger),
 	}
 }
 
@@ -416,9 +407,4 @@ type client struct {
 	// "approval resumes FROM THE CHECKPOINT"). One per client, keyed by run
 	// id, shared by every run the server drives — see checkpoints.go.
 	checkpoints *runCheckpoints
-	// parked is the same idea for a carrier that holds its continuation on a
-	// goroutine rather than in the framework's state (parkedrun.go). Two
-	// stores rather than one because they hold different things for different
-	// carriers; both are keyed by run id and both are emptied by Discard.
-	parked *parkedRuns
 }

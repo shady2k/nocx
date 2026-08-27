@@ -9,10 +9,8 @@ package assistant
 // import the framework or copy the kernel, and AD-8 forbids both in one
 // sentence: a new implementation is added "without editing a switch and
 // without copying lines". Suspension is therefore stated in OUR words —
-// Invoke returns *ApprovalRequestedError or *EgressRequestedError — and
-// whichever carrier is driving translates that into its own way of stopping
-// (einoadapter.go for the declared-call carrier; a parked goroutine for a
-// program; a halted walk for a graph). kernel_test.go holds the guard, read
+// Invoke returns *ApprovalRequestedError or *EgressRequestedError — and the
+// retained declared-call adapter translates that into eino's interrupt.
 // over the RECEIVER: no file declaring a kernel method may import eino.
 //
 // This layer SEQUENCES AND ENFORCES; it does not implement. Masking has an
@@ -91,8 +89,7 @@ const (
 // this type existed it reached the block only because the transport's default
 // arm concatenated err.Error(), which is what dragged eino's
 // "[NodeRunError] … node path: […]" onto the screen with it. Deleting that
-// concatenation without this type would have silently swallowed a working
-// sentence, so the sentence gets a carrier of its own instead.
+// sentence gets a field of its own instead.
 //
 // Unwrap returns the tool's error, so terminationReasonOf's lease check and
 // every other errors.Is/As over the inner error are unchanged.
@@ -494,26 +491,6 @@ const (
 	policyAsk
 	policyRefuse
 )
-
-// decide is the permit/ask/refuse function over the ADR-0020 lattice
-// (decision 6) as amended (2026-08-16, amendment pending owner approval):
-// the grant's policy MATRIX carries one decision per effect class, and two
-// rules hold under any matrix — a call naming a resource outside the
-// SELECTED EFFECT's row scopes is refused (the tool's contract is "within
-// the grant's paths"; widening the grant is a NEW grant on a NEW attempt,
-// never a mid-run question), and an effect the matrix refuses is refused
-// (the tool should never have been declared under this grant — ForGrant
-// filters — and this is the defense that holds if the declaration path is
-// bypassed).
-//
-// The second return value is meaningful ONLY for policyRefuse: it is the
-// reason, and it exists because the product must tell a person WHY a call did
-// not run. It is returned from here rather than re-derived at the transport —
-// the two branches below are the whole of "why", and a second derivation of
-// one question is the defect AGENTS.md spends a section on.
-func (m *effectKernel) decide(t agenttools.Tool, args map[string]any) (policyOutcome, PolicyRefusalReason) {
-	return m.decideInvocation(t, args, content.Invocation{Parsed: true})
-}
 
 func (m *effectKernel) decideInvocation(t agenttools.Tool, args map[string]any, invocation content.Invocation) (policyOutcome, PolicyRefusalReason) {
 	decision := m.grant.Policy.DecisionForInvocation(t.Effect, invocation)
@@ -1239,9 +1216,8 @@ func tripLatch(ctx context.Context, reason error) {
 // *ApprovalRequestedError when a person must answer before the call may run,
 // *EgressRequestedError when the call ran and its result may not leave until
 // a person has seen what was found in it. Both carry the request the surface
-// renders. A carrier translates them into whatever it uses to stop — an eino
-// interrupt, a parked goroutine, a halted graph walk — and none of that is
-// the kernel's business.
+// renders. The retained declared-call adapter translates those values into
+// eino interrupts; that framework detail is not the kernel's business.
 func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string) (string, error) {
 	out, err := k.invokeClassified(ctx, name, callID, rawArgs)
 	if err != nil {
@@ -1423,8 +1399,8 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// could produce a different result than the one approved.
 	out, runErr := k.runWithRetained(decl, callID, ctx, capability, []byte(rawArgs))
 	// 6b. The result is held to what the tool DECLARES it returns, before
-	// anything reads it — the egress gate, a program's variable, the
-	// model. Only a successful call has a result to check.
+	// anything reads it — the egress gate or the model. Only a successful call
+	// has a result to check.
 	if runErr == nil {
 		if err := k.checkResult(decl.Name, out); err != nil {
 			k.warn("agent tool: the result does not match its own contract",
@@ -1517,31 +1493,14 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		return modelResult{}, fmt.Errorf("agent tool %q: record outcome: %w", decl.Name, err)
 	}
 	// The RESULT, unframed. Marking a result as untrusted data for a model to
-	// read is a statement addressed to a model, and only a carrier that talks
-	// to one can make it — the program carrier hands this value to an
-	// interpreter, where a <tool-output> wrapper would be text to parse back
-	// off. FrameForModel below is the projection, kept here so there is still
-	// exactly one place that knows how a result is presented to a model.
+	// read is a statement addressed to a model, and the retained declared-call
+	// adapter applies that projection before returning it to the model.
 	return modelResult{text: out, kind: modelToolOutput}, nil
 }
 
-// Declares reports whether a tool exists at all. A carrier that validates a
-// plan before running it needs this, and must not keep its own list: two
-// answers to "which tools exist" disagree the day one is added.
-func (k *effectKernel) Declares(tool string) bool {
-	_, ok := k.registry.Lookup(tool)
-	return ok
-}
-
-// note and warn are the kernel's logger with the nil check the whole package
-// needs. A client built without a logger is the ordinary shape in a test, and
-// a diagnostic that panics a run is worse than no diagnostic at all — which is
-// exactly what happened the first time these were called directly.
-func (k *effectKernel) note(msg string, args ...any) {
-	if k.log != nil {
-		k.log.Info(msg, args...)
-	}
-}
+// warn is the kernel's logger with the nil check the whole package needs. A
+// client built without a logger is the ordinary shape in a test, and a
+// diagnostic that panics a run is worse than no diagnostic at all.
 
 func (k *effectKernel) warn(msg string, args ...any) {
 	if k.log != nil {

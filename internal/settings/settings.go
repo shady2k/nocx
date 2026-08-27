@@ -889,49 +889,6 @@ var AssistantExpandReasoning = MustRegisterBool(BoolSpec{
 // between the two stores, and check a new key against it before adding one
 // here.
 
-// AssistantCarrier chooses HOW the assistant composes multi-step work
-// (nocx-d6gn4.8). It is the experiment's controlled cohort, and it exists
-// because the alternative measures the wrong thing: declare two methods to
-// the model at once and "which one it reaches for" reports tool-description
-// salience, ordering and model bias rather than fitness.
-//
-//   - calls    — the model names one effect, the host runs it, the result
-//     comes back into the model's context, and the model names the next.
-//     Every step costs a model turn and every intermediate result is read
-//     by the model.
-//   - program  — the model writes ONE bounded program and the interpreter
-//     carries a result from one effect into the arguments of the next. A
-//     chain of dependent effects costs one model turn and the intermediate
-//     value never enters the context.
-//   - graph    — the model emits a plan of effect sites and pure
-//     expressions. It expresses less than a program and buys one thing for
-//     it: the whole plan can be shown to a person BEFORE anything runs.
-//
-// UNDER DEVELOPER, IN A SECTION OF ITS OWN, and both halves are decisions.
-// The group already means "not for everyday use", which is exactly what an
-// unfinished experiment is; a top-level Experimental GROUP would be a
-// promise about a whole class of features we do not intend to make. The
-// section is its own rather than joining Test because Test is the fixture
-// section the test binaries declare into — a shipped setting living there
-// would be indistinguishable from a fixture.
-//
-// Default calls: the authority floor is the declared-call carrier, and a
-// person who has never opened this page must get the method the product is
-// actually built on.
-var AssistantCarrier = MustRegisterSelect(SelectSpec{
-	Key:         "assistant.carrier",
-	Section:     "Experimental",
-	Label:       "How the assistant composes multi-step work",
-	Description: "Calls is the shipped method: the assistant asks for one thing at a time and reads each result before asking for the next. Program lets it write one small program instead, so a chain of steps happens in a single turn and the middle results never reach the model. Plan lets it lay out the whole sequence first, which is the only method that can show you every step before any of them runs. All three obey the same permissions and ask you the same questions.",
-	DataClass:   PublicConfig,
-	Default:     "calls",
-	Options: []SelectOption{
-		{Value: "calls", Label: "One call at a time"},
-		{Value: "program", Label: "One program"},
-		{Value: "graph", Label: "One plan"},
-	},
-})
-
 // ── Declared groups ────────────────────────────────────────────────────
 // The settings rail's group catalogue (nocx-dgsp): declared here, shipped
 // beside the declarations in settings.describe, rendered by the frontend
@@ -953,10 +910,6 @@ func init() {
 	// is grouped here so the rail shows it under Developer in every build
 	// that carries it (criterion 7).
 	RegisterSectionGroup("Test", "developer")
-	// Experimental is where a setting that switches an unfinished mechanism
-	// lives (nocx-d6gn4.8). Under Developer rather than a group of its own:
-	// see AssistantCarrier for why.
-	RegisterSectionGroup("Experimental", "developer")
 }
 
 // ── Document shape ─────────────────────────────────────────────────────

@@ -507,14 +507,6 @@ type agentHandlers struct {
 	// built without it, which is what a unit test constructing the struct
 	// directly has.
 	personalInstructions func() string
-	// carrier reads the person's chosen method for composing multi-step work
-	// (settings.AssistantCarrier, nocx-d6gn4.8). A function for the same
-	// reason personalInstructions is one: it must be read WHEN the question
-	// is asked, so switching the method takes effect on the next question
-	// with no restart — which is the whole point of a switch that exists to
-	// be compared against itself. A handler built without it uses the
-	// shipped carrier.
-	carrier func() assistant.CarrierKind
 	// sessionPolicy is where "allow in this session" lands and where it
 	// dies (ws_sessionpolicy.go). Never nil: the server constructs one.
 	sessionPolicy *sessionPolicyStore
@@ -572,19 +564,13 @@ func environmentForSession(sess session.Session) content.Environment {
 //     the request path, and handed in — the prompt function never looks a
 //     setting up. Read fresh per ask, so a change on the settings screen
 //     governs the next question with no restart and nothing to invalidate.
-//   - The CARRIER is read here for the same reason the paragraph is: it has
-//     an owner, and the owner is the settings document. The prompt describes
-//     how the model acts, and under a composing carrier "the tools you are
-//     given" is not how it acts — so the fact travels with the ask rather
-//     than being assumed by the prompt.
-func systemPromptFactsFor(sessionID, cwd string, env content.Environment, attached []assistant.AttachedContentItem, personal string, carrier assistant.CarrierKind) assistant.SystemPromptFacts {
+func systemPromptFactsFor(sessionID, cwd string, env content.Environment, attached []assistant.AttachedContentItem, personal string) assistant.SystemPromptFacts {
 	f := assistant.SystemPromptFacts{
 		SessionID:            sessionID,
 		Cwd:                  cwd,
 		Env:                  env,
 		AttachedContent:      attached,
 		PersonalInstructions: personal,
-		Carrier:              carrier,
 	}
 	if env.Kind != content.EnvSSH {
 		f.OS = runtime.GOOS
@@ -617,32 +603,6 @@ func (s *WSServer) personalInstructionsText() string {
 		return ""
 	}
 	return v
-}
-
-// chosenCarrier is the seam read, or the shipped carrier when this handler
-// was built without it — a unit test constructing agentHandlers directly,
-// never the registration builder.
-func (h agentHandlers) chosenCarrier() assistant.CarrierKind {
-	if h.carrier == nil {
-		return assistant.CarrierCalls
-	}
-	return h.carrier()
-}
-
-// assistantCarrier reads the person's chosen method out of the settings
-// registry — the document that owns it. Nil registry (a server built without
-// settings) and a rejected read are both "they have not chosen", which is the
-// shipped method: the declared-call carrier is the authority floor, and a
-// person who never opened the page must get what the product is built on.
-func (s *WSServer) assistantCarrier() assistant.CarrierKind {
-	if s.settings == nil {
-		return assistant.CarrierCalls
-	}
-	v, err := s.settings.GetSelect(settings.AssistantCarrier)
-	if err != nil {
-		return assistant.CarrierCalls
-	}
-	return assistant.CarrierKind(v)
 }
 
 // errNoEndpoint is the ask's no-endpoint refusal: a renderable condition
@@ -817,7 +777,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		// carried and the ledger recorded with it, the pane's environment
 		// as environmentForSession already derived it, and the person's
 		// own paragraph as the settings document holds it right now.
-		promptFacts: systemPromptFactsFor(p.SessionID, in.Cwd, in.Env, attached, h.personalParagraph(), h.chosenCarrier()),
+		promptFacts: systemPromptFactsFor(p.SessionID, in.Cwd, in.Env, attached, h.personalParagraph()),
 	}
 	h.pendingRunsMu.Lock()
 	h.pendingRuns[rc.runID] = rc
@@ -1023,7 +983,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	var reasoningChars, answerChars, toolCalls int
 	streamStarted := time.Now()
 	h.log.Info("agent ask: streaming", "run", rc.runID, "model", rc.model,
-		"carrier", string(h.chosenCarrier()), "question", len(rc.question))
+		"question", len(rc.question))
 	// The gate deltas may not pass before: a delta persisted before the
 	// streaming transition commits would be a delta outside the run's
 	// non-terminal span.
@@ -1121,7 +1081,6 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Requester:     h.requester,
 		KnownMaterial: h.knownMaterial,
 		Approvals:     h.approvals,
-		Carrier:       h.chosenCarrier(),
 		RunID:         strconv.FormatInt(rc.runID, 10),
 		Attempt:       rc.attempt,
 		// The turn every entry this run causes is joined to (nocx-h1l4o).
@@ -1328,7 +1287,8 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// and whatever else the engine wrapped, which is the only place
 		// that trace survives at all.
 		h.log.Warn("agent ask: the run failed",
-			"run", rc.runID, "reason", string(reason), "sentence", sentence, "error", err)
+			"run", rc.runID, "reason", string(reason), "sentence", sentence,
+			"error", err, "callPath", log.CallPath(0))
 		h.terminalize(ctx, rc, dropped, content.RunFailed, reason, sentence, r)
 		return
 	}
@@ -2310,7 +2270,6 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,
 			personalInstructions: s.personalInstructionsText,
-			carrier:              s.assistantCarrier,
 			sessionPolicy:        s.sessionPolicy, globalPolicy: s.agentPolicy,
 			log: s.log, state: state, clientID: connectionID(w), r: r,
 		}

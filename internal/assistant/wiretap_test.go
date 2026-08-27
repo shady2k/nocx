@@ -6,6 +6,7 @@ package assistant
 
 import (
 	"context"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -19,24 +20,28 @@ func TestWireTap_RecordsBothHalvesAndNeverTheKey(t *testing.T) {
 	defer func() { wireLogPath = old }()
 
 	grant, dir := testDirGrant(t, autonomousMatrix())
-	chainedFiles(t, dir)
+	file := filepath.Join(dir, "a.txt")
+	writeFile(t, file, "wire tap fixture")
+	args, err := json.Marshal(map[string]string{"path": file})
+	if err != nil {
+		t.Fatalf("marshal files.read args: %v", err)
+	}
 	_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{
-		name: "run_program",
-		args: jsonArgs(t, map[string]any{"source": programSource(dir)}),
+		name: "files.read",
+		args: string(args),
 	}))
 	defer srv.Close()
 	cl, _ := newClient(nil, os.DirFS(realToolsFS))
 	p := askParams(srv.URL, &grant, &fakeLedger{}, NewApprovalStore())
-	p.Carrier = CarrierProgram
-	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
-		t.Fatalf("Ask: %v", err)
+	if askErr := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); askErr != nil {
+		t.Fatalf("Ask: %v", askErr)
 	}
 	b, err := os.ReadFile(path) // #nosec G304 — the test wrote this path itself
 	if err != nil {
 		t.Fatalf("the tap wrote nothing: %v", err)
 	}
 	got := string(b)
-	for _, want := range []string{"REQUEST POST", "run_program", "RESPONSE 200", "RESPONSE BODY", "chat.completion.chunk"} {
+	for _, want := range []string{"REQUEST POST", "files.read", "RESPONSE 200", "RESPONSE BODY", "chat.completion.chunk"} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("wire log lacks %q:\n%s", want, got)
 		}

@@ -1,6 +1,6 @@
 package assistant
 
-// THE WIRE, VERBATIM (nocx-d6gn4.8).
+// THE WIRE, VERBATIM.
 //
 // When a run goes wrong the question is always the same and until now nothing
 // could answer it: what did we actually send the model, and what did it

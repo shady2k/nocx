@@ -102,30 +102,3 @@ func TestToolDescription_CarriesNoAuthorityVocabulary(t *testing.T) {
 		}
 	}
 }
-
-// THE DIALECT IS STATED, and every line of the list was bought by a live
-// model losing a turn to it (nocx-d6gn4.8.1). Read from one reasoning trace:
-// the model started `import subprocess`, stopped itself, asked whether it was
-// writing a shell script or Starlark, wrote `try:` (which a previous run had
-// already died on), and considered `for…else`. It spent thousands of tokens
-// deciding what the language was, because the description named one
-// difference from Python and left the rest to be guessed.
-func TestProgramDescription_NamesWhatTheDialectDoesNotHave(t *testing.T) {
-	grant, _ := testDirGrant(t, autonomousMatrix())
-	k := kernelFor(t, grant, &fakeLedger{})
-	desc := programDescription(k.registry.ForGrant(k.grant))
-
-	for _, want := range []string{
-		"No import",
-		"No try/except",
-		"No f-strings",
-		"no `while`, and no recursion",
-		// And what IS there: a list of absences alone reads as a warning to
-		// stay away from the language altogether.
-		"What IS there: def",
-	} {
-		if !strings.Contains(desc, want) {
-			t.Fatalf("the description does not say %q:\n%s", want, desc)
-		}
-	}
-}

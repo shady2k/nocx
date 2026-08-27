@@ -4252,8 +4252,17 @@ export class TerminalContent extends BasePaneContent {
     if (answer === null || command === null) return
     const parent = command.el.parentElement
     if (parent === null) return
-    parent.insertBefore(answer, command.el.nextSibling)
-    answer.classList.remove('nocx-answer-overlay')
+    const settle = this.scrollback
+    const seat = () => {
+      parent.insertBefore(answer, command.el.nextSibling)
+      answer.classList.remove('nocx-answer-overlay')
+      // Reparenting extends the scrollback after the command-end settle has
+      // already positioned the command. Follow the new answer tail as well,
+      // or a long streamed answer remains below the fold.
+      settle?.scrollToBottomIfFollowing()
+    }
+    if (settle) settle.settleAround(seat)
+    else seat()
     this._summonedAnswer = null
     this._summonedCommand = null
   }

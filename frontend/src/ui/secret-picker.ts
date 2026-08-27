@@ -388,9 +388,23 @@ export class SecretPicker {
     this.render()
   }
 
+  /** Mouse hover moves the selection — and a hover that moves it NOWHERE
+   *  must not re-render.
+   *
+   *  `FloatingPanel.show` rebuilds the list, so a re-render replaces every row
+   *  node. The fresh node lands under a cursor that has not moved and fires
+   *  `mouseenter` again, which arrives here with the index that is already
+   *  selected — and without this guard that is a loop: the list rebuilds
+   *  itself under the pointer for as long as the pointer rests on it. It also
+   *  makes a click on a row a race with the row's own hover handler, because
+   *  the node a press began on can be replaced before the press finishes
+   *  (nocx-vzdna: this is what Playwright reported as "element was detached
+   *  from the DOM"). One re-render per actual change of selection is all the
+   *  surface ever needed. */
   private hover(index: number): void {
     const s = this.state
     if (s.name !== 'list') return
+    if (s.selected === index) return
     this.state = { ...s, selected: index }
     this.render()
   }

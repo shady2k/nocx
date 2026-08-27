@@ -594,3 +594,57 @@ describe('SecretPicker: the explicit door', () => {
     expect(rows(h.container).map((r) => r.text)).toEqual(['openai-key', 'Add a secret…'])
   })
 })
+
+describe('SecretPicker: hovering a row does not rebuild the list under the cursor', () => {
+  /** The node identity of each rendered row. A re-render replaces every one
+   *  of them, so comparing identities is how "did it re-render" is asked
+   *  without reaching into the component's internals.
+   *
+   *  Compared with `same()` and never with `toEqual`, which deep-compares two
+   *  structurally identical divs as equal and would pass through exactly the
+   *  re-render these tests exist to catch. */
+  const rowNodes = (c: HTMLElement): HTMLElement[] => [
+    ...c.querySelectorAll<HTMLElement>('.ui-floating-panel__row'),
+  ]
+  const same = (a: HTMLElement[], b: HTMLElement[]): boolean =>
+    a.length === b.length && a.every((el, i) => el === b[i])
+
+  it('a hover that changes nothing replaces no row node', async () => {
+    const h = setup(UNSEALED, [entry('openai-key'), entry('deploy-token')])
+    await h.picker.open()
+    await flush()
+    const before = rowNodes(h.container)
+    expect(before.length).toBeGreaterThan(1)
+    expect(before[0].dataset.selected).toBe('true')
+
+    // The cursor rests on the row that is ALREADY selected — which is what
+    // the browser reports the instant a fresh node appears under a
+    // stationary pointer. Before the guard this rebuilt the list, the new
+    // node fired mouseenter again, and the list rebuilt itself for as long
+    // as the pointer stayed put.
+    before[0].dispatchEvent(new MouseEvent('mouseenter'))
+    before[0].dispatchEvent(new MouseEvent('mouseenter'))
+
+    expect(same(rowNodes(h.container), before)).toBe(true)
+  })
+
+  it('a hover that moves the selection still re-renders, exactly once', async () => {
+    const h = setup(UNSEALED, [entry('openai-key'), entry('deploy-token')])
+    await h.picker.open()
+    await flush()
+    const before = rowNodes(h.container)
+
+    before[1].dispatchEvent(new MouseEvent('mouseenter'))
+    const after = rowNodes(h.container)
+    expect(same(after, before)).toBe(false)
+    expect(after[1].dataset.selected).toBe('true')
+    // The unselected row carries no `data-selected` at all (renderRow sets it
+    // only on the selected one); `aria-selected` is the one always present.
+    expect(after[0].getAttribute('aria-selected')).toBe('false')
+
+    // The replacement node under the unmoved cursor reports itself again;
+    // that second report changes nothing and must therefore rebuild nothing.
+    after[1].dispatchEvent(new MouseEvent('mouseenter'))
+    expect(same(rowNodes(h.container), after)).toBe(true)
+  })
+})

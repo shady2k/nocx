@@ -369,7 +369,7 @@ func newClient(logger log.Logger, toolsFS fs.FS, recorder WireRecorder) (Client,
 		return nil, fmt.Errorf("assistant: tool registry: %w", err)
 	}
 	if len(reg.All()) == 0 {
-		return nil, errors.New("assistant: tool registry assembled EMPTY — the tool schemas did not reach the binary; a model would be offered no tools and fails silently")
+		return nil, errors.New("assistant: tool registry assembled EMPTY — the tool schemas did not reach the binary; a model would be offered no tools")
 	}
 	return newClientWithRegistry(logger, reg, recorder), nil
 }

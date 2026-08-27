@@ -231,7 +231,7 @@ export class AgentInputTarget implements InputTarget {
         handle.close('success', undefined, handle.el.dataset.answeredBy)
       } else if (s.state === 'cancelled') {
         run.settle()
-        handle.close('cancelled')
+        handle.close('cancelled', s.error)
       } else if (s.state === 'failed' || s.state === 'interrupted') {
         run.settle()
         handle.close('failure', s.error ?? s.state)

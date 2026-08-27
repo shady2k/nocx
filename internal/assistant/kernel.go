@@ -145,6 +145,30 @@ func (e *EgressScreeningError) Unwrap() error { return e.Err }
 // cannot act on. Terminal, where a refusal is now a tool result.
 var ErrMalformedModelOutput = errors.New("agent policy: malformed model output")
 
+// modelResult is the kernel's explicit classification of text returned toward
+// a model. Refusals are nocx messages, not tool output; every other successful
+// invocation is tool output and may be framed by the carrier. Keeping this
+// bit at the kernel boundary prevents model-facing adapters from guessing from
+// the returned text.
+type modelResultKind uint8
+
+const (
+	modelToolOutput modelResultKind = iota
+	modelNocxMessage
+)
+
+type modelResult struct {
+	text string
+	kind modelResultKind
+}
+
+func (r modelResult) forModel(frame func(string) string) string {
+	if r.kind == modelNocxMessage {
+		return r.text
+	}
+	return frame(r.text)
+}
+
 // ApprovalRequestedError is what Ask returns when the run suspended for
 // human approval: the run is NOT failed — it is awaiting_approval, and
 // Request is what the approval surface renders and the resume re-validates.
@@ -1219,21 +1243,29 @@ func tripLatch(ctx context.Context, reason error) {
 // interrupt, a parked goroutine, a halted graph walk — and none of that is
 // the kernel's business.
 func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string) (string, error) {
+	out, err := k.invokeClassified(ctx, name, callID, rawArgs)
+	if err != nil {
+		return "", err
+	}
+	return out.text, nil
+}
+
+func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawArgs string) (modelResult, error) {
 	// 1. Declaration lookup. A name absent from the registry is malformed
 	// model output, not a refusal — there is nothing to call.
 	decl, ok := k.registry.Lookup(name)
 	if !ok {
-		return "", fmt.Errorf("%w: unknown tool %q", ErrMalformedModelOutput, name)
+		return modelResult{}, fmt.Errorf("%w: unknown tool %q", ErrMalformedModelOutput, name)
 	}
 
 	// 2. Parameter validation against the tool's schema: the file the
 	// model was shown, byte for byte, plus the ingress size bound.
 	if len(rawArgs) > maxArgsBytes {
-		return "", fmt.Errorf("%w: tool %q: arguments exceed the %d-byte bound", ErrMalformedModelOutput, decl.Name, maxArgsBytes)
+		return modelResult{}, fmt.Errorf("%w: tool %q: arguments exceed the %d-byte bound", ErrMalformedModelOutput, decl.Name, maxArgsBytes)
 	}
 	args, err := k.validate(decl, rawArgs)
 	if err != nil {
-		return "", fmt.Errorf("%w: tool %q: %v", ErrMalformedModelOutput, decl.Name, err)
+		return modelResult{}, fmt.Errorf("%w: tool %q: %v", ErrMalformedModelOutput, decl.Name, err)
 	}
 	// The mechanical call classifier is deliberately after validation and
 	// before every policy/approval/ledger path. Unlike the model classifier
@@ -1258,16 +1290,16 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 	//    with the person's own sentence, not the matrix's.
 	if k.approvals != nil {
 		if kind, declined := k.approvals.DeclinedKind(k.proposal(decl.Name, callID, rawArgs)); declined {
-			return refusalResult(decl.Name, RefusedByPerson, kind), nil
+			return modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}, nil
 		}
 		if decl.CommandArg == "" {
 			if kind, standing := k.approvals.DeclinedEffect(k.runID, decl.Effect); standing {
-				return refusalResult(decl.Name, RefusedByPerson, kind), nil
+				return modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}, nil
 			}
 		} else if kind, standing := k.approvals.DeclinedInvocation(k.runID, invocation); standing {
 			// A command standing no matches only the canonical
 			// invocation that the person answered about.
-			return refusalResult(decl.Name, RefusedByPerson, kind), nil
+			return modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}, nil
 		}
 	}
 	outcome, refusal := k.decideInvocation(decl, args, invocation)
@@ -1283,7 +1315,7 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 		// outcome instead of ending the run. No latch trip: the run
 		// continues, and every other call in this response is decided
 		// on its own merits.
-		return refusalResult(decl.Name, refusal, ""), nil
+		return modelResult{text: refusalResult(decl.Name, refusal, ""), kind: modelNocxMessage}, nil
 	case policyAsk:
 		// Approval binds to the exact proposal: an approved call skips
 		// the ask; a changed argument hashes differently and does NOT
@@ -1292,7 +1324,7 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 		if k.approvals != nil && k.approvals.IsApproved(ap) {
 			break // the exact proposal was approved; execute it
 		}
-		return "", k.escalate(ctx, decl, callID, rawArgs, args, invocation)
+		return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, invocation)
 	}
 
 	// 3b. The classifier (bead nocx-kpy23): a second, cheaper model
@@ -1315,10 +1347,10 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 			// nothing leaves for the classifier — the run fails with a
 			// terminal error, exactly as the result gate fails the run
 			// when IT cannot see (step 7's screenErr path).
-			return "", fmt.Errorf("agent tool %q: classifier gate: %w", decl.Name, classifyErr)
+			return modelResult{}, fmt.Errorf("agent tool %q: classifier gate: %w", decl.Name, classifyErr)
 		}
 		if ask != nil {
-			return "", k.escalateClassifier(ctx, decl, callID, rawArgs, ask, fact, invocation)
+			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, ask, fact, invocation)
 		}
 		classifierFact = fact
 	}
@@ -1329,7 +1361,7 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 	// never be told "this may already have happened" when it cannot.
 	execID, entryID, err := k.openAttempt(ctx, decl, callID, rawArgs, matchedResource(decl, args), classifierFact)
 	if err != nil {
-		return "", fmt.Errorf("agent tool %q: record attempt: %w", decl.Name, err)
+		return modelResult{}, fmt.Errorf("agent tool %q: record attempt: %w", decl.Name, err)
 	}
 
 	// 5. The narrowed capability is constructed. The tool holds only
@@ -1339,12 +1371,12 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 	// and is refused here, honestly.
 	if decl.Narrow == nil {
 		_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
-		return "", fmt.Errorf("agent tool %q is declared but not executable: no capability constructor is wired", decl.Name)
+		return modelResult{}, fmt.Errorf("agent tool %q is declared but not executable: no capability constructor is wired", decl.Name)
 	}
 	capability, err := decl.Narrow(k.grant)
 	if err != nil {
 		_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
-		return "", fmt.Errorf("agent tool %q: construct capability: %w", decl.Name, err)
+		return modelResult{}, fmt.Errorf("agent tool %q: construct capability: %w", decl.Name, err)
 	}
 	// 5b. The call becomes VISIBLE (nocx-shxv0), here and not earlier
 	// or later. Not earlier, because a call that is refused, malformed
@@ -1380,7 +1412,7 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 			// The attempt is closed rather than left open — the
 			// interval closes with a terminal reason, never silently.
 			_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
-			return "", err
+			return modelResult{}, err
 		}
 	}
 
@@ -1398,7 +1430,7 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 			k.warn("agent tool: the result does not match its own contract",
 				"tool", decl.Name, "call", callID, "error", err)
 			_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
-			return "", &ToolFailedError{Tool: decl.Name, Err: err}
+			return modelResult{}, &ToolFailedError{Tool: decl.Name, Err: err}
 		}
 	}
 
@@ -1414,7 +1446,7 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 		// the masking service's fail-closed contract, and the gate's:
 		// nothing leaves when the gate cannot see.
 		_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
-		return "", &EgressScreeningError{Tool: decl.Name, Gate: "egress", Err: screenErr}
+		return modelResult{}, &EgressScreeningError{Tool: decl.Name, Gate: "egress", Err: screenErr}
 	}
 	if len(egress) > 0 {
 		ap := k.proposal(decl.Name, callID, rawArgs)
@@ -1456,7 +1488,7 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 			// ran and its result was withheld pending the decision; the
 			// approved call is a SUBSEQUENT attempt of the same entry.
 			_ = k.closeAttempt(ctx, execID, content.TermInterrupted, content.EntryInterrupted)
-			return "", &EgressRequestedError{Request: req}
+			return modelResult{}, &EgressRequestedError{Request: req}
 		}
 	}
 
@@ -1466,12 +1498,12 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 		_ = k.closeAttempt(ctx, execID, terminationReasonOf(runErr), content.EntryFailure)
 		// Named, so the transport can say WHICH tool failed without
 		// stringifying the framework's wrapper around it.
-		return "", &ToolFailedError{Tool: decl.Name, Err: runErr}
+		return modelResult{}, &ToolFailedError{Tool: decl.Name, Err: runErr}
 	}
 
 	if len(out) > maxToolResultBytes {
 		_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
-		return "", fmt.Errorf("agent tool %q: result exceeds the %d-byte bound — a tool that returns text must return a window (design §4.4)", decl.Name, maxToolResultBytes)
+		return modelResult{}, fmt.Errorf("agent tool %q: result exceeds the %d-byte bound — a tool that returns text must return a window (design §4.4)", decl.Name, maxToolResultBytes)
 	}
 
 	// The window and the size bound. The executor windows its own
@@ -1479,10 +1511,10 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 	// tool forgets.
 	if len(out) > maxToolResultBytes {
 		_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
-		return "", fmt.Errorf("agent tool %q: result exceeds the %d-byte bound — a tool that returns text must return a window (design §4.4)", decl.Name, maxToolResultBytes)
+		return modelResult{}, fmt.Errorf("agent tool %q: result exceeds the %d-byte bound — a tool that returns text must return a window (design §4.4)", decl.Name, maxToolResultBytes)
 	}
 	if err := k.closeAttempt(ctx, execID, content.TermCompleted, content.EntrySuccess); err != nil {
-		return "", fmt.Errorf("agent tool %q: record outcome: %w", decl.Name, err)
+		return modelResult{}, fmt.Errorf("agent tool %q: record outcome: %w", decl.Name, err)
 	}
 	// The RESULT, unframed. Marking a result as untrusted data for a model to
 	// read is a statement addressed to a model, and only a carrier that talks
@@ -1490,7 +1522,7 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 	// interpreter, where a <tool-output> wrapper would be text to parse back
 	// off. FrameForModel below is the projection, kept here so there is still
 	// exactly one place that knows how a result is presented to a model.
-	return out, nil
+	return modelResult{text: out, kind: modelToolOutput}, nil
 }
 
 // Declares reports whether a tool exists at all. A carrier that validates a

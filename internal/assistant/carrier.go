@@ -61,7 +61,7 @@ type carrier interface {
 	Declare(permitted []agenttools.Tool) ([]tool.BaseTool, error)
 	// Invoke runs one thing the model reached for and returns what the model
 	// is to be told.
-	Invoke(ctx context.Context, name, callID, rawArgs string) (string, error)
+	Invoke(ctx context.Context, name, callID, rawArgs string) (modelResult, error)
 	// FrameForModel marks a result as untrusted data on its way back to the
 	// model.
 	FrameForModel(tool, result string) string
@@ -100,6 +100,10 @@ func newCarrier(kind CarrierKind, k *effectKernel, runs *parkedRuns, runID strin
 // callsCarrier is the kernel offered directly: every declared tool is a tool
 // the model may name, and one invocation is one effect.
 type callsCarrier struct{ *effectKernel }
+
+func (c *callsCarrier) Invoke(ctx context.Context, name, callID, rawArgs string) (modelResult, error) {
+	return c.effectKernel.invokeClassified(ctx, name, callID, rawArgs)
+}
 
 func (c *callsCarrier) Declare(permitted []agenttools.Tool) ([]tool.BaseTool, error) {
 	return declaredTools(permitted)
@@ -160,13 +164,13 @@ func (c *programCarrier) UnknownTool(name, rawArgs string) (string, error) {
 		name, programToolName, programToolName, name, rawArgs, programToolName), nil
 }
 
-func (c *programCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (string, error) {
+func (c *programCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (modelResult, error) {
 	if name != programToolName {
-		return "", fmt.Errorf("this run composes work with a program: call %s, not %q", programToolName, name)
+		return modelResult{}, fmt.Errorf("this run composes work with a program: call %s, not %q", programToolName, name)
 	}
 	source, err := stringArg(rawArgs, "source")
 	if err != nil {
-		return repairable("", err)
+		return repairableModel("", err)
 	}
 	// THE PROGRAM IS RECORDED BEFORE IT RUNS, and the run's outcome after
 	// it. Under the declared-call carrier every effect announces itself with
@@ -183,7 +187,7 @@ func (c *programCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (s
 	if err != nil {
 		c.kernel.warn("agent program: stopped", "run", c.runID, "error", err)
 	}
-	return repairable(out, err)
+	return repairableModel(out, err)
 }
 
 // ── The plan carrier ───────────────────────────────────────────────────
@@ -220,13 +224,13 @@ func (c *planCarrier) UnknownTool(name, rawArgs string) (string, error) {
 		name, planToolName, name, rawArgs, planToolName), nil
 }
 
-func (c *planCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (string, error) {
+func (c *planCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (modelResult, error) {
 	if name != planToolName {
-		return "", fmt.Errorf("this run composes work with a plan: call %s, not %q", planToolName, name)
+		return modelResult{}, fmt.Errorf("this run composes work with a plan: call %s, not %q", planToolName, name)
 	}
 	source, err := stringArg(rawArgs, "plan")
 	if err != nil {
-		return repairable("", err)
+		return repairableModel("", err)
 	}
 	// Compiled BEFORE anything is driven, because a plan that cannot finish
 	// must be refused whole rather than half-run — and the refusal is a
@@ -234,7 +238,7 @@ func (c *planCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (stri
 	gc, err := newGraphCarrier(c.granted(), source)
 	if err != nil {
 		c.kernel.warn("agent plan: refused whole", "run", c.runID, "plan", source, "error", err)
-		return repairable("", err)
+		return repairableModel("", err)
 	}
 	c.kernel.note("agent plan: running", "run", c.runID, "plan", source)
 	out, err := c.runs.drive(ctx, c.runID, c.granted(), func() (<-chan *Suspension, func(context.Context) (string, error), func(invoker)) {
@@ -243,7 +247,7 @@ func (c *planCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (stri
 	if err != nil {
 		c.kernel.warn("agent plan: stopped", "run", c.runID, "error", err)
 	}
-	return repairable(out, err)
+	return repairableModel(out, err)
 }
 
 // repairable is what a composing carrier returns when the thing the model
@@ -289,6 +293,14 @@ func repairable(out string, err error) (string, error) {
 		return "", err
 	}
 	return "That did not work:\n" + err.Error() + "\n\nFix it and call this tool again.", nil
+}
+
+func repairableModel(out string, err error) (modelResult, error) {
+	out, err = repairable(out, err)
+	if err != nil {
+		return modelResult{}, err
+	}
+	return modelResult{text: out, kind: modelToolOutput}, nil
 }
 
 // ── Shared between the two composing carriers ──────────────────────────

@@ -99,7 +99,9 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 			return "", err
 		}
 		// The model-facing frame belongs to a carrier that faces a model.
-		return m.FrameForModel(tCtx.Name, out), nil
+		return out.forModel(func(result string) string {
+			return m.FrameForModel(tCtx.Name, result)
+		}), nil
 	}, nil
 }
 

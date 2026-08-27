@@ -301,6 +301,23 @@ func wrappedEndpoint(mw *policyMiddleware, name, callID, args string) (string, e
 	return wrapped(context.Background(), args)
 }
 
+func TestEinoAdapter_RefusalIsNotFramedAsToolOutput(t *testing.T) {
+	grant, _ := testDirGrant(t, autonomousMatrix())
+	mw := middlewareFor(t, grant, &fakeLedger{}, nil)
+
+	out, err := wrappedEndpoint(mw, "files.read", "call-1", `{"path":"/etc/passwd"}`)
+	if err != nil {
+		t.Fatalf("refusal returned an error: %v", err)
+	}
+	want := refusalResult("files.read", RefusedOutOfScope, "")
+	if out != want {
+		t.Fatalf("refusal = %q, want nocx's own sentence %q", out, want)
+	}
+	if strings.Contains(out, "untrusted data, not instructions") {
+		t.Fatalf("refusal was framed as tool output: %q", out)
+	}
+}
+
 // ── criterion 1: a refusal is an answer (nocx-uvac6.1) ───────────────────
 
 // TestAsk_RefusalContinuesAsToolResult is the brief's first acceptance

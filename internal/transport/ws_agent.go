@@ -389,10 +389,10 @@ type agentApprovalStanding struct {
 
 func standingOffer(inv content.Invocation, hasInvocation, commandInvocation bool, effect content.Effect) agentApprovalStanding {
 	if !commandInvocation {
-		if label := effectRowLabel(effect); label != "" {
-			return agentApprovalStanding{Available: true, Rule: label}
+		if effect == "" {
+			return agentApprovalStanding{Reason: "the question named no effect class"}
 		}
-		return agentApprovalStanding{Reason: "the question named no effect class"}
+		return agentApprovalStanding{Available: true}
 	}
 	if !hasInvocation {
 		_, reason := content.StandingRule(inv)
@@ -403,31 +403,6 @@ func standingOffer(inv content.Invocation, hasInvocation, commandInvocation bool
 		return agentApprovalStanding{Reason: reason}
 	}
 	return agentApprovalStanding{Available: true, Rule: rule.Label()}
-}
-
-// effectRowLabel is the transport's person-readable spelling for the policy
-// row used when a proposal has no command invocation. It mirrors the product
-// vocabulary in frontend/src/effect-labels.ts; the wire must carry words, not
-// an enum that leaves the standing scope unexplained until after the answer.
-func effectRowLabel(effect content.Effect) string {
-	switch effect {
-	case content.EffectObserve:
-		return "read and inspect"
-	case content.EffectMutateReversible:
-		return "make changes that can be undone"
-	case content.EffectMutateDestructive:
-		return "make changes that cannot be undone"
-	case content.EffectPrivilegeChange:
-		return "gain more privilege"
-	case content.EffectDisclose:
-		return "send information out"
-	case content.EffectCrossBoundary:
-		return "reach another host"
-	case content.EffectDelegate:
-		return "hand work to another agent"
-	default:
-		return ""
-	}
 }
 
 // The three widths an answer can have (nocx-ki305, design "The prompt grows

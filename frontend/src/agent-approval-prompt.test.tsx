@@ -533,10 +533,12 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
     const { container } = renderPrompt({
       ask: {
         ...POLICY_ASK,
-        standing: { available: true, rule: 'read and inspect', reason: '' },
+        standing: { available: true, rule: '', reason: '' },
       },
     })
-    expect(container.textContent ?? '').toContain('is a standing answer for read and inspect')
+    expect(container.textContent ?? '').toContain(
+      `is a standing answer for ${EFFECT_LABEL.observe}`,
+    )
   })
 })
 

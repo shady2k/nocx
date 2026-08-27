@@ -308,8 +308,8 @@ func TestAgentApprove_ScopeAlways_CompoundInvocationIsNotSavedAsStandingRule(t *
 func TestAgentApprovalRequested_NonCommandOffersEffectStandingAnswer(t *testing.T) {
 	h := suspendedNonCommandRun(t, askPolicyStore(t))
 
-	if !h.asked.Standing.Available || h.asked.Standing.Rule != "read and inspect" || h.asked.Standing.Reason != "" {
-		t.Fatalf("standing offer = %+v, want the observe effect row in product words", h.asked.Standing)
+	if !h.asked.Standing.Available || h.asked.Standing.Rule != "" || h.asked.Standing.Reason != "" {
+		t.Fatalf("standing offer = %+v, want available effect standing with no backend vocabulary", h.asked.Standing)
 	}
 	if got := h.approve(t, "always"); got.Warning != "" {
 		t.Fatalf("warning = %q, want none — the effect-row standing answer was saved", got.Warning)

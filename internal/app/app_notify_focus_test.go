@@ -46,6 +46,15 @@ func TestBannerClickReachesTheRendererAsSessionFocus(t *testing.T) {
 	defer func() { _ = conn.Close() }()
 
 	sid := openSessionForFocus(t, conn)
+	// The open RESULT is not the moment this connection can be focused. The
+	// open handler answers first and installs the session's subscriber only
+	// afterwards, deliberately, because a session-scoped notification may not
+	// precede the id that addresses it (AD-7). FocusSession looks that
+	// subscriber up and drops the notification when it is not there yet — at
+	// Debug, so the drop is silent and the wait below would simply time out.
+	// Clicking before the subscriber exists is therefore a test that fails
+	// under load and passes on an idle machine, which is what it did.
+	awaitSubscriberFor(t, conn, sid)
 
 	// What the OS hands back when the user clicks the banner, as the adapter
 	// decodes it: a session id and nothing else.
@@ -74,6 +83,59 @@ func TestBannerClickReachesTheRendererAsSessionFocus(t *testing.T) {
 			t.Fatalf("session.focus named %q, want the clicked session %q", notif.Params.SessionID, sid)
 		}
 		return
+	}
+}
+
+// awaitSubscriberFor blocks until this connection has been published as sid's
+// subscriber, and does it by observing the product rather than by waiting out
+// a duration.
+//
+// The observable is any session-scoped notification naming sid. Every one of
+// them resolves its destination at emit time from the session's CURRENT
+// subscriber — the same lookup FocusSession makes — so one arriving here is
+// not a proxy for the state the click needs, it is that state, reported by
+// the mechanism that will carry the click.
+//
+// session.integrationChanged is what makes the wait terminate. A local
+// session's integration status is registered by the pty factory, which is the
+// only thing that knows which binary it exec'd, and it registers on every
+// branch that returns a pty: the enhanced launch reports `starting`, the
+// login shell with no local tier reports `conventional`, and a failed
+// bootstrap reports `conventional` too. The open handler emits that
+// registration through the subscriber it has just installed, unconditionally
+// and synchronously. lifecycle.changed usually arrives first and is accepted
+// just as happily, but it is NOT the thing waited on: it needs a lifecycle
+// lane bound to the session, which only the enhanced branch has, so a session
+// that degraded would wait for a fact nobody was going to send.
+//
+// internal/testwait is not used: it polls a predicate on a timer, and the
+// predicate here is a blocking socket read. Polling one would mean a read
+// deadline per attempt, and a gorilla connection is permanently failed by any
+// read error, timeout included — the first poll that expired would destroy
+// the connection the test still has to read session.focus from.
+func awaitSubscriberFor(t *testing.T, conn *websocket.Conn, sid string) {
+	t.Helper()
+	// ONE deadline for the whole wait, for the reason given above.
+	if derr := conn.SetReadDeadline(time.Now().Add(30 * time.Second)); derr != nil {
+		t.Fatalf("SetReadDeadline: %v — the wait would be unbounded", derr)
+	}
+	for {
+		_, raw, rerr := conn.ReadMessage()
+		if rerr != nil {
+			t.Fatalf("the session never published a subscriber to click against: %v", rerr)
+		}
+		var notif struct {
+			Method string `json:"method"`
+			Params struct {
+				SessionID string `json:"sessionId"`
+			} `json:"params"`
+		}
+		if json.Unmarshal(raw, &notif) != nil || notif.Method == "" {
+			continue // a response, or a binary data frame
+		}
+		if notif.Params.SessionID == sid {
+			return
+		}
 	}
 }
 

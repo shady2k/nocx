@@ -42,7 +42,8 @@ func TestBashScript_ParsesUnderBash32(t *testing.T) {
 
 // bashCandidates are the names this package looks for a GNU bash under: the
 // PATH bash (a developer's own shell, and the 5.x side of the matrix on
-// Linux), the fixture both CI images and scripts/install-bash32.sh install,
+// Linux), the fixture the CI Linux image and scripts/install-bash32.sh
+// install,
 // and macOS's frozen /bin/bash. One list, because "which bashes exist here"
 // is one question — requireBash32 and bashVariants are two readings of it,
 // not two implementations.

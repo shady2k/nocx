@@ -98,7 +98,10 @@ nothing sits in front of a file read.
 1. Take the next task with the queue command in [What to work on next](#what-to-work-on-next).
 2. Read the relevant `AD`(s) before touching a boundary.
 3. **TDD**: red → green → refactor. The failing test comes first.
-4. Keep it green — the pre-commit hook is the gate on every commit.
+4. Keep it green — the pre-commit hook gates every commit, and it is a
+   **static** gate: format, lint, types, ratchets, contracts. It runs no tests
+   and starts no container (`nocx-hzsiv`), so a green commit says nothing about
+   whether the code works. Run the tests for the files you changed yourself.
 5. Update the bead; record any non-obvious decision as an ADR in `docs/decisions/`.
 
 ## Testing: five rules, each bought by a green suite over a broken product

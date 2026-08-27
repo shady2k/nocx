@@ -47,7 +47,7 @@
  * answer block has gained its `completed` chip — the run terminalized, so
  * the gate has been passed rather than not yet reached.
  */
-import { test as base, expect, type Page } from '@playwright/test'
+import { test as base, expect, type Locator, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -202,6 +202,54 @@ function approvalPrompt(page: Page) {
   return page.getByRole('dialog', { name: APPROVAL_TITLE })
 }
 
+/**
+ * Geometry proof for the approval action rows. This is intentionally a browser
+ * assertion: jsdom has no layout engine and cannot observe overlap or paint
+ * outside the prompt sheet.
+ */
+async function expectApprovalActionsFit(prompt: Locator): Promise<void> {
+  const sheet = await prompt.locator('.ui-prompt').boundingBox()
+  if (sheet === null) throw new Error('approval prompt sheet has no geometry')
+
+  const expectedLabels = [
+    'Allow once',
+    'Allow in this session',
+    'Allow always',
+    'Deny once',
+    'Deny in this session',
+    'Deny always',
+  ]
+  await expect(prompt.locator('.ui-button__label')).toHaveText(expectedLabels)
+  await expect(prompt.locator('.ui-button__secondary')).toHaveCount(6)
+
+  const groups = prompt.locator('.ui-action-group')
+  await expect(groups).toHaveCount(2)
+  for (let groupIndex = 0; groupIndex < 2; groupIndex += 1) {
+    const group = groups.nth(groupIndex)
+    const groupBox = await group.boundingBox()
+    if (groupBox === null) throw new Error('approval action group has no geometry')
+    expect(groupBox.x).toBeGreaterThanOrEqual(sheet.x)
+    expect(groupBox.x + groupBox.width).toBeLessThanOrEqual(sheet.x + sheet.width)
+    expect(groupBox.y).toBeGreaterThanOrEqual(sheet.y)
+    expect(groupBox.y + groupBox.height).toBeLessThanOrEqual(sheet.y + sheet.height)
+    const buttons = group.locator('.ui-button')
+    await expect(buttons).toHaveCount(3)
+    let previousRight = -Infinity
+    for (let buttonIndex = 0; buttonIndex < 3; buttonIndex += 1) {
+      const button = buttons.nth(buttonIndex)
+      await expect(button).toBeVisible()
+      const box = await button.boundingBox()
+      if (box === null) throw new Error('approval action has no geometry')
+      expect(box.x).toBeGreaterThanOrEqual(groupBox.x)
+      expect(box.x + box.width).toBeLessThanOrEqual(groupBox.x + groupBox.width)
+      expect(box.y).toBeGreaterThanOrEqual(groupBox.y)
+      expect(box.y + box.height).toBeLessThanOrEqual(groupBox.y + groupBox.height)
+      expect(box.x).toBeGreaterThanOrEqual(previousRight)
+      previousRight = box.x + box.width
+    }
+  }
+}
+
 /** Open Settings and select a page in the rail — Settings is a tab like any
  *  other, and the keyboard shortcut is how a person gets there. */
 async function openSettings(page: Page, navSelector: string): Promise<void> {
@@ -263,6 +311,12 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     // words the standing answer will later be shown in.
     await expect(prompt).toContainText('read and inspect')
     await expect(prompt).toContainText('session.read')
+
+    // ── 2b. The complete visible coverage remains inside each action cell
+    // at the ordinary width and after the same open prompt is narrowed.
+    await expectApprovalActionsFit(prompt)
+    await page.setViewportSize({ width: 420, height: 900 })
+    await expectApprovalActionsFit(prompt)
 
     // ── 3. Allow always. The suspended run resumes on the same binding, the
     // tool runs, and the answer finishes.

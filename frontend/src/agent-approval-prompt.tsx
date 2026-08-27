@@ -370,15 +370,11 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
   const offeredScopes = () =>
     SCOPES.filter(({ scope }) => scope === 'once' || ask().standing.available)
 
-  const answerLabel = (verb: string, scope: ApprovalScope) => {
-    const base = `${verb} ${SCOPES.find((candidate) => candidate.scope === scope)?.label ?? scope}`
-    return scope === 'once' ? base : `${base} — ${approvalScopeCoverage(scope, ask().standing)}`
-  }
+  const answerLabel = (verb: string, scope: ApprovalScope) =>
+    `${verb} ${SCOPES.find((candidate) => candidate.scope === scope)?.label ?? scope}`
 
   const answerAriaLabel = (verb: string, scope: ApprovalScope) =>
-    scope === 'once'
-      ? `${answerLabel(verb, scope)} — ${approvalScopeCoverage(scope, ask().standing)}`
-      : answerLabel(verb, scope)
+    `${answerLabel(verb, scope)} — ${approvalScopeCoverage(scope, ask().standing)}`
 
   const group = (approved: boolean, verb: string, variant: 'primary' | 'danger') => (
     <ActionGroup ariaLabel={approved ? 'Allow this action' : 'Refuse this action'}>
@@ -386,6 +382,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
         {({ scope }) => (
           <Button
             variant={scope === 'once' ? variant : 'default'}
+            secondary={`— ${approvalScopeCoverage(scope, ask().standing)}`}
             disabled={props.busy}
             ariaLabel={answerAriaLabel(verb, scope)}
             onClick={() => props.onDecide(approved, scope)}
@@ -415,6 +412,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
             <>
               <Button
                 variant="primary"
+                secondary={`— ${approvalScopeCoverage('once', ask().standing)}`}
                 disabled={props.busy}
                 ariaLabel={answerAriaLabel('Allow', 'once')}
                 onClick={() => props.onDecide(true, 'once')}
@@ -423,6 +421,7 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
               </Button>
               <Button
                 variant="danger"
+                secondary={`— ${approvalScopeCoverage('once', ask().standing)}`}
                 disabled={props.busy}
                 ariaLabel={answerAriaLabel('Deny', 'once')}
                 onClick={() => props.onDecide(false, 'once')}

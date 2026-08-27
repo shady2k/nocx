@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 import type { TerminalRenderer, RenderFenceEvent } from '../renderers/types'
 import { ScrollbackController } from './controller'
 import { CommandSnapshotStore } from '../command-snapshot'
@@ -255,6 +255,96 @@ describe('ScrollbackController unstructured mode', () => {
 
     expect(controller.mode).toBe('unstructured')
     expect(controller.xtermLiveContainer.className).toContain('live-unstructured')
+  })
+})
+
+describe('finished command landing', () => {
+  let pendingFrames: FrameRequestCallback[]
+
+  beforeEach(() => {
+    pendingFrames = []
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      pendingFrames.push(callback)
+      return pendingFrames.length
+    })
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function flushFrames(): void {
+    while (pendingFrames.length > 0) {
+      pendingFrames.shift()!(performance.now())
+    }
+  }
+
+  type ScrollIntoViewSpy = (arg?: ScrollIntoViewOptions | boolean) => void
+
+  function setFollowing(controller: ScrollbackController, following: boolean): void {
+    const state = controller as unknown as { _following: boolean }
+    state._following = following
+  }
+
+  function finishWithMeasuredBlock(
+    height: number,
+    scrollIntoView: Mock<ScrollIntoViewSpy>,
+  ): ScrollbackController {
+    const { controller } = makeController()
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      configurable: true,
+      value: 500,
+    })
+    controller.beginBlockNow('printf output', '~', 0, 0)
+    controller.onCommandEnd(() => new BufferLine('output'), 2, 0)
+    const block = controller.scrollbackInner.querySelector<HTMLElement>('.cmd-block')
+    expect(block).not.toBeNull()
+    Object.defineProperty(block!, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ height }),
+    })
+    block!.scrollIntoView = scrollIntoView
+    flushFrames()
+    return controller
+  }
+
+  it('lands a block taller than the viewport at its end', () => {
+    const scrollIntoView = vi.fn<ScrollIntoViewSpy>()
+    const controller = finishWithMeasuredBlock(720, scrollIntoView)
+
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'end', behavior: 'instant' })
+    controller.blockManager.clearAll()
+  })
+
+  it('does not scroll a block that fits the viewport', () => {
+    const scrollIntoView = vi.fn<ScrollIntoViewSpy>()
+    const controller = finishWithMeasuredBlock(300, scrollIntoView)
+
+    expect(scrollIntoView).not.toHaveBeenCalled()
+    controller.blockManager.clearAll()
+  })
+
+  it('does not move a person who scrolled away from the live end', () => {
+    const { controller } = makeController()
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      configurable: true,
+      value: 500,
+    })
+    const scrollIntoView = vi.fn<ScrollIntoViewSpy>()
+    setFollowing(controller, false)
+    controller.beginBlockNow('printf output', '~', 0, 0)
+    controller.onCommandEnd(() => new BufferLine('output'), 2, 0)
+    const block = controller.scrollbackInner.querySelector<HTMLElement>('.cmd-block')
+    expect(block).not.toBeNull()
+    Object.defineProperty(block!, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ height: 720 }),
+    })
+    block!.scrollIntoView = scrollIntoView
+    flushFrames()
+
+    expect(scrollIntoView).not.toHaveBeenCalled()
+    controller.blockManager.clearAll()
   })
 })
 

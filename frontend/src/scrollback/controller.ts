@@ -633,39 +633,39 @@ export class ScrollbackController {
   }
 
   /**
-   * Put the top of the finished command's block at the top of the view.
+   * Put the END of the finished command's block at the bottom of the view.
    *
    * Nothing scrolled here at all before, so the view stayed wherever the
-   * running command had left it — and a program that had filled the pane left
-   * it at the top of a block taller than the viewport, showing its first screen
-   * with the prompt somewhere far below. Neither "stay put" nor "jump to the
-   * bottom" is right for a block UI: what you want to read when a command
-   * finishes is the command and the start of what it printed.
+   * running command had left it. A block taller than the viewport therefore
+   * left its prompt far below the fold. The current decision is to land at the
+   * block's END instead: the prompt is immediately visible, at the cost of
+   * making the first lines of long output require an upward scroll. This
+   * reverses the former start-anchor decision, which showed the first screen
+   * but left the prompt far below.
    *
    * A frame late on purpose. `setIdle` has just collapsed the live region and
    * the block was inserted in the same tick, so the scroller's height is still
    * the old one until layout runs.
    */
-  private _scrollToLastBlockStart(): void {
+  private _scrollToLastBlockEnd(): void {
     requestAnimationFrame(() => {
+      if (!this._following) return
       const blocks = this.scrollbackInner.querySelectorAll('.cmd-block')
       const last = blocks[blocks.length - 1]
       if (!last) return
-      // ONLY FOR A BLOCK THAT DOES NOT FIT, which is the case this was
-      // written for: a program that filled the pane leaves the view at the top
-      // of a block taller than the viewport, showing its first screen with the
-      // prompt far below. A block that fits is already whole on screen — the
-      // stack hangs from the bottom edge and we are following it — so there is
-      // nothing to bring into view, and asking anyway put a second owner on
-      // the scroll position beside the settle that was still unwinding
-      // (nocx-i4h04.2: `scrollIntoView` reads the transformed box, and in the
-      // container it scrolled a row it then had to give back).
+      // ONLY FOR A BLOCK THAT DOES NOT FIT. A block that fits is already
+      // whole on screen — the stack hangs from the bottom edge and we are
+      // following it — so there is nothing to bring into view, and asking
+      // anyway would put a second owner on the scroll position beside the
+      // settle that was still unwinding (nocx-i4h04.2:
+      // `scrollIntoView` reads the transformed box, and in the container it
+      // scrolled a row it then had to give back).
       if (last.getBoundingClientRect().height <= this.scrollbackArea.clientHeight) return
-      // Through the glide: the freeze's own settle may still be unwinding, and
-      // a scroll that lands as a jump in the middle of it is the twitch this
-      // whole seam exists to remove.
+      // Through the glide: the freeze's own settle may still be unwinding,
+      // and a scroll that lands as a jump in the middle of it is the twitch
+      // this whole seam exists to remove.
       this._glide(() => {
-        last.scrollIntoView({ block: 'start', behavior: 'instant' })
+        last.scrollIntoView({ block: 'end', behavior: 'instant' })
       })
     })
   }
@@ -903,7 +903,7 @@ export class ScrollbackController {
       this._clearFrozenRows()
       this.setIdle()
     })
-    this._scrollToLastBlockStart()
+    this._scrollToLastBlockEnd()
   }
 
   private _updateSeparator(): void {

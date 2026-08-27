@@ -234,6 +234,92 @@ async function mountTerminal(
   }
 }
 
+// ═══════════════════════════════════════════════════════════════════════════
+// Geometry handoff and PTY resize policy (nocx-cwnz0)
+// ═══════════════════════════════════════════════════════════════════════════
+// Two fit drivers share one geometry decision: the presentation delivery
+// (viewportChanged) and the live-region output path (refitIfResized). A pane
+// fit followed by identical parsed-output frames must not fit the same usable
+// rectangle a second time, and the trailing PTY resize must settle on the
+// final grid and be cancelled by disposal.
+describe('TerminalContent geometry handoff and PTY resize policy (nocx-cwnz0)', () => {
+  it('a pane fit followed by identical parsed-output frames does not re-fit the same usable rectangle', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const renderer = rendererOf(content)
+    const raf = globalThis.requestAnimationFrame
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      cb(0)
+      return 0
+    }
+    try {
+      content.viewportChanged({ width: 800, height: 400, devicePixelRatio: 1 })
+      /* eslint-disable @typescript-eslint/unbound-method */
+      expect(renderer.fitViewport).toHaveBeenCalledTimes(1)
+      expect(renderer.fitViewport).toHaveBeenLastCalledWith(
+        expect.objectContaining({ width: 800, height: 400 }),
+      )
+
+      // The live-region output path runs on every parsed frame; the usable
+      // rectangle is unchanged, so it must not fit again — the existing grid
+      // stays authoritative.
+      renderer._fireWriteParsed()
+      renderer._fireWriteParsed()
+      renderer._fireWriteParsed()
+      expect(renderer.fitViewport).toHaveBeenCalledTimes(1)
+      /* eslint-enable @typescript-eslint/unbound-method */
+    } finally {
+      globalThis.requestAnimationFrame = raf
+      teardown()
+    }
+  })
+
+  it('sends only the final grid to the session after the 80 ms settle window', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    let teardown: (() => void) | undefined
+    try {
+      const client = makeClient()
+      const mounted = await mountTerminal(makeClipboard(), {}, client)
+      teardown = mounted.teardown
+      const renderer = rendererOf(mounted.content)
+      const session = sessionOf(mounted.content)
+      renderer._fireResize(120, 40)
+      renderer._fireResize(100, 30)
+      renderer._fireResize(90, 28)
+
+      expect(session.sendResize).not.toHaveBeenCalled()
+      vi.advanceTimersByTime(80)
+      expect(session.sendResize).toHaveBeenCalledTimes(1)
+      expect(session.sendResize).toHaveBeenCalledWith(90, 28)
+    } finally {
+      teardown?.()
+      vi.useRealTimers()
+    }
+  })
+
+  it('disposal cancels a pending PTY resize', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] })
+    try {
+      const client = makeClient()
+      const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+
+      renderer._fireResize(90, 28)
+      expect(session.sendResize).not.toHaveBeenCalled()
+
+      // Dispose before the settle window elapses: the trailing resize must
+      // never reach the session.
+      teardown()
+
+      vi.advanceTimersByTime(100)
+      expect(session.sendResize).not.toHaveBeenCalled()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+})
+
 describe('the pane is the native file-drop target (nocx-9le.5.8)', () => {
   // In the Wails window a drop delivers absolute paths on the BACKEND's
   // machine, and the renderer may never learn one (design R2). The runtime

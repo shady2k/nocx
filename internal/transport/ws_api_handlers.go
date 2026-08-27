@@ -1123,12 +1123,15 @@ type apiRequestReadResponse struct {
 }
 
 type apiRequestWire struct {
-	ID      string          `json:"id"`
-	Name    string          `json:"name"`
-	Method  string          `json:"method"`
-	URL     string          `json:"url"`
-	Headers []apiHeaderWire `json:"headers"`
-	Query   []apiParamWire  `json:"query"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Method string `json:"method"`
+	URL    string `json:"url"`
+	// Environment is omitted for legacy requests that have never chosen.
+	// A present empty string is the explicit "no environment" choice.
+	Environment *string         `json:"environment,omitempty"`
+	Headers     []apiHeaderWire `json:"headers"`
+	Query       []apiParamWire  `json:"query"`
 	// Variables are the request's own. Never null on the wire, like every
 	// other list here: the file may omit the key — `omitempty` is right for
 	// a file — and the renderer's first .map on a null throws.
@@ -1526,15 +1529,16 @@ func wireRequest(r apicoll.Request) (apiRequestWire, error) {
 		return apiRequestWire{}, err
 	}
 	return apiRequestWire{
-		ID:        r.ID,
-		Name:      r.Name,
-		Method:    r.Method,
-		URL:       r.URL,
-		Headers:   wireHeaders(r.Headers),
-		Query:     wireParams(r.Query),
-		Variables: wireParams(r.Variables),
-		Auth:      apiAuthWire{Kind: authKind, User: r.Auth.User, Token: r.Auth.Token, Password: r.Auth.Password},
-		Body:      apiBodyWire{Kind: bodyKind, Text: r.Body.Text, FileRef: r.Body.FileRef},
+		ID:          r.ID,
+		Name:        r.Name,
+		Method:      r.Method,
+		URL:         r.URL,
+		Environment: r.Environment,
+		Headers:     wireHeaders(r.Headers),
+		Query:       wireParams(r.Query),
+		Variables:   wireParams(r.Variables),
+		Auth:        apiAuthWire{Kind: authKind, User: r.Auth.User, Token: r.Auth.Token, Password: r.Auth.Password},
+		Body:        apiBodyWire{Kind: bodyKind, Text: r.Body.Text, FileRef: r.Body.FileRef},
 	}, nil
 }
 
@@ -1553,15 +1557,16 @@ func storedRequest(r apiRequestWire) apicoll.Request {
 		variables = append(variables, apicoll.Param{Name: v.Name, Value: v.Value, Enabled: v.Enabled})
 	}
 	return apicoll.Request{
-		ID:        r.ID,
-		Name:      r.Name,
-		Method:    r.Method,
-		URL:       r.URL,
-		Headers:   headers,
-		Query:     query,
-		Variables: variables,
-		Body:      apicoll.Body{Kind: r.Body.Kind, Text: r.Body.Text, FileRef: r.Body.FileRef},
-		Auth:      apicoll.Auth{Kind: r.Auth.Kind, User: r.Auth.User, Token: r.Auth.Token, Password: r.Auth.Password},
+		ID:          r.ID,
+		Name:        r.Name,
+		Method:      r.Method,
+		URL:         r.URL,
+		Environment: r.Environment,
+		Headers:     headers,
+		Query:       query,
+		Variables:   variables,
+		Body:        apicoll.Body{Kind: r.Body.Kind, Text: r.Body.Text, FileRef: r.Body.FileRef},
+		Auth:        apicoll.Auth{Kind: r.Auth.Kind, User: r.Auth.User, Token: r.Auth.Token, Password: r.Auth.Password},
 	}
 }
 

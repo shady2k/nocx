@@ -163,6 +163,46 @@ func TestAPIRequest_ARequestWithNoVariablesAnswersAnEmptyList(t *testing.T) {
 	}
 }
 
+// The request's environment choice is optional on disk and over the wire:
+// legacy files omit it, while an explicit no-environment choice is `""`.
+func TestAPIRequestRead_PreservesEnvironmentChoiceAndLegacyOmission(t *testing.T) {
+	_, conn := newAPIWSServer(t)
+	root := apiCollectionFolder(t, "https://example.test/ping")
+	if err := os.WriteFile(filepath.Join(root, "ping.json"), []byte(
+		`{"id":"r1","name":"ping","method":"GET","url":"https://example.test/ping",`+
+			`"environment":"","headers":[],"query":[],"body":{"kind":"none"},"auth":{"kind":"none"}}`,
+	), 0o600); err != nil {
+		t.Fatalf("write explicit environment choice: %v", err)
+	}
+	handle := openAPICollection(t, conn, root, 1)
+
+	read := func(relPath string, id int) json.RawMessage {
+		t.Helper()
+		resp := vaultCall(t, conn, "api.request.read", map[string]any{
+			"handle": handle, "relPath": relPath,
+		}, id)
+		if resp.Error != nil {
+			t.Fatalf("api.request.read %s: %+v", relPath, resp.Error)
+		}
+		var got struct {
+			Request struct {
+				Environment json.RawMessage `json:"environment"`
+			} `json:"request"`
+		}
+		if err := json.Unmarshal(resp.Result, &got); err != nil {
+			t.Fatalf("unmarshal %s: %v", relPath, err)
+		}
+		return got.Request.Environment
+	}
+
+	if got := string(read("ping.json", 2)); got != `""` {
+		t.Fatalf("explicit environment = %s, want empty string", got)
+	}
+	if got := read("nested/echo.json", 3); got != nil {
+		t.Fatalf("legacy environment = %s, want the property omitted", got)
+	}
+}
+
 // THE ORDER, over the socket: two requests with different values for one
 // name, under an environment that answers that name too. Each gets its own,
 // and the environment's answer is what neither gets.

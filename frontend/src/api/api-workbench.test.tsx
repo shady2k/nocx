@@ -6851,6 +6851,57 @@ describe('secrets are doors in every request field', () => {
     expect(requestCreate).toHaveBeenCalledWith('draft')
     expect(url.value).toBe('@draft')
   })
+  it('the lock opens create with the shared proposed name', async () => {
+    const createSecret = vi.fn().mockResolvedValue({ name: 'created' })
+    const request: ApiRequest = {
+      ...REQUEST,
+      url: 'https://api.example.test',
+      headers: [{ name: 'Authorization', value: '', enabled: true }],
+      query: [],
+      variables: [],
+      auth: { kind: 'none', token: '', password: '', user: '' },
+    }
+    await openSecretRequest(source, request, {
+      secretCreate: {
+        list: vi.fn().mockResolvedValue([]),
+        createSecret,
+      },
+    })
+
+    fireEvent.click(button('Headers 1'))
+    const header = field('api-header-value-0')
+    fireEvent.input(header, { target: { value: 'raw-token' } })
+    pressLock(header)
+    await takePanelRow('Store "raw-token" in the vault\u2026')
+
+    await vi.waitFor(() => expect(field('secret-create-name').value).toBe('api.example.test token'))
+    expect(createSecret).not.toHaveBeenCalled()
+  })
+  it('the @ door keeps the typed create name instead of using the proposal', async () => {
+    const createSecret = vi.fn().mockResolvedValue({ name: 'created' })
+    const request: ApiRequest = {
+      ...REQUEST,
+      url: 'https://api.example.test',
+      headers: [],
+      query: [],
+      variables: [],
+      auth: { kind: 'none', token: '', password: '', user: '' },
+    }
+    await openSecretRequest(source, request, {
+      secretCreate: {
+        list: vi.fn().mockResolvedValue([]),
+        createSecret,
+      },
+    })
+
+    const url = field('api-url')
+    fireEvent.input(url, { target: { value: '@draft' } })
+    await vi.waitFor(() => expect(document.body.textContent).toContain('Add "draft" to the vault'))
+    fireEvent.keyDown(url, { key: 'Enter' })
+
+    await vi.waitFor(() => expect(field('secret-create-name').value).toBe('draft'))
+    expect(createSecret).not.toHaveBeenCalled()
+  })
 
   it('sends a raw header token as typed without opening or rewriting a secret picker', async () => {
     const sendRequest = vi.fn().mockResolvedValue(sendFixture())

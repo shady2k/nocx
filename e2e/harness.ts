@@ -423,6 +423,32 @@ export interface BackendEndpoint {
   port: number
   token: string
 }
+/**
+ * Read the vault lifecycle from the backend the spec is actually exercising.
+ *
+ * Specs that depend on a fresh or sealed vault must state that precondition
+ * against the wire, not infer it from whichever offer row happens to render.
+ * The shared stand deliberately keeps vault state across specs, so a UI-only
+ * assertion can otherwise turn a stale home into a different activation path.
+ */
+export async function readVaultState(
+  endpoint: BackendEndpoint,
+): Promise<'uninitialized' | 'sealed' | 'unsealed'> {
+  const wire = await openControlPlane(endpoint.port, endpoint.token)
+  try {
+    const result = await wire.call('vault.status', {})
+    if (typeof result !== 'object' || result === null || !('state' in result)) {
+      throw new Error('e2e: vault.status returned no lifecycle state')
+    }
+    const state = result.state
+    if (state !== 'uninitialized' && state !== 'sealed' && state !== 'unsealed') {
+      throw new Error(`e2e: vault.status returned invalid lifecycle state: ${String(state)}`)
+    }
+    return state
+  } finally {
+    wire.close()
+  }
+}
 
 /**
  * Where the backend keeps its documents — settings, profiles, the vault — under

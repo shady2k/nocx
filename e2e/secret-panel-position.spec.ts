@@ -26,19 +26,19 @@
  * `pointer-events: none` toast host.
  *
  * SO THIS SPEC ASKS BOTH QUESTIONS, and the second one with
- * `elementFromPoint` rather than with a real click: this runs on the shared
- * stand, and activating a row here would set up a vault every other spec on
- * that stand would then inherit. The hit test is the exact predicate
- * Playwright's click uses, without the side effect.
+ * `elementFromPoint` rather than with a real click: the test starts its own
+ * backend on a disposable home, so activating a row cannot change another
+ * spec's vault state. The hit test is the exact predicate Playwright's click
+ * uses, without the side effect.
  *
  * The unit tests assert the placement ARITHMETIC
  * (frontend/src/ui/floating-panel.test.ts); jsdom lays nothing out, calls
  * every element visible and cannot hit-test at all, so both questions here
  * are ones only a browser can answer.
  *
- * NO VAULT NEEDED, deliberately. The panel opens on '@' in every vault state
- * — an offer row when the vault is uninitialized or sealed, the list when
- * it is open — and this spec is about WHERE it opens, not what it lists.
+ * NO VAULT NEEDED for the placement tests, deliberately. The panel opens on
+ * '@' in every vault state; the activation test below explicitly requires an
+ * uninitialized vault because it proves the setup path.
  *
  * NO Escape ANYWHERE, also deliberately. `ui/overlay/stack.ts` installs its
  * Escape handler on `document` in the CAPTURE phase, so Escape reaches the
@@ -47,19 +47,58 @@
  * test then waits for controls that are gone. A panel is dismissed here the
  * way the adapter dismisses it — by removing the '@' the trigger is made of.
  */
+import { mkdtempSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+
 import type { Locator } from '@playwright/test'
-import { test, expect, settingsReady, type Page } from './harness'
+import {
+  bindEndpoint,
+  readVaultState,
+  test,
+  expect,
+  settingsReady,
+  type BackendEndpoint,
+  type Page,
+  VaultBackend,
+} from './harness'
+import { readStand } from './stand'
 import { activateRow } from './secret-field'
 
 const SETTINGS_ENDPOINTS_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
 const SETTINGS_CONNECTIONS_NAV = '.ui-grouped-nav__item[data-item="connections"]'
 const OPEN_PANEL = '.ui-floating-panel[data-variant="secret"][data-open="true"]'
 
+let backend: VaultBackend | undefined
+let endpoint: BackendEndpoint | undefined
+
+function currentEndpoint(): BackendEndpoint {
+  if (endpoint === undefined) throw new Error('secret panel backend was not started')
+  return endpoint
+}
+
+test.beforeEach(async () => {
+  const root = mkdtempSync(join(tmpdir(), 'nocx-secret-panel-position-'))
+  backend = new VaultBackend(readStand().devharness, { root }, true)
+  endpoint = await backend.start()
+})
+
+test.afterEach(() => {
+  backend?.stop()
+  backend = undefined
+  endpoint = undefined
+})
+
+async function openApp(page: Page): Promise<void> {
+  await bindEndpoint(page, currentEndpoint())
+  await page.goto('/')
+  await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
+}
+
 /** The New Endpoint dialog with its header row already added, so both fields
  *  this spec measures exist before anything is opened over them. */
 async function openEndpointDialog(page: Page): Promise<Locator> {
-  await page.goto('/')
-  await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
+  await openApp(page)
   await page.keyboard.press('Meta+,')
   await settingsReady(page)
   await page.locator(`${SETTINGS_ENDPOINTS_NAV} button`).click()
@@ -72,8 +111,7 @@ async function openEndpointDialog(page: Page): Promise<Locator> {
 
 /** The ordinary connection editor with its password field visible. */
 async function openConnectionDialog(page: Page): Promise<Locator> {
-  await page.goto('/')
-  await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
+  await openApp(page)
   await page.keyboard.press('Meta+,')
   await settingsReady(page)
   await page.locator(SETTINGS_CONNECTIONS_NAV).click()
@@ -189,6 +227,11 @@ test.describe('the secret panel opens where a person can reach it', () => {
   })
 
   test('a row still activates from the panel portion hanging past the dialog', async ({ page }) => {
+    const vaultState = await readVaultState(currentEndpoint())
+    expect(
+      vaultState,
+      `the overhang activation test requires an uninitialized vault; got ${vaultState}`,
+    ).toBe('uninitialized')
     const dialog = await openConnectionDialog(page)
     const field = dialog.locator('#profile-auth-password')
     const panel = await triggerPanel(page, field)

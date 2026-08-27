@@ -9,20 +9,21 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import { test, expect, VaultBackend, type DisposableRoot, type Page } from './harness'
-import { openWorkbench, RATE_LIMIT, treeRow } from './api-workbench'
+import { openWorkbench, treeRow, ZEN } from './api-workbench'
 import { readStand } from './stand'
 
 const devharnessBin = (): string => readStand().devharness
 const OPEN_PANEL = '.ui-floating-panel[data-variant="secret"][data-open="true"]'
 
-/** Open the seeded request whose Headers tab has a value field. */
+/** Open the seeded request, then add the empty header used by the picker path. */
 async function openHeaderField(
   page: Page,
   backend: VaultBackend,
 ): Promise<{ workbench: Locator; field: Locator }> {
   const workbench = await openWorkbench(page, backend)
-  await treeRow(page, workbench, RATE_LIMIT).click()
-  await workbench.getByRole('tab', { name: 'Headers 1', exact: true }).click()
+  await treeRow(page, workbench, ZEN).click()
+  await workbench.getByRole('tab', { name: 'Headers', exact: true }).click()
+  await workbench.getByRole('button', { name: 'Add header', exact: true }).click()
   const field = workbench.locator('#api-header-value-0')
   await expect(field).toBeVisible({ timeout: 10_000 })
   return { workbench, field }
@@ -31,7 +32,7 @@ async function openHeaderField(
 /** Type the trigger with a real caret, then wait for the mounted panel. */
 async function triggerPanel(page: Page, field: Locator): Promise<void> {
   await field.click()
-  await field.pressSequentially('@')
+  await page.keyboard.type('@')
   await expect(page.locator(OPEN_PANEL)).toBeVisible({ timeout: 10_000 })
 }
 

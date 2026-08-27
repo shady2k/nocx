@@ -2408,8 +2408,9 @@ export class TerminalContent extends BasePaneContent {
         // of the same keystroke (AGENTS.md: two surfaces may never own one
         // input):
         //
-        //  - a real selection anywhere: Ctrl+C is COPY, and always was;
-        //  - somebody else's text control: their copy, their interrupt;
+        //  - a live selection in this pane's scrollback while it owns focus:
+        //    Ctrl+C is COPY; stale text after focus moves is not.
+        //  - somebody else's text control: its own handler owns the key;
         //  - the editor on screen: its own handler clears the draft and
         //    decides about the pty from the active target (see `cancel`);
         //  - the live grid with the editor hidden: xterm is already turning
@@ -2420,10 +2421,27 @@ export class TerminalContent extends BasePaneContent {
         // alone — signalActiveCommand is the one owner of that check too.
         if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'c' || e.key === 'C')) {
           if (!this.hasRunningCommand()) return
-          const sel = window.getSelection()
-          if (sel && !sel.isCollapsed && sel.toString() !== '') return
           const active = document.activeElement
+          const sel = window.getSelection()
+          // Ctrl+C remains copy only for a live selection in this pane while
+          // the pane's scrollback still owns focus. A selection's anchor and
+          // focus nodes keep that ownership tied to this pane; once focus
+          // moves to chrome or a menu, stale scrollback text cannot swallow
+          // the interrupt.
+          const scrollbackArea = this.scrollback?.scrollbackArea
+          const selectionOwnedByFocus =
+            sel !== null &&
+            !sel.isCollapsed &&
+            sel.toString() !== '' &&
+            sel.anchorNode !== null &&
+            sel.focusNode !== null &&
+            scrollbackArea?.contains(sel.anchorNode) === true &&
+            scrollbackArea.contains(sel.focusNode) &&
+            active !== null &&
+            scrollbackArea.contains(active)
+          if (selectionOwnedByFocus) return
           if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
+          if (this.editor?.isVisible && active && this.editor.rootContains(active)) return
           if (active && this.scrollback?.xtermLiveContainer.contains(active) === true) return
           e.preventDefault()
           this.signalActiveCommand('interrupt')

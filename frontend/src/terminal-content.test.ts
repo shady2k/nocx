@@ -7729,6 +7729,126 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     return sessionOf(content).signal.mock.calls.map((c: unknown[]) => c[0] as string)
   }
 
+  it('Ctrl+C keeps selection ownership tied to the focused target', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    const selection = {
+      anchorNode: null as Node | null,
+      focusNode: null as Node | null,
+      isCollapsed: false,
+      rangeCount: 1,
+      toString: () => {
+        return 'selected output'
+      },
+    }
+    const selectionSpy = vi
+      .spyOn(window, 'getSelection')
+      .mockReturnValue(selection as unknown as Selection)
+    const targets: Array<{ name: string; element: HTMLElement }> = []
+    const scrollbackBackground = tab.pane.querySelector<HTMLElement>('.scrollback-area')
+    expect(scrollbackBackground).not.toBeNull()
+    const scrollbackInner = scrollbackBackground!.querySelector<HTMLElement>('.scrollback-inner')
+    expect(scrollbackInner).not.toBeNull()
+
+    const frozen = document.createElement('div')
+    frozen.className = 'cmd-block'
+    const frozenButton = document.createElement('button')
+    frozenButton.className = 'cmd-overflow-btn'
+    const selectedText = document.createTextNode('selected output')
+    frozen.append(selectedText, frozenButton)
+    scrollbackInner!.append(frozen)
+    selection.anchorNode = selectedText
+    selection.focusNode = selectedText
+    targets.push({ name: 'frozen block', element: frozenButton })
+
+    const chrome = document.createElement('button')
+    chrome.className = 'nocx-editor-chrome'
+    tab.pane.append(chrome)
+    targets.push({ name: 'chrome', element: chrome })
+
+    const priorTabIndex = scrollbackBackground!.getAttribute('tabindex')
+    scrollbackBackground!.tabIndex = 0
+    targets.push({ name: 'scrollback background', element: scrollbackBackground! })
+
+    const menu = document.createElement('div')
+    menu.className = 'cmd-overflow-menu'
+    const menuItem = document.createElement('button')
+    menuItem.className = 'cmd-overflow-menu-item'
+    menu.append(menuItem)
+    document.body.append(menu)
+    targets.push({ name: 'block action menu', element: menuItem })
+
+    const results: Array<{
+      target: string
+      activeElement: string
+      defaultPrevented: boolean
+      signals: string[]
+    }> = []
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      for (const target of targets) {
+        target.element.focus()
+        client.dispatcher.call.mockClear()
+        sessionOf(content).signal.mockClear()
+        const event = new KeyboardEvent('keydown', {
+          key: 'c',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        })
+        target.element.dispatchEvent(event)
+        const signals = signalsSent(content)
+        results.push({
+          target: target.name,
+          activeElement: document.activeElement?.constructor.name ?? 'null',
+          defaultPrevented: event.defaultPrevented,
+          signals,
+        })
+      }
+      expect(results).toEqual([
+        {
+          target: 'frozen block',
+          activeElement: 'HTMLButtonElement',
+          defaultPrevented: false,
+          signals: [],
+        },
+        {
+          target: 'chrome',
+          activeElement: 'HTMLButtonElement',
+          defaultPrevented: true,
+          signals: ['interrupt'],
+        },
+        {
+          target: 'scrollback background',
+          activeElement: 'HTMLDivElement',
+          defaultPrevented: false,
+          signals: [],
+        },
+        {
+          target: 'block action menu',
+          activeElement: 'HTMLButtonElement',
+          defaultPrevented: true,
+          signals: ['interrupt'],
+        },
+      ])
+    } finally {
+      selectionSpy.mockRestore()
+      if (priorTabIndex === null) scrollbackBackground!.removeAttribute('tabindex')
+      else scrollbackBackground!.setAttribute('tabindex', priorTabIndex)
+      menu.remove()
+      frozen.remove()
+      chrome.remove()
+      restore()
+      teardown()
+    }
+  })
+
   it('Ctrl+C is addressed to the running command even when the grid does not hold focus', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(

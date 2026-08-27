@@ -7917,7 +7917,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     const selectionSpy = vi
       .spyOn(window, 'getSelection')
       .mockReturnValue(selection as unknown as Selection)
-    const targets: Array<{ name: string; element: HTMLElement }> = []
+    const targets: Array<{ name: string; element: HTMLElement; take?: () => void }> = []
     const scrollbackBackground = tab.pane.querySelector<HTMLElement>('.scrollback-area')
     expect(scrollbackBackground).not.toBeNull()
     const scrollbackInner = scrollbackBackground!.querySelector<HTMLElement>('.scrollback-inner')
@@ -7951,6 +7951,19 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     document.body.append(menu)
     targets.push({ name: 'block action menu', element: menuItem })
 
+    // The row the merge with main needed (nocx-45vkz + nocx-4ff.38). Claiming
+    // a selection for the scrollback RELEASES the composer's focus and puts
+    // nothing in its place, so the person who just dragged across a running
+    // command's output has focus on the body and a live highlight in front of
+    // them. Their Ctrl+C is a copy. Answering it with a SIGINT is the worst
+    // reading of the gesture available, and it is what the two changes did
+    // together while each was right alone.
+    targets.push({
+      name: 'released composer, selection still claimed',
+      element: document.body,
+      take: () => (document.activeElement as HTMLElement | null)?.blur(),
+    })
+
     const results: Array<{
       target: string
       activeElement: string
@@ -7961,7 +7974,8 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       content.setVisible(true)
       startCommand(client)
       for (const target of targets) {
-        target.element.focus()
+        if (target.take) target.take()
+        else target.element.focus()
         client.dispatcher.call.mockClear()
         sessionOf(content).signal.mockClear()
         const event = new KeyboardEvent('keydown', {
@@ -8003,6 +8017,12 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
           activeElement: 'HTMLButtonElement',
           defaultPrevented: true,
           signals: ['interrupt'],
+        },
+        {
+          target: 'released composer, selection still claimed',
+          activeElement: 'HTMLBodyElement',
+          defaultPrevented: false,
+          signals: [],
         },
       ])
     } finally {

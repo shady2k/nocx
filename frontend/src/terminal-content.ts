@@ -2494,12 +2494,24 @@ export class TerminalContent extends BasePaneContent {
           if (!this.hasRunningCommand()) return
           const active = document.activeElement
           const sel = window.getSelection()
-          // Ctrl+C remains copy only for a live selection in this pane while
-          // the pane's scrollback still owns focus. A selection's anchor and
-          // focus nodes keep that ownership tied to this pane; once focus
-          // moves to chrome or a menu, stale scrollback text cannot swallow
-          // the interrupt.
+          // Ctrl+C remains copy only for a live selection in this pane that
+          // no other surface has taken the focus away from. The anchor and
+          // focus nodes tie the selection to this pane; once focus moves to
+          // chrome or a menu, stale scrollback text cannot swallow the
+          // interrupt.
+          //
+          // "No other surface" includes the BODY, and that is not a
+          // technicality: claiming a selection for the scrollback releases
+          // the composer's focus and puts nothing else in its place
+          // (nocx-45vkz — blurring an editing host is itself a selection
+          // change on WebKit, so the claim is re-asserted there rather than
+          // assumed). The person who just dragged across a running command's
+          // output has focus on the body and a live highlight in front of
+          // them; answering their Ctrl+C with a SIGINT would be the worst
+          // reading of the gesture available.
           const scrollbackArea = this.scrollback?.scrollbackArea
+          const focusElsewhere =
+            active !== null && active !== document.body && scrollbackArea?.contains(active) !== true
           const selectionOwnedByFocus =
             sel !== null &&
             !sel.isCollapsed &&
@@ -2508,8 +2520,7 @@ export class TerminalContent extends BasePaneContent {
             sel.focusNode !== null &&
             scrollbackArea?.contains(sel.anchorNode) === true &&
             scrollbackArea.contains(sel.focusNode) &&
-            active !== null &&
-            scrollbackArea.contains(active)
+            !focusElsewhere
           if (selectionOwnedByFocus) return
           if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
           if (this.editor?.isVisible && active && this.editor.rootContains(active)) return

@@ -1,4 +1,4 @@
-package git
+package registry
 
 import (
 	"context"
@@ -7,7 +7,9 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/git"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // stubRepo is a Repo that records calls and can block them.
@@ -21,7 +23,7 @@ type stubRepo struct {
 	closed   bool
 }
 
-func (s *stubRepo) Status(ctx context.Context) (Status, error) {
+func (s *stubRepo) Status(ctx context.Context) (git.Status, error) {
 	s.mu.Lock()
 	s.calls++
 	s.inflight++
@@ -39,39 +41,39 @@ func (s *stubRepo) Status(ctx context.Context) (Status, error) {
 	s.mu.Lock()
 	s.inflight--
 	s.mu.Unlock()
-	return Status{Staged: []Entry{}, Unstaged: []Entry{}, Conflicted: []Entry{}}, nil
+	return git.Status{Staged: []git.Entry{}, Unstaged: []git.Entry{}, Conflicted: []git.Entry{}}, nil
 }
 
-func (s *stubRepo) EnvState() (EnvState, string) {
-	return EnvResolved, ""
+func (s *stubRepo) EnvState() (git.EnvState, string) {
+	return git.EnvResolved, ""
 }
 
-func (s *stubRepo) Diff(ctx context.Context, path string, side Side, maxBytes int64) (Diff, error) {
-	return Diff{}, nil
+func (s *stubRepo) Diff(ctx context.Context, path string, side git.Side, maxBytes int64) (git.Diff, error) {
+	return git.Diff{}, nil
 }
 
-func (s *stubRepo) Log(ctx context.Context, max int) (Log, error) {
-	return Log{Entries: []LogEntry{}}, nil
+func (s *stubRepo) Log(ctx context.Context, max int) (git.Log, error) {
+	return git.Log{Entries: []git.LogEntry{}}, nil
 }
 
-func (s *stubRepo) Stage(ctx context.Context, paths []string) (Status, error) {
+func (s *stubRepo) Stage(ctx context.Context, paths []string) (git.Status, error) {
 	return s.Status(ctx)
 }
 
-func (s *stubRepo) Unstage(ctx context.Context, paths []string) (Status, error) {
+func (s *stubRepo) Unstage(ctx context.Context, paths []string) (git.Status, error) {
 	return s.Status(ctx)
 }
 
-func (s *stubRepo) StageAll(ctx context.Context) (Status, error) { return s.Status(ctx) }
+func (s *stubRepo) StageAll(ctx context.Context) (git.Status, error) { return s.Status(ctx) }
 
-func (s *stubRepo) UnstageAll(ctx context.Context) (Status, error) { return s.Status(ctx) }
+func (s *stubRepo) UnstageAll(ctx context.Context) (git.Status, error) { return s.Status(ctx) }
 
-func (s *stubRepo) Commit(ctx context.Context, msg string, amend bool) (CommitOutcome, error) {
-	return CommitOutcome{State: CommitOK}, nil
+func (s *stubRepo) Commit(ctx context.Context, msg string, amend bool) (git.CommitOutcome, error) {
+	return git.CommitOutcome{State: git.CommitOK}, nil
 }
 
-func (s *stubRepo) HeadMessage(ctx context.Context) (HeadMessage, error) {
-	return HeadMessage{State: HeadMessageOK}, nil
+func (s *stubRepo) HeadMessage(ctx context.Context) (git.HeadMessage, error) {
+	return git.HeadMessage{State: git.HeadMessageOK}, nil
 }
 
 func (s *stubRepo) RemoteURL(ctx context.Context) (string, error) {
@@ -324,16 +326,10 @@ func TestMethodRefusedAfterCloseBegins(t *testing.T) {
 
 	// Poll until a new method is refused: Close's closed flag flips at its
 	// very start, so this becomes true and stays true.
-	deadline := time.Now().Add(2 * time.Second)
-	for {
-		if _, err := h.Diff(ctx, "x", SideStaged, 100); err != nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("methods kept running after Close began")
-		}
-		time.Sleep(time.Millisecond)
-	}
+	waittest.WaitFor(t, "methods to be refused after Close began", func() bool {
+		_, err := h.Diff(ctx, "x", git.SideStaged, 100)
+		return err != nil
+	})
 
 	close(repo.block)
 	<-done
@@ -397,11 +393,7 @@ func TestCloseSessionClosesOnlyThatSession(t *testing.T) {
 
 func waitInflight(t *testing.T, repo *stubRepo) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for repo.inflightCount() == 0 && time.Now().Before(deadline) {
-		time.Sleep(time.Millisecond)
-	}
-	if repo.inflightCount() == 0 {
-		t.Fatal("call never started")
-	}
+	waittest.WaitFor(t, "repository method to enter", func() bool {
+		return repo.inflightCount() > 0
+	})
 }

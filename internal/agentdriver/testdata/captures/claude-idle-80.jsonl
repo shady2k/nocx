@@ -1,0 +1,10 @@
+{"agent":"claude","argv":["claude"],"cols":80,"rows":40,"started":"2026-08-25T17:33:46.516067554Z","script":["+12000ms \"\""]}
+{"atMs":450,"offset":0,"data":"\u001b7\u001b[r\u001b8\u001b[?25h"}
+{"atMs":492,"offset":13,"data":"\u001b[?25l\u001b[?2004h\u001b[?1004h\u001b[?2031h"}
+{"atMs":524,"offset":43,"data":"\u001b[\u003e0q"}
+{"atMs":524,"offset":48,"data":"\u001b[c"}
+{"atMs":1474,"offset":51,"data":"\u001b[?1049h\u001b[2J\u001b[H\u001b[?1000h\u001b[?1002h\u001b[?1003h\u001b[?1006h"}
+{"atMs":1479,"offset":98,"data":"\u001b]0;✳ Claude Code\u0007"}
+{"atMs":1522,"offset":118,"data":"\u001b[H\r\u001b[1C\u001b[1B▐▛███▛█\u001b[12GClaude\u001b[19GCode\u001b[24Gv2.1.238\r\u001b[1B▝▜██████▀\u001b[12GOpus\u001b[17G5\u001b[19G(1M\u001b[23Gcontext)\u001b[32Gwith\u001b[37Ghigh\u001b[42Geffort\u001b[49G·\u001b[51GClaude\u001b[58GMax\r\u001b[2C\u001b[1B▝▝\u001b[6G▝▝\u001b[12G~/.herdr/worktrees/nocx/szb40-8-narrow\r\u001b[62C\u001b[31B●\u001b[65Ghigh\u001b[70G·\u001b[72G/effort\r\u001b[1B────────────────────────────────────────────────────────────────────────────────\r\u001b[1B❯ Try\u001b[7G\"write\u001b[14Ga\u001b[16Gtest\u001b[21Gfor\u001b[25Gterminal-content.ts\"\r\u001b[1B────────────────────────────────────────────────────────────────────────────────\r\u001b[2C\u001b[2B⏵⏵\u001b[6Gauto\u001b[11Gmode\u001b[16Gon\u001b[19G(shift+tab\u001b[30Gto\u001b[33Gcycle)\u001b[40G·\u001b[42G←\u001b[44Gfor\u001b[48Gagents\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs":2443,"offset":1104,"data":"\u001b[?25l\u001b[H\r\u001b[2C\u001b[36B\u001b[K\u001b[40;1H\u001b[37;3H\u001b[?25h"}
+{"atMs":11486,"offset":1146,"data":"\u001b[?25l\u001b[H\r\u001b[62C\u001b[34B \u001b[65G    \u001b[70G 0 tokens\u001b[40;1H\u001b[37;3H\u001b[?25h"}

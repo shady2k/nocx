@@ -80,13 +80,19 @@ func runComposedLine(t *testing.T, line, pathDir, password string) string {
 	defer func() { _ = ptmx.Close() }()
 
 	done := make(chan string, 1)
+	promptSeen := make(chan struct{})
 	go func() {
 		var sb strings.Builder
 		buf := make([]byte, 4096)
+		prompt := false
 		for {
 			n, rerr := ptmx.Read(buf)
 			if n > 0 {
 				sb.Write(buf[:n])
+				if !prompt && strings.Contains(sb.String(), "password: ") {
+					close(promptSeen)
+					prompt = true
+				}
 			}
 			if rerr != nil {
 				break
@@ -95,9 +101,15 @@ func runComposedLine(t *testing.T, line, pathDir, password string) string {
 		done <- sb.String()
 	}()
 
-	// The client asks; the human answers. Anything the composer staged ahead
-	// of this write is what the client would read instead.
-	time.Sleep(700 * time.Millisecond)
+	// The client asks; the human answers. Wait for the visible prompt rather
+	// than guessing how long the fake client takes to start.
+	select {
+	case <-promptSeen:
+	case <-time.After(15 * time.Second):
+		_ = c.Process.Kill()
+		t.Fatal("timed out waiting for the composed line's password prompt")
+		return ""
+	}
 	if _, werr := ptmx.Write([]byte(password + "\n")); werr != nil {
 		t.Logf("write password: %v", werr)
 	}

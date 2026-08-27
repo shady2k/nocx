@@ -51,7 +51,50 @@ const (
 	// authenticated channel to the PARENT (its envelope addresses the
 	// parent); the bootstrap is opaque text the parent never parses.
 	KindDomainGrant EventKind = "domain_grant"
+	// KindAgentEnrol asks nocx to watch this lane's pane while an agent runs
+	// in it. It is THE ENROLMENT ACT the AD-6 amendment requires: an explicit
+	// call naming a pane, never an inference that a title or a command word
+	// looked like an agent, because an inferred set has no upper bound and no
+	// audit. The shell-visible answer is KindAgentEnrolled, and the two are
+	// one request/response pair (protocol doc §15).
+	//
+	// It rides this channel rather than a socket of its own because a second
+	// socket would be a second authenticator for the same trust decision, and
+	// because the per-epoch capability lives in the integration script's text
+	// and nowhere else (decision 2) — which is also why the caller is a
+	// function inside the bundle rather than a binary reading an environment
+	// variable.
+	KindAgentEnrol EventKind = "agent_enrol"
+	// KindAgentEnrolled is the kernel's answer to an agent_enrol, carrying the
+	// verdict so the caller can refuse VISIBLY. Failure here is closed: no
+	// enrolment, no orchestration, and the pane says so. That is the opposite
+	// of the domain_grant path, which answers a refusal with an empty
+	// bootstrap and lets the parent run its command conventionally — right for
+	// an optional enhancement, wrong for something an invariant rests on.
+	KindAgentEnrolled EventKind = "agent_enrolled"
+	// KindAgentWithdraw closes the interval an enrolment opened. The amendment
+	// wants an interval with BOTH ends, and this is the end the caller knows
+	// about: the agent it bracketed has returned. The backend closes the same
+	// interval on domain close and on session end, because a caller that was
+	// killed cannot send this.
+	KindAgentWithdraw EventKind = "agent_withdraw"
+	// KindAgentWithdrawn answers a withdraw, so a caller can tell a close that
+	// happened from one that never arrived.
+	KindAgentWithdrawn EventKind = "agent_withdrawn"
 )
+
+// maxAgentNameLen bounds the agent name an enrolment may carry. The name is
+// spliced into no command line and quoted by nobody — it selects a driver and
+// appears in a refusal a person reads — but an unbounded one out of a
+// malformed frame is a log line nobody can use and a driver key nobody can
+// look up.
+const maxAgentNameLen = 32
+
+// maxPaneDimension bounds the geometry an enrolment may name. A grid is a real
+// emulator with a real allocation, and the number arrives from a shell — a
+// bound here is what keeps a malformed frame from asking for one the size of a
+// building. No terminal anyone runs is near it.
+const maxPaneDimension = 1000
 
 // Nested environment kinds a domain_request may name. The kernel validates
 // the kind and rejects anything else outright; the bootstrap the grant
@@ -93,6 +136,10 @@ type Event struct {
 	DomainClosed      *DomainClosedEvent
 	DomainRequest     *DomainRequest
 	DomainGrant       *DomainGrant
+	AgentEnrol        *AgentEnrol
+	AgentEnrolled     *AgentEnrolled
+	AgentWithdraw     *AgentWithdraw
+	AgentWithdrawn    *AgentWithdrawn
 }
 
 // EventKind is the wire name of an event kind.
@@ -121,6 +168,10 @@ func (e Event) validInbound() bool {
 		return e.DomainClosed != nil
 	case KindDomainRequest:
 		return e.DomainRequest != nil
+	case KindAgentEnrol:
+		return e.AgentEnrol != nil
+	case KindAgentWithdraw:
+		return e.AgentWithdraw != nil
 	}
 	return false
 }
@@ -278,6 +329,52 @@ type (
 		Domain    DomainID `json:"domain"`
 		Epoch     uint64   `json:"epoch"`
 		Bootstrap string   `json:"bootstrap,omitempty"`
+	}
+
+	// AgentEnrol asks nocx to watch this lane's pane while Agent runs in it.
+	// It names WHAT is about to run and nothing about the pane: the pane is
+	// the envelope's lane, which the kernel authenticated, so a caller cannot
+	// enrol a pane that is not its own.
+	AgentEnrol struct {
+		RequestID RequestID `json:"request"`
+		Agent     string    `json:"agent"`
+		// Cols and Rows are the geometry the caller is about to run the agent
+		// at. They come from the SHELL rather than from the pty because at
+		// this point in the backend nothing owns "how big is that pane" — the
+		// session interface answers no such question, and inventing a second
+		// owner of a pane's geometry to answer it once would be worse than
+		// taking the number from the process that is about to be that pane.
+		// It is a starting value, not the authority: every subsequent resize
+		// reaches the grid from the pty's own path, which is authoritative,
+		// so a stale or wrong start is corrected by the first window change
+		// rather than believed forever.
+		Cols int `json:"cols"`
+		Rows int `json:"rows"`
+	}
+
+	// AgentEnrolled is the answer. Enrolled defaults to false and that is
+	// load-bearing: an answer nobody filled in reads as a refusal, so a seam
+	// that is absent, that errored, or that was never wired cannot be mistaken
+	// for consent (D4).
+	AgentEnrolled struct {
+		RequestID RequestID `json:"request"`
+		Agent     string    `json:"agent"`
+		Enrolled  bool      `json:"enrolled"`
+		// Reason says why not, for a person reading a refusal in their own
+		// pane. Empty on success.
+		Reason string `json:"reason,omitempty"`
+	}
+
+	// AgentWithdraw closes the interval the matching enrolment opened.
+	AgentWithdraw struct {
+		RequestID RequestID `json:"request"`
+	}
+
+	// AgentWithdrawn answers a withdraw. It carries no verdict: withdrawing
+	// something already gone is not a failure, because a caller racing a
+	// session teardown should not have to care who won.
+	AgentWithdrawn struct {
+		RequestID RequestID `json:"request"`
 	}
 )
 

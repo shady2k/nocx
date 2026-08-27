@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/settings.set.schema.json",
+  "title": "SettingsSet",
+  "description": "Result of the settings.set JSON-RPC method: the acknowledgement that one non-secret setting was validated, persisted and published to every listener. It is the method the notification routing matrix travels on (nocx-3mniv D1) — the epic adds no wire method of its own because the settings methods already carry the choice, so the wire criterion is honoured on the method that actually carries the feature. A rejected value is a JSON-RPC error and never a result, which is why there is no failure shape here: 'ok' is present, true, and alone. Secret-class settings do not use this method at all (settings.secretSet does; ADR-0011 §2).",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["ok"],
+  "properties": {
+    "ok": {
+      "description": "Always true. The field exists because a JSON-RPC result must be a value, and an empty object would leave a later 'partially applied' variant expressible without a contract change.",
+      "type": "boolean",
+      "const": true
+    }
+  }
+}

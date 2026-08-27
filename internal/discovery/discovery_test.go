@@ -3,12 +3,14 @@ package discovery
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ---------------------------------------------------------------------------
@@ -440,6 +442,8 @@ func TestDetector_Timeout_BacksOff(t *testing.T) {
 	// succeeds — success resets the backoff.
 	f.block = nil
 	f.queue(fakeResponse{result: framed(knownRow)})
+	// The detector has no clock seam; retain this bounded wait to cross the
+	// backoff expiry, which has no other observable trigger.
 	time.Sleep(40 * time.Millisecond)
 	s3 := d.Sample(context.Background())
 	if s3.State != StateAvailable {
@@ -505,13 +509,9 @@ func TestDetector_CloseMidSample_DiscardsLateResult(t *testing.T) {
 	resCh := make(chan Sample, 1)
 	go func() { resCh <- d.Sample(context.Background()) }()
 
-	deadline := time.Now().Add(5 * time.Second)
-	for len(f.commands()) != 2 {
-		if time.Now().After(deadline) {
-			t.Fatalf("in-flight sample never entered the probe (execs = %d)", len(f.commands()))
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
+	waittest.WaitForDetail(t, "in-flight sample to enter the probe",
+		func() string { return fmt.Sprintf("execs = %d", len(f.commands())) },
+		func() bool { return len(f.commands()) >= 2 })
 	if err := d.Close(); err != nil {
 		t.Fatalf("Close: %v", err)
 	}
@@ -651,16 +651,15 @@ func TestDetector_OneInFlight(t *testing.T) {
 
 	// Wait until the first sample is inside the probe, then start the
 	// second — it must wait on the one-in-flight guard, not execute.
-	deadline := time.Now().Add(5 * time.Second)
-	for len(f.commands()) != 1 {
-		if time.Now().After(deadline) {
-			t.Fatalf("first sample never entered the probe (execs = %d)", len(f.commands()))
-		}
-		time.Sleep(5 * time.Millisecond)
-	}
-	go func() { res2 <- d.Sample(context.Background()) }()
-
-	time.Sleep(50 * time.Millisecond)
+	waittest.WaitForDetail(t, "first sample to enter the probe",
+		func() string { return fmt.Sprintf("execs = %d", len(f.commands())) },
+		func() bool { return len(f.commands()) == 1 })
+	secondStarted := make(chan struct{})
+	go func() {
+		close(secondStarted)
+		res2 <- d.Sample(context.Background())
+	}()
+	<-secondStarted
 	if got := len(f.commands()); got != 1 {
 		t.Fatalf("execs while first sample in flight = %d, want 1", got)
 	}

@@ -393,6 +393,19 @@ func (s *WSServer) settleDownload(rt *runningTransfer) {
 	s.deliverTransferDone(rt.sessionID, rt.id, retainedDone{
 		method: "files.downloadDone", params: mustMarshal(p),
 	})
+	// AND THE TRANSFER'S END BECOMES A NOTIFICATION (nocx-zlxmm), through the
+	// same owner the upload's settle uses and deliberately not through a
+	// parallel one: a person has one answer to "tell me when a transfer
+	// ends", so there is one kind, one toggle and one wording.
+	//
+	// No stranded list, for the reason this params struct has no field for
+	// one: a download writes nothing on the far host and so can leave nothing
+	// behind.
+	s.raiseTransferFinished(rt, transferOutcome{
+		state:  state,
+		name:   p.Name,
+		reason: p.Error,
+	})
 }
 
 // downloadName is the base name of a download's pinned file, or "" for a

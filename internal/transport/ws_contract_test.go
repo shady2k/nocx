@@ -30,11 +30,14 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/git/registry"
+	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/note"
+	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
 	"github.com/shady2k/nocx/internal/session"
@@ -45,6 +48,7 @@ import (
 	"github.com/shady2k/nocx/internal/tunnel"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vaultreset"
+	"github.com/shady2k/nocx/internal/waittest"
 	"github.com/shady2k/nocx/internal/workspace"
 )
 
@@ -1932,11 +1936,14 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 		t.Errorf("shell = %q, want %q for an unpinned remote", status.Shell, ssh.ShellAuto)
 	}
 	// The resolver stamped no mode (openProfileResolver builds a bare
-	// config), so the ack must report the default: script (N3 — wrap and
-	// install automatically). A direct-host or profile-less open gets the
-	// hardcoded default, exactly like a profile that resolves to nothing.
-	if got.DesiredMode != "script" {
-		t.Errorf("desiredMode = %q, want %q (default when the resolver stamps none)", got.DesiredMode, "script")
+	// config), so the ack must report the default. A direct-host or
+	// profile-less open is unanswered in exactly the sense a profile that
+	// resolves to nothing is, so it reports the SAME value — read from the
+	// cascade rather than spelled again here, which is what stops this
+	// assertion from drifting away from the resolver the way the ack's own
+	// literal did (ADR-0033).
+	if want := string(profile.DefaultDesiredMode()); got.DesiredMode != want {
+		t.Errorf("desiredMode = %q, want %q (default when the resolver stamps none)", got.DesiredMode, want)
 	}
 
 	// The launcher the transport option attached must have reached the
@@ -2428,6 +2435,39 @@ func TestShellFootprintStatus_DTOConformsToContract(t *testing.T) {
 		t.Fatalf("marshal empty: %v", err)
 	}
 	validateJSON(t, schema, raw, "shell.footprint.status DTO (empty)")
+
+	// A helper install rides the same result (remote-helper design D8).
+	raw, err = json.Marshal(shellFootprintStatusResult{
+		Destinations: []shellFootprintDestination{},
+		Helpers: []shellFootprintHelper{{
+			Identity:           "u@db01:22",
+			Fingerprint:        "SHA256:deadbeef",
+			Path:               "~/.nocx/helper/1-linux-amd64-abc/",
+			Hash:               "abc",
+			InstalledAt:        time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC),
+			RemovableProfileID: &removable,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal helpers: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.status DTO (helper install)")
+
+	// A helper install with no saved connection: removableProfileId null.
+	raw, err = json.Marshal(shellFootprintStatusResult{
+		Destinations: []shellFootprintDestination{},
+		Helpers: []shellFootprintHelper{{
+			Identity:    "root@10.0.0.7:22",
+			Fingerprint: "SHA256:deadbeef",
+			Path:        "~/.nocx/helper/1-linux-amd64-abc/",
+			Hash:        "abc",
+			InstalledAt: time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC),
+		}},
+	})
+	if err != nil {
+		t.Fatalf("marshal non-removable helper: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.status DTO (non-removable helper)")
 }
 
 // OverTheWire: the real handler, a real fact store holding one
@@ -2453,10 +2493,22 @@ func TestShellFootprintStatus_OverTheWireConformsToContract(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("Record: %v", err)
 	}
+	installs := consent.NewInstallStore(
+		log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "helper-installs.json")
+	if err := installs.Record(consent.Install{
+		Fingerprint: "SHA256:deadbeef",
+		Identity:    "u@db01:22",
+		Path:        "~/.nocx/helper/1-linux-amd64-abc/",
+		Hash:        "abc",
+		InstalledAt: time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("Record install: %v", err)
+	}
 
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
 		WithInstalledFactStore(facts),
+		WithHelperInstallStore(installs),
 		WithSSHConfigResolver(resolver, "/nonexistent/config"),
 		WithProfileResolver(&openProfileResolver{host: "pi@192.168.0.93"}),
 		WithProfileRepository(&footprintTestProfileRepo{profiles: []profile.SSHProfile{{
@@ -2492,6 +2544,74 @@ func TestShellFootprintStatus_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if got.Destinations[1].RemovableProfileID != nil {
 		t.Errorf("direct-host destination removableProfileId = %v, want null", *got.Destinations[1].RemovableProfileID)
+	}
+	if len(got.Helpers) != 1 {
+		t.Fatalf("helpers = %d, want 1 — the recorded helper install must ride the status result", len(got.Helpers))
+	}
+	if got.Helpers[0].Fingerprint != "SHA256:deadbeef" || got.Helpers[0].Identity != "u@db01:22" {
+		t.Errorf("helper row = %+v, want the recorded install", got.Helpers[0])
+	}
+}
+
+// ── shell.footprint.helperUninstall ──────────────────────────────────────
+
+func TestShellFootprintHelperUninstall_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.footprint.helperUninstall.schema.json")
+
+	raw, err := json.Marshal(shellFootprintHelperUninstallResult{Removed: true})
+	if err != nil {
+		t.Fatalf("marshal removed: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.helperUninstall DTO (removed)")
+
+	raw, err = json.Marshal(shellFootprintHelperUninstallResult{Removed: false})
+	if err != nil {
+		t.Fatalf("marshal no-op: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.helperUninstall DTO (nothing installed)")
+}
+
+// OverTheWire: the real handler with recording seams — the closer and the
+// remover are the same doubles the handler tests use, so the D25 order and
+// the schema are proven on the real socket in one pass.
+func TestShellFootprintHelperUninstall_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.footprint.helperUninstall.schema.json")
+	installs := consent.NewInstallStore(
+		log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "helper-installs.json")
+	if err := installs.Record(consent.Install{
+		Fingerprint: "SHA256:deadbeef",
+		Identity:    "u@db01:22",
+		Path:        "~/.nocx/helper/1-linux-amd64-abc/",
+		Hash:        "abc",
+		InstalledAt: time.Date(2026, 8, 10, 9, 0, 0, 0, time.UTC),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	closer := &recordingHelperCloser{}
+	remover := &recordingHelperUninstaller{removed: true}
+	ws, events := footprintHelperUninstallHarness(t, installs, closer, remover)
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := vaultCall(t, conn, "shell.footprint.helperUninstall", map[string]any{
+		"profileId":   "p_01",
+		"fingerprint": "SHA256:deadbeef",
+		"path":        "~/.nocx/helper/1-linux-amd64-abc/",
+	}, 3)
+	if resp.Error != nil {
+		t.Fatalf("shell.footprint.helperUninstall: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "shell.footprint.helperUninstall result (real socket)")
+
+	// D25's order survived the socket: close, then remove.
+	want := []string{"close", "remove"}
+	if len(*events) != len(want) {
+		t.Fatalf("events = %v, want %v", *events, want)
+	}
+	for i := range want {
+		if (*events)[i] != want[i] {
+			t.Fatalf("events = %v, want %v — the close must precede the removal", *events, want)
+		}
 	}
 }
 
@@ -2554,6 +2674,145 @@ func TestShellFootprintUninstall_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if len(got.Conflicts) != 1 || got.Conflicts[0] != "integration/v10/nocx.bash" {
 		t.Errorf("conflicts = %v, want the capability's list verbatim", got.Conflicts)
+	}
+}
+
+// ── shell.footprint.consent ─────────────────────────────────────────────
+
+func TestShellFootprintConsent_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.footprint.consent.schema.json")
+	raw, err := json.Marshal(shellFootprintConsentResult{State: "granted"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "shell.footprint.consent DTO")
+}
+
+// fingerprintChannel is a StubChannel that carries a host public-key
+// fingerprint — the session-level fact shell.footprint.consent keys the
+// grant by (consent design §3.2).
+type fingerprintChannel struct {
+	*ssh.StubChannel
+	fingerprint string
+}
+
+func (c *fingerprintChannel) HostKeyFingerprint() string { return c.fingerprint }
+
+// TestShellFootprintConsent_OverTheWireConformsToContract runs the real
+// method off the real socket: an SSH session whose machine has no answer
+// is granted through the RPC, the result validates against the schema, and
+// the grant is durable — a store reconstruction reads it back.
+func TestShellFootprintConsent_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "shell.footprint.consent.schema.json")
+	ctx := context.Background()
+	logger := log.NewSlogAdapter(nil)
+	dir := t.TempDir()
+	consents := consent.NewStore(logger, storage.NewDocumentStore(dir), "consent.json")
+	reg := newRegWithStub(logger)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			return &fingerprintChannel{StubChannel: ssh.NewStubChannel(logger), fingerprint: "SHA256:consented"}, nil
+		},
+	})
+	ws := NewWSServer(logger, reg,
+		WithHelperConsentStore(consents),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
+				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	sid := openSSHSession(t, conn, 1)
+	resp := vaultCall(t, conn, "shell.footprint.consent", map[string]any{"sessionId": sid}, 2)
+	if resp.Error != nil {
+		t.Fatalf("shell.footprint.consent: %+v", resp.Error)
+	}
+	validateJSON(t, schema, resp.Result, "shell.footprint.consent result (real socket)")
+
+	// The grant is durable: a store reconstructed over the same directory
+	// reads the answer the RPC persisted.
+	again := consent.NewStore(logger, storage.NewDocumentStore(dir), "consent.json")
+	if ans, ok := again.Lookup("SHA256:consented"); !ok || ans != consent.Granted {
+		t.Fatalf("Lookup after the RPC and a store reopen = %q/%v, want granted", ans, ok)
+	}
+}
+
+// TestShellFootprintConsent_OwnershipAndKeyRefusals: the accept is
+// authorised by connState (a connection grants only for a session it
+// owns) and a session with no host key never grants (consent design §3.2).
+func TestShellFootprintConsent_OwnershipAndKeyRefusals(t *testing.T) {
+	ctx := context.Background()
+	logger := log.NewSlogAdapter(nil)
+	consents := consent.NewStore(logger, storage.NewDocumentStore(t.TempDir()), "consent.json")
+	reg := newRegWithStub(logger)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			// No fingerprint: the stub channel carries none.
+			return ssh.NewStubChannel(logger), nil
+		},
+	})
+	ws := NewWSServer(logger, reg,
+		WithHelperConsentStore(consents),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
+				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+	sid := openSSHSession(t, conn, 1)
+
+	// A session whose host key was never captured must not grant.
+	if resp := vaultCall(t, conn, "shell.footprint.consent", map[string]any{"sessionId": sid}, 2); resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("consent for a keyless session = %+v, want the -32602 key refusal", resp)
+	}
+	// Missing sessionId: -32602.
+	if resp := vaultCall(t, conn, "shell.footprint.consent", map[string]any{}, 3); resp.Error == nil || resp.Error.Code != -32602 {
+		t.Fatalf("consent without sessionId = %+v, want -32602", resp)
+	}
+}
+
+// TestShellFootprintConsent_UnwiredStoreRefuses: a server with no consent
+// store wired refuses the accept — a consent prompt offered by a server
+// that cannot record the answer would fail at click time (AGENTS.md rule
+// 1).
+func TestShellFootprintConsent_UnwiredStoreRefuses(t *testing.T) {
+	ctx := context.Background()
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			return ssh.NewStubChannel(logger), nil
+		},
+	})
+	ws := NewWSServer(logger, reg,
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
+				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	defer func() { _ = ws.Stop(ctx) }()
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+	sid := openSSHSession(t, conn, 1)
+	if resp := vaultCall(t, conn, "shell.footprint.consent", map[string]any{"sessionId": sid}, 2); resp.Error == nil || resp.Error.Code != -32603 {
+		t.Fatalf("consent without a store = %+v, want -32603", resp)
 	}
 }
 
@@ -3339,7 +3598,7 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 	bid := e.openBinding(t, sid, dir, 2)
 	w := e.watchDir(t, bid, []string{dir}, 3)
 
-	waitFor(t, "watch baseline", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		return w.paths[dir] != ""
@@ -3351,7 +3610,7 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "changed.txt"), []byte("x"), 0o600); err != nil {
 		t.Fatalf("write: %v", err)
 	}
-	waitFor(t, "dirty path", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "dirty path", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
 		_, ok := w.dirty[dir]
@@ -3487,11 +3746,27 @@ func TestGitOpen_DTOConformsToContract(t *testing.T) {
 			State: "ok", BindingID: "ab12", Toplevel: "/tmp/repo",
 			GitVersion: "2.55.0", EnvState: "resolved",
 		},
-		"not a repository":   {State: "notARepository"},
-		"git unavailable":    {State: "gitUnavailable"},
-		"git too old":        {State: "gitTooOld", GitVersion: "2.20.1"},
-		"no cwd":             {State: "noCwd"},
-		"remote unsupported": {State: "remoteUnsupported"},
+		"not a repository": {State: "notARepository"},
+		"git unavailable":  {State: "gitUnavailable"},
+		"git too old":      {State: "gitTooOld", GitVersion: "2.20.1"},
+		"no cwd":           {State: "noCwd"},
+		"consent required": {State: "consentRequired"},
+		"unsupported platform": {
+			State:   "unsupportedPlatform",
+			Message: "we build no helper for darwin/amd64",
+		},
+		"deploy failed": {
+			State:   "deployFailed",
+			Message: "installing the helper on host.example failed: upload refused",
+		},
+		"exec forbidden": {
+			State:   "execForbidden",
+			Message: "the host refused the probe that would run the helper: exec request failed",
+		},
+		"helper version mismatch": {
+			State:   "helperVersionMismatch",
+			Message: "the helper installed on host.example answered with a different protocol version or content than nocx installed — reinstall it to recover",
+		},
 	}
 	for name, r := range cases {
 		t.Run(name, func(t *testing.T) {
@@ -3796,6 +4071,69 @@ func TestGitOpen_OverTheWireConformsToContract(t *testing.T) {
 
 	raw := gitWireCall(t, e, "git.open", map[string]any{"sessionId": sid, "cwd": "/tmp/repo"}, 2)
 	validateJSON(t, schema, raw, "git.open result (real socket)")
+}
+
+// TestGitOpen_OverTheWireConformsToContract_SSHHelper is the SSH half of
+// the over-the-wire contract: an SSH session served through the helper
+// factory answers ok with a binding off the real socket, and that binding
+// is fully operational — git.status and git.commit work through it — so
+// the panel renders its mutation controls (git D14: what the panel cannot
+// do it does not draw, and now it can).
+func TestGitOpen_OverTheWireConformsToContract_SSHHelper(t *testing.T) {
+	openSchema := loadSchema(t, "git.open.schema.json")
+	statusSchema := loadSchema(t, "git.status.schema.json")
+	commitSchema := loadSchema(t, "git.commit.schema.json")
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(_ context.Context, _ string, _ ...ssh.ConnectOption) (ssh.Channel, error) {
+			return ssh.NewStubChannel(logger), nil
+		},
+	})
+	helper := newStubGitFactory()
+	ws := NewWSServer(logger, reg,
+		WithGitRegistry(registry.New()),
+		WithGitRepoFactory(newStubGitFactory()),
+		WithGitHelperFactory(func(session.Session) GitOpenSelection {
+			return GitOpenSelection{Factory: helper}
+		}),
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(_ string) (string, *ssh.ConnectConfig, error) {
+				return "host.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	sid := openSSHSession(t, conn, 1)
+
+	raw := gitWireCall(t, &gitTestEnv{ws: ws, conn: conn}, "git.open",
+		map[string]any{"sessionId": sid, "cwd": "/some/cwd"}, 2)
+	validateJSON(t, openSchema, raw, "git.open result off the real socket (SSH helper)")
+	var open struct {
+		State     string `json:"state"`
+		BindingID string `json:"bindingId"`
+	}
+	if err := json.Unmarshal(raw, &open); err != nil {
+		t.Fatalf("decode open: %v", err)
+	}
+	if open.State != "ok" || open.BindingID == "" {
+		t.Fatalf("open = %+v, want ok with a binding — the helper serves the SSH session", open)
+	}
+
+	// The binding the panel would hold answers the poll and the mutation
+	// controls: status, then a commit, each against its schema.
+	statusRaw := gitWireCall(t, &gitTestEnv{ws: ws, conn: conn}, "git.status",
+		map[string]any{"bindingId": open.BindingID}, 3)
+	validateJSON(t, statusSchema, statusRaw, "git.status result off the real socket (SSH helper)")
+	commitRaw := gitWireCall(t, &gitTestEnv{ws: ws, conn: conn}, "git.commit",
+		map[string]any{"bindingId": open.BindingID, "message": "a remote commit", "amend": false}, 4)
+	validateJSON(t, commitSchema, commitRaw, "git.commit result off the real socket (SSH helper)")
 }
 
 func TestGitStatus_OverTheWireConformsToContract(t *testing.T) {
@@ -8069,6 +8407,333 @@ func TestFilesDownloadDone_OverTheWireConformsToContract(t *testing.T) {
 			t.Fatalf("got %+v; want the sent outcome of %s", got, started.TransferID)
 		}
 	})
+}
+
+// ── notify.feed.read / notify.feed.markRead / notify.feed.changed ──────
+
+// The DTO's own conformance across the shapes a live feed produces. The
+// over-the-socket cases live in ws_notify_feed_test.go — this pins the
+// struct: field tags, the empty slice marshalling as [] rather than null,
+// the enum spellings, and that a read row and an unread row both satisfy
+// the contract.
+func TestNotifyFeedRead_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "notify.feed.read.schema.json")
+	at := time.Date(2026, 8, 22, 9, 41, 0, 0, time.UTC)
+	read := at.Add(time.Minute)
+
+	cases := map[string]notify.FeedSnapshot{
+		// Everything populated, including a collapsed row carrying a full
+		// tail (one member read, one not) and a lone row holding itself.
+		"populated": {
+			Revision:    12,
+			UnreadCount: 1,
+			Occurrences: []notify.Occurrence{
+				{
+					ID: "occ-2", Count: 3, LastAt: at,
+					Event: notify.Event{
+						SessionID: "s2", Title: "build finished", Body: "",
+						Kind: notify.KindBlockFinished, Trust: notify.TrustAttested,
+						Level: notify.LevelSuccess, At: at,
+						Attribution: notify.Attribution{Backend: "local", Host: "laptop", Session: "s2"},
+					},
+					Run: []notify.RunMember{
+						{ID: "occ-2", At: at, Title: "build started", ReadAt: &read},
+						{ID: "occ-3", At: at.Add(time.Second), Title: "build halfway"},
+						{ID: "occ-4", At: at.Add(2 * time.Second), Title: "build finished"},
+					},
+				},
+				{
+					ID: "occ-1", Count: 1, LastAt: at, ReadAt: &read,
+					Event: notify.Event{
+						SessionID: "s1", Title: "deploy failed", Body: "exit status 1",
+						Kind: notify.KindSessionEnded, Trust: notify.TrustAttested,
+						Level: notify.LevelWarning, At: at,
+						Attribution: notify.Attribution{Backend: "local", Host: "prod-1", Session: "s1"},
+					},
+					Run: []notify.RunMember{{ID: "occ-1", At: at, Title: "deploy failed", ReadAt: &read}},
+				},
+			},
+		},
+		// A tail that has overflowed: the row counted 4310 and holds two.
+		// runDropped is what stops the expansion presenting a truncation
+		// as the whole.
+		"an overflowed tail": {
+			Revision:    99,
+			UnreadCount: 1,
+			Occurrences: []notify.Occurrence{{
+				ID: "occ-9", Count: 4310, LastAt: at, RunDropped: 4308,
+				Event: notify.Event{
+					SessionID: "s-runaway", Title: "ding", Body: "",
+					Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest,
+					Level: notify.LevelInfo, At: at,
+					Attribution: notify.Attribution{Backend: "local", Host: "laptop", Session: "s-runaway"},
+				},
+				Run: []notify.RunMember{
+					{ID: "occ-4309", At: at, Title: "ding"},
+					{ID: "occ-4310", At: at.Add(time.Second), Title: "ding"},
+				},
+			}},
+		},
+		// A row whose tail is empty. The feed never produces one — a row
+		// always holds itself — but the DTO must still marshal run as []
+		// and never null, which is the exact defect the contracts' first
+		// run caught on vault.status.
+		"an empty tail": {
+			Revision:    3,
+			UnreadCount: 1,
+			Occurrences: []notify.Occurrence{{
+				ID: "occ-7", Count: 1, LastAt: at,
+				Event: notify.Event{
+					SessionID: "s3", Title: "bell", Body: "",
+					Kind: notify.KindBell, Trust: notify.TrustProgramRequest,
+					Level: notify.LevelInfo, At: at,
+					Attribution: notify.Attribution{Backend: "local", Host: "laptop", Session: "s3"},
+				},
+				Run: nil,
+			}},
+		},
+		// The state a fresh process is in. occurrences must be [] and never
+		// null — the schema's `type: array` rejects null, which is the
+		// defect the first schema run caught on vault.status — and the
+		// dropped record's two instants are the empty string, not "0001-01-01".
+		"empty": {Revision: 0, UnreadCount: 0, Occurrences: nil},
+		// Eviction happened, and it is visible: a soft degrade must be in
+		// the product, not only in a log.
+		"something was dropped": {
+			Revision: 40, UnreadCount: 0, Occurrences: nil,
+			Dropped: notify.DroppedRecord{Count: 7, Oldest: at, Newest: at.Add(time.Hour)},
+		},
+	}
+
+	for name, snap := range cases {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(snapshotToResult(snap))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "notify.feed.read DTO ("+name+")")
+			if !strings.Contains(string(raw), `"occurrences":[`) {
+				t.Errorf("occurrences did not marshal as an array: %s", raw)
+			}
+			// Same statement for the tail, and it is the one that would
+			// actually bite: a nil Run marshals to null, which the
+			// schema's `type: array` rejects.
+			if strings.Contains(string(raw), `"run":null`) {
+				t.Errorf("run marshalled as null: %s", raw)
+			}
+		})
+	}
+}
+
+func TestNotifyFeedMarkRead_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "notify.feed.markRead.schema.json")
+	// Zero is a legal revision (minimum: 0) and must still marshal as a
+	// present key — there is no omitempty on it, and a mark on an untouched
+	// feed is exactly when it would bite.
+	for name, dto := range map[string]feedMarkReadResult{
+		"an advanced feed": {Revision: 41},
+		"a zero revision":  {Revision: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(dto)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "notify.feed.markRead DTO ("+name+")")
+		})
+	}
+}
+
+func TestNotifyFeedChanged_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "notify.feed.changed.schema.json")
+	for name, dto := range map[string]feedChangedParams{
+		"an advanced feed": {Revision: 9},
+		"a zero revision":  {Revision: 0},
+	} {
+		t.Run(name, func(t *testing.T) {
+			raw, err := json.Marshal(dto)
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			validateJSON(t, schema, raw, "notify.feed.changed DTO ("+name+")")
+		})
+	}
+}
+
+// ── settings.set ───────────────────────────────────────────────────────
+
+// The result shape settings.set answers with, pinned. It is the method the
+// notification routing matrix travels on (nocx-3mniv D1): the epic adds no
+// JSON-RPC method of its own because the settings methods already carry the
+// user's choice, so the wire criterion (AGENTS.md rule 5) is honoured on the
+// method that actually carries the feature rather than on a redundant one
+// built to have somewhere to put it. The other six settings methods stay with
+// the nocx-bt3w sweep.
+//
+// The handler's result is a map literal rather than a named DTO, so this case
+// cannot do what a struct case does — there is no field tag or omitempty to
+// catch. What it CAN do is pin the shape in both directions, which is why the
+// refusals below are half the test: `additionalProperties: false` plus an
+// explicit `required` is what makes a schema exact, and a schema whose
+// negative cases are untested has never been shown to refuse anything.
+func TestSettingsSet_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "settings.set.schema.json")
+
+	// The expression the handler itself marshals (ws_config_handlers.go,
+	// handleSet's last line).
+	validateJSON(t, schema, mustMarshal(map[string]bool{"ok": true}), "settings.set result")
+
+	refusals := map[string]any{
+		"ok absent":           map[string]any{},
+		"ok false":            map[string]bool{"ok": false},
+		"ok not a boolean":    map[string]any{"ok": "true"},
+		"an undeclared field": map[string]any{"ok": true, "revision": 3},
+	}
+	for name, payload := range refusals {
+		t.Run(name, func(t *testing.T) {
+			if err := validateJSONErr(schema, mustMarshal(payload)); err == nil {
+				t.Fatalf("the contract accepts %s; it is not exact", name)
+			}
+		})
+	}
+}
+
+// The real result off the real socket. This is the row that matters
+// (contracts/README.md): a test that validates a payload the test itself built
+// proves the shape is well-formed, not that the server sends it.
+//
+// It drives a REAL setting through a REAL registry — and it drives the toggle
+// kind on purpose, because that is the control the routing matrix is made of.
+func TestSettingsSet_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "settings.set.schema.json")
+
+	ws, cleanup := newSettingsWSServer(t)
+	defer cleanup()
+
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	raw := jsonrpcCall(t, conn, "settings.set", map[string]any{
+		"key":   "clipboard.osc52Suppressed",
+		"value": true,
+	})
+	var env rpcEnvelope
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("unmarshal settings.set response: %v", err)
+	}
+	if env.Error != nil {
+		t.Fatalf("settings.set: code=%d msg=%s", env.Error.Code, env.Error.Message)
+	}
+	validateJSON(t, schema, env.Result, "settings.set result over the socket")
+}
+
+// ── notify.bell (nocx-n3nfg) ───────────────────────────────────────────
+
+// TestNotifyBell_DTOConformsToContract pins the Go struct against
+// contracts/notify.bell.schema.json in BOTH directions, which is the only
+// way `additionalProperties: false` plus an explicit `required` is worth
+// anything: the positive case says the DTO marshals to something the schema
+// accepts, and the refusals say the schema actually refuses — a contract
+// whose negative cases are untested has never been shown to refuse a thing.
+//
+// The refusals are not decoration here. They are the wire half of the
+// provenance rule: title, body, kind, trust, level, attribution and at are
+// absent from notify.bell's record, and this is where "absent" is checked.
+// The one that matters most is `title` — for notify.raise it is a legitimate
+// field, and for notify.bell it is a protected one, because BEL carries no
+// text and the backend stamps the words. A schema that accepted it would let
+// a program write the sentence on a notification whose kind it did not have
+// to earn.
+//
+// The over-the-socket half lives in ws_notify_bell_test.go beside the rest
+// of the method's behaviour (TestNotifyBell_OverTheWireConformsToContract),
+// the same place notify.raise keeps its own.
+func TestNotifyBell_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "notify.bell.schema.json")
+
+	raw, err := json.Marshal(notifyBellParams{SessionID: "0123456789abcdef0123456789abcdef"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "notify.bell params DTO")
+
+	refusals := map[string]any{
+		"sessionId absent":       map[string]any{},
+		"sessionId not a string": map[string]any{"sessionId": 7},
+		// Every field the backend stamps. A record that could carry one of
+		// these is a record whose provenance is validated rather than
+		// structural, which is the thing ADR-0029 §2.2 rules out.
+		"a title":        map[string]any{"sessionId": "s", "title": "Ваш банк: подтвердите вход"},
+		"a body":         map[string]any{"sessionId": "s", "body": "tap here"},
+		"a kind":         map[string]any{"sessionId": "s", "kind": "block.finished"},
+		"a trust":        map[string]any{"sessionId": "s", "trust": "attested"},
+		"a level":        map[string]any{"sessionId": "s", "level": "danger"},
+		"an attribution": map[string]any{"sessionId": "s", "attribution": map[string]any{"host": "h"}},
+		"an at":          map[string]any{"sessionId": "s", "at": "2026-08-23T00:00:00Z"},
+	}
+	for name, payload := range refusals {
+		t.Run(name, func(t *testing.T) {
+			if err := validateJSONErr(schema, mustMarshal(payload)); err == nil {
+				t.Fatalf("the contract accepts %s; it is not exact", name)
+			}
+		})
+	}
+}
+
+// ── notify.paneWorkFinished (nocx-n3nfg) ───────────────────────────────
+
+// TestNotifyPaneWorkFinished_DTOConformsToContract pins the Go struct
+// against contracts/notify.paneWorkFinished.schema.json in BOTH directions,
+// which is the only way `additionalProperties: false` plus an explicit
+// `required` is worth anything: the positive case says the DTO marshals to
+// something the schema accepts, and the refusals say the schema actually
+// refuses — a contract whose negative cases are untested has never been
+// shown to refuse a thing.
+//
+// The refusals are the wire half of the provenance rule, and for this method
+// they are the wire half of the TRUST rule too. It is the pipeline's only
+// heuristic source: design §3.1 confines heuristic to local attention and
+// forbids it push, and a record that could carry `trust` would be an
+// inference able to arrive claiming `attested` — with a push route and the
+// completion-subscription override behind it. `title` is the other one that
+// matters, and more here than for the bell: this source has text within
+// reach — the pane title the inference was drawn from — and that title is a
+// string a PROGRAM wrote.
+//
+// The over-the-socket half lives in ws_notify_pane_work_finished_test.go
+// beside the rest of the method's behaviour
+// (TestNotifyPaneWorkFinished_OverTheWireConformsToContract), the same place
+// notify.raise and notify.bell keep their own.
+func TestNotifyPaneWorkFinished_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "notify.paneWorkFinished.schema.json")
+
+	raw, err := json.Marshal(notifyPaneWorkFinishedParams{SessionID: "0123456789abcdef0123456789abcdef"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "notify.paneWorkFinished params DTO")
+
+	refusals := map[string]any{
+		"sessionId absent":       map[string]any{},
+		"sessionId not a string": map[string]any{"sessionId": 7},
+		// Every field the backend stamps. A record that could carry one of
+		// these is a record whose provenance is validated rather than
+		// structural, which is the thing ADR-0029 §2.2 rules out.
+		"a title":        map[string]any{"sessionId": "s", "title": "⣿ Ваш банк: подтвердите вход"},
+		"a body":         map[string]any{"sessionId": "s", "body": "tap here"},
+		"a kind":         map[string]any{"sessionId": "s", "kind": "block.finished"},
+		"a trust":        map[string]any{"sessionId": "s", "trust": "attested"},
+		"a level":        map[string]any{"sessionId": "s", "level": "danger"},
+		"an attribution": map[string]any{"sessionId": "s", "attribution": map[string]any{"host": "h"}},
+		"an at":          map[string]any{"sessionId": "s", "at": "2026-08-23T00:00:00Z"},
+	}
+	for name, payload := range refusals {
+		t.Run(name, func(t *testing.T) {
+			if err := validateJSONErr(schema, mustMarshal(payload)); err == nil {
+				t.Fatalf("the contract accepts %s; it is not exact", name)
+			}
+		})
+	}
 }
 
 func TestAPIFolderReadAndWrite_DTOConformToContracts(t *testing.T) {

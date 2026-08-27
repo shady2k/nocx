@@ -1,7 +1,9 @@
 // Command e2e-sshd runs an in-process SSH server for the nocx e2e suite
 // (e2e/shell-mode.spec.ts, e2e/nocxify-journey.spec.ts,
 // e2e/api-import-url.spec.ts) that executes REAL commands on a REAL PTY with
-// the REAL shell. The nocx integration path needs the far side to actually run
+// the REAL shell — or, for a pty-less exec channel, on pipes, as sshd serves
+// `ssh host cmd` and as the remote helper protocol requires. The nocx
+// integration path needs the far side to actually run
 // `exec bash --rcfile <(...) -i` (or a plain `bash -i` shell) and emit OSC 133
 // markers — an echo server cannot. Hermetic and deterministic: keys are minted
 // at startup, the address is ephemeral, and everything the spec needs is
@@ -51,6 +53,7 @@ package main
 import (
 	"crypto/ed25519"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/pem"
 	"errors"
 	"flag"
@@ -59,6 +62,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
@@ -80,7 +84,19 @@ func main() {
 func run() error {
 	banner := flag.String("banner", "", "sshd banner sent before authentication")
 	password := flag.String("password", "", "require password auth; accepts exactly this password and refuses every key")
+	repo := flag.String("repo", "", "seed a git repository at this path for the git acceptance spec: an initial commit, an untracked file whose name has a space, a quote, a leading dash and a newline, and a pre-commit hook that writes a marker outside the repository and prints more than one packet of output; the fixture chdirs into it so every served shell starts inside the repository")
 	flag.Parse()
+
+	if *repo != "" {
+		// Normalized to an absolute path before chdir and print: the REPO=
+		// value the spec reads is the path it asserts over SSH and the path
+		// the shells (and the git panel's cwd) actually stand in.
+		abs, err := filepath.Abs(*repo)
+		if err != nil {
+			return fmt.Errorf("repo path: %w", err)
+		}
+		*repo = abs
+	}
 
 	hostSigner, _, _, err := signer()
 	if err != nil {
@@ -102,9 +118,28 @@ func run() error {
 	}
 	defer func() { _ = ln.Close() }()
 
+	// The sftp server's root must be the account home, resolved BEFORE the
+	// -repo seeding chdirs: a real sshd's sftp-server starts in the user's
+	// home, and the helper install lease discovers that home via SFTP
+	// RealPath(".") — a server rooted at the repository would install the
+	// helper INTO the repository (found by the acceptance test).
+	accountHome()
+
 	printLine("ADDR=" + ln.Addr().String())
 	printLine("USERKEY=" + userKeyPath)
 	printLine("KNOWNHOSTS=" + knownhosts.Line([]string{ln.Addr().String()}, hostSigner.PublicKey()))
+
+	if *repo != "" {
+		marker, hostile, err := seedRepo(*repo)
+		if err != nil {
+			return err
+		}
+		// The hostile name rides base64: it contains a newline, and the
+		// fixture's handshake is line-oriented.
+		printLine("REPO=" + *repo)
+		printLine("MARKER=" + marker)
+		printLine("HOSTILE_B64=" + base64.StdEncoding.EncodeToString([]byte(hostile)))
+	}
 	printLine("READY")
 
 	for {
@@ -525,6 +560,22 @@ type sessionState struct {
 	rows    uint16
 	slave   *os.File
 	started bool
+	// ptyReq records whether a pty-req preceded the command request. sshd
+	// treats the pty as an option on the session: a client that wants a
+	// terminal asks for one first, and a client that does not (`ssh host
+	// cmd`) gets pipes. The fixture must make the same choice — the remote
+	// helper protocol (Task 6 of the remote-helper plan) is built on a
+	// pty-less exec, and a pty would translate \n to \r\n and echo input
+	// back, corrupting binary frames (plan D19).
+	ptyReq bool
+}
+
+// sawPtyReq reports whether this session's client requested a pty before the
+// command request. Callers use it to pick the pipe path over the pty path.
+func (s *sessionState) sawPtyReq() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.ptyReq
 }
 
 // clampU16 bounds a window-size field before the narrowing conversion
@@ -558,6 +609,7 @@ func handleSession(ch gossh.Channel, reqs <-chan *gossh.Request) {
 					st.mu.Lock()
 					st.cols = clampU16(p.Cols)
 					st.rows = clampU16(p.Rows)
+					st.ptyReq = true
 					st.mu.Unlock()
 				}
 				_ = req.Reply(true, nil)
@@ -591,16 +643,27 @@ func handleSession(ch gossh.Channel, reqs <-chan *gossh.Request) {
 					continue
 				}
 				_ = req.Reply(true, nil)
-				startCommand(ch, st, e.Command)
+				if st.sawPtyReq() {
+					startCommand(ch, st, e.Command)
+				} else {
+					// A pty-less exec is the helper's own lane: internal/helper's
+					// client frames its protocol over stdin/stdout of a channel
+					// that never asked for a terminal, so the fixture has to serve
+					// it over pipes rather than a pty.
+					startPipeCommand(ch, st, e.Command)
+				}
 			case "subsystem":
-				// RFC 4254 Â§6.5: one string, the subsystem name. OpenSSH
-				// ships `internal-sftp` and is configured with it by default,
-				// so a far side that refuses this request is not a smaller
-				// sshd â it is a different one, and nocx publishes its
-				// integration bundle over SFTP and nothing else (ADR-0035).
-				// While this fell through to `default`, every connection to
-				// the fixture came up "Not integrated", which is the same
-				// class of dishonesty as the denied tcpip-forward above.
+				// RFC 4254 §6.5: one string, the subsystem name. OpenSSH ships
+				// `internal-sftp` and is configured with it by default, so a far
+				// side that refuses this request is not a smaller sshd — it is a
+				// different one. Two consumers depend on it: nocx publishes its
+				// integration bundle over SFTP and nothing else (ADR-0035), and
+				// the helper install lease (internal/ssh.HelperInstallConn)
+				// writes the versioned binary through the same subsystem. While
+				// this fell through to `default`, every connection to the fixture
+				// came up "Not integrated", which is the same class of dishonesty
+				// as the denied tcpip-forward above, and every helper install
+				// would have answered deployFailed.
 				var sub struct{ Name string }
 				if gossh.Unmarshal(req.Payload, &sub) != nil || sub.Name != "sftp" {
 					_ = req.Reply(false, nil)
@@ -685,7 +748,7 @@ func startSFTP(ch gossh.Channel, st *sessionState) {
 	if !st.claim() {
 		return
 	}
-	srv, err := sftp.NewServer(ch)
+	srv, err := sftp.NewServer(ch, sftp.WithServerWorkingDirectory(accountHome()))
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "e2e-sshd: sftp server:", err)
 		_ = ch.Close()
@@ -805,4 +868,227 @@ func startCommand(ch gossh.Channel, st *sessionState, command string) {
 		// does not exist is not faithfulness but invention: it also reaches
 		// the interactive shell on this fixture, where ^D means "exit".
 	}()
+}
+
+// startPipeCommand runs the given command with the channel itself as its
+// stdio — no pty, no line discipline. This is how sshd serves an exec
+// channel when the client never asked for a terminal: the command's stdin
+// and stdout are pipes, so 0x0A stays 0x0A, nothing is echoed, and binary
+// data survives byte-identical. The remote helper protocol is built on
+// exactly this lane (plan Task 6): frames are binary, and the pty path
+// would corrupt them (plan D19).
+//
+// The command is wrapped in `bash -c` and given sessionEnv for the same
+// reasons the pty path states on startCommand: launcher strings execute as
+// shell constructs, and SHELL is published rather than inherited.
+// cmd.Wait() returns only after the exec/stdout and exec/stderr copy
+// goroutines have flushed everything into the channel (os/exec pipes the
+// non-*os.File stdio), so when the status is sent below, every byte the
+// command wrote has already reached the client — the same ordering the pty
+// path documents above: exit-status first, then channel close.
+func startPipeCommand(ch gossh.Channel, st *sessionState, command string) {
+	st.mu.Lock()
+	if st.started {
+		st.mu.Unlock()
+		return
+	}
+	st.started = true
+	st.mu.Unlock()
+
+	bash, err := exec.LookPath("bash")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "e2e-sshd: bash not found:", err)
+		return
+	}
+	//nolint:gosec // dev-only fixture: the command string is this binary's own contract.
+	cmd := exec.Command(bash, "-c", command)
+	cmd.Env = sessionEnv(bash)
+	// STDIN THROUGH AN os.Pipe, NOT THE CHANNEL ITSELF, and the indirection is
+	// the whole point. os/exec only hands a descriptor straight to the child
+	// when Stdin is an *os.File; for anything else it copies on a goroutine
+	// and — its own words — "Wait will not return until the goroutine copying
+	// to the process's stdin has completed". That goroutine reads the ssh
+	// channel, so Wait waited for the CLIENT to close its stdin rather than
+	// for the command to exit, and exit-status and the channel close waited
+	// with it.
+	//
+	// Which deadlocked every client that keeps stdin open, and nocx's mux
+	// client is exactly that: internal/ssh/mux hands the master a socketpair
+	// it holds for the life of the session. `echo $HOME` finished in
+	// microseconds while its caller read stdout for an EOF that could not
+	// arrive until the connection died 48 s later — and by then the mux
+	// master was gone, so the SFTP publish that follows found no control
+	// socket and the far side never integrated (nocx-eoijp).
+	//
+	// A real sshd reaps the child and reports the status then. So does this,
+	// now: the child gets a real descriptor, Wait waits for the child alone,
+	// and the copier below is nobody's dependency — it ends when ch.Close()
+	// below makes its read return.
+	inR, inW, err := os.Pipe()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "e2e-sshd: stdin pipe:", err)
+		return
+	}
+	cmd.Stdin = inR
+	cmd.Stdout = ch
+	cmd.Stderr = ch.Stderr()
+	if err := cmd.Start(); err != nil {
+		_ = inR.Close()
+		_ = inW.Close()
+		fmt.Fprintln(os.Stderr, "e2e-sshd: spawn:", err)
+		return
+	}
+	// The child holds its own copy; ours would keep the read end open and
+	// hide a closed writer from it.
+	_ = inR.Close()
+	go func() {
+		_, _ = io.Copy(inW, ch)
+		_ = inW.Close()
+	}()
+
+	go func() {
+		_ = cmd.Wait()
+		code := 0
+		if cmd.ProcessState != nil {
+			code = cmd.ProcessState.ExitCode()
+		}
+		// A negative code means the process was signalled; the wire field is
+		// unsigned, and the fixture only has to be faithful about ordinary
+		// exits, so a signal reports as 255 the way a shell would.
+		if code < 0 {
+			code = 255
+		}
+		_, _ = ch.SendRequest(
+			"exit-status",
+			false,
+			gossh.Marshal(struct{ Status uint32 }{Status: uint32(code)}), // #nosec G115 — clamped non-negative just above.
+		)
+		_ = ch.Close()
+	}()
+}
+
+// The sftp server's root: the fixture account's home, resolved once before
+// the -repo seeding chdirs. A real sshd's sftp-server starts in the user's
+// home, and the helper install lease (internal/ssh.HelperInstallConn.Home)
+// discovers that home via SFTP RealPath(".") — so the server must root
+// RELATIVE paths at the account home, never at the fixture's process cwd,
+// which the -repo seeding chdirs into the repository. A server rooted
+// there would answer the repository path as the home and install the
+// helper INTO the repository — the acceptance test caught exactly that.
+var (
+	sftpRootOnce sync.Once
+	sftpRoot     string
+)
+
+func accountHome() string {
+	sftpRootOnce.Do(func() {
+		if h := os.Getenv("HOME"); h != "" {
+			sftpRoot = h
+			return
+		}
+		// HOME-less environment: fall back to the cwd at first use. run()
+		// calls this BEFORE the seeding chdir, so the fallback is the
+		// pre-repository cwd even then.
+		if wd, err := os.Getwd(); err == nil {
+			sftpRoot = wd
+		}
+	})
+	return sftpRoot
+}
+
+// seedRepo creates the acceptance repository at dir and chdirs the fixture
+// into it, so every served shell (and the git panel's cwd) starts inside
+// the repository. The repository carries its own git identity — a commit's
+// success never depends on the environment the fixture inherits.
+//
+// The contents are the acceptance test's three load-bearing pieces:
+//
+//   - an initial commit with a base file, so the repository has a HEAD and
+//     the hostile file is the ONLY change the panel sees;
+//   - an untracked file whose name has a space, a quote, a leading dash and
+//     a newline (the D8 hostile filename) — the one path the panel stages;
+//   - a pre-commit hook that writes a marker OUTSIDE the repository (a
+//     marker inside would show up in the post-commit status, which the
+//     acceptance asserts is clean) and prints more than one packet of
+//     output to each of stdout and stderr — under the commit capture bound
+//     (git.MaxCommitOutputBytes, 64 KiB per stream), so the commit still
+//     succeeds, and larger than one SSH data packet, so the output would
+//     expose a reader that stops at a packet boundary.
+//
+// The hook is installed after the initial commit: the seed's own commit
+// must not run it.
+func seedRepo(dir string) (string, string, error) {
+	marker, hostile := "", ""
+	gitBin, lookErr := exec.LookPath("git")
+	if lookErr != nil {
+		return "", "", fmt.Errorf("seed repo: git not found: %w", lookErr)
+	}
+	run := func(args ...string) error {
+		cmd := exec.Command(gitBin, args...) // #nosec G204 — gitBin is LookPath-resolved; args are fixed literals at every call site
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("seed repo: git %s: %v: %s", strings.Join(args, " "), err, out)
+		}
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		return "", "", fmt.Errorf("seed repo: mkdir: %w", err)
+	}
+	for _, args := range [][]string{
+		{"init", "-q", "-b", "main"},
+		{"config", "user.email", "e2e@nocx.local"},
+		{"config", "user.name", "nocx e2e"},
+		{"config", "commit.gpgsign", "false"},
+	} {
+		if err := run(args...); err != nil {
+			return "", "", err
+		}
+	}
+	// #nosec G306 — a repository working-tree file, not a secret
+	if err := os.WriteFile(filepath.Join(dir, "base.txt"), []byte("base\n"), 0o644); err != nil {
+		return "", "", fmt.Errorf("seed repo: base file: %w", err)
+	}
+	if err := run("add", "base.txt"); err != nil {
+		return "", "", err
+	}
+	if err := run("commit", "-q", "-m", "initial"); err != nil {
+		return "", "", err
+	}
+
+	hostile = "-staged 'file\nname.txt"
+	// #nosec G306 — a repository working-tree file, not a secret
+	if err := os.WriteFile(filepath.Join(dir, hostile), []byte("hostile\n"), 0o644); err != nil {
+		return "", "", fmt.Errorf("seed repo: hostile file: %w", err)
+	}
+
+	markerDir, err := os.MkdirTemp("", "nocx-e2e-remote-marker-*")
+	if err != nil {
+		return "", "", fmt.Errorf("seed repo: marker dir: %w", err)
+	}
+	marker = filepath.Join(markerDir, "pre-commit-ran")
+
+	hook := filepath.Join(dir, ".git", "hooks", "pre-commit")
+	script := "#!/bin/sh\n" +
+		"# nocx acceptance fixture: write the marker and be chatty.\n" +
+		"touch '" + marker + "'\n" +
+		"i=0\n" +
+		"while [ $i -lt 500 ]; do printf 'pre-commit packet %04d %064d\\n' \"$i\" \"$i\"; i=$((i+1)); done\n" +
+		"i=0\n" +
+		"while [ $i -lt 500 ]; do printf 'pre-commit stderr %04d %064d\\n' \"$i\" \"$i\" >&2; i=$((i+1)); done\n" +
+		"exit 0\n"
+	// A hook must be executable; write it private first and chmod after, so
+	// gosec's G306 (writes must be 0600) has nothing to flag and the file
+	// never exists world-writable mid-write.
+	if err := os.WriteFile(hook, []byte(script), 0o600); err != nil {
+		return "", "", fmt.Errorf("seed repo: hook: %w", err)
+	}
+	// #nosec G302 — git requires the pre-commit hook to be executable.
+	if err := os.Chmod(hook, 0o755); err != nil {
+		return "", "", fmt.Errorf("seed repo: hook chmod: %w", err)
+	}
+
+	if err := os.Chdir(dir); err != nil {
+		return "", "", fmt.Errorf("seed repo: chdir: %w", err)
+	}
+	return marker, hostile, nil
 }

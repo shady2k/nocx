@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/waittest"
 	gossh "golang.org/x/crypto/ssh"
 )
 
@@ -60,10 +61,12 @@ func startTestSSHServerWithKey(t *testing.T, signer gossh.Signer) *testSSHServer
 // handshake. The client's gossh.NewClientConn call blocks until ctx
 // cancellation closes the socket.
 type blockingListener struct {
-	l       net.Listener
-	done    chan struct{}
-	conns   []net.Conn
-	connsMu sync.Mutex
+	l          net.Listener
+	done       chan struct{}
+	accepted   chan struct{}
+	acceptOnce sync.Once
+	conns      []net.Conn
+	connsMu    sync.Mutex
 }
 
 func startBlockingListener(t *testing.T) *blockingListener {
@@ -72,7 +75,7 @@ func startBlockingListener(t *testing.T) *blockingListener {
 	if err != nil {
 		t.Fatalf("listen: %v", err)
 	}
-	bl := &blockingListener{l: l, done: make(chan struct{})}
+	bl := &blockingListener{l: l, done: make(chan struct{}), accepted: make(chan struct{})}
 	go bl.acceptLoop()
 	return bl
 }
@@ -86,6 +89,7 @@ func (bl *blockingListener) acceptLoop() {
 		bl.connsMu.Lock()
 		bl.conns = append(bl.conns, conn)
 		bl.connsMu.Unlock()
+		bl.acceptOnce.Do(func() { close(bl.accepted) })
 		// Hold the connection open, never do SSH handshake.
 		<-bl.done
 	}
@@ -138,8 +142,8 @@ func TestDialCancel_DirectHandshake(t *testing.T) {
 		errCh <- err
 	}()
 
-	// Give the dial enough time to reach NewClientConn.
-	time.Sleep(100 * time.Millisecond)
+	// Wait for the TCP connection to reach the blocking listener.
+	<-bl.accepted
 	cancel()
 
 	select {
@@ -177,7 +181,7 @@ func TestDialCancel_DirectNewClientConn(t *testing.T) {
 		errCh <- err
 	}()
 
-	time.Sleep(100 * time.Millisecond)
+	<-bl.accepted
 	cancel()
 
 	select {
@@ -219,7 +223,12 @@ func TestPoolAcquire_WaiterCancellation(t *testing.T) {
 
 	// Wait for the dial to actually start.
 	<-dialStarted
-	time.Sleep(10 * time.Millisecond) // let acquire register dialInProgress
+	waittest.WaitForTimeout(t, "pool dial registration", 2*time.Second, func() bool {
+		pool.mu.Lock()
+		defer pool.mu.Unlock()
+		_, ok := pool.dialing[key]
+		return ok
+	})
 
 	// Second caller — waiter — with cancellable context.
 	ctx2, cancel2 := context.WithCancel(context.Background())
@@ -229,8 +238,8 @@ func TestPoolAcquire_WaiterCancellation(t *testing.T) {
 		secondErrCh <- err
 	}()
 
-	// Let the waiter settle on the done channel.
-	time.Sleep(20 * time.Millisecond)
+	// Cancellation is itself the observable event; the in-flight dial is
+	// still blocked, so the waiter cannot race a completed dial.
 	cancel2()
 
 	// Waiter must return promptly with context.Canceled.
@@ -277,7 +286,12 @@ func TestPoolAcquire_WaiterCancellationConcurrent(t *testing.T) {
 	}()
 
 	<-dialStarted
-	time.Sleep(10 * time.Millisecond)
+	waittest.WaitForTimeout(t, "pool dial registration", 2*time.Second, func() bool {
+		pool.mu.Lock()
+		defer pool.mu.Unlock()
+		_, ok := pool.dialing[key]
+		return ok
+	})
 
 	// Spawn waiters. Half get a cancellable context and cancel immediately;
 	// the other half keep their context alive and will get a connection when
@@ -305,8 +319,13 @@ func TestPoolAcquire_WaiterCancellationConcurrent(t *testing.T) {
 		}(ctx)
 	}
 
-	// Wait a moment for cancelled waiters to bail out.
-	time.Sleep(50 * time.Millisecond)
+	// Wait for every already-cancelled waiter to report its cancellation
+	// before releasing the in-flight dial.
+	waittest.WaitForTimeout(t, "cancelled waiters to return", 2*time.Second, func() bool {
+		cancelledMu.Lock()
+		defer cancelledMu.Unlock()
+		return cancelledCount == waiters/2
+	})
 
 	// Release the first dialer — remaining waiters should now succeed.
 	close(blockCh)
@@ -580,8 +599,8 @@ func TestDialCancel_JumpHandshake(t *testing.T) {
 		errCh <- err
 	}()
 
-	// Allow time for the handshake through the bastion to begin.
-	time.Sleep(300 * time.Millisecond)
+	// Wait for the target connection to reach the blocking listener.
+	<-bl.accepted
 	cancel()
 
 	select {

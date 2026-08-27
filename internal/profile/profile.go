@@ -40,15 +40,72 @@ const (
 // existing cascade (profile → group → global → hardcoded default). It
 // replaces the old auto|ask|off launch policy outright (N1): raw adds
 // nothing, script runs the shell tiers we ship, relay deploys the Tier-B
-// binary. N3 makes script the default — wrap and install automatically,
-// consent asked only for the relay.
+// binary.
+//
+// The fourth value is auto, and it is the hardcoded default (ADR-0033). It
+// is not a fourth kind of delivery — it is the name for "the user has not
+// answered", and it exists so that an answer can be told apart from a
+// silence. Without it script had to be both, and D8's rule that an explicit
+// script is never silently upgraded had nothing to bite on: honouring it
+// would have meant never offering the helper on any connection nobody had
+// hand-edited. auto wraps and installs the scripts exactly as script does
+// (N3 — automatic, unasked); what it additionally permits is the ask for
+// the relay binary, and only where a surface has actually reached for it
+// (D8's requested condition). There is deliberately no `ask` mode: asking
+// is what auto does when no answer is stored for that host key, and making
+// it a mode would re-collapse the axes §3.5 separated.
 type DesiredMode string
 
 const (
+	DesiredAuto   DesiredMode = "auto"   // not answered: scripts as N3, the relay may be offered
 	DesiredRaw    DesiredMode = "raw"    // nothing added: no rewrite, no remote write
 	DesiredScript DesiredMode = "script" // the shell tiers we ship — no compiled artifact
 	DesiredRelay  DesiredMode = "relay"  // Tier B, a deployed binary — consent-gated
 )
+
+// DeliversScripts reports whether m publishes the shell bundle and
+// integrates at session open — the open-time gate, and the ONE owner of
+// that question (AD-8). The empty string is an unanswered destination (a
+// direct host, an ad-hoc open, a local session) and answers as the default
+// does; an unrecognised value fails closed and never integrates.
+//
+// It lives on the axis rather than at either call site because it had two
+// call sites and they disagreed. internal/ssh gated the open on
+// `mode == "" || mode == "script"` while internal/transport decided whether
+// a session had even REQUESTED integration with `... == "script"`, each a
+// separate literal of the same rule. Changing the default to auto
+// (ADR-0033) made the second one false for every unconfigured connection,
+// so sessions integrated and then reported nothing — the status
+// notification never fired, because the axis had one meaning in the gate
+// and another in the reporter.
+//
+// raw is the ONLY answer that means "nothing", and an unrecognised value
+// joins it by failing closed. Every other mode integrates, relay included:
+// the tiers are additive, not alternative (§5.2 — "declining a deployed
+// binary must not also decline shell scripts — different risks", and the
+// inverse holds for the same reason).
+//
+// relay refused for an epic after it stopped being true (nocx-7k8ma). The
+// refusal was written when `relay` named the Tier-B carrier of §3.4 — a
+// binary that would own the PTY and deliver integration itself — so
+// refusing the script carrier for it was coherent. That carrier is still
+// designed-for-not-built (D15, nocx-if6 phase B), while the mode was put
+// to work meaning "allow the remote helper", which owns no PTY and
+// delivers no markers. Between those two facts a user who picked the most
+// capable mode on the axis got the least capable delivery: helper, no
+// blocks, and nothing in the product saying why.
+//
+// If the Tier-B carrier ever does deliver integration itself, this stays
+// true — the mode still integrates, by another carrier — and which carrier
+// ran is the observed-delivery axis's question, not this one's.
+func (m DesiredMode) DeliversScripts() bool {
+	switch m {
+	case "", DesiredAuto, DesiredScript, DesiredRelay:
+		return true
+	default:
+		return false
+	}
+}
 
 // validDesiredMode reports whether v is a value this build recognises.
 // An unrecognised stored value is not an error at decode time — it falls back
@@ -56,7 +113,7 @@ const (
 // user choice never becomes a silent no-op.
 func validDesiredMode(v DesiredMode) bool {
 	switch v {
-	case DesiredRaw, DesiredScript, DesiredRelay:
+	case DesiredAuto, DesiredRaw, DesiredScript, DesiredRelay:
 		return true
 	default:
 		return false
@@ -568,13 +625,26 @@ func (d *ProfileDefaults) Validate() error {
 	return nil
 }
 
+// DefaultDesiredMode is what an unanswered destination resolves to — the
+// cascade's base layer, exported so nothing outside this package has to
+// spell the default a second time. A destination with no profile behind it
+// (a direct host, an ad-hoc open, a local session) is unanswered in exactly
+// the same sense, so it reads the same value here rather than carrying a
+// literal of its own. That second literal is the defect ADR-0033 closes:
+// the open ack said script while the consent resolver said auto, for one
+// absent mode.
+func DefaultDesiredMode() DesiredMode { return *hardcodedDefaults().DesiredMode }
+
 // hardcodedDefaults returns the base-layer defaults that always apply when
 // no group, global, or profile overrides them.
 func hardcodedDefaults() SparseSSHOptions {
 	port := 22
 	user := currentUser()
 	beh := BehaviorAuto
-	mode := DesiredScript
+	// auto, not script: silence must be distinguishable from an answer
+	// (ADR-0033). Both install the scripts; only auto may be offered the
+	// relay.
+	mode := DesiredAuto
 	pd := PortDiscoveryAuto
 	return SparseSSHOptions{
 		Port:                 &port,
@@ -783,13 +853,14 @@ func ResolveEffectiveProfile(
 	applySparseLayer(&acc, &source, profileSparse, FieldSourceProfile)
 
 	// A desiredMode value this build does not recognise falls back to the
-	// default (script — N3 wraps and installs automatically) rather than
-	// being treated as a silent no-op: script is the safe behaviour for an
-	// unrecognised choice, and the provenance records "default" so the
-	// effective view shows the fallback instead of a value that never
-	// takes effect.
+	// default (auto — ADR-0033) rather than being treated as a silent
+	// no-op. The delivery behaviour is unchanged by the fallback: auto
+	// wraps and installs the scripts exactly as script does (N3). What it
+	// does not do is record an answer the user never gave, and the
+	// provenance says "default" so the effective view shows the fallback
+	// instead of a value that never takes effect.
 	if acc.DesiredMode != nil && !validDesiredMode(*acc.DesiredMode) {
-		mode := DesiredScript
+		mode := DesiredAuto
 		acc.DesiredMode = &mode
 		source["desiredMode"] = FieldSourceDefault
 	}

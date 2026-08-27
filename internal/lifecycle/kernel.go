@@ -7,6 +7,7 @@ import (
 	"io"
 	"regexp"
 	"sort"
+	"strconv"
 	"sync"
 	"time"
 )
@@ -43,6 +44,10 @@ type Kernel struct {
 // of any quoting the shell side does and makes a malformed id a rejection
 // rather than a string compared by accident.
 var requestIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,64}$`)
+
+// agentNameRe bounds the agent an enrolment names: it is a driver key and a
+// word a person reads in a refusal, so [A-Za-z0-9._-] and nothing else.
+var agentNameRe = regexp.MustCompile(`^[A-Za-z0-9._-]{1,` + strconv.Itoa(maxAgentNameLen) + `}$`)
 
 // Bounds on a domain request's carried ssh options (nocx-c6z0). They are not
 // a shape — an ssh option argument is an arbitrary path, host list or config
@@ -250,6 +255,10 @@ func (k *Kernel) ingestLocked(t TransportID, env Envelope) ([]Outbound, error) {
 		out, err = k.applyClose(d, ls, env)
 	case KindDomainRequest:
 		out, err = k.applyDomainRequest(d, ls, env)
+	case KindAgentEnrol:
+		out, err = k.applyAgentEnrol(d, ls, env)
+	case KindAgentWithdraw:
+		out, err = k.applyAgentWithdraw(d, ls, env)
 	default:
 		return nil, ErrIllegalEvent
 	}
@@ -781,6 +790,67 @@ func (k *Kernel) applyDomainRequest(d *Domain, ls *laneState, env Envelope) ([]O
 	// builds the bootstrap. This outbound is the request echo; the seam
 	// enriches it (or delivers it as the empty-bootstrap refusal).
 	return []Outbound{k.grantOutbound(d, req)}, nil
+}
+
+// applyAgentEnrol validates the enrolment act and echoes it for the seam that
+// actually opens the grid.
+//
+// The kernel keeps NOTHING here, and that is the design rather than an
+// omission. Enrolment is not lifecycle state: it may not open, complete or
+// alter an execution attempt (ADR-0024 decision 1), and a kernel that held it
+// would be a second place where "is this pane being watched" is answered. The
+// kernel's job is the one thing only it can do — say that this frame really
+// came from this domain in this epoch — after which the fact belongs to
+// whoever owns grids, which is not this package and cannot be, since the
+// kernel is a pure model with no transport and no pane.
+func (k *Kernel) applyAgentEnrol(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
+	if err := k.requireActive(d, ls); err != nil {
+		return nil, err
+	}
+	req := env.Event.AgentEnrol
+	if req.RequestID == "" || !requestIDRe.MatchString(string(req.RequestID)) {
+		return nil, ErrRequestIDShape
+	}
+	if !agentNameRe.MatchString(req.Agent) {
+		return nil, ErrBadRequest
+	}
+	if req.Cols <= 0 || req.Rows <= 0 || req.Cols > maxPaneDimension || req.Rows > maxPaneDimension {
+		return nil, ErrBadRequest
+	}
+	return []Outbound{k.agentOutbound(d, Event{
+		Kind:          KindAgentEnrolled,
+		AgentEnrolled: &AgentEnrolled{RequestID: req.RequestID, Agent: req.Agent},
+	})}, nil
+}
+
+// applyAgentWithdraw closes the caller's end of the interval. It is answered
+// rather than silently absorbed: an interval whose close is fire-and-forget is
+// an interval with one end, which is the shape AGENTS.md names.
+func (k *Kernel) applyAgentWithdraw(d *Domain, ls *laneState, env Envelope) ([]Outbound, error) {
+	if err := k.requireActive(d, ls); err != nil {
+		return nil, err
+	}
+	req := env.Event.AgentWithdraw
+	if req.RequestID == "" || !requestIDRe.MatchString(string(req.RequestID)) {
+		return nil, ErrRequestIDShape
+	}
+	return []Outbound{k.agentOutbound(d, Event{
+		Kind:           KindAgentWithdrawn,
+		AgentWithdrawn: &AgentWithdrawn{RequestID: req.RequestID},
+	})}, nil
+}
+
+// agentOutbound addresses an answer back to the domain that asked, by the same
+// tuple the adapter routes a grant by.
+func (k *Kernel) agentOutbound(d *Domain, evt Event) Outbound {
+	return Outbound{
+		Transport: d.Transport,
+		Envelope: Envelope{
+			Version: ProtocolVersion, Lane: d.Lane, Domain: d.ID,
+			Epoch: d.Epoch, Capability: d.capability,
+			Event: evt,
+		},
+	}
 }
 
 func (k *Kernel) grantOutbound(d *Domain, req *DomainRequest) Outbound {

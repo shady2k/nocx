@@ -273,7 +273,16 @@
   opacity: 1;
 }
 
-/* ── Agent status (derived from the terminal title) ──────────────────── */
+/* ── What the pane is doing ───────────────────────────────────────────────
+   ONE dot, five states, and a qualifier for how strong the evidence is.
+
+   The states come from `pane-observation.ts`, which merges the two sources:
+   an enrolled pane's DRIVER, which reads the agent's own chrome out of a grid
+   the backend keeps, and the terminal TITLE, which is all any other pane has.
+   The dot is the same dot either way — a second indicator beside it would be a
+   second vocabulary for one concept — and `data-agent-source` is what says
+   which reading it is. The weaker one is drawn hollow: a guess and a finding
+   that look identical teach people to read findings as guesses. */
 
 .nocx-tab-status {
   flex: none;
@@ -285,14 +294,34 @@
   transition: width 0.15s;
 }
 
-.nocx-tab[data-agent-status='working'] .nocx-tab-status,
-.nocx-tab[data-agent-status='idle'] .nocx-tab-status {
+.nocx-tab[data-agent-status] .nocx-tab-status {
   width: 10px;
   margin: 0 7px 0 0;
 }
 
+/* The agent is waiting for a prompt: its work is done and the pane is yours. */
 .nocx-tab[data-agent-status='idle'] .nocx-tab-status {
   background: var(--color-success);
+}
+
+/* It is holding a dialog open for a human — a tool approval, or a menu. This
+   is the state a person most needs to find, so it is the loudest thing tab
+   chrome is allowed to be. */
+.nocx-tab[data-agent-status='waiting'] .nocx-tab-status {
+  background: var(--color-warning);
+}
+
+/* The driver could not read the screen, or nocx has no driver for this agent.
+   Every consumer treats that as busy, and the dot says "something is here and
+   nocx cannot tell you what" rather than picking a state. */
+.nocx-tab[data-agent-status='unknown'] .nocx-tab-status {
+  background: var(--color-text-muted);
+}
+
+/* The agent's process is gone, with whatever it did behind it. */
+.nocx-tab[data-agent-status='exited'] .nocx-tab-status {
+  background: transparent;
+  border: 2px solid var(--color-text-muted);
 }
 
 .nocx-tab[data-agent-status='working'] .nocx-tab-status {
@@ -313,6 +342,14 @@
     background: var(--color-accent);
     border-color: transparent;
   }
+}
+
+/* THE WEAKER SOURCE, drawn as a weaker mark. A title-derived reading is a
+   guess about any pane at all — the classifier's own comment says its spinner
+   test matches `npm install` under ora — so it lights the indicator and looks
+   like what it is. A driver's reading is left at full strength. */
+.nocx-tab[data-agent-source='title'] .nocx-tab-status {
+  opacity: 0.55;
 }
 
 /* ── Environment-degraded mark (nocx-4t37.2) ─────────────────────────

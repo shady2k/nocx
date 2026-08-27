@@ -83,12 +83,22 @@ type sessionLane struct {
 	// that is only ever closed (a tombstone) never starts one.
 	startOnce sync.Once
 
+	// resized is called after a resize the session accepted, with the size it
+	// accepted. It exists so the pane's backend grid can follow the pane's
+	// geometry (nocx-szb40.5): both powers the AD-6 amendment grants a grid
+	// are POSITIONAL, so a grid left at the size it was enrolled at answers
+	// about a screen that never existed. It hangs off the APPLY rather than
+	// off the request because resizes coalesce — a lane that dropped three
+	// superseded sizes must tell the grid the one that landed, not all four.
+	// nil for a tombstone lane, which applies nothing.
+	resized func(cols, rows uint16)
+
 	mu      sync.Mutex
 	sess    session.Session // nil once close is admitted
 	pending *resizeOp       // latest unapplied resize; nil when idle
 }
 
-func newSessionLane(sess session.Session) *sessionLane {
+func newSessionLane(sess session.Session, resized func(cols, rows uint16)) *sessionLane {
 	// Lane-owned lifetime: the lane context is the session's own and is
 	// deliberately derived from Background — its owner is the per-session
 	// resize lane, and its closing event is closeLane's admission (see the
@@ -97,10 +107,11 @@ func newSessionLane(sess session.Session) *sessionLane {
 	// is resized by whichever connection is attached (AD-9).
 	ctx, cancel := context.WithCancel(context.Background())
 	return &sessionLane{
-		ctx:    ctx,
-		cancel: cancel,
-		wake:   make(chan struct{}, 1),
-		sess:   sess,
+		ctx:     ctx,
+		cancel:  cancel,
+		wake:    make(chan struct{}, 1),
+		sess:    sess,
+		resized: resized,
 	}
 }
 
@@ -180,6 +191,9 @@ func (l *sessionLane) worker() {
 // session alive until the resize returns.
 func (l *sessionLane) apply(sess session.Session, op *resizeOp) {
 	err := sess.Resize(l.ctx, op.cols, op.rows, op.xpixel, op.ypixel)
+	if err == nil && l.resized != nil {
+		l.resized(op.cols, op.rows)
+	}
 
 	l.mu.Lock()
 	closed := l.closed
@@ -204,7 +218,7 @@ func (s *WSServer) laneFor(sid session.ID, sess session.Session) *sessionLane {
 	if l, ok := s.lanes[sid]; ok {
 		return l
 	}
-	l := newSessionLane(sess)
+	l := newSessionLane(sess, func(cols, rows uint16) { s.resizePaneGrid(sid, cols, rows) })
 	s.lanes[sid] = l
 	return l
 }
@@ -220,7 +234,7 @@ func (s *WSServer) closeLane(sid session.ID) {
 	s.lanesMu.Lock()
 	l, ok := s.lanes[sid]
 	if !ok {
-		l = newSessionLane(nil)
+		l = newSessionLane(nil, nil)
 		s.lanes[sid] = l
 	}
 	s.lanesMu.Unlock()

@@ -51,6 +51,7 @@ import { PromptVaultController } from './prompt-vault'
 import { VaultClient } from './vault-client'
 import { showToast } from './ui/toast'
 import type { SessionIntegrationChanged } from './generated/session.integrationChanged'
+import type { DriverState } from './pane-observation'
 import type { SessionSignal } from './generated/session.signal'
 import {
   IntegrationSilenceStore,
@@ -274,6 +275,11 @@ export interface TerminalContentHooks {
    *  title, not the tab label). Only TerminalContent knows the two
    *  apart, so it pushes the program title on its own hook. */
   onProgramTitleChange?: (programTitle: string) => void
+  /** What an ENROLLED pane's driver says its screen is inviting
+   *  (nocx-szb40.3). Pushed like the program title, and for the same reason:
+   *  the content owns the session handle, the pane owns what the tab shows.
+   *  Null when the pane stops being observed. */
+  onPaneObservationChange?: (state: DriverState | null) => void
   /** The session is an alias (not a saved profile) and can be adopted as a
    *  nocx connection. True = adoptable, false = not. */
   onAdoptabilityChange?: (adoptable: boolean) => void
@@ -611,6 +617,66 @@ export class TerminalContent extends BasePaneContent {
       this.markAffordance?.hide()
       return
     }
+    // ── THE SELECTION HAS ONE OWNER, AND IT IS THIS SURFACE (nocx-45vkz) ─
+    //
+    // The scrollback is about to offer a grant over this selection, so it
+    // must also hold the focus that decides who may move it. CodeMirror
+    // restores the DOM selection into its own document whenever it holds
+    // focus and the selection is anchored outside it — correct behaviour for
+    // a focused editor, whose caret IS the DOM selection — and it did so
+    // about 50ms after a selection made in the scrollback WITHOUT the mouse
+    // drag that would have moved focus first. The guard at the top of this
+    // handler then saw a collapsed selection and hid an offer nobody had had
+    // time to press. Both surfaces owned one input and the composer won by
+    // evaluation order; the loser went on advertising a grant it could no
+    // longer deliver (AGENTS.md).
+    //
+    // Released here rather than taught to the editor, because "do not
+    // restore a selection anchored outside my root" leaves the composer
+    // focused with a caret the document selection no longer shows — two live
+    // claims still, just neither of them visible. A real mouse drag already
+    // ends with the focus off the composer; this makes every other way of
+    // selecting agree with it. Nothing is lost by it: the first character
+    // typed goes back into the prompt through the global keydown rescue,
+    // exactly as it does after a click on a block.
+    //
+    // AND THE RELEASE MUST NOT TAKE THE SELECTION WITH IT. Blurring an
+    // editing host is itself a selection change on some engines: WebKit
+    // empties the document selection along with the host that held it —
+    // measured, rangeCount goes 1 to 0 synchronously inside blur(), and the
+    // selectionchange announcing it arrives a frame later — while Chromium
+    // leaves the selection where it was. Left alone, this handler's own blur
+    // came back to it as a collapsed selection and it hid the offer it had
+    // just shown. So the claim is RE-ASSERTED here rather than assumed to
+    // have survived, and the event the blur provokes then finds the range
+    // already back in place and re-shows this same offer instead of hiding
+    // it. The condition is on what the selection actually holds afterwards,
+    // never on which engine is running, so neither is the special case; and
+    // re-asserting is what a claim of ownership means — the surface that
+    // takes the focus keeps the selection it took it for, so the highlight a
+    // person made stays under the offer they are being made.
+    const active = document.activeElement
+    if (active instanceof HTMLElement && this.editor?.rootContains(active) === true) {
+      const startNode = range.startContainer
+      const startOffset = range.startOffset
+      const endNode = range.endContainer
+      const endOffset = range.endOffset
+      active.blur()
+      const held = window.getSelection()
+      const heldRange = held !== null && held.rangeCount > 0 ? held.getRangeAt(0) : null
+      const survived =
+        heldRange !== null &&
+        heldRange.startContainer === startNode &&
+        heldRange.startOffset === startOffset &&
+        heldRange.endContainer === endNode &&
+        heldRange.endOffset === endOffset
+      if (!survived && held !== null) {
+        range.setStart(startNode, startOffset)
+        range.setEnd(endNode, endOffset)
+        held.removeAllRanges()
+        held.addRange(range)
+      }
+    }
     this.markAffordance?.show(
       {
         left: rect.left,
@@ -724,10 +790,15 @@ export class TerminalContent extends BasePaneContent {
   private host: PaneHost | null = null
 
   // ── Capability rail (nocx-mlm7) ────────────────────────────────────
-  /** The resolved destination mode from the open ack (raw|script|relay):
-   *  the connection-scope default the capability control starts from. raw
-   *  refuses every rewrite and remote write; relay is consent-gated. */
-  private _policy: DesiredMode = 'script'
+  /** The resolved destination mode from the open ack
+   *  (auto|raw|script|relay): the connection-scope default the capability
+   *  control starts from. auto is the initial value because it is what an
+   *  unanswered destination resolves to everywhere else (ADR-0033) — the
+   *  ack is authoritative and arrives shortly, and a placeholder that
+   *  disagreed with the cascade's default is the two-defaults defect that
+   *  ADR closed on the backend. raw refuses every rewrite and remote
+   *  write; relay allows the Tier-B binary. */
+  private _policy: DesiredMode = 'auto'
   /** The session's integration status, as the backend keeps revising it
    *  (nocx-dvql). It replaced the open ack's one-shot shellIntegrationReason,
    *  which could not report the two failures that matter most because both
@@ -2747,7 +2818,7 @@ export class TerminalContent extends BasePaneContent {
       // reason (nocx-4t37.2): the capability control starts from the
       // backend's own resolution, never from a second fetch that could
       // disagree with it.
-      this._policy = session.desiredMode ?? 'script'
+      this._policy = session.desiredMode ?? 'auto'
       // The integration axis is a SUBSCRIPTION, not a field of the ack: the
       // backend revises it as it learns (starting → integrated, or →
       // conventional with a reason, or → lost). Subscribed before anything
@@ -2859,6 +2930,15 @@ export class TerminalContent extends BasePaneContent {
         }
         this.session?.send(data)
       })
+      // The pane's classification, for an enrolled agent pane. Registered
+      // beside the exit handler and before anything else touches the
+      // session: the backend replays the current observation immediately
+      // after an attach, so a subscription made later would miss the state
+      // of a pane that then sits still — which for a settled agent is
+      // forever.
+      session.onObservation((observation) => {
+        this.hooks.onPaneObservationChange?.(observation.state)
+      })
       session.onExit((exit) => {
         log.info('nocx: session exited', {
           sid: exit.sessionId,
@@ -2956,7 +3036,35 @@ export class TerminalContent extends BasePaneContent {
         this.env?.recordCwd(path)
       })
       renderer.onBell(() => {
+        // TWO facts, not one, and neither replaces the other. The tab dot is
+        // "something happened in a pane you are not looking at" — local,
+        // instant, and free. The notification is "a program asked for you",
+        // which is a routable event with a trust class, an attribution and a
+        // feed row. A bell is both, so it does both.
         host.requestAttention()
+        // A program printed BEL (ADR-0029). Reported through its OWN method:
+        // kind is stamped from the method invoked, so notify.bell is what
+        // makes this a bell, and there is no argument here — or anywhere on
+        // this client — by which it could become a different kind or reach a
+        // destination the renderer named.
+        //
+        // Fire-and-forget, and the id is read at fire time rather than at
+        // subscribe time, for the same reasons the OSC 9 / 777 wiring above
+        // gives: the session id is server-authoritative (AD-7) and a reattach
+        // replaces it, and a bell is not worth blocking terminal output on.
+        // Every refusal is final rather than retryable. No session means the
+        // pane is between sessions and the bell has nothing to address — the
+        // tab dot above still lit, which is the half that never needed one.
+        const sid = this.session?.sessionId
+        if (!sid) return
+        void new NotifyClient(this.client.dispatcher)
+          .bell({ sessionId: sid })
+          .catch((err: unknown) => {
+            log.warn('nocx: bell not reported', {
+              sid,
+              error: err instanceof Error ? err.message : String(err),
+            })
+          })
       })
       // ── Clipboard ────────────────────────────────────────────────────
       renderer.onSelectionChange((text) => {

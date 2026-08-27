@@ -372,8 +372,15 @@ __nocx_lc_json_unescape() {
         # 0xF0. Measured exactly that: a payload's `select(...)>0` reached the
         # child as `select(...)\xF0 ? 0 : 1` and perl refused to parse it
         # (nocx-aupk). `2>&1` corrupts the same way — & gives \46, and
-        # `&1` reads as \461. bash's twin has always used %03o; this is the
-        # zsh side catching up.
+        # `&1` reads as \461.
+        #
+        # The bash twin needs the same padding AND a leading zero, because
+        # printf %b reads \0NNN where (g:o:) reads \NNN. This comment used
+        # to end "bash's twin has always used %03o; this is the zsh side
+        # catching up" — true about the verb, false about the outcome, and
+        # bash went on corrupting every `2>&1` in the carrier loader for as
+        # long as that sentence stood (nocx-eoijp). Two grammars, one idea:
+        # read the other side's decoder before believing it agrees.
         octc=$(( [##8] 16#$hexc ))
         octc="${(l:3::0:)octc}"
         s="${s//${bs}"u"$hexc/${bs}${octc}}"
@@ -391,6 +398,114 @@ __nocx_lc_json_unescape() {
 # from an earlier request) are handled or skipped. Returns non-zero on
 # timeout or a dead channel — the parent then runs its command
 # conventionally.
+# ── The enrolment act (nocx-szb40.5, protocol doc §15) ────────────────────
+#
+# The bash script carries the long form of why this lives in the integration
+# script rather than in a launcher binary, and why it brackets the agent rather
+# than exec'ing it. The short form: the per-epoch capability is in this file's
+# text and never in the environment (ADR-0024 decision 2), so only something
+# sourced here can authenticate; and bracketing gives the interval a second end
+# the shell cannot forget.
+
+__nocx_agent_n=0
+__nocx_agent_enrolled=0
+__nocx_agent_reason=
+
+__nocx_lc_read_agent_answer() {
+    local __rid="$1" __t=0 __reason
+    __nocx_agent_enrolled=0
+    __nocx_agent_reason=
+    while (( __t < __nocx_lc_grant_timeout_s )); do
+        if zmodload zsh/zselect 2>/dev/null; then
+            if ! zselect -t 0 -r "$__nocx_lc_fd" 2>/dev/null; then
+                sleep 1
+                __t=$(( __t + 1 ))
+                continue
+            fi
+        fi
+        __nocx_lc_read_frame 1 || return 1
+        case "$__nocx_lc_frame" in
+            *'"evt":"agent_enrolled"'*|*'"evt":"agent_withdrawn"'*) : ;;
+            *'"evt":"refresh_request"'*) __nocx_lc_ans_refresh || true; continue ;;
+            *) continue ;; # a stale frame (a late accept, an old grant): skip
+        esac
+        case "$__nocx_lc_frame" in
+            *'"request":"'"$__rid"'"'*) : ;;
+            *) continue ;; # an answer to a different request: stale
+        esac
+        # Consent is the PRESENCE of the field, and the field rather than the
+        # word: the event kind is itself `agent_enrolled`, so matching the bare
+        # word finds consent in every refusal ever sent.
+        case "$__nocx_lc_frame" in
+            *'"enrolled":true'*) __nocx_agent_enrolled=1 ;;
+        esac
+        case "$__nocx_lc_frame" in
+            *'"reason":"'*)
+                __reason="${__nocx_lc_frame#*\"reason\":\"}"
+                __reason="${__reason%%\"*}"
+                __nocx_lc_json_unescape "$__reason"
+                __nocx_agent_reason="$__nocx_lc_json_unescaped"
+                ;;
+        esac
+        return 0
+    done
+    return 1
+}
+
+# The pane's geometry for the grid to start at. zsh keeps COLUMNS and LINES
+# current in an interactive shell; stty is the fallback and 80x24 the last
+# resort, because a wrong starting size is corrected by the first window change
+# while a refusal here would cost the whole feature.
+__nocx_agent_geometry() {
+    __nocx_agent_cols=${COLUMNS:-0}
+    __nocx_agent_rows=${LINES:-0}
+    if (( __nocx_agent_cols <= 0 || __nocx_agent_rows <= 0 )); then
+        local __size
+        __size="$(command stty size 2>/dev/null)" || __size=
+        if [[ "$__size" == <->" "<-> ]]; then
+            __nocx_agent_rows="${__size%% *}"
+            __nocx_agent_cols="${__size##* }"
+        fi
+    fi
+    (( __nocx_agent_cols > 0 )) || __nocx_agent_cols=80
+    (( __nocx_agent_rows > 0 )) || __nocx_agent_rows=24
+}
+
+# Run agent $1 with the pane enrolled for its lifetime. The refusal is visible
+# and the agent still runs: "failure is closed" means no enrolment implies no
+# orchestration, not that a terminal declines to start the program it was asked
+# for.
+__nocx_agent_run() {
+    local __agent="$1" __rid __rc
+    shift
+    if [[ "${__nocx_lc_active:-0}" != "1" ]]; then
+        builtin printf 'nocx: not orchestrated — this pane has no lifecycle channel\n' >&2
+        command "$__agent" "$@"
+        return $?
+    fi
+    __nocx_agent_geometry
+    __rid="a-$__nocx_lc_dom-$(( __nocx_agent_n++ ))"
+    if ! __nocx_lc_send agent_enrol ',"request":"'"$__rid"'","agent":"'"$__agent"'","cols":'"$__nocx_agent_cols"',"rows":'"$__nocx_agent_rows" \
+        || ! __nocx_lc_read_agent_answer "$__rid" || (( __nocx_agent_enrolled != 1 )); then
+        if [[ -n "$__nocx_agent_reason" ]]; then
+            builtin printf 'nocx: not orchestrated — %s\n' "$__nocx_agent_reason" >&2
+        else
+            builtin printf 'nocx: not orchestrated — nocx did not answer\n' >&2
+        fi
+        command "$__agent" "$@"
+        return $?
+    fi
+    command "$__agent" "$@"
+    __rc=$?
+    __nocx_lc_send agent_withdraw ',"request":"'"$__rid"'"' || return $__rc
+    __nocx_lc_read_agent_answer "$__rid" || true
+    return $__rc
+}
+
+# One agent today (D15: one worker first, not three). A function, not an alias,
+# and not exported: what it wraps is what the user TYPES in a nocx pane.
+claude() { __nocx_agent_run claude "$@"; }
+
 __nocx_lc_read_grant() {
     local __rid="$1" __t=0 __env __bootstrap
     __nocx_grant_bootstrap=

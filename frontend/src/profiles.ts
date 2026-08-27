@@ -1,5 +1,6 @@
 import { Dispatcher } from './dispatcher'
 import type { ConnectionTestResult } from './generated/connections.probe'
+import type { SettingsSet } from './generated/settings.set'
 import type { TrustHostKeyResult } from './generated/connections.trustHostKey'
 import type { SaveKeyMaterialMintResult } from './generated/secrets.saveKeyMaterial'
 import type { BackupCreateResult } from './generated/backup.create'
@@ -576,7 +577,7 @@ export class ProfileClient {
   }> {
     return this.call('settings.getSnapshot', {})
   }
-  setSetting(key: string, value: unknown): Promise<{ ok: true }> {
+  setSetting(key: string, value: unknown): Promise<SettingsSet> {
     return this.call('settings.set', { key, value })
   }
   resetSetting(key: string): Promise<{ ok: true }> {

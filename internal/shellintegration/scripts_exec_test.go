@@ -3,7 +3,6 @@ package shellintegration
 import (
 	"encoding/json"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,7 +11,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/creack/pty"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // writeScriptFile materialises an embedded script to a temp file so a real
@@ -1061,40 +1060,33 @@ func TestBashSnapshotArrivesBeforeFirstPrompt(t *testing.T) {
 		// ordering (nocx-0ije).
 		"NOCX_SNAPSHOT_WAIT_MS=5000",
 	)
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		t.Fatalf("pty start: %v", err)
-	}
-	defer func() { _ = ptmx.Close() }()
+	capture := newPTYCapture(t, cmd)
 
-	done := make(chan []byte, 1)
-	go func() {
-		out, _ := io.ReadAll(ptmx)
-		done <- out
-	}()
-
-	// Let the first prompt render (hello, A, snapshot, B), then run one
-	// command — bracketed by C/D — then exit.
-	time.Sleep(300 * time.Millisecond)
-	if _, werr := ptmx.Write([]byte("true\n")); werr != nil {
+	// The first prompt and the command completion are observable PTY fences.
+	waittest.WaitForTimeout(t, "bash snapshot test first prompt", 15*time.Second, func() bool {
+		return strings.Contains(capture.output(), "\x1b]133;B")
+	})
+	if _, werr := capture.ptmx.Write([]byte("true\n")); werr != nil {
 		t.Fatalf("write command: %v", werr)
 	}
-	time.Sleep(300 * time.Millisecond)
-	if _, werr := ptmx.Write([]byte("exit\n")); werr != nil {
+	waittest.WaitForTimeout(t, "bash snapshot test command completion", 15*time.Second, func() bool {
+		return strings.Contains(capture.output(), "\x1b]133;D;0")
+	})
+	if _, werr := capture.ptmx.Write([]byte("exit\n")); werr != nil {
 		t.Fatalf("write exit: %v", werr)
 	}
-
-	var out []byte
-	select {
-	case out = <-done:
-	case <-time.After(15 * time.Second):
-		_ = cmd.Process.Kill()
-		t.Fatal("timed out waiting for the interactive session to end")
-	}
+	waittest.WaitForTimeout(t, "bash snapshot test session end", 15*time.Second, func() bool {
+		select {
+		case <-capture.done:
+			return true
+		default:
+			return false
+		}
+	})
+	output := capture.output()
 	if werr := cmd.Wait(); werr != nil {
 		t.Logf("bash exited non-zero (may be benign): %v", werr)
 	}
-	output := string(out)
 
 	ms := extractOscMarkers(output)
 	firstH, firstS, firstB := -1, -1, -1
@@ -1854,38 +1846,32 @@ func TestZshSnapshotArrivesBeforeFirstPrompt(t *testing.T) {
 		// existing (nocx-0ije).
 		"NOCX_SNAPSHOT_WAIT_MS=5000",
 	)
-	ptmx, err := pty.Start(cmd)
-	if err != nil {
-		t.Fatalf("pty start: %v", err)
-	}
-	defer func() { _ = ptmx.Close() }()
+	capture := newPTYCapture(t, cmd)
 
-	done := make(chan []byte, 1)
-	go func() {
-		out, _ := io.ReadAll(ptmx)
-		done <- out
-	}()
-
-	time.Sleep(500 * time.Millisecond)
-	if _, werr := ptmx.Write([]byte("true\n")); werr != nil {
+	waittest.WaitForTimeout(t, "zsh snapshot test first prompt", 20*time.Second, func() bool {
+		return strings.Contains(capture.output(), "\x1b]133;B")
+	})
+	if _, werr := capture.ptmx.Write([]byte("true\n")); werr != nil {
 		t.Fatalf("write command: %v", werr)
 	}
-	time.Sleep(500 * time.Millisecond)
-	if _, werr := ptmx.Write([]byte("exit\n")); werr != nil {
+	waittest.WaitForTimeout(t, "zsh snapshot test command completion", 20*time.Second, func() bool {
+		return strings.Contains(capture.output(), "\x1b]133;D;0")
+	})
+	if _, werr := capture.ptmx.Write([]byte("exit\n")); werr != nil {
 		t.Fatalf("write exit: %v", werr)
 	}
-
-	var out []byte
-	select {
-	case out = <-done:
-	case <-time.After(20 * time.Second):
-		_ = cmd.Process.Kill()
-		t.Fatal("timed out waiting for the interactive session to end")
-	}
+	waittest.WaitForTimeout(t, "zsh snapshot test session end", 20*time.Second, func() bool {
+		select {
+		case <-capture.done:
+			return true
+		default:
+			return false
+		}
+	})
 	if werr := cmd.Wait(); werr != nil {
 		t.Logf("zsh exited non-zero (may be benign): %v", werr)
 	}
-	output := string(out)
+	output := capture.output()
 
 	ms := extractOscMarkers(output)
 	firstH, firstS, firstB := -1, -1, -1
@@ -2068,6 +2054,58 @@ __nocx_lc_json_unescape "$bootstrap"
 builtin printf '%s' "$__nocx_lc_json_unescaped"
 `
 	out := runShellProgEnv(t, zsh, prog, script, "NOCX_TEST_FRAME_PATH="+framePath)
+	if out != payload {
+		t.Errorf("unescaped bootstrap mismatch:\n got %q\nwant %q", out, payload)
+	}
+}
+
+// TestBashNestedJsonUnescape is the zsh test's missing twin, and it exists
+// because the two decoders are one idea written twice and they drifted.
+// zsh's `(g:o:)` reads `\NNN` — three digits, no leading zero — so %03o is
+// the whole answer there. bash's `printf %b` reads `\0NNN`: a zero and then
+// UP TO three octal digits, so an escape written without the zero eats the
+// character after it whenever that character is an octal digit. Go's JSON
+// encoder escapes `<`, `>` and `&` by default, so the shell text that
+// travels here is full of them, and `2>&1` is the shape that bites: `&`
+// becomes \u0026, the decoder wrote \046, and `%b` read `\0461` as octal
+// 461 — 305, truncated to the byte 0x31, which IS the digit `1`. The
+// ampersand vanished silently and the remote loader ran `exec 2>1`, writing
+// its stderr to a file called `1` instead of onto stdout.
+//
+// The zsh side already carries this reasoning in a comment ending "bash's
+// twin has always used %03o; this is the zsh side catching up" — true about
+// the format verb and false about the outcome, because it read one decoder's
+// grammar onto the other. So the payload below is not generic: it pins the
+// adjacency cases specifically, and every one of them is a real fragment of
+// the carrier loader that shipped broken (nocx-eoijp).
+func TestBashNestedJsonUnescape(t *testing.T) {
+	bash := requireShell(t, "bash")
+	script := writeScriptFile(t, "nocx.bash", bashScript)
+
+	// Every escaped byte here is followed by an octal digit — the ONLY
+	// arrangement that fails, and the one a generic payload misses.
+	payload := "R(){ exec 2>&1 9<&-;}\nx>0 && y<1\na&&b\n\x01" + "7z\n"
+	b, err := json.Marshal(payload)
+	if err != nil {
+		t.Fatalf("marshal payload: %v", err)
+	}
+	frame := []byte(`{"v":1,"lane":"L","dom":"D","epoch":1,"seq":9,"cap":"abc","evt":"domain_grant","request":"r-1","env":"sudo","bootstrap":` + string(b) + `}`)
+	framePath := filepath.Join(t.TempDir(), "frame")
+	if err := os.WriteFile(framePath, frame, 0o600); err != nil {
+		t.Fatalf("write frame: %v", err)
+	}
+
+	prog := `
+export NOCX_SHELL_INTEGRATION=1
+source "$1" >/dev/null 2>&1
+frame=$(cat "$NOCX_TEST_FRAME_PATH")
+bootstrap="${frame##*\"bootstrap\":\"}"
+bootstrap="${bootstrap%?}"
+bootstrap="${bootstrap%\"}"
+__nocx_lc_json_unescape "$bootstrap"
+builtin printf '%s' "$__nocx_lc_json_unescaped"
+`
+	out := runShellProgEnv(t, bash, prog, script, "NOCX_TEST_FRAME_PATH="+framePath)
 	if out != payload {
 		t.Errorf("unescaped bootstrap mismatch:\n got %q\nwant %q", out, payload)
 	}

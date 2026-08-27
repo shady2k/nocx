@@ -1,0 +1,68 @@
+/* The notification centre's panel.
+
+   Placement only. Not one rule here sets background, border, color, font-*,
+   padding or box-shadow on a ui-* class — a surface may place a kit component
+   and may never repaint it. The dropped line, the narrowed count and the run
+   expansion are this surface's OWN elements, so they carry their own
+   appearance. */
+
+.notifications-panel {
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  min-height: 0;
+}
+
+/* The narrowing controls: kit Fields, stacked, above the list. A column
+   because the panel is 240px by default and three labelled selects on one
+   row would each be too narrow to read a host name in. */
+.notifications-panel__filters {
+  flex: 0 0 auto;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  padding: var(--space-2);
+  border-bottom: 1px solid var(--color-divider);
+}
+
+/* "3 of 12 shown" — the narrowed count, which the bell deliberately does not
+   answer (D3). Between the controls that caused it and the list it describes. */
+.notifications-panel__shown {
+  flex: 0 0 auto;
+  padding: var(--space-1) var(--space-2);
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-dim);
+}
+
+.notifications-panel__list {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+
+/* What a collapsed row discloses. Geometry only: the kit rows inside it are
+   the same RecordRow the list above uses and are painted by the kit, exactly
+   as they are anywhere else. */
+.notifications-panel__run {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+
+/* How much of the run is being shown, when the tail overflowed. */
+.notifications-panel__run-dropped {
+  padding: var(--space-1) 0 0;
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-dim);
+}
+
+.notifications-panel__dropped {
+  flex: 0 0 auto;
+  padding: 8px 16px;
+  font-family: var(--font-family-ui);
+  font-size: var(--font-size-2xs);
+  color: var(--color-text-dim);
+  border-top: 1px solid var(--color-border);
+}

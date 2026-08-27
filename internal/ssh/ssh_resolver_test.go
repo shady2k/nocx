@@ -537,9 +537,16 @@ func TestSSHConfigResolver_CacheInvalidationOnConfigChange(t *testing.T) {
 	if wErr := os.WriteFile(filepath.Join(hostnamesDir, "myalias"), []byte("other.example.com"), 0o600); wErr != nil {
 		t.Fatalf("update hostname: %v", wErr)
 	}
-	time.Sleep(10 * time.Millisecond) // ensure mtime change
+	configInfo, sErr := os.Stat(configPath)
+	if sErr != nil {
+		t.Fatalf("stat config before update: %v", sErr)
+	}
 	if wErr := os.WriteFile(configPath, []byte("Host myalias\n  HostName other.example.com\n"), 0o600); wErr != nil {
 		t.Fatalf("update config: %v", wErr)
+	}
+	newMtime := configInfo.ModTime().Add(time.Second)
+	if wErr := os.Chtimes(configPath, newMtime, newMtime); wErr != nil {
+		t.Fatalf("advance config mtime: %v", wErr)
 	}
 
 	// Resolution should re-invoke ssh -G and see the new hostname.

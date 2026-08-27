@@ -1,0 +1,68 @@
+/* ToggleMatrix — a grid of controls, where a row meets a column (nocx-3mniv).
+
+   The whole point of the shape is that a reader can scan a column and see what
+   one place receives, or scan a row and see where one thing goes. So the
+   column headers are the emphasis, the row headers carry the reading weight of
+   a label, and the cells are quiet — nothing in a cell but the control the
+   caller placed there.
+
+   Hidden rows and columns are `display: none` rather than removed from the
+   DOM (the component's doc comment says why): a table collapses cleanly when a
+   `tr`, a `th` and the matching `td` in every row all go, and the remaining
+   columns simply re-share the width. */
+
+.ui-toggle-matrix {
+  border-collapse: collapse;
+  width: 100%;
+  /* A grid, not a form: type is one step down from the surrounding prose so a
+     wide row of headers stays a row rather than a paragraph. */
+  font-size: var(--font-size-sm);
+}
+
+/* The top-left cell names neither axis and draws nothing. The label column's
+   width is declared on the row header below — the one cell in that column with
+   anything in it. */
+.ui-toggle-matrix__corner {
+  padding: 0;
+}
+
+.ui-toggle-matrix__column {
+  padding: var(--space-1) var(--space-3);
+  text-align: center;
+  vertical-align: bottom;
+  white-space: nowrap;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  border-bottom: 1px solid var(--color-divider);
+}
+
+.ui-toggle-matrix__row-header {
+  padding: var(--space-2) var(--space-3) var(--space-2) 0;
+  text-align: left;
+  font-weight: 400;
+  color: var(--color-text);
+  /* The label column takes what it needs and the cells take the rest: a
+     control column sized by its longest label would jump about as the labels
+     change. */
+  width: 100%;
+}
+
+.ui-toggle-matrix__cell {
+  padding: var(--space-2) var(--space-3);
+  text-align: center;
+  white-space: nowrap;
+}
+
+/* Every row but the first is separated from the one above, so a long grid
+   stays trackable across its width. The header row draws its own rule. */
+.ui-toggle-matrix__row:not([data-hidden='true'])
+  ~ .ui-toggle-matrix__row:not([data-hidden='true'])
+  > * {
+  border-top: 1px solid var(--color-divider);
+}
+
+.ui-toggle-matrix__row[data-hidden='true'],
+.ui-toggle-matrix__column[data-hidden='true'],
+.ui-toggle-matrix__cell[data-hidden='true'] {
+  display: none;
+}

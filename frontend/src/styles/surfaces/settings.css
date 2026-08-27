@@ -187,12 +187,31 @@
    had on the label side. Right of the control, not under it: under it is where
    the pointer already is after operating the control, which is what made the old
    full-width button one slip away from undoing the change just made. */
-.ui-settings-row .ui-settings-provenance {
+.ui-settings-row .ui-settings-provenance,
+.ui-settings-matrix-cell .ui-settings-provenance {
   display: flex;
   align-items: center;
   justify-content: center;
   flex: 0 0 auto;
   width: 18px;
+}
+
+/* ── The routing matrix ───────────────────────────────────────────────────
+   The kit's ToggleMatrix draws the grid; this is the surface placing it and
+   the contents of one cell. Nothing here repaints the table, the switch or the
+   reset icon — a cell is a switch, its reset gutter, and the gap between them.
+
+   The cell keeps the provenance slot every settings row has, at the same
+   reserved width, so the switches stay in one column whether or not any of
+   them has been changed. Without it a cell would widen the moment its value
+   moved off the default — the control moving as a side effect of being used,
+   which is the defect the row's reserved gutter already exists to prevent. */
+
+.ui-settings-matrix-cell {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-2);
 }
 
 /* Spacing only. The description's size and colour are Field's own and are declared

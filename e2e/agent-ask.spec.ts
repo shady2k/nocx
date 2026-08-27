@@ -283,7 +283,13 @@ async function runCommand(
  *  what this spec is about is what a selection MEANS, and the range is the
  *  same object a mouse would leave behind. */
 async function pointAt(block: Locator): Promise<void> {
+  const page = block.page()
   await expect(block.locator('.cmd-output .term-line').first()).toBeVisible({ timeout: 15_000 })
+  // The state a person points FROM: mid-draft, so the composer holds the
+  // focus. Put there deliberately rather than left to whatever the previous
+  // step happened to focus, because it is the whole difficulty — see the
+  // wait below.
+  await page.locator(INPUT).click()
   await block.evaluate((el) => {
     const lines = Array.from(el.querySelectorAll<HTMLElement>('.cmd-output .term-line'))
     if (lines.length === 0) throw new Error('block has no output rows to point at')
@@ -299,8 +305,29 @@ async function pointAt(block: Locator): Promise<void> {
   })
   // The offer, then the confirmation. `.mark-affordance` is the surface's
   // wrapper and `.ui-button` inside it is the kit control a person presses.
-  const offer = block.page().locator('.mark-affordance .ui-button')
+  const offer = page.locator('.mark-affordance .ui-button')
   await expect(offer).toBeVisible({ timeout: 10_000 })
+  // THE OFFER MUST OUTLIVE THE COMPOSER, NOT OUTRUN IT (nocx-45vkz).
+  //
+  // CodeMirror restores the DOM selection into its own document while its
+  // contentDOM is the active element, and a selection made without taking
+  // focus off it was collapsed a frame or two later — the offer vanished,
+  // and this helper passed only because it clicked within a few
+  // milliseconds. The scrollback now takes the focus when it claims the
+  // selection, so the observable to wait on is that transfer: with the
+  // composer unfocused there is nothing left to restore. Then a pair of
+  // frames, which is when the restore would have run, and the offer is
+  // still there to press. Frames and a DOM state, never a duration.
+  await expect
+    .poll(() => page.evaluate(() => String(document.activeElement?.className ?? '')), {
+      timeout: 10_000,
+    })
+    .not.toContain('nocx-editor-input')
+  await page.evaluate(
+    () =>
+      new Promise<void>((done) => requestAnimationFrame(() => requestAnimationFrame(() => done()))),
+  )
+  await expect(offer).toBeVisible()
   await offer.click()
 }
 

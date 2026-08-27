@@ -1,0 +1,7 @@
+# settle into the idle input box
+12000
+# a request that must reach the Bash tool, so a permission prompt is unavoidable
+500 Run the shell command: echo hello
+2000 \r
+# inference, then the tool call, then the prompt that waits for a human
+30000

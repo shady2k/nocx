@@ -119,10 +119,10 @@ function fakeServices(over: Partial<GitPanelServices> = {}): GitPanelServices {
     unstageAll: vi.fn().mockResolvedValue({ status: statusFixture() }),
     commit: vi.fn().mockResolvedValue({ state: 'ok', outputTruncated: false }),
     headMessage: vi.fn().mockResolvedValue({ state: 'ok', message: 'head' }),
-    // none by default: no recognised remote means no open-link affordance
+    remote: vi.fn().mockResolvedValue({ state: 'none' }),
+    grantConsent: vi.fn().mockResolvedValue({ state: 'granted' }),
     // (D14), which is the DOM every pre-existing test expects. Tests that
     // exercise the links override with an ok remote.
-    remote: vi.fn().mockResolvedValue({ state: 'none' }),
     openUrl: vi.fn().mockResolvedValue({}),
     close: vi.fn().mockResolvedValue({ closed: true }),
     subscribeGitChanged: vi.fn().mockReturnValue(() => {}),
@@ -243,15 +243,40 @@ describe('the panel renders what the store says', () => {
     const { panel } = mountApp(fakeServices())
     expect(panel.textContent).toContain('No repository to show')
   })
-
-  it('remote: the mutation controls are ABSENT from the DOM, not disabled (D14)', async () => {
-    const { panel, setActiveOrigin } = mountApp(fakeServices())
+  it('ssh: an SSH tab that has not consented shows the offer and NO mutation controls (D14)', async () => {
+    const { panel, setActiveOrigin } = mountApp(
+      fakeServices({ open: vi.fn().mockResolvedValue({ state: 'consentRequired' }) }),
+    )
     setActiveOrigin(SSH_ORIGIN)
     await settle()
-    expect(panel.textContent).toContain("Git on a remote host isn't supported yet")
+    // The consent offer renders with its Accept — the panel offers the
+    // flow, and what the panel cannot do it does not draw (D14).
+    expect(panel.textContent).toContain('Allow the nocx helper')
+    expect(panel.querySelector('[data-testid="git-consent-accept"]')).not.toBeNull()
     expect(panel.querySelector('[data-testid="git-stage-all"]')).toBeNull()
     expect(panel.querySelector('[data-testid="git-unstage-all"]')).toBeNull()
     expect(panel.querySelector('[data-testid="git-commit"]')).toBeNull()
+  })
+
+  it('ssh: every refusal state renders its own message naming what to do', async () => {
+    const cases: { state: string; title: string }[] = [
+      { state: 'unsupportedPlatform', title: "This platform can't run the nocx helper" },
+      { state: 'deployFailed', title: "Couldn't install the nocx helper" },
+      { state: 'execForbidden', title: 'The host refused the nocx helper' },
+      { state: 'helperVersionMismatch', title: 'The nocx helper needs reinstalling' },
+    ]
+    for (const tc of cases) {
+      const { panel, setActiveOrigin } = mountApp(
+        fakeServices({
+          open: vi.fn().mockResolvedValue({ state: tc.state, message: `account for ${tc.state}` }),
+        }),
+      )
+      setActiveOrigin(SSH_ORIGIN)
+      await settle()
+      expect(panel.textContent).toContain(tc.title)
+      expect(panel.textContent).toContain(`account for ${tc.state}`)
+      expect(panel.querySelector('[data-testid="git-stage-all"]')).toBeNull()
+    }
   })
 
   it('ready: the lists and the header render from the wire status', async () => {

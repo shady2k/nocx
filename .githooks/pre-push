@@ -1,0 +1,114 @@
+#!/bin/sh
+set -eu
+
+# THE SLOW GATE, once per push rather than once per commit.
+#
+# The two containerized suites — the whole Go module under -race, the whole
+# vitest suite — used to run in pre-commit on every commit that touched a .go
+# or a frontend/ file. That is minutes per commit, paid again on every amend
+# and on every small step of a refactor, and it made the cheap habit (commit
+# often, in small steps) the expensive one. Here they are paid once, at the
+# last moment before the work leaves this machine, which is the first moment
+# being wrong costs anybody else anything. CI is still the source of truth,
+# and the merge gate (make ci-full, on the merged tree) is still whoever
+# integrates.
+#
+# SCOPING IS CONSERVATIVE IN ONE DIRECTION ONLY: anything that cannot be
+# classified runs everything. A push we cannot classify is cheap; a push that
+# skipped the gate it needed is a broken commit in a history AGENTS.md expects
+# to bisect.
+
+warn() { printf "FAIL: %s\n" "$1"; }
+ok()   { printf "OK:   %s\n" "$1"; }
+
+command -v go >/dev/null 2>&1 && PATH="$(go env GOPATH)/bin:$PATH"
+
+. "$(dirname "$0")/containerized-tests.sh"
+
+# --- what is being pushed? --------------------------------------------------
+# stdin carries "<local ref> <local sha> <remote ref> <remote sha>" per ref. A
+# remote sha of all zeros is a branch the remote has never seen, so there is no
+# range to diff and everything runs.
+RUN_GO=0
+RUN_FE=0
+CLASSIFIED=1
+RANGES=""
+while read -r _localref localsha _remoteref remotesha; do
+    [ -n "${localsha:-}" ] || continue
+    case "$localsha" in *[!0]*) ;; *) continue ;; esac   # deleting a ref: nothing to test
+    case "$remotesha" in
+        *[!0]*) RANGES="$RANGES $remotesha..$localsha" ;;
+        *)      CLASSIFIED=0 ;;
+    esac
+done
+
+if [ "$CLASSIFIED" = 0 ] || [ -z "$RANGES" ]; then
+    RUN_GO=1
+    RUN_FE=1
+else
+    for r in $RANGES; do
+        CHANGED=$(git diff --name-only "$r" 2>/dev/null || echo UNCLASSIFIED)
+        case "$CHANGED" in UNCLASSIFIED) RUN_GO=1; RUN_FE=1; continue ;; esac
+        for f in $CHANGED; do
+            case "$f" in
+                .githooks/*|Makefile|.golangci.yml) RUN_GO=1; RUN_FE=1 ;;
+                *.go|go.mod|go.sum)                 RUN_GO=1 ;;
+                frontend/*)                         RUN_FE=1 ;;
+            esac
+        done
+    done
+fi
+
+# --- both suites at once ----------------------------------------------------
+# They share nothing — one is a Go toolchain, the other a Node one — and in
+# sequence they were 72% of the old hook's wall time.
+GO_LOG=$(mktemp) || exit 1
+FE_LOG=$(mktemp) || exit 1
+GO_PID=""
+FE_PID=""
+cleanup() {
+    [ -n "$GO_PID" ] && kill "$GO_PID" 2>/dev/null || true
+    [ -n "$FE_PID" ] && kill "$FE_PID" 2>/dev/null || true
+    rm -f "$GO_LOG" "$FE_LOG"
+}
+trap cleanup EXIT INT TERM
+
+if [ "$RUN_GO" = 1 ]; then
+    go_test_containerized >"$GO_LOG" 2>&1 &
+    GO_PID=$!
+fi
+if [ "$RUN_FE" = 1 ]; then
+    vitest_containerized >"$FE_LOG" 2>&1 &
+    FE_PID=$!
+fi
+
+FAILED=0
+if [ -n "$GO_PID" ]; then
+    if wait "$GO_PID"; then ok "go test -race (container)"; else warn "go test -race (container)"; cat "$GO_LOG"; FAILED=1; fi
+    GO_PID=""
+else
+    ok "go test -race — skipped (no Go changes in this push)"
+fi
+if [ -n "$FE_PID" ]; then
+    if wait "$FE_PID"; then ok "vitest (container)"; else warn "vitest (container)"; cat "$FE_LOG"; FAILED=1; fi
+    FE_PID=""
+else
+    ok "vitest — skipped (no frontend/ changes in this push)"
+fi
+
+if [ "$FAILED" != 0 ]; then
+    printf "\nPre-push hook FAILED. Fix the issues above and try again.\n"
+    exit 1
+fi
+
+# Push the issue tracker along with the code.
+#
+# The issue database goes to refs/dolt/data on the remote. That ref — not the
+# tracked .beads/issues.jsonl — is what a fresh clone reads: `bd bootstrap`
+# prefers sync.remote and falls back to the JSONL only fourth. So a push that
+# skips this step leaves collaborators on a backlog that can be days old, with
+# nothing on screen to suggest it.
+
+. "$(dirname "$0")/beads-hook.sh"
+
+push_beads_state

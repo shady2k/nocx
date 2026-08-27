@@ -1,13 +1,16 @@
 package main
 
 import (
+	"bytes"
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
+	"path/filepath"
 	"slices"
 	"strings"
 	"sync"
@@ -346,6 +349,73 @@ func TestExec_RunsToCompletionWhenTheClientHalfClosesItsStdin(t *testing.T) {
 	}
 }
 
+// And the case the test above cannot see, which is the one the product is in.
+// `Output` gives the session an empty stdin, so the client sends EOF at once
+// and the fixture's stdin copier finishes with it. nocx's mux client does the
+// opposite: internal/ssh/mux hands the master a socketpair for stdin and holds
+// its end open for the life of the session, because the session is a stream it
+// may still write to. Every caller of an auxiliary channel is that shape.
+//
+// The fixture then never finishes. `cmd.Stdin = ch` is not an *os.File, so
+// os/exec copies it on a goroutine, and its Wait "will not return until the
+// goroutine copying to the process's stdin has completed" — a goroutine
+// reading a channel the client is deliberately keeping open. So `echo $HOME`
+// exits in microseconds and its exit-status and channel close never leave,
+// which leaves the CLIENT reading stdout for an EOF that is waiting on it.
+// Both sides wait for the other, and the deadlock breaks only when the whole
+// connection dies: measured at 48.2 s in e2e/nocxify-journey.spec.ts, by which
+// time the mux master is gone and the SFTP publish that should have followed
+// finds no control socket at all (nocx-eoijp).
+//
+// A real sshd reaps the child and reports its status then and there; it does
+// not hold the exit hostage to the client's stdin. The deadline below is a
+// bound on a hang, not a measurement — the assertion is that EOF ARRIVES, and
+// the timer only turns "never" into a failure instead of a hung test.
+func TestExec_ReportsItsExitWhileTheClientHoldsStdinOpen(t *testing.T) {
+	client := dialFixture(t)
+
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("NewSession: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	// Stdin that never ends and is never closed — the mux client's socketpair,
+	// spelled with the cheapest thing that has the same behaviour.
+	pr, pw := io.Pipe()
+	t.Cleanup(func() { _ = pw.Close() })
+	sess.Stdin = pr
+
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		t.Fatalf("StdoutPipe: %v", err)
+	}
+	if err := sess.Start("echo $HOME"); err != nil {
+		t.Fatalf("Start(echo $HOME): %v", err)
+	}
+
+	type read struct {
+		out []byte
+		err error
+	}
+	done := make(chan read, 1)
+	go func() {
+		b, rErr := io.ReadAll(stdout)
+		done <- read{b, rErr}
+	}()
+
+	select {
+	case r := <-done:
+		if strings.TrimSpace(string(r.out)) == "" {
+			t.Errorf("stdout = %q, want the remote home", r.out)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("stdout never reached EOF while the client held its stdin open: " +
+			"the fixture is holding the command's exit until a stdin the client will not close, " +
+			"which is the deadlock that leaves nocx's SFTP publish with a dead control socket")
+	}
+}
+
 // And the paired failure: a command that exits non-zero reports THAT status,
 // not the 255 a signalled child reports. Without this the test above passes
 // against a fixture that answers 0 for everything.
@@ -365,6 +435,187 @@ func TestExec_ReportsTheCommandsOwnNonZeroStatus(t *testing.T) {
 	}
 	if exitErr.ExitStatus() != 3 {
 		t.Errorf("exit status = %d, want 3", exitErr.ExitStatus())
+	}
+}
+
+// startFixture starts the in-process server the way run() does and returns
+// everything a client needs to reach it: the address, the host key, and the
+// user key's signer (the server accepts exactly that key). The listener is
+// closed by the test's cleanup.
+func startFixture(t *testing.T) (addr string, hostKey gossh.PublicKey, userSigner gossh.Signer) {
+	t.Helper()
+	hostSigner, _, _, err := signer()
+	if err != nil {
+		t.Fatalf("host signer: %v", err)
+	}
+	userSigner, _, _, err = signer()
+	if err != nil {
+		t.Fatalf("user signer: %v", err)
+	}
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	t.Cleanup(func() { _ = ln.Close() })
+	go func() {
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			config := buildConfig(userSigner, hostSigner, "", "", func() {})
+			go serveConn(conn, config)
+		}
+	}()
+	return ln.Addr().String(), hostSigner.PublicKey(), userSigner
+}
+
+// dial opens a client connection to the fixture, trusting exactly the host
+// key startFixture returned.
+func dial(t *testing.T, addr string, hostKey gossh.PublicKey, userSigner gossh.Signer) *gossh.Client {
+	t.Helper()
+	conn, err := net.Dial("tcp", addr)
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	config := &gossh.ClientConfig{
+		User: "e2e",
+		Auth: []gossh.AuthMethod{gossh.PublicKeys(userSigner)},
+		HostKeyCallback: func(_ string, _ net.Addr, key gossh.PublicKey) error {
+			if string(key.Marshal()) != string(hostKey.Marshal()) {
+				return fmt.Errorf("host key mismatch")
+			}
+			return nil
+		},
+	}
+	sshConn, chans, reqs, err := gossh.NewClientConn(conn, addr, config)
+	if err != nil {
+		_ = conn.Close()
+		t.Fatalf("ssh connect: %v", err)
+	}
+	client := gossh.NewClient(sshConn, chans, reqs)
+	t.Cleanup(func() { _ = client.Close() })
+	return client
+}
+
+// TestExecChannelIsPtyLess proves the fixture is faithful to sshd for exec
+// channels: no pty means no line discipline, so a binary frame survives.
+// A pty would turn the 0x0A into 0x0D 0x0A and echo the input back.
+func TestExecChannelIsPtyLess(t *testing.T) {
+	addr, hostKey, signer := startFixture(t)
+	client := dial(t, addr, hostKey, signer)
+	sess, err := client.NewSession()
+	if err != nil {
+		t.Fatalf("new session: %v", err)
+	}
+	defer func() { _ = sess.Close() }()
+
+	stdin, err := sess.StdinPipe()
+	if err != nil {
+		t.Fatalf("stdin: %v", err)
+	}
+	stdout, err := sess.StdoutPipe()
+	if err != nil {
+		t.Fatalf("stdout: %v", err)
+	}
+	if err = sess.Start("cat"); err != nil {
+		t.Fatalf("start: %v", err)
+	}
+
+	want := []byte{0x00, 0x0A, 0x0D, 0x0A, 0xFF, 'x'}
+	if _, err = stdin.Write(want); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	_ = stdin.Close()
+
+	got, err := io.ReadAll(stdout)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, want) {
+		t.Fatalf("bytes mangled: want %v, got %v", want, got)
+	}
+}
+
+// TestSFTPSubsystemServesTheRealFilesystem proves the fixture is faithful
+// to sshd for the sftp subsystem: the helper install path (plan Task 9,
+// internal/ssh.HelperInstallConn) writes the versioned binary through an
+// SFTP lease, and a fixture that refuses the subsystem would make every
+// remote helper install answer deployFailed instead of serving the panel.
+// pkg/sftp's server serves the real filesystem with absolute paths, which
+// is exactly what the installer needs — its paths are absolute
+// (~/.nocx/helper/<version>-<goos>-<goarch>-<hash>/), and a server rooted
+// at a virtual directory would fail the install in a different way. The
+// create-and-read round trip through an absolute path is the assertion,
+// not merely that the subsystem request was accepted.
+func TestSFTPSubsystemServesTheRealFilesystem(t *testing.T) {
+	addr, hostKey, signer := startFixture(t)
+	client := dial(t, addr, hostKey, signer)
+
+	conn, err := sftp.NewClient(client)
+	if err != nil {
+		t.Fatalf("sftp connect: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	target := filepath.Join(t.TempDir(), "installed-helper")
+	want := []byte{0x00, 0x0A, 0x0D, 0xFF, 'f', 'r', 'a', 'm', 'e'}
+	f, err := conn.Create(target)
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if _, err = f.Write(want); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	if err = f.Close(); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+
+	rf, err := conn.Open(target)
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	got, err := io.ReadAll(rf)
+	if err != nil {
+		t.Fatalf("read back: %v", err)
+	}
+	_ = rf.Close()
+	if !bytes.Equal(got, want) {
+		t.Fatalf("bytes mangled: want %v, got %v", want, got)
+	}
+}
+
+// TestSFTPRootIsTheAccountHomeNotTheProcessCwd pins the sftp server's
+// relative-path root: a real sshd's sftp-server starts in the user's home,
+// and the helper install lease discovers that home via SFTP RealPath(".")
+// (internal/ssh.HelperInstallConn.Home). The fixture chdirs into the seeded
+// repository at -repo, so a server rooted at the process cwd would answer
+// the repository path as the home and install the helper INTO the
+// repository — the acceptance test caught exactly that. The process cwd is
+// moved away from the home before the assertion, which is the condition
+// that used to fail.
+func TestSFTPRootIsTheAccountHomeNotTheProcessCwd(t *testing.T) {
+	home := os.Getenv("HOME")
+	if home == "" {
+		t.Skip("no HOME to assert the sftp root against")
+	}
+	t.Chdir(t.TempDir()) // the server must NOT root relative paths here
+
+	addr, hostKey, signer := startFixture(t)
+	client := dial(t, addr, hostKey, signer)
+
+	conn, err := sftp.NewClient(client)
+	if err != nil {
+		t.Fatalf("sftp connect: %v", err)
+	}
+	defer func() { _ = conn.Close() }()
+
+	got, err := conn.Getwd() // client Getwd is the server's RealPath(".")
+	if err != nil {
+		t.Fatalf("getwd: %v", err)
+	}
+	if got != home {
+		t.Fatalf("sftp root = %q, want the account home %q", got, home)
 	}
 }
 

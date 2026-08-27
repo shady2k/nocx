@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // errTestNoClient is the harness transport's answer when no renderer is
@@ -317,7 +318,7 @@ func (h *harness) dial(t *testing.T) *websocket.Conn {
 
 func (h *harness) waitForRenderers(t *testing.T, n int) {
 	t.Helper()
-	waitFor(t, "renderer registered", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "renderer registered", wantWithin, func() bool {
 		h.srv.mu.Lock()
 		defer h.srv.mu.Unlock()
 		return len(h.srv.conns) >= n
@@ -718,7 +719,7 @@ func TestBroker_ConnectionLossOfOneRendererLeavesRequestAnswerableByAnother(t *t
 	// A dies without answering. The request must survive: B is still a
 	// recipient and can resolve it.
 	_ = connA.Close()
-	waitFor(t, "A's loss processed", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "A's loss processed", wantWithin, func() bool {
 		h.srv.mu.Lock()
 		defer h.srv.mu.Unlock()
 		return len(h.srv.conns) == 1 && h.broker.Pending() == 1
@@ -1114,7 +1115,7 @@ func TestBroker_FailedDeliveryIsNotARecipient(t *testing.T) {
 	// Wait for the request to be registered (the deliver seams are no-ops,
 	// so the id never reaches the test through a socket), then resolve it
 	// as c2 — the recipient whose delivery landed.
-	waitFor(t, "pending request registered", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "pending request registered", wantWithin, func() bool {
 		return broker.Pending() == 1
 	})
 	broker.mu.Lock()
@@ -1172,7 +1173,7 @@ func TestBroker_WrongResolveMethodIsRefused(t *testing.T) {
 
 	// The deliver seam is a no-op, so read the pending id the way the
 	// notification would have carried it — directly from the broker.
-	waitFor(t, "pending request registered", wantWithin, func() bool {
+	waittest.WaitForTimeout(t, "pending request registered", wantWithin, func() bool {
 		return broker.Pending() == 1
 	})
 	broker.mu.Lock()

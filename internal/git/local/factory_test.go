@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 func TestOpenResolvesRealRepository(t *testing.T) {
@@ -339,17 +340,11 @@ func TestOpenFailureNotReattemptedPerOpen(t *testing.T) {
 	defer f.Stop()
 
 	// The background attempt must have run before we count; poll its marker.
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	waittest.WaitFor(t, "the background resolution to run", func() bool {
 		// #nosec G304 — the count path is a test TempDir.
-		if b, err := os.ReadFile(count); err == nil && len(b) > 0 {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the background resolution never ran")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		b, err := os.ReadFile(count)
+		return err == nil && len(b) > 0
+	})
 
 	for i := range 5 {
 		_, outcome, err := f.Open(context.Background(), t.TempDir())
@@ -396,17 +391,11 @@ func TestEnvStateSettlesResolvedWithoutReopen(t *testing.T) {
 	// The background attempt is in flight (gated): the resolution cannot
 	// settle until the test releases it, so the open below is guaranteed
 	// to land in the pre-settle window.
-	deadline := time.Now().Add(3 * time.Second)
-	for {
+	waittest.WaitFor(t, "the background resolution to start", func() bool {
 		// #nosec G304 — the marker path is a test TempDir.
-		if _, err := os.Stat(started); err == nil {
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("the background resolution never started")
-		}
-		time.Sleep(10 * time.Millisecond)
-	}
+		_, err := os.Stat(started)
+		return err == nil
+	})
 
 	repo, outcome, err := f.Open(context.Background(), repoDir)
 	if err != nil {

@@ -511,7 +511,17 @@ test.describe('4. Scroll ownership — measured', () => {
     // Scroll the last setting row into view using the scroll container. The
     // scroller arrives WITH Interface — Settings opens on Connections, which
     // is contained and has none — so it is waited for, never assumed.
-    const lastRow = page.locator('.ui-settings-row').last()
+    //
+    // `:visible` is load-bearing. Settings renders EVERY section and hides the
+    // ones the rail has not selected with `display: none`, so `.ui-settings-row`
+    // alone matches the rows of every section on the page and `.last()` returns
+    // whichever one the backend happens to declare last — which has no box, and
+    // reported `boundingBox() === null`. That was latent from the day the hiding
+    // was introduced and cost nothing only while Interface was the last section
+    // to declare a row; a section registered after it (Notifications, nocx-z73vk)
+    // took the assertion straight to null. The subject here has always been the
+    // OPEN section's last row, and this is the locator that says so.
+    const lastRow = page.locator('.ui-settings-row:visible').last()
     const scroller = page.locator('.ui-page__scroll')
     await expect(scroller).toBeVisible({ timeout: 5_000 })
     await page.evaluate(() => {
@@ -526,6 +536,10 @@ test.describe('4. Scroll ownership — measured', () => {
       .toBeGreaterThan(0)
 
     // The row should be visible within the scroll container
+    // Asserted before it is measured, so a section that stops rendering rows
+    // fails as "there is no visible row" rather than as a mystery null.
+    await expect(lastRow).toBeVisible({ timeout: 5_000 })
+
     const scrollerBox = await scroller.boundingBox()
     const rowBox = await lastRow.boundingBox()
 
@@ -909,7 +923,9 @@ test.describe('6. Page duties', () => {
       // `.ui-page__scroll` at all; the element below belongs to Interface and
       // exists only once that page is the open one. Without this the evaluate
       // found null, scrolled nothing, and the boundingBox below timed out.
-      const lastRow = page.locator('.ui-settings-row').last()
+      // `:visible` for the reason given at the 1024px test above: unscoped,
+      // `.last()` lands in a `display: none` section and measures null.
+      const lastRow = page.locator('.ui-settings-row:visible').last()
       const scroller = page.locator('.ui-page__scroll')
       await expect(scroller).toBeVisible({ timeout: 5_000 })
       await page.evaluate(() => {
@@ -923,6 +939,8 @@ test.describe('6. Page duties', () => {
       await expect
         .poll(() => scroller.evaluate((el) => el.scrollTop), { timeout: 5_000 })
         .toBeGreaterThan(0)
+
+      await expect(lastRow).toBeVisible({ timeout: 5_000 })
 
       const scrollerBox = await scroller.boundingBox()
       const rowBox = await lastRow.boundingBox()

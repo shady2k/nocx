@@ -6357,6 +6357,174 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     }
   })
 
+  /** What CodeMirror 6 does to a selection made outside it while it holds
+   *  focus: `docView.updateSelection` puts the DOM selection back on its own
+   *  document — and returns early unless the contentDOM is the ACTIVE
+   *  ELEMENT (@codemirror/view). That conditional is the whole contract
+   *  here, so the rule is applied by hand rather than waited for: jsdom runs
+   *  no measure cycle, and a test that waited out the ~50ms window would be
+   *  asserting a duration instead of an owner. */
+  function restoreSelectionLikeCodeMirror(view: EditorView): void {
+    if (document.activeElement !== view.contentDOM) return
+    const selection = window.getSelection()
+    selection?.removeAllRanges()
+    const range = document.createRange()
+    range.selectNodeContents(view.contentDOM)
+    range.collapse(true)
+    selection?.addRange(range)
+    document.dispatchEvent(new Event('selectionchange'))
+  }
+
+  // ── ONE OWNER FOR THE DOCUMENT SELECTION (nocx-45vkz) ─────────────────
+  //
+  // A selection can be made in the scrollback WITHOUT taking focus off the
+  // composer — programmatically, from a keyboard, or by any gesture that is
+  // not a mouse drag beginning on a block. The scrollback then offers a
+  // grant over a selection CodeMirror still believes it owns, and about
+  // 50ms later CodeMirror restores the selection into its own document: the
+  // handler below sees a collapsed selection and hides the offer nobody has
+  // had time to press. Both surfaces were claiming one input and the
+  // composer won by evaluation order, which is exactly the arrangement
+  // AGENTS.md forbids.
+  //
+  // So the claim moves the focus with it. The offer must outlive the
+  // restore, not race it.
+  it('a selection claimed by the scrollback takes the focus off the composer, so the offer outlives the restore', async () => {
+    const client = storeWith([entry()], 'output')
+    const { ed, view, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      ed.show()
+      // The state a person is actually in: drafting a question, caret in the
+      // composer, when they go to select the output they want to point at.
+      ed.focus()
+      expect(ed.rootContains(document.activeElement)).toBe(true)
+
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelector('[data-restored="true"]')).not.toBeNull()
+      })
+      const block = inner.querySelector<HTMLElement>('[data-restored="true"]')!
+      const output = block.querySelector<HTMLElement>('.cmd-output')!
+      const selection = window.getSelection()!
+      const range = document.createRange()
+      range.selectNodeContents(output)
+      range.getClientRects = () => [new DOMRect(100, 200, 200, 20)] as unknown as DOMRectList
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.dispatchEvent(new Event('selectionchange'))
+
+      expect(document.querySelector<HTMLElement>('.mark-affordance')?.style.display).toBe('block')
+      // The owner changed hands with the claim — this, and not the speed of
+      // the press, is what disarms the restore below.
+      expect(ed.rootContains(document.activeElement)).toBe(false)
+
+      restoreSelectionLikeCodeMirror(view)
+
+      expect(document.querySelector<HTMLElement>('.mark-affordance')?.style.display).toBe('block')
+      const offer = document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')!
+      offer.click()
+      expect((content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks[0]?.itemId).toBe(
+        'e-1',
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  // ── AND THE RELEASE MUST NOT TAKE THE SELECTION WITH IT (nocx-45vkz) ──
+  //
+  // Blurring an editing host is itself a selection change on some engines.
+  // Measured in the e2e container on WebKit, polling the live DOM frame by
+  // frame right after the claim:
+  //
+  //   after-addRange  active=DIV.cm-content  collapsed=false rc=1  wd=none
+  //   selchange#1     active=BODY            collapsed=true  rc=0  wd=block
+  //   selchange#2     active=BODY            collapsed=true  rc=0  wd=none
+  //
+  // The blur emptied the document selection synchronously — rangeCount 1 to
+  // 0 — and the selectionchange announcing it arrived a frame later, where
+  // the guard at the top of the handler read it as "the selection is gone"
+  // and hid the offer the same handler had just shown. Chromium keeps the
+  // selection across the blur and never sent that second event, so the fix
+  // for one engine was a deterministic regression on the other.
+  //
+  // The handler therefore re-asserts its claim after releasing the focus,
+  // conditioned on what the selection actually holds. The engine that does
+  // not empty it takes the no-op branch. jsdom is a third engine again — it
+  // keeps the selection too — so the emptying is applied BY HAND from the
+  // blur event, the same way the test above applies CodeMirror's restore
+  // rule by hand, and for the same reason: the contract is what the handler
+  // must survive, not what one runtime happens to do.
+  it('a selection survives the blur that claims it, so the engine that empties it on blur cannot hide the offer', async () => {
+    const client = storeWith([entry()], 'output')
+    const { ed, view, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.focus()
+      const focused = document.activeElement as HTMLElement
+      expect(ed.rootContains(focused)).toBe(true)
+      // WebKit, by hand: the document selection belongs to the editing host,
+      // and goes when the host does.
+      focused.addEventListener(
+        'blur',
+        () => {
+          window.getSelection()?.removeAllRanges()
+        },
+        { once: true },
+      )
+
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelector('[data-restored="true"]')).not.toBeNull()
+      })
+      const block = inner.querySelector<HTMLElement>('[data-restored="true"]')!
+      const output = block.querySelector<HTMLElement>('.cmd-output')!
+      const selection = window.getSelection()!
+      const range = document.createRange()
+      range.selectNodeContents(output)
+      range.getClientRects = () => [new DOMRect(100, 200, 200, 20)] as unknown as DOMRectList
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.dispatchEvent(new Event('selectionchange'))
+
+      expect(document.querySelector<HTMLElement>('.mark-affordance')?.style.display).toBe('block')
+      expect(ed.rootContains(document.activeElement)).toBe(false)
+      // The person's highlight is still under the offer being made about it:
+      // the surface that took the focus kept the selection it took it for.
+      const held = window.getSelection()!
+      expect(held.rangeCount).toBe(1)
+      expect(held.getRangeAt(0).startContainer).toBe(output)
+      expect(held.getRangeAt(0).endContainer).toBe(output)
+      expect(held.isCollapsed).toBe(false)
+
+      // The event the blur provoked, arriving a frame late — the one that
+      // used to find an empty selection and hide the offer.
+      document.dispatchEvent(new Event('selectionchange'))
+      restoreSelectionLikeCodeMirror(view)
+
+      expect(document.querySelector<HTMLElement>('.mark-affordance')?.style.display).toBe('block')
+      const offer = document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')!
+      offer.click()
+      expect((content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks[0]?.itemId).toBe(
+        'e-1',
+      )
+    } finally {
+      teardown()
+    }
+  })
+
   it('marks and unmarks a restored block from its menu, using the durable entry id', async () => {
     const client = storeWith([entry()], 'output')
     const { ed, content, teardown } = await mountTerminal(
@@ -8196,6 +8364,105 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       restore()
       teardown()
       document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// BEL is two facts (nocx-n3nfg)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// A program printed BEL. That is a local attention signal — the tab dot,
+// which costs nothing and needs no backend — AND a notification event with a
+// kind, a trust class, an attribution and a feed row. The wiring must do
+// both, because they are different facts: the dot says "output you have not
+// seen", the event says "a program asked for you", and neither answers the
+// other's question. Replacing one with the other is the defect these tests
+// exist to catch, so every one of them asserts both halves.
+//
+// The BEL BYTE reaching onBell is proven against the real VT parser in
+// renderers/xterm.test.ts ("onBell through the real parser"), including that
+// the BEL terminating an OSC sequence does NOT ring. This file owns the
+// other half of the chain: what the callback does when it fires.
+describe('a program printing BEL (nocx-n3nfg)', () => {
+  /** The bell only lights the dot on a pane that has SETTLED and is not the
+   *  one being looked at (panes.ts markActivity): a shell's banner and first
+   *  prompt are not unread output. The B marker is what a real prompt-end
+   *  delivers, so the settle here is the one a user's session performs. */
+  const settle = (content: TerminalContent): void => {
+    rendererOf(content)._fireCommandMarker({ kind: 'B', line: 0, col: 0, buffer: 'normal' })
+  }
+
+  /** The notify.bell requests this pane sent, in order. */
+  const bellCalls = (client: ClientFake): unknown[][] =>
+    client.dispatcher.call.mock.calls.filter((c: unknown[]) => c[0] === 'notify.bell')
+
+  it('reports the bell AND marks the tab, addressing the live session', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      settle(content)
+      expect(tab.hasActivity).toBe(false)
+
+      rendererOf(content)._fireBell()
+
+      // The notification: its own method, carrying addressing and nothing
+      // else. The kind is not here because it cannot be — it is stamped from
+      // the method invoked, which is the whole reason notify.bell exists
+      // rather than an argument on notify.raise (ADR-0029 §2.2, design §3).
+      expect(bellCalls(client)).toEqual([
+        ['notify.bell', { sessionId: sessionOf(content).sessionId }],
+      ])
+      // The tab dot, which is local and never went near the backend.
+      expect(tab.hasActivity).toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+
+  // AGENTS.md rule 3: for every external call, a test where that call fails.
+  // The bell is fire-and-forget, so the failure must cost the report and
+  // nothing else — the pane keeps running and the tab dot, which never
+  // needed the backend, still lights. A rejection that escaped here would be
+  // an unhandled promise rejection on a byte any shell prints.
+  it('keeps the tab dot when the backend refuses the report', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      settle(content)
+      // Set after the mount so this rejection belongs to the bell alone.
+      client.dispatcher.call.mockRejectedValue(new Error('notify.bell not available'))
+
+      rendererOf(content)._fireBell()
+      // Let the rejection settle: an unhandled one surfaces here, not later.
+      await Promise.resolve()
+      await Promise.resolve()
+
+      expect(bellCalls(client).length).toBe(1)
+      expect(tab.hasActivity).toBe(true)
+      expect(content.shellState).toBeDefined()
+    } finally {
+      teardown()
+    }
+  })
+
+  // The id is read at FIRE time, not at subscribe time: it is
+  // server-authoritative (AD-7) and a reattach replaces it, so a captured one
+  // would address the session the pane used to hold. With no session there is
+  // nothing to address — and the half that never needed one still happens.
+  it('marks the tab and reports nothing when the pane holds no session', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      settle(content)
+      ;(content as unknown as { session: SessionFake | null }).session = null
+
+      rendererOf(content)._fireBell()
+
+      expect(bellCalls(client)).toEqual([])
+      expect(tab.hasActivity).toBe(true)
+    } finally {
+      teardown()
     }
   })
 })

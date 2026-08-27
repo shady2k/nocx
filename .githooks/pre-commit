@@ -92,9 +92,9 @@ host_gate() {
 # --- 1. NO TESTS RUN HERE, and that is the decision, not an omission --------
 # This hook used to start two containers on every commit — `go test -race` in
 # .githooks/images/go-tests and vitest in a node image — which its own comment
-# measured at 72% of the hook's wall time. They are gone (nocx-hzsiv), together
-# with the docker requirement above and the containerized-tests.sh helper whose
-# only caller they were.
+# measured at 72% of the hook's wall time. They are gone from THIS hook
+# (nocx-hzsiv); they run in `pre-push` instead, once per push rather than once
+# per commit.
 #
 # The reason is not speed alone. A test runner is the most expensive thing this
 # machine does, and several agent worktrees commit at once: on 2026-08-27 three
@@ -107,8 +107,9 @@ host_gate() {
 # So the per-commit gate is STATIC: formatting, linting, type-checking, the
 # ratchets, the wire contracts, and the beads export. Say the cost out loud —
 # a commit can now be made whose tests do not pass. The suites keep their teeth
-# at three addresses that already existed:
+# at four addresses:
 #
+#   .githooks/pre-push   the two containerized suites, once per push
 #   make test            on demand, on this host
 #   make ci-full         the integrator, once, on the merged tree (AGENTS.md)
 #   ci.yml               every pull request, in the environment each job owns
@@ -259,8 +260,10 @@ fi
 # Cheap (no toolchain, no container), so it runs whenever it could have anything
 # to say. It is also run by the deploy workflow: a page that fails it must not
 # reach the public URL because someone skipped a local hook.
-if printf '%s\n' "$CHANGED" | grep -qE '^(site/|scripts/check-site\.sh$|scripts/site-forbidden-phrases\.txt$)'; then
+if printf '%s
+' "$CHANGED" | grep -qE '^(site/|scripts/check-site\.sh$|scripts/site-forbidden-phrases\.txt$)'; then
     if ! ./scripts/check-site.sh; then
+        warn "check-site"
         printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
         exit 1
     fi
@@ -278,18 +281,14 @@ ok "beads export"
 
 printf "\nAll static checks passed.\n"
 
-# What "all static checks passed" does NOT mean, spelled out because this hook
-# once read as a faithful pre-flight and was not even when it ran tests: it ran
-# them in Debian with the golang image's Go, no Secret Service, every core this
-# host has and the test cache intact, where CI runs Ubuntu, setup-go, two
-# keyring variants and -count=1. A release attempt and its follow-up PR both
-# came back red from a job this hook had just called green (nocx-cn86).
-#
-# It now runs NO tests at all (nocx-hzsiv), so the gap is wider and simpler:
-# nothing below has been executed, only read. A green commit here says the tree
-# is formatted, linted, type-checked and contract-current. It says nothing
-# whatever about whether the code works.
-printf "  NOT covered here: any test at all              — \`make test\`, and CI on the PR\n"
+# What "all checks passed" does NOT mean. This hook is STATIC: it reads the
+# tree and never runs a test. The suites moved to pre-push (the Go module under
+# -race, vitest), and even there the warning below still holds — those run in
+# Debian with Go from the golang image, no Secret Service, every core this host
+# has and the test cache intact, where CI runs Ubuntu, setup-go, two keyring
+# variants, 4 cores and -count=1. A release attempt and its follow-up PR both
+# came back red from a job the old hook had just called green (nocx-cn86).
+printf "  NOT covered here: the test suites themselves  — pre-push, or \`make ci\`\n"
 printf "                    macOS (bash 3.2, no /proc, Darwin PTY) — CI's \`ci-mac\` job\n"
 printf "                    Ubuntu + both keyring variants — scripts/ci-linux.sh\n"
 printf "                    the e2e suite itself           — e2e/run-in-container.sh\n"

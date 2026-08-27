@@ -38,6 +38,9 @@ type sessionMachine interface {
 	laneFor(sid session.ID, sess session.Session) *sessionLane
 	closeLane(sid session.ID)
 	closeSession(sid session.ID, sess session.Session)
+	// markCloseRequested records that this session's end was asked for, so
+	// the exit it produces is not filed as news the user has to read.
+	markCloseRequested(sid session.ID)
 	ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, ring *outputRing, startOffset uint64)
 	flushFilesChanged(sid session.ID, wconn Responder)
 	// flushUploadDone re-emits the upload outcomes that settled while
@@ -58,6 +61,12 @@ type sessionMachine interface {
 	// the handshake expired must learn it is in a conventional terminal,
 	// and no further transition is ever coming to tell it.
 	replayIntegration(sid session.ID)
+	// replayPaneObservation re-sends an enrolled pane's current
+	// classification on reattach (nocx-szb40.3). Beside replayIntegration
+	// and for the identical reason: only changes are pushed, so a renderer
+	// that reconnects to a settled agent would otherwise never be told what
+	// the pane is.
+	replayPaneObservation(sid session.ID)
 }
 
 // openMachine is the transport-owned machinery handleOpen needs after the
@@ -597,7 +606,10 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// every WebSocket (AD-9); the pump must survive a disconnect so the
 	// session's output keeps flowing into the ring for the next reattach.
 	// Closing event: session teardown — closeSession's registry.Close, which
-	// ends StartOutput and lets the pump return.
+	// ends the read pump StartOutput started. This call itself returns
+	// immediately: StartOutput installs the handler and starts that pump on
+	// its own goroutine rather than blocking, so nothing may hang off its
+	// return as though it meant "the output is over" (nocx-szb40.5).
 	go h.sess.pumpToRing(context.Background(), sess, rx.ring)
 
 	// Start exactly one monitorExit goroutine per session (DEFECT 2).
@@ -732,6 +744,15 @@ func (h sessionOpsHandlers) handleClose(ctx context.Context, state *connState, r
 			_ = respond(h.r, resp)
 			return nil
 		}
+		// The end is the user's own doing, and the session layer cannot
+		// see that: a forced teardown records no shell report, so the exit
+		// it produces reads as ExitInterrupted like any dropped connection.
+		// Marked BEFORE the registry close, because the registry close is
+		// what wakes monitorExit — which takes the marker and files
+		// nothing. Not marked on the branch above: the session is already
+		// out of the registry there, so no exit of ours is coming and the
+		// entry would have nothing to clear it.
+		h.machine.markCloseRequested(sid)
 		_ = svc.Close(sid)
 		h.machine.closeSession(sid, sess)
 		state.remove(sid)
@@ -854,6 +875,7 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		// last saw this session.
 		h.machine.replayLifecycleFacts(sid)
 		h.machine.replayIntegration(sid)
+		h.machine.replayPaneObservation(sid)
 
 		sidBytes, _ := session.IDToBytes(sid)
 		go h.machine.ringToConn(ctx, wconn, sidBytes, rx.ring, from)

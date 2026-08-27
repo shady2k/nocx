@@ -216,13 +216,26 @@ test('an SSH connection comes up integrated and its commands become blocks', asy
     // that matters to a user: a real remote shell on a real PTY produces
     // blocks. The switch path is not covered by anything now, and that is
     // written down rather than papered over (nocx-z9s9.10).
+    // The editor coming UP is what says the remote shell reached a prompt, so
+    // it is waited for first and it carries the whole budget. The order is not
+    // cosmetic: the recovery chip lives INSIDE the editor's root, and a hidden
+    // prompt is `display: none` on that root (editor.ts hide()), so "recovery
+    // is not visible" is satisfied by the exact state the next line rejects.
+    // Asserted before the editor is up it closes vacuously, spends none of its
+    // 20s on the thing being waited for, and leaves the editor 10s of a
+    // 30s wait — which is how this passed under chromium and timed out under
+    // webkit on the same run. Same shape as nocx-sx4sg: a wait whose predicate
+    // the failure state also satisfies.
+    const editor = page.locator('.pane.active .nocx-editor-input')
+    await expect(editor).toBeVisible({ timeout: 30_000 })
+
+    // And now the healthy state means something: the prompt is up and its
+    // chrome offers no recovery.
     const recovery = page.locator('.pane.active .nocx-editor-recovery')
-    await expect(recovery).not.toBeVisible({ timeout: 20_000 })
+    await expect(recovery).not.toBeVisible()
 
     // The user then runs a command through the nocx editor, and it becomes
     // a block — the epic's "switches it to nocxify, and gets blocks".
-    const editor = page.locator('.pane.active .nocx-editor-input')
-    await expect(editor).toBeVisible({ timeout: 10_000 })
     await editor.click()
     await editor.pressSequentially('echo hello-from-e2e')
     await editor.press('Enter')

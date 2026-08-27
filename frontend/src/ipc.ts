@@ -4,6 +4,8 @@ import { historyOutbox } from './history-client'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
 import type { SessionLiveness } from './generated/session.liveness'
+import type { SessionObservationChanged } from './generated/session.observationChanged'
+import { isDriverState } from './pane-observation'
 import type { SessionSignal } from './generated/session.signal'
 import type { SecretsPaneClosed } from './generated/secrets.paneClosed'
 
@@ -241,6 +243,10 @@ interface SessionState {
   // terminal half of that vocabulary never arrives here — a session that
   // ended is the exit notification's news.
   livenessCallback: ((liveness: SessionLiveness) => void) | null
+  // What an ENROLLED agent pane's screen is currently inviting, as the
+  // agent's driver classified it in the backend (nocx-szb40.3). Null for
+  // every pane nobody enrolled, which is almost all of them.
+  observationCallback: ((observation: SessionObservationChanged) => void) | null
 
   // The livenessEpoch of the last observation applied to this session. An
   // observation whose epoch is not GREATER describes an older moment,
@@ -336,6 +342,10 @@ export class SessionHandle {
    *  this session (nocx-iarf9). Fires on a CHANGE — the backend publishes
    *  when the value changes, not once per probe — so a handler may treat
    *  every call as news. */
+  onObservation(cb: (observation: SessionObservationChanged) => void): void {
+    this.client.onSessionObservation(this.sessionId, cb)
+  }
+
   onLiveness(cb: (liveness: SessionLiveness) => void): void {
     this.client.onSessionLiveness(this.sessionId, cb)
   }
@@ -492,6 +502,40 @@ export class WSClient {
     //   - the observation must be NEWER than the last one applied. A report
     //     delayed behind a faster path would otherwise revive a belief the
     //     backend has already moved on from, purely by arriving last.
+    // What an enrolled agent pane's screen is inviting (nocx-szb40.3).
+    //
+    // Guarded at the boundary like every other unsolicited notification, and
+    // bound to the INCARNATION here rather than downstream: this is the one
+    // place that already holds the (instanceId, sessionEpoch) pair the open
+    // ack minted, so an observation out of a previous incarnation is refused
+    // once, for every consumer, instead of each of them remembering to.
+    //
+    // The state is checked against the closed set on the way in. A value
+    // nobody wrote a branch for would otherwise reach the indicator and land
+    // in whichever branch was written last — and every consumer of this
+    // treats what it cannot read as busy, which only works if what it cannot
+    // read never gets through.
+    this.dispatcher.subscribe('session.observationChanged', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const raw = params as Record<string, unknown>
+      const sid = raw.sessionId
+      if (typeof sid !== 'string') return
+      const state = this.sessions.get(sid)
+      if (!state) return
+      if (raw.instanceId !== state.instanceId || raw.sessionEpoch !== state.sessionEpoch) return
+      const agent = raw.agent
+      if (typeof agent !== 'string' || agent === '') return
+      const paneState = raw.state
+      if (!isDriverState(paneState)) return
+      state.observationCallback?.({
+        sessionId: sid,
+        instanceId: state.instanceId,
+        sessionEpoch: state.sessionEpoch,
+        agent,
+        state: paneState,
+      })
+    })
+
     this.dispatcher.subscribe('session.liveness', (params: unknown) => {
       if (!params || typeof params !== 'object') return
       const raw = params as Record<string, unknown>
@@ -701,6 +745,7 @@ export class WSClient {
       resetCallback: null,
       inputStalledCallback: null,
       livenessCallback: null,
+      observationCallback: null,
       livenessEpoch: 0,
       instanceId,
       sessionEpoch,
@@ -808,6 +853,14 @@ export class WSClient {
     if (state) {
       state.inputStalledCallback = cb
     }
+  }
+
+  onSessionObservation(
+    sessionId: string,
+    cb: (observation: SessionObservationChanged) => void,
+  ): void {
+    const state = this.sessions.get(sessionId)
+    if (state) state.observationCallback = cb
   }
 
   onSessionLiveness(sessionId: string, cb: (liveness: SessionLiveness) => void): void {

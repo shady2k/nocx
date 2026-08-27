@@ -15,6 +15,10 @@ import (
 	"github.com/shady2k/nocx/internal/pathname"
 )
 
+// ErrInvalidArchive identifies bytes that are not a readable ZIP archive.
+// The transport maps this caller-supplied input refusal to JSON-RPC -32602.
+var ErrInvalidArchive = errors.New("invalid Postman archive")
+
 // ArchiveDocumentKind identifies the Postman document represented by an
 // archive member. The manifest has the kind, while the document supplies its
 // display name.
@@ -52,11 +56,11 @@ func ReadPostmanArchive(r io.Reader) ([]ArchiveDocument, error) {
 	if len(raw) > MaxDocumentBytes {
 		return nil, fmt.Errorf("apiimport: Postman archive is over the %d-byte limit", MaxDocumentBytes)
 	}
-
 	zr, err := zip.NewReader(bytes.NewReader(raw), int64(len(raw)))
 	if err != nil {
-		return nil, fmt.Errorf("apiimport: read Postman archive: %w", err)
+		return nil, fmt.Errorf("apiimport: read Postman archive: %w: %v", ErrInvalidArchive, err)
 	}
+
 	members := make(map[string]*zip.File, len(zr.File))
 	for _, member := range zr.File {
 		if pathErr := validateArchiveMember(member.Name); pathErr != nil {

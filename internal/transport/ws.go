@@ -994,14 +994,13 @@ func WithAPI(collections apicoll.Collections, sender apisend.Sender, refs capabi
 }
 
 // WithAPIImportFetcher attaches the seam that acquires an import document by
-// URL (internal/apifetch), enabling api.import.postman's third source.
+// URL (internal/apifetch), enabling one source of api.import.postman.
 //
-// It is a third option rather than a parameter of WithAPI because it wires
-// apart from the sender in exactly the way the other three do: a build with
-// a sender and no fetcher can send requests and cannot fetch an export, and
-// says so. Without it, `url` is refused by name (ErrImportURLUnavailable)
-// while `path` and `document` go on working — absence is the capability, and
-// the renderer draws the entrance from what the backend answers.
+// It is a separate option rather than a parameter of WithAPI because it wires
+// a capability that may be absent. Without it, `url` is refused by name
+// (ErrImportURLUnavailable), while `path`, `document`, and `archiveBytes` go
+// on working — absence is the capability, and the renderer draws the entrance
+// from what the backend answers.
 func WithAPIImportFetcher(f apifetch.Fetcher) WSServerOption {
 	return func(s *WSServer) { s.apiFetch = f }
 }
@@ -1879,10 +1878,10 @@ type ackParams struct {
 // with close code 1009 (message too big) and ReadMessage returns an error.
 // That is the chosen failure mode — clean and per-connection; other
 // connections and their sessions are untouched (AD-9). It is the
-// last-resort bound behind the per-method params budget: 16 MiB exceeds the
-// largest declared budget (8 MiB for document-carrying methods) plus
-// envelope and base64 overhead, so no legitimate frame can trip it.
-const wsReadLimit = 16 << 20 // 16 MiB
+// last-resort bound behind the per-method params budget: 32 MiB exceeds the
+// largest declared budget (24 MiB for encoded Postman archives) plus
+// envelope overhead, so no legitimate frame can trip it.
+const wsReadLimit = 32 << 20 // 32 MiB
 
 // outboundBudgetBytes caps queued outbound bytes across all connections of
 // one server. The per-connection queue (outbound.DefaultQueueDepth frames,
@@ -1918,6 +1917,9 @@ const (
 	// an exported backup or a Tabby config. 8 MiB is ~68x the measured
 	// realistic backup, comfortably absorbing a year of command history.
 	budgetDocument = 8 << 20 // 8 MiB
+	// budgetArchive covers base64-encoded Postman ZIPs, whose decoded bytes
+	// are capped separately by apiimport.MaxDocumentBytes.
+	budgetArchive = 24 << 20 // 24 MiB
 )
 
 // paramsBudgetForMethod returns the frame budget for a control-plane method.
@@ -1941,23 +1943,12 @@ func paramsBudgetForMethod(method string) int {
 		// matches.
 		return budgetDocument
 	case "backup.create", "backup.preview", "backup.restore", "backup.saveToFile",
-		"profiles.importTabby", "profiles.tabbyPreview",
-		// api.import.postman carries a Postman export INLINE as `document`
-		// (the route for a backend that is not the person's machine), so
-		// it is a document-carrying method in exactly the sense this tier
-		// names. budgetDefault is 64 KiB because it was sized on an
-		// ORDINARY frame — a pasted key, a form — and an export of a
-		// working API with its saved examples is not that size class;
-		// apiimport bounds the document it parses at 16 MiB, which is the
-		// size an export is expected to reach.
-		//
-		// This tier is not the bound a caller meets. That is
-		// maxAPIImportDocumentRunes (1 MiB, ws_api_handlers.go), which is
-		// what the refusal names and what points at `path` for anything
-		// larger; the budget only has to sit above it so the refusal comes
-		// from the method rather than from the frame.
-		"api.import.postman":
+		"profiles.importTabby", "profiles.tabbyPreview":
 		return budgetDocument
+	case "api.import.postman":
+		// The archive route carries base64 ZIP bytes, so its encoded frame
+		// needs more room than the decoded apiimport limit.
+		return budgetArchive
 	default:
 		return budgetDefault
 	}

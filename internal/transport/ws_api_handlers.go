@@ -35,6 +35,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -584,18 +585,64 @@ func (h apiImportHandlers) handlePostman(ctx context.Context, req jsonrpcRequest
 			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: msg})
 			return nil
 		}
-		// One import, three ways in, and the choice is already made: the
+		// One import, four ways in, and the choice is already made: the
 		// validator refused several-and-none, so exactly one of these is
+		// selected.
 		var (
 			unsup []apiimport.Unsupported
 			err   error
 		)
 		switch {
-		case p.URL != "":
-			unsup, err = svc.ImportPostmanURL(ctx, p.URL, storedRoute(p.Route), p.Dest)
-		case p.Document != "":
-			unsup, err = svc.ImportPostmanDocument(ctx, p.Document, p.Dest)
+		case p.ArchiveBytes != "":
+			archive, decodeErr := base64.StdEncoding.DecodeString(p.ArchiveBytes)
+			if decodeErr != nil {
+				_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "archiveBytes must be base64"})
+				return nil
+			}
+			// Keep the decoded-size check beside the capability call as a
+			// defense-in-depth guard if validation is ever reused incorrectly.
+			if len(archive) > apiimport.MaxDocumentBytes {
+				_ = h.r.TryError(req.ID, RPCError{
+					Code:    -32602,
+					Message: fmt.Sprintf("archiveBytes exceeds the %d-byte limit after base64 decoding", apiimport.MaxDocumentBytes),
+				})
+				return nil
+			}
+			if p.Preview {
+				documents, previewErr := svc.PreviewPostmanArchiveBytes(ctx, archive, p.Dest)
+				if previewErr != nil {
+					_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(previewErr), Message: previewErr.Error()})
+					return nil
+				}
+				_ = h.r.TryResult(req.ID, mustMarshal(apiImportPostmanResponse{
+					Unsupported: []apiUnsupportedWire{},
+					Documents:   wireArchiveDocuments(documents),
+				}))
+				return nil
+			}
+			results, importErr := svc.ImportPostmanArchiveBytes(ctx, archive, p.Dest)
+			if importErr != nil {
+				_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(importErr), Message: importErr.Error()})
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(apiImportPostmanResponse{
+				Unsupported: []apiUnsupportedWire{},
+				Documents:   wireArchiveImportResults(results),
+			}))
+			return nil
 		case p.Path != "" && strings.HasSuffix(strings.ToLower(p.Path), ".zip"):
+			if p.Preview {
+				documents, previewErr := svc.PreviewPostmanArchive(ctx, p.Path, p.Dest)
+				if previewErr != nil {
+					_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(previewErr), Message: previewErr.Error()})
+					return nil
+				}
+				_ = h.r.TryResult(req.ID, mustMarshal(apiImportPostmanResponse{
+					Unsupported: []apiUnsupportedWire{},
+					Documents:   wireArchiveDocuments(documents),
+				}))
+				return nil
+			}
 			results, importErr := svc.ImportPostmanArchive(ctx, p.Path, p.Dest)
 			if importErr != nil {
 				_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(importErr), Message: importErr.Error()})
@@ -606,6 +653,10 @@ func (h apiImportHandlers) handlePostman(ctx context.Context, req jsonrpcRequest
 				Documents:   wireArchiveImportResults(results),
 			}))
 			return nil
+		case p.URL != "":
+			unsup, err = svc.ImportPostmanURL(ctx, p.URL, storedRoute(p.Route), p.Dest)
+		case p.Document != "":
+			unsup, err = svc.ImportPostmanDocument(ctx, p.Document, p.Dest)
 		default:
 			unsup, err = svc.ImportPostman(ctx, p.Path, p.Dest)
 		}
@@ -672,6 +723,7 @@ func apiMethodErrorCode(err error) int {
 		errors.Is(err, apicoll.ErrFolderNotFound),
 		errors.Is(err, apicoll.ErrRequestExists),
 		errors.Is(err, capability.ErrImportNotAFile),
+		errors.Is(err, apiimport.ErrInvalidArchive),
 		errors.Is(err, os.ErrNotExist):
 		return -32602
 	default:
@@ -808,34 +860,21 @@ type apiRequestWriteParams struct {
 	Request apiRequestWire `json:"request"`
 }
 
-// apiImportPostmanParams names the export THREE ways, and exactly one of
-// them may be given (validateAPIImportPostmanRaw).
+// apiImportPostmanParams names the export four ways, and exactly one of them
+// may be given (validateAPIImportPostmanRaw). `archiveBytes` is base64-encoded
+// ZIP content from a renderer that has bytes but whose backend may be remote.
 //
-// Path names a file on the machine running THIS process. In the desktop app
-// that is also the person's machine, which is why it reads naturally there;
-// reached over a forwarded port (`make dev-web` forwards both ports over
-// SSH) it names a file on the server, which is almost never the export a
-// person just downloaded. Document carries the export's bytes instead, and
-// bytes reach a backend wherever it runs.
-//
-// This is NOT ws_upload.go's R2 in reverse. R2 says the renderer may name an
-// upload's DESTINATION and may never name its SOURCE path, because a
-// renderer that could spell a backend path could have the backend read
-// ~/.ssh/id_ed25519 and send it somewhere. `path` here is an existing
-// parameter of an existing method — design §13.1's second and last path,
-// unchanged and not widened by this — and `document` names no path at all,
-// which is strictly the safer of the two routes rather than a new way to
-// spell a source.
+// Path names a file on the machine running this process. Document carries
+// UTF-8 export bytes. URL names a location the backend fetches. Route is
+// meaningful only with URL. Dest is the one folder shared by archive members.
 type apiImportPostmanParams struct {
-	Path     string `json:"path"`
-	Document string `json:"document"`
-	// URL is the third and most general source: the document is neither on
-	// the backend's disk nor in the renderer's hands, because it is behind a
-	// network the renderer may not be on. Route says how to reach it, and
-	// means nothing without it.
-	URL   string        `json:"url"`
-	Route *apiRouteWire `json:"route"`
-	Dest  string        `json:"dest"`
+	Path         string        `json:"path"`
+	Document     string        `json:"document"`
+	ArchiveBytes string        `json:"archiveBytes"`
+	URL          string        `json:"url"`
+	Route        *apiRouteWire `json:"route"`
+	Dest         string        `json:"dest"`
+	Preview      bool          `json:"preview"`
 }
 
 type apiImportCurlParams struct {
@@ -1684,6 +1723,18 @@ func wireArchiveImportResults(results []apiimport.ArchiveImportResult) []apiImpo
 	return out
 }
 
+func wireArchiveDocuments(documents []apiimport.ArchiveDocument) []apiImportPostmanArchiveDocumentWire {
+	out := make([]apiImportPostmanArchiveDocumentWire, 0, len(documents))
+	for _, document := range documents {
+		out = append(out, apiImportPostmanArchiveDocumentWire{
+			Kind:        string(document.Kind),
+			Name:        document.Name,
+			Unsupported: []apiUnsupportedWire{},
+		})
+	}
+	return out
+}
+
 // decodeAPIParams decodes an api.* params object STRICTLY: a field this
 // method does not declare is REFUSED, not ignored.
 //
@@ -2016,38 +2067,67 @@ func validateAPIRequestBody(r apiRequestWire) string {
 // validateAPIImportPostmanRaw checks the import's two halves: WHICH export,
 // and where it goes.
 //
-// The export is named by `path`, by `document` or by `url`, and several or
-// none is refused BY NAME, naming all three. A precedence rule would be the
-// cheaper code and the worse answer: a caller that sent two would have one
-// of them silently do nothing, and would never learn which one the server
-// ignored. The same reasoning is why `route` beside anything but `url` is
-// refused rather than dropped — a parameter that quietly does nothing is
+// The export is named by `path`, by `document`, by `archiveBytes` or by `url`,
+// and several or none is refused BY NAME, naming all four. A precedence rule
+// would be the cheaper code and the worse answer: a caller that sent two would
+// have one of them silently do nothing, and would never learn which one the
+// server ignored. The same reasoning is why `route` beside anything but `url`
+// is refused rather than dropped — a parameter that quietly does nothing is
 // worse than an error, because the caller believes it worked.
 //
 // There is deliberately NO length or shape check on `url` here. apifetch
 // refuses a scheme it cannot GET by name and before any dial, and a second
 // URL parser in the validator would be a second answer to "is this a URL",
 // agreeing with the first everywhere anyone looked.
+// validateAPIImportArchiveBytes performs the non-allocating size half of
+// archive validation. The handler still owns the import bytes; this helper
+// only derives the decoded-size bound from the encoded length.
+func validateAPIImportArchiveBytes(encoded string) string {
+	const limit = apiimport.MaxDocumentBytes
+	maxEncoded := base64.StdEncoding.EncodedLen(limit)
+	if len(encoded) > maxEncoded {
+		return fmt.Sprintf("archiveBytes exceeds the %d-byte limit after base64 decoding", limit)
+	}
+	if len(encoded)%4 != 0 {
+		return ""
+	}
+	padding := 0
+	if strings.HasSuffix(encoded, "=") {
+		padding++
+	}
+	if strings.HasSuffix(encoded, "==") {
+		padding++
+	}
+	decoded := len(encoded)/4*3 - padding
+	if decoded > limit {
+		return fmt.Sprintf("archiveBytes exceeds the %d-byte limit after base64 decoding", limit)
+	}
+	return ""
+}
+
 func validateAPIImportPostmanRaw(raw json.RawMessage) string {
 	var p apiImportPostmanParams
 	if msg := decodeAPIParams(raw, &p); msg != "" {
 		return msg
 	}
 	named := 0
-	for _, given := range []bool{p.Path != "", p.Document != "", p.URL != ""} {
+	for _, given := range []bool{p.Path != "", p.Document != "", p.ArchiveBytes != "", p.URL != ""} {
 		if given {
 			named++
 		}
 	}
 	switch {
 	case named > 1:
-		return "path, document and url are three routes to one import — path names the export on the machine running nocx, document carries its bytes, url says where to fetch it; give one of them, not several"
+		return "path, document, archiveBytes and url are four routes to one import — give one of them, not several"
 	case named == 0:
-		return "an import needs the export: path, naming it on the machine running nocx, document, carrying its bytes, or url, naming where to fetch it"
+		return "an import needs the export: path, document, archiveBytes or url"
+	}
+	if p.Preview && p.ArchiveBytes == "" && !strings.HasSuffix(strings.ToLower(p.Path), ".zip") {
+		return "preview is only available for a Postman archive"
 	}
 	if p.Route != nil {
 		if p.URL == "" {
-			return "route says how to REACH a url and means nothing beside path or document; give it with url or leave it out"
+			return "route says how to REACH a url and means nothing beside path, document or archiveBytes; give it with url or leave it out"
 		}
 		if !slices.Contains(apiRouteKinds, p.Route.Kind) {
 			return fmt.Sprintf("route.kind must be one of %v", apiRouteKinds)
@@ -2058,6 +2138,19 @@ func validateAPIImportPostmanRaw(raw json.RawMessage) string {
 			return fmt.Sprintf(
 				"document exceeds %d characters; an export this large is imported with path, which names the file on the machine running nocx and sends no bytes over this socket",
 				maxAPIImportDocumentRunes)
+		}
+	}
+	if msg := validateAPIImportArchiveBytes(p.ArchiveBytes); msg != "" {
+		return msg
+	}
+	if p.ArchiveBytes != "" {
+		// The validator must reject malformed params before entering the
+		// handler, but paramsValidator returns only a refusal string, not
+		// parsed bytes. The bounded syntax check here therefore precedes the
+		// validator's required decode; the handler decodes once more because
+		// it needs the bytes for the capability call.
+		if _, err := base64.StdEncoding.DecodeString(p.ArchiveBytes); err != nil {
+			return "archiveBytes must be base64"
 		}
 	}
 	if p.Path != "" {

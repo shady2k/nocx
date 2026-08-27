@@ -3,6 +3,7 @@ package transport
 import (
 	"archive/zip"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"os"
@@ -64,6 +65,38 @@ func TestAPIImportPostmanArchive_ImportsNamedCollectionsAndEnvironments(t *testi
 		if _, err := os.Stat(file); err != nil {
 			t.Errorf("expected imported file %s: %v", file, err)
 		}
+	}
+}
+
+func TestAPIImportPostmanArchiveBytes_ImportsOverWebSocket(t *testing.T) {
+	_, conn := newAPIWSServer(t)
+	archive := makePostmanArchiveForTransport(t, map[string]string{
+		"archive.json":          `{"collection":{"col-1":true}}`,
+		"collection/col-1.json": `{"info":{"name":"Accounts"},"item":[]}`,
+	})
+	dest := filepath.Join(t.TempDir(), "imported")
+	resp := vaultCall(t, conn, "api.import.postman", map[string]any{
+		"archiveBytes": base64.StdEncoding.EncodeToString(archive),
+		"dest":         dest,
+	}, 1)
+	if resp.Error != nil {
+		t.Fatalf("api.import.postman archiveBytes: %+v", resp.Error)
+	}
+	validateJSON(t, loadSchema(t, "api.import.postman.schema.json"), resp.Result, "archiveBytes result")
+	var result struct {
+		Documents []struct {
+			Kind string `json:"kind"`
+			Name string `json:"name"`
+		} `json:"documents"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode archiveBytes result: %v", err)
+	}
+	if len(result.Documents) != 1 || result.Documents[0].Kind != "collection" || result.Documents[0].Name != "Accounts" {
+		t.Fatalf("documents = %+v, want one collection named Accounts", result.Documents)
+	}
+	if _, err := os.Stat(filepath.Join(dest, "Accounts", "nocx-collection.json")); err != nil {
+		t.Fatalf("expected imported archiveBytes file: %v", err)
 	}
 }
 

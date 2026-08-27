@@ -552,6 +552,7 @@ export function servicesFixture(over: Partial<ApiWorkbenchServices> = {}): ApiWo
     sendRequest: vi.fn().mockResolvedValue(sendFixture()),
     cancelRequest: vi.fn().mockResolvedValue({}),
     importPostman: vi.fn().mockResolvedValue({ unsupported: [] }),
+    previewPostman: vi.fn().mockResolvedValue({ unsupported: [], documents: [] }),
     importCurl: vi.fn().mockResolvedValue({ request: REQUEST, unsupported: [] }),
     ...over,
   }

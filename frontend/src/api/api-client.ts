@@ -260,12 +260,23 @@ class ApiClient {
    *  answer what the conversion did NOT carry over — a result rather than a
    *  log line, so a soft degrade is visible in the product.
    *
-   *  The export arrives as an ImportSource: a path on the backend's machine,
-   *  the document itself, or a URL the backend fetches over a route. The
-   *  three spread onto the params as the one field each carries, so this
-   *  method never has to know which is which. */
+   * The export arrives as an ImportSource: a path on the backend's machine,
+   * the document or archive bytes themselves, or a URL the backend fetches
+   * over a route. The four spread onto the params as the one field each
+   * carries, so this method never has to know which is which. */
   importPostman(source: ImportSource, dest: string): Promise<ApiImportPostmanResult> {
     return this.dispatcher.call<ApiImportPostmanResult>('api.import.postman', { ...source, dest })
+  }
+
+  /** Inspect a Postman archive without writing it. The destination is still
+   *  carried so the preview and the eventual write use the same request shape;
+   *  the backend ignores it while previewing. */
+  previewPostman(source: ImportSource, dest: string): Promise<ApiImportPostmanResult> {
+    return this.dispatcher.call<ApiImportPostmanResult>('api.import.postman', {
+      ...source,
+      dest,
+      preview: true,
+    })
   }
 
   /** Convert one pasted curl command line into a request. The line is
@@ -290,21 +301,14 @@ class ApiClient {
 type ChosenPath = { path: string }
 
 /**
- * WHERE THE EXPORT AN IMPORT READS COMES FROM — the one question
- * `api.import.postman` asks about its source, with three answers rather than
- * one, chosen by what the gesture could answer with.
- *
- * `path` names a file on the BACKEND'S machine, which is the narrow case:
- * `apicoll.DefaultRoot()` is `paths.DataDir()` of the process running Go,
- * and `make dev-web` is documented as forwarding both ports over SSH, so
- * that machine is not always the person's. Typed into the field, or handed
- * over by the Wails window's own drop — where Go took the path off the
- * runtime and the backend IS the person's machine.
- *
  * `document` is the export itself: a browser drop and the kit's file input
  * both yield bytes, and bytes reach a backend wherever it runs (spec §1a).
  * `apiimport.ImportInto` already takes a READER; only
  * `capability.ImportPostman` opened a file first.
+ *
+ * `archiveBytes` is the base64 encoding of a browser-held ZIP. It is separate
+ * from `document` because a ZIP is binary and the backend applies its byte
+ * limit after decoding it.
  *
  * `url` names where the backend should FETCH it, and it is the general case
  * in the direction the document cannot serve: an export behind a network the
@@ -313,12 +317,15 @@ type ChosenPath = { path: string }
  * it is absent from the object rather than present and undefined, which is a
  * key `decodeAPIParams` would refuse once the source is spread.
  *
- * Never two of them. A union rather than three optional fields, because "a
- * path AND a document" is a state with no meaning and the type is where it
- * stops being expressible.
+ * Never two of them. A union rather than four optional fields, because
+ * "a path AND a document" is a state with no meaning and the type is where
+ * it stops being expressible.
  */
 export type ImportSource =
-  { path: string } | { document: string } | { url: string; route?: ApiRoute }
+  | { path: string }
+  | { document: string }
+  | { archiveBytes: string }
+  | { url: string; route?: ApiRoute }
 
 /**
  * The native directory picker, as this surface consumes it.
@@ -508,6 +515,7 @@ export interface ApiWorkbenchServices {
   /** Stop the exchange running under a token this surface minted. */
   cancelRequest(token: string): Promise<ApiRequestCancelResult>
   importPostman(source: ImportSource, dest: string): Promise<ApiImportPostmanResult>
+  previewPostman(source: ImportSource, dest: string): Promise<ApiImportPostmanResult>
   importCurl(line: string): Promise<ApiImportCurlResult>
   /**
    * The SSH connections this window knows about, for an environment that
@@ -640,6 +648,7 @@ export function createApiWorkbenchServices(
       client.sendRequest(handle, relPath, envRelPath, token),
     cancelRequest: (token) => client.cancelRequest(token),
     importPostman: (source, dest) => client.importPostman(source, dest),
+    previewPostman: (source, dest) => client.previewPostman(source, dest),
     importCurl: (line) => client.importCurl(line),
   }
 }

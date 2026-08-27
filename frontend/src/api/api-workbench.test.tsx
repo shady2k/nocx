@@ -2185,6 +2185,11 @@ function destSummary(): string {
   const named = /^Imports into: (.+)$/.exec((el.textContent ?? '').trim())
   return named === null ? '' : named[1]
 }
+/** The pre-write archive inventory shown in the ask. */
+function archiveSummary(): string {
+  const el = importAskBody().querySelector<HTMLElement>('.api-import-summary')
+  return el === null || !reachable(el) ? '' : (el.textContent ?? '').trim()
+}
 
 function paste(text: string): void {
   fireEvent.input(field('api-import-paste'), { target: { value: text } })
@@ -2358,6 +2363,100 @@ describe('the import ask asks one question', () => {
 
     await vi.waitFor(() => expect(sourceLine()).not.toBe(''))
     expect(field('api-import-postman-dest').value).toBe('/elsewhere/mine')
+  })
+  it('accepts a zip, previews its inventory before writing, and uses one destination', async () => {
+    const previewPostman = vi.fn<ApiWorkbenchServices['previewPostman']>().mockResolvedValue({
+      unsupported: [],
+      documents: [
+        { kind: 'collection', name: 'Accounts', unsupported: [] },
+        { kind: 'collection', name: 'Billing', unsupported: [] },
+        { kind: 'environment', name: 'Development', unsupported: [] },
+      ],
+    })
+    const importPostman = vi
+      .fn<ApiWorkbenchServices['importPostman']>()
+      .mockResolvedValue({ unsupported: [], documents: [] })
+    await openBrowserAsk({ previewPostman, importPostman })
+
+    const input = importAskBody().querySelector<HTMLInputElement>('.ui-file-input__native')
+    expect(input?.accept).toBe('application/json,.json,.zip')
+    const file = exportFile('workspace.zip')
+    Object.defineProperty(input!, 'files', { value: [file] })
+    fireEvent.change(input!)
+
+    await vi.waitFor(() => expect(archiveSummary()).toContain('2 collections'))
+    expect(archiveSummary()).toContain('1 environment')
+    const previewCall = previewPostman.mock.calls[0]
+    expect(previewCall).toBeDefined()
+    if (previewCall === undefined) throw new Error('preview call missing')
+    const [previewSource, previewDest] = previewCall
+    expect(previewDest).toBe('/data/collections/workspace')
+    expect('archiveBytes' in previewSource).toBe(true)
+    if ('archiveBytes' in previewSource) expect(previewSource.archiveBytes).not.toBe('')
+    expect(importPostman).not.toHaveBeenCalled()
+
+    fireEvent.click(button('Change where this goes'))
+    await vi.waitFor(() => expect(reachable(field('api-import-postman-dest'))).toBe(true))
+    fireEvent.input(field('api-import-postman-dest'), { target: { value: '/elsewhere/workspace' } })
+    await vi.waitFor(() => expect(button('Import').disabled).toBe(false))
+    fireEvent.click(button('Import'))
+
+    await vi.waitFor(() => expect(importPostman).toHaveBeenCalled())
+    const importCall = importPostman.mock.calls[0]
+    expect(importCall).toBeDefined()
+    if (importCall === undefined) throw new Error('import call missing')
+    const [importSource, importDest] = importCall
+    expect(importDest).toBe('/elsewhere/workspace')
+    expect('archiveBytes' in importSource).toBe(true)
+    if ('archiveBytes' in importSource) expect(importSource.archiveBytes).not.toBe('')
+  })
+
+  it('shows an archive preview refusal and keeps Import disabled', async () => {
+    const previewPostman = vi
+      .fn<ApiWorkbenchServices['previewPostman']>()
+      .mockRejectedValue(new Error('archive preview refused'))
+    const importPostman = vi.fn<ApiWorkbenchServices['importPostman']>()
+    await openBrowserAsk({ previewPostman, importPostman })
+
+    const input = importAskBody().querySelector<HTMLInputElement>('.ui-file-input__native')
+    const file = exportFile('workspace.zip')
+    Object.defineProperty(input!, 'files', { value: [file] })
+    fireEvent.change(input!)
+
+    await vi.waitFor(() => expect(destError()).toContain('archive preview refused'))
+    expect(archiveSummary()).toBe('')
+    expect(button('Import').disabled).toBe(true)
+    expect(importPostman).not.toHaveBeenCalled()
+  })
+
+  it('keeps each archive document refusal in one readable report', async () => {
+    const importPostman = vi.fn().mockResolvedValue({
+      unsupported: [],
+      documents: [
+        {
+          kind: 'collection',
+          name: 'Accounts',
+          unsupported: [{ what: 'scripts', why: 'no scripting sandbox' }],
+        },
+        {
+          kind: 'environment',
+          name: 'Development',
+          unsupported: [{ what: 'dynamic values', why: 'not portable' }],
+        },
+      ],
+    })
+    await openBrowserAsk({ importPostman })
+    paste('{"info":{"name":"workspace"}}')
+    await vi.waitFor(() => expect(destSummary()).toBe('/data/collections/workspace'))
+    fireEvent.click(button('Import'))
+
+    await vi.waitFor(() => expect(notImportedToast()).toBeDefined())
+    const message = notImportedToast()?.message ?? ''
+    expect(message).toContain('Accounts')
+    expect(message).toContain('scripts')
+    expect(message).toContain('Development')
+    expect(message).toContain('dynamic values')
+    expect(toasts().filter((t) => t.level === 'warning')).toHaveLength(1)
   })
 })
 
@@ -2936,9 +3035,9 @@ describe('the import ask accepts a browser drop', () => {
   })
 
   it('sends a TYPED path as a path, on the very same build', async () => {
-    // The two routes are chosen by what the gesture could answer with, never
-    // by what kind of build this is: a person naming a file on the backend's
-    // own machine still gets the path route in a browser.
+    // The import routes are chosen by what the gesture could answer with,
+    // never by what kind of build this is: a person naming a file on the
+    // backend's own machine still gets the path route in a browser.
     const importPostman = vi.fn().mockResolvedValue({ unsupported: [] })
     await openBrowserAsk({ importPostman })
 

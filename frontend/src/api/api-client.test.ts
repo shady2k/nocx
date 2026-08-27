@@ -200,6 +200,18 @@ describe('ApiClient — one method per contract', () => {
     })
   })
 
+  it('imports a browser-held Postman archive as base64 bytes', async () => {
+    const { dispatcher, call } = fakeDispatcher({ unsupported: [], documents: [] })
+    await createApiWorkbenchServices(dispatcher).importPostman(
+      { archiveBytes: 'UEsDBA==' },
+      '/w/workspace',
+    )
+    expect(call).toHaveBeenCalledWith('api.import.postman', {
+      archiveBytes: 'UEsDBA==',
+      dest: '/w/workspace',
+    })
+  })
+
   it('imports the DOCUMENT itself when that is what the gesture answered with', async () => {
     // A browser drop and the kit's file input hold bytes and no location, and
     // the backend is not always on the person's machine (spec §1a). The two
@@ -220,10 +232,10 @@ describe('ApiClient — one method per contract', () => {
   })
 
   it('imports from a URL, carrying the route the backend should fetch it over', async () => {
-    // The third source is the general case in the direction the document
+    // The URL source is the general case in the direction the document
     // cannot serve: an export behind a network the renderer is not on. The
     // route rides WITH the url because it is part of how that document is
-    // reached, and it spreads onto the params like the other two sources —
+    // reached, and it spreads onto the params like the other three sources —
     // `importPostman` never learns which member it was handed.
     const { dispatcher, call } = fakeDispatcher({ unsupported: [] })
     await createApiWorkbenchServices(dispatcher).importPostman(

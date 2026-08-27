@@ -88,6 +88,7 @@ import {
   type SecretCreateVault,
 } from '../secret-create-ask'
 import { proposeSecret } from '../secret-name-proposal'
+import type { ApiImportPostmanResult } from '../generated/api.import.postman'
 import { RunList } from './run-list'
 import type { ApiStore, VariableAnswer } from './api-store'
 import type { DirectoryPicker, FilePicker, ImportSource, NativeDropPort } from './api-client'
@@ -273,6 +274,7 @@ type HeldSource =
   | { kind: 'none' }
   | { kind: 'path'; path: string }
   | { kind: 'file'; file: File }
+  | { kind: 'archive'; name: string; bytes: string }
   | { kind: 'document'; text: string }
   | { kind: 'url'; url: string }
 
@@ -286,6 +288,8 @@ function sourceLabel(held: HeldSource): string {
       return held.path
     case 'file':
       return held.file.name
+    case 'archive':
+      return held.name
     case 'document':
       return 'Pasted Postman export'
     case 'url':
@@ -302,7 +306,21 @@ function sourceLabel(held: HeldSource): string {
 function sourcePath(held: HeldSource): string {
   if (held.kind === 'path') return held.path
   if (held.kind === 'file') return held.file.name
+  if (held.kind === 'archive') return held.name
   return ''
+}
+
+function isArchiveFile(file: File): boolean {
+  return file.name.toLowerCase().endsWith('.zip') || file.type === 'application/zip'
+}
+
+function encodeBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+  }
+  return btoa(binary)
 }
 
 /** The empty set a filtered tree is flattened against — one object rather
@@ -795,6 +813,10 @@ export function ApiPane(props: ApiPaneProps) {
    */
   const [destTyped, setDestTyped] = createSignal(false)
   const [importingBusy, setImportingBusy] = createSignal(false)
+  const [archivePreview, setArchivePreview] = createSignal<
+    ApiImportPostmanResult['documents'] | null
+  >(null)
+  let archivePreviewRequest = 0
   /**
    * WHAT ONE IMPORT COULD NOT CARRY, said once, where the person is looking.
    *
@@ -824,6 +846,17 @@ export function ApiPane(props: ApiPaneProps) {
       duration: 0,
       message: `Not imported from ${about}: ${notes.map((n) => `${n.what} — ${n.why}`).join('; ')}`,
     })
+  }
+
+  const archiveSummary = (): string => {
+    const documents = archivePreview() ?? []
+    if (documents.length === 0) return ''
+    const collections = documents.filter((document) => document.kind === 'collection').length
+    const environments = documents.filter((document) => document.kind === 'environment').length
+    const parts: string[] = []
+    if (collections > 0) parts.push(`${collections} collection${collections === 1 ? '' : 's'}`)
+    if (environments > 0) parts.push(`${environments} environment${environments === 1 ? '' : 's'}`)
+    return `Archive contains ${parts.join(' and ')}`
   }
   /** Where a credential sits as TEXT in the request that is in the form —
    *  '' when there is none. See literalCredentialIn. */
@@ -1649,7 +1682,9 @@ export function ApiPane(props: ApiPaneProps) {
     // A path REPLACES whatever was held, and the paste box empties with it:
     // exactly one source at a time (spec §2), and a box still showing the
     // text it was holding would go on offering a source the ask has let go.
+    archivePreviewRequest++
     setPostmanSource(path === '' ? { kind: 'none' } : { kind: 'path', path })
+    setArchivePreview(null)
     clearPaste()
     proposeDestination(path)
   }
@@ -1685,6 +1720,8 @@ export function ApiPane(props: ApiPaneProps) {
       return
     }
     setPasteRefused('')
+    archivePreviewRequest++
+    setArchivePreview(null)
     // The last attempt's refusal belonged to the source it was refused
     // about. A new one is a new attempt, and leaving the old sentence up
     // would have it read as a verdict on this one.
@@ -1703,7 +1740,9 @@ export function ApiPane(props: ApiPaneProps) {
    *  who dropped the wrong file gets the ask back empty rather than having to
    *  drop the right one over it. */
   const clearSource = (): void => {
+    archivePreviewRequest++
     setPostmanSource({ kind: 'none' })
+    setArchivePreview(null)
     clearPaste()
     setImportRefused('')
     // The route belonged to the source that travelled. Letting it stand
@@ -1713,8 +1752,8 @@ export function ApiPane(props: ApiPaneProps) {
   }
 
   /**
-   * THE EXPORT AS A DOCUMENT — a browser drop, or the kit's file input in the
-   * region beside it, both of which yield `File` objects.
+   * THE EXPORT AS DOCUMENT OR ARCHIVE — a browser drop, or the kit's file input
+   * in the region beside it, both of which yield `File` objects.
    *
    * The same gesture as `chooseExport` above and answered the same way: what
    * was chosen goes in the field, and the destination is proposed from it.
@@ -1723,25 +1762,72 @@ export function ApiPane(props: ApiPaneProps) {
    * runs while a path only names a file on the machine running Go.
    *
    * The source line shows the file's NAME. It is not a path and is never
-   * sent as one: the route is chosen by what this gesture answered with, so
-   * `importPostman` below spells `{ document }` and never `{ path }` while a
-   * file is held. The name is there because it is what the person recognises
-   * from their downloads folder, and because the destination is proposed from
-   * its stem exactly as it is from a path's.
+   * sent as one: the route is chosen by what this gesture answered, so
+   * `importPostman` below spells `{ document }` for JSON and
+   * `{ archiveBytes }` for ZIP while a file is held. The name is there
+   * because it is what the person recognises from their downloads folder,
+   * and because the destination is proposed from its stem exactly as it is
+   * from a path's.
    */
   const chooseDocument = (files: File[]): void => {
     if (files.length > 1) {
-      // The same rule and the same sentence as the native half below: one
-      // import makes one collection, and N collections is N destinations.
       setImportRefused(MULTIPLE_EXPORTS_REFUSAL)
       return
     }
     const file = files[0]
     if (file === undefined) return
+    const requestId = ++archivePreviewRequest
     setImportRefused('')
-    setPostmanSource({ kind: 'file', file })
+    setArchivePreview(null)
     clearPaste()
-    proposeDestination(file.name)
+    if (!isArchiveFile(file)) {
+      setPostmanSource({ kind: 'file', file })
+      proposeDestination(file.name)
+      return
+    }
+    setImportingBusy(true)
+    void file
+      .arrayBuffer()
+      .then((buffer) =>
+        untrack(() => {
+          if (requestId !== archivePreviewRequest) return null
+          const archiveBytes = encodeBase64(buffer)
+          setPostmanSource({ kind: 'archive', name: file.name, bytes: archiveBytes })
+          const proposed = proposedDestination(
+            untrack(() => store.defaultRoot()),
+            file.name,
+          )
+          proposeDestination(file.name)
+          const dest = postmanDest().trim() || proposed
+          return store.previewPostman({ archiveBytes }, dest).then((result) => ({
+            result,
+            archiveBytes,
+          }))
+        }),
+      )
+      .then((payload) =>
+        untrack(() => {
+          if (payload === null || requestId !== archivePreviewRequest) return
+          const { result, archiveBytes } = payload
+          const held = postmanSource()
+          if (held.kind !== 'archive' || held.bytes !== archiveBytes) return
+          setArchivePreview(result.documents ?? [])
+          setImportRefused('')
+        }),
+      )
+      .catch((err: unknown) =>
+        untrack(() => {
+          if (requestId !== archivePreviewRequest) return
+          setPostmanSource({ kind: 'none' })
+          setArchivePreview(null)
+          setImportRefused(err instanceof Error ? err.message : String(err))
+        }),
+      )
+      .finally(() =>
+        untrack(() => {
+          if (requestId === archivePreviewRequest) setImportingBusy(false)
+        }),
+      )
   }
 
   const browseForExport = (): void => {
@@ -2220,9 +2306,7 @@ export function ApiPane(props: ApiPaneProps) {
    * A URL, with the route it travels only when there IS one.
    *
    * The direct case omits the key rather than spelling `route: undefined`:
-   * the Go side decodes strictly and an absent route already reads as
-   * direct, so a key holding nothing is a third spelling of a state that has
-   * two — and the one the decoder refuses.
+   * the Go side decodes strictly and an absent route already reads as direct.
    */
   const urlSource = (url: string): ImportSource => {
     const route = importRoute()
@@ -2234,35 +2318,24 @@ export function ApiPane(props: ApiPaneProps) {
     const held = postmanSource()
     if (held.kind === 'none' || dest === '') return
     setImportingBusy(true)
-    // WHICH ROUTE IS DECIDED BY WHAT THE GESTURE ANSWERED WITH, never by
-    // what kind of build this is: a held file goes as bytes, a named place
-    // goes as a path, a pasted export goes as itself, an address goes as a
-    // URL the backend fetches — and a person naming a file on the backend's
-    // own machine gets the path route in a browser too (api-client.ts,
-    // ImportSource).
-    //
-    // Reading the file can fail — it may have moved, or been revoked —
-    // between the drop and the press, so the read is INSIDE the chain and
-    // its refusal goes where the backend's own refusals go: under the field,
-    // with the ask still open.
     const source: Promise<ImportSource> =
-      held.kind === 'file'
-        ? held.file.text().then((document) => ({ document }))
-        : Promise.resolve(
-            held.kind === 'path'
-              ? { path: held.path }
-              : held.kind === 'document'
-                ? { document: held.text }
-                : urlSource(held.url),
-          )
+      held.kind === 'archive'
+        ? Promise.resolve({ archiveBytes: held.bytes })
+        : held.kind === 'file'
+          ? held.file.text().then((document) => ({ document }))
+          : Promise.resolve(
+              held.kind === 'path'
+                ? { path: held.path }
+                : held.kind === 'document'
+                  ? { document: held.text }
+                  : urlSource(held.url),
+            )
     void source
       .then((chosen) => store.importPostman(chosen, dest))
       .then(async (): Promise<void> => {
         const refused = store.error()
         setImportRefused(refused)
         if (refused !== '') return
-        // The folder is what a person can point at afterwards, so it is what
-        // the report is about.
         tellWhatWasNotImported(dest)
         const notOpened = await putInTree(dest)
         setImporting(false)
@@ -2817,6 +2890,8 @@ export function ApiPane(props: ApiPaneProps) {
           pasted={postmanPasted()}
           onPaste={pasteSource}
           pasteRefusal={pasteRefused()}
+          archiveSummary={archiveSummary()}
+          archiveReady={postmanSource().kind !== 'archive' || archivePreview() !== null}
           sourceLabel={sourceLabel(postmanSource())}
           onClearSource={clearSource}
           sourceIsURL={postmanSource().kind === 'url'}
@@ -2831,6 +2906,38 @@ export function ApiPane(props: ApiPaneProps) {
           onDest={(value) => {
             setDestTyped(true)
             setPostmanDest(value)
+            const held = postmanSource()
+            if (held.kind !== 'archive') return
+            const requestId = ++archivePreviewRequest
+            setArchivePreview(null)
+            setImportingBusy(true)
+            void store
+              .previewPostman({ archiveBytes: held.bytes }, value.trim())
+              .then((result) =>
+                untrack(() => {
+                  const current = postmanSource()
+                  if (
+                    requestId !== archivePreviewRequest ||
+                    current.kind !== 'archive' ||
+                    current.bytes !== held.bytes
+                  ) {
+                    return
+                  }
+                  setArchivePreview(result.documents ?? [])
+                  setImportRefused('')
+                }),
+              )
+              .catch((err: unknown) =>
+                untrack(() => {
+                  if (requestId !== archivePreviewRequest) return
+                  setImportRefused(err instanceof Error ? err.message : String(err))
+                }),
+              )
+              .finally(() =>
+                untrack(() => {
+                  if (requestId === archivePreviewRequest) setImportingBusy(false)
+                }),
+              )
           }}
           defaultRoot={store.defaultRoot()}
           dropSession={nativeDrop?.session() ?? null}

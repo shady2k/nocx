@@ -966,6 +966,13 @@ type APIImportService interface {
 	// ImportPostmanArchive reads a Postman workspace archive and writes each
 	// named document below dest, rolling the fan-out back if one arrival fails.
 	ImportPostmanArchive(ctx context.Context, srcPath, dest string) ([]apiimport.ArchiveImportResult, error)
+	// ImportPostmanArchiveBytes is the same archive route for a renderer that
+	// holds the ZIP bytes rather than a path on the backend's machine.
+	ImportPostmanArchiveBytes(ctx context.Context, archive []byte, dest string) ([]apiimport.ArchiveImportResult, error)
+	// PreviewPostmanArchive reads and validates a path archive without writing.
+	PreviewPostmanArchive(ctx context.Context, srcPath, dest string) ([]apiimport.ArchiveDocument, error)
+	// PreviewPostmanArchiveBytes reads and validates archive bytes without writing.
+	PreviewPostmanArchiveBytes(ctx context.Context, archive []byte, dest string) ([]apiimport.ArchiveDocument, error)
 
 	// ImportPostmanDocument writes the same collection from the export's
 	// BYTES, which the caller already holds. It is not a second import: the
@@ -1001,8 +1008,8 @@ type APIImportOperation interface {
 //
 // fetch acquires a document by URL and may be nil, which is a build without
 // the URL entrance rather than a build with a broken one: ImportPostmanURL
-// then refuses by name (ErrImportURLUnavailable) and the other two
-// entrances are untouched.
+// then refuses by name (ErrImportURLUnavailable) and the other entrances
+// are untouched.
 func NewAPIImportOperation(
 	apiGate, lane control.Admission,
 	fsys apiimport.FS,
@@ -1064,6 +1071,64 @@ func (s *apiImportService) ImportPostmanArchive(ctx context.Context, srcPath, de
 	}
 	defer func() { _ = f.Close() }()
 	return apiimport.ImportPostmanArchive(ctx, s.fsys, dest, f, apicoll.Route{Kind: apicoll.RouteDirect})
+}
+
+// ImportPostmanArchiveBytes runs the archive writer over bytes carried by the
+// control plane. The transport has already decoded and bounded the base64;
+// this method keeps the writer's one MaxDocumentBytes limit authoritative.
+func (s *apiImportService) ImportPostmanArchiveBytes(ctx context.Context, archive []byte, dest string) ([]apiimport.ArchiveImportResult, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	return apiimport.ImportPostmanArchive(ctx, s.fsys, dest, bytes.NewReader(archive), apicoll.Route{Kind: apicoll.RouteDirect})
+}
+
+func (s *apiImportService) PreviewPostmanArchive(ctx context.Context, srcPath, dest string) ([]apiimport.ArchiveDocument, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	f, err := openImportArchive(srcPath)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	documents, err := apiimport.ReadPostmanArchive(f)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := apiimport.ValidatePostmanArchiveDestination(s.fsys, dest, documents); err != nil {
+		return nil, err
+	}
+	return documents, nil
+}
+
+func (s *apiImportService) PreviewPostmanArchiveBytes(ctx context.Context, archive []byte, dest string) ([]apiimport.ArchiveDocument, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	documents, err := apiimport.ReadPostmanArchive(bytes.NewReader(archive))
+	if err != nil {
+		return nil, err
+	}
+	if _, err := apiimport.ValidatePostmanArchiveDestination(s.fsys, dest, documents); err != nil {
+		return nil, err
+	}
+	return documents, nil
+}
+
+func openImportArchive(srcPath string) (*os.File, error) {
+	fi, err := os.Lstat(srcPath)
+	if err != nil {
+		return nil, fmt.Errorf("capability: read the Postman archive: %w", err)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %s", ErrImportNotAFile, srcPath)
+	}
+	f, err := os.Open(srcPath) //nolint:gosec // the archive path is chosen by the user and was Lstat-checked above
+	if err != nil {
+		return nil, fmt.Errorf("capability: read the Postman archive: %w", err)
+	}
+	return f, nil
 }
 
 // ImportPostmanDocument runs the same import over the bytes it was given.

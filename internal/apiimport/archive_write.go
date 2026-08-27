@@ -39,31 +39,9 @@ func ImportPostmanArchive(ctx context.Context, fsys FS, dest string, r io.Reader
 	if err != nil {
 		return nil, err
 	}
-	destExisted := false
-	if info, statErr := fsys.Lstat(dest); statErr == nil {
-		if !info.IsDir() {
-			return nil, fmt.Errorf("apiimport: archive destination %q is not a directory", dest)
-		}
-		destExisted = true
-	} else if !errors.Is(statErr, os.ErrNotExist) {
-		return nil, fmt.Errorf("apiimport: check archive destination: %w", statErr)
-	}
-
-	seen := make(map[string]struct{}, len(documents))
-	for _, doc := range documents {
-		if err := pathname.CheckComponent(doc.Name); err != nil {
-			return nil, fmt.Errorf("apiimport: archive document name %q is invalid: %w", doc.Name, err)
-		}
-		key := strings.ToLower(doc.Name)
-		if _, exists := seen[key]; exists {
-			return nil, fmt.Errorf("apiimport: archive contains duplicate document name %q", doc.Name)
-		}
-		seen[key] = struct{}{}
-		if _, statErr := fsys.Lstat(filepath.Join(dest, doc.Name)); statErr == nil {
-			return nil, fmt.Errorf("apiimport: archive destination for %q already exists", doc.Name)
-		} else if !errors.Is(statErr, os.ErrNotExist) {
-			return nil, fmt.Errorf("apiimport: check archive destination for %q: %w", doc.Name, statErr)
-		}
+	destExisted, err := ValidatePostmanArchiveDestination(fsys, dest, documents)
+	if err != nil {
+		return nil, err
 	}
 
 	if err := fsys.MkdirAll(dest, collectionDirMode); err != nil {
@@ -102,4 +80,37 @@ func ImportPostmanArchive(ctx context.Context, fsys FS, dest string, r io.Reader
 	}
 	complete = true
 	return results, nil
+}
+
+// ValidatePostmanArchiveDestination applies the archive writer's complete
+// destination preflight without creating or writing anything. The bool says
+// whether dest already existed, which the writer needs for rollback.
+func ValidatePostmanArchiveDestination(fsys FS, dest string, documents []ArchiveDocument) (bool, error) {
+	destExisted := false
+	if info, statErr := fsys.Lstat(dest); statErr == nil {
+		if !info.IsDir() {
+			return false, fmt.Errorf("apiimport: archive destination %q is not a directory", dest)
+		}
+		destExisted = true
+	} else if !errors.Is(statErr, os.ErrNotExist) {
+		return false, fmt.Errorf("apiimport: check archive destination: %w", statErr)
+	}
+
+	seen := make(map[string]struct{}, len(documents))
+	for _, doc := range documents {
+		if err := pathname.CheckComponent(doc.Name); err != nil {
+			return false, fmt.Errorf("apiimport: archive document name %q is invalid: %w", doc.Name, err)
+		}
+		key := strings.ToLower(doc.Name)
+		if _, exists := seen[key]; exists {
+			return false, fmt.Errorf("apiimport: archive contains duplicate document name %q", doc.Name)
+		}
+		seen[key] = struct{}{}
+		if _, statErr := fsys.Lstat(filepath.Join(dest, doc.Name)); statErr == nil {
+			return false, fmt.Errorf("apiimport: archive destination for %q already exists", doc.Name)
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return false, fmt.Errorf("apiimport: check archive destination for %q: %w", doc.Name, statErr)
+		}
+	}
+	return destExisted, nil
 }

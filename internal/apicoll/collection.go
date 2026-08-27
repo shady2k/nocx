@@ -14,12 +14,17 @@ package apicoll
 // line later — are views of this, and the file is the truth rather than
 // either of them (design §6.4).
 type Request struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Method  string   `json:"method"`
-	URL     string   `json:"url"`
-	Headers []Header `json:"headers,omitempty"`
-	Query   []Param  `json:"query,omitempty"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Method string `json:"method"`
+	URL    string `json:"url"`
+	// Environment is the request's persisted environment choice. A nil
+	// pointer means the request has never chosen one, so the sender can keep
+	// the collection default (exactly one environment, otherwise none).
+	// A non-nil empty value is an explicit choice of no environment.
+	Environment *string  `json:"environment,omitempty"`
+	Headers     []Header `json:"headers,omitempty"`
+	Query       []Param  `json:"query,omitempty"`
 	// Variables are the request's OWN, and they are rows of name, value and
 	// enabled because that is the shape Query and Headers already have —
 	// the model grows by one more list of the same thing rather than by a

@@ -17,10 +17,11 @@
 // nearly every Postman export — failed from the product while working
 // perfectly over the control plane (nocx-pnvnn).
 //
-// It is a control now, over the collection's own environments. It is absent
-// rather than empty for a collection that has none, for the reason the old
-// comment gives: a picker with nothing in it is a control that governs
-// nothing.
+// It is a control now, over the active request's collection environments. The
+// selection is persisted on that request file, so switching requests restores
+// each request's answer. It is absent rather than empty for a collection that
+// has none, for the reason the old comment gives: a picker with nothing in it
+// is a control that governs nothing.
 
 import {
   For,
@@ -3257,10 +3258,9 @@ export function ApiPane(props: ApiPaneProps) {
             one. It replaced the picker that used to sit on the pane's
             header; the list IS the picker, and a second one would be two
             places to answer one question.
-
-            It shows the ACTIVE collection's environments, because that is
-            what an environment belongs to (§6.5) — the tick says which one a
-            send goes out under. */}
+            It shows the ACTIVE request's collection environments, because that
+            is where the environment belongs (§6.5) — the tick says which one
+            this request sends under, and the choice is stored in its file. */}
         <Show when={store.activeCollection() !== ''}>
           <Section
             id="api-environments"

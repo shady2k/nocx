@@ -635,28 +635,16 @@ export function createApiStore(
   // Where a draft with no file behind it will be written. Only the curl
   // import mints such a draft, and the ask is what answers this.
   const [draftFolder, setDraftFolder] = createSignal('')
-  // ── Which environment a send goes out under (nocx-pnvnn) ────────────────
+  // ── Which environment a request goes out under (nocx-ei9fy.1) ───────────
   //
-  // Keyed by the collection HANDLE, and the absence of a key is a state of
-  // its own: "nobody has chosen for this folder yet" is not "None was
-  // chosen", and only the first may be filled in by a default. Collapsing
-  // them would make a person's deliberate None revert to an environment on
-  // the next listing — a control whose answer the panel quietly replaces.
+  // The request file owns this choice. It is a per-request preference, so it
+  // must not be keyed by the ephemeral collection handle or collapse two
+  // requests into one collection choice. A missing field means nobody chose
+  // yet; a present empty string is the deliberate "No environment" choice.
   //
-  // The default is applied ONLY when a collection has exactly ONE
-  // environment. That is the whole rule, and both halves are bought:
-  //
-  //  * With one, there is no choice to make. Nearly every Postman export is
-  //    this case, and starting on None would make its first Send fail on
-  //    `{{baseUrl}}` — a variable the folder can answer — which is the
-  //    product contradicting itself.
-  //  * With several, the first in a list is not a choice anybody made, and
-  //    one of them is usually production. A request fired at a live system
-  //    because a panel picked alphabetically is not a mistake a message can
-  //    undo, so the panel picks nothing and says so.
-  const [chosenEnvironments, setChosenEnvironments] = createSignal<ReadonlyMap<string, string>>(
-    new Map(),
-  )
+  // The default is applied ONLY when a request has no saved choice and its
+  // collection has exactly ONE environment. With several, the first in a
+  // list is not a choice anybody made, and one is usually production.
   const [selected, setSelected] = createSignal<ApiSelection | null>(null)
   const [draft, setDraft] = createSignal<ApiRequest | null>(null)
   const [saved, setSaved] = createSignal<ApiRequest | null>(null)
@@ -851,13 +839,22 @@ export function createApiStore(
   const environmentsOf = (handle: string): readonly ApiEnvironmentRef[] =>
     collections().find((c) => c.handle === handle)?.collection.environments ?? []
 
-  /** Which environment a send from ONE collection goes out under. The
-   *  picker and the send read the same function, so the control cannot say
-   *  one thing while the wire carries another. */
+  /** Which environment a send from ONE request goes out under. The picker
+   *  and the send read this same function, so the control cannot say one
+   *  thing while the wire carries another. */
   const environmentFor = (handle: string): string => {
-    const chosen = chosenEnvironments().get(handle)
-    if (chosen !== undefined) return chosen
     const envs = environmentsOf(handle)
+    const target = selected()
+    const current = draft()
+    if (
+      current !== null &&
+      (target?.handle === handle || (target === null && activeCollection() === handle))
+    ) {
+      const chosen = current.environment
+      if (chosen !== undefined && (chosen === '' || envs.some((env) => env.relPath === chosen))) {
+        return chosen
+      }
+    }
     return envs.length === 1 ? envs[0].relPath : ''
   }
 
@@ -951,16 +948,21 @@ export function createApiStore(
     }
   }
 
-  /** Refresh the complete backend-computed scope after a source change. */
   const refreshVariables = async (): Promise<void> => {
     await refreshScope()
   }
 
+  /** Refresh the complete backend-computed scope after a source change. */
   const setEnvironment = (relPath: string): void => {
     const handle = untrack(activeCollection)
-    if (handle === '') return
-    setChosenEnvironments((prev) => new Map(prev).set(handle, relPath))
+    const current = untrack(draft)
+    if (handle === '' || current === null) return
+    const envs = environmentsOf(handle)
+    if (relPath !== '' && !envs.some((env) => env.relPath === relPath)) return
+    if (current.environment === relPath) return
+    setDraft({ ...current, environment: relPath })
     void refreshVariables()
+    if (untrack(selected) !== null) void saveDraft()
   }
 
   /** The draft differs from what the file last answered. Compared by value —
@@ -1164,18 +1166,9 @@ export function createApiStore(
 
   const closeFolder = async (handle: string): Promise<void> => {
     try {
+      await flushDraft()
       await services.closeCollection(handle)
       setCollections((prev) => prev.filter((c) => c.handle !== handle))
-      // Nothing is pointed at a folder that has left — and the environment
-      // chosen for it goes with it, which is the closing end of that
-      // choice's interval. A handle is minted fresh every open, so a
-      // remembered row could never be read again; it would only be a map
-      // that grows for the life of the window.
-      setChosenEnvironments((prev) => {
-        const next = new Map(prev)
-        next.delete(handle)
-        return next
-      })
       if (selected()?.handle === handle) cancelPendingSave()
       if (activeCollection() === handle) {
         setActiveCollection('')
@@ -1264,6 +1257,8 @@ export function createApiStore(
   // landed after a delete would put the file back, and one that landed after
   // a move would put the old path back.
   let saveTimer: ReturnType<typeof setTimeout> | null = null
+  let saveChain: Promise<void> = Promise.resolve()
+  let pendingSaves = 0
 
   const cancelPendingSave = (): void => {
     if (saveTimer === null) return
@@ -1491,29 +1486,49 @@ export function createApiStore(
       setError(message(err))
     }
   }
-
   const saveDraft = async (): Promise<void> => {
     const target = untrack(selected)
     const request = untrack(draft)
     if (target === null || request === null) return
-    try {
-      await services.writeRequest(target.handle, target.relPath, request)
-      setSaved(request)
-      setError('')
-    } catch (err) {
-      setError(message(err))
+    pendingSaves += 1
+    const write = async (): Promise<void> => {
+      try {
+        await services.writeRequest(target.handle, target.relPath, request)
+        const currentTarget = untrack(selected)
+        const currentDraft = untrack(draft)
+        if (
+          currentTarget?.handle === target.handle &&
+          currentTarget.relPath === target.relPath &&
+          currentDraft !== null &&
+          JSON.stringify(currentDraft) === JSON.stringify(request)
+        ) {
+          setSaved(request)
+          setError('')
+        }
+      } catch (err) {
+        const currentTarget = untrack(selected)
+        if (currentTarget?.handle === target.handle && currentTarget.relPath === target.relPath) {
+          setError(message(err))
+        }
+      } finally {
+        pendingSaves -= 1
+      }
     }
+    saveChain = saveChain.then(write, write)
+    await saveChain
   }
 
   const deleteRequest = async (handle: string, relPath: string): Promise<void> => {
     try {
-      await services.deleteRequest(handle, relPath)
       const open = untrack(selected)
       if (open !== null && open.handle === handle && open.relPath === relPath) {
-        // CANCELLED, NOT FLUSHED. A scheduled write for the file that was
-        // just deleted would put it back — the delete would look like it
-        // worked and the row would return on the next listing.
         cancelPendingSave()
+        if (pendingSaves > 0) await saveChain
+      }
+      await services.deleteRequest(handle, relPath)
+      if (open !== null && open.handle === handle && open.relPath === relPath) {
+        // The request has been deleted, so the draft and its pending save must
+        // leave together rather than allowing an old write to recreate it.
         setSelected(null)
         setDraft(null)
         setSaved(null)
@@ -1578,13 +1593,13 @@ export function createApiStore(
       setError(message(err))
     }
   }
-
   const send = async (): Promise<void> => {
     let request = untrack(draft)
     if (request === null) return
-    // This path writes the file itself, below, and a timer firing beside it
-    // would be a second writer of the same bytes.
-    cancelPendingSave()
+    // The file is the send's source of truth. Join any scheduled or immediate
+    // write before asking the backend to snapshot it, but keep the clean path
+    // synchronous so the pending row is observable immediately.
+    if (untrack(selected) !== null && untrack(dirty)) await flushDraft()
     // A REQUEST WITH NO FILE GETS ONE, HERE. `api.request.send` sends the
     // FILE — the backend snapshots it off disk, which is what makes the run
     // and the folder agree (§6.4) — so a converted curl line could not be

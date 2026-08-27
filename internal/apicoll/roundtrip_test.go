@@ -2,6 +2,7 @@ package apicoll
 
 import (
 	"os"
+	"path/filepath"
 	"reflect"
 	"testing"
 )
@@ -116,6 +117,39 @@ func TestReadWriteRequest_RoundTrips(t *testing.T) {
 				t.Errorf("%q was written but does not list: %+v", tc.rel, coll.Requests)
 			}
 		})
+	}
+}
+
+func TestReadWriteRequest_SelectedEnvironmentSurvivesAServiceRestart(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "coll")
+	writeFile(t, root, ManifestName, manifestJSON)
+
+	first := newService()
+	opened, err := first.Open(root)
+	if err != nil {
+		t.Fatalf("first Open: %v", err)
+	}
+	selected := "environments/prod.json"
+	request := Request{
+		ID: "1", Name: "Uses production", Method: "GET", URL: "https://api.example.test",
+		Environment: &selected,
+		Body:        Body{Kind: BodyNone}, Auth: Auth{Kind: AuthNone},
+	}
+	if writeErr := first.WriteRequest(opened.Handle, "request.json", request); writeErr != nil {
+		t.Fatalf("WriteRequest: %v", writeErr)
+	}
+
+	second := newService()
+	reopened, err := second.Open(root)
+	if err != nil {
+		t.Fatalf("second Open: %v", err)
+	}
+	got, err := second.ReadRequest(reopened.Handle, "request.json")
+	if err != nil {
+		t.Fatalf("ReadRequest after restart: %v", err)
+	}
+	if got.Environment == nil || *got.Environment != selected {
+		t.Fatalf("selected environment = %#v, want %q", got.Environment, selected)
 	}
 }
 

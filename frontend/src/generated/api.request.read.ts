@@ -21,6 +21,10 @@ export interface Request {
   method: string
   url: string
   /**
+   * The request's persisted environment choice, addressed by path within its collection. Absent means no choice has been made and the normal default applies; an empty string is the explicit choice to send with no environment.
+   */
+  environment?: string
+  /**
    * Never null — a request with no headers is []. The stored form omits the key entirely, which is right for a file and wrong for the renderer's first .map.
    */
   headers: Header[]

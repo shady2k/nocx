@@ -229,6 +229,12 @@ type ledgerHandlers struct {
 	state    *connState
 	clientID string
 	r        Responder
+
+	// raiser is the notification pipeline's ingress (ADR-0029); nil when the
+	// host built no pipeline, which every headless test server is. The close
+	// is the ONLY one of the three lifecycle methods that holds it: an open
+	// and a bind are not outcomes, and nothing may be told about them.
+	raiser NotifyRaiser
 }
 
 // ledgerCommand is one decoded, validated event: the phase it would move the
@@ -319,7 +325,52 @@ func (h ledgerHandlers) handleClose(ctx context.Context, req jsonrpcRequest) {
 		payload := content.ShellPayloadJSON(p.Facts.ExitCode)
 		cmd.finish.Payload = &payload
 	}
-	h.apply(ctx, req, cmd)
+	// Read the session BEFORE the write, not after: h.command has just
+	// proved it is live on this connection, and the store call below can
+	// outlast a tab the user closed the instant their command ended — which
+	// is precisely the block the notification centre exists to remember.
+	sess, live := h.state.get(session.ID(p.Envelope.SessionID))
+	out, ok := h.apply(ctx, req, cmd)
+	if !ok || !live || h.raiser == nil {
+		return
+	}
+	// A block finishing is an outcome, and it becomes an event exactly once.
+	// `replay` is the renderer's outbox re-delivering a close it never saw
+	// acknowledged and `dropped` is an event that moved nothing; raising on
+	// either would be a second banner for one command, which is the defect
+	// design §A3 states as "exactly one notification when it exits and no
+	// second one". The phase check is the same rule from the other side: a
+	// close is the only lifecycle event that ends in `closed`, so anything
+	// else here is a row this event did not finish.
+	if out.Outcome != ledgerApplied || out.Phase != string(content.PhaseClosed) {
+		return
+	}
+	// THE OTHER RAISE IS IN handleHistoryRecord, and this is not a duplicate
+	// (nocx-n3nfg). The two are the ledger's two durable writers of one
+	// product object — the split `command` below already documents — and a
+	// command travels exactly one of them: today's renderer sends
+	// history.record and never a close, and a client that sends closes is on
+	// the fuller lifecycle protocol and sends no record. Two raises for one
+	// command would need one client doing both, which nothing does. Deleting
+	// this one instead would leave `ledger.close` — a contracted method with
+	// its own schema, its own create-the-row-from-the-envelope path and a
+	// renderer migration still ahead of it — silently unable to tell anybody
+	// that a command ended.
+	// Background, deliberately, and for the reason ws.go's session.ended
+	// raise gives at the same seam. Owner: this handler, which runs once per
+	// applied close on the content queue. Closing event: the return of
+	// Raise, which records the occurrence in the feed and hands the event to
+	// the policy synchronously — delivery past the debounce window is the
+	// policy's to own. The request's context would cancel the record of a
+	// command whose tab died with it, and Admit refuses a cancelled context
+	// outright, so the one block nobody was watching is the one that would
+	// be lost.
+	//
+	// The MASKED intent, never the envelope's: cmd.entry.Intent is what
+	// maskCommandSafe returned and what the row stores (ws_ledger.go's
+	// command), and a title reaches further than a database row does.
+	h.raiser.Raise(context.Background(), blockFinishedEvent(
+		sess, cmd.entry.Intent, content.EntryStatus(p.Status), p.Facts))
 }
 
 // command turns the envelope into the store's own shapes: the environment
@@ -435,10 +486,14 @@ func panePtr(paneID string) *string {
 //  3. A close for an unknown id creates the row, closed, from its envelope —
 //     and so does a bind, by the same reasoning and the same envelope.
 //  4. Re-delivery of any event for a row already in that phase is a no-op.
-func (h ledgerHandlers) apply(ctx context.Context, req jsonrpcRequest, cmd ledgerCommand) {
+//
+// It reports the ack it sent and whether it sent one at all, so the close can
+// tell an outcome worth announcing from a replay, a drop or a refusal. Open
+// and bind discard both.
+func (h ledgerHandlers) apply(ctx context.Context, req jsonrpcRequest, cmd ledgerCommand) (ledgerEventResponse, bool) {
 	if h.op == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "method not found: content store not wired"})
-		return
+		return ledgerEventResponse{}, false
 	}
 	var out ledgerEventResponse
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.LedgerService) error {
@@ -484,9 +539,10 @@ func (h ledgerHandlers) apply(ctx context.Context, req jsonrpcRequest, cmd ledge
 	})
 	if err != nil {
 		h.answerError(req, err)
-		return
+		return ledgerEventResponse{}, false
 	}
 	_ = h.r.TryResult(req.ID, mustMarshal(out))
+	return out, true
 }
 
 // create writes a row that does not exist yet and walks it to the event's
@@ -744,6 +800,7 @@ func (s *WSServer) ledgerSpecs(contentSub control.Submission, lane control.Admis
 			// store refuses a replayed id whose content changed.
 			clientID: connectionID(w),
 			r:        r,
+			raiser:   s.notifyRaiser,
 		}
 	}
 	return []methodSpec{

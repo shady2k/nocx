@@ -13,8 +13,8 @@ import { hasWailsWebview, installBrowserTransport } from './wails-runtime'
 import { WSClient } from './ipc'
 import { LayoutStore } from './layout/layout-store'
 import { LayoutClient } from './layout/layout-client'
-import { PaneManager } from './panes'
-import { mountSidebar, type SidebarViewDescriptor } from './sidebar'
+import { LOCAL_BACKEND_ID, PaneManager } from './panes'
+import { mountSidebar, type SidebarViewDescriptor, type SidebarViewStatus } from './sidebar'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { AboutClient } from './about-client'
 import { ClipboardBannerImpl } from './banner'
@@ -44,7 +44,7 @@ import { createApiWorkbenchServices, nativePickers } from './api/api-client'
 import { mountUpdateNotice } from './update-notice'
 import { mountConnectionNotice } from './connection-notice'
 import { IconButton } from './ui/icon-button'
-import { PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
+import { BellIcon, CheckCircleIcon, PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { mountReadScreenHandler } from './read-screen'
 import { mountRunCommandHandler } from './run-command'
@@ -107,6 +107,11 @@ import { NotesStore } from './notes/notes-store'
 import { createNotesView } from './notes/notes-view'
 import { registerNotesSurface, openNote, createAndOpenNote } from './notes'
 import { isNoteChord } from './notes/chord'
+import { NotifyFeedClient } from './notify/feed-client'
+import { createFeedStore } from './notify/feed-store'
+import { subscribeSessionFocus } from './notify/focus-request'
+import { subscribeNotifyToast } from './notify/toast-bridge'
+import { NotificationsPanel } from './notify/notifications-panel'
 import { createOverviewController } from './overview/overview-controller'
 import { askFields } from './snippets/resolve'
 
@@ -1010,9 +1015,87 @@ async function main() {
     onCreate: () => void createAndOpenNote(),
   })
 
-  const sidebarViews = [filesView, PORTS_VIEW, gitView, notesView, operationsView].sort(
-    (a, b) => a.order - b.order,
-  )
+  // ── Notifications (nocx-p0xhg) ───────────────────────────────────────
+  // The store is created HERE, at the composition root, because two surfaces
+  // consume it: the panel body and the activity-bar badge. Creating it inside
+  // the view would leave the badge with nothing to read until the panel was
+  // first opened — a bell that only starts counting once you look at it.
+  const feedStore = createFeedStore(new NotifyFeedClient(dispatcher), dispatcher)
+  // The two backend-initiated halves of the same pipeline, wired HERE for the
+  // same reason the store is: both need something only the composition root
+  // holds — the pane manager for one, and for the other nothing at all beyond
+  // being installed before the first push can arrive.
+  //
+  // A banner clicked while nocx was in the background asks for the pane
+  // holding a session (nocx-jiwq.1). Resolution is the RENDERER's and it is
+  // the same lookup the panel's row activation uses above — one answer to
+  // "which tab holds this session", not two. The backend id is this backend:
+  // the push carries a session id and nothing else, because the socket it
+  // arrived on is what says which machine it is about.
+  subscribeSessionFocus(dispatcher, (sessionId) => {
+    const pane = tm.findBySession(LOCAL_BACKEND_ID, sessionId)
+    if (pane) void tm.activate(pane)
+  })
+  // And the toast sink's other end (nocx-c6ef): the router decided a toast
+  // was the destination, and this presents it with the kit's own toast.
+  subscribeNotifyToast(dispatcher)
+  const NOTIFICATIONS_VIEW: SidebarViewDescriptor = {
+    id: 'notifications',
+    title: 'Notifications',
+    icon: BellIcon,
+    // Read by the ACTIVITY BAR while the panel is elsewhere. Quiet where there
+    // is nothing to show (nocx-708q.1): at zero the bar renders no badge
+    // element at all, not a grey nought.
+    //
+    // `kind: 'unread'` is what stops the bar's accessible name reading
+    // "Notifications — 3 running". Progress is null and always will be: a
+    // notification is not a thing with a fraction done, and null is how the
+    // bar knows not to draw a bar at all.
+    status: (): SidebarViewStatus => ({
+      count: feedStore.unreadCount(),
+      kind: 'unread',
+      progress: null,
+    }),
+    actions: () => (
+      <IconButton
+        data-testid="notifications-mark-read"
+        size="sm"
+        ariaLabel="Mark all notifications read"
+        title="Mark all read"
+        disabled={feedStore.unreadCount() === 0}
+        onClick={() => feedStore.markRead()}
+      >
+        <CheckCircleIcon />
+      </IconButton>
+    ),
+    view: () => (
+      <NotificationsPanel
+        store={feedStore}
+        // Resolution is the RENDERER's: it already owns session -> tab, and
+        // the backend cannot do it at all (Attribution.Tab is a WebSocket
+        // connection id). Focusing a tab does NOT mark anything read — that
+        // is the deliberate act on the header action above, and the two are
+        // different facts.
+        onActivate={(backendId, sessionId) => {
+          const pane = tm.findBySession(backendId, sessionId)
+          if (pane) void tm.activate(pane)
+        }}
+        canActivate={(backendId, sessionId) => tm.findBySession(backendId, sessionId) !== undefined}
+      />
+    ),
+    // Last in the bar, after Operations (3) — see OPERATIONS_VIEW_ORDER for
+    // why these are distinct numbers rather than three views all claiming 2.
+    order: 4,
+  }
+
+  const sidebarViews = [
+    filesView,
+    PORTS_VIEW,
+    gitView,
+    notesView,
+    operationsView,
+    NOTIFICATIONS_VIEW,
+  ].sort((a, b) => a.order - b.order)
   if (sidebarViews[0]?.id !== FILES_VIEW_ID) {
     throw new Error('nocx: Files must be the first activity-bar view')
   }

@@ -10,7 +10,7 @@
  */
 
 /**
- * Params of the notify.raise JSON-RPC request: a program asked nocx to present a message (OSC 9 / OSC 777 parsed in the renderer). The record carries exactly the fields the renderer is authorised to originate, plus addressing — sessionId, title and body and NOTHING else (ADR-0029 §2.2: provenance is structural, not validated). kind, trust, level, attribution and at are absent from the wire rather than validated on it: the backend stamps them from the method invoked and its own session registry, and a schema proves a record's shape, never who assigned a field. sessionId is ADDRESSING, not attribution: one WebSocket multiplexes many server-assigned sessions (AD-1), so the record must say which terminal parsed the sequence, and the backend rejects an id not live on that connection. additionalProperties: false is what makes the absence of the protected fields enforceable — a record carrying trust, kind, level or any attribution field is rejected, and there is no argument, header or method variant by which a renderer call produces an attested event. The result of the method is the empty object.
+ * Params of the notify.raise JSON-RPC request: a program asked nocx to present a message (OSC 9 / OSC 777 parsed in the renderer). The record carries exactly the fields the renderer is authorised to originate, plus addressing — sessionId, title and body and NOTHING else (ADR-0029 §2.2: provenance is structural, not validated). kind, trust, level, attribution and at are absent from the wire rather than validated on it: the backend stamps them from the method invoked and its own session registry, and a schema proves a record's shape, never who assigned a field. sessionId is ADDRESSING, not attribution: one WebSocket multiplexes many server-assigned sessions (AD-1), so the record must say which terminal parsed the sequence, and the backend rejects an id not live on that connection. additionalProperties: false is what makes the absence of the protected fields enforceable — a record carrying trust, kind, level or any attribution field is rejected, and there is no argument, header or method variant by which a renderer call produces an attested event. title and body are bounded at 4096 Unicode code points by maxLength below — one bound, declared here and enforced by the backend from this declaration rather than restated. The result of the method is the empty object.
  */
 export interface NotifyRaise {
   /**
@@ -18,11 +18,11 @@ export interface NotifyRaise {
    */
   sessionId: string
   /**
-   * The presentation title, chosen by the source — untrusted presentation data (ADR-0029 §2.3), never control data. The backend stamps it into the event verbatim and it never participates in routing, destination or attribution construction.
+   * The presentation title, chosen by the source — untrusted presentation data (ADR-0029 §2.3), never control data. The backend stamps it into the event verbatim and it never participates in routing, destination or attribution construction. Bounded at 4096 Unicode code points. The unit is stated because the bound has two enforcers and they must count the same thing: this schema's maxLength counts characters as RFC 8259 defines them, which is code points, and the Go validator counts runes, which is the same unit — so an astral-plane character (one code point, two UTF-16 code units) costs one on both sides. A refusal names that unit.
    */
   title: string
   /**
-   * The presentation body, chosen by the source — untrusted presentation data like title, with the same noninterference guarantees.
+   * The presentation body, chosen by the source — untrusted presentation data like title, with the same noninterference guarantees. Bounded at 4096 Unicode code points. The unit is stated because the bound has two enforcers and they must count the same thing: this schema's maxLength counts characters as RFC 8259 defines them, which is code points, and the Go validator counts runes, which is the same unit — so an astral-plane character (one code point, two UTF-16 code units) costs one on both sides. A refusal names that unit.
    */
   body: string
 }

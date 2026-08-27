@@ -2,12 +2,63 @@ package shellintegration
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 
+	"github.com/creack/pty"
 	"github.com/shady2k/nocx/internal/log"
 )
+
+type ptyCapture struct {
+	cmd  *exec.Cmd
+	ptmx *os.File
+	mu   sync.Mutex
+	out  []byte
+	done chan struct{}
+}
+
+func newPTYCapture(t *testing.T, cmd *exec.Cmd) *ptyCapture {
+	t.Helper()
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatalf("pty start: %v", err)
+	}
+	c := &ptyCapture{cmd: cmd, ptmx: ptmx, done: make(chan struct{})}
+	go c.read()
+	t.Cleanup(func() {
+		_ = ptmx.Close()
+		if cmd.ProcessState == nil && cmd.Process != nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	})
+	return c
+}
+
+func (c *ptyCapture) read() {
+	defer close(c.done)
+	buf := make([]byte, 8192)
+	for {
+		n, err := c.ptmx.Read(buf)
+		if n > 0 {
+			c.mu.Lock()
+			c.out = append(c.out, buf[:n]...)
+			c.mu.Unlock()
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+func (c *ptyCapture) output() string {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return string(c.out)
+}
 
 func testLogger() log.Logger {
 	return log.NewSlogAdapter(nil)

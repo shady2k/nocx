@@ -13,7 +13,7 @@ import (
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
-	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/git/registry"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -516,6 +516,7 @@ func (f *fakeSession) ExitOutcome() (session.ExitCause, int) {
 	return session.ExitInterrupted, 0
 }
 func (f *fakeSession) SSHOptions() []ssh.ConnectOption { return f.sshOpts }
+func (f *fakeSession) HostKeyFingerprint() string      { return "" }
 
 // fakeLedgerRepo records the two ledger methods the capability layer reaches:
 // the capture-save rewrite and the completed-command write. Nothing else is
@@ -622,7 +623,7 @@ func testLane() control.Admission {
 }
 
 // newFakeGitRegistry builds an empty git registry for gate tests.
-func newFakeGitRegistry() *git.Registry { return git.New() }
+func newFakeGitRegistry() *registry.Registry { return registry.New() }
 
 // noCaller owns nothing — Acquire on any binding answers the ownership
 // error rather than a panic.

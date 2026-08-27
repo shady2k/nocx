@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // fakeDialogService returns canned paths; "" means the user cancelled. The
@@ -328,28 +330,30 @@ func TestDialogOpenDirectory_RefusedWhileOpenFileIsOutstanding(t *testing.T) {
 // change (the method answering a result), never on a duration.
 func waitDirectoryDialogFree(t *testing.T, conn *websocket.Conn, wantPath string) {
 	t.Helper()
-	deadline := time.Now().Add(3 * time.Second)
-	for {
-		resp := jsonrpcCall(t, conn, "dialog.openDirectory", map[string]any{})
-		var env struct {
-			Error  *jsonrpcErrorObj `json:"error"`
-			Result *struct {
-				Path string `json:"path"`
-			} `json:"result"`
-		}
-		if err := json.Unmarshal(resp, &env); err != nil {
-			t.Fatalf("unmarshal: %v", err)
-		}
-		if env.Result != nil {
-			if env.Result.Path != wantPath {
-				t.Fatalf("path = %q, want %q", env.Result.Path, wantPath)
+	var gotPath string
+	var lastResp json.RawMessage
+	waittest.WaitForTimeoutDetail(t, "directory dialog capability to become free", 3*time.Second,
+		func() string { return fmt.Sprintf("last response %s", lastResp) },
+		func() bool {
+			resp := jsonrpcCall(t, conn, "dialog.openDirectory", map[string]any{})
+			lastResp = resp
+			var env struct {
+				Error  *jsonrpcErrorObj `json:"error"`
+				Result *struct {
+					Path string `json:"path"`
+				} `json:"result"`
 			}
-			return
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("dialog capability never freed: last response %s", resp)
-		}
-		time.Sleep(20 * time.Millisecond)
+			if err := json.Unmarshal(resp, &env); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if env.Result == nil {
+				return false
+			}
+			gotPath = env.Result.Path
+			return true
+		})
+	if gotPath != wantPath {
+		t.Fatalf("path = %q, want %q", gotPath, wantPath)
 	}
 }
 

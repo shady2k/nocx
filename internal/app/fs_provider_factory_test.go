@@ -67,6 +67,8 @@ func (s factorySession) ExitOutcome() (session.ExitCause, int) {
 	return session.ExitInterrupted, 0
 }
 
+func (s factorySession) HostKeyFingerprint() string { return "" }
+
 // refusingLease stands where the SFTP lease provider does. The remote half
 // of these tests never gets a lease — the point is what the LOCAL branch
 // builds — and a lease that refuses is how "the remote path was not

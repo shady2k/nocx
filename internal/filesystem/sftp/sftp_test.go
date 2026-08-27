@@ -590,6 +590,8 @@ func TestListTimesOutDuringEntryBuilding(t *testing.T) {
 		mustWrite(t, filepath.Join(dir, "f"+string(rune('a'+i))), nil)
 	}
 	p := New(newFakeFS(t), WithListTimeout(25*time.Millisecond))
+	// No clock seam exists for the elapsed-time cap; this forces the timeout
+	// branch while the fake metadata work is intentionally slow.
 	p.beforeEntry = func() { time.Sleep(10 * time.Millisecond) }
 	_, err := p.List(context.Background(), dir, filesystem.Page{Offset: 0, Limit: 10})
 	var to *filesystem.ErrTimedOut
@@ -598,6 +600,8 @@ func TestListTimesOutDuringEntryBuilding(t *testing.T) {
 	}
 	// Paired: the same slow per-entry work under a generous cap is a listing.
 	p2 := New(newFakeFS(t), WithListTimeout(time.Second))
+	// No clock seam exists for the elapsed-time cap; this forces the
+	// non-timeout branch while the fake metadata work is intentionally slow.
 	p2.beforeEntry = func() { time.Sleep(10 * time.Millisecond) }
 	if _, err := p2.List(context.Background(), dir, filesystem.Page{Offset: 0, Limit: 10}); err != nil {
 		t.Fatalf("generous-cap listing failed: %v", err)

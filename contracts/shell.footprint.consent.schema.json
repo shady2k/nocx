@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "shell.footprint.consent.schema.json",
+  "title": "shell.footprint.consent result",
+  "description": "The accept of the git panel's consent prompt (remote-helper design D8): the session's machine — keyed by its host public-key fingerprint, resolved server-side from the sessionId the requesting connection owns — has been raised to the relay tier, and the next git.open on that machine proceeds past consentRequired. The write is durable: a grant survives a store reconstruction, and an empty fingerprint never grants.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["state"],
+  "properties": {
+    "state": {
+      "description": "The persisted answer. Exactly one value exists: granted. The denied value has no writer in this deliverable (the resolver honours it so a later writer changes behaviour without touching the decision).",
+      "type": "string",
+      "enum": ["granted"]
+    }
+  }
+}

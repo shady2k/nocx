@@ -10,13 +10,27 @@
  */
 
 /**
- * Result of the git.open JSON-RPC method: the outcome table of resolving a repository for a session (design §5.1), plus the binding that names it for every later git.* call. sessionId appears exactly once on the wire — here — and the authorisation is connState's, not the global session registry's (D15): a connection that learned another connection's session id gets a refusal, not a repository. state is the discriminator: every outcome is a RESULT state, never a JSON-RPC error, because each one is something the panel can render (not a repository, git absent, git too old, no verified cwd, remote tab). The first status rides this result — otherwise every open is two round trips and a guaranteed frame of empty lists — and is present exactly when the inline read succeeded.
+ * Result of the git.open JSON-RPC method: the outcome table of resolving a repository for a session (design §5.1, remote-helper design §6), plus the binding that names it for every later git.* call. sessionId appears exactly once on the wire — here — and the authorisation is connState's, not the global session registry's (D15): a connection that learned another connection's session id gets a refusal, not a repository. state is the discriminator: every outcome is a RESULT state, never a JSON-RPC error, because each one is something the panel can render (not a repository, git absent, git too old, no verified cwd, consent required, an unsupported platform, a failed deploy, an exec the host refused, a version-mismatched helper). The first status rides this result — otherwise every open is two round trips and a guaranteed frame of empty lists — and is present exactly when the inline read succeeded.
  */
 export interface GitOpenResult {
   /**
-   * The open outcome. noCwd and remoteUnsupported are decided by the transport from the session's origin before the repo factory is invoked; the factory itself answers ok, notARepository, gitUnavailable or gitTooOld.
+   * The open outcome (remote-helper design §6). noCwd is decided by the transport from the session's origin before the repo factory is invoked; the refusal states (consentRequired, unsupportedPlatform, deployFailed, execForbidden, helperVersionMismatch) are decided by the helper selection and dial; the factory itself answers ok, notARepository, gitUnavailable or gitTooOld.
    */
-  state: 'ok' | 'notARepository' | 'gitUnavailable' | 'gitTooOld' | 'noCwd' | 'remoteUnsupported'
+  state:
+    | 'ok'
+    | 'notARepository'
+    | 'gitUnavailable'
+    | 'gitTooOld'
+    | 'noCwd'
+    | 'consentRequired'
+    | 'unsupportedPlatform'
+    | 'deployFailed'
+    | 'execForbidden'
+    | 'helperVersionMismatch'
+  /**
+   * The refusal's account: what failed and what to do about it, present exactly when state is one of unsupportedPlatform, deployFailed, execForbidden or helperVersionMismatch. Each refusal state names its recovery — which platform, what failed, how to reinstall — never a generic error.
+   */
+  message?: string
   /**
    * The backend-issued id every later git.* call echoes. Minted from crypto/rand so it cannot be guessed or enumerated; it is an address, not a bearer token — every later call re-checks that the binding's session is in the requesting connection's connState (Acquire performs that one check). Present iff state is ok.
    */

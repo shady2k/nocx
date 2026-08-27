@@ -26,6 +26,7 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/storage"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // autonomousPolicyStore returns a store seeded with the autonomous matrix —
@@ -463,19 +464,36 @@ func TestReadScreen_DisconnectedRendererTerminalizes(t *testing.T) {
 	// leaks. Poll the ledger (an observable state change, never a sleep).
 	led := h.db.Ledger()
 	ctx := context.Background()
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		entry, entryErr := led.Entry(ctx, res.EntryID)
-		if entryErr != nil || entry == nil || len(entry.Executions) == 0 {
-			t.Fatalf("question entry: %v (err %v)", entry, entryErr)
-		}
-		st := entry.Executions[0].State
-		if st != nil && *st != content.RunPrepared && *st != content.RunStreaming {
-			break // terminal: failed | cancelled | interrupted
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("run %d never terminalized; last state %v", res.RunID, st)
-		}
-		time.Sleep(50 * time.Millisecond)
+	var entryErr error
+	lastState, lastExecs := "<none>", -1
+	waittest.WaitForTimeoutDetail(t, "the run to terminalize", 15*time.Second,
+		func() string {
+			return fmt.Sprintf("run %d never terminalized; last state %s (executions=%d, entry err %v)",
+				res.RunID, lastState, lastExecs, entryErr)
+		},
+		func() bool {
+			entry, err := led.Entry(ctx, res.EntryID)
+			if err != nil {
+				entryErr = err
+				return true
+			}
+			if entry == nil {
+				lastExecs = -1
+				return false
+			}
+			lastExecs = len(entry.Executions)
+			if lastExecs == 0 {
+				return false
+			}
+			st := entry.Executions[0].State
+			if st == nil {
+				lastState = "<nil>"
+				return false
+			}
+			lastState = string(*st)
+			return *st != content.RunPrepared && *st != content.RunStreaming
+		})
+	if entryErr != nil {
+		t.Fatalf("question entry: %v", entryErr)
 	}
 }

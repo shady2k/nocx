@@ -91,10 +91,34 @@ export interface SidebarViewProps {
  * says it in one vocabulary. A descriptor that carried markup instead would
  * be the second kind of entry all over again.
  */
+export type SidebarCountKind = 'running' | 'unread'
+
+/** The word the bar says for each kind of count. The map lives HERE, beside
+ *  the bar that draws it, because the invariant this file opens with is that
+ *  the BAR owns the wording and a view owns only the numbers — two views must
+ *  not describe the same number in two vocabularies.
+ *
+ *  What changed when Notifications arrived is that "running" stopped being
+ *  the only true sentence. Background operations run; unread notifications do
+ *  not, and a bell whose accessible name read "Notifications — 3 running"
+ *  told a screen-reader user something false. The fix is NOT to let the view
+ *  pass a string — that is exactly the second vocabulary the invariant
+ *  forbids. The view names a KIND from this closed set and the bar keeps the
+ *  wording. */
+const COUNT_WORD: Record<SidebarCountKind, string> = {
+  running: 'running',
+  unread: 'unread',
+}
+
 export interface SidebarViewStatus {
   /** How many things are live. The badge is ABSENT at zero — a badge that
    *  said "0" would be a permanent mark meaning nothing. */
   count: number
+  /** WHAT is being counted, which decides the word the bar says. Required
+   *  rather than defaulted to 'running': a default is how the wrong word gets
+   *  read as the right one, and there are few enough callers that saying it
+   *  costs nothing. */
+  kind: SidebarCountKind
   /** Aggregate progress over those things, 0..1, or null when nothing is
    *  running — which is how the bar knows not to be there.
    *
@@ -461,7 +485,9 @@ function SidebarSolid(props: SidebarSolidProps) {
             const progress = () => status()?.progress ?? null
             /* The name carries the count, because somebody who reaches this
                button with the keyboard cannot see the badge. */
-            const label = () => (count() === 0 ? view.title : `${view.title} — ${count()} running`)
+            const kind = () => status()?.kind ?? 'running'
+            const label = () =>
+              count() === 0 ? view.title : `${view.title} — ${count()} ${COUNT_WORD[kind()]}`
             return (
               <IconButton
                 size="lg"

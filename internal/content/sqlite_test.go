@@ -322,7 +322,7 @@ func dirEntries(t *testing.T, dir string) []string {
 // A read of your history answers while a command is being recorded into it.
 // It does not report the database as corrupt.
 //
-// WHAT IT GUARDS (nocx-4p3l2, ADR-0042). The store is encrypted through a VFS
+// WHAT IT GUARDS (nocx-4p3l2, ADR-0043). The store is encrypted through a VFS
 // that enciphers whole 4096-byte blocks. SQLite's write-ahead log is framed at
 // 24+page_size, so its frames never align to those blocks, and appending one
 // rewrites the block holding the tail of the frame before it — a frame a

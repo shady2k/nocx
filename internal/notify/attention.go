@@ -5,11 +5,18 @@ import (
 	"errors"
 )
 
-// ErrUnavailable is returned by the unavailable AttentionHost adapter: the
-// current host (cmd/devharness, a web host) has no desktop attention
-// surface. It reports unavailable rather than panicking or silently
-// succeeding, so a soft degrade is visible.
-var ErrUnavailable = errors.New("notify: attention host unavailable")
+// ErrUnavailable is what an attention surface reports when it does not exist
+// on this host at all: the unavailable AttentionHost adapter on a build with
+// no desktop banner (cmd/devharness, a web host), and the unavailable toast
+// presenter on a backend no renderer is attached to. Reported rather than
+// panicked on or silently succeeded, so a soft degrade is visible.
+//
+// ONE sentinel for the two surfaces on purpose (AD-8). The composition root's
+// single exemption from the failure feed is exactly this word — a channel
+// that does not exist on this host is not a channel that lost a message — and
+// a second spelling would mean that exemption had to know how many kinds of
+// absence there are.
+var ErrUnavailable = errors.New("notify: attention surface unavailable on this host")
 
 // AttentionHost is the host-context-bound attention surface: the OS banner,
 // the dock badge and the attention bounce (spec §2.2). runtime.SendNotification,

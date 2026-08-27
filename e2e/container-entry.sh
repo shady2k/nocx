@@ -31,13 +31,19 @@ npm ci --silent
 # and `prettier --check .` both die on EACCES while expanding the directory,
 # which broke the local gate every time the local suite ran (nocx-z9s9.8).
 #
+# The helper artifacts are on the list for the same reason and are the one
+# entry INSIDE the source tree: the stand builds them on its way up
+# (e2e/stand.ts), so they land root-owned next to the .gitignore that hides
+# them, where the next `make helpers` on the host cannot overwrite them.
+#
 # In the EXIT trap, not after the run: the point is the FAILING run, whose
 # artefacts are the ones somebody is about to read. `|| true` because a
 # best-effort tidy must never be what a run reports — the test result is.
 handback() {
   local status=$?
   if [ -n "${NOCX_E2E_HOST_UID:-}" ] && [ -n "${NOCX_E2E_HOST_GID:-}" ]; then
-    chown -R "$NOCX_E2E_HOST_UID:$NOCX_E2E_HOST_GID" /work/.e2e /work/test-results 2>/dev/null || true
+    chown -R "$NOCX_E2E_HOST_UID:$NOCX_E2E_HOST_GID" \
+      /work/.e2e /work/test-results /work/internal/helper/deploy/artifacts 2>/dev/null || true
   fi
   return $status
 }

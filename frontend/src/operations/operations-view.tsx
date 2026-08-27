@@ -49,10 +49,16 @@ import { createThrottledOperations, type RenderThrottleDeps } from './render-thr
 /** The view's registry id, and the sidebar's persisted `activeViewId` for it. */
 export const OPERATIONS_VIEW_ID = 'operations'
 
-/** Last in the bar: Files (-1), Ports (0), Git and Notes (1). A view a person
- *  visits when something is happening does not belong above the ones they
- *  work in. */
-const OPERATIONS_VIEW_ORDER = 2
+/** Files (-1), Ports (0), Git (1), Notes (2), Operations (3), Notifications
+ *  (4). A view a person visits when something is happening does not belong
+ *  above the ones they work in.
+ *
+ *  These are DISTINCT on purpose. Operations and Notes both said 2 and the
+ *  bar sorts on this number, so their relative position was decided by
+ *  whichever order the composition root happened to list them in — a fact no
+ *  one reading either file could see. Notifications arriving as a third 2
+ *  is what made it worth fixing rather than worth noting. */
+const OPERATIONS_VIEW_ORDER = 3
 
 /** The panel header, and the accessible name of the list inside it. One
  *  string, because they are one thing to a reader. */
@@ -96,7 +102,11 @@ export function createOperationsView(
     // to keep working while the view is not mounted at all.
     status: (): SidebarViewStatus => {
       const p = model.progress()
-      return { count: model.activeCount(), progress: p === null ? null : p.fraction }
+      return {
+        count: model.activeCount(),
+        kind: 'running',
+        progress: p === null ? null : p.fraction,
+      }
     },
     // Called rather than mounted as JSX, and that is deliberate: `deps` is
     // configuration read once (two clocks and an interval), not reactive

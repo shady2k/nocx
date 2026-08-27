@@ -661,18 +661,20 @@ func TestResolver_KeySecretBinding(t *testing.T) {
 // TestResolver_ModeFromEffectiveProfile: the effective desiredMode field
 // (profile > group > global > default) is stamped verbatim onto the
 // ConnectConfig (nocx-mlm7) — the ssh layer gates open-time integration on
-// it directly (script integrates at startup; raw and relay open a plain
-// shell — relay is inert this epic) and the open ack reports the same AXIS
-// value, which must keep relay distinguishable from raw. One row per mode,
-// plus the unset default. The LaunchPolicy translation is retired: the
-// resolver stamps the mode, and nothing else.
+// it directly (auto and script integrate at startup; raw opens a plain
+// shell) and the open ack reports the same AXIS value, which must keep every
+// mode distinguishable from every other. One row per mode, plus the unset
+// default, which is auto and NOT script: silence is not an answer
+// (ADR-0033). The LaunchPolicy translation is retired: the resolver stamps
+// the mode, and nothing else.
 func TestResolver_ModeFromEffectiveProfile(t *testing.T) {
 	cases := []struct {
 		name     string
 		mode     *profile.DesiredMode
 		wantMode string
 	}{
-		{name: "unset defaults to script", wantMode: "script"},
+		{name: "unset defaults to auto — silence, not an answer", wantMode: "auto"},
+		{name: "auto", mode: profile.Ptr(profile.DesiredAuto), wantMode: "auto"},
 		{name: "script", mode: profile.Ptr(profile.DesiredScript), wantMode: "script"},
 		{name: "raw", mode: profile.Ptr(profile.DesiredRaw), wantMode: "raw"},
 		{name: "relay", mode: profile.Ptr(profile.DesiredRelay), wantMode: "relay"},

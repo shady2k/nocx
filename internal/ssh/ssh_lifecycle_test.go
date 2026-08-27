@@ -130,14 +130,18 @@ func TestConnect_LifecycleRefusalStaysConventional(t *testing.T) {
 }
 
 // TestConnect_LifecycleRawMode_NeverEstablished proves the mode half of
-// the gate (nocx-tr2n). raw and relay integrate nothing — shellStartCommand
-// returns before the launcher is consulted and the session runs a plain
-// shell that will never dial the forwarded port. Establishing a channel for
-// it would allocate a remote listener and a domain that the very next
-// statement closes unused. Every session asks for integration now, so this
-// is a raw tab's cost per open, not a path nothing takes.
+// the gate (nocx-tr2n). raw integrates nothing — shellStartCommand returns
+// before the launcher is consulted and the session runs a plain shell that
+// will never dial the forwarded port. Establishing a channel for it would
+// allocate a remote listener and a domain that the very next statement
+// closes unused. Every session asks for integration now, so this is a raw
+// tab's cost per open, not a path nothing takes.
+//
+// relay used to be in this table and moved to the positive one (nocx-7k8ma):
+// it integrates, so it needs the channel. raw is now the only mode here,
+// which is the point — it is the only answer that means "nothing".
 func TestConnect_LifecycleRawMode_NeverEstablished(t *testing.T) {
-	for _, mode := range []string{"raw", "relay"} {
+	for _, mode := range []string{"raw"} {
 		t.Run(mode, func(t *testing.T) {
 			srv := startTestSSHServer(t)
 			defer srv.close()
@@ -170,9 +174,12 @@ func TestConnect_LifecycleRawMode_NeverEstablished(t *testing.T) {
 
 // TestConnect_LifecycleScriptMode_Established is the paired positive: the
 // mode gate must not swallow the integrating destinations it was added
-// beside. script and the empty direct-host default both establish.
+// beside. auto (the default), script, relay and the empty direct-host
+// default all establish — every mode but raw, because the tiers are
+// additive and relay allows the binary without withholding the scripts
+// (§5.2, nocx-7k8ma).
 func TestConnect_LifecycleScriptMode_Established(t *testing.T) {
-	for _, mode := range []string{"script", ""} {
+	for _, mode := range []string{"auto", "script", "relay", ""} {
 		t.Run("mode="+mode, func(t *testing.T) {
 			srv := startTestSSHServer(t)
 			defer srv.close()

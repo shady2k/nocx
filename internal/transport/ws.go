@@ -23,6 +23,7 @@ import (
 	"github.com/shady2k/nocx/internal/backup"
 
 	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/connectfwd"
 	"github.com/shady2k/nocx/internal/content"
@@ -30,10 +31,14 @@ import (
 	"github.com/shady2k/nocx/internal/discovery"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/git/registry"
+	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/note"
+	"github.com/shady2k/nocx/internal/notify"
+	"github.com/shady2k/nocx/internal/panegrid"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
@@ -156,6 +161,11 @@ type WSServer struct {
 	// notify.raise answers -32601.
 	notifyRaiser NotifyRaiser
 
+	// notifyFeed is the notification centre's bounded in-memory record,
+	// read by notify.feed.read and marked by notify.feed.markRead. Wired
+	// through WithNotifyFeed; when nil, both methods answer -32601.
+	notifyFeed NotifyFeed
+
 	// Profile service provides a single validated write path for profiles
 	// and groups through the domain layer.
 	profileSvc *profile.ProfileService
@@ -229,7 +239,23 @@ type WSServer struct {
 	build version.BuildInfo
 	// Structured backup capability and native file saver. The operation is
 	// constructed after all options so it shares the current config gate.
-	backupService   *backup.Service
+	backupService *backup.Service
+	// paneGrid is the backend's VT grid for ENROLLED panes (nocx-szb40.2,
+	// the AD-6 amendment). Nil is the normal state: a session without one
+	// runs exactly as it did before, and the byte path never depends on it.
+	paneGrid panegrid.Observer
+	// paneObserver classifies an enrolled pane's grid and reports the
+	// changes (nocx-szb40.3). Nil when unwired, like paneGrid above.
+	paneObserver paneObserver
+	// sweepDone closes at Stop and is the coalescer's second end;
+	// sweepExited closes when the coalescer has actually returned, so Stop
+	// can be sure nothing is still sweeping. Same shape as panegrid's own
+	// drain handshake: asking a goroutine to stop is not the same as it
+	// having stopped, and an interval whose close nobody waits for is an
+	// interval with one end.
+	sweepDone   chan struct{}
+	sweepExited chan struct{}
+
 	backupFileSaver func(string, string) (*backup.SaveResult, error)
 
 	// SSH config resolver and config path for the ssh.listAliases RPC.
@@ -273,6 +299,19 @@ type WSServer struct {
 	// the footprint surface answers an empty list (the P7 observation RPC
 	// that used to write it was severed — ADR-0024 §1).
 	installedFacts *ssh.InstalledFactStore
+	// helperInstalls is the observed helper footprint (remote-helper
+	// design D8): the persisted memory of which machines carry an
+	// installed helper, recorded when the install completed. Wired through
+	// WithHelperInstallStore; when nil, the footprint surface answers an
+	// empty helpers list — nothing is claimed installed that cannot be
+	// shown.
+	helperInstalls *consent.InstallStore
+	// helperConsent is the per-machine relay-tier answer store
+	// (remote-helper design D8): the write half shell.footprint.consent
+	// persists grants through. Wired through WithHelperConsentStore; when
+	// nil, the method refuses — the consent prompt is never offered by a
+	// server that cannot record the answer.
+	helperConsent *consent.Store
 	// installedFactSeen bounds the write to once per domain: a lane
 	// publishes a fact at every prompt, and the installation it reports does
 	// not change while the shell that reported it is alive.
@@ -284,6 +323,20 @@ type WSServer struct {
 	// when nil, shell.footprint.uninstall answers an error and removes
 	// nothing — the status surface never offers the button without it.
 	remoteUninstaller RemoteUninstaller
+
+	// helperUninstaller removes a helper install tree on a remote host,
+	// owning the dial-and-call (remote-helper design D25). Wired through
+	// WithRemoteHelperUninstaller; when nil, shell.footprint.helperUninstall
+	// answers an error and removes nothing — the status surface never
+	// offers the button without it.
+	helperUninstaller RemoteHelperUninstaller
+	// helperCloser closes every live helper channel on a machine before
+	// its install directory is removed — the D25 order (remote-helper
+	// design D25). Wired through WithHelperChannelCloser; when nil,
+	// shell.footprint.helperUninstall refuses: without a closer the
+	// handler cannot prove the close-before-remove invariant that is the
+	// whole point of the rule.
+	helperCloser HelperChannelCloser
 
 	// localCompleter answers shell.complete for KindLocal sessions.
 	// When nil, the method returns a JSON-RPC error for local sessions.
@@ -460,8 +513,14 @@ type WSServer struct {
 	// §5.1). When nil, those methods return -32601. The repo factory rides
 	// a separate option; the transport never constructs a repository
 	// itself (AD-8).
-	git        *git.Registry
+	git        *registry.Registry
 	gitFactory git.RepoFactory
+	// gitHelperFor resolves the helper-backed repo factory selection
+	// git.open uses for an SSH session (the remote-helper design). When
+	// nil, or when the selection answers none of Factory, ConsentRequired
+	// and Refusal, git.open answers the not-available error for that
+	// session.
+	gitHelperFor GitFactoryFor
 
 	// gitMu guards gitBindings and gitBySession: the transport's own
 	// bookkeeping for bindings it issued (internal/git exposes neither a
@@ -477,6 +536,23 @@ type WSServer struct {
 	ringsMu sync.Mutex
 	rx      map[session.ID]*sessionRx
 	stopped bool
+	// closeRequested holds the session ids whose end the user asked for:
+	// written by the "close" handler before the registry close, read and
+	// cleared by monitorExit when that close produces the exit. It is the
+	// only thing that can tell a teardown apart from a loss, because a
+	// forced teardown leaves no shell report and ExitOutcome correctly
+	// refuses to invent one — so both arrive as ExitInterrupted.
+	//
+	// The interval, both ends: an id is in this map from just before the
+	// registry close that the "close" handler runs until the monitorExit
+	// woken by that close takes it out (takeCloseRequested). Exactly one
+	// monitorExit exists per session (sessionRx.monitorOnce) and it always
+	// runs — at the latest when Stop closes the registry — so an entry left
+	// by a close whose registry close failed is cleared by the session's
+	// eventual end, and no id can be entered twice (ids are unique per
+	// session). Guarded by ringsMu, the mutex that already owns the other
+	// session-keyed transport state.
+	closeRequested map[session.ID]struct{}
 	// lanesMu guards lanes: the per-session resize lanes (ws_session_ops.go).
 	// One lane per session that has been resized or closed; entries are
 	// never deleted (a closed lane is the tombstone that refuses every
@@ -1057,7 +1133,7 @@ func WithFilesystemProviderFactory(f FilesystemProviderFactory) WSServerOption {
 // composition root constructs the registry (internal/app/app.go); without
 // this line the whole git package is reachable from its own tests and
 // nowhere else (AGENTS.md check 5).
-func WithGitRegistry(r *git.Registry) WSServerOption {
+func WithGitRegistry(r *registry.Registry) WSServerOption {
 	return func(s *WSServer) { s.git = r }
 }
 
@@ -1068,6 +1144,53 @@ func WithGitRegistry(r *git.Registry) WSServerOption {
 // error.
 func WithGitRepoFactory(f git.RepoFactory) WSServerOption {
 	return func(s *WSServer) { s.gitFactory = f }
+}
+
+// GitOpenRefusal is the honest non-factory answer the selection carries for
+// one SSH session (remote-helper design §6): a §6 state
+// (unsupportedPlatform, deployFailed, execForbidden) with the message
+// naming what to do about it. State "" is the resolver's Refused — raw, a
+// denied answer, nothing to offer — a machine that has no earned state,
+// and git.open answers the not-available error carrying the reason.
+type GitOpenRefusal struct {
+	State   git.OpenState
+	Message string
+}
+
+// GitOpenSelection is the composition root's selection for one SSH session
+// (remote-helper design D8): a factory to open through, consentRequired to
+// answer, or a refusal naming the §6 state and what to do about it.
+// ConsentRequired, Refusal and Factory are mutually exclusive — the ask and
+// the refusal are the alternatives to opening, never a factory that
+// answers them.
+type GitOpenSelection struct {
+	Factory git.RepoFactory
+	// ConsentRequired — the session's machine has no relay-tier answer;
+	// git.open must answer the consentRequired state and the panel offers
+	// the consent flow. Set means Factory is nil.
+	ConsentRequired bool
+	// Refusal — the honest refusal when the machine cannot be served:
+	// unsupportedPlatform, deployFailed or execForbidden with the message
+	// naming what to do, or State "" with the reason for the resolver's
+	// Refused (raw, a denied answer). Set means Factory is nil.
+	Refusal *GitOpenRefusal
+}
+
+// GitFactoryFor resolves the helper-backed factory selection git.open uses
+// for an SSH session — the composition root's answer to "is a helper
+// available for this host, and may it be used" (the remote-helper design).
+// ConsentRequired and Refusal answer their states instead of opening; a
+// selection with none of the three answers the not-available error.
+// It must be side-effect-free: git.open consults it twice (the handler's
+// refusal decision, then the open), and the two calls must agree.
+type GitFactoryFor func(sess session.Session) GitOpenSelection
+
+// WithGitHelperFactory attaches the helper-backed factory selection for SSH
+// sessions (the remote-helper design). The composition root wires it from
+// the helper's install configuration and the consent store; when absent,
+// git.open answers the not-available error for SSH sessions.
+func WithGitHelperFactory(f GitFactoryFor) WSServerOption {
+	return func(s *WSServer) { s.gitHelperFor = f }
 }
 
 // WithFilesRevealer attaches the OS file-manager reveal capability
@@ -1141,6 +1264,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
 		rx:                  make(map[session.ID]*sessionRx),
+		closeRequested:      make(map[session.ID]struct{}),
 		conns:               make(map[*wsConn]struct{}),
 		outboundBudget:      outbound.NewBudget(outboundBudgetBytes),
 		tunnels:             make(map[string]*tunnel.Tunnel),
@@ -1246,6 +1370,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.backupSpecs(lane, gates.config)...)
 	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)
 	specs = append(specs, s.notifySpecs()...)
+	specs = append(specs, s.notifyFeedSpecs()...)
 	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
 	specs = append(specs, s.gitSpecs(lane, gates.session, gates.git)...)
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
@@ -1309,6 +1434,23 @@ func (s *WSServer) Start(ctx context.Context) error {
 	// Fail closed: no entropy → no token → no connections.
 	if err := s.mintToken(); err != nil {
 		return err
+	}
+
+	// The pane-observation coalescer, for the life of the server (see
+	// ws_paneobserve.go). It runs whether or not anything is enrolled: a
+	// sweep with no watched pane touches one lock and returns.
+	//
+	// Its interval has BOTH ends, and the second one is Stop rather than the
+	// caller's context. A ticker whose only end is the context passed to
+	// Start outlives the server whenever that context does — which in this
+	// package's own tests is the background one, so three of them went on
+	// firing every 120ms for the rest of the run. In a package whose 30s
+	// timeouts already move between test names under constrained scheduling
+	// (nocx-2h08), a leaked periodic goroutine is not a tidiness question.
+	if s.paneObserver != nil {
+		s.sweepDone = make(chan struct{})
+		s.sweepExited = make(chan struct{})
+		go s.runPaneObserverSweeps(ctx, s.sweepDone, s.sweepExited)
 	}
 
 	// Configure the upgrader to accept only our token as the subprotocol,
@@ -1429,6 +1571,17 @@ func (s *WSServer) Stop(ctx context.Context) error {
 	// forced-abandonment policy for work outside a commit interval. Stop
 	// therefore terminates within the documented maximum against any
 	// dependency, cooperative or not.
+	// End the pane-observation coalescer with the server, not with whatever
+	// context happened to start it — and WAIT for it, so a returned Stop
+	// means no sweep is still running.
+	if s.sweepDone != nil {
+		select {
+		case <-s.sweepDone:
+		default:
+			close(s.sweepDone)
+		}
+		<-s.sweepExited
+	}
 	s.inflight.stop()
 	if !s.inflight.waitDrained(s.controlDrainTimeout) {
 		s.log.Warn("abandoning in-flight control work at shutdown", "maxWait", s.controlDrainTimeout)
@@ -1531,6 +1684,29 @@ func (s *WSServer) removeRx(id session.ID) *sessionRx {
 	}
 	delete(s.rx, id)
 	return rx
+}
+
+// markCloseRequested records that the user asked for this session's end.
+// Called by the "close" handler BEFORE the registry close, because the
+// registry close is what wakes monitorExit and the marker has to be there
+// when it looks.
+func (s *WSServer) markCloseRequested(id session.ID) {
+	s.ringsMu.Lock()
+	defer s.ringsMu.Unlock()
+	s.closeRequested[id] = struct{}{}
+}
+
+// takeCloseRequested reports whether this session's end was asked for, and
+// clears the marker. Read-and-clear: the marker describes one teardown, and
+// the exit it describes happens once.
+func (s *WSServer) takeCloseRequested(id session.ID) bool {
+	s.ringsMu.Lock()
+	defer s.ringsMu.Unlock()
+	_, ok := s.closeRequested[id]
+	if ok {
+		delete(s.closeRequested, id)
+	}
+	return ok
 }
 
 // Responder is the outbound capability handed to control-plane handlers:
@@ -1716,6 +1892,40 @@ func (c *connState) get(id session.ID) (session.Session, bool) {
 // files.* call (D15). One line of forwarding; the authorisation answer
 // still comes from the one place that already owns it.
 func (c *connState) Owns(id session.ID) bool { return c.has(id) }
+
+// sessionForPane returns the connection's session that is the pipe of pane.
+//
+// It exists because history.record names a PANE and no session (the pane id
+// is that method's one deliberate renderer-minted identity, ws_history_record
+// .go), while a notification's attribution may only come from the session the
+// backend holds — never from the renderer's claim about where it is (AD-7).
+// Session.PaneID is what makes the walk possible and immutable: "a session is
+// the pipe of one pane for its whole life" (internal/session/session.go).
+//
+// AMBIGUITY IS A NO, never a guess. An empty pane matches nothing — a session
+// attached to no recorded pane is a legitimate state and it is not "the pane
+// with no id" — and two sessions claiming one pane is a state this walk must
+// not resolve by picking, for the same reason sessionIDsOf falls back rather
+// than guessing. Both answer false, and the caller's feature is absent rather
+// than wrong.
+func (c *connState) sessionForPane(pane string) (session.Session, bool) {
+	if pane == "" {
+		return nil, false
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	var found session.Session
+	for _, s := range c.sessions {
+		if s.PaneID() != pane {
+			continue
+		}
+		if found != nil {
+			return nil, false
+		}
+		found = s
+	}
+	return found, found != nil
+}
 
 // --- JSON-RPC types -------------------------------------------------------
 
@@ -2333,18 +2543,25 @@ func (s *WSServer) emitSaturatedNotification(wconn Responder, method string, rej
 // (nocx-mlm7). The resolver stamps the mode on the ConnectConfig it builds
 // from the profile's effective desiredMode; a direct-host open (alias or
 // ad-hoc — no profile to say otherwise) and a local session keep the
-// hardcoded default: script (N3 — wrap and install automatically). Unknown
-// values fall back to the same default so malformed profile data can never
-// violate the open schema over the real socket.
+// hardcoded default. Unknown values fall back to that same default so
+// malformed profile data can never violate the open schema over the real
+// socket.
+//
+// The default is auto, and it must stay the same value the cascade's
+// hardcoded default carries (ADR-0033) — not a literal that merely happens
+// to agree today. Two defaults for one absent mode is what let the ack call
+// a connection `script` while the consent resolver read the same absence as
+// `auto` and offered an upgrade, which is exactly what D8 forbids for a
+// machine at script.
 func desiredModeForAck(remote *ssh.ConnectConfig) string {
 	if remote == nil || remote.DesiredMode == "" {
-		return string(profile.DesiredScript)
+		return string(profile.DefaultDesiredMode())
 	}
 	switch profile.DesiredMode(remote.DesiredMode) {
-	case profile.DesiredRaw, profile.DesiredScript, profile.DesiredRelay:
+	case profile.DesiredAuto, profile.DesiredRaw, profile.DesiredScript, profile.DesiredRelay:
 		return remote.DesiredMode
 	default:
-		return string(profile.DesiredScript)
+		return string(profile.DefaultDesiredMode())
 	}
 }
 
@@ -2492,9 +2709,28 @@ func (s *WSServer) handleDataFrame(state *connState, data []byte) {
 // connection (AD-9). Blocks on ring.write when the ring is full and
 // nothing has been acked — that is the AD-10 backpressure seam.
 func (s *WSServer) pumpToRing(ctx context.Context, sess session.Session, ring *outputRing) {
+	// The grid is fed HERE, on the backend's own read path, and deliberately
+	// not on the subscriber path: this goroutine is started per session and
+	// lives connection-independently, so "closing the frontend does not stop
+	// it being fed" is a property of the placement rather than a promise
+	// (nocx-szb40.2). An unenrolled session drops the bytes at a map lookup.
 	err := sess.StartOutput(ctx, func(data []byte) error {
+		s.feedPaneGrid(sess.ID(), data)
 		return ring.write(data)
 	})
+	// THE INTERVAL'S SECOND END IS NOT HERE, and it was, which made it no end
+	// at all. StartOutput installs the handler and starts the read pump on a
+	// goroutine of its own — it does NOT block until the output is over — so a
+	// withdrawal on this line ran the instant the session opened, racing the
+	// enrolment it was meant to outlive, and nothing closed the interval when
+	// the session actually ended. The comment that used to sit here reasoned
+	// about a blocking call that is not one.
+	//
+	// The close now lives in monitorExit, which waits on sess.Done() and is
+	// the session's teardown owner, started exactly once per session. Found by
+	// the test that asserts the END rather than the start (nocx-szb40.5) —
+	// the shape AGENTS.md names: an invariant with a start and no named
+	// closing event buys a test that guards only the start.
 	if err != nil {
 		s.log.Debug("session output ended", "session_id", string(sess.ID()), "error", err)
 	}
@@ -2577,6 +2813,14 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	<-sess.Done()
 
+	// The pane's backend grid closes here, first, because everything below
+	// this line tears down the things a frame could still be about. A session
+	// that is done can produce no further frame, which is what the AD-6
+	// amendment means by the interval's second end — and this is the end that
+	// covers an enrolment whose own withdrawal never came, because the shell
+	// holding it was killed rather than returning (nocx-szb40.5).
+	s.withdrawPaneGrid(sess.ID())
+
 	// The session died on its own: the close gate is terminal here too, so
 	// a resize in flight on a dead channel is cancelled and nothing new is
 	// enqueued. Same gate as the explicit-close path (closeLane is
@@ -2638,15 +2882,79 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	// scoped to.
 	s.sessionPolicy.Drop(sess.ID())
 
+	// The cause discriminates an authoritative shell exit (with its status)
+	// from a loss, so a tab whose ssh connection dropped is marked instead
+	// of destroyed (nocx-ictcq). The classification is the session layer's
+	// single owner; here the outcome is only mapped onto the wire fields —
+	// and onto the notification centre's record below.
+	//
+	// It is read BEFORE the subscriber check because the raise that follows
+	// does not need a renderer and the exit notification does. That order is
+	// the whole point of the raise: a session that ended while nothing was
+	// attached is exactly the one the bell exists to remember.
+	cause, status := sess.ExitOutcome()
+
+	// Was this end the user's own doing? Read-and-cleared here, and read
+	// unconditionally so the marker never outlives the session it names
+	// (see closeRequested). It cannot be inferred from the cause: a forced
+	// teardown leaves no shell report, so the session layer classifies a
+	// closed tab exactly as it classifies a dropped connection, and it is
+	// right to — the difference is intent, which only the handler saw.
+	requested := s.takeCloseRequested(sess.ID())
+
+	// The feed's first attested source (spec §9). This is a registry fact,
+	// not a parsed byte: AD-6 is untouched because nothing here reads the
+	// stream — the cause comes from the session layer, which is its single
+	// owner (nocx-ictcq).
+	//
+	// A close the user asked for raises NOTHING. This is source
+	// correctness, not filtering: every event that is raised is a member of
+	// the feed and policy decides only its channels, so an end nobody needs
+	// to be told about must not become an event in the first place.
+	// Otherwise the centre's first source opened with a warning — "Session
+	// on <host> was interrupted" — on the most ordinary action there is.
+	// The exit notification below is unaffected: the renderer still learns
+	// the session is gone.
+	if s.notifyRaiser != nil && !requested {
+		level := notify.LevelWarning
+		body := ""
+		if cause == session.ExitExited {
+			if status == 0 {
+				level = notify.LevelSuccess
+			} else {
+				body = fmt.Sprintf("exit status %d", status)
+			}
+		}
+		// At is deliberately not stamped: ingress is the first nocx-owned
+		// stage and stamps it once (internal/notify/ingress.go).
+		//
+		// Background, deliberately. Owner: monitorExit, which is this
+		// session's own teardown goroutine and runs exactly once per
+		// session. Closing event: the return of Admit, which records into
+		// the feed and hands the event to the policy synchronously —
+		// delivery past the debounce window is the policy's to own, not
+		// this call's. Tying it to a connection's context instead would
+		// cancel the record of a session that ended precisely because
+		// nothing was attached, which is the one case the feed exists for.
+		s.notifyRaiser.Raise(context.Background(), notify.Event{
+			SessionID: string(sess.ID()),
+			Title:     sessionEndedTitle(sess.Host(), cause),
+			Body:      body,
+			Kind:      notify.KindSessionEnded,
+			Trust:     notify.TrustAttested,
+			Level:     level,
+			Attribution: notify.Attribution{
+				Backend: commandnames.LocalRoute,
+				Host:    sess.Host(),
+				Session: string(sess.ID()),
+			},
+		})
+	}
+
 	if wconn == nil {
 		return
 	}
 
-	// The cause discriminates an authoritative shell exit (with its status)
-	// from a loss, so a tab whose ssh connection dropped is marked instead
-	// of destroyed (nocx-ictcq). The classification is the session layer's
-	// single owner; here the outcome is only mapped onto the wire fields.
-	cause, status := sess.ExitOutcome()
 	var statusPtr *int
 	if cause == session.ExitExited {
 		statusPtr = &status
@@ -2661,6 +2969,24 @@ func (s *WSServer) monitorExit(rx *sessionRx, sess session.Session) {
 	})); err != nil {
 		s.log.Debug("write exit notification", "error", err)
 	}
+}
+
+// sessionEndedTitle names the end of a session, and is the ONE place that
+// wording is decided (nocx-lmmi5). A local session has no host — Config.Host
+// is set only on the remote branch (internal/session/session.go) — so the
+// hostless format rendered "Session on  ended", a double space in the centre's
+// very first source. The renderer must not paper over it either: a second
+// place deciding how an end reads is two owners of one sentence, and they
+// would part company the first time either changed.
+func sessionEndedTitle(host string, cause session.ExitCause) string {
+	verb := "was interrupted"
+	if cause == session.ExitExited {
+		verb = "ended"
+	}
+	if host == "" {
+		return "Local session " + verb
+	}
+	return "Session on " + host + " " + verb
 }
 
 // exitNotificationParams is the exit notification payload, declared once

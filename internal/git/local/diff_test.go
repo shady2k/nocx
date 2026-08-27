@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/git"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // diffRepo builds a repo with one committed file, then one staged change and
@@ -159,35 +160,57 @@ func TestDiffGoneUntrackedRealGit(t *testing.T) {
 }
 
 func TestDiffContextCancelled(t *testing.T) {
-	env := fakeGitEnv(t, map[string]string{"FAKE_DIFF": "sleep"})
+	marker := filepath.Join(t.TempDir(), "started")
+	env := fakeGitEnv(t, map[string]string{"FAKE_DIFF": "sleep", "FAKE_STARTED_FILE": marker})
 	repo := openRepo(t, env, t.TempDir())
 
 	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
 	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
+		_, err := repo.Diff(ctx, "f.txt", git.SideUnstaged, 1<<20)
+		done <- err
 	}()
-	_, err := repo.Diff(ctx, "f.txt", git.SideUnstaged, 1<<20)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Diff returned %v, want context.Canceled", err)
+	waittest.WaitFor(t, "fake diff to start", func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	})
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Diff returned %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Diff did not return after cancellation")
 	}
 }
 
 // TestDiffChildIgnoresTERM: the escalation reaches KILL and the read sees
 // EOF — the diff child ignores INT and TERM, and only KILL ends it.
 func TestDiffChildIgnoresTERM(t *testing.T) {
-	env := fakeGitEnv(t, map[string]string{"FAKE_DIFF": "sleep_stubborn"})
+	marker := filepath.Join(t.TempDir(), "started")
+	env := fakeGitEnv(t, map[string]string{"FAKE_DIFF": "sleep_stubborn", "FAKE_STARTED_FILE": marker})
 	repo := openRepo(t, env, t.TempDir())
 
 	ctx, cancel := context.WithCancel(context.Background())
 	start := time.Now()
+	done := make(chan error, 1)
 	go func() {
-		time.Sleep(50 * time.Millisecond)
-		cancel()
+		_, err := repo.Diff(ctx, "f.txt", git.SideUnstaged, 1<<20)
+		done <- err
 	}()
-	_, err := repo.Diff(ctx, "f.txt", git.SideUnstaged, 1<<20)
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("Diff returned %v, want context.Canceled", err)
+	waittest.WaitFor(t, "fake diff to start", func() bool {
+		_, err := os.Stat(marker)
+		return err == nil
+	})
+	cancel()
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("Diff returned %v, want context.Canceled", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("Diff did not return after cancellation")
 	}
 	if elapsed := time.Since(start); elapsed > 3*time.Second {
 		t.Fatalf("escalation took %s, KILL never landed", elapsed)

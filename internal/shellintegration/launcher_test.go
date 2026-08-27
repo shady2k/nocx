@@ -1,7 +1,6 @@
 package shellintegration
 
 import (
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -9,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/creack/pty"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // writeBashFixtureHome materialises a fixture $HOME whose .bashrc sets a
@@ -94,6 +93,26 @@ if ls -d "${TMPDIR:-/tmp}"/nocx-zsh.* >/dev/null 2>&1; then echo TRANSIENT_PRESE
 	return home
 }
 
+func launcherStartupObserved(out string) bool {
+	for _, marker := range []string{
+		"\x1b]133;B",
+		"FIXTURE-PROMPT> ",
+		"USER_RC_RAN",
+		"NATIVE_LOGIN_RAN",
+		"RCFILE_TAIL_RAN",
+		"RC_GONE",
+		"RC_PRESENT",
+		"$ ",
+		"# ",
+		"% ",
+	} {
+		if strings.Contains(out, marker) {
+			return true
+		}
+	}
+	return false
+}
+
 // runLauncherOnPTY executes `shPath -c cmd` — shPath standing in for the
 // login shell sshd hands a remote command to — on a real pty, waits for the
 // first prompt, types each line, then waits for the session to end. It
@@ -107,39 +126,37 @@ func runLauncherOnPTY(t *testing.T, shPath, cmd string, env []string, lines ...s
 	t.Helper()
 	c := exec.Command(shPath, "-c", cmd)
 	c.Env = append(os.Environ(), env...)
-	ptmx, err := pty.Start(c)
-	if err != nil {
-		t.Fatalf("pty start: %v", err)
-	}
-	defer func() { _ = ptmx.Close() }()
+	capture := newPTYCapture(t, c)
 
-	done := make(chan []byte, 1)
-	go func() {
-		out, _ := io.ReadAll(ptmx)
-		done <- out
-	}()
-
-	// The bash launcher's first prompt can wait up to 250 ms for the
-	// source-time snapshot job; give both shells room to settle.
-	time.Sleep(600 * time.Millisecond)
+	// The first prompt or fixture readiness marker is the observable boundary
+	// before typing commands. Native fallback shells do not share the
+	// integrated B marker.
+	waittest.WaitForTimeout(t, "the launcher's startup prompt", 20*time.Second, func() bool {
+		select {
+		case <-capture.done:
+			return true
+		default:
+			return launcherStartupObserved(capture.output())
+		}
+	})
 	for _, line := range lines {
-		if _, werr := ptmx.Write([]byte(line + "\n")); werr != nil {
+		if _, werr := capture.ptmx.Write([]byte(line + "\n")); werr != nil {
 			t.Logf("write %q failed (session may have exited early): %v", line, werr)
 		}
-		time.Sleep(400 * time.Millisecond)
 	}
 
-	var out []byte
-	select {
-	case out = <-done:
-	case <-time.After(20 * time.Second):
-		_ = c.Process.Kill()
-		t.Fatal("timed out waiting for the session to end")
-	}
+	waittest.WaitForTimeout(t, "the launcher session to end", 20*time.Second, func() bool {
+		select {
+		case <-capture.done:
+			return true
+		default:
+			return false
+		}
+	})
 	if werr := c.Wait(); werr != nil {
 		t.Logf("session exited non-zero (may be benign): %v", werr)
 	}
-	return string(out)
+	return capture.output()
 }
 
 // The dispatch and the argv cap that used to be asserted here went with the

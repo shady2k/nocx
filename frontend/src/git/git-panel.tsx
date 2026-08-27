@@ -24,11 +24,15 @@
 //    lives in the row's actions slot and owns its click — activating it
 //    never opens the diff (the kit guarantees it; the tests prove it).
 // 3. WHAT THE PANEL CANNOT DO, IT DOES NOT DRAW (D14). On an SSH tab the
-//    mutation controls are ABSENT from the DOM, not disabled — a disabled
-//    control advertises a capability the surface does not have. While a
-//    conflict is unresolved the whole-index controls refuse, VISIBLY and
-//    with the reason (D19): measured, git add -A resolves the conflict
-//    using the marker-laden file and bare git reset aborts the merge.
+//    mutation controls are present exactly when the helper serves the
+//    repository — the wire's ok answer — and absent from the DOM, not
+//    disabled, on every refusal state (consentRequired, unsupported
+//    platform, failed deploy, refused exec, version mismatch), each of
+//    which renders its own message naming what to do (remote-helper
+//    design §6). While a conflict is unresolved the whole-index controls
+//    refuse, VISIBLY and with the reason (D19): measured, git add -A
+//    resolves the conflict using the marker-laden file and bare git reset
+//    aborts the merge.
 // 4. A CLICKED ROW'S DIFF TARGETS THE BINDING AS IT WAS AT THE CLICK — the
 //    store's binding() read inside the handler, never a re-bound one — and
 //    carries the FROZEN origin (cwdFollow:false) so the diff tab answers
@@ -594,10 +598,76 @@ export function GitPanel(props: GitPanelProps) {
             description="Focus a terminal tab to see the repository your shell is standing in."
           />
         </Match>
-        <Match when={props.store.state() === 'remote'}>
-          <EmptyState
-            title="Git on a remote host isn't supported yet"
-            description="The git panel is local-only for now — remote repositories wait on the relay."
+        <Match when={props.store.state() === 'consentRequired'}>
+          <div class="git-consent" data-testid="git-consent-required">
+            {/* The consent flow (remote-helper design D8): the ask is a
+                state, and accepting raises this machine to the relay tier.
+                The copy states the helper serves other remote features,
+                not only git — the panel is where the user meets the
+                trade. */}
+            <StatusCard
+              tone="neutral"
+              title="Allow the nocx helper on this host?"
+              description="The nocx helper hasn't been allowed on this machine yet. Accepting lets nocx run it here, so the git panel can open this repository — the helper serves git and other remote features."
+              action={
+                <Button
+                  size="sm"
+                  data-testid="git-consent-accept"
+                  onClick={() => props.store.grantConsent()}
+                >
+                  Accept
+                </Button>
+              }
+            />
+            <Show when={props.store.consentError() !== null}>
+              {/* The kit's card, not a class of this surface's own: a
+                  refusal shown in place is exactly what StatusCard is for,
+                  and it is inline rather than a toast because a toast
+                  evaporates while the offer it refuses is still on screen. */}
+              <div data-testid="git-consent-error">
+                <StatusCard tone="danger" title={props.store.consentError()!} />
+              </div>
+            </Show>
+          </div>
+        </Match>
+        <Match when={props.store.state() === 'unsupportedPlatform'}>
+          <StatusCard
+            tone="warning"
+            title="This platform can't run the nocx helper"
+            description={
+              props.store.refusalMessage() ??
+              'nocx builds no helper for this machine, so the repository cannot be opened here.'
+            }
+          />
+        </Match>
+        <Match when={props.store.state() === 'deployFailed'}>
+          <StatusCard
+            tone="warning"
+            title="Couldn't install the nocx helper"
+            description={
+              props.store.refusalMessage() ??
+              'Uploading or installing the helper on this host failed. Check the host and refresh to retry.'
+            }
+          />
+        </Match>
+        <Match when={props.store.state() === 'execForbidden'}>
+          <StatusCard
+            tone="warning"
+            title="The host refused the nocx helper"
+            description={
+              props.store.refusalMessage() ??
+              'The host refused the command that would run the helper, or answered with something else. Check the host and refresh to retry.'
+            }
+          />
+        </Match>
+        <Match when={props.store.state() === 'helperVersionMismatch'}>
+          <StatusCard
+            tone="danger"
+            title="The nocx helper needs reinstalling"
+            description={
+              props.store.refusalMessage() ??
+              'The helper on this host answered with a different version than nocx installed. Reinstall it, then refresh.'
+            }
           />
         </Match>
         <Match when={props.store.state() === 'noCwd'}>

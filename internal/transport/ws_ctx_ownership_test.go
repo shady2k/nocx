@@ -34,6 +34,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // probeCallRecorder is a cooperative Prober: the first call blocks until its
@@ -165,6 +166,7 @@ func TestConnectionsTest_DisconnectCancelsProbeAndFreesSlot(t *testing.T) {
 		if time.Now().After(deadline) {
 			t.Fatalf("probe admission slot never freed: last response %s", resp)
 		}
+		// Retry pacing between observable admission responses.
 		time.Sleep(20 * time.Millisecond)
 	}
 }
@@ -220,7 +222,11 @@ loopA:
 	// Disconnect. The session and its replay ring MUST survive (AD-9): the
 	// pump runs on a server/session-owned context, never the connection's.
 	_ = connA.Close()
-	time.Sleep(200 * time.Millisecond)
+	waittest.WaitForTimeout(t, "server to observe the dropped connection", 5*time.Second, func() bool {
+		ws.connsMu.Lock()
+		defer ws.connsMu.Unlock()
+		return len(ws.conns) == 0
+	})
 
 	// Produce output while detached, through the registry.
 	sessObj, err := sess.Get(session.ID(sid))
@@ -228,7 +234,6 @@ loopA:
 		t.Fatalf("get session: %v", err)
 	}
 	_, _ = sessObj.Write([]byte("echo ctx-owner-detached\n"))
-	time.Sleep(500 * time.Millisecond)
 
 	// Reattach: the buffered output replays.
 	connB := connectWS(t, ws)
@@ -354,6 +359,7 @@ func waitDialogFree(t *testing.T, conn *websocket.Conn, wantPath string) {
 		if time.Now().After(deadline) {
 			t.Fatalf("dialog capability never freed: last response %s", resp)
 		}
+		// Retry pacing between observable dialog responses.
 		time.Sleep(20 * time.Millisecond)
 	}
 }

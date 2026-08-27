@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -29,6 +30,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"golang.org/x/sys/unix"
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
@@ -38,7 +40,7 @@ import (
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vault/file"
-	"golang.org/x/sys/unix"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ── socket tap: ONE reader for the whole test ──────────────────────────────
@@ -345,14 +347,9 @@ func terminationReasonOfRun(t *testing.T, h *runLeaseHarness) *content.Terminati
 // observable of the escalation having reached it.
 func waitChildDead(t *testing.T, pid int) {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if err := unix.Kill(pid, 0); errors.Is(err, unix.ESRCH) {
-			return
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("child %d survived the lease's cancellation", pid)
+	waittest.WaitForTimeout(t, fmt.Sprintf("child %d to exit", pid), 10*time.Second, func() bool {
+		return errors.Is(unix.Kill(pid, 0), unix.ESRCH)
+	})
 }
 
 // waitChildAlive asserts the child is STILL running — the negative half of
@@ -371,20 +368,20 @@ func waitChildAlive(t *testing.T, pid int) {
 // execution actually started (there is something for the lease to cancel).
 func readPidFile(t *testing.T, path string) int {
 	t.Helper()
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
+	var pid int
+	waittest.WaitForTimeout(t, "the command to write its pid file", 10*time.Second, func() bool {
 		b, err := os.ReadFile(path) //nolint:gosec // the pid file is the test's own temp file, written by the command under test
-		if err == nil {
-			pid, perr := strconv.Atoi(strings.TrimSpace(string(b)))
-			if perr == nil && pid > 0 {
-				return pid
-			}
+		if err != nil {
+			return false
+		}
+		parsed, perr := strconv.Atoi(strings.TrimSpace(string(b)))
+		if perr != nil || parsed <= 0 {
 			t.Fatalf("pid file holds %q", strings.TrimSpace(string(b)))
 		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	t.Fatalf("the command never wrote its pid file")
-	return 0
+		pid = parsed
+		return true
+	})
+	return pid
 }
 
 // waitForRunState scans the tap until the run terminalizes with the wanted

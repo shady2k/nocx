@@ -51,8 +51,10 @@ import {
   textLengthError,
   reconnectRevisionPolicy,
   recordSaveOutcome,
+  sectionBlocks,
   type Declaration,
   type RevisionPolicy,
+  type SettingsMatrix,
   type SaveOutcome,
   type SettingsMirror,
   type SettingsGroup,
@@ -79,6 +81,8 @@ import {
   type GroupedRailItem,
   IconButton,
   StatusCard,
+  ToggleMatrix,
+  type ToggleMatrixAxis,
   CodeBlock,
   Section,
 } from './ui'
@@ -1160,6 +1164,86 @@ export function SettingsComponent(props: SettingsComponentProps) {
     )
   }
 
+  /**
+   * One cell of a routing matrix: the switch, and the reset affordance every
+   * other setting has.
+   *
+   * The switch's accessible name is the declaration's own label — the whole
+   * cell name ("A program asked for a notification → OS banner"), not the
+   * column it sits under. The headers say WHERE a control is; a screen-reader
+   * user who lands on the switch itself must still hear what it does, and
+   * "banner" alone is not that.
+   *
+   * The declaration's description does not become a line of prose here — ten
+   * of them in a list is the shape this task exists to replace — but it is not
+   * thrown away either: it is the cell's `title`, which is the kit's tooltip
+   * (ADR-0014).
+   */
+  function MatrixCell(props: { decl: Declaration }) {
+    // eslint-disable-next-line solid/reactivity
+    const decl = props.decl
+    const eff = () => effectiveValue(decl.key)
+    return (
+      <div
+        class="ui-settings-matrix-cell"
+        id={keyToDomId(decl.key)}
+        data-key={decl.key}
+        title={decl.description || undefined}
+      >
+        <Checkbox
+          variant="switch"
+          checked={!!eff()}
+          ariaLabel={decl.label}
+          onChange={(c) => void saveSetting(decl.key, c)}
+        />
+        <ProvenanceBadge decl={decl} />
+      </div>
+    )
+  }
+
+  /**
+   * The matrix a section's cells collapse into.
+   *
+   * Nothing here names a kind or a channel: the axes arrive from
+   * `sectionBlocks`, which reads them out of the declaration keys, so a kind
+   * the backend adds gets its row with no edit in this file. The only thing
+   * this function knows is how to turn "which cells match the search" into
+   * "which rows and columns are on screen".
+   *
+   * A search hides an axis rather than removing it (ToggleMatrix's contract),
+   * and hides the matrix WHOLE when no cell survives — a table of headers with
+   * nothing under them says a control exists where none is showing.
+   */
+  function MatrixBlock(props: { matrix: SettingsMatrix; section: string }) {
+    // eslint-disable-next-line solid/reactivity
+    const matrix = props.matrix
+    const cellVisible = (rowId: string, columnId: string): boolean => {
+      const decl = matrix.cell(rowId, columnId)
+      return decl !== undefined && visibleKeys().has(decl.key)
+    }
+    const rowHidden = (row: ToggleMatrixAxis) =>
+      !matrix.columns.some((c) => cellVisible(row.id, c.id))
+    const columnHidden = (column: ToggleMatrixAxis) =>
+      !matrix.rows.some((r) => cellVisible(r.id, column.id))
+    const empty = () => !matrix.rows.some((r) => !rowHidden(r))
+
+    return (
+      <div class="ui-settings-matrix" classList={{ 'st-vis-hidden': empty() }}>
+        <ToggleMatrix
+          ariaLabel={props.section}
+          rows={matrix.rows}
+          columns={matrix.columns}
+          rowHidden={rowHidden}
+          columnHidden={columnHidden}
+          renderCell={(row, column) => {
+            const decl = matrix.cell(row.id, column.id)
+            return decl === undefined ? null : <MatrixCell decl={decl} />
+          }}
+        />
+      </div>
+    )
+  }
+
   function SettingRow(props: { decl: Declaration; visible: boolean }) {
     // eslint-disable-next-line solid/reactivity
     const decl = props.decl
@@ -1396,6 +1480,16 @@ export function SettingsComponent(props: SettingsComponentProps) {
             <For each={visibleSections()}>
               {(section) => {
                 const sectionDecls = () => declarations().filter((d) => d.section === section)
+                // No `sectionVisible` here any more: whether a section shows
+                // at all is `visibleSections`' question and only its
+                // (nocx-avogl.4). A second predicate saying the same thing is
+                // how the two come to disagree.
+                // Memoised, not recomputed per read: the axes are objects, and
+                // `For` keys by reference, so a fresh set on every render would
+                // dispose and rebuild every control in the grid each time the
+                // search box changed. This recomputes only when the backend's
+                // declarations do.
+                const blocks = createMemo(() => sectionBlocks(sectionDecls()))
                 return (
                   <PageSection
                     id={'st-section-' + encodeURIComponent(section)}
@@ -1440,10 +1534,21 @@ export function SettingsComponent(props: SettingsComponentProps) {
                     <Show
                       when={section === INSTRUCTIONS_SECTION}
                       fallback={
-                        <For each={sectionDecls()}>
-                          {(decl) => (
-                            <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />
-                          )}
+                        /* One block per declaration, except that a section's
+                           routing cells collapse into a single matrix at the
+                           position of the first of them (sectionBlocks). Every
+                           section without cells comes through unchanged. */
+                        <For each={blocks()}>
+                          {(block) => {
+                            // Branched outside the JSX rather than in it: a
+                            // block's kind is fixed for the life of the block,
+                            // so there is nothing here for a `Show` to react to.
+                            if (block.kind === 'matrix') {
+                              return <MatrixBlock matrix={block.matrix} section={section} />
+                            }
+                            const decl = block.decl
+                            return <SettingRow decl={decl} visible={visibleKeys().has(decl.key)} />
+                          }}
                         </For>
                       }
                     >

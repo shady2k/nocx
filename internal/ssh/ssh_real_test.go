@@ -22,6 +22,7 @@ import (
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/vault"
+	"github.com/shady2k/nocx/internal/waittest"
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/crypto/ssh/knownhosts"
 )
@@ -187,19 +188,15 @@ func (s *testSSHServer) setMaxSessions(n int) {
 // and the count is the only thing that says it has (nocx-zlvw).
 func (s *testSSHServer) waitLiveConns(want int) {
 	s.t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	waittest.WaitForTimeoutDetail(s.t, "the SSH server connection count", 5*time.Second, func() string {
 		s.liveMu.Lock()
-		got := len(s.liveConns)
-		s.liveMu.Unlock()
-		if got == want {
-			return
-		}
-		if time.Now().After(deadline) {
-			s.t.Fatalf("server holds %d established connections, want %d", got, want)
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
+		defer s.liveMu.Unlock()
+		return fmt.Sprintf("server holds %d established connections, want %d", len(s.liveConns), want)
+	}, func() bool {
+		s.liveMu.Lock()
+		defer s.liveMu.Unlock()
+		return len(s.liveConns) == want
+	})
 }
 
 // killConns closes every established server-side connection, simulating
@@ -706,6 +703,50 @@ func TestConnect_KeyAuth_Success(t *testing.T) {
 	}
 	if string(buf[:n]) != "echo:hello" {
 		t.Fatalf("expected echo:hello, got %q", string(buf[:n]))
+	}
+}
+
+// TestConnect_CapturesTheHostKeyFingerprint: the channel exposes the target
+// host's public-key fingerprint as observed at dial time — the consent key
+// (consent design §3.2). The same machine reached any way is one answer;
+// an empty capture would make every machine share one.
+func TestConnect_CapturesTheHostKeyFingerprint(t *testing.T) {
+	srv := startTestSSHServer(t)
+	defer srv.close()
+
+	khPath := writeKnownHosts(t, srv, srv.addr)
+
+	client, err := NewReal(
+		log.NewSlogAdapter(nil),
+		WithKnownHostsFile(khPath),
+	)
+	if err != nil {
+		t.Fatalf("NewReal: %v", err)
+	}
+	defer func() { _ = client.Close() }()
+
+	ch, err := client.Connect(
+		context.Background(), srv.addr,
+		WithUser("test"),
+		WithAuthMethods([]gossh.AuthMethod{
+			gossh.PublicKeys(srv.userSigner),
+		}),
+		WithPTYSize(80, 24, 640, 480),
+	)
+	if err != nil {
+		t.Fatalf("Connect: %v", err)
+	}
+	defer func() { _ = ch.Close() }()
+
+	rc, ok := ch.(*RealChannel)
+	if !ok {
+		t.Fatalf("Connect returned %T, want *RealChannel", ch)
+	}
+	<-srv.shellReady
+
+	want := gossh.FingerprintSHA256(srv.hostSigner.PublicKey())
+	if got := rc.HostKeyFingerprint(); got != want {
+		t.Fatalf("HostKeyFingerprint = %q, want %q — the fingerprint observed at dial time", got, want)
 	}
 }
 

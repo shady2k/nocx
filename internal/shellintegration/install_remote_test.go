@@ -20,6 +20,8 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 
 	"github.com/pkg/sftp"
+
+	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // ---------------------------------------------------------------------------
@@ -219,7 +221,7 @@ func TestEnsureInstalledRemote_PublishesBundleOverSFTP(t *testing.T) {
 	// A committed manifest names exactly one active generation, and every
 	// file it names exists with the recorded hash and mode (the publisher's
 	// own Verify is the per-file proof — assert it over the wire).
-	vr, err := NewPublisher(testLogger(), sftpFS{client: mustSFTPClient(t, client)}, root).Verify()
+	vr, err := NewPublisher(testLogger(), sftpFS{SFTPFS: ssh.NewSFTPFS(mustSFTPClient(t, client))}, root).Verify()
 	if err != nil {
 		t.Fatalf("Verify over SFTP: %v", err)
 	}
@@ -276,7 +278,7 @@ func TestSFTPFSRename_ReplacesCommittedManifest(t *testing.T) {
 	}
 
 	root := filepath.Join(t.TempDir(), dirName)
-	pub := NewPublisher(testLogger(), sftpFS{client: sftpClient}, root)
+	pub := NewPublisher(testLogger(), sftpFS{SFTPFS: ssh.NewSFTPFS(sftpClient)}, root)
 	if _, err := pub.Publish(testBundle("1")); err != nil {
 		t.Fatalf("publish v1: %v", err)
 	}
@@ -321,7 +323,7 @@ func TestSFTPFSRename_WithoutPosixExtensionKeepsPriorActivation(t *testing.T) {
 	}
 
 	root := filepath.Join(t.TempDir(), dirName)
-	pub := NewPublisher(testLogger(), sftpFS{client: sftpClient}, root)
+	pub := NewPublisher(testLogger(), sftpFS{SFTPFS: ssh.NewSFTPFS(sftpClient)}, root)
 	if _, err := pub.Publish(testBundle("1")); err != nil {
 		t.Fatalf("first publish without posix-rename: %v", err)
 	}
@@ -556,7 +558,7 @@ func TestSFTPCarrierFault_InterruptedPublishLeavesActivationUntouched(t *testing
 	sftpClient := mustSFTPClient(t, client)
 
 	root := filepath.Join(remoteHome, dirName)
-	fsys := newFaultFS(sftpFS{client: sftpClient})
+	fsys := newFaultFS(sftpFS{SFTPFS: ssh.NewSFTPFS(sftpClient)})
 	pub := NewPublisher(testLogger(), fsys, root)
 
 	v1 := testBundle("1")

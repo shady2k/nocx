@@ -191,7 +191,7 @@ func (rc *RealClient) Connect(ctx context.Context, host string, opts ...ConnectO
 		}
 	}
 
-	ch, err := rc.openShell(ctx, acq.client, acq.resolved, acq.cfg, func() { rc.pool.Release(acq.handle) }, lc)
+	ch, err := rc.openShell(ctx, acq.client, acq.resolved, acq.cfg, func() { rc.pool.Release(acq.handle) }, lc, acq.pconn.fingerprint)
 	if err != nil {
 		// Failed to open the shell — release our reference so the
 		// connection can close if we were the only tab. Without this the
@@ -727,9 +727,10 @@ func validateTrustWrite(path, content, addr string, key gossh.PublicKey, authori
 //     command-line and remote command"), so the configured command runs
 //     as-is and no launcher or installer is consulted (spec §4.2).
 //  2. The desired mode (nocx-mlm7) gates everything else: raw publishes
-//     nothing and opens a plain shell; relay behaves as raw in this epic;
-//     script (or empty — the direct-host default) publishes and
-//     integrates.
+//     nothing and opens a plain shell; auto (the default), script and
+//     relay — or empty, the direct-host default — publish and integrate.
+//     The tiers are additive: relay allows the deployed binary and never
+//     withholds the scripts (§5.2, nocx-7k8ma).
 //  3. In script mode the bundle is published over SFTP through the
 //     RemoteInstaller, CONCURRENTLY with the loader (design §6.1 step 2,
 //     §7). Its outcome is REPORTED AND NOT CONSULTED for which command is
@@ -763,8 +764,10 @@ func (rc *RealClient) shellStartCommand(ctx context.Context, gclient *gossh.Clie
 		return resolved.remoteCommand, ReasonRemoteCommand, nil
 	}
 
-	// raw and relay publish nothing and integrate nothing (N1, §3.1; relay
-	// is inert this epic). Unknown modes fail closed.
+	// raw publishes nothing and integrates nothing (N1, §3.1). relay is
+	// NOT inert: the tiers are additive, so allowing the deployed binary
+	// never withholds the scripts (§5.2, nocx-7k8ma). Unknown modes fail
+	// closed.
 	if !modeAllowsIntegration(cfg.DesiredMode) {
 		return "", ReasonNone, nil
 	}
@@ -965,7 +968,7 @@ func (rc *RealClient) publishBundle(ctx context.Context, gclient *gossh.Client, 
 // happens between these two statements is one round trip for a channel and its
 // pty; the publish then runs beside the loader on that same connection exactly
 // as before.
-func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, releaseRef func(), lc *lifecycleHandle) (*RealChannel, error) {
+func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, resolved *resolvedConfig, cfg *ConnectConfig, releaseRef func(), lc *lifecycleHandle, hostKeyFingerprint string) (*RealChannel, error) {
 	sess, err := rc.openSessionWithPTY(gclient, resolved, cfg)
 	if err != nil {
 		lc.close()
@@ -1053,6 +1056,7 @@ func (rc *RealClient) openShell(ctx context.Context, gclient *gossh.Client, reso
 		inputGate:              gate,
 		bootstrapDone:          bootstrapDone,
 		shellIntegrationReason: reason,
+		hostKeyFingerprint:     hostKeyFingerprint,
 		closeCb: func() {
 			_ = session.Close()
 		},

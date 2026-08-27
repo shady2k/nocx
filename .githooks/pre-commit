@@ -1,22 +1,19 @@
 #!/bin/sh
 set -eu
 
+# THE FAST GATE. Everything here is static and reads the tree: formatting,
+# linting, the ratchets, the wire contracts, the type checkers. Seconds.
+#
+# THE TEST SUITES ARE NOT HERE, and that is deliberate. They ran in containers
+# on every commit that touched a .go or a frontend/ file — the whole Go module
+# under -race and the whole vitest suite — which is minutes per commit, paid
+# again on every amend and every small step of a refactor. They now run in
+# pre-push, once per push, which is the last moment before work leaves this
+# machine and the moment where being wrong actually costs somebody else
+# something. CI remains the source of truth either way.
+
 warn() { printf "FAIL: %s\n" "$1"; }
 ok()   { printf "OK:   %s\n" "$1"; }
-
-# Tests do NOT run in this hook. They used to — two containers started in
-# parallel here, `go test -race` and vitest — and that made every commit wait on
-# a Docker daemon: minutes of wall clock, plus the concurrency defect nocx-x6z3
-# names, where parallel container runs from different worktrees break each
-# other's node_modules. This hook is now STATIC ONLY: formatters, linters,
-# ratchets, type checks and the wire contracts. Everything here reads files.
-#
-# The runners still exist and are still the gate — they moved, they did not go
-# away. `.githooks/containerized-tests.sh` carries both functions, so
-# `. .githooks/containerized-tests.sh && go_test_containerized` runs one by
-# hand, and `make ci-full` runs every CI job. Per AGENTS.md that full gate
-# belongs to whoever integrates into main, which is exactly the party this hook
-# was charging on every commit by every worker.
 
 # go-installed tools (gofumpt, golangci-lint) live in $(go env GOPATH)/bin, which
 # an interactive shell has on PATH but a hook invoked by an editor or a sandboxed
@@ -220,12 +217,17 @@ else
     ok "tsc --noEmit (e2e) — skipped (no e2e/ changes staged)"
 fi
 
-# --- 6. the landing page's structural gate -----------------------------------
-# Cheap (no toolchain, no container), so it runs whenever it could have anything
-# to say. It is also run by the deploy workflow: a page that fails it must not
-# reach the public URL because someone skipped a local hook.
+# The landing page's structural gate. Cheap (no toolchain, no container), so
+# it runs whenever it could have anything to say. It is also run by the deploy
+# workflow: a page that fails it must not reach the public URL because someone
+# skipped a local hook.
 if printf '%s\n' "$CHANGED" | grep -qE '^(site/|scripts/check-site\.sh$|scripts/site-forbidden-phrases\.txt$)'; then
-    host_gate "check-site" ./scripts/check-site.sh
+    if ! ./scripts/check-site.sh; then
+        warn "check-site"
+        printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
+        exit 1
+    fi
+    ok "check-site"
 else
     ok "check-site — skipped (no site/ changes staged)"
 fi
@@ -239,15 +241,14 @@ ok "beads export"
 
 printf "\nAll checks passed.\n"
 
-# What "all checks passed" does NOT mean. AGENTS.md carries this warning for the
-# e2e container and carried nothing of the kind for this hook, so it read as a
-# faithful pre-flight and is not — and it covers less now than when that was
-# written, because no test of any kind runs here. What passes is: it compiles,
-# it is formatted, it lints, and the wire contracts are current. Whether it
-# WORKS is answered by the runs below, and by nothing in this file. A release
-# attempt and its follow-up PR both came back red from a job this hook had just
-# called green (nocx-cn86), back when it did run tests.
-printf "  NOT covered here: any test at all           — make ci-full\n"
+# What "all checks passed" does NOT mean. This hook is STATIC: it reads the
+# tree and never runs a test. The suites moved to pre-push (the Go module under
+# -race, vitest), and even there the warning below still holds — those run in
+# Debian with Go from the golang image, no Secret Service, every core this host
+# has and the test cache intact, where CI runs Ubuntu, setup-go, two keyring
+# variants, 4 cores and -count=1. A release attempt and its follow-up PR both
+# came back red from a job the old hook had just called green (nocx-cn86).
+printf "  NOT covered here: the test suites themselves  — pre-push, or \`make ci\`\n"
 printf "                    macOS (bash 3.2, no /proc, Darwin PTY) — CI's \`ci-mac\` job\n"
 printf "                    Ubuntu + both keyring variants — scripts/ci-linux.sh\n"
 printf "                    the e2e suite itself           — e2e/run-in-container.sh\n"

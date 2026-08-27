@@ -75,7 +75,7 @@ type Config struct {
 
 const (
 	// maxOpenConns is ONE, and the reason is the cipher rather than SQLite
-	// (ADR-0042, nocx-4p3l2). This store is encrypted through a VFS that
+	// (ADR-0043, nocx-4p3l2). This store is encrypted through a VFS that
 	// enciphers whole 4096-byte blocks. A WAL frame is 24+page_size, so
 	// frames never align to those blocks: appending one rewrites the block
 	// holding the tail of the frame before it — a frame a reader on another
@@ -174,6 +174,8 @@ func (s *sqliteContent) run(ctx context.Context, fn func(ctx context.Context) er
 		return ErrClosed
 	}
 	req := writeReq{ctx: ctx, fn: fn, done: make(chan writeOutcome, 1)}
+	// Before the handoff the request is still the caller's, so a cancel or a
+	// Close may abandon it: nothing has run and nothing is owed.
 	select {
 	case s.writeCh <- req:
 	case <-ctx.Done():
@@ -181,19 +183,30 @@ func (s *sqliteContent) run(ctx context.Context, fn func(ctx context.Context) er
 	case <-s.stop:
 		return ErrClosed
 	}
-	select {
-	case out := <-req.done:
-		// Matches the other write paths: the at-rest posture (0600 on every
-		// database file) is re-asserted after any outcome — a failed
-		// transaction is a no-op for chmod, and a committed one must not be
-		// skipped because of an error that followed it.
-		enforceFileModes(s.path)
-		return out.err
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-s.stop:
-		return ErrClosed
-	}
+	// After it, the request is the writer's and the answer is the only way
+	// out — which is why this select has no cancellation branches to match
+	// the one above. The moment the send lands, fn is running on the writer
+	// goroutine; returning here would abandon a mutation still executing, on
+	// both axes at once. It would race every caller that assigns into the
+	// variable it returns, the write happening on the writer goroutine and
+	// the read on this one with nothing ordering them. And it would report a
+	// committed transaction as a cancel: fn runs to its Commit regardless,
+	// so the ledger keeps the row while the caller is told it does not
+	// exist.
+	//
+	// Waiting is safe on both axes because the writer never drops an
+	// accepted request: see process, whose contract this is, and writer's
+	// drain loop, which answers everything already queued before it exits on
+	// stop. And it costs a cancelled caller nothing extra — fn is handed
+	// req.ctx, so cancellation still ends the work promptly rather than
+	// making this wait out a full transaction.
+	out := <-req.done
+	// Matches the other write paths: the at-rest posture (0600 on every
+	// database file) is re-asserted after any outcome — a failed transaction
+	// is a no-op for chmod, and a committed one must not be skipped because
+	// of an error that followed it.
+	enforceFileModes(s.path)
+	return out.err
 }
 
 // Open creates or opens the encrypted ContentDB at cfg.Path. A wrong key

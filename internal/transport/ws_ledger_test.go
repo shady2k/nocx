@@ -915,6 +915,17 @@ func (l *failingLedger) StartExecution(ctx context.Context, in content.StartExec
 	return l.LedgerRepository.StartExecution(ctx, in)
 }
 
+// RecordCompleted is history.record's own store call — the second durable
+// writer of a finished command (ws_ledger_notify.go). It is here rather than
+// in a double of its own so "the store refuses this write" is one fixture for
+// both writers.
+func (l *failingLedger) RecordCompleted(ctx context.Context, in content.CompletedCommand) (string, error) {
+	if l.failOn == "RecordCompleted" {
+		return "", l.err
+	}
+	return l.LedgerRepository.RecordCompleted(ctx, in)
+}
+
 func (l *failingLedger) FinishExecution(ctx context.Context, execID int64, end content.FinishExecution) error {
 	if l.failOn == "FinishExecution" {
 		return l.err

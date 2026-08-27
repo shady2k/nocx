@@ -6,17 +6,23 @@
 // Keyed on the dispatcher, so the app's one dispatcher means one surface
 // and a test that builds its own gets its own — nothing is global.
 //
-// It also owns THE SAME REPORT AN UPLOAD'S FAILURE GETS, through the same
-// seam and deliberately not through a parallel one: `subscribeDone` ->
-// `showToast` on a `failed` outcome. A person must learn a transfer failed
-// wherever they are, and the operations indicator is a badge they may not
-// be looking at.
+// IT NO LONGER TOASTS A TRANSFER'S OUTCOME, for upload-surface.ts's reason
+// and in the same commit (nocx-zlxmm). It used to subscribe to
+// files.downloadDone and call showToast itself on a `failed` outcome —
+// straight into the overlay, past the notification pipeline, so nothing
+// remained afterwards for the notification centre to show.
 //
-// Two differences from the upload surface, both the direction rather than
-// an omission. There is no stranded-paths warning, because a download
-// creates nothing on the far host and can leave nothing behind. And a
-// `cancelled` outcome is silent, exactly as it is for an upload: the person
-// asked for it, and telling them what they just did is noise.
+// The backend raises that outcome now, at `settleDownload`, as an attested
+// `transfer.finished` carrying the same name and the same reason, and it
+// reaches this same `showToast` through `notify.toast`
+// (frontend/src/notify/toast-bridge.ts). Keeping the subscription would give
+// a person two toasts for one download. The brief for this work named only
+// the upload surface; leaving this one would have doubled the download
+// instead, which is the same defect wearing the other direction's clothes.
+//
+// `report` stays, and is not the same fact: it fires where files.download
+// was refused or where there is no connection to fetch the bytes over —
+// states in which no backend transfer exists to settle at all.
 
 import type { Dispatcher } from '../dispatcher'
 import { showToast } from '../ui/toast'
@@ -42,14 +48,6 @@ function createDownloadSurface(dispatcher: Dispatcher): DownloadSurface {
     store,
     saver: createBrowserDownloadSaver(),
     report: (message, level) => showToast({ message, level }),
-  })
-  services.subscribeDone((p) => {
-    if (p.outcome === 'failed') {
-      // The name is always on the frame, including on a failure, so the
-      // person can tell which of two downloads this was.
-      const why = p.error !== undefined && p.error !== '' ? `: ${p.error}` : '.'
-      showToast({ message: `Download failed — ${p.name}${why}`, level: 'danger' })
-    }
   })
   return { services, store, flow }
 }

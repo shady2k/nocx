@@ -38,6 +38,11 @@ func writeFakeGit(t *testing.T) string {
 	body := `#!/bin/sh
 printf '%s\n' "$@" >> "$FAKE_GIT_LOG"
 printf '\n' >> "$FAKE_GIT_LOG"
+mark_started() {
+  if [ -n "${FAKE_STARTED_FILE:-}" ]; then
+    printf started > "$FAKE_STARTED_FILE"
+  fi
+}
 # Real git accepts git-level options BEFORE the subcommand, and the reader
 # uses one: --no-optional-locks, so that polling never rewrites .git/index.
 # Skip them here for the same reason, or this fake dispatches on a flag and
@@ -104,8 +109,10 @@ case "$1" in
         echo "fatal: index corrupt" >&2
         exit 1 ;;
       sleep)
+        mark_started
         sleep 1000 ;;
       sleep_stubborn)
+        mark_started
         trap '' INT TERM
         sleep 1000 ;;
       fail)
@@ -200,8 +207,8 @@ case "$1" in
       esac
     fi
     case "${FAKE_DIFF:-none}" in
-      sleep) sleep 1000 ;;
-      sleep_stubborn) trap '' INT TERM; sleep 1000 ;;
+      sleep) mark_started; sleep 1000 ;;
+      sleep_stubborn) mark_started; trap '' INT TERM; sleep 1000 ;;
       fail) echo "fatal: bad config" >&2; exit 128 ;;
       *) exit 0 ;;
     esac ;;

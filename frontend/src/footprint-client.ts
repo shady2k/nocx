@@ -8,12 +8,16 @@
 // no longer reach, and lastObservedAt is "when nocx last saw it", never a
 // claim about the host right now.
 //
-// shell.footprint.uninstall is offered only for destinations with a
-// removableProfileId (a saved connection resolves to them) — an action that
-// is valid from the state the user is in. The backend owns the dial; the
-// renderer never sees an SSH client.
+// shell.footprint.uninstall and shell.footprint.helperUninstall are
+// offered only where a removableProfileId is present (a saved connection
+// resolves to them) — an action that is valid from the state the user is
+// in. The backend owns the dial; the renderer never sees an SSH client.
+// The helper uninstall closes the running helper's channel before removing
+// the tree (D25) and forgets the observation, so the next status call
+// stops listing the host.
 
 import type { Dispatcher } from './dispatcher'
+import type { ShellFootprintHelperUninstallResult } from './generated/shell.footprint.helperUninstall'
 import type { ShellFootprintStatusResult } from './generated/shell.footprint.status'
 import type { ShellFootprintUninstallResult } from './generated/shell.footprint.uninstall'
 
@@ -35,5 +39,22 @@ export class FootprintClient {
     return this.dispatcher.call<ShellFootprintUninstallResult>('shell.footprint.uninstall', {
       profileId,
     })
+  }
+
+  /** Remove the remote helper on the host a saved connection reaches
+   *  (remote-helper design D25): the whole ~/.nocx/helper tree goes —
+   *  including directories an interrupted install left incomplete — and the
+   *  row disappears from the listing. removed reports whether a tree
+   *  existed at all; uninstalling a host with nothing installed is a
+   *  no-op that succeeds. */
+  helperUninstall(
+    profileId: string,
+    fingerprint: string,
+    path: string,
+  ): Promise<ShellFootprintHelperUninstallResult> {
+    return this.dispatcher.call<ShellFootprintHelperUninstallResult>(
+      'shell.footprint.helperUninstall',
+      { profileId, fingerprint, path },
+    )
   }
 }

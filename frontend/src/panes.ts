@@ -23,12 +23,20 @@
 
 import type { WSClient } from './ipc'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
+import {
+  paneIndicator,
+  type PaneActivity,
+  type PaneActivitySource,
+  type DriverState,
+} from './pane-observation'
+import { WorkFinishedWatch } from './pane-work-finished'
 import { type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import type { ProfileClient, SSHProfile } from './profiles'
 import { adoptAliasProfile, parseQuickConnect } from './profiles'
 import { resolveSshProfileOverlay } from './quick-connect-assembly'
 import { cardQuote } from './overview/overview-model'
+import { NotifyClient } from './notify-client'
 import { showToast } from './ui/toast'
 import { showConfirm } from './ui/dialog'
 import {
@@ -99,6 +107,11 @@ export class Pane implements PaneHost {
    *  separately, through updateProgramTitle. */
   private _pushedTitle = ''
   private _hasActivity = false
+  /** What an ENROLLED pane's driver last said its screen was inviting
+   *  (nocx-szb40.3), or null for a pane nobody enrolled — which is almost
+   *  every pane. Never derived here: it is classified in the backend, where
+   *  the grid lives, and arrives as session.observationChanged. */
+  private _observation: DriverState | null = null
   /** Whether the content has declared its opening over (PaneHost.
    *  contentSettled). Output before that is the pane starting up, not
    *  something the user missed. */
@@ -111,6 +124,20 @@ export class Pane implements PaneHost {
   private _groupKey = ''
   private _depth = 0
   private _agentStatus: AgentStatus | null = null
+  /** The settle window between "this pane looks idle" and "its work
+   *  finished" (nocx-n3nfg, notification design §3.4). The pane owns the
+   *  STATUS; the watch owns only the timer over it, so the two are not two
+   *  copies of one fact. Constructed unconditionally: a surface that is not
+   *  a terminal never produces a program title, so its watch never arms. */
+  private readonly _workWatch = new WorkFinishedWatch({
+    session: () => this.content.lineage?.()?.sessionId ?? null,
+    onFinished: (sessionId) => this.onWorkFinished?.(sessionId),
+  })
+  /** Where a settled pane is reported. Wired by PaneManager, which is the
+   *  half of this that holds a client — a Pane is chrome and asks nobody
+   *  anything. Read at FIRE time, so a pane whose reporting is rewired
+   *  mid-window reports through the new one. */
+  onWorkFinished: ((sessionId: string) => void) | null = null
   private _tooltip = ''
   private _subtitle = ''
   private _adoptable = false
@@ -225,8 +252,20 @@ export class Pane implements PaneHost {
     return this._hasActivity
   }
 
-  get agentStatus(): AgentStatus | null {
-    return this._agentStatus
+  /** What this pane is doing, merged from both sources — the enrolled pane's
+   *  driver when there is one, the terminal title otherwise. See
+   *  pane-observation.ts, which owns the merge. `_agentStatus` below is NOT
+   *  this: it is the title's own reading, kept separate because the
+   *  work-finished watcher's edge is a claim about the title and must stay
+   *  one (its trust class is `heuristic` for that reason). */
+  get agentStatus(): PaneActivity | null {
+    return paneIndicator(this._observation, this._agentStatus)?.activity ?? null
+  }
+
+  /** How strong the evidence behind agentStatus is. `title` is the weaker row
+   *  of the provenance table: it may light an indicator and decides nothing. */
+  get agentSource(): PaneActivitySource | null {
+    return paneIndicator(this._observation, this._agentStatus)?.source ?? null
   }
 
   get tooltip(): string {
@@ -393,6 +432,20 @@ export class Pane implements PaneHost {
    *  string; that empty delivery reaches here too and resets the status,
    *  the way an empty title always did.
    *  Wired through TerminalContent's constructor. */
+  /** The backend's classification of this pane's screen (nocx-szb40.3).
+   *
+   *  Pushed by the content, which owns the session handle, exactly as the
+   *  program title is. Null when the pane stops being observed — its agent
+   *  exited, or the enrolment was withdrawn — and the indicator falls back to
+   *  the title's weaker reading rather than holding a stale finding.
+   */
+  updatePaneObservation(state: DriverState | null): void {
+    if (this._disposed) return
+    if (state === this._observation) return
+    this._observation = state
+    this.onDisplayChange?.()
+  }
+
   updateProgramTitle(programTitle: string): void {
     if (this._disposed) return
     this.updateAgentStatus(programTitle)
@@ -428,6 +481,10 @@ export class Pane implements PaneHost {
 
   close(): void {
     this._disposed = true
+    // Cancel three of §3.4's four: the tab is going, so whatever it was
+    // about to say about itself is no longer true. The other three cancels
+    // are transitions and live in updateAgentStatus.
+    this._workWatch.cancel()
     this._mountAbort.abort()
     this._viewportObserver?.disconnect()
     this._viewportObserver = null
@@ -456,7 +513,21 @@ export class Pane implements PaneHost {
     if (this._disposed) return
     const next = detectAgentStatus(programTitle)
     if (next === this._agentStatus) return
+    const prev = this._agentStatus
     this._agentStatus = next
+    // The EDGE, not the value. detectAgentStatus is stateless and answers
+    // about one title; "work finished" is a transition held for a while,
+    // and pane-work-finished.ts is the state machine over it (design §3.4).
+    // The transition is handed over rather than re-derived there, so the
+    // pane's status keeps one owner.
+    //
+    // Nothing here asks whether the tab is active. Suppressing what the
+    // person is already looking at is the ROUTER's rule (design §6.1) and
+    // it owns it for every other source; deciding it a second time here
+    // would be a second owner of "where does this go" — and it would also
+    // silence the feed row, which is the half that exists precisely so a
+    // person can find out what they missed.
+    this._workWatch.edge(prev, next)
     if (next === 'idle' && !this._active) {
       this.markActivity()
     }
@@ -545,6 +616,23 @@ function insertionIndex(from: number, to: number, before: boolean): number {
   const at = before ? to : to + 1
   return from < at ? at - 1 : at
 }
+
+/**
+ * The route identity of this machine, the one backend a tab can be on today.
+ *
+ * The same vocabulary internal/commandnames.LocalRoute uses, and the same
+ * string the notify feed stamps into every occurrence's backendId. It is
+ * spelled here rather than imported from ports-client's LOCAL_TARGET_ID
+ * because that constant answers a different question — which target the
+ * ports methods scope to — and one of the two will change when the relay
+ * lands.
+ *
+ * Exported because the composition root needs it too: a session.focus push
+ * carries a session id and nothing else (nocx-jiwq.1), so the backend id it
+ * resolves against is THIS backend — and spelling 'local' a second time at
+ * that call site would be a second answer to which machine a tab is on.
+ */
+export const LOCAL_BACKEND_ID = 'local'
 
 export class PaneManager {
   private readonly panes: Pane[] = []
@@ -1030,6 +1118,7 @@ export class PaneManager {
         onCreateEndpoint: this.onCreateEndpoint,
         onOpenRoles: this.onOpenRoles,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
+        onPaneObservationChange: (state) => paneRef.current?.updatePaneObservation(state),
         // Where the pane IS, recorded so a restart reopens it there
         // (nocx-zkiv4). Fire-and-forget and fail-quiet: a directory the
         // chain did not take costs the NEXT restore its cwd — it falls back
@@ -1113,6 +1202,7 @@ export class PaneManager {
         },
         onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
+        onPaneObservationChange: (state) => paneRef.current?.updatePaneObservation(state),
         onActiveOriginChange: () => this.onActivePaneChange?.(),
         onPortsTargetChange: () => this.onActivePaneChange?.(),
         onVaultSealed: this.onVaultSealed,
@@ -1249,6 +1339,28 @@ export class PaneManager {
     pane.setupViewportObserver()
 
     pane.onCloseRequested = () => void this.closePane(pane)
+    // A settled pane, reported to the pipeline (ADR-0029). Wired HERE and
+    // not in Pane for the same reason the close intent is: a Pane holds no
+    // client. Its OWN method, because kind is stamped from the method
+    // invoked — notify.paneWorkFinished is what makes this heuristic, and
+    // there is no argument here or on NotifyClient by which it could become
+    // a kind that reaches push.
+    //
+    // Fire-and-forget and fail-quiet, exactly as the bell is. Every refusal
+    // is final rather than retryable: the method missing means a backend
+    // built without the pipeline, and an unknown session means the pane
+    // reattached inside the settle window, which is a notification that
+    // should not happen rather than one to try again.
+    pane.onWorkFinished = (sessionId) => {
+      void new NotifyClient(this.client.dispatcher)
+        .paneWorkFinished({ sessionId })
+        .catch((err: unknown) => {
+          log.warn('nocx: finished work not reported', {
+            sid: sessionId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+        })
+    }
     this.tabStrip.addPane(pane)
     if (activateNow) {
       void this.activate(pane)
@@ -1957,6 +2069,40 @@ export class PaneManager {
   activeTerminalContent(): TerminalContent | null {
     const content = this.activePane?.content
     return content instanceof TerminalContent ? content : null
+  }
+
+  /**
+   * The tab a (backendId, sessionId) pair names, or undefined.
+   *
+   * Session -> tab is the RENDERER's question and only the renderer can
+   * answer it: the backend's Attribution.Tab is a WebSocket connection id,
+   * not a tab. The notification centre asks it to focus the tab an
+   * occurrence came from.
+   *
+   * The backend id is COMPARED, never ignored. Every tab this build opens is
+   * on this machine, so the only pair that can match carries
+   * internal/commandnames.LocalRoute's value — and an argument that is
+   * accepted and dropped silently stops meaning anything by the time the
+   * relay lands and a second backend's sessions start arriving with ids of
+   * their own.
+   *
+   * The session comes from the content's own capability, so PaneManager never
+   * learns which content class replied — and the capability is `lineage()`,
+   * the one that answers what a tab HOLDS, not `activeOrigin()`, which answers
+   * which MACHINE a tab speaks for (nocx-2gfh6). The difference is the whole
+   * defect: activeOrigin goes silent the moment the shell exits, so a
+   * session.ended row — the notification centre's own first source — could
+   * never be activated, while its tab was still on the strip with its
+   * scrollback readable. A pane is resolvable for exactly as long as it
+   * exists, which is what the panel's meta line already claims.
+   *
+   * Only the session id is read here. The parent edge beside it confers
+   * nothing and is not consulted: this answers "which tab is this occurrence
+   * from", never "what may one tab do to another" (ADR-0020 §5, lineage.ts).
+   */
+  findBySession(backendId: string, sessionId: string): Pane | undefined {
+    if (backendId !== LOCAL_BACKEND_ID || sessionId === '') return undefined
+    return this.panes.find((p) => p.content.lineage?.()?.sessionId === sessionId)
   }
 
   /** The pane whose session matches, when any pane in this window holds it.

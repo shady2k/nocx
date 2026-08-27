@@ -163,7 +163,12 @@ type historyRecordHandlers struct {
 	// entry carries one; a row that cannot say who wrote it is a shape the
 	// ledger does not have.
 	clientID string
-	r        Responder
+	// raiser is the notification pipeline's ingress (ADR-0029); nil when the
+	// host built no pipeline, which every headless test server is. It is on
+	// THIS handler and on no other of the history family because this is the
+	// one that records an ending: history.query is a question (nocx-n3nfg).
+	raiser NotifyRaiser
+	r      Responder
 }
 
 // historyMachine is the transport-owned discovery seam history.record needs:
@@ -202,6 +207,16 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + msg})
 		return
 	}
+
+	// Read the session BEFORE the store write, not after (nocx-n3nfg): the
+	// store call below can outlast a tab the user closed the instant their
+	// command ended, and that block — the one nobody was watching — is
+	// precisely what the notification centre exists to remember. The walk is
+	// pane -> session because this method names a pane and no session, and a
+	// notification's attribution may only come from the session the backend
+	// holds (AD-7); see connState.sessionForPane for what an ambiguous or
+	// absent pane answers, and why it answers no rather than a guess.
+	sess, live := state.sessionForPane(p.PaneID)
 
 	// Mask at the wire, in exactly one place. ws_history_record is the
 	// single writer of durable rows, so it is the single place masking can
@@ -429,6 +444,71 @@ func (h historyRecordHandlers) handleHistoryRecord(ctx context.Context, wconn *w
 	}
 
 	_ = h.r.TryResult(req.ID, mustMarshal(ack))
+
+	// AND THE COMMAND'S END BECOMES A NOTIFICATION (nocx-n3nfg, design §3).
+	// Last, after the ack, for the reason the close's raise is last: the
+	// renderer's answer must not wait on a sink.
+	//
+	// The gate is `the record landed AND the status is an outcome`. The
+	// second half is this seam's "closed phase": validateHistoryRecord admits
+	// `running` — the renderer sends it for a command it is still watching —
+	// and a command still running has not finished, whatever the store wrote.
+	// The first half is everything above having returned no error; a
+	// notification for a command whose end was never recorded would announce
+	// a fact that does not exist.
+	//
+	// THERE IS NO REPLAY GUARD HERE, and none is invented (nocx-n3nfg).
+	// history.record carries no client-minted id and no clientSeq, and
+	// RecordCompleted mints its own id every call — "nothing replays this id
+	// — the backend minted it" (internal/content/ledger_command.go) — so a
+	// re-delivery from history-outbox.ts writes a SECOND ROW. The outbox only
+	// re-sends a call whose send() rejected, so that needs an ack lost after
+	// the write landed; when it happens the duplicate notification is exactly
+	// as wrong as the duplicate row, and no more. Making the raise idempotent
+	// alone would make the notification more careful than the durable record
+	// it announces, and hide the row from whoever comes to fix it.
+	if live && h.raiser != nil && isBlockOutcome(content.EntryStatus(p.Status)) {
+		// Background, deliberately, and for the reason ws.go's session.ended
+		// raise gives at the same seam. The request's context would cancel
+		// the record of a command whose tab died with it, and Admit refuses a
+		// cancelled context outright, so the one block nobody was watching is
+		// the one that would be lost.
+		//
+		// Owner: this handler, which runs once per recorded outcome on the
+		// content queue. Closing event: the return of Raise, which records
+		// the occurrence in the feed and hands the event to the policy
+		// synchronously — delivery past the debounce window is the policy's
+		// to own, not this call's. So the span has both ends: the context
+		// exists from here until Raise returns, and nothing holds it after.
+		//
+		// rowCommand, never p.Command: it is the text the ROW stores — every
+		// secret replaced by its mask or by the reference a save already
+		// consumed — and a title travels further than a database row does.
+		h.raiser.Raise(context.Background(), blockFinishedEvent(
+			sess, rowCommand, content.EntryStatus(p.Status), ledgerCloseFacts{
+				// The reason this seam does not carry: derived from the one
+				// outcome it does, through the owner that already derives it
+				// for the row (ws_history_ledger.go). A second mapping here
+				// would let the banner and the row disagree about how a
+				// command ended.
+				TerminationReason: string(terminationForStatus(content.EntryStatus(p.Status))),
+				ExitCode:          p.ExitCode,
+			}))
+	}
+}
+
+// isBlockOutcome reports whether a history.record status says how a command
+// ENDED. It is the history seam's equivalent of the close's `phase == closed`
+// check: the wire vocabulary (validateHistoryRecord) also admits `running`,
+// which is a command the renderer is still watching and has no ending to
+// announce. `unknown` IS an outcome — the run ended and nobody observed how,
+// which blockFinishedTitle renders with the neutral verb.
+func isBlockOutcome(status content.EntryStatus) bool {
+	switch status {
+	case content.EntrySuccess, content.EntryFailure, content.EntryInterrupted, content.EntryUnknown:
+		return true
+	}
+	return false
 }
 
 // connectionID is the backend's own per-connection identity, in the string

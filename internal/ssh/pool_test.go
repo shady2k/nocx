@@ -133,7 +133,7 @@ func TestPoolConcurrentAcquireSameKey(t *testing.T) {
 		dialMu.Lock()
 		dialCount++
 		dialMu.Unlock()
-		time.Sleep(10 * time.Millisecond) // simulate slow dial
+		time.Sleep(10 * time.Millisecond) // pacing only: keep concurrent acquires in flight.
 		return &fakeClient{}, nil
 	}
 
@@ -411,7 +411,7 @@ func TestPoolConcurrentAcquireRelease(t *testing.T) {
 		dialMu.Lock()
 		dialCount++
 		dialMu.Unlock()
-		time.Sleep(10 * time.Millisecond) // slow dial so Acquire calls overlap
+		time.Sleep(10 * time.Millisecond) // pacing only: keep concurrent acquires in flight.
 		return &fakeClient{}, nil
 	}
 
@@ -426,7 +426,7 @@ func TestPoolConcurrentAcquireRelease(t *testing.T) {
 				return
 			}
 			// Hold the ref briefly so Release contends with other Acquires.
-			time.Sleep(time.Millisecond)
+			time.Sleep(time.Millisecond) // pacing only: overlap Release with other acquires.
 			pool.Release(h)
 		}()
 	}

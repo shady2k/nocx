@@ -2,16 +2,18 @@ package vault_test
 
 import (
 	"context"
+	"fmt"
 	"log/slog"
 	"os"
 	"runtime"
+	"strings"
 	"testing"
-	"time"
 
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vault/file"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 func newClosableVault(t *testing.T) *vault.Vault {
@@ -30,7 +32,26 @@ func newClosableVault(t *testing.T) *vault.Vault {
 	return v
 }
 
-// Close stops the auto-seal goroutine.
+// autoSealGoroutines counts the vault's own background goroutines, by the
+// name of the function they are parked in.
+//
+// The deleted version of this test compared runtime.NumGoroutine() totals,
+// which meant it could not tell one of our goroutines from the test runtime's
+// own — and paid for that with five rounds of Gosched and a 10ms sleep to
+// keep the totals meaningful at all. Naming the goroutine removes both the
+// noise and the sleep.
+func autoSealGoroutines() int {
+	buf := make([]byte, 1<<16)
+	for {
+		n := runtime.Stack(buf, true)
+		if n < len(buf) {
+			return strings.Count(string(buf[:n]), "vault.(*Vault).autoSealLoop")
+		}
+		buf = make([]byte, 2*len(buf))
+	}
+}
+
+// Close stops the auto-seal goroutine and does not return until it is gone.
 //
 // Counting goroutines is a blunt instrument, so this creates a batch and
 // measures the delta rather than an absolute: a leak of one per Vault is
@@ -42,37 +63,45 @@ func newClosableVault(t *testing.T) *vault.Vault {
 func TestClose_StopsTheAutoSealGoroutine(t *testing.T) {
 	const batch = 20
 
-	settle := func() int {
-		// Two rounds: goroutines returning from a select need a scheduling
-		// point before they are gone from the count.
-		for range 5 {
-			runtime.Gosched()
-			time.Sleep(10 * time.Millisecond)
-		}
-		return runtime.NumGoroutine()
-	}
-
-	before := settle()
+	// The floor is what earlier tests still hold. Take it as two consecutive
+	// equal observations: a goroutine whose Close has returned is still on the
+	// runtime's list for a few instructions afterwards, and counting one of
+	// those into the floor would put the delta below permanently out of reach.
+	before := -1
+	waittest.WaitForDetail(t, "the auto-seal goroutine count to settle before the batch",
+		func() string { return fmt.Sprintf("last count=%d", before) },
+		func() bool {
+			n := autoSealGoroutines()
+			settled := n == before
+			before = n
+			return settled
+		},
+	)
 
 	vaults := make([]*vault.Vault, 0, batch)
 	for range batch {
 		vaults = append(vaults, newClosableVault(t))
 	}
-	running := settle()
-	if running-before < batch {
-		t.Fatalf("expected at least %d new goroutines while %d vaults are open, saw %d",
-			batch, batch, running-before)
-	}
+
+	running := before
+	waittest.WaitForDetail(t,
+		fmt.Sprintf("at least %d new goroutines while %d vaults are open", batch, batch),
+		func() string { return fmt.Sprintf("before=%d running=%d", before, running) },
+		func() bool { running = autoSealGoroutines(); return running-before >= batch },
+	)
 
 	for _, v := range vaults {
 		v.Close()
 	}
-	after := settle()
 
-	if after-before >= batch {
-		t.Fatalf("goroutines did not go away after Close: before=%d running=%d after=%d",
-			before, running, after)
-	}
+	after := running
+	waittest.WaitForDetail(t, "the auto-seal goroutines to go away after Close",
+		func() string {
+			return fmt.Sprintf("goroutines did not go away after Close: before=%d running=%d after=%d",
+				before, running, after)
+		},
+		func() bool { after = autoSealGoroutines(); return after-before < batch },
+	)
 }
 
 // Close is idempotent and safe on a vault that was never set up. Shutdown paths

@@ -278,9 +278,23 @@ func TestAPIRequestSend_ATokenAlreadyInFlightIsRefused(t *testing.T) {
 	released = true
 	close(sender.block)
 	box.await(t, 2)
-	if again := box.call(t, "api.request.send",
-		map[string]any{"handle": handle, "relPath": "ping.json", "token": "run-1"}, 4); again.Error != nil {
-		t.Fatalf("the token was still held after its exchange settled: %+v", again.Error)
+	// The response to the first send and the release of its token are two
+	// events, not one: the handler answers and then lets the name go. Asking
+	// once, immediately, asserts an ORDER nobody promised — and it held until
+	// a loaded machine put the two the other way round. So the far end of the
+	// interval is waited for, which is what "the name comes back" means; a
+	// token that never frees still fails, it just takes wantWithin to say so.
+	deadline := time.Now().Add(wantWithin)
+	var last *vaultRPCResult
+	for id := 4; ; id++ {
+		last = box.call(t, "api.request.send",
+			map[string]any{"handle": handle, "relPath": "ping.json", "token": "run-1"}, id)
+		if last.Error == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("the token was still held after its exchange settled: %+v", last.Error)
+		}
 	}
 }
 

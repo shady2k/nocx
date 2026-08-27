@@ -727,20 +727,27 @@ func TestAgentAsk_DataPlaneCarriesNoNonPTYPayload(t *testing.T) {
 // interleavedAskClient streams two concurrent Ask calls with strictly
 // alternating deltas: the wire order genuinely interleaves the runs, which
 // is the point the acceptance criterion drives.
+//
+// Each script is keyed by the QUESTION its ask carries, never by arrival
+// order. agent.ask answers "prepared" and the run streams on its own
+// goroutine, so which of the two runs reaches Ask first is the scheduler's
+// choice and nothing the product promises; a counter here handed the
+// second run's script to whichever goroutine won, and every assertion
+// about which text belongs to which run then reported the swap as
+// corruption (nocx-sxvnh).
 type interleavedAskClient struct {
 	mu          sync.Mutex
-	scripts     [][]string
-	nextScript  int
+	scripts     map[string][]string
 	started     int
 	bothStarted chan struct{}
 	turn        chan struct{}
 }
 
-func newInterleavedAskClient(a, b []string) *interleavedAskClient {
+func newInterleavedAskClient(scripts map[string][]string) *interleavedAskClient {
 	turn := make(chan struct{}, 1)
 	turn <- struct{}{}
 	return &interleavedAskClient{
-		scripts:     [][]string{a, b},
+		scripts:     scripts,
 		bothStarted: make(chan struct{}),
 		turn:        turn,
 	}
@@ -754,15 +761,35 @@ func (c *interleavedAskClient) Probe(context.Context, assistant.ProbeParams) (as
 // state, so there is nothing to drop.
 func (*interleavedAskClient) Discard(string) {}
 
-func (c *interleavedAskClient) Ask(_ context.Context, _ assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
+// askQuestion is the question one ask carries. The transport assembles the
+// standing prompt, then the prior turn, then the run's own question last
+// (ws_agent.go), so the final user message is this ask's question and the
+// only part of AskParams that distinguishes two runs of the same session
+// against the same endpoint.
+func askQuestion(p assistant.AskParams) string {
+	q := ""
+	for _, m := range p.Messages {
+		if m.Role == "user" {
+			q = m.Content
+		}
+	}
+	return q
+}
+
+func (c *interleavedAskClient) Ask(_ context.Context, p assistant.AskParams, onEvent func(assistant.AskEvent) error) error {
+	question := askQuestion(p)
 	c.mu.Lock()
-	script := c.scripts[c.nextScript]
-	c.nextScript++
+	script, ok := c.scripts[question]
 	c.started++
 	if c.started == 2 {
 		close(c.bothStarted)
 	}
 	c.mu.Unlock()
+	if !ok {
+		// Counted as started above, so an unscripted question fails this
+		// ask instead of wedging the other one on the barrier.
+		return fmt.Errorf("interleavedAskClient: no script for question %q", question)
+	}
 	<-c.bothStarted // both runs are streaming before either emits
 	for _, d := range script {
 		<-c.turn
@@ -781,10 +808,10 @@ func (c *interleavedAskClient) Ask(_ context.Context, _ assistant.AskParams, onE
 // are still being read, and a reader that consumes it (readNotification)
 // would make the test race the streams.
 func TestAgentAsk_TwoConcurrentStreamsInterleaveWithoutCorrupting(t *testing.T) {
-	client := newInterleavedAskClient(
-		[]string{"aaa1", "aaa2", "aaa3"},
-		[]string{"bbb1", "bbb2", "bbb3"},
-	)
+	client := newInterleavedAskClient(map[string][]string{
+		"first?":  {"aaa1", "aaa2", "aaa3"},
+		"second?": {"bbb1", "bbb2", "bbb3"},
+	})
 	h := newAskHarness(t, client)
 	h.createEndpoint()
 	sid := openLocalSession(t, h.conn)

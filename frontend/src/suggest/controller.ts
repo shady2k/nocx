@@ -428,10 +428,18 @@ export class CompletionController {
   }
 
   /** Mouse hover: move the selection to an absolute row (the dropdown's
-   *  onHover). Same surface as the arrow keys — the ghost follows. */
+   *  onHover). Same surface as the arrow keys — the ghost follows.
+   *
+   *  A hover that selects what is already selected re-renders nothing: the
+   *  dropdown rebuilds its rows on render, the new node appears under a
+   *  cursor that has not moved, and its `mouseenter` arrives back here — a
+   *  list that rebuilds itself for as long as the pointer rests on it, and a
+   *  row whose node can vanish under a press that began on it. Same shape and
+   *  same guard as SecretPicker.hover (nocx-vzdna). */
   select(index: number): void {
     const s = this.state
     if (s.name !== 'open' || index < 0 || index >= s.candidates.length) return
+    if (s.selectedIndex === index) return
     this.state = { ...s, selectedIndex: index }
     this.render()
   }

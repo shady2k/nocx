@@ -6285,6 +6285,86 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     }
   })
 
+  /** What CodeMirror 6 does to a selection made outside it while it holds
+   *  focus: `docView.updateSelection` puts the DOM selection back on its own
+   *  document — and returns early unless the contentDOM is the ACTIVE
+   *  ELEMENT (@codemirror/view). That conditional is the whole contract
+   *  here, so the rule is applied by hand rather than waited for: jsdom runs
+   *  no measure cycle, and a test that waited out the ~50ms window would be
+   *  asserting a duration instead of an owner. */
+  function restoreSelectionLikeCodeMirror(view: EditorView): void {
+    if (document.activeElement !== view.contentDOM) return
+    const selection = window.getSelection()
+    selection?.removeAllRanges()
+    const range = document.createRange()
+    range.selectNodeContents(view.contentDOM)
+    range.collapse(true)
+    selection?.addRange(range)
+    document.dispatchEvent(new Event('selectionchange'))
+  }
+
+  // ── ONE OWNER FOR THE DOCUMENT SELECTION (nocx-45vkz) ─────────────────
+  //
+  // A selection can be made in the scrollback WITHOUT taking focus off the
+  // composer — programmatically, from a keyboard, or by any gesture that is
+  // not a mouse drag beginning on a block. The scrollback then offers a
+  // grant over a selection CodeMirror still believes it owns, and about
+  // 50ms later CodeMirror restores the selection into its own document: the
+  // handler below sees a collapsed selection and hides the offer nobody has
+  // had time to press. Both surfaces were claiming one input and the
+  // composer won by evaluation order, which is exactly the arrangement
+  // AGENTS.md forbids.
+  //
+  // So the claim moves the focus with it. The offer must outlive the
+  // restore, not race it.
+  it('a selection claimed by the scrollback takes the focus off the composer, so the offer outlives the restore', async () => {
+    const client = storeWith([entry()], 'output')
+    const { ed, view, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      ed.show()
+      // The state a person is actually in: drafting a question, caret in the
+      // composer, when they go to select the output they want to point at.
+      ed.focus()
+      expect(ed.rootContains(document.activeElement)).toBe(true)
+
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      await vi.waitFor(() => {
+        expect(inner.querySelector('[data-restored="true"]')).not.toBeNull()
+      })
+      const block = inner.querySelector<HTMLElement>('[data-restored="true"]')!
+      const output = block.querySelector<HTMLElement>('.cmd-output')!
+      const selection = window.getSelection()!
+      const range = document.createRange()
+      range.selectNodeContents(output)
+      range.getClientRects = () => [new DOMRect(100, 200, 200, 20)] as unknown as DOMRectList
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.dispatchEvent(new Event('selectionchange'))
+
+      expect(document.querySelector<HTMLElement>('.mark-affordance')?.style.display).toBe('block')
+      // The owner changed hands with the claim — this, and not the speed of
+      // the press, is what disarms the restore below.
+      expect(ed.rootContains(document.activeElement)).toBe(false)
+
+      restoreSelectionLikeCodeMirror(view)
+
+      expect(document.querySelector<HTMLElement>('.mark-affordance')?.style.display).toBe('block')
+      const offer = document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')!
+      offer.click()
+      expect((content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks[0]?.itemId).toBe(
+        'e-1',
+      )
+    } finally {
+      teardown()
+    }
+  })
+
   it('marks and unmarks a restored block from its menu, using the durable entry id', async () => {
     const client = storeWith([entry()], 'output')
     const { ed, content, teardown } = await mountTerminal(

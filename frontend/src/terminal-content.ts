@@ -69,7 +69,12 @@ import { isInteractiveTransition, extractDestination } from './ssh-transition'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
-import type { AnswerToolCall, BlockRecord, RunningBlockActions } from './scrollback/blocks'
+import type {
+  AnswerToolCall,
+  BlockRecord,
+  DumpSource,
+  RunningBlockActions,
+} from './scrollback/blocks'
 import {
   CommandLedger,
   type CommandAuthor,
@@ -511,6 +516,7 @@ export class TerminalContent extends BasePaneContent {
   private _summonedAnswer: HTMLElement | null = null
   private _summonedCommand: BlockRecord | null = null
   private scrollback: ScrollbackController | null = null
+  private dumpSource: DumpSource | null = null
   private ledger: CommandLedger | null = null
   /** The vault RPC client, built over this tab's WS client (the shared
    *  dispatcher — the sealed-access seam it carries is already installed at
@@ -1344,7 +1350,8 @@ export class TerminalContent extends BasePaneContent {
 
       log.info('nocx: creating renderer')
       const renderer = new XtermRenderer()
-
+      const agentClient = new AgentClient(this.client.dispatcher)
+      this.dumpSource = (entryId) => agentClient.dump(entryId)
       // The snippet palette chord (⌥⌘P) at the xterm boundary: the renderer
       // consumes it before xterm encodes it (zero bytes to the pty) and
       // delegates here — the same handler the editor's arbiter calls, so
@@ -1376,6 +1383,7 @@ export class TerminalContent extends BasePaneContent {
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
         sessionName: (id) => this.hooks.sessionName?.(id) ?? null,
         answerText: (entryId) => answerTextForEntry(this.client, entryId),
+        dump: (entryId) => agentClient.dump(entryId),
         runningActions: this.runningActions,
       })
 
@@ -1480,7 +1488,6 @@ export class TerminalContent extends BasePaneContent {
       // to be here was `() => new AgentClient(…).status()` handed to the
       // ask target — a function called at refusal time, which no surface
       // can render and nothing can repaint.
-      const agentClient = new AgentClient(this.client.dispatcher)
       const readiness = new AgentReadiness(agentClient)
       this.readiness = readiness
       this._readinessUnsub = readiness.subscribe(() => this.renderTargetChips())
@@ -3489,6 +3496,7 @@ export class TerminalContent extends BasePaneContent {
             () => {},
             snapshotStore,
             this.runningActions,
+            this.dumpSource ?? undefined,
           ),
         )
         continue
@@ -3546,6 +3554,7 @@ export class TerminalContent extends BasePaneContent {
                 () => {},
                 snapshotStore,
                 this.runningActions,
+                this.dumpSource ?? undefined,
               )
             }
             // An ACTION child is a tool line — a header naming what was
@@ -3582,6 +3591,7 @@ export class TerminalContent extends BasePaneContent {
                 () => {},
                 snapshotStore,
                 this.runningActions,
+                this.dumpSource ?? undefined,
               )
             }
             // A block the turn RAN (or a person's, if the ledger
@@ -3597,9 +3607,11 @@ export class TerminalContent extends BasePaneContent {
               () => {},
               snapshotStore,
               this.runningActions,
+              this.dumpSource ?? undefined,
             )
           },
           this.runningActions,
+          this.dumpSource ?? undefined,
         ),
       )
     }

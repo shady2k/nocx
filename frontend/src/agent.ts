@@ -9,6 +9,7 @@
  */
 import { Dispatcher } from './dispatcher'
 import type { AgentCancel } from './generated/agent.cancel'
+import type { AgentDump } from './generated/agent.dump'
 import type { AgentStatusResult } from './generated/agent.status'
 
 export class AgentClient {
@@ -20,5 +21,9 @@ export class AgentClient {
 
   cancel(runId: number): Promise<AgentCancel> {
     return this.dispatcher.call<AgentCancel>('agent.cancel', { runId })
+  }
+
+  dump(entryId: string): Promise<AgentDump> {
+    return this.dispatcher.call<AgentDump>('agent.dump', { entryId })
   }
 }

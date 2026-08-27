@@ -357,27 +357,23 @@ type ProbeResult struct {
 	At time.Time `json:"at"`
 }
 
-// NewClient builds the engine client: eino's openai adapter over the
-// guarded HTTP client (httpguard.go), with the tool registry assembled from
-// the schemas EMBEDDED in the binary (nocx-jtz3q) — the shipped bundle has
-// no contracts/ tree, so a cwd-relative path assembled the quiet empty set.
-// Cheap; nothing dials until Probe.
-//
-// An assembly that comes up empty or incomplete is a build defect, not a
-// runtime accident, and it is VISIBLE: NewClient returns an error and the
-// composition root fails startup, rather than shipping an assistant that
-// declares no tools and fails silently (AGENTS.md: a soft degrade must be
-// visible in the product, not only in a log).
+// NewClient builds the engine client with no product recorder.
 func NewClient(logger log.Logger) (Client, error) {
 	return newClient(logger, tools.Schemas)
 }
 
-// newClient is the construction seam: assemble the registry from toolsFS
-// (the embedded schemas in production, a real or synthetic directory in
-// tests), fail loudly on an assembly that is incomplete or comes up EMPTY —
-// the tool schemas must reach the binary or the build is broken — and build
-// the client over it.
+// NewClientWithWireRecorder builds the engine client with the recorder that
+// persists provider bytes under each turn. The recorder is optional for tests
+// and for callers that only need the model client.
+func NewClientWithWireRecorder(logger log.Logger, recorder WireRecorder) (Client, error) {
+	return newClientWithRecorder(logger, tools.Schemas, recorder)
+}
+
 func newClient(logger log.Logger, toolsFS fs.FS) (Client, error) {
+	return newClientWithRecorder(logger, toolsFS, nil)
+}
+
+func newClientWithRecorder(logger log.Logger, toolsFS fs.FS, recorder WireRecorder) (Client, error) {
 	reg, err := agenttools.Assemble(toolsFS)
 	if err != nil {
 		return nil, fmt.Errorf("assistant: tool registry: %w", err)
@@ -385,13 +381,18 @@ func newClient(logger log.Logger, toolsFS fs.FS) (Client, error) {
 	if len(reg.All()) == 0 {
 		return nil, errors.New("assistant: tool registry assembled EMPTY — the tool schemas did not reach the binary; a model would be offered no tools")
 	}
-	return newClientWithRegistry(logger, reg), nil
+	return newClientWithRegistryAndRecorder(logger, reg, recorder), nil
 }
 
+// Deprecated internal construction seam retained for package tests.
 func newClientWithRegistry(logger log.Logger, reg agenttools.Registry) Client {
+	return newClientWithRegistryAndRecorder(logger, reg, nil)
+}
+
+func newClientWithRegistryAndRecorder(logger log.Logger, reg agenttools.Registry, recorder WireRecorder) Client {
 	return &client{
 		log:         logger,
-		http:        newGuardedHTTPClient(logger),
+		http:        newGuardedHTTPClientWithResolverAndRecorder(logger, nil, recorder),
 		tools:       reg,
 		approvals:   NewApprovalStore(),
 		checkpoints: newRunCheckpoints(),
@@ -399,12 +400,9 @@ func newClientWithRegistry(logger log.Logger, reg agenttools.Registry) Client {
 }
 
 type client struct {
-	log       log.Logger
-	http      *http.Client
-	tools     agenttools.Registry
-	approvals *ApprovalStore
-	// checkpoints is the process-lifetime suspended-run store (ADR-0028:
-	// "approval resumes FROM THE CHECKPOINT"). One per client, keyed by run
-	// id, shared by every run the server drives — see checkpoints.go.
+	log         log.Logger
+	http        *http.Client
+	tools       agenttools.Registry
+	approvals   *ApprovalStore
 	checkpoints *runCheckpoints
 }

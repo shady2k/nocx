@@ -450,8 +450,8 @@ type agentApproveResponse struct {
 // ask ids — per connection, so a reconnect mints a new one) and the
 // Responder; never the *WSServer.
 type agentHandlers struct {
-	op capability.AgentOperation // nil → content store not wired
-	// stopForeground is the parent-cancel seam. It resolves a connection-owned
+	op     capability.AgentOperation // nil → content store not wired
+	dumpOp capability.LedgerOperation
 	// session and runs the shared stop ladder without holding the content
 	// queue or pending-runs mutex.
 	stopForeground func(session.ID) foregroundOutcome
@@ -1070,6 +1070,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// numbering (askRunContext.prose). Empty on a fresh run and after every
 	// tool call: the first delta then opens the next block.
 	prose := rc.prose
+	ctx = assistant.WithWireIdentity(ctx, strconv.FormatInt(rc.runID, 10), rc.entryID)
 	err := h.client.Ask(ctx, assistant.AskParams{
 		Key:           secret,
 		BaseURL:       rc.endpoint.BaseURL,
@@ -2243,6 +2244,10 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 	if s.contentDB != nil {
 		agentOp = capability.NewAgentOperation(contentGate, lane, s.contentDB)
 	}
+	var dumpOp capability.LedgerOperation
+	if s.contentDB != nil {
+		dumpOp = capability.NewLedgerOperation(contentGate, lane, s.contentDB)
+	}
 	var attemptLedger assistant.AttemptLedger
 	if s.contentDB != nil {
 		attemptLedger = s.contentDB.Ledger()
@@ -2263,7 +2268,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 				}
 				return stopForeground(s.log, sid, leaseSess, s.effectiveRunLease().SignalGrace)
 			},
-			op: agentOp, configOp: configOp, endpointWired: endpointWired,
+			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
 			credentials: credentials, client: client, askSub: askSub,
 			attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, knownMaterial: s.agentKnownMaterial,
@@ -2286,6 +2291,10 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		reg(contentSub, "agent.approve", params(validateAgentApproveRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleApprove(ctx, req) }
+		}),
+		regResponder(contentSub, "agent.dump", params(validateAgentDumpRaw), func(r Responder) handlerFunc {
+			h := agentDumpHandlers{op: dumpOp, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
 		}),
 	}
 }

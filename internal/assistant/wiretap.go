@@ -2,27 +2,12 @@ package assistant
 
 // THE WIRE, VERBATIM.
 //
-// When a run goes wrong the question is always the same and until now nothing
-// could answer it: what did we actually send the model, and what did it
-// actually say? The structured log carries a sentence and a classified
-// reason, which is right for a person and useless for this — a sentence
-// cannot tell you that the tool description invited the mistake, or that the
-// model answered with a tool call nobody could resolve.
-//
-// So this writes both halves as bytes, unedited, to a file of their own.
-//
-// OFF UNLESS ASKED, and off is the default: the body carries the person's
-// question, the contents of whatever their tools read, and their own
-// paragraph from settings. That is not something to leave lying in a file
-// because it might be handy. Set NOCX_WIRE_LOG to a path to turn it on.
-//
-// THE KEY NEVER REACHES IT. The Authorization header and any custom header
-// that could carry a credential are dropped rather than redacted-in-place,
-// because a redaction is a line somebody has to keep correct and a drop is
-// not.
+// wireTap is the one owner of provider capture. It records the request body
+// and the response bytes as they pass the HTTP boundary; it never records
+// headers, so API keys and secret-valued headers cannot enter a dump.
 
 import (
-	"bytes"
+	"context"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,83 +17,224 @@ import (
 	"time"
 )
 
-// wireLogPath is the file the tap writes to, or "" when nobody asked for one.
-// Read once at process start: a tap that could be turned on halfway through
-// would make a run's record depend on when somebody set an environment
-// variable.
-var wireLogPath = os.Getenv("NOCX_WIRE_LOG")
-
-// wireTap is an http.RoundTripper that copies a request and its response into
-// the wire log on the way past. It changes neither.
-type wireTap struct {
-	inner http.RoundTripper
-	mu    sync.Mutex
+// WireRecorder receives the bytes of one provider exchange. Implementations
+// persist them under the turn entry. The recorder is deliberately best-effort:
+// losing a diagnostic must never abort an otherwise valid model response.
+type WireRecorder interface {
+	RecordWire(ctx context.Context, runID, entryID, kind string, body []byte, truncated bool)
 }
 
-func newWireTap(inner http.RoundTripper) http.RoundTripper {
-	if wireLogPath == "" {
+type wireIdentity struct {
+	runID   string
+	entryID string
+}
+
+type wireIdentityKey struct{}
+
+// WithWireIdentity carries the backend-owned run and turn ids through the
+// model framework into the HTTP RoundTripper. The context is the only route
+// across that boundary; no package global is used.
+func WithWireIdentity(ctx context.Context, runID, entryID string) context.Context {
+	return context.WithValue(ctx, wireIdentityKey{}, wireIdentity{runID: runID, entryID: entryID})
+}
+
+func wireIdentityFrom(ctx context.Context) (wireIdentity, bool) {
+	v, ok := ctx.Value(wireIdentityKey{}).(wireIdentity)
+	return v, ok && v.runID != "" && v.entryID != ""
+}
+
+// wireCaptureCap is the per-direction ceiling. It matches the ledger's
+// MaxArtifactBytes: one provider request or response cannot consume more than
+// one artifact's budget, while truncation remains visible in the dump.
+const wireCaptureCap = 1 << 20
+
+// wireTap is an http.RoundTripper that copies a request and its response into
+// the optional developer log and product recorder. It changes neither.
+type wireTap struct {
+	inner    http.RoundTripper
+	logPath  string
+	recorder WireRecorder
+	mu       sync.Mutex
+}
+
+func newWireTapWith(inner http.RoundTripper, logPath string, recorder WireRecorder) http.RoundTripper {
+	if logPath == "" && recorder == nil {
 		return inner
 	}
-	return &wireTap{inner: inner}
+	return &wireTap{inner: inner, logPath: logPath, recorder: recorder}
 }
 
 func (w *wireTap) RoundTrip(req *http.Request) (*http.Response, error) {
-	var body []byte
+	var body *wireRequestBody
 	if req.Body != nil {
-		b, err := io.ReadAll(req.Body)
-		_ = req.Body.Close()
-		if err != nil {
-			return nil, err
+		body = &wireRequestBody{
+			parent: w,
+			ctx:    req.Context(),
+			orig:   req.Body,
+			label:  "REQUEST " + req.Method + " " + req.URL.String(),
 		}
-		body = b
-		req.Body = io.NopCloser(bytes.NewReader(b))
+		req.Body = body
 	}
-	w.write("REQUEST " + req.Method + " " + req.URL.String() + "\n" + string(body))
-
 	resp, err := w.inner.RoundTrip(req)
+	if body == nil {
+		w.write("REQUEST " + req.Method + " " + req.URL.String())
+		w.record(req.Context(), "request", nil, false)
+	} else {
+		// A custom transport may return without consuming or closing the body.
+		// Finish here so the record still describes the bytes it observed.
+		body.finish(true)
+	}
 	if err != nil {
 		w.write("TRANSPORT ERROR\n" + err.Error())
 		return resp, err
 	}
-	// The response is a STREAM, and the interesting part of it arrives over
-	// seconds. Copying it whole here would hold the whole answer before the
-	// caller saw any of it — the streaming the product is built on — so the
-	// body is teed instead and each chunk lands in the log as it passes.
 	w.write(fmt.Sprintf("RESPONSE %s", resp.Status))
-	pr, pw := io.Pipe()
-	orig := resp.Body
-	resp.Body = struct {
-		io.Reader
-		io.Closer
-	}{Reader: io.TeeReader(orig, pw), Closer: closerFunc(func() error {
-		_ = pw.Close()
-		return orig.Close()
-	})}
-	go func() {
-		b, _ := io.ReadAll(pr)
-		w.write("RESPONSE BODY\n" + string(b))
-	}()
+	resp.Body = &wireResponseBody{
+		parent: w,
+		ctx:    req.Context(),
+		orig:   resp.Body,
+		buf:    make([]byte, 0, minInt(wireCaptureCap, 64*1024)),
+	}
 	return resp, nil
 }
 
-// write appends one record. Failures are silent: a diagnostic that could end
-// a run would be worse than no diagnostic.
+func (w *wireTap) record(ctx context.Context, kind string, body []byte, early bool) {
+	if w.recorder == nil {
+		return
+	}
+	id, ok := wireIdentityFrom(ctx)
+	if !ok {
+		return
+	}
+	truncated := early || len(body) > wireCaptureCap
+	if len(body) > wireCaptureCap {
+		body = body[:wireCaptureCap]
+	}
+	w.recorder.RecordWire(ctx, id.runID, id.entryID, kind, body, truncated)
+}
+
 func (w *wireTap) write(record string) {
+	if w.logPath == "" {
+		return
+	}
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	// #nosec G304 — the path is the operator's own, named in an environment
-	// variable of this process. There is no untrusted input anywhere near it,
-	// and the alternative (a fixed path) would put the exchange somewhere the
-	// person did not choose.
-	f, err := os.OpenFile(wireLogPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
+	// variable of this process; no untrusted input reaches it.
+	f, err := os.OpenFile(w.logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o600)
 	if err != nil {
 		return
 	}
+
 	defer func() { _ = f.Close() }()
 	stamp := time.Now().Format("15:04:05.000")
 	_, _ = fmt.Fprintf(f, "\n===== %s %s\n%s\n", stamp, strings.SplitN(record, "\n", 2)[0], record)
 }
 
-type closerFunc func() error
+type wireRequestBody struct {
+	parent   *wireTap
+	ctx      context.Context
+	orig     io.ReadCloser
+	label    string
+	buf      []byte
+	overflow bool
+	done     bool
+	mu       sync.Mutex
+}
 
-func (c closerFunc) Close() error { return c() }
+func (b *wireRequestBody) Read(p []byte) (int, error) {
+	n, err := b.orig.Read(p)
+	if n > 0 {
+		b.mu.Lock()
+		keep := n
+		if keep > wireCaptureCap-len(b.buf) {
+			keep = wireCaptureCap - len(b.buf)
+			b.overflow = true
+		}
+		if keep > 0 {
+			b.buf = append(b.buf, p[:keep]...)
+		}
+		b.mu.Unlock()
+	}
+	if err == io.EOF {
+		b.finish(false)
+	}
+	return n, err
+}
+
+func (b *wireRequestBody) Close() error {
+	err := b.orig.Close()
+	b.finish(true)
+	return err
+}
+
+func (b *wireRequestBody) finish(closedEarly bool) {
+	b.mu.Lock()
+	if b.done {
+		b.mu.Unlock()
+		return
+	}
+	b.done = true
+	body := append([]byte(nil), b.buf...)
+	truncated := closedEarly || b.overflow
+	b.mu.Unlock()
+	b.parent.write(b.label + "\n" + string(body))
+	b.parent.record(b.ctx, "request", body, truncated)
+}
+
+type wireResponseBody struct {
+	parent   *wireTap
+	ctx      context.Context
+	orig     io.ReadCloser
+	buf      []byte
+	overflow bool
+	done     bool
+	mu       sync.Mutex
+}
+
+func (b *wireResponseBody) Read(p []byte) (int, error) {
+	n, err := b.orig.Read(p)
+	if n > 0 {
+		b.mu.Lock()
+		keep := n
+		if keep > wireCaptureCap-len(b.buf) {
+			keep = wireCaptureCap - len(b.buf)
+			b.overflow = true
+		}
+		if keep > 0 {
+			b.buf = append(b.buf, p[:keep]...)
+		}
+		b.mu.Unlock()
+	}
+	if err == io.EOF {
+		b.finish(false)
+	}
+	return n, err
+}
+
+func (b *wireResponseBody) Close() error {
+	err := b.orig.Close()
+	b.finish(true)
+	return err
+}
+
+func (b *wireResponseBody) finish(closedEarly bool) {
+	b.mu.Lock()
+	if b.done {
+		b.mu.Unlock()
+		return
+	}
+	b.done = true
+	body := append([]byte(nil), b.buf...)
+	truncated := closedEarly || b.overflow
+	b.mu.Unlock()
+	b.parent.write("RESPONSE BODY\n" + string(body))
+	b.parent.record(b.ctx, "response", body, truncated)
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}

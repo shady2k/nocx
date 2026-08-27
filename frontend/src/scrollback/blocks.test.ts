@@ -1061,6 +1061,52 @@ describe('overflow menu (P1-6)', () => {
 
     document.body.removeChild(container)
   })
+  it('loads a finished answer dump through the menu with its entry id', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const seen: string[] = []
+    const dump = (entryId: string) => {
+      seen.push(entryId)
+      return Promise.resolve({
+        request: [{ text: 'request bytes', truncated: false }],
+        response: [],
+      })
+    }
+    const el = createCommandBlock(
+      'ask',
+      1,
+      'what happened?',
+      '~',
+      '',
+      '',
+      null,
+      null,
+      'settled',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      undefined,
+      undefined,
+      'turn-entry-1',
+      dump,
+    )
+    el.dataset.turnState = 'success'
+    container.appendChild(el)
+
+    ;(el.querySelector('.cmd-overflow-btn') as HTMLElement).click()
+    const item = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.cmd-overflow-menu-item'),
+    ).find((button) => button.textContent === 'Show dump')
+    expect(item).toBeDefined()
+    item!.click()
+    await new Promise<void>((resolve) => queueMicrotask(resolve))
+
+    expect(seen).toEqual(['turn-entry-1'])
+    document.querySelector('.cmd-overflow-menu')?.remove()
+    document.querySelector('.nocx-dialog')?.remove()
+    document.body.removeChild(container)
+  })
 })
 
 describe('frozen block header highlighting', () => {

@@ -1,0 +1,28 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "agent.dump",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["request", "response"],
+  "properties": {
+    "request": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/drive" }
+    },
+    "response": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/drive" }
+    }
+  },
+  "$defs": {
+    "drive": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["text", "truncated"],
+      "properties": {
+        "text": { "type": "string" },
+        "truncated": { "type": "boolean" }
+      }
+    }
+  }
+}

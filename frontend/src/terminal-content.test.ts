@@ -916,6 +916,42 @@ describe('paste with focus on a frozen block (nocx-w7h.9)', () => {
       teardown()
     }
   })
+  it("Cmd/Ctrl+V leaves xterm's helper textarea as the text owner", async () => {
+    const { ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    const renderer = rendererOf(content)
+    const textarea = document.createElement('textarea')
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('keep this draft')
+      renderer.paste.mockClear()
+      const live = tab.pane.querySelector<HTMLElement>('.xterm-live-container')
+      expect(live).not.toBeNull()
+      live!.append(textarea)
+      textarea.focus()
+      expect(document.activeElement).toBe(textarea)
+
+      const ev = new KeyboardEvent('keydown', {
+        key: 'v',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+      textarea.dispatchEvent(ev)
+
+      // xterm owns paste while its helper textarea is focused. The
+      // document rescue must not steal a browser-native paste from it.
+      expect(ev.defaultPrevented).toBe(false)
+      expect(document.activeElement).toBe(textarea)
+      expect(ed.getDoc()).toBe('keep this draft')
+      expect(renderer.paste).not.toHaveBeenCalled()
+    } finally {
+      textarea.remove()
+      teardown()
+    }
+  })
 })
 
 describe('inserting a saved secret into the pane in front (nocx-fk32)', () => {
@@ -7442,6 +7478,57 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       expect(targetNamed(ed)).toBe('shell')
     } finally {
       restore()
+      teardown()
+    }
+  })
+  it("Escape dismisses an accepted summon when xterm's helper textarea owns focus", async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summonChord(content)
+      const editor = editorOf(content)
+      editor.insertText('why is this still running?')
+      viewOf(editor).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(client.dispatcher.call.mock.calls.some(([method]) => method === 'agent.ask')).toBe(
+          true,
+        ),
+      )
+
+      const textarea = document.createElement('textarea')
+      gridOf(content).append(textarea)
+      textarea.focus()
+      expect(document.activeElement).toBe(textarea)
+
+      const event = new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      })
+      textarea.dispatchEvent(event)
+
+      expect(event.defaultPrevented).toBe(true)
+      expect(content.pinnedFrame()).toBeNull()
+      expect(ed.isVisible).toBe(false)
+    } finally {
       teardown()
     }
   })

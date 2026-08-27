@@ -223,9 +223,14 @@ function hostKeyEvidenceFromOpenError(
  * Used to keep the terminal's document-level key rescue off other people's
  * fields. `isContentEditable` is checked too: a rich-text surface is a text
  * entry even though it is neither an input nor a textarea.
+ *
+ * When `terminalSurface` is supplied, controls inside that surface belong to
+ * the terminal rather than to another text-owning surface. Paste deliberately
+ * omits it: the browser still needs xterm's helper textarea to own paste.
  */
-function isTextEntry(el: Element | null): boolean {
+function isTextEntry(el: Element | null, terminalSurface: Element | null = null): boolean {
   if (!(el instanceof HTMLElement)) return false
+  if (terminalSurface?.contains(el)) return false
   if (el.isContentEditable) return true
   const tag = el.tagName
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
@@ -2403,8 +2408,9 @@ export class TerminalContent extends BasePaneContent {
         // of the same keystroke (AGENTS.md: two surfaces may never own one
         // input):
         //
-        //  - a real selection anywhere: Ctrl+C is COPY, and always was;
-        //  - somebody else's text control: their copy, their interrupt;
+        //  - a live selection in this pane's scrollback while it owns focus:
+        //    Ctrl+C is COPY; stale text after focus moves is not.
+        //  - somebody else's text control: its own handler owns the key;
         //  - the editor on screen: its own handler clears the draft and
         //    decides about the pty from the active target (see `cancel`);
         //  - the live grid with the editor hidden: xterm is already turning
@@ -2415,25 +2421,40 @@ export class TerminalContent extends BasePaneContent {
         // alone — signalActiveCommand is the one owner of that check too.
         if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'c' || e.key === 'C')) {
           if (!this.hasRunningCommand()) return
-          const sel = window.getSelection()
-          if (sel && !sel.isCollapsed && sel.toString() !== '') return
           const active = document.activeElement
-          if (isTextEntry(active)) return
+          const sel = window.getSelection()
+          // Ctrl+C remains copy only for a live selection in this pane while
+          // the pane's scrollback still owns focus. A selection's anchor and
+          // focus nodes keep that ownership tied to this pane; once focus
+          // moves to chrome or a menu, stale scrollback text cannot swallow
+          // the interrupt.
+          const scrollbackArea = this.scrollback?.scrollbackArea
+          const selectionOwnedByFocus =
+            sel !== null &&
+            !sel.isCollapsed &&
+            sel.toString() !== '' &&
+            sel.anchorNode !== null &&
+            sel.focusNode !== null &&
+            scrollbackArea?.contains(sel.anchorNode) === true &&
+            scrollbackArea.contains(sel.focusNode) &&
+            active !== null &&
+            scrollbackArea.contains(active)
+          if (selectionOwnedByFocus) return
+          if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
           if (this.editor?.isVisible && active && this.editor.rootContains(active)) return
           if (active && this.scrollback?.xtermLiveContainer.contains(active) === true) return
           e.preventDefault()
           this.signalActiveCommand('interrupt')
           return
         }
-        // Paste (Cmd/Ctrl+V) belongs to the same rescue policy: wherever in
-        // the pane the user clicked — a frozen block, the scrollback, the
-        // running grid — the paste must reach the command editor, and it
-        // must never reach the shell as a literal \x16. The same isTextEntry
-        // guard keeps other surfaces' paste to themselves (a settings field,
-        // quick connect, a dialog). When the overlay is open, its arbiter
-        // runs before this document listener on the editor's own keys and
-        // decides first; when the editor itself has focus this branch is
-        // skipped by the guard and the editor's own paste path runs.
+        // Paste (Cmd/Ctrl+V) follows the same ownership policy: a frozen
+        // block or scrollback hands the gesture to the command editor, while
+        // a focused text control — including xterm's helper textarea — keeps
+        // its native paste. The generic isTextEntry guard intentionally has
+        // no terminal-surface carve-out here. When the overlay is open, its
+        // arbiter runs before this document listener on the editor's own keys
+        // and decides first; when the editor itself has focus this branch is
+        // skipped and the editor's own paste path runs.
         // Focus-only, deliberately: leave the keydown uncancelled so the
         // browser emits its paste event at the now-focused editor and CM6's
         // own paste inserts at the caret — reading the clipboard here would
@@ -2453,7 +2474,7 @@ export class TerminalContent extends BasePaneContent {
         // running command ends, when it takes its scrollback seat.
         if (e.key === 'Escape' && this._summoned && this._summonedAnswer !== null) {
           const active = document.activeElement
-          if (active && isTextEntry(active) && !this.editor?.rootContains(active)) return
+          if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
           if (hasOpenOverlays()) return
           if (document.querySelector('.cmd-overflow-menu')) return
           if (this.dismissSummonedEditor()) e.preventDefault()
@@ -2482,9 +2503,7 @@ export class TerminalContent extends BasePaneContent {
           // space, so the rescue runs here too (when the editor is hidden
           // this branch never runs and the key reaches the shell as
           // before).
-          const onLiveGrid =
-            active !== null && this.scrollback?.xtermLiveContainer.contains(active) === true
-          if (!onLiveGrid && isTextEntry(active)) return
+          if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
           if (hasOpenOverlays()) return
           if (document.querySelector('.cmd-overflow-menu')) return
           if (this.editor.handleExternalEscape(e)) e.preventDefault()

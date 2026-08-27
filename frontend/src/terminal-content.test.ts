@@ -916,6 +916,42 @@ describe('paste with focus on a frozen block (nocx-w7h.9)', () => {
       teardown()
     }
   })
+  it("Cmd/Ctrl+V leaves xterm's helper textarea as the text owner", async () => {
+    const { ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    const renderer = rendererOf(content)
+    const textarea = document.createElement('textarea')
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('keep this draft')
+      renderer.paste.mockClear()
+      const live = tab.pane.querySelector<HTMLElement>('.xterm-live-container')
+      expect(live).not.toBeNull()
+      live!.append(textarea)
+      textarea.focus()
+      expect(document.activeElement).toBe(textarea)
+
+      const ev = new KeyboardEvent('keydown', {
+        key: 'v',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+      textarea.dispatchEvent(ev)
+
+      // xterm owns paste while its helper textarea is focused. The
+      // document rescue must not steal a browser-native paste from it.
+      expect(ev.defaultPrevented).toBe(false)
+      expect(document.activeElement).toBe(textarea)
+      expect(ed.getDoc()).toBe('keep this draft')
+      expect(renderer.paste).not.toHaveBeenCalled()
+    } finally {
+      textarea.remove()
+      teardown()
+    }
+  })
 })
 
 describe('inserting a saved secret into the pane in front (nocx-fk32)', () => {
@@ -7445,6 +7481,57 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       teardown()
     }
   })
+  it("Escape dismisses an accepted summon when xterm's helper textarea owns focus", async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summonChord(content)
+      const editor = editorOf(content)
+      editor.insertText('why is this still running?')
+      viewOf(editor).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(client.dispatcher.call.mock.calls.some(([method]) => method === 'agent.ask')).toBe(
+          true,
+        ),
+      )
+
+      const textarea = document.createElement('textarea')
+      gridOf(content).append(textarea)
+      textarea.focus()
+      expect(document.activeElement).toBe(textarea)
+
+      const event = new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      })
+      textarea.dispatchEvent(event)
+
+      expect(event.defaultPrevented).toBe(true)
+      expect(content.pinnedFrame()).toBeNull()
+      expect(ed.isVisible).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
 
   it('a half-typed question survives the dismissal, and is still there on the next summon', async () => {
     const client = makeClient()
@@ -7641,6 +7728,126 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
   function signalsSent(content: TerminalContent): string[] {
     return sessionOf(content).signal.mock.calls.map((c: unknown[]) => c[0] as string)
   }
+
+  it('Ctrl+C keeps selection ownership tied to the focused target', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    const selection = {
+      anchorNode: null as Node | null,
+      focusNode: null as Node | null,
+      isCollapsed: false,
+      rangeCount: 1,
+      toString: () => {
+        return 'selected output'
+      },
+    }
+    const selectionSpy = vi
+      .spyOn(window, 'getSelection')
+      .mockReturnValue(selection as unknown as Selection)
+    const targets: Array<{ name: string; element: HTMLElement }> = []
+    const scrollbackBackground = tab.pane.querySelector<HTMLElement>('.scrollback-area')
+    expect(scrollbackBackground).not.toBeNull()
+    const scrollbackInner = scrollbackBackground!.querySelector<HTMLElement>('.scrollback-inner')
+    expect(scrollbackInner).not.toBeNull()
+
+    const frozen = document.createElement('div')
+    frozen.className = 'cmd-block'
+    const frozenButton = document.createElement('button')
+    frozenButton.className = 'cmd-overflow-btn'
+    const selectedText = document.createTextNode('selected output')
+    frozen.append(selectedText, frozenButton)
+    scrollbackInner!.append(frozen)
+    selection.anchorNode = selectedText
+    selection.focusNode = selectedText
+    targets.push({ name: 'frozen block', element: frozenButton })
+
+    const chrome = document.createElement('button')
+    chrome.className = 'nocx-editor-chrome'
+    tab.pane.append(chrome)
+    targets.push({ name: 'chrome', element: chrome })
+
+    const priorTabIndex = scrollbackBackground!.getAttribute('tabindex')
+    scrollbackBackground!.tabIndex = 0
+    targets.push({ name: 'scrollback background', element: scrollbackBackground! })
+
+    const menu = document.createElement('div')
+    menu.className = 'cmd-overflow-menu'
+    const menuItem = document.createElement('button')
+    menuItem.className = 'cmd-overflow-menu-item'
+    menu.append(menuItem)
+    document.body.append(menu)
+    targets.push({ name: 'block action menu', element: menuItem })
+
+    const results: Array<{
+      target: string
+      activeElement: string
+      defaultPrevented: boolean
+      signals: string[]
+    }> = []
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      for (const target of targets) {
+        target.element.focus()
+        client.dispatcher.call.mockClear()
+        sessionOf(content).signal.mockClear()
+        const event = new KeyboardEvent('keydown', {
+          key: 'c',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        })
+        target.element.dispatchEvent(event)
+        const signals = signalsSent(content)
+        results.push({
+          target: target.name,
+          activeElement: document.activeElement?.constructor.name ?? 'null',
+          defaultPrevented: event.defaultPrevented,
+          signals,
+        })
+      }
+      expect(results).toEqual([
+        {
+          target: 'frozen block',
+          activeElement: 'HTMLButtonElement',
+          defaultPrevented: false,
+          signals: [],
+        },
+        {
+          target: 'chrome',
+          activeElement: 'HTMLButtonElement',
+          defaultPrevented: true,
+          signals: ['interrupt'],
+        },
+        {
+          target: 'scrollback background',
+          activeElement: 'HTMLDivElement',
+          defaultPrevented: false,
+          signals: [],
+        },
+        {
+          target: 'block action menu',
+          activeElement: 'HTMLButtonElement',
+          defaultPrevented: true,
+          signals: ['interrupt'],
+        },
+      ])
+    } finally {
+      selectionSpy.mockRestore()
+      if (priorTabIndex === null) scrollbackBackground!.removeAttribute('tabindex')
+      else scrollbackBackground!.setAttribute('tabindex', priorTabIndex)
+      menu.remove()
+      frozen.remove()
+      chrome.remove()
+      restore()
+      teardown()
+    }
+  })
 
   it('Ctrl+C is addressed to the running command even when the grid does not hold focus', async () => {
     const client = makeClient()

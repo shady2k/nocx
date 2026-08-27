@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -34,15 +35,27 @@ import (
 //
 // So a wait for a fact names the fact. Not the count before it — the count is
 // not the test's to choose.
+//
+// ONE ABSOLUTE DEADLINE covers the whole search rather than one per frame: a
+// loop that re-armed wantWithin for each frame it skipped would have no bound
+// at all, which is the defect ws_inbox_test.go's own comment records from the
+// other direction.
+//
+// The bound reports what it was looking for AND every fact it turned down on
+// the way. A predicate that never matched is indistinguishable from a fact
+// that never arrived unless the skipped ones are named — and it is the
+// skipped ones that say which emitter got in front of the wanted one.
 func readLifecycleWhere(t *testing.T, conn *websocket.Conn, what string,
 	want func(lifecyclepub.Fact) bool,
 ) (json.RawMessage, lifecyclepub.Fact) {
 	t.Helper()
 	deadline := time.Now().Add(wantWithin)
+	var skipped []string
 	for {
 		msg, err := awaitFrame(conn, deadline, isNotification("lifecycle.changed"))
 		if err != nil {
-			t.Fatalf("waiting for %s: %v", what, err)
+			t.Fatalf("waiting for %s: %v\nfacts turned down on the way: %s",
+				what, err, strings.Join(skipped, "; "))
 		}
 		f, _ := decodeFrame(msg)
 		var fact lifecyclepub.Fact
@@ -52,6 +65,7 @@ func readLifecycleWhere(t *testing.T, conn *websocket.Conn, what string,
 		if want(fact) {
 			return f.Params, fact
 		}
+		skipped = append(skipped, fmt.Sprintf("%+v", fact))
 	}
 }
 
@@ -144,20 +158,40 @@ func mustLifecycleIngest(t *testing.T, pub *lifecyclepub.Publisher, tID lifecycl
 	}
 }
 
-// ackEstablishmentFrom reads the published prompt_ready fact for the lane,
-// extracts the establishment generation and acknowledges it — the renderer's
-// decision-9 step, driven directly at the publisher (the wire-level ack RPC
-// is covered by the establishAck tests). The domain is not live before this.
+// ackEstablishmentFrom reads the published fact that CARRIES the
+// establishment being acknowledged, takes its generation and acknowledges it
+// — the renderer's decision-9 step, driven directly at the publisher (the
+// wire-level ack RPC is covered by the establishAck tests). The domain is not
+// live before this.
+//
+// It names that fact with a PREDICATE, for the reason readLifecycleWhere
+// gives, and it is not one emitter this time either: handleOpen's tail
+// replays the lane's current projection the moment the subscriber is
+// installed, so a test that registers its lane after `open` has RETURNED
+// races it. On an idle machine the replay finds no lane yet and the hello's
+// fact is the only one on the wire; under load the test wins and a native,
+// domain-less fact sits in front of it. "The next lifecycle.changed" then
+// means the replay, and the ack reads a fact that names no domain at all
+// (nocx-josaw). Reproduced exactly by calling replayLifecycleFacts where the
+// race would land it, which fails every establishing integration test.
+//
+// The predicate is the acknowledgement's OWN key. AcknowledgeEstablishment is
+// keyed on (lane, domain, epoch) and refuses a generation that does not match
+// the accept pending under it, so nothing weaker names the fact whose
+// generation may be sent: a later epoch of the same lane carries a different
+// establishment, and a fact naming no domain carries no generation to send.
+// A replay of the same establishment satisfies it too, and correctly — it
+// carries the very same generation, so either copy acknowledges the same
+// episode.
 func ackEstablishmentFrom(t *testing.T, pub *lifecyclepub.Publisher, lane lifecycle.LaneID, h lifecycle.DomainHandle, conn *websocket.Conn) {
 	t.Helper()
-	raw := readNotification(t, conn, "lifecycle.changed", wantWithin)
-	var ready lifecyclepub.Fact
-	if err := json.Unmarshal(raw, &ready); err != nil {
-		t.Fatalf("decode prompt_ready: %v\nraw: %s", err, raw)
-	}
-	if ready.Generation == "" {
-		t.Fatalf("published fact carries no establishment generation: %+v", ready)
-	}
+	_, ready := readLifecycleWhere(t, conn,
+		fmt.Sprintf("the establishment fact for lane %s domain %s epoch %d, carrying its generation",
+			lane, h.Domain, h.Epoch),
+		func(f lifecyclepub.Fact) bool {
+			return f.Lane == string(lane) && f.Domain == string(h.Domain) &&
+				f.Epoch == h.Epoch && f.Generation != ""
+		})
 	if err := pub.AcknowledgeEstablishment(lane, h.Domain, h.Epoch, ready.Generation); err != nil {
 		t.Fatalf("AcknowledgeEstablishment: %v", err)
 	}

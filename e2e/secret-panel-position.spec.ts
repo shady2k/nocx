@@ -230,7 +230,10 @@ test.describe('the secret panel opens where a person can reach it', () => {
     // The clicked offer row opens the vault setup surface. The connection
     // dialog must remain open underneath it; a light-dismiss would discard it.
     await expect(dialog).toBeVisible()
-    await expect(page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })).toBeVisible()
+    const setupSheet = page
+      .locator('.ui-prompt-overlay')
+      .filter({ has: page.locator('#vault-setup-passphrase') })
+    await expect(setupSheet).toBeVisible()
   })
 
   test('a field further down the form opens its panel at ITS OWN offset', async ({ page }) => {

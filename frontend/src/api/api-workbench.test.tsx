@@ -3431,6 +3431,51 @@ describe('Auth can store a typed value in the vault', () => {
     expect(vault.createSecret).not.toHaveBeenCalled()
   })
 
+  it('suffixes an occupied Auth proposal before opening the create ask', async () => {
+    const occupied = {
+      id: 'secrow:users-token',
+      name: 'users token',
+      kind: 'api-token' as const,
+      provider: 'sec:v1:users-token',
+      ownerId: '',
+      usedBy: 0,
+      reachable: true,
+    }
+    await openWithCreate({
+      secretCreate: {
+        list: vi.fn().mockResolvedValue([occupied]),
+        createSecret: vi.fn(),
+      },
+      secretSource: { ...mintlessSource(), list: vi.fn().mockResolvedValue([occupied]) },
+    })
+    fireEvent.input(field('api-auth-var'), { target: { value: 'hello' } })
+
+    await storeAuthValue('hello')
+
+    await vi.waitFor(() => expect(field('secret-create-name').value).toBe('users token 2'))
+  })
+
+  it('keeps the Auth ask available when its inventory lookup fails', async () => {
+    const list = vi
+      .fn()
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([])
+      .mockRejectedValueOnce(new Error('inventory unavailable'))
+    await openWithCreate({
+      secretSource: { ...mintlessSource(), list },
+      secretCreate: {
+        list: vi.fn().mockResolvedValue([]),
+        createSecret: vi.fn(),
+      },
+    })
+    fireEvent.input(field('api-auth-var'), { target: { value: 'hello' } })
+
+    await storeAuthValue('hello')
+
+    await vi.waitFor(() => expect(field('secret-create-name').value).toBe('users token'))
+  })
+
   it('offers no store row for empty input but offers one for arbitrary text', async () => {
     // The disabled Store button said this; the panel says it by construction
     // — an empty field has nothing to keep, so the lock opens the plain list
@@ -6900,6 +6945,78 @@ describe('secrets are doors in every request field', () => {
     fireEvent.keyDown(url, { key: 'Enter' })
 
     await vi.waitFor(() => expect(field('secret-create-name').value).toBe('draft'))
+    expect(createSecret).not.toHaveBeenCalled()
+  })
+
+  it('suffixes an occupied proposal when storing a request header value', async () => {
+    const occupied = {
+      id: 'secrow:api-token',
+      name: 'api.example.test token',
+      kind: 'api-token' as const,
+      provider: 'sec:v1:api-token',
+      ownerId: '',
+      usedBy: 0,
+      reachable: true,
+    }
+    const createSecret = vi.fn().mockResolvedValue({ name: 'api.example.test token 2' })
+    const occupiedSource = {
+      ...source,
+      list: vi.fn().mockResolvedValue([occupied]),
+    }
+    await openSecretRequest(
+      occupiedSource,
+      {
+        ...REQUEST,
+        url: 'https://api.example.test',
+        headers: [{ name: 'Authorization', value: '', enabled: true }],
+        query: [],
+        variables: [],
+        auth: { kind: 'none', token: '', password: '', user: '' },
+      },
+      {
+        secretCreate: {
+          list: vi.fn().mockResolvedValue([occupied]),
+          createSecret,
+        },
+      },
+    )
+    fireEvent.click(button('Headers 1'))
+    const header = field('api-header-value-0')
+    fireEvent.input(header, { target: { value: 'header-value' } })
+    pressLock(header)
+    await takePanelRow('Store "header-value" in the vault\u2026')
+
+    await vi.waitFor(() =>
+      expect(field('secret-create-name').value).toBe('api.example.test token 2'),
+    )
+  })
+
+  it('opens the create ask when the API inventory lookup fails', async () => {
+    const createSecret = vi.fn()
+    await openSecretRequest(
+      source,
+      {
+        ...REQUEST,
+        url: 'https://api.example.test',
+        headers: [{ name: 'Authorization', value: '', enabled: true }],
+        query: [],
+        variables: [],
+        auth: { kind: 'none', token: '', password: '', user: '' },
+      },
+      {
+        secretCreate: {
+          list: vi.fn().mockRejectedValue(new Error('inventory unavailable')),
+          createSecret,
+        },
+      },
+    )
+    fireEvent.click(button('Headers 1'))
+    const header = field('api-header-value-0')
+    fireEvent.input(header, { target: { value: 'header-value' } })
+    pressLock(header)
+    await takePanelRow('Store "header-value" in the vault\u2026')
+
+    await vi.waitFor(() => expect(field('secret-create-name').value).toBe('api.example.test token'))
     expect(createSecret).not.toHaveBeenCalled()
   })
 

@@ -26,6 +26,8 @@ export interface ProposalContext {
   folder?: string
   /** The request's own name, if any. */
   request?: string
+  /** Names currently present in the vault, used to avoid proposing a collision. */
+  occupiedNames?: readonly string[]
 }
 
 export interface SecretProposal {
@@ -44,12 +46,27 @@ export function proposeSecret(ctx: ProposalContext): SecretProposal {
   const where = hostFromURL(ctx) || nonEmpty(ctx.folder) || nonEmpty(ctx.request)
   const kind: VaultSecretKind =
     ctx.site.at === 'auth' && ctx.site.scheme === 'basic' ? 'password' : 'api-token'
+  const baseName =
+    where === ''
+      ? siteWord
+      : ctx.site.at === 'auth' || ctx.site.at === 'field'
+        ? `${where} ${siteWord}`
+        : `${siteWord} for ${where}`
 
-  if (where === '') return { name: siteWord, kind }
-  if (ctx.site.at === 'auth' || ctx.site.at === 'field') {
-    return { name: `${where} ${siteWord}`, kind }
+  return { name: firstFreeName(baseName, ctx.occupiedNames), kind }
+}
+
+export function firstFreeName(name: string, occupiedNames?: readonly string[]): string {
+  if (occupiedNames === undefined || !occupiedNames.includes(name)) return name
+
+  const occupied = new Set(occupiedNames)
+  let suffix = 2
+  let candidate = `${name} ${suffix}`
+  while (occupied.has(candidate)) {
+    suffix += 1
+    candidate = `${name} ${suffix}`
   }
-  return { name: `${siteWord} for ${where}`, kind }
+  return candidate
 }
 
 function wordForSite(site: ProposalSite): string {

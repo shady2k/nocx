@@ -115,6 +115,28 @@ describe('proposeSecret — the name from the standing site and where', () => {
   )
 })
 
+describe('proposeSecret — occupied names', () => {
+  it('keeps the first proposal unchanged when its name is free', () => {
+    const context = {
+      site: { at: 'auth', scheme: 'bearer' },
+      url,
+      occupiedNames: ['other secret'],
+    } as ProposalContext
+
+    expect(proposeSecret(context).name).toBe('api.example.com token')
+  })
+
+  it('adds the first free numeric suffix when the proposal is occupied', () => {
+    const context = {
+      site: { at: 'auth', scheme: 'bearer' },
+      url,
+      occupiedNames: ['api.example.com token'],
+    } as ProposalContext
+
+    expect(proposeSecret(context).name).toBe('api.example.com token 2')
+  })
+})
+
 describe('proposeSecret — metadata purity', () => {
   it('takes one metadata context parameter and is deterministic', () => {
     expect(proposeSecret.length).toBe(1)

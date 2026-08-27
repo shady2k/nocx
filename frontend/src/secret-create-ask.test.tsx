@@ -183,7 +183,6 @@ describe('SecretCreateDialog', () => {
       resolve: true,
     })
   })
-
   it('keeps the value and shows a sealed-vault refusal', async () => {
     const createSecret = vi.fn().mockRejectedValue(new Error('vault is sealed'))
     const vault = vaultWith([[]], createSecret)

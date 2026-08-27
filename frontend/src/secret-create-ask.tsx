@@ -7,6 +7,7 @@ import { Select, type SelectOption } from './ui/select'
 import { Stack } from './ui/stack'
 import { TextField } from './ui/text-field'
 import type { InventoryEntry, VaultSecretKind } from './vault-client'
+import { firstFreeName } from './secret-name-proposal'
 
 /** What a door already knows when it opens the ask. */
 export interface SecretCreateAsk {
@@ -51,17 +52,6 @@ const SECRET_KIND_OPTIONS: SelectOption[] = (
   Object.keys(SECRET_KIND_LABELS) as VaultSecretKind[]
 ).map((value) => ({ value, label: SECRET_KIND_LABELS[value] }))
 
-function firstFreeVariant(name: string, entries: InventoryEntry[]): string {
-  const names = new Set(entries.map((entry) => entry.name))
-  let suffix = 2
-  let candidate = `${name} ${suffix}`
-  while (names.has(candidate)) {
-    suffix += 1
-    candidate = `${name} ${suffix}`
-  }
-  return candidate
-}
-
 function SecretCreateForm(
   props: Omit<SecretCreateDialogProps, 'ask'> & { ask: SecretCreateAsk },
 ): JSX.Element {
@@ -82,7 +72,12 @@ function SecretCreateForm(
     if (entries.some((entry) => entry.name === candidate)) {
       const message = `A secret named "${candidate}" is already in the vault`
       setNameError(message)
-      setName(firstFreeVariant(candidate, entries))
+      setName(
+        firstFreeName(
+          candidate,
+          entries.map((entry) => entry.name),
+        ),
+      )
       throw new Error(message)
     }
 

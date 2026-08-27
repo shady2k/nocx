@@ -451,12 +451,26 @@ export function ApiPane(props: ApiPaneProps) {
     // `name`; preserve that name. The explicit lock/store row includes the
     // value and passes an empty filter, so its name comes from the shared
     // proposal instead.
+    const fromStoreDoor = value !== undefined
+    const nothingTyped = name.trim() === ''
+    // What the vault already holds, so the proposal can avoid a name that is
+    // taken (nocx-3o0ed.8). Read only when the proposal will actually be
+    // used. An inventory that cannot be read must not stop the ask opening:
+    // its own check at save time stays authoritative.
+    let entries: InventoryEntry[] | undefined
+    if (fromStoreDoor && nothingTyped) {
+      try {
+        entries = await secretCreate.list()
+      } catch {
+        entries = undefined
+      }
+    }
     const proposal = proposeSecret({
       site: { at: 'field' },
       url: store.draft()?.url ?? '',
+      occupiedNames: entries?.map((entry) => entry.name),
     })
-    const fromStoreDoor = value !== undefined
-    const askName = fromStoreDoor && name.trim() === '' ? proposal.name : name
+    const askName = fromStoreDoor && nothingTyped ? proposal.name : name
     const created = await openSecretCreateAsk({
       name: askName,
       kind: proposal.kind,

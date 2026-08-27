@@ -56,7 +56,7 @@ export function proposeSecret(ctx: ProposalContext): SecretProposal {
   return { name: firstFreeName(baseName, ctx.occupiedNames), kind }
 }
 
-function firstFreeName(name: string, occupiedNames?: readonly string[]): string {
+export function firstFreeName(name: string, occupiedNames?: readonly string[]): string {
   if (occupiedNames === undefined || !occupiedNames.includes(name)) return name
 
   const occupied = new Set(occupiedNames)

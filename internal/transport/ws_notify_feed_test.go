@@ -423,6 +423,13 @@ func TestNotifyFeedChanged_OverTheWireConformsToContract(t *testing.T) {
 func TestBroadcastFeedChangedSurvivesARefusingClient(t *testing.T) {
 	ws, live := newNotifyFeedWS(t, newTestFeed(t))
 
+	// The wait is for the LIVE client alone, and it comes before the refusing
+	// connection joins: a dial that has returned is not yet a client, and a
+	// broadcast that overtakes the registration legitimately misses it. Waiting
+	// for one connection AFTER registerConn(dead) would be satisfied by the
+	// refusing connection by itself and would prove nothing.
+	waitForConns(t, ws, 1)
+
 	dead := &wsConn{
 		out: outbound.New(refusingSocket{}, outbound.Config{}),
 		log: log.NewSlogAdapter(nil),

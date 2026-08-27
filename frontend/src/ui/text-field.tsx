@@ -374,7 +374,7 @@ export function TextField(props: TextFieldProps) {
       <div
         class="ui-text-field__control"
         data-trailing={props.trailing !== undefined ? 'true' : 'false'}
-        data-action={props.trailingAction && focused() ? 'true' : undefined}
+        data-action={props.trailingAction !== undefined ? 'true' : undefined}
         data-unit={props.unit !== undefined && props.multiline !== true ? 'true' : undefined}
         data-ink={inked() ? 'true' : undefined}
       >

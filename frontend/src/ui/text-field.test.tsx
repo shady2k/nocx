@@ -478,6 +478,24 @@ describe('TextField trailing action', () => {
     fireEvent.focus(first)
     expect(container.querySelectorAll('button[aria-label="Store in vault"]')).toHaveLength(1)
   })
+  it('reserves action space before focus while keeping the action hidden', () => {
+    const { container } = render(() => (
+      <TextField id="value" value="ordinary text" trailingAction={action(vi.fn())} />
+    ))
+    const input = container.querySelector<HTMLInputElement>('#value')!
+    const control = container.querySelector('.ui-text-field__control')!
+
+    expect(control.getAttribute('data-action')).toBe('true')
+    expect(container.querySelector('button[aria-label="Store in vault"]')).toBeNull()
+
+    fireEvent.focus(input)
+    expect(container.querySelector('button[aria-label="Store in vault"]')).toBeTruthy()
+    expect(control.getAttribute('data-action')).toBe('true')
+
+    fireEvent.blur(input)
+    expect(container.querySelector('button[aria-label="Store in vault"]')).toBeNull()
+    expect(control.getAttribute('data-action')).toBe('true')
+  })
 
   it('shows the action for both empty and filled values when focused', () => {
     const { container } = render(() => (

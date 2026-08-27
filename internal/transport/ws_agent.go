@@ -375,6 +375,21 @@ type agentApprovalRequested struct {
 	Resource *content.GrantScope       `json:"resource,omitempty"`
 	WasError bool                      `json:"wasError,omitempty"`
 	Findings []assistant.EgressFinding `json:"findings,omitempty"`
+	Standing agentApprovalStanding     `json:"standing"`
+}
+
+type agentApprovalStanding struct {
+	Available bool   `json:"available"`
+	Rule      string `json:"rule"`
+	Reason    string `json:"reason"`
+}
+
+func standingOffer(inv content.Invocation) agentApprovalStanding {
+	rule, reason := content.StandingRule(inv)
+	if reason != "" {
+		return agentApprovalStanding{Reason: reason}
+	}
+	return agentApprovalStanding{Available: true, Rule: rule.Label()}
 }
 
 // The three widths an answer can have (nocx-ki305, design "The prompt grows
@@ -1303,6 +1318,7 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	if ap != nil {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = ap.RunID, ap.Attempt, ap.Tool, ap.CallID, ap.ArgHash, ap.Arguments
 		n.Effect, n.Resource = string(ap.Effect), ap.Resource
+		n.Standing = standingOffer(ap.Invocation)
 	} else {
 		n.RunID, n.Attempt, n.Tool, n.CallID, n.ArgHash, n.Arguments = eg.RunID, eg.Attempt, eg.Tool, eg.CallID, eg.ArgHash, eg.Arguments
 		n.Reason, n.WasError, n.Findings = "egress", eg.WasError, eg.Findings
@@ -1310,6 +1326,7 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 		// declaration: the surface ignores them here, but the wire is not
 		// two shapes and the schema requires the effect on both.
 		n.Effect, n.Resource = string(eg.Effect), eg.Resource
+		n.Standing = agentApprovalStanding{Reason: "standing answers are not offered for result disclosure"}
 	}
 	// Carry the drops across the suspension: the resume re-drives this
 	// same context (runAskStream starts from rc.droppedBefore), and the
@@ -1591,12 +1608,13 @@ func (h agentHandlers) applyStandingAnswer(p approveParams, ap assistant.Approva
 		}
 		return ""
 	}
-	rule, err := content.LiteralInvocationRule(invocation, d)
-	if err != nil {
+	rule, standingReason := content.StandingRule(invocation)
+	if standingReason != "" {
 		h.log.Warn("agent.approve: the standing answer was not recorded",
-			"run", p.RunID, "tool", p.Tool, "scope", p.Scope, "error", err)
-		return "the decision was applied to this call, but could not be saved as a standing answer: " + err.Error()
+			"run", p.RunID, "tool", p.Tool, "scope", p.Scope, "reason", standingReason)
+		return "the decision was applied to this call, but could not be saved as a standing answer: " + standingReason
 	}
+	rule.Decision = d
 	if p.Scope == approveScopeSession {
 		h.sessionPolicy.SetRule(sid, rule)
 		return ""

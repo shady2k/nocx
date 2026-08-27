@@ -3,6 +3,7 @@ package content
 import (
 	"fmt"
 	"strings"
+	"unicode"
 )
 
 // Invocation is the canonical, backend-parsed command representation used by
@@ -50,6 +51,61 @@ func LiteralInvocationRule(inv Invocation, decision Decision) (InvocationRule, e
 		}
 	}
 	return rule, nil
+}
+
+// StandingRule returns the only invocation rule a person may be offered from
+// this canonical parse. A standing answer must show one complete command:
+// compound, disqualified, unparsed and pattern-bearing invocations are not
+// representable without granting more than the question showed.
+func StandingRule(inv Invocation) (InvocationRule, string) {
+	if !inv.Parsed {
+		return InvocationRule{}, "the command could not be parsed safely"
+	}
+	if len(inv.Commands) == 0 {
+		return InvocationRule{}, "the command has no complete invocation to show"
+	}
+	if len(inv.Commands) != 1 {
+		return InvocationRule{}, "the command contains more than one command"
+	}
+	if inv.Disqualified {
+		return InvocationRule{}, "the command uses an indirect wrapper or shell feature"
+	}
+	rule, err := LiteralInvocationRule(inv, DecisionPermit)
+	if err != nil {
+		return InvocationRule{}, err.Error()
+	}
+	return rule, ""
+}
+
+// Label returns the canonical, shell-safe spelling of the invocation pattern.
+// It is presentation of Pattern, not a second parse of the original command.
+func (r InvocationRule) Label() string {
+	commands := make([]string, 0, len(r.Pattern))
+	for _, command := range r.Pattern {
+		tokens := make([]string, 0, len(command))
+		for _, token := range command {
+			tokens = append(tokens, ruleTokenLabel(token))
+		}
+		commands = append(commands, strings.Join(tokens, " "))
+	}
+	return strings.Join(commands, " ; ")
+}
+
+func ruleTokenLabel(token string) string {
+	if token != "" {
+		safe := true
+		for _, r := range token {
+			if !unicode.IsLetter(r) && !unicode.IsDigit(r) &&
+				!strings.ContainsRune("_./:@+,=-", r) {
+				safe = false
+				break
+			}
+		}
+		if safe {
+			return token
+		}
+	}
+	return "'" + strings.ReplaceAll(token, "'", "'\\''") + "'"
 }
 
 // Matches reports whether this rule covers the complete canonical invocation.

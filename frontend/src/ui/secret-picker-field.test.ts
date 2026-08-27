@@ -149,6 +149,46 @@ describe('createSecretPickerField', () => {
     expect(panel()?.dataset.open).not.toBe('true')
   })
 
+  it('document Escape closes after focus leaves the field and does not resurrect it', async () => {
+    const h = setup()
+    h.value.current = '@prod'
+    h.controller.onInput(h.value.current, h.value.current.length)
+    await flush()
+
+    const other = document.createElement('input')
+    document.body.appendChild(other)
+    other.focus()
+    const escape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    })
+    document.dispatchEvent(escape)
+
+    expect(escape.defaultPrevented).toBe(true)
+    expect(panel()?.dataset.open).not.toBe('true')
+
+    h.value.current = '@prod-k'
+    h.controller.onInput(h.value.current, h.value.current.length)
+    await flush()
+    expect(panel()?.dataset.open).not.toBe('true')
+  })
+
+  it('pointerdown outside closes the panel and clears its lock anchor', async () => {
+    const h = setup()
+    h.value.current = ''
+    h.controller.openForStore({ start: 0, end: 0 })
+    await flush()
+
+    document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    expect(panel()?.dataset.open).not.toBe('true')
+
+    h.value.current = 'p'
+    h.controller.onInput(h.value.current, h.value.current.length)
+    await flush()
+    expect(panel()?.dataset.open).not.toBe('true')
+  })
+
   it('destroy removes its mounted panel from the document', () => {
     const h = setup()
     expect(document.querySelectorAll('.ui-floating-panel[data-variant="secret"]')).toHaveLength(1)

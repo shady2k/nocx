@@ -81,6 +81,8 @@ export interface SecretPickerCallbacks {
   onInsert(name: string): void
   /** Report a refused picker read through the host's logger. */
   onError?(message: string, error: unknown): void
+  /** The panel was dismissed outside the field's keyboard path. */
+  onDismiss?(reason: 'escape' | 'outside'): void
 }
 
 /** The one fact about a secret row the panel reads: its name (the vault's
@@ -223,6 +225,13 @@ export class SecretPicker {
       callbacks: {
         onHover: (index) => this.hover(index),
         onPick: (index) => this.pick(index),
+        onDismiss: (reason) => {
+          // Close before notifying the host: the callback may clear the
+          // trigger that opened this panel, but it must never observe a live
+          // stale surface.
+          this.close()
+          this.callbacks.onDismiss?.(reason)
+        },
       },
       ...(opts?.anchor !== undefined ? { anchor: opts.anchor } : {}),
     })

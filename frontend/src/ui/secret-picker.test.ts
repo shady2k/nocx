@@ -197,6 +197,50 @@ describe('SecretPicker: the list', () => {
   })
 })
 
+describe('SecretPicker: document dismissal', () => {
+  it('closes through the host after an external Escape or pointerdown', async () => {
+    const h = setup(UNSEALED, [entry('openai-key')])
+    const states: boolean[] = []
+    const pickerRef: { current: SecretPicker | undefined } = { current: undefined }
+    const onDismiss = vi.fn(() => {
+      const picker = pickerRef.current
+      if (picker === undefined) throw new Error('dismissal ran before picker construction')
+      states.push(picker.isOpen)
+    })
+    const callbacks = { onInsert: h.onInsert, onError: h.onError, onDismiss }
+    const picker = new SecretPicker(h.source, callbacks)
+    pickerRef.current = picker
+    picker.mount(h.container)
+
+    await picker.open()
+    await flush()
+
+    const escape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    })
+    document.dispatchEvent(escape)
+    expect(escape.defaultPrevented).toBe(true)
+    expect(onDismiss).toHaveBeenLastCalledWith('escape')
+    expect(states).toEqual([false])
+    expect(picker.isOpen).toBe(false)
+
+    await picker.open()
+    await flush()
+    key(picker, { key: 'Escape' })
+    expect(onDismiss).toHaveBeenCalledTimes(1)
+    expect(picker.isOpen).toBe(false)
+
+    await picker.open()
+    await flush()
+    document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    expect(onDismiss).toHaveBeenLastCalledWith('outside')
+    expect(states).toEqual([false, false])
+    expect(picker.isOpen).toBe(false)
+  })
+})
+
 describe('SecretPicker: the passive filter', () => {
   it('filters as the trigger word grows; a match is highlighted', async () => {
     const h = setup(UNSEALED, [entry('openai-key'), entry('openai-secret'), entry('github-pat')])

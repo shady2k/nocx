@@ -5,7 +5,9 @@ import (
 	"context"
 	"encoding/json"
 	"path/filepath"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/connection"
 	"github.com/shady2k/nocx/internal/credential"
@@ -80,6 +82,170 @@ func TestProfilesRPC_CreateList(t *testing.T) {
 	}
 	if list.Result[0].Options.Host != "example.com" {
 		t.Errorf("host = %q", list.Result[0].Options.Host)
+	}
+}
+
+func TestProfilesAndGroupsRPC_NameAndIDBounds(t *testing.T) {
+	const (
+		wantMaxNameRunes = 200
+		wantMaxIDRunes   = 128
+	)
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	logger := log.NewSlogAdapter(nil)
+	ws := NewWSServer(logger, newRegWithStub(logger),
+		WithProfileRepository(ps), WithGroupRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+
+	type envelope struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	call := func(method string, params map[string]any) envelope {
+		t.Helper()
+		var got envelope
+		raw := jsonrpcCall(t, conn, method, params)
+		if err := json.Unmarshal(raw, &got); err != nil {
+			t.Fatalf("%s response: %v", method, err)
+		}
+		return got
+	}
+	accepted := func(method string, params map[string]any) json.RawMessage {
+		t.Helper()
+		got := call(method, params)
+		if got.Error != nil {
+			t.Fatalf("%s refused boundary value: %+v", method, got.Error)
+		}
+		return got.Result
+	}
+	refused := func(method string, params map[string]any, field string) {
+		t.Helper()
+		got := call(method, params)
+		if got.Error == nil || got.Error.Code != -32602 || !strings.Contains(got.Error.Message, field) {
+			t.Fatalf("%s over-bound %s: got %+v, want -32602 naming %s", method, field, got.Error, field)
+		}
+	}
+
+	profileParams := func(name, id string) map[string]any {
+		return map[string]any{
+			"id": id, "name": name, "type": "ssh",
+			"options": map[string]any{"host": "bound.example.com"},
+		}
+	}
+	profileResult := accepted("profiles.create", profileParams(strings.Repeat("n", wantMaxNameRunes), ""))
+	var mintedProfile profile.SSHProfile
+	if err := json.Unmarshal(profileResult, &mintedProfile); err != nil {
+		t.Fatalf("profile result: %v", err)
+	}
+	if got := utf8.RuneCountInString(mintedProfile.ID); got > wantMaxIDRunes {
+		t.Errorf("minted profile id has %d runes, want at most %d", got, wantMaxIDRunes)
+	}
+	refused("profiles.create", profileParams(strings.Repeat("n", wantMaxNameRunes+1), ""), "name")
+	accepted("profiles.create", profileParams("id-at-limit", strings.Repeat("i", wantMaxIDRunes)))
+	refused("profiles.create", profileParams("id-over-limit", strings.Repeat("i", wantMaxIDRunes+1)), "id")
+
+	groupParams := func(name, id string) map[string]any {
+		return map[string]any{"id": id, "name": name}
+	}
+	groupResult := accepted("groups.create", groupParams(strings.Repeat("g", wantMaxNameRunes), ""))
+	var mintedGroup profile.ProfileGroup
+	if err := json.Unmarshal(groupResult, &mintedGroup); err != nil {
+		t.Fatalf("group result: %v", err)
+	}
+	if got := utf8.RuneCountInString(mintedGroup.ID); got > wantMaxIDRunes {
+		t.Errorf("minted group id has %d runes, want at most %d", got, wantMaxIDRunes)
+	}
+	refused("groups.create", groupParams(strings.Repeat("g", wantMaxNameRunes+1), ""), "name")
+	accepted("groups.create", groupParams("id-at-limit", strings.Repeat("j", wantMaxIDRunes)))
+	refused("groups.create", groupParams("id-over-limit", strings.Repeat("j", wantMaxIDRunes+1)), "id")
+}
+
+func TestProfilesRPC_CreateRejectsOptionLikeHost(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	logger := log.NewSlogAdapter(nil)
+	ws := NewWSServer(logger, newRegWithStub(logger),
+		WithProfileRepository(ps), WithGroupRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	p := profile.SSHProfile{
+		Base:    profile.Base{ID: profile.NewProfileID("ssh", "option-host"), Type: "ssh", Name: "option-host"},
+		Options: profile.StoredSSHProfileOptions{Host: "-F/tmp/attacker_config"},
+	}
+	resp := jsonrpcCall(t, conn, "profiles.create", p)
+	var envelope struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal create response: %v", err)
+	}
+	if envelope.Error == nil || envelope.Error.Code != -32602 {
+		t.Fatalf("option-like profile host: got %+v, want -32602", envelope.Error)
+	}
+
+	stored, err := ps.LoadProfiles()
+	if err != nil {
+		t.Fatalf("list profiles: %v", err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("refused profile was persisted: %+v", stored)
+	}
+}
+
+func TestProfilesRPC_CreateRejectsEmptyHostBeforeStorage(t *testing.T) {
+	dir := t.TempDir()
+	ps := profile.NewJSONStore(filepath.Join(dir, "p.json"))
+	logger := log.NewSlogAdapter(nil)
+	ws := NewWSServer(logger, newRegWithStub(logger),
+		WithProfileRepository(ps), WithGroupRepository(ps))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	resp := jsonrpcCall(t, conn, "profiles.create", map[string]any{
+		"id": "ssh:empty:1", "name": "empty", "type": "ssh",
+		"options": map[string]any{"host": ""},
+	})
+	var envelope struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal create response: %v", err)
+	}
+	if envelope.Error == nil || envelope.Error.Code != -32602 || !strings.Contains(envelope.Error.Message, "host") {
+		t.Fatalf("empty host: got %+v, want -32602 naming host", envelope.Error)
+	}
+	stored, err := ps.LoadProfiles()
+	if err != nil {
+		t.Fatalf("list profiles: %v", err)
+	}
+	if len(stored) != 0 {
+		t.Fatalf("empty-host profile was persisted: %+v", stored)
 	}
 }
 

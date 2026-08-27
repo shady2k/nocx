@@ -292,7 +292,7 @@ func ValidateEndpoint(e Endpoint) error {
 // profile ids are: an id is identity, and a display layer that invents one
 // has to know the uniqueness rule the store enforces.
 func NewEndpointID(name string) string {
-	return "endpoint:custom:" + slugify(name) + ":" + newUUID()
+	return mintID("endpoint", name)
 }
 
 // EndpointDTO is the wire form of an endpoint (design §4.5.4): the stored

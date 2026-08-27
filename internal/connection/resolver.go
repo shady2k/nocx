@@ -212,7 +212,10 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 	// stored as the authorization identity. At connect time, the same
 	// resolution is applied to the dial target, so an alias connects and
 	// a HostName change (drift) is detected as a mismatch.
-	authHost := r.resolveProfileHost(prof.Options.Host)
+	authHost, err := r.resolveProfileHost(prof.Options.Host)
+	if err != nil {
+		return nil, err
+	}
 	cfg.AuthorizedEndpoint = authHost
 	if cfg.Port > 0 {
 		cfg.AuthorizedEndpoint = net.JoinHostPort(authHost, strconv.Itoa(cfg.Port))
@@ -287,7 +290,10 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 			cfg.JumpPassphraseSecretID = jumpCfg.PassphraseSecretID
 			// Authorized endpoint for the jump credential: resolved through
 			// ~/.ssh/config, same as the target credential.
-			jumpAuthHost := r.resolveProfileHost(jumpProf.Options.Host)
+			jumpAuthHost, err := r.resolveProfileHost(jumpProf.Options.Host)
+			if err != nil {
+				return nil, fmt.Errorf("jump host %s: %w", jumpHostID, err)
+			}
 			cfg.JumpAuthorizedEndpoint = jumpAuthHost
 			if jumpCfg.Port > 0 {
 				cfg.JumpAuthorizedEndpoint = net.JoinHostPort(jumpAuthHost, strconv.Itoa(jumpCfg.Port))
@@ -304,15 +310,18 @@ func (r *Resolver) buildConfig(prof *profile.SSHProfile, visited map[string]bool
 // Uses context.Background() since profile resolution runs during
 // configuration, not on the connect path; the resolver's own 10s internal
 // timeout still bounds the subprocess.
-func (r *Resolver) resolveProfileHost(host string) string {
+func (r *Resolver) resolveProfileHost(host string) (string, error) {
+	if ssh.IsOptionLikeHost(host) {
+		return "", fmt.Errorf("profile host must not begin with a dash")
+	}
 	if r.configResolver == nil {
-		return host
+		return host, nil
 	}
 	resolved, err := r.configResolver.ResolveHost(context.Background(), host)
 	if err != nil || resolved == "" {
-		return host
+		return host, nil
 	}
-	return resolved
+	return resolved, nil
 }
 
 // ErrProfileNotFound is returned when a profile ID is not found.

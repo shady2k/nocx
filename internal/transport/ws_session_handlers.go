@@ -878,7 +878,7 @@ type ackHandler struct {
 //
 // Offsets that run ahead of what was produced or go backwards are rejected
 // with a warn — the server never trusts the client blindly.
-func (h ackHandler) handleAck(req jsonrpcRequest) {
+func (h ackHandler) handleAck(wconn *wsConn, state *connState, req jsonrpcRequest) {
 	var params ackParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
 		h.log.Warn("ack invalid params")
@@ -886,10 +886,13 @@ func (h ackHandler) handleAck(req jsonrpcRequest) {
 	}
 
 	sid := session.ID(params.SessionID)
-
 	rx := h.machine.getRx(sid)
 	if rx == nil {
 		h.log.Warn("ack for unknown session", "session_id", string(sid))
+		return
+	}
+	if !rx.isSubscriber(wconn, state) {
+		h.log.Warn("ack for session not subscribed by connection", "session_id", string(sid))
 		return
 	}
 
@@ -951,7 +954,7 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 		}),
 		reg(immediate, "ack", params(validateAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := ackHandler{machine: s, log: s.log}
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleAck(req) }
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleAck(w, state, req) }
 		}),
 	}
 }
@@ -1016,7 +1019,7 @@ func validateOpenRaw(raw json.RawMessage) string {
 			return msg
 		}
 	}
-	if msg := validateStringBound("host", p.Host, maxHostRunes); msg != "" {
+	if msg := validateSSHHost("host", p.Host); msg != "" {
 		return msg
 	}
 	if msg := validateStringBound("user", p.User, maxUserRunes); msg != "" {

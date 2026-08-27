@@ -131,6 +131,8 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 - Binds: all SSH connection handling.
 - Prevents: a spawn-`ssh` MVP that would need rewriting for the Phase-2 vault/profiles.
 - Rule: SSH sits behind a clean interface; honor `~/.ssh/config` via a config parser (e.g. `kevinburke/ssh_config`); SFTP via `pkg/sftp` later; the vault injects credentials through this library. The `ssh` module owns a **ref-counted `ssh.Client` connection pool** keyed by host+identity: channels multiplex over one connection, and the connection closes with the last tab that references it — preserving connection reuse and Phase-2 vault credential caching.
+  - Renderer-supplied and stored-profile hosts are positional SSH destinations, never
+    options: a host beginning with `-` is refused before `ssh -G` or a dial is attempted.
 
 **AD-5 — Two-tier shell-integration substrate.**
 
@@ -171,6 +173,8 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 - Binds: session + transport + ipc + terminal.
 - Prevents: data loss or corrupt render on a dropped WS; scrollback dual-ownership.
 - Rule: the backend holds a **bounded per-session output ring** keyed by a monotonic byte-offset; the frontend acks the last-received offset. On reconnect the frontend sends its last offset and the backend replays from there, or emits an explicit `reset` (clear + resync) if the offset is past the buffer.
+  - An ack is accepted only from the WebSocket currently registered as the
+    session's subscriber; a stale pre-reattach client cannot trim replay bytes.
   - This replay ring is **transport buffering, not scrollback ownership** — scrollback stays frontend-owned, so AD-6 is intact.
 
 **AD-10 — Backpressure / flow-control.**

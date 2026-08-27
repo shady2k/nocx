@@ -170,6 +170,45 @@ func TestWSServer_Open_SSHDirectHost_RequestsIntegration(t *testing.T) {
 	}
 }
 
+func TestWSServer_Open_SSHDirectHost_RejectsOptionLikeHost(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	reg := newRegWithStub(logger)
+	rec := &sshConfigRecorder{}
+	reg.WithSSHFactory(rec.factory(logger))
+
+	ws := NewWSServer(logger, reg, WithSSHConfigResolver(newLauncherTestResolver(), "/nonexistent/config"))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
+	resp := jsonrpcCall(t, conn, "open", map[string]any{
+		"cols": 80, "rows": 24, "kind": "ssh", "host": "-F/tmp/attacker_config",
+	})
+	var envelope struct {
+		Error *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("unmarshal open response: %v", err)
+	}
+	if envelope.Error == nil || envelope.Error.Code != -32602 {
+		t.Fatalf("option-like host: got %+v, want -32602", envelope.Error)
+	}
+
+	rec.mu.Lock()
+	dialed := rec.seen
+	rec.mu.Unlock()
+	if dialed {
+		t.Error("option-like host reached the SSH dialer")
+	}
+}
+
 // The local session asks for integration without the renderer saying so.
 // It already worked, because the renderer happened to pass true; the
 // assertion is that it keeps working once the parameter is gone.

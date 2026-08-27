@@ -334,6 +334,15 @@ func TestParse_RejectsEmptyProfileName(t *testing.T) {
 	}
 }
 
+func TestParse_RejectsObsoleteNeedsReviewField(t *testing.T) {
+	svc, _, _, _, _ := newFakeService()
+	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"ssh","name":"host","needsReview":true,"options":{"host":"h"}}],"groups":[]}}`
+	_, err := svc.Preview(contents, backup.RestoreMerge)
+	if err == nil || !strings.Contains(err.Error(), "needsReview") {
+		t.Fatalf("Preview error = %v, want obsolete needsReview field refusal", err)
+	}
+}
+
 func TestParse_RejectsNonSSHType(t *testing.T) {
 	svc, _, _, _, _ := newFakeService()
 	contents := `{"format":"nocx-backup","version":1,"createdAt":"2026-01-01T00:00:00Z","settings":{"overrides":{}},"connections":{"profiles":[{"id":"p1","type":"telnet","name":"a","options":{"host":"h"}}],"groups":[]}}`

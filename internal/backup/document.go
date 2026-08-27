@@ -134,7 +134,6 @@ type BackupProfile struct {
 	BehaviorOnSessionEnd profile.BehaviorOnSessionEnd `json:"behaviorOnSessionEnd,omitempty"`
 	Weight               int                          `json:"weight,omitempty"`
 	IsBuiltin            bool                         `json:"isBuiltin,omitempty"`
-	NeedsReview          bool                         `json:"needsReview,omitempty"`
 	Options              BackupSSHOptions             `json:"options"`
 	RequiresCredential   bool                         `json:"requiresCredential,omitempty"`
 }

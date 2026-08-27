@@ -1,5 +1,7 @@
 package transport
 
+import "github.com/shady2k/nocx/internal/ssh"
+
 // Ingress bounds shared by more than one control domain.
 //
 // A bound lives here when two domains bound THE SAME THING. It does not live
@@ -27,3 +29,16 @@ const maxHostRunes = 253
 // at the same number independently, which is the clearest sign it is one
 // concept rather than two.
 const maxUserRunes = 256
+
+// validateSSHHost owns the control-plane shape shared by direct opens and
+// stored profiles. A leading dash would be parsed by ssh -G as an option, not
+// as the positional destination the caller named.
+func validateSSHHost(field, value string) string {
+	if msg := validateStringBound(field, value, maxHostRunes); msg != "" {
+		return msg
+	}
+	if ssh.IsOptionLikeHost(value) {
+		return field + " must not begin with a dash"
+	}
+	return ""
+}

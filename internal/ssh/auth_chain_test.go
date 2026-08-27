@@ -845,6 +845,38 @@ func TestNoAuthMaterial_ProbeSaysTheSameThingAsConnect(t *testing.T) {
 	}
 }
 
+func TestProbeConfig_KeyPathReadAndParseFailuresHaveTheSamePublicError(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("SSH_AUTH_SOCK", "")
+	garbage := filepath.Join(home, "not-a-private-key")
+	if err := os.WriteFile(garbage, []byte("ordinary file contents"), 0o600); err != nil {
+		t.Fatalf("write garbage key fixture: %v", err)
+	}
+
+	rc := newTestRealClient(t)
+	paths := []string{filepath.Join(home, "missing-key"), garbage}
+	var publicError string
+	for _, path := range paths {
+		_, err := rc.probeConfig(context.Background(), "192.168.0.57", &ConnectConfig{
+			AuthMode: "publicKey",
+			KeyFile:  path,
+		})
+		var noAuth *ErrNoAuthMethod
+		if !errors.As(err, &noAuth) {
+			t.Fatalf("keyPath %q: got %T %v, want ErrNoAuthMethod", path, err, err)
+		}
+		if publicError == "" {
+			publicError = err.Error()
+		} else if err.Error() != publicError {
+			t.Fatalf("keyPath failures differ on the public seam: first %q, next %q", publicError, err.Error())
+		}
+		if strings.Contains(err.Error(), path) {
+			t.Fatalf("public error leaked the probed path %q: %q", path, err)
+		}
+	}
+}
+
 // TestNoAuthMaterial_JumpDialSaysWhichMethodHasNothing is the bastion-side
 // sibling of the two above. dialJumpForConnect builds its own auth chain and
 // dials the bastion directly, so it needs the same empty-chain guard: without

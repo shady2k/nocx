@@ -2,6 +2,7 @@ package connection
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -223,6 +224,24 @@ func TestResolver_InlineMode(t *testing.T) {
 	}
 	if cfg.Secrets != nil {
 		t.Error("Secrets should be nil in inline mode")
+	}
+}
+
+func TestResolver_RejectsOptionLikeStoredHostWithoutConfigResolver(t *testing.T) {
+	ps := newStubProfileStore()
+	if err := ps.SaveProfile(profile.SSHProfile{
+		Base: profile.Base{ID: "profile:option-host", Name: "option-host"},
+		Options: profile.StoredSSHProfileOptions{
+			Host: "-F/tmp/attacker_config",
+			Port: profile.Ptr(22),
+		},
+	}); err != nil {
+		t.Fatalf("SaveProfile: %v", err)
+	}
+
+	_, _, err := NewResolver(ps, ps, newStubSecretStore()).Resolve("profile:option-host")
+	if err == nil || !strings.Contains(err.Error(), "host must not begin with a dash") {
+		t.Fatalf("Resolve error = %v, want option-like host refusal before any oracle or dial", err)
 	}
 }
 

@@ -1,21 +1,6 @@
 package profile
 
-import (
-	"errors"
-	"fmt"
-)
-
-// ---------------------------------------------------------------------------
-// Domain-level errors
-// ---------------------------------------------------------------------------
-
-// ErrProfileNeedsReview is returned when trying to resolve a profile marked
-// NeedsReview. The profile references identity resolved from local state
-// during import and requires human review before it can be used.
-var ErrProfileNeedsReview = errors.New("profile requires review before it can be resolved")
-
-// NeedsReviewReason explains why a profile was marked NeedsReview.
-const NeedsReviewReason = "profile references identity imported from another source; review required"
+import "fmt"
 
 // ---------------------------------------------------------------------------
 // ImportResult
@@ -304,38 +289,4 @@ func (s *ProfileService) AtomicReplace(snap ConfigSnapshot) error {
 		return fmt.Errorf("group tree invalid: %w", err)
 	}
 	return s.store.WriteAll(d)
-}
-
-// ---------------------------------------------------------------------------
-// Review flag management
-// ---------------------------------------------------------------------------
-
-// ClearReviewFlag clears the NeedsReview flag on a profile, returning
-// the updated profile. Returns ErrProfileNotFound if the profile does
-// not exist.
-func (s *ProfileService) ClearReviewFlag(profileID string) (SSHProfile, error) {
-	if profileID == "" {
-		return SSHProfile{}, ErrProfileIDRequired
-	}
-
-	storeData, err := s.store.LoadAll()
-	if err != nil {
-		return SSHProfile{}, fmt.Errorf("load store: %w", err)
-	}
-
-	for i, p := range storeData.Profiles {
-		if p.ID == profileID {
-			storeData.Profiles[i].NeedsReview = false
-			if err := s.store.WriteAll(storeData); err != nil {
-				return SSHProfile{}, fmt.Errorf("write store: %w", err)
-			}
-			// Sync BehaviorOnSessionEnd from Options to Base for the caller.
-			if storeData.Profiles[i].Options.BehaviorOnSessionEnd != nil {
-				storeData.Profiles[i].BehaviorOnSessionEnd = *storeData.Profiles[i].Options.BehaviorOnSessionEnd
-			}
-			return storeData.Profiles[i], nil
-		}
-	}
-
-	return SSHProfile{}, fmt.Errorf("%s: %w", profileID, ErrProfileNotFound)
 }

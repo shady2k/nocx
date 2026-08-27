@@ -1295,6 +1295,59 @@ func TestWSServer_AckTrimsRing(t *testing.T) {
 	}
 }
 
+func TestWSServer_AckRejectsStaleOwnerAfterReattach(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	ws := NewWSServer(logger, newRegWithStub(logger))
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+
+	stale := connectWS(t, ws)
+	current := connectWS(t, ws)
+	t.Cleanup(func() { _ = stale.Close() })
+	t.Cleanup(func() { _ = current.Close() })
+	sid := openSessionOnConn(t, ws, stale, 1)
+	rx := ws.getRx(session.ID(sid))
+	if rx == nil {
+		t.Fatal("opened session has no replay ring")
+	}
+	if err := rx.ring.write([]byte("test")); err != nil {
+		t.Fatalf("seed replay ring: %v", err)
+	}
+	acked := func() uint64 {
+		rx.ring.mu.Lock()
+		defer rx.ring.mu.Unlock()
+		return rx.ring.acked
+	}
+
+	attached := jsonrpcCallWithID(t, current, "attach", map[string]any{
+		"sessionId": sid, "offset": uint64(0),
+	}, 2)
+	var attachEnvelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(attached, &attachEnvelope); err != nil {
+		t.Fatalf("attach response: %v", err)
+	}
+	if attachEnvelope.Error != nil {
+		t.Fatalf("reattach: %+v", attachEnvelope.Error)
+	}
+
+	sendAck(t, stale, sid, 4)
+	_ = openSessionOnConn(t, ws, stale, 3) // stale read-loop ordering barrier
+	if got := acked(); got != 0 {
+		t.Fatalf("stale owner advanced ack to %d after reattach, want 0", got)
+	}
+
+	sendAck(t, current, sid, 4)
+	_ = openSessionOnConn(t, ws, current, 4) // current read-loop ordering barrier
+	if got := acked(); got != 4 {
+		t.Fatalf("current subscriber ack = %d, want 4", got)
+	}
+}
+
 func TestWSServer_TwoSessionsIndependentRings(t *testing.T) {
 	reg := newRegWithStub(log.NewSlogAdapter(nil))
 	ws := NewWSServer(log.NewSlogAdapter(nil), reg)

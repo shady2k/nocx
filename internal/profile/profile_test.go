@@ -7,6 +7,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"unicode/utf8"
 )
 
 func TestHardcodedDefaults(t *testing.T) {
@@ -23,7 +24,7 @@ func TestHardcodedDefaults(t *testing.T) {
 }
 
 func TestProfileIDNamespace(t *testing.T) {
-	id := NewProfileID("ssh", "my-host")
+	id := NewProfileID("ssh", "  My Host  ")
 	if !isNamespacedID(id) {
 		t.Fatalf("generated id %q is not namespaced", id)
 	}
@@ -36,6 +37,82 @@ func TestProfileIDNamespace(t *testing.T) {
 	}
 	if parsed.Name != "my-host" {
 		t.Errorf("name = %q, want my-host", parsed.Name)
+	}
+}
+
+func TestProfileIDSlugPreservesUnicodeLowercaseIntoASCII(t *testing.T) {
+	id := NewProfileID("ssh", "K")
+	parsed, ok := parseNamespacedID(id)
+	if !ok {
+		t.Fatalf("could not parse id %q", id)
+	}
+	if parsed.Name != "k" {
+		t.Fatalf("slug = %q, want k — bounded slugification must preserve strings.ToLower semantics", parsed.Name)
+	}
+}
+
+func TestMintedIDsRespectThe128RuneBound(t *testing.T) {
+	const wantMaxIDRunes = 128
+	longASCII := strings.Repeat("x", 10_000)
+	longUnicode := strings.Repeat("界", 10_000)
+	tests := map[string]func() string{
+		"profile long name":      func() string { return NewProfileID("ssh", longASCII) },
+		"profile unicode name":   func() string { return NewProfileID("ssh", longUnicode) },
+		"profile long namespace": func() string { return NewProfileID(longUnicode, "host") },
+		"group":                  func() string { return NewGroupID(longASCII) },
+		"endpoint":               func() string { return NewEndpointID(longASCII) },
+	}
+	for name, mint := range tests {
+		t.Run(name, func(t *testing.T) {
+			id := mint()
+			if got := utf8.RuneCountInString(id); got > wantMaxIDRunes {
+				t.Fatalf("minted id has %d runes, want at most %d", got, wantMaxIDRunes)
+			}
+			if _, ok := parseNamespacedID(id); !ok {
+				t.Fatalf("minted id %q is not namespaced", id)
+			}
+		})
+	}
+}
+
+func TestMintedIDSlugBudgetsAreInclusive(t *testing.T) {
+	const wantMaxIDRunes = 128
+	tests := []struct {
+		name   string
+		budget int
+		mint   func(string) string
+	}{
+		{name: "profile", budget: 84, mint: func(name string) string { return NewProfileID("ssh", name) }},
+		{name: "group", budget: 82, mint: NewGroupID},
+		{name: "endpoint", budget: 79, mint: NewEndpointID},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			atLimit := strings.Repeat("a", tc.budget)
+			overLimit := atLimit + "b"
+			for label, input := range map[string]string{"at limit": atLimit, "over limit": overLimit} {
+				id := tc.mint(input)
+				parts, ok := parseNamespacedID(id)
+				if !ok {
+					t.Fatalf("%s: minted id %q is not namespaced", label, id)
+				}
+				if parts.Name != atLimit {
+					t.Errorf("%s: slug = %q, want %q", label, parts.Name, atLimit)
+				}
+				if got := utf8.RuneCountInString(id); got != wantMaxIDRunes {
+					t.Errorf("%s: id has %d runes, want %d", label, got, wantMaxIDRunes)
+				}
+			}
+		})
+	}
+}
+
+func TestMintedIDTruncationKeepsUUIDUniqueness(t *testing.T) {
+	name := strings.Repeat("same-prefix", 100)
+	first := NewProfileID("ssh", name)
+	second := NewProfileID("ssh", name)
+	if first == second {
+		t.Fatalf("two mints returned the same id %q", first)
 	}
 }
 

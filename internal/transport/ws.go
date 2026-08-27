@@ -74,6 +74,12 @@ func (rx *sessionRx) setSubscriber(wconn *wsConn, state *connState) {
 	rx.subState = state
 }
 
+func (rx *sessionRx) isSubscriber(wconn *wsConn, state *connState) bool {
+	rx.mu.Lock()
+	defer rx.mu.Unlock()
+	return rx.subscriber == wconn && rx.subState == state
+}
+
 func (rx *sessionRx) getSubscriber() (*wsConn, *connState) {
 	rx.mu.Lock()
 	defer rx.mu.Unlock()

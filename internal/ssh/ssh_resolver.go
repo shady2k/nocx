@@ -59,6 +59,12 @@ type ConfigResolver interface {
 	ResolveArgv(ctx context.Context, argv []string) (*HostConfig, error)
 }
 
+// IsOptionLikeHost reports whether ssh would parse host as an option instead
+// of the positional destination the caller intended.
+func IsOptionLikeHost(host string) bool {
+	return host != "" && host[0] == '-'
+}
+
 // HostConfig holds the SSH configuration directives for a resolved host.
 // Fields are populated from ssh -G output.
 type HostConfig struct {
@@ -323,6 +329,10 @@ func IdentityKey(cfg *HostConfig) string {
 
 // resolve checks the cache and falls back to running ssh -G.
 func (r *sshConfigResolver) resolve(ctx context.Context, host string) (*HostConfig, error) {
+	if IsOptionLikeHost(host) {
+		return nil, fmt.Errorf("%w: host must not begin with a dash", ErrSSHConfigFailed)
+	}
+
 	r.mu.RLock()
 	mtime := r.lastMtime
 	hostCfg, ok := r.cache[host]

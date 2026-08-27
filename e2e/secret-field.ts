@@ -66,6 +66,12 @@ export async function pressLock(field: Locator): Promise<void> {
   await lock.click()
 }
 
+/** A point to press, when the caller means somewhere other than the centre. */
+export interface PressPoint {
+  x: number
+  y: number
+}
+
 /**
  * Take a row of the panel, the way the panel answers a mouse.
  *
@@ -102,14 +108,14 @@ export async function pressLock(field: Locator): Promise<void> {
  * underneath instead. Together they say the press landed on the row and the
  * row answered.
  */
-async function activateRow(page: Page, row: Locator): Promise<void> {
+export async function activateRow(page: Page, row: Locator, point?: PressPoint): Promise<void> {
   // Playwright's own actionability check — visible, stable, enabled, and
   // receiving pointer events — plus the mouse move a person makes first.
   await row.hover()
   const box = await row.boundingBox()
   expect(box, 'the row has no box to press').not.toBeNull()
-  const x = box!.x + box!.width / 2
-  const y = box!.y + box!.height / 2
+  const x = point?.x ?? box!.x + box!.width / 2
+  const y = point?.y ?? box!.y + box!.height / 2
 
   const owner = await page.evaluate(
     ({ px, py }) => {

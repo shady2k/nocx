@@ -49,6 +49,7 @@
  */
 import type { Locator } from '@playwright/test'
 import { test, expect, settingsReady, type Page } from './harness'
+import { activateRow } from './secret-field'
 
 const SETTINGS_ENDPOINTS_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
 const SETTINGS_CONNECTIONS_NAV = '.ui-grouped-nav__item[data-item="connections"]'
@@ -224,7 +225,7 @@ test.describe('the secret panel opens where a person can reach it', () => {
     const x = hangingLeft + (hangingRight - hangingLeft) / 2
     const y = rowBox.y + rowBox.height / 2
 
-    await page.mouse.click(x, y)
+    await activateRow(page, row, { x, y })
 
     // The clicked offer row opens the vault setup surface. The connection
     // dialog must remain open underneath it; a light-dismiss would discard it.

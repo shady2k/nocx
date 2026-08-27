@@ -320,6 +320,12 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	if strings.TrimSpace(p.Model) == "" {
 		return fmt.Errorf("ask: model is required")
 	}
+	if p.RunID != "" && p.TurnEntryID != "" {
+		// The HTTP recorder is below eino and can only learn which turn owns
+		// these bytes through the context that crosses the model boundary.
+		// Keep the unbound probe/test shape untouched.
+		ctx = WithWireIdentity(ctx, p.RunID, p.TurnEntryID)
+	}
 	msgs := make([]*schema.Message, 0, len(p.Messages))
 	for _, m := range p.Messages {
 		switch m.Role {

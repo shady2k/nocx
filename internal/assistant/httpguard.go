@@ -21,6 +21,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"os"
 
 	"github.com/shady2k/nocx/internal/httppolicy"
 	"github.com/shady2k/nocx/internal/log"
@@ -44,10 +45,14 @@ type guardedTransport struct {
 // newGuardedHTTPClient builds the http.Client every model call goes through.
 // logger may be nil (tests).
 func newGuardedHTTPClient(logger log.Logger) *http.Client {
-	return newGuardedHTTPClientWithResolver(logger, nil)
+	return newGuardedHTTPClientWithResolverAndRecorder(logger, nil, nil)
 }
 
 func newGuardedHTTPClientWithResolver(logger log.Logger, resolve func(ctx context.Context, host string) ([]net.IP, error)) *http.Client {
+	return newGuardedHTTPClientWithResolverAndRecorder(logger, resolve, nil)
+}
+
+func newGuardedHTTPClientWithResolverAndRecorder(logger log.Logger, resolve func(ctx context.Context, host string) ([]net.IP, error), recorder WireRecorder) *http.Client {
 	resolver := httppolicy.SystemResolver()
 	if resolve != nil {
 		resolver = httppolicy.ResolverFunc(resolve)
@@ -65,9 +70,8 @@ func newGuardedHTTPClientWithResolver(logger log.Logger, resolve func(ctx contex
 	return &http.Client{
 		// The wire tap is OUTSIDE the guard, so what it records is what the
 		// guard let through — the bytes that actually left. Inside it, it
-		// would record what we hoped to send (wiretap.go; off unless
-		// NOCX_WIRE_LOG names a file).
-		Transport:     newWireTap(tr),
+		// would record what we hoped to send.
+		Transport:     newWireTapWith(tr, os.Getenv("NOCX_WIRE_LOG"), recorder),
 		CheckRedirect: pt.CheckRedirect,
 	}
 }

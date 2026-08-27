@@ -14,6 +14,7 @@ import { BlockManager, type BlockRecord, type GetLineFn, type RunningBlockAction
 import type { CommandSnapshotStore } from '../command-snapshot'
 import { publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
+import type { AgentDump } from '../generated/agent.dump'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
 /** How long the pane takes to settle after a block opens or freezes. Short
@@ -49,6 +50,8 @@ export interface ScrollbackControllerOpts {
    *  manager, which hands it to the copy menu of every answer block it
    *  frames (nocx-v13pd). This controller neither fetches nor caches it. */
   answerText?: (entryId: string) => Promise<string | null>
+  /** The recorded provider drives for one finished answer turn. */
+  dump?: (entryId: string) => Promise<AgentDump>
   /** What a RUNNING block's ⋮ menu can do about the command in it — passed
    *  straight to the block manager (nocx-92gfl, nocx-23rph). This controller
    *  neither summons the editor nor signals a session. */
@@ -185,6 +188,7 @@ export class ScrollbackController {
       dimensions: () => ({ cols: this._renderer.cols, rows: this._renderer.rows }),
       sessionName: opts.sessionName,
       answerText: opts.answerText,
+      dump: opts.dump,
       runningActions: opts.runningActions,
     })
 

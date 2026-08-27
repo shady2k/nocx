@@ -77,3 +77,4 @@ export {
 } from './toast'
 export { EditableRowList, type EditableRowListProps } from './row-list'
 export { CompletionDropdown, type CompletionDropdownCallbacks } from './completion-dropdown'
+export { DumpPanel, mountDumpPanel, type DumpPanelProps } from './dump-panel'

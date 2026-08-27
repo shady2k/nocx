@@ -8430,3 +8430,122 @@ describe('session.read serves the frame the question is about (nocx-7l4ex.3)', (
     }
   })
 })
+
+describe('summoning answers instead of vanishing (nocx-og42r)', () => {
+  function startRunning(contentClient: ClientFake): void {
+    const handler = lifecycleHandler(contentClient)
+    handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+    handler({
+      lane: 'lane-1',
+      lifecycle: 'running',
+      domain: 'd1',
+      epoch: 1,
+      attempt: { id: 'att-run', state: 'open', origin: 'app', command: 'htop' },
+    })
+  }
+
+  function dispatchSummon(content: TerminalContent): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const scrollback = withScrollback.scrollback
+    scrollback.xtermLiveContainer.dispatchEvent(event)
+    return event
+  }
+
+  it('names the native latch in the alternate buffer and keeps the program untouched', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+      renderer._fireBufferChange('alternate')
+      content.switchToTerminalInput()
+      session.send.mockClear()
+      session.sendResize.mockClear()
+      vi.mocked(showToast).mockClear()
+
+      const event = dispatchSummon(content)
+      await Promise.resolve()
+
+      expect(event.defaultPrevented).toBe(true)
+      expect(showToast).toHaveBeenCalledWith({
+        level: 'warning',
+        message: 'Native input is active — enable command editor to ask the assistant.',
+      })
+      expect(ed.isVisible).toBe(false)
+      expect(session.send).not.toHaveBeenCalled()
+      expect(session.sendResize).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('says when the pane has no assistant target', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      ;(content as unknown as { agentTarget: null }).agentTarget = null
+      const session = sessionOf(content)
+      session.send.mockClear()
+      vi.mocked(showToast).mockClear()
+
+      const event = dispatchSummon(content)
+      await Promise.resolve()
+
+      expect(event.defaultPrevented).toBe(true)
+      expect(showToast).toHaveBeenCalledWith({
+        level: 'warning',
+        message: 'This pane has no assistant.',
+      })
+      expect(ed.isVisible).toBe(false)
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps the two benign refusals silent', async () => {
+    const client = makeClient()
+    const first = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
+    try {
+      first.content.setVisible(true)
+      startRunning(client)
+      first.ed.show()
+      vi.mocked(showToast).mockClear()
+      dispatchSummon(first.content)
+      await Promise.resolve()
+      expect(showToast).not.toHaveBeenCalled()
+    } finally {
+      first.teardown()
+    }
+
+    const secondClient = makeClient()
+    const second = await mountTerminal(makeClipboard(), { attachToDocument: true }, secondClient)
+    try {
+      second.content.setVisible(true)
+      vi.mocked(showToast).mockClear()
+      dispatchSummon(second.content)
+      await Promise.resolve()
+      expect(showToast).not.toHaveBeenCalled()
+    } finally {
+      second.teardown()
+    }
+  })
+})

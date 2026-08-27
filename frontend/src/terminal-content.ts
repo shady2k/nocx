@@ -345,6 +345,27 @@ export interface TerminalContentHooks {
   onOpenRoles?: () => void
 }
 
+type SummonDecision =
+  | {
+      kind: 'ok'
+      editor: CommandEditor
+      targets: InputTargetRegistry
+      agentId: string
+    }
+  | {
+      kind: 'silent'
+      reason: 'editor-visible' | 'no-running-command' | 'summon-pending'
+    }
+  | {
+      kind: 'speak'
+      reason: 'native-mode' | 'missing-assistant-target'
+      message: string
+    }
+  | {
+      kind: 'invariant'
+      reason: 'editor-missing' | 'missing-live-container' | 'missing-marker-host'
+    }
+
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
 // name yet shows nothing rather than a word that is never the answer.
 const FALLBACK_TITLE = ''
@@ -2986,16 +3007,21 @@ export class TerminalContent extends BasePaneContent {
         'keydown',
         (e: KeyboardEvent) => {
           if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return
-          // The editor on screen owns this chord: it is the explicit target
-          // switch there, and the editor's own handler decides.
-          if (this.editor?.isVisible) return
-          if (!this.canSummonEditor()) return
-          // Consume the chord before capture awaits the parse fence. If the
-          // capture is refused, no editor or marker appears, but the chord
-          // still cannot become a CR in the running program.
+          const decision = this.canSummonEditor()
+          // Editor-visible and no-running states are silent and unconsumed;
+          // the pending state is silent but must still consume the chord so
+          // it cannot become a CR while the existing capture finishes.
+          if (
+            (decision.kind === 'silent' && decision.reason !== 'summon-pending') ||
+            decision.kind === 'invariant'
+          )
+            return
+          // Every spoken refusal and successful summon consumes the chord
+          // before capture awaits the parse fence, so it cannot become a CR
+          // in the running program.
           e.preventDefault()
           e.stopPropagation()
-          void this.summonEditor()
+          void this.summonEditor(decision)
         },
         true,
       )
@@ -3889,18 +3915,45 @@ export class TerminalContent extends BasePaneContent {
   /** Whether the editor can begin a capture transaction. No presentation
    *  state changes here: the frame and marker are installed only after the
    *  renderer has produced a settled snapshot. */
-  private canSummonEditor(): boolean {
+  private canSummonEditor(): SummonDecision {
     const editor = this.editor
-    if (editor === null || editor.isVisible || this._summonPending) return false
-    if (!this.hasRunningCommand() || this.nativeMode) return false
+    if (editor === null) {
+      // The gesture listener is installed after the editor, so this is a
+      // silent DOM invariant rather than a user-reachable refusal.
+      return { kind: 'invariant', reason: 'editor-missing' }
+    }
+    if (editor.isVisible) return { kind: 'silent', reason: 'editor-visible' }
+    if (this._summonPending) return { kind: 'silent', reason: 'summon-pending' }
+    if (!this.hasRunningCommand()) return { kind: 'silent', reason: 'no-running-command' }
+    if (this.nativeMode) {
+      return {
+        kind: 'speak',
+        reason: 'native-mode',
+        message: 'Native input is active — enable command editor to ask the assistant.',
+      }
+    }
     const targets = this.inputTargets
     const agentId = this.agentTarget?.id
-    return (
-      targets !== null &&
-      agentId !== undefined &&
-      this.scrollback?.xtermLiveContainer !== undefined &&
-      editor.root.querySelector('.nocx-editor-chrome-left') !== null
-    )
+    if (targets === null || agentId === undefined) {
+      return {
+        kind: 'speak',
+        reason: 'missing-assistant-target',
+        message: 'This pane has no assistant.',
+      }
+    }
+    const frameHost = this.scrollback?.xtermLiveContainer
+    if (frameHost === undefined) {
+      // The mounted gesture listener always has a live xterm host; this is a
+      // silent DOM invariant, not a refusal a person can reach.
+      return { kind: 'invariant', reason: 'missing-live-container' }
+    }
+    const markerHost = editor.root.querySelector<HTMLElement>('.nocx-editor-chrome-left')
+    if (markerHost === null) {
+      // The mounted editor always has its chrome row; this is a silent DOM
+      // invariant, not a refusal a person can reach.
+      return { kind: 'invariant', reason: 'missing-marker-host' }
+    }
+    return { kind: 'ok', editor, targets, agentId }
   }
 
   /** Summon the editor over a running command, in ask mode (nocx-92gfl).
@@ -3912,12 +3965,15 @@ export class TerminalContent extends BasePaneContent {
    *
    *  Returns whether it summoned, so a caller can consume a successful
    *  gesture without creating a second input path. */
-  private async summonEditor(): Promise<boolean> {
-    if (!this.canSummonEditor()) return false
-    const editor = this.editor
-    const targets = this.inputTargets
-    const agentId = this.agentTarget?.id
-    if (editor === null || targets === null || agentId === undefined) return false
+  private async summonEditor(decision: SummonDecision): Promise<boolean> {
+    if (decision.kind === 'silent' || decision.kind === 'invariant') return false
+    if (decision.kind === 'speak') {
+      showToast({ level: 'warning', message: decision.message })
+      return false
+    }
+    const { editor, targets, agentId } = decision
+    // Alternate-buffer programs are not a refusal: the editor is an overlay,
+    // so their grid keeps its size and the program receives no resize.
 
     this._summonPending = true
     try {
@@ -4414,9 +4470,8 @@ export class TerminalContent extends BasePaneContent {
     this.grantController?.setBlocks(this.grantedBlocks)
     // The menu's Ask action is the mouse door to the same summon path as
     // Ctrl+Enter. Unmarking remains a pure toggle and never summons.
-    if (adding && isRunningBlock) void this.summonEditor()
+    if (adding && isRunningBlock) void this.summonEditor(this.canSummonEditor())
   }
-
   private refreshGrant(blockEl: HTMLElement): void {
     const refreshed = grantBlockFromElement(blockEl)
     if (!refreshed) return

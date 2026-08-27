@@ -1,5 +1,5 @@
 /**
- * e2e: the '@' panel opens where a person can see it and click it
+ * e2e: the '@' panel opens where a person can see it AND reach it
  * (nocx-vzdna).
  *
  * The owner's report was "typing '@' in a value field renders no panel". The
@@ -11,22 +11,41 @@
  * it), so the same rule resolved against the initial containing block: the
  * panel's bottom edge at y=0 and the whole panel off-screen above it.
  *
- * THIS IS THE ONLY HONEST CHECK OF IT. Every existing test drove the panel
- * with the keyboard — type `@name`, press Enter — which never asks where the
- * panel is; and the unit tests run in jsdom, which lays nothing out and calls
- * every element visible, so `toBeVisible()` passed for the whole time the
- * panel was invisible. The unit tests assert the placement ARITHMETIC
- * (frontend/src/ui/floating-panel.test.ts); only a real browser can say the
- * numbers land on the screen. `toBeInViewport` is the assertion that would
- * have caught the original defect: it is the exact condition ten clicks
- * failed on across chromium and webkit ("element is outside of the
- * viewport").
+ * TWO THINGS HAVE TO BE TRUE and the second one is not the first. Placement
+ * put the panel in the viewport; that turned ten "element is outside of the
+ * viewport" failures into ten `<html> intercepts pointer events` ones, on
+ * rows Playwright called visible, enabled and stable. The cause is the other
+ * half of the same move: a field's panel re-homes into the modal `<dialog>`
+ * its field lives in, because the browser's top layer is a parent and not a
+ * z-index — and the top layer governs PAINTING, not inheritance. These
+ * dialogs are DOM descendants of a pane, an inactive pane is
+ * `pointer-events: none` (base.css), and the panel inherited it. Painted,
+ * visible, and not hit-testable, with everything outside the modal inert, so
+ * the click fell through to the document element. The panel now declares
+ * `pointer-events: auto` for itself, the way `.ui-toast` does inside the
+ * `pointer-events: none` toast host.
+ *
+ * SO THIS SPEC ASKS BOTH QUESTIONS, and the second one with
+ * `elementFromPoint` rather than with a real click: this runs on the shared
+ * stand, and activating a row here would set up a vault every other spec on
+ * that stand would then inherit. The hit test is the exact predicate
+ * Playwright's click uses, without the side effect.
+ *
+ * The unit tests assert the placement ARITHMETIC
+ * (frontend/src/ui/floating-panel.test.ts); jsdom lays nothing out, calls
+ * every element visible and cannot hit-test at all, so both questions here
+ * are ones only a browser can answer.
  *
  * NO VAULT NEEDED, deliberately. The panel opens on '@' in every vault state
  * — an offer row when the vault is uninitialized or sealed, the list when it
- * is open — and this spec is about WHERE it opens, not what it lists. That
- * keeps it on the shared stand and independent of what other specs left
- * behind.
+ * is open — and this spec is about WHERE it opens, not what it lists.
+ *
+ * NO Escape ANYWHERE, also deliberately. `ui/overlay/stack.ts` installs its
+ * Escape handler on `document` in the CAPTURE phase, so Escape reaches the
+ * topmost overlay before the field's own keydown ever runs: pressing it to
+ * dismiss the panel closes the dialog under it instead, and the rest of the
+ * test then waits for controls that are gone. A panel is dismissed here the
+ * way the adapter dismisses it — by removing the '@' the trigger is made of.
  */
 import type { Locator } from '@playwright/test'
 import { test, expect, settingsReady, type Page } from './harness'
@@ -34,6 +53,8 @@ import { test, expect, settingsReady, type Page } from './harness'
 const SETTINGS_ENDPOINTS_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
 const OPEN_PANEL = '.ui-floating-panel[data-variant="secret"][data-open="true"]'
 
+/** The New Endpoint dialog with its header row already added, so both fields
+ *  this spec measures exist before anything is opened over them. */
 async function openEndpointDialog(page: Page): Promise<Locator> {
   await page.goto('/')
   await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
@@ -57,82 +78,105 @@ async function triggerPanel(page: Page, field: Locator): Promise<Locator> {
   return panel
 }
 
-/** The panel's rect and its field's, in one evaluation so they describe the
- *  same frame. */
-async function rects(
-  page: Page,
-  fieldId: string,
-): Promise<{
+/** Dismiss the panel the way the adapter does: the trigger word is the '@',
+ *  and deleting it is what "I am not naming a secret" looks like. */
+async function dismissPanel(page: Page, field: Locator): Promise<void> {
+  await field.press('Backspace')
+  await expect(page.locator(OPEN_PANEL)).toHaveCount(0, { timeout: 10_000 })
+}
+
+interface Measured {
   panel: { top: number; bottom: number; left: number; right: number }
   field: { top: number; bottom: number }
   viewport: { width: number; height: number }
-}> {
+  /** Does the open panel's first row own the point a click would land on?
+   *  False is the `<html> intercepts pointer events` failure, in the same
+   *  terms Playwright states it. */
+  rowOwnsItsPoint: boolean
+  /** What the hit test found instead, for a failure that has to be read. */
+  hitTarget: string
+}
+
+/** The panel's rect, its field's, and the hit test at the first row's centre
+ *  — one evaluation, so all three describe the same frame. */
+async function measure(page: Page, fieldId: string): Promise<Measured> {
   return page.evaluate((id) => {
-    const panelEl = document.querySelector(
+    const panelEl = document.querySelector<HTMLElement>(
       '.ui-floating-panel[data-variant="secret"][data-open="true"]',
     )!
     const fieldEl = document.getElementById(id)!
+    const rowEl = panelEl.querySelector<HTMLElement>('.ui-floating-panel__row')!
     const p = panelEl.getBoundingClientRect()
     const f = fieldEl.getBoundingClientRect()
+    const r = rowEl.getBoundingClientRect()
+    const hit = document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)
     return {
       panel: { top: p.top, bottom: p.bottom, left: p.left, right: p.right },
       field: { top: f.top, bottom: f.bottom },
       viewport: { width: window.innerWidth, height: window.innerHeight },
+      rowOwnsItsPoint: hit !== null && (rowEl.contains(hit) || hit.contains(rowEl)),
+      hitTarget: hit === null ? 'null' : `${hit.tagName}.${hit.className}`,
     }
   }, fieldId)
 }
 
+/** Criterion 1 and 3: the whole panel is on screen, on both axes. */
+function expectInsideViewport(m: Measured): void {
+  expect(m.panel.top).toBeGreaterThanOrEqual(0)
+  expect(m.panel.bottom).toBeLessThanOrEqual(m.viewport.height)
+  expect(m.panel.left).toBeGreaterThanOrEqual(0)
+  expect(m.panel.right).toBeLessThanOrEqual(m.viewport.width)
+}
+
+/** Anchored to its own field: the panel touches it, above or below. */
+function expectAnchoredToField(m: Measured): void {
+  const gap = Math.min(
+    Math.abs(m.field.top - m.panel.bottom),
+    Math.abs(m.panel.top - m.field.bottom),
+  )
+  expect(gap).toBeLessThanOrEqual(16)
+}
+
 test.describe('the secret panel opens where a person can reach it', () => {
-  test('a field panel is inside the viewport, and its rows are clickable', async ({ page }) => {
+  test('a field panel is inside the viewport, and its rows own their own point', async ({
+    page,
+  }) => {
     const dialog = await openEndpointDialog(page)
     const panel = await triggerPanel(page, dialog.locator('#endpoint-key'))
 
-    const r = await rects(page, 'endpoint-key')
-    // Criterion 1: the whole panel is on screen.
-    expect(r.panel.top).toBeGreaterThanOrEqual(0)
-    expect(r.panel.bottom).toBeLessThanOrEqual(r.viewport.height)
-    // Criterion 3: and it does not run off the right edge.
-    expect(r.panel.left).toBeGreaterThanOrEqual(0)
-    expect(r.panel.right).toBeLessThanOrEqual(r.viewport.width)
-
-    // Anchored to THIS field: the panel touches it, above or below.
-    const gap = Math.min(
-      Math.abs(r.field.top - r.panel.bottom),
-      Math.abs(r.panel.top - r.field.bottom),
-    )
-    expect(gap).toBeLessThanOrEqual(16)
-
-    // The assertion the ten failures made: a row can actually be clicked.
-    // "element is outside of the viewport" is what they said instead.
-    const row = panel.locator('.ui-floating-panel__row').first()
-    await expect(row).toBeInViewport()
+    const m = await measure(page, 'endpoint-key')
+    expectInsideViewport(m)
+    expectAnchoredToField(m)
+    await expect(panel.locator('.ui-floating-panel__row').first()).toBeInViewport()
+    // The second half: in a modal dialog, painted is not the same as
+    // reachable. `hitTarget` is reported so a regression names the element
+    // that took the click instead of the row.
+    expect(m.rowOwnsItsPoint, `hit target was ${m.hitTarget}`).toBe(true)
   })
 
   test('a field further down the form opens its panel at ITS OWN offset', async ({ page }) => {
     const dialog = await openEndpointDialog(page)
-
-    await triggerPanel(page, dialog.locator('#endpoint-key'))
-    const first = await rects(page, 'endpoint-key')
-    await page.keyboard.press('Escape')
-    await expect(page.locator(OPEN_PANEL)).toHaveCount(0)
-
+    // The second field FIRST, while nothing floats over the dialog: the
+    // header row's value field sits below the API key, which is what makes
+    // the two offsets different.
     await dialog.getByRole('button', { name: 'Add header' }).click()
     const header = dialog.locator('#endpoint-header-0-value')
     await expect(header).toBeVisible({ timeout: 10_000 })
-    const panel = await triggerPanel(page, header)
-    const second = await rects(page, 'endpoint-header-0-value')
+    const key = dialog.locator('#endpoint-key')
+
+    await triggerPanel(page, key)
+    const first = await measure(page, 'endpoint-key')
+    await dismissPanel(page, key)
+
+    await triggerPanel(page, header)
+    const second = await measure(page, 'endpoint-header-0-value')
 
     // Criterion 2: two fields at different offsets, two panels at different
     // offsets — neither of them at the top of the document.
     expect(second.field.top).toBeGreaterThan(first.field.top)
     expect(second.panel.top).not.toBe(first.panel.top)
-    expect(second.panel.top).toBeGreaterThanOrEqual(0)
-    expect(second.panel.bottom).toBeLessThanOrEqual(second.viewport.height)
-    const gap = Math.min(
-      Math.abs(second.field.top - second.panel.bottom),
-      Math.abs(second.panel.top - second.field.bottom),
-    )
-    expect(gap).toBeLessThanOrEqual(16)
-    await expect(panel.locator('.ui-floating-panel__row').first()).toBeInViewport()
+    expectInsideViewport(second)
+    expectAnchoredToField(second)
+    expect(second.rowOwnsItsPoint, `hit target was ${second.hitTarget}`).toBe(true)
   })
 })

@@ -73,6 +73,27 @@
      everything. Inside a modal <dialog> the top layer decides instead, and
      the component moves the panel there. */
   z-index: 250;
+  /* AND THE TOP LAYER IS ABOUT PAINTING, NOT ABOUT INHERITANCE — this line
+     is the second half of that move and is load-bearing (nocx-vzdna).
+
+     A modal dialog paints above everything, and it still inherits from its
+     DOM parent; `pointer-events` is an inherited property. The dialogs that
+     host these fields are DOM descendants of a pane, and a pane that is not
+     the active one is `pointer-events: none` (base.css). So a panel re-homed
+     into such a dialog was painted in the top layer, in the viewport,
+     visible and stable — and not hit-testable, while everything outside the
+     modal was inert. The click fell all the way through to the document
+     element, which is exactly what the run reported: `<html ...> intercepts
+     pointer events` on a row Playwright had just called visible, enabled and
+     stable. Reproduced in Chromium and WebKit, and fixed by this line in
+     both.
+
+     Same shape as the toast, which is re-homed into the top layer for the
+     same reason: `.ui-toast-host` is `pointer-events: none` and `.ui-toast`
+     turns it back on (toast.css). A surface that relocates itself into
+     somebody else's subtree states its own interactivity rather than
+     inheriting theirs. */
+  pointer-events: auto;
 }
 
 .ui-floating-panel__list {

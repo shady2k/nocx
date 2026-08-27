@@ -440,7 +440,25 @@ export class FloatingPanel {
    *  ordinary document (the endpoints page hosts the same field both ways).
    *  Fixed placement is unaffected by the move: it is the viewport either
    *  way, and an ancestor's `overflow: hidden` does not clip a fixed
-   *  descendant. */
+   *  descendant.
+   *
+   *  MOVING IS ONLY HALF OF IT. The top layer decides painting order and
+   *  changes nothing about inheritance, so the re-homed panel inherits the
+   *  dialog's `pointer-events` — and these dialogs sit inside panes, where
+   *  an inactive one is `pointer-events: none`. The panel therefore declares
+   *  its own (`pointer-events: auto`, floating-panel.css); without it the
+   *  panel is painted, visible and unclickable.
+   *
+   *  THE OVERLAY STACK WAS THE OTHER CANDIDATE for this answer, and it is
+   *  the same answer here. `ui/overlay/stack.ts` already owns "what must I
+   *  be a child of to be above the topmost overlay", and Prompt and the
+   *  toast host both read it. It is not used here because it answers a
+   *  question about the TOP of the stack while this one is about the layer
+   *  THIS FIELD is in — and for every shape in this app the two agree, since
+   *  a Prompt portals itself into the topmost overlay's element, so a field
+   *  inside a prompt has that same `<dialog>` as its nearest one. Anchoring
+   *  to the field is the safer of two answers that never differ: a panel can
+   *  only ever follow the field it belongs to. */
   private enterLayer(): void {
     if (this.anchor === undefined) return
     this.attachViewportListeners()

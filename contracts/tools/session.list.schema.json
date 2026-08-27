@@ -18,5 +18,56 @@
       "maximum": 50,
       "description": "Maximum number of newest items to return."
     }
+  },
+  "$defs": {
+    "result": {
+      "title": "SessionListResult",
+      "description": "What session.list hands back: the items of one session, newest last. There is NO `text` here — an item's output is read with session.read, by the id listed here. An empty items list is honest for a pane with nothing recorded.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "items"],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "description": "The session these items belong to."
+        },
+        "items": {
+          "type": "array",
+          "description": "The items, each addressable by its id.",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "command", "state", "lines"],
+            "properties": {
+              "id": {
+                "type": "string",
+                "description": "The item's id — what session.read takes."
+              },
+              "command": {
+                "type": "string",
+                "description": "The command or program the item is."
+              },
+              "state": {
+                "type": "string",
+                "enum": ["running", "exited"],
+                "description": "Whether the item is still running."
+              },
+              "exitCode": {
+                "type": "integer",
+                "description": "The exit status of an exited item. Absent while it runs, and absent when the store recorded none."
+              },
+              "lines": {
+                "type": "integer",
+                "description": "Lines of output the item holds, 0 when the output was not kept."
+              }
+            }
+          }
+        },
+        "more": {
+          "type": "boolean",
+          "description": "True when the session has more items than this page. Absent means false."
+        }
+      }
+    }
   }
 }

@@ -476,7 +476,11 @@ func New(opts ...Option) (*App, error) {
 	default:
 		badLevel = levelName
 	}
-	slogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
+	// AddSource everywhere: every line names the module, function and line
+	// that wrote it (internal/log says why the adapter is what makes this
+	// true rather than pointing every record at the adapter itself).
+	handlerOpts := &slog.HandlerOptions{Level: logLevel, AddSource: true}
+	slogger := slog.New(slog.NewTextHandler(os.Stderr, handlerOpts))
 	if logFilePath != "" {
 		if mkErr := os.MkdirAll(filepath.Dir(logFilePath), 0o700); mkErr != nil {
 			slogger.Warn("backend log file unavailable; logging to stderr only",
@@ -493,8 +497,7 @@ func New(opts ...Option) (*App, error) {
 			// launcher redirected stderr (the P0 that landed in a temp dir
 			// nobody would look in), and still be visible on the console.
 			logFile = f
-			slogger = slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, f),
-				&slog.HandlerOptions{Level: logLevel}))
+			slogger = slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, f), handlerOpts))
 		}
 	}
 	logger := log.NewSlogAdapter(slogger)

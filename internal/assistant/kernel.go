@@ -277,6 +277,13 @@ type effectKernel struct {
 	// Nil is "nobody is listening", which is every non-transport caller.
 	onCall     func(ToolCall) error
 	validators map[string]*jsonschema.Schema
+	// results is the compiled result schema per tool — what the executor
+	// must actually produce, checked after it runs. The params validator
+	// above disciplines what the MODEL sends; this disciplines what WE
+	// send back, and the two exist for the same reason: the description
+	// the model was shown has to be true, and the only way to keep a
+	// description true is to check it (nocx-d6gn4.8.1).
+	results map[string]*jsonschema.Schema
 }
 
 // newEffectKernel builds the pipeline for one run. A schema that does
@@ -322,6 +329,7 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 		classifier:  classifier,
 		onCall:      onCall,
 		validators:  make(map[string]*jsonschema.Schema, len(registry.All())),
+		results:     make(map[string]*jsonschema.Schema, len(registry.All())),
 	}
 	for _, t := range registry.All() {
 		v, err := compileToolSchema(t)
@@ -329,6 +337,16 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 			return nil, err
 		}
 		m.validators[t.Name] = v
+		if len(t.ResultSchema) == 0 {
+			// A row that cannot execute declares no result (registry.go
+			// says why), and there is nothing to check.
+			continue
+		}
+		r, err := compileResultSchema(t)
+		if err != nil {
+			return nil, err
+		}
+		m.results[t.Name] = r
 	}
 	return m, nil
 }
@@ -352,6 +370,52 @@ func compileToolSchema(t agenttools.Tool) (*jsonschema.Schema, error) {
 		return nil, fmt.Errorf("tool %s: params schema: %w", t.Name, err)
 	}
 	return s, nil
+}
+
+// compileResultSchema compiles what a tool says it RETURNS — the $defs/result
+// half of the same contract document — into the check applied to the
+// executor's output. The url is distinct from the params one because they are
+// two schemas, not two readings of one.
+func compileResultSchema(t agenttools.Tool) (*jsonschema.Schema, error) {
+	doc, err := jsonschema.UnmarshalJSON(bytes.NewReader(t.ResultSchema))
+	if err != nil {
+		return nil, fmt.Errorf("tool %s: result schema: %w", t.Name, err)
+	}
+	url := "https://nocx.local/contracts/tools/" + t.Name + ".result.schema.json"
+	c := jsonschema.NewCompiler()
+	if addErr := c.AddResource(url, doc); addErr != nil {
+		return nil, fmt.Errorf("tool %s: result schema: %w", t.Name, addErr)
+	}
+	sch, err := c.Compile(url)
+	if err != nil {
+		return nil, fmt.Errorf("tool %s: result schema: %w", t.Name, err)
+	}
+	return sch, nil
+}
+
+// checkResult holds the executor to the shape its contract declares. A
+// mismatch is OURS, never the model's: it means the description the model
+// was shown is a lie, and the honest outcome is a failed tool rather than a
+// result whose keys nobody can rely on.
+//
+// Applied at the one seam every carrier passes through, deliberately: a check
+// inside each executor would be several enforcement sites and the next
+// executor would be the one that forgot.
+func (m *effectKernel) checkResult(tool, out string) error {
+	v := m.results[tool]
+	if v == nil {
+		return nil
+	}
+	var doc any
+	dec := json.NewDecoder(strings.NewReader(out))
+	dec.UseNumber()
+	if err := dec.Decode(&doc); err != nil {
+		return fmt.Errorf("agent tool %q returned something that is not JSON: %w", tool, err)
+	}
+	if err := v.Validate(doc); err != nil {
+		return fmt.Errorf("agent tool %q returned a result its own contract does not allow, so what the model was told it returns is not true: %w", tool, err)
+	}
+	return nil
 }
 
 // validate applies the tool's compiled schema to the model's raw arguments.
@@ -1313,6 +1377,17 @@ func (k *effectKernel) Invoke(ctx context.Context, name, callID, rawArgs string)
 	// "send it as it is"), and re-running would repeat the effect and
 	// could produce a different result than the one approved.
 	out, runErr := k.runWithRetained(decl, callID, ctx, capability, []byte(rawArgs))
+	// 6b. The result is held to what the tool DECLARES it returns, before
+	// anything reads it — the egress gate, a program's variable, the
+	// model. Only a successful call has a result to check.
+	if runErr == nil {
+		if err := k.checkResult(decl.Name, out); err != nil {
+			k.warn("agent tool: the result does not match its own contract",
+				"tool", decl.Name, "call", callID, "error", err)
+			_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
+			return "", &ToolFailedError{Tool: decl.Name, Err: err}
+		}
+	}
 
 	// 7. Result ingest — the egress gate (design §7.1) FIRST, then the
 	// window and the size bound. The gate screens EVERY return path

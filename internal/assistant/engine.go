@@ -305,6 +305,15 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 // StreamError — the endpoint answered; it did not answer. Reasoning alone
 // does not count: a model that only thought did not reply.
 func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) error) error {
+	// The chain the transport put in the context becomes the chain
+	// everything under this ask logs with — the kernel, the carriers, the
+	// program — because they are all handed THIS logger. Binding it once
+	// here is what makes an effect three layers down say which run and
+	// which wire frame it belongs to without being told either.
+	askLog := c.log
+	if askLog != nil {
+		askLog = askLog.WithContext(ctx)
+	}
 	if strings.TrimSpace(p.BaseURL) == "" {
 		return fmt.Errorf("ask: base URL is required")
 	}
@@ -386,9 +395,9 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 			// has an owner); nil without a resolver is the feature off.
 			var classifier CallClassifier
 			if p.Classifier != nil {
-				classifier = newClassifierEngine(c.log, c.http, p.Classifier)
+				classifier = newClassifierEngine(askLog, c.http, p.Classifier)
 			}
-			mw, err := newPolicyMiddleware(p.Carrier, c.parked, c.log, *p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.TurnEntryID, p.Requester, classifier, func(call ToolCall) error {
+			mw, err := newPolicyMiddleware(p.Carrier, c.parked, askLog, *p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.TurnEntryID, p.Requester, classifier, func(call ToolCall) error {
 				return sink(AskEvent{Kind: AskToolCall, Call: &call})
 			})
 			if err != nil {
@@ -421,7 +430,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	// So an Ask whose run has a live checkpoint IS the resume of it —
 	// there is no second flag to keep in step with the store, and no way
 	// to ask for a resume of a run that is not suspended.
-	err := streamModelAnswer(ctx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, declared, unknownTool, handlers, c.checkpoints, p.RunID, sink)
+	err := streamModelAnswer(ctx, askLog, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, declared, unknownTool, handlers, c.checkpoints, p.RunID, sink)
 	if err != nil {
 		// A suspension is the ONE outcome that keeps the checkpoint: the
 		// run is not over, and the checkpoint is the only thing that can

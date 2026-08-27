@@ -28,6 +28,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 
 	"github.com/cloudwego/eino/components/tool"
@@ -154,7 +155,7 @@ func (c *programCarrier) UnknownTool(name, rawArgs string) (string, error) {
 			"Do not call it directly. Call %s with a program that calls it, like this:\n\n"+
 			"%s(source = ...) where the program is:\n"+
 			"  result = %s(...)   # the arguments you just tried: %s\n"+
-			"  answer(result[\"text\"])\n\n"+
+			"  print(result[\"text\"])\n\n"+
 			"The only tool this run has is %s.",
 		name, programToolName, programToolName, name, rawArgs, programToolName), nil
 }
@@ -173,11 +174,11 @@ func (c *programCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (s
 	// whole of what the model decided is one string nobody could see, and
 	// three failures in a row were diagnosed by guessing because of it.
 	c.kernel.note("agent program: running", "run", c.runID, "source", source)
-	out, err := c.runs.drive(ctx, c.runID, func() (<-chan *Suspension, func(context.Context) (string, error)) {
+	out, err := c.runs.drive(ctx, c.runID, c.granted(), func() (<-chan *Suspension, func(context.Context) (string, error), func(invoker)) {
 		sc := newStarlarkCarrier(c.granted(), c.permittedNames())
 		return sc.Suspensions(), func(runCtx context.Context) (string, error) {
 			return sc.Run(runCtx, source)
-		}
+		}, sc.setKernel
 	})
 	if err != nil {
 		c.kernel.warn("agent program: stopped", "run", c.runID, "error", err)
@@ -236,8 +237,8 @@ func (c *planCarrier) Invoke(ctx context.Context, name, _, rawArgs string) (stri
 		return repairable("", err)
 	}
 	c.kernel.note("agent plan: running", "run", c.runID, "plan", source)
-	out, err := c.runs.drive(ctx, c.runID, func() (<-chan *Suspension, func(context.Context) (string, error)) {
-		return gc.Suspensions(), gc.Run
+	out, err := c.runs.drive(ctx, c.runID, c.granted(), func() (<-chan *Suspension, func(context.Context) (string, error), func(invoker)) {
+		return gc.Suspensions(), gc.Run, gc.setKernel
 	})
 	if err != nil {
 		c.kernel.warn("agent plan: stopped", "run", c.runID, "error", err)
@@ -374,6 +375,134 @@ func stringArg(rawArgs, name string) (string, error) {
 	return v, nil
 }
 
+// ── the signature a composing carrier shows for one tool ───────────────────
+//
+// WHAT THIS FIXES, measured 2026-08-27 (nocx-d6gn4.8.1). A composing carrier
+// shows the model a list of functions and, until this, told it NOTHING about
+// either end of them: the arguments were printed as "(...)" — three literal
+// dots — and the result was described as "the tool's result as a dict". Under
+// a declared call neither gap exists: the model is handed the params schema
+// and reads the result as text. Under a program it must spell the arguments
+// and index the dict, and it had nothing to spell them from.
+//
+// A live run cost three turns to that. `session_list()` with no arguments,
+// refused by the params schema it was never shown; then the key from the
+// worked example, `result["text"]`, which session.list does not have; then it
+// gave up and answered with the whole dict. It never reached the second tool
+// the question needed.
+//
+// Both halves are rendered from the SAME schemas the kernel enforces — the
+// params the model's arguments are validated against, and the result the
+// executor is held to (kernel.checkResult). A description built any other way
+// would be prose that drifts, which is the defect this replaces, not a fix
+// for it.
+
+// signature renders one tool as a program's function: its named arguments,
+// which are required, and the keys of what it hands back.
+func signature(t agenttools.Tool) string {
+	var b strings.Builder
+	b.WriteString(intrinsicName(t.Name) + "(" + strings.Join(argumentNames(t.ParamsSchema), ", ") + ")")
+	b.WriteString(" — " + t.Description + "\n")
+	if fields := resultFields(t.ResultSchema); len(fields) > 0 {
+		b.WriteString("      returns a dict with: " + strings.Join(fields, ", ") + "\n")
+	}
+	return b.String()
+}
+
+// argumentNames lists a tool's parameters, required ones first and optional
+// ones marked, straight off the schema the kernel validates against.
+func argumentNames(params json.RawMessage) []string {
+	var doc struct {
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(params, &doc); err != nil {
+		return nil
+	}
+	required := map[string]bool{}
+	out := make([]string, 0, len(doc.Properties))
+	for _, name := range doc.Required {
+		required[name] = true
+		if _, ok := doc.Properties[name]; ok {
+			out = append(out, name)
+		}
+	}
+	optional := make([]string, 0, len(doc.Properties))
+	for name := range doc.Properties {
+		if !required[name] {
+			optional = append(optional, name+" (optional)")
+		}
+	}
+	sort.Strings(optional)
+	return append(out, optional...)
+}
+
+// resultFields lists the keys a tool's result carries, the required ones
+// first, so a program indexes what is there rather than what it guessed.
+// Types are deliberately left out: a JSON number reaches a program as a
+// float whatever the schema calls it (starlarkcarrier.go), and a description
+// that promised "integer" would be its own small lie.
+func resultFields(result json.RawMessage) []string {
+	if len(result) == 0 {
+		return nil
+	}
+	var doc struct {
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+	}
+	if err := json.Unmarshal(result, &doc); err != nil {
+		return nil
+	}
+	required := map[string]bool{}
+	out := make([]string, 0, len(doc.Properties))
+	for _, name := range doc.Required {
+		required[name] = true
+		if _, ok := doc.Properties[name]; ok {
+			out = append(out, name)
+		}
+	}
+	optional := make([]string, 0, len(doc.Properties))
+	for name := range doc.Properties {
+		if !required[name] {
+			optional = append(optional, name+" (may be absent)")
+		}
+	}
+	sort.Strings(optional)
+	return append(out, optional...)
+}
+
+// bareField drops the "(may be absent)" a rendered field carries.
+func bareField(field string) string {
+	if i := strings.Index(field, " ("); i > 0 {
+		return field[:i]
+	}
+	return field
+}
+
+// exampleTool picks the tool the worked example is written from: one that
+// actually HAS the field the example indexes. The example used to be built
+// from whichever tool came first and always index ["text"] — and when that
+// tool was session.list, which returns items and no text, the example taught
+// a key that does not exist and a live model copied it.
+func exampleTool(permitted []agenttools.Tool) (agenttools.Tool, string, bool) {
+	for _, t := range permitted {
+		for _, field := range resultFields(t.ResultSchema) {
+			// Matched on the bare name: resultFields decorates an optional
+			// one, and `text` is optional for files.read (a binary file has
+			// none) while still being the field an example should show.
+			if bareField(field) == "text" {
+				return t, "text", true
+			}
+		}
+	}
+	for _, t := range permitted {
+		if fields := resultFields(t.ResultSchema); len(fields) > 0 {
+			return t, bareField(fields[0]), true
+		}
+	}
+	return agenttools.Tool{}, "", false
+}
+
 // programDescription is what the model is told it may write. The vocabulary
 // is derived from the grant's tools rather than written out, so a tool the
 // grant does not permit is never named to the model and a tool it does permit
@@ -400,20 +529,32 @@ func programDescription(permitted []agenttools.Tool) string {
 		"The language is Starlark, which reads like Python. A value one call returns is a " +
 		"variable the next call can use, so you never have to see an intermediate result to " +
 		"act on it. No imports, no file or network access, no unbounded loops, and nothing " +
-		"exists except the functions below and `answer`.\n\n" +
-		"Two ways it is NOT Python, and a live model got both wrong:\n" +
-		"  - There are no f-strings. \"{x} here\" is that text literally. Build a string " +
-		"with + or with \"{} here\".format(x).\n" +
-		"  - print(...) does not reach the person. It comes back to YOU as the program's " +
-		"notes, which makes it useful for working something out; the person is told only " +
-		"what you pass to answer(...).\n\n")
+		"exists except the functions below and `print`.\n\n" +
+		"WHAT IS NOT IN IT, and every line of this list is something a live model " +
+		"reached for and lost a turn to:\n" +
+		"  - No import, and no standard library. There is no os, no subprocess, no re.\n" +
+		"  - No try/except. A call that fails ends the program and its error comes " +
+		"back to you; you do not guard against it.\n" +
+		"  - No f-strings. \"{x} here\" is that text literally. Use + , or " +
+		"\"{} here\".format(x), or just pass the pieces to print as separate arguments.\n" +
+		"  - No `else` on a `for` loop, no `while`, and no recursion.\n" +
+		"What IS there: def, if/elif/else, for over a list or dict, list and dict " +
+		"comprehensions, break and continue, and the ordinary string, list and dict " +
+		"methods — .strip() .split() .startswith() .lower() .format() .get() .append().\n\n")
 
-	b.WriteString("Functions:\n")
+	b.WriteString("Functions — each one's ARGUMENTS and the keys of what it RETURNS:\n")
 	for _, t := range permitted {
-		fmt.Fprintf(&b, "  %s(...) — %s\n", intrinsicName(t.Name), t.Description)
+		b.WriteString("  " + signature(t))
 	}
-	b.WriteString("  answer(text) — what the person is told. Call it more than once to say " +
-		"several things in order.\n\n")
+	// ONE NAME FOR SAYING SOMETHING, and it is the one every model already
+	// types. `answer` is still bound and still works — 42% of the programs
+	// measured called it, and failing them on an unknown name would spend a
+	// repair turn to enforce our preference — but it is not advertised: a
+	// second documented name for one behaviour is a second thing to keep in
+	// step, and the model needs no choice to make here.
+	b.WriteString("  print(...) — EVERYTHING YOU SEND TO print, THE PERSON SEES. It takes any " +
+		"number of values, of any type. Print as often as you like; the person reads what " +
+		"you printed, in the order you printed it, and nothing else reaches them.\n\n")
 
 	// A WORKED EXAMPLE, and it is not decoration. Told only the rules, a live
 	// model called one of the functions above as a tool — which is what the
@@ -421,14 +562,23 @@ func programDescription(permitted []agenttools.Tool) string {
 	// unambiguous statement of "this is program text, and here is its shape".
 	// It is built from a real permitted tool rather than written out, so it
 	// cannot name something this run does not have.
-	if len(permitted) > 0 {
+	if t, field, ok := exampleTool(permitted); ok {
+		args := make([]string, 0, 2)
+		for _, name := range argumentNames(t.ParamsSchema) {
+			if strings.HasSuffix(name, "(optional)") {
+				continue
+			}
+			args = append(args, name+` = ...`)
+		}
 		fmt.Fprintf(&b, "Example of the shape (not of what to do):\n"+
-			"  result = %s(argument = \"value\")\n"+
-			"  answer(result[\"text\"])\n\n", intrinsicName(permitted[0].Name))
+			"  result = %s(%s)\n"+
+			"  print(result[%q])\n\n",
+			intrinsicName(t.Name), strings.Join(args, ", "), field)
 	}
 
-	b.WriteString("Every function takes its arguments BY NAME and returns the tool's result as " +
-		"a dict. If a program fails you get the error and can send another one, so prefer " +
+	b.WriteString("Every function takes its arguments BY NAME — the names listed above, and no " +
+		"others — and returns a dict with exactly the keys listed above and no others. " +
+		"If a program fails you get the error and can send another one, so prefer " +
 		"trying to deliberating. Permissions are unchanged: a call the person has to approve " +
 		"still stops and asks, and the program continues from there once they answer.")
 	return b.String()
@@ -444,9 +594,16 @@ func planDescription(permitted []agenttools.Tool) string {
 		"An expression is CEL: string literals are quoted, and a step's result is " +
 		"read by naming its id, so \"one.text.trim()\" is the trimmed text the step " +
 		"called `one` returned. A later step may name any earlier step's id and no " +
-		"other name.\n\nAvailable effects:\n")
+		"other name.\n\nEffects — each one's ARGUMENTS and the fields of its result, " +
+		"which is what a later step reads through the step's id:\n")
+	// The same two facts the program carrier shows, and for the same reason:
+	// a step naming `one.text` on an effect that has no text is the identical
+	// blind index, and here it fails the whole plan at validation.
 	for _, t := range permitted {
-		fmt.Fprintf(&b, "  %s — %s\n", t.Name, t.Description)
+		b.WriteString("  " + t.Name + "(" + strings.Join(argumentNames(t.ParamsSchema), ", ") + ") — " + t.Description + "\n")
+		if fields := resultFields(t.ResultSchema); len(fields) > 0 {
+			b.WriteString("      its result has: " + strings.Join(fields, ", ") + "\n")
+		}
 	}
 	b.WriteString("\nThe whole plan is checked before anything runs, so a plan that " +
 		"cannot finish is returned to you unrun. Permissions are unchanged: a step the " +

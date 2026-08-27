@@ -298,3 +298,54 @@ func TestAsk_AnUnknownCarrierIsRefusedRatherThanGuessed(t *testing.T) {
 		t.Fatalf("Ask = %v, want a refusal naming the carrier", err)
 	}
 }
+
+// TestAsk_AParkedProgramSurvivesTheDeathOfTheAskThatParkedIt is the same
+// resume as the test above, driven the way the TRANSPORT drives it: each Ask
+// runs on its own admission task, and that task's context is cancelled the
+// moment the Ask returns. The parked program outlives it — it is parked
+// BETWEEN asks by construction — so a continuation that dies with the ask
+// that parked it is a program every approval kills.
+func TestAsk_AParkedProgramSurvivesTheDeathOfTheAskThatParkedIt(t *testing.T) {
+	grant, dir := testDirGrant(t, askEveryTimeMatrix())
+	chainedFiles(t, dir)
+
+	approvals := NewApprovalStore()
+	_, srv := newFakeOpenAI(reProposingModel("run_program",
+		jsonArgs(t, map[string]any{"source": programSource(dir)})))
+	defer srv.Close()
+
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	if clErr != nil {
+		t.Fatalf("newClient: %v", clErr)
+	}
+	p := askParams(srv.URL, &grant, &fakeLedger{}, approvals)
+	p.Carrier = CarrierProgram
+
+	answered := 0
+	for answered < 4 {
+		askCtx, cancelAsk := context.WithCancel(context.Background())
+		err := cl.Ask(askCtx, p, func(AskEvent) error { return nil })
+		// The task is over the moment Ask returns, and its context with it.
+		cancelAsk()
+		if err == nil {
+			break
+		}
+		var ask *ApprovalRequestedError
+		if !errors.As(err, &ask) || ask.Request == nil {
+			t.Fatalf("Ask %d: %v", answered, err)
+		}
+		if !approvals.Approve(Approval{
+			RunID:   ask.Request.RunID,
+			Attempt: ask.Request.Attempt,
+			Tool:    ask.Request.Tool,
+			CallID:  ask.Request.CallID,
+			ArgHash: ask.Request.ArgHash,
+		}) {
+			t.Fatalf("the proposal the kernel asked about was not pending")
+		}
+		answered++
+	}
+	if answered != 2 {
+		t.Fatalf("questions asked = %d, want one per effect in the chain", answered)
+	}
+}

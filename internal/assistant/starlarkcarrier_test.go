@@ -258,43 +258,107 @@ func (c *starlarkCarrier) invocations() []starlarkInvocation {
 	return append([]starlarkInvocation(nil), c.calls...)
 }
 
-// A PROGRAM THAT PRINTS AND NEVER ANSWERS TOLD THE PERSON NOTHING, and the
-// run looked like a success. Seen on a live model, which wrote print(output)
-// where it meant answer(output) — the natural mistake, since print is in the
-// language and the model is writing what looks like a script.
-func TestStarlarkCarrier_PrintingIsNotAnswering(t *testing.T) {
+// PRINT SPEAKS TO THE PERSON, and so does answer (nocx-d6gn4.8.1). This
+// replaces the rule these two tests used to hold — print is the model's
+// notes, a program that only printed has answered nothing — which was
+// written from one live model making one mistake.
+//
+// It was then measured. Across 40 programs from two models, 40% called print,
+// 42% called answer, and 20% called neither, so a fifth of every program
+// written told the person nothing at all. What the print calls CONTAINED
+// settles it: `print("Exit Code:", code)` in answer to a question about a
+// command's output is addressed to the person. Twice over — in the tool
+// description and in the run's own failure sentence — we told models print
+// was not for the reader, and they went on printing for the reader.
+//
+// So the affordance is given instead of the habit forbidden.
+func TestStarlarkCarrier_PrintReachesThePerson(t *testing.T) {
 	grant, dir := testDirGrant(t, autonomousMatrix())
 	writeFile(t, filepath.Join(dir, "index.txt"), "target.txt\n")
 	carrier := newStarlarkCarrier(kernelFor(t, grant, &fakeLedger{}), grantedTools)
 
 	out, err := carrier.Run(context.Background(),
 		`print(files_read(path = "`+dir+`/index.txt")["text"])`)
-	if err == nil {
-		t.Fatalf("a program that told the person nothing reported success: %q", out)
+	if err != nil {
+		t.Fatalf("a program that printed its result failed: %v", err)
 	}
-	// The words that name the fix, and the printed text with them — the model
-	// already did the work, and only the last line is missing.
-	for _, want := range []string{"never called answer", "target.txt", "Call answer(...)"} {
-		if !strings.Contains(err.Error(), want) {
-			t.Fatalf("the failure does not say %q:\n%s", want, err)
-		}
+	if !strings.Contains(out, "target.txt") {
+		t.Fatalf("what the program printed did not reach the person: %q", out)
 	}
 }
 
-// And when it DOES answer, what it printed comes back too — addressed to the
-// model, marked as not being for the person.
-func TestStarlarkCarrier_WhatAProgramPrintsComesBackToTheModel(t *testing.T) {
+// AND IN THE ORDER THE PROGRAM SAID IT. A heading printed before an answer is
+// a heading, not a footnote: mixing the two channels by kind rather than by
+// order would reorder a program's own sentences behind its back.
+func TestStarlarkCarrier_PrintAndAnswerAreOneOrderedVoice(t *testing.T) {
 	grant, _ := testDirGrant(t, autonomousMatrix())
 	carrier := newStarlarkCarrier(kernelFor(t, grant, &fakeLedger{}), grantedTools)
 
-	out, err := carrier.Run(context.Background(), "print(\"working it out\")\nanswer(\"done\")")
+	out, err := carrier.Run(context.Background(),
+		"print(\"what I did:\")\nanswer(\"the result\")\nprint(\"and a note\")")
 	if err != nil {
 		t.Fatalf("Run: %v", err)
 	}
-	if !strings.HasPrefix(out, "done") {
-		t.Fatalf("the answer is not what the person is told first: %q", out)
+	if out != "what I did:\nthe result\nand a note" {
+		t.Fatalf("the person was told %q, want the program's own order", out)
 	}
-	if !strings.Contains(out, "working it out") || !strings.Contains(out, "not for the person") {
-		t.Fatalf("the program's notes did not come back marked: %q", out)
+}
+
+// BOTH TAKE ANY NUMBER OF VALUES OF ANY TYPE, which is the other half of not
+// fighting the habit: a model reaches for an f-string because it wants to put
+// a value in a sentence, and Starlark has no f-strings. Passing the pieces is
+// the way that always works, and it is now the way the description names.
+func TestStarlarkCarrier_TheyTakeThePiecesRatherThanAFormattedString(t *testing.T) {
+	grant, _ := testDirGrant(t, autonomousMatrix())
+	carrier := newStarlarkCarrier(kernelFor(t, grant, &fakeLedger{}), grantedTools)
+
+	out, err := carrier.Run(context.Background(), `answer("lines:", 42, True)`)
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if out != "lines: 42 True" {
+		t.Fatalf("answer with several values gave %q", out)
+	}
+}
+
+// A PROGRAM MAY REUSE A NAME (nocx-d6gn4.8.1). Starlark forbids reassigning a
+// global by default, to keep a loaded module's globals frozen — a property a
+// one-shot script that nothing loads does not have. The restriction cost ten
+// consecutive programs in one live run, each dying on "cannot reassign global",
+// because a model writes a top-level loop and then reuses the name.
+func TestStarlarkCarrier_AProgramMayReuseAName(t *testing.T) {
+	grant, _ := testDirGrant(t, autonomousMatrix())
+	carrier := newStarlarkCarrier(kernelFor(t, grant, &fakeLedger{}), grantedTools)
+
+	out, err := carrier.Run(context.Background(), `
+lines = ["a", "b"]
+kept = []
+for line in lines:
+    kept.append(line)
+line = "reused after the loop"
+lines = kept
+print(line, len(lines))
+`)
+	if err != nil {
+		t.Fatalf("a program that reuses a name failed: %v", err)
+	}
+	if out != "reused after the loop 2" {
+		t.Fatalf("program said %q", out)
+	}
+}
+
+// AND STILL CANNOT LOOP FOREVER: the two options that bound termination are
+// untouched by that widening.
+func TestStarlarkCarrier_TheBoundsOnTerminationAreUnchanged(t *testing.T) {
+	grant, _ := testDirGrant(t, autonomousMatrix())
+	carrier := newStarlarkCarrier(kernelFor(t, grant, &fakeLedger{}), grantedTools)
+
+	for _, tc := range []struct{ name, source string }{
+		{"while", "x = 0\nwhile x < 3:\n    x = x + 1\n"},
+		{"recursion", "def f(n):\n    return f(n)\nf(1)\n"},
+	} {
+		if _, err := carrier.Run(context.Background(), tc.source); err == nil {
+			t.Fatalf("%s is available to a program", tc.name)
+		}
 	}
 }

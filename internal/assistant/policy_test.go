@@ -285,7 +285,7 @@ func middlewareForTurn(t *testing.T, grant content.Grant, ledger AttemptLedger, 
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	mw, err := newPolicyMiddleware(CarrierCalls, newParkedRuns(), nil, grant, reg, ledger, approvals, known, "run-1", 1, turnEntryID, requester, nil, nil)
+	mw, err := newPolicyMiddleware(CarrierCalls, newParkedRuns(nil), nil, grant, reg, ledger, approvals, known, "run-1", 1, turnEntryID, requester, nil, nil)
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}
@@ -694,7 +694,7 @@ func TestMiddleware_StandingDeclineDoesNotLeakAcrossRuns(t *testing.T) {
 	if regErr != nil {
 		t.Fatalf("Assemble: %v", regErr)
 	}
-	mw2, mwErr := newPolicyMiddleware(CarrierCalls, newParkedRuns(), nil, grant, reg, &fakeLedger{}, approvals, &fakeKnownMaterial{}, "run-2", 1, "", nil, nil, nil)
+	mw2, mwErr := newPolicyMiddleware(CarrierCalls, newParkedRuns(nil), nil, grant, reg, &fakeLedger{}, approvals, &fakeKnownMaterial{}, "run-2", 1, "", nil, nil, nil)
 	if mwErr != nil {
 		t.Fatalf("newPolicyMiddleware(run-2): %v", mwErr)
 	}

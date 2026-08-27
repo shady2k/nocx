@@ -167,7 +167,7 @@ func middlewareForWithClassifier(t *testing.T, grant content.Grant, ledger Attem
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	mw, err := newPolicyMiddleware(CarrierCalls, newParkedRuns(), nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, "run-1", 1, "", nil, classifier, nil)
+	mw, err := newPolicyMiddleware(CarrierCalls, newParkedRuns(nil), nil, grant, reg, ledger, approvals, &fakeKnownMaterial{}, "run-1", 1, "", nil, classifier, nil)
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}

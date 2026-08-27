@@ -83,8 +83,12 @@ type compiledStep struct {
 }
 
 type graphCarrier struct {
-	kernel invoker
-	steps  []compiledStep
+	// kernel is rebound on resume, for the reason starlarkCarrier's is: a
+	// plan parked on a person's answer must run its next step through the
+	// drive that is running now, not through the ask that parked it.
+	kernelMu sync.RWMutex
+	kernel   invoker
+	steps    []compiledStep
 
 	// suspensions carries a question out to the host, exactly as the program
 	// carrier's does. ONE mechanism for stopping, shared, because two ways to
@@ -101,6 +105,21 @@ type graphCarrier struct {
 // happened — half a plan executed is worse than none, because the effects that
 // already happened cannot be taken back and a person who approved a whole plan
 // approved one that could finish.
+// setKernel rebinds the carrier to the kernel of the drive running now.
+func (c *graphCarrier) setKernel(k invoker) {
+	c.kernelMu.Lock()
+	defer c.kernelMu.Unlock()
+	c.kernel = k
+}
+
+// kernelNow is the kernel as of this moment, never the one captured when a
+// step was first proposed.
+func (c *graphCarrier) kernelNow() invoker {
+	c.kernelMu.RLock()
+	defer c.kernelMu.RUnlock()
+	return c.kernel
+}
+
 func newGraphCarrier(kernel invoker, source string) (*graphCarrier, error) {
 	var p plan
 	if err := json.Unmarshal([]byte(source), &p); err != nil {
@@ -272,7 +291,7 @@ func (c *graphCarrier) Run(ctx context.Context) (string, error) {
 		c.calls = append(c.calls, starlarkInvocation{tool: s.step.Effect, callID: callID, rawArgs: string(raw)})
 		c.mu.Unlock()
 
-		out, err := invokeParking(ctx, c.kernel, c.suspensions, s.step.Effect, callID, string(raw))
+		out, err := invokeParking(ctx, c.kernelNow, c.suspensions, s.step.Effect, callID, string(raw))
 		if err != nil {
 			// A SUSPENSION IS NOT A FAILURE and must travel untouched: the
 			// host reads the request off it to ask a person, and a wrapped

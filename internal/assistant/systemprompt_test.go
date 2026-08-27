@@ -79,7 +79,11 @@ func TestSystemPrompt_TellsTheModelTheSessionItsToolsRequire(t *testing.T) {
 	}
 
 	// run: the same rule on the tool that changes something.
-	runner := &recordingRunner{body: runResolvedBody("e1", nil, "completed", 1, 0, 1, "ok")}
+	// "success", not "completed": completed is the BROKER's outcome, and the
+	// block's own frozen vocabulary is success|failure|entered|unknown. The
+	// fixture said completed until the result check caught it — a renderer
+	// that answered so would be refused at ingress (ws_run.go).
+	runner := &recordingRunner{body: runResolvedBody("e1", nil, "success", 1, 0, 1, "ok")}
 	mwRun := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, runner)
 	outRun, runErr := wrappedEndpoint(mwRun, "run", "c3", `{"sessionId":"the-model-made-this-up","command":"ls"}`)
 	if runErr != nil {

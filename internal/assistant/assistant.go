@@ -403,7 +403,7 @@ func newClientWithRegistry(logger log.Logger, reg agenttools.Registry) Client {
 		tools:       reg,
 		approvals:   NewApprovalStore(),
 		checkpoints: newRunCheckpoints(),
-		parked:      newParkedRuns(),
+		parked:      newParkedRuns(logger),
 	}
 }
 

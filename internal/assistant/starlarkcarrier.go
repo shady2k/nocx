@@ -80,7 +80,21 @@ type Suspension struct {
 func (s *Suspension) Resume() { close(s.resume) }
 
 type starlarkCarrier struct {
-	kernel invoker
+	// kernel is REBOUND on every resume, and that is load-bearing
+	// (nocx-d6gn4.8.1). A parked program holds the kernel of the ask that
+	// parked it, and that kernel's ask-scoped seams — the sink that
+	// announces a call, and the context its durable writes go through —
+	// die when that ask returns. A program resumed eight seconds later
+	// announced its effect into a dead stream and got back a bare
+	// context.Canceled, which the transport read as a lost connection.
+	//
+	// Only the program's LOCALS have to survive an approval; the kernel
+	// does not. The drive that resumes it hands in its own
+	// (parkedrun.go), so the effect is announced into the stream a person
+	// is actually watching and recorded as an attempt of the ask that is
+	// running.
+	kernelMu sync.RWMutex
+	kernel   invoker
 	// tools is the run's vocabulary: the tools the grant permits, and nothing
 	// else. It is passed in rather than read off the kernel because the
 	// allowlist a program sees and the tool set the model was shown must be
@@ -93,10 +107,12 @@ type starlarkCarrier struct {
 	// park on a question nobody will ever see.
 	suspensions chan *Suspension
 
-	mu      sync.Mutex
-	calls   []starlarkInvocation
-	answer  string
-	printed []string
+	mu    sync.Mutex
+	calls []starlarkInvocation
+	// said is everything the program told the person, in the order it said
+	// it. BOTH print and answer append here, and that is a decision measured
+	// rather than assumed — see Print's comment.
+	said    []string
 	nextSeq int
 }
 
@@ -104,12 +120,30 @@ func newStarlarkCarrier(kernel invoker, tools []string) *starlarkCarrier {
 	return &starlarkCarrier{kernel: kernel, tools: tools, suspensions: make(chan *Suspension)}
 }
 
+// setKernel rebinds the carrier to the kernel of the drive that is running
+// now. Called by the host before a parked effect is released, never by the
+// program.
+func (c *starlarkCarrier) setKernel(k invoker) {
+	c.kernelMu.Lock()
+	defer c.kernelMu.Unlock()
+	c.kernel = k
+}
+
+// kernelNow is the kernel as of THIS moment — read at each call rather than
+// captured, so an effect that parks across an approval makes its second
+// attempt through the drive that resumed it.
+func (c *starlarkCarrier) kernelNow() invoker {
+	c.kernelMu.RLock()
+	defer c.kernelMu.RUnlock()
+	return c.kernel
+}
+
 // logf records one effect's outcome through the kernel's own logger when the
 // kernel has one. The carrier holds no logger of its own: there is one owner
 // of "how this process logs", and a second would be a second configuration to
 // keep in step.
 func (c *starlarkCarrier) logf(msg, tool, callID, rawArgs string, err error) {
-	k, ok := c.kernel.(grantedInvoker)
+	k, ok := c.kernelNow().(grantedInvoker)
 	if !ok {
 		return
 	}
@@ -136,15 +170,27 @@ func (c *starlarkCarrier) Run(ctx context.Context, source string) (string, error
 	thread.SetMaxExecutionSteps(maxProgramSteps)
 	// print() IS IN THE LANGUAGE and there is no taking it out, so the only
 	// question is where its output goes. Left alone it goes to the library's
-	// default writer, which is nowhere anybody can read — and a live model
-	// wrote print(output) where it meant answer(output), so the run
-	// succeeded and the person was told nothing at all. Captured, it becomes
-	// what it actually is: the program's working notes, addressed to the
-	// model that wrote them.
+	// default writer, which is nowhere anybody can read.
+	//
+	// PRINT REACHES THE PERSON (nocx-d6gn4.8.1), and this reverses the
+	// decision b0fc089a made from one observation.
+	//
+	// That decision routed print to the MODEL as the program's working notes,
+	// on the reasoning that a live model had written print where it meant
+	// answer. The prohibition was then stated twice — in the tool description
+	// and in the run's failure sentence — and measured across 40 programs
+	// from two models it did not hold: 40% called print, 42% called answer,
+	// and 20% called neither, so a fifth of all programs told the person
+	// nothing at all. Reading the print calls settles what they were for —
+	// `print("Exit Code:", code)` and `print("Text:", text)` in answer to a
+	// question about a command's output are addressed to the person, not to
+	// the model that wrote them.
+	//
+	// So the affordance is given rather than the habit forbidden: print is
+	// what every model already means by "show this to the reader", and it now
+	// is that. A program that prints has answered.
 	thread.Print = func(_ *starlark.Thread, msg string) {
-		c.mu.Lock()
-		defer c.mu.Unlock()
-		c.printed = append(c.printed, msg)
+		c.say(msg)
 	}
 	// The context travels on the thread rather than in a closure so that
 	// every intrinsic sees the same cancellation, including ones added later.
@@ -173,21 +219,16 @@ func (c *starlarkCarrier) Run(ctx context.Context, source string) (string, error
 	}
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	switch {
-	case c.answer == "" && len(c.printed) > 0:
-		// The commonest way to write a program that does nothing: everything
-		// worked and the person was told nothing. Say so in the words that
-		// name the fix, rather than returning an empty answer that looks like
-		// a successful run.
-		return "", fmt.Errorf("the program ran and printed this, but it never called answer(...), "+
-			"so the person has been told nothing:\n%s\n\nCall answer(...) with what they should be told",
-			strings.Join(c.printed, "\n"))
-	case len(c.printed) > 0:
-		return c.answer + "\n\n(the program also printed, for you and not for the person:\n" +
-			strings.Join(c.printed, "\n") + "\n)", nil
-	default:
-		return c.answer, nil
-	}
+	return strings.Join(c.said, "\n"), nil
+}
+
+// say records one thing the program told the person. The order is the
+// program's own, so a program that prints a heading and then answers reads
+// the way it was written.
+func (c *starlarkCarrier) say(text string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.said = append(c.said, text)
 }
 
 // ctxLocal is the thread-local key the request context travels under.
@@ -198,16 +239,32 @@ const ctxLocal = "nocx.ctx"
 // ExecFile reads, and those globals are process-wide, so any other user of
 // the library could widen this program's dialect from another package.
 //
-// Every field here is off, and the two that matter are off for the same
-// reason: a program must TERMINATE. `while` has no bound a reader can see,
-// and recursion has none either; `for` over a finite collection does. The
-// rest are off because nothing needs them yet and a dialect is far easier to
-// widen later than to narrow.
+// The two that stay off are off for one reason: a program must TERMINATE.
+// `while` has no bound a reader can see, and recursion has none either; `for`
+// over a finite collection does. The step budget below bounds what is left.
+//
+// GLOBAL REASSIGNMENT IS ON, and it was off until it was measured
+// (nocx-d6gn4.8.1). Starlark forbids it by default because a module's globals
+// freeze when it is loaded, so a reassignment would break the determinism
+// another module's `load` depends on. A program here is loaded by nobody: it
+// is one script, run once, and there is no `load` in its vocabulary at all.
+// So the rule protected a property this dialect does not have — and it cost
+// the thing the carrier exists to save. One live run, one question, ten
+// programs in a row, every one of them dying on it:
+//
+//	program.star:10:5: cannot reassign global lines declared at program.star:6:1
+//	program.star:11:5: cannot reassign global start_index declared at line 9
+//	program.star:15:5: cannot reassign global line declared at program.star:10:5
+//
+// A model writes a top-level loop and then reuses the name, which is what
+// ordinary Python looks like. Ten model turns spent on a restriction that
+// bought nothing is the same lesson print taught: do not fight the habit
+// where the habit costs nothing.
 var programOptions = &syntax.FileOptions{
 	Set:               false,
 	While:             false,
 	TopLevelControl:   true, // if/for at the top level: a program is a script, not a module of functions
-	GlobalReassign:    false,
+	GlobalReassign:    true,
 	LoadBindsGlobally: false,
 	Recursion:         false,
 }
@@ -227,6 +284,10 @@ const maxProgramSteps = 10_000_000
 // is built from the same declarations the wire tools are projected from.
 func (c *starlarkCarrier) predeclared() starlark.StringDict {
 	d := starlark.StringDict{
+		// `answer` is the name the description does NOT use, kept bound
+		// because models type it anyway — 17 of 40 measured programs did.
+		// It is print under another name, not a second way to say things
+		// (carrier.go's vocabulary line says why only one is advertised).
 		"answer": starlark.NewBuiltin("answer", c.recordAnswer),
 	}
 	for _, tool := range c.tools {
@@ -276,7 +337,7 @@ func (c *starlarkCarrier) effect(tool string) func(*starlark.Thread, *starlark.B
 		c.calls = append(c.calls, starlarkInvocation{tool: tool, callID: callID, rawArgs: string(raw)})
 		c.mu.Unlock()
 
-		out, err := invokeParking(ctx, c.kernel, c.suspensions, tool, callID, string(raw))
+		out, err := invokeParking(ctx, c.kernelNow, c.suspensions, tool, callID, string(raw))
 		if err != nil {
 			// EVERY effect a program asks for is recorded with its outcome,
 			// which the declared-call carrier gets for free (each call is
@@ -305,25 +366,32 @@ func (c *starlarkCarrier) effect(tool string) func(*starlark.Thread, *starlark.B
 // something is wrong that asking a person twice will not fix, and a carrier
 // that kept retrying would be the ask-forever loop the resume path exists to
 // end.
-func invokeParking(ctx context.Context, kernel invoker, suspensions chan *Suspension, tool, callID, rawArgs string) (string, error) {
-	out, err := kernel.Invoke(ctx, tool, callID, rawArgs)
+func invokeParking(ctx context.Context, kernelNow func() invoker, suspensions chan *Suspension, tool, callID, rawArgs string) (string, error) {
+	out, err := kernelNow().Invoke(ctx, tool, callID, rawArgs)
 	var ask *ApprovalRequestedError
 	if !errors.As(err, &ask) {
 		return out, err
 	}
 
 	s := &Suspension{Request: ask.Request, resume: make(chan struct{})}
+	// context.Cause, never ctx.Err: the host cancels a parked program with a
+	// NAMED cause (parkedrun.go), and flattening that to context.Canceled is
+	// what let a program this process killed on purpose report itself as a
+	// lost connection. The causes wrap context.Canceled, so every existing
+	// check still holds.
 	select {
 	case suspensions <- s:
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return "", context.Cause(ctx)
 	}
 	select {
 	case <-s.resume:
 	case <-ctx.Done():
-		return "", ctx.Err()
+		return "", context.Cause(ctx)
 	}
-	return kernel.Invoke(ctx, tool, callID, rawArgs)
+	// THE CURRENT kernel, deliberately re-read: the one this function was
+	// entered with belongs to an ask that has since returned.
+	return kernelNow().Invoke(ctx, tool, callID, rawArgs)
 }
 
 // recordAnswer is what the program says to the person. Called more than once,
@@ -341,12 +409,7 @@ func (c *starlarkCarrier) recordAnswer(_ *starlark.Thread, _ *starlark.Builtin, 
 		}
 		parts = append(parts, a.String())
 	}
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	if c.answer != "" && len(parts) > 0 {
-		c.answer += "\n"
-	}
-	c.answer += strings.Join(parts, " ")
+	c.say(strings.Join(parts, " "))
 	return starlark.None, nil
 }
 

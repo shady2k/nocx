@@ -216,7 +216,10 @@ func TestProgramDescription_SaysTheseAreNotToolsAndShowsTheShape(t *testing.T) {
 		"NOT tools",
 		"calling one of them as a tool does nothing",
 		"Example of the shape",
-		"answer(result[\"text\"])",
+		// print, not answer: one advertised name for saying something, and
+		// it is the one models already type (starlarkcarrier.go's Print).
+		"print(result[\"text\"])",
+		"EVERYTHING YOU SEND TO print, THE PERSON SEES",
 		// NOT A ONE-SHOT, and this is the assertion a live failure bought.
 		// "Do the whole job in one program" cost a model three minutes and
 		// thirty-five thousand characters of reasoning with no call emitted

@@ -208,7 +208,10 @@ function approvalPrompt(page: Page) {
  * outside the prompt sheet.
  */
 async function expectApprovalActionsFit(prompt: Locator): Promise<void> {
-  const sheet = await prompt.locator('.ui-prompt').boundingBox()
+  // `prompt` IS the sheet: Prompt puts role="dialog" on the .ui-prompt
+  // section itself, so asking for a .ui-prompt inside it looks for a
+  // descendant that does not exist and waits out the whole test timeout.
+  const sheet = await prompt.boundingBox()
   if (sheet === null) throw new Error('approval prompt sheet has no geometry')
 
   const expectedLabels = [

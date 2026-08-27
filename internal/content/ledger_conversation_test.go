@@ -18,12 +18,11 @@ package content_test
 
 import (
 	"context"
+	"encoding/json"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/content"
 )
-
-// ── fixtures ─────────────────────────────────────────────────────────────
 
 // conversationPane is one store with a pane and an environment ready — the
 // shape every ask has (a turn is anchored to a pane, nocx-4em1z).
@@ -33,6 +32,132 @@ func conversationPane(t *testing.T) content.LedgerRepository {
 	aPaneUnder(t, db, "ws-conv", "tab-conv", "pane-conv")
 	envReady(t, led, "local")
 	return led
+}
+
+// callingAToolWithOpenedBlock records the production shape of a run tool:
+// the action opens a following shell block whose execution owns its output.
+func callingAToolWithOpenedBlock(t *testing.T, led content.LedgerRepository, turnID, actionID, blockID, command string, record, finish bool, body string) {
+	t.Helper()
+	payload, err := json.Marshal(map[string]any{
+		"tool":       "run",
+		"effect":     string(content.EffectObserve),
+		"args":       map[string]any{"command": command},
+		"opensBlock": true,
+	})
+	if err != nil {
+		t.Fatalf("marshal run action: %v", err)
+	}
+	if _, submitErr := led.Submit(context.Background(), content.SubmitEntry{
+		ID: "00000000-0000-7000-8000-" + actionID, Client: "agent", EnvironmentID: "local",
+		Cwd: "/", Kind: content.EntryAction, Intent: "run", Payload: string(payload),
+	}); submitErr != nil {
+		t.Fatalf("Submit run action: %v", submitErr)
+	}
+	if _, causeErr := led.AddCause(context.Background(), turnID, "00000000-0000-7000-8000-"+actionID); causeErr != nil {
+		t.Fatalf("AddCause(run): %v", causeErr)
+	}
+	if _, submitBlockErr := led.Submit(context.Background(), content.SubmitEntry{
+		ID: "00000000-0000-7000-8000-" + blockID, Client: "agent", EnvironmentID: "local",
+		Cwd: "/", Kind: content.EntryShell, Intent: command, Source: content.SourceAssistant,
+	}); submitBlockErr != nil {
+		t.Fatalf("Submit run block: %v", submitBlockErr)
+	}
+	blockIDFull := "00000000-0000-7000-8000-" + blockID
+	if _, causeBlockErr := led.AddCause(context.Background(), turnID, blockIDFull); causeBlockErr != nil {
+		t.Fatalf("AddCause(run block): %v", causeBlockErr)
+	}
+	execID, err := led.StartExecution(context.Background(), content.StartExecution{EntryID: blockIDFull})
+	if err != nil {
+		t.Fatalf("StartExecution(run block): %v", err)
+	}
+	if record {
+		artifactID, appendErr := led.AppendArtifact(context.Background(), content.AppendArtifact{
+			EntryID: blockIDFull, ExecutionID: &execID,
+			ID: "00000000-0000-7000-8000-" + blockID + "a", MediaType: content.MediaText,
+		})
+		if appendErr != nil {
+			t.Fatalf("AppendArtifact(run block): %v", appendErr)
+		}
+		if body != "" {
+			if appendChunkErr := led.AppendChunk(context.Background(), artifactID, 1, []byte(body)); appendChunkErr != nil {
+				t.Fatalf("AppendChunk(run block): %v", appendChunkErr)
+			}
+		}
+	}
+	if finish {
+		if finishErr := led.FinishExecution(context.Background(), execID, content.FinishExecution{
+			EndedAt: 1, TerminationReason: content.TermCompleted, Status: content.EntrySuccess,
+		}); finishErr != nil {
+			t.Fatalf("FinishExecution(run block): %v", finishErr)
+		}
+	}
+}
+
+// These assertions inspect PriorTurn, the content layer's assembled
+// conversation input. The assistant request body is owned by another worker's
+// package, so this is the closest owned seam and keeps the request-body gap
+// explicit rather than pretending a formatter unit test is end to end.
+func TestPriorTurn_ToolLineSaysWhenRetainedOutputIsReadable(t *testing.T) {
+	led := conversationPane(t)
+	first := askIn(t, led, "session-1", "pane-conv")
+	callingAToolWithOpenedBlock(t, led, first.EntryID, "0000000000d1", "0000000000e1", "top", true, true, "one\ntwo")
+	next := askIn(t, led, "session-1", "pane-conv")
+
+	prior := priorTo(t, led, "pane-conv", next.EntryID)
+	if prior == nil || len(prior.ToolLines) != 1 {
+		t.Fatalf("assembled conversation = %+v, want one tool line", prior)
+	}
+	if got, want := prior.ToolLines[0], "ran top → 2 lines"; got != want {
+		t.Fatalf("assembled tool line = %q, want %q", got, want)
+	}
+}
+
+func TestPriorTurn_ToolLinePreservesRetainedEmptyOutputAsZeroLines(t *testing.T) {
+	led := conversationPane(t)
+	first := askIn(t, led, "session-1", "pane-conv")
+	callingAToolWithOpenedBlock(t, led, first.EntryID, "0000000000d4", "0000000000e4", "top", true, true, "")
+	next := askIn(t, led, "session-1", "pane-conv")
+
+	prior := priorTo(t, led, "pane-conv", next.EntryID)
+	if prior == nil || len(prior.ToolLines) != 1 {
+		t.Fatalf("assembled conversation = %+v, want one tool line", prior)
+	}
+	if got, want := prior.ToolLines[0], "ran top → 0 lines"; got != want {
+		t.Fatalf("assembled tool line = %q, want %q", got, want)
+	}
+}
+
+func TestPriorTurn_ToolLineSaysWhenRecordedOutputIsNoLongerAvailable(t *testing.T) {
+	led := conversationPane(t)
+	first := askIn(t, led, "session-1", "pane-conv")
+	callingAToolWithOpenedBlock(t, led, first.EntryID, "0000000000d2", "0000000000e2", "top", true, true, "one\ntwo")
+	next := askIn(t, led, "session-1", "pane-conv")
+	if _, err := led.EvictBodies(context.Background(), content.BodyEvictionRequest{KeepBytes: 0, Max: 100}); err != nil {
+		t.Fatalf("EvictBodies: %v", err)
+	}
+
+	prior := priorTo(t, led, "pane-conv", next.EntryID)
+	if prior == nil || len(prior.ToolLines) != 1 {
+		t.Fatalf("assembled conversation = %+v, want one tool line", prior)
+	}
+	if got, want := prior.ToolLines[0], "ran top → output not available"; got != want {
+		t.Fatalf("assembled tool line = %q, want %q", got, want)
+	}
+}
+
+func TestPriorTurn_ToolLineSaysWhenThereWasNoReadableOutputToRecord(t *testing.T) {
+	led := conversationPane(t)
+	first := askIn(t, led, "session-1", "pane-conv")
+	callingAToolWithOpenedBlock(t, led, first.EntryID, "0000000000d3", "0000000000e3", "top", false, true, "")
+	next := askIn(t, led, "session-1", "pane-conv")
+
+	prior := priorTo(t, led, "pane-conv", next.EntryID)
+	if prior == nil || len(prior.ToolLines) != 1 {
+		t.Fatalf("assembled conversation = %+v, want one tool line", prior)
+	}
+	if got, want := prior.ToolLines[0], "ran top → no output was recorded"; got != want {
+		t.Fatalf("assembled tool line = %q, want %q", got, want)
+	}
 }
 
 // saying opens one run of prose under the turn, for the given run, and writes

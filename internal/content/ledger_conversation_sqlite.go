@@ -128,10 +128,22 @@ func (s *sqliteContent) priorTurns(ctx context.Context, paneID, beforeEntryID st
 	return turns, nil
 }
 
+// toolResultAvailability keeps the tool line's three output facts separate
+// from an action that never started: no artifact was recorded, an artifact was
+// retained, or retention evicted an artifact that had been recorded.
+type toolResultAvailability uint8
+
+const (
+	toolResultNotRun toolResultAvailability = iota
+	toolResultNoOutput
+	toolResultRetained
+	toolResultEvicted
+)
+
 // turnToolLines is the ledger's factual projection of action children. It
 // never reads or formats a result body into the line. A run action's result
-// is the next shell block it opened; only its stored artifact metadata is
-// consulted for the line count.
+// is the next shell block it opened; its artifact metadata decides whether
+// output was retained, evicted, or never recorded.
 func (s *sqliteContent) turnToolLines(ctx context.Context, turnID string) ([]string, error) {
 	children, err := s.Caused(ctx, turnID)
 	if err != nil {
@@ -146,11 +158,11 @@ func (s *sqliteContent) turnToolLines(ctx context.Context, turnID string) ([]str
 		if err != nil {
 			return nil, err
 		}
-		term, known, resultLines, err := s.actionResultLines(ctx, action)
+		term, availability, resultLines, err := s.actionResultLines(ctx, action)
 		if err != nil {
 			return nil, err
 		}
-		if !known && child.OpensBlock {
+		if (availability == toolResultNotRun || availability == toolResultNoOutput) && child.OpensBlock {
 			for _, opened := range children[i+1:] {
 				if opened.Kind == EntryAction {
 					break
@@ -162,7 +174,7 @@ func (s *sqliteContent) turnToolLines(ctx context.Context, turnID string) ([]str
 				if blockErr != nil {
 					return nil, blockErr
 				}
-				term, known, resultLines, err = s.actionResultLines(ctx, block)
+				term, availability, resultLines, err = s.actionResultLines(ctx, block)
 				if err != nil {
 					return nil, err
 				}
@@ -173,14 +185,14 @@ func (s *sqliteContent) turnToolLines(ctx context.Context, turnID string) ([]str
 		if command, ok := child.Args["command"].(string); ok && command != "" {
 			call = command
 		}
-		lines = append(lines, formatToolLine(call, term, known, resultLines))
+		lines = append(lines, formatToolLine(call, term, availability, resultLines))
 	}
 	return lines, nil
 }
 
-func (s *sqliteContent) actionResultLines(ctx context.Context, entry *LedgerEntry) (TerminationReason, bool, int, error) {
+func (s *sqliteContent) actionResultLines(ctx context.Context, entry *LedgerEntry) (TerminationReason, toolResultAvailability, int, error) {
 	if entry == nil || len(entry.Executions) == 0 {
-		return "", false, 0, nil
+		return "", toolResultNotRun, 0, nil
 	}
 	exec := entry.Executions[len(entry.Executions)-1]
 	var term TerminationReason
@@ -188,16 +200,16 @@ func (s *sqliteContent) actionResultLines(ctx context.Context, entry *LedgerEntr
 		term = *exec.TerminationReason
 	}
 	if len(exec.Artifacts) == 0 {
-		return term, false, 0, nil
+		return term, toolResultNoOutput, 0, nil
 	}
 	lines := 0
 	for _, artifact := range exec.Artifacts {
 		if artifact.Evicted {
-			return term, false, 0, nil
+			return term, toolResultEvicted, 0, nil
 		}
 		text, err := s.artifactText(ctx, artifact.ID)
 		if err != nil {
-			return "", false, 0, err
+			return "", toolResultNoOutput, 0, err
 		}
 		if text != "" {
 			lines += strings.Count(text, "\n")
@@ -206,20 +218,22 @@ func (s *sqliteContent) actionResultLines(ctx context.Context, entry *LedgerEntr
 			}
 		}
 	}
-	return term, true, lines, nil
+	return term, toolResultRetained, lines, nil
 }
 
-func formatToolLine(call string, term TerminationReason, known bool, resultLines int) string {
+func formatToolLine(call string, term TerminationReason, availability toolResultAvailability, resultLines int) string {
 	switch term {
 	case TermAgentDeclined:
 		return "declined by the person"
 	case TermCompleted:
-		if known {
+		switch availability {
+		case toolResultRetained:
 			return fmt.Sprintf("ran %s → %d lines", call, resultLines)
+		case toolResultEvicted:
+			return fmt.Sprintf("ran %s → output not available", call)
+		default:
+			return fmt.Sprintf("ran %s → no output was recorded", call)
 		}
-		return fmt.Sprintf("ran %s → result size unavailable", call)
-	case TermInterrupted:
-		return fmt.Sprintf("interrupted %s", call)
 	case "":
 		return fmt.Sprintf("not run %s", call)
 	default:

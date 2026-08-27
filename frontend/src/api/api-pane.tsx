@@ -446,20 +446,23 @@ export function ApiPane(props: ApiPaneProps) {
       // the same act it was handed before, plus the value when there is one.
       return value === undefined ? source?.requestCreate(name) : source?.requestCreate(name, value)
     }
-    // The picker is reachable from the URL, a header, a parameter, the body
-    // and Auth alike, so the site it can honestly name is `field` — which is
-    // the rung that gives api-token. The NAME here is what the person typed
-    // after the '@', which is almost always what they were reaching for; only
-    // the kind is derived. A stored value with no typed name gets the first
-    // available proposal instead, so opening the ask never invites a collision.
-    const trimmedName = name.trim()
+    // The picker has two create doors, and `value` is their explicit
+    // boundary: the passive '@' row omits it and passes the typed filter as
+    // `name`; preserve that name. The explicit lock/store row includes the
+    // value and passes an empty filter, so its name comes from the shared
+    // proposal instead.
+    const fromStoreDoor = value !== undefined
+    const nothingTyped = name.trim() === ''
+    // What the vault already holds, so the proposal can avoid a name that is
+    // taken (nocx-3o0ed.8). Read only when the proposal will actually be
+    // used. An inventory that cannot be read must not stop the ask opening:
+    // its own check at save time stays authoritative.
     let entries: InventoryEntry[] | undefined
-    if (value !== undefined && trimmedName === '') {
+    if (fromStoreDoor && nothingTyped) {
       try {
         entries = await secretCreate.list()
       } catch {
-        // A stale inventory must not prevent the ask from opening. Its submit
-        // path performs the authoritative duplicate check.
+        entries = undefined
       }
     }
     const proposal = proposeSecret({
@@ -467,12 +470,9 @@ export function ApiPane(props: ApiPaneProps) {
       url: store.draft()?.url ?? '',
       occupiedNames: entries?.map((entry) => entry.name),
     })
-    // The value the person is standing on, already filled in: the store row
-    // carries what the field held, so the ask is down to naming it. The '@'
-    // create row carries none, and the ask opens with an empty value field
-    // exactly as it did.
+    const askName = fromStoreDoor && nothingTyped ? proposal.name : name
     const created = await openSecretCreateAsk({
-      name: trimmedName === '' && value !== undefined ? proposal.name : name,
+      name: askName,
       kind: proposal.kind,
       value: value ?? '',
     })

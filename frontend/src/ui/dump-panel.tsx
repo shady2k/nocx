@@ -27,13 +27,13 @@ function DriveList(props: {
   copy: (text: string) => Promise<void>
 }): JSX.Element {
   return (
-    <section>
+    <section class="ui-dump-panel__drive">
       <h3>{props.label}</h3>
       <Show when={props.drives.length > 0} fallback={<p>No recorded drive.</p>}>
         <Stack>
           <For each={props.drives}>
             {(drive, index) => (
-              <div>
+              <div class="ui-dump-panel__entry">
                 <h4>Drive {index() + 1}</h4>
                 <CodeBlock
                   ariaLabel={`${props.label} drive ${index() + 1}`}
@@ -57,11 +57,15 @@ function DriveList(props: {
 export function DumpPanel(props: DumpPanelProps) {
   return (
     <Dialog open title="Model dump" size="lg" onClose={props.onClose}>
-      <Stack>
-        <p>Recorded provider bytes. Each drive is one model request and response.</p>
-        <DriveList label="Request" drives={props.dump.request} copy={props.copy} />
-        <DriveList label="Response" drives={props.dump.response} copy={props.copy} />
-      </Stack>
+      <div class="ui-dump-panel">
+        <Stack>
+          <p class="ui-dump-panel__intro">
+            Recorded provider bytes. Each drive is one model request and response.
+          </p>
+          <DriveList label="Request" drives={props.dump.request} copy={props.copy} />
+          <DriveList label="Response" drives={props.dump.response} copy={props.copy} />
+        </Stack>
+      </div>
     </Dialog>
   )
 }

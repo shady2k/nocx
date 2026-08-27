@@ -124,6 +124,14 @@ type Narrow func(grant content.Grant) (Capability, error)
 // and validated at assembly. ParamsSchema is the exact JSON the model is
 // shown; nothing here validates arguments against it — that is the
 // middleware's step (design §6.2).
+//
+// "The exact JSON the model is shown" is enforced here rather than trusted:
+// the contract document holds BOTH shapes, and $defs/result is lifted out
+// into ResultSchema and then REMOVED from the params. It was not, once, and
+// the result contract rode to the model inside the parameters of every tool —
+// 355 lines of return shape presented as how to call the thing, of which
+// eighty were run's window-and-clamping contract attached to a schema whose
+// only real parameter is `command` (nocx-ydu92).
 type Tool struct {
 	Declaration
 	ParamsSchema json.RawMessage
@@ -256,7 +264,15 @@ func assemble(fsys fs.FS, decls []Declaration) (Registry, error) {
 			problems = append(problems, fmt.Sprintf("%s: result schema in %q: %v", d.Name, d.Params, resErr))
 			continue
 		}
-		tools = append(tools, Tool{Declaration: d, ParamsSchema: raw, ResultSchema: result})
+		// And the params are what is LEFT: the two shapes share a document,
+		// they do not share a destination. Stripping happens here, at the one
+		// place that reads the document, so no consumer has to remember to.
+		params, paramsErr := paramsDefinition(raw)
+		if paramsErr != nil {
+			problems = append(problems, fmt.Sprintf("%s: params schema in %q: %v", d.Name, d.Params, paramsErr))
+			continue
+		}
+		tools = append(tools, Tool{Declaration: d, ParamsSchema: params, ResultSchema: result})
 	}
 	return Registry{tools: tools}, joinProblems(problems)
 }
@@ -413,4 +429,30 @@ func resultDefinition(params json.RawMessage) (json.RawMessage, error) {
 		return nil, errors.New("no $defs/result: an executable tool declares what it returns, or a program indexing its result is guessing")
 	}
 	return result, nil
+}
+
+// paramsDefinition is the other half of the same split: the contract document
+// without $defs, which is what a model is shown when it is deciding how to
+// CALL the tool. A return shape is not a parameter, and a model reading one
+// as though it were is reading eighty lines of window-and-clamping contract
+// on a schema whose only real field is `command`.
+//
+// Removing the whole of $defs rather than only "result" is deliberate and
+// checked: no params document $refs into $defs today. If one ever does, this
+// must resolve the reference rather than drop it — and the assembly failure
+// is where that will be noticed, because a dangling $ref is not silent.
+func paramsDefinition(raw json.RawMessage) (json.RawMessage, error) {
+	var doc map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &doc); err != nil {
+		return nil, fmt.Errorf("not JSON: %w", err)
+	}
+	if _, ok := doc["$defs"]; !ok {
+		return raw, nil
+	}
+	delete(doc, "$defs")
+	out, err := json.Marshal(doc)
+	if err != nil {
+		return nil, fmt.Errorf("re-marshal without $defs: %w", err)
+	}
+	return out, nil
 }

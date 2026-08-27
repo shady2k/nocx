@@ -420,8 +420,29 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 			t.Errorf("%s schema lacks an explicit required list", tool.Name)
 		}
 	}
-	if string(set[0].ParamsSchema) != filesReadSchema {
-		t.Error("files.read carries a schema different from the one that assembled")
+	// NOT the document byte for byte: the document declares both shapes, and
+	// ParamsSchema is the half addressed to the model. It used to be the whole
+	// file, and this assertion is what said so — which is why the return
+	// contract reached the model inside every tool's parameters and no test
+	// objected (nocx-ydu92). What must hold is that the params survive intact
+	// and the return shape is gone.
+	var got struct {
+		Type       string                     `json:"type"`
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+		Defs       json.RawMessage            `json:"$defs"`
+	}
+	if err := json.Unmarshal(set[0].ParamsSchema, &got); err != nil {
+		t.Fatalf("files.read params do not parse: %v", err)
+	}
+	if got.Defs != nil {
+		t.Errorf("files.read params still carry $defs: %s", got.Defs)
+	}
+	if got.Type != "object" || len(got.Required) != 1 || got.Required[0] != "path" {
+		t.Errorf("files.read params lost their own shape: %s", set[0].ParamsSchema)
+	}
+	if _, ok := got.Properties["path"]; !ok {
+		t.Errorf("files.read params lost the path property: %s", set[0].ParamsSchema)
 	}
 }
 

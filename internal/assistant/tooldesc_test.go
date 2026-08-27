@@ -102,3 +102,69 @@ func TestToolDescription_CarriesNoAuthorityVocabulary(t *testing.T) {
 		}
 	}
 }
+
+// toolParameters extracts name → the parameters object the request actually
+// carried, for the same reason toolDescriptions does: the assertion is on
+// what crossed the wire.
+func toolParameters(t *testing.T, body string) map[string]map[string]any {
+	t.Helper()
+	var req struct {
+		Tools []struct {
+			Function struct {
+				Name       string         `json:"name"`
+				Parameters map[string]any `json:"parameters"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal([]byte(body), &req); err != nil {
+		t.Fatalf("request body %q: %v", body, err)
+	}
+	out := make(map[string]map[string]any, len(req.Tools))
+	for _, tl := range req.Tools {
+		out[tl.Function.Name] = tl.Function.Parameters
+	}
+	return out
+}
+
+// TestToolParameters_CarryNoReturnShape: a tool's contract document declares
+// BOTH shapes — the parameters at the top level and what it returns under
+// $defs/result — and only the first is addressed to the model. The registry
+// lifts the result out for the kernel's checkResult and must not leave it in
+// the params.
+//
+// It once did, and nothing caught it, because every test that could have was
+// reading the schema FILE — where both shapes belong. The model was shown 355
+// lines of return contract as though it were how to call the tool, eighty of
+// them run's window-and-clamping rules on a schema whose only real parameter
+// is `command` (nocx-ydu92). So this asserts on the request body: the thing
+// the model receives, not the thing we store.
+func TestToolParameters_CarryNoReturnShape(t *testing.T) {
+	f := askWithGrant(t, &content.Grant{
+		Effects: []content.Effect{content.EffectObserve, content.EffectMutateDestructive},
+		Scopes: []content.GrantScope{
+			{Kind: content.ResourcePath, ID: "/workspace"},
+			{Kind: content.ResourceSession, ID: "lane-1"},
+		},
+	})
+	params := toolParameters(t, f.body())
+	if len(params) == 0 {
+		t.Fatal("no tools declared; the assertion would pass over an empty set")
+	}
+	for name, p := range params {
+		if _, ok := p["$defs"]; ok {
+			t.Errorf("tool %q parameters carry $defs: the return contract is being shown as a call parameter", name)
+		}
+		// Belt and braces against a future document that spells the return
+		// shape differently: the sent parameters must describe ONLY what the
+		// caller supplies, and every tool's real parameters are a short list.
+		encoded, err := json.Marshal(p)
+		if err != nil {
+			t.Fatalf("tool %q: re-marshal parameters: %v", name, err)
+		}
+		for _, returnOnly := range []string{"RunResult", "exitCode", "returned", "entryId"} {
+			if strings.Contains(string(encoded), returnOnly) {
+				t.Errorf("tool %q parameters mention %q, which only a RESULT has: %s", name, returnOnly, encoded)
+			}
+		}
+	}
+}

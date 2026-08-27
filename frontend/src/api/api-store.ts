@@ -63,7 +63,7 @@ import { createSignal, untrack } from 'solid-js'
 import { showConfirm } from '../ui/dialog'
 import type { ApiConnection, ApiWorkbenchServices, ImportSource } from './api-client'
 import type { ApiImportCurlResult } from '../generated/api.import.curl'
-import type { ApiImportPostmanResult } from '../generated/api.import.postman'
+import type { ApiImportPostmanResult, Unsupported } from '../generated/api.import.postman'
 import type { ApiRequestScopeResult } from '../generated/api.request.scope'
 import type { FilesChanged } from '../generated/files.changed'
 import {
@@ -1945,9 +1945,9 @@ export function createApiStore(
       // Archive reports are flattened into the store's one note list so the
       // existing single sticky toast can name every document without a second
       // reporting mechanism.
-      const documentNotes =
+      const documentNotes: Unsupported[] =
         result.documents?.flatMap((document) =>
-          document.unsupported.map((note) => ({
+          document.unsupported.map((note: Unsupported) => ({
             what: `${document.name}: ${note.what}`,
             why: note.why,
           })),

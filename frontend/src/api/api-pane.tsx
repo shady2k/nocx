@@ -89,7 +89,7 @@ import {
   type SecretCreateVault,
 } from '../secret-create-ask'
 import { proposeSecret } from '../secret-name-proposal'
-import type { ApiImportPostmanResult } from '../generated/api.import.postman'
+import type { ArchiveDocument } from '../generated/api.import.postman'
 import { RunList } from './run-list'
 import type { ApiStore, VariableAnswer } from './api-store'
 import type { DirectoryPicker, FilePicker, ImportSource, NativeDropPort } from './api-client'
@@ -814,9 +814,7 @@ export function ApiPane(props: ApiPaneProps) {
    */
   const [destTyped, setDestTyped] = createSignal(false)
   const [importingBusy, setImportingBusy] = createSignal(false)
-  const [archivePreview, setArchivePreview] = createSignal<
-    ApiImportPostmanResult['documents'] | null
-  >(null)
+  const [archivePreview, setArchivePreview] = createSignal<ArchiveDocument[] | null>(null)
   let archivePreviewRequest = 0
   /**
    * WHAT ONE IMPORT COULD NOT CARRY, said once, where the person is looking.

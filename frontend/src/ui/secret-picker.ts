@@ -698,6 +698,10 @@ export class SecretPicker {
    *  a second dispatch here is how a click and Enter drift apart. */
   private pick(index: number): void {
     const s = this.state
+    if (s.name === 'sealed' || s.name === 'uninitialized') {
+      if (index === 0) this.activate()
+      return
+    }
     if (s.name !== 'list') return
     this.state = { ...s, selected: index }
     this.activate()

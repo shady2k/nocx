@@ -77,6 +77,55 @@ func WithResultHandler(fn ResultFunc) PolicyOption {
 	return func(p *Policy) { p.onResult = fn }
 }
 
+// WindowSource answers how long a debounce window opened NOW should last. The
+// composition root satisfies it by reading the user's setting, so the policy
+// holds no copy of the value and nothing has to be pushed into it when the
+// setting moves: the registry stays the one owner of the number (AD-8), and
+// this is the pull.
+type WindowSource func() time.Duration
+
+// WithWindowSource makes the debounce window live: the policy asks fn for the
+// length of every window it opens, instead of using the duration it was
+// constructed with.
+//
+// THE INTERVAL, WITH BOTH ENDS. A window's length is fixed from the moment it
+// opens until the moment it closes. A change to the source therefore governs
+// every window opened after it and no window already open; the last window
+// sized by the old value is the one running when the change lands, and after
+// that one closes the old value is not readable from anywhere.
+//
+// The alternative — retiming open windows, so a user who shortens the window
+// sees it take effect at once rather than after the burst in flight — was
+// rejected for two reasons, one of which is a correctness argument rather
+// than a taste one.
+//
+// The correctness one: the deadline of an open window has ALREADY been used
+// to answer a caller. Submit compares now against it and returns
+// DispositionCoalesced, and that answer is out; the ingress has recorded the
+// occurrence and the raiser has replied. Shortening an open window
+// retroactively makes an event that was told "coalesced" one that should have
+// opened its own window, and lengthening makes the reverse. An answer the
+// pipeline has already given cannot be un-given, so retiming would make the
+// disposition of an event depend on a value read after that event was
+// dispositioned.
+//
+// The mechanical one: retiming means stopping and re-arming a Timer for every
+// open stream on every settings change, racing the flush callback the old
+// timer may already have entered. This file already carries one such race
+// (flush's deadline re-check, for a timer that fired and lost) and a second
+// one buys, at most, one window of the old length per (session, kind) already
+// open — after which the new value governs everything anyway.
+//
+// fn is ignored when nil, and an answer that is not positive is treated as
+// the constructed window (see Policy.windowNow).
+func WithWindowSource(fn WindowSource) PolicyOption {
+	return func(p *Policy) {
+		if fn != nil {
+			p.windowSource = fn
+		}
+	}
+}
+
 // Policy applies the attention policy between the sources and the router:
 // suppression and the per-{session,kind} debounce with coalescing (design
 // §6.1, §6.2). Both stages are payload-independent — suppression keys on
@@ -93,9 +142,16 @@ func WithResultHandler(fn ResultFunc) PolicyOption {
 type Policy struct {
 	ctx    context.Context
 	router *Router
+	// window is the length a window opened now would have when nothing
+	// answers for it: the value NewPolicy was given, and the floor a
+	// windowSource that answers nonsense falls back to.
 	window time.Duration
-	focus  Focus
-	clock  Clock
+	// windowSource, when set, is asked for the length of every window the
+	// policy opens (WithWindowSource). Nil means the window is the constant
+	// above and never changes.
+	windowSource WindowSource
+	focus        Focus
+	clock        Clock
 
 	onResult ResultFunc
 
@@ -119,7 +175,11 @@ type stream struct {
 	// last is the most recent held-back event. The window's closing summary
 	// carries ITS message, so a banner still says what happened instead of
 	// only how many times something happened (nocx-jiwq.5).
-	last     Event
+	last Event
+	// deadline is when this window closes, computed once from the length it
+	// opened with. It is never recomputed: the length of a window is fixed
+	// from the moment it opens until the moment it closes
+	// (WithWindowSource).
 	deadline time.Time
 	timer    Timer
 }
@@ -178,6 +238,13 @@ func (p *Policy) Submit(ev Event) Disposition {
 
 	key := DebounceKey{Session: ev.SessionID, Kind: ev.Kind}
 	now := p.clock.Now()
+	// Read the window BEFORE taking the lock: the source is the settings
+	// registry, which takes a lock of its own, and this policy's mutex is not
+	// a lock to hold across another package's. It is also the only read of the
+	// value in this call — the deadline below and the timer beside it are
+	// sized from the same answer, so a window can never be armed for one
+	// length and measured against another.
+	window := p.windowNow()
 
 	var expired *stream
 	p.mu.Lock()
@@ -198,9 +265,9 @@ func (p *Policy) Submit(ev Event) Disposition {
 	s := &stream{
 		key:      key,
 		opening:  ev,
-		deadline: now.Add(p.window),
+		deadline: now.Add(window),
 	}
-	s.timer = p.clock.AfterFunc(p.window, func() { p.flush(key) })
+	s.timer = p.clock.AfterFunc(window, func() { p.flush(key) })
 	p.streams[key] = s
 	p.mu.Unlock()
 
@@ -211,6 +278,27 @@ func (p *Policy) Submit(ev Event) Disposition {
 	}
 	p.deliver(ev)
 	return DispositionOpened
+}
+
+// windowNow is the length of a window opened at this instant: the live source
+// if one was given (WithWindowSource), otherwise the constructed constant.
+//
+// An answer that is not positive falls back to the constructed window rather
+// than being honoured. A zero window is not "no debouncing" — with a deadline
+// equal to now, every event opens its own window and delivers at once, which
+// is one notification per event, the flood this policy exists to prevent. So
+// the two ways a source can fail (an unreadable setting the composition root
+// reports as 0, or a value bound nobody enforced) both land on the number the
+// policy was built with, and the user's protection degrades to the default
+// rather than to none.
+func (p *Policy) windowNow() time.Duration {
+	if p.windowSource == nil {
+		return p.window
+	}
+	if d := p.windowSource(); d > 0 {
+		return d
+	}
+	return p.window
 }
 
 // flush delivers the window for key if it is still open and its deadline has

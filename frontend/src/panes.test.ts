@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { describe, expect, it, vi, beforeEach } from 'vitest'
+import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest'
 import {
   createRendererMock,
   resetSessionCounter,
@@ -15,12 +15,18 @@ import {
   FIXTURE_CWD,
   FIXTURE_DIRECTORY_LABEL,
   anchoredPane,
+  MockWebSocket,
+  type ClientFake,
   type RendererMock,
 } from './test-support/panes-fixtures'
 import { isUuidv7 } from './layout/uuid7'
+import { Dispatcher } from './dispatcher'
+import { WSClient } from './ipc'
 import { Pane, PaneManager } from './panes'
+import { PANE_WORK_FINISHED_SETTLE_MS } from './pane-work-finished'
 import { ClipboardGate } from './clipboard'
 import type { TerminalContent } from './terminal-content'
+import type { DriverState } from './pane-observation'
 import {
   BasePaneContent,
   SURFACE_TERMINAL,
@@ -1997,6 +2003,97 @@ describe('Tab agent-status channel (nocx-n8n82)', () => {
   })
 })
 
+// ── A pane whose work finished reports it (nocx-n3nfg, design §3.4) ─────
+//
+// The classifier's caller is where the settle window is fed, so this is
+// where the wiring is proven: a program title arriving on the channel a
+// real terminal pushes it on, and a report coming out the other end. The
+// window's own rules are pane-work-finished.test.ts's; what is asserted
+// here is that the two are connected and that closing the tab disconnects
+// them.
+//
+// Fake timers, and the interval is named from the module. Five real seconds
+// per case would be a test that depends on timing, which AGENTS.md forbids
+// because it is broken on a fast machine too.
+describe('a pane reports work that finished (nocx-n3nfg)', () => {
+  /** A pane content that is on a session, and can be taken off one. */
+  class SessionedContent extends CountingTestContent {
+    sessionId: string | null = 'sess-1'
+    lineage(): { sessionId: string; parentSessionId: string | null } | null {
+      if (this.sessionId === null) return null
+      return { sessionId: this.sessionId, parentSessionId: null }
+    }
+  }
+
+  function sessionedPane(): { pane: Pane; content: SessionedContent; reported: string[] } {
+    const content = new SessionedContent()
+    const pane = new Pane(
+      content,
+      {
+        surfaceType: SURFACE_TERMINAL,
+        singletonKey: null,
+        restoreDescriptor: { type: 'local' },
+        supportsAttention: true,
+        defaultTitle: '',
+      },
+      1,
+      'tab-wire-work-finished',
+    )
+    const reported: string[] = []
+    pane.onWorkFinished = (sessionId) => reported.push(sessionId)
+    return { pane, content, reported }
+  }
+
+  beforeEach(() => vi.useFakeTimers())
+  afterEach(() => vi.useRealTimers())
+
+  it('reports the session once a spinner has given way to a settled idle title', () => {
+    const { pane, reported } = sessionedPane()
+
+    pane.updateProgramTitle('⣾ building')
+    pane.updateProgramTitle('✳ done')
+    expect(reported).toEqual([])
+
+    vi.advanceTimersByTime(PANE_WORK_FINISHED_SETTLE_MS)
+    expect(reported).toEqual(['sess-1'])
+  })
+
+  it('reports nothing for a pane that was never working', () => {
+    // null → idle. A title that never mentioned an agent is not an idle
+    // agent, and this is the seam where the old caller got it wrong.
+    const { pane, reported } = sessionedPane()
+
+    pane.updateProgramTitle('~/src/nocx')
+    pane.updateProgramTitle('✳ done')
+    vi.advanceTimersByTime(PANE_WORK_FINISHED_SETTLE_MS * 10)
+    expect(reported).toEqual([])
+  })
+
+  it('says nothing about a tab that has been closed', () => {
+    const { pane, reported } = sessionedPane()
+
+    pane.updateProgramTitle('⣾ building')
+    pane.updateProgramTitle('✳ done')
+    pane.close()
+
+    vi.advanceTimersByTime(PANE_WORK_FINISHED_SETTLE_MS * 10)
+    expect(reported).toEqual([])
+  })
+
+  it('says nothing about a session the pane no longer has', () => {
+    const { pane, content, reported } = sessionedPane()
+
+    pane.updateProgramTitle('⣾ building')
+    pane.updateProgramTitle('✳ done')
+    // A reattach inside the window mints a new id (AD-7). The window was
+    // armed on the old one and speaks for that run of work or for nothing.
+    content.sessionId = 'sess-2'
+
+    vi.advanceTimersByTime(PANE_WORK_FINISHED_SETTLE_MS * 10)
+    expect(reported).toEqual([])
+  })
+})
+
 // ═══════════════════════════════════════════════════════════════════════════
 // D6 — closing a tab with live descendants ASKS rather than decides
 // (nocx-wtv3p, design §8 item 6).
@@ -2287,6 +2384,257 @@ describe('closing a workspace names what is live before anything dies (nocx-isop
     const message = String(showConfirmMock.mock.calls[0][0])
     expect(message).toMatch(/[Nn]othing is running/)
     expect(message).not.toContain('Still running')
+  })
+})
+
+// ── What the pane is doing, from two sources (nocx-szb40.3, nocx-szb40.4) ──
+//
+// The tab used to carry ONE boolean and a title-derived guess. The driver adds
+// a reading taken from the agent's own chrome, out of a grid the backend keeps
+// for an enrolled pane — and the two must never become two answers to one
+// question, so the pane merges them in one place and carries the provenance.
+describe('the pane indicator reads the driver, and marks the weaker source', () => {
+  function agentPane(id: number): Pane {
+    return new Pane(
+      new CountingTestContent(),
+      {
+        surfaceType: SURFACE_TERMINAL,
+        singletonKey: null,
+        restoreDescriptor: { type: 'local' },
+        supportsAttention: true,
+        defaultTitle: '',
+      },
+      id,
+      `tab-wire-observation-${id}`,
+    )
+  }
+
+  // A pane nobody enrolled still lights, and looks like the guess it is.
+  it('lights from the title when there is no driver, on the weaker source', () => {
+    const pane = agentPane(1)
+    pane.updateProgramTitle('⣿ working')
+    expect(pane.agentStatus).toBe('working')
+    expect(pane.agentSource).toBe('title')
+  })
+
+  // THE WHOLE POINT. A pane blocked on a permission dialog keeps a spinner in
+  // its title, so the title says "working" — a busy worker that is in fact
+  // holding a question open for a person. The driver's reading displaces it.
+  it('prefers the driver over a title that disagrees with it', () => {
+    const pane = agentPane(2)
+    pane.updateProgramTitle('⣿ working')
+    pane.updatePaneObservation('permission_choice')
+    expect(pane.agentStatus).toBe('waiting')
+    expect(pane.agentSource).toBe('driver')
+  })
+
+  // The epic's own deliverable: three workers stop collapsing into one dot.
+  it('shows three workers in three states at the same time', () => {
+    const working = agentPane(3)
+    const waiting = agentPane(4)
+    const exited = agentPane(5)
+    working.updatePaneObservation('working')
+    waiting.updatePaneObservation('permission_choice')
+    exited.updatePaneObservation('exited')
+
+    const shown = [working.agentStatus, waiting.agentStatus, exited.agentStatus]
+    expect(shown).toEqual(['working', 'waiting', 'exited'])
+    expect(new Set(shown).size).toBe(3)
+  })
+
+  // Activating a tab clears its UNREAD-OUTPUT mark, which is what that mark is
+  // for. It must not clear what the pane is doing: the failure the epic opens
+  // with is a dot that activating the tab erases, and a worker holding a
+  // dialog open does not stop holding it because you looked at the tab.
+  it('does not erase what the indicator was reporting when the tab is activated', () => {
+    const pane = agentPane(6)
+    pane.updatePaneObservation('permission_choice')
+    pane.requestAttention()
+    pane.setActive(true)
+    expect(pane.agentStatus).toBe('waiting')
+    expect(pane.agentSource).toBe('driver')
+    expect(pane.hasActivity).toBe(false)
+  })
+
+  // And the finding does not outlive the evidence. When the pane stops being
+  // observed — its agent exited, or the enrolment was withdrawn — the
+  // indicator falls back to the title's weaker reading rather than holding a
+  // classification nothing is producing any more.
+  it('falls back to the title when the pane stops being observed', () => {
+    const pane = agentPane(7)
+    pane.updateProgramTitle('⣿ working')
+    pane.updatePaneObservation('permission_choice')
+    expect(pane.agentStatus).toBe('waiting')
+
+    pane.updatePaneObservation(null)
+    expect(pane.agentStatus).toBe('working')
+    expect(pane.agentSource).toBe('title')
+  })
+
+  // A driver that cannot read the screen displaces the title too. "This screen
+  // could not be read" is a better answer than a confident wrong one, and
+  // every consumer treats unknown as busy.
+  it("keeps the driver's unknown rather than falling back to the title", () => {
+    const pane = agentPane(8)
+    pane.updateProgramTitle('✳ waiting for input')
+    pane.updatePaneObservation('unknown')
+    expect(pane.agentStatus).toBe('unknown')
+    expect(pane.agentSource).toBe('driver')
+  })
+})
+
+// ── The whole renderer chain, from the notification to the tab ────────────
+//
+// Everything above tests one link. This one watches a person's tab change
+// because the backend classified their pane: the notification is delivered to
+// the session handle, the content pushes it to the pane, the pane merges the
+// two sources, and the strip draws the result. Every link tested alone is how
+// a connection manager shipped with no way to create a group.
+describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', () => {
+  it('lights the tab as waiting when the pane raises a permission dialog', async () => {
+    const { client, manager, bar } = await mountPaneManager()
+    manager.activateByIndex(0)
+
+    client._sessions[0].fireObservation('permission_choice')
+
+    await vi.waitFor(() => {
+      const tab = bar.querySelectorAll('[role="tab"]')[0]
+      expect(tab.getAttribute('data-agent-status')).toBe('waiting')
+      expect(tab.getAttribute('data-agent-source')).toBe('driver')
+    })
+  })
+
+  // THE EPIC'S OWN DELIVERABLE, at the seam a person actually looks at: three
+  // panes in three states are three distinguishable tabs AT THE SAME TIME.
+  // Before this the whole vocabulary was one boolean that activating the tab
+  // erased, so a worker that had finished, one holding a question open and one
+  // whose agent was gone were the same dot.
+  it('shows three panes, their sources, and refuses a stale wire observation', async () => {
+    vi.stubGlobal('WebSocket', MockWebSocket)
+    MockWebSocket.last = null
+    const realClient = new WSClient(new Dispatcher())
+    const sessionIDs = [
+      '0123456789abcdef0011223344556677',
+      '1123456789abcdef0011223344556677',
+      '2123456789abcdef0011223344556677',
+    ]
+    const identity = {
+      instanceId: 'fedcba9876543210fedcba9876543210',
+      sessionEpoch: 1,
+    }
+    // The socket is taken before the helpers that close over it, so it can be
+    // const: connect() constructs it synchronously and MockWebSocket.last is
+    // how the fixture hands it back.
+    const connecting = realClient.connect(9876)
+    const constructed: MockWebSocket | null = MockWebSocket.last
+    if (!constructed) throw new Error('no WebSocket was constructed')
+    const realSocket: MockWebSocket = constructed
+    realSocket.serverAccepts()
+    await connecting
+
+    const openRequests = () => realSocket.requests().filter((request) => request.method === 'open')
+    const answerOpen = (index: number): void => {
+      const request = openRequests()[index]
+      if (request?.id === undefined) throw new Error(`missing open request ${index}`)
+      realSocket.deliverText({
+        jsonrpc: '2.0',
+        id: request.id,
+        result: {
+          sessionId: sessionIDs[index],
+          ...identity,
+          cwd: FIXTURE_CWD,
+          desiredMode: 'script',
+          workspaceId: 'default',
+          parent: null,
+        },
+      })
+    }
+    const deliverObservation = (
+      sessionId: string,
+      state: DriverState,
+      observationIdentity = identity,
+    ): void => {
+      realSocket.deliverText({
+        jsonrpc: '2.0',
+        method: 'session.observationChanged',
+        params: {
+          sessionId,
+          ...observationIdentity,
+          agent: 'claude',
+          state,
+        },
+      })
+    }
+    const expected = [
+      { status: 'working', source: 'driver' },
+      { status: 'waiting', source: 'driver' },
+      { status: 'exited', source: 'driver' },
+    ]
+
+    try {
+      const mounted = mountPaneManager(realClient as unknown as ClientFake)
+      await vi.waitFor(() => expect(openRequests()).toHaveLength(1))
+      answerOpen(0)
+      const { manager, bar, panes } = await mounted
+      const indicators = (): { status: string | null; source: string | null }[] =>
+        [...bar.querySelectorAll('[role="tab"]')].map((tab) => ({
+          status: tab.getAttribute('data-agent-status'),
+          source: tab.getAttribute('data-agent-source'),
+        }))
+
+      manager.newPane()
+      manager.newPane()
+      await vi.waitFor(() => expect(openRequests()).toHaveLength(3))
+      answerOpen(1)
+      answerOpen(2)
+      await vi.waitFor(() => {
+        expect(panes.querySelectorAll('[data-file-drop-target]').length).toBe(3)
+      })
+
+      deliverObservation(sessionIDs[0], 'working')
+      deliverObservation(sessionIDs[1], 'permission_choice')
+      deliverObservation(sessionIDs[2], 'exited')
+      await vi.waitFor(() => expect(indicators()).toEqual(expected))
+
+      manager.activateByIndex(0)
+      expect(indicators()).toEqual(expected)
+
+      deliverObservation(sessionIDs[1], 'exited', {
+        instanceId: '00000000000000000000000000000000',
+        sessionEpoch: 1,
+      })
+      deliverObservation(sessionIDs[0], 'free_text')
+      await vi.waitFor(() =>
+        expect(indicators()).toEqual([
+          { status: 'idle', source: 'driver' },
+          { status: 'waiting', source: 'driver' },
+          { status: 'exited', source: 'driver' },
+        ]),
+      )
+      expect(indicators()[1]).toEqual(expected[1])
+    } finally {
+      realClient.close()
+      vi.unstubAllGlobals()
+    }
+  })
+
+  // And the state moves with the pane, rather than latching on the first thing
+  // it was told.
+  it('follows the pane back to waiting for input when the dialog is answered', async () => {
+    const { client, manager, bar } = await mountPaneManager()
+    manager.activateByIndex(0)
+
+    client._sessions[0].fireObservation('working')
+    await vi.waitFor(() => {
+      expect(bar.querySelectorAll('[role="tab"]')[0].getAttribute('data-agent-status')).toBe(
+        'working',
+      )
+    })
+
+    client._sessions[0].fireObservation('free_text')
+    await vi.waitFor(() => {
+      expect(bar.querySelectorAll('[role="tab"]')[0].getAttribute('data-agent-status')).toBe('idle')
+    })
   })
 })
 

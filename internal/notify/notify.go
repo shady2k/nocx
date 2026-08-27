@@ -16,8 +16,12 @@
 //     in-flight slot is released on return, never at deadline expiry.
 //     Finalization is one-shot: a late result is ignored (ADR-0029 §2.2).
 //
-// The package has no production callers yet: the wire task (notify.raise,
-// nocx-9zmc) is what wires it into the composition root.
+// It is wired at the composition root (internal/app). Ingress is the one
+// entry point: it stamps what nocx owns, records the occurrence in the feed,
+// and only then submits for delivery, so membership and delivery are two
+// decisions and a suppressed event is still remembered. The routing table is
+// built from the user's settings and swapped into the router atomically —
+// a raise resolves against exactly one table, the one live when it began.
 package notify
 
 import (
@@ -25,6 +29,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
@@ -37,6 +42,7 @@ type Kind string
 const (
 	KindBlockFinished    Kind = "block.finished"    // block ledger (attested)
 	KindSessionEnded     Kind = "session.ended"     // session registry (attested)
+	KindTransferFinished Kind = "transfer.finished" // transfer registry (attested)
 	KindProgramNotify    Kind = "program.notify"    // OSC 9 / OSC 777 (programRequest)
 	KindBell             Kind = "bell"              // BEL (programRequest)
 	KindPaneWorkFinished Kind = "pane.workFinished" // title-transition inference (heuristic)
@@ -76,6 +82,13 @@ const (
 // host and session it came from. Stamped by nocx from its session registry
 // — never carried on the wire (ADR-0029 §2.2, §4.6).
 type Attribution struct {
+	// Backend names which backend raised this — "local" for this machine,
+	// the same vocabulary internal/commandnames.LocalRoute already uses for
+	// the same idea. nocx-if6 phase A makes session identity
+	// (backendId, sessionId); carrying it from the first commit is what stops
+	// every feed row needing a retrofit when the relay lands.
+	Backend string
+
 	// Tab keeps the old word on purpose (nocx-ehkvy). Everything else that
 	// held the shell-bearing object is now a pane, but this field is not
 	// filled with one: ws_notify.go stamps it from the WebSocket connection
@@ -114,7 +127,10 @@ type Event struct {
 	// Attribution is stamped by nocx from the authenticated session context.
 	Attribution Attribution
 
-	// At is stamped by nocx (the router) at raise time.
+	// At is stamped by nocx at ingress, which is the first nocx-owned stage
+	// (ingress.go). It was the router's job until the feed arrived; the stamp
+	// moved so that a relay replaying a buffered batch keeps its own instants
+	// instead of having them rewritten to the moment it reconnected.
 	At time.Time
 }
 
@@ -170,8 +186,12 @@ type Key struct {
 
 // Table is the default-deny routing table. A (kind, trust) pair reaches a
 // sink only where a row says so; one table governs both the ordinary route
-// and the ad-hoc completion-subscription route (ADR-0029 §3). The table
-// must be treated as immutable after construction.
+// and the ad-hoc completion-subscription route (ADR-0029 §3).
+//
+// One table value is immutable: nothing mutates a Table after it has been
+// handed to a router. A CHANGE replaces the whole value (SetTable), which is
+// what makes the swap atomic with respect to a raise — see the interval named
+// on SetTable.
 type Table map[Key][]Route
 
 // RouteKind selects which route an event resolves through.
@@ -230,6 +250,23 @@ var ErrTrustCapability = errors.New("notify: table row exceeds its trust class c
 
 // Outcome is the result of raising one event.
 type Outcome struct {
+	// Event is the event this outcome reports on. The router copies it onto
+	// every outcome it can return through, because the handler that observes
+	// a failure receives an Outcome and nothing else.
+	//
+	// It is here for the failure surface (D3, nocx-r6pxp): a delivery that
+	// fails AFTER notify.raise answered has no caller left to tell, and the
+	// feed row that records it must carry the ORIGINAL event's attribution
+	// so it lands beside the notification it is about. Without this the
+	// handler cannot name the event that failed, and the only alternative is
+	// somewhere else remembering "the event I just submitted" — two owners
+	// of one fact, which is what AD-8 is about.
+	//
+	// It never goes on the wire. Outcome is a Go value the transport reads
+	// Err from and never marshals, and the fields this carries are exactly
+	// the ones ADR-0029 §2.2 keeps off the wire.
+	Event Event
+
 	// Resolved is the route set resolution produced, in table order, before
 	// any invocation. Empty means default-deny: no row for the (kind,
 	// trust) pair, or the route kind refused the trust class.
@@ -256,7 +293,12 @@ type RouteResult struct {
 // default-deny table, bounds admission globally, and invokes every resolved
 // sink synchronously. It is safe for concurrent use.
 type Router struct {
-	table  Table
+	// table is the live routing table, replaced whole by SetTable. It is an
+	// atomic pointer rather than a mutex-guarded field because every reader
+	// takes exactly one load and no reader may ever hold two: a raise reads
+	// it once, at the top of Raise, and carries the routes it got for the
+	// rest of its life.
+	table  atomic.Pointer[Table]
 	limits Limits
 
 	mu       sync.Mutex
@@ -276,6 +318,7 @@ type pending struct {
 // NewRouter validates limits and the table's trust-class capability bounds,
 // then returns a router. A row a trust class may never reach is refused
 // here — loudly, at construction — rather than resolved to nothing forever.
+// The same check runs again on every table SetTable is handed.
 func NewRouter(table Table, limits Limits) (*Router, error) {
 	if limits.MaxInFlight < 1 {
 		return nil, errors.New("notify: MaxInFlight must be at least 1")
@@ -286,14 +329,56 @@ func NewRouter(table Table, limits Limits) (*Router, error) {
 	if limits.MaxQueued < 0 || limits.MaxRetained < 0 {
 		return nil, errors.New("notify: queue limits must not be negative")
 	}
+	if err := validateTable(table); err != nil {
+		return nil, err
+	}
+	r := &Router{limits: limits}
+	r.table.Store(&table)
+	return r, nil
+}
+
+// validateTable enforces the trust-class capability bound over a whole table:
+// a heuristic row may never reach a sink that leaves the machine (ADR-0029
+// §3). It returns on the FIRST offending row and reports nothing partial,
+// because its callers apply a table whole or not at all.
+//
+// It is a function rather than a method so it runs identically on the table a
+// router is built with and on every table it is later handed. A check that
+// ran only at construction would be a security control that stops holding the
+// moment the table becomes user-authored (D3).
+func validateTable(table Table) error {
 	for key, routes := range table {
 		for _, route := range routes {
+			if route.Sink == nil {
+				return fmt.Errorf("notify: table row %q/%q has no sink", key.Kind, key.Trust)
+			}
 			if key.Trust == TrustHeuristic && route.Sink.LeavesMachine() {
-				return nil, fmt.Errorf("%w: heuristic %q row grants a network sink", ErrTrustCapability, key.Kind)
+				return fmt.Errorf("%w: heuristic %q row grants a network sink", ErrTrustCapability, key.Kind)
 			}
 		}
 	}
-	return &Router{table: table, limits: limits}, nil
+	return nil
+}
+
+// SetTable re-validates a table and, only if it passes, makes it the live one.
+//
+// The interval, both ends named: a raise resolves against exactly ONE table —
+// the one live at the instant Raise called Resolve — and it keeps the routes
+// it got there until its last sink invocation has returned. A swap takes
+// effect for raises that call Resolve after the store below, and for no
+// others. No raise ever sees half of two tables, because no raise reads the
+// table twice.
+//
+// A table that fails validation is refused WHOLE: the previous table stays
+// live and nothing of the new one is applied. Partially applying a routing
+// table would silently grant a route nobody chose, which is worse than
+// refusing the change and saying so (D3).
+func (r *Router) SetTable(table Table) error {
+	if err := validateTable(table); err != nil {
+		return err
+	}
+	r.table.Store(&table)
+	return nil
 }
 
 // Resolve maps (kind, trust) through the default-deny table for one route.
@@ -305,20 +390,25 @@ func (r *Router) Resolve(kind Kind, trust Trust, route RouteKind) []Route {
 	if route == RouteSubscription && trust != TrustAttested {
 		return nil
 	}
-	return append([]Route(nil), r.table[Key{Kind: kind, Trust: trust}]...)
+	// One load, once. This is the instant the raise binds to a table.
+	table := *r.table.Load()
+	return append([]Route(nil), table[Key{Kind: kind, Trust: trust}]...)
 }
 
 // Raise resolves once, admits the event under the global limits, and
 // invokes every resolved sink synchronously. It returns when every
 // invocation has returned or admission refused the event; a queued wait is
 // bounded by ctx, and a caller that cancels while queued is removed from
-// the queue (the router stops retaining its data) and gets ctx.Err(). At is
-// stamped here — the router is the first nocx-owned stage of the pipeline.
+// the queue (the router stops retaining its data) and gets ctx.Err().
+//
+// At is NOT stamped here any more. Ingress is the first nocx-owned stage and
+// stamps it once (ingress.go); a second stamp here would overwrite the instant
+// a replayed batch carries. A zero At reaching this point means something
+// bypassed ingress, which is a wiring defect rather than a value to repair.
 func (r *Router) Raise(ctx context.Context, ev Event) Outcome {
-	ev.At = time.Now()
 	routes := r.Resolve(ev.Kind, ev.Trust, RouteRaise)
 	if len(routes) == 0 {
-		return Outcome{}
+		return Outcome{Event: ev}
 	}
 
 	p := &pending{
@@ -336,10 +426,10 @@ func (r *Router) Raise(ctx context.Context, ev Event) Outcome {
 		return r.deliver(ctx, p)
 	case len(r.queue) >= r.limits.MaxQueued:
 		r.mu.Unlock()
-		return Outcome{Resolved: routes, Err: &RefusedError{Limit: LimitQueued}}
+		return Outcome{Event: ev, Resolved: routes, Err: &RefusedError{Limit: LimitQueued}}
 	case r.retained+p.bytes > r.limits.MaxRetained:
 		r.mu.Unlock()
-		return Outcome{Resolved: routes, Err: &RefusedError{Limit: LimitRetained}}
+		return Outcome{Event: ev, Resolved: routes, Err: &RefusedError{Limit: LimitRetained}}
 	default:
 		r.queue = append(r.queue, p)
 		r.retained += p.bytes
@@ -361,7 +451,7 @@ func (r *Router) Raise(ctx context.Context, ev Event) Outcome {
 		default:
 			r.removeQueued(p)
 			r.mu.Unlock()
-			return Outcome{Resolved: routes, Err: ctx.Err()}
+			return Outcome{Event: ev, Resolved: routes, Err: ctx.Err()}
 		}
 	}
 }
@@ -374,6 +464,7 @@ func (r *Router) Raise(ctx context.Context, ev Event) Outcome {
 // handle left to reach.
 func (r *Router) deliver(ctx context.Context, p *pending) (out Outcome) {
 	defer r.release()
+	out.Event = p.ev
 	out.Resolved = p.routes
 	for _, route := range p.routes {
 		func() {

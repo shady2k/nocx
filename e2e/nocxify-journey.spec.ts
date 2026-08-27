@@ -475,7 +475,31 @@ test('a hand-typed ssh: frozen local block, remote blocks, integrated second con
     await expect(remote1.locator('.cmd-header-location')).toHaveText('e2e@127.0.0.1', {
       timeout: 10_000,
     })
-    await expect(remote1.locator('.cmd-header-cwd')).toHaveCount(0)
+    // The cwd chip is deliberately NOT asserted by presence, and this line
+    // used to demand its ABSENCE. Both are wrong now, for different reasons.
+    //
+    // Wrong as a design: the owner decided (2026-08-26) that a remote block
+    // SHOULD carry the far host's directory beside `user@host` — knowing
+    // which machine without knowing where on it is half an answer.
+    //
+    // Wrong as a test: whether the chip appears is decided by a race the
+    // product does not currently settle. The far side's OSC 7 travels on the
+    // pty while the domain's activation travels on the lifecycle channel, and
+    // domain-environment.recordCwd attributes a report to whichever domain is
+    // active WHEN THE BYTES ARRIVE. Win the race and the child's directory
+    // lands on the child; lose it and the child keeps none. Measured on this
+    // spec at one appearance in six runs, which is exactly the frequency that
+    // makes a suite look flaky rather than wrong.
+    //
+    // nocx-9csky is the fix: an entry rendezvous of the same shape the
+    // completion already uses (ADR-0024 decision 1's carve-out — a nonce on
+    // the channel, the same nonce in the stream), after which this line
+    // becomes an assertion that the REMOTE directory is shown. Until then the
+    // guard that IS stable is the one below: whatever this block shows, it is
+    // never this machine's directory.
+    for (const chip of await remote1.locator('.cmd-header-cwd').allInnerTexts()) {
+      expect(chip).not.toContain(path.basename(localHome()))
+    }
 
     // ── 3. exit: the remote session ends, local blocks again, editor back ──
     await submitInEditor(page, 'exit')

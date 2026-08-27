@@ -24,12 +24,12 @@ func TestResolveEffectiveProfile_DesiredModePrecedence(t *testing.T) {
 		wantSource FieldSource
 	}{
 		{
-			name: "hardcoded default is script",
+			name: "hardcoded default is auto — silence, not an answer (ADR-0033)",
 			profile: SSHProfile{
 				Base:    Base{ID: "p1", Type: "ssh", Name: "web"},
 				Options: StoredSSHProfileOptions{Host: "h"},
 			},
-			want:       DesiredScript,
+			want:       DesiredAuto,
 			wantSource: FieldSourceDefault,
 		},
 		{
@@ -121,9 +121,10 @@ func TestResolveEffectiveProfile_DesiredModePrecedence(t *testing.T) {
 
 func TestResolveEffectiveProfile_DesiredModeInvalidStoredFallsBackToDefault(t *testing.T) {
 	// A stored value this build does not recognise falls back to the default
-	// (script — N3 wraps and installs automatically) rather than being
-	// treated as a silent no-op: script is the safe behaviour for an
-	// unrecognised choice, and the provenance says "default" so the
+	// (auto — ADR-0033) rather than being treated as a silent no-op. auto
+	// wraps and installs the scripts exactly as script does, so the safe
+	// behaviour for an unrecognised choice is unchanged; what it does not do
+	// is claim the user answered. The provenance says "default", so the
 	// effective view shows the fallback instead of a value that never takes
 	// effect.
 	profile := SSHProfile{
@@ -142,8 +143,8 @@ func TestResolveEffectiveProfile_DesiredModeInvalidStoredFallsBackToDefault(t *t
 	if err != nil {
 		t.Fatalf("ResolveEffectiveProfile: %v", err)
 	}
-	if got := eff.ResolvedOptions.DesiredMode; got != DesiredScript {
-		t.Errorf("desiredMode = %q, want %q (fallback)", got, DesiredScript)
+	if got := eff.ResolvedOptions.DesiredMode; got != DesiredAuto {
+		t.Errorf("desiredMode = %q, want %q (fallback)", got, DesiredAuto)
 	}
 	if got := eff.Source["desiredMode"]; got != FieldSourceDefault {
 		t.Errorf("provenance for desiredMode = %q, want %q", got, FieldSourceDefault)

@@ -164,6 +164,26 @@ export async function startStand(): Promise<StandManifest> {
     root,
   })
 
+  // The remote helper's artifacts, before anything that embeds them. The
+  // deploy package pulls them in with //go:embed all:artifacts, so devharness
+  // must be compiled AFTER this or it carries an empty artifacts directory and
+  // Artifact answers ErrArtifactsNotBuilt — which the git panel renders,
+  // correctly and uselessly for a test, as "this platform can't run the nocx
+  // helper".
+  //
+  // Here rather than in a make target or a CI step, because those are two
+  // places and this is one. `make ci-e2e` had `helpers` as a prerequisite
+  // while ci.yml's ci-e2e job runs e2e/run-in-container.sh straight after a
+  // bare checkout, and the artifacts are gitignored — so the developer running
+  // the make target saw green and CI would have seen red at the same commit,
+  // with two SSH git specs waiting out their timeouts on a consent card that
+  // could never render. The suite needs them, so the suite builds them
+  // (nocx-eoijp).
+  //
+  // `make helpers`, not a second copy of the build matrix: HELPER_TARGETS and
+  // the CGO_ENABLED=0 static recipe have one owner, and it is the Makefile.
+  execFileSync('make', ['helpers'], { cwd: repoRoot, stdio: 'inherit' })
+
   // Built, not `go run`: go run wraps the binary in a child that survives a
   // kill of the parent, and an orphaned backend holds the WS port against the
   // next run.

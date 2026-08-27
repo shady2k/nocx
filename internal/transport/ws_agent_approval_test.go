@@ -22,6 +22,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // approvalScriptStep is one Ask outcome of the scripted engine.
@@ -420,7 +421,7 @@ func TestAgentApprove_NoKeepsTheContinuation(t *testing.T) {
 
 	// The run completes, and only then is its continuation dropped — the
 	// normal terminal path, never the decline.
-	waitFor(t, "the completed run's continuation to be dropped", 5*time.Second, func() bool { return len(client.discards()) > 0 })
+	waittest.WaitForTimeout(t, "the completed run's continuation to be dropped", 5*time.Second, func() bool { return len(client.discards()) > 0 })
 	if got := client.discards(); len(got) != 1 || got[0] != strconv.FormatInt(h.runID, 10) {
 		t.Fatalf("discarded %v, want exactly the run %q at completion", got, strconv.FormatInt(h.runID, 10))
 	}

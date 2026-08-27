@@ -86,17 +86,20 @@ import type { GitError } from '../generated/git.error'
  *  everything resolved is one of the eight state() answers. */
 type GitPanelPhase = 'no-origin' | 'opening' | 'ready' | 'failed'
 
-/** Exactly one of these renders (design §5.4). */
+/** Exactly one of these renders (design §5.4, remote-helper design §6). */
 type GitPanelState =
   | 'noPane'
-  | 'remote'
   | 'noCwd'
   | 'notARepository'
   | 'gitUnavailable'
   | 'gitTooOld'
+  | 'consentRequired'
+  | 'unsupportedPlatform'
+  | 'deployFailed'
+  | 'execForbidden'
+  | 'helperVersionMismatch'
   | 'ready'
   | 'tooManyChanges'
-
 /** The panel's collapsible sections (nocx-nak2). The Conflicted section and
  *  the commit form deliberately are not in the set: a conflict is a state
  *  that must stay in sight, and the form is what a collapse is for reaching.
@@ -156,6 +159,14 @@ export interface GitStore {
    *  'failed'. */
   remoteError(): string | null
   openError(): string | null
+  /** The §6 refusal's account — what failed and what to do about it —
+   *  for the unsupportedPlatform, deployFailed, execForbidden and
+   *  helperVersionMismatch states; null otherwise (remote-helper design
+   *  §6). Each refusal state renders it, never a generic error. */
+  refusalMessage(): string | null
+  /** The consent prompt's accept failure — rendered inline beside the
+   *  offer; null while nothing failed. */
+  consentError(): string | null
   /** The git version the capability probe found — the gitTooOld state
    *  renders it against the floor. */
   gitVersion(): string | null
@@ -174,6 +185,10 @@ export interface GitStore {
   /** Manual refresh: a poll under the current scope, or a re-open when the
    *  binding is gone (also the Retry for a failed open). */
   refresh(): void
+  /** The consent prompt's Accept (remote-helper design D8): raise the
+   *  session's machine to the relay tier and re-open — the fresh git.open
+   *  proceeds past consentRequired. */
+  grantConsent(): void
   /** True while a mutation is in flight — the controls that would issue
    *  another are disabled (D18). */
   mutationInFlight(): boolean
@@ -354,6 +369,15 @@ export function createGitStore(
   const [remoteUrl, setRemoteUrl] = createSignal<string | null>(null)
   const [remoteError, setRemoteError] = createSignal<string | null>(null)
   const [openError, setOpenError] = createSignal<string | null>(null)
+  /** The §6 refusal's account: what failed and what to do about it
+   *  (remote-helper design §6). Set from the open result's message for
+   *  unsupportedPlatform, deployFailed, execForbidden and
+   *  helperVersionMismatch; null otherwise. Each refusal state renders
+   *  this — a state that renders a generic error is not done. */
+  const [refusalMessage, setRefusalMessage] = createSignal<string | null>(null)
+  /** The consent prompt's accept failure — shown inline beside the offer,
+   *  never swallowed (AGENTS.md rule 3). */
+  const [consentError, setConsentError] = createSignal<string | null>(null)
   const [gitVersion, setGitVersion] = createSignal<string | null>(null)
   const [envState, setEnvState] = createSignal<'resolved' | 'degraded' | null>(null)
   const [envReason, setEnvReason] = createSignal<string | null>(null)
@@ -364,20 +388,27 @@ export function createGitStore(
   const [amend, setAmend] = createSignal(false)
   const [commitState, setCommitState] = createSignal<'idle' | 'running' | 'failed'>('idle')
   const [commitOutput, setCommitOutput] = createSignal<GitCommitFailure | null>(null)
-
   // state() is the one render discriminator (design §5.4, rule 4 of the
   // store header). tooManyChanges gates on completeness, not on a
-  // truncation boolean and not on the lists' length (D9).
+  // truncation boolean and not on the lists' length (D9). An SSH tab is
+  // NOT decided here any more: the frontend's old guard never reached
+  // git.open on a remote tab, and the answer — ok, consentRequired, one
+  // of the §6 refusals — now comes from the wire (remote-helper design
+  // §6), exactly as it does for a local tab.
   const state = createMemo<GitPanelState>(() => {
     const o = origin()
     if (o === null) return 'noPane'
-    if (o.kind === 'ssh') return 'remote'
     if (!o.cwdVerified || o.cwd === null) return 'noCwd'
     const os = openState()
     switch (os) {
       case 'notARepository':
       case 'gitUnavailable':
       case 'gitTooOld':
+      case 'consentRequired':
+      case 'unsupportedPlatform':
+      case 'deployFailed':
+      case 'execForbidden':
+      case 'helperVersionMismatch':
         return os
       case 'ok': {
         const s = status()
@@ -385,11 +416,11 @@ export function createGitStore(
         return 'ready'
       }
       default:
-        // 'noCwd', 'remoteUnsupported', or null (opening / not yet
-        // answered). The view renders phase() === 'opening' as a spinner
-        // before consulting this discriminator, so the null case is never
-        // painted; the transport's own guards answer the same way.
-        return os === 'remoteUnsupported' ? 'remote' : 'noCwd'
+        // 'noCwd' or null (opening / not yet answered). The view renders
+        // phase() === 'opening' as a spinner before consulting this
+        // discriminator, so the null case is never painted; the
+        // transport's own guards answer the same way.
+        return 'noCwd'
     }
   })
 
@@ -627,6 +658,7 @@ export function createGitStore(
     setBinding(null)
     setPhase('opening')
     setOpenError(null)
+    setConsentError(null)
     epoch++ // the open's inline status is a status-producing response too
     // bindingId null: the open is not scoped to a binding — its response
     // either establishes one or is stale by generation (rule 1, open half).
@@ -646,11 +678,13 @@ export function createGitStore(
           return
         }
         if (res.state !== 'ok') {
-          // cd'd out, git vanished, git too old, or a transport guard.
-          // The old binding, if any, is superseded: close it. The state
-          // renders from openState, never from a stale status.
+          // cd'd out, git vanished, git too old, a §6 refusal, or a
+          // transport guard. The old binding, if any, is superseded:
+          // close it. The state renders from openState, never from a
+          // stale status; a refusal's message names what to do.
           if (prev !== null) void services.close(prev.bindingId).catch(() => {})
           setOpenState(res.state)
+          setRefusalMessage(res.message ?? null)
           setGitVersion(res.gitVersion ?? null)
           setEnvState(res.envState ?? null)
           setEnvReason(res.envReason ?? null)
@@ -688,6 +722,7 @@ export function createGitStore(
           resetRepositoryState()
         }
         setOpenState('ok')
+        setRefusalMessage(null)
         setGitVersion(res.gitVersion ?? null)
         setEnvState(res.envState ?? null)
         setEnvReason(res.envReason ?? null)
@@ -708,6 +743,20 @@ export function createGitStore(
         setPhase('failed')
         setOpenError(messageOf(e))
       })
+  }
+
+  /** The consent prompt's Accept (remote-helper design D8): raise the
+   *  session's machine to the relay tier, then re-open — the fresh
+   *  git.open consults the selection again and now proceeds past
+   *  consentRequired. A failed accept is shown inline, never swallowed. */
+  function grantConsent(): void {
+    const o = untrack(origin)
+    if (o === null) return
+    setConsentError(null)
+    services.grantConsent(o.sessionId).then(
+      () => openScope(o),
+      (e) => setConsentError(messageOf(e)),
+    )
   }
 
   /** The commit form belongs to one repository: adopting a new binding
@@ -766,13 +815,16 @@ export function createGitStore(
       resetRemote()
       return
     }
-    // The frontend's own guards, decided BEFORE any backend call (D3, D14):
-    // an SSH tab and a session with no verified cwd never reach git.open.
-    if (next.kind === 'ssh' || !next.cwdVerified || next.cwd === null) {
+    // The frontend's own guard, decided BEFORE any backend call (AD-5):
+    // a session with no verified cwd never reaches git.open — local or
+    // SSH alike. An SSH tab WITH a verified cwd reaches git.open and the
+    // answer decides the state (remote-helper design §6); the old remote
+    // guard that never asked is gone.
+    if (!next.cwdVerified || next.cwd === null) {
       const b = untrack(binding)
       if (b !== null) void services.close(b.bindingId).catch(() => {})
       setBinding(null)
-      setOpenState(next.kind === 'ssh' ? 'remoteUnsupported' : 'noCwd')
+      setOpenState('noCwd')
       setStatus(null)
       setStatusStale(false)
       resetRepositoryState()
@@ -1096,6 +1148,8 @@ export function createGitStore(
     status,
     statusStale,
     openError,
+    refusalMessage,
+    consentError,
     logState,
     log,
     logError,
@@ -1108,6 +1162,7 @@ export function createGitStore(
     rescope,
     setVisible,
     refresh,
+    grantConsent,
     mutationInFlight,
     mutationError,
     stage,

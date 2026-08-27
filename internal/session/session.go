@@ -307,6 +307,13 @@ type Session interface {
 	// shares the tab's pooled connection (AD-4) only when the pool keys
 	// agree, and the options are what make them agree.
 	SSHOptions() []ssh.ConnectOption
+	// HostKeyFingerprint returns the SHA256 fingerprint of the remote
+	// host's public key, as observed and verified when the connection was
+	// dialed (the consent design §3.2 keys consent by it — the same
+	// machine reached any way is one answer). Empty for local sessions and
+	// for channels that did not capture one; an empty fingerprint never
+	// keys a consent answer.
+	HostKeyFingerprint() string
 }
 
 // ProfileUsageTracker records profile session activity (nocx-uxs5.4).
@@ -903,10 +910,10 @@ func (s *realSession) Done() <-chan struct{} {
 	return s.ch.Done()
 }
 
-// ShellIntegrationReason surfaces the connect-time refusal reason (nocx-r52q).
-// The unified Channel has no such method — local PTYs have nothing to report —
-// so this is an optional-method check: remote channels (ssh.Channel) carry it,
-// everything else is ReasonNone.
+// ShellIntegrationReason surfaces the connect-time refusal reason
+// (nocx-r52q). The unified Channel has no such method — local PTYs have
+// nothing to report — so this is an optional-method check: remote channels
+// (ssh.Channel) carry it, everything else is ReasonNone.
 func (s *realSession) ShellIntegrationReason() ssh.RefusalReason {
 	if rc, ok := s.ch.(interface{ ShellIntegrationReason() ssh.RefusalReason }); ok {
 		return rc.ShellIntegrationReason()
@@ -942,6 +949,19 @@ func (s *realSession) ExitOutcome() (ExitCause, int) {
 		return ExitExited, se.ExitStatus()
 	}
 	return ExitInterrupted, 0
+}
+
+// HostKeyFingerprint surfaces the host public-key fingerprint observed at
+// dial time (the consent design's consent key). Like
+// ShellIntegrationReason, the unified Channel has no such method — local
+// PTYs and stubs have nothing to report — so this is an optional-method
+// check: remote channels that captured the key carry it, everything else
+// answers "".
+func (s *realSession) HostKeyFingerprint() string {
+	if rc, ok := s.ch.(interface{ HostKeyFingerprint() string }); ok {
+		return rc.HostKeyFingerprint()
+	}
+	return ""
 }
 
 func (s *realSession) StartOutput(ctx context.Context, onOutput OutputHandler) error {

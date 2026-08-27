@@ -1,11 +1,19 @@
 #!/bin/sh
 set -eu
 
+# THE FAST GATE. Everything here is static and reads the tree: formatting,
+# linting, the ratchets, the wire contracts, the type checkers. Seconds.
+#
+# THE TEST SUITES ARE NOT HERE, and that is deliberate. They ran in containers
+# on every commit that touched a .go or a frontend/ file — the whole Go module
+# under -race and the whole vitest suite — which is minutes per commit, paid
+# again on every amend and every small step of a refactor. They now run in
+# pre-push, once per push, which is the last moment before work leaves this
+# machine and the moment where being wrong actually costs somebody else
+# something. CI remains the source of truth either way.
+
 warn() { printf "FAIL: %s\n" "$1"; }
 ok()   { printf "OK:   %s\n" "$1"; }
-
-# Tests run inside a container, never against the host filesystem.
-. "$(dirname "$0")/containerized-tests.sh"
 
 # go-installed tools (gofumpt, golangci-lint) live in $(go env GOPATH)/bin, which
 # an interactive shell has on PATH but a hook invoked by an editor or a sandboxed
@@ -26,7 +34,6 @@ check_cmd golangci-lint "go install github.com/golangci/golangci-lint/cmd/golang
 check_cmd go "install Go from https://go.dev/dl/"
 check_cmd node "install Node.js from https://nodejs.org/"
 check_cmd npm "install Node.js from https://nodejs.org/"
-check_cmd docker "start OrbStack or Docker Desktop — tests run in a container"
 
 if [ ! -d frontend/node_modules ]; then
     warn "frontend/node_modules not found — run: cd frontend && npm ci"
@@ -70,9 +77,7 @@ $CHANGED
 CHANGED_EOF
 fi
 
-# host_gate runs a check and, on failure, prints it and aborts the commit. Once
-# section 1 has started them, the background containers die with the shell via
-# the EXIT trap; before that there is nothing to clean up.
+# host_gate runs a check and, on failure, prints it and aborts the commit.
 host_gate() {
     _label=$1
     shift
@@ -83,31 +88,6 @@ host_gate() {
     fi
     ok "$_label"
 }
-
-# --- 1. start the container gates now, in parallel --------------------------
-# They share nothing — one is a Go toolchain, the other a Node one — and between
-# them they were 72% of this hook's wall time when run in sequence. Starting them
-# before the host-side linters means the linters run inside their shadow rather
-# than after it.
-GO_LOG=$(mktemp) || exit 1
-FE_LOG=$(mktemp) || exit 1
-GO_PID=""
-FE_PID=""
-cleanup() {
-    [ -n "$GO_PID" ] && kill "$GO_PID" 2>/dev/null || true
-    [ -n "$FE_PID" ] && kill "$FE_PID" 2>/dev/null || true
-    rm -f "$GO_LOG" "$FE_LOG"
-}
-trap cleanup EXIT INT TERM
-
-if [ "$RUN_GO" = 1 ]; then
-    go_test_containerized >"$GO_LOG" 2>&1 &
-    GO_PID=$!
-fi
-if [ "$RUN_FE" = 1 ]; then
-    vitest_containerized >"$FE_LOG" 2>&1 &
-    FE_PID=$!
-fi
 
 # --- 2. gofumpt (always: one second, and it reads the whole module) ----------
 # THE FILE LIST COMES FROM GIT, never from a walk of the directory tree.
@@ -237,52 +217,19 @@ else
     ok "tsc --noEmit (e2e) — skipped (no e2e/ changes staged)"
 fi
 
-# --- 6. collect the container gates -----------------------------------------
-# Waited on separately so a failure names the runner that produced it; a merged
-# log would leave the reader guessing which toolchain spoke.
-GO_RC=0
-FE_RC=0
-if [ -n "$GO_PID" ]; then
-    wait "$GO_PID" || GO_RC=$?
-    GO_PID=""
-    if [ "$GO_RC" -ne 0 ]; then
-        warn "go test -race (container)"
-        cat "$GO_LOG"
-    else
-        ok "go test -race (container)"
-    fi
-else
-    ok "go test -race — skipped (no Go changes staged)"
-fi
-
-if [ -n "$FE_PID" ]; then
-    wait "$FE_PID" || FE_RC=$?
-    FE_PID=""
-    if [ "$FE_RC" -ne 0 ]; then
-        warn "vitest (container)"
-        cat "$FE_LOG"
-    else
-        ok "vitest (container)"
-    fi
-else
-    ok "vitest — skipped (no frontend/ changes staged)"
-fi
-
 # The landing page's structural gate. Cheap (no toolchain, no container), so
 # it runs whenever it could have anything to say. It is also run by the deploy
 # workflow: a page that fails it must not reach the public URL because someone
 # skipped a local hook.
 if printf '%s\n' "$CHANGED" | grep -qE '^(site/|scripts/check-site\.sh$|scripts/site-forbidden-phrases\.txt$)'; then
     if ! ./scripts/check-site.sh; then
-        FE_RC=1
+        warn "check-site"
+        printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
+        exit 1
     fi
+    ok "check-site"
 else
     ok "check-site — skipped (no site/ changes staged)"
-fi
-
-if [ "$GO_RC" -ne 0 ] || [ "$FE_RC" -ne 0 ]; then
-    printf "\nPre-commit hook FAILED. Fix the issues above and try again.\n"
-    exit 1
 fi
 
 # --- 7. beads: materialise the issue snapshot into this commit ---------------
@@ -294,15 +241,15 @@ ok "beads export"
 
 printf "\nAll checks passed.\n"
 
-# What "all checks passed" does NOT mean. AGENTS.md carries this warning for the
-# e2e container and carried nothing of the kind for this hook, so it read as a
-# faithful pre-flight and is not: the Go tests above ran in Debian with Go from
-# the golang image, no Secret Service, every core this host has, and the test
-# cache intact — where CI runs Ubuntu, setup-go, two keyring variants, 4 cores
-# and -count=1. A release attempt and its follow-up PR both came back red from a
-# job this hook had just called green (nocx-cn86). The e2e suite is not run here
-# at all; only its types are checked.
-printf "  NOT covered here: macOS (bash 3.2, no /proc, Darwin PTY) — CI's \`ci-mac\` job\n"
+# What "all checks passed" does NOT mean. This hook is STATIC: it reads the
+# tree and never runs a test. The suites moved to pre-push (the Go module under
+# -race, vitest), and even there the warning below still holds — those run in
+# Debian with Go from the golang image, no Secret Service, every core this host
+# has and the test cache intact, where CI runs Ubuntu, setup-go, two keyring
+# variants, 4 cores and -count=1. A release attempt and its follow-up PR both
+# came back red from a job the old hook had just called green (nocx-cn86).
+printf "  NOT covered here: the test suites themselves  — pre-push, or \`make ci\`\n"
+printf "                    macOS (bash 3.2, no /proc, Darwin PTY) — CI's \`ci-mac\` job\n"
 printf "                    Ubuntu + both keyring variants — scripts/ci-linux.sh\n"
 printf "                    the e2e suite itself           — e2e/run-in-container.sh\n"
 printf "                    the dead-code ratchet          — CI's \`ci-mac\` and \`ci-linux\` jobs\n"

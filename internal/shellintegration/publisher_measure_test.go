@@ -69,13 +69,33 @@ import (
 // dead branch each script carried for that case below the suspend was
 // removed in the same edit, which is why 44 bytes buys a fix in two tiers.
 //
-// The CALL counts did not move on any of the four occasions —
+// 2026-08-25, fifth move (nocx-szb40.5, the enrolment act): 67,252 ->
+// 73,089, +5,837 across the two generation scripts. Both gained the agent
+// wrapper: a bounded reader for the agent_enrolled/agent_withdrawn answer, a
+// geometry probe, and the wrapper that brackets an agent with the enrolment
+// pair. This is the largest single move of the five and the reason is worth
+// stating rather than absorbing: it is a whole protocol exchange added to the
+// shell tiers, not a guard adjusted. It buys the interval a backend grid is
+// only allowed to exist inside (the AD-6 amendment), which has no cheaper
+// carrier — the per-epoch capability lives in these scripts' text and nowhere
+// else, so nothing outside them can ask.
+//
+// 2026-08-26, sixth move (nocx-eoijp): 73,089 -> 73,090, ONE byte, and it
+// is a leading zero. bash's printf %b reads \0 and then up to three octal
+// digits, so the JSON decoder's escapes had to grow from \NNN to \0NNN or
+// go on eating the character after them whenever it was an octal digit —
+// which is what turned the carrier loader's `exec 2>&1` into `exec 2>1`.
+// Recorded rather than absorbed because the smallest move in this list is
+// also the one that fixed the most: a byte is not a proxy for a change's
+// weight, which is the assumption a size ratchet quietly invites.
+//
+// The CALL counts did not move on any of the six occasions —
 // 57/17/49/58/58/63 on every path — so N = 90 is untouched: the bundle
-// changed size, not the work. B = 256 KiB still holds, now at 3.81x
+// changed size, not the work. B = 256 KiB still holds, now at 3.51x
 // headroom.
 const (
 	measuredMaxPublishCalls = 63
-	measuredMaxPublishBytes = 67252
+	measuredMaxPublishBytes = 73090
 
 	// measuredMaxBoundedResidue is the same figure for the worst attempt
 	// that is still inside the residue bounds the design asks P3 to enforce

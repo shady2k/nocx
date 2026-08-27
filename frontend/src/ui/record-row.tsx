@@ -40,10 +40,44 @@
  * this composite does not describe — Secrets' glyph + two-line body rows,
  * and the Git panel's dense commit rows whose meta line carries several
  * ref badges — and only for those.
+ *
+ * Disclosure (nocx-ctl6q): a record can DISCLOSE what it stands for — the
+ * notification feed's collapsed run opening to the occurrences inside it.
+ * The state is CONTROLLED, as it is on Section: the caller owns `expanded`
+ * and is told about `onToggle`, because a disclosure without a state owner
+ * would lie about what it toggles. The vocabulary is the kit's existing one,
+ * deliberately and to the letter — `data-disclosure` carrying
+ * `expanded | collapsed | leaf`, a native button part with `aria-expanded`
+ * in the leading slot, and the one chevron TreeRow and Section already turn.
+ * A third word for one concept is how a kit stops being one.
+ *
+ * Three states, not two, and the third is the one worth writing down:
+ *
+ *   expandable absent   the row never heard of the disclosure. It renders
+ *                       exactly as it did before this existed — no leading
+ *                       slot at all — because a column reserved for a control
+ *                       none of a list's rows can offer indents every one of
+ *                       them for nothing. Connections, Endpoints, Footprint
+ *                       and Notes are all this.
+ *   expandable={false}  a leaf in a list that DOES disclose. It reserves the
+ *                       disclosure's width, so titles still form one column —
+ *                       TreeRow's leading slot, same reason.
+ *   expandable          the button, and the caller's children while open.
+ *
+ * The Notifications panel is the pair: a row of one occurrence is the leaf,
+ * a collapsed run is the button, and both sit in one list — which is the
+ * case the middle state exists for.
+ *
+ * What is disclosed is the caller's, passed as the children slot: the kit
+ * decides the geometry and never what goes inside. Both the disclosure and
+ * the disclosed region keep their own click and their own Enter/Space —
+ * expanding is not opening, and a click that did both would make expansion
+ * unreachable with a mouse.
  */
 import { For, Show, type JSX } from 'solid-js'
 import { Badge, type BadgeTone } from './badge'
 import { CollectionRow } from './collection-view'
+import { ChevronDownIcon } from './icons'
 import { StatusDot, type StatusDotTone } from './status-dot'
 
 export interface RecordRowProps {
@@ -62,6 +96,17 @@ export interface RecordRowProps {
    *  free-form body — see the header. */
   detail?: string | readonly string[]
   actions: JSX.Element
+  /** Whether this row discloses anything. Absent means the row is not part of
+   *  a disclosing list and reserves no width; `false` is a leaf beside rows
+   *  that do expand, and holds the disclosure's width so titles align. */
+  expandable?: boolean
+  /** Expanded state — controlled by the caller; only read when expandable. */
+  expanded?: boolean
+  /** Called when the disclosure is activated (click, Enter, Space). */
+  onToggle?: (e: MouseEvent) => void
+  /** What the row discloses while expanded. The caller's, verbatim: the kit
+   *  places it under the record's text and decides nothing about it. */
+  children?: JSX.Element
   /** Makes the row activatable — see CollectionRow. */
   onActivate?: (e: MouseEvent | KeyboardEvent) => void
   /** The caller's selection vocabulary — the row only renders it. */
@@ -83,6 +128,18 @@ export function RecordRow(props: RecordRowProps) {
     return lines.filter((line) => line.trim() !== '')
   }
 
+  const expandable = () => props.expandable === true
+  const expanded = () => expandable() && props.expanded === true
+  const disclosure = () => (expandable() ? (expanded() ? 'expanded' : 'collapsed') : 'leaf')
+
+  /** The row listens for Enter and Space (CollectionRow), and both the
+   *  disclosure and whatever the caller disclosed sit inside it. Without
+   *  this, pressing Enter on the chevron would expand the row AND open it,
+   *  and the click a native button raises from that key would do it twice. */
+  const keepOwnKeys = (e: KeyboardEvent) => {
+    if (e.key === 'Enter' || e.key === ' ') e.stopPropagation()
+  }
+
   return (
     <CollectionRow
       actions={props.actions}
@@ -91,31 +148,70 @@ export function RecordRow(props: RecordRowProps) {
       focused={props.focused}
       density={props.density}
       info={
-        <>
-          <div class="ui-record-row__title">{props.title}</div>
-          <div class="ui-record-row__meta">
-            <Show when={props.kind} keyed>
-              {(kind) => <Badge tone={kind.tone ?? 'neutral'}>{kind.label}</Badge>}
+        <div class="ui-record-row" data-disclosure={disclosure()}>
+          <Show when={props.expandable !== undefined}>
+            <span class="ui-record-row__leading">
+              <Show when={expandable()}>
+                <button
+                  type="button"
+                  class="ui-record-row__disclosure"
+                  aria-expanded={expanded() ? 'true' : 'false'}
+                  aria-label={expanded() ? `Collapse ${props.title}` : `Expand ${props.title}`}
+                  onClick={(e: MouseEvent) => {
+                    // The disclosure owns this click: expanding is not
+                    // opening. Letting it reach the row would open the record
+                    // every time somebody tried to look inside it.
+                    e.stopPropagation()
+                    props.onToggle?.(e)
+                  }}
+                  onKeyDown={keepOwnKeys}
+                >
+                  <span class="ui-record-row__disclosure-icon">
+                    <ChevronDownIcon />
+                  </span>
+                </button>
+              </Show>
+            </span>
+          </Show>
+          <div class="ui-record-row__body">
+            <div class="ui-record-row__title">{props.title}</div>
+            <div class="ui-record-row__meta">
+              <Show when={props.kind} keyed>
+                {(kind) => <Badge tone={kind.tone ?? 'neutral'}>{kind.label}</Badge>}
+              </Show>
+              <Show when={props.meta}>
+                <span class="ui-record-row__meta-text">{props.meta}</span>
+              </Show>
+              <Show when={props.status} keyed>
+                {(status) => (
+                  <span class="ui-record-row__status" role="status" data-tone={status.tone}>
+                    <StatusDot tone={status.tone} accessibleName={status.text}>
+                      {status.text}
+                    </StatusDot>
+                  </span>
+                )}
+              </Show>
+            </div>
+            <Show when={detailLines().length > 0}>
+              <div class="ui-record-row__detail">
+                <For each={detailLines()}>{(line) => <div>{line}</div>}</For>
+              </div>
             </Show>
-            <Show when={props.meta}>
-              <span class="ui-record-row__meta-text">{props.meta}</span>
-            </Show>
-            <Show when={props.status} keyed>
-              {(status) => (
-                <span class="ui-record-row__status" role="status" data-tone={status.tone}>
-                  <StatusDot tone={status.tone} accessibleName={status.text}>
-                    {status.text}
-                  </StatusDot>
-                </span>
-              )}
+            <Show when={expanded()}>
+              {/* What is inside the expansion is the caller's, including its
+                  clicks and its keys — a row that opened itself when you
+                  clicked one of its occurrences would take the pointer away
+                  from the thing you aimed at. */}
+              <div
+                class="ui-record-row__disclosed"
+                onClick={(e: MouseEvent) => e.stopPropagation()}
+                onKeyDown={keepOwnKeys}
+              >
+                {props.children}
+              </div>
             </Show>
           </div>
-          <Show when={detailLines().length > 0}>
-            <div class="ui-record-row__detail">
-              <For each={detailLines()}>{(line) => <div>{line}</div>}</For>
-            </div>
-          </Show>
-        </>
+        </div>
       }
     />
   )

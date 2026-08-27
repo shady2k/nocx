@@ -20,6 +20,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ---------------------------------------------------------------------------
@@ -412,14 +413,7 @@ func portsCallParams(t *testing.T, conn *websocket.Conn, method string, params m
 
 func waitPortsFor(t *testing.T, what string, cond func() bool) {
 	t.Helper()
-	deadline := time.Now().Add(wantWithin)
-	for time.Now().Before(deadline) {
-		if cond() {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("timed out waiting for %s", what)
+	waittest.WaitForTimeout(t, what, wantWithin, cond)
 }
 
 func testPortsOption() ssh.ConnectOption {

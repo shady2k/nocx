@@ -9,29 +9,24 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/transport/outbound"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // waitForPendingAsk polls the ask broker until one ask is registered and
 // returns its request id.
 func waitForPendingAsk(t *testing.T, ws *WSServer) string {
 	t.Helper()
-	deadline := time.Now().Add(5 * time.Second)
-	for {
+	var rid string
+	waittest.WaitForTimeout(t, "ask registration", 5*time.Second, func() bool {
 		ws.asks.mu.Lock()
-		var rid string
+		defer ws.asks.mu.Unlock()
 		for k := range ws.asks.pending {
 			rid = k
-			break
+			return true
 		}
-		ws.asks.mu.Unlock()
-		if rid != "" {
-			return rid
-		}
-		if time.Now().After(deadline) {
-			t.Fatal("ask never registered")
-		}
-		time.Sleep(time.Millisecond)
-	}
+		return false
+	})
+	return rid
 }
 
 // TestUnlockResolved_ReleasesWaiterWhileOutboundBlocked is the point of the

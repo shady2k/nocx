@@ -20,6 +20,7 @@ function makePane(id: number, title: string, tooltip: string): PaneView {
     preview: '',
     hasActivity: false,
     agentStatus: null,
+    agentSource: null,
     paneId: `pane-${id}`,
     onDisplayChange: null,
   }

@@ -9,6 +9,7 @@ import {
   type SidebarViewDescriptor,
   type SidebarAction,
   type SidebarViewProps,
+  type SidebarCountKind,
 } from './sidebar'
 import { createSidebarWidthController } from './sidebar-width'
 import type { Component } from 'solid-js'
@@ -347,8 +348,17 @@ describe('sidebar — a view’s icon carries its status', () => {
 
   /** Two views where the SECOND carries a status, so every assertion below
    *  also says the mark landed on the right button. */
-  function withStatus(status: () => { count: number; progress: number | null } | null) {
-    return [TWO_VIEWS[0], { ...TWO_VIEWS[1], status }] as SidebarViewDescriptor[]
+  function withStatus(
+    status: () => { count: number; progress: number | null; kind?: SidebarCountKind } | null,
+  ) {
+    // `kind` defaults to 'running' HERE, in the test helper, and is required
+    // on the descriptor itself — the cases below are all about running work
+    // and saying so five times would bury what each is actually testing.
+    const withKind = () => {
+      const s = status()
+      return s === null ? null : { ...s, kind: s.kind ?? ('running' as const) }
+    }
+    return [TWO_VIEWS[0], { ...TWO_VIEWS[1], status: withKind }] as SidebarViewDescriptor[]
   }
 
   const badge = (bar: HTMLElement, id: string) =>
@@ -385,6 +395,22 @@ describe('sidebar — a view’s icon carries its status', () => {
     )
     expect(viewBtn(bar, 'beta').getAttribute('aria-label')).toBe('Beta — 2 running')
     expect(viewBtn(bar, 'alpha').getAttribute('aria-label')).toBe('Alpha')
+  })
+
+  it('says what the count is ABOUT, so a bell does not report unread as running', () => {
+    // The bar owns the wording — a view names a KIND and never a string, or
+    // two views end up describing the same number in two vocabularies. What
+    // this pins is that the closed set has more than one member and the bar
+    // reads the right one: Notifications counts unread things, which do not
+    // run, and "Notifications — 3 running" was false for a screen reader.
+    const { bar, panel } = mount()
+    mountSidebar(
+      bar,
+      panel,
+      withStatus(() => ({ count: 3, kind: 'unread', progress: null })),
+      [SETTINGS_ACTION],
+    )
+    expect(viewBtn(bar, 'beta').getAttribute('aria-label')).toBe('Beta — 3 unread')
   })
 
   it('draws the bar only while something is running, and at zero it is still drawn', () => {

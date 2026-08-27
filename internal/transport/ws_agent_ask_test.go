@@ -11,6 +11,7 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log/slog"
 	"path/filepath"
 	"strings"
@@ -29,6 +30,7 @@ import (
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vault/file"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // scriptedAssistantClient is the injected engine: Ask plays back a script of
@@ -475,23 +477,42 @@ func TestAgentAsk_ConnectionLostMidStreamTerminalizes(t *testing.T) {
 	// The run terminalizes failed with the renderable reason. Poll the
 	// ledger — the runState notification goes to a dead socket and is
 	// dropped; the record is what a reconnect reads.
-	deadline := time.Now().Add(5 * time.Second)
-	for {
-		q, err := h.db.Ledger().Entry(context.Background(), res.EntryID)
-		if err != nil || q == nil {
-			t.Fatalf("question entry: %v (err %v)", q, err)
-		}
-		st := q.Executions[0].State
-		if st != nil && *st != content.RunPrepared && *st != content.RunStreaming {
-			if *st != content.RunFailed {
-				t.Fatalf("run state = %v, want failed", *st)
+	var terminalState *content.RunState
+	var entryErr error
+	lastState, sawEntry := "<none>", false
+	waittest.WaitForTimeoutDetail(t, "the run to terminalize", 5*time.Second,
+		func() string {
+			return fmt.Sprintf("run never terminalized; state = %s (entry present=%v, err %v)",
+				lastState, sawEntry, entryErr)
+		},
+		func() bool {
+			q, err := h.db.Ledger().Entry(context.Background(), res.EntryID)
+			if err != nil {
+				entryErr = err
+				return true
 			}
-			break
-		}
-		if time.Now().After(deadline) {
-			t.Fatalf("run never terminalized; state = %v", st)
-		}
-		time.Sleep(20 * time.Millisecond)
+			if q == nil {
+				sawEntry = false
+				return false
+			}
+			sawEntry = true
+			st := q.Executions[0].State
+			if st == nil {
+				lastState = "<nil>"
+				return false
+			}
+			lastState = string(*st)
+			if *st == content.RunPrepared || *st == content.RunStreaming {
+				return false
+			}
+			terminalState = st
+			return true
+		})
+	if entryErr != nil {
+		t.Fatalf("question entry: %v", entryErr)
+	}
+	if *terminalState != content.RunFailed {
+		t.Fatalf("run state = %v, want failed", *terminalState)
 	}
 	// The failure sentence is recorded on the run's payload — the ledger is
 	// the record, and the reconnect reads the reason there.

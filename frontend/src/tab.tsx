@@ -2,7 +2,7 @@ import { Show } from 'solid-js'
 import { IconButton } from './ui/icon-button'
 import { TAB_DRAG_TYPE } from './layout/strip-drag'
 import { PinIcon } from './ui/icons'
-import type { AgentStatus } from './agent-status'
+import type { PaneActivity, PaneActivitySource } from './pane-observation'
 
 /**
  * Tab — a feature component for a terminal tab button.
@@ -35,8 +35,13 @@ export interface TabProps {
   index: number
   /** Whether this tab is active/selected. */
   active: boolean
-  /** Agent status for the status indicator. */
-  agentStatus: AgentStatus | null
+  /** What the pane is doing, for the status indicator — from whichever
+   *  source is strongest (pane-observation.ts). */
+  agentStatus: PaneActivity | null
+  /** How strong the evidence is: an enrolled pane's driver, or the terminal
+   *  title. Rendered as an attribute rather than as a second dot — one
+   *  indicator, qualified, never two competing ones. */
+  agentSource?: PaneActivitySource | null
   /** Display title from the reactive store. */
   title: string
   /** Tooltip text from the reactive store — rendered as subtitle in vertical mode. */
@@ -149,6 +154,7 @@ export function Tab(props: TabProps) {
       aria-selected={props.active}
       data-pane-id={String(props.paneId)}
       data-agent-status={props.agentStatus ?? undefined}
+      data-agent-source={props.agentSource ?? undefined}
       data-colour={props.colour || undefined}
       data-group-colour={props.groupColour || undefined}
       data-pinned={props.pinned === true ? 'true' : undefined}

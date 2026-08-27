@@ -1268,6 +1268,29 @@ func (s *WSServer) settleUpload(rt *runningTransfer) {
 	s.deliverTransferDone(rt.sessionID, rt.id, retainedDone{
 		method: "files.uploadDone", params: mustMarshal(p),
 	})
+	// AND THE TRANSFER'S END BECOMES A NOTIFICATION (nocx-zlxmm). Last, after
+	// the outcome the Files panel draws from, for the reason the block's
+	// raise is last at its own seam: the surface that is already watching
+	// must not wait on a sink.
+	//
+	// The FINAL name when there is one, the requested name otherwise, and
+	// the order matters in both directions. A KeepBoth upload lands under a
+	// name the sink chose, so a notification naming what was asked for would
+	// send somebody looking for a file that is not there. And a skipped,
+	// cancelled or failed transfer has NO final name — nothing was written —
+	// so falling back is what keeps "a file was skipped" from being the
+	// whole sentence.
+	name := out.FinalName
+	if name == "" {
+		name = rt.upload.Name
+	}
+	s.raiseTransferFinished(rt, transferOutcome{
+		up:       true,
+		state:    state,
+		name:     name,
+		reason:   p.Error,
+		stranded: out.Stranded,
+	})
 }
 
 // deliverUploadDone sends the terminal outcome to the session's current

@@ -53,6 +53,8 @@ func (f *Fake) Get(_ context.Context, id credential.SecretID) (credential.Secret
 		return credential.Secret{}, failure
 	}
 	if delay > 0 {
+		// Simulate provider latency; this is controlled fake latency, not
+		// a test synchronization mechanism.
 		time.Sleep(delay)
 	}
 	f.mu.Lock()
@@ -70,6 +72,8 @@ func (f *Fake) Put(_ context.Context, id credential.SecretID, s credential.Secre
 		return failure
 	}
 	if delay > 0 {
+		// Simulate provider latency; this is controlled fake latency, not
+		// a test synchronization mechanism.
 		time.Sleep(delay)
 	}
 	var val []byte
@@ -88,6 +92,8 @@ func (f *Fake) Delete(_ context.Context, id credential.SecretID) error {
 		return failure
 	}
 	if delay > 0 {
+		// Simulate provider latency; this is controlled fake latency, not
+		// a test synchronization mechanism.
 		time.Sleep(delay)
 	}
 	f.mu.Lock()

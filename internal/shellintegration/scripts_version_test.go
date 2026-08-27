@@ -163,6 +163,17 @@ func TestScriptVersionTracksScriptContent(t *testing.T) {
 		// every shell as well is the per-session scan §8 removes.
 		"40": "ba20c03432b7b31072ba5878b07032189d73fec0d5bcc16308ebd94b86852eda",
 		"41": "aba1857806f6f43c2fbc19b418eda23f36fcd9585d581940fcf32601b9447f0d",
+		// v42: bash and zsh carry the enrolment act (nocx-szb40.5). The agent
+		// wrapper brackets the agent with agent_enrol/agent_withdraw on the
+		// authenticated channel, which is what opens and closes the interval
+		// the backend keeps a pane's screen for.
+		"42": "d3b374b7a201f78c94ab912dba940360c45f7482c0a5a02e4b5e50c6aba6eb54",
+		// 43: the bash JSON decoder writes \0 and three octal digits, so a
+		// decoded <, > or & no longer swallows the digit after it. Every
+		// installed copy must be rewritten: the corruption is in the
+		// decoder that reads the grant, so a shell still sourcing 42 goes
+		// on running `exec 2>1` in the carrier loader (nocx-eoijp).
+		"43": "55c7fe381542aaceb58f8eec52c81d3224ee3da5003f5623b9305b856eb94c9f",
 	}
 
 	h := sha256.New()

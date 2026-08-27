@@ -1,5 +1,5 @@
 .PHONY: all init build dev dev-web lint format test clean hooks ci ci-full \
-        ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e \
+        ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e helpers \
         print-os-pkgs print-portable-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci
 
@@ -52,6 +52,38 @@ ifneq ($(VERSION),)
 LDFLAGS += -X $(VERSION_PKG).Version=$(VERSION)
 endif
 
+# The remote helper's build matrix (D20): three targets, gzip-compressed
+# into the deploy package's artifacts directory and embedded by
+# //go:embed all:artifacts. darwin/amd64 is deliberately NOT built.
+# CGO_ENABLED=0 is load-bearing: a static binary is what a helper on an
+# unknown remote host must be — no remote glibc, no dynamic-loader
+# surprises. The artifacts are gitignored; a fresh checkout compiles with
+# only the committed .gitignore embedded, and Artifact answers
+# ErrArtifactsNotBuilt until this target has run. `helpers` is a
+# prerequisite of the RELEASE build and of nothing else: ordinary
+# `go build`, `make build` and `make dev` must work with no artifacts
+# present.
+#
+# The e2e suite needs them too and calls this target itself, from the stand's
+# bring-up (e2e/stand.ts). It is deliberately NOT a prerequisite of ci-e2e:
+# that target's whole promise is to be ci.yml's job, and ci.yml runs
+# e2e/run-in-container.sh straight after a bare checkout. A prerequisite here
+# bought the make target artifacts CI would not have had, and two SSH git
+# specs that could only ever pass locally (nocx-eoijp).
+HELPER_TARGETS := linux/amd64 linux/arm64 darwin/arm64
+HELPER_ARTIFACT_DIR := internal/helper/deploy/artifacts
+
+.PHONY: helpers
+helpers:
+	@mkdir -p $(HELPER_ARTIFACT_DIR)
+	@for t in $(HELPER_TARGETS); do \
+	  os=$${t%/*}; arch=$${t#*/}; \
+	  CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch $(GO) build -trimpath -ldflags="-s -w" \
+	    -o $(HELPER_ARTIFACT_DIR)/nocx-helper-$$os-$$arch ./cmd/nocx-helper || exit 1; \
+	  gzip -9 -f $(HELPER_ARTIFACT_DIR)/nocx-helper-$$os-$$arch || exit 1; \
+	done
+	@echo "helper artifacts: $(HELPER_ARTIFACT_DIR)/nocx-helper-{$(HELPER_TARGETS)}.gz"
+
 all: lint test build
 
 # A local build is a DEVELOPMENT build: it resolves the nocx-dev profile, so it
@@ -66,7 +98,10 @@ build:
 # directory, and it is deliberately the side that needs the flag: a build made
 # without it costs a developer an empty profile, never a user their data.
 # `production` is v3's tag for production build semantics (devtools off).
-build-release:
+# `helpers` is a prerequisite because the shipped binary embeds the
+# cross-compiled helper artefacts; without them Artifact answers
+# ErrArtifactsNotBuilt and the remote panel has nothing to install.
+build-release: helpers
 	$(FRONTEND_BUILD)
 	$(GO) build -tags "$(strip release production $(WAILS_PLATFORM_TAGS))" -ldflags "$(LDFLAGS)" -o build/bin/nocx .
 
@@ -427,6 +462,11 @@ lint-ci:
 	@test -z "$$($(GOFUMPT) -l .)" || (echo "FAIL: files need formatting" && exit 1)
 	@echo ""
 	@echo "=== golangci-lint ==="
+	@# The platform tags every other Go target here carries. Without them
+	@# golangci-lint cannot load wails' internal webview package on a Linux
+	@# host and dies before it lints anything, which took `make ci-full` --
+	@# the gate AGENTS.md names -- out entirely for anyone not on macOS.
+	@# Empty on macOS, so that runner keeps running exactly `run ./...`.
 	$(GOLANGCI_LINT) run $(GOLANGCI_BUILD_TAGS) ./...
 
 test-ci:

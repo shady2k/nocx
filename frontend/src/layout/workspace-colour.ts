@@ -7,7 +7,7 @@
 // answer to a question that has an owner, which is the one thing AD-8 as a
 // working habit forbids.
 
-import type { AgentStatus } from '../agent-status'
+import type { PaneActivity } from '../pane-observation'
 /** What a collapsed workspace says about the panes nobody can see.
  *
  *  THIS IS THE POINT OF COLLAPSING AT ALL. In a browser a collapsed group is
@@ -24,7 +24,7 @@ export type GroupAttention = 'quiet' | 'busy' | 'alert'
 
 export interface GroupMemberState {
   readonly hasActivity: boolean
-  readonly agentStatus: AgentStatus | null
+  readonly agentStatus: PaneActivity | null
   readonly warning: boolean
 }
 
@@ -44,8 +44,16 @@ export function groupAttention(members: readonly GroupMemberState[]): GroupAtten
     // A warning is the environment saying something is wrong; an idle agent is
     // the agent saying the same. Both mean a human is needed here, which is
     // the only state worth pulling someone out of another workspace for.
-    if (m.warning || m.agentStatus === 'idle') return 'alert'
-    if (m.hasActivity || m.agentStatus === 'working') busy = true
+    // A pane that WANTS somebody. 'waiting' is the strongest of these — an
+    // agent is holding a dialog open for a human — and 'exited' is a worker
+    // that has finished; both are the same call to action as an agent that
+    // went idle, which is what this row already answered for.
+    if (m.warning || m.agentStatus === 'idle' || m.agentStatus === 'waiting') return 'alert'
+    if (m.agentStatus === 'exited') return 'alert'
+    // 'unknown' means the driver could not read the screen, and every
+    // consumer treats that as busy — a chip that called it attention would
+    // send a person to a pane that may need nothing.
+    if (m.hasActivity || m.agentStatus === 'working' || m.agentStatus === 'unknown') busy = true
   }
   return busy ? 'busy' : 'quiet'
 }

@@ -13,8 +13,8 @@ import type { LifecycleState } from './lifecycle/state'
 //
 // On 2026-08-05 (nocx-mlm7) the launch-policy enum (auto|ask|off) was
 // itself replaced by three never-collapsed axes (spec §3.5):
-//   - DesiredMode (raw|script|relay): what the user wants nocx to do with
-//     this destination, resolved by the profile cascade;
+//   - DesiredMode (auto|raw|script|relay): what the user wants nocx to do
+//     with this destination, resolved by the profile cascade;
 //   - ObservedDelivery (none|bootstrap-script|installed-script|relay): what
 //     actually happened this session, read by the renderer from the markers;
 //   - RelayConsent (unknown|granted|denied): persisted per destination,
@@ -34,10 +34,16 @@ export type ObservedDelivery = 'none' | 'bootstrap-script' | 'installed-script' 
 
 /** What the user wants nocx to do with this destination — the FIRST of the
  *  three axes (spec §3.5), resolved by the profile cascade and carried by
- *  the open ack. raw adds nothing (no rewrite, no remote write); script
- *  (the default, N3) wraps and installs automatically; relay deploys the
- *  Tier-B binary and is consent-gated. */
-export type DesiredMode = 'raw' | 'script' | 'relay'
+ *  the open ack. auto (the default, ADR-0033) is the name for "the user has
+ *  not answered": it wraps and installs the scripts exactly as script does
+ *  (N3), and additionally permits the relay to be OFFERED where a surface
+ *  reaches for it (D8). script is that same answer given explicitly, and is
+ *  never upgraded. relay allows the deployed binary and still integrates:
+ *  the tiers are additive, so allowing it never withholds the scripts
+ *  (§5.2). raw alone adds nothing — no rewrite, no remote write. There is
+ *  no 'ask': asking is what auto does when no answer is stored for that
+ *  host key. */
+export type DesiredMode = 'auto' | 'raw' | 'script' | 'relay'
 
 /** Relay consent for a destination — the THIRD of the three axes (spec
  *  §3.5). Persisted per destination; script mode never reads it. Relay
@@ -61,8 +67,8 @@ export type ShellState =
 export type InputPresentation = 'editor' | 'terminal'
 
 /** The connection-scope launch policy (nocx-4t37.2) was replaced by the
- *  DesiredMode axis (nocx-mlm7): script integrates at session open; raw
- *  refuses every rewrite and remote write; relay is consent-gated. There is
+ *  DesiredMode axis (nocx-mlm7): auto, script and relay all integrate at
+ *  session open; raw alone refuses every rewrite and remote write. There is
  *  no 'ask' — N3 makes the script footprint automatic product behaviour. */
 
 /** One recovery action the UI may offer. Derived ONLY after both

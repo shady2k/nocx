@@ -58,6 +58,15 @@ func (c *reasonChannel) ShellIntegrationReason() ssh.RefusalReason {
 	return c.reason
 }
 
+// fingerprintChannel is an ssh.Channel whose HostKeyFingerprint is
+// scripted — the shape the real RealChannel carries after a capturing dial.
+type fingerprintChannel struct {
+	reasonChannel
+	fingerprint string
+}
+
+func (c *fingerprintChannel) HostKeyFingerprint() string { return c.fingerprint }
+
 func launcherReg() *Reg {
 	return New(log.NewSlogAdapter(nil), &stubPTYFactory{stub: pty.NewStub(log.NewSlogAdapter(nil))})
 }
@@ -78,6 +87,42 @@ func TestRemoteSession_SurfacesShellIntegrationReason(t *testing.T) {
 
 	if got := sess.ShellIntegrationReason(); got != ssh.ReasonRemoteCommand {
 		t.Errorf("ShellIntegrationReason = %q, want %q", got, ssh.ReasonRemoteCommand)
+	}
+}
+
+// TestRemoteSession_SurfacesHostKeyFingerprint: the session passes through
+// the fingerprint the dial captured — the consent key (consent design
+// §3.2). A channel that does not expose one answers "", which never keys a
+// consent answer.
+func TestRemoteSession_SurfacesHostKeyFingerprint(t *testing.T) {
+	factory := &capturingSSHFactory{ch: &fingerprintChannel{fingerprint: "SHA256:captured"}}
+	reg := launcherReg().WithSSHFactory(factory)
+
+	sess, err := reg.Open(context.Background(), Config{
+		Kind:   KindRemote,
+		Host:   "example.com",
+		Remote: &ssh.ConnectConfig{},
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+
+	if got := sess.HostKeyFingerprint(); got != "SHA256:captured" {
+		t.Errorf("HostKeyFingerprint = %q, want %q", got, "SHA256:captured")
+	}
+}
+
+func TestLocalSession_HasNoHostKeyFingerprint(t *testing.T) {
+	reg := launcherReg()
+	sess, err := reg.Open(context.Background(), Config{Kind: KindLocal, Cwd: "/tmp"})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+
+	if got := sess.HostKeyFingerprint(); got != "" {
+		t.Errorf("HostKeyFingerprint on a local session = %q, want \"\"", got)
 	}
 }
 

@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Dispatcher } from './dispatcher'
 import { SessionHandle, WSClient } from './ipc'
 import { FRAME_HEADER_SIZE, FRAME_VERSION, MSG_TYPE_DATA, encodeFrame } from './frame'
+import { MockWebSocket } from './test-support/panes-fixtures'
 
 // Must match the un-exported constants in ipc.ts.
 const ACK_INTERVAL_MS = 100
@@ -9,102 +10,6 @@ const ACK_INTERVAL_MS = 100
 const SID = '0123456789abcdef0011223344556677'
 const OTHER_SID = 'ffffffffffffffffffffffffffffffff'
 const OPEN_IDENTITY = { instanceId: 'fedcba9876543210fedcba9876543210', sessionEpoch: 1 }
-
-class MockWebSocket {
-  static readonly CONNECTING = 0
-  static readonly OPEN = 1
-  static readonly CLOSING = 2
-  static readonly CLOSED = 3
-  static last: MockWebSocket | null = null
-
-  readyState: number = MockWebSocket.CONNECTING
-  binaryType = 'blob'
-  readonly sent: (string | ArrayBuffer)[] = []
-  closeCalled = false
-
-  onopen: (() => void) | null = null
-  onerror: (() => void) | null = null
-  onmessage: ((event: { data: unknown }) => void) | null = null
-  onclose: (() => void) | null = null
-
-  private _listeners = new Map<string, Set<(...args: unknown[]) => void>>()
-
-  addEventListener(type: string, fn: (...args: unknown[]) => void): void {
-    let s = this._listeners.get(type)
-    if (!s) {
-      s = new Set()
-      this._listeners.set(type, s)
-    }
-    s.add(fn)
-  }
-
-  removeEventListener(type: string, fn: (...args: unknown[]) => void): void {
-    this._listeners.get(type)?.delete(fn)
-  }
-
-  private _fire(type: string, event?: unknown): void {
-    for (const fn of this._listeners.get(type) ?? []) {
-      fn(event)
-    }
-  }
-
-  constructor(readonly url: string) {
-    MockWebSocket.last = this
-  }
-
-  send(data: string | ArrayBuffer): void {
-    this.sent.push(data)
-  }
-
-  close(): void {
-    this.closeCalled = true
-    this.readyState = MockWebSocket.CLOSED
-    this.onclose?.()
-    this._fire('close')
-  }
-
-  serverAccepts(): void {
-    this.readyState = MockWebSocket.OPEN
-    this.onopen?.()
-    this._fire('open')
-  }
-
-  serverFails(): void {
-    this.onerror?.()
-  }
-
-  serverHangsUp(): void {
-    this.readyState = MockWebSocket.CLOSED
-    this.onclose?.()
-    this._fire('close')
-  }
-
-  deliverText(payload: unknown): void {
-    const event = { data: typeof payload === 'string' ? payload : JSON.stringify(payload) }
-    this.onmessage?.(event)
-    this._fire('message', event)
-  }
-
-  deliverBinary(data: ArrayBuffer): void {
-    const event = { data }
-    this.onmessage?.(event)
-    this._fire('message', event)
-  }
-
-  requests(): { id?: number; method?: string; params?: Record<string, unknown> }[] {
-    return this.sent
-      .filter((m): m is string => typeof m === 'string')
-      .map(
-        (m) => JSON.parse(m) as { id?: number; method?: string; params?: Record<string, unknown> },
-      )
-  }
-
-  binaryFrames(): Uint8Array[] {
-    return this.sent
-      .filter((m): m is ArrayBuffer => m instanceof ArrayBuffer)
-      .map((m) => new Uint8Array(m))
-  }
-}
 
 function socket(): MockWebSocket {
   const ws = MockWebSocket.last
@@ -1343,6 +1248,71 @@ describe('session.liveness notification', () => {
 
     ws.deliverText(liveness({ liveness: 'dead', livenessEpoch: 6 }))
     ws.deliverText(liveness({ liveness: 'interrupted', livenessEpoch: 7 }))
+
+    expect(seen).toEqual([])
+  })
+})
+
+// ── session.observationChanged (nocx-szb40.3) ─────────────────────────────
+//
+// What an ENROLLED agent pane's screen is inviting, classified in the backend
+// where the grid lives. Guarded at the boundary like every other unsolicited
+// notification, and bound to the incarnation HERE — this is the one place that
+// holds the (instanceId, sessionEpoch) pair the open ack minted, so every
+// consumer downstream inherits the binding instead of remembering it.
+describe('session.observationChanged notification', () => {
+  const observation = (over: Record<string, unknown> = {}) => ({
+    jsonrpc: '2.0',
+    method: 'session.observationChanged',
+    params: {
+      sessionId: SID,
+      ...OPEN_IDENTITY,
+      agent: 'claude',
+      state: 'free_text',
+      ...over,
+    },
+  })
+
+  it('delivers what the driver said about this pane', async () => {
+    const { session, ws } = await connectedSession()
+    const seen: string[] = []
+    session.onObservation((o) => seen.push(`${o.agent}:${o.state}`))
+
+    ws.deliverText(observation())
+    ws.deliverText(observation({ state: 'permission_choice' }))
+
+    expect(seen).toEqual(['claude:free_text', 'claude:permission_choice'])
+  })
+
+  // A report naming another incarnation is about a different session that
+  // merely shares the id (nocx-3oupk) — and applying it would let a pane from
+  // a previous backend instance decide what this tab shows.
+  it('refuses a report from another incarnation or another session', async () => {
+    const { session, ws } = await connectedSession()
+    const seen: string[] = []
+    session.onObservation((o) => seen.push(o.state))
+
+    ws.deliverText(observation({ instanceId: '00000000000000000000000000000000' }))
+    ws.deliverText(observation({ sessionEpoch: 99 }))
+    ws.deliverText(observation({ sessionId: OTHER_SID }))
+
+    expect(seen).toEqual([])
+  })
+
+  // The set is CLOSED. A value nobody wrote a branch for would reach the
+  // indicator and land in whichever branch was written last — and every
+  // consumer treats what it cannot read as busy, which only works if what it
+  // cannot read never gets through.
+  it('refuses a state that is not in the closed set', async () => {
+    const { session, ws } = await connectedSession()
+    const seen: string[] = []
+    session.onObservation((o) => seen.push(o.state))
+
+    ws.deliverText(observation({ state: 'busy' }))
+    ws.deliverText(observation({ state: '' }))
+    ws.deliverText(observation({ state: 42 }))
+    ws.deliverText(observation({ agent: '' }))
+    ws.deliverText(observation({ agent: 7 }))
 
     expect(seen).toEqual([])
   })

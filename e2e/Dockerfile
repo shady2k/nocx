@@ -60,8 +60,12 @@ ENV GOTOOLCHAIN=local
 # shell they exist to prove is absent (nocx-gd84), so a thin image would report
 # a broken product instead of a missing package — the same reason ci.yml
 # installs dash on macOS and zsh on ubuntu.
+#
+# make, because the stand builds the remote helper's artifacts by calling
+# `make helpers` on its way up (e2e/stand.ts) rather than keeping a second
+# copy of that build matrix. Without it the suite dies in globalSetup.
 RUN apt-get update -qq \
-    && apt-get install -y -qq --no-install-recommends bash dash zsh openssh-client \
+    && apt-get install -y -qq --no-install-recommends bash dash make zsh openssh-client \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work

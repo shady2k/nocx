@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/proc"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // TestMain makes this binary the reaper of its own orphans before any test
@@ -52,19 +53,6 @@ func TestMain(m *testing.M) {
 // broken build fails instead of hanging.
 const waitCeiling = 20 * time.Second
 
-// waitFor polls pred until it holds or waitCeiling elapses.
-func waitFor(t *testing.T, what string, pred func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(waitCeiling)
-	for time.Now().Before(deadline) {
-		if pred() {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("never observed: %s", what)
-}
-
 // gone reports whether pid names no process at all — not merely a dead one.
 //
 // The distinction is half of assertion 34. Signal 0 is delivered to zombies
@@ -94,17 +82,14 @@ func reapOrphan(pid int) {
 // has become ours. The failure message is built when the wait fails, not
 // before it starts, so it reports the state the pid is actually stuck in.
 func waitGone(t *testing.T, role string, pid int) {
-	t.Helper()
-	deadline := time.Now().Add(waitCeiling)
-	for time.Now().Before(deadline) {
-		reapOrphan(pid)
-		if gone(pid) {
-			return
-		}
-		time.Sleep(2 * time.Millisecond)
-	}
-	t.Fatalf("%s (pid %d) never reached ESRCH: it is in state %q with ppid %q — a member of the killed group is still a process",
-		role, pid, procField(pid, 0), procField(pid, 1))
+	waittest.WaitForTimeoutDetail(t, role+" process to be reaped", waitCeiling,
+		func() string {
+			return fmt.Sprintf("pid %d state=%q ppid=%s", pid, procField(pid, 0), procField(pid, 1))
+		},
+		func() bool {
+			reapOrphan(pid)
+			return gone(pid)
+		})
 }
 
 // procField reads one field of a pid's /proc/<pid>/stat, counting from the
@@ -186,7 +171,7 @@ read line < "` + blocker + `"
 func (f fixture) awaitStarted(t *testing.T) (child, grandchild int) {
 	t.Helper()
 	var pids []int
-	waitFor(t, "the fixture to report both pids and the grandchild to install its trap", func() bool {
+	waittest.WaitForTimeout(t, "the fixture to report both pids and the grandchild to install its trap", waitCeiling, func() bool {
 		if _, err := os.Stat(f.readyFile); err != nil {
 			return false
 		}
@@ -235,7 +220,7 @@ func TestKillGroup_KillsATermIgnoringDescendantAndReapsTheChild(t *testing.T) {
 	// The direct child is reaped by the Wait above; without it the process
 	// would linger as a zombie of THIS process for the life of the test
 	// binary, which is the second half of assertion 34.
-	waitFor(t, "the direct child to be reaped", func() bool {
+	waittest.WaitForTimeout(t, "the direct child to be reaped", waitCeiling, func() bool {
 		select {
 		case <-done:
 			return true

@@ -114,6 +114,21 @@ func TestRoundTripAllKinds(t *testing.T) {
 			Domain: "dom-2", Epoch: 2,
 			Bootstrap: "sudo --preserve-fds=3,4 -i bash --rcfile /dev/fd/4 -i\n# with a \"quote\" and a \\backslash\n",
 		}}, 0),
+		env(lifecycle.KindAgentEnrol, lifecycle.Event{Kind: lifecycle.KindAgentEnrol, AgentEnrol: &lifecycle.AgentEnrol{
+			RequestID: "r-agent-1-0", Agent: "claude", Cols: 120, Rows: 40,
+		}}, 10),
+		env(lifecycle.KindAgentEnrolled, lifecycle.Event{Kind: lifecycle.KindAgentEnrolled, AgentEnrolled: &lifecycle.AgentEnrolled{
+			RequestID: "r-agent-1-0", Agent: "claude", Enrolled: true,
+		}}, 0),
+		env(lifecycle.KindAgentEnrolled, lifecycle.Event{Kind: lifecycle.KindAgentEnrolled, AgentEnrolled: &lifecycle.AgentEnrolled{
+			RequestID: "r-agent-1-0", Agent: "claude", Reason: "too many panes are already watched",
+		}}, 0),
+		env(lifecycle.KindAgentWithdraw, lifecycle.Event{Kind: lifecycle.KindAgentWithdraw, AgentWithdraw: &lifecycle.AgentWithdraw{
+			RequestID: "r-agent-1-0",
+		}}, 11),
+		env(lifecycle.KindAgentWithdrawn, lifecycle.Event{Kind: lifecycle.KindAgentWithdrawn, AgentWithdrawn: &lifecycle.AgentWithdrawn{
+			RequestID: "r-agent-1-0",
+		}}, 0),
 	}
 
 	for _, want := range envs {
@@ -536,5 +551,40 @@ func TestDomainRequestOptsSurviveTheWire(t *testing.T) {
 					tc.get(got), opts)
 			}
 		})
+	}
+}
+
+// The refusal must survive the wire as a refusal, and it must do so by being
+// ABSENT rather than by being present and false. `enrolled` is omitted when it
+// is false, so a shell reads consent by finding `"enrolled":true` in the frame
+// and reads everything else — a truncated frame, a frame from an older backend,
+// a frame a hostile writer half-composed — as "not orchestrated". A field that
+// travelled as `"enrolled":false` would have to be parsed correctly to be
+// refused correctly, which is the wrong way round for a fail-closed answer.
+func TestAgentEnrolmentRefusalIsAbsenceOnTheWire(t *testing.T) {
+	var yes, no bytes.Buffer
+	if _, err := Encode(&yes, env(lifecycle.KindAgentEnrolled, lifecycle.Event{
+		Kind:          lifecycle.KindAgentEnrolled,
+		AgentEnrolled: &lifecycle.AgentEnrolled{RequestID: "r-0", Agent: "claude", Enrolled: true},
+	}, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Encode(&no, env(lifecycle.KindAgentEnrolled, lifecycle.Event{
+		Kind:          lifecycle.KindAgentEnrolled,
+		AgentEnrolled: &lifecycle.AgentEnrolled{RequestID: "r-0", Agent: "claude", Reason: "no grid available"},
+	}, 0)); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(yes.String(), `"enrolled":true`) {
+		t.Errorf("consent must be on the wire as \"enrolled\":true, got %s", yes.String())
+	}
+	// And the match a reader must use is the FIELD, not the word: the event
+	// kind is itself `agent_enrolled`, so anything grepping for the bare word
+	// finds consent in every refusal. This caught the first draft of the test.
+	if strings.Contains(no.String(), `"enrolled":`) {
+		t.Errorf("a refusal must carry no enrolled field at all, got %s", no.String())
+	}
+	if !strings.Contains(no.String(), "no grid available") {
+		t.Errorf("a refusal must carry its reason for the person reading it, got %s", no.String())
 	}
 }

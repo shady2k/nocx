@@ -172,11 +172,12 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 		// methods below outlive them — they read the fact store, which stays.
 		regResponder(s.lane, "shell.footprint.status", noParams(), func(r Responder) handlerFunc {
 			h := footprintHandlers{
-				r:        r,
-				facts:    s.installedFacts,
-				resolver: s.resolver,
-				sshCfg:   s.sshConfigResolver,
-				profiles: s.profiles,
+				r:              r,
+				facts:          s.installedFacts,
+				helperInstalls: s.helperInstalls,
+				resolver:       s.resolver,
+				sshCfg:         s.sshConfigResolver,
+				profiles:       s.profiles,
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintStatus(ctx, req) }
 		}),
@@ -188,6 +189,26 @@ func (s *WSServer) shellSpecs(lane control.Admission, sessionGate control.Admiss
 				log:         s.log,
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintUninstall(ctx, req) }
+		}),
+		reg(s.lane, "shell.footprint.consent", params(validateFootprintConsentRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := footprintHandlers{
+				r:        r,
+				consent:  s.helperConsent,
+				registry: s.registry,
+				log:      s.log,
+			}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleConsent(ctx, state, req) }
+		}),
+		regResponder(s.lane, "shell.footprint.helperUninstall", params(validateFootprintHelperUninstallRaw), func(r Responder) handlerFunc {
+			h := footprintHandlers{
+				r:                 r,
+				helperInstalls:    s.helperInstalls,
+				helperUninstaller: s.helperUninstaller,
+				closer:            s.helperCloser,
+				resolver:          s.resolver,
+				log:               s.log,
+			}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleFootprintHelperUninstall(ctx, req) }
 		}),
 	}
 }
@@ -275,4 +296,61 @@ func validateFootprintUninstallRaw(raw json.RawMessage) string {
 		return "params must be a JSON object"
 	}
 	return validateProfileID(p.ProfileID)
+}
+
+// validateFootprintConsentRaw is the registered validator for
+// shell.footprint.consent: consent is granted against the host key of a
+// session this connection already owns, so the only field is the
+// backend-minted session id — the handler still checks ownership, which a
+// validator cannot see.
+func validateFootprintConsentRaw(raw json.RawMessage) string {
+	var p struct {
+		SessionID string `json:"sessionId"`
+	}
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if p.SessionID == "" {
+		return "sessionId is required"
+	}
+	if msg := validateSessionIDShape(p.SessionID); msg != "" {
+		return "sessionId " + msg
+	}
+	return ""
+}
+
+// validateFootprintHelperUninstallRaw is the registered validator for
+// shell.footprint.helperUninstall: the profileId names the connection the
+// removal dials, and the fingerprint plus path name the inventory row that
+// is forgotten once the remote directory is gone. All three are required —
+// the handler cannot prove the close-before-remove order (D25) without the
+// fingerprint, and cannot clear the observation without the path.
+func validateFootprintHelperUninstallRaw(raw json.RawMessage) string {
+	var p struct {
+		ProfileID   string `json:"profileId"`
+		Fingerprint string `json:"fingerprint"`
+		Path        string `json:"path"`
+	}
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if msg := validateProfileID(p.ProfileID); msg != "" {
+		return msg
+	}
+	if p.Fingerprint == "" {
+		return "fingerprint is required"
+	}
+	if utf8.RuneCountInString(p.Fingerprint) > maxIDRunes {
+		return fmt.Sprintf("fingerprint exceeds %d characters", maxIDRunes)
+	}
+	if hasControlChars(p.Fingerprint) {
+		return "fingerprint must not contain control characters"
+	}
+	if p.Path == "" {
+		return "path is required"
+	}
+	if hasControlChars(p.Path) {
+		return "path must not contain control characters"
+	}
+	return ""
 }

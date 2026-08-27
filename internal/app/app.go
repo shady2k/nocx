@@ -19,6 +19,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
@@ -37,8 +38,9 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/filesystem/sftp"
-	"github.com/shady2k/nocx/internal/git"
 	gitlocal "github.com/shady2k/nocx/internal/git/local"
+	"github.com/shady2k/nocx/internal/git/registry"
+	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclechannel"
 	"github.com/shady2k/nocx/internal/lifecyclepub"
@@ -48,6 +50,8 @@ import (
 	"github.com/shady2k/nocx/internal/nativeports"
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/notify"
+	"github.com/shady2k/nocx/internal/panegrid"
+	"github.com/shady2k/nocx/internal/paneobserve"
 	"github.com/shady2k/nocx/internal/procwatch"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/pty"
@@ -129,6 +133,30 @@ type App struct {
 	// the table was built; this is only the surface it reaches, and it stays
 	// UnavailableHost on every host that never calls SetAttentionHost.
 	attentionHost *notify.HostHolder
+
+	// notifyToast is the late-bound implementation behind the notify
+	// router's toast route (ADR-0029, plan D2). Same shape as attentionHost
+	// and for the same reason: the route was decided when the table was
+	// built, and only the surface it reaches arrives later — here, the
+	// WebSocket server, which New constructs after the router.
+	notifyToast *notify.ToastHolder
+
+	// notifyFeed and notifyIngress are the notification centre: ingress is
+	// the pipeline's one entry point (it stamps, records, then submits) and
+	// the feed is the bounded in-memory record the bell reads. Held here so
+	// the composition root's wiring is assertable — a feature whose write
+	// path is reachable only from its own tests is the shape nocx-rtg0
+	// shipped.
+	notifyFeed    *notify.Feed
+	notifyIngress *notify.Ingress
+
+	// notifyWindow is the live read of the debounce-window setting: the very
+	// closure the attention policy was given (notify.WithWindowSource), kept
+	// here so a test can watch the running pipeline's window follow a
+	// settings.set without waiting out a real window. It answers on every
+	// call — nothing caches the number, so nothing has to be invalidated
+	// when it moves.
+	notifyWindow notify.WindowSource
 
 	// UploadSources is the mint for upload SOURCE tickets (design R2): a
 	// file that lives on THIS machine is named to the renderer by an opaque
@@ -282,6 +310,21 @@ func (a *App) SetAttentionHost(host notify.AttentionHost) {
 	a.attentionHost.Set(host)
 }
 
+// FocusSession asks the renderer to bring the pane holding sessionID to the
+// front (nocx-jiwq.1, plan D1). It is the composition root's half of a banner
+// click: the desktop shell raises the window, and the tab is the part only the
+// renderer can do.
+//
+// It carries a SESSION and nothing else. The renderer owns session -> tab
+// (PaneManager.findBySession) and the backend cannot do it at all — a tab id
+// here would be a second addressing identity no part of the backend can own
+// (nocx-wyp3p). Nothing is returned because there is nothing a caller could do
+// with a failure: with no renderer attached the push is dropped, and stalling
+// the click callback to report that would be worse than dropping it.
+func (a *App) FocusSession(sessionID string) {
+	a.Transport.FocusSession(sessionID)
+}
+
 // Log logs a message from the frontend.
 func (a *App) Log(message string) {
 	a.Logger.Info("frontend: " + message)
@@ -419,7 +462,124 @@ func WithLogFilePath(path string) Option {
 // not a delay on anything — it is how much of a burst collapses into that one
 // summary. Eight seconds is termic's number for the same job (design §6.2),
 // long enough to absorb a build's chatter.
+//
+// It is no longer what the pipeline runs on — it is the DEFAULT of the
+// setting below, and the floor the policy falls back to if that setting is
+// ever unreadable. The two roles are the same number on purpose: a person who
+// never opens Settings gets exactly the behaviour this constant described
+// before it had a control beside it.
 const notifyDebounceWindow = 8 * time.Second
+
+// The bounds of that setting, as durations, because a duration is what the
+// thing IS — the seconds the registry stores are derived from these and never
+// spelled a second time.
+//
+// A second is the floor because below it the debounce stops being one: the
+// window exists so a loop cannot produce a notification per iteration, and at
+// a tenth of a second it very nearly can. Five minutes is the ceiling because
+// past it the leading edge is all anyone would ever see — a summary five
+// minutes after the thing it summarises is about a build the person has
+// already gone to look at. Neither bound is a safety limit; both are the
+// range in which the control still does the job it is named for.
+const (
+	notifyDebounceWindowMin = 1 * time.Second
+	notifyDebounceWindowMax = 5 * time.Minute
+)
+
+// notifyDebounceWindowSetting is that window, as the bounded number a person
+// can move. It is declared at package init beside the routing matrix and in
+// the same section, because the two are one subject: which notifications
+// reach you, and how much of a burst collapses before they do.
+//
+// The stored unit is SECONDS rather than a Duration, because the registry's
+// numbers are float64 and a control that says "8" with "seconds" beside it is
+// the only spelling a person has to read. Every conversion back to a Duration
+// happens in one place (the window source New builds), so there is no second
+// answer to what the number means.
+var notifyDebounceWindowSetting = settings.MustRegisterNumber(settings.NumberSpec{
+	Key:         "notifications.debounceSeconds",
+	Section:     notify.RouteSettingSection,
+	Label:       "Collapse repeats for",
+	Description: "After a notification goes out, further notifications of the same kind from the same tab are held back for this long and arrive as one summary naming how many there were. The first notification is never delayed — this is how much of a burst collapses behind it, not a wait before it. A change applies to the next burst: one already collapsing keeps the length it started with.",
+	DataClass:   settings.PublicConfig,
+	Default:     notifyDebounceWindow.Seconds(),
+	Min:         notifyWindowBound(notifyDebounceWindowMin),
+	Max:         notifyWindowBound(notifyDebounceWindowMax),
+	Unit:        "seconds",
+})
+
+// notifyWindowBound is a NumberSpec bound expressed as the duration it means.
+func notifyWindowBound(d time.Duration) *float64 {
+	seconds := d.Seconds()
+	return &seconds
+}
+
+// The feed's budgets. Rows alone are not a usable unit of account — a single
+// occurrence may carry 8 KiB of title and body — so both bind, and eviction is
+// always recorded in the dropped row rather than being silent.
+//
+// The collapse window is deliberately much shorter than any read lifetime. If
+// it were not, two separate acts sharing a session, kind and level (two
+// deploys an hour apart) would merge into one row simply because nobody had
+// cleared the inbox.
+const (
+	notifyFeedMaxOccurrences   = 200
+	notifyFeedMaxRetainedBytes = 1 << 20
+	notifyFeedCollapseWindow   = 30 * time.Second
+	// The tail a collapsed row retains so the panel can expand it (D2).
+	// Twenty: enough that an expansion is worth opening, small enough that
+	// a runaway session's row costs a bounded amount — the rest are
+	// counted and the expansion says so.
+	notifyFeedMaxRunRetained = 20
+)
+
+// notifyBannerTarget and notifyToastTarget are the resolved
+// Destination.Target of the two local routes: a local sink's target is its own
+// name (notify.Destination), the router carries it into every outcome, and a
+// failed delivery repeats it to say which channel failed.
+//
+// The WORD is the catalogue's, not this file's (AD-8). It used to be spelled
+// here because the table was written here; now the table is built from the
+// catalogue, which also derives the settings key of every cell from the same
+// id — so a second spelling in the composition root would be a second answer
+// to "what is this channel called". These stay as the names the composition
+// root and its tests reach for, bound to the one declaration.
+const (
+	notifyBannerTarget = notify.ChannelBanner
+	notifyToastTarget  = notify.ChannelToast
+)
+
+// notifyRouteToggles is the routing matrix as settings: one Bool per offered
+// (kind, channel) cell, declared from the catalogue.
+//
+// It is declared at package init, like every other setting, because that is
+// what a settings declaration is — MustRegisterBool appends to a list read
+// once and panics on a duplicate key, so declaring the matrix inside New would
+// panic the second time a process built an App. What New does with it is READ
+// it, which is a different thing and happens per composition root.
+//
+// Nothing here enumerates a kind or a channel: the loop is over the
+// catalogue's offered pairs, so a cell the trust bound forbids has no toggle
+// to turn on, and a kind added to the catalogue tomorrow gets its row of
+// toggles with no edit in this file (D1, D3).
+var notifyRouteToggles = registerNotifyRouteToggles()
+
+func registerNotifyRouteToggles() map[string]*settings.Bool {
+	settings.RegisterSectionGroup(notify.RouteSettingSection, "application")
+	pairs := notify.DefaultCatalogue().Pairs()
+	toggles := make(map[string]*settings.Bool, len(pairs))
+	for _, pair := range pairs {
+		toggles[pair.SettingKey()] = settings.MustRegisterBool(settings.BoolSpec{
+			Key:         pair.SettingKey(),
+			Section:     notify.RouteSettingSection,
+			Label:       pair.SettingLabel(),
+			Description: pair.SettingDescription(),
+			DataClass:   settings.PublicConfig,
+			Default:     pair.DefaultOn,
+		})
+	}
+	return toggles
+}
 
 func New(opts ...Option) (*App, error) {
 	var o optionSet
@@ -649,6 +809,21 @@ func New(opts ...Option) (*App, error) {
 	// produces no passport. The delivery planner reads it to choose the
 	// compact installed line; without it every host bootstraps.
 	installedFacts := ssh.NewInstalledFactStore(logger, docStore, "installed-facts.json")
+	// The helper consent (remote-helper design D8; the 2026-08-10 consent
+	// design): the per-machine relay-tier answer, keyed by the remote
+	// host's public-key fingerprint, and the observed helper installs the
+	// footprint surface lists. Both are backend-owned and persisted; the
+	// consent decision at git.open and the footprint listing read them, so
+	// without these lines the consent path is reachable from its own tests
+	// and nowhere else (AGENTS.md check 5).
+	helperConsent := consent.NewStore(logger, docStore, "helper-consent.json")
+	helperInstalls := consent.NewInstallStore(logger, docStore, "helper-installs.json")
+	// The helper-backed git factory and the registry that owns its live
+	// helper channels (remote-helper design D8, D25): one registry serves
+	// both the factory's per-session helpers and the uninstall surface's
+	// close-before-remove, so a machine's channels are closed by the same
+	// bookkeeping that started them.
+	helperFactory, helperReg := helperGitFactory(sshClient, helperConsent, helperInstalls, slogger)
 	// ContentDB (ADR-0018, amended 2026-08-01): the one SQLite database for
 	// unbounded private content, encrypted at rest by the adiantum VFS
 	// (ncruces/go-sqlite3 — no cgo). The real store is constructed below,
@@ -997,6 +1172,11 @@ func New(opts ...Option) (*App, error) {
 		// integration. The footprint status surface reads it; the
 		// observation RPC that used to write it was severed (ADR-0024 §1).
 		transport.WithInstalledFactStore(installedFacts),
+		// The helper footprint row (remote-helper design D8): the observed
+		// helper installs behind shell.footprint.status. Wired here so the
+		// listing and the consent path share the composition root.
+		transport.WithHelperConsentStore(helperConsent),
+		transport.WithHelperInstallStore(helperInstalls),
 		// The uninstall capability (nocx-mlm7 P10, design §9): *ssh.RealClient
 		// satisfies transport.RemoteUninstaller without an adapter — the
 		// signatures are identical. The capability owns the dial-and-call
@@ -1068,15 +1248,33 @@ func New(opts ...Option) (*App, error) {
 		// repository; the factory is the local one, and it is what makes
 		// internal/git reachable from main() at all — until this line
 		// existed the whole package was unreachable, which is the state
-		// AGENTS.md check 5 exists to catch. There is no remote factory:
-		// git.open refuses an ssh session before it reaches this, and the
-		// remote case waits on the relay (spec D3).
-		transport.WithGitRegistry(git.New()),
-		// The factory resolves the shell environment in the background from
-		// construction (nocx-6pz0) and is stopped at shutdown, so no
-		// resolution child can outlive the process; nothing after this point
-		// in New can fail, so the factory needs no earlier-return cleanup.
+		// AGENTS.md check 5 exists to catch.
+		transport.WithGitRegistry(registry.New()),
+		// The factory resolves the shell environment in the background
+		// from construction (nocx-6pz0) and is stopped at shutdown.
 		transport.WithGitRepoFactory(gitFactory),
+		// The helper-backed factory selection (remote-helper design D8):
+		// SSH sessions get a repository served over the helper when the
+		// machine's consent resolves to relay, and the refusal (or the
+		// consentRequired ask) stands otherwise. The helper client, the
+		// git factory over it and the consent path are reachable from
+		// main() only through this line (AGENTS.md check 5). The second
+		// return is the registry that OWNS the live helper channels; the
+		// uninstall surface needs it to close them before removing an
+		// install directory (D25), so the same registry is wired there.
+		transport.WithGitHelperFactory(helperFactory),
+		// The D25 channel closer (remote-helper design D25): the registry
+		// closes every live helper channel on a machine before
+		// shell.footprint.helperUninstall removes its install directory —
+		// no helper may be running out of a directory being deleted.
+		transport.WithHelperChannelCloser(helperReg),
+		// The helper-removal capability (remote-helper design D25):
+		// *ssh.RealClient satisfies transport.RemoteHelperUninstaller
+		// without an adapter — the signatures are identical. The
+		// capability owns the dial-and-remove (acquire the write-capable
+		// install lease, discover the remote home, run deploy.Uninstall
+		// over SFTP); the raw SSH client never leaves internal/ssh.
+		transport.WithRemoteHelperUninstaller(sshClient),
 		// The file-manager reveal (nocx-ngf3u): the OS-specific revealer
 		// behind the interface that already exists (FilesRevealer, one
 		// method). This is the same per-OS problem internal/contentkey
@@ -1099,6 +1297,31 @@ func New(opts ...Option) (*App, error) {
 	// (AGENTS.md check 5); the adapter creation itself lands with the
 	// shell-spawn wiring in internal/transport/ws_shell.go.
 	lifecycleKernel := lifecycle.New(lifecycle.Options{})
+	// The backend's VT grid for ENROLLED panes (nocx-szb40.2, the AD-6
+	// amendment "A live grid for an enrolled pane"). Constructed empty and
+	// process-lifetime: nothing is observed until an agent_enrol names a pane,
+	// which is what keeps enrolment an act rather than an inference. It is
+	// built HERE, ahead of the publisher, because both ends need it — the
+	// publisher opens and closes intervals through it, and the transport feeds
+	// it from the session read path.
+	paneGrid := panegrid.New(logger)
+	// One driver per agent (AD-8), validated once, here. NewRegistry fails
+	// only on a wiring mistake — a driver that cannot name its agent, or two
+	// for one agent — and a wiring mistake belongs to process start rather
+	// than to the first frame off a pane.
+	// Its own error name rather than the function's `err`: reusing that one
+	// here extends its live range past a dozen `if err := …` blocks above,
+	// and govet's shadow check then reports every one of them.
+	paneDrivers, driversErr := agentdriver.NewRegistry(agentdriver.Claude())
+	if driversErr != nil {
+		return nil, fmt.Errorf("pane drivers: %w", driversErr)
+	}
+	// What turns a grid into something a person or a wave can act on
+	// (nocx-szb40.3): it classifies a watched pane and reports only the
+	// CHANGES. Built here because both ends need it — the enroller opens an
+	// observation beside the grid's interval, and the transport touches it
+	// from the session read path and is where its reports go.
+	paneWatch := paneobserve.New(logger, paneGrid, paneDrivers)
 	// The establishment bound is stated here for the same reason the hello
 	// timeouts below are: how long a minted accept may wait for the
 	// renderer's acknowledgement before the domain is rolled back and the
@@ -1115,7 +1338,13 @@ func New(opts ...Option) (*App, error) {
 		// closure mints through the publisher and composes the opaque
 		// launch text the parent executes.
 		lifecyclepub.WithGrantBuilder(newChildGrantBuilder(logger,
-			func() *lifecyclepub.Publisher { return lifecyclePub }, childTransports, childSessions, typedSSH)))
+			func() *lifecyclepub.Publisher { return lifecyclePub }, childTransports, childSessions, typedSSH)),
+		// The enrolment act (nocx-szb40.5): the agent wrapper in the shell
+		// bundle asks over this same authenticated channel, and this is what
+		// answers. Wired here rather than defaulted anywhere, because an
+		// unwired enroller refuses every enrolment — the fail-closed half of
+		// D4, and the opposite of the grant builder above it.
+		lifecyclepub.WithAgentEnroller(newPaneEnroller(logger, childSessions, paneGrid, paneWatch)))
 	// The pty factory drives the channel against the PUBLISHER, not the raw
 	// kernel: every mutation an adapter causes must reach the renderer as a
 	// published fact, and the publisher is the only thing that projects them.
@@ -1172,18 +1401,116 @@ func New(opts ...Option) (*App, error) {
 	// run — keep UnavailableHost, and a raise there is a visible failed
 	// delivery rather than a silent drop.
 	attentionHost := &notify.HostHolder{}
-	notifyRouter, routerErr := notify.NewRouter(notify.Table{
-		{Kind: notify.KindProgramNotify, Trust: notify.TrustProgramRequest}: {
-			{Sink: notify.HostSink{Host: attentionHost}},
+	// The toast is the second attention surface and it is a SINK, not a
+	// special case in the renderer (plan D2): the router resolves it here,
+	// once, and the sink hands the event to a port the transport satisfies.
+	// A toast that the renderer chose for itself would put "where" somewhere
+	// other than the router, which is the one thing ADR-0029 §2.3 forbids.
+	//
+	// Its holder binds late for the same ordering reason the host's does, and
+	// the late half is nearer than it looks: the implementation is the
+	// WebSocket server, which is constructed BELOW this line because it is
+	// built with the pipeline already wired into it. The route is decided
+	// here; the surface arrives a few lines later.
+	notifyToast := &notify.ToastHolder{}
+	// The table is no longer written here. It is BUILT, from the catalogue and
+	// the toggles the person ticked, and swapped into the live router whenever
+	// one of them moves (D1, D4). What this composition root still decides —
+	// and the only thing it may decide — is which SINK sits behind each
+	// catalogue channel: the route is the router's, the surface is ours.
+	//
+	// Each row still names its destination, which is what makes a failed
+	// delivery able to say WHICH channel failed. The word comes from the
+	// catalogue's channel id now, so the toggle key, the routed target and the
+	// failure row all spell the surface once (AD-8).
+	//
+	// With nothing ticked the built table is exactly the four rows this file
+	// used to carry by hand — program.notify and session.ended, each to the
+	// banner and the toast — so nobody's notifications change the day the
+	// matrix lands (D2, notify.DefaultCatalogue).
+	notifyRoutes, routesErr := notify.NewRoutingSource(notify.RoutingConfig{
+		Catalogue: notify.DefaultCatalogue(),
+		Sinks: map[string]notify.Sink{
+			notifyBannerTarget: notify.HostSink{Host: attentionHost},
+			notifyToastTarget:  notify.ToastSink{Presenter: notifyToast},
 		},
-	}, notify.Limits{
-		MaxInFlight:     4,
-		MaxQueued:       32,
-		MaxRetained:     1 << 20,
-		DeliveryTimeout: 10 * time.Second,
+		Enabled: func(kindID, channelID string) bool {
+			toggle, declared := notifyRouteToggles[notify.RouteSettingKey(kindID, channelID)]
+			if !declared {
+				// A cell with no declaration is a cell nobody can turn on.
+				// Default-deny is the answer to every question this lookup
+				// cannot answer, including this one.
+				return false
+			}
+			on, readErr := settingsRegistry.GetBool(toggle)
+			if readErr != nil {
+				logger.Warn("notification routing cell unreadable; treating it as off",
+					"key", toggle.Key(), "error", readErr)
+				return false
+			}
+			return on
+		},
+		Limits: notify.Limits{
+			MaxInFlight:     4,
+			MaxQueued:       32,
+			MaxRetained:     1 << 20,
+			DeliveryTimeout: 10 * time.Second,
+		},
+		// A refused table has to be visible in the PRODUCT and not only in a
+		// log (AGENTS.md): the previous routing stays live, so from the
+		// Settings screen the change looks accepted while nothing about
+		// delivery moved — the silent degrade the UI contradicts.
+		//
+		// It goes to the toast DIRECTLY, not through the router, for the same
+		// reason a failed delivery's feed row is admitted directly (D3,
+		// notify.Feed.RecordDeliveryFailure): a complaint about the routing
+		// table cannot travel through the routing table that was just refused.
+		// The toast is the right surface rather than the feed because this is
+		// a fact about an action the person took a moment ago in this window,
+		// and because the feed's kind is a closed enum on the wire
+		// (contracts/notify.feed.read.schema.json) that has no honest value
+		// for it — smuggling one past the schema is what rule 5 forbids.
+		OnRefused: func(err error) {
+			logger.Warn("notification routing table refused; the previous routing stays live", "error", err)
+			toastCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+			_ = notifyToast.Toast(toastCtx, notify.Event{
+				Title: "Notification routing unchanged",
+				Body:  "That change was refused, so the previous routing is still in effect: " + err.Error(),
+				Level: notify.LevelWarning,
+			})
+		},
 	})
-	if routerErr != nil {
-		return nil, fmt.Errorf("notify router: %w", routerErr)
+	if routesErr != nil {
+		return nil, fmt.Errorf("notify routing: %w", routesErr)
+	}
+	notifyRouter := notifyRoutes.Router()
+	// Live routing: a Settings toggle applies without a restart, through the
+	// registry's own notifier — the same seam the History policy uses, and for
+	// the same reason (there is one change mechanism and this subscribes to
+	// it rather than growing a second).
+	//
+	// One rebuild per notification, not per key: a batch that moved three
+	// cells produces one table, and the table is a whole-value swap anyway.
+	settingsRegistry.AddNotifier(func(_ int, keys []string) {
+		for _, k := range keys {
+			if _, ours := notifyRouteToggles[k]; ours {
+				_ = notifyRoutes.Rebuild()
+				return
+			}
+		}
+	})
+
+	// The feed: the centre's memory, built BEFORE the policy because the
+	// policy's result handler records into it (see below).
+	notifyFeed, feedErr := notify.NewFeed(notify.FeedLimits{
+		MaxOccurrences:   notifyFeedMaxOccurrences,
+		MaxRetainedBytes: notifyFeedMaxRetainedBytes,
+		CollapseWindow:   notifyFeedCollapseWindow,
+		MaxRunRetained:   notifyFeedMaxRunRetained,
+	}, notify.RealClock{})
+	if feedErr != nil {
+		return nil, fmt.Errorf("notify feed: %w", feedErr)
 	}
 
 	// The attention policy sits IN FRONT of the router, so notify.raise
@@ -1199,16 +1526,88 @@ func New(opts ...Option) (*App, error) {
 	// silently swallows one they did. Debounce and coalescing need no focus
 	// and work in full from the first raise.
 	notifyFocus := &notify.FocusHolder{}
+	// The window is the user's, and it is PULLED rather than pushed: the
+	// policy asks this closure for the length of every window it opens, so
+	// the registry stays the one owner of the number and no notifier has to
+	// keep a copy of it in step (AD-8). That is why there is no
+	// AddNotifier for this setting beside the routing one above — the
+	// routing table is a built artefact that must be rebuilt when its
+	// inputs move; a window length is just a number, read when it is needed.
+	//
+	// Which window a change governs is stated at the seam that decides it
+	// (notify.WithWindowSource): a window's length is fixed from the moment
+	// it opens until the moment it closes, so a change governs every window
+	// opened after it and no window already open.
+	//
+	// An unreadable setting answers 0, which the policy reads as "fall back
+	// to the window I was constructed with" rather than "no debounce" — a
+	// zero window would deliver one notification per event, which is the
+	// flood the policy exists to prevent. So the degrade is to the default,
+	// and it says so in the log rather than only in behaviour.
+	notifyWindow := notify.WindowSource(func() time.Duration {
+		seconds, readErr := settingsRegistry.GetNumber(notifyDebounceWindowSetting)
+		if readErr != nil {
+			logger.Warn("debounce window unreadable; falling back to the default",
+				"key", notifyDebounceWindowSetting.Key(),
+				"default", notifyDebounceWindow, "error", readErr)
+			return 0
+		}
+		return time.Duration(seconds * float64(time.Second))
+	})
 	notifyPolicy, policyErr := notify.NewPolicy(
 		context.Background(), notifyRouter, notifyDebounceWindow, notifyFocus, notify.RealClock{},
+		notify.WithWindowSource(notifyWindow),
+		// The failure surface (nocx-r6pxp). notify.raise answers {} at
+		// ACCEPTANCE: under the policy the delivery can happen a debounce
+		// window later, with no caller left to fail to, so a failure past
+		// that point reached this logger.Warn and nothing else — the soft
+		// degrade visible only in a log that AGENTS.md condemns.
+		//
+		// It becomes a row in the feed, which is the thing whose whole
+		// purpose is remembering what happened while you were not looking.
+		// The row is admitted DIRECTLY through the feed and never raised
+		// back through the router that just failed: a complaint carried by
+		// the broken sink would fail the same way and produce another, and
+		// one broken sink would become an unbounded feed of complaints
+		// about being broken (RecordDeliveryFailure says the same at the
+		// seam that enforces it). The log stays: a headless host with no
+		// panel still has to be diagnosable.
 		notify.WithResultHandler(func(out notify.Outcome) {
+			// ErrUnavailable is the ONE failure that gets no row, and the
+			// line is between a channel that lost the message and a channel
+			// that does not exist on this host. UnavailableHost reports it
+			// for every raise on a build with no desktop attention surface
+			// (cmd/devharness, the dev-web harness, an e2e run), so a row
+			// per notification would say "this build has no banner" once per
+			// notification, forever, beside a notification that IS in the
+			// feed — nothing was lost, and nothing the user does can change
+			// it. That is noise, and it is the same argument the debounce
+			// makes when it refuses to put "1 notification" behind every
+			// notification.
+			//
+			// Every other host failure earns its row, and the ones that
+			// matter most are exactly the ones this keeps: the wails host
+			// returns ErrNotRequested and ErrDenied for a permission the
+			// user CAN act on (notify/wailsadapter/host.go), and a denied
+			// banner that says so in the centre is the whole point. The
+			// router still records unavailability in its outcome and the
+			// log still names it, so it stays visible where it is a fact
+			// about the host rather than about a notification.
+			record := func(channel string, err error) {
+				if errors.Is(err, notify.ErrUnavailable) {
+					return
+				}
+				notifyFeed.RecordDeliveryFailure(out.Event, channel, err)
+			}
 			if out.Err != nil {
 				logger.Warn("notification refused", "error", out.Err)
+				record(notify.ChannelPipeline, out.Err)
 				return
 			}
 			for _, r := range out.Results {
 				if r.Err != nil {
 					logger.Warn("notification delivery failed", "target", r.Route.Destination.Target, "error", r.Err)
+					record(r.Route.Destination.Target, r.Err)
 				}
 			}
 		}),
@@ -1216,7 +1615,20 @@ func New(opts ...Option) (*App, error) {
 	if policyErr != nil {
 		return nil, fmt.Errorf("notify policy: %w", policyErr)
 	}
-	tpOpts = append(tpOpts, transport.WithNotifyRaiser(notifyPolicy))
+	// Ingress is the pipeline's one entry point: it stamps what nocx owns,
+	// records the occurrence in the feed, and only THEN submits for
+	// delivery. The policy is reached THROUGH it and never around it, which
+	// is the whole inversion — before this, a suppressed notification was
+	// destroyed, so the events most worth seeing were exactly the ones
+	// nothing remembered.
+	notifyIngress, ingressErr := notify.NewIngress(notifyFeed, notifyPolicy, notify.RealClock{})
+	if ingressErr != nil {
+		return nil, fmt.Errorf("notify ingress: %w", ingressErr)
+	}
+	tpOpts = append(tpOpts,
+		transport.WithNotifyRaiser(notifyIngress),
+		transport.WithNotifyFeed(notifyFeed),
+	)
 
 	// The assistant engine (nocx-edio): eino behind the guarded HTTP
 	// client, wired at the composition root like every other client —
@@ -1237,12 +1649,32 @@ func New(opts ...Option) (*App, error) {
 		transport.WithAssistantClient(assistantClient),
 		transport.WithAssistantProbeStore(assistantProbes),
 	)
+	// The same store the publisher enrols into, on its other end: the
+	// transport is what feeds it, from the session's own read path.
+	tpOpts = append(tpOpts, transport.WithPaneGrid(paneGrid), transport.WithPaneObserver(paneWatch))
 	tp := transport.NewWSServer(logger, sess, tpOpts...)
+	// The feed's change hint, bound now that the server exists: every
+	// mutation tells the attached renderers the revision moved. It carries
+	// the revision only, so it rides the refreshable outbound queue and a
+	// dropped one costs one refetch rather than a row nobody learns about.
+	notifyFeed.OnChange(tp.BroadcastFeedChanged)
+	// The toast route's implementation, bound now that the server exists. The
+	// route itself was decided above and is not reachable from here — this
+	// binds an implementation, never a destination. The window before this
+	// line is empty: nothing can raise before the transport is listening.
+	notifyToast.Set(tp)
 	// The transport is the publisher's emitter: facts route to the lane's
 	// session's current subscriber. Bound post-construction because the
 	// server is built above; the window before this line is empty (no
 	// session can have spawned a shell yet).
 	lifecyclePub.SetEmitter(tp)
+
+	// Where a pane's classification goes, bound post-construction for the
+	// same reason as the emitter above. Without this line the backend would
+	// go on classifying every enrolled pane and telling nobody — which is
+	// precisely the silent degrade AGENTS.md names, so the watcher refuses
+	// to sweep at all until it has a destination.
+	paneWatch.SetEmitter(tp.EmitPaneObservation)
 
 	// The liveness projection's watcher (nocx-iarf9), bound here for the same
 	// reason as the emitter above. The registry decides WHEN a session's
@@ -1381,6 +1813,10 @@ func New(opts ...Option) (*App, error) {
 		logFile:          logFile,
 		procs:            procs,
 		attentionHost:    attentionHost,
+		notifyToast:      notifyToast,
+		notifyFeed:       notifyFeed,
+		notifyIngress:    notifyIngress,
+		notifyWindow:     notifyWindow,
 		UIState:          uiStateStore,
 		slogger:          slogger,
 	}
@@ -1745,6 +2181,26 @@ type lifecyclePTY struct {
 	// descriptors this session's shell inherited, and a reader outliving its
 	// shell would report a stage for a session that no longer exists.
 	bp *bootstrapprogress.Reader
+}
+
+// WaitErr forwards the shell's wait result from the pty this wraps
+// (nocx-o3amz). It exists because lifecyclePTY embeds the pty.Pty INTERFACE,
+// and a concrete type's method is not promoted through an embedded interface:
+// *pty.LocalPty.WaitErr — the only thing that knows what cmd.Wait returned —
+// was invisible to the optional-method assertion session.ExitOutcome makes, so
+// every enhanced local session classified as a LOSS. The tab hung about marked
+// "Connection lost" on a clean `exit`, and the shell's status was discarded.
+//
+// Anything else optional a pty grows needs the same forward, for the same
+// reason. The `(nil, false)` answer is not a stand-in for a clean exit: it says
+// this pty made no report, which ExitOutcome maps to a loss without inventing
+// a status.
+func (p *lifecyclePTY) WaitErr() (error, bool) {
+	provider, ok := p.Pty.(interface{ WaitErr() (error, bool) })
+	if !ok {
+		return nil, false
+	}
+	return provider.WaitErr()
 }
 
 func (p *lifecyclePTY) Close() error {

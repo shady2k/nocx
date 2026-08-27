@@ -29,6 +29,7 @@ import (
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/httppolicy"
 	"github.com/shady2k/nocx/internal/ssh"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // ─── a fake pooled SSH connection ──────────────────────────────────────────
@@ -275,7 +276,7 @@ func TestSSHDialer_CancellationReleasesTheCallerButCannotInterruptTheDial(t *tes
 	}()
 	// Cancel only once the remote dial is genuinely in flight — otherwise
 	// the pre-dial context check answers and the test proves nothing.
-	waitFor(t, "the remote dial to be in flight", func() bool { return lease.dialCount() == 1 })
+	waittest.WaitForTimeout(t, "the remote dial to be in flight", 20*time.Second, func() bool { return lease.dialCount() == 1 })
 	cancel()
 
 	err := <-returned
@@ -318,14 +319,14 @@ func TestSSHDialer_AConnectionArrivingAfterCancellationIsClosed(t *testing.T) {
 	}()
 	// The dial must be in flight before the cancel, or the pre-dial check
 	// answers and there is no late connection to close.
-	waitFor(t, "the remote dial to be in flight", func() bool { return lease.dialCount() == 1 })
+	waittest.WaitForTimeout(t, "the remote dial to be in flight", 20*time.Second, func() bool { return lease.dialCount() == 1 })
 	cancel()
 	<-returned
 
 	// Now let the remote dial complete. The connection it produces belongs
 	// to nobody, so the adapter closes it.
 	close(block)
-	waitFor(t, "the late connection to be closed", func() bool {
+	waittest.WaitForTimeout(t, "the late connection to be closed", 20*time.Second, func() bool {
 		c := lease.conn()
 		return c != nil && c.closed.Load()
 	})
@@ -373,7 +374,7 @@ func TestSSHDialer_AConnectionArrivingAfterTheTimeoutIsClosed(t *testing.T) {
 		t.Fatal("DialContext succeeded, want the timeout")
 	}
 	close(block)
-	waitFor(t, "the late connection to be closed", func() bool {
+	waittest.WaitForTimeout(t, "the late connection to be closed", 20*time.Second, func() bool {
 		c := lease.conn()
 		return c != nil && c.closed.Load()
 	})
@@ -526,20 +527,5 @@ func TestNewSSHDialer_ZeroTimeoutStillBounds(t *testing.T) {
 		if got.timeout != defaultSSHDialTimeout {
 			t.Errorf("NewSSHDialer(_, %v).timeout = %v, want the default %v", d, got.timeout, defaultSSHDialTimeout)
 		}
-	}
-}
-
-// waitFor polls a condition. It waits on an OBSERVABLE STATE CHANGE rather
-// than on a duration (AGENTS.md): a slow machine takes more passes, never a
-// different answer. The deadline is a failure report, not a timing
-// assertion.
-func waitFor(t *testing.T, what string, cond func() bool) {
-	t.Helper()
-	deadline := time.Now().Add(20 * time.Second)
-	for !cond() {
-		if time.Now().After(deadline) {
-			t.Fatalf("timed out waiting for %s", what)
-		}
-		time.Sleep(time.Millisecond)
 	}
 }

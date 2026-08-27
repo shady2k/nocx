@@ -32,6 +32,7 @@ import (
 	"github.com/creack/pty"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/lifecyclecodec"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 const (
@@ -66,6 +67,13 @@ type nestedKernel struct {
 	// frame here delivers it to the kernel's read loop on the other end —
 	// which is how the stillborn tests inject a late child frame.
 	shellFile *os.File
+	// refuseEnrolment answers agent_enrol with the fail-closed shape: an
+	// answer carrying no `enrolled` field at all. The wrapper must read that
+	// as "not orchestrated", say so in the pane, and still run the agent.
+	refuseEnrolment bool
+	// enrolReason is the sentence a refusal carries, which is what the pane
+	// prints. Empty means the kernel refuses without one.
+	enrolReason string
 	// rejected counts frames the kernel rejects: a wrong addressing tuple,
 	// a stale (non-increasing) sequence, or a frame addressed to the child
 	// domain after the parent restored (the child's interval ended — it
@@ -159,6 +167,10 @@ func (k *nestedKernel) accept(f frame, body []byte) {
 		k.sendAcceptLocked(f.Dom, f.Epoch, f.Cap)
 	case "domain_request":
 		k.grantLocked()
+	case "agent_enrol":
+		k.sendAgentAnswerLocked(f, lifecycle.KindAgentEnrolled)
+	case "agent_withdraw":
+		k.sendAgentAnswerLocked(f, lifecycle.KindAgentWithdrawn)
 	case "domain_suspended":
 		k.parentSuspended = true
 	case "domain_closed":
@@ -242,6 +254,40 @@ func (k *nestedKernel) sendAcceptLocked(dom string, epoch uint64, capHex string)
 	k.t.Logf("kernel accept sent for dom=%s", dom)
 }
 
+// sendAgentAnswerLocked answers the enrolment pair (protocol §15). The answer
+// is composed through the real codec, so a wrapper that reads it is reading the
+// bytes the real backend sends and not a shape the test invented.
+func (k *nestedKernel) sendAgentAnswerLocked(f frame, kind lifecycle.EventKind) {
+	var evt lifecycle.Event
+	switch kind {
+	case lifecycle.KindAgentEnrolled:
+		ans := &lifecycle.AgentEnrolled{
+			RequestID: lifecycle.RequestID(f.Request),
+			Agent:     f.Agent,
+			Enrolled:  !k.refuseEnrolment,
+		}
+		if k.refuseEnrolment {
+			ans.Reason = k.enrolReason
+		}
+		evt = lifecycle.Event{Kind: kind, AgentEnrolled: ans}
+	default:
+		evt = lifecycle.Event{Kind: kind, AgentWithdrawn: &lifecycle.AgentWithdrawn{
+			RequestID: lifecycle.RequestID(f.Request),
+		}}
+	}
+	env := lifecycle.Envelope{
+		Version:    lifecycle.ProtocolVersion,
+		Lane:       lifecycle.LaneID(testLane),
+		Domain:     lifecycle.DomainID(f.Dom),
+		Epoch:      f.Epoch,
+		Capability: capBytes(k.t, f.Cap),
+		Event:      evt,
+	}
+	if _, err := lifecyclecodec.Encode(k.conn, env); err != nil {
+		k.t.Fatalf("encode %s: %v", kind, err)
+	}
+}
+
 // sendRefresh pushes a refresh_request envelope at the parent's connection,
 // exactly what the adapter's Send would frame when the kernel
 // desynchronizes the parent domain (protocol §10).
@@ -284,6 +330,15 @@ func (k *nestedKernel) count(evt string) int {
 		}
 	}
 	return n
+}
+
+// orderTrace returns the §9 ordering trace. Failure details read it through
+// this rather than touching k.order directly: the detail runs on the waiting
+// goroutine while the kernel's read loop is still appending.
+func (k *nestedKernel) orderTrace() []string {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	return append([]string(nil), k.order...)
 }
 
 // events returns the accepted events.
@@ -351,13 +406,11 @@ func exportBashOptsWithExtdebug(t *testing.T, s *channelShell, k *nestedKernel) 
 	t.Helper()
 	before := k.count("complete")
 	_, _ = s.ptmx.Write([]byte("export LC_ALL=C BASHOPTS\n"))
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) && k.count("complete") == before {
-		time.Sleep(25 * time.Millisecond)
-	}
-	if k.count("complete") == before {
-		t.Fatalf("parent never completed BASHOPTS setup; output=%q", s.output())
-	}
+	waittest.WaitForTimeoutDetail(t, "BASHOPTS setup completion", 10*time.Second,
+		func() string { return fmt.Sprintf("output=%q", s.output()) },
+		func() bool {
+			return k.count("complete") > before
+		})
 }
 
 func assertNoInheritedBashDebugger(t *testing.T, s *channelShell) {
@@ -386,13 +439,9 @@ func fakeSudoWithoutPreserveFDS() string {
 func assertUnsupportedSudoRunsConventionally(t *testing.T, s *channelShell, k *nestedKernel) {
 	t.Helper()
 	_, _ = s.ptmx.Write([]byte("sudo -i\n"))
-	deadline := time.Now().Add(10 * time.Second)
-	for time.Now().Before(deadline) {
-		if strings.Contains(s.output(), "CONVENTIONAL-SUDO:") {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
+	waittest.WaitForTimeout(t, "conventional sudo output", 10*time.Second, func() bool {
+		return strings.Contains(s.output(), "CONVENTIONAL-SUDO:")
+	})
 	out := s.output()
 	if !strings.Contains(out, "CONVENTIONAL-SUDO:-i") {
 		t.Fatalf("the user's sudo command did not run conventionally; output=%q", out)
@@ -500,83 +549,58 @@ func driveNestedHappyInterval(t *testing.T, s *channelShell, k *nestedKernel, en
 	}
 
 	// The child establishes its own domain and reaches a prompt.
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		if k.count("hello") >= 2 && childPromptReady(t, k) {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if k.count("hello") < 2 {
-		t.Fatalf("no child hello; order=%v output=%q", k.order, s.output())
-	}
+	waittest.WaitForTimeoutDetail(t, "child lifecycle prompt", 20*time.Second,
+		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
+		func() bool {
+			return k.count("hello") >= 2 && childPromptReady(t, k)
+		})
 
 	// The child is a working shell: run a command inside it. The assertion
 	// is the child DOMAIN's accepted complete — not the echo text, which
 	// readline also mirrors into the pty.
 	_, _ = s.ptmx.Write([]byte("echo CHILD-SHELL-OK\n"))
-	deadline = time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		childRan := false
-		for _, e := range k.events() {
-			if e.Body["dom"] == nestedChildDom && e.Evt == "complete" {
-				childRan = true
+	waittest.WaitForTimeoutDetail(t, "child command completion", 15*time.Second,
+		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
+		func() bool {
+			for _, e := range k.events() {
+				if e.Body["dom"] == nestedChildDom && e.Evt == "complete" {
+					return true
+				}
 			}
-		}
-		if childRan {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	var childCompleted bool
-	for _, e := range k.events() {
-		if e.Body["dom"] == nestedChildDom && e.Evt == "complete" {
-			childCompleted = true
-		}
-	}
-	if !childCompleted {
-		t.Fatalf("the child never completed a command through its own domain; order=%v output=%q", k.order, s.output())
-	}
+			return false
+		})
 
 	// The child closes; the parent re-activates at its next prompt.
 	_, _ = s.ptmx.Write([]byte("exit\n"))
-	deadline = time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		k.mu.Lock()
-		done := k.parentActivated
-		k.mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	waittest.WaitForTimeoutDetail(t, "parent activation after child close", 20*time.Second,
+		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
+		func() bool {
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			return k.parentActivated
+		})
 
 	// Wait for the parent's post-activation complete + prompt_ready — the
 	// activation is the FIRST frame of the resumed boundary and the other
-	// two follow as separate writes, so asserting on the activation alone
-	// races the frames behind it (observed on the su tests under load:
-	// the accepted order ended at domain_activated while the shell had
-	// already written the rest).
-	deadline = time.Now().Add(10 * time.Second)
+	// two follow as separate writes.
 	resumed := false
-	for time.Now().Before(deadline) {
-		k.mu.Lock()
-		var sawComplete, sawReady bool
-		for _, e := range k.accepted {
-			if e.Body["dom"] == testDom && e.Evt == "complete" {
-				sawComplete = true
+	waittest.WaitForTimeoutDetail(t, "parent lifecycle after activation", 10*time.Second,
+		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
+		func() bool {
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			var sawComplete, sawReady bool
+			for _, e := range k.accepted {
+				if e.Body["dom"] == testDom && e.Evt == "complete" {
+					sawComplete = true
+				}
+				if e.Body["dom"] == testDom && e.Evt == "prompt_ready" {
+					sawReady = true
+				}
 			}
-			if e.Body["dom"] == testDom && e.Evt == "prompt_ready" {
-				sawReady = true
-			}
-		}
-		resumed = k.parentActivated && sawComplete && sawReady
-		k.mu.Unlock()
-		if resumed {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
+			resumed = k.parentActivated && sawComplete && sawReady
+			return resumed
+		})
 
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -748,22 +772,23 @@ func TestZshNestedChildStillborn(t *testing.T) {
 
 	// The parent still re-activates at its next prompt — the §9 stillborn
 	// interval is the expected path, not an error, and never a hang.
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		k.mu.Lock()
-		done := k.parentActivated
-		k.mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	waittest.WaitForTimeoutDetail(t, "parent activation after refused child", 15*time.Second,
+		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
+		func() bool {
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			return k.parentActivated
+		})
 
 	// The sentinel is written to the PTY; the activation above was observed
 	// on the CHANNEL. One transport cannot speak for the other, so wait for
 	// the sentinel itself (channelShell.run carries the long note) — and do
 	// it before taking the kernel mutex, so nothing waits while holding it.
-	waitForOutput(t, s, "STILLBORN-SUDO-RAN", 15*time.Second)
+	waittest.WaitForTimeoutDetail(t, "the STILLBORN-SUDO-RAN sentinel", 15*time.Second,
+		func() string { return fmt.Sprintf("output=%q", s.output()) },
+		func() bool {
+			return strings.Contains(s.output(), "STILLBORN-SUDO-RAN")
+		})
 
 	k.mu.Lock()
 	defer k.mu.Unlock()
@@ -882,52 +907,52 @@ func TestZshNestedChildStillbornSu(t *testing.T) {
 
 	// The parent still re-activates at its next prompt — the §9 stillborn
 	// interval is the expected path, not an error, and never a hang.
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		k.mu.Lock()
-		done := k.parentActivated
-		k.mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-
+	waittest.WaitForTimeoutDetail(t, "parent activation after authentication failure", 15*time.Second,
+		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
+		func() bool {
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			return k.parentActivated
+		})
 	k.mu.Lock()
-	if !k.parentSuspended {
-		k.mu.Unlock()
-		t.Fatalf("parent never suspended before the refused launch; order=%v output=%q", k.order, s.output())
-	}
-	if k.childHeard {
-		k.mu.Unlock()
-		t.Fatalf("a refused child still established (hello accepted); order=%v", k.order)
-	}
-	if !k.parentActivated {
-		k.mu.Unlock()
-		t.Fatalf("parent never re-activated after the stillborn child; order=%v output=%q", k.order, s.output())
-	}
+	parentSuspended := k.parentSuspended
+	childHeard := k.childHeard
+	parentActivated := k.parentActivated
 	rejectedBefore := k.rejected
+	order := append([]string(nil), k.order...)
 	k.mu.Unlock()
+	if !parentSuspended {
+		t.Fatalf("parent never suspended before the refused launch; order=%v output=%q", order, s.output())
+	}
+	if childHeard {
+		t.Fatalf("a refused child still established (hello accepted); order=%v", order)
+	}
+	if !parentActivated {
+		t.Fatalf("parent never re-activated after the stillborn child; order=%v output=%q", order, s.output())
+	}
 
 	// The sentinel is written to the PTY; k.parentActivated was observed on
 	// the CHANNEL. One transport cannot speak for the other — wait for the
 	// sentinel itself (channelShell.run carries the long note).
-	waitForOutput(t, s, "su: Authentication failure", 15*time.Second)
+	waittest.WaitForTimeoutDetail(t, "the sudo authentication failure sentinel", 15*time.Second,
+		func() string { return fmt.Sprintf("output=%q", s.output()) },
+		func() bool {
+			return strings.Contains(s.output(), "su: Authentication failure")
+		})
 
 	// A late frame from the never-established child: inject a hello with
 	// the child's full tuple after the parent restored, and assert the
 	// kernel rejects it.
 	injectLateChildFrame(t, k)
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		k.mu.Lock()
-		rejected := k.rejected
-		k.mu.Unlock()
-		if rejected > rejectedBefore {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
+	waittest.WaitForTimeoutDetail(t, "late child frame rejection", 5*time.Second,
+		func() string {
+			return fmt.Sprintf("rejected=%d order=%v", k.rejectedCount(), k.orderTrace())
+		},
+		func() bool {
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			return k.rejected > rejectedBefore
+		})
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if k.rejected <= rejectedBefore {
@@ -973,49 +998,50 @@ func TestBashNestedChildDomainSuFallback(t *testing.T) {
 
 	// The child never establishes; the parent stillborn-activates at its
 	// next prompt.
-	deadline := time.Now().Add(15 * time.Second)
-	for time.Now().Before(deadline) {
-		k.mu.Lock()
-		done := k.parentActivated
-		k.mu.Unlock()
-		if done {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
+	waittest.WaitForTimeoutDetail(t, "parent activation after fallback child", 15*time.Second,
+		func() string { return fmt.Sprintf("order=%v output=%q", k.orderTrace(), s.output()) },
+		func() bool {
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			return k.parentActivated
+		})
 
 	k.mu.Lock()
-	if !k.parentSuspended {
-		k.mu.Unlock()
-		t.Fatalf("parent never suspended before the fallback launch; order=%v output=%q", k.order, s.output())
-	}
-	if k.childHeard {
-		k.mu.Unlock()
-		t.Fatalf("a descriptor-closed child still established (hello accepted); order=%v", k.order)
-	}
-	if !k.parentActivated {
-		k.mu.Unlock()
-		t.Fatalf("parent never re-activated after the fallback child; order=%v output=%q", k.order, s.output())
-	}
+	parentSuspended := k.parentSuspended
+	childHeard := k.childHeard
+	parentActivated := k.parentActivated
 	rejectedBefore := k.rejected
+	order := append([]string(nil), k.order...)
 	k.mu.Unlock()
+	if !parentSuspended {
+		t.Fatalf("parent never suspended before the fallback launch; order=%v output=%q", order, s.output())
+	}
+	if childHeard {
+		t.Fatalf("a descriptor-closed child still established (hello accepted); order=%v", order)
+	}
+	if !parentActivated {
+		t.Fatalf("parent never re-activated after the fallback child; order=%v output=%q", order, s.output())
+	}
 
 	// PTY sentinel after a CHANNEL wait: wait for the sentinel itself.
-	waitForOutput(t, s, "FALLBACK-CHILD-RAN", 15*time.Second)
+	waittest.WaitForTimeoutDetail(t, "the FALLBACK-CHILD-RAN sentinel", 15*time.Second,
+		func() string { return fmt.Sprintf("output=%q", s.output()) },
+		func() bool {
+			return strings.Contains(s.output(), "FALLBACK-CHILD-RAN")
+		})
 
 	// A late frame from the never-established child is rejected and
 	// counted.
 	injectLateChildFrame(t, k)
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		k.mu.Lock()
-		rejected := k.rejected
-		k.mu.Unlock()
-		if rejected > rejectedBefore {
-			break
-		}
-		time.Sleep(25 * time.Millisecond)
-	}
+	waittest.WaitForTimeoutDetail(t, "late fallback child frame rejection", 5*time.Second,
+		func() string {
+			return fmt.Sprintf("rejected=%d order=%v", k.rejectedCount(), k.orderTrace())
+		},
+		func() bool {
+			k.mu.Lock()
+			defer k.mu.Unlock()
+			return k.rejected > rejectedBefore
+		})
 	k.mu.Lock()
 	defer k.mu.Unlock()
 	if k.rejected <= rejectedBefore {

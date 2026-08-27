@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/waittest"
 )
 
 // stubProvider records how the binding drives its provider. watchErrs makes
@@ -470,6 +471,7 @@ func TestRegistryConcurrentUse(t *testing.T) {
 	}
 	ctx := context.Background()
 	var wg sync.WaitGroup
+	acquired := make(chan struct{}, 64)
 	for i := 0; i < 64; i++ {
 		wg.Add(1)
 		go func(i int) {
@@ -478,6 +480,7 @@ func TestRegistryConcurrentUse(t *testing.T) {
 			if err != nil {
 				return // closed underneath us is fine
 			}
+			acquired <- struct{}{}
 			defer release()
 			var hr *ErrHandleReleased
 			if _, err := h.Root(ctx); err != nil && !errors.As(err, &hr) {
@@ -485,7 +488,14 @@ func TestRegistryConcurrentUse(t *testing.T) {
 			}
 		}(i)
 	}
-	time.Sleep(2 * time.Millisecond) // let some acquires land before the close
+	waittest.WaitFor(t, "an acquire to reach the provider", func() bool {
+		select {
+		case <-acquired:
+			return true
+		default:
+			return false
+		}
+	})
 	reg.CloseSession("s1")
 	wg.Wait()
 }

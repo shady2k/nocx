@@ -1,6 +1,13 @@
 # ADR-0002 — Native tabs; no embedded multiplexer
 
-- **Status:** Accepted
+- **Status:** Accepted; **superseded in part 2026-08-25** by the `AD-6` amendment "A live
+  grid for a participant pane" (`nocx-szb40.2`). The decision to own tabs natively and embed
+  no multiplexer **stands unchanged**. What no longer holds without qualification is the
+  first consequence below: the backend now keeps a VT grid for a pane explicitly ENROLLED for
+  observation, bounded by an interval and limited to two powers. Enrolment is an act, not an
+  inference about what a pane is running, so the set is bounded and auditable. Every
+  unenrolled pane is as this ADR describes. The revisit trigger named at the bottom of this document — a session
+  that survives the client process entirely — is what fired.
 - **Date:** 2026-07-21
 - **Related:** `AD-6`, epic `nocx-8yg` (Terminal UI), `nocx-8yg.1`, `nocx-8yg.3`,
   `nocx-2ho.3`, `nocx-2ho.5`
@@ -40,6 +47,13 @@ only — no code, and no place in the process tree.
 ## Consequences
 
 - **AD-6 stands.** No VT grid on the Go side; render state stays in the frontend.
+  **Amended 2026-08-25 (`nocx-szb40.2`):** true for every pane except one explicitly enrolled for
+  observation, where the backend keeps a grid for the length of that enrolment and may
+  decide exactly two things from it — whether nocx may type into that pane, and what its
+  indicator shows. It may never decide wave state, a lifecycle attempt or an execution
+  attempt. See the `AD-6` bullet in `docs/architecture.md` for the interval and the full
+  refusal list. Render state for the USER's terminal still stays in the frontend, which is
+  what this consequence was protecting.
 - We own the work: `nocx-8yg.1` (tab bar), `nocx-8yg.3` (restore tabs on
   restart), `nocx-2ho.5` (multi-session over one WS), `nocx-2ho.3` (reconnect).
   None of it gets outsourced.

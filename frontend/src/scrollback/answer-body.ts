@@ -73,8 +73,9 @@ export interface AnswerBody {
    *  the open row first, so text arriving afterwards cannot be written into a
    *  row that sits BEFORE the element. */
   insert(node: HTMLElement): void
-  /** No more text: drop the trailing empty rows the '\n'-terminated stream
-   *  leaves behind, in the body and inside a fence alike. */
+  /** No more text: paint a final non-empty partial row, then drop trailing
+   *  empty rows the '\n'-terminated stream leaves behind, in the body and
+   *  inside a fence alike. */
   finish(): void
 }
 
@@ -134,7 +135,9 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
   const codeContainer = (): HTMLElement => {
     if (!codeEl) {
       const container = document.createElement('div')
-      container.className = 'cmd-output-code'
+      container.className = 'cmd-output-code ui-code-block ui-code-block-wrap'
+      container.dataset.variant = 'answer'
+      container.tabIndex = 0
       outputEl.appendChild(container)
       codeEl = container
       if (opts.copy) {
@@ -148,6 +151,49 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
       }
     }
     return codeEl
+  }
+
+  const completeRow = (row: HTMLSpanElement, line: string): void => {
+    if (!started && line.trim() === '') {
+      row.remove()
+      return
+    }
+    started = true
+    if (FENCE_MARKER.test(line)) {
+      const opening = !inFence
+      row.dataset.fenceDelim = opening ? 'open' : 'close'
+      inFence = opening
+      if (opening) {
+        // The opener belongs to the code region it opens: a fresh
+        // container, with the marker as its first row.
+        codeEl = null
+        row.remove()
+        codeContainer().appendChild(row)
+        fenceLang = fenceLanguage(line)
+      }
+      // The closer was created inside the code region and stays there; the
+      // rows after it go back to the prose body.
+      //
+      // NEITHER DELIMITER IS PAINTED. They mark where the region starts
+      // and ends; they are not code, and they are not prose whose
+      // asterisks mean anything. Leaving them as plain text is also
+      // what keeps `Copy output` returning the answer with its fence
+      // markers intact, which is a contract this block already had
+      // (nocx-juau).
+    } else if (inFence) {
+      // A code row. The EXISTING lexer, on a shell fence only
+      // (SHELL_FENCE above says why), through the one painter that also
+      // catches up if the grammar has not loaded — an answer that
+      // arrives in the first milliseconds of a launch must not stay
+      // grey forever.
+      if (SHELL_FENCE.has(fenceLang) && line !== '') paintShellInto(row, line, store)
+    } else {
+      // Prose. The structure a model actually emits, painted per
+      // completed line, with every byte escaped (nocx-swoje;
+      // ui/answer-markdown.ts owns the whole grammar and says what it
+      // deliberately does not render).
+      paintAnswerLine(row, line)
+    }
   }
 
   const makeRow = (): HTMLSpanElement => {
@@ -177,48 +223,8 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
           if (!partial) partial = makeRow()
           partial.textContent += part
           const row = partial
-          const line = partial.textContent
           partial = null
-          if (!started && line.trim() === '') {
-            row.remove()
-            continue
-          }
-          started = true
-          if (FENCE_MARKER.test(line)) {
-            const opening = !inFence
-            row.dataset.fenceDelim = opening ? 'open' : 'close'
-            inFence = opening ? true : false
-            if (opening) {
-              // The opener belongs to the code region it opens: a fresh
-              // container, with the marker as its first row.
-              codeEl = null
-              row.remove()
-              codeContainer().appendChild(row)
-              fenceLang = fenceLanguage(line)
-            }
-            // The closer was created inside the code region and stays there;
-            // the rows after it go back to the prose body.
-            //
-            // NEITHER DELIMITER IS PAINTED. They mark where the region starts
-            // and ends; they are not code, and they are not prose whose
-            // asterisks mean anything. Leaving them as plain text is also
-            // what keeps `Copy output` returning the answer with its fence
-            // markers intact, which is a contract this block already had
-            // (nocx-juau).
-          } else if (inFence) {
-            // A code row. The EXISTING lexer, on a shell fence only
-            // (SHELL_FENCE above says why), through the one painter that also
-            // catches up if the grammar has not loaded — an answer that
-            // arrives in the first milliseconds of a launch must not stay
-            // grey forever.
-            if (SHELL_FENCE.has(fenceLang) && line !== '') paintShellInto(row, line, store)
-          } else {
-            // Prose. The structure a model actually emits, painted per
-            // completed line, with every byte escaped (nocx-swoje;
-            // ui/answer-markdown.ts owns the whole grammar and says what it
-            // deliberately does not render).
-            paintAnswerLine(row, line)
-          }
+          completeRow(row, row.textContent ?? '')
         } else {
           // The final segment stays partial — the next chunk continues it.
           if (!partial) partial = makeRow()
@@ -238,7 +244,13 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
     },
 
     finish(): void {
-      partial = null
+      if (partial) {
+        const row = partial
+        partial = null
+        const line = row.textContent ?? ''
+        if (line.trim() === '') row.remove()
+        else completeRow(row, line)
+      }
       for (;;) {
         const last = outputEl.lastElementChild
         if (!last) {

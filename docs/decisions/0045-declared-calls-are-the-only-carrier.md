@@ -1,4 +1,4 @@
-# ADR-0042 — Declared tool calls are the assistant's only carrier
+# ADR-0045 — Declared tool calls are the assistant's only carrier
 
 - **Status:** Accepted
 - **Date:** 2026-08-27

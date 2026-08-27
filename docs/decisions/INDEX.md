@@ -67,7 +67,7 @@ When a collision is cited by number alone, disambiguate by filename.
 | 0039 | [An assistant turn is one ledger entry](0039-an-assistant-turn-is-one-entry.md)                                                   | Accepted (2026-08-23)                |
 | 0040 | [A block is a node in an ordered tree](0040-a-block-is-a-node-in-an-ordered-tree.md)                                              | Accepted (2026-08-23)                |
 | 0041 | [charmbracelet/x/vt is the backend's emulator, chosen by column geometry](0041-x-vt-as-the-backend-emulator.md)                   | Accepted (2026-08-25)                |
-| 0042 | [Declared tool calls are the assistant's only carrier](0042-declared-calls-are-the-only-carrier.md)                               | Accepted (2026-08-27)                |
+| 0045 | [Declared tool calls are the assistant's only carrier](0045-declared-calls-are-the-only-carrier.md)                               | Accepted (2026-08-27)                |
 
 ## Adding one
 

@@ -1,6 +1,7 @@
 package content_test
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/content"
@@ -94,5 +95,54 @@ func TestLiteralInvocationRuleRejectsPatternCharacters(t *testing.T) {
 	rule, err := content.LiteralInvocationRule(invocation, content.DecisionPermit)
 	if err == nil {
 		t.Fatalf("literal rule for %q was minted: %+v", invocation.Commands, rule)
+	}
+}
+
+func TestStandingRuleUsesCanonicalSingleInvocationLabel(t *testing.T) {
+	rule, reason := content.StandingRule(content.Invocation{
+		Commands: [][]string{{"df", "-h"}},
+		Parsed:   true,
+	})
+	if reason != "" {
+		t.Fatalf("standing rule reason = %q, want none", reason)
+	}
+	if got := rule.Label(); got != "df -h" {
+		t.Fatalf("standing rule label = %q, want canonical invocation %q", got, "df -h")
+	}
+	if len(rule.Pattern) != 1 || len(rule.Pattern[0]) != 2 ||
+		rule.Pattern[0][0] != "df" || rule.Pattern[0][1] != "-h" {
+		t.Fatalf("standing rule pattern = %#v, want the canonical invocation tokens", rule.Pattern)
+	}
+}
+
+func TestStandingRuleRefusesInvocationsItCannotShowCompletely(t *testing.T) {
+	tests := []struct {
+		name   string
+		inv    content.Invocation
+		reason string
+	}{
+		{
+			name:   "exec wrapper",
+			inv:    content.Invocation{Commands: [][]string{{"sudo", "df", "-h"}}, Parsed: true, Disqualified: true},
+			reason: "wrapper",
+		},
+		{
+			name:   "compound command",
+			inv:    content.Invocation{Commands: [][]string{{"df", "-h"}, {"rm", "-rf", "/"}}, Parsed: true, Disqualified: true},
+			reason: "more than one command",
+		},
+		{
+			name:   "unparsed",
+			inv:    content.Invocation{Parsed: false},
+			reason: "could not be parsed",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rule, reason := content.StandingRule(test.inv)
+			if reason == "" || !strings.Contains(reason, test.reason) {
+				t.Fatalf("standing rule = %#v, reason = %q, want reason containing %q", rule, reason, test.reason)
+			}
+		})
 	}
 }

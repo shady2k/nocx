@@ -36,6 +36,7 @@ type scopeHarness struct {
 	policy assistant.GlobalPolicy
 	sid    string
 	runID  int64
+	asked  agentApprovalRequested
 }
 
 // suspendedRun leaves a run suspended on a readScreen-shaped policy ask
@@ -99,8 +100,12 @@ func suspendedRunWith(t *testing.T, policy assistant.GlobalPolicy, client *scrip
 	if errObj != nil {
 		t.Fatalf("ask: %+v", errObj)
 	}
-	readNotification(t, h.conn, "agent.approvalRequested", 5*time.Second)
-	return &scopeHarness{askHarness: h, policy: policy, sid: sid, runID: res.RunID}
+	raw := readNotification(t, h.conn, "agent.approvalRequested", 5*time.Second)
+	var asked agentApprovalRequested
+	if err := json.Unmarshal(raw, &asked); err != nil {
+		t.Fatalf("approvalRequested: %v", err)
+	}
+	return &scopeHarness{askHarness: h, policy: policy, sid: sid, runID: res.RunID, asked: asked}
 }
 
 // answer is the renderer's literal payload for this run's proposal.
@@ -239,6 +244,54 @@ func TestAgentApprove_CommandLiteralWildcardIsNotSavedAsStandingRule(t *testing.
 			}
 			if len(h.policy.Policy().Rules) != 0 {
 				t.Fatalf("global rules = %+v, want none", h.policy.Policy().Rules)
+			}
+		})
+	}
+}
+
+func TestAgentApprove_ScopeAlways_CompoundInvocationIsNotSavedAsStandingRule(t *testing.T) {
+	h := suspendedCommandRun(t, askPolicyStore(t), content.Invocation{
+		Commands: [][]string{{"df", "-h"}, {"rm", "-rf", "/"}},
+		Parsed:   true,
+	})
+
+	got := h.approve(t, "always")
+	if !strings.Contains(got.Warning, "more than one command") {
+		t.Fatalf("warning = %q, want the compound-invocation refusal reason", got.Warning)
+	}
+	if len(h.overlay().Rules) != 0 {
+		t.Fatalf("session rules = %+v, want none", h.overlay().Rules)
+	}
+	if len(h.policy.Policy().Rules) != 0 {
+		t.Fatalf("global rules = %+v, want none", h.policy.Policy().Rules)
+	}
+}
+
+func TestAgentApprovalRequested_StandingOfferOmitsUnshowableInvocations(t *testing.T) {
+	tests := []struct {
+		name   string
+		inv    content.Invocation
+		reason string
+	}{
+		{
+			name:   "exec wrapper",
+			inv:    content.Invocation{Commands: [][]string{{"sudo", "df", "-h"}}, Parsed: true, Disqualified: true},
+			reason: "wrapper",
+		},
+		{
+			name:   "compound command",
+			inv:    content.Invocation{Commands: [][]string{{"df", "-h"}, {"rm", "-rf", "/"}}, Parsed: true, Disqualified: true},
+			reason: "more than one command",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			h := suspendedCommandRun(t, askPolicyStore(t), test.inv)
+			if h.asked.Standing.Available || h.asked.Standing.Rule != "" {
+				t.Fatalf("standing offer = %+v, want no standing control", h.asked.Standing)
+			}
+			if !strings.Contains(h.asked.Standing.Reason, test.reason) {
+				t.Fatalf("standing reason = %q, want %q", h.asked.Standing.Reason, test.reason)
 			}
 		})
 	}
@@ -527,6 +580,9 @@ func TestAgentApprove_ScopeAlways_RealRunClassificationWritesAnInvocationRule(t 
 	if n.Effect != string(content.EffectObserve) {
 		t.Fatalf("approval effect = %q, want observe — the call is read-only", n.Effect)
 	}
+	if !n.Standing.Available || n.Standing.Rule != "df -h" || n.Standing.Reason != "" {
+		t.Fatalf("standing offer = %+v, want the exact canonical invocation df -h", n.Standing)
+	}
 
 	got, errObj := approveOverWire(t, h.conn, map[string]any{
 		"runId": n.RunID, "attempt": n.Attempt, "tool": n.Tool,
@@ -540,6 +596,9 @@ func TestAgentApprove_ScopeAlways_RealRunClassificationWritesAnInvocationRule(t 
 	}
 	if got := policy.Policy().Rules; len(got) != 1 {
 		t.Fatalf("rules = %+v, want one exact invocation rule", got)
+	}
+	if got := policy.Policy().Rules[0].Label(); got != n.Standing.Rule {
+		t.Fatalf("saved rule label = %q, want the notification's rule sentence %q", got, n.Standing.Rule)
 	}
 	want := content.Invocation{Commands: [][]string{{"df", "-h"}}, Parsed: true}
 	if d := policy.Policy().DecisionForInvocation(content.EffectObserve, want); d != content.DecisionPermit {

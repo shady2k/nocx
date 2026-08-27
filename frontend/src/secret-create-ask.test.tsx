@@ -90,6 +90,17 @@ describe('SecretCreateDialog', () => {
     mount(ask({ value: 'word' }), vault)
     expect(valueInput().value).toBe('word')
   })
+  it('keeps the save action in the dialog footer, not beside the value field', () => {
+    const vault = vaultWith([])
+    mount(ask(), vault)
+    const footer = document.querySelector('.nocx-dialog__actions')!
+
+    const footerButtons = Array.from(footer.querySelectorAll('button')).map((button) =>
+      button.textContent?.trim(),
+    )
+    expect(footerButtons).toEqual(['Cancel', 'Save to vault'])
+    expect(document.querySelector('.ui-secret-value-field button')).toBeNull()
+  })
 
   it('opens with an empty value when the door knows none', () => {
     const vault = vaultWith([])

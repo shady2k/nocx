@@ -2,7 +2,7 @@ import { createSignal, Show, untrack, type JSX } from 'solid-js'
 import { Button } from './ui/button'
 import { Dialog } from './ui/dialog'
 import { Field } from './ui/field'
-import { SecretValueField } from './ui/secret-value-field'
+import { SecretValueField, type SecretValueFieldAction } from './ui/secret-value-field'
 import { Select, type SelectOption } from './ui/select'
 import { Stack } from './ui/stack'
 import { TextField } from './ui/text-field'
@@ -58,6 +58,9 @@ function SecretCreateForm(
   const [name, setName] = createSignal(untrack(() => props.ask.name))
   const [kind, setKind] = createSignal<VaultSecretKind>(untrack(() => props.ask.kind))
   const [nameError, setNameError] = createSignal('')
+  // The field registers an action, never its draft, so the footer can submit
+  // without taking ownership of the secret value.
+  const [submitAction, setSubmitAction] = createSignal<SecretValueFieldAction>()
 
   const submit = async (value: string): Promise<void> => {
     const candidate = name().trim()
@@ -102,7 +105,21 @@ function SecretCreateForm(
       open={true}
       onClose={props.onClose}
       title="Create secret"
-      footer={<Button onClick={props.onClose}>Cancel</Button>}
+      onSubmit={() => submitAction()?.invoke()}
+      footer={
+        <>
+          <Button variant="default" onClick={props.onClose}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            disabled={submitAction()?.disabled() ?? true}
+            onClick={() => submitAction()?.invoke()}
+          >
+            Save to vault
+          </Button>
+        </>
+      }
     >
       <Stack gap="default">
         <TextField
@@ -129,7 +146,10 @@ function SecretCreateForm(
             id="secret-create-value"
             ariaLabel="Value"
             placeholder="Paste the secret value"
-            actionLabel="Save to vault"
+            actionPlacement="external"
+            onSubmitAction={(action) => {
+              setSubmitAction(action)
+            }}
             title="Save secret to vault"
             initialValue={props.ask.value}
             onSubmit={submit}

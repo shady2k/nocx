@@ -27,8 +27,12 @@
  * same store, and a second field with its own clearing rules would have been
  * two vocabularies for the one moment a credential is on screen — so it moved
  * here and both surfaces place it.
+ * An external placement receives only the submit action through
+ * `onSubmitAction`; it never receives the value or a draft. The default keeps
+ * the action beside the field, while a dialog can place its own Button in the
+ * footer and invoke that action.
  */
-import { createSignal } from 'solid-js'
+import { createSignal, onMount, Show } from 'solid-js'
 import { Button } from './button'
 import { TextField } from './text-field'
 
@@ -62,16 +66,31 @@ export interface SecretValueFieldProps {
   /** Where the value goes, exactly once. A rejection is a refusal and its
    *  message is shown on the field; resolving means it landed. */
   onSubmit: (value: string) => Promise<unknown> | undefined
+  /**
+   * Receives the submit action for an external button. This callback carries
+   * an action, never the value or a draft, so the field keeps its ownership.
+   */
+  onSubmitAction?: (action: SecretValueFieldAction) => void
+  /** Keep the action beside the field (default) or expose it to its surface. */
+  actionPlacement?: 'inline' | 'external'
+}
+
+export interface SecretValueFieldAction {
+  /** Invoke the field's submit path without receiving its value. */
+  invoke: () => void
+  /** Whether invoking now would be a no-op. */
+  disabled: () => boolean
 }
 
 export function SecretValueField(props: SecretValueFieldProps) {
   const [value, setValue] = createSignal(props.initialValue ?? '')
   const [busy, setBusy] = createSignal(false)
   const [refused, setRefused] = createSignal('')
+  const isDisabled = (): boolean => value() === '' || busy() || props.disabled === true
 
   const submit = (): void => {
     const typed = value()
-    if (typed === '' || busy() || props.disabled === true) return
+    if (isDisabled()) return
     setBusy(true)
     setRefused('')
     void Promise.resolve(props.onSubmit(typed))
@@ -83,6 +102,13 @@ export function SecretValueField(props: SecretValueFieldProps) {
       })
       .finally(() => setBusy(false))
   }
+  const submitAction: SecretValueFieldAction = {
+    invoke: submit,
+    disabled: isDisabled,
+  }
+  // The external surface receives this action, never `typed`: the value remains
+  // owned by this component even when its button lives in a dialog footer.
+  onMount(() => props.onSubmitAction?.(submitAction))
 
   return (
     <div class="ui-secret-value-field">
@@ -95,13 +121,11 @@ export function SecretValueField(props: SecretValueFieldProps) {
         error={refused() !== '' ? refused() : undefined}
         onInput={setValue}
       />
-      <Button
-        disabled={value() === '' || busy() || props.disabled === true}
-        title={props.title}
-        onClick={submit}
-      >
-        {props.actionLabel ?? 'Store'}
-      </Button>
+      <Show when={(props.actionPlacement ?? 'inline') === 'inline'}>
+        <Button disabled={isDisabled()} title={props.title} onClick={submit}>
+          {props.actionLabel ?? 'Store'}
+        </Button>
+      </Show>
     </div>
   )
 }

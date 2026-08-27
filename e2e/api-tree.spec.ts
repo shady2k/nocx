@@ -66,12 +66,13 @@
  * credential-secrecy walk; this file owns tree geometry and keeps no second
  * copy of that question.
  */
-import { test as base, expect, type Locator, type Page } from '@playwright/test'
+import { test as base, expect, type Locator } from '@playwright/test'
 import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { bindEndpoint, collectionsDir, VaultBackend, type DisposableRoot } from './harness'
+import { collectionsDir, VaultBackend, type DisposableRoot } from './harness'
+import { openWorkbench, PLAYGROUND, RATE_LIMIT, treeRow, ZEN } from './api-workbench'
 import { readStand } from './stand'
 
 const test = base
@@ -79,20 +80,6 @@ const test = base
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
 const devharnessBin = (): string => readStand().devharness
-
-/**
- * The built-in collection and its two seeded requests
- * (internal/apicoll/starter.go). They are the setup these tests would
- * otherwise have to build: a collection that is already open, with two
- * requests whose names are far enough apart to tell one row from another.
- *
- * Named as constants rather than typed into each assertion so that a rename
- * of the seed is one edit here, and so a reader can see at a glance that
- * nothing in this file invented a fixture.
- */
-const PLAYGROUND = 'Playground'
-const ZEN = 'Zen'
-const RATE_LIMIT = 'Rate limit'
 
 /** What a copy is called: `freeCopyName` in api-store.ts, whose rule is
  *  "<name> copy", then "<name> copy 2". Spelled here because the whole point
@@ -116,25 +103,6 @@ const SAVED_URL = 'https://example.invalid/weekly'
  *  again. */
 const MALFORMED_NAME = 'post-broker-access.json'
 const MALFORMED_REASON = 'json: unknown field "var"'
-
-/**
- * A row in the tree, by the name it shows.
- *
- * By the name span's `title`, which the kit sets to the row's name — or,
- * on a malformed row, to the reason it could not be read (ui/tree-row.tsx
- * takes a `hint`, and api-pane.tsx passes the malformed file's reason;
- * the title is the exception to the "name and nothing else" rule). So
- * this matches a request or folder row EXACTLY, and a malformed row is
- * found by its `data-row-key` (`${handle}:!${relPath}`) instead — which
- * is how the fourth test locates one. A text filter would not: `Zen` is
- * a prefix of `Zen copy`, and the whole subject of the second test is
- * that both are on screen at once.
- */
-function treeRow(page: Page, workbench: Locator, name: string): Locator {
-  return workbench
-    .locator('.api-tree__row')
-    .filter({ has: page.locator(`.ui-tree-row__name[title="${name}"]`) })
-}
 
 /** What a menu is offering, once it is on screen. The wait is part of the
  *  read: `allTextContents` does not retry, so asking before the popover has
@@ -162,37 +130,10 @@ test.describe('the collections tree: folders, a row’s acts, and the mark that 
     backend?.stop()
   })
 
-  /**
-   * Reach the workbench the way a person does, and answer with it.
-   *
-   * The waits are preconditions rather than assertions about the subject: the
-   * tab title is the app having started, and the two seeded rows are the
-   * first listing having landed. Waiting on `Zen` specifically rather than on
-   * "some row" is what makes a later `Zen copy` a second row rather than a
-   * race with the first one arriving.
-   */
-  const openWorkbench = async (page: Page): Promise<Locator> => {
-    const ep = await backend.start()
-    await bindEndpoint(page, ep)
-    await page.goto('/')
-    await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
-
-    // The activity-bar entry, which design §9.2 says opens or focuses the
-    // pane. Reaching the workbench any other way would prove the workbench
-    // works and say nothing about whether it can be got to.
-    await page.locator('.activity-bar button[data-action="api"]').click()
-    const workbench = page.locator('.api-workbench')
-    await expect(workbench).toBeVisible({ timeout: 15_000 })
-    await expect(treeRow(page, workbench, PLAYGROUND)).toBeVisible({ timeout: 15_000 })
-    await expect(treeRow(page, workbench, ZEN)).toBeVisible({ timeout: 15_000 })
-    await expect(treeRow(page, workbench, RATE_LIMIT)).toBeVisible({ timeout: 15_000 })
-    return workbench
-  }
-
   test('a person makes a folder in a collection, another inside it, and saves a request into the inner one', async ({
     page,
   }) => {
-    const workbench = await openWorkbench(page)
+    const workbench = await openWorkbench(page, backend)
     const folderMenu = page.getByTestId('api-folder-row-menu')
 
     // ── The door: the right button on the collection's own row ────────────
@@ -334,7 +275,7 @@ test.describe('the collections tree: folders, a row’s acts, and the mark that 
   test('the right button on a request row offers its acts, the header’s ⋮ offers the same list, and each aims at its own request', async ({
     page,
   }) => {
-    const workbench = await openWorkbench(page)
+    const workbench = await openWorkbench(page, backend)
     const requestMenu = page.getByTestId('api-request-row-menu')
 
     // ── The row's own menu, where the webview's used to be ────────────────
@@ -428,7 +369,7 @@ test.describe('the collections tree: folders, a row’s acts, and the mark that 
   })
 
   test('the tree marks the request that is open, and the mark moves with it', async ({ page }) => {
-    const workbench = await openWorkbench(page)
+    const workbench = await openWorkbench(page, backend)
 
     /** Every REQUEST row wearing the kit's selected mark. Scoped by
      *  `data-rel-path`, which only a request row carries: a collection row is
@@ -473,7 +414,7 @@ test.describe('the collections tree: folders, a row’s acts, and the mark that 
   test('a file the format does not recognise is a row that says why, and can be deleted', async ({
     page,
   }) => {
-    const workbench = await openWorkbench(page)
+    const workbench = await openWorkbench(page, backend)
 
     // ── The file, seeded on disk AFTER the first listing ──────────────────
     //

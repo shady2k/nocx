@@ -326,6 +326,37 @@ a returning author six months from now will reach for.
 When RU lands (§12) a fourth check compares the set of section `id`s across the two files
 and fails on any difference.
 
+## 11b. Amended 2026-08-28 — the page may run ahead of the tag, never behind
+
+Two checks arrived after §11 was written and are recorded here rather than left
+to be rediscovered from the script.
+
+**The RU parity check** is the fourth §11 anticipated: the set of section `id`s
+in `site/index.html` and `site/ru/index.html` must be identical. Two
+near-identical files drift, and the safety caveats drift first.
+
+**The version check was two-sided and should never have been.** It compared the
+committed `data-version` against the newest tag and failed on any difference.
+That made the ordinary state of a release unrepresentable. The landing is part
+of a release, not a thing published after one: the copy describing vNEXT is
+written, reviewed and merged _before_ vNEXT is tagged. Under equality the
+release commit could not be committed until the tag existed, and the tag could
+not be cut until the commit did — so the only way through was to leave the page
+describing the previous release and fix it afterwards, which is precisely the
+failure the check was bought to prevent, arrived at by obeying the check.
+
+So it is one-sided. **Behind the newest tag fails; equal or ahead passes.**
+Being ahead is safe to publish because `pages.yml` stamps `data-version` and
+`data-released` from the newest tag on every deploy: what the file holds is the
+version being shipped, what a visitor reads is the version that shipped, and the
+download button can never point at a tag nobody can fetch. Only the visitor's
+copy can be wrong, and only downwards, which is the case that still fails.
+
+A second check came with it: every `data-version` on one page must name the same
+version. The comparison reads the first `<b data-version>`, so a hand-edited
+release commit that bumps the badge and forgets a call-to-action would otherwise
+ship _Download v0.2.0_ under _v0.3.0_ until the next deploy stamped it away.
+
 ## 11a. Amended 2026-08-20 — the page's graphics are terminal material
 
 Text-only and complete was correct against "no screenshots"; it was not correct

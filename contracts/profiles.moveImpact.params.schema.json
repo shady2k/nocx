@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/profiles.moveImpact.params.schema.json",
+  "title": "ProfilesMoveimpactParams",
+  "description": "Params for profiles.moveImpact.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profileIds"],
+  "properties": {
+    "profileIds": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 256
+      },
+      "minItems": 1
+    },
+    "targetGroupId": {
+      "type": "string",
+      "maxLength": 256
+    }
+  }
+}

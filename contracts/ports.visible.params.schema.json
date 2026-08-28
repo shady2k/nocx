@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/ports.visible.params.schema.json",
+  "title": "PortsVisibleParams",
+  "description": "Params for ports.visible.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profileId"],
+  "properties": {
+    "profileId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "paused": {
+      "type": "boolean"
+    },
+    "visible": {
+      "type": "boolean"
+    }
+  }
+}

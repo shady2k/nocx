@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/history.record.params.schema.json",
+  "title": "HistoryRecordParams",
+  "description": "Params for history.record.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["command", "source", "status", "paneId"],
+  "properties": {
+    "command": {
+      "type": "string",
+      "minLength": 1
+    },
+    "attemptId": {
+      "type": "string"
+    },
+    "cwd": {
+      "type": "string"
+    },
+    "host": {
+      "type": "string"
+    },
+    "source": {
+      "type": "string",
+      "enum": ["user", "assistant"]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["running", "success", "failure", "interrupted", "unknown"]
+    },
+    "exitCode": {
+      "type": ["integer", "null"]
+    },
+    "startedAt": {
+      "type": ["integer", "null"],
+      "minimum": 1577836800000
+    },
+    "endedAt": {
+      "type": ["integer", "null"],
+      "minimum": 1577836800000
+    },
+    "trusted": {
+      "type": "boolean"
+    },
+    "paneId": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

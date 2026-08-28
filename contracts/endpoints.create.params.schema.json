@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/endpoints.create.params.schema.json",
+  "title": "EndpointsCreateParams",
+  "description": "Params for endpoints.create.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name", "baseUrl", "models"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "baseUrl": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192
+    },
+    "schema": {
+      "type": "string",
+      "enum": ["", "openai-compatible"]
+    },
+    "noKey": {
+      "type": "boolean"
+    },
+    "key": {
+      "type": "string",
+      "maxLength": 8000
+    },
+    "credential": {
+      "type": "string",
+      "maxLength": 512
+    },
+    "models": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "alias": {
+            "type": "string",
+            "maxLength": 200
+          }
+        },
+        "required": ["name"]
+      },
+      "minItems": 1
+    },
+    "headers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "value": {
+            "type": ["string", "null"]
+          },
+          "secret": {
+            "type": ["string", "null"]
+          }
+        },
+        "required": []
+      }
+    }
+  }
+}

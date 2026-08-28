@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/endpoints.probe.params.schema.json",
+  "title": "EndpointsProbeParams",
+  "description": "Params for endpoints.probe.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["baseUrl"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "baseUrl": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8192
+    },
+    "noKey": {
+      "type": "boolean"
+    },
+    "key": {
+      "type": "string",
+      "maxLength": 8000
+    },
+    "model": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "endpointId": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "headers": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "properties": {
+          "name": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "value": {
+            "type": ["string", "null"]
+          },
+          "secret": {
+            "type": ["string", "null"]
+          }
+        },
+        "required": []
+      }
+    }
+  }
+}

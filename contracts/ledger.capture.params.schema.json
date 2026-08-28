@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/ledger.capture.params.schema.json",
+  "title": "LedgerCaptureParams",
+  "description": "Params for ledger.capture.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entryId", "artifactId", "mediaType", "captureVersion", "seq", "body"],
+  "properties": {
+    "entryId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "artifactId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "mediaType": {
+      "type": "string",
+      "enum": ["application/vt", "text/plain"]
+    },
+    "derivedFrom": {
+      "type": "string",
+      "minLength": 1
+    },
+    "truncated": {
+      "type": "string",
+      "enum": ["cap", "gap", "suppressed"]
+    },
+    "captureVersion": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "terminalCols": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "terminalRows": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "seq": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "body": {
+      "type": "string",
+      "maxLength": 4194304
+    }
+  }
+}

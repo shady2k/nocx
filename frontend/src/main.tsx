@@ -1397,6 +1397,12 @@ async function main() {
     // on the first strip works until the orientation changes and then
     // silently stops.
     strip.onSnippets = () => qc.showSnippets()
+    // "New note" (design §6.3): the SAME path as ⌥⌘N below, so the store
+    // makes the note before a tab exists over it and the failure says why.
+    // A chord is only a shortcut once you know it exists — until then this
+    // row is the whole feature, which is why it is wired here beside the
+    // other three rather than left to the panel a person has to find first.
+    strip.onNewNote = () => void createAndOpenNote()
   }
   wireQuickConnect(tabStrip)
 

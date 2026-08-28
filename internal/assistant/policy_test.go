@@ -28,6 +28,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/hashline"
 )
 
 // ── helpers ───────────────────────────────────────────────────────────────
@@ -109,6 +110,12 @@ func (f *fakeLedger) FinishExecution(_ context.Context, _ int64, end content.Fin
 	defer f.mu.Unlock()
 	f.log = append(f.log, "finish:"+string(end.Status))
 	return nil
+}
+
+func (f *fakeLedger) recordedSubmissions() []fakeSubmission {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeSubmission(nil), f.submissions...)
 }
 
 func (f *fakeLedger) AddCause(_ context.Context, turnID, causedID string) (int, error) {
@@ -929,6 +936,190 @@ func TestAsk_PermittedReadReturnsFileContents(t *testing.T) {
 	}
 }
 
+// TestAsk_PermittedEditChangesFile drives files.edit through the real Ask
+// pipeline: the declaration, policy narrowing, executor and ledger all take
+// part, and the model receives the applied result as its tool message.
+func TestAsk_PermittedEditChangesFile(t *testing.T) {
+	grant, dir := testDirGrant(t, autonomousMatrix())
+	path := filepath.Join(dir, "a.txt")
+	writeFile(t, path, "before\n")
+	snapshot, err := hashline.Read(path, filesReadWindowBytes)
+	if err != nil {
+		t.Fatalf("hashline.Read: %v", err)
+	}
+	args := fmt.Sprintf(`{"path":%q,"revision":%q,"patch":"PUT 1.=1:\n+after"}`, path, snapshot.Revision)
+	ledger := &fakeLedger{}
+	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.edit", args: args}))
+	defer srv.Close()
+
+	cl, err := newClient(nil, os.DirFS(realToolsFS), nil)
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	if askErr := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(AskEvent) error { return nil }); askErr != nil {
+		t.Fatalf("Ask: %v", askErr)
+	}
+	// #nosec G304 -- path is created under t.TempDir.
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "after\n" {
+		t.Fatalf("file = %q, want after", got)
+	}
+	if ledger.started() != 1 {
+		t.Fatalf("ledger started %d executions, want 1", ledger.started())
+	}
+	var req struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(f.body()), &req); err != nil {
+		t.Fatalf("request body: %v", err)
+	}
+	found := false
+	for _, message := range req.Messages {
+		if message["role"] != "tool" {
+			continue
+		}
+		content, _ := message["content"].(string)
+		var result filesMutationResult
+		if err := json.Unmarshal([]byte(content), &result); err != nil {
+			t.Fatalf("tool result: %v", err)
+		}
+		if result.Status == "applied" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("model request did not carry applied edit result: %s", f.body())
+	}
+	submissions := ledger.recordedSubmissions()
+	if len(submissions) != 1 {
+		t.Fatalf("ledger recorded %d submissions, want exactly 1", len(submissions))
+	}
+	if submissions[0].intent != "files.edit" {
+		t.Fatalf("ledger intent = %q, want files.edit", submissions[0].intent)
+	}
+	if submissions[0].source != content.SourceAssistant {
+		t.Fatalf("ledger source = %q, want assistant", submissions[0].source)
+	}
+	if strings.Contains(submissions[0].payload, `"command"`) {
+		t.Fatalf("ledger payload describes a shell command: %s", submissions[0].payload)
+	}
+}
+
+// TestAsk_StaleEditIsRefusedAsToolResult drives the read-then-edit flow
+// through Ask. The model's second request mutates the file after receiving
+// the read result and submits that stale revision; the refusal is a tool
+// result, so Ask completes and the file remains at the intervening bytes.
+func TestAsk_StaleEditIsRefusedAsToolResult(t *testing.T) {
+	grant, dir := testDirGrant(t, autonomousMatrix())
+	path := filepath.Join(dir, "a.txt")
+	const before = "before\n"
+	const intervening = "changed behind the assistant\n"
+	writeFile(t, path, before)
+
+	ledger := &fakeLedger{}
+	var revision string
+	var requests int
+	f, srv := newFakeOpenAI(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			streamToolCalls(w, toolCallSpec{
+				id:   "read_call",
+				name: "files.read",
+				args: fmt.Sprintf(`{"path":%q}`, path),
+			})
+			return
+		}
+		if requests > 2 {
+			streamOK(w)
+			return
+		}
+
+		var req struct {
+			Messages []map[string]any `json:"messages"`
+		}
+		if err := json.Unmarshal([]byte(requestBody(r)), &req); err == nil {
+			for _, message := range req.Messages {
+				if message["role"] != "tool" {
+					continue
+				}
+				content, _ := message["content"].(string)
+				start := strings.Index(content, "{")
+				end := strings.LastIndex(content, "}")
+				var result filesReadResult
+				if start >= 0 && end >= start && json.Unmarshal([]byte(content[start:end+1]), &result) == nil && result.Revision != "" {
+					revision = result.Revision
+				}
+			}
+		}
+		if revision == "" {
+			streamAnswer(w, "missing read revision")
+			return
+		}
+		if err := os.WriteFile(path, []byte(intervening), 0o600); err != nil {
+			streamAnswer(w, "mutation failed")
+			return
+		}
+		streamToolCalls(w, toolCallSpec{
+			id:   "edit_call",
+			name: "files.edit",
+			args: fmt.Sprintf(`{"path":%q,"revision":%q,"patch":"PUT 1.=1:\n+after"}`, path, revision),
+		})
+	})
+	defer srv.Close()
+
+	cl, err := newClient(nil, os.DirFS(realToolsFS), nil)
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	if askErr := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(AskEvent) error {
+		return nil
+	}); askErr != nil {
+		t.Fatalf("Ask: %v — stale refusal must be a tool result", askErr)
+	}
+
+	// #nosec G304 -- path is created under t.TempDir.
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != intervening {
+		t.Fatalf("file after stale edit = %q, want intervening bytes %q", got, intervening)
+	}
+	if f.requests.Load() != 3 {
+		t.Fatalf("the engine made %d model requests, want read, stale edit, and answer", f.requests.Load())
+	}
+
+	var final struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(f.body()), &final); err != nil {
+		t.Fatalf("final request body: %v", err)
+	}
+	foundRefusal := false
+	for _, message := range final.Messages {
+		if message["role"] != "tool" {
+			continue
+		}
+		content, _ := message["content"].(string)
+		var result filesMutationResult
+		if err := json.Unmarshal([]byte(content), &result); err != nil {
+			continue
+		}
+		if result.Status == "refused" {
+			foundRefusal = true
+			if result.Reason == "" || !strings.Contains(strings.ToLower(result.Reason), "changed") {
+				t.Fatalf("stale refusal reason = %q, want an actionable changed-file explanation", result.Reason)
+			}
+		}
+	}
+	if !foundRefusal {
+		t.Fatalf("final model request carried no stale-edit refusal tool result: %s", f.body())
+	}
+}
+
 // TestExecuteFilesRead_WindowIsHonest is criterion 6: files.read returns a
 // window — total, the window, and which window was actually returned — and a
 // file shorter than the window (a window past the end) is answered honestly,
@@ -1078,7 +1269,7 @@ func TestNewClient_AssemblesFromTheEmbedOutsideTheRepo(t *testing.T) {
 	for _, tl := range internal.tools.All() {
 		names = append(names, tl.Name)
 	}
-	want := []string{"files.read", "session.list", "session.read", "run", "git.status"}
+	want := []string{"files.read", "session.list", "session.read", "run", "files.edit", "files.create", "git.status"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("assembled tools = %v, want %v", names, want)
 	}

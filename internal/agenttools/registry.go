@@ -8,12 +8,10 @@ package agenttools
 // construct — nocx-lndv), and the schema the model is shown and its arguments
 // validated against.
 //
-// This slice is declaration-only: nothing executes, the constructor for the
-// narrowed capability (Narrow) is deliberately absent until nocx-lndv owns
-// the capability types, and the engine that consumes the set is
-// internal/assistant (the same commit that makes this package reachable from
-// main). The three tests of design §5 are what keep the table honest, not the
-// table itself.
+// Each executable row also carries its Narrow constructor; the assistant's
+// middleware invokes the resulting capability after policy evaluation. The
+// registry remains the sole declaration table, and the executor table in
+// internal/assistant is checked against its executable rows.
 
 import (
 	"encoding/json"
@@ -272,6 +270,26 @@ var declarations = []Declaration{
 		Params:           "run.schema.json",
 		Narrow:           narrowRun,
 		OpensBlock:       true,
+	},
+	{
+		Name:             "files.edit",
+		Description:      "Apply a strict line-addressed patch to a file you have read; reach for this to change the file directly, and the call is refused if the file changed or a line was not displayed.",
+		Effect:           content.EffectMutateReversible,
+		ResourceKinds:    []content.ResourceKind{content.ResourcePath},
+		ResolveResources: resourceArgument("path", content.ResourcePath),
+		Executes:         InGo,
+		Params:           "files.edit.schema.json",
+		Narrow:           narrowFilesEdit,
+	},
+	{
+		Name:             "files.create",
+		Description:      "Create a new file if it does not already exist; reach for this instead of composing a shell redirection when a file must be created.",
+		Effect:           content.EffectMutateReversible,
+		ResourceKinds:    []content.ResourceKind{content.ResourcePath},
+		ResolveResources: resourceArgument("path", content.ResourcePath),
+		Executes:         InGo,
+		Params:           "files.create.schema.json",
+		Narrow:           narrowFilesCreate,
 	},
 	{
 		Name:          "git.status",

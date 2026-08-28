@@ -119,3 +119,28 @@ func TestScopedReader_UnknowableRootFailsConstruction(t *testing.T) {
 		t.Fatal("NewScopedReader accepted an unknowable root")
 	}
 }
+
+// TestScopedReader_ExactFileScopesRefuseUnrequestedPaths proves a files.read
+// capability can retain grant roots for provider containment while limiting
+// execution to the exact resolved file resources for this call.
+func TestScopedReader_ExactFileScopesRefuseUnrequestedPaths(t *testing.T) {
+	dir := scopeDir(t)
+	ctx := context.Background()
+	sibling := filepath.Join(dir, "a", "sibling.txt")
+	if err := os.WriteFile(sibling, []byte("sibling"), 0o600); err != nil {
+		t.Fatalf("write sibling: %v", err)
+	}
+	in := filepath.Join(dir, "a", "in.txt")
+	s, err := filesystem.NewScopedReaderWithExactFiles(ctx, local.New(), []string{filepath.Join(dir, "a"), filepath.Join(dir, "b")}, []string{in})
+	if err != nil {
+		t.Fatalf("NewScopedReaderWithExactFiles: %v", err)
+	}
+	if _, err := s.Read(ctx, in, 1<<20); err != nil {
+		t.Fatalf("resolved file read: %v", err)
+	}
+	for _, path := range []string{sibling, filepath.Join(dir, "b", "out.txt")} {
+		if _, err := s.Read(ctx, path, 1<<20); !errors.Is(err, filesystem.ErrOutOfScope) {
+			t.Fatalf("unrequested path %q error = %v, want ErrOutOfScope", path, err)
+		}
+	}
+}

@@ -14,6 +14,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/hashline"
 )
 
 // realToolsFS is the repo's contracts/tools directory, the way the transport
@@ -55,6 +56,45 @@ const filesReadSchema = `{
     "additionalProperties": false,
     "required": ["text"],
     "properties": {"text": {"type": "string"}}
+  }}
+}`
+
+const filesEditSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "revision", "patch"],
+  "properties": {
+    "path": {"type": "string"},
+    "revision": {"type": "string"},
+    "patch": {"type": "string"}
+  },
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["path", "status"],
+    "properties": {
+      "path": {"type": "string"},
+      "status": {"type": "string"}
+    }
+  }}
+}`
+
+const filesCreateSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "content"],
+  "properties": {
+    "path": {"type": "string"},
+    "content": {"type": "string"}
+  },
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["path", "status"],
+    "properties": {
+      "path": {"type": "string"},
+      "status": {"type": "string"}
+    }
   }}
 }`
 
@@ -289,6 +329,8 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"git.status.schema.json":   gitStatusSchema,
 		"session.list.schema.json": sessionListSchema,
 		"session.read.schema.json": sessionReadSchema,
+		"files.edit.schema.json":   filesEditSchema,
+		"files.create.schema.json": filesCreateSchema,
 		"run.schema.json":          runSchema,
 	}))
 	if err != nil {
@@ -307,9 +349,13 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		}
 	}
 
-	// Effect not permitted: a mutate grant offers no observe tool.
-	if got := reg.ForGrant(grant([]content.Effect{content.EffectMutateReversible}, content.ResourcePath)); len(got) != 0 {
-		t.Fatalf("ForGrant(mutate+path) = %v, want empty (observe tools forbidden)", toolNames(got))
+	// Effect not permitted: an observe grant offers no mutating tool.
+	if got := reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourcePath)); containsName(got, "files.edit") || containsName(got, "files.create") {
+		t.Fatalf("ForGrant(observe+path) = %v, want mutating tools absent", toolNames(got))
+	}
+	mutatePath := toolNames(reg.ForGrant(grant([]content.Effect{content.EffectMutateReversible}, content.ResourcePath)))
+	if !reflect.DeepEqual(mutatePath, []string{"files.edit", "files.create"}) {
+		t.Fatalf("ForGrant(mutate-reversible+path) = %v, want files.edit and files.create", mutatePath)
 	}
 	// Resource kind not covered: a path grant offers no session tool.
 	if got := reg.ForGrant(observePath); containsName(got, "session.read") {
@@ -389,6 +435,8 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"git.status.schema.json":   gitStatusSchema,
 		"session.list.schema.json": sessionListSchema,
 		"session.read.schema.json": sessionReadSchema,
+		"files.edit.schema.json":   filesEditSchema,
+		"files.create.schema.json": filesCreateSchema,
 		"run.schema.json":          runSchema,
 	}))
 	if err != nil {
@@ -496,12 +544,15 @@ func toolNames(tools []Tool) []string {
 // tests pin that it is DERIVED from the table and not a second list kept in
 // step by hand.
 
-// TestLiveEffects_IsWhatTheDeclarationsCarry pins today's answer. Three of
-// the four rows carry observe and one carries mutate-destructive, so the
-// live set is those two — deduplicated, and in the lattice's order.
+// TestLiveEffects_IsWhatTheDeclarationsCarry pins today's answer. The reading
+// rows carry observe, files.edit and files.create carry mutate-reversible and
+// run carries mutate-destructive, so the live set is those three —
+// deduplicated, and in the lattice's order. It moves when a declaration's
+// effect moves, which is the point: the settings surface must not offer a
+// control over an effect no tool carries.
 func TestLiveEffects_IsWhatTheDeclarationsCarry(t *testing.T) {
 	got := LiveEffects()
-	want := []content.Effect{content.EffectObserve, content.EffectMutateDestructive}
+	want := []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("LiveEffects() = %v, want %v", got, want)
 	}
@@ -515,12 +566,11 @@ func TestLiveEffects_ADeclarationIsTheOnlyEditNeeded(t *testing.T) {
 		Name:          "secrets.reveal",
 		Effect:        content.EffectDisclose,
 		ResourceKinds: []content.ResourceKind{content.ResourceCredential},
-		Executes:      InGo,
-		Params:        "secrets.reveal.schema.json",
 	})
 	got := liveEffects(withDisclose)
 	want := []content.Effect{
 		content.EffectObserve,
+		content.EffectMutateReversible,
 		content.EffectMutateDestructive,
 		content.EffectDisclose,
 	}
@@ -864,7 +914,104 @@ func TestNarrowFilesRead_UsesOnlyResolvedResources(t *testing.T) {
 		t.Fatalf("resolved path refused: %v", err)
 	}
 	if _, err := reader.Read(context.Background(), other, 100); !errors.Is(err, filesystem.ErrOutOfScope) {
-		t.Fatalf("unresolved grant path error = %v, want %v", err, filesystem.ErrOutOfScope)
+		t.Fatalf("second granted root read error = %v, want ErrOutOfScope", err)
+	}
+}
+
+func TestNarrowFilesEdit_UsesOnlyResolvedResources(t *testing.T) {
+	root := t.TempDir()
+	insideRoot := filepath.Join(root, "inside")
+	otherRoot := filepath.Join(root, "other")
+	if err := os.MkdirAll(insideRoot, 0o750); err != nil {
+		t.Fatalf("MkdirAll inside: %v", err)
+	}
+	if err := os.MkdirAll(otherRoot, 0o750); err != nil {
+		t.Fatalf("MkdirAll other: %v", err)
+	}
+	inside := filepath.Join(insideRoot, "inside.txt")
+	sibling := filepath.Join(insideRoot, "sibling.txt")
+	other := filepath.Join(otherRoot, "other.txt")
+	for path, body := range map[string]string{inside: "inside\n", sibling: "sibling\n", other: "other\n"} {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatalf("WriteFile %s: %v", path, err)
+		}
+	}
+	grant := content.Grant{Scopes: []content.GrantScope{
+		{Kind: content.ResourcePath, ID: insideRoot},
+		{Kind: content.ResourcePath, ID: otherRoot},
+	}}
+	resolved := []ResourceRef{{Kind: content.ResourcePath, ID: inside}}
+	capability, err := narrowFilesEdit(grant, resolved, RunContext{})
+	if err != nil {
+		t.Fatalf("narrowFilesEdit: %v", err)
+	}
+	editor, ok := capability.(*filesystem.ScopedEditor)
+	if !ok {
+		t.Fatalf("capability = %T, want *filesystem.ScopedEditor", capability)
+	}
+	snapshot, err := hashline.Read(inside, 64<<10)
+	if err != nil {
+		t.Fatalf("hashline.Read: %v", err)
+	}
+	if _, err := editor.Edit(context.Background(), inside, snapshot.Revision, "PUT 1.=1:\n+changed"); err != nil {
+		t.Fatalf("resolved edit refused: %v", err)
+	}
+	for _, path := range []string{sibling, other} {
+		if _, err := editor.Edit(context.Background(), path, snapshot.Revision, "PUT 1.=1:\n+changed"); !errors.Is(err, filesystem.ErrOutOfScope) {
+			t.Fatalf("unrequested edit %q error = %v, want ErrOutOfScope", path, err)
+		}
+	}
+}
+
+func TestNarrowFilesCreate_UsesResolvedParent(t *testing.T) {
+	root := t.TempDir()
+	insideRoot := filepath.Join(root, "inside")
+	otherRoot := filepath.Join(root, "other")
+	outsideRoot := filepath.Join(root, "outside")
+	if err := os.MkdirAll(insideRoot, 0o750); err != nil {
+		t.Fatalf("MkdirAll inside: %v", err)
+	}
+	if err := os.MkdirAll(otherRoot, 0o750); err != nil {
+		t.Fatalf("MkdirAll other: %v", err)
+	}
+	if err := os.MkdirAll(outsideRoot, 0o750); err != nil {
+		t.Fatalf("MkdirAll outside: %v", err)
+	}
+	target := filepath.Join(insideRoot, "new.txt")
+	other := filepath.Join(otherRoot, "other.txt")
+	grant := content.Grant{Scopes: []content.GrantScope{
+		{Kind: content.ResourcePath, ID: insideRoot},
+		{Kind: content.ResourcePath, ID: otherRoot},
+	}}
+	capability, err := narrowFilesCreate(grant, []ResourceRef{{Kind: content.ResourcePath, ID: target}}, RunContext{})
+	if err != nil {
+		t.Fatalf("narrowFilesCreate: %v", err)
+	}
+	editor, ok := capability.(*filesystem.ScopedEditor)
+	if !ok {
+		t.Fatalf("capability = %T, want *filesystem.ScopedEditor", capability)
+	}
+	if _, createErr := editor.Create(context.Background(), target, "created\n"); createErr != nil {
+		t.Fatalf("resolved create refused: %v", createErr)
+	}
+	if _, otherErr := editor.Create(context.Background(), other, "other\n"); !errors.Is(otherErr, filesystem.ErrOutOfScope) {
+		t.Fatalf("unrequested create %q error = %v, want ErrOutOfScope", other, otherErr)
+	}
+	link := filepath.Join(insideRoot, "link")
+	if symlinkErr := os.Symlink(outsideRoot, link); symlinkErr != nil {
+		t.Skipf("symlink unavailable: %v", symlinkErr)
+	}
+	escapeTarget := filepath.Join(link, "escape.txt")
+	escapeCapability, err := narrowFilesCreate(grant, []ResourceRef{{Kind: content.ResourcePath, ID: escapeTarget}}, RunContext{})
+	if err != nil {
+		t.Fatalf("narrowFilesCreate escape: %v", err)
+	}
+	escapeEditor, ok := escapeCapability.(*filesystem.ScopedEditor)
+	if !ok {
+		t.Fatalf("escape capability = %T, want *filesystem.ScopedEditor", escapeCapability)
+	}
+	if _, escapeErr := escapeEditor.Create(context.Background(), escapeTarget, "escape\n"); !errors.Is(escapeErr, filesystem.ErrOutOfScope) {
+		t.Fatalf("symlink-escaped create error = %v, want ErrOutOfScope", escapeErr)
 	}
 }
 

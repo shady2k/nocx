@@ -36,6 +36,8 @@ const filesReadWindowBytes = 64 << 10
 // run).
 var executors = map[string]func(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error){
 	"files.read":   executeFilesRead,
+	"files.edit":   executeFilesEdit,
+	"files.create": executeFilesCreate,
 	"session.list": executeSessionListTool,
 }
 
@@ -62,7 +64,9 @@ func executeSessionListTool(ctx context.Context, cap agenttools.Capability, args
 type filesReadResult struct {
 	Path     string          `json:"path"`
 	Total    int64           `json:"total"`
+	Revision string          `json:"revision"`
 	Window   filesReadWindow `json:"window"`
+	Seen     filesReadSeen   `json:"seen"`
 	Returned int64           `json:"returned"`
 	Binary   bool            `json:"binary,omitempty"`
 	Text     string          `json:"text,omitempty"`
@@ -71,6 +75,11 @@ type filesReadResult struct {
 type filesReadWindow struct {
 	Start int64 `json:"start"`
 	End   int64 `json:"end"`
+}
+
+type filesReadSeen struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
 }
 
 // executeFilesRead runs the files.read tool: read the named path through the
@@ -87,28 +96,79 @@ func executeFilesRead(ctx context.Context, cap agenttools.Capability, args json.
 		Path string `json:"path"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
-		// Unreachable through the middleware (validation precedes policy,
-		// let alone execution); the direct-call seam still answers honestly.
 		return "", fmt.Errorf("files.read: args: %w", err)
 	}
-	c, err := scoped.Read(ctx, p.Path, filesReadWindowBytes)
+	snapshot, err := scoped.ReadSnapshot(ctx, p.Path, filesReadWindowBytes)
 	if err != nil {
 		return "", err
 	}
 	out := filesReadResult{
-		Path:  c.Path,
-		Total: c.Total,
-		Window: filesReadWindow{
-			Start: 0,
-			End:   c.Size,
-		},
-		Returned: c.Size,
-		Binary:   c.Binary,
-		Text:     c.Text,
+		Path:     p.Path,
+		Total:    snapshot.Total,
+		Revision: snapshot.Revision,
+		Window:   filesReadWindow{Start: 0, End: snapshot.WindowEnd},
+		Seen:     filesReadSeen{Start: snapshot.SeenStart, End: snapshot.SeenEnd},
+		Returned: snapshot.WindowEnd,
+		Binary:   snapshot.Binary,
+		Text:     snapshot.Text,
 	}
 	b, err := json.Marshal(out)
 	if err != nil {
 		return "", fmt.Errorf("files.read: marshal result: %w", err)
+	}
+	return string(b), nil
+}
+
+type filesMutationResult struct {
+	Path     string `json:"path"`
+	Status   string `json:"status"`
+	Revision string `json:"revision,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+func executeFilesEdit(ctx context.Context, cap agenttools.Capability, args json.RawMessage, _ toolSeams) (string, error) {
+	editor, ok := cap.(*filesystem.ScopedEditor)
+	if !ok {
+		return "", fmt.Errorf("files.edit: capability is %T, not *filesystem.ScopedEditor", cap)
+	}
+	var p struct {
+		Path     string `json:"path"`
+		Revision string `json:"revision"`
+		Patch    string `json:"patch"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return "", fmt.Errorf("files.edit: args: %w", err)
+	}
+	result, err := editor.Edit(ctx, p.Path, p.Revision, p.Patch)
+	if err != nil {
+		return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "refused", Reason: err.Error()})
+	}
+	return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "applied", Revision: result.Revision})
+}
+
+func executeFilesCreate(ctx context.Context, cap agenttools.Capability, args json.RawMessage, _ toolSeams) (string, error) {
+	editor, ok := cap.(*filesystem.ScopedEditor)
+	if !ok {
+		return "", fmt.Errorf("files.create: capability is %T, not *filesystem.ScopedEditor", cap)
+	}
+	var p struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return "", fmt.Errorf("files.create: args: %w", err)
+	}
+	result, err := editor.Create(ctx, p.Path, p.Content)
+	if err != nil {
+		return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "refused", Reason: err.Error()})
+	}
+	return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "created", Revision: result.Revision})
+}
+
+func marshalFilesMutation(result filesMutationResult) (string, error) {
+	b, err := json.Marshal(result)
+	if err != nil {
+		return "", fmt.Errorf("files mutation: marshal result: %w", err)
 	}
 	return string(b), nil
 }

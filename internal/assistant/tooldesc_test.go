@@ -57,7 +57,7 @@ func TestToolDescription_IsTheDeclarationsSentence(t *testing.T) {
 	}
 
 	f := askWithGrant(t, &content.Grant{
-		Effects: []content.Effect{content.EffectObserve, content.EffectMutateDestructive},
+		Effects: []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive},
 		Scopes: []content.GrantScope{
 			{Kind: content.ResourcePath, ID: "/workspace"},
 			{Kind: content.ResourceSession, ID: "lane-1"},
@@ -83,7 +83,7 @@ func TestToolDescription_IsTheDeclarationsSentence(t *testing.T) {
 // rendering.
 func TestToolDescription_CarriesNoAuthorityVocabulary(t *testing.T) {
 	f := askWithGrant(t, &content.Grant{
-		Effects: []content.Effect{content.EffectObserve, content.EffectMutateDestructive},
+		Effects: []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive},
 		Scopes: []content.GrantScope{
 			{Kind: content.ResourcePath, ID: "/workspace"},
 			{Kind: content.ResourceSession, ID: "lane-1"},
@@ -126,6 +126,27 @@ func toolParameters(t *testing.T, body string) map[string]map[string]any {
 	return out
 }
 
+func schemaContainsKey(value any, want string) bool {
+	switch v := value.(type) {
+	case map[string]any:
+		if _, ok := v[want]; ok {
+			return true
+		}
+		for _, child := range v {
+			if schemaContainsKey(child, want) {
+				return true
+			}
+		}
+	case []any:
+		for _, child := range v {
+			if schemaContainsKey(child, want) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // TestToolParameters_CarryNoReturnShape: a tool's contract document declares
 // BOTH shapes — the parameters at the top level and what it returns under
 // $defs/result — and only the first is addressed to the model. The registry
@@ -140,7 +161,7 @@ func toolParameters(t *testing.T, body string) map[string]map[string]any {
 // the model receives, not the thing we store.
 func TestToolParameters_CarryNoReturnShape(t *testing.T) {
 	f := askWithGrant(t, &content.Grant{
-		Effects: []content.Effect{content.EffectObserve, content.EffectMutateDestructive},
+		Effects: []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive},
 		Scopes: []content.GrantScope{
 			{Kind: content.ResourcePath, ID: "/workspace"},
 			{Kind: content.ResourceSession, ID: "lane-1"},
@@ -162,8 +183,8 @@ func TestToolParameters_CarryNoReturnShape(t *testing.T) {
 			t.Fatalf("tool %q: re-marshal parameters: %v", name, err)
 		}
 		for _, returnOnly := range []string{"RunResult", "exitCode", "returned", "entryId"} {
-			if strings.Contains(string(encoded), returnOnly) {
-				t.Errorf("tool %q parameters mention %q, which only a RESULT has: %s", name, returnOnly, encoded)
+			if schemaContainsKey(p, returnOnly) {
+				t.Errorf("tool %q parameters carry result-only key %q: %s", name, returnOnly, encoded)
 			}
 		}
 	}

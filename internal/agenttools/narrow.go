@@ -3,6 +3,7 @@ package agenttools
 import (
 	"context"
 	"fmt"
+	"path/filepath"
 
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/filesystem"
@@ -15,11 +16,46 @@ import (
 // call.
 func narrowFilesRead(grant content.Grant, resources []ResourceRef, _ RunContext) (Capability, error) {
 	paths := resourceIDs(grant, resources, content.ResourcePath)
-	r, err := filesystem.NewScopedReader(context.Background(), local.New(), paths)
+	r, err := filesystem.NewScopedReaderWithExactFiles(context.Background(), local.New(), filesystemRoots(grant), paths)
 	if err != nil {
 		return nil, fmt.Errorf("narrow files.read: %w", err)
 	}
 	return r, nil
+}
+
+func filesystemRoots(grant content.Grant) []string {
+	roots := make([]string, 0, len(grant.Scopes))
+	for _, scope := range grant.Scopes {
+		if scope.Kind == content.ResourcePath {
+			roots = append(roots, scope.ID)
+		}
+	}
+	return roots
+}
+
+func narrowFilesEdit(grant content.Grant, resources []ResourceRef, _ RunContext) (Capability, error) {
+	paths := resourceIDs(grant, resources, content.ResourcePath)
+	editor, err := filesystem.NewScopedEditorWithExactFiles(context.Background(), local.New(), filesystemRoots(grant), paths)
+	if err != nil {
+		return nil, fmt.Errorf("narrow files.edit: %w", err)
+	}
+	return editor, nil
+}
+
+func narrowFilesCreate(grant content.Grant, resources []ResourceRef, _ RunContext) (Capability, error) {
+	// A new target cannot itself be canonicalized until it exists. Bind the
+	// capability to the existing parent directories of the resolved targets;
+	// ScopedEditor.Create canonicalizes that parent before writing.
+	paths := resourceIDs(grant, resources, content.ResourcePath)
+	parents := make([]string, 0, len(paths))
+	for _, path := range paths {
+		parents = append(parents, filepath.Dir(path))
+	}
+	editor, err := filesystem.NewScopedEditorWithExactParents(context.Background(), local.New(), filesystemRoots(grant), parents)
+	if err != nil {
+		return nil, fmt.Errorf("narrow files.create: %w", err)
+	}
+	return editor, nil
 }
 
 // narrowSession is the session.list and session.read constructor. The

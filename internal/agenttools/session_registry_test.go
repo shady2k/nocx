@@ -14,7 +14,7 @@ func TestSessionToolsReplaceTheFinishedVersusLiveChoice(t *testing.T) {
 		t.Fatalf("Assemble: %v", err)
 	}
 	got := toolNames(reg.All())
-	want := []string{"files.read", "session.list", "session.read", "run", "git.status"}
+	want := []string{"files.read", "session.list", "session.read", "run", "files.edit", "files.create", "git.status"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("assembled tools = %v, want %v", got, want)
 	}

@@ -462,9 +462,6 @@ type agentApproveResponse struct {
 type agentHandlers struct {
 	op     capability.AgentOperation // nil → content store not wired
 	dumpOp capability.LedgerOperation
-	// session and runs the shared stop ladder without holding the content
-	// queue or pending-runs mutex.
-	stopForeground func(session.ID) foregroundOutcome
 	// configOp resolves the endpoint the run uses (the ONE config operation,
 	// shared with the config handlers — AD-8). nil → no endpoint store.
 	configOp capability.ConfigOperation
@@ -1415,10 +1412,11 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	_ = r.TryNotify("agent.approvalRequested", mustMarshal(n))
 }
 
-// handleCancel stops one prepared, streaming or awaiting-approval run. The
-// foreground escalation completes before the run context is cancelled and the
-// terminal ledger write is completed before the result is answered, so no
-// stream event can overtake the person's stop decision.
+// handleCancel stops one prepared, streaming or awaiting-approval assistant
+// turn. It never signals the session's foreground command: command interruption
+// belongs exclusively to session.signal and its existing focus owners. The
+// terminal ledger write completes before the result is answered, so no stream
+// event can overtake the person's stop decision.
 func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 	if h.op == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "method not found: content store not wired"})
@@ -1443,22 +1441,7 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 	state := content.RunCancelled
 	reason := content.TermUserKilled
 	sentence := "the person stopped this answer"
-	outcome := foregroundNothingRunning
-	if h.stopForeground != nil {
-		// Foreground escalation completes before cancellation lets the stream
-		// terminalize. The callback runs without pendingRunsMu or the content
-		// operation queue held.
-		outcome = h.stopForeground(rc.sessionID)
-	}
-	if outcome == foregroundUnsupported {
-		// The assistant turn is cancelled, but the command on a remote host
-		// may still be alive. Keep that distinction visible in the terminal
-		// state instead of claiming the command was stopped.
-		sentence = "the person stopped this answer, but its command could not be stopped on the host"
-		h.log.Warn("agent cancel: foreground command could not be stopped",
-			"run", rc.runID, "session", rc.sessionID)
-	}
-	rc.control.finishCancel(state, reason, sentence, outcome == foregroundUnsupported)
+	rc.control.finishCancel(state, reason, sentence, false)
 	rc.control.cancelContext()
 	h.terminalize(ctx, rc, rc.droppedBefore, state, reason, sentence, h.r)
 	_ = h.r.TryResult(req.ID, mustMarshal(agentCancelResponse{
@@ -2264,17 +2247,6 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		// idempotency to the connection (a reconnect mints a new one), never
 		// to a renderer-minted tab.
 		return agentHandlers{
-			stopForeground: func(sid session.ID) foregroundOutcome {
-				sess, owned := state.get(sid)
-				if !owned || sess == nil || sess.Kind() == session.KindRemote {
-					return foregroundUnsupported
-				}
-				leaseSess, ok := sess.(runLeaseSession)
-				if !ok {
-					return foregroundUnsupported
-				}
-				return stopForeground(s.log, sid, leaseSess, s.effectiveRunLease().SignalGrace)
-			},
 			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
 			credentials: credentials, client: client, askSub: askSub,
 			attemptLedger: attemptLedger, grantFor: s.runGrantFor,

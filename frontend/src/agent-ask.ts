@@ -100,8 +100,25 @@ export class AgentInputTarget implements InputTarget {
     const running: RunningBlockActions = {
       stop: (): void => {
         if (runId === null || settled || cancellationRequested) return
+        const cancellingRunID = runId
         cancellationRequested = true
-        void this.seams.cancel(runId).catch(() => undefined)
+        // The response is reserved and arrives after durable terminalization;
+        // runState is a notification and may be dropped under outbound pressure.
+        // Whichever arrives first closes the same handle exactly once.
+        void this.seams
+          .cancel(cancellingRunID)
+          .then(() => {
+            const run = this.runs.get(cancellingRunID)
+            if (!run) return
+            run.settle()
+            this.seams.onTurnEnd?.(run.askId)
+            run.handle.close('cancelled')
+            this.runs.delete(cancellingRunID)
+          })
+          .catch(() => {
+            // The backend refused the stop; keep the menu/key action retryable.
+            cancellationRequested = false
+          })
       },
       isActive: (): boolean => runId !== null && !settled && !cancellationRequested,
     }

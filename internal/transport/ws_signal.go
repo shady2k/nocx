@@ -140,7 +140,7 @@ func (h signalHandlers) handleSignal(ctx context.Context, state *connState, req 
 // Reaching a process on the far host is the remote-footprint work's, not
 // this method's.
 func (h signalHandlers) answer(req jsonrpcRequest, sid session.ID, sess session.Session, intent string) {
-	outcome := foregroundOutcome("unsupported")
+	outcome := foregroundUnsupported
 	if sess.Kind() != session.KindRemote {
 		sg, ok := sess.(runLeaseSession)
 		if !ok {

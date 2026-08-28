@@ -97,16 +97,10 @@ test.beforeAll(async () => {
   fixtureDir = mkdtempSync(join(tmpdir(), 'nocx-92gfl-job-'))
   scriptPath = join(fixtureDir, 'slow-job.sh')
   flagPath = join(fixtureDir, 'finish')
-  // POSIX sh, deliberately dull, and run in the FOREGROUND: this is the
-  // command the person is asking about, so it must own the pty.
-  //
-  // The marker is printed with NO trailing newline so the cursor stays on
-  // its row — a captured frame is the window around the cursor, so a row the
-  // cursor is on is a row the frame contains, whatever the live region's
-  // height happens to be.
-  //
-  // The wait is a CONDITION, not a delay: it ends when this spec creates the
-  // file, which it does only after every assertion.
+  // POSIX sh prints the marker with no trailing newline, then waits on a
+  // condition this spec releases only after every assertion. The real key is
+  // observed on the app's session.signal request; transport coverage owns the
+  // process-group delivery contract.
   writeFileSync(
     scriptPath,
     [
@@ -144,6 +138,8 @@ interface ResolvedFrame {
 
 interface SpecRecord {
   asks: string[]
+  cancels: number[]
+  signals: string[]
   raised: string[]
   resolved: ResolvedFrame[]
 }
@@ -162,7 +158,7 @@ declare global {
  */
 async function recordFrames(page: Page): Promise<void> {
   await page.addInitScript(() => {
-    window.__nocxRunningAskSpec = { asks: [], raised: [], resolved: [] }
+    window.__nocxRunningAskSpec = { asks: [], cancels: [], signals: [], raised: [], resolved: [] }
     const send = WebSocket.prototype.send
     WebSocket.prototype.send = function (this: WebSocket, data: Parameters<typeof send>[0]) {
       if (typeof data === 'string') {
@@ -171,6 +167,12 @@ async function recordFrames(page: Page): Promise<void> {
           const rec = window.__nocxRunningAskSpec!
           if (msg.method === 'agent.ask' && typeof msg.params?.sessionId === 'string') {
             rec.asks.push(msg.params.sessionId)
+          }
+          if (msg.method === 'agent.cancel' && typeof msg.params?.runId === 'number') {
+            rec.cancels.push(msg.params.runId)
+          }
+          if (msg.method === 'session.signal' && typeof msg.params?.signal === 'string') {
+            rec.signals.push(msg.params.signal)
           }
           if (msg.method === 'notify.raise' && typeof msg.params?.body === 'string') {
             rec.raised.push(msg.params.body)
@@ -189,7 +191,16 @@ async function recordFrames(page: Page): Promise<void> {
 }
 
 async function recorded(page: Page): Promise<SpecRecord> {
-  return page.evaluate(() => window.__nocxRunningAskSpec ?? { asks: [], raised: [], resolved: [] })
+  return page.evaluate(
+    () =>
+      window.__nocxRunningAskSpec ?? {
+        asks: [],
+        cancels: [],
+        signals: [],
+        raised: [],
+        resolved: [],
+      },
+  )
 }
 
 /** The frame's text as a person would read it: rows of cells, joined. */
@@ -293,7 +304,7 @@ function answerFromWhatTheModelWasSent(body: string): string[] {
 test.describe('asking about a command that is still running (nocx-92gfl)', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
 
-  test('⌘/Ctrl+Enter summons the editor over a running command, and the answer names what is on its screen', async ({
+  test('Ctrl+C interrupts the command, Escape stops its held answer, and both remain independently usable', async ({
     page,
   }) => {
     // Vault setup, an endpoint, a role, a policy row, a real shell command
@@ -359,36 +370,37 @@ test.describe('asking about a command that is still running (nocx-92gfl)', () =>
     // .json), which for a RUNNING command is its live grid rather than a
     // transcript of something finished.
     fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: { sessionId } }] })
-    fake.setScript({ chunks: answerFromWhatTheModelWasSent })
+    fake.setScript({ chunks: answerFromWhatTheModelWasSent, holdAfter: 2 })
 
     const QUESTION = 'What is this command showing right now?'
     expect(QUESTION).not.toContain(MARKER)
     const firstRequestOfTheRun = fake.requests().length
     await page.locator(INPUT).fill(QUESTION)
     await page.keyboard.press('Enter')
-    await answerFinished(page, QUESTION)
 
-    const body = answerBlock(page, QUESTION).locator('[data-answer-body]')
+    const turn = answerBlock(page, QUESTION)
+    const body = turn.locator('[data-answer-body]')
+    // The final model response is held after the marker chunk. The answer is
+    // visibly partial and the fake's request remains streaming until a real
+    // stop gesture reaches it.
+    await expect(body).toContainText(MARKER, { timeout: 30_000 })
+    const heldRequests = await fake.waitForRequests(firstRequestOfTheRun + 2)
+    const held = heldRequests
+      .slice(firstRequestOfTheRun)
+      .filter((request) => request.body.includes('"messages"'))
+      .at(-1)
+    if (!held) throw new Error('fake-openai: held final response was not recorded')
+    await fake.waitForState(held.id, 'streaming')
 
     // 1. THE ANSWER A PERSON READS names what is on the screen of the
-    //    command they asked about. This is the bead's sentence.
-    const answer = (await body.locator('.term-line').allTextContents()).join('\n')
-    expect(answer).toContain(MARKER)
-
-    // 2. AND THE COMMAND IS STILL RUNNING. Asserted after the answer, which
-    //    is the whole difference between this and asking about a finished
-    //    command: nothing can end this job but the flag file below, and it
-    //    does not exist yet.
+    //    command they asked about, before the stream closes.
+    expect((await body.locator('.term-line').allTextContents()).join('\n')).toContain(MARKER)
     await expect(page.locator(RUNNING_BLOCK)).toHaveCount(1)
 
-    // 3. It got there by READING THE SCREEN, and the frame was the real
+    // 2. It got there by READING THE SCREEN, and the frame was the real
     //    renderer's — the app's own answer to the broker, off its own
     //    socket, carrying the marker in its cells.
-    // Since ADR-0040 the call is a `tool` CHILD of the turn, named by the
-    // tool and the arguments it ran on (scrollback/tool-call-title.ts).
-    const call = answerBlock(page, QUESTION).locator(
-      ':scope > .cmd-children > .cmd-block[data-block-kind="tool"]',
-    )
+    const call = turn.locator(':scope > .cmd-children > .cmd-block[data-block-kind="tool"]')
     await expect(call).toHaveCount(1)
     await expect(call).toHaveAttribute('data-tool', 'session.read')
     await expect(call.locator('.cmd-header-text')).toContainText('session.read')
@@ -398,32 +410,63 @@ test.describe('asking about a command that is still running (nocx-92gfl)', () =>
     expect(frame.outcome, frame.error ?? 'the renderer reported no error').toBe('frame')
     expect(frameText(frame)).toContain(MARKER)
 
-    // 4. And the model was told the marker by the TOOL and by nothing else,
-    //    which is what makes the derived answer above evidence rather than
-    //    an echo of the fixture. The first request of this run carries the
-    //    system prompt and the person's question; the second adds the tool
-    //    result.
+    // 3. The model learned the marker only from the tool result.
     const runBodies = fake
       .requests()
       .slice(firstRequestOfTheRun)
-      // Chat requests only: the endpoint's connection check is a GET to
-      // /models with an empty body and is recorded like any other request.
       .filter((r) => r.body.includes('"messages"'))
       .map((r) => r.body)
     expect(runBodies.length).toBeGreaterThanOrEqual(2)
     expect(runBodies[0]).not.toContain(MARKER)
     expect(runBodies[1]).toContain(MARKER)
 
-    // 5. And Escape gives the keys back to the process: the job ends because
-    //    the file appears, and the block freezes — which it cannot do while
-    //    the editor owns input and the grid is read-only.
+    // 4. Ctrl+C belongs only to the command. Focus a real pane control so the
+    //    existing global owner emits the ordinary session.signal intent; the
+    //    answer remains streaming and no agent.cancel frame exists. Focused
+    //    grid delivery is already the xterm/raw path and is covered separately.
+    await turn.locator(':scope > .cmd-header .cmd-overflow-btn').focus()
+    await page.keyboard.press('Control+C')
+    await expect.poll(async () => (await recorded(page)).signals).toEqual(['interrupt'])
+    expect((await recorded(page)).cancels).toHaveLength(0)
+    await fake.waitForState(held.id, 'streaming')
+    await expect(page.locator(RUNNING_BLOCK)).toHaveCount(1)
+
+    // 5. Escape belongs only to the streaming turn. The same Stop seam as
+    //    the answer menu emits one agent.cancel; arrived prose survives under
+    //    stopped (never failed), the frozen summon closes, and the trapped
+    //    command is still running.
+    await page.keyboard.press('Escape')
+    await expect.poll(async () => (await recorded(page)).cancels.length).toBe(1)
+    await expect(turn.locator(':scope > .cmd-header .cmd-header-exit')).toHaveText('stopped', {
+      timeout: 30_000,
+    })
+    await expect(body).toContainText(MARKER)
+    await expect(turn.locator(':scope > .cmd-header .cmd-header-exit')).not.toHaveText('failed')
+    await expect(page.locator(INPUT)).toBeHidden({ timeout: 10_000 })
+    await expect(page.locator('.pane.active .nocx-freeze-frame')).toHaveCount(0)
+    await expect(page.locator(RUNNING_BLOCK)).toHaveCount(1)
+
+    // 6. The answer overlay remains readable after thaw. Its focused pane
+    //    still owns the summon chord, so the command can be asked again
+    //    without a pointer click through that overlay.
+    await page.keyboard.press('ControlOrMeta+Enter')
+    await expect(page.locator(INPUT)).toBeVisible({ timeout: 10_000 })
+    await expect(modeIndicator(page)).toHaveAttribute('data-target', 'agent', { timeout: 10_000 })
+    const NEXT = 'Can I ask again after stopping only that answer?'
+    fake.setScript({ chunks: ['Yes. The next answer completed normally.'] })
+    await page.locator(INPUT).fill(NEXT)
+    await page.keyboard.press('Enter')
+    await answerFinished(page, NEXT)
+
+    // A settled-turn Escape is dismiss-only, so the cancel count stays one.
     await page.keyboard.press('Escape')
     await expect(page.locator(INPUT)).toBeHidden({ timeout: 10_000 })
+    expect((await recorded(page)).cancels).toHaveLength(1)
+
+    // Finally release the command through its own fixture condition.
     writeFileSync(flagPath, 'go\n')
     await expect(page.locator(RUNNING_BLOCK)).toHaveCount(0, { timeout: 30_000 })
     await expect(page.locator(INPUT)).toBeVisible({ timeout: 20_000 })
-    // The prompt is back and it is the SHELL's again: the summon is spent,
-    // and the empty draft is what allows the target to go back.
     await expect(modeIndicator(page)).toHaveAttribute('data-target', 'shell', { timeout: 10_000 })
   })
 })

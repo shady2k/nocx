@@ -8298,7 +8298,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     }
   })
 
-  it('the editor’s own Ctrl+C sends no ^C to the pty while the question is the submission (nocx-oova)', async () => {
+  it('the summoned Agent editor delegates Ctrl+C once to the running command and never to the turn', async () => {
     const client = makeClient()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -8323,13 +8323,14 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         }),
       )
 
-      // The draft is cancelled, which is what the key means in a prompt.
+      // The draft is cancelled locally, while the command — not the turn —
+      // receives exactly one ordinary interrupt through its signal ladder.
       expect(ed.getDoc()).toBe('')
-      // And nothing reached the pty: a submission that is not a shell
-      // command must not carry shell behaviour to the process. Under the
-      // summon this is not academic — the ^C would have killed the very
-      // command the person was composing a question about.
+      expect(signalsSent(content)).toEqual(['interrupt'])
       expect(session.send).not.toHaveBeenCalledWith('\x03')
+      expect(
+        client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.cancel'),
+      ).toHaveLength(0)
     } finally {
       restore()
       teardown()
@@ -8901,7 +8902,7 @@ describe('session.read serves the frame the question is about (nocx-7l4ex.3)', (
       teardown()
     }
   })
-  it('keeps the read pin through Escape until the same ask turn ends', async () => {
+  it('keeps the read pin through Escape until the stopped ask turn terminalizes', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -8965,7 +8966,7 @@ describe('session.read serves the frame the question is about (nocx-7l4ex.3)', (
         ([method]) => method === 'agent.runState',
       )
       expect(runState).toBeDefined()
-      ;(runState![1] as (params: unknown) => void)({ runId: 42, state: 'completed' })
+      ;(runState![1] as (params: unknown) => void)({ runId: 42, state: 'cancelled' })
 
       capture.mockResolvedValue(live)
       readCurrent(dispatcher, content, 'read-after-turn')
@@ -9518,6 +9519,61 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
+  it('does not cancel an older turn when the newest answer is still pre-ack', async () => {
+    const client = makeClient()
+    let resolveFirst!: (value: { runId: number; entryId: string; model: string }) => void
+    let rejectSecond!: (error: Error) => void
+    const firstAsk = new Promise<{ runId: number; entryId: string; model: string }>((resolve) => {
+      resolveFirst = resolve
+    })
+    const secondAsk = new Promise<never>((_resolve, reject) => {
+      rejectSecond = reject
+    })
+    let asks = 0
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        asks += 1
+        return asks === 1 ? firstAsk : secondAsk
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const first = await submitQuestion(content, client, 'older accepted turn')
+      await submitQuestion(content, client, 'newer pre-ack turn')
+      resolveFirst({ runId: 1, entryId: 'entry-1', model: 'test-model' })
+      await vi.waitFor(() => expect(first.dataset.entryId).toBe('entry-1'))
+
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      await Promise.resolve()
+      expect(
+        client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.cancel'),
+      ).toHaveLength(0)
+      expect(content.pinnedFrame()).toBeNull()
+
+      rejectSecond(new Error('newer ask refused during cleanup'))
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      state?.({ runId: 1, entryId: 'entry-1', state: 'completed', droppedDeltas: 0 })
+    } finally {
+      teardown()
+    }
+  })
+
   it('does not resurrect answers after their running command is cleared', async () => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
@@ -9637,12 +9693,13 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
-  it('Escape after acceptance thaws the live screen and keeps the answer streaming', async () => {
+  it('Escape stops the exact current answer once, thaws the summon, and leaves the command running', async () => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
-      if (method === 'agent.ask') {
+      if (method === 'agent.ask')
         return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
-      }
+      if (method === 'agent.cancel')
+        return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
       return Promise.resolve({
         endpointConfigured: true,
         credential: 'resolvable',
@@ -9658,36 +9715,242 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       content.setVisible(true)
       startCommand(client)
       await summon(content)
-      const answer = await submitQuestion(content, client, 'can I leave this view?')
+      const answer = await submitQuestion(content, client, 'stop only this answer')
+      await vi.waitFor(() => expect(answer.dataset.entryId).toBe('entry-42'))
       const delta = client.dispatcher.subscribe.mock.calls.find(
         ([method]) => method === 'agent.runDelta',
       )?.[1] as ((params: unknown) => void) | undefined
-      expect(delta).toBeDefined()
-      delta!({ runId: 42, entryId: 'entry-42', text: 'still running' })
+      delta!({ runId: 42, entryId: 'entry-42', text: 'partial prose survives' })
 
+      const escape = (): KeyboardEvent => {
+        const event = new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        })
+        document.body.dispatchEvent(event)
+        return event
+      }
+      expect(escape().defaultPrevented).toBe(true)
+      escape()
+
+      await vi.waitFor(() =>
+        expect(
+          client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.cancel'),
+        ).toEqual([['agent.cancel', { runId: 42 }]]),
+      )
+      expect(sessionOf(content).signal).not.toHaveBeenCalled()
+      expect(
+        (content as unknown as { scrollback: ScrollbackController }).scrollback.blockManager
+          .runningBlock,
+      ).not.toBeNull()
+      expect(content.pinnedFrame()).toBeNull()
+      expect(editorOf(content).isVisible).toBe(false)
+
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      state!({ runId: 42, entryId: 'entry-42', state: 'cancelled', droppedDeltas: 0 })
+      expect(answer.querySelector('[data-answer-body]')?.textContent).toContain(
+        'partial prose survives',
+      )
+      expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).toBe(
+        'stopped',
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a streaming answer leaves Escape with text controls, overlays, and the block menu', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask')
+        return Promise.resolve({ runId: 43, entryId: 'entry-43', model: 'test-model' })
+      if (method === 'agent.cancel')
+        return Promise.resolve({ runId: 43, state: 'cancelled', cancelled: true })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const input = document.createElement('input')
+    const menu = document.createElement('div')
+    menu.className = 'cmd-overflow-menu'
+    let overlayClosed = false
+    let overlay: ReturnType<typeof pushOverlay> | null = null
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'owners keep Escape')
+      await vi.waitFor(() => expect(answer.dataset.entryId).toBe('entry-43'))
       const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
-      expect(pane.querySelector('.nocx-freeze-frame')).not.toBeNull()
+      pane.append(input)
+
+      input.focus()
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      input.blur()
+
+      overlay = pushOverlay(() => {
+        overlayClosed = true
+        return true
+      })
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      expect(overlayClosed).toBe(true)
+      popOverlay(overlay)
+      overlay = null
+
+      document.body.append(menu)
       document.body.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
       )
 
-      expect(content.pinnedFrame()).toBeNull()
-      expect(pane.querySelector('.nocx-freeze-frame')).toBeNull()
-      expect(editorOf(content).isVisible).toBe(false)
-      const session = sessionOf(content)
-      session.send.mockClear()
-      rendererOf(content)._fireData('q')
-      expect(session.send).toHaveBeenCalledWith('q')
-      // After Escape the turn remains a view over the live screen: it stays
-      // in the pane-owned stack until the command ends, then takes its seat.
-      expect(answer.parentElement?.classList.contains('nocx-summon-answers')).toBe(true)
-      expect(answer.parentElement?.parentElement?.parentElement).toBe(pane)
-      expect(answer.classList.contains('nocx-answer-overlay')).toBe(true)
+      expect(
+        client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.cancel'),
+      ).toHaveLength(0)
+      expect(content.pinnedFrame()).not.toBeNull()
+    } finally {
+      if (overlay !== null) popOverlay(overlay)
+      input.remove()
+      menu.remove()
+      teardown()
+    }
+  })
 
-      delta!({ runId: 42, entryId: 'entry-42', text: ' after Escape' })
-      expect(answer.querySelector('[data-answer-body]')?.textContent).toContain(
-        'still running after Escape',
+  it('Ctrl+C keeps one command owner across chrome, grid, selection, and text-control focus while the turn streams', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask')
+        return Promise.resolve({ runId: 44, entryId: 'entry-44', model: 'test-model' })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const key = (target: HTMLElement): void => {
+      target.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'c',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
       )
+    }
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'do not stop this turn')
+      await vi.waitFor(() => expect(answer.dataset.entryId).toBe('entry-44'))
+      const session = sessionOf(content)
+      session.signal.mockClear()
+      const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
+
+      const chrome = document.createElement('button')
+      pane.append(chrome)
+      chrome.focus()
+      key(chrome)
+      expect(session.signal.mock.calls.map((call: unknown[]) => call[0])).toEqual(['interrupt'])
+
+      session.signal.mockClear()
+      const gridInput = document.createElement('textarea')
+      ;(
+        content as unknown as { scrollback: ScrollbackController }
+      ).scrollback.xtermLiveContainer.append(gridInput)
+      gridInput.focus()
+      key(gridInput)
+      expect(session.signal).not.toHaveBeenCalled()
+
+      const otherInput = document.createElement('input')
+      pane.append(otherInput)
+      otherInput.focus()
+      key(otherInput)
+      expect(session.signal).not.toHaveBeenCalled()
+
+      const selected = document.createElement('span')
+      const selectedText = document.createTextNode('copy this output')
+      selected.append(selectedText)
+      ;(
+        content as unknown as { scrollback: ScrollbackController }
+      ).scrollback.scrollbackArea.append(selected)
+      const selectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
+        anchorNode: selectedText,
+        focusNode: selectedText,
+        isCollapsed: false,
+        toString: () => 'copy this output',
+      } as unknown as Selection)
+      otherInput.blur()
+      try {
+        key(document.body)
+        expect(session.signal).not.toHaveBeenCalled()
+      } finally {
+        selectionSpy.mockRestore()
+      }
+      expect(
+        client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.cancel'),
+      ).toHaveLength(0)
+      expect(content.pinnedFrame()).not.toBeNull()
+    } finally {
+      window.getSelection()?.removeAllRanges()
+      teardown()
+    }
+  })
+
+  it('Escape on a settled summoned answer keeps dismiss-only behaviour', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask')
+        return Promise.resolve({ runId: 45, entryId: 'entry-45', model: 'test-model' })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'already settled')
+      await vi.waitFor(() => expect(answer.dataset.entryId).toBe('entry-45'))
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      state!({ runId: 45, entryId: 'entry-45', state: 'completed', droppedDeltas: 0 })
+      await vi.waitFor(() => expect(editorOf(content).isVisible).toBe(true))
+
+      viewOf(editorOf(content)).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+
+      expect(
+        client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.cancel'),
+      ).toHaveLength(0)
+      expect(editorOf(content).isVisible).toBe(false)
+      expect(content.pinnedFrame()).toBeNull()
     } finally {
       teardown()
     }

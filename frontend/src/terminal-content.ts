@@ -499,8 +499,9 @@ export class TerminalContent extends BasePaneContent {
    *  renderer keeps parsing underneath it; this is presentation state only. */
   private _pinnedFrame: CapturedFrame | null = null
   /** A captured frame waiting for the ask submit seam to mint its askId.
-   *  This is distinct from the display pin: Escape ends the display, but
-   *  cannot end a turn that is already answering. */
+   *  This is distinct from the display pin: Escape ends the display
+   *  immediately, while the read pin ends at the stopped turn's existing
+   *  terminal seam. */
   private _pendingReadFrame: CapturedFrame | null = null
   private _readPinnedFrame: { askId: string; frame: CapturedFrame } | null = null
   private _freezeFrameView: HTMLElement | null = null
@@ -524,7 +525,11 @@ export class TerminalContent extends BasePaneContent {
   /** Every answer opened by this command's summon, in ask order. A terminal
    *  answer stays in the absolute stack so the same composer can return below
    *  it; command completion reparents these exact nodes into scrollback. */
-  private _summonedAnswers: { el: HTMLElement; terminal: boolean }[] = []
+  private _summonedAnswers: {
+    el: HTMLElement
+    terminal: boolean
+    running: RunningBlockActions | undefined
+  }[] = []
   private _summonedCommand: BlockRecord | null = null
   /** The one presentation-owned stack. Answers scroll in its first child and
    *  the existing editor occupies its final flex seat while the summon is
@@ -1657,7 +1662,7 @@ export class TerminalContent extends BasePaneContent {
             if (surface !== null) {
               handle.el.classList.add('nocx-answer-overlay')
               surface.answers.appendChild(handle.el)
-              this._summonedAnswers.push({ el: handle.el, terminal: false })
+              this._summonedAnswers.push({ el: handle.el, terminal: false, running })
               // A deliberate follow-up moves the answer scroller to its new
               // current turn; subsequent content grows in that visible seat.
               surface.answers.scrollTop = surface.answers.scrollHeight
@@ -1859,18 +1864,25 @@ export class TerminalContent extends BasePaneContent {
           // per-mode boolean inside the editor and no second derivation of
           // "which mode am I in".
           //
-          // It was already the right rule and it is now load-bearing: a
-          // summoned editor is up while a command RUNS (nocx-92gfl), so the
-          // bare CR would go into that program's stdin and the ^C would
-          // kill the very command the person is composing a question about.
+          // A summoned editor is up while a command RUNS (nocx-92gfl), so a
+          // bare CR must never enter that program. Ctrl-C is different: the
+          // final two-key contract deliberately delegates it to the running
+          // command's interrupt owner while leaving the assistant turn alone.
           // Before the summon the editor could only be up at a prompt, where
-          // both were merely wrong rather than destructive.
+          // the shell target owned both behaviours directly.
           submitEmpty: () => {
             if (this.inputTargets?.active().routesToShell === false) return
             this.session?.send('\r')
           },
           cancel: () => {
-            if (this.inputTargets?.active().routesToShell === false) return
+            const target = this.inputTargets?.active()
+            if (target?.routesToShell === false) {
+              // Ctrl-C never stops an assistant turn. In the one state where
+              // an Agent composer sits over a running command, it delegates
+              // to that command's existing interrupt owner and nothing else.
+              if (this._summoned && this.hasRunningCommand()) this.signalActiveCommand('interrupt')
+              return
+            }
             // Ctrl-C at a prompt is a keystroke to the SHELL — its line
             // editor discards the line and prints a fresh prompt — and the
             // byte is what delivers that. Over a RUNNING command the same
@@ -1879,11 +1891,11 @@ export class TerminalContent extends BasePaneContent {
             if (this.hasRunningCommand()) this.signalActiveCommand('interrupt')
             else this.session?.send('\x03')
           },
-          // A summoned editor's Escape puts it away and gives the keys back
-          // to the running process, leaving the half-typed question where it
-          // is (nocx-92gfl). Everywhere else this declines and Escape stays
-          // the draft clear it has always been.
-          onEscape: () => this.dismissSummonedEditor(),
+          // The editor's own overlay/IME arbiters run first. An unclaimed
+          // Escape then stops the current summoned turn through its answer's
+          // exact Stop action and unwinds the summon; with no active turn it
+          // keeps the prior dismiss-only behaviour.
+          onEscape: () => this.stopCurrentSummonedAnswerAndDismiss(),
           // A taller editor is a shorter scrollback. Keep the bottom of the
           // transcript where it belongs — just above the editor — instead of
           // letting it slide underneath.
@@ -2571,16 +2583,16 @@ export class TerminalContent extends BasePaneContent {
           return
         }
         // Once an accepted summoned answer owns the overlay, the editor is
-        // intentionally hidden so the answer is readable. Escape still
-        // dismisses the summon through the document path: every answer remains
-        // a view over the live screen and the current one keeps receiving
-        // deltas until the running command ends, when all take ordered seats.
+        // intentionally hidden so the answer is readable. Selection above,
+        // then text controls, overlays and the block menu below retain their
+        // established Escape priority. Only an otherwise-unclaimed Escape
+        // reaches the answer's exact Stop action before the summon thaws.
         if (e.key === 'Escape' && this._summoned && this._currentSummonedAnswer() !== null) {
           const active = document.activeElement
           if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
           if (hasOpenOverlays()) return
           if (document.querySelector('.cmd-overflow-menu')) return
-          if (this.dismissSummonedEditor()) e.preventDefault()
+          if (this.stopCurrentSummonedAnswerAndDismiss()) e.preventDefault()
           return
         }
         // Escape with the editor on screen but out of focus: the editor's
@@ -3951,7 +3963,7 @@ export class TerminalContent extends BasePaneContent {
 
   /** The frame displayed by the active summoned editor, or null otherwise.
    *  This display seam ends with the overlay; the read-turn pin is separate so
-   *  session.read can keep describing the same turn after Escape. */
+   *  an in-flight read keeps its turn identity until Stop terminalizes it. */
   pinnedFrame(): CapturedFrame | null {
     return this._pinnedFrame
   }
@@ -4373,6 +4385,24 @@ export class TerminalContent extends BasePaneContent {
     return null
   }
 
+  /** Stop the newest active summoned turn, then thaw its presentation.
+   *
+   * The action is the exact object the answer menu received. Its isActive
+   * guard owns run acceptance, terminal state and repeat-stop idempotence;
+   * dismissing through the existing unwind makes repeated Escape a no-op. */
+  private stopCurrentSummonedAnswerAndDismiss(): boolean {
+    if (!this._summoned) return false
+    for (let i = this._summonedAnswers.length - 1; i >= 0; i -= 1) {
+      const answer = this._summonedAnswers[i]
+      if (answer.terminal) continue
+      if (answer.running?.isActive(answer.el) === true) answer.running.stop()
+      // A newer pre-ack or already-stopping turn still owns Escape. Never
+      // fall through and cancel an older conversation the person did not aim at.
+      break
+    }
+    return this.dismissSummonedEditor()
+  }
+
   /** Keep the current answer tail visible only while the person was already
    * following it. The stack's nested answer list is the actual scroller; the
    * outer scrollback cannot move content inside this absolute surface. */
@@ -4407,14 +4437,12 @@ export class TerminalContent extends BasePaneContent {
 
   /** Dismiss a summoned editor: the keys go back to the process (nocx-92gfl).
    *
-   *  The DRAFT IS LEFT ALONE, which is the one thing that distinguishes this
-   *  from the Escape the editor has always had. Escape here means "put this
-   *  away" — the person dismissed a surface, they did not cancel their
-   *  question — and a re-summon resumes it. Clearing is still Ctrl-C's, and
-   *  it still means exactly that.
+   *  The DRAFT IS LEFT ALONE. The caller decides whether Escape first stops
+   *  an active answer; this method owns only the existing presentation unwind
+   *  and therefore remains the dismiss-only path for a settled or absent turn.
    *
    *  Returns whether anything was dismissed, so Escape falls through to the
-   *  clear when it was not. */
+   *  ordinary editor clear when it was not. */
   private dismissSummonedEditor(): boolean {
     if (!this._summoned) return false
     // Through _endSummon, which is the ONE place a summon is unwound —

@@ -4260,6 +4260,17 @@ export class TerminalContent extends BasePaneContent {
       // already positioned the command. Follow the new answer tail as well,
       // or a long streamed answer remains below the fold.
       settle?.scrollToBottomIfFollowing()
+      // WebKit can apply the class/style change after this task's scroll
+      // height read. Its initial ResizeObserver delivery is the first
+      // observable point at which the reparented answer owns its final box;
+      // follow there too, without moving a reader who scrolled away.
+      if (settle && typeof ResizeObserver !== 'undefined') {
+        const observer = new ResizeObserver(() => {
+          observer.disconnect()
+          settle.scrollToBottomIfFollowing()
+        })
+        observer.observe(answer)
+      }
     }
     if (settle) settle.settleAround(seat)
     else seat()

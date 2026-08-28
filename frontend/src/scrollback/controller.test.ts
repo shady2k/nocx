@@ -258,6 +258,57 @@ describe('ScrollbackController unstructured mode', () => {
   })
 })
 
+describe('the live region follows the pane it fills (nocx-liveheight)', () => {
+  // The defect: setUnstructured and enterFullscreen each wrote the scroller's
+  // height to the box ONCE, at mode entry, and the re-measure path returned at
+  // its first line unless the mode was `running`. So a pane that changed size
+  // afterwards — the integration card raised and dismissed, or the window
+  // resized — left the box at the height it had when the mode began. Because
+  // .scrollback-inner hangs from the bottom of the scroller, the leftover
+  // pixels showed up as a blank strip at the TOP, and the rows past the box
+  // were clipped by its overflow: a 40-row grid showing 34 rows of `top`.
+  it('re-measures an unstructured session when the scroller grows', () => {
+    const { controller } = makeController()
+    controller.setUnstructured()
+    expect(controller.xtermLiveContainer.style.height).toBe('360px')
+
+    // The card is dismissed and the pane gives the pixels back.
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 540,
+      configurable: true,
+    })
+    controller.setLiveHeight(null)
+
+    expect(controller.xtermLiveContainer.style.height).toBe('540px')
+  })
+
+  it('re-measures an alt-screen program when the scroller shrinks', () => {
+    const { controller } = makeController()
+    controller.enterFullscreen()
+    expect(controller.xtermLiveContainer.style.height).toBe('360px')
+
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 200,
+      configurable: true,
+    })
+    controller.setLiveHeight(null)
+
+    expect(controller.xtermLiveContainer.style.height).toBe('200px')
+  })
+
+  it('leaves an idle pane alone: there is no live box to fill', () => {
+    const { controller } = makeController()
+    controller.setIdle()
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 540,
+      configurable: true,
+    })
+    controller.setLiveHeight(null)
+
+    expect(controller.xtermLiveContainer.style.height).toBe('')
+  })
+})
+
 describe('finished command landing', () => {
   let pendingFrames: FrameRequestCallback[]
 

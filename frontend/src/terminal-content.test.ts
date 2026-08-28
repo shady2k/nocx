@@ -3987,6 +3987,52 @@ describe('two attempts and the live region stay separate while running (nocx-m87
   })
 })
 
+describe('the live box follows the pane it fills (nocx-liveheight)', () => {
+  const scrollbackOf = (content: TerminalContent): ScrollbackController =>
+    (content as unknown as { scrollback: ScrollbackController }).scrollback
+
+  // A markerless session — which is every session whose shell integration did
+  // not come up, the ones that wear the "Not integrated" card — fills the pane
+  // with the terminal. The card sits in the pane's flow above it, so raising
+  // and dismissing it changes the scroller's height underneath a mode that
+  // used to measure itself once, on the way in. The grid was refitted and the
+  // box was not, which is a blank strip at the top and clipped rows at the
+  // bottom. A window resize does the same thing with no card involved, and
+  // that is the seam this test drives.
+  it('re-measures when the pane changes size, not only when the mode is entered', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const raf = globalThis.requestAnimationFrame
+    globalThis.requestAnimationFrame = (cb: FrameRequestCallback): number => {
+      cb(0)
+      return 0
+    }
+    try {
+      const sb = scrollbackOf(content)
+      expect(sb.mode).toBe('unstructured')
+      // jsdom does no layout: the scroller's height is named, as everywhere
+      // else in this file.
+      Object.defineProperty(sb.scrollbackArea, 'clientHeight', {
+        value: 400,
+        configurable: true,
+      })
+      content.viewportChanged({ width: 800, height: 400 })
+      expect(sb.xtermLiveContainer.style.height).toBe('400px')
+
+      // The card is dismissed (or the window grew): the scroller is taller.
+      Object.defineProperty(sb.scrollbackArea, 'clientHeight', {
+        value: 560,
+        configurable: true,
+      })
+      content.viewportChanged({ width: 800, height: 560 })
+      expect(sb.xtermLiveContainer.style.height).toBe('560px')
+    } finally {
+      globalThis.requestAnimationFrame = raf
+      teardown()
+    }
+  })
+})
+
 describe('alt-screen exit and the ready prompt present the structured layout (nocx-u7uh.26, nocx-u7uh.27)', () => {
   /** The lifecycle fact handler TerminalContent registered on the fake
    *  dispatcher — the wire seam tests deliver authenticated facts through. */

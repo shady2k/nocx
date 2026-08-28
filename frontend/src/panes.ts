@@ -71,6 +71,7 @@ import type {
 import { SURFACE_TERMINAL } from './pane-content'
 import type { SnippetProviderDeps } from './snippets/snippet-provider'
 import { TerminalContent, type HostKeyErrorEvidence, type PaneIdentity } from './terminal-content'
+import type { OutputRecordingSource } from './integration/status'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Pane — chrome and lifecycle, delegates content to PaneContent
@@ -784,6 +785,13 @@ export class PaneManager {
    *  composition root; handed to each TerminalContent as it is built. */
   snippets?: SnippetProviderDeps
   onSnippetAccepted?: (snippetId: string) => void
+  /** Where every pane reads "is what my session prints being written down"
+   *  (nocx-22k1c.3). Set once by the composition root to the
+   *  HistoryStatusStore, which owns the fact; a plain tab's card needs it to
+   *  say what IS happening to its output beside what is not. Read through
+   *  recordingSource() rather than handed to a pane directly, so a pane
+   *  built before the root has wired it still sees the answer afterwards. */
+  outputRecording?: OutputRecordingSource
 
   constructor(
     bar: HTMLElement,
@@ -1092,6 +1100,21 @@ export class PaneManager {
     return { paneId: opened.paneId, registered }
   }
 
+  /** The panes' view of the recording fact, resolved at READ time rather
+   *  than captured at pane construction (nocx-22k1c.3).
+   *
+   *  Late binding on purpose: a restore builds panes from the layout chain
+   *  well after the composition root has run, but nothing guarantees the two
+   *  orders, and a pane handed `undefined` once would go on saying nothing
+   *  about its output for the life of the tab. Resolving per call costs one
+   *  indirection and cannot go stale. */
+  private recordingSource(): OutputRecordingSource {
+    return {
+      outputRecording: () => this.outputRecording?.outputRecording() ?? 'unknown',
+      subscribe: (listener) => this.outputRecording?.subscribe(listener) ?? (() => {}),
+    }
+  }
+
   /** Create a new local terminal pane and activate it: mint the identity,
    *  ask the backend for the tab, and put the chrome up in the same turn. */
   newPane(): Pane {
@@ -1123,6 +1146,7 @@ export class PaneManager {
         // the session may be another pane's.
         sessionName: (id) => this.sessionDisplayName(id),
         onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
+        outputRecording: this.recordingSource(),
         onPortsTargetChange: () => this.onActivePaneChange?.(),
         onActiveOriginChange: () => this.onActivePaneChange?.(),
         onSetupVault: this.onSetupVault,
@@ -1216,6 +1240,7 @@ export class PaneManager {
           }
         },
         onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
+        outputRecording: this.recordingSource(),
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
         onPaneObservationChange: (state) => paneRef.current?.updatePaneObservation(state),
         onActiveOriginChange: () => this.onActivePaneChange?.(),

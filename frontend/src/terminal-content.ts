@@ -59,8 +59,19 @@ import {
   isDegraded,
   safeSilenceStorage,
   subscribeIntegrationChanged,
+  type OutputRecordingSource,
 } from './integration/status'
 import { mountIntegrationNotice } from './integration/notice'
+
+/** What a pane reads when nothing supplied the recording seam: the fact is
+ *  unknown and stays unknown, so the card says nothing about this session's
+ *  output. Deliberately not 'not-recorded' — a missing wire is not evidence
+ *  that the store is off, and claiming a loss the person is not suffering is
+ *  the same defect as hiding one. */
+const RECORDING_UNKNOWN: OutputRecordingSource = {
+  outputRecording: () => 'unknown',
+  subscribe: () => () => {},
+}
 import { BlockReceipt } from './ui/block-receipt'
 import type { HistoryRecord } from './generated/history.record'
 import { blockOutputText, renderRecordedCommand } from './scrollback/blocks'
@@ -288,6 +299,13 @@ export interface TerminalContentHooks {
    *  exec). Tab chrome renders at most this small warning mark
    *  (nocx-4t37.2); the capability statement itself lives in the rail. */
   onWarningChange?: (warning: boolean, label?: string) => void
+  /** Where this pane reads "is what my session prints being written down"
+   *  (nocx-22k1c.3). A plain tab records its output and produces no blocks,
+   *  and the card has to be able to say both halves; the fact belongs to
+   *  HistoryStatusStore and reaches the pane through here rather than being
+   *  derived a second time. Absent in a pane assembled without it, which
+   *  reads as "nothing known" and never as "nothing kept". */
+  outputRecording?: OutputRecordingSource
   /** The pane entered or left an environment, so the ports panel's target
    *  changed without the active tab changing (nocx-695k.3). */
   onPortsTargetChange?: () => void
@@ -3817,7 +3835,8 @@ export class TerminalContent extends BasePaneContent {
     // mark: it is the backend's own fact about this session, not a
     // stream-derived claim.
     const degraded = isDegraded(this._integration)
-    const label = integrationMessage(this._integration)?.title ?? ''
+    const label =
+      integrationMessage(this._integration, this._recording().outputRecording())?.title ?? ''
     if (
       shellState === this._shellState &&
       presentation === this._presentation &&
@@ -3870,6 +3889,14 @@ export class TerminalContent extends BasePaneContent {
       return
     }
     this._maybeShowIntegrationNotice(fact)
+  }
+
+  /** Where this pane reads the recording fact, with the honest fallback for
+   *  a pane assembled without the seam: nothing known, so the card says
+   *  nothing about recording rather than guessing. It is never a claim that
+   *  nothing is kept — that is a different sentence and it would be wrong. */
+  private _recording(): OutputRecordingSource {
+    return this.hooks.outputRecording ?? RECORDING_UNKNOWN
   }
 
   /** Take the card down and give the pane back to the terminal. */
@@ -3948,6 +3975,7 @@ export class TerminalContent extends BasePaneContent {
     if (this._silencedShells.isSilenced(fact.shell)) return
     this._noticeDispose = mountIntegrationNotice(target, {
       fact,
+      recording: this._recording(),
       copy: (text) => this.clipboard.writeText(text),
       onSuppressShell: () => {
         this._silencedShells.silenceShell(fact.shell)

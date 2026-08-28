@@ -415,6 +415,18 @@ async function main() {
   // asking afterwards.
   const layout = new LayoutStore(new LayoutClient(dispatcher))
 
+  // Durable-history availability (nocx-rtg0.15). Started here rather than
+  // inside Settings so the status is already known when the tab opens, and
+  // so a degrade raised while the app runs (nocx-rtg0.10 raises through the
+  // same surface) reaches a screen that is already on the section.
+  //
+  // Before the pane manager rather than after it (nocx-22k1c.3): the panes
+  // read the same status to say what is happening to a plain tab's output,
+  // and the first status should be in hand before the first tab is built
+  // rather than one round trip later.
+  const historyStatusStore = new HistoryStatusStore(client)
+  historyStatusStore.start()
+
   const tm = new PaneManager(
     bar,
     verticalStripHost,
@@ -430,6 +442,10 @@ async function main() {
     // is already warm — `load()` above ran before this line (ADR-0048).
     uiStateClient,
   )
+  // A plain tab records its output and produces no blocks; the card that
+  // says so reads the recording half from the store that owns it, rather
+  // than deriving it a second time (nocx-22k1c.3).
+  tm.outputRecording = historyStatusStore
   tm.onVaultSealed = () => vaultController.openUnlock('open this connection')
   tm.onHostKeyError = (evidence, signal) => openHostKeys.request(evidence, signal)
   tm.onSetupVault = () => vaultController.openSetup()
@@ -479,12 +495,6 @@ async function main() {
   tm.onOpenOverview = () => overview.open()
 
   const observer = new SettingsObserver(dispatcher)
-  // Durable-history availability (nocx-rtg0.15). Started here rather than
-  // inside Settings so the status is already known when the tab opens, and
-  // so a degrade raised while the app runs (nocx-rtg0.10 will raise through
-  // the same surface) reaches a screen that is already on the section.
-  const historyStatusStore = new HistoryStatusStore(client)
-  historyStatusStore.start()
 
   // Surface registry — surfaces declared once, every entry point resolves
   // through the registry rather than rebuilding the descriptor. (AD-8)

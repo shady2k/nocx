@@ -31,6 +31,7 @@
 // grow its own copy of the fact, which is the defect this module exists to
 // prevent.
 import type { WSClient } from './ipc'
+import type { OutputRecording, OutputRecordingSource } from './integration/status'
 
 // The wire type is GENERATED from contracts/history.status.schema.json
 // (npm run contracts) and re-exported here so callers import it from the
@@ -189,7 +190,7 @@ export const HISTORY_UNAVAILABLE_RECALL_DESC = 'see Settings → History for why
  * unlike a vault snapshot there is nothing further to fetch and a refetch
  * would put a round trip between the degrade and the sentence about it.
  */
-export class HistoryStatusStore {
+export class HistoryStatusStore implements OutputRecordingSource {
   private current: HistoryStatus | null = null
   private readonly listeners = new Set<(s: HistoryStatus | null) => void>()
   private unsub: (() => void) | null = null
@@ -201,6 +202,24 @@ export class HistoryStatusStore {
   /** The status as last read, or null until the first read answers. */
   status(): HistoryStatus | null {
     return this.current
+  }
+
+  /** The one question a terminal pane asks of this status (nocx-22k1c.3): is
+   *  what a session prints being written down?
+   *
+   *  Here rather than derived in the pane, because this module owns the fact
+   *  and a second derivation of it would be a second answer that agrees
+   *  until the day it does not (AD-8). It is the same field
+   *  detachedOutputSentence reads — `detachedOutput.recorded` is "output
+   *  produced now would be kept", which is exactly the pane's question and
+   *  not only the detached case's.
+   *
+   *  A status not yet read is `unknown` and never `not-recorded`: an
+   *  unanswered question is not an answer, and the pane says nothing about
+   *  recording rather than claiming a loss the person is not suffering. */
+  outputRecording(): OutputRecording {
+    if (this.current === null) return 'unknown'
+    return this.current.detachedOutput.recorded ? 'recorded' : 'not-recorded'
   }
 
   /** Observe the status. Fires on every change, never on a re-read that

@@ -197,6 +197,12 @@ Two rules fall out and both are load-bearing:
   the target as the TUI. Exit forces a visible transition.
 - **Key ownership binds to a live session generation.** After a reconnect, the same-looking
   target is a different process.
+- **A protected shell process group is not proof of an idle pane.** Some foreground
+  programs share the launcher shell's group, so TIOCGPGRP correctly refuses to signal
+  that group while the authenticated lifecycle still names an exact open attempt.
+  `session.signal` keeps the process-group ladder first; only on that contradiction it
+  sends the terminal's ordinary `0x03` byte. Stop waits for the exact attempt to end and
+  otherwise reports `unreconciled` — never `nothing-running` beside a running block.
 
 A summon over a running program reuses that machine and the **same `CommandEditor`** for
 follow-ups. The existing editor and every summoned answer are reparented into one absolute

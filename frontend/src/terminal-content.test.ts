@@ -7874,6 +7874,8 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       await summonChord(content)
       expect(ed.isVisible).toBe(true)
       const renderer = rendererOf(content)
+      const focus = vi.spyOn(renderer, 'focus')
+      focus.mockClear()
       const write = Object.getOwnPropertyDescriptor(renderer, 'write')?.value as Mock<
         (data: string) => void
       >
@@ -7891,6 +7893,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       expect(ed.isVisible).toBe(false)
       expect(ed.root.dataset.placement).toBe('inline')
       expect(readOnlyOf(content)).toHaveBeenLastCalledWith(false)
+      expect(focus).toHaveBeenCalledTimes(1)
       // The assertion that matters is not the flag: it is a key the PROGRAM
       expect(content.pinnedFrame()).toBeNull()
       expect(gridOf(content).textContent).toContain('during freeze\n')
@@ -8656,6 +8659,46 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       restore()
       teardown()
       document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
+    }
+  })
+
+  it('names a lifecycle/foreground contradiction instead of claiming nothing is running', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = lifecycleHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-shared', state: 'open', origin: 'app', command: 'top' },
+      })
+      sessionOf(content).signal.mockResolvedValue({
+        signal: 'stop',
+        outcome: 'unreconciled',
+      })
+      vi.mocked(showToast).mockClear()
+
+      itemNamed(runningBlockMenu(content), 'stop')!.click()
+
+      await vi.waitFor(() => expect(showToast).toHaveBeenCalled())
+      const calls = vi.mocked(showToast).mock.calls
+      const warning = calls[calls.length - 1]?.[0]
+      expect(warning).toMatchObject({ level: 'warning' })
+      expect(warning?.message).toContain('still recorded as running')
+      expect(warning?.message).not.toContain('Nothing is running')
+    } finally {
+      restore()
+      teardown()
+      document.querySelectorAll('.cmd-overflow-menu').forEach((el) => el.remove())
     }
   })
 })

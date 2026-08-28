@@ -29,7 +29,10 @@ import (
 
 	"github.com/gorilla/websocket"
 
+	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/session"
 )
 
 // signalWireResult is session.signal's answer as the renderer reads it: the
@@ -203,6 +206,65 @@ func TestSessionSignal_StopEscalatesUntilTheExecutionIsGone(t *testing.T) {
 // TestSessionSignal_RefusesParamsItCannotHonour: the params are validated
 // before the handler runs, so a bad signal name or a session this
 // connection does not hold never reaches a process group.
+// TestSessionSignal_SharedShellGroupUsesAuthenticatedLifecycle covers the
+// contradiction nocx-92gfl.4 captured live: TIOCGPGRP names the protected
+// launcher shell group while the lifecycle kernel names an exact open attempt.
+// The explicit attempt permits only the terminal's ordinary Ctrl+C byte, never
+// a kill of the shell group. Interrupt reports that delivery; Stop refuses to
+// claim completion while the exact attempt remains open.
+func TestSessionSignal_SharedShellGroupUsesAuthenticatedLifecycle(t *testing.T) {
+	validateJSON(t, loadSchema(t, "session.signal.schema.json"), mustMarshal(signalResult{
+		Signal: signalStop, Outcome: string(foregroundUnreconciled),
+	}), "session.signal unreconciled DTO")
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t,
+		WithLifecyclePublisher(pub),
+		WithRunLease(RunLeaseConfig{SignalGrace: 10 * time.Millisecond}),
+	)
+	pub.SetEmitter(e.ws)
+	sid := e.openSession(t, 1)
+	const lane = lifecycle.LaneID("lane-shared-shell")
+	e.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	if err := pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatal(err)
+	}
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	ackEstablishmentFrom(t, pub, lane, h, e.conn)
+	gotAttempt := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		map[string]string{"domain": string(h.Domain), "command": "key-owning-tui", "cwd": "/tmp", "host": "", "source": "user"}, 40))
+
+	call := func(id int, intent string) signalWireResult {
+		raw := jsonrpcCallWithID(t, e.conn, "session.signal", map[string]any{"sessionId": sid, "signal": intent}, id)
+		var env struct {
+			Result signalWireResult `json:"result"`
+			Error  *jsonrpcErrorObj `json:"error"`
+		}
+		if decodeErr := json.Unmarshal(raw, &env); decodeErr != nil {
+			t.Fatalf("decode session.signal: %v", decodeErr)
+		}
+		if env.Error != nil {
+			t.Fatalf("session.signal: %+v", env.Error)
+		}
+		return env.Result
+	}
+
+	if got := call(41, signalInterrupt); got.Outcome != string(foregroundDelivered) {
+		t.Fatalf("interrupt outcome = %q, want delivered", got.Outcome)
+	}
+	state, err := pub.State(lane)
+	if err != nil || state.Lifecycle != lifecycle.LifecycleRunning || string(state.Attempt) != gotAttempt.ID {
+		t.Fatalf("lifecycle after interrupt = %+v, %v; want the same open attempt", state, err)
+	}
+	if got := call(42, signalStop); got.Outcome != string(foregroundUnreconciled) {
+		t.Fatalf("stop outcome = %q, want unreconciled while attempt stays open", got.Outcome)
+	}
+}
+
 func TestSessionSignal_RefusesParamsItCannotHonour(t *testing.T) {
 	conn, tap := signalServer(t)
 	sid := openSessionTapped(t, conn, tap)

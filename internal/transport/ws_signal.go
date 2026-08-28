@@ -28,8 +28,10 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -90,8 +92,9 @@ type signalHandlers struct {
 	r       Responder
 }
 
-// handleSignal addresses one signal to one session's foreground process
-// group.
+// handleSignal addresses one signal intent to one session's foreground
+// execution, through its process group or the lifecycle-confirmed terminal
+// interrupt fallback.
 //
 // The session is resolved through the same two checks resize and close use,
 // in the same order and with the same refusal: the connection must hold the
@@ -114,13 +117,13 @@ func (h signalHandlers) handleSignal(ctx context.Context, state *connState, req 
 		_ = respond(h.r, newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
 		return
 	}
-	err = op.Run(ctx, func(_ context.Context, svc capability.SessionService) error {
+	err = op.Run(ctx, func(signalCtx context.Context, svc capability.SessionService) error {
 		sess, gerr := svc.Get(sid)
 		if gerr != nil {
 			_ = respond(h.r, newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
 			return nil
 		}
-		h.answer(req, sid, sess, params.Signal)
+		h.answer(signalCtx, req, sid, sess, params.Signal)
 		return nil
 	})
 	if err != nil {
@@ -128,30 +131,113 @@ func (h signalHandlers) handleSignal(ctx context.Context, state *connState, req 
 	}
 }
 
-// answer runs the intent against the session and writes the result.
-//
-// A REMOTE SESSION IS SAID OUT LOUD RATHER THAN COLLAPSED INTO
-// "nothing-running". realSession.SignalForeground reports pty.ErrNoForeground
-// for a remote channel just as it does for a shell at a prompt — it has no
-// local process group either way — so the two are indistinguishable by the
-// error alone, and telling a person "nothing is running" while their command
-// is plainly running on the far host is a lie they would act on. The kind is
-// the fact that separates them, and it is asked here rather than guessed.
-// Reaching a process on the far host is the remote-footprint work's, not
-// this method's.
-func (h signalHandlers) answer(req jsonrpcRequest, sid session.ID, sess session.Session, intent string) {
+// runningLifecycleAttempt returns the exact authenticated attempt the backend
+// currently projects as running for sid. It is consulted only after the PTY
+// foreground guard found the launcher shell's own group: lifecycle is evidence
+// that an execution still exists, never permission to signal that shell group.
+func (s *WSServer) runningLifecycleAttempt(sid session.ID) (lifecycle.AttemptID, bool) {
+	if s.lifecyclePub == nil {
+		return "", false
+	}
+	s.lifecycleMu.Lock()
+	var lane lifecycle.LaneID
+	for candidate, owner := range s.lifecycleLanes {
+		if owner == sid {
+			lane = candidate
+			break
+		}
+	}
+	s.lifecycleMu.Unlock()
+	if lane == "" {
+		return "", false
+	}
+	snapshot, err := s.lifecyclePub.State(lane)
+	if err != nil || snapshot.Lifecycle != lifecycle.LifecycleRunning || snapshot.Attempt == "" {
+		return "", false
+	}
+	return snapshot.Attempt, true
+}
+
+// waitLifecycleAttemptEnd keeps Stop's synchronous promise on the fallback
+// path. The ordinary process-group ladder waits the same two cooperative
+// graces (after INT and TERM); this rare path polls the backend-owned lifecycle
+// read model for at most that bound and never inspects terminal bytes.
+func (s *WSServer) waitLifecycleAttemptEnd(ctx context.Context, attempt lifecycle.AttemptID, grace time.Duration) bool {
+	if grace <= 0 {
+		grace = defaultRunSignalGrace
+	}
+	timer := time.NewTimer(2 * grace)
+	defer timer.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	ended := func() bool {
+		current, ok := s.lifecyclePub.Attempt(attempt)
+		return !ok || current.State != lifecycle.AttemptOpen
+	}
+	for {
+		if ended() {
+			return true
+		}
+		select {
+		case <-ctx.Done():
+			return false
+		case <-ticker.C:
+		case <-timer.C:
+			return ended()
+		}
+	}
+}
+
+// reconcileSharedShellForeground handles the real shell mode in which an
+// external foreground program shares the launcher shell's process group. The
+// TIOCGPGRP guard must not kill that group. An authenticated open lifecycle
+// attempt makes one safer route available: write the terminal's ordinary
+// Ctrl+C byte and let the line discipline/program handle it.
+func (h signalHandlers) reconcileSharedShellForeground(ctx context.Context, sid session.ID, sess session.Session, intent string, outcome foregroundOutcome) foregroundOutcome {
+	if outcome != foregroundNothingRunning {
+		return outcome
+	}
+	attempt, ok := h.machine.runningLifecycleAttempt(sid)
+	if !ok {
+		return outcome
+	}
+	if !sess.EnqueueWrite([]byte{0x03}) {
+		h.machine.log.Warn("foreground signal: lifecycle-owned fallback enqueue failed",
+			"session_id", string(sid), "attempt", string(attempt))
+		return foregroundUnreconciled
+	}
+	h.machine.log.Info("foreground signal: delivered terminal interrupt to lifecycle-owned shared group",
+		"session_id", string(sid), "attempt", string(attempt), "intent", intent)
+	if intent == signalInterrupt {
+		return foregroundDelivered
+	}
+	if h.machine.waitLifecycleAttemptEnd(ctx, attempt, h.machine.effectiveRunLease().SignalGrace) {
+		return foregroundDelivered
+	}
+	h.machine.log.Warn("foreground signal: lifecycle attempt stayed open after terminal interrupt",
+		"session_id", string(sid), "attempt", string(attempt))
+	return foregroundUnreconciled
+}
+
+// answer runs the intent against the session and writes the result. A remote
+// session stays distinct from nothing-running: this process has no host-side
+// group to reach, while a local prompt has a protected shell group and no
+// authenticated execution. Reaching the far host remains remote-footprint work.
+
+func (h signalHandlers) answer(ctx context.Context, req jsonrpcRequest, sid session.ID, sess session.Session, intent string) {
 	outcome := foregroundUnsupported
 	if sess.Kind() != session.KindRemote {
 		sg, ok := sess.(runLeaseSession)
 		if !ok {
 			// A session whose channel cannot be signalled at all. Same
 			// honest answer as a remote one: this process cannot reach it.
-			outcome = "unsupported"
+			outcome = foregroundUnsupported
 		} else if intent == signalStop {
 			outcome = stopForeground(h.machine.log, sid, sg, h.machine.effectiveRunLease().SignalGrace)
 		} else {
 			outcome = interruptForeground(h.machine.log, sid, sg)
 		}
+		outcome = h.reconcileSharedShellForeground(ctx, sid, sess, intent, outcome)
 	}
 	result, err := json.Marshal(signalResult{Signal: intent, Outcome: string(outcome)})
 	if err != nil {
@@ -167,8 +253,9 @@ func (h signalHandlers) answer(req jsonrpcRequest, sid session.ID, sess session.
 // close could queue behind: `stop` waits out its escalation grace, and the
 // one operation that can tear a wedged session down must never wait for it.
 // The queue bounds how many signals may be in flight and runs each off the
-// read loop, which is the whole requirement — the work itself reads
-// TIOCGPGRP and calls kill(2), and mutates no session state.
+// read loop. The ordinary route reads TIOCGPGRP and calls kill(2); the guarded
+// shared-group route enqueues one terminal-input byte and may wait on the
+// backend-owned lifecycle read model, so neither may occupy the socket loop.
 func (s *WSServer) signalSpecs(lane control.Admission, sessionGate control.Admission) []methodSpec {
 	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
 	sub := s.operationQueue("signal")

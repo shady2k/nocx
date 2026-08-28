@@ -24,7 +24,10 @@ package transport
 // Nothing here reads the byte stream to decide anything (AD-6): the
 // foreground process group comes from the kernel through TIOCGPGRP, and the
 // shell's own group is never signalled — it is not part of the job it is
-// waiting on (internal/pty.SignalForeground).
+// waiting on (internal/pty.SignalForeground). When an authenticated lifecycle
+// attempt shares that protected group, ws_signal.go may deliver the terminal's
+// ordinary 0x03 byte and wait on that exact attempt; it never weakens this
+// process-group guard or adds another escalation policy.
 
 import (
 	"errors"
@@ -53,6 +56,10 @@ const (
 	// backend can signal, notably a remote host. It is distinct from
 	// foregroundNothingRunning so a caller cannot claim a command was stopped.
 	foregroundUnsupported foregroundOutcome = "unsupported"
+	// foregroundUnreconciled means lifecycle still names an execution after
+	// the shell-group guard prevented direct signalling and the safe terminal
+	// interrupt could not prove that exact attempt ended.
+	foregroundUnreconciled foregroundOutcome = "unreconciled"
 )
 
 // interruptForeground sends one SIGINT to the session's foreground process

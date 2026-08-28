@@ -4520,6 +4520,10 @@ export class TerminalContent extends BasePaneContent {
     // the e2e, because no unit followed a dismissal past the command's end.
     this._endSummon()
     this._syncLifecycleOwnership()
+    // Escape is the discoverable hand-back gesture. Read-only state alone
+    // does not route the next physical key: focus can remain on the hidden
+    // CodeMirror content or an answer control, where q reaches nothing.
+    if (this.hasRunningCommand()) this.takeKeyboardToGrid()
     return true
   }
 
@@ -4656,13 +4660,17 @@ export class TerminalContent extends BasePaneContent {
     void session.signal(signal).then(
       (result) => {
         if (result.outcome === 'delivered') return
-        showToast({
-          level: 'warning',
-          message:
-            result.outcome === 'unsupported'
-              ? 'This command is running on the remote host, which nocx cannot signal from here.'
-              : 'Nothing is running in this pane any more, so there was nothing to stop.',
-        })
+        let message: string
+        if (result.outcome === 'unsupported') {
+          message =
+            'This command is running on the remote host, which nocx cannot signal from here.'
+        } else if (result.outcome === 'unreconciled') {
+          message =
+            'The command is still recorded as running, but nocx could not stop it without signalling the shell. Try its own exit key or Ctrl+C.'
+        } else {
+          message = 'Nothing is running in this pane any more, so there was nothing to stop.'
+        }
+        showToast({ level: 'warning', message })
       },
       (err: unknown) => {
         log.warn('nocx: session.signal failed', {

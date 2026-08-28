@@ -1,8 +1,11 @@
 import { decodeFrame, encodeFrame, isSessionID } from './frame'
 import { Dispatcher } from './dispatcher'
 import { historyOutbox } from './history-client'
+import type { AttachResult } from './generated/attach'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
+import type { LiveSession, SessionsLiveResult } from './generated/sessions.live'
+import type { SessionDisplaced } from './generated/session.displaced'
 import type { SessionLiveness } from './generated/session.liveness'
 import type { SessionObservationChanged } from './generated/session.observationChanged'
 import { isDriverState } from './pane-observation'
@@ -190,12 +193,6 @@ class UTF8StreamDecoder {
   }
 }
 
-interface AttachResult {
-  resumed?: boolean
-  reset?: boolean
-  from: number
-}
-
 interface SessionState {
   decoder: UTF8StreamDecoder
 
@@ -358,6 +355,13 @@ export class WSClient {
   // Reattach-outcome subscribers (nocx-gbhwh): the notice consumes the
   // aggregate of one reconnect's session reattach pass.
   private reconnectResultHandlers = new Set<(r: { resumed: number; lost: number }) => void>()
+  // Displacement subscribers (nocx-oevq4, D8): another client took a session
+  // this one was holding. A client-level set rather than a per-session
+  // callback because the surface that has to react — the pane holding the
+  // session — is found BY the session id, and a pane that never registered a
+  // callback is exactly the one that would otherwise go on advertising a
+  // terminal it no longer has.
+  private displacedHandlers = new Set<(displaced: SessionDisplaced) => void>()
 
   constructor(private readonly dispatcherImpl: Dispatcher) {
     // Wire binary frame handling and session reattach on every connect/reconnect.
@@ -401,7 +405,7 @@ export class WSClient {
       // listener can state what became of the sessions on this reconnect
       // (nocx-gbhwh): resumed, or gone — the backend no longer has them.
       const reattached = [...this.sessions.entries()].map(([sid, state]) =>
-        this._sendAttach(sid, state.offset)
+        this._sendAttach(sid, state.offset, state)
           .then((result) => {
             if (result.reset) {
               state.offset = result.from ?? 0
@@ -559,6 +563,37 @@ export class WSClient {
         livenessEpoch: epoch,
         observedAt,
       })
+    })
+
+    // Another client took a session this one was holding (D8). The take has
+    // already happened on the backend — no output is coming and no input will
+    // be accepted — so this is not a request to give it up, it is the news
+    // that it is gone.
+    //
+    // The session is dropped from the map BEFORE the handlers run, and that
+    // order is the point: a handler that reacted while the entry was still
+    // there could send one more keystroke into a stream this client no longer
+    // owns, and sendToSession's only guard is the map.
+    this.dispatcher.subscribe('session.displaced', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const raw = params as Record<string, unknown>
+      const sid = raw.sessionId
+      if (typeof sid !== 'string') return
+      const state = this.sessions.get(sid)
+      // Unknown, or a previous incarnation of this id: not this client's
+      // session, so nothing is dropped and nobody is told. The identity is
+      // checked exactly as every other session-scoped notification checks it
+      // (nocx-3oupk) — the renderer never mints one and never assumes one.
+      if (!state) return
+      if (raw.instanceId !== state.instanceId || raw.sessionEpoch !== state.sessionEpoch) return
+      this._flushAck(sid)
+      this.sessions.delete(sid)
+      const displaced: SessionDisplaced = {
+        sessionId: sid,
+        instanceId: state.instanceId,
+        sessionEpoch: state.sessionEpoch,
+      }
+      for (const h of this.displacedHandlers) h(displaced)
     })
 
     // The backend dropped input for a session: its write queue is full,
@@ -736,20 +771,7 @@ export class WSClient {
     if (typeof instanceId !== 'string' || typeof sessionEpoch !== 'number') {
       throw new Error(`nocx: invalid session identity from server: ${sid}`)
     }
-    this.sessions.set(sid, {
-      decoder: new UTF8StreamDecoder(),
-      offset: 0,
-      dataCallback: null,
-      pendingData: '',
-      exitCallback: null,
-      resetCallback: null,
-      inputStalledCallback: null,
-      livenessCallback: null,
-      observationCallback: null,
-      livenessEpoch: 0,
-      instanceId,
-      sessionEpoch,
-    })
+    this._registerSession(sid, { instanceId, sessionEpoch }, 0)
     return new SessionHandle(
       this,
       sid,
@@ -760,10 +782,113 @@ export class WSClient {
     )
   }
 
+  /** Mint the per-session state this client keeps. ONE PLACE, because an open
+   *  and a reclaim are two ways of coming to hold the same thing, and a second
+   *  literal would be the field the next callback is added to and forgotten
+   *  in. The offset differs: an open starts at zero, a reclaim starts where
+   *  the backend says the replay does. */
+  private _registerSession(
+    sessionId: string,
+    identity: { instanceId: string; sessionEpoch: number },
+    offset: number,
+  ): void {
+    this.sessions.set(sessionId, {
+      decoder: new UTF8StreamDecoder(),
+      offset,
+      dataCallback: null,
+      pendingData: '',
+      exitCallback: null,
+      resetCallback: null,
+      inputStalledCallback: null,
+      livenessCallback: null,
+      observationCallback: null,
+      livenessEpoch: 0,
+      instanceId: identity.instanceId,
+      sessionEpoch: identity.sessionEpoch,
+    })
+  }
+
   // --- reattach -----------------------------------------------------------
 
-  private _sendAttach(sessionId: string, offset: number): Promise<AttachResult> {
-    return this.dispatcher.call<AttachResult>('attach', { sessionId, offset })
+  /** The claim, in the one shape both callers use (contracts/attach.schema
+   *  .json). The identity travels with it because a claim names a session
+   *  COMPLETELY — instanceId and sessionEpoch, never a bare id — so a binding
+   *  written against a backend that has since restarted is refused as what it
+   *  is rather than answered "no such session". */
+  private _sendAttach(
+    sessionId: string,
+    offset: number,
+    identity: { instanceId: string; sessionEpoch: number },
+  ): Promise<AttachResult> {
+    return this.dispatcher.call<AttachResult>('attach', {
+      sessionId,
+      offset,
+      instanceId: identity.instanceId,
+      sessionEpoch: identity.sessionEpoch,
+    })
+  }
+
+  // --- reclaim -------------------------------------------------------------
+
+  /** What the BACKEND is holding right now: every live session with the pane
+   *  it is the pipe of and the offset its replay starts at
+   *  (contracts/sessions.live.schema.json).
+   *
+   *  This is the answer `this.sessions` cannot give. That Map is renderer
+   *  process memory, so a window that has just started knows nothing, and the
+   *  reconnect pass below reattaches only what is in it — which is why live
+   *  PTYs were orphaned by closing the window. The list replaces the memory;
+   *  it does not replace the reattach. */
+  listLiveSessions(): Promise<LiveSession[]> {
+    return this.dispatcher
+      .call<SessionsLiveResult>('sessions.live', {})
+      .then((result) => result.sessions)
+  }
+
+  /** Take a live session back: register it as if this client had opened it,
+   *  then attach at the offset the backend named.
+   *
+   *  The handle it returns knows the session and NOT the pane's own facts —
+   *  no cwd, no mode, no workspace — because those belong to the pane, which
+   *  is the renderer's durable identity and is read from the layout store.
+   *  The backend owns the live binding and the renderer owns the pane; a
+   *  reclaim is where the two are joined, not where either learns the other's
+   *  half.
+   *
+   *  A reset here is not a loss to report: this client has drawn nothing yet,
+   *  so it simply starts at the offset the backend resumed from. */
+  reclaimSession(entry: LiveSession): Promise<SessionHandle> {
+    const identity = { instanceId: entry.instanceId, sessionEpoch: entry.sessionEpoch }
+    this._registerSession(entry.sessionId, identity, entry.replayFrom)
+    return this._sendAttach(entry.sessionId, entry.replayFrom, identity)
+      .then((result) => {
+        const state = this.sessions.get(entry.sessionId)
+        if (state) state.offset = result.from
+        // No cwd, no mode, no parent, no workspace: every one of those is a
+        // fact of the PANE or of the open that made the session, and the
+        // reclaiming window reads them from the layout store it already has.
+        // Inventing them here would be the second owner (AD-8) — and the one
+        // that is wrong, because it would be guessing.
+        return new SessionHandle(this, entry.sessionId, '')
+      })
+      .catch((err) => {
+        // A refused claim leaves NOTHING behind: the map must not hold a
+        // session this client does not have, or its next reconnect would
+        // reattach to it and its input would be sent into a stream it never
+        // owned.
+        this.sessions.delete(entry.sessionId)
+        throw err
+      })
+  }
+
+  /** Fires when another client takes a session this one was holding (D8,
+   *  contracts/session.displaced.schema.json). The session is already gone
+   *  from this client's map when a handler runs: the backend has stopped
+   *  sending its output and refuses its input, so the only honest state here
+   *  is not holding it. Returns an unsubscribe. */
+  onSessionDisplaced(cb: (displaced: SessionDisplaced) => void): () => void {
+    this.displacedHandlers.add(cb)
+    return () => this.displacedHandlers.delete(cb)
   }
 
   // --- data plane ---------------------------------------------------------

@@ -154,6 +154,22 @@ func (r *outputRing) writtenLocked() uint64 {
 	return r.base + uint64(len(r.buf))
 }
 
+// oldestLocked returns the oldest byte offset the ring still holds — the
+// lowest offset an attach can ask for and be answered with a resume rather
+// than a reset. Takes its own lock, like writtenLocked, so external callers
+// need not know about r.mu.
+//
+// It is what sessions.live reports as replayFrom (nocx-oevq4): a client with
+// no offset of its own has to be TOLD where the replayable stream starts,
+// because the two answers it could guess are both wrong — 0 is a reset once
+// anything has been acked, and `written` silently discards everything the ring
+// was keeping for exactly this moment.
+func (r *outputRing) oldestLocked() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.base
+}
+
 // snapshot returns all buffered bytes starting from offset. When offset is
 // older than the ring's base, needsReset is true and `from` is the current
 // written offset (the client must clear and resync). When offset is at or

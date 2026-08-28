@@ -72,11 +72,25 @@ type sessionRx struct {
 	inputStalled atomic.Bool
 }
 
-func (rx *sessionRx) setSubscriber(wconn *wsConn, state *connState) {
+// setSubscriber installs wconn as the session's one subscriber and RETURNS
+// WHOEVER IT REPLACED, which is the whole of D8 at this seam: one client owns
+// a session, and the displacement is a fact the caller has to act on rather
+// than something that quietly happened.
+//
+// The slot was always single — it replaced its occupant silently, so the
+// displaced client went on rendering a stream it no longer owned and offering
+// a keyboard whose bytes the backend would refuse. Returning the previous pair
+// is what lets the caller tell it (session.displaced), drop the session from
+// its connection state and stop its pump. A nil first return means the slot
+// was empty; the same connection re-installing itself returns itself, and the
+// caller compares before announcing anything.
+func (rx *sessionRx) setSubscriber(wconn *wsConn, state *connState) (*wsConn, *connState) {
 	rx.mu.Lock()
 	defer rx.mu.Unlock()
+	prevConn, prevState := rx.subscriber, rx.subState
 	rx.subscriber = wconn
 	rx.subState = state
+	return prevConn, prevState
 }
 
 func (rx *sessionRx) getSubscriber() (*wsConn, *connState) {
@@ -2083,10 +2097,45 @@ type closeParams struct {
 	SessionID string `json:"sessionId"`
 }
 
-// attachParams is the payload of the "attach" RPC method (AD-9 reconnect).
+// attachParams is the payload of the "attach" RPC method: the AD-9 reconnect
+// and the CLAIM of a session by a client that never opened it (nocx-oevq4,
+// the nocx-server design D5).
+//
+// InstanceID and SessionEpoch are the identity the claim is written against,
+// as sessions.live handed it over — the same three words the open ack and the
+// parent edge use, because a session is named completely by (instance,
+// sessionId, epoch) and nothing here mints a fourth way to say it.
+//
+// They are OPTIONAL, and that is a decision rather than a leniency. A session
+// id is 128 random bits minted by this backend, so the only way an attach can
+// name a live session at all is that this backend told the caller the id — in
+// the open ack or in sessions.live — and both carry the identity beside it.
+// Requiring it would therefore refuse nothing that could otherwise succeed;
+// it would only turn a caller that named less than it had into a failure.
+// What the check DOES buy is the refusal: a claim carrying an identity is
+// judged against it, so a binding remembered across a coordinator restart is
+// answered "that is a different backend" instead of "no such session", which
+// is the distinction D5 exists for.
 type attachParams struct {
-	SessionID string `json:"sessionId"`
-	Offset    uint64 `json:"offset"`
+	SessionID  string `json:"sessionId"`
+	InstanceID string `json:"instanceId,omitempty"`
+	// A POINTER, so "absent" and "zero" stay different facts. The epoch is
+	// minted from 1, so an explicit 0 names no incarnation and is refused as
+	// the nonsense it is — the same rule the open params apply to a claimed
+	// parent edge. A plain uint64 would silently read that nonsense as "the
+	// caller did not claim an incarnation".
+	SessionEpoch *uint64 `json:"sessionEpoch,omitempty"`
+	Offset       uint64  `json:"offset"`
+}
+
+// claimedEpoch is the epoch the caller claimed, or 0 for "claimed none" — the
+// form judgeClaim takes. One reader of the pointer, so nowhere else has to
+// know it is one.
+func (p attachParams) claimedEpoch() uint64 {
+	if p.SessionEpoch == nil {
+		return 0
+	}
+	return *p.SessionEpoch
 }
 
 // ackParams is the payload of the "ack" notification (AD-9 trimming).
@@ -2757,19 +2806,36 @@ func (s *WSServer) pumpToRing(ctx context.Context, sess session.Session, ring *o
 	}
 }
 
-// ringToConn streams the output ring to a WebSocket connection starting at
-// the given byte offset. Exits when the connection drops or the ring closes.
+// ringToConn streams a session's output ring to a WebSocket connection
+// starting at the given byte offset. Exits when the connection drops, when the
+// ring closes, or when this connection STOPS BEING the session's subscriber.
+//
+// That last exit is D8 made real rather than announced (nocx-oevq4). It takes
+// the whole rx rather than the bare ring for exactly this: the ring says what
+// the session produced, and only the subscriber slot says who it is for. A
+// displaced client used to go on receiving the stream — its pump lived until
+// its socket died — so "one client owns the session" was true of the slot and
+// false of the bytes. The check is on the loop rather than a cancellation
+// because the slot is already the single owner of the answer, and a second
+// mechanism carrying it (a per-pump context the attach handler would have to
+// find and cancel) would be a second owner of one fact.
 //
 // Enforces AD-10 credit-based flow control: a subscriber stops sending once
 // unacked bytes reach CreditLimit and resumes when an ack frees room. Each
 // send is capped at FairChunk bytes so a flooding session releases the
 // shared wsConn write mutex between chunks, giving other sessions a chance
 // to send (cross-tab fairness).
-func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, ring *outputRing, startOffset uint64) {
+func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, rx *sessionRx, startOffset uint64) {
+	ring := rx.ring
 	var pending []byte
 	pos := startOffset
 
 	for {
+		// The displacement check comes FIRST, before any wait: a pump that
+		// has lost the session must not send the byte it is already holding.
+		if cur, _ := rx.getSubscriber(); cur != wconn {
+			return
+		}
 		// Wait until the in-flight window has room (AD-10). The ring owns
 		// the predicate; acked may legitimately exceed pos after a large
 		// ack on reattach, which counts as no bytes unacked.

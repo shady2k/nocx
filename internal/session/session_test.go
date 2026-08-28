@@ -673,3 +673,75 @@ func TestMintInstanceID_OrdinaryMachineSucceeds(t *testing.T) {
 		}
 	}
 }
+
+// The pane association, at the registry that owns it (nocx-oevq4, the
+// nocx-server design D5). The transport asserts the same interval over the
+// wire; this asserts it where the fact is made, because the two ends of the
+// interval are properties of Open and Close and of nothing above them.
+//
+// The opening end is the strict one: the association exists WHEN OPEN RETURNS,
+// which is strictly before anything can announce the session — Open's caller
+// is the first holder of the id, and the ack it builds comes after. Move the
+// recording later and this fails.
+func TestOpenBindsThePaneBeforeTheSessionCanBeAnnounced(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	r := New(logger, &stubPTYFactory{stub: pty.NewStub(logger)})
+
+	const pane = "0198f2b0-0000-7000-8000-0000000000b2"
+	sess, err := r.Open(context.Background(), Config{Cwd: t.TempDir(), PaneID: pane})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+
+	if sess.PaneID() != pane {
+		t.Fatalf("PaneID() = %q immediately after Open, want %q", sess.PaneID(), pane)
+	}
+	if sess.Identity().InstanceID != r.InstanceID() {
+		t.Fatalf("the session was stamped with %q, want this registry's instance %q",
+			sess.Identity().InstanceID, r.InstanceID())
+	}
+	found := false
+	for _, s := range r.List() {
+		if s.ID() == sess.ID() && s.PaneID() == pane {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("the association was not readable from the registry when Open returned: a claim could not resolve the id the caller now holds")
+	}
+
+	// The closing end: the session's own end. The pane outlives it and will
+	// carry the next session; the binding does not.
+	if err := r.Close(sess.ID()); err != nil {
+		t.Fatalf("close: %v", err)
+	}
+	for _, s := range r.List() {
+		if s.ID() == sess.ID() {
+			t.Fatal("the association outlived the session it binds")
+		}
+	}
+}
+
+// The other end named in the invariant: a different registry is a different
+// backend instance, and no association of one can be claimed through the
+// other. The instance id is the whole of that guarantee, so it is asserted
+// rather than assumed — a constant here would make every refusal vacuous.
+func TestInstanceIDIsPerRegistryAndStable(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	first := New(logger, &stubPTYFactory{stub: pty.NewStub(logger)})
+	second := New(logger, &stubPTYFactory{stub: pty.NewStub(logger)})
+
+	if first.InstanceID() == "" {
+		t.Fatal("a registry with no instance id: every claim would be judged against nothing")
+	}
+	if first.InstanceID() == second.InstanceID() {
+		t.Fatal("two registries share one instance id; a claim from a dead backend would be admitted by a live one")
+	}
+	// Stable across reads: a claim judged twice must be judged the same way.
+	// Held in a variable because the compiler's own linter reads `a() != a()`
+	// as a mistake, and it would be one anywhere the value were not the point.
+	firstRead := first.InstanceID()
+	if first.InstanceID() != firstRead {
+		t.Fatal("the instance id changed between reads")
+	}
+}

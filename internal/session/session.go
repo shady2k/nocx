@@ -333,6 +333,10 @@ type Registry interface {
 	Get(id ID) (Session, error)
 	Close(id ID) error
 	List() []Session
+	// InstanceID is the backend instance every session this registry opens is
+	// stamped with — see Reg.InstanceID for why a claim cannot be judged
+	// without it.
+	InstanceID() InstanceID
 }
 
 func NewID() ID {
@@ -539,6 +543,24 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	}
 	return s, nil
 }
+
+// InstanceID is this backend instance's identity: the value stamped on every
+// session this registry opens, minted once at construction and equal to no
+// other registry's.
+//
+// It is readable because a CLAIM has to be judged against it, and the judgement
+// must be possible when the registry holds nothing at all. A claim carrying
+// another instance's id names a session that died with the backend that minted
+// it, whatever the session id says — so the refusal is "that is a different
+// backend", which is a different fact from "I do not hold that session", and
+// only this value can tell them apart on an empty registry (nocx-oevq4, the
+// nocx-server design D5). validateParentLocked already judges the parent edge
+// this way, against this same field; this is the same question asked from
+// outside the package rather than a second answer to it.
+//
+// No lock: the field is written once, by newReg, before the registry is
+// reachable, and never again.
+func (r *Reg) InstanceID() InstanceID { return r.instanceID }
 
 func (r *Reg) Get(id ID) (Session, error) {
 	r.mu.Lock()

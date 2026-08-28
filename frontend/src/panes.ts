@@ -819,6 +819,21 @@ export class PaneManager {
     // about what "after a close" looks like.
     this.layout.onChange(() => this.renderFromLayout())
 
+    // A session this window was holding has been taken by another client
+    // (nocx-oevq4, the nocx-server design D8). The pane is still on the strip
+    // with its scrollback readable, and it is no longer connected to anything
+    // — so the one thing that must not happen is silence, which leaves a
+    // terminal that looks live and swallows every keystroke.
+    this.client.onSessionDisplaced((displaced) => {
+      const name = this.sessionDisplayName(displaced.sessionId)
+      showToast({
+        level: 'warning',
+        message: name
+          ? `"${name}" is now open in another window — this one is no longer connected to it`
+          : 'A pane is now open in another window — this one is no longer connected to it',
+      })
+    })
+
     window.addEventListener('keydown', this.onKeydown, true)
   }
 

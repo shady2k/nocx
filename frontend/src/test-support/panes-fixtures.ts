@@ -538,6 +538,12 @@ export interface ClientFake {
   /** Fire that report at every subscriber, so a test can drive the retry the
    *  way a returning socket does. */
   _fireReconnect: (r?: { resumed: number; lost: number }) => void
+  /** Another client took a session this window was holding (nocx-oevq4, D8).
+   *  Returns an unsubscribe, like the real one. */
+  onSessionDisplaced: ReturnType<typeof vi.fn>
+  /** Deliver that news to every subscriber, so a test can drive the take the
+   *  way a second window does. */
+  _fireDisplaced: (d?: { sessionId: string; instanceId: string; sessionEpoch: number }) => void
   readonly connected: boolean
   /** Sessions created by openSession calls, in order. */
   _sessions: SessionFake[]
@@ -601,6 +607,8 @@ export function anchoredPane(paneId = 'tab-wire-1'): PaneIdentity {
 export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
   const sessions: SessionFake[] = []
   const reconnectHandlers = new Set<(r: { resumed: number; lost: number }) => void>()
+  type DisplacedFact = { sessionId: string; instanceId: string; sessionEpoch: number }
+  const displacedHandlers = new Set<(d: DisplacedFact) => void>()
   const newSession = (): SessionFake => {
     const s = makeSession()
     sessions.push(s)
@@ -625,6 +633,19 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     }),
     _fireReconnect: (r = { resumed: 0, lost: 0 }) => {
       for (const cb of [...reconnectHandlers]) cb(r)
+    },
+    onSessionDisplaced: vi.fn((cb: (d: DisplacedFact) => void) => {
+      displacedHandlers.add(cb)
+      return () => displacedHandlers.delete(cb)
+    }),
+    _fireDisplaced: (
+      d = {
+        sessionId: 'sess-0',
+        instanceId: 'fedcba9876543210fedcba9876543210',
+        sessionEpoch: 1,
+      },
+    ) => {
+      for (const cb of [...displacedHandlers]) cb(d)
     },
     dispatcher: {
       subscribe: vi.fn(() => () => undefined),

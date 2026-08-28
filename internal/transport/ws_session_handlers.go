@@ -36,6 +36,11 @@ type sessionMachine interface {
 	getOrCreateRx(sid session.ID) *sessionRx
 	removeRx(sid session.ID) *sessionRx
 	laneFor(sid session.ID, sess session.Session) *sessionLane
+	// takeSize hands a session the geometry of the client that now owns it
+	// (nocx-eidfb.2). One narrow method rather than the lane itself: the
+	// handler may report the take it just performed, and the failure and the
+	// tombstone are answered in one place for both callers.
+	takeSize(sid session.ID, sess session.Session, reported session.Size)
 	closeLane(sid session.ID)
 	closeSession(sid session.ID, sess session.Session)
 	// markCloseRequested records that this session's end was asked for, so
@@ -927,6 +932,27 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 			// otherwise go on holding the session until its next byte.
 			h.machine.announceDisplacement(sid, sess.Identity(), prev, prevState)
 			rx.ring.wake()
+		}
+
+		// THE OTHER HALF OF THE TAKE (nocx-eidfb.2): the client that attached
+		// last is the active one, and the shared channel resizes to ITS
+		// geometry. Beside the displacement rather than anywhere else,
+		// because they are one event — the session changed hands, so both the
+		// old owner's claim and the old owner's geometry stop being true at
+		// the same instant.
+		//
+		// A claim carrying no measurement is passed over rather than answered
+		// with the default: a fresh window reclaiming a pane it has never
+		// rendered has not measured itself yet, and that is not the no-client
+		// state (session.NoClient). The size then stands until somebody
+		// reports one.
+		//
+		// AD-1 is untouched by this. The channel is created at its final size
+		// and this session's was created long before the claim arrived; a
+		// resize applied to a live channel by a window-change is what AD-1
+		// describes, not what it forbids.
+		if reported := params.reportedSize(); reported.Valid() {
+			h.machine.takeSize(sid, sess, reported)
 		}
 
 		_ = r.TryResult(req.ID, mustMarshal(attachResult{

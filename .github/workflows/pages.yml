@@ -43,8 +43,15 @@ jobs:
       # The page states a version and a release date. They are committed so a
       # local preview is truthful, and rewritten here so a release that never
       # touched site/ still updates the live page. Both pages carry them in
-      # data-version and data-released; check-site.sh compares the committed
-      # text with the same tag this step reads, so the two cannot disagree.
+      # data-version and data-released.
+      #
+      # This step is why the committed value may be AHEAD of the newest tag and
+      # check-site.sh only refuses it falling behind. The landing is part of a
+      # release, so the copy describing vNEXT is merged before vNEXT is tagged;
+      # between those two moments the file says vNEXT and this step publishes
+      # the tag that exists. A visitor therefore never meets a download button
+      # pointing at a tag nobody can fetch, and the repository can still hold
+      # the release it is preparing.
       - name: stamp the released version
         run: |
           set -euo pipefail

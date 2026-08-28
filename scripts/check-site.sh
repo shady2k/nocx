@@ -76,19 +76,60 @@ for f in $pages; do
   done
 done
 
-# 3. The version on the page is the version that was released. Both pages
-#    carry it in data-version / data-released, the deploy workflow rewrites
-#    those from the newest tag, and this compares the committed text with the
-#    same tag — so the repository cannot quietly fall behind its own release
-#    while the deployed page looks current.
+# 3. The page never falls BEHIND the release. Both pages carry the version in
+#    data-version / data-released, the deploy workflow rewrites those from the
+#    newest tag, and this compares the committed text with the same tag.
+#
+#    The check is one-sided on purpose, and the direction is the whole point.
+#    Behind is the defect it was bought for: a page describing the release
+#    before last while the deployed copy looks current, because pages.yml
+#    stamped the tag over it. Ahead is a release being prepared — the landing
+#    is part of a release, so the copy that describes vNEXT is written,
+#    reviewed and merged BEFORE vNEXT is tagged, and a gate that demanded
+#    equality made that ordinary state unrepresentable: the release commit
+#    could not be committed until the tag existed, and the tag could not be
+#    cut until the commit did.
+#
+#    Ahead is also safe to deploy. pages.yml stamps from the newest tag, so a
+#    page merged early advertises the release that actually exists and the
+#    download button never points at a tag nobody can fetch. What the file
+#    holds is the version we are shipping; what a visitor reads is the version
+#    that shipped. Only the second one can be wrong, and only downwards.
+#
+#    Also: every data-version on a page names the SAME version. check 3 reads
+#    the first <b>; a hand-edited release commit that bumps the badge and
+#    forgets a call-to-action would otherwise ship "Download v0.2.0" under
+#    "v0.3.0" until the next deploy stamped it away.
+
+# 0 when $1 is strictly older than $2. Both are vMAJOR.MINOR.PATCH. `sort -V`
+# is not portable to the BSD sort on macOS, where this hook also runs; a
+# three-key numeric sort on '.' is, and it is exact for the shape we tag.
+version_lt() {
+  a="${1#v}"
+  b="${2#v}"
+  [ "$a" = "$b" ] && return 1
+  older="$(printf '%s\n%s\n' "$a" "$b" | sort -t. -k1,1n -k2,2n -k3,3n | head -1)"
+  [ "$older" = "$a" ]
+}
+
 tag="$(git -C "$root" describe --tags --abbrev=0 2>/dev/null || true)"
 if [ -n "$tag" ]; then
   for f in $pages; do
     shown="$(grep -oE '<b data-version>[^<]+</b>' "$f" |
       sed -E 's/<[^>]+>//g' | head -1 || true)"
-    if [ -n "$shown" ] && [ "$shown" != "$tag" ]; then
+    [ -n "$shown" ] || continue
+    if version_lt "$shown" "$tag"; then
       echo "FAIL: ${f#$root/} shows $shown; the newest tag is $tag"
-      echo "       Update data-version and data-released, or tag the release."
+      echo "       The page has fallen behind the release. Update data-version"
+      echo "       and data-released to $tag."
+      fail=1
+    fi
+    others="$(grep -oE 'data-version>[^<]*v[0-9]+\.[0-9]+\.[0-9]+' "$f" |
+      grep -oE 'v[0-9]+\.[0-9]+\.[0-9]+' | sort -u || true)"
+    count="$(printf '%s\n' "$others" | grep -c . || true)"
+    if [ "$count" -gt 1 ]; then
+      echo "FAIL: ${f#$root/} names more than one version in data-version:"
+      printf '%s\n' "$others" | sed 's/^/       /'
       fail=1
     fi
   done

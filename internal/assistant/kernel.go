@@ -199,12 +199,14 @@ type ApprovalRequest struct {
 	// the backend computes it once, and a changed argument must not resume
 	// under the old approval.
 	ArgHash string `json:"argHash"`
-	// Effect is the effect class the gate decided on. It remains on the wire
-	// as a fact for the prompt; command-bearing standing answers use the
-	// internal canonical invocation below rather than granting this row.
+	// Effect is the effect class the gate decided on.
 	Effect content.Effect `json:"effect"`
-	// Resource is what the gate matched the call against, or nil when the
-	// call named none. It is a fact for the person reading the question.
+	// Resources are every resource resolved from the validated call. They are
+	// internal checkpoint state; Resource remains the singular wire projection
+	// until the notification contract grows its multi-resource shape.
+	Resources []agenttools.ResourceRef `json:"-"`
+	// Resource is the first resolved resource for the current wire contract,
+	// or nil when the declaration names no resource at all.
 	Resource *content.GrantScope `json:"resource,omitempty"`
 	// EntryID is the ledger entry that recorded the proposal — what the
 	// approved call runs as a SUBSEQUENT attempt of.
@@ -262,6 +264,7 @@ type effectKernel struct {
 	approvals *ApprovalStore
 	known     KnownMaterial
 	runID     string
+	runCtx    agenttools.RunContext
 	attempt   int
 	// turnEntryID is the TURN's own ledger entry — the thing every entry
 	// this run causes is joined to (nocx-h1l4o, ADR-0039's closing
@@ -291,7 +294,7 @@ type effectKernel struct {
 	// onCall announces a call that is ABOUT TO RUN (nocx-shxv0). It lives
 	// here rather than in the engine's event loop because this is the only
 	// place that holds all four facts at once: the declaration the gate
-	// decided with, the resource namedResource derived from the validated
+	// decided with, the resolved resources derived from the validated
 	// arguments, the ledger entry the attempt was recorded under, and the
 	// knowledge that the call will actually execute. The engine's loop sees
 	// only the messages, and would have to derive the resource a second
@@ -351,9 +354,10 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 		turnEntryID: turnEntryID,
 		requester:   requester,
 		classifier:  classifier,
-		onCall:      onCall,
+		runCtx:      agenttools.RunContext{RunID: runID},
 		validators:  make(map[string]*jsonschema.Schema, len(registry.All())),
 		results:     make(map[string]*jsonschema.Schema, len(registry.All())),
+		onCall:      onCall,
 	}
 	for _, t := range registry.All() {
 		v, err := compileToolSchema(t)
@@ -495,12 +499,12 @@ const (
 	policyRefuse
 )
 
-func (m *effectKernel) decideInvocation(t agenttools.Tool, args map[string]any, invocation content.Invocation) (policyOutcome, PolicyRefusalReason) {
+func (m *effectKernel) decideInvocation(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool, invocation content.Invocation) (policyOutcome, PolicyRefusalReason) {
 	decision := m.grant.Policy.DecisionForInvocation(t.Effect, invocation)
 	if decision == content.DecisionRefuse {
 		return policyRefuse, RefusedByDecision
 	}
-	if !m.inScope(t, args) {
+	if !m.inScope(t, resources, resourceDeclaration) {
 		return policyRefuse, RefusedOutOfScope
 	}
 	if decision == content.DecisionPermit {
@@ -522,75 +526,73 @@ func (m *effectKernel) decideInvocation(t agenttools.Tool, args map[string]any, 
 // resolves canonical identity, the policy compares the spelled path. A call
 // this check lets through can still be refused by the capability; a call it
 // refuses never reaches the capability.
-func (m *effectKernel) inScope(t agenttools.Tool, args map[string]any) bool {
-	named, declares := namedResource(t, args)
-	if !declares {
-		// The tool names no resource in its parameters; its scope is the
-		// grant's own scope for the kinds it declares.
-		return true
+// resolveResources is the one call-resource derivation. A nil resolver means
+// the declaration names no resource at all; a non-nil resolver may validly
+// return zero refs for this call. Resolver failures are malformed model
+// output because arguments were validated but could not identify the
+// declared authority.
+func (m *effectKernel) resolveResources(decl agenttools.Tool, args map[string]any) ([]agenttools.ResourceRef, bool, error) {
+	if decl.ResolveResources == nil {
+		return nil, false, nil
 	}
-	if named == nil {
-		return false // validation already required it; refuse to be sure
+	resources, err := decl.ResolveResources(args, m.runCtx)
+	if err != nil {
+		return nil, true, err
 	}
-	for _, s := range m.grant.Policy.RowScopes(t.Effect) {
-		// A path scope is a lexical containment test (pathUnder — both ends
-		// absolute); a session scope is an exact identity match: the
-		// spelled sessionId IS the resource, there is no containment to
-		// approximate. A call this check lets through can still be refused
-		// by the capability; a call it refuses never reaches it.
-		switch s.Kind {
-		case content.ResourcePath:
-			if pathUnder(named.ID, s.ID) {
-				return true
-			}
-		case content.ResourceSession:
-			if named.ID == s.ID {
-				return true
+	for _, resource := range resources {
+		if resource.Kind == "" || resource.ID == "" {
+			return nil, true, fmt.Errorf("resource resolver returned an incomplete resource")
+		}
+		declared := false
+		for _, kind := range decl.ResourceKinds {
+			if resource.Kind == kind {
+				declared = true
+				break
 			}
 		}
+		if !declared {
+			return nil, true, fmt.Errorf("resource resolver returned undeclared kind %q", resource.Kind)
+		}
 	}
-	return false
+	return resources, true, nil
 }
 
-// namedResource is the ONE derivation of "which argument names the resource
-// this call touches, and what did the call spell there". Two callers ask it:
-// the scope check, which compares the answer against the row's scopes, and
-// the approval ask, which shows the answer to the person. They were written
-// as one deliberately — a second derivation of a single question agrees
-// everywhere anyone looks and disagrees somewhere nobody did, which is the
-// defect AGENTS.md spends a section on.
-//
-// declares is false only when the tool names no resource in its parameters
-// at ALL: git.status's repository IS the grant's path scope, so there is
-// nothing to compare and nothing to show. It is true with a nil scope when
-// the declared argument is absent or not a string — validation already
-// required it, so the scope check refuses rather than guessing, and the ask
-// shows no resource. The kind is the DECLARATION's, never inferred from the
-// value: a path and a session id are both strings.
-func namedResource(t agenttools.Tool, args map[string]any) (named *content.GrantScope, declares bool) {
-	if t.ResourceArg == "" {
-		return nil, false
+// inScope checks EVERY resolved resource against the selected effect row.
+// The resolver's nil/non-nil distinction is preserved: nil means the
+// declaration names no resource, while an empty resolved list is a
+// resource-bearing declaration whose current call touches none.
+func (m *effectKernel) inScope(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool) bool {
+	if !resourceDeclaration {
+		return true
 	}
-	id, ok := args[t.ResourceArg].(string)
-	if !ok {
-		return nil, true
+	for _, resource := range resources {
+		inside := false
+		for _, scope := range m.grant.Policy.RowScopes(t.Effect) {
+			switch resource.Kind {
+			case content.ResourcePath:
+				inside = pathUnder(resource.ID, scope.ID) && scope.Kind == content.ResourcePath
+			default:
+				inside = resource.Kind == scope.Kind && resource.ID == scope.ID
+			}
+			if inside {
+				break
+			}
+		}
+		if !inside {
+			return false
+		}
 	}
-	var kind content.ResourceKind
-	if len(t.Resources) > 0 {
-		kind = t.Resources[0]
-	}
-	return &content.GrantScope{Kind: kind, ID: id}, true
+	return true
 }
 
-// matchedResource is what the ask carries: the resource the call named, or
-// nil when it named none. The wire declares kind and id both non-empty, so a
-// half-named resource is no resource — never a scope with an empty half.
-func matchedResource(t agenttools.Tool, args map[string]any) *content.GrantScope {
-	named, _ := namedResource(t, args)
-	if named == nil || named.Kind == "" || named.ID == "" {
+// matchedResource is the singular wire projection of the first resolved
+// resource. The complete Resources slice remains on ApprovalRequest and in
+// the persisted proposal payload.
+func matchedResource(resources []agenttools.ResourceRef) *content.GrantScope {
+	if len(resources) == 0 || resources[0].Kind == "" || resources[0].ID == "" {
 		return nil
 	}
-	return named
+	return &content.GrantScope{Kind: resources[0].Kind, ID: resources[0].ID}
 }
 
 // pathUnder is the lexical containment test of the policy's scope check: the
@@ -619,18 +621,18 @@ func pathUnder(path, scope string) bool {
 // same intent, never a new intent). The persisted interrupt state is the
 // proposal itself: the resume re-runs the pipeline and the approval record
 // decides whether the exact proposal may execute.
-func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, invocation content.Invocation) error {
+func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef, invocation content.Invocation) error {
 	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
 	ap.CommandInvocation = decl.CommandArg != ""
 	var entryID string
 	if m.ledger != nil {
-		id, err := m.recordProposal(ctx, decl, rawArgs, matchedResource(decl, args), ap, nil)
+		id, err := m.recordProposal(ctx, decl, rawArgs, resources, ap, nil)
 		if err != nil {
 			return err
 		}
 		entryID = id
 	}
-	req := m.request(decl, callID, rawArgs, args)
+	req := m.request(decl, callID, rawArgs, resources)
 	req.CommandInvocation = decl.CommandArg != ""
 	req.Invocation = cloneInvocation(invocation)
 	req.ArgHash = ap.ArgHash
@@ -651,12 +653,12 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 // machinery as a policy ask: the person's yes covers the proposal
 // INCLUDING its classification, and the resume skips a second
 // consultation (the loop property).
-func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, ask *ApprovalRequest, fact *classifierFact, invocation content.Invocation) error {
+func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, ask *ApprovalRequest, fact *classifierFact, resources []agenttools.ResourceRef, invocation content.Invocation) error {
 	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
 	ap.CommandInvocation = decl.CommandArg != ""
 	var entryID string
 	if m.ledger != nil {
-		id, err := m.recordProposal(ctx, decl, rawArgs, ask.Resource, ap, fact)
+		id, err := m.recordProposal(ctx, decl, rawArgs, resources, ap, fact)
 		if err != nil {
 			return err
 		}
@@ -678,7 +680,7 @@ func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.T
 // the effect and the resource come off the declaration the gate just decided
 // with: one builder is what keeps a classifier ask from reaching the surface
 // without an effect, which the notification's schema requires.
-func (m *effectKernel) request(decl agenttools.Tool, callID, rawArgs string, args map[string]any) *ApprovalRequest {
+func (m *effectKernel) request(decl agenttools.Tool, callID, rawArgs string, resources []agenttools.ResourceRef) *ApprovalRequest {
 	return &ApprovalRequest{
 		RunID:     m.runID,
 		Attempt:   m.attempt,
@@ -686,7 +688,8 @@ func (m *effectKernel) request(decl agenttools.Tool, callID, rawArgs string, arg
 		CallID:    callID,
 		Arguments: rawArgs,
 		Effect:    decl.Effect,
-		Resource:  matchedResource(decl, args),
+		Resources: append([]agenttools.ResourceRef(nil), resources...),
+		Resource:  matchedResource(resources),
 	}
 }
 
@@ -753,8 +756,8 @@ func (m *effectKernel) screenResult(ctx context.Context, out string, runErr erro
 // too, off the same declaration and by the same derivation as a policy ask:
 // the surface offers only allow/deny once here, but the notification is ONE
 // shape on the wire, and a required field absent on one path is how a schema
-// stops being a contract.
-func (m *effectKernel) egressRequest(decl agenttools.Tool, callID, rawArgs string, args map[string]any, findings []EgressFinding, wasError bool) *EgressRequest {
+// failure becomes a missing fact on the surface.
+func (m *effectKernel) egressRequest(decl agenttools.Tool, callID, rawArgs string, resources []agenttools.ResourceRef, findings []EgressFinding, wasError bool) *EgressRequest {
 	return &EgressRequest{
 		RunID:     m.runID,
 		Attempt:   m.attempt,
@@ -763,7 +766,7 @@ func (m *effectKernel) egressRequest(decl agenttools.Tool, callID, rawArgs strin
 		Arguments: rawArgs,
 		ArgHash:   canonicalArgHash(rawArgs),
 		Effect:    decl.Effect,
-		Resource:  matchedResource(decl, args),
+		Resource:  matchedResource(resources),
 		Findings:  findings,
 		WasError:  wasError,
 	}
@@ -827,7 +830,7 @@ func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind) st
 // call runs as a SUBSEQUENT attempt of this same entry. A failed write
 // fails the run: a question whose answer would resume nothing is the hole
 // the thread criterion exists to close.
-func (m *effectKernel) recordProposal(ctx context.Context, decl agenttools.Tool, rawArgs string, resource *content.GrantScope, ap Approval, fact *classifierFact) (string, error) {
+func (m *effectKernel) recordProposal(ctx context.Context, decl agenttools.Tool, rawArgs string, resources []agenttools.ResourceRef, ap Approval, fact *classifierFact) (string, error) {
 	envID := content.EnvironmentIDFor(content.EnvLocal, "")
 	if err := m.ledger.EnsureEnvironment(ctx, content.Environment{ID: envID, Kind: content.EnvLocal}); err != nil {
 		return "", fmt.Errorf("proposal environment: %w", err)
@@ -850,15 +853,12 @@ func (m *effectKernel) recordProposal(ctx context.Context, decl agenttools.Tool,
 			"argHash": ap.ArgHash,
 		},
 	}
-	// The resource the call named, derived ONCE (matchedResource, shared
-	// with the scope check, the approval prompt and the visible announcement
-	// of the call) and stored with the proposal. A restored turn draws the
-	// call from the record; without the resource on the record the renderer
-	// would have to derive it from the raw arguments a second time, which
-	// is the defect AGENTS.md spends a section on. Absent when the tool
-	// names no resource at all — never an empty scope.
-	if resource != nil {
-		payloadBody["resource"] = resource
+	// The complete resolved resource list is stored with the proposal so a
+	// restored turn never derives it again from raw arguments. Keep the
+	// singular first-resource field for existing readers.
+	if len(resources) > 0 {
+		payloadBody["resources"] = resources
+		payloadBody["resource"] = matchedResource(resources)
 	}
 	// The classifier block (bead nocx-kpy23, criterion 6): when this
 	// escalation was caused by the classifier — suspect, failed, or an
@@ -927,7 +927,7 @@ func (m *effectKernel) recordProposal(ctx context.Context, decl agenttools.Tool,
 // nocx-5dldy) — the entry the escalation recorded, found through the
 // approval store. The returned entryID is what the egress gate's request
 // carries into the store, so the same rule holds for a finding's approval.
-func (m *effectKernel) openAttempt(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, resource *content.GrantScope, classifierFact *classifierFact) (int64, string, error) {
+func (m *effectKernel) openAttempt(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, resources []agenttools.ResourceRef, classifierFact *classifierFact) (int64, string, error) {
 	if m.ledger == nil {
 		return 0, "", errors.New("no attempt ledger wired — a tool call may not run without a durable attempt (design §6.4)")
 	}
@@ -966,12 +966,11 @@ func (m *effectKernel) openAttempt(ctx context.Context, decl agenttools.Tool, ca
 		if m.runID != "" {
 			payloadBody["runId"] = m.runID
 		}
-		// The resource the call named, derived ONCE (matchedResource) and
-		// stored so a RESTORED turn can draw this call's line without the
-		// renderer deriving it a second time from the arguments blob. See
-		// recordProposal for the same field on the escalation's own entry.
-		if resource != nil {
-			payloadBody["resource"] = resource
+		// The complete resolved resource list is stored with the attempt.
+		// Keep the singular first-resource field for existing readers.
+		if len(resources) > 0 {
+			payloadBody["resources"] = resources
+			payloadBody["resource"] = matchedResource(resources)
 		}
 		// Whether this call's work becomes a top-level BLOCK — the
 		// declaration's own fact (nocx-9sqii). Stored with the attempt so a
@@ -1263,6 +1262,10 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		invocation.Parsed = true
 	}
 
+	resources, resourceDeclaration, err := k.resolveResources(decl, args)
+	if err != nil {
+		return modelResult{}, fmt.Errorf("%w: tool %q: resolve resources: %v", ErrMalformedModelOutput, decl.Name, err)
+	}
 	// 3. Policy — permit / ask / refuse over the ADR-0020 lattice.
 	//    FIRST, the person's own no (nocx-uvac6.1): the resume re-runs
 	//    this very call through the pipeline, and the refusal is the
@@ -1285,7 +1288,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			return modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}, nil
 		}
 	}
-	outcome, refusal := k.decideInvocation(decl, args, invocation)
+	outcome, refusal := k.decideInvocation(decl, resources, resourceDeclaration, invocation)
 	switch outcome {
 	case policyRefuse:
 		// (nocx-uvac6.1) The refusal IS the call's result: a tool
@@ -1307,9 +1310,9 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		if k.approvals != nil && k.approvals.IsApproved(ap) {
 			break // the exact proposal was approved; execute it
 		}
-		return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, invocation)
-	}
+		return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation)
 
+	}
 	// 3b. The classifier (bead nocx-kpy23): a second, cheaper model
 	// judges the proposed call and may only RAISE suspicion — permit →
 	// ask — never lower it. Consulted ONLY where the policy says permit
@@ -1323,7 +1326,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// classifier is never silently skipped.
 	var classifierFact *classifierFact
 	if k.classifier != nil && !k.proposalApproved(decl.Name, callID, rawArgs) {
-		ask, fact, classifyErr := k.classifyProposal(ctx, decl, callID, rawArgs, args)
+		ask, fact, classifyErr := k.classifyProposal(ctx, decl, callID, rawArgs, args, resources)
 		if classifyErr != nil {
 			// The classifier's INPUT gate could not see (the recognizer
 			// failed closed): nothing decides this call unseen and
@@ -1333,7 +1336,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			return modelResult{}, fmt.Errorf("agent tool %q: classifier gate: %w", decl.Name, classifyErr)
 		}
 		if ask != nil {
-			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, ask, fact, invocation)
+			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, ask, fact, resources, invocation)
 		}
 		classifierFact = fact
 	}
@@ -1342,7 +1345,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// capability is constructed, next is not called, and the run fails
 	// with a terminal infrastructure error — an interrupted run can
 	// never be told "this may already have happened" when it cannot.
-	execID, entryID, err := k.openAttempt(ctx, decl, callID, rawArgs, matchedResource(decl, args), classifierFact)
+	execID, entryID, err := k.openAttempt(ctx, decl, callID, rawArgs, resources, classifierFact)
 	if err != nil {
 		return modelResult{}, fmt.Errorf("agent tool %q: record attempt: %w", decl.Name, err)
 	}
@@ -1356,7 +1359,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
 		return modelResult{}, fmt.Errorf("agent tool %q is declared but not executable: no capability constructor is wired", decl.Name)
 	}
-	capability, err := decl.Narrow(k.grant)
+	capability, err := decl.Narrow(k.grant, resources, k.runCtx)
 	if err != nil {
 		_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
 		return modelResult{}, fmt.Errorf("agent tool %q: construct capability: %w", decl.Name, err)
@@ -1372,7 +1375,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	// the block sitting below the answer written from it.
 	//
 	// It carries the arguments the tool is about to run on and the
-	// resource namedResource derived from them, and never the result (see
+	// resolved resources derived from them, and never the result (see
 	// ToolCall's doc for why the result is left off). The arguments are
 	// the VALIDATED object from step 2, not the raw string: what is
 	// announced is what ran, and step 2 is where "what ran" was settled.
@@ -1387,7 +1390,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			Args:       args,
 			EntryID:    entryID,
 			Effect:     decl.Effect,
-			Resource:   matchedResource(decl, args),
+			Resource:   matchedResource(resources),
 			OpensBlock: decl.OpensBlock,
 		}); err != nil {
 			// The caller refused the write, which is the one thing that
@@ -1458,7 +1461,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			// exact proposal through the existing approval machinery;
 			// the run is NOT failed — it is awaiting the decision the
 			// surface renders.
-			req := k.egressRequest(decl, callID, rawArgs, args, egress, runErr != nil)
+			req := k.egressRequest(decl, callID, rawArgs, resources, egress, runErr != nil)
 			if k.approvals != nil {
 				ap.EntryID = entryID
 				k.approvals.Request(ap)
@@ -1561,7 +1564,7 @@ func (k *effectKernel) proposalApproved(toolName, callID, rawArgs string) bool {
 //
 // The returned ask is the suspension's approval request; the returned fact
 // is what the ledger records. A nil ask means the verdict was clear.
-func (k *effectKernel) classifyProposal(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any) (*ApprovalRequest, *classifierFact, error) {
+func (k *effectKernel) classifyProposal(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef) (*ApprovalRequest, *classifierFact, error) {
 	findings, err := k.screenResult(ctx, rawArgs, nil)
 	if err != nil {
 		return nil, nil, err
@@ -1571,14 +1574,14 @@ func (k *effectKernel) classifyProposal(ctx context.Context, decl agenttools.Too
 			Findings: findings,
 			Reason:   "the classifier could not be consulted: " + findingsSentence(findings),
 		}
-		return k.request(decl, callID, rawArgs, args), fact, nil
+		return k.request(decl, callID, rawArgs, resources), fact, nil
 	}
 	classification, err := k.classifier.Classify(ctx, ClassifyInput{Tool: decl.Name, CallID: callID, Arguments: rawArgs})
 	if err != nil {
 		fact := &classifierFact{
 			Reason: maskClassifierReason("the classifier could not be consulted: " + summarizeClassifierError(err)),
 		}
-		return k.request(decl, callID, rawArgs, args), fact, nil
+		return k.request(decl, callID, rawArgs, resources), fact, nil
 	}
 	if classification.Verdict != ClassifierClear {
 		fact := &classifierFact{
@@ -1587,7 +1590,7 @@ func (k *effectKernel) classifyProposal(ctx context.Context, decl agenttools.Too
 			Model:     classification.Model,
 			Reason:    maskClassifierReason(classification.Reason),
 		}
-		return k.request(decl, callID, rawArgs, args), fact, nil
+		return k.request(decl, callID, rawArgs, resources), fact, nil
 	}
 	return nil, &classifierFact{
 		Consulted: true,

@@ -1,7 +1,9 @@
 package agenttools
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -11,6 +13,7 @@ import (
 	"testing/fstest"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/filesystem"
 )
 
 // realToolsFS is the repo's contracts/tools directory, the way the transport
@@ -176,13 +179,13 @@ func TestAssemble_MissingRootIsQuiet(t *testing.T) {
 func TestAssemble_RejectsUnclassifiedDeclaration(t *testing.T) {
 	cases := map[string]Declaration{
 		"unknown effect": {
-			Name: "x", Effect: content.Effect("imagine"), Resources: []content.ResourceKind{content.ResourcePath}, Executes: InGo, Params: "x.schema.json",
+			Name: "x", Effect: content.Effect("imagine"), ResourceKinds: []content.ResourceKind{content.ResourcePath}, Executes: InGo, Params: "x.schema.json",
 		},
 		"unknown resource kind": {
-			Name: "x", Effect: content.EffectObserve, Resources: []content.ResourceKind{content.ResourceKind("imaginary")}, Executes: InGo, Params: "x.schema.json",
+			Name: "x", Effect: content.EffectObserve, ResourceKinds: []content.ResourceKind{content.ResourceKind("imaginary")}, Executes: InGo, Params: "x.schema.json",
 		},
 		"unknown execution site": {
-			Name: "x", Effect: content.EffectObserve, Resources: []content.ResourceKind{content.ResourcePath}, Executes: Executes("teleport"), Params: "x.schema.json",
+			Name: "x", Effect: content.EffectObserve, ResourceKinds: []content.ResourceKind{content.ResourcePath}, Executes: Executes("teleport"), Params: "x.schema.json",
 		},
 		"empty row": {},
 	}
@@ -337,23 +340,23 @@ func TestForGrant_ExcludesDeclarationsWithoutCapability(t *testing.T) {
 		"files.read.schema.json": filesReadSchema,
 	}), []Declaration{
 		{
-			Name:        "wired",
-			Description: "a wired observe tool",
-			Effect:      content.EffectObserve,
-			Resources:   []content.ResourceKind{content.ResourcePath},
-			Executes:    InGo,
-			Params:      "files.read.schema.json",
-			Narrow: func(content.Grant) (Capability, error) {
+			Name:          "wired",
+			Description:   "a wired observe tool",
+			Effect:        content.EffectObserve,
+			ResourceKinds: []content.ResourceKind{content.ResourcePath},
+			Executes:      InGo,
+			Params:        "files.read.schema.json",
+			Narrow: func(content.Grant, []ResourceRef, RunContext) (Capability, error) {
 				return nil, nil
 			},
 		},
 		{
-			Name:        "unwired",
-			Description: "an unwired observe tool",
-			Effect:      content.EffectObserve,
-			Resources:   []content.ResourceKind{content.ResourcePath},
-			Executes:    InGo,
-			Params:      "files.read.schema.json",
+			Name:          "unwired",
+			Description:   "an unwired observe tool",
+			Effect:        content.EffectObserve,
+			ResourceKinds: []content.ResourceKind{content.ResourcePath},
+			Executes:      InGo,
+			Params:        "files.read.schema.json",
 		},
 	})
 	if err != nil {
@@ -509,11 +512,11 @@ func TestLiveEffects_IsWhatTheDeclarationsCarry(t *testing.T) {
 // makes disclose live, with no other edit anywhere.
 func TestLiveEffects_ADeclarationIsTheOnlyEditNeeded(t *testing.T) {
 	withDisclose := append(append([]Declaration{}, declarations...), Declaration{
-		Name:      "secrets.reveal",
-		Effect:    content.EffectDisclose,
-		Resources: []content.ResourceKind{content.ResourceCredential},
-		Executes:  InGo,
-		Params:    "secrets.reveal.schema.json",
+		Name:          "secrets.reveal",
+		Effect:        content.EffectDisclose,
+		ResourceKinds: []content.ResourceKind{content.ResourceCredential},
+		Executes:      InGo,
+		Params:        "secrets.reveal.schema.json",
 	})
 	got := liveEffects(withDisclose)
 	want := []content.Effect{
@@ -533,11 +536,11 @@ func TestLiveEffects_ADeclarationIsTheOnlyEditNeeded(t *testing.T) {
 // tools in.
 func TestLiveEffects_IsTheLatticesOrderNotTheTables(t *testing.T) {
 	withReversible := append(append([]Declaration{}, declarations...), Declaration{
-		Name:      "files.write",
-		Effect:    content.EffectMutateReversible,
-		Resources: []content.ResourceKind{content.ResourcePath},
-		Executes:  InGo,
-		Params:    "files.write.schema.json",
+		Name:          "files.write",
+		Effect:        content.EffectMutateReversible,
+		ResourceKinds: []content.ResourceKind{content.ResourcePath},
+		Executes:      InGo,
+		Params:        "files.write.schema.json",
 	})
 	got := liveEffects(withReversible)
 	want := []content.Effect{
@@ -607,11 +610,11 @@ func TestDeclarationsDescribeInTheProductsWords(t *testing.T) {
 // error and absent from the set.
 func TestAssemble_RejectsDeclarationWithoutDescription(t *testing.T) {
 	reg, err := assemble(schemaFS(t, map[string]string{"x.schema.json": filesReadSchema}), []Declaration{{
-		Name:      "x",
-		Effect:    content.EffectObserve,
-		Resources: []content.ResourceKind{content.ResourcePath},
-		Executes:  InGo,
-		Params:    "x.schema.json",
+		Name:          "x",
+		Effect:        content.EffectObserve,
+		ResourceKinds: []content.ResourceKind{content.ResourcePath},
+		Executes:      InGo,
+		Params:        "x.schema.json",
 	}})
 	if err == nil {
 		t.Fatal("assemble succeeded on a row with no description, want an error")
@@ -681,13 +684,13 @@ func TestAssemble_AnExecutableToolWithNoDeclaredResultDoesNotAssemble(t *testing
   "properties": {"path": {"type": "string"}}
 }`
 	reg, err := assemble(schemaFS(t, map[string]string{"x.schema.json": noResult}), []Declaration{{
-		Name:        "x",
-		Description: "a tool that does not say what it returns",
-		Effect:      content.EffectObserve,
-		Resources:   []content.ResourceKind{content.ResourcePath},
-		Executes:    InGo,
-		Params:      "x.schema.json",
-		Narrow:      func(content.Grant) (Capability, error) { return nil, nil },
+		Name:          "x",
+		Description:   "a tool that does not say what it returns",
+		Effect:        content.EffectObserve,
+		ResourceKinds: []content.ResourceKind{content.ResourcePath},
+		Executes:      InGo,
+		Params:        "x.schema.json",
+		Narrow:        func(content.Grant, []ResourceRef, RunContext) (Capability, error) { return nil, nil },
 	}})
 	if err == nil {
 		t.Fatal("Assemble returned nil error for a tool that never says what it returns")
@@ -735,5 +738,148 @@ func TestAssemble_EveryExecutableToolDeclaresItsResult(t *testing.T) {
 		if len(tool.ResultSchema) == 0 {
 			t.Fatalf("%s executes and does not declare what it returns", tool.Name)
 		}
+	}
+}
+
+func TestDeclaration_ResolvesEveryResourceFromArgumentsAndRunContext(t *testing.T) {
+	want := []ResourceRef{
+		{Kind: content.ResourcePath, ID: "/repo/new.go"},
+		{Kind: content.ResourcePath, ID: "/repo/backup.go"},
+		{Kind: content.ResourceSession, ID: "session-7"},
+	}
+	d := Declaration{
+		ResolveResources: func(args map[string]any, runCtx RunContext) ([]ResourceRef, error) {
+			source, ok := args["source"].(string)
+			if !ok {
+				return nil, errors.New("source is not a string")
+			}
+			destination, ok := args["destination"].(string)
+			if !ok {
+				return nil, errors.New("destination is not a string")
+			}
+			return []ResourceRef{
+				{Kind: content.ResourcePath, ID: source},
+				{Kind: content.ResourcePath, ID: destination},
+				{Kind: content.ResourceSession, ID: runCtx.Session},
+			}, nil
+		},
+	}
+	got, err := d.ResolveResources(map[string]any{
+		"source":      "/repo/new.go",
+		"destination": "/repo/backup.go",
+	}, RunContext{Session: "session-7"})
+	if err != nil {
+		t.Fatalf("ResolveResources: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("resolved resources = %+v, want %+v", got, want)
+	}
+}
+
+func TestDeclaration_NarrowReceivesResolvedResources(t *testing.T) {
+	want := []ResourceRef{{Kind: content.ResourcePath, ID: "/repo/new.go"}}
+	var got []ResourceRef
+	d := Declaration{
+		Narrow: func(_ content.Grant, resources []ResourceRef, _ RunContext) (Capability, error) {
+			got = append([]ResourceRef(nil), resources...)
+			return resources, nil
+		},
+	}
+	capability, err := d.Narrow(content.Grant{
+		Scopes: []content.GrantScope{
+			{Kind: content.ResourcePath, ID: "/repo"},
+			{Kind: content.ResourcePath, ID: "/other"},
+		},
+	}, want, RunContext{})
+	if err != nil {
+		t.Fatalf("Narrow: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("Narrow resources = %+v, want %+v", got, want)
+	}
+	if !reflect.DeepEqual(capability, want) {
+		t.Fatalf("capability = %+v, want the resolved resources", capability)
+	}
+}
+
+func TestNarrowSession_UsesOnlyResolvedResources(t *testing.T) {
+	resolved := []ResourceRef{{Kind: content.ResourceSession, ID: "session-a"}}
+	capability, err := narrowSession(content.Grant{
+		Scopes: []content.GrantScope{
+			{Kind: content.ResourceSession, ID: "session-a"},
+			{Kind: content.ResourceSession, ID: "session-b"},
+			{Kind: content.ResourceSession, ID: "session-c"},
+		},
+	}, resolved, RunContext{})
+	if err != nil {
+		t.Fatalf("narrowSession: %v", err)
+	}
+	reader, ok := capability.(*SessionReader)
+	if !ok {
+		t.Fatalf("capability = %T, want *SessionReader", capability)
+	}
+	if !reader.Allows("session-a") {
+		t.Fatal("capability refused the resolved session")
+	}
+	for _, sessionID := range []string{"session-b", "session-c"} {
+		if reader.Allows(sessionID) {
+			t.Fatalf("capability allowed grant scope %q that the call did not resolve", sessionID)
+		}
+	}
+}
+
+func TestNarrowFilesRead_UsesOnlyResolvedResources(t *testing.T) {
+	root := t.TempDir()
+	insideRoot := filepath.Join(root, "inside")
+	otherRoot := filepath.Join(root, "other")
+	if err := os.MkdirAll(insideRoot, 0o750); err != nil {
+		t.Fatalf("MkdirAll inside: %v", err)
+	}
+	if err := os.MkdirAll(otherRoot, 0o750); err != nil {
+		t.Fatalf("MkdirAll other: %v", err)
+	}
+	inside := filepath.Join(insideRoot, "inside.txt")
+	other := filepath.Join(otherRoot, "other.txt")
+	if err := os.WriteFile(inside, []byte("inside"), 0o600); err != nil {
+		t.Fatalf("WriteFile inside: %v", err)
+	}
+	if err := os.WriteFile(other, []byte("other"), 0o600); err != nil {
+		t.Fatalf("WriteFile other: %v", err)
+	}
+
+	capability, err := narrowFilesRead(content.Grant{
+		Scopes: []content.GrantScope{
+			{Kind: content.ResourcePath, ID: insideRoot},
+			{Kind: content.ResourcePath, ID: otherRoot},
+		},
+	}, []ResourceRef{{Kind: content.ResourcePath, ID: inside}}, RunContext{})
+	if err != nil {
+		t.Fatalf("narrowFilesRead: %v", err)
+	}
+	reader, ok := capability.(*filesystem.ScopedReader)
+	if !ok {
+		t.Fatalf("capability = %T, want *filesystem.ScopedReader", capability)
+	}
+	if _, err := reader.Read(context.Background(), inside, 100); err != nil {
+		t.Fatalf("resolved path refused: %v", err)
+	}
+	if _, err := reader.Read(context.Background(), other, 100); !errors.Is(err, filesystem.ErrOutOfScope) {
+		t.Fatalf("unresolved grant path error = %v, want %v", err, filesystem.ErrOutOfScope)
+	}
+}
+
+func TestResourceInGrant_RootContainsAbsolutePath(t *testing.T) {
+	if !resourceInGrant(content.Grant{
+		Scopes: []content.GrantScope{{Kind: content.ResourcePath, ID: "/"}},
+	}, ResourceRef{Kind: content.ResourcePath, ID: "/tmp/file.txt"}) {
+		t.Fatal("root path scope did not contain an absolute descendant")
+	}
+}
+
+func TestResourceInGrant_TrailingSlashUsesPolicyBoundary(t *testing.T) {
+	if resourceInGrant(content.Grant{
+		Scopes: []content.GrantScope{{Kind: content.ResourcePath, ID: "/a/"}},
+	}, ResourceRef{Kind: content.ResourcePath, ID: "/a/b"}) {
+		t.Fatal(`trailing-slash scope "/a/" contained "/a/b"; policy Contains must remain the single lexical boundary`)
 	}
 }

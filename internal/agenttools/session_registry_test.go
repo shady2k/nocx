@@ -34,7 +34,7 @@ func TestSessionToolsReplaceTheFinishedVersusLiveChoice(t *testing.T) {
 	if read.Executes != Dynamic {
 		t.Fatalf("session.read executes as %q, want dynamic dispatch", read.Executes)
 	}
-	if read.Effect != content.EffectObserve || !reflect.DeepEqual(read.Resources, []content.ResourceKind{content.ResourceSession}) {
-		t.Fatalf("session.read classification = effect %q resources %v", read.Effect, read.Resources)
+	if read.Effect != content.EffectObserve || !reflect.DeepEqual(read.ResourceKinds, []content.ResourceKind{content.ResourceSession}) {
+		t.Fatalf("session.read classification = effect %q resources %v", read.Effect, read.ResourceKinds)
 	}
 }

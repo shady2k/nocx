@@ -947,7 +947,11 @@ func TestExecuteFilesRead_WindowIsHonest(t *testing.T) {
 	if !ok {
 		t.Fatal("files.read not in the registry")
 	}
-	narrowed, err := decl.Narrow(grant)
+	refs, err := decl.ResolveResources(map[string]any{"path": short}, agenttools.RunContext{})
+	if err != nil {
+		t.Fatalf("ResolveResources: %v", err)
+	}
+	narrowed, err := decl.Narrow(grant, refs, agenttools.RunContext{})
 	if err != nil {
 		t.Fatalf("Narrow: %v", err)
 	}
@@ -973,7 +977,15 @@ func TestExecuteFilesRead_WindowIsHonest(t *testing.T) {
 	// a zero-length window, no error.
 	empty := filepath.Join(dir, "empty.txt")
 	writeFile(t, empty, "")
-	out, err = executeFilesRead(context.Background(), narrowed, json.RawMessage(fmt.Sprintf(`{"path":%q}`, empty)), toolSeams{})
+	emptyRefs, err := decl.ResolveResources(map[string]any{"path": empty}, agenttools.RunContext{})
+	if err != nil {
+		t.Fatalf("ResolveResources(empty): %v", err)
+	}
+	emptyNarrowed, err := decl.Narrow(grant, emptyRefs, agenttools.RunContext{})
+	if err != nil {
+		t.Fatalf("Narrow(empty): %v", err)
+	}
+	out, err = executeFilesRead(context.Background(), emptyNarrowed, json.RawMessage(fmt.Sprintf(`{"path":%q}`, empty)), toolSeams{})
 	if err != nil {
 		t.Fatalf("executeFilesRead on an empty file: %v — a window past the end is answered honestly, not as an error", err)
 	}
@@ -1252,21 +1264,21 @@ func TestMiddleware_RunCommandClassifiesTheCallEffect(t *testing.T) {
 	}
 }
 
-// TestAsk_EscalationWithoutAResourceArgCarriesNoResource is the null half:
-// an executable declaration whose parameters name no resource escalates with
-// an effect and NO resource. Null is a fact, not a gap — and the wire says so.
-func TestAsk_EscalationWithoutAResourceArgCarriesNoResource(t *testing.T) {
+// TestAsk_EscalationWithoutAResourceResolverCarriesNoResource is the null
+// half: an executable declaration whose resolver is nil names no resource,
+// while a non-nil resolver is a declaration of resource-bearing calls.
+func TestAsk_EscalationWithoutAResourceResolverCarriesNoResource(t *testing.T) {
 	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
 	// Use the real session.list executor and schema, but remove only its
-	// ResourceArg in this synthetic registry. This keeps the test on a tool
-	// that can actually run while exercising the no-resource policy branch.
+	// resolver in this synthetic registry. This keeps the test on a tool that
+	// can actually run while exercising the no-resource policy branch.
 	var found bool
 	for i, tool := range reg.All() {
 		if tool.Name == "session.list" {
-			reg.All()[i].ResourceArg = ""
+			reg.All()[i].ResolveResources = nil
 			found = true
 			break
 		}
@@ -1398,5 +1410,47 @@ func TestAsk_ObserveToolResultIsFramedAsDataBeforeModelActs(t *testing.T) {
 	}
 	if calls := runner.runCalls(); len(calls) != 0 {
 		t.Fatalf("the instruction-shaped block caused a command: %+v", calls)
+	}
+}
+
+func TestMiddleware_RefusesWhenAnyResolvedResourceIsOutsideScope(t *testing.T) {
+	grant, dir := testDirGrant(t, autonomousMatrix())
+	inside := filepath.Join(dir, "inside.txt")
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	var found bool
+	for i, tool := range reg.All() {
+		if tool.Name != "files.read" {
+			continue
+		}
+		reg.All()[i].ResolveResources = func(args map[string]any, _ agenttools.RunContext) ([]agenttools.ResourceRef, error) {
+			path, ok := args["path"].(string)
+			if !ok {
+				return nil, errors.New("path is not a string")
+			}
+			return []agenttools.ResourceRef{
+				{Kind: content.ResourcePath, ID: path},
+				{Kind: content.ResourcePath, ID: outside},
+			}, nil
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Fatal("files.read declaration not found")
+	}
+	mw, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-1", 1, "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("newPolicyMiddleware: %v", err)
+	}
+	out, err := wrappedEndpoint(mw, "files.read", "call-1", `{"path":"`+inside+`"}`)
+	if err != nil {
+		t.Fatalf("outside resource returned an error: %v", err)
+	}
+	if !strings.Contains(out, "REFUSED") {
+		t.Fatalf("result = %q, want a refusal when the second resource is outside scope", out)
 	}
 }

@@ -29,8 +29,8 @@ import (
 // return from a cancelled context, and an adapter must never assume its ctx
 // will be cancelled at all.
 //
-// The capability is ONE native dialog, not one per method: the file picker,
-// the directory picker and the upload picker share a single gate, so no
+// The capability is ONE native dialog, not one per method: file, directory,
+// upload-source and download-destination pickers share a single gate, so no
 // second picker ever stacks over the first, whichever method opened it.
 type DialogService interface {
 	// OpenFile opens the platform file picker and returns the chosen
@@ -184,7 +184,7 @@ func (h dialogHandlers) answerPath(req jsonrpcRequest, errPrefix string, open fu
 // dialog.openFile has existing callers whose whole answer is a path — the
 // key-material input types one into a field — and upload has the opposite
 // requirement: the renderer must never learn where the file came from.
-// One seam, two questions, and the adapter answers whichever it can.
+// One seam, several questions, and the adapter answers whichever it can.
 //
 // A DialogService that does not implement this reports the method
 // unavailable, exactly as a missing service does. That is the honest

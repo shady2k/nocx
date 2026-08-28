@@ -2,9 +2,9 @@
 
 - **Status:** accepted (2026-08-22)
 - **Amends:** `AD-1` (what may travel beside its two planes) —
-  `docs/architecture.md:101`, the bulk-file-bytes amendment at `:111`. That
-  amendment ends "nothing further may be added to this route without its own
-  ADR", and this is that ADR. See "What this leaves to AD-1" below.
+  `docs/architecture.md:111` now names both ticketed browser routes and the
+  backend-owned native desktop destination. See "What this changes in AD-1"
+  below.
 - **Extends:** [ADR-0039](0036-an-http-upload-route-beside-the-websocket.md),
   whose decision is scoped to `POST /upload/{ticket}` and whose own words are
   "exactly one documented exception, **in one direction**, for one payload
@@ -12,7 +12,7 @@
 - **Reads, does not change:** `AD-6`, `AD-9`, `AD-10`,
   [ADR-0026](0026-control-plane-runs-off-the-read-loop.md) (the read-loop
   invariant), [ADR-0001](0001-xterm-js-as-vt-frontend.md).
-- **Related:** `nocx-9le.8`, `nocx-9le.8.1`.
+- **Related:** `nocx-9le.8`, `nocx-9le.8.1`, `nocx-9le.8.4`.
 
 ## Context
 
@@ -31,10 +31,12 @@ second route is a second crossing, however similar it looks, and this is it.
 
 ## Decision
 
-**File bytes travelling from the tab's host to the renderer are carried by a
+**File bytes travelling from the tab's host to a browser are carried by a
 `GET /download/{ticket}` served by the same `http.ServeMux` that serves
-`/session` and `/upload/{ticket}`. They travel on neither of AD-1's two planes,
-and no msg-type is allocated on the data plane.**
+`/session` and `/upload/{ticket}`. In the Wails desktop, `files.downloadSave`
+claims the same one-shot transfer and streams its pinned source into an injected
+local `transfer.Sink` selected behind the native save dialog. Neither path uses
+AD-1's two WebSocket planes, and no msg-type is allocated on the data plane.**
 
 The same three bounds ADR-0039 set apply unchanged, and a fourth is added by
 this route existing beside the first:
@@ -102,17 +104,21 @@ reaches the source's copy loop as a slow `Write`.
 The golden-vector argument is direction-agnostic and is repeated here only so
 that it is not read as having been forgotten.
 
-### 4. A download has to become a file, and only the browser can do that part
-
-This one has no upload counterpart and would decide the question by itself.
+### 4. A download has to become a file, and the platform owns that part
 
 A browser saves an HTTP response to disk itself, streaming it, with a memory
 cost that does not grow with the file. Bytes arriving as WebSocket messages
 cannot be streamed to disk: a page has to accumulate them and hand the platform
 one `Blob`, so a 2 GB download would need 2 GB of renderer memory before any of
-it reached the disk. There is no version of that which is not worse, and there
-is no API that fixes it — the File System Access API is not available in the
-WKWebView the desktop app ships.
+it reached the disk. The File System Access API is unavailable in the embedded
+WebViews.
+
+The desktop has a different platform capability: Wails can ask the native save
+dialog for a destination, while the Go core can stream to that disk. The
+renderer still cannot name or observe the destination. It sends only the
+authorised transfer id; the backend claims the same ticket, and the existing
+`transfer.Source` and local `transfer.Sink` meet through a bounded pipe. This is
+not a second SFTP or atomic-write engine, and it never puts the body in a Blob.
 
 ## Consequences
 
@@ -175,6 +181,29 @@ byte, so the head is committed as late as possible — at the first byte that is
 actually going out — which leaves a status to tell the truth with when nothing
 was sent.
 
+### A native destination is atomic where an HTTP response cannot be
+
+The HTTP client owns bytes once its response head is committed, so a partial
+browser download can only be reported. A native destination remains backend-
+owned until promotion: the local Sink writes a same-directory temporary file,
+syncs and closes it, then atomically replaces the path the person selected.
+Cancel, a short or failed remote read, local write failure, connection loss and
+shutdown therefore leave the previous destination unchanged; the Sink removes
+its temporary file or records a cleanup failure only in the backend log.
+
+The native method claims the ticket before opening the dialog. That closes the
+unclaimed-ticket TTL without extending it, and makes the HTTP/native race use
+the same four claim states. `files.downloadSave` takes exactly `transferId`;
+binding/session ownership is re-checked from the transfer, and no ticket,
+source path, destination path or URL can be supplied by the renderer. The
+dialog runs under the existing capacity-one off-read-loop admission.
+
+Wails v3's synchronous save dialog exposes no dismissal handle. Cancellation
+still closes the pinned source, aborts the temporary destination and prevents a
+later dialog result from attaching or promoting anything. The capacity-one
+dialog permit remains held until the person closes the still-visible prompt;
+releasing it earlier would allow a second native dialog to stack over the first.
+
 ### The route sets its own deadline, and it is a WRITE deadline
 
 ADR-0039 noted that the shared `http.Server` has `ReadHeaderTimeout: 0` because
@@ -219,21 +248,13 @@ absolute, clean, bounded, then the provider's own syntax — and the provider
 refuses anything that is not a regular file, because a directory has no byte
 stream and a fifo blocks.
 
-### What this leaves to AD-1
+### What this changes in AD-1
 
-AD-1's bulk-file-bytes amendment (`docs/architecture.md:111`) is worded around
-the upload: it names `POST /upload/{ticket}`, says "the bytes of a file being
-uploaded", and closes with "nothing further may be added to this route without
-its own ADR". This document is that ADR, and the line now needs widening to name
-both directions and both routes.
-
-That widening is deliberately **not** done here, following the precedent
-ADR-0039 set in these words: "This document was written without claiming the
-authority to widen AD-1's own wording, because that was the coordinator's call
-rather than a side effect of writing it." The same holds. The half of the change
-that lives in `docs/architecture.md` is the coordinator's, and until it lands
-AD-1 and this ADR disagree about how many routes there are — which is a thing to
-fix in the open rather than quietly.
+AD-1's bulk-file-bytes amendment (`docs/architecture.md:111`) now names both
+ticketed browser routes and the native desktop destination. The closed rule is
+unchanged: bulk file payloads stay off the WebSocket, the control plane owns
+authorisation and lifecycle, and another route or payload class requires its
+own ADR.
 
 ### What is unchanged
 

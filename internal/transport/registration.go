@@ -10,13 +10,10 @@ package transport
 //
 // The ingress-critical set is closed and VALIDATED at construction. A handler
 // that wrongly claims immediate recreates the original bug: a blocking
-// handler on the read loop freezes every tab on the socket. The methods below
-// are the complete set that must never queue — the reason is concrete for the
-// resolvers: RequestUnlock and RequestConnectionPassword block until their
-// resolution arrives over the same socket the read loop consumes, so a
-// resolution queued behind a full lane would deadlock the ask. ack is ring
-// trimming, bounded bookkeeping whose delay would close the AD-10 credit
-// window. Nothing else may pair an immediate disposition with a handler.
+// handler on the read loop freezes every tab on the socket. Every member below
+// has a bounded inline shape and a waiter or one-shot linearization point that
+// cannot safely queue behind the ordinary lane; all platform work and file I/O
+// stays in admitted continuations.
 
 import (
 	"context"
@@ -54,6 +51,11 @@ var ingressCriticalMethods = map[string]struct{}{
 	// waits on the awaiting-takeover transition it feeds, so it must never
 	// queue behind the lane either. Handler: a mutex update, microseconds.
 	"agent.laneInteractivity": {},
+	// Native download save linearises its one-shot claim before the bounded
+	// dialog queue can refuse it. Its inline half is only strict decode, two
+	// mutex lookups and nonblocking TrySubmit; the platform dialog and all I/O
+	// remain in the submitted continuation (nocx-9le.8.4).
+	"files.downloadSave": {},
 }
 
 // methodSpec declares one control method at server construction: the

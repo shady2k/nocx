@@ -26,9 +26,12 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"io"
 	"io/fs"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/transfer"
 )
@@ -273,6 +276,61 @@ func TestSourceGet_CancelledByThePerson(t *testing.T) {
 	}
 	if sent >= 8192 {
 		t.Fatalf("sent = %d; a cancelled download must stop short", sent)
+	}
+}
+
+var errBlockingReaderClosed = errors.New("blocking reader closed")
+
+type blockingReadFS struct {
+	started chan struct{}
+	closed  chan struct{}
+	start   sync.Once
+	close   sync.Once
+}
+
+func (f *blockingReadFS) Open(string) (transfer.RemoteReader, int64, error) {
+	return &blockingReadFile{fs: f}, 1, nil
+}
+
+type blockingReadFile struct{ fs *blockingReadFS }
+
+func (f *blockingReadFile) Read([]byte) (int, error) {
+	f.fs.start.Do(func() { close(f.fs.started) })
+	<-f.fs.closed
+	return 0, errBlockingReaderClosed
+}
+
+func (f *blockingReadFile) Close() error {
+	f.fs.close.Do(func() { close(f.fs.closed) })
+	return nil
+}
+
+func TestDownloadClose_InterruptsAReadAlreadyInFlight(t *testing.T) {
+	fsys := &blockingReadFS{started: make(chan struct{}), closed: make(chan struct{})}
+	source := transfer.NewSource(fsys, transfer.DefaultChunk)
+	download, err := source.Open("/srv/blocked")
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() {
+		_, getErr := source.Get(context.Background(), download, io.Discard, nil)
+		done <- getErr
+	}()
+	<-fsys.started
+	if err := download.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case getErr := <-done:
+		if !errors.Is(getErr, errBlockingReaderClosed) {
+			t.Fatalf("Get error = %v, want reader-close interruption", getErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Get stayed blocked after Download.Close")
+	}
+	if err := download.Close(); err != nil {
+		t.Fatalf("second Close = %v, want idempotent", err)
 	}
 }
 

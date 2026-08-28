@@ -59,13 +59,11 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 			h := trustHostKeyHandlers{truster: s.hostKeyTruster, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleConnectionsTrustHostKey(ctx, req) }
 		}),
-		// The dialog methods run under a bounded queue submission wrapped
-		// in the inflight set; the native-picker capability itself is
-		// dialogAdmit, a capacity-one WAITING gate the handler acquires on
-		// the task goroutine (ws.go says why it may not be a submission's).
-		// All three own the SAME gate: the native dialog is one capability,
-		// so no picker can open over an outstanding one, whichever method
-		// asked for it.
+		// Native dialog continuations run under the bounded dialog queue and
+		// capacity-one waiting gate, so no picker stacks over another.
+		// files.downloadSave is the one split registration: its immediate,
+		// nonblocking half claims the transfer before queue refusal can strand
+		// it; the dialog and all I/O are submitted to this same queue below.
 		regResponder(s.dialogSub, "dialog.openFile", noParams(), func(r Responder) handlerFunc {
 			h := dialogHandlers{dialog: dialog, admit: s.dialogAdmit, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenFile(ctx, req) }
@@ -80,6 +78,14 @@ func (s *WSServer) seamSpecs(lane control.Admission, sessionGate control.Admissi
 		regResponder(s.dialogSub, "dialog.openFileForUpload", noParams(), func(r Responder) handlerFunc {
 			h := dialogHandlers{dialog: dialog, admit: s.dialogAdmit, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleDialogOpenFileForUpload(ctx, req) }
+		}),
+		// Claim first, then submit: see ingressCriticalMethods for the closed,
+		// read-loop-safe shape of the immediate half.
+		reg(control.ImmediateSubmission{}, "files.downloadSave", params(validateFilesDownloadSaveRaw), func(_ *wsConn, state *connState, r Responder) handlerFunc {
+			h := downloadSaveHandlers{
+				dialog: dialog, admit: s.dialogAdmit, submit: s.dialogSub, machine: s, r: r,
+			}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleDownloadSave(ctx, state, req) }
 		}),
 		regResponder(s.lane, "sshConfig.aliases", noParams(), func(r Responder) handlerFunc {
 			h := sshConfigHandlers{resolver: s.sshConfigResolver, path: s.sshConfigPath, r: r}

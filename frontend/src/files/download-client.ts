@@ -24,6 +24,7 @@
 import type { Dispatcher } from '../dispatcher'
 import type { FilesDownloadResult } from '../generated/files.download'
 import type { FilesDownloadCancelResult } from '../generated/files.downloadCancel'
+import type { FilesDownloadSaveResult } from '../generated/files.downloadSave'
 import type { FilesDownloadDone } from '../generated/files.downloadDone'
 import type { FilesDownloadProgress } from '../generated/files.downloadProgress'
 
@@ -46,6 +47,9 @@ export interface DownloadServices {
   /** Idempotent: cancelling a finished transfer is not an error, because
    *  the person's cancel races the transfer's own completion every time. */
   cancel(transferId: string): Promise<FilesDownloadCancelResult>
+  /** Claim the minted transfer and let the backend-owned native picker choose
+   *  a durable local Sink target. The transfer id is the entire wire input. */
+  saveNative(transferId: string): Promise<FilesDownloadSaveResult>
   /** Resolve the result's `url` — a PATH on the backend's HTTP surface —
    *  against the socket's own origin. It is here rather than in the saver
    *  because only the client holds the dispatcher, and it is the same
@@ -73,6 +77,10 @@ class DownloadClient {
 
   cancel(transferId: string): Promise<FilesDownloadCancelResult> {
     return this.dispatcher.call<FilesDownloadCancelResult>('files.downloadCancel', { transferId })
+  }
+
+  saveNative(transferId: string): Promise<FilesDownloadSaveResult> {
+    return this.dispatcher.call<FilesDownloadSaveResult>('files.downloadSave', { transferId })
   }
 
   resolveUrl(url: string): string | null {
@@ -122,6 +130,7 @@ export function createDownloadServices(dispatcher: Dispatcher): DownloadServices
   return {
     download: (req) => client.download(req),
     cancel: (transferId) => client.cancel(transferId),
+    saveNative: (transferId) => client.saveNative(transferId),
     resolveUrl: (url) => client.resolveUrl(url),
     subscribeProgress: (handler) => client.subscribeProgress(handler),
     subscribeDone: (handler) => client.subscribeDone(handler),

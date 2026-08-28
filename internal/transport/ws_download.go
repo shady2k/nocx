@@ -124,7 +124,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"io/fs"
 	"net/http"
 	"strconv"
@@ -193,12 +192,11 @@ type filesDownloadCancelParams struct {
 // outcome leaves the indicator saying "downloading" for the rest of the
 // session about a transfer that ended ten minutes ago.
 //
-// It carries neither finalName nor stranded, and both absences are the
-// direction rather than an economy. Nothing is renamed, because nothing on
-// the far host is being written; nothing can be left behind, because
-// nothing was created. What replaces them is Bytes, which is the only
-// number that says how much of the file the person actually got — and on a
-// failed download that number is the whole of the account.
+// It carries no finalName because nothing on the source host is renamed.
+// Browser downloads cannot strand a backend destination; a native local Sink
+// can report a temporary path it could not clean, but that path is backend-
+// private and is written only to the operator log. What replaces both fields
+// on the wire is Bytes, the amount that left the pinned source.
 type filesDownloadDoneParams struct {
 	TransferID string `json:"transferId"`
 	Outcome    string `json:"outcome"`
@@ -320,40 +318,27 @@ func (s *WSServer) startDownload(rt *runningTransfer, source transfer.Source) er
 // both let go when files.download answered (D8).
 func (s *WSServer) runDownload(rt *runningTransfer, source transfer.Source) {
 	defer close(rt.done)
-	// The pinned handle is closed on EVERY path out of this goroutine,
-	// including the one where nobody ever fetched. It is the closing end
-	// of the interval that opened when files.download called Open: from
-	// that call until this line, one descriptor on the source host is held
-	// against this transfer, and nothing else in the process may close it.
 	defer func() { _ = rt.download.Close() }()
 
-	var dst io.Writer
+	var destination downloadDestination
 	select {
-	case dst = <-rt.dest:
+	case destination = <-rt.dest:
 	case <-rt.ctx.Done():
-		// Cancelled, or the ticket's TTL elapsed with nobody fetching. No
-		// byte has left the host and none ever will.
 		rt.finish(downloadStateCancelled, transfer.Outcome{}, rt.ctx.Err(), s.transfers.clock())
 		s.transfers.retireTicket(rt.ticket)
 		s.settleDownload(rt)
 		return
 	}
 
-	sent, err := source.Get(rt.ctx, rt.download, dst, rt.progress)
-	rt.finish(downloadStateOf(err, rt.ctx.Err()), transfer.Outcome{}, err, s.transfers.clock())
+	result := destination.receive(rt.ctx, source, rt.download, rt.progress)
+	rt.finish(result.state, result.outcome, result.wireErr, s.transfers.clock())
 	s.transfers.retireTicket(rt.ticket)
-	// Before the deferred close(rt.done), on every path: anything that
-	// observes a transfer as over — the fetch handler, the teardown wait, a
-	// test — must find the terminal outcome already delivered or already
-	// retained, never in flight behind it.
 	s.settleDownload(rt)
-	if err != nil {
-		// The reason reaches the person through files.downloadDone; the
-		// log is for the operator and carries neither the ticket nor the
-		// path.
+	if result.err != nil {
 		s.log.Warn("download did not complete",
 			"transfer_id", rt.id, "binding_id", rt.bindingID,
-			"sent", sent, "total", rt.size(), "error", err)
+			"sent", result.sent, "total", rt.size(),
+			"stranded", result.outcome.Stranded, "error", result.err)
 	}
 }
 
@@ -513,7 +498,7 @@ func (h downloadHandlers) handleDownload(ctx context.Context, state *connState, 
 			download:  d,
 			ctx:       tctx,
 			cancel:    cancel,
-			dest:      make(chan io.Writer, 1),
+			dest:      make(chan downloadDestination, 1),
 			done:      make(chan struct{}),
 			// One slot: the emitter reads the latest byte count off the
 			// transfer, so a second pending wake would only ask it to send
@@ -813,12 +798,7 @@ func (rt *runningTransfer) attachWriter(body *downloadResponse) bool {
 	rt.mu.Lock()
 	rt.closer = body
 	rt.mu.Unlock()
-	select {
-	case rt.dest <- body:
-		return true
-	case <-rt.done:
-		return false
-	}
+	return rt.attachDestination(writerDownloadDestination{writer: body})
 }
 
 // writeDownloadHead writes the response head. It is called at most once per

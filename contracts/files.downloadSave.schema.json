@@ -1,0 +1,9 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files.downloadSave.schema.json",
+  "title": "FilesDownloadSaveResult",
+  "description": "Empty result of files.downloadSave. The request takes exactly one transferId naming a download already minted and owned by this connection's session. The backend claims its one-shot ticket before opening the shared native dialog, and the renderer receives neither the ticket nor a local destination path. Completion remains authoritative in files.downloadDone.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": []
+}

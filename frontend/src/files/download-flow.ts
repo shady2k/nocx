@@ -7,23 +7,23 @@
 // body to send because the bytes come the other way, and they do not come
 // through the renderer at all (`download-save.ts`).
 //
-// So the whole gesture is: mint a transfer, record it from the RESULT, and
-// hand the URL to the platform. Two things can go wrong here and both are
-// the renderer's own half:
+// The whole gesture is: mint a transfer, record it from the RESULT, and hand
+// its opaque id plus the browser URL to the selected platform saver.
 //
-// - `files.download` was refused. No transfer exists, so there is no row to
-//   fail — the refusal is reported and nothing else happens. (A row minted
-//   for a transfer the backend never created is a row nothing can ever end.)
-// - The URL cannot be resolved, which means there is no connection to
-//   resolve it against. The transfer DOES exist, the ticket will expire
-//   unredeemed, and the row says so rather than sitting at 0% forever.
+// - `files.download` may be refused before a transfer exists; then no row is
+//   minted.
+// - A browser may have no socket origin with which to redeem the URL; its
+//   unclaimed ticket will expire, so the renderer marks that local half failed.
+// - A native start may reject after the backend claimed the transfer; the error
+//   is reported immediately, while `files.downloadDone` remains the only writer
+//   of its terminal outcome.
 //
 // Everything after the save is the backend's account: files.downloadProgress
 // moves the row and files.downloadDone ends it.
 
 import type { ToastLevel } from '../ui/toast'
 import type { DownloadServices } from './download-client'
-import type { DownloadSaver } from './download-save'
+import { DownloadNotClaimedError, type DownloadSaver } from './download-save'
 import type { DownloadStore } from './download-store'
 
 /** Which file, on which binding. The name is not here: the backend measures
@@ -87,15 +87,22 @@ export function createDownloadFlow(deps: DownloadFlowDeps): DownloadFlow {
       size: result.size,
     })
     const url = services.resolveUrl(result.url)
-    if (url === null) {
-      const why = `${result.name}: there is no connection to the backend to fetch the bytes over`
-      store.failLocally(result.transferId, why)
-      report(why, 'danger')
-      return
+    // Exactly once. Browser spends the one-shot ticket with the anchor;
+    // native spends the same ticket inside files.downloadSave before its
+    // dialog opens. A rejected native start is visible here while the
+    // backend's files.downloadDone remains the authoritative terminal row.
+    try {
+      await saver.save({ transferId: result.transferId, name: result.name, url })
+    } catch (e) {
+      const detail = e instanceof Error ? e.message : String(e)
+      if (e instanceof DownloadNotClaimedError) {
+        store.failLocally(result.transferId, detail)
+      }
+      report(
+        e instanceof DownloadNotClaimedError ? detail : `Could not save ${result.name}: ${detail}`,
+        'danger',
+      )
     }
-    // Exactly once. The ticket is one-shot: a retry would be a 410, which
-    // would report a failure for a file that may already be on the disk.
-    saver.save(url)
   }
 
   return { fetch: fetchOne }

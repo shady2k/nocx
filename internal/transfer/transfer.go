@@ -102,6 +102,11 @@ type Upload struct {
 	OnExists Decision
 }
 
+// Validate reports whether the instruction is one Sink can express. Callers
+// that must answer synchronously use this same rule before starting async
+// work; Sink.Put calls it again at the ownership boundary.
+func (u Upload) Validate() error { return u.validate() }
+
 // Outcome is what Put leaves behind, said out loud.
 //
 // FinalName is the name actually written, which KeepBoth may have changed.

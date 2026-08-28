@@ -1,18 +1,13 @@
-// How a download reaches the disk — one seam, one implementation, and one
-// thing it deliberately does not do.
+// How a download reaches the disk — one seam with browser and native
+// implementations, selected at the composition root.
 //
 // ## The renderer never names a destination path
 //
-// There is no path parameter here and there is nowhere for one to go. The
-// backend answers `files.download` with a URL and
-// `Content-Disposition: attachment`, so handing that URL to the browser is
-// the whole of the save: the browser puts the file where that person's
-// browser puts files, under the name the header carries, by the platform's
-// own mechanism. A renderer that chose a directory would be inventing an
-// answer the person never gave it, and the one place a person DOES get
-// asked — the desktop build's native save dialog — is a backend method
-// (nocx-9le.8.4) that will arrive as another implementation of this
-// interface, not as a path threaded through this one.
+// A browser receives the backend's attachment URL; a Wails window sends only
+// the opaque transfer id to `files.downloadSave`. In neither case can the
+// renderer choose or observe a local destination path. The browser picks its
+// configured downloads directory; the native backend asks through the OS save
+// dialog and keeps that answer behind the control-plane boundary.
 //
 // ## Why an anchor and not `fetch` into a Blob
 //
@@ -39,14 +34,24 @@
 // attempt on a spent ticket is a 410, which would report a failure for a
 // file that is already on the disk.
 
-/** Hand one download to the platform. The URL is absolute — the client
- *  resolved it against the socket's origin, because under `dev-web` the
- *  page and the backend are not on the same one. */
+interface DownloadSave {
+  /** The only value native save sends over the wire. */
+  transferId: string
+  /** The authoritative name measured on the pinned source handle. */
+  name: string
+  /** Used only by the browser implementation; null while no socket origin is reachable. */
+  url: string | null
+}
+
+/** The browser never claimed the backend ticket, so no authoritative done
+ * frame can arrive until its TTL cancels it. The flow may mark that local
+ * half failed immediately; native RPC failures are different because the
+ * backend has already claimed and will send the terminal account. */
+export class DownloadNotClaimedError extends Error {}
+
+/** Hand one download to the selected platform. */
 export interface DownloadSaver {
-  /** Start the save. Returns nothing: whether the bytes arrive is the
-   *  transfer's account (files.downloadDone), not this call's, and a
-   *  boolean here would be a second opinion about it. */
-  save(url: string): void
+  save(download: DownloadSave): Promise<void>
 }
 
 /**
@@ -69,15 +74,33 @@ export interface DownloadSaver {
  */
 export function createBrowserDownloadSaver(doc: Document = document): DownloadSaver {
   return {
-    save(url: string): void {
+    save(download: DownloadSave): Promise<void> {
+      if (download.url === null) {
+        return Promise.reject(
+          new DownloadNotClaimedError(
+            `${download.name}: there is no connection to the backend to fetch the bytes over`,
+          ),
+        )
+      }
       const a = doc.createElement('a')
-      a.href = url
+      a.href = download.url
       // Empty: "save it, and take the name from the response". A name here
-      // would be the renderer overriding Content-Disposition, which is the
-      // sanitised one and the only one that has seen the real bytes.
+      // would be the renderer overriding Content-Disposition.
       a.download = ''
       a.rel = 'noopener'
       a.click()
+      return Promise.resolve()
+    },
+  }
+}
+
+/** The desktop save starts and ends entirely behind the control plane. */
+export function createNativeDownloadSaver(
+  saveNative: (transferId: string) => Promise<unknown>,
+): DownloadSaver {
+  return {
+    async save(download: DownloadSave): Promise<void> {
+      await saveNative(download.transferId)
     },
   }
 }

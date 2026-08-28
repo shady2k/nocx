@@ -14,8 +14,10 @@ import (
 	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 
 	"github.com/shady2k/nocx/internal/app"
+	filesystemlocal "github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/notify/wailsadapter"
+	"github.com/shady2k/nocx/internal/transfer"
 	"github.com/shady2k/nocx/internal/transport"
 	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/update"
@@ -244,7 +246,8 @@ func (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOpti
 		// The upload half of the picker mints into the backend's own store,
 		// which is the SAME store the window drop mints into and the same
 		// one a later files.upload claims from. One mint, one owner.
-		sources: w.backend.UploadSources,
+		sources:      w.backend.UploadSources,
+		downloadSink: filesystemlocal.New().DurableSink(),
 	})
 
 	// The native browser-open is the same control-plane shape as the file
@@ -513,6 +516,9 @@ type wailsDialogService struct {
 	// the only method that touches it, and it is what makes this adapter a
 	// transport.UploadPicker as well as a transport.DialogService.
 	sources *transport.SourceTicketStore
+	// downloadSink is injected by the composition root so the adapter only
+	// chooses a destination; the existing transfer Sink owns all writes.
+	downloadSink transfer.Sink
 }
 
 func (d *wailsDialogService) OpenFile(_ context.Context) (string, error) {
@@ -563,6 +569,50 @@ func (d *wailsDialogService) OpenFileForUpload(_ context.Context) (transport.Sou
 	}
 	return d.sources.Mint(path)
 }
+
+// PickDownloadSave asks Wails for the destination and converts that private
+// path immediately into the existing local Sink instruction. The renderer
+// receives only the empty files.downloadSave result.
+func (d *wailsDialogService) PickDownloadSave(
+	_ context.Context,
+	name string,
+	size int64,
+) (*transport.DownloadSaveTarget, error) {
+	path, err := d.app.Dialog.SaveFile().
+		SetFilename(name).
+		CanCreateDirectories(true).
+		AddFilter("All files", "*").
+		PromptForSingleSelection()
+	if err != nil {
+		return nil, err
+	}
+	if path == "" {
+		return nil, nil
+	}
+	clean := filepath.Clean(path)
+	if !filepath.IsAbs(path) || clean != path || filepath.Dir(path) == path {
+		return nil, errors.New("save dialog returned an invalid destination")
+	}
+	target := &transport.DownloadSaveTarget{
+		Sink: d.downloadSink,
+		Upload: transfer.Upload{
+			DestDir:  filepath.Dir(clean),
+			Name:     filepath.Base(clean),
+			Size:     size,
+			OnExists: transfer.Overwrite,
+		},
+	}
+	if err := target.Upload.Validate(); err != nil {
+		return nil, errors.New("save dialog returned an invalid destination")
+	}
+	return target, nil
+}
+
+var (
+	_ transport.DialogService      = (*wailsDialogService)(nil)
+	_ transport.UploadPicker       = (*wailsDialogService)(nil)
+	_ transport.DownloadSavePicker = (*wailsDialogService)(nil)
+)
 
 // handleFilesDropped is the window-drop mint site: Wails hands over the
 // dropped absolute paths and every attribute of the element that carried

@@ -210,6 +210,20 @@ interface SessionState {
   // length, because a multi-byte rune is several bytes and one character.
   offset: number
 
+  // The geometry THIS client last reported for this session — what it told
+  // the backend at open, and every resize since. It is kept because the
+  // report has to survive the socket: the backend returns a session to its
+  // named default the moment its last client detaches (nocx-eidfb.2), so a
+  // reconnecting client that said nothing would leave a live window's
+  // terminal running at 80x24. It rides the attach, which re-takes the
+  // session and its size together.
+  //
+  // Null for a session this client has never reported a size for — a pane
+  // reclaimed by a window that has not laid it out yet. That is not a report
+  // of nothing: the attach then carries no geometry at all and the backend
+  // leaves the session at the size it is running at.
+  reported: { cols: number; rows: number } | null
+
   // dataCallback receives decoded PTY output for the caller (Tab → renderer).
   // May be null briefly between session creation (open response) and the
   // first onSessionData() call — binary frames arriving in that window are
@@ -405,7 +419,7 @@ export class WSClient {
       // listener can state what became of the sessions on this reconnect
       // (nocx-gbhwh): resumed, or gone — the backend no longer has them.
       const reattached = [...this.sessions.entries()].map(([sid, state]) =>
-        this._sendAttach(sid, state.offset, state)
+        this._sendAttach(sid, state.offset, state, state.reported)
           .then((result) => {
             if (result.reset) {
               state.offset = result.from ?? 0
@@ -708,7 +722,7 @@ export class WSClient {
         ypixel: 0,
         ...paneParam(anchor),
       })
-      .then((result) => this._registerHandle(result))
+      .then((result) => this._registerHandle(result, { cols, rows }))
   }
 
   // openSSHSession opens an SSH session via a profile ID. The backend
@@ -730,7 +744,7 @@ export class WSClient {
         profileId,
         ...paneParam(anchor),
       })
-      .then((result) => this._registerHandle(result))
+      .then((result) => this._registerHandle(result, { cols, rows }))
   }
 
   // openSSHSessionByHost opens a direct SSH session by hostname/alias,
@@ -753,13 +767,16 @@ export class WSClient {
         user,
         ...paneParam(anchor),
       })
-      .then((result) => this._registerHandle(result))
+      .then((result) => this._registerHandle(result, { cols, rows }))
   }
 
   /** The open ack's wire shape (contracts/open.schema.json). Every open —
    *  local, profile SSH, direct-host SSH — carries the resolved launch
    *  policy and the refusal reason alongside the id and cwd. */
-  private _registerHandle(result: OpenResult): SessionHandle {
+  private _registerHandle(
+    result: OpenResult,
+    reported: { cols: number; rows: number },
+  ): SessionHandle {
     const sid = result?.sessionId
     if (!sid || !isSessionID(sid)) {
       throw new Error(`nocx: invalid session-id from server: ${sid}`)
@@ -771,7 +788,7 @@ export class WSClient {
     if (typeof instanceId !== 'string' || typeof sessionEpoch !== 'number') {
       throw new Error(`nocx: invalid session identity from server: ${sid}`)
     }
-    this._registerSession(sid, { instanceId, sessionEpoch }, 0)
+    this._registerSession(sid, { instanceId, sessionEpoch }, 0, reported)
     return new SessionHandle(
       this,
       sid,
@@ -791,10 +808,12 @@ export class WSClient {
     sessionId: string,
     identity: { instanceId: string; sessionEpoch: number },
     offset: number,
+    reported: { cols: number; rows: number } | null = null,
   ): void {
     this.sessions.set(sessionId, {
       decoder: new UTF8StreamDecoder(),
       offset,
+      reported,
       dataCallback: null,
       pendingData: '',
       exitCallback: null,
@@ -819,12 +838,21 @@ export class WSClient {
     sessionId: string,
     offset: number,
     identity: { instanceId: string; sessionEpoch: number },
+    reported: { cols: number; rows: number } | null = null,
   ): Promise<AttachResult> {
     return this.dispatcher.call<AttachResult>('attach', {
       sessionId,
       offset,
       instanceId: identity.instanceId,
       sessionEpoch: identity.sessionEpoch,
+      // The claiming client's own geometry, when it has one. A claim takes
+      // the session AND its size — the client that attached last is the one
+      // the shared channel follows (nocx-eidfb.2) — so a reconnect that
+      // omitted it would leave the terminal at the default the backend put
+      // it on when this client went away. Omitted entirely, not sent as
+      // zeroes, when this client has never laid the session out: the backend
+      // then leaves the size alone rather than reading it as "no client".
+      ...(reported ? { cols: reported.cols, rows: reported.rows, xpixel: 0, ypixel: 0 } : {}),
     })
   }
 
@@ -909,6 +937,11 @@ export class WSClient {
     const ws = this.dispatcher.socket
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     if (!this.sessions.has(sessionId)) return
+    // Recorded before it is sent, and recorded whatever the backend answers:
+    // this is what THIS client measured, and it is what the next attach has
+    // to report to take the session's size back (nocx-eidfb.2).
+    const state = this.sessions.get(sessionId)
+    if (state) state.reported = { cols, rows }
     // Fire-and-forget — response is silently dropped.
     void this.dispatcher
       .call('resize', { sessionId, cols, rows, xpixel: 0, ypixel: 0 })

@@ -458,3 +458,73 @@ func TestResize_ChannelRefuses_TheEffectiveSizeIsUnchanged(t *testing.T) {
 		t.Fatalf("EffectiveSize = %+v after a refused resize, want the unchanged %+v", got, before)
 	}
 }
+
+// ── the foreground client owns the size (nocx-eidfb.2) ─────────────────
+
+// THE INTERVAL, BOTH ENDS NAMED. A session runs at the geometry of the
+// client that attached last from the moment that client's report is
+// accepted by the channel until either another client's report replaces it
+// or the last client detaches; from that detach until the next client
+// reports, it runs at the named default.
+//
+// This test walks the whole span: a first client's size, a second client's
+// size replacing it, and the detach that closes the interval. NoClient is
+// what the transport hands the session when its subscriber slot empties —
+// the state, spelled as itself rather than as a report of nonsense.
+func TestSize_TheForegroundClientOwnsIt_UntilTheLastClientDetaches(t *testing.T) {
+	f := &recordingPtyFactory{}
+	reg := New(log.NewSlogAdapter(nil), f)
+
+	first := Size{Cols: 80, Rows: 24}
+	sess, err := reg.Open(context.Background(), Config{
+		Kind: KindLocal, Cols: first.Cols, Rows: first.Rows,
+	})
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = reg.Close(sess.ID()) }()
+
+	if got := sess.EffectiveSize(); got != first {
+		t.Fatalf("EffectiveSize = %+v, want the opening client's %+v", got, first)
+	}
+
+	// A second client becomes the foreground one: its report is the size.
+	second := Size{Cols: 132, Rows: 43, XPixel: 1320, YPixel: 860}
+	if rerr := sess.Resize(context.Background(), second); rerr != nil {
+		t.Fatalf("Resize to the second client's geometry: %v", rerr)
+	}
+	if got := sess.EffectiveSize(); got != second {
+		t.Fatalf("EffectiveSize = %+v, want the foreground client's %+v", got, second)
+	}
+	applied, ok := f.last.lastResize()
+	if !ok || applied != second {
+		t.Fatalf("channel resized to %+v (seen=%v), want %+v", applied, ok, second)
+	}
+
+	// THE CLOSING EVENT: the last client detaches. The session does not keep
+	// a departed client's geometry — it returns to the named default.
+	if rerr := sess.Resize(context.Background(), NoClient()); rerr != nil {
+		t.Fatalf("Resize to NoClient: %v", rerr)
+	}
+	if got := sess.EffectiveSize(); got != DefaultSize() {
+		t.Fatalf("EffectiveSize = %+v after the last client detached, want the default %+v",
+			got, DefaultSize())
+	}
+	applied, ok = f.last.lastResize()
+	if !ok || applied != DefaultSize() {
+		t.Fatalf("channel resized to %+v (seen=%v) after the last client detached, want the default %+v",
+			applied, ok, DefaultSize())
+	}
+}
+
+// NoClient is not a grid a channel could be created at, and that is the
+// whole of what it says: "nobody is reporting". A caller that mistook it for
+// a size would be asking for 0x0.
+func TestNoClient_IsNotAUsableGrid(t *testing.T) {
+	if NoClient().Valid() {
+		t.Fatalf("NoClient() = %+v reports itself as a usable grid", NoClient())
+	}
+	if got := effectiveSize(NoClient()); got != DefaultSize() {
+		t.Fatalf("effectiveSize(NoClient()) = %+v, want the default %+v", got, DefaultSize())
+	}
+}

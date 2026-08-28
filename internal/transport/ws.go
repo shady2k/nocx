@@ -111,7 +111,16 @@ func (rx *sessionRx) getSubscriber() (*wsConn, *connState) {
 // acknowledgement validates against (decision 9): a detached connection's
 // late ack must never release an accept, and with the slot cleared on
 // teardown it cannot.
-func (rx *sessionRx) clearSubscriber(wconn *wsConn) {
+//
+// It RETURNS WHETHER THE SLOT EMPTIED, which is the closing event of the
+// foreground interval (nocx-eidfb.2): the session's size belongs to the
+// client that attached last, from the moment its report reaches the channel
+// until another client replaces it or this returns true. Reported rather
+// than inferred, because "this connection went away" and "nobody is holding
+// the session any more" are different facts — a displaced connection's
+// teardown is the first without being the second — and only the slot can
+// tell them apart.
+func (rx *sessionRx) clearSubscriber(wconn *wsConn) bool {
 	rx.mu.Lock()
 	defer rx.mu.Unlock()
 	if rx.subscriber == wconn {
@@ -122,7 +131,9 @@ func (rx *sessionRx) clearSubscriber(wconn *wsConn) {
 		// already parked against a client that will never ack is released by
 		// the signal this sends.
 		rx.ring.setAttached(false)
+		return true
 	}
+	return false
 }
 
 type WSServer struct {
@@ -2168,6 +2179,35 @@ type attachParams struct {
 	// caller did not claim an incarnation".
 	SessionEpoch *uint64 `json:"sessionEpoch,omitempty"`
 	Offset       uint64  `json:"offset"`
+	// Cols/Rows/XPixel/YPixel are the geometry the CLAIMING client measured,
+	// in the same four words open and resize use — one shape for one concept
+	// (AD-1). They ride the claim because the claim is the only moment a
+	// client that has never held this session can report anything about it:
+	// resize is refused until the session is in the connection's own state,
+	// so there is no earlier seam to report at.
+	//
+	// A measurement, never an instruction. The backend decides what the
+	// session runs at (nocx-eidfb.1) and what it decided is read off the
+	// session; what this task adds is WHOSE measurement is taken — the
+	// client that attached last, which is the one the shared channel follows
+	// (nocx-eidfb.2).
+	//
+	// Absent is a client that has not measured itself yet, which is NOT the
+	// no-client state: the session keeps the size it is running at rather
+	// than dropping to the default. See session.NoClient for the two facts
+	// spelled apart.
+	Cols   uint16 `json:"cols"`
+	Rows   uint16 `json:"rows"`
+	XPixel uint16 `json:"xpixel"`
+	YPixel uint16 `json:"ypixel"`
+}
+
+// reportedSize is the claiming client's measurement as one value. One reader
+// of the four loose fields, so nowhere else has to know they are four — the
+// rule session.Config.clientSize already applies on the open side. Valid is
+// false when the client reported nothing.
+func (p attachParams) reportedSize() session.Size {
+	return session.Size{Cols: p.Cols, Rows: p.Rows, XPixel: p.XPixel, YPixel: p.YPixel}
 }
 
 // claimedEpoch is the epoch the caller claimed, or 0 for "claimed none" — the
@@ -2485,14 +2525,32 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	// it still holds (a newer subscriber is preserved), then wake any ring
 	// waiters blocked on this connection's sessions. The cancel above also
 	// fires (via defer) which is the primary exit signal for ringToConn.
+	//
+	// A slot that EMPTIED closes the foreground interval (nocx-eidfb.2): that
+	// session has no client left, so it must not go on running at a departed
+	// window's geometry. Which of these sessions those are is collected here
+	// and acted on below, outside the lock: admitting a resize can complete a
+	// superseded one, whose completion writes a JSON-RPC response to a socket,
+	// and that must never happen while this connection's state is held.
+	var orphaned []session.Session
 	state.mu.Lock()
-	for sid := range state.sessions {
+	for sid, sess := range state.sessions {
 		if rx := s.getRx(sid); rx != nil {
-			rx.clearSubscriber(wconn)
+			if rx.clearSubscriber(wconn) {
+				orphaned = append(orphaned, sess)
+			}
 			rx.ring.wake()
 		}
 	}
 	state.mu.Unlock()
+
+	// Back to the named default, one session at a time. NoClient is the report
+	// rather than a size, because that is what is true: nobody is measuring
+	// this session any more (session.NoClient). The session stays alive and
+	// keeps producing into its ring — this is AD-9, not a close.
+	for _, sess := range orphaned {
+		s.takeSize(sess.ID(), sess, session.NoClient())
+	}
 }
 
 func (s *WSServer) readLoop(ctx context.Context, wconn *wsConn, state *connState, readErr chan<- error) {

@@ -232,6 +232,44 @@ func (s *WSServer) laneFor(sid session.ID, sess session.Session) *sessionLane {
 	return l
 }
 
+// takeSize hands a session the geometry of the client that now owns it — the
+// one that attached last, which is the client the shared channel follows
+// (nocx-eidfb.2) — and the report NoClient when the last client has gone.
+//
+// One owner of that hand-off, because it has two callers whose facts must not
+// drift: the attach that takes a session, and the connection teardown that
+// empties its subscriber slot. It goes through the session's resize lane
+// rather than calling sess.Resize, for the reason the lane exists: a
+// window-change on a dead SSH channel blocks, and neither an attach on the
+// read loop nor a teardown that other sessions are queued behind may wait on
+// one. So this ADMITS a resize and returns; the lane applies it, and
+// EffectiveSize reports the new grid only once the channel has taken it.
+//
+// The failure is said out loud rather than swallowed. Nothing on the wire
+// answers it — no JSON-RPC request is waiting, and in the teardown case there
+// is by definition no client left to tell — so the log is the only audience
+// there is, and "the terminal is at a different grid than the window" is
+// exactly the state a silent degrade would hide.
+func (s *WSServer) takeSize(sid session.ID, sess session.Session, reported session.Size) {
+	op := &resizeOp{
+		reported: reported,
+		done: func(err error) {
+			if err != nil {
+				s.log.Warn("the session could not be resized to the client that owns it; the terminal is running at a different grid than the window",
+					"session_id", string(sid),
+					"cols", reported.Cols, "rows", reported.Rows, "error", err)
+			}
+		},
+	}
+	if !s.laneFor(sid, sess).enqueue(op) {
+		// The lane is a tombstone: this session's close was already admitted,
+		// so there is no channel left to resize. Not a failure — the same
+		// refusal a client's own resize would get.
+		s.log.Debug("session size not taken; the session is closing",
+			"session_id", string(sid))
+	}
+}
+
 // closeLane admits the terminal close for the session's lane, creating the
 // tombstone when none exists. Creating it matters: a close must not leave a
 // window in which a resize from another connection — one that passed

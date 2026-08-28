@@ -10,6 +10,11 @@ const ACK_INTERVAL_MS = 100
 const SID = '0123456789abcdef0011223344556677'
 const OTHER_SID = 'ffffffffffffffffffffffffffffffff'
 const OPEN_IDENTITY = { instanceId: 'fedcba9876543210fedcba9876543210', sessionEpoch: 1 }
+// The geometry the helpers below open at. Named because the reconnect
+// assertions read it back: an attach carries the size this client last
+// reported, and with no resize in between that is still the opening one.
+const OPEN_COLS = 80
+const OPEN_ROWS = 24
 
 function socket(): MockWebSocket {
   const ws = MockWebSocket.last
@@ -888,7 +893,48 @@ describe('reconnect and reattach', () => {
     // The identity rides every attach: a claim names a session completely,
     // so a backend that has restarted refuses it as a stale binding rather
     // than as an unknown id (nocx-oevq4).
-    expect(attaches[0].params).toEqual({ sessionId: SID, offset: 0, ...OPEN_IDENTITY })
+    //
+    // And so does the geometry this client last reported — here the one it
+    // opened at, because nothing has resized since. The backend returns a
+    // session to its named default the moment its last client detaches
+    // (nocx-eidfb.2), so an attach that carried no size would leave this
+    // window's terminal running at 80x24 after every reconnect.
+    expect(attaches[0].params).toEqual({
+      sessionId: SID,
+      offset: 0,
+      ...OPEN_IDENTITY,
+      cols: OPEN_COLS,
+      rows: OPEN_ROWS,
+      xpixel: 0,
+      ypixel: 0,
+    })
+  })
+
+  // THE SEAM A PERSON REACHES. A window that has been resized loses its
+  // socket and gets it back, and the terminal comes back the size the window
+  // is — not the size it was opened at, and not the backend's 80x24 default.
+  //
+  // The default is the trap this test exists for: the backend returns a
+  // session to it the moment its last client detaches (nocx-eidfb.2), which
+  // is exactly what a dropped socket looks like from the other end. Only the
+  // attach can undo that, so only the attach carrying the size makes a
+  // reconnect invisible to the user.
+  it('reattaches at the size this client last reported, not the one it opened at', async () => {
+    const client = new WSClient(mockDispatcher())
+    const { session, firstWS } = await connectedSessionWithBackoff(client)
+
+    session.sendResize(132, 43)
+
+    firstWS.serverHangsUp()
+    vi.advanceTimersByTime(475)
+
+    const reconnectedWS = socket()
+    reconnectedWS.serverAccepts()
+    await Promise.resolve()
+
+    const attaches = reconnectedWS.requests().filter((r) => r.method === 'attach')
+    expect(attaches).toHaveLength(1)
+    expect(attaches[0].params).toMatchObject({ cols: 132, rows: 43 })
   })
 
   it('sends attach with the last received byte offset', async () => {
@@ -908,7 +954,15 @@ describe('reconnect and reattach', () => {
 
     const attaches = reconnectedWS.requests().filter((r) => r.method === 'attach')
     expect(attaches).toHaveLength(1)
-    expect(attaches[0].params).toEqual({ sessionId: SID, offset: 5, ...OPEN_IDENTITY })
+    expect(attaches[0].params).toEqual({
+      sessionId: SID,
+      offset: 5,
+      ...OPEN_IDENTITY,
+      cols: OPEN_COLS,
+      rows: OPEN_ROWS,
+      xpixel: 0,
+      ypixel: 0,
+    })
   })
 
   it('continues without resetting on resumed response', async () => {

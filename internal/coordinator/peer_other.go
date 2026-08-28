@@ -12,3 +12,5 @@ var errUnsupportedPlatform = errors.New("peer credentials are not implemented on
 func peerUID(uintptr) (uint32, error) { return 0, errUnsupportedPlatform }
 
 func ownerUID(string) (uint32, error) { return 0, errUnsupportedPlatform }
+
+func peerPID(uintptr) (int, error) { return 0, errUnsupportedPlatform }

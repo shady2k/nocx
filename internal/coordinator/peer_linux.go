@@ -37,3 +37,20 @@ func ownerUID(path string) (uint32, error) {
 	}
 	return st.Uid, nil
 }
+
+// peerPID reports the pid the kernel recorded for the peer at connect time.
+// Linux's ucred carries it beside the uid, so the same getsockopt answers
+// both questions.
+//
+// The SERVER deliberately does not use it — peerUID above says why a pid is
+// the wrong thing to make a trust decision on. The CLIENT does, and for a
+// different job: a coordinator that must be replaced has to be named to the
+// kernel somehow, and a pid the kernel stamped is the only name a launcher
+// can get that the daemon could not have made up.
+func peerPID(fd uintptr) (int, error) {
+	cred, err := unix.GetsockoptUcred(int(fd), unix.SOL_SOCKET, unix.SO_PEERCRED)
+	if err != nil {
+		return 0, err
+	}
+	return int(cred.Pid), nil
+}

@@ -434,6 +434,12 @@ func (f *fakeSessionRegistry) Open(context.Context, session.Config) (session.Ses
 	return nil, errors.New("not in test")
 }
 
+// InstanceID answers with a fixed, well-shaped instance: this fake is one
+// backend instance for as long as it exists, like the real registry.
+func (f *fakeSessionRegistry) InstanceID() session.InstanceID {
+	return session.InstanceID("00000000000000000000000000000001")
+}
+
 func (f *fakeSessionRegistry) Get(id session.ID) (session.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

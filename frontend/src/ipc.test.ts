@@ -885,7 +885,10 @@ describe('reconnect and reattach', () => {
 
     const attaches = reconnectedWS.requests().filter((r) => r.method === 'attach')
     expect(attaches).toHaveLength(1)
-    expect(attaches[0].params).toEqual({ sessionId: SID, offset: 0 })
+    // The identity rides every attach: a claim names a session completely,
+    // so a backend that has restarted refuses it as a stale binding rather
+    // than as an unknown id (nocx-oevq4).
+    expect(attaches[0].params).toEqual({ sessionId: SID, offset: 0, ...OPEN_IDENTITY })
   })
 
   it('sends attach with the last received byte offset', async () => {
@@ -905,7 +908,7 @@ describe('reconnect and reattach', () => {
 
     const attaches = reconnectedWS.requests().filter((r) => r.method === 'attach')
     expect(attaches).toHaveLength(1)
-    expect(attaches[0].params).toEqual({ sessionId: SID, offset: 5 })
+    expect(attaches[0].params).toEqual({ sessionId: SID, offset: 5, ...OPEN_IDENTITY })
   })
 
   it('continues without resetting on resumed response', async () => {
@@ -1315,5 +1318,171 @@ describe('session.observationChanged notification', () => {
     ws.deliverText(observation({ agent: 7 }))
 
     expect(seen).toEqual([])
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// Reclaiming a live session (nocx-oevq4, the nocx-server design D5 and D8):
+// the window that has just started holds nothing, so it asks.
+// ═══════════════════════════════════════════════════════════════════════════
+
+describe('reclaiming a live session', () => {
+  const PANE = '0198f2b0-0000-7000-8000-0000000000c3'
+
+  function liveEntry(over: Record<string, unknown> = {}) {
+    return {
+      sessionId: SID,
+      instanceId: OPEN_IDENTITY.instanceId,
+      sessionEpoch: OPEN_IDENTITY.sessionEpoch,
+      paneId: PANE,
+      replayFrom: 0,
+      attached: false,
+      ...over,
+    }
+  }
+
+  /** A client that has connected and opened NOTHING — the state a fresh
+   *  window is in, and the whole premise of this feature. */
+  async function freshClient(): Promise<{ client: WSClient; ws: MockWebSocket }> {
+    const client = new WSClient(mockDispatcher())
+    const connecting = client.connect(9876)
+    socket().serverAccepts()
+    await connecting
+    return { client, ws: socket() }
+  }
+
+  function answerLast(ws: MockWebSocket, method: string, result: unknown): void {
+    const req = ws
+      .requests()
+      .filter((r) => r.method === method)
+      .pop()
+    ws.deliverText({ jsonrpc: '2.0', id: req?.id, result })
+  }
+
+  it('asks the backend what is live instead of its own memory', async () => {
+    const { client, ws } = await freshClient()
+    const listing = client.listLiveSessions()
+    answerLast(ws, 'sessions.live', { sessions: [liveEntry({ replayFrom: 42 })] })
+
+    const live = await listing
+    expect(live).toHaveLength(1)
+    expect(live[0].paneId).toBe(PANE)
+    expect(live[0].replayFrom).toBe(42)
+  })
+
+  it('claims one at the offset the backend named, carrying its identity', async () => {
+    const { client, ws } = await freshClient()
+    const reclaiming = client.reclaimSession(liveEntry({ replayFrom: 42 }))
+    const attach = ws
+      .requests()
+      .filter((r) => r.method === 'attach')
+      .pop()
+    expect(attach?.params).toEqual({
+      sessionId: SID,
+      offset: 42,
+      instanceId: OPEN_IDENTITY.instanceId,
+      sessionEpoch: OPEN_IDENTITY.sessionEpoch,
+    })
+
+    answerLast(ws, 'attach', { resumed: true, reset: false, from: 42 })
+    const session = await reclaiming
+    expect(session.sessionId).toBe(SID)
+  })
+
+  // The acceptance at this layer: after the reclaim, output for that session
+  // reaches the renderer. Before it, the client would drop every frame — the
+  // map is what routes them, and a fresh window's map is empty.
+  it('receives the session output once it holds it', async () => {
+    const { client, ws } = await freshClient()
+    const reclaiming = client.reclaimSession(liveEntry({ replayFrom: 8 }))
+    answerLast(ws, 'attach', { resumed: true, reset: false, from: 8 })
+    const session = await reclaiming
+
+    const seen: string[] = []
+    session.onData((d) => seen.push(d))
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('output')))
+
+    expect(seen).toEqual(['output'])
+  })
+
+  // A refused claim must leave NOTHING behind. A map entry for a session this
+  // client does not hold would be reattached on the next reconnect and would
+  // accept keystrokes in the meantime.
+  it('holds nothing when the claim is refused', async () => {
+    const { client, ws } = await freshClient()
+    const reclaiming = client.reclaimSession(liveEntry())
+    const attach = ws
+      .requests()
+      .filter((r) => r.method === 'attach')
+      .pop()
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: attach?.id,
+      error: { code: -32602, message: 'refused', data: { reason: 'foreign-instance' } },
+    })
+
+    await expect(reclaiming).rejects.toBeTruthy()
+    const sent = ws.sent.length
+    client.sendToSession(SID, 'x')
+    expect(ws.sent.length).toBe(sent)
+  })
+})
+
+describe('session.displaced notification', () => {
+  function displaced(over: Record<string, unknown> = {}) {
+    return {
+      jsonrpc: '2.0',
+      method: 'session.displaced',
+      params: { sessionId: SID, ...OPEN_IDENTITY, ...over },
+    }
+  }
+
+  it('tells the subscriber the session was taken', async () => {
+    const { client, ws } = await connectedSession()
+    const seen: string[] = []
+    client.onSessionDisplaced((d) => seen.push(d.sessionId))
+
+    ws.deliverText(displaced())
+
+    expect(seen).toEqual([SID])
+  })
+
+  // Being told is half of it. A client that goes on sending into a session it
+  // no longer holds is the surface still advertising what it cannot deliver.
+  it('stops holding the session: no input, and no reattach on reconnect', async () => {
+    const { client, ws } = await connectedSession()
+    client.onSessionDisplaced(() => undefined)
+
+    ws.deliverText(displaced())
+
+    const sent = ws.sent.length
+    client.sendToSession(SID, 'x')
+    expect(ws.sent.length).toBe(sent)
+
+    ws.serverHangsUp()
+    const reconnecting = client.connect(9876)
+    socket().serverAccepts()
+    await reconnecting
+    expect(
+      socket()
+        .requests()
+        .filter((r) => r.method === 'attach'),
+    ).toHaveLength(0)
+  })
+
+  it('refuses a notification for another session or another incarnation', async () => {
+    const { client, ws } = await connectedSession()
+    const seen: string[] = []
+    client.onSessionDisplaced((d) => seen.push(d.sessionId))
+
+    ws.deliverText(displaced({ sessionId: OTHER_SID }))
+    ws.deliverText(displaced({ instanceId: '00000000000000000000000000000000' }))
+    ws.deliverText(displaced({ sessionEpoch: 99 }))
+
+    expect(seen).toEqual([])
+    // And the session this client DOES hold is untouched by any of them.
+    const sent = ws.sent.length
+    client.sendToSession(SID, 'x')
+    expect(ws.sent.length).toBe(sent + 1)
   })
 })

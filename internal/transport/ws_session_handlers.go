@@ -41,7 +41,7 @@ type sessionMachine interface {
 	// markCloseRequested records that this session's end was asked for, so
 	// the exit it produces is not filed as news the user has to read.
 	markCloseRequested(sid session.ID)
-	ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, ring *outputRing, startOffset uint64)
+	ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, rx *sessionRx, startOffset uint64)
 	flushFilesChanged(sid session.ID, wconn Responder)
 	// flushUploadDone re-emits the upload outcomes that settled while
 	// nothing was attached (upload design §5.3). Separate from the files
@@ -50,6 +50,11 @@ type sessionMachine interface {
 	// and a missed uploadDone leaves the UI saying "uploading" forever.
 	flushUploadDone(sid session.ID, wconn Responder)
 	notifyInputStalled(sid session.ID)
+	// announceDisplacement tells the client that has just lost a session that
+	// it lost it, and takes the session out of its connection state (D8). One
+	// narrow method rather than the notification machinery itself: the handler
+	// may report the displacement it caused, and nothing more.
+	announceDisplacement(sid session.ID, ident session.Identity, prev *wsConn, prevState *connState)
 	// replayLifecycleFacts re-emits the current lifecycle projection of the
 	// session's lanes on reattach (ADR-0024 decision 8 / AD-9). One narrow
 	// method rather than the publisher itself: the handler may resynchronise
@@ -77,7 +82,7 @@ type openMachine interface {
 	removeRx(sid session.ID) *sessionRx
 	pumpToRing(ctx context.Context, sess session.Session, ring *outputRing)
 	monitorExit(rx *sessionRx, sess session.Session)
-	ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, ring *outputRing, startOffset uint64)
+	ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, rx *sessionRx, startOffset uint64)
 	replayStoredForwards(profileID, host string, cfg *ssh.ConnectConfig)
 	discoveryUp(profileID, host string, cfg *ssh.ConnectConfig)
 	discoveryUpLocal()
@@ -577,7 +582,11 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	// renderer knows sessionId lets an existing tab claim the fact. The
 	// current projection is replayed immediately after installation, so a
 	// fact dropped during the pre-result window is not lost.
-	rx.setSubscriber(wconn, state)
+	// Nothing can have been attached to a session that did not exist a moment
+	// ago, so the displaced pair is discarded here rather than announced: the
+	// slot is empty by construction on this path, and a displacement that
+	// cannot happen must not be dressed up as one that did.
+	_, _ = rx.setSubscriber(wconn, state)
 	h.sess.replayLifecycleFacts(sess.ID())
 	// A remote session's launch-time refusal is registered here rather than
 	// at the dial because ShellIntegrationReason is the ssh channel's own
@@ -618,16 +627,23 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	})
 
 	sidBytes, _ := session.IDToBytes(sess.ID())
-	go h.sess.ringToConn(ctx, wconn, sidBytes, rx.ring, 0)
+	go h.sess.ringToConn(ctx, wconn, sidBytes, rx, 0)
 }
 
 // sessionOpsHandlers answers resize, close and attach: the per-session
 // operations (SessionOperation via ForSession) plus the transport lanes. It
 // needs the connection's connState (session ownership checks) per call.
 type sessionOpsHandlers struct {
-	ops     *capability.SessionOperations // nil → session store not wired
-	r       Responder
-	machine sessionMachine
+	ops *capability.SessionOperations // nil → session store not wired
+	r   Responder
+	// instance is THIS backend's identity, read from the registry at
+	// construction and held as a value: a claim is judged against it, and the
+	// judgement must be possible when the registry holds nothing. A value
+	// rather than the registry itself, because a handler that could reach the
+	// registry could do more than judge (migration map: handlers hold seams,
+	// never stores).
+	instance session.InstanceID
+	machine  sessionMachine
 }
 
 // handleResize enqueues a resize into the session's operation lane.
@@ -767,22 +783,33 @@ func (h sessionOpsHandlers) handleClose(ctx context.Context, state *connState, r
 	}
 }
 
-// handleAttach reattaches a connection to a session's output ring at the
-// given byte offset (AD-9 reconnect).
+// handleAttach gives a connection a session's output stream from a byte
+// offset: the AD-9 reconnect, and the CLAIM by which a fresh client takes back
+// a pane it has never seen (nocx-oevq4, the nocx-server design D5).
 //
-//	--> {"jsonrpc":"2.0","id":N,"method":"attach","params":{"sessionId":"...","offset":1234}}
+// ONE METHOD FOR BOTH, deliberately. The fresh client differs from the
+// reconnecting one in exactly one thing — where it learned the session and the
+// offset — and that difference is answered by sessions.live, not by a second
+// reattach. The ring, the offsets, the reset and the replays are already this
+// handler's, and a second path to them would be the concept implemented twice.
+//
+//	--> {"jsonrpc":"2.0","id":N,"method":"attach","params":{"sessionId":"...","instanceId":"...","sessionEpoch":1,"offset":1234}}
 //
 // Result when offset is still in the ring:
 //
-//	<-- {"jsonrpc":"2.0","id":N,"result":{"resumed":true,"from":1234}}
+//	<-- {"jsonrpc":"2.0","id":N,"result":{"resumed":true,"reset":false,"from":1234}}
 //
 // Result when offset is too old (ring has advanced past it):
 //
-//	<-- {"jsonrpc":"2.0","id":N,"result":{"reset":true,"from":5678}}
+//	<-- {"jsonrpc":"2.0","id":N,"result":{"resumed":false,"reset":true,"from":5678}}
 //
-// Unknown sessionId → JSON-RPC error.
+// A refused claim → -32602 carrying data.reason, one of foreign-instance,
+// foreign-incarnation or unknown-session (judgeClaim owns which).
 // Offset ahead of written → JSON-RPC error (DEFECT 4).
 // Duplicate attach on the same connection → JSON-RPC error (DEFECT 3).
+//
+// A successful attach TAKES the session (D8): whoever held it is told and
+// stops holding it, before this connection is given a byte.
 func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r Responder, state *connState, req jsonrpcRequest) {
 	var params attachParams
 	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
@@ -793,17 +820,28 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 
 	sid := session.ID(params.SessionID)
 
+	// The instance is judged before the session is looked up at all, so a
+	// claim carried across a coordinator restart is answered "that is a
+	// different backend" rather than "no such session" — see judgeClaim.
+	// ForSession's own failure is indistinguishable from an unknown session,
+	// so it is answered in the claim's vocabulary too.
+	if foreignInstance(h.instance, params.InstanceID) {
+		_ = r.TryError(req.ID, foreignInstanceRefusal())
+		return
+	}
+
 	op, err := h.ops.ForSession(sid)
 	if err != nil {
-		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-		_ = respond(r, resp)
+		_ = r.TryError(req.ID, refuseClaim(reasonUnknownSession, "Invalid params: unknown sessionId"))
 		return
 	}
 	err = op.Run(ctx, func(ctx context.Context, svc capability.SessionService) error {
 		sess, gerr := svc.Get(sid)
 		if gerr != nil {
-			resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-			_ = respond(r, resp)
+			sess = nil
+		}
+		if refusal := judgeClaim(h.instance, params.InstanceID, params.claimedEpoch(), sess); refusal != nil {
+			_ = r.TryError(req.ID, *refusal)
 			return nil
 		}
 
@@ -819,8 +857,11 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 
 		rx := h.machine.getRx(sid)
 		if rx == nil {
-			resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
-			_ = respond(r, resp)
+			// The registry holds the session and the transport does not hold
+			// its ring: a teardown in flight, or an open that has not reached
+			// its ring yet. Same word as an unknown session, because the same
+			// thing is true of the claim — there is no stream to give it.
+			_ = r.TryError(req.ID, refuseClaim(reasonUnknownSession, "Invalid params: unknown sessionId"))
 			return nil
 		}
 
@@ -839,17 +880,22 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		_, from, needsReset := rx.ring.snapshot(params.Offset)
 
 		state.add(sess)
-		rx.setSubscriber(wconn, state)
-
-		if needsReset {
-			respJSON, _ := json.Marshal(map[string]any{"reset": true, "from": from})
-			resp := newJSONRPCResult(req.ID, respJSON)
-			_ = respond(r, resp)
-		} else {
-			respJSON, _ := json.Marshal(map[string]any{"resumed": true, "from": from})
-			resp := newJSONRPCResult(req.ID, respJSON)
-			_ = respond(r, resp)
+		prev, prevState := rx.setSubscriber(wconn, state)
+		if prev != nil && prev != wconn {
+			// The take, before this connection is answered: the loser is told,
+			// loses the session from its own state, and its pump is woken so
+			// it observes that it is no longer the subscriber and stops. The
+			// wake is needed because a pump parked in waitForData would
+			// otherwise go on holding the session until its next byte.
+			h.machine.announceDisplacement(sid, sess.Identity(), prev, prevState)
+			rx.ring.wake()
 		}
+
+		_ = r.TryResult(req.ID, mustMarshal(attachResult{
+			Resumed: !needsReset,
+			Reset:   needsReset,
+			From:    from,
+		}))
 
 		// Files (fm-w8): deliver the dirty paths the session's bindings
 		// accumulated while no connection was attached. Runs after the attach
@@ -878,7 +924,7 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 		h.machine.replayPaneObservation(sid)
 
 		sidBytes, _ := session.IDToBytes(sid)
-		go h.machine.ringToConn(ctx, wconn, sidBytes, rx.ring, from)
+		go h.machine.ringToConn(ctx, wconn, sidBytes, rx, from)
 		return nil
 	})
 	if err != nil {
@@ -943,6 +989,10 @@ func answerOperationRefusal(r Responder, req jsonrpcRequest, err error) {
 func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate control.Admission) []methodSpec {
 	openOp := capability.NewOpenOperation(configGate, sessionGate, lane, s.resolver, s.registry)
 	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
+	// The whole-domain operation sessions.live reads the registry under, beside
+	// the per-session factory the other methods use: the list is about every
+	// session and no one of them.
+	liveOp := capability.NewSessionOperation(sessionGate, lane, s.registry, s.profileUsage)
 	immediate := control.ImmediateSubmission{}
 	openSub := s.operationQueue("open")
 	sessionSub := s.operationQueue("session")
@@ -954,22 +1004,34 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 	// worker preserves submission order; the bound refuses under a flood
 	// with the saturation contract like any admission-backed method.
 	ordered := control.NewOrderedSubmission("session-ops", 32)
+	// The instance identity is read ONCE, here, where the registry is: a
+	// handler judging a claim needs the value, never the registry.
+	instance := s.instanceIdentity()
 	return []methodSpec{
 		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, installer: s.remoteInstaller, lifecycle: s.remoteLifecycle, panes: s.layoutReader(), log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
 		}),
 		reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := sessionOpsHandlers{ops: sessionOps, r: r, machine: s}
+			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleResize(ctx, state, req) }
 		}),
 		reg(ordered, "close", params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := sessionOpsHandlers{ops: sessionOps, r: r, machine: s}
+			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleClose(ctx, state, req) }
 		}),
 		reg(sessionSub, "attach", params(validateAttachRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := sessionOpsHandlers{ops: sessionOps, r: r, machine: s}
+			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAttach(ctx, w, r, state, req) }
+		}),
+		// sessions.live is the session plane's read, and it rides the same
+		// per-operation queue as attach: the two are one act for a fresh
+		// client — ask what is alive, take one — and a list answered under a
+		// different admission than the claim it feeds would be a list that can
+		// be admitted while every claim it names is refused.
+		regResponder(sessionSub, "sessions.live", noParams(), func(r Responder) handlerFunc {
+			h := sessionsLiveHandlers{op: liveOp, rings: s, r: r, log: s.log}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleSessionsLive(ctx, req) }
 		}),
 		reg(immediate, "ack", params(validateAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := ackHandler{machine: s, log: s.log}
@@ -1127,6 +1189,13 @@ func validateCloseRaw(raw json.RawMessage) string {
 // must be a real server-minted id. offset is uint64 by wire type and 0 (from
 // the start of the ring) is ordinary — the handler checks the offset against
 // what the ring actually wrote.
+//
+// The claimed identity is OPTIONAL and, when present, must be WELL SHAPED
+// (nocx-oevq4). Both halves matter and they are different answers: "you sent
+// nonsense" is refused here by shape, and "that identity names another
+// backend" is a fact about a claim, decided by the handler and told apart by
+// data.reason. Before the open params drew that line, a malformed pane id went
+// straight to the store, which could only report "no such pane".
 func validateAttachRaw(raw json.RawMessage) string {
 	var p attachParams
 	if len(raw) == 0 {
@@ -1140,6 +1209,14 @@ func validateAttachRaw(raw json.RawMessage) string {
 	}
 	if msg := validateSessionIDShape(p.SessionID); msg != "" {
 		return "sessionId " + msg
+	}
+	if p.InstanceID != "" {
+		if msg := validateSessionIDShape(p.InstanceID); msg != "" {
+			return "instanceId " + msg
+		}
+	}
+	if p.SessionEpoch != nil && *p.SessionEpoch == 0 {
+		return "sessionEpoch starts at 1"
 	}
 	return ""
 }

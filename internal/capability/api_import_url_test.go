@@ -51,11 +51,9 @@ func (f *recordingFetcher) Fetch(_ context.Context, rawURL string, route apicoll
 func newImportOpWithFetcher(t *testing.T, f apifetch.Fetcher) capability.APIImportOperation {
 	t.Helper()
 	return capability.NewAPIImportOperation(
-		capability.Gate(capability.GateVault, 1, 64, 5*time.Second),
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apiimport.NewOSFS(),
-		stubBindWriter{},
 		f,
 	)
 }

@@ -401,7 +401,6 @@ export function watchFixture(
 const ENVIRONMENT = {
   name: 'Local',
   values: { baseUrl: 'https://api.example.test' },
-  secretVars: [],
   route: { kind: 'direct' as const, profileId: '', insecureTls: false },
 }
 
@@ -541,7 +540,6 @@ export function servicesFixture(over: Partial<ApiWorkbenchServices> = {}): ApiWo
     writeEnvironment: vi.fn().mockResolvedValue({}),
     readFolder: vi.fn().mockResolvedValue({ variables: [] }),
     writeFolder: vi.fn().mockResolvedValue({ variables: [] }),
-    bindSecret: vi.fn().mockResolvedValue({}),
     deleteRequest: vi.fn().mockResolvedValue({}),
     readRequest: vi.fn().mockResolvedValue({ request: REQUEST }),
     requestScope: vi.fn().mockResolvedValue({ variables: [] }),
@@ -554,6 +552,7 @@ export function servicesFixture(over: Partial<ApiWorkbenchServices> = {}): ApiWo
     sendRequest: vi.fn().mockResolvedValue(sendFixture()),
     cancelRequest: vi.fn().mockResolvedValue({}),
     importPostman: vi.fn().mockResolvedValue({ unsupported: [] }),
+    previewPostman: vi.fn().mockResolvedValue({ unsupported: [], documents: [] }),
     importCurl: vi.fn().mockResolvedValue({ request: REQUEST, unsupported: [] }),
     ...over,
   }

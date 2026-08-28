@@ -19,6 +19,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { VaultBackend, bindEndpoint, settingsReady, type DisposableRoot } from './harness'
 import { readStand } from './stand'
+import { addSecretFromLock, pressLock } from './secret-field'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
@@ -146,45 +147,24 @@ test.describe('Vault — no keyring, full round trip', () => {
         .getByRole('radio', { name: 'Password' }),
     ).toHaveAttribute('aria-checked', 'true', { timeout: 3000 })
 
-    // Click "Set Password" by its accessible name, scoped to the profile form
-    // the comment always said it meant. The bare name used to match two
-    // elements because the editor drew the action twice (nocx-azxe.6); that is
-    // fixed in the component, and the scope stays because "the button in this
-    // form" is what the step is about.
-    await page
-      .locator('.cm-form')
-      .getByRole('button', { name: /Set Password/i })
-      .click()
-    // The PasswordEditor's OWN field, by id. A bare
-    // `[role="dialog"] input[type="password"]` used to be unique and stopped
-    // being so: closing this editor opens the vault setup sheet, which holds
-    // two password fields of its own, so the "it closed" assertion below
-    // resolved to those instead — and on webkit, which gets there faster, it
-    // resolved to both and failed strict mode.
-    const pwInput = page.locator('#password-value')
-    await expect(pwInput).toBeVisible({ timeout: 3000 })
-    await pwInput.fill('test-password-123')
-    // Click the dialog's primary action button to confirm password.
-    await page.getByRole('button', { name: 'OK' }).click()
-    // Wait for the PasswordEditor to close.
-    await expect(pwInput).not.toBeVisible({ timeout: 3000 })
-
-    // ── Phase 2: vault setup dialog ─────────────────────────────────────
-    // Minting the password is what needs the vault, so that is what asks for
-    // it: the SetupDialog follows the password dialog directly. This used to
-    // click "Create Connection" first, on the older arrangement where the save
-    // attempted the write, failed with vault-uninitialized, and the setup came
-    // out of the failure. Asking at the moment the secret is created is the
-    // arrangement nocx-v64o settled on, and the old order left this test
-    // clicking a button the setup sheet was already covering.
+    // ── Phase 2: the lock, and the vault setup it raises ────────────────
+    // There is no "Set Password" button any more (nocx-3o0ed.4): the password
+    // is ONE field, and the door onto the vault is the lock on it. Pressing
+    // the lock is an explicit request (ui/secret-picker.ts), so an
+    // uninitialized vault answers with the real setup surface rather than an
+    // offer row — which is why the SETUP now comes before the password
+    // dialog, and not after it as it did when "Set Password" opened the
+    // PasswordEditor first and the mint discovered the missing vault.
+    //
     // Identified by what it CONTAINS, not by its text. The connection form is
-    // itself a role="dialog" and the setup sheet opens inside it, so hasText
-    // matches both — a descendant's text is the ancestor's text too.
-    // Scoped to the PROMPT OVERLAY, not to a role or a text. The connection
-    // form is itself a role="dialog" and the setup sheet opens inside it, so
-    // both `hasText` and `has:` match the ancestor as well as the sheet — a
+    // itself a role="dialog" and the setup sheet opens inside it, so both
+    // `hasText` and `has:` match the ancestor as well as the sheet — a
     // descendant's text and contents are the ancestor's too. The overlay is
     // the sheet's own container and nothing wraps it.
+    const pwField = page.locator('#profile-auth-password')
+    await expect(pwField).toBeVisible({ timeout: 3000 })
+    await pressLock(pwField)
+
     const setupDialog = page
       .locator('.ui-prompt-overlay')
       .filter({ has: page.locator('#vault-setup-passphrase') })
@@ -214,8 +194,36 @@ test.describe('Vault — no keyring, full round trip', () => {
     expect(code).not.toBeNull()
     expect((code ?? '').length).toBeGreaterThan(10)
 
-    // Click "Done" to close setup. The password is now minted and bound.
+    // Click "Done" to close setup. The vault is open; nothing is minted yet.
     await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+
+    // ── Phase 2b: the password itself ───────────────────────────────────
+    // The setup sheet took the surface, so the panel closed with it and the
+    // person presses the lock again — this time onto an OPEN vault, which
+    // answers with its list. The vault is empty, so the row left to take is
+    // the create row, and on a connection's password field a new secret IS a
+    // password: it raises the same generator dialog "Set Password" used to,
+    // and what it makes is minted and bound by the same call.
+    await addSecretFromLock(page, pwField)
+
+    // The PasswordEditor's OWN field, by id. A bare
+    // `[role="dialog"] input[type="password"]` used to be unique and stopped
+    // being so: the vault setup sheet holds two password fields of its own,
+    // so a bare selector resolved to those instead — and on webkit, which
+    // gets there faster, it resolved to both and failed strict mode.
+    const pwInput = page.locator('#password-value')
+    await expect(pwInput).toBeVisible({ timeout: 3000 })
+    await pwInput.fill('test-password-123')
+    // Click the dialog's primary action button to confirm password.
+    await page.getByRole('button', { name: 'OK' }).click()
+    // Wait for the PasswordEditor to close.
+    await expect(pwInput).not.toBeVisible({ timeout: 3000 })
+
+    // The mint bound the row: the field holds the reference now, which is the
+    // binding this phase exists to make and the state Phase 3 reloads. This
+    // assertion is new — the old flow had nothing on screen to check it by,
+    // and read the binding only from the restart that followed.
+    await expect(pwField).toHaveValue(/^\{\{secret:.+\}\}$/, { timeout: 10_000 })
 
     // Back in the connection form, which never closed: save it.
     await page.getByRole('button', { name: 'Create Connection', exact: true }).click()
@@ -327,20 +335,14 @@ test.describe('Vault — recovery code unseal', () => {
       .getByRole('radio', { name: 'Password' })
       .click()
 
-    await page
-      .locator('.cm-form')
-      .getByRole('button', { name: /Set Password/i })
-      .click()
-    const pwInput = page.locator('#password-value')
-    await expect(pwInput).toBeVisible({ timeout: 3000 })
-    await pwInput.fill('test-password-456')
-    await page.getByRole('button', { name: 'OK' }).click()
-    await expect(pwInput).not.toBeVisible({ timeout: 3000 })
+    // The lock is the door onto the vault (nocx-3o0ed.4), and pressing it is
+    // an explicit request — so an uninitialized vault answers with the setup
+    // sheet FIRST, and the password dialog comes after it. Case 1 says the
+    // same thing at length.
+    const pwField = page.locator('#profile-auth-password')
+    await expect(pwField).toBeVisible({ timeout: 3000 })
+    await pressLock(pwField)
 
-    // Setup dialog — it follows the password dialog directly, because minting
-    // the secret is what needs the vault (nocx-v64o). Clicking "Create
-    // Connection" first, as this used to, aims at a button the setup sheet is
-    // already covering.
     const setupDialog = page
       .locator('.ui-prompt-overlay')
       .filter({ has: page.locator('#vault-setup-passphrase') })
@@ -365,8 +367,18 @@ test.describe('Vault — recovery code unseal', () => {
     expect((code ?? '').length).toBeGreaterThan(10)
     const recoveryCode = code ?? ''
 
-    // Click "Done". The password is minted and bound; the form is still open.
+    // Click "Done". The vault is open; the form is still open behind it.
     await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+
+    // Now the password: the lock again, onto an open and empty vault, whose
+    // create row raises the generator and whose result is minted and bound.
+    await addSecretFromLock(page, pwField)
+    const pwInput = page.locator('#password-value')
+    await expect(pwInput).toBeVisible({ timeout: 3000 })
+    await pwInput.fill('test-password-456')
+    await page.getByRole('button', { name: 'OK' }).click()
+    await expect(pwInput).not.toBeVisible({ timeout: 3000 })
+    await expect(pwField).toHaveValue(/^\{\{secret:.+\}\}$/, { timeout: 10_000 })
 
     // Save the connection.
     await page.getByRole('button', { name: 'Create Connection', exact: true }).click()
@@ -497,18 +509,31 @@ test.describe('Vault — with keyring, silent setup', () => {
         .getByRole('radio', { name: 'Password' })
         .click()
 
-      // Same locator as cases 1 and 2. `profile-password-action` is a Field's
-      // `for=` — a label target, not an element id — so scoping to it matched
-      // nothing and this case timed out looking for a button that was on screen.
-      await page
-        .locator('.cm-form')
-        .getByRole('button', { name: /Set Password/i })
-        .click()
+      // THE SILENT PATH, and it is the whole point of this case. The lock is
+      // an explicit request onto an uninitialized vault, so it sets the vault
+      // up — but a machine whose OS key can carry it is set up WITHOUT a
+      // sheet, and the panel stays where the person is standing and lists
+      // what the vault now holds (createVaultSecretSource.requestSetup).
+      // Cases 1 and 2 get the sheet because they run with no Secret Service;
+      // this one must not, and that difference is what is asserted below.
+      //
+      // So there is exactly one dialog in this flow, and it is the password
+      // generator behind the panel's create row — the same one "Set Password"
+      // used to raise directly (nocx-3o0ed.4).
+      const pwField = page.locator('#profile-auth-password')
+      await expect(pwField).toBeVisible({ timeout: 3000 })
+      await addSecretFromLock(page, pwField)
+      // The create row was reached, so the vault is already open — and the
+      // sheet cases 1 and 2 meet at exactly this moment did not appear.
+      await expect(
+        page.locator('.ui-prompt-overlay').filter({ has: page.locator('#vault-setup-passphrase') }),
+      ).not.toBeVisible()
       const pwInput = page.locator('#password-value')
       await expect(pwInput).toBeVisible({ timeout: 3000 })
       await pwInput.fill('keyring-password-789')
       await page.getByRole('button', { name: 'OK' }).click()
       await expect(pwInput).not.toBeVisible({ timeout: 3000 })
+      await expect(pwField).toHaveValue(/^\{\{secret:.+\}\}$/, { timeout: 10_000 })
 
       // Click "Create Connection". With a keyring, the vault setup should be
       // silent — no dialog should appear.

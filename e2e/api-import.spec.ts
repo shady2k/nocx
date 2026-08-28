@@ -38,8 +38,7 @@
  * no drop target" was read as "no drop", and the ask drew nothing at all at
  * localhost:5180 where the owner opened it.
  *
- * ITS OWN BACKEND, like `api-testing.spec.ts` and `api-secret-in-path.spec.ts`
- * and for the same two reasons. The import writes a secret VALUE, so this run
+ * ITS OWN BACKEND, like `api-secret-in-path.spec.ts`, and for the same two reasons.
  * needs a vault it set up itself rather than leaving one behind for every
  * other spec; and the destination the ask proposes is under the collections
  * folder of the isolated home THIS backend resolved, so it is only knowable

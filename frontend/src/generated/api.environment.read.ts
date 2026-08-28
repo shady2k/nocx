@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the api.environment.read JSON-RPC method: ONE environment whole — what it is called, what it answers, which of its variables are secret by name, and how a request under it gets there (design §6.5). The collection listing names environments so a person can choose one and deliberately carries no values; this is the editor's read of a single file, so what it copies lives exactly as long as the ask that opened it. There is no field here in which a secret value or an identifier for one can be spelled — that is §8 restated as a field list rather than as a redaction step.
+ * Result of the api.environment.read JSON-RPC method: ONE environment whole — what it is called, what it answers, and how a request under it gets there (design §6.5). The collection listing names environments so a person can choose one and deliberately carries no values; this is the editor's read of a single file, so what it copies lives exactly as long as the ask that opened it. There is no field here in which a secret value or an identifier for one can be spelled — that is §8 restated as a field list rather than as a redaction step.
  */
 export interface ApiEnvironmentReadResult {
   environment: Environment
@@ -26,10 +26,6 @@ export interface Environment {
   values: {
     [k: string]: string
   }
-  /**
-   * The NAMES of the variables whose values are held outside the file. Never null — none is []. A name here is a declaration that the value lives in the vault under a binding, never the value and never an identifier for it.
-   */
-  secretVars: string[]
   route: Route
 }
 /**

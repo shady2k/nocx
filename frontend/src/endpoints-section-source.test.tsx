@@ -1,10 +1,12 @@
 // @vitest-environment jsdom
 /**
- * The endpoint form's secret-source control and custom-header rows (bead
- * nocx-rzjw + nocx-lyyk, acceptance 6 & 7): the key field offers the same
- * two-way source choice the connections editor does and can reference an
- * existing vault secret instead of minting a second copy; header rows edit
- * through the kit's EditableRowList with the same source control per row.
+ * The endpoint form's key field and custom-header rows (nocx-rzjw + nocx-lyyk,
+ * acceptance 6 & 7, rewritten for nocx-3o0ed.4): each is the SAME field the
+ * connections editor and the API workbench place, and a value that IS a
+ * `{{secret:…}}` reference is a reference to an existing vault secret rather
+ * than a second copy minted here. The two-way choice these tests used to make
+ * through a segmented control is now made by what the field holds; every
+ * assertion about the WIRE is unchanged, because the wire is unchanged.
  */
 import { cleanup, render, fireEvent, waitFor } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
@@ -12,8 +14,20 @@ import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { EndpointsSection } from './endpoints-section'
 import { EndpointClient, type Endpoint, type EndpointWrite } from './endpoints'
 import { Dispatcher } from './dispatcher'
-import { VaultOperationCancelledError, createVaultState, type VaultController } from './vault'
+import {
+  VaultOperationCancelledError,
+  createVaultSecretSource,
+  createVaultState,
+  type VaultController,
+} from './vault'
 import type { VaultClient, InventoryEntry } from './vault-client'
+import type { SecretPickerSource } from './ui/secret-picker'
+import {
+  bindSecretByTyping,
+  bindSecretFromLock,
+  offeredSecretRows,
+  pressLock,
+} from './secret-field-test-helpers'
 
 afterEach(cleanup)
 
@@ -118,17 +132,26 @@ function mount(
 ) {
   const harness = createClient(initial)
   const container = document.body.appendChild(document.createElement('div'))
+  const openSecretCreate = vi.fn()
+  // The source main.tsx wires, not a second one built for the test: the panel
+  // behind every lock on this page is the composition root's (nocx-3o0ed.4).
+  const secretSource: SecretPickerSource = createVaultSecretSource({
+    vaultClient: vault.client,
+    vaultController: vault.ctrl,
+    openSecretCreate,
+  })
   render(
     () => (
       <EndpointsSection
         client={harness.client}
         vaultController={vault.ctrl}
         vaultClient={vault.client}
+        secretSource={secretSource}
       />
     ),
     { container },
   )
-  return { ...harness, ...vault, container }
+  return { ...harness, ...vault, container, openSecretCreate }
 }
 
 /** Flush the microtask chain deterministically — the repo's convention for
@@ -183,45 +206,46 @@ function fillModelAndBase(container: HTMLElement, dialog: HTMLElement) {
   fillField(container, 'endpoint-model-0-name', 'gpt-4o')
 }
 
-/** Click the segmented segment with the given label. */
-function clickSegment(scope: HTMLElement, label: string) {
-  const segment = Array.from(scope.querySelectorAll('[role="radio"]')).find(
-    (r) => r.textContent?.trim() === label,
-  )
-  expect(segment, `segment ${label} not found`).toBeTruthy()
-  fireEvent.click(segment!)
+/** The field with this id, which must exist. */
+function fieldEl(scope: ParentNode, id: string): HTMLInputElement {
+  const el = scope.querySelector<HTMLInputElement>(`#${id}`)
+  expect(el, `field #${id} not found`).toBeTruthy()
+  return el!
 }
 
-/** Wait until the given select offers the vault rows, then pick one. */
-async function pickSecret(select: HTMLSelectElement, row: string, name: string) {
-  await waitFor(() => {
-    expect(Array.from(select.options).map((o) => o.text)).toContain(name)
-  })
-  fireEvent.change(select, { target: { value: row } })
+/** What a bound field READS as — the chip's text, never the handle. */
+function chipText(input: HTMLInputElement): string | undefined {
+  return input
+    .closest('.ui-text-field__control')
+    ?.querySelector('.ui-text-field__mark')
+    ?.textContent?.trim()
 }
 
-describe('the endpoint key source control (nocx-rzjw)', () => {
-  it('reuses the connections editor source choice and references an existing secret instead of minting', async () => {
+describe('the endpoint key field (nocx-rzjw, nocx-3o0ed.4)', () => {
+  it('places the same field the other surfaces do, and references an existing secret instead of minting', async () => {
     const { container, createEndpoint, inventory } = mount()
     await waitForRows(container, 0)
     const dialog = openNew(container)
 
-    // The two-way source choice, with the connections editor's vocabulary.
-    const segments = Array.from(dialog.querySelectorAll('[role="radio"]')).map((r) => r.textContent)
-    expect(segments).toContain('Type a new one')
-    expect(segments).toContain('Use existing secret')
+    // ONE control. There is no source choice to make in advance any more —
+    // no segments, and no second field under a second copy of the label.
+    expect(dialog.querySelectorAll('[role="radio"]')).toHaveLength(0)
+    expect(
+      Array.from(dialog.querySelectorAll('label')).filter(
+        (l) => l.textContent?.trim() === 'API key',
+      ),
+    ).toHaveLength(1)
 
-    // Choose the existing secret: the picker lists the vault's password rows.
-    // Putting it on screen is what asks the vault for them (nocx-5ratm); a
-    // blank form showing no picker never does.
+    // Reaching for a stored secret is what asks the vault for its rows
+    // (nocx-5ratm); a blank form nobody has reached from never does.
     expect(inventory).not.toHaveBeenCalled()
-    clickSegment(dialog, 'Use existing secret')
-    await waitFor(() => {
-      expect(inventory).toHaveBeenCalled()
-    })
-    const picker = dialog.querySelector('select') as HTMLSelectElement
-    expect(picker).toBeTruthy()
-    await pickSecret(picker, 'secrow:aaaaaaaa', 'prod api key')
+    const key = fieldEl(dialog, 'endpoint-key')
+    await bindSecretFromLock(key, 'prod api key')
+    expect(inventory).toHaveBeenCalled()
+
+    // The field holds the opaque handle and READS as the secret's name.
+    expect(key.value).toBe('{{secret:secrow:aaaaaaaa}}')
+    expect(chipText(key)).toBe('prod api key')
 
     fillModelAndBase(container, dialog)
     clickButton(dialog, 'Create Endpoint')
@@ -234,6 +258,24 @@ describe('the endpoint key source control (nocx-rzjw)', () => {
     const input = createEndpoint.mock.calls[0][0]
     expect(input.key).toBe('')
     expect(input.credential).toBe('secrow:aaaaaaaa')
+  })
+
+  it("the '@' door binds the same field to the same row", async () => {
+    const { container, createEndpoint } = mount()
+    await waitForRows(container, 0)
+    const dialog = openNew(container)
+
+    const key = fieldEl(dialog, 'endpoint-key')
+    await bindSecretByTyping(key, 'prod', 'prod api key')
+    expect(key.value).toBe('{{secret:secrow:aaaaaaaa}}')
+
+    fillModelAndBase(container, dialog)
+    clickButton(dialog, 'Create Endpoint')
+    await waitFor(() => {
+      expect(createEndpoint).toHaveBeenCalledTimes(1)
+    })
+    expect(createEndpoint.mock.calls[0][0].credential).toBe('secrow:aaaaaaaa')
+    expect(createEndpoint.mock.calls[0][0].key).toBe('')
   })
 
   it('a typed key still rides the wire once and mints (the source control is not a removal)', async () => {
@@ -270,20 +312,15 @@ describe('custom header rows (nocx-lyyk)', () => {
     fillField(container, 'endpoint-header-0-name', 'HTTP-Referer')
     fillField(container, 'endpoint-header-0-value', 'nocx')
 
-    // Row 2: an existing secret — the value source is the SAME control the
-    // key uses. Scope to the header row: the dialog also holds the key
-    // source's segments.
+    // Row 2: an existing secret — the value is the SAME field the key is, and
+    // it is bound through the same lock.
     clickButton(dialog, 'Add header')
     fillField(container, 'endpoint-header-1-name', 'api-key')
     const rows = dialog.querySelectorAll('.ui-row-list__row')
     const row2 = rows[1] as HTMLElement
-    const row2Source = Array.from(row2.querySelectorAll('[role="radio"]')).find(
-      (r) => r.textContent?.trim() === 'Use existing secret',
-    )
-    expect(row2Source, 'header value source control missing').toBeTruthy()
-    fireEvent.click(row2Source!)
-    const picker = row2.querySelector('select') as HTMLSelectElement
-    await pickSecret(picker, 'secrow:aaaaaaaa', 'prod api key')
+    const secretValue = fieldEl(row2, 'endpoint-header-1-value')
+    await bindSecretFromLock(secretValue, 'prod api key')
+    expect(chipText(secretValue)).toBe('prod api key')
 
     fillModelAndBase(container, dialog)
     clickButton(dialog, 'Create Endpoint')
@@ -298,22 +335,27 @@ describe('custom header rows (nocx-lyyk)', () => {
     ])
   })
 
-  it('offers an em-dashed "None" as the empty choice, not the text of an escape (nocx-0sagl)', async () => {
+  it('an empty header value offers the vault rows and nothing else to escape (nocx-0sagl)', async () => {
     const { container } = mount()
     await waitForRows(container, 0)
     const dialog = openNew(container)
     clickButton(dialog, 'Add header')
 
     const row = dialog.querySelector('.ui-row-list__row') as HTMLElement
-    clickSegment(row, 'Use existing secret')
-    const picker = row.querySelector('select') as HTMLSelectElement
-    // The placeholder is a JS string, so it must arrive through an
-    // expression: as a JSX string attribute the escapes are never
-    // interpreted and the person reads the source code of a dash.
+    const value = fieldEl(row, 'endpoint-header-0-value')
+    // The em-dashed "— None —" option this test used to check belonged to the
+    // Select inside the segmented control: an empty CHOICE only exists where
+    // something forces a choice. An empty field is its own empty state, so
+    // what is asserted here is what the panel offers over it — the rows, and
+    // the create row — with the placeholder still a real em dash rather than
+    // the text of an escape.
+    expect(value.value).toBe('')
+    expect(value.placeholder).toBe('nocx')
+    pressLock(value)
     await waitFor(() => {
-      expect(Array.from(picker.options).map((o) => o.text)).toContain('\u2014 None \u2014')
+      expect(offeredSecretRows()).toEqual(['prod api key', 'Add a secret\u2026'])
     })
-    expect(picker.textContent).not.toContain('u2014')
+    expect(offeredSecretRows().join('')).not.toContain('u2026')
   })
 
   it("a saved endpoint's header rows reopen with their sources intact", async () => {
@@ -334,15 +376,17 @@ describe('custom header rows (nocx-lyyk)', () => {
     const dialog = findDialogByTitle(container, 'Edit Endpoint') as HTMLElement
     expect(dialog).toBeTruthy()
 
-    // The literal row's value is visible; the secret row's picker is bound
-    // to the stored row handle — a reference, never material.
     expect((dialog.querySelector('#endpoint-header-0-value') as HTMLInputElement).value).toBe(
       'nocx',
     )
-    const picker = dialog.querySelector('select') as HTMLSelectElement
-    expect(picker.value).toBe('secrow:aaaaaaaa')
+    const bound = fieldEl(dialog, 'endpoint-header-1-value')
+    expect(bound.value).toBe('{{secret:secrow:aaaaaaaa}}')
+    await waitFor(() => {
+      expect(chipText(bound)).toBe('prod api key')
+    })
+    expect(dialog.textContent).not.toContain('secrow:aaaaaaaa')
 
-    // Saving without touching them re-sends the same rows through update.
+    // Saving without touching them re-sends the restored source through update.
     clickButton(dialog, 'Save Endpoint')
     await waitFor(() => {
       expect(updateEndpoint).toHaveBeenCalledTimes(1)
@@ -395,7 +439,7 @@ function openEdit(container: HTMLElement, name: string) {
 }
 
 describe('the picker asks the vault (nocx-5ratm, ADR-0032)', () => {
-  it('asks a SEALED vault the moment a picker is on screen — the vault layer is what raises the unlock', async () => {
+  it('asks a SEALED vault the moment somebody reaches for a secret — the vault layer is what raises the unlock', async () => {
     const vault = sealedVault(PASSWORD_ROWS)
     const { container, inventory, ctrl } = mount([], vault)
     await ctrl.refresh()
@@ -403,17 +447,17 @@ describe('the picker asks the vault (nocx-5ratm, ADR-0032)', () => {
     await waitForRows(container, 0)
     expect(inventory).not.toHaveBeenCalled() // the LIST never asks
 
-    // A blank form shows no picker and wants nothing from the vault.
+    // A blank form holds no reference and wants nothing from the vault.
     const dialog = openNew(container)
     await flush()
     expect(inventory).not.toHaveBeenCalled()
 
-    // Switching the key's source to the vault puts a picker on screen —
-    // and a picker renders secret NAMES, which only the vault can answer.
-    // The caller must not read the vault's state and decide not to ask: the
-    // sealed seam (dispatcher.ts) raises the unlock for any call that lands
-    // on a sealed vault and re-sends it once unlocked.
-    clickSegment(dialog, 'Use existing secret')
+    // Pressing the field's lock IS the request, and a list of secret NAMES is
+    // something only the vault can answer. The caller must not read the
+    // vault's state and decide not to ask: the explicit door raises the real
+    // unlock (secret-picker.ts) and the sealed seam (dispatcher.ts) re-sends
+    // any call that lands on a sealed vault.
+    pressLock(fieldEl(dialog, 'endpoint-key'))
     await waitFor(() => {
       expect(inventory).toHaveBeenCalled()
     })
@@ -421,7 +465,7 @@ describe('the picker asks the vault (nocx-5ratm, ADR-0032)', () => {
 
   it('asks on open when the key IS a bound row, and names it — never its handle', async () => {
     const vault = sealedVault(PASSWORD_ROWS)
-    const { container, ctrl, status, inventory } = mount(
+    const { container, ctrl, status, inventory, updateEndpoint } = mount(
       [ep({ name: 'provider', credential: 'secrow:aaaaaaaa' })],
       vault,
     )
@@ -429,27 +473,31 @@ describe('the picker asks the vault (nocx-5ratm, ADR-0032)', () => {
     await waitForRows(container, 1)
     expect(inventory).not.toHaveBeenCalled()
 
-    // The editor opens on "Use existing secret" with the row bound, so the
-    // picker is on screen from the first frame and asks at once.
+    // The editor opens holding the reference, so it has a NAME to render from
+    // the first frame and asks at once.
     const dialog = openEdit(container, 'provider')
     await waitFor(() => {
       expect(inventory).toHaveBeenCalled()
     })
 
-    // The unlock resolves: the vault is open and the rows arrive.
+    // The person unlocks the vault; the chip receives the row's name.
     status.mockResolvedValue(UNSEALED_STATUS)
     await ctrl.refresh()
 
-    const picker = dialog.querySelector('select') as HTMLSelectElement
+    const key = fieldEl(dialog, 'endpoint-key')
     await waitFor(() => {
-      expect(Array.from(picker.options).map((o) => o.text)).toContain('prod api key')
+      expect(chipText(key)).toBe('prod api key')
     })
-    // The bound row reads as what it IS. A picker labelling it
-    // `secrow:aaaaaaaa` shows the person an opaque id where the name of
-    // their own secret belongs.
-    expect(picker.value).toBe('secrow:aaaaaaaa')
-    expect(picker.selectedOptions[0].text).toBe('prod api key')
-    expect(Array.from(picker.options).map((o) => o.text)).not.toContain('secrow:aaaaaaaa')
+    expect(key.value).toBe('{{secret:secrow:aaaaaaaa}}')
+    expect(dialog.textContent).not.toContain('secrow:aaaaaaaa')
+
+    // The restored binding is observable at the surface's write seam, not
+    // through the chip a person reads.
+    clickButton(dialog, 'Save Endpoint')
+    await waitFor(() => {
+      expect(updateEndpoint).toHaveBeenCalledTimes(1)
+    })
+    expect(updateEndpoint.mock.calls[0][1].credential).toBe('secrow:aaaaaaaa')
   })
 
   it('does not ask an UNINITIALIZED vault: there is nothing to unlock', async () => {
@@ -460,7 +508,7 @@ describe('the picker asks the vault (nocx-5ratm, ADR-0032)', () => {
     await waitForRows(container, 0)
 
     const dialog = openNew(container)
-    clickSegment(dialog, 'Use existing secret')
+    pressLock(fieldEl(dialog, 'endpoint-key'))
     await flush()
 
     expect(inventory).not.toHaveBeenCalled()
@@ -475,9 +523,6 @@ describe('the picker asks the vault (nocx-5ratm, ADR-0032)', () => {
     )
     await ctrl.refresh()
     await waitForRows(container, 1)
-
-    // The person chose not to unlock: the deferred call rejects with the
-    // cancellation the vault layer speaks.
     inventory.mockRejectedValueOnce(new VaultOperationCancelledError())
     const dialog = openEdit(container, 'provider')
     await waitFor(() => {
@@ -487,8 +532,14 @@ describe('the picker asks the vault (nocx-5ratm, ADR-0032)', () => {
     // The editor still works — a dismissal is a choice, not a failure.
     fillField(container, 'endpoint-name', 'renamed')
     expect((container.querySelector('#endpoint-name') as HTMLInputElement).value).toBe('renamed')
-    const picker = dialog.querySelector('select') as HTMLSelectElement
-    expect(Array.from(picker.options).map((o) => o.text)).not.toContain('prod api key')
+    // And the bound key still reads as something a person can act on rather
+    // than as its own handle. The Select's "Unavailable secret" option was
+    // this fact's old shape; the chip's is the vault's own sentence, which
+    // says WHY as well — the rows never arrived because the unlock was
+    // dismissed, and the vault is still sealed.
+    const key = fieldEl(dialog, 'endpoint-key')
+    expect(chipText(key)).toBe('Vault locked \u2014 unlock to view')
+    expect(dialog.textContent).not.toContain('secrow:aaaaaaaa')
 
     // And the refusal is not remembered as a store failure: unsealing the
     // vault later loads the rows the list needs for its credential state.

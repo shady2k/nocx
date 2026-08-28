@@ -31,11 +31,15 @@ type fakeProfileRepo struct {
 	mu       sync.Mutex
 	profiles []profile.SSHProfile
 	cleared  []string
+	loadErr  error
 }
 
 func (f *fakeProfileRepo) LoadProfiles() ([]profile.SSHProfile, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.loadErr != nil {
+		return nil, f.loadErr
+	}
 	out := make([]profile.SSHProfile, len(f.profiles))
 	copy(out, f.profiles)
 	return out, nil
@@ -93,13 +97,17 @@ func (f *fakeProfileRepo) ClearSecretRefs(ref string) error {
 // fakeGroupRepo is an in-memory profile.GroupRepository that also
 // implements the optional DeleteGroupAtomic and ApplyGroups surfaces.
 type fakeGroupRepo struct {
-	mu     sync.Mutex
-	groups []profile.ProfileGroup
+	mu      sync.Mutex
+	groups  []profile.ProfileGroup
+	loadErr error
 }
 
 func (f *fakeGroupRepo) LoadGroups() ([]profile.ProfileGroup, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
+	if f.loadErr != nil {
+		return nil, f.loadErr
+	}
 	out := make([]profile.ProfileGroup, len(f.groups))
 	copy(out, f.groups)
 	return out, nil
@@ -371,6 +379,13 @@ func (f *fakeVaultSeam) Get(_ context.Context, id credential.SecretID) (credenti
 		return credential.Secret{}, nil
 	}
 	return credential.NewSecret(v), nil
+}
+
+// Material is the capability.SecretMaterial seam. In the product it is the
+// transport's stanced resolver; here the fake answers it the same way it
+// answers a store read, because what this double is for is the VALUE.
+func (f *fakeVaultSeam) Material(ctx context.Context, id credential.SecretID) (credential.Secret, error) {
+	return f.Get(ctx, id)
 }
 
 func (f *fakeVaultSeam) Delete(_ context.Context, id credential.SecretID) error {
@@ -1309,5 +1324,106 @@ func TestMintSecretFallsBackToPlainStore(t *testing.T) {
 		})
 	}); err != nil {
 		t.Fatalf("read back failed: %v", err)
+	}
+}
+
+type failingSecretStore struct {
+	err error
+}
+
+func (f failingSecretStore) Create(context.Context, credential.Secret) (credential.SecretID, error) {
+	return "", f.err
+}
+
+func (f failingSecretStore) Get(context.Context, credential.SecretID) (credential.Secret, error) {
+	return credential.Secret{}, f.err
+}
+
+// Material is the capability.SecretMaterial seam: the same failure, reached
+// the way the send reaches it.
+func (f failingSecretStore) Material(ctx context.Context, id credential.SecretID) (credential.Secret, error) {
+	return f.Get(ctx, id)
+}
+
+func (f failingSecretStore) Delete(context.Context, credential.SecretID) error {
+	return f.err
+}
+
+func (f failingSecretStore) Exists(context.Context, credential.SecretID) (bool, error) {
+	return false, f.err
+}
+
+func TestSecretRefs_OnlyOpaqueRowsResolveAndStoreErrorsRemainErrors(t *testing.T) {
+	vaultSeam := newFakeVault()
+	_, err := vaultSeam.CreateNamed(context.Background(), credential.NewSecret("vault-value"), vault.SecretMeta{Name: "secrow:row"})
+	if err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+	profiles := &fakeProfileRepo{}
+	groups := &fakeGroupRepo{}
+
+	refs := capability.NewSecretRefs(vaultSeam, vaultSeam, profiles, groups)
+	out, placed, err := refs.ResolveText(context.Background(), "prefix {{secret:secrow:row}} suffix")
+	if err != nil {
+		t.Fatalf("ResolveText: %v", err)
+	}
+	if out != "prefix vault-value suffix" {
+		t.Fatalf("resolved text = %q, want vault bytes", out)
+	}
+	if len(placed) != 1 || placed[0].Name != "secrow:row" || placed[0].Value != "vault-value" {
+		t.Fatalf("placed = %+v, want one opaque row", placed)
+	}
+	displayErr := func() error {
+		_, _, resolveErr := refs.ResolveText(context.Background(), "{{secret:display name}}")
+		return resolveErr
+	}()
+	if displayErr == nil || !strings.Contains(displayErr.Error(), "display name") {
+		t.Fatalf("display-name reference error = %v, want named refusal", displayErr)
+	}
+	missingErr := func() error {
+		_, _, resolveErr := refs.ResolveText(context.Background(), "{{secret:secrow:missing}}")
+		return resolveErr
+	}()
+	if missingErr == nil || !strings.Contains(missingErr.Error(), "secrow:missing") {
+		t.Fatalf("unknown-row error = %v, want named refusal", missingErr)
+	}
+
+	providerErr := errors.New("vault provider sealed")
+	failing := capability.NewSecretRefs(vaultSeam, failingSecretStore{err: providerErr}, profiles, groups)
+	_, _, err = failing.ResolveText(context.Background(), "{{secret:secrow:row}}")
+	if !errors.Is(err, providerErr) {
+		t.Fatalf("provider error = %v, want %v", err, providerErr)
+	}
+	var unresolved *capability.UnresolvedSecretError
+	if errors.As(err, &unresolved) {
+		t.Fatalf("provider error was classified unresolved: %v", err)
+	}
+}
+
+func TestSecretRefsProfileLoadFailureReachesCaller(t *testing.T) {
+	vaultSeam := newFakeVault()
+	if _, err := vaultSeam.CreateNamed(context.Background(), credential.NewSecret("value"), vault.SecretMeta{Name: "secrow:row"}); err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+	loadErr := errors.New("profiles unavailable")
+	refs := capability.NewSecretRefs(vaultSeam, vaultSeam, &fakeProfileRepo{loadErr: loadErr}, &fakeGroupRepo{})
+
+	_, _, err := refs.ResolveText(context.Background(), "{{secret:secrow:row}}")
+	if !errors.Is(err, loadErr) || !strings.Contains(err.Error(), loadErr.Error()) {
+		t.Fatalf("ResolveText error = %v, want profile load failure", err)
+	}
+}
+
+func TestSecretRefsGroupLoadFailureReachesCaller(t *testing.T) {
+	vaultSeam := newFakeVault()
+	if _, err := vaultSeam.CreateNamed(context.Background(), credential.NewSecret("value"), vault.SecretMeta{Name: "secrow:row"}); err != nil {
+		t.Fatalf("CreateNamed: %v", err)
+	}
+	loadErr := errors.New("groups unavailable")
+	refs := capability.NewSecretRefs(vaultSeam, vaultSeam, &fakeProfileRepo{}, &fakeGroupRepo{loadErr: loadErr})
+
+	_, _, err := refs.ResolveText(context.Background(), "{{secret:secrow:row}}")
+	if !errors.Is(err, loadErr) || !strings.Contains(err.Error(), loadErr.Error()) {
+		t.Fatalf("ResolveText error = %v, want group load failure", err)
 	}
 }

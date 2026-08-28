@@ -5,20 +5,14 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
-	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apiimport"
 	"github.com/shady2k/nocx/internal/capability"
 )
-
-// stubBindWriter is the narrow consumer contract the importer declares: one
-// method, and the import test is not about where a secret ends up.
-type stubBindWriter struct{}
-
-func (stubBindWriter) Bind(context.Context, apibind.Key, []byte) error { return nil }
 
 // apiPaths is a storage.Paths whose three roles land under one test root, so
 // a created collection goes there rather than into the developer's own app
@@ -38,9 +32,26 @@ func newAPIOperation(t *testing.T) capability.APICollectionOperation {
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apicoll.NewCollections(apiPaths{root: t.TempDir()}),
-		// No binding store: a secret variable resolves to nothing, which is
-		// what a build wired without one does.
-		nil,
+	)
+}
+
+type testSecretRefs struct{}
+
+func (testSecretRefs) ResolveText(_ context.Context, text string) (string, []capability.PlacedSecret, error) {
+	const ref = "{{secret:secrow:X}}"
+	const value = "header-secret"
+	if !strings.Contains(text, ref) {
+		return text, nil, nil
+	}
+	return strings.ReplaceAll(text, ref, value), []capability.PlacedSecret{{Name: "secrow:X", Value: value}}, nil
+}
+
+func newAPIOperationWithSecrets(t *testing.T) capability.APICollectionOperation {
+	t.Helper()
+	return capability.NewAPICollectionOperation(
+		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
+		capability.Gate("lane", 8, 64, 5*time.Second),
+		apicoll.NewCollections(apiPaths{root: t.TempDir()}),
 	)
 }
 
@@ -55,7 +66,6 @@ func TestAPICollectionService_DefaultRootIsWhereACreatedCollectionLands(t *testi
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apicoll.NewCollections(apiPaths{root: root}),
-		nil,
 	)
 
 	var got string
@@ -91,7 +101,6 @@ func TestAPICollectionService_DefaultRootIsWhereACreatedCollectionLands(t *testi
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apicoll.NewCollections(nil),
-		nil,
 	)
 	if err := none.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
 		where, err := svc.DefaultRoot()
@@ -124,6 +133,78 @@ func apiFolder(t *testing.T) string {
 		t.Fatalf("write request: %v", err)
 	}
 	return root
+}
+
+func apiFolderWithSecretHeader(t *testing.T) string {
+	t.Helper()
+	root := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		if err := os.MkdirAll(filepath.Dir(filepath.Join(root, rel)), 0o700); err != nil {
+			t.Fatalf("mkdir for %s: %v", rel, err)
+		}
+		if err := os.WriteFile(filepath.Join(root, rel), []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", rel, err)
+		}
+	}
+	write(apicoll.ManifestName, `{"schemaVersion":1,"name":"acme"}`)
+	write("send.json", `{"id":"r1","name":"send","method":"GET","url":"https://example.test",`+
+		`"headers":[{"name":"X-Token","value":"{{token}}","enabled":true}],`+
+		`"variables":[{"name":"token","value":"{{secret:secrow:X}}","enabled":true}],`+
+		`"body":{"kind":"none"},"auth":{"kind":"none"}}`)
+	return root
+}
+
+// A header takes a request variable, that variable holds a secret reference,
+// and the send resolves both — with no environment named at all.
+//
+// IT IS TWO STEPS, and the split is the subject as much as the values are
+// (nocx-o3606). Snapshot runs INSIDE the operation and leaves the reference
+// alone; the caller resolves it OUTSIDE, because an operation-stance read
+// blocks on the unlock while holding the lane vault.unseal needs. The
+// assertions below are deliberately placed on either side of that line: the
+// snapshot still carries the reference, and only the resolved result has the
+// value.
+func TestAPICollectionService_SnapshotResolvesVariableThenSecretWithoutEnvironment(t *testing.T) {
+	op := newAPIOperationWithSecrets(t)
+	root := apiFolderWithSecretHeader(t)
+
+	var snapshot capability.SendInputs
+	if err := op.Run(context.Background(), func(_ context.Context, svc capability.APICollectionService) error {
+		opened, err := svc.Open(root)
+		if err != nil {
+			return err
+		}
+		in, err := svc.Snapshot(context.Background(), opened.Handle, "send.json", "")
+		if err != nil {
+			return err
+		}
+		// The plain variable IS substituted here — that pass needs the
+		// folder and the environment, which is what the gate is held for.
+		// The secret reference is what survives it.
+		if got := in.Request.Headers[0].Value; got != "{{secret:secrow:X}}" {
+			t.Errorf("header inside the operation = %q, want the reference still unresolved", got)
+		}
+		if len(in.Secrets) != 0 {
+			t.Errorf("secrets inside the operation = %+v, want none placed yet", in.Secrets)
+		}
+		snapshot = in
+		return nil
+	}); err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+
+	// Outside the admission, where the material may be asked for.
+	resolved, err := capability.ResolveSnapshotSecrets(context.Background(), snapshot, testSecretRefs{})
+	if err != nil {
+		t.Fatalf("ResolveSnapshotSecrets: %v", err)
+	}
+	if got := resolved.Request.Headers[0].Value; got != "header-secret" {
+		t.Errorf("header = %q, want resolved secret value", got)
+	}
+	if len(resolved.Secrets) != 1 || resolved.Secrets[0].Value != "header-secret" {
+		t.Errorf("placed secrets = %+v, want the substituted value", resolved.Secrets)
+	}
 }
 
 // A service that escapes its callback is dead on arrival. This is the whole
@@ -338,14 +419,12 @@ func TestAPICollectionService_ListOpenReportsADeadFolderBesideALiveOne(t *testin
 // The import's own external call: the document it is told to read. A path
 // that is not a regular file is refused BY NAME rather than opened — a fifo
 // would block the read for as long as nothing wrote to it, while holding
-// both the vault and api gates.
+// the api gate and execution lane.
 func TestAPIImportService_RefusesADocumentThatIsNotAFile(t *testing.T) {
 	op := capability.NewAPIImportOperation(
-		capability.Gate(capability.GateVault, 1, 64, 5*time.Second),
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apiimport.NewOSFS(),
-		stubBindWriter{},
 		// No fetcher: this test is about the two entrances that reach no
 		// network, and a build without one is a coherent build (it refuses
 		// the URL entrance by name — api_import_url_test.go).
@@ -404,11 +483,9 @@ func TestAPIImportService_RefusesADocumentThatIsNotAFile(t *testing.T) {
 // makes: a document apiimport cannot parse.
 func TestAPIImportService_ImportsADocumentItWasHandedTheBytesOf(t *testing.T) {
 	op := capability.NewAPIImportOperation(
-		capability.Gate(capability.GateVault, 1, 64, 5*time.Second),
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apiimport.NewOSFS(),
-		stubBindWriter{},
 		// No fetcher: this test is about the two entrances that reach no
 		// network, and a build without one is a coherent build (it refuses
 		// the URL entrance by name — api_import_url_test.go).

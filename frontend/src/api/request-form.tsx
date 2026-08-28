@@ -18,11 +18,13 @@
 // here is the literal it is, and the binding from a name to a stored value
 // lives in the binding document, nowhere in this folder.
 //
-// The Auth tab can nonetheless MAKE a secret (AuthSecret, below), and that
-// costs the property nothing: the value is typed into a control that hands
-// it straight to the vault and keeps no copy, and what lands in the draft is
-// the `{{name}}` reference. Nothing about the file changed — there is still
-// nowhere in it a byte of a value could go but the text the person typed.
+// The Auth tab places the SAME field as every other value on this surface
+// (nocx-3o0ed.4). There is no "where does this come from" control in front of
+// it any more: a person types a literal, or presses the field's lock and
+// stores it, or takes a secret the vault already holds — and the value it
+// holds afterwards says which of those happened, because a bound value IS the
+// `{{secret:secrow:…}}` reference. ADR-0017 §1 gave that choice to a segmented
+// control called SecretSource; the control is gone and the field owns it.
 //
 // A DISABLED ROW IS A ROW THE USER KEEPS. Header and query rows carry
 // `enabled`, and turning one off is a checkbox rather than deleting it:
@@ -59,9 +61,18 @@ import { BodyEditor } from './body-editor'
 import { Tabs } from '../ui/tabs'
 import { layOutJSON } from '../ui/format-json'
 import { showToast } from '../ui/toast'
-import { SecretValueField } from '../ui/secret-value-field'
 import { applyTypedUrl, urlWithParams } from './api-url'
 import { findVariables } from './variable-reference'
+import type { SecretPickerSource } from '../ui/secret-picker'
+import {
+  SecretTextField,
+  secretMarks,
+  type SecretEntry,
+  type VaultState,
+} from './secret-text-field'
+import type { InventoryEntry } from '../vault-client'
+import type { SecretCreateAsk } from '../secret-create-ask'
+import { proposeSecret } from '../secret-name-proposal'
 import type { ApiHeader, ApiParam, ApiRequest } from './api-model'
 import type { ApiScopeVariable } from './api-store'
 
@@ -86,47 +97,6 @@ const AUTH_KINDS: Array<{ value: ApiRequest['auth']['kind']; label: string }> = 
   { value: 'apikey', label: 'API key' },
 ]
 
-/**
- * What a new secret would be CALLED, when the person has not named one.
- *
- * THE IMPORTER'S OWN THREE WORDS, deliberately. A curl line whose
- * Authorization header carries a bearer token already becomes `token` and a
- * basic one already becomes `password` (internal/apiimport/secretvar.go), so
- * a person who imports a line and a person who pastes a token into this tab
- * end up with a collection spelled the same way. A second vocabulary here
- * would be one product naming one thing twice.
- *
- * What it deliberately does NOT repeat is the rest of that namer: the
- * collision suffix and the sanitizer belong to a pass minting many names out
- * of a document nobody is watching. Here a person is minting ONE, the name is
- * in the field in front of them before they press anything, and the field is
- * where they change it.
- */
-function proposeSecretName(auth: ApiRequest['auth']): string {
-  switch (auth.kind) {
-    case 'basic':
-      return 'password'
-    case 'apikey':
-      return 'api_key'
-    default:
-      return 'token'
-  }
-}
-
-/**
- * Where a value created on the Auth tab would be bound — or, when nothing
- * can be, WHICH absence it is.
- *
- * ABSENCE IS THE CAPABILITY, the rule every picker in this surface keeps: a
- * control that fails when pressed is worse than one that was never drawn. But
- * the two reasons a binding has nowhere to go are different problems with
- * different answers — a request with no file behind it is saved, a collection
- * sending under nothing has an environment chosen — so the tab says which of
- * them it is rather than going quiet.
- */
-export type SecretTarget =
-  { kind: 'environment'; name: string } | { kind: 'no-collection' } | { kind: 'no-environment' }
-
 /** How many rows a tab is holding, for the tab's own label. A count that is
  *  zero is not shown: "Headers 0" is a longer way to write "Headers", and the
  *  point of the number is to be noticed. */
@@ -143,6 +113,7 @@ export function counted(label: string, rows: readonly unknown[]): string {
  *  `file` names one instead, so both are a different control — and the
  *  editor must not be built for either, because building it mounts a CM6
  *  view. */
+
 function isTextBody(kind: ApiRequest['body']['kind']): boolean {
   return kind === 'raw' || kind === 'json' || kind === 'form'
 }
@@ -198,6 +169,11 @@ export interface RequestLineProps {
    *  say about it — this line only knows where it was and what it is
    *  called. */
   onVariable?: (name: string, at: { x: number; y: number }) => void
+  secretSource?: SecretPickerSource
+  secretEntries?: () => readonly SecretEntry[]
+  vaultState?: () => VaultState
+  onSecretReference?: (handle: string, at: { x: number; y: number }, replace: () => void) => void
+  onPickerReady?: (open: (() => void) | undefined) => void
 }
 
 /** The line: the verb, the address, what it goes out under, and Send. */
@@ -277,6 +253,12 @@ export function RequestLine(props: RequestLineProps) {
       tone: markTone(props.variableState?.(name)),
     }))
 
+  const urlMarks = (): TextFieldMark[] =>
+    [
+      ...variableMarks(),
+      ...secretMarks(typedUrl(), props.secretEntries?.() ?? [], props.vaultState?.() ?? 'unknown'),
+    ].sort((a, b) => a.from - b.from)
+
   /** The kit's word for what this reference is. `unknown` is used ONLY when
    *  somebody can say so: a missing backend scope answer leaves every mark in
    *  the ordinary tone rather than painting the address as broken. */
@@ -319,21 +301,20 @@ export function RequestLine(props: RequestLineProps) {
         />
       </div>
       <div class="api-request__url">
-        <TextField
+        <SecretTextField
           id="api-url"
           ariaLabel="URL"
           value={typedUrl()}
           disabled={request() === null}
           onInput={editUrl}
-          marks={variableMarks()}
-          onMarkClick={
-            props.onVariable
-              ? (mark, at) => {
-                  const name = variableAt(mark.from)
-                  if (name !== '') props.onVariable?.(name, at)
-                }
-              : undefined
-          }
+          source={props.secretSource}
+          onPickerReady={props.onPickerReady}
+          marks={urlMarks()}
+          onSecretReference={props.onSecretReference}
+          onMarkClick={(mark, at) => {
+            const name = variableAt(mark.from)
+            if (name !== '') props.onVariable?.(name, at)
+          }}
         />
       </div>
       {/* SEND BECOMES STOP, and it stays ENABLED while it does. A disabled
@@ -356,125 +337,36 @@ export function RequestLine(props: RequestLineProps) {
   )
 }
 
-/**
- * THE DOOR THE AUTH TAB DID NOT HAVE.
- *
- * The tab asked for the NAME of a variable that had to already exist and
- * already be bound somewhere else. A person holding a token — the only reason
- * anybody opens this tab — could do nothing here but type a name, walk to the
- * environments page, find the row, mark it secret, paste the value and come
- * back. This is the same act, where they already are.
- *
- * IT IS THE SAME WRITE, not a second one. The value goes out through the
- * store's `bindSecret` — the one call in this product that carries a
- * credential, and the one the environments page has used since it was built.
- * There is no new method, no second minter, and nothing here that could put a
- * value in a file: the draft is patched with the NAME and the value is never
- * in this component's hands after `onCreate` has it.
- *
- * IT IS AN OFFER, NEVER A REQUIREMENT. A person who pasted a credential into
- * a header keeps it there (nocx-14exx); nothing on this tab rewrites or
- * refuses a plain header, and nothing here happens unless somebody types a
- * value and presses Store.
- *
- * The NAME lands in the draft only AFTER the write is accepted. A refusal
- * that had already renamed the variable would leave the file pointing at a
- * binding that was never made, which is the one state this tab exists to get
- * a person out of.
- */
-function AuthSecret(props: {
-  auth: ApiRequest['auth']
-  target: SecretTarget
-  onName: (name: string) => void
-  onCreate: (variable: string, value: string) => Promise<void>
-}) {
-  /** What a new secret is called. If the credential field already holds
-   *  exactly one `{{name}}` reference, that is the name — the person is
-   *  ADDING the value for a reference they already wrote, which is the
-   *  "referenced by typing its name" case this door has always served.
-   *  Otherwise it is the product's proposal for this scheme; the credential
-   *  field is now a VALUE (possibly a literal the person pasted,
-   *  nocx-6hg2w.20), so a name is never derived from value-like text. */
-  const name = (): string => {
-    const field = props.auth.kind === 'basic' ? props.auth.password : props.auth.token
-    const ref = /^\{\{\s*([^{}\s]+)\s*\}\}$/.exec(field)
-    if (ref) return ref[1]
-    return proposeSecretName(props.auth)
-  }
-  const bindable = (): { name: string } | null =>
-    props.target.kind === 'environment' ? props.target : null
-
-  const create = async (value: string): Promise<void> => {
-    const variable = name()
-    const environment = bindable()?.name ?? ''
-    await props.onCreate(variable, value)
-    props.onName(variable)
-    // What a person needs to know afterwards is that there is nothing else to
-    // do — the variable and where it was bound, and no byte of the value,
-    // which the backend deliberately never answers back either.
-    showToast({
-      level: 'success',
-      message: `${variable} is stored for ${environment}. This request sends with it now.`,
-    })
-  }
-
-  return (
-    <Show
-      when={bindable()}
-      fallback={
-        <p class="api-request__idle">
-          {props.target.kind === 'no-collection'
-            ? 'Open a collection to store a value for it. A secret is kept under the collection and environment it belongs to, and this request has neither yet — it was converted from a curl line with nothing open to write it into.'
-            : 'Choose an environment to store a value under. A secret is kept under the collection and environment it belongs to, and “No environment” has nowhere to put one.'}
-        </p>
-      }
-    >
-      {(environment) => (
-        <>
-          <SecretValueField
-            id="api-auth-secret-value"
-            ariaLabel="A value for this variable, stored in the vault"
-            placeholder="Paste the value — it goes to the vault, not to this file"
-            title={`Store the value for ${name()} in the vault`}
-            onSubmit={(value) => create(value)}
-          />
-          <p class="api-request__idle">
-            The value goes to the vault under {environment().name} — never into this file, which
-            keeps the reference and no byte of the value.
-          </p>
-        </>
-      )}
-    </Show>
-  )
-}
-
 export interface RequestEditorProps {
   request: ApiRequest | null
   scopeVariables: readonly ApiScopeVariable[] | null
+  /** The folder the person is standing in while this request is open. */
+  folder?: () => string
   onEdit: (next: ApiRequest) => void
+  /** Vault-backed source shared by every request text field. */
+  secretSource?: SecretPickerSource
+  secretEntries?: () => readonly SecretEntry[]
+  secretInventory?: () => readonly InventoryEntry[]
+  vaultState?: () => VaultState
+  onSecretReference?: (handle: string, at: { x: number; y: number }, replace: () => void) => void
+  onPickerReady?: (open: (() => void) | undefined) => void
   /**
-   * Give the auth variable its VALUE — the one call from this form that
-   * carries a credential, and the same one the environments page makes.
-   *
-   * Handed in rather than reached for: which collection and which environment
-   * a binding belongs to is the store's answer, and a form that worked it out
-   * itself would be a second one. ABSENT on a build with nowhere to bind, and
-   * then no field to type a value into is drawn at all.
-   *
-   * A REJECTION is a refusal, and its message reaches the person on the
-   * field. A caller whose store swallows failures must translate one back
-   * into a rejection here, or a value that was never stored will look stored.
+   * Mint a secret without leaving the request (nocx-7mfwb). The workbench
+   * owns the one create ask; this editor only says what is already known —
+   * the value the person typed, and the name and kind proposed from where
+   * they are standing. Resolves with the handle when it landed and with
+   * `undefined` when the person cancelled. Absent means the host cannot
+   * mint, and the offer is not rendered at all.
    */
-  onCreateSecret?: (variable: string, value: string) => Promise<void>
-  /** Where such a value would go, or which absence stops it. Undefined where
-   *  the host has not said — then the tab offers nothing and claims nothing,
-   *  which is the state it was in before this existed. */
-  secretTarget?: SecretTarget
+  onCreateSecret?: (ask: SecretCreateAsk) => Promise<{ handle: string; name: string } | undefined>
 }
 
 /** The editor: the four parts of a request, one at a time. */
 export function RequestEditor(props: RequestEditorProps) {
   const request = () => props.request
+
+  const fieldMarks = (value: string): TextFieldMark[] =>
+    secretMarks(value, props.secretEntries?.() ?? [], props.vaultState?.() ?? 'unknown')
   // WHICH TAB, held here. It is the surface's own state and not the store's:
   // it does not have to outlive the pane, and nothing else in the product
   // asks which part of a request somebody was last looking at.
@@ -504,6 +396,89 @@ export function RequestEditor(props: RequestEditorProps) {
   // editor was replaced", which is what formatting is, and `fill` is already
   // a no-op when the text has not moved (body-editor.tsx).
   const [laidOut, setLaidOut] = createSignal(0)
+
+  const authValue = (): string => {
+    const current = request()?.auth
+    if (current === undefined || current.kind === 'none') return ''
+    return current.kind === 'basic' ? current.password : current.token
+  }
+  const resolveVariable = (name: string): string | undefined =>
+    props.scopeVariables?.find((variable) => variable.name === name && !variable.overridden)?.value
+  const setAuthValue = (value: string): void => {
+    const current = request()
+    if (current === null) return
+    patch({
+      auth:
+        current.auth.kind === 'basic'
+          ? { ...current.auth, password: value }
+          : { ...current.auth, token: value },
+    })
+  }
+
+  /**
+   * The Auth field's own picker source — the shared one, with a better answer
+   * to a single question: what a stored value should be CALLED.
+   *
+   * Everywhere else on this surface the panel can honestly say only "a secret
+   * from a field" (api-pane.tsx, createSecretInPlace). Here the scheme and the
+   * URL name the credential — "users token", "users password" — which is what
+   * the standalone Store button used to know and the reason it existed at all.
+   * The button is gone (nocx-3o0ed.4: the lock is the one door), so its
+   * knowledge moves onto the lock's own store row rather than being lost with
+   * it. Everything else — the list, the lifecycle offers, the '@' create row —
+   * is the shared source's, untouched.
+   *
+   * A typed name wins over the proposal: the panel's filter is what the person
+   * wrote, and a proposal is an offer, never a correction.
+   */
+  const authSecretSource = (): SecretPickerSource | undefined => {
+    const base = props.secretSource
+    if (base === undefined) return undefined
+    const mint = props.onCreateSecret
+    if (mint === undefined) return base
+    return {
+      ...base,
+      requestCreate: async (name, value) => {
+        const current = request()
+        // No value is the plain "Add a secret…" row: nothing to keep, so
+        // nothing to propose a name for — the shared source answers it.
+        if (value === undefined || current === null) return base.requestCreate(name)
+        const trimmedName = name.trim()
+        let occupiedNames: readonly string[] | undefined
+        if (trimmedName === '') {
+          try {
+            occupiedNames = (await base.list()).map((entry) => entry.name)
+          } catch {
+            // A stale inventory must not prevent the ask from opening. Its
+            // submit path performs the authoritative duplicate check.
+          }
+        }
+        const proposal = proposeSecret({
+          site:
+            current.auth.kind === 'bearer' || current.auth.kind === 'basic'
+              ? { at: 'auth', scheme: current.auth.kind }
+              : { at: 'field' },
+          url: current.url,
+          resolveVariable,
+          folder: props.folder?.(),
+          request: current.name,
+          occupiedNames,
+        })
+        const created = await mint({
+          name: trimmedName === '' ? proposal.name : trimmedName,
+          kind: proposal.kind,
+          value,
+        })
+        if (created === undefined) return undefined
+        // The row the ask just wrote is not in the snapshot the marks read,
+        // so the chip would name the brand-new secret "not on this machine"
+        // for as long as nothing else asked. One re-list, off the shared
+        // source, whose own `list` is what keeps that snapshot (api-pane.tsx).
+        void base.list()
+        return { id: created.handle, name: created.name }
+      },
+    }
+  }
 
   /**
    * Lay the body out, or say why not and change nothing.
@@ -593,13 +568,16 @@ export function RequestEditor(props: RequestEditorProps) {
                           />
                         </td>
                         <td>
-                          <TextField
+                          <SecretTextField
                             id={`api-query-value-${i}`}
                             ariaLabel={`Parameter ${i + 1} value`}
                             value={row().value}
                             onInput={(v) =>
                               patch({ query: patchRow(req().query, i, { value: v }) })
                             }
+                            source={props.secretSource}
+                            onSecretReference={props.onSecretReference}
+                            marks={fieldMarks(row().value)}
                           />
                         </td>
                       </>
@@ -650,13 +628,16 @@ export function RequestEditor(props: RequestEditorProps) {
                             />
                           </td>
                           <td>
-                            <TextField
+                            <SecretTextField
                               id={`api-variable-value-${i}`}
                               ariaLabel={`Variable ${i + 1} value`}
                               value={row().value}
                               onInput={(v) =>
                                 patch({ variables: patchRow(req().variables, i, { value: v }) })
                               }
+                              source={props.secretSource}
+                              onSecretReference={props.onSecretReference}
+                              marks={fieldMarks(row().value)}
                             />
                           </td>
                         </>
@@ -698,7 +679,7 @@ export function RequestEditor(props: RequestEditorProps) {
                           <>
                             <td>{row().scope}</td>
                             <td>{row().name}</td>
-                            <td>{row().scope === 'vault' ? 'Bound in the vault' : row().value}</td>
+                            <td>{row().secret ? 'Bound in the vault' : row().value}</td>
                             <td>{row().from === '' ? 'Collection root' : row().from}</td>
                             <td>{row().overridden ? 'Overridden' : 'Used'}</td>
                           </>
@@ -817,13 +798,16 @@ export function RequestEditor(props: RequestEditorProps) {
                           />
                         </td>
                         <td>
-                          <TextField
+                          <SecretTextField
                             id={`api-header-value-${i}`}
                             ariaLabel={`Header ${i + 1} value`}
                             value={row().value}
                             onInput={(v) =>
                               patch({ headers: patchRow(req().headers, i, { value: v }) })
                             }
+                            source={props.secretSource}
+                            onSecretReference={props.onSecretReference}
+                            marks={fieldMarks(row().value)}
                           />
                         </td>
                       </>
@@ -873,65 +857,20 @@ export function RequestEditor(props: RequestEditorProps) {
                           onInput={(v) => patch({ auth: { ...req().auth, user: v } })}
                         />
                       </Show>
-                      {/* THE CREDENTIAL, AS TEXT, LIKE EVERY OTHER FIELD.
-                          Since nocx-6hg2w.20 the product does not refuse or
-                          move a value a person types: a literal pasted here
-                          is sent and is written to the request file, and a
-                          person who writes `{{name}}` gets the SAME
-                          substitution every other field gets. The
-                          placeholder is what the product would call a
-                          variable made below, so the proposal is on screen
-                          before anything is pressed. */}
-                      <TextField
+                      {/* ONE control, and its label is on it. The tab used
+                          to draw a Field labelled "Token" around a segmented
+                          control and then a TextField labelled "Token" inside
+                          it — the same word twice, one above the other, for
+                          one value (nocx-3o0ed.4). */}
+                      <SecretTextField
                         id="api-auth-var"
                         label={req().auth.kind === 'basic' ? 'Password' : 'Token'}
-                        description={
-                          req().auth.kind === 'basic'
-                            ? 'The password. A literal you paste is sent; a {{name}} resolves like one in the URL.'
-                            : 'The token. A literal you paste is sent; a {{name}} resolves like one in the URL.'
-                        }
-                        placeholder={proposeSecretName(req().auth)}
-                        value={req().auth.kind === 'basic' ? req().auth.password : req().auth.token}
-                        onInput={(v) =>
-                          patch({
-                            auth:
-                              req().auth.kind === 'basic'
-                                ? { ...req().auth, password: v }
-                                : { ...req().auth, token: v },
-                          })
-                        }
+                        value={authValue()}
+                        onInput={setAuthValue}
+                        source={authSecretSource()}
+                        onSecretReference={props.onSecretReference}
+                        marks={fieldMarks(authValue())}
                       />
-                      {/* NO CHIP UNDER THE FIELD. The chip earns its place
-                          in the RUN view, where it stands where a
-                          credential's BYTES were and says whose they are
-                          without showing them; here there is nothing hidden
-                          for it to stand for, and the one fact it could
-                          have added — that the text resolves to a bound
-                          value — is not a fact this side has: the renderer
-                          never learns what the vault holds (ADR-0021), and
-                          a name bound through the door below is not
-                          declared in the environment file either. A line
-                          that can only guess is worse than no line
-                          (nocx-qoavg). */}
-                      <Show when={props.onCreateSecret && props.secretTarget}>
-                        {(target) => (
-                          <AuthSecret
-                            auth={req().auth}
-                            target={target()}
-                            onName={(name) =>
-                              patch({
-                                auth:
-                                  req().auth.kind === 'basic'
-                                    ? { ...req().auth, password: `{{${name}}}` }
-                                    : { ...req().auth, token: `{{${name}}}` },
-                              })
-                            }
-                            onCreate={(variable, value) =>
-                              props.onCreateSecret?.(variable, value) ?? Promise.resolve()
-                            }
-                          />
-                        )}
-                      </Show>
                     </Show>
                   </>
                 ),

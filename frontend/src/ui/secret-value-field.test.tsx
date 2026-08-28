@@ -5,7 +5,7 @@
 // caller once, and in no field, no attribute and no signal afterwards.
 import { describe, expect, it, afterEach, vi } from 'vitest'
 import { render, cleanup, fireEvent } from '@solidjs/testing-library'
-import { SecretValueField } from './secret-value-field'
+import { SecretValueField, type SecretValueFieldAction } from './secret-value-field'
 
 afterEach(() => cleanup())
 
@@ -21,6 +21,9 @@ function mount(over: Partial<Parameters<typeof SecretValueField>[0]> = {}) {
       onSubmit={over.onSubmit ?? vi.fn().mockResolvedValue(undefined)}
       disabled={over.disabled}
       actionLabel={over.actionLabel}
+      initialValue={over.initialValue}
+      onSubmitAction={over.onSubmitAction}
+      actionPlacement={over.actionPlacement}
     />
   ))
 }
@@ -32,6 +35,27 @@ const action = (): HTMLButtonElement =>
   document.querySelector<HTMLButtonElement>('.ui-secret-value-field button') as HTMLButtonElement
 
 describe('the field a secret value is typed into', () => {
+  it('registers an external submit action without exposing the typed value', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined)
+    let submitAction: SecretValueFieldAction | undefined
+    mount({
+      onSubmit,
+      onSubmitAction: (action) => {
+        submitAction = action
+      },
+    })
+
+    expect(typeof submitAction?.invoke).toBe('function')
+    expect(typeof submitAction?.disabled).toBe('function')
+    expect(submitAction?.disabled()).toBe(true)
+    fireEvent.input(input(), { target: { value: VALUE } })
+    expect(submitAction?.disabled()).toBe(false)
+    submitAction?.invoke()
+
+    await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith(VALUE))
+    expect(document.body.innerHTML).not.toContain(VALUE)
+  })
+
   it('hands the value over once and empties itself afterwards', async () => {
     const onSubmit = vi.fn().mockResolvedValue(undefined)
     mount({ onSubmit })
@@ -45,6 +69,26 @@ describe('the field a secret value is typed into', () => {
     // …and no byte of it is left anywhere in the markup either: a value can
     // ride an attribute no text assertion would look at.
     expect(document.body.innerHTML).not.toContain(VALUE)
+  })
+  it('seeds the initial value, submits it, and clears after success', async () => {
+    const onSubmit = vi.fn().mockResolvedValue(undefined)
+    mount({ onSubmit, initialValue: VALUE })
+
+    expect(input().value).toBe(VALUE)
+    fireEvent.click(action())
+
+    await vi.waitFor(() => expect(onSubmit).toHaveBeenCalledWith(VALUE))
+    await vi.waitFor(() => expect(input().value).toBe(''))
+  })
+
+  it('keeps a seeded value when the write is refused', async () => {
+    const onSubmit = vi.fn().mockRejectedValue(new Error('sealed'))
+    const { container } = mount({ onSubmit, initialValue: VALUE })
+
+    fireEvent.click(action())
+
+    await vi.waitFor(() => expect(container.textContent).toContain('sealed'))
+    expect(input().value).toBe(VALUE)
   })
 
   it('is a password field, because somebody may be looking at the screen', () => {

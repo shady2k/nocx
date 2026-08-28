@@ -9,13 +9,8 @@ package apicoll_test
 // one. So the request's answer wins and the environment's is inherited —
 // nothing that resolved before resolves differently.
 //
-// The refusal: a request row whose name the environment declares SECRET. A
-// credential belongs in the vault and a request file goes into git, so the
-// two meeting is refused by name rather than decided silently in either
-// direction (design §8).
 
 import (
-	"errors"
 	"strings"
 	"testing"
 
@@ -143,60 +138,20 @@ func TestRequestVariables_ADisabledRowTakesNoPart(t *testing.T) {
 	}
 }
 
-// THE REFUSAL. A request row cannot answer a name the environment declares
-// secret: that is a file in git choosing what a reader's request sends,
-// against a vault-held value the reader deliberately kept out of it.
-func TestRequestVariables_ARowShadowingASecretIsRefusedByName(t *testing.T) {
-	env := apicoll.Environment{Name: "dev", SecretVars: []string{"token"}}
-	req := apicoll.Request{
-		Method:    "GET",
-		URL:       "https://x.test/bot{{token}}/send",
-		Variables: []apicoll.Param{on("token", "the-file-s-own-value")},
-	}
-
-	_, err := apicoll.RequestLookup(req, env)
-	if !errors.Is(err, apicoll.ErrSecretShadowed) {
-		t.Fatalf("err = %v, want ErrSecretShadowed", err)
-	}
-	if !strings.Contains(err.Error(), "token") {
-		t.Errorf("err = %v, want it to name the variable", err)
-	}
-	// NEVER THE VALUE. The refusal is written where a person did not choose
-	// to put it, and the row it is about holds something somebody typed.
-	if strings.Contains(err.Error(), "the-file-s-own-value") {
-		t.Fatalf("the refusal carries the row's value: %v", err)
-	}
-}
-
-// …and it is the SECRET DECLARATION that refuses, not the name: the same
-// row against an environment that declares nothing secret is an ordinary
-// request variable. Without this the refusal could be "any row named token".
-func TestRequestVariables_TheSameRowIsFineWhereNothingIsDeclaredSecret(t *testing.T) {
+// A request variable may use the same name as an environment value. The
+// request layer still wins by ordinary first-answer precedence.
+func TestRequestVariables_TheRequestWinsOverAnEnvironmentSecretReference(t *testing.T) {
 	req := apicoll.Request{
 		Method:    "GET",
 		URL:       "https://x.test/bot{{token}}/send",
 		Variables: []apicoll.Param{on("token", "an-ordinary-value")},
 	}
-	got, err := resolve(t, req, apicoll.Environment{Name: "dev"})
+	got, err := resolve(t, req, apicoll.Environment{Name: "dev", Values: map[string]string{"token": "{{secret:secrow:env-token}}"}})
 	if err != nil {
 		t.Fatalf("RequestLookup: %v", err)
 	}
 	if got.URL != "https://x.test/botan-ordinary-value/send" {
 		t.Errorf("url = %q", got.URL)
-	}
-}
-
-// A DISABLED ROW CANNOT SHADOW ANYTHING either, because it resolves nothing:
-// refusing it would refuse a send over a row taking no part in it.
-func TestRequestVariables_ADisabledRowDoesNotShadowASecret(t *testing.T) {
-	env := apicoll.Environment{Name: "dev", SecretVars: []string{"token"}}
-	req := apicoll.Request{
-		Method:    "GET",
-		URL:       "https://x.test/x",
-		Variables: []apicoll.Param{{Name: "token", Value: "off", Enabled: false}},
-	}
-	if _, err := apicoll.RequestLookup(req, env); err != nil {
-		t.Fatalf("a switched-off row was refused: %v", err)
 	}
 }
 

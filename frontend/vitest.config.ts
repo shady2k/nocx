@@ -24,5 +24,27 @@ export default defineConfig({
     // future `.test`/`.spec`/`.bench` method from breaking the suite.
     exclude: ['src/generated/**'],
     setupFiles: ['./vitest.setup.ts'],
+    // A BUDGET, NOT AN EXPECTATION ABOUT SPEED. Vitest's own default is five
+    // seconds, and nothing here ever chose it: that is fine for the thousands
+    // of tests that finish in milliseconds and far too tight for the handful
+    // that MOUNT THE WHOLE APP and then walk it. Those take one to three
+    // seconds on an idle machine, so five leaves no headroom at all — they go
+    // green alone and red under a loaded parallel run, which is the flake
+    // shape AGENTS.md names and refuses.
+    //
+    // MEASURED 2026-08-26 (nocx-jzlsf): with the suite at 4957 tests across
+    // 270 files, one case of 'secrets are doors in every request field' timed
+    // out at 5000ms in a pre-commit run and passed in 692ms when its file ran
+    // alone. Nothing about that test had changed; the suite had merely grown
+    // enough to run it under contention.
+    //
+    // Thirty seconds is a HANG DETECTOR. Every wait in this suite is on an
+    // observable state — a rendered node, a resolved call — so a test that
+    // reaches this number is stuck, not slow, and no test is kept alive by
+    // it that a faster machine would have caught.
+    testTimeout: 30_000,
+    // The same reasoning for beforeEach/beforeAll: a hook that mounts the app
+    // is doing the same work under the same contention.
+    hookTimeout: 30_000,
   },
 })

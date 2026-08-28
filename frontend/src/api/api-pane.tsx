@@ -17,10 +17,11 @@
 // nearly every Postman export — failed from the product while working
 // perfectly over the control plane (nocx-pnvnn).
 //
-// It is a control now, over the collection's own environments. It is absent
-// rather than empty for a collection that has none, for the reason the old
-// comment gives: a picker with nothing in it is a control that governs
-// nothing.
+// It is a control now, over the active request's collection environments. The
+// selection is persisted on that request file, so switching requests restores
+// each request's answer. It is absent rather than empty for a collection that
+// has none, for the reason the old comment gives: a picker with nothing in it
+// is a control that governs nothing.
 
 import {
   For,
@@ -81,10 +82,19 @@ import {
 import { API_IMPORT_DROP_TARGET, CurlImportDialog, PostmanImportDialog } from './import-dialogs'
 import { RequestCrumbs } from './request-crumbs'
 import { MoveToFolderDialog } from './move-dialog'
-import { RequestEditor, RequestLine, type SecretTarget } from './request-form'
+import { RequestEditor, RequestLine } from './request-form'
+import {
+  SecretCreateDialog,
+  type SecretCreateAsk,
+  type SecretCreateVault,
+} from '../secret-create-ask'
+import { proposeSecret } from '../secret-name-proposal'
+import type { ArchiveDocument } from '../generated/api.import.postman'
 import { RunList } from './run-list'
 import type { ApiStore, VariableAnswer } from './api-store'
 import type { DirectoryPicker, FilePicker, ImportSource, NativeDropPort } from './api-client'
+import type { SecretEntry, SecretPickerSource } from '../ui/secret-picker'
+import type { InventoryEntry } from '../vault-client'
 import type { ApiOpenCollection, ApiParam, ApiRequest, ApiRoute } from './api-model'
 import { findVariables } from './variable-reference'
 
@@ -120,6 +130,22 @@ export interface ApiPaneProps {
    * (`nativeWindow`, below).
    */
   nativeDrop?: NativeDropPort
+  /** The vault-backed source shared by all request text fields. */
+  /** Full vault inventory used by Auth's existing-secret selector. */
+  secretInventory?: () => Promise<InventoryEntry[]>
+  secretSource?: SecretPickerSource
+  /**
+   * Where a secret is MINTED from inside the workbench (nocx-7mfwb). The
+   * workbench could use a secret everywhere and mint one nowhere: creating
+   * one threw the person out to Settings and back, which is the detour the
+   * owner's decision of 2026-08-23 forbids — if the product will not push
+   * people into the vault, the vault must be the easier path from where they
+   * stand, not a longer one. Absent means the host cannot mint (no vault
+   * client), and both doors are then simply not offered.
+   */
+  secretCreate?: SecretCreateVault
+  /** Opens the existing Secrets settings page from a reference menu. */
+  openSecrets?: () => void
 }
 
 /** Floors for the two seams: a tree column narrower than this cannot show a
@@ -249,6 +275,7 @@ type HeldSource =
   | { kind: 'none' }
   | { kind: 'path'; path: string }
   | { kind: 'file'; file: File }
+  | { kind: 'archive'; name: string; bytes: string }
   | { kind: 'document'; text: string }
   | { kind: 'url'; url: string }
 
@@ -262,6 +289,8 @@ function sourceLabel(held: HeldSource): string {
       return held.path
     case 'file':
       return held.file.name
+    case 'archive':
+      return held.name
     case 'document':
       return 'Pasted Postman export'
     case 'url':
@@ -278,7 +307,21 @@ function sourceLabel(held: HeldSource): string {
 function sourcePath(held: HeldSource): string {
   if (held.kind === 'path') return held.path
   if (held.kind === 'file') return held.file.name
+  if (held.kind === 'archive') return held.name
   return ''
+}
+
+function isArchiveFile(file: File): boolean {
+  return file.name.toLowerCase().endsWith('.zip') || file.type === 'application/zip'
+}
+
+function encodeBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer)
+  let binary = ''
+  for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000))
+  }
+  return btoa(binary)
 }
 
 /** The empty set a filtered tree is flattened against — one object rather
@@ -312,6 +355,153 @@ export function ApiPane(props: ApiPaneProps) {
   const filePicker = props.openFile
   // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
   const nativeDrop = props.nativeDrop
+  // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
+  const source = props.secretSource
+  // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
+  const openSecrets = props.openSecrets
+  // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
+  const secretInventory = props.secretInventory
+  // eslint-disable-next-line solid/reactivity -- injected dependency, never replaced
+  const secretCreate = props.secretCreate
+  let openRequestSecretPicker: (() => void) | undefined
+  const [secretEntries, setSecretEntries] = createSignal<SecretEntry[]>([])
+  const [secretInventoryEntries, setSecretInventoryEntries] = createSignal<InventoryEntry[]>([])
+  const [vaultState, setVaultState] = createSignal<
+    'uninitialized' | 'sealed' | 'unsealed' | 'unknown'
+  >('unknown')
+  // Keep the API pane's display-only name map in step with every picker list
+  // request. The picker owns the list interaction; this wrapper only records
+  // the same rows so raw run chips can name a handle without owning a second
+  // inventory fetch.
+  const secretSource: SecretPickerSource | undefined =
+    source === undefined
+      ? undefined
+      : {
+          status: () => source.status(),
+          list: async () => {
+            const entries = await source.list()
+            setSecretEntries(entries)
+            return entries
+          },
+          onError: source.onError,
+          requestUnseal: () => source.requestUnseal(),
+          requestSetup: () => source.requestSetup(),
+          requestCreate: (name, value) => createSecretInPlace(name, value),
+        }
+  const refreshSecretEntries = async (): Promise<void> => {
+    if (secretSource === undefined) {
+      setVaultState('unknown')
+      setSecretEntries([])
+      setSecretInventoryEntries([])
+      return
+    }
+    try {
+      const status = await secretSource.status()
+      setVaultState(status.state)
+      if (status.state !== 'unsealed') {
+        setSecretEntries([])
+        setSecretInventoryEntries([])
+        return
+      }
+      const entries = await secretSource.list()
+      setSecretEntries(entries)
+      try {
+        setSecretInventoryEntries((await secretInventory?.()) ?? [])
+      } catch {
+        setSecretInventoryEntries([])
+      }
+    } catch {
+      setVaultState('unknown')
+      setSecretEntries([])
+      setSecretInventoryEntries([])
+    }
+  }
+  onMount(() => {
+    void refreshSecretEntries()
+  })
+
+  // ── Minting a secret WHERE THE PERSON IS STANDING ────────────────────
+  // ONE create ask, reached from two doors — the Auth tab's save action and
+  // the '@' picker's create row — differing only in what is already known
+  // (nocx-7mfwb). It is mounted once, here, because two mounts of one ask is
+  // the "two vocabularies for one act" defect the epic exists to undo; the
+  // doors call `openSecretCreateAsk` and await the handle.
+  //
+  // The promise resolves with the handle on success and with `undefined` on
+  // cancel, so a door can tell "the person chose not to" from "it landed"
+  // without either door owning the dialog's state.
+  const [secretAsk, setSecretAsk] = createSignal<SecretCreateAsk | null>(null)
+  let settleSecretAsk: ((created: { handle: string; name: string } | undefined) => void) | undefined
+  const closeSecretCreateAsk = (created?: { handle: string; name: string }): void => {
+    setSecretAsk(null)
+    const settle = settleSecretAsk
+    settleSecretAsk = undefined
+    settle?.(created)
+  }
+  const openSecretCreateAsk = (
+    ask: SecretCreateAsk,
+  ): Promise<{ handle: string; name: string } | undefined> => {
+    if (secretCreate === undefined) return Promise.resolve(undefined)
+    // A second ask while one is up would strand the first door's promise
+    // for ever. The one on screen wins; the newcomer is answered at once.
+    if (settleSecretAsk !== undefined) return Promise.resolve(undefined)
+    setSecretAsk(ask)
+    return new Promise((resolve) => {
+      settleSecretAsk = resolve
+    })
+  }
+  const createSecretInPlace = async (
+    name: string,
+    value?: string,
+  ): Promise<SecretEntry | undefined> => {
+    // NO MINT SEAM, NO DEAD ROW. A workbench built without a vault client can
+    // still offer the create row — it just cannot answer it here, so it hands
+    // off the way it always did rather than doing nothing at all. A control
+    // that silently does nothing is worse than the detour this epic removed:
+    // the detour at least ended somewhere. (Found by the merged gate, which
+    // is the only place the two halves of this were ever visible together.)
+    if (secretCreate === undefined) {
+      // Absent, not `undefined` (secret-picker.ts): the host is being handed
+      // the same act it was handed before, plus the value when there is one.
+      return value === undefined ? source?.requestCreate(name) : source?.requestCreate(name, value)
+    }
+    // The picker has two create doors, and `value` is their explicit
+    // boundary: the passive '@' row omits it and passes the typed filter as
+    // `name`; preserve that name. The explicit lock/store row includes the
+    // value and passes an empty filter, so its name comes from the shared
+    // proposal instead.
+    const fromStoreDoor = value !== undefined
+    const nothingTyped = name.trim() === ''
+    // What the vault already holds, so the proposal can avoid a name that is
+    // taken (nocx-3o0ed.8). Read only when the proposal will actually be
+    // used. An inventory that cannot be read must not stop the ask opening:
+    // its own check at save time stays authoritative.
+    let entries: InventoryEntry[] | undefined
+    if (fromStoreDoor && nothingTyped) {
+      try {
+        entries = await secretCreate.list()
+      } catch {
+        entries = undefined
+      }
+    }
+    const proposal = proposeSecret({
+      site: { at: 'field' },
+      url: store.draft()?.url ?? '',
+      occupiedNames: entries?.map((entry) => entry.name),
+    })
+    const askName = fromStoreDoor && nothingTyped ? proposal.name : name
+    const created = await openSecretCreateAsk({
+      name: askName,
+      kind: proposal.kind,
+      value: value ?? '',
+    })
+    if (created === undefined) return undefined
+    const entry = { id: created.handle, name: created.name }
+    setSecretEntries((entries) =>
+      entries.some((existing) => existing.id === entry.id) ? entries : [...entries, entry],
+    )
+    return entry
+  }
   // The clipboard a copied path lands on (AD-8). The composition root
   // injects one into the surfaces whose copy was designed with it; the
   // workbench predates that seam, so it makes its own through the same
@@ -442,6 +632,8 @@ export function ApiPane(props: ApiPaneProps) {
    * signal.
    */
   let requestMenuTarget: RequestTarget | null = null
+  /** Which door opened the request menu; panel-only acts stay off tree rows. */
+  let requestMenuDoor: 'row' | 'panel' = 'row'
   /** Where a malformed file's menu hangs — its own menu, because what a file
    *  can do is not what a folder can do: Delete and Copy Absolute Path,
    *  the two acts that need no decoded request (api.request.delete never
@@ -465,7 +657,13 @@ export function ApiPane(props: ApiPaneProps) {
   // rather than the collections menu's: two menus that shared one open flag
   // would be two surfaces owning one input, and the second one to open would
   // close the first from underneath the pointer.
-  const [varMenu, setVarMenu] = createSignal<{ name: string; x: number; y: number } | null>(null)
+  const [varMenu, setVarMenu] = createSignal<{
+    name: string
+    x: number
+    y: number
+    secret?: boolean
+    replace?: () => void
+  } | null>(null)
 
   const [curling, setCurling] = createSignal(false)
   const [curlLine, setCurlLine] = createSignal('')
@@ -616,6 +814,8 @@ export function ApiPane(props: ApiPaneProps) {
    */
   const [destTyped, setDestTyped] = createSignal(false)
   const [importingBusy, setImportingBusy] = createSignal(false)
+  const [archivePreview, setArchivePreview] = createSignal<ArchiveDocument[] | null>(null)
+  let archivePreviewRequest = 0
   /**
    * WHAT ONE IMPORT COULD NOT CARRY, said once, where the person is looking.
    *
@@ -645,6 +845,17 @@ export function ApiPane(props: ApiPaneProps) {
       duration: 0,
       message: `Not imported from ${about}: ${notes.map((n) => `${n.what} — ${n.why}`).join('; ')}`,
     })
+  }
+
+  const archiveSummary = (): string => {
+    const documents = archivePreview() ?? []
+    if (documents.length === 0) return ''
+    const collections = documents.filter((document) => document.kind === 'collection').length
+    const environments = documents.filter((document) => document.kind === 'environment').length
+    const parts: string[] = []
+    if (collections > 0) parts.push(`${collections} collection${collections === 1 ? '' : 's'}`)
+    if (environments > 0) parts.push(`${environments} environment${environments === 1 ? '' : 's'}`)
+    return `Archive contains ${parts.join(' and ')}`
   }
   /** Where a credential sits as TEXT in the request that is in the form —
    *  '' when there is none. See literalCredentialIn. */
@@ -1470,7 +1681,9 @@ export function ApiPane(props: ApiPaneProps) {
     // A path REPLACES whatever was held, and the paste box empties with it:
     // exactly one source at a time (spec §2), and a box still showing the
     // text it was holding would go on offering a source the ask has let go.
+    archivePreviewRequest++
     setPostmanSource(path === '' ? { kind: 'none' } : { kind: 'path', path })
+    setArchivePreview(null)
     clearPaste()
     proposeDestination(path)
   }
@@ -1506,6 +1719,8 @@ export function ApiPane(props: ApiPaneProps) {
       return
     }
     setPasteRefused('')
+    archivePreviewRequest++
+    setArchivePreview(null)
     // The last attempt's refusal belonged to the source it was refused
     // about. A new one is a new attempt, and leaving the old sentence up
     // would have it read as a verdict on this one.
@@ -1524,7 +1739,9 @@ export function ApiPane(props: ApiPaneProps) {
    *  who dropped the wrong file gets the ask back empty rather than having to
    *  drop the right one over it. */
   const clearSource = (): void => {
+    archivePreviewRequest++
     setPostmanSource({ kind: 'none' })
+    setArchivePreview(null)
     clearPaste()
     setImportRefused('')
     // The route belonged to the source that travelled. Letting it stand
@@ -1534,8 +1751,8 @@ export function ApiPane(props: ApiPaneProps) {
   }
 
   /**
-   * THE EXPORT AS A DOCUMENT — a browser drop, or the kit's file input in the
-   * region beside it, both of which yield `File` objects.
+   * THE EXPORT AS DOCUMENT OR ARCHIVE — a browser drop, or the kit's file input
+   * in the region beside it, both of which yield `File` objects.
    *
    * The same gesture as `chooseExport` above and answered the same way: what
    * was chosen goes in the field, and the destination is proposed from it.
@@ -1544,25 +1761,72 @@ export function ApiPane(props: ApiPaneProps) {
    * runs while a path only names a file on the machine running Go.
    *
    * The source line shows the file's NAME. It is not a path and is never
-   * sent as one: the route is chosen by what this gesture answered with, so
-   * `importPostman` below spells `{ document }` and never `{ path }` while a
-   * file is held. The name is there because it is what the person recognises
-   * from their downloads folder, and because the destination is proposed from
-   * its stem exactly as it is from a path's.
+   * sent as one: the route is chosen by what this gesture answered, so
+   * `importPostman` below spells `{ document }` for JSON and
+   * `{ archiveBytes }` for ZIP while a file is held. The name is there
+   * because it is what the person recognises from their downloads folder,
+   * and because the destination is proposed from its stem exactly as it is
+   * from a path's.
    */
   const chooseDocument = (files: File[]): void => {
     if (files.length > 1) {
-      // The same rule and the same sentence as the native half below: one
-      // import makes one collection, and N collections is N destinations.
       setImportRefused(MULTIPLE_EXPORTS_REFUSAL)
       return
     }
     const file = files[0]
     if (file === undefined) return
+    const requestId = ++archivePreviewRequest
     setImportRefused('')
-    setPostmanSource({ kind: 'file', file })
+    setArchivePreview(null)
     clearPaste()
-    proposeDestination(file.name)
+    if (!isArchiveFile(file)) {
+      setPostmanSource({ kind: 'file', file })
+      proposeDestination(file.name)
+      return
+    }
+    setImportingBusy(true)
+    void file
+      .arrayBuffer()
+      .then((buffer) =>
+        untrack(() => {
+          if (requestId !== archivePreviewRequest) return null
+          const archiveBytes = encodeBase64(buffer)
+          setPostmanSource({ kind: 'archive', name: file.name, bytes: archiveBytes })
+          const proposed = proposedDestination(
+            untrack(() => store.defaultRoot()),
+            file.name,
+          )
+          proposeDestination(file.name)
+          const dest = postmanDest().trim() || proposed
+          return store.previewPostman({ archiveBytes }, dest).then((result) => ({
+            result,
+            archiveBytes,
+          }))
+        }),
+      )
+      .then((payload) =>
+        untrack(() => {
+          if (payload === null || requestId !== archivePreviewRequest) return
+          const { result, archiveBytes } = payload
+          const held = postmanSource()
+          if (held.kind !== 'archive' || held.bytes !== archiveBytes) return
+          setArchivePreview(result.documents ?? [])
+          setImportRefused('')
+        }),
+      )
+      .catch((err: unknown) =>
+        untrack(() => {
+          if (requestId !== archivePreviewRequest) return
+          setPostmanSource({ kind: 'none' })
+          setArchivePreview(null)
+          setImportRefused(err instanceof Error ? err.message : String(err))
+        }),
+      )
+      .finally(() =>
+        untrack(() => {
+          if (requestId === archivePreviewRequest) setImportingBusy(false)
+        }),
+      )
   }
 
   const browseForExport = (): void => {
@@ -1682,6 +1946,9 @@ export function ApiPane(props: ApiPaneProps) {
     }
   }
 
+  const environmentName = (relPath: string): string =>
+    store.environments().find((environment) => environment.relPath === relPath)?.name ?? relPath
+
   /** What the panel says about the variable that was clicked — one line,
    *  naming WHICH SCOPE answered, and never a secret's value: the renderer
    *  does not have it (ADR-0021) and says where it lives instead. */
@@ -1720,6 +1987,29 @@ export function ApiPane(props: ApiPaneProps) {
    */
   const variableMenuItems = () => {
     const name = varMenu()?.name ?? ''
+    if (varMenu()?.secret === true) {
+      return [
+        {
+          id: 'api-secret-replace',
+          label: 'Replace with another secret',
+          icon: PencilIcon,
+          onSelect: () => {
+            const replace = varMenu()?.replace
+            setVarMenu(null)
+            replace?.()
+          },
+        },
+        {
+          id: 'api-secret-open',
+          label: 'Open in Secrets',
+          icon: FolderOpenIcon,
+          onSelect: () => {
+            setVarMenu(null)
+            openSecrets?.()
+          },
+        },
+      ]
+    }
     if (name === '') return []
     const answer = store.variableAnswer(name)
     const env = store.activeEnvironment()
@@ -1783,43 +2073,6 @@ export function ApiPane(props: ApiPaneProps) {
       ...current,
       variables: [...current.variables, { name, value: '', enabled: true }],
     })
-  }
-
-  /** The environment's own NAME, by the path the picker chose it under. */
-  const environmentName = (relPath: string): string =>
-    store.environments().find((e) => e.relPath === relPath)?.name ?? relPath
-
-  /**
-   * Where a secret made on the Auth tab would be bound — read from the same
-   * two answers the WRITE uses, so the tab cannot name one environment while
-   * `bindSecret` addresses another.
-   *
-   * Both absences are real states of this panel and neither is an error: a
-   * converted curl line has no file until it is saved, and "No environment"
-   * is a row a person can choose. The tab says which one it is; it does not
-   * draw a control that would fail.
-   */
-  const secretTarget = (): SecretTarget => {
-    if (store.selected() === null) return { kind: 'no-collection' }
-    const relPath = store.activeEnvironment()
-    if (relPath === '') return { kind: 'no-environment' }
-    return { kind: 'environment', name: environmentName(relPath) }
-  }
-
-  /**
-   * Give the auth variable its value — the store's method, not the client's.
-   * The store is what knows which collection and which environment a binding
-   * belongs to, and a form working that out for itself would be a second
-   * answer to a question that already has one.
-   *
-   * `false` becomes a REJECTION here because the store answers a boolean and
-   * keeps the reason in `error()`. Without the translation the field would
-   * empty on a refusal, and a value that never landed would look stored.
-   */
-  const createSecret = async (variable: string, value: string): Promise<void> => {
-    if (!(await store.bindSecret(variable, value))) {
-      throw new Error(store.error() || 'The value was not stored.')
-    }
   }
 
   /**
@@ -2052,9 +2305,7 @@ export function ApiPane(props: ApiPaneProps) {
    * A URL, with the route it travels only when there IS one.
    *
    * The direct case omits the key rather than spelling `route: undefined`:
-   * the Go side decodes strictly and an absent route already reads as
-   * direct, so a key holding nothing is a third spelling of a state that has
-   * two — and the one the decoder refuses.
+   * the Go side decodes strictly and an absent route already reads as direct.
    */
   const urlSource = (url: string): ImportSource => {
     const route = importRoute()
@@ -2066,35 +2317,24 @@ export function ApiPane(props: ApiPaneProps) {
     const held = postmanSource()
     if (held.kind === 'none' || dest === '') return
     setImportingBusy(true)
-    // WHICH ROUTE IS DECIDED BY WHAT THE GESTURE ANSWERED WITH, never by
-    // what kind of build this is: a held file goes as bytes, a named place
-    // goes as a path, a pasted export goes as itself, an address goes as a
-    // URL the backend fetches — and a person naming a file on the backend's
-    // own machine gets the path route in a browser too (api-client.ts,
-    // ImportSource).
-    //
-    // Reading the file can fail — it may have moved, or been revoked —
-    // between the drop and the press, so the read is INSIDE the chain and
-    // its refusal goes where the backend's own refusals go: under the field,
-    // with the ask still open.
     const source: Promise<ImportSource> =
-      held.kind === 'file'
-        ? held.file.text().then((document) => ({ document }))
-        : Promise.resolve(
-            held.kind === 'path'
-              ? { path: held.path }
-              : held.kind === 'document'
-                ? { document: held.text }
-                : urlSource(held.url),
-          )
+      held.kind === 'archive'
+        ? Promise.resolve({ archiveBytes: held.bytes })
+        : held.kind === 'file'
+          ? held.file.text().then((document) => ({ document }))
+          : Promise.resolve(
+              held.kind === 'path'
+                ? { path: held.path }
+                : held.kind === 'document'
+                  ? { document: held.text }
+                  : urlSource(held.url),
+            )
     void source
       .then((chosen) => store.importPostman(chosen, dest))
       .then(async (): Promise<void> => {
         const refused = store.error()
         setImportRefused(refused)
         if (refused !== '') return
-        // The folder is what a person can point at afterwards, so it is what
-        // the report is about.
         tellWhatWasNotImported(dest)
         const notOpened = await putInTree(dest)
         setImporting(false)
@@ -2156,6 +2396,7 @@ export function ApiPane(props: ApiPaneProps) {
    *  has not been saved is still the name a person would be asked about. */
   const openRequestMenu = (e: MouseEvent): void => {
     const open = store.selected()
+    requestMenuDoor = 'panel'
     if (open === null) return
     const box = (e.currentTarget as HTMLElement).getBoundingClientRect()
     aimRequestMenu(open.handle, open.relPath, store.draft()?.name ?? '')
@@ -2163,12 +2404,9 @@ export function ApiPane(props: ApiPaneProps) {
   }
 
   /**
-   * WHAT A REQUEST CAN BE — one list, built once, reached by two doors: the
-   * right button on its row in the tree, and the ⋮ over the one in the form.
-   *
-   * Two hand-written lists would be this repo's most recurrent defect with a
-   * menu as the thing the two owners disagreed about — they would agree for
-   * as long as anyone looked, and diverge the day an act was added to one.
+   * WHAT A REQUEST CAN BE — shared acts built once for both doors. The panel
+   * door also gets caret-dependent secret insertion; a tree row does not,
+   * because it is not the request currently held in the form.
    *
    * Every item reads `requestMenuTarget` when it FIRES rather than when it is
    * built: the kit closes the menu before calling `onSelect`, so anything
@@ -2199,10 +2437,7 @@ export function ApiPane(props: ApiPaneProps) {
   const askToDelete = (target: RequestTarget): void => {
     // "are you sure" lives in this product. A delete removes a file from a
     // folder somebody shares through git, and the only undo is a working
-    // tree they may not have committed. The question NAMES what goes,
-    // because "are you sure" is a question about nothing — and it names the
-    // row that was AIMED AT, which is the whole reason the target is not the
-    // open request any more.
+    // tree they may not have committed. The question NAMES what goes.
     void showConfirm(
       `Delete ${target.name}? The file is removed from the collection folder.`,
       'Delete',
@@ -2212,7 +2447,28 @@ export function ApiPane(props: ApiPaneProps) {
   }
 
   const requestMenuItems = (): ContextMenuItem[] => {
+    const open = store.selected()
+    const aimed = requestMenuTarget
+    const requestIsOpen =
+      open !== null &&
+      aimed !== null &&
+      open.handle === aimed.handle &&
+      open.relPath === aimed.relPath
     const items: ContextMenuItem[] = [
+      ...(requestMenuDoor === 'panel' && secretSource !== undefined
+        ? [
+            {
+              id: 'api-insert-secret',
+              label: 'Insert a secret…',
+              icon: PlusIcon,
+              onSelect: () => {
+                const picker = openRequestSecretPicker
+                if (picker !== undefined) picker()
+                setRequestMenu(null)
+              },
+            },
+          ]
+        : []),
       {
         id: 'api-row-duplicate',
         label: 'Duplicate',
@@ -2241,24 +2497,7 @@ export function ApiPane(props: ApiPaneProps) {
         },
       },
     ]
-    // CLOSE IS ABOUT THE REQUEST IN THE FORM, and only about that one. The
-    // list is reached by two doors and the other one aims at a ROW, which
-    // may be any request in any open collection — a row nobody has opened
-    // has nothing to close, and an item that did nothing there would be a
-    // control that swallows the press.
-    //
-    // It exists at all because there was no way to put the form down: every
-    // other client closes a tab, and this surface has one form by design
-    // (one draft, one selection), so the act is one item rather than a strip
-    // (nocx-8aczn.9).
-    const open = store.selected()
-    const aimed = requestMenuTarget
-    if (
-      open !== null &&
-      aimed !== null &&
-      open.handle === aimed.handle &&
-      open.relPath === aimed.relPath
-    ) {
+    if (requestIsOpen) {
       items.splice(items.length - 1, 0, {
         id: 'api-row-close',
         label: 'Close request',
@@ -2500,13 +2739,10 @@ export function ApiPane(props: ApiPaneProps) {
             },
           ]}
         />
-        {/* What a REQUEST can be — one menu, mounted once, opened by either
-            door: the right button on a row, or the ⋮ over the open one. It
-            is one element rather than one per door for the same reason it is
-            one item list: two would be two surfaces owning one popover, and
-            the second to open would close the first from under the pointer.
-            Deleting is a menu item rather than a control because it takes
-            something away, so it has to be read and chosen. */}
+        {/* What a REQUEST can be — one popover mounted once, opened by either
+            door. Shared request acts are available from both; the panel door
+            also gets caret-dependent secret insertion, while a tree row does
+            not. */}
         <ContextMenu
           open={requestMenu() !== null}
           x={requestMenu()?.x ?? 0}
@@ -2563,6 +2799,25 @@ export function ApiPane(props: ApiPaneProps) {
           onClose={() => setVarMenu(null)}
           items={variableMenuItems()}
         />
+        {/* The create ask, mounted once for both doors. It renders nothing
+            while `ask` is null — the value input is a password field and must
+            not sit in the DOM of a workbench nobody is minting from. */}
+        <Show when={secretCreate}>
+          {(vault) => (
+            <SecretCreateDialog
+              ask={secretAsk()}
+              vault={vault()}
+              onClose={() => closeSecretCreateAsk()}
+              onCreated={(created) => {
+                closeSecretCreateAsk(created)
+                // The row the person just minted must be in the inventory the
+                // chips and the picker read, or the field they land on shows a
+                // reference to a secret "not on this machine".
+                void refreshSecretEntries()
+              }}
+            />
+          )}
+        </Show>
         <CollectionDialog
           open={naming()}
           title="New collection"
@@ -2634,6 +2889,8 @@ export function ApiPane(props: ApiPaneProps) {
           pasted={postmanPasted()}
           onPaste={pasteSource}
           pasteRefusal={pasteRefused()}
+          archiveSummary={archiveSummary()}
+          archiveReady={postmanSource().kind !== 'archive' || archivePreview() !== null}
           sourceLabel={sourceLabel(postmanSource())}
           onClearSource={clearSource}
           sourceIsURL={postmanSource().kind === 'url'}
@@ -2648,6 +2905,38 @@ export function ApiPane(props: ApiPaneProps) {
           onDest={(value) => {
             setDestTyped(true)
             setPostmanDest(value)
+            const held = postmanSource()
+            if (held.kind !== 'archive') return
+            const requestId = ++archivePreviewRequest
+            setArchivePreview(null)
+            setImportingBusy(true)
+            void store
+              .previewPostman({ archiveBytes: held.bytes }, value.trim())
+              .then((result) =>
+                untrack(() => {
+                  const current = postmanSource()
+                  if (
+                    requestId !== archivePreviewRequest ||
+                    current.kind !== 'archive' ||
+                    current.bytes !== held.bytes
+                  ) {
+                    return
+                  }
+                  setArchivePreview(result.documents ?? [])
+                  setImportRefused('')
+                }),
+              )
+              .catch((err: unknown) =>
+                untrack(() => {
+                  if (requestId !== archivePreviewRequest) return
+                  setImportRefused(err instanceof Error ? err.message : String(err))
+                }),
+              )
+              .finally(() =>
+                untrack(() => {
+                  if (requestId === archivePreviewRequest) setImportingBusy(false)
+                }),
+              )
           }}
           defaultRoot={store.defaultRoot()}
           dropSession={nativeDrop?.session() ?? null}
@@ -2829,6 +3118,7 @@ export function ApiPane(props: ApiPaneProps) {
                       onContextMenu={(e: MouseEvent) => {
                         if (row.kind === 'request') {
                           e.preventDefault()
+                          requestMenuDoor = 'row'
                           aimRequestMenu(row.handle, row.relPath, row.name)
                           setRequestMenu({ x: e.clientX, y: e.clientY })
                           return
@@ -2966,10 +3256,9 @@ export function ApiPane(props: ApiPaneProps) {
             one. It replaced the picker that used to sit on the pane's
             header; the list IS the picker, and a second one would be two
             places to answer one question.
-
-            It shows the ACTIVE collection's environments, because that is
-            what an environment belongs to (§6.5) — the tick says which one a
-            send goes out under. */}
+            It shows the ACTIVE request's collection environments, because that
+            is where the environment belongs (§6.5) — the tick says which one
+            this request sends under, and the choice is stored in its file. */}
         <Show when={store.activeCollection() !== ''}>
           <Section
             id="api-environments"
@@ -3133,8 +3422,6 @@ export function ApiPane(props: ApiPaneProps) {
               <Show when={store.draft() !== null}>
                 <IconButton
                   id="api-folder-close"
-                  size="sm"
-                  title="Back to the request"
                   ariaLabel="Back to the request"
                   onClick={showRequest}
                 >
@@ -3189,6 +3476,15 @@ export function ApiPane(props: ApiPaneProps) {
             onEdit={(next) => store.editDraft(next)}
             variableState={variableState}
             onVariable={(name, at) => setVarMenu({ name, x: at.x, y: at.y })}
+            secretSource={secretSource}
+            secretEntries={secretEntries}
+            vaultState={vaultState}
+            onSecretReference={(handle, at, replace) =>
+              setVarMenu({ name: handle, x: at.x, y: at.y, secret: true, replace })
+            }
+            onPickerReady={(open) => {
+              openRequestSecretPicker = open
+            }}
             onSend={() => void store.send()}
             onStop={() => void store.stop()}
           />
@@ -3222,6 +3518,12 @@ export function ApiPane(props: ApiPaneProps) {
             saveError={folderSaveRefused()}
             onVariables={setFolderRows}
             onNewRequest={newRequestHere}
+            secretSource={secretSource}
+            secretEntries={secretEntries}
+            vaultState={vaultState}
+            onSecretReference={(handle, at, replace) =>
+              setVarMenu({ name: handle, x: at.x, y: at.y, secret: true, replace })
+            }
           />
         </div>
       </Show>
@@ -3257,14 +3559,13 @@ export function ApiPane(props: ApiPaneProps) {
                 setEnvDirty(true)
               }}
               connections={store.connections()}
-              // The one control in this panel that carries a credential. It
-              // is handed the store's method rather than the client's: the
-              // store is what knows which collection and which environment
-              // the editor is showing, and a surface naming those itself
-              // would be a second answer to a question the store already
-              // owns.
-              onBindSecret={(variable, value) => store.bindSecret(variable, value).then(() => {})}
               onSave={saveEnvironment}
+              secretSource={secretSource}
+              secretEntries={secretEntries}
+              vaultState={vaultState}
+              onSecretReference={(handle, at, replace) =>
+                setVarMenu({ name: handle, x: at.x, y: at.y, secret: true, replace })
+              }
               onReset={resetEnvironment}
             />
           </div>
@@ -3276,8 +3577,23 @@ export function ApiPane(props: ApiPaneProps) {
               request={store.draft()}
               scopeVariables={store.scopeVariables()}
               onEdit={(next) => store.editDraft(next)}
-              secretTarget={secretTarget()}
-              onCreateSecret={createSecret}
+              secretSource={secretSource}
+              secretEntries={secretEntries}
+              secretInventory={secretInventoryEntries}
+              vaultState={vaultState}
+              onSecretReference={(handle, at, replace) =>
+                setVarMenu({ name: handle, x: at.x, y: at.y, secret: true, replace })
+              }
+              onPickerReady={(open) => {
+                openRequestSecretPicker = open
+              }}
+              onCreateSecret={secretCreate === undefined ? undefined : openSecretCreateAsk}
+              // WHERE THE PERSON IS STANDING, for the proposed name's folder
+              // rung (nocx-7mfwb.2). `activeFolder` and not `draftFolder`:
+              // this is the place they walked to, which opening a request
+              // moves, and the proposal is about where they are — not about
+              // where a file with no home yet would be written.
+              folder={() => store.activeFolder()}
             />
           </section>
 
@@ -3311,6 +3627,9 @@ export function ApiPane(props: ApiPaneProps) {
               runs={store.runs()}
               onView={(id, at) => store.setRunView(id, at)}
               connectionName={connectionName}
+              secretName={(handle) =>
+                secretEntries().find((entry) => entry.id === handle)?.name ?? handle
+              }
             />
           </section>
         </Show>

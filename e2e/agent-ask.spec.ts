@@ -74,6 +74,7 @@ import { tmpdir } from 'node:os'
 import { VaultBackend, bindEndpoint, settingsReady } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
+import { fieldChip } from './secret-field'
 
 /** The Test button's probe request, identified by its BODY: a
  *  chat-completions request naming the configured model. The form's silent
@@ -709,18 +710,26 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     await newDialog.getByRole('button', { name: 'Create Endpoint', exact: true }).click()
     await expect(newDialog).not.toBeVisible({ timeout: 10_000 })
 
-    // ── Stored credential: the key SOURCE is the bound row ──────────────
+    // ── Stored credential: the key field HOLDS the bound row ────────────
     // Open the saved endpoint for editing. The key material never crosses
-    // back (ADR-0030 §3): the source control (nocx-rzjw) opens on "Use
-    // existing secret" with the bound row — there is no key input at all,
-    // and the probe must still authenticate with the credential the
-    // endpoint OWNS, resolved by the backend from the vault.
+    // back (ADR-0030 §3): the field opens holding the reference to the row
+    // the mint created, drawn as a chip carrying the secret's NAME — and the
+    // probe must still authenticate with the credential the endpoint OWNS,
+    // resolved by the backend from the vault.
+    //
+    // The name used to be the bound combobox's DOM value (nocx-rzjw); that
+    // control is gone (nocx-3o0ed.4) and the field's value is the opaque
+    // reference itself, so the name-not-handle assertion moves onto the chip
+    // painted over it. Both halves are still here: what a person reads is the
+    // name, and `secrow:` appears nowhere they can read.
     await page.getByRole('button', { name: `Edit ${name}` }).click()
     const editDialog = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
     await expect(editDialog).toBeVisible()
-    const picker = editDialog.locator('select')
-    await expect(picker).toBeVisible()
-    await expect(picker).toHaveValue(/^secrow:/)
+    const keyField = editDialog.locator('#endpoint-key')
+    const keyChip = fieldChip(keyField)
+    await expect(keyChip).toHaveText(`${name} API key`)
+    await expect(keyField).toHaveValue(/^\{\{secret:.+\}\}$/)
+    await expect(editDialog).not.toContainText('secrow:')
     // The button must be ENABLED before the click: it is disabled while a
     // probe is in flight (testDisabled = probing()), and a click on a
     // disabled button is silently swallowed — leaving the dialog without a
@@ -738,18 +747,20 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // The probe succeeded end to end — a streamed answer through the real
     // backend, not merely a request that arrived.
     await expect(editDialog).toContainText(/e2e-model answered in \d+ ms/, { timeout: 15_000 })
-    // The material was never sent back to the renderer: the source is still
-    // the bound row after a probe that resolved the stored material.
-    await expect(picker).toHaveValue(/^secrow:/)
+    await expect(keyChip).toHaveText(`${name} API key`)
+    await expect(editDialog).not.toContainText('secrow:')
 
     // ── A key typed into the form WINS over the stored one ──────────────
     const typedKey = `typed-key-${nonce}`
-    // Switching the source to "Type a new one" reveals the EMPTY password
-    // field — an input, never a stored value.
-    await editDialog.getByRole('radio', { name: 'Type a new one' }).click()
-    const keyInput = editDialog.locator('#endpoint-key')
-    await expect(keyInput).toHaveValue('')
-    await keyInput.fill(typedKey)
+    // Typing over the reference is what "switch to Type a new one" was: the
+    // reference goes, the chip goes with it, and what is left is an input —
+    // never a stored value, which the record could not hand back in any case.
+    // Clearing first is the assertion the old empty-field check made: nothing
+    // the vault held is carried into the material this probe sends.
+    await keyField.fill('')
+    await expect(keyField).toHaveValue('')
+    await expect(fieldChip(keyField)).toHaveCount(0)
+    await keyField.fill(typedKey)
     await expect(testButton).toBeEnabled()
     const typedBase = fake.requests().length
     await testButton.click()

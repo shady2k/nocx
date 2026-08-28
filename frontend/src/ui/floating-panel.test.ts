@@ -5,6 +5,7 @@
 // ceiling (measured once per list, never per selection change), max-height
 // and scrolling, the row list, the group caption, the footer of key hints,
 // the match highlight, and row overflow (ellipsis, never a clipped glyph).
+import { readFileSync } from 'node:fs'
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
 import {
   FloatingPanel,
@@ -391,5 +392,224 @@ describe('FloatingPanel', () => {
     expect(getComputedStyle(rowEl).whiteSpace).toBe('nowrap')
     // The row is capped: the panel never exceeds the ceiling to fit it.
     expect(panel.root.style.width).toBe(`${MAX_PANEL_WIDTH_PX}px`)
+  })
+})
+
+/** A field at a known place in the viewport, and the anchored panel that
+ *  opens against it.
+ *
+ *  jsdom lays nothing out: every rect is zero and every element reports
+ *  itself visible, so `toBeVisible()` on this panel proves nothing at all
+ *  (it passed for the whole time the panel was opening above the top of the
+ *  window). What CAN be tested here is the arithmetic — feed the component a
+ *  field rect and a panel size and assert the top and left it computes. The
+ *  proof that the numbers correspond to a real screen is the e2e spec
+ *  (e2e/secret-panel-position.spec.ts), which reads the live rect. */
+const anchoredMount = (rect: { top: number; bottom: number; left: number }) => {
+  const field = document.createElement('input')
+  document.body.appendChild(field)
+  field.getBoundingClientRect = (): DOMRect => ({
+    top: rect.top,
+    bottom: rect.bottom,
+    left: rect.left,
+    right: rect.left,
+    width: 0,
+    height: rect.bottom - rect.top,
+    x: rect.left,
+    y: rect.top,
+    toJSON: () => ({}),
+  })
+  const container = document.createElement('div')
+  Object.defineProperty(container, 'clientWidth', { value: 1200 })
+  document.body.appendChild(container)
+  const panel = new FloatingPanel({
+    variant: 'secret',
+    role: 'listbox',
+    ariaLabel: 'test',
+    anchor: () => field,
+  })
+  panel.mount(container)
+  return { panel, field, container }
+}
+
+/** The laid-out size jsdom never computes. Height is what the vertical
+ *  placement reads; width is the horizontal clamp's, as above. */
+const withSize = <T>(width: number, height: number, fn: () => T): T => {
+  const proto = HTMLElement.prototype
+  Object.defineProperty(proto, 'scrollWidth', { configurable: true, get: () => width })
+  Object.defineProperty(proto, 'offsetWidth', { configurable: true, get: () => width })
+  Object.defineProperty(proto, 'offsetHeight', { configurable: true, get: () => height })
+  try {
+    return fn()
+  } finally {
+    delete (proto as { scrollWidth?: number }).scrollWidth
+    delete (proto as { offsetWidth?: number }).offsetWidth
+    delete (proto as { offsetHeight?: number }).offsetHeight
+  }
+}
+
+/** The viewport the placement is computed against. jsdom's default is
+ *  1024x768; naming it makes the expected numbers readable. */
+const viewport = (width: number, height: number): void => {
+  Object.defineProperty(window, 'innerWidth', { configurable: true, value: width })
+  Object.defineProperty(window, 'innerHeight', { configurable: true, value: height })
+}
+
+describe('FloatingPanel anchored to a field (nocx-vzdna)', () => {
+  beforeEach(() => viewport(1024, 768))
+
+  it('declares the anchored variance, and the editor-mounted panel does not', () => {
+    const { panel } = anchoredMount({ top: 400, bottom: 424, left: 100 })
+    expect(panel.root.dataset.anchor).toBe('viewport')
+    expect(mount().panel.root.dataset.anchor).toBeUndefined()
+  })
+
+  it('opens INSIDE the viewport, above the field it belongs to', () => {
+    const { panel } = anchoredMount({ top: 400, bottom: 424, left: 100 })
+    withSize(480, 200, () => panel.show({ rows: [row({ id: 'a' })], selectedIndex: 0 }))
+    // 400 (the field's top) - 6 (the gap) - 200 (the panel) = 194.
+    const top = Number.parseFloat(panel.root.style.top)
+    expect(top).toBe(194)
+    // Criterion 1, as geometry: the whole panel is on screen.
+    expect(top).toBeGreaterThanOrEqual(0)
+    expect(top + 200).toBeLessThanOrEqual(768)
+    expect(panel.root.style.left).toBe('100px')
+  })
+
+  it('is anchored to ITS OWN field: two fields at different offsets open at different heights', () => {
+    const near = anchoredMount({ top: 80, bottom: 104, left: 40 })
+    const far = anchoredMount({ top: 600, bottom: 624, left: 240 })
+    withSize(480, 40, () => {
+      near.panel.show({ rows: [row({ id: 'a' })], selectedIndex: 0 })
+      far.panel.show({ rows: [row({ id: 'a' })], selectedIndex: 0 })
+    })
+    expect(near.panel.root.style.top).toBe('34px') // 80 - 6 - 40
+    expect(far.panel.root.style.top).toBe('554px') // 600 - 6 - 40
+    expect(near.panel.root.style.left).toBe('40px')
+    expect(far.panel.root.style.left).toBe('240px')
+  })
+
+  it('flips BELOW the field when the panel does not fit above it', () => {
+    const { panel } = anchoredMount({ top: 40, bottom: 64, left: 100 })
+    withSize(480, 200, () => panel.show({ rows: [row({ id: 'a' })], selectedIndex: 0 }))
+    // 40 - 6 - 200 is negative — off the top of the window, which is the
+    // defect itself. Below the field instead: 64 + 6.
+    expect(panel.root.style.top).toBe('70px')
+  })
+
+  it('clamps into the window when the panel fits neither above nor below', () => {
+    const { panel } = anchoredMount({ top: 100, bottom: 700, left: 100 })
+    withSize(480, 300, () => panel.show({ rows: [row({ id: 'a' })], selectedIndex: 0 }))
+    // Below would be 706, putting 238px of a 300px panel off the bottom.
+    // Clamped to innerHeight - height.
+    const top = Number.parseFloat(panel.root.style.top)
+    expect(top).toBe(468)
+    expect(top).toBeGreaterThanOrEqual(0)
+    expect(top + 300).toBeLessThanOrEqual(768)
+  })
+
+  it('never runs off the right edge — the anchorLeft guard, read against the window', () => {
+    const { panel } = anchoredMount({ top: 400, bottom: 424, left: 900 })
+    withSize(480, 100, () => panel.show({ rows: [row({ id: 'a' })], selectedIndex: 0 }))
+    // 900 + 480 would be 1380 against a 1024 window: clamped to 1024 - 480.
+    expect(panel.root.style.left).toBe('544px')
+  })
+
+  it('follows its field when the page scrolls under an open panel', () => {
+    const { panel, field } = anchoredMount({ top: 400, bottom: 424, left: 100 })
+    withSize(480, 100, () => {
+      panel.show({ rows: [row({ id: 'a' })], selectedIndex: 0 })
+      expect(panel.root.style.top).toBe('294px')
+      field.getBoundingClientRect = () =>
+        ({ top: 300, bottom: 324, left: 100, height: 24 }) as DOMRect
+      document.dispatchEvent(new Event('scroll'))
+      expect(panel.root.style.top).toBe('194px')
+    })
+  })
+
+  it('stops following once closed', () => {
+    const { panel, field } = anchoredMount({ top: 400, bottom: 424, left: 100 })
+    withSize(480, 100, () => {
+      panel.show({ rows: [row({ id: 'a' })], selectedIndex: 0 })
+      panel.hide()
+      field.getBoundingClientRect = () =>
+        ({ top: 300, bottom: 324, left: 100, height: 24 }) as DOMRect
+      document.dispatchEvent(new Event('scroll'))
+      expect(panel.root.style.top).toBe('294px')
+    })
+  })
+
+  it('places itself somewhere visible when its field has gone', () => {
+    const field = document.createElement('input')
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const panel = new FloatingPanel({
+      variant: 'secret',
+      role: 'listbox',
+      ariaLabel: 'test',
+      anchor: () => (field.isConnected ? field : null),
+    })
+    panel.mount(container)
+    withSize(480, 100, () => panel.showEmpty('loading secrets…'))
+    expect(panel.root.style.top).toBe('0px')
+    expect(panel.root.style.left).toBe('0px')
+  })
+
+  it('moves into the open dialog its field lives in — the top layer, not the body', () => {
+    const dialog = document.createElement('dialog')
+    dialog.setAttribute('open', '')
+    document.body.appendChild(dialog)
+    const field = document.createElement('input')
+    dialog.appendChild(field)
+    const body = document.createElement('div')
+    document.body.appendChild(body)
+    const panel = new FloatingPanel({
+      variant: 'secret',
+      role: 'listbox',
+      ariaLabel: 'test',
+      anchor: () => field,
+    })
+    panel.mount(body)
+    expect(panel.root.parentElement).toBe(body)
+    withSize(480, 100, () => panel.show({ rows: [row({ id: 'a' })], selectedIndex: 0 }))
+    // A native modal <dialog> paints in the browser's top layer, outside
+    // every stacking context: a panel left on the body would be behind the
+    // dialog's own scrim, which is the same defect as being off-screen.
+    expect(panel.root.parentElement).toBe(dialog)
+    // And back, once the field is not in a dialog any more.
+    dialog.removeAttribute('open')
+    withSize(480, 100, () => panel.show({ rows: [row({ id: 'a' })], selectedIndex: 0 }))
+    expect(panel.root.parentElement).toBe(body)
+  })
+
+  it('states its own interactivity, because the layer it moves into does not', () => {
+    // The top layer decides painting order and nothing about inheritance: a
+    // panel re-homed into a modal <dialog> inherits that dialog's
+    // `pointer-events`, and these dialogs live inside panes where an
+    // inactive one is `pointer-events: none` (base.css). The panel was then
+    // painted, visible, stable — and not hit-testable, and the click fell
+    // through to the document element. jsdom cannot hit-test, so what is
+    // asserted here is that the declaration is present; the browser proof is
+    // e2e/secret-panel-position.spec.ts, which reads elementFromPoint.
+    //
+    // Read from the SHIPPED stylesheet, not from the block this file injects:
+    // jsdom loads no project CSS, so asserting a computed style here would
+    // only assert the test's own fixture — green while the real rule was
+    // missing, which is the shape of defect this whole bead is about.
+    const css = readFileSync('src/styles/components/floating-panel.css', 'utf8')
+    const anchored = css.slice(css.indexOf(".ui-floating-panel[data-anchor='viewport']"))
+    expect(anchored.slice(0, anchored.indexOf('}'))).toMatch(/pointer-events:\s*auto/)
+  })
+
+  it('leaves the editor-mounted panel entirely to CSS — the terminal path is untouched', () => {
+    // prompt-vault.ts mounts into editor.root (position: relative), where
+    // `bottom: 100%` already means "directly above the prompt". A panel with
+    // no anchor must therefore compute NO top at all: an inline top would
+    // silently move the terminal's panel.
+    const { panel } = mount('secret')
+    withSize(480, 100, () => panel.show({ rows: [row({ id: 'a' })], selectedIndex: 0 }))
+    expect(panel.root.style.top).toBe('')
+    expect(panel.root.style.position).toBe('')
+    expect(panel.root.dataset.anchor).toBeUndefined()
   })
 })

@@ -25,11 +25,6 @@
     },
     {
       "kind": "exports",
-      "file": "src/authentication-editor.tsx",
-      "symbol": "SecretPicker"
-    },
-    {
-      "kind": "exports",
       "file": "src/connections.tsx",
       "symbol": "sourceLabel"
     },

@@ -81,7 +81,7 @@ func varCollection(t *testing.T, baseURL string) string {
 // panel makes: read what is on disk, write it back edited, read it again.
 func TestAPIRequest_VariablesSurviveTheReadWriteRoundTrip(t *testing.T) {
 	srv, _ := varServer(t)
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := varCollection(t, srv.URL)
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -139,7 +139,7 @@ func TestAPIRequest_VariablesSurviveTheReadWriteRoundTrip(t *testing.T) {
 // A REQUEST WITH NO VARIABLES answers [] and never null — the renderer's
 // first .map on a null throws, and the file is allowed to omit the key.
 func TestAPIRequest_ARequestWithNoVariablesAnswersAnEmptyList(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, "https://example.test/ping")
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -163,12 +163,52 @@ func TestAPIRequest_ARequestWithNoVariablesAnswersAnEmptyList(t *testing.T) {
 	}
 }
 
+// The request's environment choice is optional on disk and over the wire:
+// legacy files omit it, while an explicit no-environment choice is `""`.
+func TestAPIRequestRead_PreservesEnvironmentChoiceAndLegacyOmission(t *testing.T) {
+	_, conn := newAPIWSServer(t)
+	root := apiCollectionFolder(t, "https://example.test/ping")
+	if err := os.WriteFile(filepath.Join(root, "ping.json"), []byte(
+		`{"id":"r1","name":"ping","method":"GET","url":"https://example.test/ping",`+
+			`"environment":"","headers":[],"query":[],"body":{"kind":"none"},"auth":{"kind":"none"}}`,
+	), 0o600); err != nil {
+		t.Fatalf("write explicit environment choice: %v", err)
+	}
+	handle := openAPICollection(t, conn, root, 1)
+
+	read := func(relPath string, id int) json.RawMessage {
+		t.Helper()
+		resp := vaultCall(t, conn, "api.request.read", map[string]any{
+			"handle": handle, "relPath": relPath,
+		}, id)
+		if resp.Error != nil {
+			t.Fatalf("api.request.read %s: %+v", relPath, resp.Error)
+		}
+		var got struct {
+			Request struct {
+				Environment json.RawMessage `json:"environment"`
+			} `json:"request"`
+		}
+		if err := json.Unmarshal(resp.Result, &got); err != nil {
+			t.Fatalf("unmarshal %s: %v", relPath, err)
+		}
+		return got.Request.Environment
+	}
+
+	if got := string(read("ping.json", 2)); got != `""` {
+		t.Fatalf("explicit environment = %s, want empty string", got)
+	}
+	if got := read("nested/echo.json", 3); got != nil {
+		t.Fatalf("legacy environment = %s, want the property omitted", got)
+	}
+}
+
 // THE ORDER, over the socket: two requests with different values for one
 // name, under an environment that answers that name too. Each gets its own,
 // and the environment's answer is what neither gets.
 func TestAPIRequestSend_TheRequestsOwnVariableWinsOverTheEnvironments(t *testing.T) {
 	srv, got := varServer(t)
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := varCollection(t, srv.URL)
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -201,7 +241,7 @@ func TestAPIRequestSend_TheRequestsOwnVariableWinsOverTheEnvironments(t *testing
 // presence list the tree needs, so no folder gets a second read round trip.
 func TestAPIRequestSend_FolderVariablesResolveInNearestOrderAndListPresence(t *testing.T) {
 	srv, got := varServer(t)
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := t.TempDir()
 	write := func(rel, body string) {
 		t.Helper()
@@ -275,13 +315,11 @@ func TestAPIRequestSend_FolderVariablesResolveInNearestOrderAndListPresence(t *t
 	}
 }
 
-// THE REFUSAL, over the socket: a request row that would shadow a name the
-// environment declares secret. It comes back as a RUN at compose — a thing
-// that happened to somebody who pressed Send — naming the variable and never
-// the row's value.
-func TestAPIRequestSend_ARequestVariableShadowingASecretIsRefused(t *testing.T) {
+// A request variable and an environment value are ordinary layers. Secret
+// references are values, not a fourth layer that can refuse the request.
+func TestAPIRequestSend_ARequestVariableOverridesAnEnvironmentValue(t *testing.T) {
 	srv, got := varServer(t)
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	root := t.TempDir()
 	write := func(rel, body string) {
@@ -296,42 +334,27 @@ func TestAPIRequestSend_ARequestVariableShadowingASecretIsRefused(t *testing.T) 
 	}
 	write("nocx-collection.json", `{"schemaVersion":1,"name":"acme"}`)
 	write("send.json", `{"id":"r1","name":"send","method":"GET","url":"{{baseUrl}}/bot{{token}}/x",`+
-		`"headers":[],"query":[],`+
-		`"variables":[{"name":"token","value":"the-file-s-own-value","enabled":true}],`+
+		`"headers":[],"query":[],"variables":[{"name":"token","value":"the-file-s-own-value","enabled":true}],`+
 		`"body":{"kind":"none"},"auth":{"kind":"none"}}`)
 	write("environments/dev.json", `{"name":"dev","values":{"baseUrl":`+mustJSON(t, srv.URL)+
-		`},"secretVars":["token"],"route":{"kind":"direct"}}`)
+		`,"token":"environment-value"},"route":{"kind":"direct"}}`)
 
 	handle := openAPICollection(t, conn, root, 1)
 	resp := vaultCall(t, conn, "api.request.send", map[string]any{
-		"handle": handle, "relPath": "send.json",
-		"envRelPath": "environments/dev.json", "token": "t-1",
+		"handle": handle, "relPath": "send.json", "envRelPath": "environments/dev.json",
+		"token": "request-variable-override",
 	}, 2)
 	if resp.Error != nil {
-		t.Fatalf("expected a run, got an error: %+v", resp.Error)
+		t.Fatalf("api.request.send: %+v", resp.Error)
 	}
 	var run apiSendResponse
 	if err := json.Unmarshal(resp.Result, &run); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if run.Outcome != "failed" {
-		t.Fatalf("outcome = %q, want failed", run.Outcome)
+	if run.Outcome != "answered" {
+		t.Fatalf("outcome = %q, want answered", run.Outcome)
 	}
-	if run.Failure == nil || run.Failure.Phase != "compose" {
-		t.Fatalf("failure = %+v, want phase compose", run.Failure)
-	}
-	if !strings.Contains(run.Failure.Reason, "token") {
-		t.Errorf("reason = %q, want it to name the variable", run.Failure.Reason)
-	}
-	if !strings.Contains(run.Failure.Reason, "secret") {
-		t.Errorf("reason = %q, want it to say why", run.Failure.Reason)
-	}
-	// NEVER THE ROW'S VALUE. The reason crosses to the renderer and reaches
-	// any log that prints it.
-	if strings.Contains(run.Failure.Reason, "the-file-s-own-value") {
-		t.Fatalf("the refusal carries the row's value: %s", run.Failure.Reason)
-	}
-	if _, hits := got.get(); hits != 0 {
-		t.Errorf("the server was reached %d times by a refused send", hits)
+	if path, hits := got.get(); hits != 1 || path != "/botthe-file-s-own-value/x" {
+		t.Fatalf("server received path %q in %d requests, want request value once", path, hits)
 	}
 }

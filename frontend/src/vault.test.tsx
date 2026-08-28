@@ -4,7 +4,9 @@ import { cleanup, render, screen, fireEvent } from '@solidjs/testing-library'
 import {
   SetupDialog,
   UnlockDialog,
+  createVaultSecretSource,
   createVaultState,
+  type VaultController,
   ChangePassphraseDialog,
   RecoveryCodeDialog,
   VaultSection,
@@ -336,6 +338,81 @@ describe('createVaultState', () => {
 function makeRpcError(reason: string): Error {
   return new RpcError('vault error', -32000, { reason })
 }
+
+// ── createVaultSecretSource — the ONE picker source main.tsx wires ────
+//
+// Its `requestSetup` is the EXPLICIT door onto an uninitialized vault: the
+// person pressed a field's lock, which is a request, so it raises the real
+// surface rather than an offer row (secret-picker.ts). WHICH real surface is
+// the question these tests pin, and the answer is the one saveSecretWithVault
+// already gives: a machine whose OS key can carry the vault is set up in
+// silence, and only a machine that cannot is asked for a passphrase. Two
+// doors onto one act must not disagree about whether it needs a dialog
+// (nocx-3o0ed.4).
+
+describe('createVaultSecretSource: the explicit door onto an uninitialized vault', () => {
+  function source(over: Partial<Parameters<typeof createVaultSecretSource>[0]> = {}) {
+    const h = mockClient()
+    const openSetup = vi.fn()
+    const refresh = vi.fn().mockResolvedValue(true)
+    const onError = vi.fn()
+    const controller = { openSetup, refresh, openUnlock: vi.fn() } as unknown as VaultController
+    const picker = createVaultSecretSource({
+      vaultClient: h.client,
+      vaultController: controller,
+      openSecretCreate: vi.fn(),
+      onError,
+      ...over,
+    })
+    return { ...h, picker, openSetup, refresh, onError }
+  }
+
+  it('sets up SILENTLY on a machine whose OS key can carry the vault', async () => {
+    const h = source()
+    h.status.mockResolvedValue({ ...BASE_STATUS, state: 'uninitialized', osKeyCapable: true })
+    h.setup.mockResolvedValue({})
+
+    // `false` is the whole answer: nothing took the surface, so the panel
+    // stays where the person is standing and reloads its list.
+    await expect(h.picker.requestSetup()).resolves.toBe(false)
+    expect(h.setup).toHaveBeenCalledWith({})
+    expect(h.openSetup).not.toHaveBeenCalled()
+    // And the controller learns the vault is open, or every later read of its
+    // state answers about the vault as it was a moment ago.
+    expect(h.refresh).toHaveBeenCalled()
+  })
+
+  it('raises the setup sheet on a machine that cannot', async () => {
+    const h = source()
+    h.status.mockResolvedValue({ ...BASE_STATUS, state: 'uninitialized', osKeyCapable: false })
+
+    await expect(h.picker.requestSetup()).resolves.toBe(true)
+    expect(h.openSetup).toHaveBeenCalled()
+    expect(h.setup).not.toHaveBeenCalled()
+  })
+
+  it('falls through to the sheet when the silent setup itself fails, and says so', async () => {
+    const h = source()
+    h.status.mockResolvedValue({ ...BASE_STATUS, state: 'uninitialized', osKeyCapable: true })
+    h.setup.mockRejectedValue(new Error('keyring refused'))
+
+    await expect(h.picker.requestSetup()).resolves.toBe(true)
+    expect(h.openSetup).toHaveBeenCalled()
+    // A silent failure that stayed silent would be a lock that appeared to do
+    // nothing (AGENTS.md: a soft degrade must be visible).
+    expect(h.onError).toHaveBeenCalled()
+  })
+
+  it('asks when it cannot even read the status: no remedy is known, so none is assumed', async () => {
+    const h = source()
+    h.status.mockRejectedValue(new Error('no backend'))
+
+    await expect(h.picker.requestSetup()).resolves.toBe(true)
+    expect(h.openSetup).toHaveBeenCalled()
+    expect(h.setup).not.toHaveBeenCalled()
+    expect(h.onError).toHaveBeenCalled()
+  })
+})
 
 describe('saveSecretWithVault', () => {
   it('vault-uninitialized + no OS key: shows SetupDialog, retries save after setup', async () => {

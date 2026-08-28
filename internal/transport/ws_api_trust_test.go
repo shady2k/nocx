@@ -45,7 +45,7 @@ func TestAPIRequestSend_AnUnverifiedChainIsNamedOnTheRun(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiConnectionFolder(t, srv.URL)
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -71,7 +71,7 @@ func TestAPIRequestSend_TheSameServerVerifiedIsRefusedAndClaimsNoChain(t *testin
 	}))
 	defer srv.Close()
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiConnectionFolder(t, srv.URL)
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -102,7 +102,7 @@ func TestAPIRequestSend_APlainExchangeUnderAnInsecureRouteClaimsNothing(t *testi
 	}))
 	defer srv.Close()
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiConnectionFolder(t, srv.URL)
 	handle := openAPICollection(t, conn, root, 1)
 

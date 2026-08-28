@@ -94,10 +94,10 @@ type ApiMalformedRef = ListedMalformedRef
 export type ApiEnvironmentRef = ListedEnvironmentRef
 
 /** ONE environment whole, as the editor reads and writes it: the name, the
- *  plain values, the names of the secret variables, and the route. The ref
- *  above names an environment so a person can CHOOSE one; this is what an
- *  ask holds while it is open, which is the only interval in which the
- *  renderer legitimately has a copy of a file's contents (§6.4). */
+ * plain values, and the route. The ref above names an environment so a person
+ * can CHOOSE one; this is what an ask holds while it is open, which is the
+ * only interval in which the renderer legitimately has a copy of a file's
+ * contents (§6.4). */
 export type ApiEnvironment = ReadEnvironment
 export type ApiRoute = ReadRoute
 export type ApiOpenCollection = OpenCollection

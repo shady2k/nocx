@@ -31,19 +31,12 @@ const defaultEnvName = "default"
 // postmanResult is a converted document: the collection, its requests read
 // two ways — Collection.Requests[i].RelPath is where Requests[i] belongs,
 // because a request is addressed by its path within the collection (§6.1)
-// and the model itself holds no path — its environments, the secret VALUES,
-// and what could not be carried.
-//
-// It is unexported, and the values are why. There was a public FromPostman
-// returning everything but them; nothing outside this package's own tests
-// ever called it, because api.import.postman WRITES A FOLDER rather than
-// answering with a collection, so it was a converter with no entrance. The
-// entrance is ImportInto, which has a BindWriter to hand the values to (§8).
+// and the model itself holds no path — its environments, and what could not
+// be carried.
 type postmanResult struct {
 	Collection   apicoll.Collection
 	Requests     []apicoll.Request
 	Environments []apicoll.Environment
-	Secrets      []secretOffer
 	Unsupported  []Unsupported
 }
 
@@ -259,6 +252,7 @@ func parsePostman(r io.Reader, route apicoll.Route) (postmanResult, error) {
 		if name == "" {
 			name = defaultEnvName
 		}
+		c.res.Collection.Name = name
 		c.env = &apicoll.Environment{Name: name, Route: c.arrivalRoute()}
 		c.readVariables(doc.Values)
 		c.res.Environments = append(c.res.Environments, *c.env)
@@ -324,9 +318,9 @@ func (c *pmConv) collection(doc pmDoc) (postmanResult, error) {
 // The rule is §6.3 exactly: a "secret" variable contributes its NAME and
 // nothing else. A variable NOT marked secret whose value is
 // credential-shaped is promoted to the same treatment and said out loud —
-// leaving a live token in a file that exists to be committed is the failure
-// this whole format is built to make impossible, and Postman users mark
-// perhaps half of theirs.
+// The import keeps ordinary collection variables and drops every imported
+// credential value. A Postman secret is still an ordinary variable so the
+// person can supply its value after import.
 func (c *pmConv) readVariables(vars []pmVariable) {
 	for _, v := range vars {
 		name := strings.TrimSpace(v.Key.String())
@@ -339,40 +333,32 @@ func (c *pmConv) readVariables(vars []pmVariable) {
 			c.itemise("disabled variable "+clip(name), "the model has no disabled state for a variable; an environment holds the ones in use")
 			continue
 		}
-		switch {
-		case strings.EqualFold(v.Type, "secret"):
-			c.declareSecret(name, v.Value.String())
-		case headerValueIsSecret(name, v.Value.String()):
-			c.declareSecret(name, v.Value.String())
-			c.itemise("variable "+clip(name)+" was not marked secret",
-				"its value is credential-shaped, so it was stored as a secret variable: the name is in the environment file and the value is not")
-		default:
+		value := c.dropSecretReferences(v.Value.String(), "variable "+clip(name))
+		if strings.EqualFold(v.Type, "secret") || headerValueIsSecret(name, value) {
 			c.ensureEnv()
-			if c.env.Values == nil {
-				c.env.Values = map[string]string{}
-			}
-			c.env.Values[name] = v.Value.String()
+			c.itemise("variable "+clip(name), "imported credential material is not carried; supply the value after import")
+			continue
 		}
+		c.ensureEnv()
+		if c.env.Values == nil {
+			c.env.Values = map[string]string{}
+		}
+		c.env.Values[name] = value
 	}
+}
+
+func (c *pmConv) dropSecretReferences(value, where string) string {
+	redacted, refs := dropSecretReferences(value)
+	for _, ref := range refs {
+		c.itemise(where+" "+ref, "vault references are not imported; supply the value after import")
+	}
+	return redacted
 }
 
 func (c *pmConv) ensureEnv() {
 	if c.env == nil {
 		c.env = &apicoll.Environment{Name: defaultEnvName, Route: c.arrivalRoute()}
 	}
-}
-
-// declareSecret records the NAME in the environment and hands the VALUE to
-// the offer list, which only ImportInto reads.
-func (c *pmConv) declareSecret(name, value string) {
-	c.ensureEnv()
-	for _, existing := range c.env.SecretVars {
-		if existing == name {
-			return
-		}
-	}
-	c.env.SecretVars = append(c.env.SecretVars, name)
-	c.res.Secrets = append(c.res.Secrets, secretOffer{Environment: c.env.Name, Variable: name, Value: []byte(value)})
 }
 
 func (c *pmConv) walk(items []pmItem, dir string, depth int, inherited *pmAuth) error {
@@ -475,12 +461,9 @@ func (c *pmConv) request(it pmItem, dir string, inherited *pmAuth) {
 	}
 	headers = c.applyAuth(&req, auth, headers, clip(it.Name.String()))
 
-	kept, headerAuth, offers, unsup := absorbHeaderSecrets(headers, c.namer)
+	kept, headerAuth, unsup := absorbHeaderSecrets(headers, c.namer)
 	req.Headers = kept
 	c.res.Unsupported = append(c.res.Unsupported, unsup...)
-	for _, o := range offers {
-		c.offerSecret(o)
-	}
 	if headerAuth != nil {
 		req.Auth = *headerAuth
 	}
@@ -496,25 +479,13 @@ func (c *pmConv) request(it pmItem, dir string, inherited *pmAuth) {
 // offerSecret routes a value found inside a request to the environment that
 // declares its name, creating that environment if the collection had none:
 // a binding whose variable no file declares is a binding nothing resolves.
-func (c *pmConv) offerSecret(o secretOffer) {
-	c.ensureEnv()
-	o.Environment = c.env.Name
-	for _, existing := range c.env.SecretVars {
-		if existing == o.Variable {
-			c.res.Secrets = append(c.res.Secrets, o)
-			return
-		}
-	}
-	c.env.SecretVars = append(c.env.SecretVars, o.Variable)
-	c.res.Secrets = append(c.res.Secrets, o)
-}
-
-// applyAuth maps Postman's auth onto the model's, returning the headers
-// with any auth-carrying header added.
 //
 // apikey has a header or parameter NAME, and apicoll.Auth has nowhere to
 // hold one. Rather than add a second field meaning what a header already
 // means, an apikey becomes the header or query parameter it actually is.
+// applyAuth maps Postman's auth onto the model's, returning the headers
+// with any auth-carrying header added. Imported credential literals are
+// dropped; ordinary collection variable references remain text.
 func (c *pmConv) applyAuth(req *apicoll.Request, a *pmAuth, headers []apicoll.Header, item string) []apicoll.Header {
 	if a == nil {
 		return headers
@@ -524,36 +495,42 @@ func (c *pmConv) applyAuth(req *apicoll.Request, a *pmAuth, headers []apicoll.He
 		return headers
 
 	case "bearer":
-		token := a.param(a.Bearer, "token")
+		token := c.dropSecretReferences(a.param(a.Bearer, "token"), "bearer auth on "+item)
 		if name, ok := varRef(token); ok {
 			c.namer.reserve(name)
 			req.Auth = apicoll.Auth{Kind: apicoll.AuthBearer, Token: "{{" + name + "}}"}
 			return headers
 		}
-		v := c.namer.take("token")
-		req.Auth = apicoll.Auth{Kind: apicoll.AuthBearer, Token: "{{" + v + "}}"}
-		c.offerSecret(secretOffer{Variable: v, Value: []byte(token)})
+		if token != "" {
+			c.itemise("bearer auth on "+item, "imported credential material is not carried; supply the value after import")
+		}
 		return headers
 
 	case "basic":
-		user := a.param(a.Basic, "username")
-		pass := a.param(a.Basic, "password")
+		user := c.dropSecretReferences(a.param(a.Basic, "username"), "basic auth username on "+item)
+		pass := c.dropSecretReferences(a.param(a.Basic, "password"), "basic auth password on "+item)
 		if name, ok := varRef(pass); ok {
 			c.namer.reserve(name)
 			req.Auth = apicoll.Auth{Kind: apicoll.AuthBasic, User: user, Password: "{{" + name + "}}"}
 			return headers
 		}
-		v := c.namer.take("password")
-		req.Auth = apicoll.Auth{Kind: apicoll.AuthBasic, User: user, Password: "{{" + v + "}}"}
-		c.offerSecret(secretOffer{Variable: v, Value: []byte(pass)})
+		if pass != "" {
+			c.itemise("basic auth on "+item, "imported credential material is not carried; supply the value after import")
+		}
 		return headers
 
 	case "apikey":
-		key := a.param(a.APIKey, "key")
-		value := a.param(a.APIKey, "value")
+		key := c.dropSecretReferences(a.param(a.APIKey, "key"), "apikey name on "+item)
+		value := c.dropSecretReferences(a.param(a.APIKey, "value"), "apikey value on "+item)
 		in := strings.ToLower(a.param(a.APIKey, "in"))
 		if key == "" {
 			c.itemise("apikey auth on "+item, "it names no header or parameter to carry the key")
+			return headers
+		}
+		if _, ok := varRef(value); !ok {
+			if value != "" {
+				c.itemise("apikey auth on "+item, "imported credential material is not carried; supply the value after import")
+			}
 			return headers
 		}
 		if in == "query" {
@@ -563,9 +540,6 @@ func (c *pmConv) applyAuth(req *apicoll.Request, a *pmAuth, headers []apicoll.He
 		return append(headers, apicoll.Header{Name: key, Value: value, Enabled: true})
 
 	default:
-		// The credential inside an auth type we cannot map is dropped here
-		// and reaches no file: there is no field in which one may be
-		// spelled (§8), so "carry it just in case" is not available.
 		c.itemise(a.Type+" auth on "+item,
 			"the model holds bearer, basic and api-key auth; the request was imported unauthenticated and no credential was written")
 		return headers
@@ -584,7 +558,8 @@ func (c *pmConv) readHeaders(raw json.RawMessage, item string) []apicoll.Header 
 			if name == "" {
 				continue
 			}
-			out = append(out, apicoll.Header{Name: name, Value: h.Value.String(), Enabled: !h.Disabled})
+			value := c.dropSecretReferences(h.Value.String(), "header "+name+" on "+item)
+			out = append(out, apicoll.Header{Name: name, Value: value, Enabled: !h.Disabled})
 		}
 		return out
 	}
@@ -597,7 +572,9 @@ func (c *pmConv) readHeaders(raw json.RawMessage, item string) []apicoll.Header 
 			if !ok || strings.TrimSpace(name) == "" {
 				continue
 			}
-			out = append(out, apicoll.Header{Name: strings.TrimSpace(name), Value: strings.TrimSpace(value), Enabled: true})
+			name = strings.TrimSpace(name)
+			value = c.dropSecretReferences(strings.TrimSpace(value), "header "+name+" on "+item)
+			out = append(out, apicoll.Header{Name: name, Value: value, Enabled: true})
 		}
 		return out
 	}
@@ -620,6 +597,7 @@ func (c *pmConv) readURL(raw json.RawMessage, item string) (string, []apicoll.Pa
 		// A URL Postman wrote as a bare string carries no `variable` list
 		// beside it, but it can still spell a `:name` — so the rewrite runs
 		// here too and the panel gets a row to fill.
+		asString = c.dropSecretReferences(asString, "url on "+item)
 		plain, query := splitQuery(asString)
 		rewritten, vars := c.readPathVariables(plain, nil, item)
 		return rewritten, query, vars
@@ -634,6 +612,7 @@ func (c *pmConv) readURL(raw json.RawMessage, item string) (string, []apicoll.Pa
 	if base == "" {
 		base = assembleURL(u)
 	}
+	base = c.dropSecretReferences(base, "url on "+item)
 	base, decoded := splitQuery(base)
 	base, pathVars := c.readPathVariables(base, u.Variable, item)
 	if len(u.Query) == 0 {
@@ -645,7 +624,8 @@ func (c *pmConv) readURL(raw json.RawMessage, item string) (string, []apicoll.Pa
 		if name == "" {
 			continue
 		}
-		out = append(out, apicoll.Param{Name: name, Value: q.Value.String(), Enabled: !q.Disabled})
+		value := c.dropSecretReferences(q.Value.String(), "query "+name+" on "+item)
+		out = append(out, apicoll.Param{Name: name, Value: value, Enabled: !q.Disabled})
 	}
 	return base, out, pathVars
 }
@@ -695,7 +675,7 @@ func (c *pmConv) readPathVariables(base string, vars []pmVariable, item string) 
 		if _, already := values[name]; !already {
 			declared = append(declared, name)
 		}
-		values[name] = v.Value.String()
+		values[name] = c.dropSecretReferences(v.Value.String(), "path variable "+clip(name)+" on "+item)
 	}
 
 	rewritten, found := rewriteColonSegments(base)
@@ -705,9 +685,7 @@ func (c *pmConv) readPathVariables(base string, vars []pmVariable, item string) 
 
 	// One row per name the ADDRESS uses, in the order it uses them, so the
 	// table reads like the URL. A variable the export declared but the
-	// address never mentions is not a hole to fill and is reported rather
-	// than carried — inventing a row for it would put a value in a file
-	// under a name nothing reads.
+	// address never mentions is reported rather than carried.
 	out := make([]apicoll.Param, 0, len(found))
 	seen := make(map[string]bool, len(found))
 	for _, name := range found {
@@ -846,29 +824,28 @@ func (c *pmConv) readBody(b *pmBody, item string) apicoll.Body {
 		return apicoll.Body{Kind: apicoll.BodyNone}
 
 	case "raw":
-		return apicoll.Body{Kind: apicoll.BodyRaw, Text: b.Raw.String()}
+		return apicoll.Body{Kind: apicoll.BodyRaw, Text: c.dropSecretReferences(b.Raw.String(), "body on "+item)}
 
 	case "urlencoded":
-		return apicoll.Body{Kind: apicoll.BodyForm, Text: encodeFormParams(b.Urlencoded)}
+		return apicoll.Body{Kind: apicoll.BodyForm, Text: encodeFormParams(c.redactFormParams(b.Urlencoded, item))}
 
 	case "formdata":
-		var files int
-		for _, p := range b.Formdata {
+		parts := c.redactFormParams(b.Formdata, item)
+		for _, p := range parts {
 			if strings.EqualFold(p.Type, "file") || p.Src != "" {
-				files++
 				c.itemise("multipart file part "+clip(p.Key.String())+" on "+item,
 					"it names a local file to upload; the model has no multipart part that reads one, and an import reads no file its input names")
 			}
 		}
 		c.itemise("multipart body on "+item,
 			"it was converted to a urlencoded body, which is a different Content-Type: the text fields are carried and the multipart framing is not")
-		text := encodeFormParams(filterTextParts(b.Formdata))
+		text := encodeFormParams(filterTextParts(parts))
 		return apicoll.Body{Kind: apicoll.BodyForm, Text: text}
 
 	case "file":
 		src := ""
 		if b.File != nil {
-			src = b.File.Src.String()
+			src = c.dropSecretReferences(b.File.Src.String(), "file body on "+item)
 		}
 		if src == "" {
 			c.itemise("file body on "+item, "it names no file")
@@ -877,8 +854,6 @@ func (c *pmConv) readBody(b *pmBody, item string) apicoll.Body {
 		return apicoll.Body{Kind: apicoll.BodyFile, FileRef: src}
 
 	case "graphql":
-		// A GraphQL body IS this JSON on the wire, so carrying it as raw
-		// loses nothing: it is a projection, not a degrade.
 		var gql struct {
 			Query     pmString `json:"query"`
 			Variables pmString `json:"variables"`
@@ -888,8 +863,10 @@ func (c *pmConv) readBody(b *pmBody, item string) apicoll.Body {
 			c.itemise("graphql body on "+item, "it could not be read: "+err.Error())
 			return apicoll.Body{Kind: apicoll.BodyNone}
 		}
-		payload := map[string]any{"query": gql.Query.String()}
-		if v := strings.TrimSpace(gql.Variables.String()); v != "" {
+		payload := map[string]any{
+			"query": c.dropSecretReferences(gql.Query.String(), "graphql query on "+item),
+		}
+		if v := strings.TrimSpace(c.dropSecretReferences(gql.Variables.String(), "graphql variables on "+item)); v != "" {
 			var parsed any
 			if json.Unmarshal([]byte(v), &parsed) == nil {
 				payload["variables"] = parsed
@@ -897,7 +874,7 @@ func (c *pmConv) readBody(b *pmBody, item string) apicoll.Body {
 				payload["variables"] = v
 			}
 		}
-		if op := gql.Operation.String(); op != "" {
+		if op := c.dropSecretReferences(gql.Operation.String(), "graphql operation on "+item); op != "" {
 			payload["operationName"] = op
 		}
 		text, err := json.Marshal(payload)
@@ -911,6 +888,17 @@ func (c *pmConv) readBody(b *pmBody, item string) apicoll.Body {
 		c.itemise("body mode "+clip(b.Mode)+" on "+item, "it is not a body mode this importer knows; the request was imported without a body")
 		return apicoll.Body{Kind: apicoll.BodyNone}
 	}
+}
+
+func (c *pmConv) redactFormParams(parts []pmFormParam, item string) []pmFormParam {
+	out := make([]pmFormParam, 0, len(parts))
+	for _, p := range parts {
+		p.Key = pmString(c.dropSecretReferences(p.Key.String(), "body field on "+item))
+		p.Value = pmString(c.dropSecretReferences(p.Value.String(), "body field "+clip(p.Key.String())+" on "+item))
+		p.Src = pmString(c.dropSecretReferences(p.Src.String(), "body file "+clip(p.Key.String())+" on "+item))
+		out = append(out, p)
+	}
+	return out
 }
 
 func filterTextParts(parts []pmFormParam) []pmFormParam {

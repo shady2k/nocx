@@ -34,17 +34,15 @@ func assertAbsent(t *testing.T, v any, needle string) {
 	}
 }
 
-// mustCurlBinder is the OTHER entrance: the same converter, called the way
-// ImportInto calls it — with somewhere for a credential to go. The §8
-// assertions live against this one, because §8 is about a file and this is
-// the route that writes one.
-func mustCurlBinder(t *testing.T, line string) (apicoll.Request, []secretOffer, []Unsupported) {
+// mustCurlImport parses the collection-writing entrance. Credential values
+// are dropped and reported instead of being offered to a vault writer.
+func mustCurlImport(t *testing.T, line string) (apicoll.Request, []Unsupported) {
 	t.Helper()
-	req, offers, unsup, err := parseCurl(line, newVarNamer(), credentialsToBinder)
+	req, unsup, err := parseCurl(line, newVarNamer(), credentialsToImport)
 	if err != nil {
 		t.Fatalf("parseCurl(%q) error: %v", line, err)
 	}
-	return req, offers, unsup
+	return req, unsup
 }
 
 func unsupportedWhat(unsup []Unsupported) []string {
@@ -308,25 +306,19 @@ func TestCurlFlag_u_User(t *testing.T) {
 
 // -u INTO A COLLECTION: the password is a variable in the file and a value
 // at the binder, which is §8 and has not changed.
-func TestCurlFlag_u_UserToBinder(t *testing.T) {
-	req, offers, unsup := mustCurlBinder(t, `curl -u alice:s3cr3t-p4ssw0rd https://api.example/x`)
-	if len(unsup) != 0 {
+func TestCurlFlag_u_LiteralPasswordIsDropped(t *testing.T) {
+	req, unsup := mustCurlImport(t, `curl -u alice:s3cr3t-p4ssw0rd https://api.example/x`)
+	if req.Auth.Kind != "" {
+		t.Fatalf("auth = %+v, want none", req.Auth)
+	}
+	if !hasUnsupported(unsup, "-u") {
 		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
 	}
-	if req.Auth.Kind != apicoll.AuthBasic || req.Auth.User != "alice" || req.Auth.Password == "" {
-		t.Fatalf("auth = %+v", req.Auth)
-	}
-	if req.Auth.Password == "s3cr3t-p4ssw0rd" {
-		t.Fatal("the password's TEXT is in the file — a bound value is a {{name}} here")
-	}
 	assertAbsent(t, req, "s3cr3t-p4ssw0rd")
-	if len(offers) != 1 || string(offers[0].Value) != "s3cr3t-p4ssw0rd" {
-		t.Fatalf("offers = %d, want the password offered to the binder", len(offers))
-	}
 
-	// No colon: the variable is named and unbound, so the send blocks and
-	// says which variable is missing (§6.5).
-	req2, _, _ := mustCurlBinder(t, `curl -u alice https://api.example/x`)
+	// No colon: the variable is named and unbound, so the person can fill it
+	// after import.
+	req2, _ := mustCurlImport(t, `curl -u alice https://api.example/x`)
 	if req2.Auth.Kind != apicoll.AuthBasic || req2.Auth.User != "alice" || req2.Auth.Password == "" {
 		t.Fatalf("auth = %+v", req2.Auth)
 	}
@@ -476,30 +468,21 @@ func TestCurlRefusedFlagNeverEchoesItsArgument(t *testing.T) {
 // INTO A COLLECTION, which is the route §8 is about: the token becomes a
 // variable name in the file and a value at the binder, and the header does
 // not survive.
-func TestCurlAuthorizationBearerBecomesAVariable(t *testing.T) {
-	const token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlLXZhbHVl" //nolint:gosec // a synthetic token: the test exists to prove this exact string reaches no file
-	req, offers, unsup := mustCurlBinder(t, `curl -H 'Authorization: Bearer `+token+`' https://api.example/x`)
-	if len(unsup) != 0 {
+// INTO A COLLECTION, which is the route §8 is about: the credential is
+// dropped from the request and itemised for the person to supply later.
+func TestCurlAuthorizationBearerIsDroppedAndReported(t *testing.T) {
+	const token = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.c2lnbmF0dXJlLXZhbHVl" //nolint:gosec // a synthetic token: the test proves it reaches no file
+	req, unsup := mustCurlImport(t, `curl -H 'Authorization: Bearer `+token+`' https://api.example/x`)
+	if req.Auth.Kind != "" {
+		t.Fatalf("auth = %+v, want none", req.Auth)
+	}
+	if !hasUnsupported(unsup, "Authorization") {
 		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
-	}
-	if req.Auth.Kind != apicoll.AuthBearer {
-		t.Fatalf("auth kind = %q, want bearer", req.Auth.Kind)
-	}
-	if req.Auth.Token == "" {
-		t.Fatal("auth names no variable")
-	}
-	if req.Auth.Token == token {
-		t.Fatal("the token's TEXT is in the file — a value at the binder is a {{name}} here")
 	}
 	if _, ok := headerValue(req, "Authorization"); ok {
 		t.Fatal("the Authorization header survived into the request")
 	}
 	assertAbsent(t, req, token)
-	if len(offers) != 1 || offers[0].Variable != "token" || string(offers[0].Value) != token ||
-		req.Auth.Token != "{{"+offers[0].Variable+"}}" {
-		t.Fatalf("offers = %d, auth = %+v, want the token offered under the reference in the file",
-			len(offers), req.Auth)
-	}
 }
 
 // INTO THE FORM: nothing here can bind a value, so nothing here mints a
@@ -522,25 +505,25 @@ func TestCurlAuthorizationStaysOnTheRequestForTheForm(t *testing.T) {
 	}
 }
 
-func TestCurlAuthorizationBasicBecomesAVariable(t *testing.T) {
+func TestCurlAuthorizationBasicIsDroppedAndReported(t *testing.T) {
 	// base64("alice:s3cr3t-p4ssw0rd")
 	const enc = "YWxpY2U6czNjcjN0LXA0c3N3MHJk"
-	req, _, _ := mustCurlBinder(t, `curl -H 'Authorization: Basic `+enc+`' https://api.example/x`)
-	if req.Auth.Kind != apicoll.AuthBasic || req.Auth.User != "alice" || req.Auth.Password == "" {
-		t.Fatalf("auth = %+v", req.Auth)
+	req, unsup := mustCurlImport(t, `curl -H 'Authorization: Basic `+enc+`' https://api.example/x`)
+	if req.Auth.Kind != "" {
+		t.Fatalf("auth = %+v, want none", req.Auth)
+	}
+	if !hasUnsupported(unsup, "Authorization") {
+		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
 	}
 	assertAbsent(t, req, "s3cr3t-p4ssw0rd")
 	assertAbsent(t, req, enc)
 }
 
-// A scheme the model has no auth block for is refused on the route that
-// writes a file, because there is no field in which the credential could be
-// spelled (§8) — and CARRIED on the route that writes none, because there
-// it is just the header the line wrote, which is what curl sends.
+// A scheme the model has no auth block for is refused on the import route.
 func TestCurlAuthorizationUnknownSchemeIsRefusedNotWritten(t *testing.T) {
 	const cred = "0123456789abcdefghij"
-	req, _, unsup := mustCurlBinder(t, `curl -H 'Authorization: Digest `+cred+`' https://api.example/x`)
-	if !hasUnsupported(unsup, "Authorization: Digest") {
+	req, unsup := mustCurlImport(t, `curl -H 'Authorization: Digest `+cred+`' https://api.example/x`)
+	if !hasUnsupported(unsup, "Authorization") {
 		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
 	}
 	assertAbsent(t, req, cred)
@@ -550,22 +533,19 @@ func TestCurlAuthorizationUnknownSchemeIsRefusedNotWritten(t *testing.T) {
 		t.Fatalf("unsupported = %v, want none: nothing was dropped", unsupportedWhat(formUnsup))
 	}
 	if v, _ := headerValue(form, "Authorization"); v != "Digest "+cred {
-		t.Fatalf("Authorization = %q, want the line's own header", v)
+		t.Fatalf("Authorization = %q, want the line's own value", v)
 	}
 }
 
 // A value that is ALREADY one of our variable references is not a secret:
 // binding it would store the literal text "{{tok}}" as a credential.
 func TestCurlAuthorizationAlreadyAVariableIsCarriedThrough(t *testing.T) {
-	req, offers, unsup := mustCurlBinder(t, `curl -H 'Authorization: Bearer {{tok}}' https://api.example/x`)
+	req, unsup := mustCurlImport(t, `curl -H 'Authorization: Bearer {{tok}}' https://api.example/x`)
 	if len(unsup) != 0 {
 		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
 	}
 	if req.Auth.Kind != apicoll.AuthBearer || req.Auth.Token != "{{tok}}" {
 		t.Fatalf("auth = %+v, want the existing variable reference", req.Auth)
-	}
-	if len(offers) != 0 {
-		t.Fatalf("offers = %d, want none: the reference is not a credential", len(offers))
 	}
 	// Into the form it is the header, reference and all, and substitution
 	// resolves it from the environment exactly as it resolves every other
@@ -576,19 +556,15 @@ func TestCurlAuthorizationAlreadyAVariableIsCarriedThrough(t *testing.T) {
 	}
 }
 
-func TestCurlSecretShapedHeaderBecomesAVariable(t *testing.T) {
+func TestCurlSecretShapedHeaderIsDroppedAndReported(t *testing.T) {
 	const key = "sk-abcdefghijklmnopqrstuvwxyz0123"
-	req, offers, _ := mustCurlBinder(t, `curl -H 'X-API-Key: `+key+`' https://api.example/x`)
+	req, unsup := mustCurlImport(t, `curl -H 'X-API-Key: `+key+`' https://api.example/x`)
 	assertAbsent(t, req, key)
-	v, ok := headerValue(req, "X-API-Key")
-	if !ok {
-		t.Fatal("the header was dropped rather than made a variable")
+	if _, ok := headerValue(req, "X-API-Key"); ok {
+		t.Fatal("the credential header survived the import")
 	}
-	if !strings.HasPrefix(v, "{{") || !strings.HasSuffix(v, "}}") {
-		t.Fatalf("X-API-Key = %q, want a {{variable}}", v)
-	}
-	if len(offers) != 1 || string(offers[0].Value) != key {
-		t.Fatalf("offers = %d, want the key offered to the binder", len(offers))
+	if !hasUnsupported(unsup, "X-API-Key") {
+		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
 	}
 }
 

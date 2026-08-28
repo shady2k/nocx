@@ -22,7 +22,7 @@ import { ProfileClient, type RestorePreview } from './profiles'
 import { Dispatcher } from './dispatcher'
 import type { Declaration, SettingsGroup } from './settings-domain'
 import type { PaneHost } from './pane-content'
-import { VaultSection } from './vault'
+import { VaultSection, createVaultSecretSource, type VaultController } from './vault'
 import type { VaultClient } from './vault-client'
 import { render, cleanup, fireEvent } from '@solidjs/testing-library'
 import { log } from './log'
@@ -1643,5 +1643,180 @@ describe("the person's own instructions to the assistant", () => {
     expect(codeBlockCss).toMatch(
       /\.ui-code-block\s*\{[\s\S]*max-height:\s*200px;[\s\S]*overflow:\s*auto;/,
     )
+  })
+})
+
+// ── The value the field was holding reaches the create form (nocx-3o0ed.6) ──
+//
+// The no-mint-seam fallback: a person presses the lock over a filled value
+// field in a workbench with no vault client of its own, the picker offers to
+// store what they are holding, and the create ask is the Secrets page. Before
+// this, only the NAME travelled — they landed on an empty value field and had
+// to go back and copy the value out by hand, which is exactly the detour this
+// epic exists to remove.
+//
+// Driven from `createVaultSecretSource`, which IS the source main.tsx wires
+// (main.tsx builds no second one), through SettingsContent.startNewSecret and
+// the Solid handle, to the form a person actually reads.
+describe('the Secrets fallback carries the value, not only the name', () => {
+  let target: HTMLDivElement
+  let client: ProfileClient
+  let content: SettingsContent
+  let host: PaneHost
+  let signal: AbortSignal
+  let vaultController: VaultController
+  let vaultClient: VaultClient
+
+  const UNSEALED = {
+    state: 'unsealed' as const,
+    osKeyAvailable: true,
+    osKeyCapable: true,
+    hasPassphrase: true,
+    autoSealMinutes: 15,
+    providers: [{ id: 'system', writable: true, ready: true, reason: undefined }],
+    defaultProvider: 'system',
+  }
+
+  beforeEach(() => {
+    document.body.replaceChildren()
+    toasts.length = 0
+    target = document.createElement('div')
+    document.body.append(target)
+    client = new ProfileClient(new Dispatcher())
+    vaultController = {
+      status: () => UNSEALED,
+      refresh: vi.fn().mockResolvedValue(true),
+      seal: vi.fn().mockResolvedValue(undefined),
+      setDefaultProvider: vi.fn().mockResolvedValue(undefined),
+      showSetup: vi.fn().mockReturnValue(false),
+      showUnlock: vi.fn().mockReturnValue(false),
+      unlockReason: vi.fn().mockReturnValue(null),
+      ensureBeforeSave: vi.fn(),
+      onSetupDone: vi.fn(),
+      onUnsealDone: vi.fn(),
+      openUnlock: vi.fn(),
+      openSetup: vi.fn(),
+      closeSetup: vi.fn(),
+      closeUnlock: vi.fn(),
+      saveSecretWithVault: vi.fn(),
+      changePassphrase: vi.fn(),
+      regenerateRecovery: vi.fn(),
+    }
+    vaultClient = {
+      status: vi.fn().mockResolvedValue(UNSEALED),
+      inventory: vi.fn().mockResolvedValue({ entries: [] }),
+      setup: vi.fn(),
+      unseal: vi.fn(),
+      seal: vi.fn(),
+      changePassphrase: vi.fn(),
+      regenerateRecovery: vi.fn(),
+      setDefaultProvider: vi.fn(),
+      setAutoSeal: vi.fn().mockResolvedValue(undefined),
+      activity: vi.fn(),
+    } as unknown as VaultClient
+    content = new SettingsContent(client, undefined, vaultController, vaultClient)
+    host = mockPaneHost()
+    signal = new AbortController().signal
+  })
+
+  /** The picker source main.tsx wires, with the Settings pane already open. */
+  function fallbackSource() {
+    return createVaultSecretSource({
+      vaultClient,
+      vaultController,
+      openSecretCreate: (name, value) => content.startNewSecret(name, value),
+    })
+  }
+
+  async function addDialog(): Promise<{ name: HTMLInputElement; value: HTMLInputElement }> {
+    let name: HTMLInputElement | null = null
+    let value: HTMLInputElement | null = null
+    await vi.waitFor(() => {
+      name = document.querySelector<HTMLInputElement>('#sr-add-name')
+      value = document.querySelector<HTMLInputElement>('#sr-add-value')
+      expect(name).toBeTruthy()
+      expect(value).toBeTruthy()
+    })
+    return { name: name!, value: value! }
+  }
+
+  it('the store offer lands in the create form with the value already filled in', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    await fallbackSource().requestCreate('', 'Bearer t.Yixxxx')
+
+    const { name, value } = await addDialog()
+    expect(value.value).toBe('Bearer t.Yixxxx')
+    expect(name.value).toBe('')
+  })
+
+  it('a name typed after @ AND a value both arrive', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    await fallbackSource().requestCreate('api-token', 'Bearer t.Yixxxx')
+
+    const { name, value } = await addDialog()
+    expect(name.value).toBe('api-token')
+    expect(value.value).toBe('Bearer t.Yixxxx')
+  })
+
+  it('the create row with no value opens the form on an empty value field', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    await fallbackSource().requestCreate('api-token')
+
+    const { name, value } = await addDialog()
+    expect(name.value).toBe('api-token')
+    expect(value.value).toBe('')
+  })
+
+  // The other callers hand a name alone (main.tsx: tm.onCreateSecret, the
+  // quick-connect secrets provider). They must keep working, and the value
+  // they do not have must not arrive as anything but an empty field.
+  it('startNewSecret with a name alone still opens the form', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    content.startNewSecret('deploy-key')
+
+    const { name, value } = await addDialog()
+    expect(name.value).toBe('deploy-key')
+    expect(value.value).toBe('')
+  })
+
+  // Queued before mount: opening Settings and asking for the form is one user
+  // action, and the mount is a promise the caller does not hold. The value has
+  // to survive that queue or the fallback loses it exactly when the tab was
+  // freshly opened — the common case.
+  it('a value asked for before the tab mounts survives the queue', async () => {
+    mockReady(client)
+
+    content.startNewSecret('api-token', 'Bearer t.Yixxxx')
+    await content.mount(target, host, signal)
+
+    const { name, value } = await addDialog()
+    expect(name.value).toBe('api-token')
+    expect(value.value).toBe('Bearer t.Yixxxx')
+  })
+
+  it('nothing inspects the value: a second create replaces it whole', async () => {
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    await fallbackSource().requestCreate('first', 'AKIA0000000000000000')
+    await addDialog()
+    await fallbackSource().requestCreate('second', '-----BEGIN OPENSSH PRIVATE KEY-----')
+
+    await vi.waitFor(() => {
+      const { name, value } = {
+        name: document.querySelector<HTMLInputElement>('#sr-add-name')!,
+        value: document.querySelector<HTMLInputElement>('#sr-add-value')!,
+      }
+      expect(name.value).toBe('second')
+      expect(value.value).toBe('-----BEGIN OPENSSH PRIVATE KEY-----')
+    })
   })
 })

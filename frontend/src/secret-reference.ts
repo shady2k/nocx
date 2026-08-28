@@ -33,3 +33,24 @@ export function findReferences(input: string): ReferenceSpan[] {
 export function secretReference(name: string): string {
   return `{{secret:${name}}}`
 }
+
+/** The handle a field is BOUND to, or `undefined` when it holds a literal.
+ *
+ *  A field is bound when its WHOLE value is one reference and nothing else:
+ *  `{{secret:secrow:…}}` alone means "this value comes from the vault", while
+ *  `Bearer {{secret:x}}` is a literal that happens to interpolate one. The
+ *  distinction is what the segmented "type a new one / use existing secret"
+ *  control used to ask a person to declare before they had typed anything
+ *  (nocx-3o0ed.4); it is now read off the value, so the two-way choice is
+ *  made by doing rather than by declaring.
+ *
+ *  This is the ONE reader of that rule. Three surfaces write a bound value to
+ *  three different wire shapes — the endpoint's `credential`, a header row's
+ *  `secret`, a connection's `options.passwordSecret` — and each of them asks
+ *  here rather than re-deriving it, because a second derivation is a second
+ *  answer waiting to disagree (AGENTS.md: one owner per behaviour). */
+export function boundSecret(value: string): string | undefined {
+  const spans = findReferences(value)
+  const only = spans.length === 1 ? spans[0] : undefined
+  return only !== undefined && only.from === 0 && only.to === value.length ? only.name : undefined
+}

@@ -14,7 +14,6 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/pathname"
 )
@@ -37,32 +36,10 @@ const (
 // which asserts this package cannot reach net/http or os/exec at all.
 //
 // The shape, and every step of it is a test with the failure injected
-// through FS:
-//
-//  1. dest must not exist. It is REFUSED, not replaced — an import that
-//     silently ate the collection somebody was working in would be a
-//     data-loss bug with a success message on it.
-//  2. Everything is assembled in a staging directory created INSIDE dest's
-//     parent, so the rename is within one filesystem. Across filesystems a
-//     rename is a copy, and a copy is not atomic.
-//  3. Files and then the directories holding them are synced, deepest
-//     first; without that the crash window is "the rename landed and the
-//     contents did not".
-//  4. One rename, then the parent is synced so the directory entry is
-//     durable too.
-//  5. Only then are the secret values offered to the BindWriter.
-//
-// The invariant, with both ends named as testing rule 3 demands:
-//
-//	dest DOES NOT EXIST from before the first byte is written until the
-//	rename has landed AND every binding this import declares has been
-//	written; from that moment it exists until the user deletes it. There is
-//	no state in between in which dest exists and this import is unfinished
-//	— any failure after the rename removes it again.
-//
-// Ordering within the binding store is apibind's (§8.2, §12.2: the vault
-// value first, the binding second). This package hands over one value at a
-// time and that is the whole of its part in it.
+// through FS. The destination is absent from before the first byte is
+// written until the rename and parent sync complete; it exists from that
+// arrival until the user deletes it. Any failure before arrival removes only
+// staging, and any failure after arrival removes the destination.
 //
 // route is how the document was ACQUIRED, and the environment this mints
 // inherits it (§6): a collection fetched through a connection whose
@@ -71,10 +48,7 @@ const (
 // Kind and ProfileID are inherited — InsecureTLS is the environment's own
 // choice (apicoll/collection.go:126) and a one-off fetch may not make it
 // for every request the collection will ever send.
-func ImportInto(ctx context.Context, fsys FS, b BindWriter, dest string, r io.Reader, route apicoll.Route) ([]Unsupported, error) {
-	if fsys == nil || b == nil {
-		return nil, errors.New("apiimport: an importer needs both a filesystem and a binding store")
-	}
+func ImportInto(ctx context.Context, fsys FS, dest string, r io.Reader, route apicoll.Route) ([]Unsupported, error) {
 	dest = strings.TrimRight(filepath.Clean(dest), string(filepath.Separator))
 	if dest == "" || dest == "." || dest == ".." || dest == string(filepath.Separator) {
 		return nil, fmt.Errorf("apiimport: %q is not a usable collection folder", dest)
@@ -175,18 +149,6 @@ func ImportInto(ctx context.Context, fsys FS, b BindWriter, dest string, r io.Re
 		return nil, undo(err)
 	}
 
-	for _, s := range res.Secrets {
-		env := s.Environment
-		if env == "" {
-			env = defaultEnvName
-		}
-		key := apibind.Key{Collection: dest, Environment: env, Variable: s.Variable}
-		if err := b.Bind(ctx, key, s.Value); err != nil {
-			// The variable's NAME is safe to name; its value is what we are
-			// carrying and never what we report.
-			return nil, undo(fmt.Errorf("apiimport: bind %s: %w", s.Variable, err))
-		}
-	}
 	return res.Unsupported, nil
 }
 
@@ -218,7 +180,7 @@ func parseImport(r io.Reader, route apicoll.Route) (postmanResult, error) {
 func curlImport(line string) (postmanResult, error) {
 	var res postmanResult
 	namer := newVarNamer()
-	req, offers, unsup, err := parseCurl(line, namer, credentialsToBinder)
+	req, unsup, err := parseCurl(line, namer, credentialsToImport)
 	if err != nil {
 		return res, err
 	}
@@ -238,38 +200,8 @@ func curlImport(line string) (postmanResult, error) {
 	res.Unsupported = unsup
 
 	env := apicoll.Environment{Name: defaultEnvName, Route: apicoll.Route{Kind: apicoll.RouteDirect}}
-	for _, o := range offers {
-		o.Environment = defaultEnvName
-		env.SecretVars = append(env.SecretVars, o.Variable)
-		res.Secrets = append(res.Secrets, o)
-	}
-	// An auth field that is EXACTLY one reference — which is what the
-	// importers write, and what "carries the name, not the value" means in
-	// the model — needs that name declared secret too, or the send has
-	// nothing to report as unresolved when the binding is absent.
-	sawAuth := map[string]bool{}
-	if n, ok := apicoll.ExactReference(req.Auth.Token); ok {
-		sawAuth[n] = true
-	}
-	if n, ok := apicoll.ExactReference(req.Auth.Password); ok {
-		sawAuth[n] = true
-	}
-	for n := range sawAuth {
-		if !contains(env.SecretVars, n) {
-			env.SecretVars = append(env.SecretVars, n)
-		}
-	}
 	res.Environments = []apicoll.Environment{env}
 	return res, nil
-}
-
-func contains(list []string, s string) bool {
-	for _, v := range list {
-		if v == s {
-			return true
-		}
-	}
-	return false
 }
 
 // collectionNameFor names a one-request collection after its host, which is

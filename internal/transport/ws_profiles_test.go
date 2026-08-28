@@ -232,6 +232,18 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 	assertClean := func(method string, params map[string]any) {
 		t.Helper()
 		resp := jsonrpcCall(t, conn, method, params)
+		// A method that no longer answers cannot leak, so it would pass the
+		// canary checks below while guarding nothing. Fail instead: this list
+		// is only a guard for as long as every entry in it is alive.
+		var probe struct {
+			Error *struct {
+				Code int `json:"code"`
+			} `json:"error"`
+		}
+		if err := json.Unmarshal(resp, &probe); err == nil && probe.Error != nil && probe.Error.Code == -32601 {
+			t.Errorf("%s does not answer on the wire, so this canary guards nothing: %s", method, string(resp))
+			return
+		}
 		if bytes.Contains(resp, []byte(targetCanary)) {
 			t.Errorf("%s response contains TARGET canary: %s", method, string(resp))
 		}
@@ -243,8 +255,14 @@ func TestNoPlaintextSecretsOnWire(t *testing.T) {
 	// profiles.list — must not leak passwords.
 	assertClean("profiles.list", map[string]any{})
 
-	// credentials.list — metadata only, no passwords.
-	assertClean("credentials.list", map[string]any{})
+	// profiles.effective — the successor risk surface. credentials.list stood
+	// here until ADR-0017 deleted the aggregate; what resolves a profile to
+	// the secret it authenticates with is now inheritance, and this is the
+	// method that walks it. It must answer with the reference, never the
+	// material behind it.
+	assertClean("profiles.effective", map[string]any{
+		"ids": []string{"profile:canary-tgt", "profile:canary-jump"},
+	})
 
 	// open with target profile (will fail — no SSH factory — but error must be clean).
 	assertClean("open", map[string]any{

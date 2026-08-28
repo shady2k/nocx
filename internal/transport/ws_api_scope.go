@@ -32,6 +32,7 @@ type apiRequestScopeVariableWire struct {
 	From       string `json:"from"`
 	Overridden bool   `json:"overridden"`
 	Refused    string `json:"refused"`
+	Secret     bool   `json:"secret"`
 }
 
 func wireRequestScope(result capability.RequestScopeResult) apiRequestScopeResponse {
@@ -40,6 +41,7 @@ func wireRequestScope(result capability.RequestScopeResult) apiRequestScopeRespo
 		variables = append(variables, apiRequestScopeVariableWire{
 			Name: variable.Name, Value: variable.Value, Scope: variable.Scope,
 			From: variable.From, Overridden: variable.Overridden, Refused: variable.Refused,
+			Secret: variable.Secret,
 		})
 	}
 	return apiRequestScopeResponse{Variables: variables}

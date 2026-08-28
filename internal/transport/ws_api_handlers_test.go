@@ -13,6 +13,7 @@ package transport
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -25,6 +26,7 @@ import (
 	"github.com/gorilla/websocket"
 
 	"github.com/shady2k/nocx/internal/apicoll"
+	"github.com/shady2k/nocx/internal/apiimport"
 	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/storage"
@@ -121,7 +123,7 @@ func newAPIServerAndConn(t *testing.T, sender apisend.Sender) (*WSServer, *webso
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	ws := NewWSServer(logger, newRegWithStub(logger),
-		WithAPI(apicoll.NewCollections(apiTestPaths(t)), sender))
+		WithAPI(apicoll.NewCollections(apiTestPaths(t)), sender, nil))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -832,23 +834,22 @@ func (p apiTestPathsT) CacheDir() string  { return filepath.Join(p.root, "cache"
 
 func apiTestPaths(t *testing.T) storage.Paths { return apiTestPathsT{root: t.TempDir()} }
 
-// THREE routes to one import, and exactly one of them may be given.
+// FOUR routes to one import, and exactly one of them may be given.
 //
-// The rule was two-way and is now three-way, and the refusal has to widen
-// with it: a caller told only "path and document are exclusive" would never
-// learn that url is a third way in, and one that sent url beside path would
-// have one of the two silently ignored.
-func TestValidateAPIImportPostman_ExactlyOneOfThreeSources(t *testing.T) {
+// The rule was three-way and now includes binary archive bytes. The refusal
+// has to widen with it: a caller told only "path, document and url are
+// exclusive" would never learn that archiveBytes is another route.
+func TestValidateAPIImportPostman_ExactlyOneOfFourSources(t *testing.T) {
 	cases := []struct {
 		name   string
 		params string
 		want   []string // substrings the refusal must carry
 	}{
-		{"none", `{"dest":"/w/acme"}`, []string{"path", "document", "url"}},
-		{"path and url", `{"path":"/w/a.json","url":"https://h/a.json","dest":"/w/acme"}`, []string{"path", "document", "url", "give one of them"}},
+		{"none", `{"dest":"/w/acme"}`, []string{"path", "document", "url", "archiveBytes"}},
+		{"path and url", `{"path":"/w/a.json","url":"https://h/a.json","dest":"/w/acme"}`, []string{"path", "document", "url", "archiveBytes", "give one of them"}},
 		{"document and url", `{"document":"{}","url":"https://h/a.json","dest":"/w/acme"}`, []string{"give one of them"}},
 		{"path and document", `{"path":"/w/a.json","document":"{}","dest":"/w/acme"}`, []string{"give one of them"}},
-		{"all three", `{"path":"/w/a.json","document":"{}","url":"https://h/a.json","dest":"/w/acme"}`, []string{"give one of them"}},
+		{"all four", `{"path":"/w/a.json","document":"{}","archiveBytes":"eA==","url":"https://h/a.json","dest":"/w/acme"}`, []string{"give one of them"}},
 		{"route without url, beside path", `{"path":"/w/a.json","route":{"kind":"connection","profileId":"p"},"dest":"/w/acme"}`, []string{"route", "url"}},
 		{"route without url, beside document", `{"document":"{}","route":{"kind":"direct"},"dest":"/w/acme"}`, []string{"route", "url"}},
 		{"unknown route kind", `{"url":"https://h/a.json","route":{"kind":"carrier-pigeon"},"dest":"/w/acme"}`, []string{"route.kind"}},
@@ -883,6 +884,40 @@ func TestValidateAPIImportPostman_AcceptsEachSourceAlone(t *testing.T) {
 				t.Fatalf("refused a valid import (%s): %s", params, msg)
 			}
 		})
+	}
+}
+
+func TestValidateAPIImportPostman_ArchiveBytesRefusals(t *testing.T) {
+	oversized := base64.StdEncoding.EncodeToString(make([]byte, apiimport.MaxDocumentBytes+1))
+	for name, params := range map[string]string{
+		"not base64":                    `{"archiveBytes":"%","dest":"/w/acme"}`,
+		"oversized decoded bytes":       fmt.Sprintf(`{"archiveBytes":%q,"dest":"/w/acme"}`, oversized),
+		"archive bytes beside document": `{"archiveBytes":"eA==","document":"{}","dest":"/w/acme"}`,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if msg := validateAPIImportPostmanRaw(json.RawMessage(params)); msg == "" {
+				t.Fatalf("accepted invalid archive source: %s", params)
+			}
+		})
+	}
+}
+
+func TestValidateAPIImportPostman_ArchiveBytesRejectsOversizedBeforeDecode(t *testing.T) {
+	// Invalid alphabet makes the stage observable: a pre-decode size refusal
+	// must win over the decoder's "illegal base64" error.
+	encoded := strings.Repeat("%", base64.StdEncoding.EncodedLen(apiimport.MaxDocumentBytes)+1)
+	msg := validateAPIImportPostmanRaw(json.RawMessage(fmt.Sprintf(
+		`{"archiveBytes":%q,"dest":"/w/acme"}`, encoded)))
+	if !strings.Contains(msg, "exceeds") {
+		t.Fatalf("refusal = %q, want an encoded-size refusal", msg)
+	}
+}
+
+func TestValidateAPIImportPostman_ArchiveBytesAcceptsExactDecodedLimit(t *testing.T) {
+	encoded := base64.StdEncoding.EncodeToString(make([]byte, apiimport.MaxDocumentBytes))
+	if msg := validateAPIImportPostmanRaw(json.RawMessage(fmt.Sprintf(
+		`{"archiveBytes":%q,"dest":"/w/acme"}`, encoded))); msg != "" {
+		t.Fatalf("exactly limited archive refused: %s", msg)
 	}
 }
 

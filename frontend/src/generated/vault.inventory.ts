@@ -30,7 +30,7 @@ export interface InventoryEntry {
   /**
    * What the material is. The closed vocabulary of the registry (spec §4.1); a new kind is an addition, not a degradation into 'unknown'.
    */
-  kind: 'password' | 'key-passphrase' | 'private-key' | 'public-key' | 'otp-seed'
+  kind: 'password' | 'key-passphrase' | 'private-key' | 'public-key' | 'otp-seed' | 'api-token'
   /**
    * Provider tag from the secret reference: sec:v1:<provider>:<32 hex>.
    */

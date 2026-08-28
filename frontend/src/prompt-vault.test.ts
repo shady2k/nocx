@@ -190,6 +190,29 @@ describe('PromptVaultController: the @ trigger -> picker', () => {
     h.controller.onDocChanged('@ope')
     expect(h.editor.root.querySelector('.ui-floating-panel[data-variant="secret"]')).not.toBeNull()
   })
+
+  // nocx-vzdna moved the FIELD-mounted panel off `bottom: 100%` and onto a
+  // computed viewport rect, because a body mount resolves that rule against
+  // the initial containing block and opens the panel above the top of the
+  // window. The terminal is the half that was already right and is the half
+  // a positioning change breaks silently: this panel is a child of the
+  // editor root, which is `position: relative`, so CSS alone places it
+  // directly above the prompt and the component must compute nothing.
+  it('the terminal panel stays the CSS-placed one, inside the editor root', async () => {
+    const h = setup()
+    h.editor.doc = '@'
+    h.editor.caret = 1
+    h.controller.onDocChanged('@')
+    h.controller.onSecretPicker(0)
+    await flush()
+    const panel = h.editor.root.querySelector<HTMLElement>(
+      '.ui-floating-panel[data-variant="secret"]',
+    )!
+    expect(panel.parentElement).toBe(h.editor.root)
+    expect(panel.dataset.anchor).toBeUndefined()
+    expect(panel.style.top).toBe('')
+    expect(panel.style.position).toBe('')
+  })
 })
 
 describe('PromptVaultController: detection drives a decoration, never a panel', () => {

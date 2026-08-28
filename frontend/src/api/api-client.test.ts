@@ -188,29 +188,6 @@ describe('ApiClient — one method per contract', () => {
     })
   })
 
-  it('sends a secret value ONE WAY — the value in, nothing back', async () => {
-    // The one call on this client that carries a credential. What it puts on
-    // the wire is asserted exactly, because an extra field here is an extra
-    // place a credential travels.
-    const { dispatcher, call } = fakeDispatcher({})
-    const answer = await createApiWorkbenchServices(dispatcher).bindSecret(
-      'h1',
-      'environments/dev.json',
-      'token',
-      'sk-live-value',
-    )
-    expect(call).toHaveBeenCalledWith('api.environment.bindSecret', {
-      handle: 'h1',
-      relPath: 'environments/dev.json',
-      variable: 'token',
-      value: 'sk-live-value',
-    })
-    // NOTHING COMES BACK. The identifier for stored credential material never
-    // leaves the backend and the value came from here, so a result carrying
-    // either would hand back the thing this method exists to take away.
-    expect(answer).toEqual({})
-  })
-
   it('imports a Postman export from a path into a destination', async () => {
     const { dispatcher, call } = fakeDispatcher({ unsupported: [] })
     await createApiWorkbenchServices(dispatcher).importPostman(
@@ -220,6 +197,18 @@ describe('ApiClient — one method per contract', () => {
     expect(call).toHaveBeenCalledWith('api.import.postman', {
       path: '/w/acme.json',
       dest: '/w/acme-api',
+    })
+  })
+
+  it('imports a browser-held Postman archive as base64 bytes', async () => {
+    const { dispatcher, call } = fakeDispatcher({ unsupported: [], documents: [] })
+    await createApiWorkbenchServices(dispatcher).importPostman(
+      { archiveBytes: 'UEsDBA==' },
+      '/w/workspace',
+    )
+    expect(call).toHaveBeenCalledWith('api.import.postman', {
+      archiveBytes: 'UEsDBA==',
+      dest: '/w/workspace',
     })
   })
 
@@ -243,10 +232,10 @@ describe('ApiClient — one method per contract', () => {
   })
 
   it('imports from a URL, carrying the route the backend should fetch it over', async () => {
-    // The third source is the general case in the direction the document
+    // The URL source is the general case in the direction the document
     // cannot serve: an export behind a network the renderer is not on. The
     // route rides WITH the url because it is part of how that document is
-    // reached, and it spreads onto the params like the other two sources —
+    // reached, and it spreads onto the params like the other three sources —
     // `importPostman` never learns which member it was handed.
     const { dispatcher, call } = fakeDispatcher({ unsupported: [] })
     await createApiWorkbenchServices(dispatcher).importPostman(
@@ -292,7 +281,6 @@ describe('ApiClient — one method per contract', () => {
     await s.closeCollection('h1')
     await s.readRequest('h1', 'a.json')
     await s.writeRequest('h1', 'a.json', REQUEST)
-    await s.bindSecret('h1', 'environments/dev.json', 'token', 'v')
     await s.sendRequest('h1', 'a.json', 'environments/dev.json', 'run-1')
     await s.cancelRequest('run-1')
     for (const [, params] of call.mock.calls) {
@@ -315,7 +303,6 @@ describe('ApiClient — every call has a test where it fails', () => {
     ['closeCollection', (s) => s.closeCollection('h1')],
     ['readRequest', (s) => s.readRequest('h1', 'a.json')],
     ['writeRequest', (s) => s.writeRequest('h1', 'a.json', REQUEST)],
-    ['bindSecret', (s) => s.bindSecret('h1', 'environments/dev.json', 'token', 'v')],
     ['sendRequest', (s) => s.sendRequest('h1', 'a.json', 'environments/dev.json', 'run-1')],
     ['cancelRequest', (s) => s.cancelRequest('run-1')],
     ['importPostman', (s) => s.importPostman({ path: '/w/a.json' }, '/w/b')],

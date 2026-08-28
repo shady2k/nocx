@@ -63,6 +63,7 @@ import { createSignal, untrack } from 'solid-js'
 import { showConfirm } from '../ui/dialog'
 import type { ApiConnection, ApiWorkbenchServices, ImportSource } from './api-client'
 import type { ApiImportCurlResult } from '../generated/api.import.curl'
+import type { ApiImportPostmanResult, Unsupported } from '../generated/api.import.postman'
 import type { ApiRequestScopeResult } from '../generated/api.request.scope'
 import type { FilesChanged } from '../generated/files.changed'
 import {
@@ -91,7 +92,6 @@ import { proposedRequestName, slugify } from './api-paths'
 // looks until the day they do not.
 import { directoryOf } from './api-tree'
 import { foldQueryIntoParams } from './api-url'
-import type { Unsupported as PostmanNote } from '../generated/api.import.postman'
 
 /** WHICH PART of an exchange is being read. Three, not two: the headers
  *  were stacked above the body in one pane, so a long body pushed them off
@@ -320,9 +320,6 @@ export interface ApiStore {
 
   /** The backend-computed request, folder, environment and vault rows. */
   scopeVariables(): readonly ApiScopeVariable[] | null
-  /** Give a secret variable its value — the one call that carries a
-   *  credential. Answers whether it landed; the value is never kept. */
-  bindSecret(variable: string, value: string): Promise<boolean>
 
   /** The backend's reported refresh mode for the collection watch set, or
    *  null until the first `files.watch` answers — and for a build that
@@ -514,6 +511,7 @@ export interface ApiStore {
    *  kit's file input hold BYTES and no location, bytes reach a backend
    *  wherever it runs, and an export can sit behind a network only the
    *  backend is on (api-client.ts). */
+  previewPostman(source: ImportSource, dest: string): Promise<ApiImportPostmanResult>
   importPostman(source: ImportSource, dest: string): Promise<void>
   setRunView(id: number, view: ApiRunView): void
 }
@@ -637,28 +635,16 @@ export function createApiStore(
   // Where a draft with no file behind it will be written. Only the curl
   // import mints such a draft, and the ask is what answers this.
   const [draftFolder, setDraftFolder] = createSignal('')
-  // ── Which environment a send goes out under (nocx-pnvnn) ────────────────
+  // ── Which environment a request goes out under (nocx-ei9fy.1) ───────────
   //
-  // Keyed by the collection HANDLE, and the absence of a key is a state of
-  // its own: "nobody has chosen for this folder yet" is not "None was
-  // chosen", and only the first may be filled in by a default. Collapsing
-  // them would make a person's deliberate None revert to an environment on
-  // the next listing — a control whose answer the panel quietly replaces.
+  // The request file owns this choice. It is a per-request preference, so it
+  // must not be keyed by the ephemeral collection handle or collapse two
+  // requests into one collection choice. A missing field means nobody chose
+  // yet; a present empty string is the deliberate "No environment" choice.
   //
-  // The default is applied ONLY when a collection has exactly ONE
-  // environment. That is the whole rule, and both halves are bought:
-  //
-  //  * With one, there is no choice to make. Nearly every Postman export is
-  //    this case, and starting on None would make its first Send fail on
-  //    `{{baseUrl}}` — a variable the folder can answer — which is the
-  //    product contradicting itself.
-  //  * With several, the first in a list is not a choice anybody made, and
-  //    one of them is usually production. A request fired at a live system
-  //    because a panel picked alphabetically is not a mistake a message can
-  //    undo, so the panel picks nothing and says so.
-  const [chosenEnvironments, setChosenEnvironments] = createSignal<ReadonlyMap<string, string>>(
-    new Map(),
-  )
+  // The default is applied ONLY when a request has no saved choice and its
+  // collection has exactly ONE environment. With several, the first in a
+  // list is not a choice anybody made, and one is usually production.
   const [selected, setSelected] = createSignal<ApiSelection | null>(null)
   const [draft, setDraft] = createSignal<ApiRequest | null>(null)
   const [saved, setSaved] = createSignal<ApiRequest | null>(null)
@@ -853,13 +839,22 @@ export function createApiStore(
   const environmentsOf = (handle: string): readonly ApiEnvironmentRef[] =>
     collections().find((c) => c.handle === handle)?.collection.environments ?? []
 
-  /** Which environment a send from ONE collection goes out under. The
-   *  picker and the send read the same function, so the control cannot say
-   *  one thing while the wire carries another. */
+  /** Which environment a send from ONE request goes out under. The picker
+   *  and the send read this same function, so the control cannot say one
+   *  thing while the wire carries another. */
   const environmentFor = (handle: string): string => {
-    const chosen = chosenEnvironments().get(handle)
-    if (chosen !== undefined) return chosen
     const envs = environmentsOf(handle)
+    const target = selected()
+    const current = draft()
+    if (
+      current !== null &&
+      (target?.handle === handle || (target === null && activeCollection() === handle))
+    ) {
+      const chosen = current.environment
+      if (chosen !== undefined && (chosen === '' || envs.some((env) => env.relPath === chosen))) {
+        return chosen
+      }
+    }
     return envs.length === 1 ? envs[0].relPath : ''
   }
 
@@ -913,7 +908,7 @@ export function createApiStore(
     const row = rows.find((candidate) => candidate.name === name)
     if (row === undefined) return { scope: 'none', value: null, from: null }
 
-    if (row.scope === 'vault') return { scope: 'secret', value: null, from: null }
+    if (row.secret) return { scope: 'secret', value: null, from: null }
     return {
       scope: row.scope,
       value: row.value,
@@ -953,16 +948,21 @@ export function createApiStore(
     }
   }
 
-  /** Refresh the complete backend-computed scope after a source change. */
   const refreshVariables = async (): Promise<void> => {
     await refreshScope()
   }
 
+  /** Refresh the complete backend-computed scope after a source change. */
   const setEnvironment = (relPath: string): void => {
     const handle = untrack(activeCollection)
-    if (handle === '') return
-    setChosenEnvironments((prev) => new Map(prev).set(handle, relPath))
+    const current = untrack(draft)
+    if (handle === '' || current === null) return
+    const envs = environmentsOf(handle)
+    if (relPath !== '' && !envs.some((env) => env.relPath === relPath)) return
+    if (current.environment === relPath) return
+    setDraft({ ...current, environment: relPath })
     void refreshVariables()
+    if (untrack(selected) !== null) void saveDraft()
   }
 
   /** The draft differs from what the file last answered. Compared by value —
@@ -1166,18 +1166,9 @@ export function createApiStore(
 
   const closeFolder = async (handle: string): Promise<void> => {
     try {
+      await flushDraft()
       await services.closeCollection(handle)
       setCollections((prev) => prev.filter((c) => c.handle !== handle))
-      // Nothing is pointed at a folder that has left — and the environment
-      // chosen for it goes with it, which is the closing end of that
-      // choice's interval. A handle is minted fresh every open, so a
-      // remembered row could never be read again; it would only be a map
-      // that grows for the life of the window.
-      setChosenEnvironments((prev) => {
-        const next = new Map(prev)
-        next.delete(handle)
-        return next
-      })
       if (selected()?.handle === handle) cancelPendingSave()
       if (activeCollection() === handle) {
         setActiveCollection('')
@@ -1266,6 +1257,8 @@ export function createApiStore(
   // landed after a delete would put the file back, and one that landed after
   // a move would put the old path back.
   let saveTimer: ReturnType<typeof setTimeout> | null = null
+  let saveChain: Promise<void> = Promise.resolve()
+  let pendingSaves = 0
 
   const cancelPendingSave = (): void => {
     if (saveTimer === null) return
@@ -1493,29 +1486,49 @@ export function createApiStore(
       setError(message(err))
     }
   }
-
   const saveDraft = async (): Promise<void> => {
     const target = untrack(selected)
     const request = untrack(draft)
     if (target === null || request === null) return
-    try {
-      await services.writeRequest(target.handle, target.relPath, request)
-      setSaved(request)
-      setError('')
-    } catch (err) {
-      setError(message(err))
+    pendingSaves += 1
+    const write = async (): Promise<void> => {
+      try {
+        await services.writeRequest(target.handle, target.relPath, request)
+        const currentTarget = untrack(selected)
+        const currentDraft = untrack(draft)
+        if (
+          currentTarget?.handle === target.handle &&
+          currentTarget.relPath === target.relPath &&
+          currentDraft !== null &&
+          JSON.stringify(currentDraft) === JSON.stringify(request)
+        ) {
+          setSaved(request)
+          setError('')
+        }
+      } catch (err) {
+        const currentTarget = untrack(selected)
+        if (currentTarget?.handle === target.handle && currentTarget.relPath === target.relPath) {
+          setError(message(err))
+        }
+      } finally {
+        pendingSaves -= 1
+      }
     }
+    saveChain = saveChain.then(write, write)
+    await saveChain
   }
 
   const deleteRequest = async (handle: string, relPath: string): Promise<void> => {
     try {
-      await services.deleteRequest(handle, relPath)
       const open = untrack(selected)
       if (open !== null && open.handle === handle && open.relPath === relPath) {
-        // CANCELLED, NOT FLUSHED. A scheduled write for the file that was
-        // just deleted would put it back — the delete would look like it
-        // worked and the row would return on the next listing.
         cancelPendingSave()
+        if (pendingSaves > 0) await saveChain
+      }
+      await services.deleteRequest(handle, relPath)
+      if (open !== null && open.handle === handle && open.relPath === relPath) {
+        // The request has been deleted, so the draft and its pending save must
+        // leave together rather than allowing an old write to recreate it.
         setSelected(null)
         setDraft(null)
         setSaved(null)
@@ -1580,13 +1593,13 @@ export function createApiStore(
       setError(message(err))
     }
   }
-
   const send = async (): Promise<void> => {
     let request = untrack(draft)
     if (request === null) return
-    // This path writes the file itself, below, and a timer firing beside it
-    // would be a second writer of the same bytes.
-    cancelPendingSave()
+    // The file is the send's source of truth. Join any scheduled or immediate
+    // write before asking the backend to snapshot it, but keep the clean path
+    // synchronous so the pending row is observable immediately.
+    if (untrack(selected) !== null && untrack(dirty)) await flushDraft()
     // A REQUEST WITH NO FILE GETS ONE, HERE. `api.request.send` sends the
     // FILE — the backend snapshots it off disk, which is what makes the run
     // and the folder agree (§6.4) — so a converted curl line could not be
@@ -1722,37 +1735,6 @@ export function createApiStore(
       // run: the run's own ending is whatever its send answers, and this
       // must not overwrite it.
       setError(message(err))
-    }
-  }
-
-  /**
-   * Give a secret variable its value.
-   *
-   * THE ONE CALL IN THIS STORE THAT CARRIES A CREDENTIAL, and it carries it
-   * one way: the value goes out and nothing about it comes back. Nothing here
-   * keeps it, no signal holds it, and the environment the editor is showing
-   * is re-read afterwards from the FILE — which holds the name and never the
-   * value (§6.3), so the re-read cannot bring it back either.
-   *
-   * The refusal is the store's ordinary one (`error`), because that is what
-   * every surface in this panel already reads. A sealed vault is not refused
-   * here at all: it travels as the canonical sealed error and the dispatcher
-   * raises the unlock, exactly as a send does (nocx-pgp9c.7).
-   */
-  const bindSecret = async (variable: string, value: string): Promise<boolean> => {
-    const handle = untrack(activeCollection)
-    const relPath = untrack(() => environmentFor(handle))
-    if (handle === '' || relPath === '' || variable === '') return false
-    try {
-      await services.bindSecret(handle, relPath, variable, value)
-      setError('')
-      // The backend scope answer has changed, so a reference to it stops
-      // being unanswered in the address field.
-      await refreshVariables()
-      return true
-    } catch (err) {
-      setError(message(err))
-      return false
     }
   }
 
@@ -1957,13 +1939,20 @@ export function createApiStore(
     // state and the one `unsavedWork` still describes.
     await saveDraftAs()
   }
-
   const importPostman = async (source: ImportSource, dest: string): Promise<void> => {
     try {
       const result = await services.importPostman(source, dest)
-      // Both importers' "what did not come across" is one vocabulary — a
-      // feature named, and why — so the surface holds one list of them.
-      const carried: ApiImportNote[] = result.unsupported satisfies PostmanNote[]
+      // Archive reports are flattened into the store's one note list so the
+      // existing single sticky toast can name every document without a second
+      // reporting mechanism.
+      const documentNotes: Unsupported[] =
+        result.documents?.flatMap((document) =>
+          document.unsupported.map((note: Unsupported) => ({
+            what: `${document.name}: ${note.what}`,
+            why: note.why,
+          })),
+        ) ?? []
+      const carried: ApiImportNote[] = [...result.unsupported, ...documentNotes]
       setNotes(carried)
       setError('')
       // The folder is on disk now; the listing is what puts it in the tree.
@@ -1972,6 +1961,8 @@ export function createApiStore(
       setError(message(err))
     }
   }
+  const previewPostman = (source: ImportSource, dest: string): Promise<ApiImportPostmanResult> =>
+    services.previewPostman(source, dest)
 
   const setRunView = (id: number, view: ApiRunView): void => {
     setRuns((prev) => prev.map((r) => (r.id === id ? { ...r, view } : r)))
@@ -2036,7 +2027,6 @@ export function createApiStore(
     writeFolderVariables,
     watchFailed,
     variableAnswer,
-    bindSecret,
     startWatching,
     dispose,
     refresh,
@@ -2068,6 +2058,7 @@ export function createApiStore(
     writeEnvironment,
     importCurl,
     importPostman,
+    previewPostman,
     setRunView,
   }
 }

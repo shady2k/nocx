@@ -2,15 +2,31 @@
  * TextField — text, number, or password input.
  *
  * Composes Field for label, description, error, and required marker.
- * Only the input and its event wiring live here.
+ * Only the input, trailing action, and their event wiring live here.
  *
  * Justified by callers:
  * - settings.ts: input[type=text] and input[type=number] with change event, min/max
  * - connections.ts: inputField() / textField() / numberField() — label + input with input event
+ * - secret-text-field.tsx: a focused value-field action that reports its UTF-16 selection
  */
-import { For, Show, Switch, Match, type JSX } from 'solid-js'
+import { For, Show, Switch, Match, createSignal, type JSX } from 'solid-js'
 import { Field } from './field'
+import { IconButton } from './icon-button'
 import { mirrorControlledValue } from './controlled-value'
+
+/** The current selection in the field, in UTF-16 code units. */
+export interface TextFieldSelection {
+  start: number
+  end: number
+}
+
+/** An icon action rendered while the field or its action has focus. */
+export interface TextFieldAction {
+  ariaLabel: string
+  title?: string
+  onClick: (selection: TextFieldSelection) => void
+  children: JSX.Element
+}
 
 /** One marked span of a field's text. `to` is exclusive. */
 export interface TextFieldMark {
@@ -28,6 +44,10 @@ export interface TextFieldMark {
    * flight is how a person learns to ignore the colour.
    */
   tone?: 'reference' | 'secret' | 'unknown'
+  /** The human-facing label painted over an opaque secret reference. */
+  displayText?: string
+  /** The opaque secret row handle, when this mark is a vault reference. */
+  secretHandle?: string
 }
 
 export interface TextFieldProps {
@@ -66,6 +86,8 @@ export interface TextFieldProps {
   value: string | number
   /** Fires on every keystroke (input event). */
   onInput?: (value: string) => void
+  /** Fires when the control receives focus. */
+  onFocus?: (event: FocusEvent) => void
   /**
    * Fires when focus leaves the input.
    *
@@ -73,6 +95,8 @@ export interface TextFieldProps {
    * typing the first character of an empty field, so `createFormValidation` marks
    * a field answered on blur rather than on input. See `ui/validation.ts`.
    */
+  /** Fires when a key reaches the input, before the surface handles it. */
+  onKeyDown?: (event: KeyboardEvent) => void
   onBlur?: (value: string) => void
   /**
    * Fires when the person is FINISHED with the value: when focus leaves, and
@@ -110,6 +134,8 @@ export interface TextFieldProps {
    */
   selectOnFocus?: boolean
   trailing?: JSX.Element
+  /** An icon action shown only while this field or its action has focus. */
+  trailingAction?: TextFieldAction
   /**
    * A numeric field's unit ('days', 'MiB'), rendered as a suffix inside the
    * control so the number and its unit read — and copy — as one thing.
@@ -173,22 +199,49 @@ export function TextField(props: TextFieldProps) {
   const errorId = () => (props.error ? `${inputId()}__error` : undefined)
   const ariaDescribedBy = () => [descriptionId(), errorId()].filter(Boolean).join(' ') || undefined
 
+  const [focused, setFocused] = createSignal(false)
+  let fieldControl: HTMLInputElement | HTMLTextAreaElement | undefined
+  let actionControl: HTMLButtonElement | undefined
+
   const onInput = (e: Event) => {
-    const target = e.currentTarget as HTMLInputElement
+    const target = e.currentTarget as HTMLInputElement | HTMLTextAreaElement
     props.onInput?.(target.value)
   }
 
+  const onFocus = (e: FocusEvent) => {
+    setFocused(true)
+    props.onFocus?.(e)
+  }
+
   const onBlur = (e: FocusEvent) => {
-    const target = e.currentTarget as HTMLInputElement
+    const target = e.currentTarget as HTMLInputElement | HTMLTextAreaElement
+    if (e.relatedTarget !== actionControl) setFocused(false)
     props.onBlur?.(target.value)
     props.onCommit?.(target.value)
   }
 
+  const onActionBlur = (e: FocusEvent) => {
+    if (e.relatedTarget !== fieldControl) setFocused(false)
+  }
+
+  const selection = (): TextFieldSelection => ({
+    start: fieldControl?.selectionStart ?? 0,
+    end: fieldControl?.selectionEnd ?? 0,
+  })
+
   /** Enter commits a single-line field. Wired to the input only — in a
    *  textarea Enter is a newline, and stealing it would make the control
-   *  unable to do the one thing multiline exists for. */
+   *  unable to do the one thing multiline exists for.
+   *
+   *  The caller's handler runs FIRST and may claim the key. A field wearing
+   *  the secret picker answers Enter with "take the selected row", and the
+   *  panel says so the way it already says it to every other listener — by
+   *  calling `preventDefault` (`secret-picker.ts`, `consume`). Reading that
+   *  flag keeps one owner for "this key is spoken for"; a second channel
+   *  would be a second answer to the same question. */
   const onKeyDown = (e: KeyboardEvent) => {
-    if (e.key !== 'Enter') return
+    props.onKeyDown?.(e)
+    if (e.key !== 'Enter' || e.defaultPrevented) return
     props.onCommit?.((e.currentTarget as HTMLInputElement).value)
   }
 
@@ -207,6 +260,7 @@ export function TextField(props: TextFieldProps) {
       aria-describedby={ariaDescribedBy()}
       autofocus={props.autoFocus === true}
       ref={(element) => {
+        fieldControl = element
         // Read BEFORE the microtask, not inside it. A prop read inside a
         // deferred callback is a reactive read outside any tracked scope —
         // `solid/reactivity` refuses it, and it is right to: the value it
@@ -224,6 +278,7 @@ export function TextField(props: TextFieldProps) {
         // eslint-disable-next-line solid/reactivity -- helper-boundary contract
         mirrorControlledValue(element, () => props.value)
       }}
+      onFocus={onFocus}
       onInput={onInput}
       onBlur={onBlur}
       onKeyDown={onKeyDown}
@@ -244,6 +299,7 @@ export function TextField(props: TextFieldProps) {
       autofocus={props.autoFocus === true}
       rows={4}
       ref={(element) => {
+        fieldControl = element
         // Read before the microtask — see the input above for why.
         const focusOnMount = props.autoFocus === true
         const selectOnMount = props.selectOnFocus === true
@@ -255,7 +311,9 @@ export function TextField(props: TextFieldProps) {
         // eslint-disable-next-line solid/reactivity -- same helper-boundary contract.
         mirrorControlledValue(element, () => props.value)
       }}
+      onFocus={onFocus}
       onInput={onInput}
+      onKeyDown={props.onKeyDown}
       onBlur={onBlur}
     />
   )
@@ -316,6 +374,7 @@ export function TextField(props: TextFieldProps) {
       <div
         class="ui-text-field__control"
         data-trailing={props.trailing !== undefined ? 'true' : 'false'}
+        data-action={props.trailingAction !== undefined ? 'true' : undefined}
         data-unit={props.unit !== undefined && props.multiline !== true ? 'true' : undefined}
         data-ink={inked() ? 'true' : undefined}
       >
@@ -342,15 +401,38 @@ export function TextField(props: TextFieldProps) {
                       props.onMarkClick?.(mark, { x: e.clientX, y: e.clientY })
                     }}
                   >
-                    {run.text}
+                    {run.mark?.displayText ?? run.text}
                   </span>
                 </Show>
               )}
             </For>
           </div>
         </Show>
-        <Show when={!props.multiline && props.trailing}>
-          <span class="ui-text-field__trailing">{props.trailing}</span>
+        <Show
+          when={
+            (!props.multiline && props.trailing) || (focused() ? props.trailingAction : undefined)
+          }
+        >
+          <span class="ui-text-field__trailing">
+            <Show when={!props.multiline && props.trailing}>{props.trailing}</Show>
+            <Show when={focused() ? props.trailingAction : undefined}>
+              {(action) => (
+                <IconButton
+                  size="sm"
+                  ariaLabel={action().ariaLabel}
+                  title={action().title ?? action().ariaLabel}
+                  ref={(element) => {
+                    actionControl = element
+                  }}
+                  onMouseDown={(e) => e.preventDefault()}
+                  onBlur={onActionBlur}
+                  onClick={() => action().onClick(selection())}
+                >
+                  {action().children}
+                </IconButton>
+              )}
+            </Show>
+          </span>
         </Show>
         <Show when={!props.multiline && props.unit !== undefined}>
           <span class="ui-text-field__unit">{props.unit}</span>

@@ -13,9 +13,10 @@ export interface ApiRequestScopeResult {
   variables: {
     name: string
     value: string
-    scope: 'request' | 'folder' | 'environment' | 'vault'
+    scope: 'request' | 'folder' | 'environment'
     from: string
     overridden: boolean
     refused: string
+    secret: boolean
   }[]
 }

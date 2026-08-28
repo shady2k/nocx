@@ -1590,8 +1590,9 @@ export interface BlockManagerOpts {
   /** Fired when a DEFERRED freeze lands — the fence arrived, or the
    *  FENCE_DEFER_MS window elapsed and the block settled at the current
    *  output end. The freeze originated inside the manager (sightFence /
-   *  the deferral timer), so the caller learns to settle the live region. */
-  onDeferredFreeze?: () => void
+   *  the deferral timer), so the caller learns to settle the live region
+   *  around this exact frozen record. */
+  onDeferredFreeze?: (rec: BlockRecord) => void
   /** Fired at the end of EVERY visual freeze — the moment the frozen
    *  element replaces the running one and the block's output rows are fixed
    *  in the DOM (nocx-tjppv: the run tool's completion wait reads the
@@ -1659,7 +1660,7 @@ export class BlockManager {
   /** Currently selected block id, or null if none selected (P1-8). */
   private _selectedBlockId: number | null = null
   private _snapshotStore: CommandSnapshotStore
-  private _onDeferredFreeze?: () => void
+  private _onDeferredFreeze?: (rec: BlockRecord) => void
   private _dimensions?: () => { cols: number; rows: number }
   /** The tab strip's answer to "what is this session called to a person",
    *  handed to every tool block this manager draws (nocx-vnzek). */
@@ -2255,8 +2256,7 @@ export class BlockManager {
       this._freezeVisual(pending.rec, pending.getLine, line, pending.status)
       this._consumedFence = hex
       // Settle the live region only if no newer command owns the running
-      // slot — a new command's live region must stay up.
-      if (this._runningBlock === null) this._onDeferredFreeze?.()
+      if (this._runningBlock === null) this._onDeferredFreeze?.(pending.rec)
       return
     }
 
@@ -2283,7 +2283,7 @@ export class BlockManager {
     const boundary = this._runningBlock === null ? pending.getEndLine() : pending.endLine
     this._freezeVisual(pending.rec, pending.getLine, boundary, pending.status)
     this._consumedFence = pending.hex
-    if (this._runningBlock === null) this._onDeferredFreeze?.()
+    if (this._runningBlock === null) this._onDeferredFreeze?.(pending.rec)
   }
 
   private _cancelPendingFence(): void {

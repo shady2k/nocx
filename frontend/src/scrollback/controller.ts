@@ -180,7 +180,7 @@ export class ScrollbackController {
       // the FENCE_DEFER_MS window elapsed): hand the block's rows to the
       // DOM and settle the live region exactly like a direct freeze, since
       // freezeFromAttempt already returned.
-      onDeferredFreeze: () => this._settleFrozen(),
+      onDeferredFreeze: (rec) => this._settleFrozen(rec),
       onBlockFrozen: opts.onBlockFrozen,
       // Read at freeze time rather than captured at construction: a pane is
       // resized, and the provenance must say what the serializer actually
@@ -635,7 +635,7 @@ export class ScrollbackController {
   onCommandEnd(getLine: GetLineFn, endLine: number, exitCode: number | null): void {
     const rec = this._blockManager.freezeBlock(getLine, endLine, exitCode)
     if (rec) {
-      this._settleFrozen()
+      this._settleFrozen(rec)
     }
   }
 
@@ -654,12 +654,11 @@ export class ScrollbackController {
    * the block was inserted in the same tick, so the scroller's height is still
    * the old one until layout runs.
    */
-  private _scrollToLastBlockEnd(): void {
+  private _scrollToLastBlockEnd(target: HTMLElement): void {
     requestAnimationFrame(() => {
       if (!this._following) return
-      const blocks = this.scrollbackInner.querySelectorAll('.cmd-block')
-      const last = blocks[blocks.length - 1]
-      if (!last) return
+      const last = target
+      if (!last || !this.scrollbackInner.contains(last)) return
       // ONLY FOR A BLOCK THAT DOES NOT FIT. A block that fits is already
       // whole on screen — the stack hangs from the bottom edge and we are
       // following it — so there is nothing to bring into view, and asking
@@ -905,12 +904,12 @@ export class ScrollbackController {
    * behaviour with six copies: the glide had to be added in six places, and
    * the seventh path to arrive would have been written without it.
    */
-  private _settleFrozen(): void {
+  private _settleFrozen(rec: BlockRecord): void {
     this._glide(() => {
       this._clearFrozenRows()
       this.setIdle()
     })
-    this._scrollToLastBlockEnd()
+    this._scrollToLastBlockEnd(rec.el)
   }
 
   private _updateSeparator(): void {
@@ -933,7 +932,7 @@ export class ScrollbackController {
       this._renderer.cursorLine(),
     )
     if (rec) {
-      this._settleFrozen()
+      this._settleFrozen(rec)
       return true
     }
     return false
@@ -945,7 +944,7 @@ export class ScrollbackController {
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.abandonAttempt(attempt, getLine, endLine)
     if (rec) {
-      this._settleFrozen()
+      this._settleFrozen(rec)
       return true
     }
     return false
@@ -958,7 +957,7 @@ export class ScrollbackController {
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.abandonUnbound(getLine, endLine)
     if (rec) {
-      this._settleFrozen()
+      this._settleFrozen(rec)
       return true
     }
     return false
@@ -971,7 +970,7 @@ export class ScrollbackController {
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.freezeEntered(getLine, endLine)
     if (rec) {
-      this._settleFrozen()
+      this._settleFrozen(rec)
       return true
     }
     return false

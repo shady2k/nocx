@@ -96,9 +96,9 @@
                 class="transcript__body"
               ><span class="cwd">nocx</span> <span class="dim">main</span>
 <span class="cwd">❯</span> <b>git log --oneline -3</b>
-3f7f19c7 fix(readme): the header rule stops being cut by a floated icon
-b637e161 Merge pull request #99 from shady2k/feat/landing
-e750cc84 feat(site): the page has no frames waiting to be filled
+8422d6f8 Merge pull request #115 from shady2k/fix/resize-vertical-oscillation
+165b2f51 chore(beads): close nocx-uus3o
+b6f066f4 Merge remote-tracking branch 'origin/main' into pr-115
 
 <span class="cwd">❯</span> <b>go test ./internal/session/ ./internal/settings/</b>
 <span class="ok">ok</span>    github.com/shady2k/nocx/internal/session   0.155s
@@ -157,7 +157,7 @@ e750cc84 feat(site): the page has no frames waiting to be filled
 
       <section class="wrap" id="workspace">
         <p class="eyebrow">02 — Workspace</p>
-        <h2>Four panels, about the machine your tab is on</h2>
+        <h2>Five panels, about the machine your tab is on</h2>
         <p class="lede">
           Tabs group into named, coloured workspaces. The sidebar follows whichever tab is in front,
           so the context on the left is the context you are typing into.
@@ -181,6 +181,14 @@ e750cc84 feat(site): the page has no frames waiting to be filled
           <div class="matrix__row">
             <dt>PORTS</dt>
             <dd>what something in the tab is listening on, and the tunnels you forwarded</dd>
+          </div>
+          <div class="matrix__row">
+            <dt>OPERATIONS</dt>
+            <dd>
+              files going to and from the machine that tab is on — drop one on the terminal, or use
+              the Files tree's menu · each transfer cancellable on its own · aggregate progress
+              stays on the activity bar with the sidebar collapsed
+            </dd>
           </div>
           <div class="matrix__row">
             <dt>NOTES</dt>
@@ -236,43 +244,107 @@ e750cc84 feat(site): the page has no frames waiting to be filled
 
       <section class="wrap" id="ask">
         <p class="eyebrow">04 — Ask</p>
-        <h2>Ask about the output, without leaving the scrollback</h2>
+        <h2>It acts in the scrollback, and every step is a row you can read</h2>
         <p class="lede">
-          Select what a finished command printed, and a chip naming that command appears in your
-          input line. A switch beside the prompt sends the line to the assistant instead of the
-          shell, and the answer arrives as a block in the same scrollback — no chat pane, no mode to
-          leave.
+          A switch beside the prompt sends the line to the assistant instead of the shell. A turn
+          arrives as one entry with everything under it in the order it happened: the prose it
+          wrote, the tools it called, the commands it ran. Scroll back through it later and you are
+          reading what took place, not a summary of it. Restart, and it comes back off disk the same
+          way.
         </p>
 
         <div class="cols">
           <div>
-            <h3>You attach</h3>
-            <p>The text of the frames you picked, and nothing you did not pick.</p>
-          </div>
-          <div>
-            <h3>You ask</h3>
-            <p>Your question, on the same line you can read before sending it.</p>
-          </div>
-          <div>
-            <h3>Your endpoint receives</h3>
+            <h3>You mark</h3>
             <p>
-              A system rule marking frame content as data rather than instructions, your question,
-              and that attached text, labelled.
+              Nothing attaches itself. A selection offers to be marked; so does one item in the
+              block menu. What is marked is a count on one chip you can open, dismiss from, and
+              scroll to. The question names those blocks and inlines none of their text.
+            </p>
+          </div>
+          <div>
+            <h3>You approve</h3>
+            <p>
+              A proposal to run something reads as a sentence — the command verbatim, the machine it
+              would land on, the tab it would land in. Your answer has a width: once, this session,
+              or always, and each control says what it covers next to itself.
+            </p>
+          </div>
+          <div>
+            <h3>You stop</h3>
+            <p>
+              Stop is on the live turn, where a command's Stop already is. The prose that arrived
+              stays, the turn is marked stopped by you, and the next question works.
+            </p>
+          </div>
+        </div>
+
+        <p class="lede" style="margin-top: 1.6rem">
+          While a command is running, ⌘/Ctrl+Enter opens the question box over it — including over a
+          full-screen program that owns the whole grid. The screen holds one frame while the box is
+          open and the program is never told: no resize, no signal, and the frame the assistant
+          reads is the frame you are looking at. Escape gives every key back.
+        </p>
+
+        <p class="warn">
+          nocx ships an integration, not a model — you configure the endpoint, and retention is your
+          provider's. A standing yes is saved over the exact command you were shown, never over a
+          class of them, and a rule can never be broader than the window that offered it. Settings
+          shows the instructions nocx gives the assistant, unresolved, and a finished turn can show
+          what was sent and what came back, verbatim. Over plain http nocx reaches loopback and
+          private addresses only, checking the address it actually resolved and connected to on
+          every request and every redirect; credentials are dropped on any change of scheme, host or
+          port.
+        </p>
+      </section>
+
+      <section class="wrap" id="api">
+        <p class="eyebrow">05 — API</p>
+        <h2>An API client whose collections are files in a folder you own</h2>
+        <p class="lede">
+          Open a Postman export — a <code>.json</code> or a whole <code>.zip</code> — and it becomes
+          ordinary JSON files, one per request. Edit in a form, press Send, read the response. Two
+          people editing two requests conflict in two files. No account, no cloud, nothing to sign
+          into.
+        </p>
+
+        <div class="cols">
+          <div>
+            <h3>Where it goes</h3>
+            <p>
+              A request leaves this machine, or leaves from inside an SSH connection you already
+              have open. An environment carries both the address and the route to it, so a
+              production request cannot go around its bastion by the two drifting apart.
+            </p>
+          </div>
+          <div>
+            <h3>What it resolves</h3>
+            <p>
+              Variables at three levels — request, folder, environment — edited where you are
+              standing. A request's Variables tab shows the whole scope it will send under, and says
+              which level answered each name.
+            </p>
+          </div>
+          <div>
+            <h3>What the file holds</h3>
+            <p>
+              A credential goes in any field — a header, the URL, the body, Auth — through a lock on
+              the field itself. The file keeps an opaque handle: not the value, and not the name you
+              chose for it.
             </p>
           </div>
         </div>
 
         <p class="warn">
-          nocx ships an integration, not a model — you configure the endpoint, and retention is your
-          provider's. A question with no attached frames carries only the question. Over plain http
-          nocx reaches loopback and private addresses only, checking the address it actually
-          resolved and connected to on every request and every redirect; credentials are dropped on
-          any change of scheme, host or port.
+          So a collection you accepted from a pull request cannot reach the password behind an SSH
+          profile, and importing somebody else's export never mints a secret out of what it happened
+          to carry. Responses are read up to 2 MiB; bytes matching a stored secret are removed
+          before the response reaches the window, and a badge says which one was there.
         </p>
       </section>
 
       <section class="wrap" id="edit">
-        <p class="eyebrow">05 — The prompt</p>
+        <p class="eyebrow">06 — The prompt</p>
         <h2>The command line is an editor</h2>
         <p class="lede">
           Built on CodeMirror 6: shell syntax highlighted as you type, commands and paths completed
@@ -305,7 +377,7 @@ e750cc84 feat(site): the page has no frames waiting to be filled
       </section>
 
       <section class="wrap" id="boundaries">
-        <p class="eyebrow">06 — Boundaries</p>
+        <p class="eyebrow">07 — Boundaries</p>
         <h2>What it takes in, and what it never builds around you</h2>
 
         <div class="cols cols--two">
@@ -420,7 +492,7 @@ e750cc84 feat(site): the page has no frames waiting to be filled
             >
             <a
               class="cta cta--quiet"
-              href="https://github.com/shady2k/nocx/blob/main/docs/release-notes/v0.2.0.md"
+              href="https://github.com/shady2k/nocx/blob/main/docs/release-notes/v0.3.0.md"
               >Read what changed</a
             >
           </div>
@@ -432,8 +504,8 @@ e750cc84 feat(site): the page has no frames waiting to be filled
           nocx is MIT licensed ·
           <a href="https://github.com/shady2k/nocx">Source</a> ·
           <a href="https://github.com/shady2k/nocx/releases">Releases</a> ·
-          <a href="https://github.com/shady2k/nocx/blob/main/docs/release-notes/v0.2.0.md"
-            >v0.2.0 notes</a
+          <a href="https://github.com/shady2k/nocx/blob/main/docs/release-notes/v0.3.0.md"
+            >v0.3.0 notes</a
           >
         </p>
         <p>English · <a href="./ru/?lang=ru">Русский</a></p>

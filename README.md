@@ -12,11 +12,13 @@ network it touches is the network you point it at.
 Wails v3 desktop shell, connected over one WebSocket carrying a raw binary data
 plane and a JSON-RPC 2.0 control plane.
 
-**Status:** `v0.2.0`, early release, no formal support. macOS (universal) and
+**Status:** `v0.3.0`, early release, no formal support. macOS (universal) and
 Linux (x86_64 AppImage). Tabs and workspaces, session restore, the sidebar
-(Files, Git, Ports, Notes), encrypted command history, the vault, snippets and
-the assistant all ship — see
-[the v0.2.0 notes](docs/release-notes/v0.2.0.md) for what each one does.
+(Files, Git, Ports, Notes, Operations), encrypted command history, the vault,
+snippets, file transfer between machines, an API client, and an assistant that
+runs things all ship — see
+[the v0.3.0 notes](docs/release-notes/v0.3.0.md) for what each one does, and
+[the v0.2.0 notes](docs/release-notes/v0.2.0.md) for what came before.
 
 > An earlier version of this line said SSH, tabs and cwd were "under active
 > development" long after they shipped. It is named rather than quietly
@@ -29,10 +31,11 @@ Flawless rendering of modern agent TUIs (Claude Code, aider, …) is table-stake
 the wedge is the _combination_, all local in one app: Ghostty-grade rendering,
 an integrated SSH manager, a secrets vault that leaves a reference in the
 command instead of the value, command blocks with completions and a real
-editor at the prompt, and an assistant that answers into the same scrollback —
-without an account or a cloud service of ours.
+editor at the prompt, an API client whose collections are files in a folder you
+own, and an assistant that acts inside the same scrollback — without an account
+or a cloud service of ours.
 
-Everything in that list ships as of `v0.2.0`; the vault, the blocks and the
+Everything in that list ships as of `v0.3.0`; the vault, the blocks and the
 completions carried a "(later)" here for two releases after they landed.
 
 ## Install (macOS)

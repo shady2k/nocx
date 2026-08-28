@@ -285,7 +285,7 @@ func TestRealRegistry_Resize(t *testing.T) {
 	defer func() { _ = reg.Close(sess.ID()) }()
 
 	// Resize to new dimensions — should not error.
-	err = sess.Resize(context.Background(), 100, 40, 0, 0)
+	err = sess.Resize(context.Background(), Size{Cols: 100, Rows: 40})
 	if err != nil {
 		t.Fatalf("Resize: %v", err)
 	}

@@ -229,6 +229,9 @@ func TestOpenParent_DTOConformsToContract(t *testing.T) {
 		WorkspaceID: "workspace:default",
 		Cwd:         "~/work",
 		DesiredMode: "script",
+		// effectiveSize became required with nocx-eidfb.1: every session has
+		// a size, so every ack carries one.
+		EffectiveSize: sizeResultOf(session.DefaultSize()),
 		Parent: &openParentResult{
 			SessionID:    "00000000000000000000000000000001",
 			InstanceID:   "fedcba9876543210fedcba9876543210",

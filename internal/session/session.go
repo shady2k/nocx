@@ -136,6 +136,13 @@ type Config struct {
 	Host   string
 	Local  *pty.Config
 	Remote *ssh.ConnectConfig
+	// Cols/Rows/XPixel/YPixel are the geometry the opening CLIENT REPORTED
+	// (nocx-eidfb.1). They are a measurement, not an instruction: only a
+	// webview knows its own font metrics and pane geometry, so the client
+	// still measures — but the size the channel is created at is decided
+	// here, by effectiveSize, and read back off the session. A config that
+	// reports nothing (no client attached at all) is not an error and does
+	// not open a 0x0 channel: the session runs at DefaultSize.
 	Cols   uint16
 	Rows   uint16
 	XPixel uint16
@@ -166,6 +173,12 @@ type Config struct {
 	// It is recorded rather than derived, unlike the workspace beside it —
 	// see the note on Session.PaneID.
 	PaneID string
+}
+
+// clientSize is the geometry this config reports, as one value. One reader
+// of the four loose fields, so nowhere else has to know they are four.
+func (c Config) clientSize() Size {
+	return Size{Cols: c.Cols, Rows: c.Rows, XPixel: c.XPixel, YPixel: c.YPixel}
 }
 
 type PTYFactory interface {
@@ -273,7 +286,24 @@ type Session interface {
 	// full the frame is dropped. Returns false if the session is
 	// closed or the queue is full.
 	EnqueueWrite(p []byte) bool
-	Resize(ctx context.Context, cols, rows, xpixel, ypixel uint16) error
+	// EffectiveSize is the geometry this session's channel is running at —
+	// the backend's own conclusion, never the client's claim (nocx-eidfb.1).
+	// It is never the zero Size: a session with no client attached holds
+	// DefaultSize, which is the whole point of the field. Read it to answer
+	// "how big is this session", including from a client that has just
+	// attached and reported something else.
+	EffectiveSize() Size
+	// Resize REPORTS a client's new geometry and returns once the channel
+	// has taken whatever size the backend concluded from it. The argument
+	// is a report for exactly the reason Config's is: the measurement is
+	// the client's and the decision is not. A report the backend cannot use
+	// puts the session on DefaultSize rather than on nothing.
+	//
+	// On a channel that refuses the resize the error is returned and
+	// EffectiveSize is left describing the size the channel is still
+	// running at — a session must never report a grid its channel never
+	// took.
+	Resize(ctx context.Context, reported Size) error
 	Close() error
 	Done() <-chan struct{}
 	StartOutput(ctx context.Context, onOutput OutputHandler) error
@@ -471,6 +501,14 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		}
 	}
 
+	// THE size decision, made once, before anything is created (nocx-eidfb.1).
+	// Both arms below create their channel at exactly this size and neither
+	// resizes it afterwards, which is AD-1's "created at that size — never
+	// spawned-then-resized" with the chooser changed from the client to the
+	// backend. A config that reported nothing lands on DefaultSize here, so
+	// there is no path from this point on where a session has no size.
+	eff := effectiveSize(cfg.clientSize())
+
 	var ch Channel
 	var err error
 	var opts []ssh.ConnectOption
@@ -483,6 +521,13 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 			return nil, fmt.Errorf("remote session requires ConnectConfig")
 		}
 		opts = sshOptionsFromConfig(cfg.Remote)
+		// The size is appended HERE rather than read off the ConnectConfig,
+		// because the registry is the one that decided it. sshOptionsFromConfig
+		// translates what the caller supplied; this is the backend's own
+		// conclusion, and it is supplied on every remote open — including the
+		// one with no client — so internal/ssh's own 80x24 fallback
+		// (ssh_config.go) can no longer be what decides a session's geometry.
+		opts = append(opts, ssh.WithPTYSize(eff.Cols, eff.Rows, eff.XPixel, eff.YPixel))
 		opts = append(opts, ssh.WithSessionID(string(id)))
 		// The keepalive prober's findings come back here (nocx-iarf9): it is
 		// the one mechanism that already notices a host has stopped answering
@@ -501,10 +546,10 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 	} else {
 		pt, perr := r.ptf.NewPTY(ctx, pty.Config{
 			Cwd:       cfg.Cwd,
-			Cols:      cfg.Cols,
-			Rows:      cfg.Rows,
-			XPixel:    cfg.XPixel,
-			YPixel:    cfg.YPixel,
+			Cols:      eff.Cols,
+			Rows:      eff.Rows,
+			XPixel:    eff.XPixel,
+			YPixel:    eff.YPixel,
 			Enhanced:  cfg.Enhanced,
 			SessionID: string(id),
 		})
@@ -527,6 +572,7 @@ func (r *Reg) Open(ctx context.Context, cfg Config) (Session, error) {
 		credentialID: cfg.CredentialID,
 		sshOpts:      opts,
 		ch:           ch,
+		size:         eff,
 		log:          r.log.With("session_id", string(id)),
 		writeCh:      make(chan writeJob, writeQueueDepth),
 		writeDone:    make(chan struct{}),
@@ -646,6 +692,13 @@ func kindName(k Kind) string {
 }
 
 // sshOptionsFromConfig converts a ssh.ConnectConfig into ConnectOptions.
+//
+// It deliberately does NOT translate the config's Cols/Rows/XPixel/YPixel
+// (removed in nocx-eidfb.1). The channel's size is the registry's decision,
+// not the caller's, so Open appends WithPTYSize itself with the size it
+// concluded; translating the caller's copy here as well would be a second
+// answer to one question, and the two would part company the first time a
+// session ran at a size no client had reported.
 func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	var opts []ssh.ConnectOption
 	if cfg.User != "" {
@@ -659,9 +712,6 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	}
 	if cfg.UseAgent {
 		opts = append(opts, ssh.WithAgent())
-	}
-	if cfg.Cols > 0 || cfg.Rows > 0 {
-		opts = append(opts, ssh.WithPTYSize(cfg.Cols, cfg.Rows, cfg.XPixel, cfg.YPixel))
 	}
 	if cfg.AuthMode != "" {
 		opts = append(opts, ssh.WithAuthMode(cfg.AuthMode))
@@ -756,6 +806,16 @@ type realSession struct {
 	handler   OutputHandler
 	handlerMu sync.Mutex
 	closeOnce sync.Once
+
+	// size is what the session is RUNNING at: the backend's conclusion,
+	// written at construction (never after the channel exists at a
+	// different one) and again after each resize the channel accepted.
+	// Guarded by its own mutex because every reader of it — the open ack,
+	// the resize lane's follow-up, a later attaching client — asks while
+	// something else may be resizing, and none of them should contend with
+	// a handler swap or a write.
+	sizeMu sync.Mutex
+	size   Size
 
 	// The liveness projection (nocx-iarf9). livenessMu guards the record;
 	// livenessEpochs is this session's own monotonic source of observation
@@ -908,8 +968,27 @@ func (s *realSession) startWriteLoop() {
 	}()
 }
 
-func (s *realSession) Resize(ctx context.Context, cols, rows, xpixel, ypixel uint16) error {
-	return s.ch.Resize(ctx, cols, rows, xpixel, ypixel)
+func (s *realSession) EffectiveSize() Size {
+	s.sizeMu.Lock()
+	defer s.sizeMu.Unlock()
+	return s.size
+}
+
+func (s *realSession) Resize(ctx context.Context, reported Size) error {
+	// The same decision Open made, asked again — one owner, so a resize can
+	// never put a session on a size an open would have refused.
+	eff := effectiveSize(reported)
+	if err := s.ch.Resize(ctx, eff.Cols, eff.Rows, eff.XPixel, eff.YPixel); err != nil {
+		return err
+	}
+	// Recorded only after the channel took it: the interval in which this
+	// field is true opens when the channel accepts the size and closes when
+	// the next accepted resize replaces it, so a refusal leaves the session
+	// describing what it is still running at rather than what was asked for.
+	s.sizeMu.Lock()
+	s.size = eff
+	s.sizeMu.Unlock()
+	return nil
 }
 
 func (s *realSession) Close() error {

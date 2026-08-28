@@ -180,12 +180,35 @@ type openResult struct {
 	WorkspaceID string `json:"workspaceId"`
 	Cwd         string `json:"cwd"`
 	DesiredMode string `json:"desiredMode"`
+	// EffectiveSize is the geometry the BACKEND decided this session runs
+	// at (nocx-eidfb.1). The open params carry what the client measured;
+	// this carries what was done with it, so a renderer learns the answer
+	// rather than assuming its own report was adopted. It is never absent
+	// and never zero: a session with no client attached holds the named
+	// default, which is the state this field exists to make expressible.
+	EffectiveSize sizeResult `json:"effectiveSize"`
 	// Parent is the edge the backend RECORDED, echoed back so the renderer
 	// stores what was admitted rather than what it asked for (nocx-9hu9d).
 	// Null for a root session — and null rather than absent, because the
 	// schema requires the key: an omitempty here would drop it for every root
 	// session and leave "no parent" indistinguishable from "an old backend".
 	Parent *openParentResult `json:"parent"`
+}
+
+// sizeResult is a session's geometry on the wire, in the same four words
+// AD-1's open and resize params use — one shape for one concept, so the
+// answer cannot be spelled differently from the question.
+type sizeResult struct {
+	Cols   uint16 `json:"cols"`
+	Rows   uint16 `json:"rows"`
+	XPixel uint16 `json:"xpixel"`
+	YPixel uint16 `json:"ypixel"`
+}
+
+// sizeResultOf renders a session's effective size onto the wire. One place
+// converts, for the reason parentResultFor is one place (AD-8).
+func sizeResultOf(s session.Size) sizeResult {
+	return sizeResult{Cols: s.Cols, Rows: s.Rows, XPixel: s.XPixel, YPixel: s.YPixel}
 }
 
 // openParentResult is the recorded parent edge on the wire: the full identity
@@ -306,7 +329,13 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 	}
 
 	cfg := session.Config{
-		Kind:   session.KindLocal,
+		Kind: session.KindLocal,
+		// The client's REPORT of its own geometry, carried through as a
+		// measurement (nocx-eidfb.1). The registry decides the size the
+		// channel is created at and the ack reports what it decided, so
+		// nothing here may treat these four as the answer — including this
+		// handler, which reads the size back off the session below rather
+		// than echoing what it just sent.
 		Cols:   params.Cols,
 		Rows:   params.Rows,
 		XPixel: params.XPixel,
@@ -384,10 +413,12 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 					return nil
 				}
 
-				remote.Cols = params.Cols
-				remote.Rows = params.Rows
-				remote.XPixel = params.XPixel
-				remote.YPixel = params.YPixel
+				// The size is deliberately NOT set here (nocx-eidfb.1): the
+				// params carry what the client MEASURED, and the session
+				// registry is what decides the size the channel opens at.
+				// Writing it onto the ConnectConfig as well would put the
+				// renderer's number back on the path the registry's
+				// conclusion travels.
 				remote.RemoteLauncher = h.launcher
 				remote.RemoteLifecycle = h.lifecycle
 
@@ -439,11 +470,12 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 					keyFile = resolved.IdentityFile
 				}
 				remote = &ssh.ConnectConfig{
-					User:            user,
-					Port:            port,
-					KeyFile:         keyFile,
-					Cols:            params.Cols,
-					Rows:            params.Rows,
+					User:    user,
+					Port:    port,
+					KeyFile: keyFile,
+					// No size: see the profile branch above — the registry
+					// decides it, and this struct carries what the caller
+					// supplied (nocx-eidfb.1).
 					RemoteLauncher:  h.launcher,
 					RemoteInstaller: h.installer,
 					RemoteLifecycle: h.lifecycle,
@@ -570,7 +602,11 @@ func (h openHandlers) handleOpen(ctx context.Context, wconn *wsConn, r Responder
 		WorkspaceID:  workspaceID,
 		Cwd:          sess.Cwd(),
 		DesiredMode:  desiredModeForAck(cfg.Remote),
-		Parent:       parentResultFor(sess),
+		// Read off the SESSION, never echoed from the params: the two agree
+		// only when the report was adopted, and reading the record is what
+		// makes the ack an answer instead of a repetition.
+		EffectiveSize: sizeResultOf(sess.EffectiveSize()),
+		Parent:        parentResultFor(sess),
 	}
 	resultJSON, _ := json.Marshal(result)
 	resp := newJSONRPCResult(req.ID, resultJSON)
@@ -683,10 +719,12 @@ func (h sessionOpsHandlers) handleResize(ctx context.Context, state *connState, 
 		// The response completes when the lane settles the op (applied,
 		// superseded, or cancelled by close) — the renderer never reads it.
 		rop := &resizeOp{
-			cols:   params.Cols,
-			rows:   params.Rows,
-			xpixel: params.XPixel,
-			ypixel: params.YPixel,
+			reported: session.Size{
+				Cols:   params.Cols,
+				Rows:   params.Rows,
+				XPixel: params.XPixel,
+				YPixel: params.YPixel,
+			},
 			done: func(err error) {
 				if err != nil {
 					resp := newJSONRPCError(req.ID, -32603, "Internal error")

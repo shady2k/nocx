@@ -38,6 +38,27 @@ export interface Open {
    */
   desiredMode: 'auto' | 'raw' | 'script' | 'relay'
   /**
+   * The geometry the BACKEND decided this session runs at (nocx-eidfb.1). The open params carry {cols, rows, xpixel, ypixel} as the client's MEASUREMENT — only a webview knows its own font metrics and pane geometry — and this carries what was done with it, so a renderer learns the size its session took rather than assuming its own report was adopted. NEVER absent and never zero: a session with no client attached holds a named default (80x24), which is the state this field exists to make expressible — before it, a session whose window had gone away had no size at all. The channel is created at this size and never spawned-then-resized (AD-1's resize contract is unchanged; what moved is who chose the number). It is the SESSION's size, not the window's: rendering at it rather than at the window's own geometry is deliberately not implied here (nocx-eidfb.3), and neither is the choice among several attached clients (nocx-eidfb.2).
+   */
+  effectiveSize: {
+    /**
+     * Columns in the session's grid. At least 1 — a session never runs at zero columns, because the no-client case is the named default rather than the absence of a size.
+     */
+    cols: number
+    /**
+     * Rows in the session's grid. At least 1, for the same reason as cols.
+     */
+    rows: number
+    /**
+     * Width of the grid in pixels, or 0 when the client reported no pixel geometry. Zero is meaningful here and is not the absence of a size: the cell grid is what a channel is created at, and every client in this repo sends 0 for both pixel fields today.
+     */
+    xpixel: number
+    /**
+     * Height of the grid in pixels, or 0 — see xpixel.
+     */
+    ypixel: number
+  }
+  /**
    * The session that opened this one (nocx-9hu9d), or null for a root session. Always present: null is the answer for a root, and a missing key would make "this session has no parent" indistinguishable from "this backend does not say". It is the edge the backend RECORDED — the renderer's claim in the open params is checked against the live registry and refused (-32602) if it cannot be true, so what comes back here is an admitted fact, not an echo. The full identity is carried, never a bare sessionId: an id alone re-resolves to whatever holds it now, which is the ambiguity instanceId + sessionEpoch exist to remove (nocx-3oupk), and this edge is written once and never revisited. PROVENANCE ONLY — it says "A created B" and confers nothing: the parent gains no right to observe or control the child by appearing here, and continuing authority is a separate, revocable object (ADR-0020 §5). The edge outlives its subject: a parent that exits leaves this value exactly as it was, because a parent's death never closes or rewrites its children (design D6).
    */
   parent: {

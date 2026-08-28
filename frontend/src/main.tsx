@@ -70,6 +70,8 @@ import {
 import { profileRows } from './quick-connect-assembly'
 import { showToast } from './ui/toast'
 import { registerFileViewerSurface, openFileViewer } from './file-viewer'
+import { registerTerminalLinks } from './terminal-links'
+import { createUrlOpener } from './open-url'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
 import { uploadSurfaceFor } from './files/upload-surface'
@@ -797,6 +799,28 @@ async function main() {
     diff: (params) => gitServices.diff(params.bindingId, params.path, params.side, params.maxBytes),
     onBindingLiveness: onGitBindingLiveness,
     onDiffStale: (bindingId, path, side, cb) => gitStore.onDiffStale(bindingId, path, side, cb),
+  })
+
+  // ── Clickable paths and urls in terminal output (nocx-8yg.8) ─────────
+  //
+  // Registered here, once, and before `openInitialPane` — every terminal
+  // pane asks this module for the shared opener when it mounts, so a pane
+  // built before the registration would simply have no links and nothing
+  // would say why.
+  //
+  // The dependencies are the ones already standing: the URL seam that owns
+  // "open a link" for the whole app (open-url.ts, AD-8), the SAME tracked
+  // files services the Files panel and the viewer use — so a link click and
+  // a panel click share one binding-liveness registry rather than each
+  // keeping its own view of whether a session is still there — and the
+  // viewer surface itself.
+  const terminalLinkUrlOpener = createUrlOpener({ openUrl: (url) => gitServices.openUrl(url) })
+  registerTerminalLinks({
+    openUrl: (url) => terminalLinkUrlOpener.open(url),
+    openBinding: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),
+    openViewer: (target) => openFileViewer(target),
+    onBindingLiveness: onFilesBindingLiveness,
+    notify: (message) => showToast({ message, level: 'warning' }),
   })
   const gitView = createGitView({
     services: gitServicesTracked,

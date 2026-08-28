@@ -68,8 +68,11 @@ export function charIndexAt(flat: FlattenedLine, node: Text, offset: number): nu
 }
 
 /** The (node, offset) of the char at flattened `index`, clamped to the last
- *  char so an end-of-line bound still resolves. */
-function charPos(flat: FlattenedLine, index: number): { node: Text; offset: number } {
+ *  char so an end-of-line bound still resolves. Exported because the link
+ *  decorator (terminal-links/decorate.ts) builds ranges over the SAME
+ *  flattened line this module already knows how to walk — a second walker
+ *  would be a second answer to "where is char N of this row". */
+export function charPos(flat: FlattenedLine, index: number): { node: Text; offset: number } {
   const clamped = Math.max(0, Math.min(index, flat.chars.length - 1))
   return flat.chars[clamped]
 }

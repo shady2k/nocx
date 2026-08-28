@@ -187,3 +187,74 @@ vitest_containerized() {
             exec setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --clear-groups sh -euc "$INNER"
         '
 }
+
+# --- one containerized gate at a time, machine-wide --------------------------
+#
+# CPU_SHARES above weighs the hook against the DESKTOP, and its measurement was
+# one hook run. It cannot weigh a hook against another hook: three concurrent
+# pushes carry weight 512 each, so they are equal to one another and together
+# still take every core. Nothing in that reasoning bounds the aggregate.
+#
+# And the binding resource is not CPU. This Docker VM has 12 CPUs but 8 GiB of
+# RAM, while `go test -race` and `npm ci` are both memory-hungry: one push is
+# two containers, so three workers pushing at once is six, and the VM starts
+# reclaiming. AGENTS.md already recorded the shape without naming the cause —
+# "the containerized jobs serialize on one Docker daemon and one CPU, so
+# parallel workers each running four jobs finish later than the same work run
+# in sequence". This makes that serialization explicit and orderly instead of
+# leaving the VM to discover it by thrashing.
+#
+# The lock is a directory because mkdir is atomic on every POSIX filesystem and
+# macOS ships no flock(1). It lives in /tmp rather than the worktree: each
+# worktree checks out its own .githooks, so a lock inside one would not be seen
+# by the others, which is the entire case being defended against. Keyed by uid
+# so two accounts on one machine do not block each other.
+#
+# It never blocks a push forever. A holder that dies leaves a stale directory,
+# reclaimed by checking whether its pid is still alive; a holder that merely
+# takes very long eventually exhausts the wait, and then we warn and run anyway
+# — stranding a worker behind a neighbour is worse than the load we were
+# avoiding, the same trade the pull side already makes.
+GATE_LOCK_DIR="/tmp/nocx-hook-gate-${HOST_UID}.lock"
+GATE_LOCK_WAIT=${NOCX_GATE_LOCK_WAIT:-1800}
+GATE_LOCK_HELD=0
+
+gate_lock_acquire() {
+    _waited=0
+    _announced=0
+    while :; do
+        if mkdir "$GATE_LOCK_DIR" 2>/dev/null; then
+            printf '%s\n' "$$" > "$GATE_LOCK_DIR/pid" 2>/dev/null || true
+            GATE_LOCK_HELD=1
+            return 0
+        fi
+
+        # Stale? The holder is gone if its pid no longer exists. An unreadable
+        # or empty pid file is treated as stale too: the only way to get one is
+        # a holder that died between mkdir and the write above.
+        _holder=$(cat "$GATE_LOCK_DIR/pid" 2>/dev/null || echo "")
+        if [ -z "$_holder" ] || ! kill -0 "$_holder" 2>/dev/null; then
+            rm -rf "$GATE_LOCK_DIR" 2>/dev/null || true
+            continue
+        fi
+
+        if [ "$_announced" = 0 ]; then
+            printf 'WAIT: another worktree is running the containerized gate (pid %s).\n' "$_holder" >&2
+            printf '      Waiting rather than running six containers against an 8 GiB VM.\n' >&2
+            _announced=1
+        fi
+
+        if [ "$_waited" -ge "$GATE_LOCK_WAIT" ]; then
+            printf 'WARN: gate lock still held after %ss — running anyway.\n' "$GATE_LOCK_WAIT" >&2
+            return 0
+        fi
+        sleep 2
+        _waited=$((_waited + 2))
+    done
+}
+
+gate_lock_release() {
+    [ "$GATE_LOCK_HELD" = 1 ] || return 0
+    GATE_LOCK_HELD=0
+    rm -rf "$GATE_LOCK_DIR" 2>/dev/null || true
+}

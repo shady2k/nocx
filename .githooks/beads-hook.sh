@@ -30,10 +30,19 @@ push_beads_state() {
 
     # Never call bd bare here: these hooks run under `set -eu`, and a nonzero
     # exit would kill the script before the policy below could look at it.
+    # -k: `bd dolt pull` and `bd dolt push` IGNORE SIGTERM (measured 2026-08-28,
+    # nocx-v48vl: a wedged pull survived `kill` and needed `kill -9`). Plain
+    # `timeout` sends TERM, reports 124 and returns, leaving the process alive
+    # and still holding the embedded store's exclusive .dolt/noms/LOCK. Every
+    # worktree on the machine shares that store, so one abandoned run freezes
+    # `bd ready`, `bd create` and `bd export` everywhere until somebody finds
+    # it by hand. That is exactly what happened: four sessions queued behind one
+    # orphan, the longest waiting 85 minutes. --kill-after sends KILL so the
+    # timeout actually times out.
     if command -v timeout >/dev/null 2>&1; then
-        timeout "$timeout_secs" bd dolt push && bd_exit=0 || bd_exit=$?
+        timeout -k 5 "$timeout_secs" bd dolt push && bd_exit=0 || bd_exit=$?
     elif command -v gtimeout >/dev/null 2>&1; then
-        gtimeout "$timeout_secs" bd dolt push && bd_exit=0 || bd_exit=$?
+        gtimeout -k 5 "$timeout_secs" bd dolt push && bd_exit=0 || bd_exit=$?
     else
         bd dolt push && bd_exit=0 || bd_exit=$?
     fi
@@ -91,10 +100,19 @@ pull_beads_state() {
 
     # Never call bd bare: these hooks run under `set -eu` and a nonzero exit
     # would kill the script before the policy below could look at it.
+    # -k: `bd dolt pull` and `bd dolt push` IGNORE SIGTERM (measured 2026-08-28,
+    # nocx-v48vl: a wedged pull survived `kill` and needed `kill -9`). Plain
+    # `timeout` sends TERM, reports 124 and returns, leaving the process alive
+    # and still holding the embedded store's exclusive .dolt/noms/LOCK. Every
+    # worktree on the machine shares that store, so one abandoned run freezes
+    # `bd ready`, `bd create` and `bd export` everywhere until somebody finds
+    # it by hand. That is exactly what happened: four sessions queued behind one
+    # orphan, the longest waiting 85 minutes. --kill-after sends KILL so the
+    # timeout actually times out.
     if command -v timeout >/dev/null 2>&1; then
-        timeout "$timeout_secs" bd dolt pull >/dev/null 2>&1 && bd_exit=0 || bd_exit=$?
+        timeout -k 5 "$timeout_secs" bd dolt pull >/dev/null 2>&1 && bd_exit=0 || bd_exit=$?
     elif command -v gtimeout >/dev/null 2>&1; then
-        gtimeout "$timeout_secs" bd dolt pull >/dev/null 2>&1 && bd_exit=0 || bd_exit=$?
+        gtimeout -k 5 "$timeout_secs" bd dolt pull >/dev/null 2>&1 && bd_exit=0 || bd_exit=$?
     else
         bd dolt pull >/dev/null 2>&1 && bd_exit=0 || bd_exit=$?
     fi

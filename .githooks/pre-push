@@ -70,8 +70,19 @@ cleanup() {
     [ -n "$GO_PID" ] && kill "$GO_PID" 2>/dev/null || true
     [ -n "$FE_PID" ] && kill "$FE_PID" 2>/dev/null || true
     rm -f "$GO_LOG" "$FE_LOG"
+    # Release on every exit path, including a failed gate and a Ctrl-C: a lock
+    # left behind is reclaimed by the pid check in gate_lock_acquire, but only
+    # after the next pusher has already waited to notice.
+    gate_lock_release
 }
 trap cleanup EXIT INT TERM
+
+# Serialize with any other worktree's gate before starting containers, and only
+# when there is something to run — a beads-only or docs-only push skips both
+# suites and must not queue behind anybody.
+if [ "$RUN_GO" = 1 ] || [ "$RUN_FE" = 1 ]; then
+    gate_lock_acquire
+fi
 
 if [ "$RUN_GO" = 1 ]; then
     go_test_containerized >"$GO_LOG" 2>&1 &
@@ -108,6 +119,11 @@ fi
 # prefers sync.remote and falls back to the JSONL only fourth. So a push that
 # skips this step leaves collaborators on a backlog that can be days old, with
 # nothing on screen to suggest it.
+
+# Hand the lock on before the tracker push: that step talks to the network, not
+# to Docker, so holding the gate through it would idle every other worktree for
+# no reason.
+gate_lock_release
 
 . "$(dirname "$0")/beads-hook.sh"
 

@@ -39,6 +39,7 @@ import (
 	"fmt"
 	"io"
 	"path"
+	"sync"
 )
 
 // ErrNotRegular is the refusal for a source that is not a regular file: a
@@ -113,21 +114,36 @@ type Download struct {
 	// and what Get refuses to disagree with in either direction.
 	Size int64
 
-	r RemoteReader
+	mu sync.Mutex
+	r  RemoteReader
 }
 
-// Close lets go of the pinned handle. It is idempotent, so a path that
-// closes defensively and a deferred close cannot double-close the lease's
-// handle — idempotent for one owner, which is what Source.Open's contract
-// gives it, and not a substitute for that ownership: two goroutines racing
-// Close on one Download is a defect in the caller, not a case this closes.
+// Close lets go of the pinned handle and may race the one active Get. That
+// race is intentional: RemoteReader has no context, so closing it is the only
+// way cancellation or a failed destination can unblock a Read already in
+// flight. The mutex protects handle ownership; the underlying reader's Close
+// provides the interruption. Later defensive/deferred closes are no-ops.
 func (d *Download) Close() error {
-	if d == nil || d.r == nil {
+	if d == nil {
 		return nil
 	}
+	d.mu.Lock()
 	r := d.r
 	d.r = nil
+	d.mu.Unlock()
+	if r == nil {
+		return nil
+	}
 	return r.Close()
+}
+
+func (d *Download) reader() RemoteReader {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return d.r
 }
 
 // Source reads files off one host. It is the read counterpart of Sink, and
@@ -166,6 +182,56 @@ type Source interface {
 	// transfer is cancelled; Get's half of the bargain is that once either
 	// end reports a failure it unwinds at once and reports how far it got.
 	Get(ctx context.Context, d *Download, w io.Writer, progress func(total int64)) (int64, error)
+}
+
+type saveDownloadResult struct {
+	outcome Outcome
+	err     error
+}
+
+// SaveDownload streams one pinned source into an atomic Sink operation. The
+// pipe is the bounded backpressure boundary between the read and write
+// engines; its sink goroutine is joined before SaveDownload returns, so no
+// transfer work escapes the caller's context or lifetime.
+func SaveDownload(
+	ctx context.Context,
+	source Source,
+	download *Download,
+	sink Sink,
+	upload Upload,
+	progress func(int64),
+) (int64, Outcome, error) {
+	reader, writer := io.Pipe()
+	stopOnCancel := context.AfterFunc(ctx, func() {
+		err := ctx.Err()
+		_ = download.Close()
+		_ = writer.CloseWithError(err)
+		_ = reader.CloseWithError(err)
+	})
+	defer stopOnCancel()
+
+	sinkDone := make(chan saveDownloadResult, 1)
+	go func() {
+		outcome, err := sink.Put(ctx, upload, reader, nil)
+		if err != nil {
+			// Sink.Put may fail before Source.Get reaches its first pipe
+			// Write. Closing the pipe cannot interrupt a remote Read, but
+			// closing the pinned handle can.
+			_ = download.Close()
+		}
+		_ = reader.CloseWithError(err)
+		sinkDone <- saveDownloadResult{outcome: outcome, err: err}
+	}()
+
+	sent, sourceErr := source.Get(ctx, download, writer, progress)
+	_ = writer.CloseWithError(sourceErr)
+	sinkResult := <-sinkDone
+	if sinkResult.err != nil {
+		// The reader-close error is fallout from a failed destination; keep
+		// the Sink error as the causal diagnostic.
+		return sent, sinkResult.outcome, sinkResult.err
+	}
+	return sent, sinkResult.outcome, sourceErr
 }
 
 type source struct {
@@ -212,14 +278,15 @@ func (s *source) Open(p string) (*Download, error) {
 // is why the caller frames the response at Size and lets a short body be
 // visible as one.
 func (s *source) Get(ctx context.Context, d *Download, w io.Writer, progress func(int64)) (int64, error) {
-	if d == nil || d.r == nil {
+	r := d.reader()
+	if r == nil {
 		return 0, fmt.Errorf("%w: no open source", ErrInvalidDownload)
 	}
 	if progress == nil {
 		progress = func(int64) {}
 	}
 	var sent int64
-	err := copyChunks(ctx, w, d.r, d.Size, s.chunk, func(total int64) {
+	err := copyChunks(ctx, w, r, d.Size, s.chunk, func(total int64) {
 		sent = total
 		progress(total)
 	}, copyLabels{read: "read remote", write: "send"})

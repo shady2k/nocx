@@ -21,6 +21,7 @@
 import { afterEach, describe, expect, it } from 'vitest'
 
 import { downloadSurfaceFor } from './download-surface'
+import { downloadResultFixture } from './download-fixtures'
 import { clearToasts, toasts } from '../ui/toast'
 import type { Dispatcher } from '../dispatcher'
 
@@ -28,12 +29,17 @@ import type { Dispatcher } from '../dispatcher'
  *  one thing these tests drive is the notification coming back. */
 function fakeDispatcher(): {
   dispatcher: Dispatcher
+  calls: Array<{ method: string; params: unknown }>
   emit(method: string, params: unknown): void
 } {
   const handlers = new Map<string, Set<(p: unknown) => void>>()
+  const calls: Array<{ method: string; params: unknown }> = []
   const dispatcher = {
     socket: null,
-    call: () => Promise.resolve({}),
+    call: (method: string, params: unknown) => {
+      calls.push({ method, params })
+      return Promise.resolve(method === 'files.download' ? downloadResultFixture() : {})
+    },
     subscribe(method: string, h: (p: unknown) => void) {
       const set = handlers.get(method) ?? new Set()
       set.add(h)
@@ -44,6 +50,7 @@ function fakeDispatcher(): {
   } as unknown as Dispatcher
   return {
     dispatcher,
+    calls,
     emit(method, params) {
       for (const h of [...(handlers.get(method) ?? [])]) h(params)
     },
@@ -87,5 +94,35 @@ describe('one surface per dispatcher', () => {
     expect(downloadSurfaceFor(fakeDispatcher().dispatcher)).not.toBe(
       downloadSurfaceFor(fakeDispatcher().dispatcher),
     )
+  })
+})
+
+describe('platform saver composition', () => {
+  it('uses files.downloadSave in Wails and sends only the transfer id', async () => {
+    const host = window as unknown as {
+      webkit?: { messageHandlers?: { external?: { postMessage?: () => void } } }
+    }
+    const previous = host.webkit
+    host.webkit = { messageHandlers: { external: { postMessage: () => {} } } }
+    try {
+      const d = fakeDispatcher()
+      await downloadSurfaceFor(d.dispatcher).flow.fetch({
+        bindingId: 'binding-1',
+        path: '/srv/report.bin',
+        machine: 'alice@srv',
+      })
+      expect(d.calls).toEqual([
+        {
+          method: 'files.download',
+          params: { bindingId: 'binding-1', path: '/srv/report.bin' },
+        },
+        {
+          method: 'files.downloadSave',
+          params: { transferId: '0'.repeat(32) },
+        },
+      ])
+    } finally {
+      host.webkit = previous
+    }
   })
 })

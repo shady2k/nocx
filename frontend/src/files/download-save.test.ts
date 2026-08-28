@@ -10,7 +10,11 @@
 // bytes.
 import { describe, expect, it, vi } from 'vitest'
 
-import { createBrowserDownloadSaver } from './download-save'
+import {
+  createBrowserDownloadSaver,
+  createNativeDownloadSaver,
+  DownloadNotClaimedError,
+} from './download-save'
 
 /** A document whose anchors record their click instead of navigating —
  *  jsdom cannot follow one, and a test must not want it to. */
@@ -33,7 +37,11 @@ function recordingDocument(): { doc: Document; clicked: HTMLAnchorElement[] } {
 describe('handing a download to the browser', () => {
   it('clicks an anchor at the URL, once', () => {
     const { doc, clicked } = recordingDocument()
-    createBrowserDownloadSaver(doc).save('http://127.0.0.1:7331/download/abc')
+    void createBrowserDownloadSaver(doc).save({
+      transferId: '0'.repeat(32),
+      name: 'report.bin',
+      url: 'http://127.0.0.1:7331/download/abc',
+    })
 
     expect(clicked).toHaveLength(1)
     expect(clicked[0].href).toBe('http://127.0.0.1:7331/download/abc')
@@ -45,7 +53,11 @@ describe('handing a download to the browser', () => {
     // the sanitised one and the only one the backend built from the handle
     // it actually read.
     const { doc, clicked } = recordingDocument()
-    createBrowserDownloadSaver(doc).save('http://127.0.0.1:7331/download/abc')
+    void createBrowserDownloadSaver(doc).save({
+      transferId: '0'.repeat(32),
+      name: 'report.bin',
+      url: 'http://127.0.0.1:7331/download/abc',
+    })
 
     expect(clicked[0].getAttribute('download')).toBe('')
   })
@@ -58,7 +70,11 @@ describe('handing a download to the browser', () => {
     vi.stubGlobal('fetch', fetchSpy)
     try {
       const { doc } = recordingDocument()
-      createBrowserDownloadSaver(doc).save('http://127.0.0.1:7331/download/abc')
+      void createBrowserDownloadSaver(doc).save({
+        transferId: '0'.repeat(32),
+        name: 'report.bin',
+        url: 'http://127.0.0.1:7331/download/abc',
+      })
       // A microtask turn, so an implementation that fetched without
       // awaiting would still have called it.
       await Promise.resolve()
@@ -72,7 +88,48 @@ describe('handing a download to the browser', () => {
     // Appending even for a tick is a visible mutation of somebody's page,
     // and a click on a detached element dispatches perfectly well.
     const before = document.body.childNodes.length
-    createBrowserDownloadSaver(recordingDocument().doc).save('http://x/download/abc')
+    void createBrowserDownloadSaver(recordingDocument().doc).save({
+      transferId: '0'.repeat(32),
+      name: 'report.bin',
+      url: 'http://x/download/abc',
+    })
     expect(document.body.childNodes.length).toBe(before)
+  })
+
+  it('refuses a missing backend origin without clicking or fetching', async () => {
+    const browser = recordingDocument()
+    await expect(
+      createBrowserDownloadSaver(browser.doc).save({
+        transferId: '0'.repeat(32),
+        name: 'report.bin',
+        url: null,
+      }),
+    ).rejects.toBeInstanceOf(DownloadNotClaimedError)
+    expect(browser.clicked).toEqual([])
+  })
+})
+
+describe('handing a download to the native backend', () => {
+  it('sends only the transfer id and awaits the control call', async () => {
+    const saveNative = vi.fn(() => Promise.resolve({}))
+    await createNativeDownloadSaver(saveNative).save({
+      transferId: 'a'.repeat(32),
+      name: 'report.bin',
+      url: null,
+    })
+
+    expect(saveNative).toHaveBeenCalledTimes(1)
+    expect(saveNative).toHaveBeenCalledWith('a'.repeat(32))
+  })
+
+  it('forwards a backend start refusal to the flow', async () => {
+    const saveNative = vi.fn(() => Promise.reject(new Error('picker failed')))
+    await expect(
+      createNativeDownloadSaver(saveNative).save({
+        transferId: 'a'.repeat(32),
+        name: 'report.bin',
+        url: null,
+      }),
+    ).rejects.toThrow('picker failed')
   })
 })

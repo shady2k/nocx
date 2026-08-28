@@ -61,6 +61,15 @@ const newFileMode = 0o666
 // day they did not.
 func (p *Provider) Sink() transfer.Sink { return transfer.NewSink(osFS{}, transfer.DefaultChunk) }
 
+// DurableSink is the local destination used when a native download crosses
+// from a remote Source into this machine. It is the existing atomic sink with
+// one stronger close boundary: the temporary file is synced before it is
+// closed and promoted, so a successful native save means the bytes reached
+// stable storage rather than only the page cache.
+func (p *Provider) DurableSink() transfer.Sink {
+	return transfer.NewSink(durableOSFS{}, transfer.DefaultChunk)
+}
+
 // osFS presents this machine's filesystem as the write surface
 // internal/transfer declares. It is the local counterpart of the
 // composition root's fsTransferLease, and it is far shorter for one reason:
@@ -82,7 +91,36 @@ func (p *Provider) Sink() transfer.Sink { return transfer.NewSink(osFS{}, transf
 // still owns syntax, and checkPath is what the read half applies.
 type osFS struct{}
 
+// durableOSFS is the native-download variation of the local RemoteFS. It
+// inherits the path operations verbatim and overrides only Create so the
+// existing Sink syncs the temporary file before its atomic promote.
+type durableOSFS struct{ osFS }
+
+type durableFile struct {
+	*os.File
+}
+
+func (f *durableFile) Close() error {
+	if err := f.Sync(); err != nil {
+		_ = f.File.Close()
+		return err
+	}
+	return f.File.Close()
+}
+
 func (osFS) Create(path string) (transfer.RemoteFile, error) {
+	return createExclusive(path)
+}
+
+func (durableOSFS) Create(path string) (transfer.RemoteFile, error) {
+	f, err := createExclusive(path)
+	if err != nil {
+		return nil, err
+	}
+	return &durableFile{File: f}, nil
+}
+
+func createExclusive(path string) (*os.File, error) {
 	// #nosec G304 — a caller-supplied destination is the feature, not the
 	// oversight. `path` is the sink's join of an Upload the transport
 	// already validated (§5.3: destDir absolute, clean and bounded; name
@@ -92,9 +130,6 @@ func (osFS) Create(path string) (transfer.RemoteFile, error) {
 	// the one scp gives.
 	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, newFileMode) //nolint:gosec // see above
 	if err != nil {
-		// The concrete type must not be returned as a nil interface: a
-		// non-nil transfer.RemoteFile holding a nil *os.File would pass
-		// the sink's error check and then panic on the first Write.
 		return nil, err
 	}
 	return f, nil

@@ -10,7 +10,7 @@ import type { DownloadRequest, DownloadServices } from './download-client'
 import type { FilesDownloadDone } from '../generated/files.downloadDone'
 import type { FilesDownloadProgress } from '../generated/files.downloadProgress'
 import type { FilesDownloadResult } from '../generated/files.download'
-import type { DownloadSaver } from './download-save'
+import { DownloadNotClaimedError, type DownloadSaver } from './download-save'
 
 export { fakeClock } from './upload-fixtures'
 
@@ -38,6 +38,7 @@ export function fakeDownloadServices(): DownloadServices & {
   emitDone(p: FilesDownloadDone): void
   downloads: DownloadRequest[]
   cancels: string[]
+  nativeSaves: string[]
   nextResult: FilesDownloadResult[]
   /** What `resolveUrl` answers. Null is the real "there is no socket" —
    *  the case the flow has to report rather than guess an origin for. */
@@ -49,6 +50,7 @@ export function fakeDownloadServices(): DownloadServices & {
   const api = {
     downloads: [] as DownloadRequest[],
     cancels: [] as string[],
+    nativeSaves: [] as string[],
     nextResult: [] as FilesDownloadResult[],
     origin: 'http://127.0.0.1:7331' as string | null,
     download(req: DownloadRequest): Promise<FilesDownloadResult> {
@@ -59,6 +61,10 @@ export function fakeDownloadServices(): DownloadServices & {
     },
     cancel(transferId: string) {
       api.cancels.push(transferId)
+      return Promise.resolve({})
+    },
+    saveNative(transferId: string) {
+      api.nativeSaves.push(transferId)
       return Promise.resolve({})
     },
     resolveUrl(url: string): string | null {
@@ -92,8 +98,16 @@ export function fakeSaver(): DownloadSaver & { saved: string[] } {
   const saved: string[] = []
   return {
     saved,
-    save(url: string) {
-      saved.push(url)
+    save(download) {
+      if (download.url === null) {
+        return Promise.reject(
+          new DownloadNotClaimedError(
+            `${download.name}: there is no connection to the backend to fetch the bytes over`,
+          ),
+        )
+      }
+      saved.push(download.url)
+      return Promise.resolve()
     },
   }
 }

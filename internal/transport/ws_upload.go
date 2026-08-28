@@ -399,11 +399,11 @@ type runningTransfer struct {
 	// Content-Length would then describe different bytes from the ones it
 	// sends. An open handle cannot be raced at all.
 	download *transfer.Download
-	// dest carries the claimed response writer from the GET handler to the
-	// goroutine running the source — the mirror of body. Buffered by one,
-	// for body's reason: the claim happens once, so nothing can queue
-	// behind it.
-	dest chan io.Writer
+	// dest carries the one claimed destination to the goroutine running the
+	// source. HTTP supplies a writer destination; native save supplies the
+	// bounded pipe into the existing local Sink. Buffered by one because a
+	// transfer is claimed once, so nothing can queue behind it.
+	dest chan downloadDestination
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -472,6 +472,12 @@ func (rt *runningTransfer) stop() {
 	rt.mu.Unlock()
 	if c != nil {
 		_ = c.Close()
+	}
+	if rt.dir == dirDownload && rt.download != nil {
+		// RemoteReader has no context. Closing the pinned handle is the only
+		// operation that can interrupt a Read already in flight; Download.Close
+		// is synchronized with Get and the deferred owner close.
+		_ = rt.download.Close()
 	}
 }
 

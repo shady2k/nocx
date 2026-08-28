@@ -66,21 +66,25 @@ immediately.
 
 ### 2. The closed ingress-critical set
 
-Three methods run inline on the read loop, and the set is validated at server
-construction in both directions (`internal/transport/registration.go`): `ack`,
-`vault.unlockResolved`, `connections.passwordResolved`. `buildMethodSpecs` rejects a
-registration that pairs an immediate disposition with any other method, and one that
-pairs a non-immediate disposition with a member — a wrong claim fails the server
-build, never a socket at runtime. The set is closed deliberately: a handler that
-wrongly claims immediate recreates the original bug (a blocking handler on the read
-loop freezes every tab).
+The set runs inline on the read loop and is validated at server construction in
+both directions (`internal/transport/registration.go`): a member must use
+`control.ImmediateSubmission`, and no non-member may use it. A wrong claim
+fails the server build, never a socket at runtime. The members are:
 
-The most work a member may do:
+- `ack`, bounded ring-credit bookkeeping whose delay would close the credit
+  window;
+- `vault.unlockResolved`, `connections.passwordResolved`,
+  `agent.readScreenResolved`, and `agent.runResolved`, which resolve asks whose
+  callers cannot finish until the same read loop consumes the answer;
+- `agent.laneInteractivity`, a mutex-guarded transition awaited by the run
+  lease;
+- `files.downloadSave`, whose inline half strictly decodes the bounded request,
+  atomically claims one already-open transfer under mutexes, and performs one
+  non-blocking `TrySubmit`. The native dialog and every byte of file I/O remain
+  in the submitted continuation.
 
-- `ack` is ring trimming (AD-9 credit): bounded bookkeeping whose delay would close
-  the credit window;
-- the two resolvers unmarshal a `budgetTiny` (1 KiB) frame, look up a pending ask by
-  server-assigned request id, signal its channel, and answer.
+The set is closed deliberately: a blocking member would recreate the original
+bug and freeze every tab on the connection.
 
 **Why `RequestUnlock`/`RequestConnectionPassword` can never queue.** The asks block
 until their resolution arrives over the same socket the read loop consumes. A

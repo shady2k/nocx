@@ -118,4 +118,19 @@ describe('when it cannot start', () => {
       },
     ])
   })
+
+  it('reports an asynchronous native start failure and leaves done authoritative', async () => {
+    const f = fixture()
+    f.services.nextResult.push(downloadResultFixture({ name: 'big.iso' }))
+    f.saver.save = () => Promise.reject(new Error('save dialog failed'))
+
+    await expect(
+      f.flow.fetch({ bindingId: 'b1', path: '/srv/big.iso', machine: 'alice@srv-01' }),
+    ).resolves.toBeUndefined()
+
+    expect(f.store.transfers()[0]).toMatchObject({ phase: 'running' })
+    expect(f.said).toEqual([
+      { message: 'Could not save big.iso: save dialog failed', level: 'danger' },
+    ])
+  })
 })

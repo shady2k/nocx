@@ -99,6 +99,13 @@ describe('what reaches the wire', () => {
     const frame = frames(s).find((f) => f.method === 'files.downloadCancel')
     expect(frame?.params).toEqual({ transferId: '0'.repeat(32) })
   })
+
+  it('files.downloadSave takes exactly the transfer id', async () => {
+    const { d, s } = await connected()
+    void createDownloadServices(d).saveNative('a'.repeat(32))
+    const frame = frames(s).find((f) => f.method === 'files.downloadSave')
+    expect(frame?.params).toEqual({ transferId: 'a'.repeat(32) })
+  })
 })
 
 describe('resolving the fetch URL', () => {

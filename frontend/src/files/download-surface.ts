@@ -26,9 +26,10 @@
 
 import type { Dispatcher } from '../dispatcher'
 import { showToast } from '../ui/toast'
+import { hasWailsWebview } from '../wails-runtime'
 import { createDownloadServices, type DownloadServices } from './download-client'
 import { createDownloadFlow, type DownloadFlow } from './download-flow'
-import { createBrowserDownloadSaver } from './download-save'
+import { createBrowserDownloadSaver, createNativeDownloadSaver } from './download-save'
 import { createDownloadStore, type DownloadStore } from './download-store'
 
 export interface DownloadSurface {
@@ -43,10 +44,13 @@ export interface DownloadSurface {
 function createDownloadSurface(dispatcher: Dispatcher): DownloadSurface {
   const services = createDownloadServices(dispatcher)
   const store = createDownloadStore({ services })
+  const saver = hasWailsWebview()
+    ? createNativeDownloadSaver((transferId) => services.saveNative(transferId))
+    : createBrowserDownloadSaver()
   const flow = createDownloadFlow({
     services,
     store,
-    saver: createBrowserDownloadSaver(),
+    saver,
     report: (message, level) => showToast({ message, level }),
   })
   return { services, store, flow }

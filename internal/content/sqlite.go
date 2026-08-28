@@ -419,6 +419,20 @@ func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 	if n > 0 && logger != nil {
 		logger.Info("content: startup sweep dropped sessions of a previous backend", "sessions", n)
 	}
+	// The output recordings go with them, and for the same sentence
+	// (nocx-22k1c.1): a recording is the bytes ONE pipe produced, the pipe
+	// cannot outlive the process, so at open no recording names anything
+	// live. This is also why session_output is absent from the budget sweep
+	// — its unit is `artifacts.byte_len` ordered by `ingest_seq`, and a
+	// recording has neither; the bound on a live recording is the per-command
+	// cap, and the bound on a dead one is this line.
+	rec, err := conn.ExecContext(ctx, `DELETE FROM session_output`)
+	if err != nil {
+		return fmt.Errorf("content: startup sweep: drop dead session recordings: %w", err)
+	}
+	if m, affErr := rec.RowsAffected(); affErr == nil && m > 0 && logger != nil {
+		logger.Info("content: startup sweep dropped session recordings of a previous backend", "recordings", m)
+	}
 	return nil
 }
 
@@ -434,7 +448,7 @@ func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 14
+const schemaVersion = 15
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -443,6 +457,7 @@ const schemaVersion = 14
 // schema of THIS store and is discarded deliberately; one containing any
 // other table is refused.
 var rebuildDropOrder = []string{
+	"session_output_chunks", "session_output",
 	"api_run_artifact_chunks", "api_run_artifacts", "api_runs", "api_run_schema",
 	"grant_scopes", "grant_effects", "artifact_chunks", "authority_grants", "artifacts",
 	"edges", "executions", "environment_observations", "entries",
@@ -998,6 +1013,42 @@ INSERT INTO ledger_sequence (id, next) VALUES (1, 0)
 -- survivors reports a partial store as a whole one. Written in the SAME
 -- transaction as the deletion it accounts for; see retention.go for why this
 -- is one accumulating row rather than a journal of passes.
+-- The backend's own recording of what a session printed (nocx-22k1c.1,
+-- session_output.go). It is NOT the ledger's artifacts and must not be
+-- folded into them: an artifact hangs on an ENTRY — a block a person ran —
+-- and these bytes belong to a PIPE, with no entry to hang on precisely
+-- because nothing was attached to record one. One table answering two
+-- identities acquires a second writer, which is the argument api_runs
+-- already makes for its own pair.
+--
+-- Geometry-free on purpose (AD-6): a stream has no width, so there is no
+-- size, no grid and no VT here, and no byte is interpreted. byte_offset is
+-- the coordinate the replay ring already keys on, which is what lets a
+-- recording be checked against what a client received by offset.
+CREATE TABLE IF NOT EXISTS session_output (
+  session_id   TEXT PRIMARY KEY,        -- transport's session id (AD-7, server-authoritative)
+  first_offset INTEGER NOT NULL,        -- stream offset of the first byte ever recorded
+  next_offset  INTEGER NOT NULL,        -- offset one past the last byte accepted; also "produced"
+  byte_len     INTEGER NOT NULL DEFAULT 0, -- what is currently KEPT, across every chunk
+  head_end     INTEGER NOT NULL,        -- offset one past the reserved head; head chunks end at or before it
+  truncated    TEXT CHECK (truncated IN ('cap','gap','suppressed')),
+  gaps         TEXT NOT NULL DEFAULT '[]', -- JSON [{start,end,reason}]; recomputed, never accumulated
+  started_at   INTEGER NOT NULL,
+  updated_at   INTEGER NOT NULL
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS session_output_chunks (
+  session_id  TEXT NOT NULL REFERENCES session_output(session_id) ON DELETE CASCADE,
+  byte_offset INTEGER NOT NULL,          -- stream offset of body[0]
+  body        BLOB NOT NULL,
+  -- head = 1 marks a chunk the cap may never take. The head holds the
+  -- invocation and its first diagnostics; the tail holds the errors. Same
+  -- half-and-half split capture-client.ts applies to a frozen block, so the
+  -- two halves of one product cut a body the same way.
+  head        INTEGER NOT NULL DEFAULT 0 CHECK (head IN (0, 1)),
+  PRIMARY KEY (session_id, byte_offset)
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS retention_watermark (
   id              INTEGER PRIMARY KEY CHECK (id = 1), -- exactly one row
   evicted_count   INTEGER NOT NULL DEFAULT 0, -- entries EVER evicted; monotonic
@@ -1163,6 +1214,14 @@ func (s *sqliteContent) Ledger() LedgerRepository {
 // ledger.go's is: `deadcode` cannot tell a wired write path from an unwired
 // one in this package.
 func (s *sqliteContent) Layout() LayoutRepository {
+	return s
+}
+
+// SessionOutput returns the session-output recorder (session_output.go). Its
+// production caller is the transport's per-session recorder, which is the
+// replay ring's consumer while no client is attached — so unlike Layout this
+// one is wired, and pumpToRing is where.
+func (s *sqliteContent) SessionOutput() SessionOutputRepository {
 	return s
 }
 

@@ -3,7 +3,7 @@
 - **Status:** Accepted
 - **Date:** 2026-08-27
 - **Related:** AD-8 (one owner per behaviour), ADR-0011 (persistence storage
-  capabilities and secret references), ADR-0033 (UI state is a document, not a
+  capabilities and secret references), ADR-0048 (UI state is a document, not a
   setting), `.internal/specs/2026-08-21-api-testing-design.md` §§6.4 and 6.5
 
 ## Context
@@ -13,7 +13,7 @@ which route carries a request. That answer must survive reopening the request
 and restarting the app, while two requests in one collection must be able to
 choose different environments.
 
-The existing `internal/uistate` document is the wrong owner. ADR-0033 limits it
+The existing `internal/uistate` document is the wrong owner. ADR-0048 limits it
 to incidental machine-local UI state such as window geometry, sidebar state and
 the front tab. An environment choice changes the request's execution context;
 it is not a side effect of arranging the UI. The settings registry is also the

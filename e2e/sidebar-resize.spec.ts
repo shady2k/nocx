@@ -8,7 +8,7 @@
  *
  * This spec starts its own devharness backend (VaultBackend) so it can
  * RESTART it mid-test — the width's persistence is the subject, and the
- * seam that persists it is the UI-state document (ADR-0033): drag →
+ * seam that persists it is the UI-state document (ADR-0048): drag →
  * uistate.set → uistate.json → restart → uistate.get → applied to #sidebar.
  * The assertion after the restart is the panel's computed width, not a
  * variable read back.
@@ -100,7 +100,7 @@ async function openGitPanel(page: import('@playwright/test').Page, repo: GitRepo
 /** The persisted width in the backend's uistate.json — the durable seam.
  *  It moved out of settings.json in nocx-mqie.3: a width produced by
  *  dragging a panel edge is not a decision, so it is not a setting
- *  (ADR-0033). The backend's HOME is the isolated home under the disposable
+ *  (ADR-0048). The backend's HOME is the isolated home under the disposable
  *  root (root/home, per home-isolation.ts), so the doc lives under THAT
  *  home, never under the root itself. */
 function persistedWidth(backend: VaultBackend): unknown {

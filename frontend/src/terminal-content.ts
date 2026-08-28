@@ -2182,7 +2182,7 @@ export class TerminalContent extends BasePaneContent {
       // not parse these degrades to raising nothing rather than failing to
       // mount, which is what the fakes in the test suite rely on.
       renderer.onNotification?.((request) => {
-        // A program asked nocx to present a message (ADR-0029). The renderer
+        // A program asked nocx to present a message (ADR-0047). The renderer
         // reports the request and never grants it: what crosses is the text
         // the program supplied plus this session's id, and the backend stamps
         // kind, trust, level and attribution from the method invoked and its
@@ -3053,7 +3053,7 @@ export class TerminalContent extends BasePaneContent {
         // which is a routable event with a trust class, an attribution and a
         // feed row. A bell is both, so it does both.
         host.requestAttention()
-        // A program printed BEL (ADR-0029). Reported through its OWN method:
+        // A program printed BEL (ADR-0047). Reported through its OWN method:
         // kind is stamped from the method invoked, so notify.bell is what
         // makes this a bell, and there is no argument here — or anywhere on
         // this client — by which it could become a different kind or reach a

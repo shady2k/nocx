@@ -129,13 +129,13 @@ type App struct {
 	logFile *os.File
 
 	// attentionHost is the late-bound implementation behind the notify
-	// router's banner route (ADR-0029). The route itself was decided when
+	// router's banner route (ADR-0047). The route itself was decided when
 	// the table was built; this is only the surface it reaches, and it stays
 	// UnavailableHost on every host that never calls SetAttentionHost.
 	attentionHost *notify.HostHolder
 
 	// notifyToast is the late-bound implementation behind the notify
-	// router's toast route (ADR-0029, plan D2). Same shape as attentionHost
+	// router's toast route (ADR-0047, plan D2). Same shape as attentionHost
 	// and for the same reason: the route was decided when the table was
 	// built, and only the surface it reaches arrives later — here, the
 	// WebSocket server, which New constructs after the router.
@@ -168,7 +168,7 @@ type App struct {
 	UploadSources *transport.SourceTicketStore
 
 	// UIState owns what the app must remember without being asked
-	// (ADR-0033) — window geometry and the shell's layout. Exported because
+	// (ADR-0048) — window geometry and the shell's layout. Exported because
 	// main.go is the only place a Wails context exists, and the window half
 	// of this document can only be sampled and applied there.
 	UIState *uistate.Store
@@ -297,7 +297,7 @@ func (a *App) SetUrlOpener(opener transport.UrlOpener) {
 }
 
 // SetAttentionHost binds the desktop attention surface behind the notify
-// router's banner route (ADR-0029). Like SetDialogService it is wired from
+// router's banner route (ADR-0047). Like SetDialogService it is wired from
 // main.go's WailsApp.startup — the Wails context the adapter needs exists
 // only there, after the router was built — and must be called before Start,
 // so no raise can observe the unset state.
@@ -715,7 +715,7 @@ func New(opts ...Option) (*App, error) {
 	sshConfigPath := filepath.Join(home, ".ssh", "config")
 	sshCfgResolver := ssh.NewSSHConfigResolver(logger, sshConfigPath, "")
 
-	// The typed-`ssh` delivery (ADR-0035, design §4.3): the one owner of
+	// The typed-`ssh` delivery (ADR-0049, design §4.3): the one owner of
 	// "does nocx interpose on a line the user typed, and on which socket".
 	// Assembled here because every part of it is a product decision — which
 	// oracle answers for the user's configuration, where our control sockets
@@ -798,7 +798,7 @@ func New(opts ...Option) (*App, error) {
 	)
 	apiFetcher := apifetch.New(apiRouteTable, logger)
 
-	// The UI-state document (ADR-0033): the same document family again, and
+	// The UI-state document (ADR-0048): the same document family again, and
 	// deliberately NOT the settings registry — a drag is not a decision. It
 	// never fails to open, because an absent document is an ordinary state
 	// and an unreadable one costs the user their window size, not their
@@ -1368,7 +1368,7 @@ func New(opts ...Option) (*App, error) {
 	// this line names it, so the seam stays reachable from production and
 	// a future settings surface flips one option here, not a default.
 	tpOpts = append(tpOpts, transport.WithRunLease(transport.DefaultRunLeaseConfig()))
-	// The notification router (ADR-0029): the only holder of "where" a raised
+	// The notification router (ADR-0047): the only holder of "where" a raised
 	// notification goes. Before this line the whole notify package was
 	// reachable from its own tests and nowhere else (AGENTS.md check 5).
 	//
@@ -1389,7 +1389,7 @@ func New(opts ...Option) (*App, error) {
 	// special case in the renderer (plan D2): the router resolves it here,
 	// once, and the sink hands the event to a port the transport satisfies.
 	// A toast that the renderer chose for itself would put "where" somewhere
-	// other than the router, which is the one thing ADR-0029 §2.3 forbids.
+	// other than the router, which is the one thing ADR-0047 §2.3 forbids.
 	//
 	// Its holder binds late for the same ordering reason the host's does, and
 	// the late half is nearer than it looks: the implementation is the

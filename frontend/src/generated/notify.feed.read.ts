@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of notify.feed.read: the authoritative snapshot of the notification centre's in-memory feed. The renderer reconciles against revision — it applies a notify.feed.changed hint only when the hint is exactly its own revision plus one, and refetches on any gap, so a change notification dropped by the refreshable outbound queue costs one refetch rather than a lost row (nocx-sb3f). Occurrences are newest first. trust is deliberately absent: it is a routing capability bound (ADR-0029 §3) and not something a surface renders, and carrying it would invite a renderer to act on a decision the router already made.
+ * Result of notify.feed.read: the authoritative snapshot of the notification centre's in-memory feed. The renderer reconciles against revision — it applies a notify.feed.changed hint only when the hint is exactly its own revision plus one, and refetches on any gap, so a change notification dropped by the refreshable outbound queue costs one refetch rather than a lost row (nocx-sb3f). Occurrences are newest first. trust is deliberately absent: it is a routing capability bound (ADR-0047 §3) and not something a surface renders, and carrying it would invite a renderer to act on a decision the router already made.
  */
 export interface NotifyFeedRead {
   /**
@@ -37,7 +37,7 @@ export interface Occurrence {
    */
   at: string
   /**
-   * Untrusted presentation data (ADR-0029 §2.3). Rendered as text, never as markup.
+   * Untrusted presentation data (ADR-0047 §2.3). Rendered as text, never as markup.
    */
   title: string
   /**
@@ -102,7 +102,7 @@ export interface RunMember {
    */
   at: string
   /**
-   * The title this constituent arrived with. Untrusted presentation data (ADR-0029 §2.3), same guarantees as the row's: rendered as text, never as markup.
+   * The title this constituent arrived with. Untrusted presentation data (ADR-0047 §2.3), same guarantees as the row's: rendered as text, never as markup.
    */
   title: string
   /**

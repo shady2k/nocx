@@ -8515,7 +8515,7 @@ describe('a program printing BEL (nocx-n3nfg)', () => {
       // The notification: its own method, carrying addressing and nothing
       // else. The kind is not here because it cannot be — it is stamped from
       // the method invoked, which is the whole reason notify.bell exists
-      // rather than an argument on notify.raise (ADR-0029 §2.2, design §3).
+      // rather than an argument on notify.raise (ADR-0047 §2.2, design §3).
       expect(bellCalls(client)).toEqual([
         ['notify.bell', { sessionId: sessionOf(content).sessionId }],
       ])

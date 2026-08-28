@@ -271,7 +271,7 @@ func zshArgFor(rc string) string {
 }
 
 // The per-tier ARG method that used to sit here went with the command that
-// consumed it (ADR-0035). It substituted the two bearers into the rcfile TEXT
+// consumed it (ADR-0049). It substituted the two bearers into the rcfile TEXT
 // and that text travelled inside the remote COMMAND, so both reached the far
 // host's process arguments — the defect this epic exists to remove. What
 // survives is zshArgFor, which the installed launch carrier uses and which

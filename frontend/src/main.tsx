@@ -184,7 +184,7 @@ async function main() {
   const footprintClient = new FootprintClient(dispatcher)
   const endpointsClient = new EndpointClient(dispatcher)
   const agentClient = new AgentClient(dispatcher)
-  // The UI-state document (ADR-0033): what the app remembers without being
+  // The UI-state document (ADR-0048): what the app remembers without being
   // asked — the sidebar's collapse, its view, its width. Not the settings
   // registry, which holds what a user deliberately chose, and not
   // localStorage, which may not carry facts.
@@ -373,7 +373,7 @@ async function main() {
 
   let placement: unknown = 'horizontal'
   // The sidebar's remembered state, from the UI-state document rather than
-  // the settings snapshot below — a drag is not a decision (ADR-0033). A
+  // the settings snapshot below — a drag is not a decision (ADR-0048). A
   // failure falls back to the declared defaults, which is also what the CSS
   // paints before this bootstrap runs (style.css #sidebar); load() never
   // throws for exactly that reason.
@@ -426,7 +426,7 @@ async function main() {
     tabStrip,
     layout,
     // Which tab was in front: the UI-state document holds it, and the mirror
-    // is already warm — `load()` above ran before this line (ADR-0033).
+    // is already warm — `load()` above ran before this line (ADR-0048).
     uiStateClient,
   )
   tm.onVaultSealed = () => vaultController.openUnlock('open this connection')
@@ -939,7 +939,7 @@ async function main() {
         // The sidebar width is deliberately absent from this loop now. It
         // is not a setting, so no settings revision can carry it, and one
         // window is the only thing that changes it — re-reading it here
-        // would be the app telling itself what it just did (ADR-0033 §7).
+        // would be the app telling itself what it just did (ADR-0048 §7).
       } catch {
         // Silently ignore — a settings fetch failure is not actionable here.
       }

@@ -457,7 +457,7 @@ func declaredReasonFor(t startupTier, id string) string {
 // arms, so what this reads is the payload the far host runs, byte for byte.
 // The per-tier ARG methods this used to call are gone with the remote command
 // they were built for — they substituted both bearers into the rcfile TEXT and
-// that text travelled in argv (ADR-0035) — and a payload rendered any other
+// that text travelled in argv (ADR-0049) — and a payload rendered any other
 // way here would be a second answer to "what does tier X ship".
 //
 // The env block is the carrier's own, which is empty: the carrier is published

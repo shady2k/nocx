@@ -668,7 +668,7 @@ export class PaneManager {
    * while "the one I was looking at" is a fact about a VIEWPORT, exactly like
    * `viewedWorkspaceId` above it. It is not in localStorage either — the
    * renderer holding a fact of its own is the arrangement the UI-state
-   * document exists to end (ADR-0033).
+   * document exists to end (ADR-0048).
    */
   private readonly uiState: UIStateClient
   /**
@@ -1339,7 +1339,7 @@ export class PaneManager {
     pane.setupViewportObserver()
 
     pane.onCloseRequested = () => void this.closePane(pane)
-    // A settled pane, reported to the pipeline (ADR-0029). Wired HERE and
+    // A settled pane, reported to the pipeline (ADR-0047). Wired HERE and
     // not in Pane for the same reason the close intent is: a Pane holds no
     // client. Its OWN method, because kind is stamped from the method
     // invoked — notify.paneWorkFinished is what makes this heuristic, and

@@ -102,7 +102,7 @@ There is a house convention for that, and it is worth naming so the next person
 follows it rather than reinventing it: AD-1 has been widened twice before, and
 both times the amendment was written into `docs/architecture.md` itself, dated
 and attributed inline — "amended 2026-08-02, nocx-m64b, nocx-rtg0.13"
-(`docs/architecture.md:109`) for ledger facts, and "amended 2026-08-14, ADR-0029,
+(`docs/architecture.md:109`) for ledger facts, and "amended 2026-08-14, ADR-0047,
 nocx-uz7f" (`:110`) for presentation requests. ADR-0024 likewise declares
 "**Amends:** `AD-1`" in its own header
 ([ADR-0024](0024-authenticated-shell-integration-channel.md):8). An ADR that

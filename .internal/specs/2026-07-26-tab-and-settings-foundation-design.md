@@ -280,7 +280,7 @@ Three owners, three different quantities, no one reaching into another:
 ```
 DOM/layout change
   → TabStrip / pane presentation measures the allocated viewport (CSS pixels)
-  → TabContent.viewportChanged({ width, height, devicePixelRatio })
+  → TabContent.viewportChanged({ width, height })
   → TerminalContent asks TerminalRenderer to fit that viewport
   → TerminalRenderer computes cols/rows from real cell metrics
   → TerminalContent debounces and sends the PTY resize
@@ -295,6 +295,13 @@ strip the placement layer of the authority this refactor exists to give it.
 The renderer may still observe things placement cannot express (font loading, glyph metrics,
 device-pixel-ratio changes). Those recompute the grid **within the last authoritative
 viewport**; they never redefine the viewport.
+
+Which is why the payload above is the rectangle and nothing else. It carried
+`devicePixelRatio` until nocx-uus3o, and no consumer ever read it — placement compared it to
+decide whether to deliver, so a window moved between two differently-scaled displays
+announced a rectangle that had not changed, and content dropped it. A quantity two layers
+both claim is a second owner even when the second one only announces it (nocx-cwnz0 gave the
+renderer its own resolution query; this is the other half of that decision).
 
 Delivery rules: no viewport callback before `mount` starts; equal consecutive rectangles may
 be suppressed; the latest viewport is replayed after an asynchronous mount completes;

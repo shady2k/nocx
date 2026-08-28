@@ -32,6 +32,7 @@ import type { CapturedFrame } from '../frame/types'
 import { fromITheme } from '../scrollback/serializer'
 import { isSnippetChord } from '../snippets/chord'
 import { parseOscNotification } from '../osc-notification'
+import { logDecision, isDecisionTracing } from '../log'
 type BellCallback = () => void
 type SelectionCallback = (text: string) => void
 type ClipboardWriteCallback = (text: string) => void
@@ -504,6 +505,24 @@ export class XtermRenderer implements TerminalRenderer {
         // Recompute the grid INSIDE the last authoritative viewport (B.5):
         // placement's CSS rectangle did not change; its cell mapping did.
         if (this._lastViewport) this.fitViewport(this._lastViewport)
+        // The one trace this path gets. A display move happens on somebody
+        // else's second monitor, in a build nobody is attached to, and the
+        // symptom nocx-cwnz0 was filed for was a grid that would not settle
+        // — so the next report of it needs the four numbers that decide the
+        // fit, not a reconstruction. Behind the existing decision seam:
+        // `window.nocxDebug = true` in devtools turns it on live, and off it
+        // does not even build the fields.
+        if (isDecisionTracing()) {
+          const cell = this._getCellDims()
+          logDecision('dpr refit', {
+            dpr: typeof window !== 'undefined' ? window.devicePixelRatio : null,
+            cellWidth: cell?.width ?? null,
+            cellHeight: cell?.height ?? null,
+            viewport: this._lastViewport,
+            cols: this.term?.cols ?? null,
+            rows: this.term?.rows ?? null,
+          })
+        }
       })
     }
     this._dprMedia = media

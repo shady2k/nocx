@@ -35,11 +35,6 @@
     },
     {
       "kind": "exports",
-      "file": "src/log.ts",
-      "symbol": "DECISION_PREFIX"
-    },
-    {
-      "kind": "exports",
       "file": "src/password-editor.tsx",
       "symbol": "generatePassword"
     },

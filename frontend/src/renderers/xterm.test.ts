@@ -32,6 +32,7 @@ import {
   ReadScreenRangeError,
 } from '../frame/capture-identity'
 import { getCurrentTheme } from './theme-adapter'
+import { setDecisionTracing, DECISION_PREFIX } from '../log'
 
 const stubBrowser = () => {
   window.matchMedia = (query: string) => ({
@@ -1544,6 +1545,40 @@ describe('XtermRenderer refits the cached viewport on a DPR change (nocx-cwnz0)'
     expect(resize).toHaveBeenCalledTimes(3)
     expect(activeWatches()).toHaveLength(0)
     cancel.mockRestore()
+  })
+
+  // The refit happens on somebody else's second monitor. Off by default and
+  // building nothing; on, it names the numbers the fit was made from
+  // (nocx-uus3o).
+  it('traces the refit behind the decision seam, and nothing when it is off', async () => {
+    const { r, setCell, watches } = await mountWithDprWatch({ width: 10, height: 20 })
+    const live = (): DprWatch => watches.filter((w) => w.listeners.size > 0)[0]
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const traces = (): string[] =>
+      debug.mock.calls.map((c) => String(c[0])).filter((line) => line.includes('dpr refit'))
+    try {
+      r.fitViewport({ width: 800, height: 400 })
+
+      // Tracing off — the default. A display move says nothing.
+      fire(live())
+      setCell({ width: 11, height: 21 })
+      await vi.waitFor(() => expect(r.cellHeight).toBe(21))
+      expect(traces()).toHaveLength(0)
+
+      setDecisionTracing(true)
+      fire(live())
+      setCell({ width: 12, height: 22 })
+      await vi.waitFor(() => expect(traces()).toHaveLength(1))
+      // The grid it settled on, and the metrics it settled on it from.
+      expect(traces()[0]).toContain(DECISION_PREFIX)
+      expect(traces()[0]).toContain('"cellWidth":12')
+      expect(traces()[0]).toContain('"cols":66')
+      expect(traces()[0]).toContain('"rows":18')
+    } finally {
+      setDecisionTracing(false)
+      debug.mockRestore()
+      r.dispose()
+    }
   })
 })
 

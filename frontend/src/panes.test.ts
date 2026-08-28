@@ -1856,6 +1856,48 @@ describe('PaneManager', () => {
       expect(renderers[renderers.length - 1].fitViewport).toHaveBeenCalledTimes(1)
     })
 
+    it('a display move that changes only the pixel ratio is not a delivery (nocx-uus3o)', async () => {
+      const { manager, client } = await mountPaneManager()
+      const tab = manager.newPane()
+      await vi.waitFor(() => expect(client.openSession).toHaveBeenCalledTimes(2))
+
+      Object.defineProperty(tab.pane, 'getBoundingClientRect', {
+        value: () => ({
+          width: 800,
+          height: 600,
+          top: 0,
+          left: 0,
+          right: 800,
+          bottom: 600,
+          x: 0,
+          y: 0,
+          toJSON: () => {},
+        }),
+        configurable: true,
+      })
+
+      await fireResize(tab.pane, 800, 600)
+      const delivered = vi.spyOn(tab.content, 'viewportChanged')
+
+      // The window moved to a display with a different scale. The pane's CSS
+      // rectangle is byte-for-byte the one already delivered; the only thing
+      // that changed is the device pixel ratio, and B.5 gives that to the
+      // RENDERER — it watches its own resolution query and recomputes the
+      // grid inside the last authoritative viewport. Placement has nothing
+      // new to say about the rectangle, so it must say nothing: a delivery
+      // here is one content drops on the floor, and a surface that goes on
+      // announcing what nobody acts on is how the second owner comes back.
+      const real = window.devicePixelRatio
+      Object.defineProperty(window, 'devicePixelRatio', { value: real * 2, configurable: true })
+      try {
+        await fireResize(tab.pane, 800, 600)
+        expect(delivered).not.toHaveBeenCalled()
+      } finally {
+        Object.defineProperty(window, 'devicePixelRatio', { value: real, configurable: true })
+        delivered.mockRestore()
+      }
+    })
+
     it('no callbacks after dispose', async () => {
       const { manager, client } = await mountPaneManager()
       const tab = manager.newPane()

@@ -21,11 +21,17 @@ export const SURFACE_TERMINAL: SurfaceType = 'nocx.terminal' as SurfaceType
 // ── Geometry (B.5) ────────────────────────────────────────────────────────
 
 /** CSS-pixel viewport delivered from the presentation layer to the content.
- *  Content MUST NOT interpret container geometry itself. */
+ *  Content MUST NOT interpret container geometry itself.
+ *
+ *  The rectangle, and nothing else. Placement owns CSS pixels; the device
+ *  pixel ratio is the RENDERER's quantity, watched through its own resolution
+ *  query and applied inside the last authoritative viewport (B.5). It rode
+ *  along in this payload until nocx-uus3o, read by nobody but the delivery
+ *  dedupe that produced it — so a display move announced a rectangle that had
+ *  not changed, and the fit guard dropped it. One owner, no announcement. */
 export interface ContentViewport {
   width: number
   height: number
-  devicePixelRatio: number
 }
 
 // ── Origin (B.9) ──────────────────────────────────────────────────────────

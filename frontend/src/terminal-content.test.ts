@@ -253,7 +253,7 @@ describe('TerminalContent geometry handoff and PTY resize policy (nocx-cwnz0)', 
       return 0
     }
     try {
-      content.viewportChanged({ width: 800, height: 400, devicePixelRatio: 1 })
+      content.viewportChanged({ width: 800, height: 400 })
       /* eslint-disable @typescript-eslint/unbound-method */
       expect(renderer.fitViewport).toHaveBeenCalledTimes(1)
       expect(renderer.fitViewport).toHaveBeenLastCalledWith(
@@ -3722,7 +3722,7 @@ describe('two attempts and the live region stay separate while running (nocx-m87
       content.setVisible(true)
       // The initial fit uses the delivered viewport (jsdom reports no
       // layout, so clientHeight is 0 at this point).
-      content.viewportChanged({ width: 800, height: 400, devicePixelRatio: 1 })
+      content.viewportChanged({ width: 800, height: 400 })
       expect(fitViewport).toHaveBeenLastCalledWith(
         expect.objectContaining({ width: 800, height: 400 }),
       )

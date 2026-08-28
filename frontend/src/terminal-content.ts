@@ -3272,6 +3272,18 @@ export class TerminalContent extends BasePaneContent {
    * No loop: fitting changes the row count, which changes the PTY size, which
    * produces output, which lands back here — and the usable height is the same,
    * so nothing refits.
+   *
+   * The guard covers WIDTH too since nocx-cwnz0, and that half needs its own
+   * argument, because a width the fit can move is a width that can alternate.
+   * It cannot: `usableViewport` reads `.scrollback-area`'s clientWidth, and
+   * that box is `flex: 1 1 auto` inside the pane — its width comes from the
+   * pane, never from the grid drawn in it, and `overflow-x: hidden` keeps a
+   * wide grid from widening it. The one thing that could move it is the
+   * vertical scrollbar appearing as rows change, and neither engine lets it:
+   * Chromium reserves the gutter (`scrollbar-gutter: stable`, style.css) and
+   * WebKit draws an overlay bar that occupies no width at all. Which is also
+   * why the two engines disagreed by 10px in nocx-vydj and why clientWidth,
+   * not a subtracted constant, is the number read here.
    */
   private refitIfResized(): void {
     const v = this._latestViewport

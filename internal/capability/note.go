@@ -26,6 +26,7 @@ type NoteService interface {
 // the config gate serialises. Notes never touch the vault, so the vault
 // gate is deliberately not held.
 type NoteOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, NoteService) error) error
 }
 
@@ -33,7 +34,7 @@ type NoteOperation interface {
 // execution lane, and hands the callback a guard-bound notes service.
 func NewNoteOperation(configGate, lane control.Admission, svc *note.Service) NoteOperation {
 	g := &guard{}
-	return newOperation[NoteService](control.NewComposite(configGate, lane), g, &noteService{guard: g, svc: svc})
+	return newOperation[NoteService](Direct("NoteOperation"), control.NewComposite(configGate, lane), g, &noteService{guard: g, svc: svc})
 }
 
 type noteService struct {

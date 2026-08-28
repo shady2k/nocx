@@ -210,6 +210,16 @@ no scenario may use a sleep as synchronization.
 | R06 | Copy or open a forwarded address          | None — renderer/URL action                                                                | `assistant.ui.execute("ports.openAddress")` through the renderer executor      | `ports.openAddress`: the explicit address reaches the held opener/clipboard seam                            |
 | R07 | Edit assistant policy rules               | None — policy store/approval seam is not an `internal/capability` operation               | `assistant.ui.execute("agent.policy")`                                         | `agent.policy`: a rule is saved, then the next matching proposal is refused or allowed as specified         |
 
+## Where the authority now lives
+
+This document produced the classification; it no longer holds it. Each operation
+in `internal/capability` carries its disposition as a required field, and an
+operation without one does not construct — so the code is what a reader should
+trust when the two disagree, and this map is the analysis that argued for it.
+`TestOperationDispositionsMatchMap` pins the code against an independent list;
+nothing mechanically checks this prose, so treat a difference as a stale
+document rather than as two competing answers.
+
 ## Operation classification
 
 The following is the complete classification of the 23 operation interfaces. A

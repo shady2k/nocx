@@ -27,6 +27,7 @@ type SnippetService interface {
 // under it) the way profiles.* and settings.* do. Snippets never touch the
 // vault, so the vault gate is deliberately not held.
 type SnippetOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, SnippetService) error) error
 }
 
@@ -35,7 +36,7 @@ type SnippetOperation interface {
 // service.
 func NewSnippetOperation(configGate, lane control.Admission, svc *snippet.Service) SnippetOperation {
 	g := &guard{}
-	return newOperation[SnippetService](control.NewComposite(configGate, lane), g, newSnippetService(g, svc))
+	return newOperation[SnippetService](Direct("SnippetOperation"), control.NewComposite(configGate, lane), g, newSnippetService(g, svc))
 }
 
 // newSnippetService builds the concrete guard-bound snippet service.

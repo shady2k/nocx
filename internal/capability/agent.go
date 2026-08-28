@@ -61,6 +61,7 @@ type AgentService interface {
 // AgentOperation is the typed operation for the agent domain. Its gate is
 // [content].
 type AgentOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, AgentService) error) error
 }
 
@@ -68,7 +69,7 @@ type AgentOperation interface {
 // before the execution lane.
 func NewAgentOperation(contentGate, lane control.Admission, db content.ContentDB) AgentOperation {
 	g := &guard{}
-	return newOperation[AgentService](control.NewComposite(contentGate, lane), g, newAgentService(g, db))
+	return newOperation[AgentService](Direct("AgentOperation"), control.NewComposite(contentGate, lane), g, newAgentService(g, db))
 }
 
 func newAgentService(g *guard, db content.ContentDB) *agentService {

@@ -219,9 +219,15 @@ func (g *guard) ok() bool {
 // embeds. It is the ONE place the exclusion is enforced; a domain operation
 // type is a typed alias over it with a fixed service type.
 type operation[S any] struct {
-	admission control.Admission
-	guard     *guard
-	service   S
+	admission   control.Admission
+	guard       *guard
+	service     S
+	disposition Disposition
+}
+
+// Disposition returns the operation's explicit assistant projection contract.
+func (op *operation[S]) Disposition() Disposition {
+	return op.disposition
 }
 
 // Run acquires the operation's gates (one composite admission, built in

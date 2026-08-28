@@ -149,6 +149,10 @@ export interface PostmanImportDialogProps {
   onFiles?: (files: File[]) => void
   /** The backend's reason the last attempt was refused, or ''. */
   error: string
+  /** Inventory returned by the archive preview, or '' for non-archives. */
+  archiveSummary?: string
+  /** Whether a held archive has been previewed for the current destination. */
+  archiveReady?: boolean
   busy: boolean
   /** Open the native directory picker for the DESTINATION. Absent wherever
    *  there is no Wails runtime — see CollectionDialog, same rule. */
@@ -186,7 +190,8 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
   // introduces a second value of exactly that kind: the collections root
   // certainly exists, so Import on it comes back "a folder is already
   // there" about a folder the person never chose.
-  const ready = () => props.sourceLabel !== '' && nameable() && !props.busy
+  const ready = () =>
+    props.sourceLabel !== '' && nameable() && !props.busy && (props.archiveReady ?? true)
   const refusal = (): string | undefined => (props.error !== '' ? props.error : undefined)
   const pasteRefusal = (): string | undefined =>
     props.pasteRefusal !== '' ? props.pasteRefusal : undefined
@@ -314,10 +319,11 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
         sessionId={props.dropSession}
         hint="Drop a Postman export here to import it"
         pickLabel="Or select a file"
-        // What the browser picker offers. The export is a JSON document
-        // (design §10, Postman v2.1), and it bounds the PICKER only — a drop
-        // can carry anything, which the backend refuses on its own terms.
-        accept="application/json,.json"
+        // What the browser picker offers. Postman exports are JSON documents
+        // or ZIP archives (design §10, Postman v2.1), and this bounds the
+        // PICKER only — a drop can carry anything, which the backend refuses
+        // on its own terms.
+        accept="application/json,.json,.zip"
         native={props.nativeWindow}
         onPick={props.onBrowseFile}
         onFiles={props.onFiles}
@@ -361,6 +367,9 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
           not exist yet, asked before the person had said what they were
           importing. The field is still the truth and still carries every
           refusal; the pencil is what puts it back on screen. */}
+      <Show when={props.archiveSummary !== undefined && props.archiveSummary !== ''}>
+        <p class="api-import-summary">{props.archiveSummary}</p>
+      </Show>
       <Show when={!editing()}>
         <p class="api-import-dest">
           {props.sourceLabel !== '' && nameable()

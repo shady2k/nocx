@@ -301,15 +301,14 @@ type Timings struct {
 // that owns the folder. The caller opens the file and hands over the bytes.
 var ErrFileBody = errors.New(component + ": a body that names a file must be resolved by the caller; this package knows nothing about files")
 
-// ErrAuthUnresolved is auth the sender cannot apply. A collection file names
-// a VARIABLE, never a secret (design §8), and the binding from a variable
-// name to a stored value lives in internal/apibind. Sending the variable's
-// NAME as though it were the credential would be worse than refusing, and
-// sending nothing at all while the user believes they are authenticated
-// would be the silent degrade AGENTS.md forbids.
-var ErrAuthUnresolved = errors.New(component + ": auth names a variable this package cannot resolve; the caller resolves it and sets the header")
-
-var _ Sender = (*Client)(nil)
+// ErrAuthUnresolved is auth the sender cannot apply. The capability layer
+// resolves secret references before sending; passing unresolved text here
+// would be worse than refusing, and sending nothing while the user believes
+// they are authenticated would be the silent degrade AGENTS.md forbids.
+var (
+	ErrAuthUnresolved        = errors.New(component + ": auth was not resolved before sending")
+	_                 Sender = (*Client)(nil)
+)
 
 // Send performs one request and returns the EXCHANGE — what was attempted,
 // how far it got, and what came back if anything did.
@@ -502,10 +501,9 @@ func composeUnsent(r apicoll.Request) string {
 		b.WriteByte('\n')
 	}
 	b.WriteByte('\n')
-	switch r.Body.Kind {
-	case apicoll.BodyRaw, apicoll.BodyJSON, apicoll.BodyForm:
+	if r.Body.TransmitsText() {
 		b.WriteString(r.Body.Text)
-	case apicoll.BodyFile:
+	} else if r.Body.Kind == apicoll.BodyFile {
 		// The bytes were never read — that is the caller's to do (ErrFileBody)
 		// — so the run says which file it would have sent rather than
 		// pretending to show it.

@@ -15,6 +15,7 @@ import {
   copyToClipboard,
   createCommandBlock,
   type BlockKind,
+  type DumpSource,
   type FrozenStatus,
   type RunningBlockActions,
 } from './blocks'
@@ -72,8 +73,8 @@ export interface RestoredBlockFacts {
    * Whether the prose of THIS RUN is no longer kept (ADR-0040's retention
    * rule, ADR-0019 §7). The TURN's notice is gated on this FACT, never on
    * `body === null` alone: a turn that never streamed a word has an empty
-   * body and everything is fine (nothing was lost), while a turn whose
-   * prose retention took has the same empty body and one sentence to say.
+   * body and everything is fine (nothing was lost), while a turn whose prose
+   * retention took has the same empty body and one sentence to say.
    * Meaningless on a non-ask block.
    */
   proseEvicted?: boolean
@@ -114,6 +115,7 @@ export function restoredBlock(
   onSelect: (id: number, selected: boolean) => void,
   store: CommandSnapshotStore,
   menuActions?: RunningBlockActions,
+  dump?: DumpSource,
 ): HTMLElement {
   // A TURN's body is prose and is drawn by the answer body's own renderer —
   // the one the live stream draws through (nocx-4em1z). A `text` CHILD's
@@ -156,8 +158,15 @@ export function restoredBlock(
     undefined,
     menuActions,
     facts.entryId,
+    dump,
   )
   el.dataset.restored = 'true'
+  if (facts.kind === 'ask') {
+    // Restored turns are already terminal ledger facts. The live close path
+    // writes this marker when the stream ends; restore must write the same
+    // marker so the finished turn exposes the dump affordance.
+    el.dataset.turnState = facts.status === 'settled' ? 'success' : facts.status
+  }
   if (facts.entryId) el.dataset.entryId = facts.entryId
   // The EVICTED SENTENCE. A COMMAND says it whenever its body is gone; a
   // TURN says it only when the RUN's prose fact says so — never from
@@ -249,6 +258,7 @@ export function restoredTurn(
   store: CommandSnapshotStore,
   drawCaused: (cause: RestoredCause) => HTMLElement | null,
   menuActions?: RunningBlockActions,
+  dump?: DumpSource,
 ): HTMLElement[] {
   const el = restoredBlock(
     { ...facts, id: nextId() },
@@ -257,6 +267,7 @@ export function restoredTurn(
     onSelect,
     store,
     menuActions,
+    dump,
   )
   // The turn's prose, when the run still had it, is drawn by the block
   // builder's own answer-body path; when it is GONE the block says the

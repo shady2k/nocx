@@ -15,7 +15,7 @@
 // takes. The editor is reached through the same private-field escape hatch
 // editor.test.ts uses, and the selection is seeded through the CM6 view —
 // the same transaction a mouse drag produces.
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { beforeEach, describe, expect, it, vi, type Mock } from 'vitest'
 // node builtins are untyped here (@types/node is not installed), so the
 // imports sit behind @ts-expect-error and the calls behind a contained
 // no-unsafe disable — the same trade theme-catalogue.test.ts makes at file
@@ -26,6 +26,7 @@ import { resolve } from 'node:path'
 
 const srcDir = import.meta.dirname ?? resolve(new URL('.', import.meta.url).pathname)
 const STYLE_ENTRY = resolve(srcDir, 'style.css')
+const BASE_STYLE_ENTRY = resolve(srcDir, 'styles/base.css')
 
 import type { PaneIdentity } from './terminal-content'
 import { grantBlockFromElement, type GrantBlock } from './ask-entry'
@@ -66,13 +67,29 @@ import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import type { WSClient } from './ipc'
 import { createCommandBlock } from './scrollback/blocks'
+import { mountReadScreenHandler } from './read-screen'
 import { CommandSnapshotStore } from './command-snapshot'
-import type { DesiredMode } from './capability'
+import type { ActionFacts, DesiredMode } from './capability'
+import type * as Capability from './capability'
 import type { ScrollbackController } from './scrollback/controller'
 import { pushOverlay, popOverlay } from './ui/overlay/stack'
 import { _resetThemeState } from './renderers/theme-adapter'
 import { showToast } from './ui/toast'
+import type { CapturedFrame } from './frame/types'
+import { emptyAttrs } from './scrollback/serializer'
 import { BufferLine } from './scrollback/test-helpers'
+
+const capturedActionFacts = vi.hoisted(() => [] as ActionFacts[])
+vi.mock('./capability', async () => {
+  const actual = await vi.importActual<typeof Capability>('./capability')
+  return {
+    ...actual,
+    deriveActions: (facts: ActionFacts) => {
+      capturedActionFacts.push(facts)
+      return actual.deriveActions(facts)
+    },
+  }
+})
 
 // Mock the XtermRenderer class before any imports use it (same as tabs.test.ts).
 // The shared fixture mock implements the full TerminalRenderer surface,
@@ -982,6 +999,42 @@ describe('paste with focus on a frozen block (nocx-w7h.9)', () => {
       expect(session.send.mock.calls.length).toBe(sentBefore)
       expect(ev.defaultPrevented).toBe(false) // native paste still runs
     } finally {
+      teardown()
+    }
+  })
+  it("Cmd/Ctrl+V leaves xterm's helper textarea as the text owner", async () => {
+    const { ed, content, tab, teardown } = await mountTerminal(makeClipboard(), {
+      attachToDocument: true,
+    })
+    const renderer = rendererOf(content)
+    const textarea = document.createElement('textarea')
+    try {
+      content.setVisible(true)
+      ed.show()
+      ed.insertText('keep this draft')
+      renderer.paste.mockClear()
+      const live = tab.pane.querySelector<HTMLElement>('.xterm-live-container')
+      expect(live).not.toBeNull()
+      live!.append(textarea)
+      textarea.focus()
+      expect(document.activeElement).toBe(textarea)
+
+      const ev = new KeyboardEvent('keydown', {
+        key: 'v',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+      textarea.dispatchEvent(ev)
+
+      // xterm owns paste while its helper textarea is focused. The
+      // document rescue must not steal a browser-native paste from it.
+      expect(ev.defaultPrevented).toBe(false)
+      expect(document.activeElement).toBe(textarea)
+      expect(ed.getDoc()).toBe('keep this draft')
+      expect(renderer.paste).not.toHaveBeenCalled()
+    } finally {
+      textarea.remove()
       teardown()
     }
   })
@@ -2151,6 +2204,25 @@ describe('the command editor chrome pins the clock to the right edge without dis
 
     expect(chrome).not.toMatch(/justify-content\s*:\s*(space-between|space-around|space-evenly)/)
     expect(time).toMatch(/margin-left\s*:\s*auto/)
+  })
+})
+
+describe('summoned editor overlay stylesheet contract (nocx-92gfl)', () => {
+  it('shares the pane padding band and pins the overlay to its bottom edge', () => {
+    const css = stripComments(readFileSync(STYLE_ENTRY, 'utf8'))
+    const baseCss = stripComments(readFileSync(BASE_STYLE_ENTRY, 'utf8'))
+    const match = css.match(/\.nocx-editor\[data-placement=['"]overlay['"]\]\s*\{([^}]*)\}/)
+    const pane = baseCss.match(/\.pane\s*\{([^}]*)\}/)
+    expect(match).not.toBeNull()
+    expect(pane).not.toBeNull()
+    const declarations = match?.[1] ?? ''
+    const paneDeclarations = pane?.[1] ?? ''
+    expect(paneDeclarations).toMatch(/--pane-inline-padding\s*:\s*10px/)
+    expect(paneDeclarations).toMatch(/padding\s*:\s*0\s+var\(--pane-inline-padding\)/)
+    expect(declarations).toMatch(/position\s*:\s*absolute/)
+    expect(declarations).toMatch(/left\s*:\s*var\(--pane-inline-padding\)/)
+    expect(declarations).toMatch(/right\s*:\s*var\(--pane-inline-padding\)/)
+    expect(declarations).toMatch(/bottom\s*:\s*0/)
   })
 })
 
@@ -7372,9 +7444,40 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     return el?.dataset.target ?? null
   }
 
+  function defaultPinnedFrame(): CapturedFrame {
+    const text = 'pinned frame'
+    return {
+      rows: [
+        {
+          kind: 'cells',
+          cells: Array.from({ length: 80 }, (_, index) => ({
+            char: text[index] ?? ' ',
+            attrs: emptyAttrs(),
+          })),
+        },
+      ],
+      cursor: { line: 0, col: text.length },
+      provenance: {
+        source: 'live',
+        identity: {
+          buffer: { kind: 'normal' },
+          cols: 80,
+          rows: 24,
+          generation: 0,
+        },
+        range: { start: 0, end: 1 },
+        scrollbackCapLines: 10000,
+      },
+    }
+  }
+
   /** ⌘/Ctrl+Enter, dispatched where a person's keystroke lands while the
    *  grid owns input: on the live grid, so it travels the same path. */
-  function summonChord(content: TerminalContent): void {
+  async function summonChord(content: TerminalContent): Promise<void> {
+    const renderer = rendererOf(content)
+    if (typeof renderer.captureLiveFrame !== 'function') {
+      renderer.captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+    }
     gridOf(content).dispatchEvent(
       new KeyboardEvent('keydown', {
         key: 'Enter',
@@ -7383,6 +7486,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         cancelable: true,
       }),
     )
+    await Promise.resolve()
   }
 
   function escapeOn(el: HTMLElement): void {
@@ -7427,7 +7531,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
   }
 
-  it('Ctrl+Enter while a command is running summons the editor, in ask mode', async () => {
+  it('Ctrl+Enter while a command is running summons the editor as an overlay without resizing the grid', async () => {
     const client = makeClient()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -7438,20 +7542,139 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       startCommand(client)
-      // The editor is gone while it runs — that is today's behaviour and it
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+      const dimensions = { cols: renderer.cols, rows: renderer.rows }
+      const resizeCalls = session.sendResize.mock.calls.length
+      session.send.mockClear()
+      // The editor is gone while it runs — that is deliberate and it
       // is the state this gesture exists for.
       expect(ed.isVisible).toBe(false)
+      capturedActionFacts.length = 0
 
-      summonChord(content)
+      await summonChord(content)
+
+      const summonedFacts = capturedActionFacts[capturedActionFacts.length - 1]
+      expect(summonedFacts).toEqual(expect.objectContaining({ presentation: 'editor' }))
+      const recovery = ed.root.querySelector<HTMLElement>('.nocx-editor-recovery')
+      expect(recovery?.style.display).toBe('none')
 
       expect(ed.isVisible).toBe(true)
+      expect(ed.root.dataset.placement).toBe('overlay')
       // Ask, not the shell: the summoned editor's only target. Read off the
       // indicator, which is the product's own account of where Enter goes.
       expect(targetNamed(ed)).toBe('agent')
+      const frozen = ed.root.querySelector<HTMLElement>('[role="status"]')
+      expect(frozen?.textContent).toBe('Screen frozen while you ask')
+      expect(content.pinnedFrame()?.provenance.source).toBe('live')
+      expect(gridOf(content).parentElement?.parentElement?.textContent).toContain('pinned frame')
+      // The grid remains the same size and no PTY resize was requested. The
+      // overlay is removed from layout rather than making a second viewport
+      // fit pass.
+      expect({ cols: renderer.cols, rows: renderer.rows }).toEqual(dimensions)
+      expect(session.send).not.toHaveBeenCalled()
+      expect(session.sendResize).toHaveBeenCalledTimes(resizeCalls)
       // And the grid is read-only again, which is the invariant
       // _syncLifecycleOwnership states about itself: editor shown ⟺ grid
       // read-only.
       expect(readOnlyOf(content)).toHaveBeenLastCalledWith(true)
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('disposal removes the freeze presentation and restores the live host', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      const frameHost = gridOf(content)
+      frameHost.style.position = 'sticky'
+
+      await summonChord(content)
+
+      const frame = frameHost.querySelector('.nocx-freeze-frame')
+      const marker = ed.root.querySelector('[role="status"]')
+      expect(ed.root.dataset.placement).toBe('overlay')
+      expect(frameHost.style.position).toBe('relative')
+      expect(frame).not.toBeNull()
+      expect(marker).not.toBeNull()
+
+      content.dispose()
+
+      expect(ed.root.dataset.placement).toBe('inline')
+      expect(content.pinnedFrame()).toBeNull()
+      expect(frame?.isConnected).toBe(false)
+      expect(marker?.isConnected).toBe(false)
+      expect(frameHost.style.position).toBe('sticky')
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('waits for the pinned frame before showing the editor or marker', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    let release!: (frame: CapturedFrame) => void
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      const renderer = rendererOf(content)
+      renderer.captureLiveFrame = vi.fn(
+        () =>
+          new Promise<CapturedFrame>((resolve) => {
+            release = resolve
+          }),
+      )
+
+      await summonChord(content)
+      expect(ed.isVisible).toBe(false)
+      expect(content.pinnedFrame()).toBeNull()
+      expect(ed.root.querySelector('[role="status"]')).toBeNull()
+
+      release(defaultPinnedFrame())
+      await vi.waitFor(() => expect(ed.isVisible).toBe(true))
+      expect(content.pinnedFrame()).not.toBeNull()
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('refused capture leaves the live pane untouched', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      rendererOf(content).captureLiveFrame = vi.fn().mockRejectedValue(new Error('capture refused'))
+
+      await summonChord(content)
+      expect(ed.isVisible).toBe(false)
+      expect(ed.root.dataset.placement).toBe('inline')
+      expect(content.pinnedFrame()).toBeNull()
+      expect(ed.root.querySelector('[role="status"]')).toBeNull()
+      expect(
+        gridOf(content).parentElement?.parentElement?.querySelector('.nocx-freeze-frame'),
+      ).toBeNull()
     } finally {
       restore()
       teardown()
@@ -7469,14 +7692,33 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       startCommand(client, 'top')
-      summonChord(content)
+      await summonChord(content)
       expect(ed.isVisible).toBe(true)
+      const renderer = rendererOf(content)
+      const write = Object.getOwnPropertyDescriptor(renderer, 'write')?.value as Mock<
+        (data: string) => void
+      >
+      const liveOutput = document.createElement('span')
+      gridOf(content).appendChild(liveOutput)
+      write.mockImplementation((data: string) => {
+        liveOutput.textContent += data
+      })
+      write.mockClear()
+      sessionOf(content).fireData('during freeze\n')
+      expect(write).toHaveBeenCalledWith('during freeze\n')
 
       escapeOn(viewOf(ed).contentDOM)
 
       expect(ed.isVisible).toBe(false)
+      expect(ed.root.dataset.placement).toBe('inline')
       expect(readOnlyOf(content)).toHaveBeenLastCalledWith(false)
       // The assertion that matters is not the flag: it is a key the PROGRAM
+      expect(content.pinnedFrame()).toBeNull()
+      expect(gridOf(content).textContent).toContain('during freeze\n')
+      expect(
+        gridOf(content).parentElement?.parentElement?.querySelector('.nocx-freeze-frame'),
+      ).toBeNull()
+      expect(ed.root.querySelector('[role="status"]')).toBeNull()
       // consumes arriving at the session. `q` is what quits `top`, and if
       // the editor still owned input it would be a letter in a draft.
       const session = sessionOf(content)
@@ -7493,6 +7735,57 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       teardown()
     }
   })
+  it("Escape dismisses an accepted summon when xterm's helper textarea owns focus", async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summonChord(content)
+      const editor = editorOf(content)
+      editor.insertText('why is this still running?')
+      viewOf(editor).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(client.dispatcher.call.mock.calls.some(([method]) => method === 'agent.ask')).toBe(
+          true,
+        ),
+      )
+
+      const textarea = document.createElement('textarea')
+      gridOf(content).append(textarea)
+      textarea.focus()
+      expect(document.activeElement).toBe(textarea)
+
+      const event = new KeyboardEvent('keydown', {
+        key: 'Escape',
+        bubbles: true,
+        cancelable: true,
+      })
+      textarea.dispatchEvent(event)
+
+      expect(event.defaultPrevented).toBe(true)
+      expect(content.pinnedFrame()).toBeNull()
+      expect(ed.isVisible).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
 
   it('a half-typed question survives the dismissal, and is still there on the next summon', async () => {
     const client = makeClient()
@@ -7505,13 +7798,13 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       startCommand(client)
-      summonChord(content)
+      await summonChord(content)
       ed.insertText('why is this slow')
 
       escapeOn(viewOf(ed).contentDOM)
       expect(ed.isVisible).toBe(false)
 
-      summonChord(content)
+      await summonChord(content)
       // Escape here means "put this away", not "throw it away": the person
       // dismissed a surface, they did not cancel their question.
       expect(ed.getDoc()).toBe('why is this slow')
@@ -7536,7 +7829,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       startCommand(client)
-      summonChord(content)
+      await summonChord(content)
       expect(targetNamed(ed)).toBe('agent')
 
       // The chord is now the editor's own — the explicit target switch. It
@@ -7581,10 +7874,11 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       const handler = startCommand(client)
-      summonChord(content)
+      await summonChord(content)
       expect(targetNamed(ed)).toBe('agent')
 
       finishCommand(handler)
+      expect(ed.root.dataset.placement).toBe('inline')
 
       expect(ed.isVisible).toBe(true)
       expect(targetNamed(ed)).toBe('shell')
@@ -7605,7 +7899,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       const handler = startCommand(client)
-      summonChord(content)
+      await summonChord(content)
       ed.insertText('what did that do')
 
       finishCommand(handler)
@@ -7649,7 +7943,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     }
   })
 
-  it('the alternate buffer is untouched: the chord summons nothing there', async () => {
+  it('the alternate buffer also gets the ask overlay without changing its grid', async () => {
     const client = makeClient()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -7660,13 +7954,19 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       startCommand(client, 'htop')
-      rendererOf(content)._fireBufferChange('alternate')
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+      renderer._fireBufferChange('alternate')
+      const dimensions = { cols: renderer.cols, rows: renderer.rows }
+      const resizeCalls = session.sendResize.mock.calls.length
 
-      summonChord(content)
+      await summonChord(content)
 
-      // A full-screen program owns the pane, and that is its own
-      // conversation — the editor has no business over it.
-      expect(ed.isVisible).toBe(false)
+      expect(ed.isVisible).toBe(true)
+      expect(ed.root.dataset.placement).toBe('overlay')
+      expect(targetNamed(ed)).toBe('agent')
+      expect({ cols: renderer.cols, rows: renderer.rows }).toEqual(dimensions)
+      expect(session.sendResize).toHaveBeenCalledTimes(resizeCalls)
     } finally {
       restore()
       teardown()
@@ -7682,6 +7982,146 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
   function signalsSent(content: TerminalContent): string[] {
     return sessionOf(content).signal.mock.calls.map((c: unknown[]) => c[0] as string)
   }
+
+  it('Ctrl+C keeps selection ownership tied to the focused target', async () => {
+    const client = makeClient()
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    const selection = {
+      anchorNode: null as Node | null,
+      focusNode: null as Node | null,
+      isCollapsed: false,
+      rangeCount: 1,
+      toString: () => {
+        return 'selected output'
+      },
+    }
+    const selectionSpy = vi
+      .spyOn(window, 'getSelection')
+      .mockReturnValue(selection as unknown as Selection)
+    const targets: Array<{ name: string; element: HTMLElement; take?: () => void }> = []
+    const scrollbackBackground = tab.pane.querySelector<HTMLElement>('.scrollback-area')
+    expect(scrollbackBackground).not.toBeNull()
+    const scrollbackInner = scrollbackBackground!.querySelector<HTMLElement>('.scrollback-inner')
+    expect(scrollbackInner).not.toBeNull()
+
+    const frozen = document.createElement('div')
+    frozen.className = 'cmd-block'
+    const frozenButton = document.createElement('button')
+    frozenButton.className = 'cmd-overflow-btn'
+    const selectedText = document.createTextNode('selected output')
+    frozen.append(selectedText, frozenButton)
+    scrollbackInner!.append(frozen)
+    selection.anchorNode = selectedText
+    selection.focusNode = selectedText
+    targets.push({ name: 'frozen block', element: frozenButton })
+
+    const chrome = document.createElement('button')
+    chrome.className = 'nocx-editor-chrome'
+    tab.pane.append(chrome)
+    targets.push({ name: 'chrome', element: chrome })
+
+    const priorTabIndex = scrollbackBackground!.getAttribute('tabindex')
+    scrollbackBackground!.tabIndex = 0
+    targets.push({ name: 'scrollback background', element: scrollbackBackground! })
+
+    const menu = document.createElement('div')
+    menu.className = 'cmd-overflow-menu'
+    const menuItem = document.createElement('button')
+    menuItem.className = 'cmd-overflow-menu-item'
+    menu.append(menuItem)
+    document.body.append(menu)
+    targets.push({ name: 'block action menu', element: menuItem })
+
+    // The row the merge with main needed (nocx-45vkz + nocx-4ff.38). Claiming
+    // a selection for the scrollback RELEASES the composer's focus and puts
+    // nothing in its place, so the person who just dragged across a running
+    // command's output has focus on the body and a live highlight in front of
+    // them. Their Ctrl+C is a copy. Answering it with a SIGINT is the worst
+    // reading of the gesture available, and it is what the two changes did
+    // together while each was right alone.
+    targets.push({
+      name: 'released composer, selection still claimed',
+      element: document.body,
+      take: () => (document.activeElement as HTMLElement | null)?.blur(),
+    })
+
+    const results: Array<{
+      target: string
+      activeElement: string
+      defaultPrevented: boolean
+      signals: string[]
+    }> = []
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      for (const target of targets) {
+        if (target.take) target.take()
+        else target.element.focus()
+        client.dispatcher.call.mockClear()
+        sessionOf(content).signal.mockClear()
+        const event = new KeyboardEvent('keydown', {
+          key: 'c',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        })
+        target.element.dispatchEvent(event)
+        const signals = signalsSent(content)
+        results.push({
+          target: target.name,
+          activeElement: document.activeElement?.constructor.name ?? 'null',
+          defaultPrevented: event.defaultPrevented,
+          signals,
+        })
+      }
+      expect(results).toEqual([
+        {
+          target: 'frozen block',
+          activeElement: 'HTMLButtonElement',
+          defaultPrevented: false,
+          signals: [],
+        },
+        {
+          target: 'chrome',
+          activeElement: 'HTMLButtonElement',
+          defaultPrevented: true,
+          signals: ['interrupt'],
+        },
+        {
+          target: 'scrollback background',
+          activeElement: 'HTMLDivElement',
+          defaultPrevented: false,
+          signals: [],
+        },
+        {
+          target: 'block action menu',
+          activeElement: 'HTMLButtonElement',
+          defaultPrevented: true,
+          signals: ['interrupt'],
+        },
+        {
+          target: 'released composer, selection still claimed',
+          activeElement: 'HTMLBodyElement',
+          defaultPrevented: false,
+          signals: [],
+        },
+      ])
+    } finally {
+      selectionSpy.mockRestore()
+      if (priorTabIndex === null) scrollbackBackground!.removeAttribute('tabindex')
+      else scrollbackBackground!.setAttribute('tabindex', priorTabIndex)
+      menu.remove()
+      frozen.remove()
+      chrome.remove()
+      restore()
+      teardown()
+    }
+  })
 
   it('Ctrl+C is addressed to the running command even when the grid does not hold focus', async () => {
     const client = makeClient()
@@ -7806,7 +8246,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       startCommand(client)
-      summonChord(content)
+      await summonChord(content)
       ed.insertText('what is it waiting on')
       const session = sessionOf(content)
       session.send.mockClear()
@@ -7844,7 +8284,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     try {
       content.setVisible(true)
       startCommand(client)
-      summonChord(content)
+      await summonChord(content)
       const session = sessionOf(content)
       session.send.mockClear()
 
@@ -7915,7 +8355,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     return items.find((el) => el.dataset.action === action)
   }
 
-  it('the running block’s ⋮ menu offers the same whole-block grant as a finished block', async () => {
+  it('the running block’s ⋮ menu grants it and summons the editor, like a finished block', async () => {
     const client = makeClient()
     const { view, ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -7939,16 +8379,32 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         attempt: { id: 'att-run', state: 'open', origin: 'app', command: 'sleep 300' },
       })
       expect(ed.isVisible).toBe(false)
+      rendererOf(content).captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
 
       const grant = itemNamed(runningBlockMenu(content), 'grant')
       expect(grant?.textContent).toBe('Ask about this block')
       grant?.click()
+      await vi.waitFor(() => expect(ed.isVisible).toBe(true))
 
       const block = paneOf(content).querySelector<HTMLElement>('.cmd-block-running')
       expect(block?.dataset.granted).toBe('true')
       expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.dataset.state).toBe(
         'chosen',
       )
+      expect(ed.isVisible).toBe(true)
+      expect(targetNamed(ed)).toBe('agent')
+      expect(document.activeElement).toBe(view.contentDOM)
+
+      escapeOn(view.contentDOM)
+      expect(ed.isVisible).toBe(false)
+      expect(targetNamed(ed)).toBe('shell')
+
+      const unmark = itemNamed(runningBlockMenu(content), 'grant')
+      expect(unmark?.textContent).toBe('Unmark')
+      unmark?.click()
+      expect(block?.dataset.granted).toBeUndefined()
+      expect(ed.isVisible).toBe(false)
+      expect(targetNamed(ed)).toBe('shell')
     } finally {
       restore()
       teardown()
@@ -8111,6 +8567,804 @@ describe('a program printing BEL (nocx-n3nfg)', () => {
 
       expect(bellCalls(client)).toEqual([])
       expect(tab.hasActivity).toBe(true)
+    } finally {
+      teardown()
+    }
+  })
+})
+describe('session.read serves the frame the question is about (nocx-7l4ex.3)', () => {
+  type ReadCall = { method: string; params: unknown }
+  type ReadCell = { char: string }
+  type ReadRow = { cells?: ReadCell[] }
+  type ReadResolution = {
+    requestId: string
+    outcome: string
+    rows?: ReadRow[]
+    cursor?: unknown
+    identity?: unknown
+    range?: unknown
+    error?: string
+  }
+  type ReadCallFunction = (method: string, params: unknown) => Promise<undefined>
+  type ReadDispatcher = {
+    handlers: Map<string, (params: unknown) => void>
+    calls: ReadCall[]
+    subscribe: (method: string, handler: (params: unknown) => void) => () => void
+    call: ReadCallFunction
+  }
+
+  function readDispatcher(): ReadDispatcher {
+    const handlers = new Map<string, (params: unknown) => void>()
+    const calls: ReadCall[] = []
+    const subscribe = (method: string, handler: (params: unknown) => void): (() => void) => {
+      handlers.set(method, handler)
+      return () => handlers.delete(method)
+    }
+    const call = vi.fn((method: string, params: unknown) => {
+      calls.push({ method, params })
+      return Promise.resolve(undefined)
+    })
+    return { handlers, calls, subscribe, call }
+  }
+
+  function frame(text: string): CapturedFrame {
+    return {
+      rows: [
+        {
+          kind: 'cells',
+          cells: Array.from({ length: 80 }, (_, index) => ({
+            char: text[index] ?? ' ',
+            attrs: emptyAttrs(),
+          })),
+        },
+      ],
+      cursor: { line: 0, col: text.length },
+      provenance: {
+        source: 'live',
+        identity: {
+          buffer: { kind: 'alternate', altSession: 1 },
+          cols: 80,
+          rows: 24,
+          generation: 11,
+        },
+        range: { start: 0, end: 1 },
+        scrollbackCapLines: 10000,
+      },
+    }
+  }
+
+  function wireText(params: unknown): string {
+    const resolution = params as ReadResolution
+    const rows = resolution.rows ?? []
+    return rows.map((row) => (row.cells ?? []).map((cell) => cell.char).join('')).join('\n')
+  }
+
+  function startRunning(client: ClientFake, command = 'top'): void {
+    const handler = lifecycleHandler(client)
+    handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+    handler({
+      lane: 'lane-1',
+      lifecycle: 'running',
+      domain: 'd1',
+      epoch: 1,
+      attempt: { id: 'att-run', state: 'open', origin: 'app', command },
+    })
+  }
+
+  function gridOf(content: TerminalContent): HTMLElement {
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    return withScrollback.scrollback.xtermLiveContainer
+  }
+
+  async function summon(content: TerminalContent): Promise<void> {
+    gridOf(content).dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    await vi.waitFor(() => expect(editorOf(content).isVisible).toBe(true))
+  }
+
+  function readCurrent(
+    dispatcher: ReadDispatcher,
+    content: TerminalContent,
+    requestId: string,
+  ): void {
+    mountReadScreenHandler(dispatcher as unknown as Dispatcher, (sessionId) =>
+      sessionId === content.sessionId() ? content : null,
+    )
+    dispatcher.handlers.get('agent.readScreenRequest')!({
+      requestId,
+      sessionId: content.sessionId(),
+    })
+  }
+
+  it('returns the pinned frame for both reads in one question turn', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      const pinned = frame('top: load 1.00')
+      const renderer = rendererOf(content)
+      const capture = vi.fn().mockResolvedValue(pinned)
+      renderer.captureLiveFrame = capture
+      await summon(content)
+      capture.mockClear()
+
+      const dispatcher = readDispatcher()
+      readCurrent(dispatcher, content, 'read-1')
+      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(1))
+      readCurrent(dispatcher, content, 'read-2')
+      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(2))
+
+      const first = dispatcher.calls[0].params as ReadResolution
+      const second = dispatcher.calls[1].params as ReadResolution
+      expect(first).toMatchObject({ requestId: 'read-1', outcome: 'frame' })
+      expect(second).toMatchObject({ requestId: 'read-2', outcome: 'frame' })
+      expect(wireText(first)).toContain('top: load 1.00')
+      expect(second.rows).toEqual(first.rows)
+      expect(second.cursor).toEqual(first.cursor)
+      expect(second.identity).toEqual(first.identity)
+      expect(second.range).toEqual(first.range)
+      expect(capture).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('uses the live renderer again after the overlay closes', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      const pinned = frame('pinned top frame')
+      const renderer = rendererOf(content)
+      const capture = vi.fn().mockResolvedValue(pinned)
+      renderer.captureLiveFrame = capture
+      await summon(content)
+
+      const editorWithView = editorOf(content) as unknown as { view: EditorView }
+      const view = editorWithView.view
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      expect(content.pinnedFrame()).toBeNull()
+
+      const live = frame('live after next question')
+      capture.mockResolvedValue(live)
+      const result = await content.captureLiveFrame()
+      expect(result).toBe(live)
+      expect(capture).toHaveBeenCalledTimes(2)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('answers a repainting top without waiting on the live capture fence', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client, 'top')
+      const pinned = frame('top: pinned while repainting')
+      const renderer = rendererOf(content)
+      const capture = vi.fn().mockResolvedValue(pinned)
+      renderer.captureLiveFrame = capture
+      await summon(content)
+
+      let liveCaptureStarted = false
+      const blockedCapture = vi.fn(
+        () =>
+          new Promise<CapturedFrame>(() => {
+            liveCaptureStarted = true
+          }),
+      )
+      renderer.captureLiveFrame = blockedCapture
+
+      await expect(content.captureLiveFrame()).resolves.toBe(pinned)
+      expect(liveCaptureStarted).toBe(false)
+      expect(blockedCapture).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps region reads live while the whole-screen read is pinned', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      const pinned = frame('pinned whole screen')
+      const renderer = rendererOf(content)
+      const capture = vi.fn().mockResolvedValue(pinned)
+      renderer.captureLiveFrame = capture
+      await summon(content)
+
+      const live = frame('live selected rows')
+      capture.mockResolvedValue(live)
+      const result = await content.captureLiveFrame({ start: 3, end: 5 })
+
+      expect(result).toBe(live)
+      expect(capture).toHaveBeenLastCalledWith({ start: 3, end: 5 })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps the renderer failed outcome when no frame can be produced', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      rendererOf(content).captureLiveFrame = vi.fn().mockRejectedValue(new Error('capture refused'))
+
+      const dispatcher = readDispatcher()
+      readCurrent(dispatcher, content, 'read-failed')
+      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(1))
+
+      expect(dispatcher.calls[0].params).toMatchObject({
+        requestId: 'read-failed',
+        outcome: 'failed',
+        error: 'capture refused',
+      })
+    } finally {
+      teardown()
+    }
+  })
+  it('keeps the read pin through Escape until the same ask turn ends', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      const pinned = frame('pinned while the answer streams')
+      const live = frame('live after the answer ends')
+      const renderer = rendererOf(content)
+      const capture = vi.fn().mockResolvedValue(pinned)
+      renderer.captureLiveFrame = capture
+      client.dispatcher.call.mockImplementation((method: string) => {
+        if (method === 'agent.ask') {
+          return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+        }
+        return Promise.resolve({
+          id: 'att-0',
+          domain: 'd1',
+          state: 'open',
+          command: '',
+          cwd: '',
+          host: '',
+          origin: 'app',
+          startedAt: '2026-08-08T12:00:00Z',
+        })
+      })
+
+      await summon(content)
+      capture.mockClear()
+      const ed = editorOf(content)
+      ed.insertText('why is this screen changing?')
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(client.dispatcher.call.mock.calls.some(([method]) => method === 'agent.ask')).toBe(
+          true,
+        ),
+      )
+
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      expect(content.pinnedFrame()).toBeNull()
+
+      const dispatcher = readDispatcher()
+      readCurrent(dispatcher, content, 'read-after-escape-1')
+      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(1))
+      readCurrent(dispatcher, content, 'read-after-escape-2')
+      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(2))
+      const first = dispatcher.calls[0].params as ReadResolution
+      const second = dispatcher.calls[1].params as ReadResolution
+      expect(wireText(first)).toContain('pinned while the answer streams')
+      expect(second.rows).toEqual(first.rows)
+      expect(capture).not.toHaveBeenCalled()
+
+      const runState = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )
+      expect(runState).toBeDefined()
+      ;(runState![1] as (params: unknown) => void)({ runId: 42, state: 'completed' })
+
+      capture.mockResolvedValue(live)
+      readCurrent(dispatcher, content, 'read-after-turn')
+      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(3))
+      expect(wireText(dispatcher.calls[2].params)).toContain('live after the answer ends')
+      expect(capture).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
+    }
+  })
+  it('clears an unsettled turn pin when the next question starts without a summon', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      const pinned = frame('stale first-turn frame')
+      const live = frame('live second-turn frame')
+      const renderer = rendererOf(content)
+      const capture = vi.fn().mockResolvedValue(pinned)
+      renderer.captureLiveFrame = capture
+      let nextRun = 42
+      client.dispatcher.call.mockImplementation((method: string) => {
+        if (method === 'agent.status') {
+          return Promise.resolve({
+            endpointConfigured: true,
+            credential: 'resolvable',
+            lastProbe: null,
+            answering: { ready: true, reason: null, endpoint: 'openrouter', model: 'test-model' },
+          })
+        }
+        if (method === 'agent.ask') {
+          nextRun += 1
+          return Promise.resolve({
+            runId: nextRun,
+            entryId: `entry-${nextRun}`,
+            model: 'test-model',
+          })
+        }
+        return Promise.resolve({
+          id: 'att-0',
+          domain: 'd1',
+          state: 'open',
+          command: '',
+          cwd: '',
+          host: '',
+          origin: 'app',
+          startedAt: '2026-08-08T12:00:00Z',
+        })
+      })
+
+      await summon(content)
+      capture.mockClear()
+      const ed = editorOf(content)
+      ed.insertText('what is this first screen?')
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(client.dispatcher.call.mock.calls.some(([method]) => method === 'agent.ask')).toBe(
+          true,
+        ),
+      )
+
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      lifecycleHandler(client)({
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd1',
+        epoch: 1,
+      })
+      ed.show()
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      ed.insertText('what is this second screen?')
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() =>
+        expect(
+          client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.ask'),
+        ).toHaveLength(2),
+      )
+
+      capture.mockResolvedValue(live)
+      const dispatcher = readDispatcher()
+      readCurrent(dispatcher, content, 'read-second-turn')
+      await vi.waitFor(() => expect(dispatcher.calls).toHaveLength(1))
+      expect(wireText(dispatcher.calls[0].params)).toContain('live second-turn frame')
+      expect(capture).toHaveBeenCalledTimes(1)
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe('summoning answers instead of vanishing (nocx-og42r)', () => {
+  function startRunning(contentClient: ClientFake): void {
+    const handler = lifecycleHandler(contentClient)
+    handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+    handler({
+      lane: 'lane-1',
+      lifecycle: 'running',
+      domain: 'd1',
+      epoch: 1,
+      attempt: { id: 'att-run', state: 'open', origin: 'app', command: 'htop' },
+    })
+  }
+
+  function dispatchSummon(content: TerminalContent): KeyboardEvent {
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    const withScrollback = content as unknown as { scrollback: ScrollbackController }
+    const scrollback = withScrollback.scrollback
+    scrollback.xtermLiveContainer.dispatchEvent(event)
+    return event
+  }
+
+  it('names the native latch in the alternate buffer and keeps the program untouched', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      const renderer = rendererOf(content)
+      const session = sessionOf(content)
+      renderer._fireBufferChange('alternate')
+      content.switchToTerminalInput()
+      session.send.mockClear()
+      session.sendResize.mockClear()
+      vi.mocked(showToast).mockClear()
+
+      const event = dispatchSummon(content)
+      await Promise.resolve()
+
+      expect(event.defaultPrevented).toBe(true)
+      expect(showToast).toHaveBeenCalledWith({
+        level: 'warning',
+        message: 'Native input is active — enable command editor to ask the assistant.',
+      })
+      expect(ed.isVisible).toBe(false)
+      expect(session.send).not.toHaveBeenCalled()
+      expect(session.sendResize).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('says when the pane has no assistant target', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      ;(content as unknown as { agentTarget: null }).agentTarget = null
+      const session = sessionOf(content)
+      session.send.mockClear()
+      vi.mocked(showToast).mockClear()
+
+      const event = dispatchSummon(content)
+      await Promise.resolve()
+
+      expect(event.defaultPrevented).toBe(true)
+      expect(showToast).toHaveBeenCalledWith({
+        level: 'warning',
+        message: 'This pane has no assistant.',
+      })
+      expect(ed.isVisible).toBe(false)
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps the two benign refusals silent', async () => {
+    const client = makeClient()
+    const first = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
+    try {
+      first.content.setVisible(true)
+      startRunning(client)
+      first.ed.show()
+      vi.mocked(showToast).mockClear()
+      dispatchSummon(first.content)
+      await Promise.resolve()
+      expect(showToast).not.toHaveBeenCalled()
+    } finally {
+      first.teardown()
+    }
+
+    const secondClient = makeClient()
+    const second = await mountTerminal(makeClipboard(), { attachToDocument: true }, secondClient)
+    try {
+      second.content.setVisible(true)
+      vi.mocked(showToast).mockClear()
+      dispatchSummon(second.content)
+      await Promise.resolve()
+      expect(showToast).not.toHaveBeenCalled()
+    } finally {
+      second.teardown()
+    }
+  })
+})
+describe('the summoned answer takes its seat after the program (nocx-7l4ex.4)', () => {
+  const commandFence = 'd'.repeat(64)
+
+  function startCommand(client: ClientFake): (params: unknown) => void {
+    const handler = lifecycleHandler(client)
+    handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+    handler({
+      lane: 'lane-1',
+      lifecycle: 'running',
+      domain: 'd1',
+      epoch: 1,
+      attempt: { id: 'att-run', state: 'open', origin: 'app', command: 'top' },
+    })
+    return handler
+  }
+
+  async function summon(content: TerminalContent): Promise<void> {
+    const renderer = rendererOf(content)
+    renderer.captureLiveFrame = vi.fn().mockResolvedValue({
+      rows: [],
+      cursor: { line: 0, col: 0 },
+      provenance: {
+        source: 'live',
+        identity: {
+          buffer: { kind: 'normal' },
+          cols: renderer.cols,
+          rows: renderer.rows,
+          generation: 0,
+        },
+        range: { start: 0, end: 0 },
+        scrollbackCapLines: 10000,
+      },
+    } satisfies CapturedFrame)
+    const grid = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      .xtermLiveContainer
+    grid.dispatchEvent(
+      new KeyboardEvent('keydown', {
+        key: 'Enter',
+        ctrlKey: true,
+        bubbles: true,
+        cancelable: true,
+      }),
+    )
+    await vi.waitFor(() => expect(editorOf(content).isVisible).toBe(true))
+  }
+
+  async function submitQuestion(
+    content: TerminalContent,
+    client: ClientFake,
+    question: string,
+  ): Promise<HTMLElement> {
+    const editor = editorOf(content)
+    editor.insertText(question)
+    viewOf(editor).contentDOM.dispatchEvent(
+      new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
+    )
+    await vi.waitFor(() =>
+      expect(client.dispatcher.call.mock.calls.some(([method]) => method === 'agent.ask')).toBe(
+        true,
+      ),
+    )
+    const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
+    const answer = pane.querySelector<HTMLElement>('.cmd-block[data-block-kind="ask"]')
+    expect(answer).not.toBeNull()
+    return answer!
+  }
+
+  it('streams readable prose in the summoned overlay', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'what is on screen?')
+
+      const delta = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runDelta',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(delta).toBeDefined()
+      delta!({ runId: 42, entryId: 'entry-42', text: '## The answer\n' })
+
+      expect(answer.classList.contains('nocx-answer-overlay')).toBe(true)
+      expect(answer.querySelector('.cmd-header-text')?.textContent).toBe('what is on screen?')
+      expect(answer.querySelector('[data-answer-body]')).not.toBeNull()
+      expect(editorOf(content).isVisible).toBe(false)
+      expect(answer.querySelector('[data-md="h2"]')?.textContent).toBe('The answer')
+      expect(answer.dataset.entryId).toBe('entry-42')
+
+      const askCall = client.dispatcher.call.mock.calls.find(([method]) => method === 'agent.ask')
+      const askCalls = client.dispatcher.call.mock.calls.filter(
+        ([method]) => method === 'agent.ask',
+      )
+      expect(askCalls).toHaveLength(1)
+      const askParams = askCall?.[1] as { askId?: unknown; question?: unknown }
+      expect(typeof askParams.askId).toBe('string')
+      expect(askParams.question).toBe('what is on screen?')
+      expect(askCall?.[1]).not.toHaveProperty('placement')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('moves the streaming turn after command completion without duplication', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      const handler = startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'why is it changing?')
+      const delta = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runDelta',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(delta).toBeDefined()
+      delta!({ runId: 42, entryId: 'entry-42', text: 'before the program ends' })
+      const answerBody = answer.querySelector('[data-answer-body]')
+      expect(answerBody?.textContent).toContain('before the program ends')
+
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-run',
+          state: 'completed',
+          exitCode: 0,
+          fence: commandFence,
+          completedAt: '2026-08-27T12:00:00Z',
+        },
+      })
+      rendererOf(content)._fireRenderFence({
+        hex: commandFence,
+        line: 3,
+        buffer: 'normal',
+      })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      const command = inner.querySelector<HTMLElement>('.cmd-block[data-block-kind="command"]')
+      expect(command).not.toBeNull()
+      expect(answer.parentElement).toBe(inner)
+      expect(answer.isConnected).toBe(true)
+      expect(Array.from(inner.children).indexOf(command!)).toBeLessThan(
+        Array.from(inner.children).indexOf(answer),
+      )
+
+      delta!({ runId: 42, entryId: 'entry-42', text: ' after it ends' })
+      expect(answerBody).toBe(answer.querySelector('[data-answer-body]'))
+      expect(answerBody?.textContent).toContain('before the program ends after it ends')
+      expect(inner.querySelectorAll('.cmd-block[data-block-kind="ask"]')).toHaveLength(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('Escape after acceptance thaws the live screen and keeps the answer streaming', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'can I leave this view?')
+      const delta = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runDelta',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(delta).toBeDefined()
+      delta!({ runId: 42, entryId: 'entry-42', text: 'still running' })
+
+      const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
+      expect(pane.querySelector('.nocx-freeze-frame')).not.toBeNull()
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+
+      expect(content.pinnedFrame()).toBeNull()
+      expect(pane.querySelector('.nocx-freeze-frame')).toBeNull()
+      expect(editorOf(content).isVisible).toBe(false)
+      const session = sessionOf(content)
+      session.send.mockClear()
+      rendererOf(content)._fireData('q')
+      expect(session.send).toHaveBeenCalledWith('q')
+      // After Escape the turn remains a view over the live screen: it stays
+      // in the pane overlay until the command ends, then takes its seat.
+      expect(answer.parentElement).toBe(pane)
+      expect(answer.classList.contains('nocx-answer-overlay')).toBe(true)
+
+      delta!({ runId: 42, entryId: 'entry-42', text: ' after Escape' })
+      expect(answer.querySelector('[data-answer-body]')?.textContent).toContain(
+        'still running after Escape',
+      )
     } finally {
       teardown()
     }

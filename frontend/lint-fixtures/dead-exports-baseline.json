@@ -25,11 +25,6 @@
     },
     {
       "kind": "exports",
-      "file": "src/authentication-editor.tsx",
-      "symbol": "SecretPicker"
-    },
-    {
-      "kind": "exports",
       "file": "src/connections.tsx",
       "symbol": "sourceLabel"
     },
@@ -397,6 +392,11 @@
       "kind": "types",
       "file": "src/generated/panes.setCwd.ts",
       "symbol": "Pane"
+    },
+    {
+      "kind": "types",
+      "file": "src/generated/policy.get.ts",
+      "symbol": "Rule"
     },
     {
       "kind": "types",

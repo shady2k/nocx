@@ -273,6 +273,65 @@ describe('Dialog', () => {
     // tolerates that and the effect runs.
     expect(document.querySelector('dialog.nocx-dialog')).toBeTruthy()
   })
+  it('does not light-dismiss when the pointer starts inside a floating panel', () => {
+    const onClose = vi.fn()
+    subject({
+      open: true,
+      onClose,
+      children: (
+        <>
+          <div class="ui-floating-panel">
+            <span>secret row</span>
+          </div>
+          <div class="empty-background" />
+        </>
+      ),
+    })
+
+    const panel = document.querySelector<HTMLElement>('.nocx-dialog__panel')!
+    vi.spyOn(panel, 'getBoundingClientRect').mockReturnValue({
+      left: 100,
+      right: 200,
+      top: 100,
+      bottom: 200,
+    } as DOMRect)
+
+    fireEvent.mouseDown(document.querySelector('.ui-floating-panel span')!, {
+      clientX: 300,
+      clientY: 300,
+    })
+
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('still light-dismisses when the pointer starts on empty dialog background', () => {
+    const onClose = vi.fn()
+    subject({
+      open: true,
+      onClose,
+      children: (
+        <>
+          <div class="ui-floating-panel">secret row</div>
+          <div class="empty-background" />
+        </>
+      ),
+    })
+
+    const panel = document.querySelector<HTMLElement>('.nocx-dialog__panel')!
+    vi.spyOn(panel, 'getBoundingClientRect').mockReturnValue({
+      left: 100,
+      right: 200,
+      top: 100,
+      bottom: 200,
+    } as DOMRect)
+
+    fireEvent.mouseDown(document.querySelector('.empty-background')!, {
+      clientX: 300,
+      clientY: 300,
+    })
+
+    expect(onClose).toHaveBeenCalledOnce()
+  })
 })
 
 /* ── Panel height animation ──────────────────────────────────────────── */

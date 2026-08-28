@@ -34,6 +34,9 @@ func TestAgentOperation_RunsAgainstTheLedgerSeam(t *testing.T) {
 		if _, err := svc.SubmitAsk(ctx, content.AgentAsk{ID: "a", Client: "x", Question: "q"}); !errors.Is(err, content.ErrNotImplemented) {
 			t.Errorf("SubmitAsk error = %v, want ErrNotImplemented (the ledger seam)", err)
 		}
+		if _, err := svc.PriorTurns(ctx, "pane", "before"); !errors.Is(err, content.ErrNotImplemented) {
+			t.Errorf("PriorTurns error = %v, want ErrNotImplemented (the ledger seam)", err)
+		}
 		return nil
 	})
 	if err != nil {

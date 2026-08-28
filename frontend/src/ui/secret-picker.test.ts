@@ -6,7 +6,13 @@
 // drive handleKey directly (the editor's arbiter chain is terminal-content's
 // wiring, tested there); rendering is asserted through the panel's DOM.
 import { describe, it, expect, vi } from 'vitest'
-import { SecretPicker, type SecretPickerSource, type SecretPickerCallbacks } from './secret-picker'
+import {
+  SecretPicker,
+  storeSecretLabel,
+  STORE_LABEL_MAX,
+  type SecretPickerSource,
+  type SecretPickerCallbacks,
+} from './secret-picker'
 import type { VaultStatus, InventoryEntry } from '../vault-client'
 
 function entry(name: string, id = name): InventoryEntry {
@@ -41,6 +47,7 @@ interface Harness {
     requestSetup: ReturnType<typeof vi.fn>
   }
   onInsert: ReturnType<typeof vi.fn>
+  onError: (message: string, error: unknown) => unknown
   container: HTMLElement
 }
 
@@ -53,12 +60,13 @@ function setup(status: VaultStatus = UNSEALED, entries: InventoryEntry[] = []): 
     requestSetup: vi.fn(() => Promise.resolve(false)),
   } satisfies SecretPickerSource
   const onInsert = vi.fn()
-  const callbacks: SecretPickerCallbacks = { onInsert }
+  const onError = vi.fn()
+  const callbacks: SecretPickerCallbacks = { onInsert, onError }
   const picker = new SecretPicker(source, callbacks)
   const container = document.createElement('div')
   document.body.appendChild(container)
   picker.mount(container)
-  return { picker, source, onInsert, container }
+  return { picker, source, onInsert, onError, container }
 }
 
 const flush = async (): Promise<void> => {
@@ -189,6 +197,50 @@ describe('SecretPicker: the list', () => {
   })
 })
 
+describe('SecretPicker: document dismissal', () => {
+  it('closes through the host after an external Escape or pointerdown', async () => {
+    const h = setup(UNSEALED, [entry('openai-key')])
+    const states: boolean[] = []
+    const pickerRef: { current: SecretPicker | undefined } = { current: undefined }
+    const onDismiss = vi.fn(() => {
+      const picker = pickerRef.current
+      if (picker === undefined) throw new Error('dismissal ran before picker construction')
+      states.push(picker.isOpen)
+    })
+    const callbacks = { onInsert: h.onInsert, onError: h.onError, onDismiss }
+    const picker = new SecretPicker(h.source, callbacks)
+    pickerRef.current = picker
+    picker.mount(h.container)
+
+    await picker.open()
+    await flush()
+
+    const escape = new KeyboardEvent('keydown', {
+      key: 'Escape',
+      bubbles: true,
+      cancelable: true,
+    })
+    document.dispatchEvent(escape)
+    expect(escape.defaultPrevented).toBe(true)
+    expect(onDismiss).toHaveBeenLastCalledWith('escape')
+    expect(states).toEqual([false])
+    expect(picker.isOpen).toBe(false)
+
+    await picker.open()
+    await flush()
+    key(picker, { key: 'Escape' })
+    expect(onDismiss).toHaveBeenCalledTimes(1)
+    expect(picker.isOpen).toBe(false)
+
+    await picker.open()
+    await flush()
+    document.body.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+    expect(onDismiss).toHaveBeenLastCalledWith('outside')
+    expect(states).toEqual([false, false])
+    expect(picker.isOpen).toBe(false)
+  })
+})
+
 describe('SecretPicker: the passive filter', () => {
   it('filters as the trigger word grows; a match is highlighted', async () => {
     const h = setup(UNSEALED, [entry('openai-key'), entry('openai-secret'), entry('github-pat')])
@@ -217,6 +269,17 @@ describe('SecretPicker: the passive filter', () => {
     expect(rows(h.container).map((r) => r.text)).toEqual(['Add "zzz" to the vault…'])
     key(h.picker, { key: 'Enter' })
     expect(h.source.requestCreate).toHaveBeenCalledTimes(1)
+  })
+  it('inserts the row returned by an in-place create', async () => {
+    const h = setup(UNSEALED, [entry('openai-key')])
+    h.source.requestCreate.mockResolvedValue(entry('brand-new', 'secrow:new'))
+    await h.picker.open()
+    await flush()
+    h.picker.setFilter('brand-new')
+    key(h.picker, { key: 'Enter' })
+    await flush()
+    expect(h.onInsert).toHaveBeenCalledWith('brand-new')
+    expect(h.picker.isOpen).toBe(false)
   })
 
   it('a space in the filter closes (the trigger word ended)', async () => {
@@ -254,6 +317,19 @@ describe('SecretPicker: vault lifecycle states are OFFERS', () => {
     await flush()
     expect(rows(h.container).map((r) => r.text)).toEqual(['Set up the vault to store secrets'])
     key(h.picker, { key: 'Enter' })
+    expect(h.source.requestSetup).toHaveBeenCalledTimes(1)
+    await flush()
+    expect(rows(h.container).map((r) => r.text)).toEqual(['openai-key', 'Add a secret…'])
+  })
+  it('a mouse press activates the uninitialized setup offer', async () => {
+    const h = setup({ ...UNSEALED, state: 'uninitialized' }, [entry('openai-key')])
+    await h.picker.open()
+    await flush()
+
+    const row = h.container.querySelector<HTMLElement>('.ui-floating-panel__row')
+    expect(row).not.toBeNull()
+    row!.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+
     expect(h.source.requestSetup).toHaveBeenCalledTimes(1)
     await flush()
     expect(rows(h.container).map((r) => r.text)).toEqual(['openai-key', 'Add a secret…'])
@@ -304,5 +380,328 @@ describe('SecretPicker: vault lifecycle states are OFFERS', () => {
     key(h.picker, { key: 'Enter' })
     await flush()
     expect(rows(h.container).map((r) => r.text)).toEqual(['Unlock the vault to use its secrets'])
+  })
+  it('keeps a visible refusal row and logs when vault status is refused', async () => {
+    const h = setup()
+    const refusal = new Error('vault status unavailable')
+    h.source.status.mockRejectedValue(refusal)
+    await h.picker.open()
+    await flush()
+    expect(h.picker.isOpen).toBe(true)
+    expect(
+      h.container.querySelector<HTMLElement>('.ui-floating-panel__row')?.dataset.empty,
+    ).toBeUndefined()
+    expect(rows(h.container).map((r) => r.text)).toEqual([
+      'Could not read vault secrets: vault status unavailable',
+    ])
+    expect(h.onError).toHaveBeenCalledWith('vault status unavailable', refusal)
+  })
+  it('keeps a visible refusal row and logs when inventory listing is refused', async () => {
+    const h = setup()
+    const refusal = new Error('inventory unavailable')
+    h.source.list.mockRejectedValue(refusal)
+    await h.picker.open()
+    await flush()
+    expect(h.picker.isOpen).toBe(true)
+    expect(rows(h.container).map((r) => r.text)).toEqual([
+      'Could not read vault secrets: inventory unavailable',
+    ])
+    expect(h.onError).toHaveBeenCalledWith('inventory unavailable', refusal)
+  })
+  it('keeps the sealed offer and logs when inventory reports the vault sealed', async () => {
+    const h = setup()
+    const refusal = Object.assign(new Error('vault is sealed'), {
+      data: { reason: 'vault-sealed' },
+    })
+    h.source.list.mockRejectedValue(refusal)
+    await h.picker.open()
+    await flush()
+    expect(rows(h.container).map((r) => r.text)).toEqual(['Unlock the vault to use its secrets'])
+    expect(h.onError).toHaveBeenCalledWith('vault is sealed', refusal)
+  })
+})
+
+// ── The store offer ──────────────────────────────────────────────────────
+// The lock inside a field opens THIS panel, with one extra input: the text
+// that would be stored. Nothing about that text decides what is offered —
+// the panel never reads it except to name it (nocx-0khco ruled out guessing
+// at credentials).
+describe('SecretPicker: the store offer', () => {
+  it('names the value it would store, truncated, and leaves a short one whole', () => {
+    expect(storeSecretLabel('hello world')).toBe('Store "hello world" in the vault…')
+    const long = 'sk-live-0123456789abcdefghijklmnopqrstuvwxyz'
+    expect(long.length).toBeGreaterThan(STORE_LABEL_MAX)
+    expect(storeSecretLabel(long)).toBe(`Store "${long.slice(0, STORE_LABEL_MAX)}…" in the vault…`)
+    // A multiline selection must still read as one row.
+    expect(storeSecretLabel('a\nb')).toBe('Store "a b" in the vault…')
+  })
+
+  it('puts the store row ABOVE the list, so an existing secret is still reachable', async () => {
+    const h = setup(UNSEALED, [entry('openai-key')])
+    await h.picker.open('insert', { value: 'Bearer t.Yixxxx' })
+    await flush()
+    expect(rows(h.container).map((r) => r.text)).toEqual([
+      'Store "Bearer t.Yixxxx" in the vault…',
+      'openai-key',
+      'Add a secret…',
+    ])
+    expect(rows(h.container)[0].selected).toBe(true)
+  })
+
+  it('opened without a store offer, the list is exactly what it was', async () => {
+    const h = setup(UNSEALED, [entry('openai-key')])
+    await h.picker.open()
+    await flush()
+    expect(rows(h.container).map((r) => r.text)).toEqual(['openai-key', 'Add a secret…'])
+  })
+
+  it('Enter on the store row creates from that value and inserts the result', async () => {
+    const h = setup(UNSEALED, [entry('openai-key')])
+    h.source.requestCreate.mockResolvedValue(entry('deploy', 'secrow:new'))
+    await h.picker.open('insert', { value: 't.Yixxxx' })
+    await flush()
+    key(h.picker, { key: 'Enter' })
+    expect(h.source.requestCreate).toHaveBeenCalledWith('', 't.Yixxxx')
+    await flush()
+    expect(h.onInsert).toHaveBeenCalledWith('deploy')
+    expect(h.picker.isOpen).toBe(false)
+  })
+
+  it('the trailing create row still carries no value — it is the other act', async () => {
+    const h = setup(UNSEALED, [])
+    await h.picker.open('insert', { value: 't.Yixxxx' })
+    await flush()
+    // store row, then the create row (no entries)
+    key(h.picker, { key: 'ArrowDown' })
+    expect(rows(h.container).find((r) => r.selected)?.text).toBe('Add a secret…')
+    key(h.picker, { key: 'Enter' })
+    // One argument, not two: the create row has no value to carry, and
+    // "absent" is how that is said.
+    expect(h.source.requestCreate).toHaveBeenCalledWith('')
+  })
+
+  it('arrows reach the store row and wrap through it', async () => {
+    const h = setup(UNSEALED, [entry('a')])
+    await h.picker.open('insert', { value: 'v' })
+    await flush()
+    key(h.picker, { key: 'ArrowUp' })
+    expect(rows(h.container).find((r) => r.selected)?.text).toBe('Add a secret…')
+    key(h.picker, { key: 'ArrowDown' })
+    expect(rows(h.container).find((r) => r.selected)?.text).toBe('Store "v" in the vault…')
+  })
+
+  it('a click takes the store row too (the lock is a mouse affordance)', async () => {
+    const h = setup(UNSEALED, [entry('a')])
+    await h.picker.open('insert', { value: 'v' })
+    await flush()
+    // The panel accepts a row on mousedown (floating-panel.ts).
+    h.container
+      .querySelectorAll<HTMLElement>('.ui-floating-panel__row')[0]
+      .dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
+    expect(h.source.requestCreate).toHaveBeenCalledWith('', 'v')
+  })
+
+  it('NOTHING about the value decides the rows: a sentence and a token get the same offer', async () => {
+    const sentence = setup(UNSEALED, [entry('openai-key')])
+    await sentence.picker.open('insert', { value: 'hello world' })
+    await flush()
+    const token = setup(UNSEALED, [entry('openai-key')])
+    await token.picker.open('insert', { value: 'sk-live-9c1f' })
+    await flush()
+    expect(rows(sentence.container).map((r) => r.text)).toEqual([
+      'Store "hello world" in the vault…',
+      'openai-key',
+      'Add a secret…',
+    ])
+    expect(rows(token.container).map((r) => r.text)).toEqual([
+      'Store "sk-live-9c1f" in the vault…',
+      'openai-key',
+      'Add a secret…',
+    ])
+    expect(rows(sentence.container).length).toBe(rows(token.container).length)
+  })
+
+  it('a sealed vault offers to unlock first, and the store row survives the unseal', async () => {
+    const h = setup({ ...UNSEALED, state: 'sealed' }, [entry('openai-key')])
+    await h.picker.open('insert', { value: 'v' })
+    await flush()
+    expect(rows(h.container).map((r) => r.text)).toEqual(['Unlock the vault to use its secrets'])
+    key(h.picker, { key: 'Enter' })
+    await flush()
+    expect(rows(h.container).map((r) => r.text)).toEqual([
+      'Store "v" in the vault…',
+      'openai-key',
+      'Add a secret…',
+    ])
+  })
+
+  it('the offer does not outlive its panel: the next open has no store row', async () => {
+    const h = setup(UNSEALED, [entry('openai-key')])
+    await h.picker.open('insert', { value: 'v' })
+    await flush()
+    h.picker.close()
+    await h.picker.open()
+    await flush()
+    expect(rows(h.container).map((r) => r.text)).toEqual(['openai-key', 'Add a secret…'])
+  })
+})
+
+// TWO DOORS. Everything above is the PASSIVE door — '@' offers and never
+// traps. The lock is the EXPLICIT door: a click IS a request, and answering
+// a request with an offer row is the same defect as answering it with
+// silence (secret-picker.ts header, the owner's decision of 2026-08-26).
+describe('SecretPicker: the explicit door', () => {
+  it('a sealed vault is ASKED to open — the unlock is raised, the list follows', async () => {
+    const h = setup({ ...UNSEALED, state: 'sealed' }, [entry('openai-key')])
+    await h.picker.open('insert', { value: 'v' }, 'explicit')
+    await flush()
+
+    expect(h.source.requestUnseal).toHaveBeenCalledTimes(1)
+    expect(rows(h.container).map((r) => r.text)).toEqual([
+      'Store "v" in the vault…',
+      'openai-key',
+      'Add a secret…',
+    ])
+  })
+
+  it('a cancelled unlock closes and does nothing else: no offer row, no list, no insert', async () => {
+    const h = setup({ ...UNSEALED, state: 'sealed' }, [entry('openai-key')])
+    h.source.requestUnseal.mockRejectedValue(new Error('cancelled'))
+    await h.picker.open('insert', { value: 'v' }, 'explicit')
+    await flush()
+
+    expect(h.picker.isOpen).toBe(false)
+    expect(rows(h.container)).toEqual([])
+    expect(h.source.list).not.toHaveBeenCalled()
+    expect(h.onInsert).not.toHaveBeenCalled()
+  })
+
+  it('the passive door is untouched: the same sealed vault still only offers', async () => {
+    const h = setup({ ...UNSEALED, state: 'sealed' }, [entry('openai-key')])
+    await h.picker.open()
+    await flush()
+
+    expect(h.source.requestUnseal).not.toHaveBeenCalled()
+    expect(rows(h.container).map((r) => r.text)).toEqual(['Unlock the vault to use its secrets'])
+  })
+
+  it('an uninitialized vault gets the setup surface from the explicit door', async () => {
+    const h = setup({ ...UNSEALED, state: 'uninitialized' }, [entry('openai-key')])
+    await h.picker.open('insert', undefined, 'explicit')
+    await flush()
+
+    expect(h.source.requestSetup).toHaveBeenCalledTimes(1)
+    expect(rows(h.container).map((r) => r.text)).toEqual(['openai-key', 'Add a secret…'])
+  })
+
+  it('a setup dialog that takes the surface leaves no panel behind it', async () => {
+    const h = setup({ ...UNSEALED, state: 'uninitialized' }, [entry('openai-key')])
+    h.source.requestSetup.mockResolvedValue(true)
+    await h.picker.open('insert', undefined, 'explicit')
+    await flush()
+
+    expect(h.picker.isOpen).toBe(false)
+    expect(h.source.list).not.toHaveBeenCalled()
+  })
+
+  it('a refused setup closes rather than falling back to the offer row', async () => {
+    const h = setup({ ...UNSEALED, state: 'uninitialized' }, [entry('openai-key')])
+    h.source.requestSetup.mockRejectedValue(new Error('cancelled'))
+    await h.picker.open('insert', undefined, 'explicit')
+    await flush()
+
+    expect(h.picker.isOpen).toBe(false)
+    expect(rows(h.container)).toEqual([])
+  })
+
+  it('an uninitialized vault still only OFFERS through the passive door', async () => {
+    const h = setup({ ...UNSEALED, state: 'uninitialized' }, [entry('openai-key')])
+    await h.picker.open()
+    await flush()
+
+    expect(h.source.requestSetup).not.toHaveBeenCalled()
+    expect(rows(h.container).map((r) => r.text)).toEqual(['Set up the vault to store secrets'])
+  })
+
+  it('nothing about the value decides it: no offer and a token-shaped one raise the same unlock', async () => {
+    const bare = setup({ ...UNSEALED, state: 'sealed' }, [entry('openai-key')])
+    await bare.picker.open('insert', undefined, 'explicit')
+    await flush()
+    const token = setup({ ...UNSEALED, state: 'sealed' }, [entry('openai-key')])
+    await token.picker.open('insert', { value: 'sk-live-9c1f' }, 'explicit')
+    await flush()
+
+    expect(bare.source.requestUnseal).toHaveBeenCalledTimes(1)
+    expect(token.source.requestUnseal).toHaveBeenCalledTimes(1)
+    expect(rows(bare.container).map((r) => r.text)).toEqual(['openai-key', 'Add a secret…'])
+    expect(rows(token.container).map((r) => r.text)).toEqual([
+      'Store "sk-live-9c1f" in the vault…',
+      'openai-key',
+      'Add a secret…',
+    ])
+  })
+
+  it('an unsealed vault opens identically through either door', async () => {
+    const h = setup(UNSEALED, [entry('openai-key')])
+    await h.picker.open('insert', undefined, 'explicit')
+    await flush()
+
+    expect(h.source.requestUnseal).not.toHaveBeenCalled()
+    expect(h.source.requestSetup).not.toHaveBeenCalled()
+    expect(rows(h.container).map((r) => r.text)).toEqual(['openai-key', 'Add a secret…'])
+  })
+})
+
+describe('SecretPicker: hovering a row does not rebuild the list under the cursor', () => {
+  /** The node identity of each rendered row. A re-render replaces every one
+   *  of them, so comparing identities is how "did it re-render" is asked
+   *  without reaching into the component's internals.
+   *
+   *  Compared with `same()` and never with `toEqual`, which deep-compares two
+   *  structurally identical divs as equal and would pass through exactly the
+   *  re-render these tests exist to catch. */
+  const rowNodes = (c: HTMLElement): HTMLElement[] => [
+    ...c.querySelectorAll<HTMLElement>('.ui-floating-panel__row'),
+  ]
+  const same = (a: HTMLElement[], b: HTMLElement[]): boolean =>
+    a.length === b.length && a.every((el, i) => el === b[i])
+
+  it('a hover that changes nothing replaces no row node', async () => {
+    const h = setup(UNSEALED, [entry('openai-key'), entry('deploy-token')])
+    await h.picker.open()
+    await flush()
+    const before = rowNodes(h.container)
+    expect(before.length).toBeGreaterThan(1)
+    expect(before[0].dataset.selected).toBe('true')
+
+    // The cursor rests on the row that is ALREADY selected — which is what
+    // the browser reports the instant a fresh node appears under a
+    // stationary pointer. Before the guard this rebuilt the list, the new
+    // node fired mouseenter again, and the list rebuilt itself for as long
+    // as the pointer stayed put.
+    before[0].dispatchEvent(new MouseEvent('mouseenter'))
+    before[0].dispatchEvent(new MouseEvent('mouseenter'))
+
+    expect(same(rowNodes(h.container), before)).toBe(true)
+  })
+
+  it('a hover that moves the selection still re-renders, exactly once', async () => {
+    const h = setup(UNSEALED, [entry('openai-key'), entry('deploy-token')])
+    await h.picker.open()
+    await flush()
+    const before = rowNodes(h.container)
+
+    before[1].dispatchEvent(new MouseEvent('mouseenter'))
+    const after = rowNodes(h.container)
+    expect(same(after, before)).toBe(false)
+    expect(after[1].dataset.selected).toBe('true')
+    // The unselected row carries no `data-selected` at all (renderRow sets it
+    // only on the selected one); `aria-selected` is the one always present.
+    expect(after[0].getAttribute('aria-selected')).toBe('false')
+
+    // The replacement node under the unmoved cursor reports itself again;
+    // that second report changes nothing and must therefore rebuild nothing.
+    after[1].dispatchEvent(new MouseEvent('mouseenter'))
+    expect(same(rowNodes(h.container), after)).toBe(true)
   })
 })

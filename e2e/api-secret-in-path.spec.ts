@@ -26,10 +26,10 @@
  * halves are wired. Nothing here calls the control plane to arrange a state
  * the product is supposed to arrange.
  *
- * ITS OWN BACKEND, like api-testing.spec.ts and for the same two reasons: the
- * import writes a secret VALUE, so this run needs a vault it set up itself
- * rather than leaving one behind for every other spec — and the walk in step
- * 3 reads the collection folder off the isolated home this backend resolved.
+ * ITS OWN BACKEND, like `api-import.spec.ts`, and for the same two reasons:
+ * the import writes no credential value, while the picker-created value lives
+ * in the vault; and the walk in step 3 reads the collection folder off the
+ * isolated home this backend resolved.
  *
  * NOTHING HERE WAITS ON A DURATION. Every wait is on an observable state: a
  * dialog, a directory on disk, a row in the tree, a run in the list.
@@ -181,10 +181,18 @@ test.describe('a secret in the path: the value crosses to the server and never t
         TELEGRAM_BOT_TOKEN,
       )
     }
-    // …and it DECLARES the variable, or the absence above would pass on an
-    // import that dropped it. The name is in the file; the value is not.
+    // The importer leaves credential-shaped variables empty; the person
+    // supplies the value through the shared secret picker below.
     const env = readFileSync(join(collectionRoot, 'environments', 'default.json')).toString('utf8')
-    expect(JSON.parse(env) as { secretVars?: string[] }).toMatchObject({ secretVars: ['token'] })
+    const parsed: unknown = JSON.parse(env)
+    if (typeof parsed !== 'object' || parsed === null || !('values' in parsed)) {
+      throw new Error('imported environment has no values object')
+    }
+    const values = parsed.values
+    if (typeof values !== 'object' || values === null || Array.isArray(values)) {
+      throw new Error('imported environment values is not an object')
+    }
+    expect('token' in values).toBe(false)
 
     // ── Send, and NOTHING IS PRESSED TO GET HERE ──────────────────────────
     //
@@ -206,11 +214,60 @@ test.describe('a secret in the path: the value crosses to the server and never t
     // form is a projection of it (§6.4). This is the address a person sees,
     // and the token is not in it.
     await expect(workbench.locator('#api-url')).toHaveValue('{{baseUrl}}/bot{{token}}/sendMessage')
+    const urlField = workbench.locator('#api-url')
+    const picker = page.getByRole('listbox', { name: 'vault secrets' })
+
+    // `@token` is inside a word in this URL path, so the passive picker
+    // deliberately does not open. The create journey below starts at a word
+    // boundary, then removes only that separator after insertion.
+    await urlField.fill('{{baseUrl}}/bot@token/sendMessage')
+    await expect(picker).not.toBeVisible()
+
+    // Type the requested name after a word-start `@`; the picker offers its
+    // create row in place and carries the typed name into the dialog.
+    await urlField.fill('{{baseUrl}}/bot @token')
+    await expect(picker).toBeVisible()
+    await expect(picker.getByRole('option', { name: /Add "token"/ })).toBeVisible()
+    await urlField.press('Enter')
+
+    const createSecret = page.getByRole('dialog').filter({ hasText: 'Create secret' })
+    await expect(createSecret).toBeVisible()
+    await expect(createSecret.locator('#secret-create-name')).toHaveValue('token')
+    await expect(createSecret.locator('#secret-create-kind')).toHaveValue('api-token')
+    await createSecret.locator('#secret-create-value').fill(TELEGRAM_BOT_TOKEN)
+    await createSecret.getByRole('button', { name: 'Save to vault', exact: true }).click()
+    await expect(createSecret).not.toBeVisible()
+    await expect(urlField).toHaveValue(/\{\{secret:[^}]+\}\}/)
+    await urlField.click()
+    await urlField.press('End')
+    await urlField.pressSequentially('/sendMessage')
+    // The picker requires a word boundary before `@`; remove that separator
+    // as the person finishes placing the secret inside the path segment.
+    await urlField.evaluate((el) => {
+      const input = el as HTMLInputElement
+      const separator = input.value.indexOf(' {{secret:')
+      if (separator < 0) throw new Error('created secret has no path separator')
+      input.focus()
+      input.setSelectionRange(separator, separator + 1)
+    })
+    await urlField.press('Backspace')
+    await expect(urlField).toHaveValue(/\{\{baseUrl\}\}\/bot\{\{secret:[^}]+\}\}\/sendMessage/)
 
     await workbench.getByRole('button', { name: 'Send', exact: true }).click()
 
     const run = workbench.locator('.api-run').first()
     await expect(run).toHaveAttribute('data-outcome', 'answered', { timeout: 20_000 })
+    const savedFiles = walk(collectionRoot)
+    for (const file of savedFiles) {
+      const text = readFileSync(file, 'utf8')
+      expect(text, `${file} carries the token`).not.toContain(TELEGRAM_BOT_TOKEN)
+      expect(text, `${file} carries the secret name`).not.toContain('"token"')
+    }
+    const requestFile = savedFiles.find((file) =>
+      readFileSync(file, 'utf8').includes(`"name": "${TELEGRAM_REQUEST_NAME}"`),
+    )
+    if (requestFile === undefined) throw new Error('imported request file was not found')
+    expect(readFileSync(requestFile, 'utf8')).toContain('{{secret:')
 
     // ── 1. THE SERVER RECEIVED THE REAL VALUE ─────────────────────────────
     //

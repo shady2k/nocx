@@ -46,7 +46,13 @@ const filesReadSchema = `{
   "type": "object",
   "additionalProperties": false,
   "required": ["path"],
-  "properties": {"path": {"type": "string"}}
+  "properties": {"path": {"type": "string"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["text"],
+    "properties": {"text": {"type": "string"}}
+  }}
 }`
 
 const gitStatusSchema = `{
@@ -63,7 +69,13 @@ const sessionListSchema = `{
   "properties": {
     "sessionId": {"type": "string"},
     "limit": {"type": "integer"}
-  }
+  },
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["text"],
+    "properties": {"text": {"type": "string"}}
+  }}
 }`
 
 const sessionReadSchema = `{
@@ -75,7 +87,13 @@ const sessionReadSchema = `{
     "id": {"type": "string"},
     "start": {"type": "integer"},
     "count": {"type": "integer"}
-  }
+  },
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["text"],
+    "properties": {"text": {"type": "string"}}
+  }}
 }`
 
 const runSchema = `{
@@ -85,7 +103,13 @@ const runSchema = `{
   "properties": {
     "sessionId": {"type": "string"},
     "command": {"type": "string"}
-  }
+  },
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["text"],
+    "properties": {"text": {"type": "string"}}
+  }}
 }`
 
 // TestAssemble_MissingSchemaDoesNotAssemble is acceptance criterion 1: a tool
@@ -270,9 +294,9 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 
 	observePath := grant([]content.Effect{content.EffectObserve}, content.ResourcePath)
 	got := toolNames(reg.ForGrant(observePath))
-	want := []string{"files.read", "git.status"}
+	want := []string{"files.read"}
 	if len(got) != len(want) {
-		t.Fatalf("ForGrant(observe+path) = %v, want exactly %v", got, want)
+		t.Fatalf("ForGrant(observe+path) = %v, want exactly %v (git.status is declared but not executable)", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
@@ -308,6 +332,40 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	}
 }
 
+func TestForGrant_ExcludesDeclarationsWithoutCapability(t *testing.T) {
+	reg, err := assemble(schemaFS(t, map[string]string{
+		"files.read.schema.json": filesReadSchema,
+	}), []Declaration{
+		{
+			Name:        "wired",
+			Description: "a wired observe tool",
+			Effect:      content.EffectObserve,
+			Resources:   []content.ResourceKind{content.ResourcePath},
+			Executes:    InGo,
+			Params:      "files.read.schema.json",
+			Narrow: func(content.Grant) (Capability, error) {
+				return nil, nil
+			},
+		},
+		{
+			Name:        "unwired",
+			Description: "an unwired observe tool",
+			Effect:      content.EffectObserve,
+			Resources:   []content.ResourceKind{content.ResourcePath},
+			Executes:    InGo,
+			Params:      "files.read.schema.json",
+		},
+	})
+	if err != nil {
+		t.Fatalf("assemble: %v", err)
+	}
+
+	got := toolNames(reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourcePath)))
+	if want := []string{"wired"}; !reflect.DeepEqual(got, want) {
+		t.Fatalf("ForGrant = %v, want %v", got, want)
+	}
+}
+
 func containsName(tools []Tool, name string) bool {
 	for _, t := range tools {
 		if t.Name == name {
@@ -335,8 +393,8 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 	}
 
 	set := reg.ForGrant(grant([]content.Effect{content.EffectObserve}, content.ResourcePath))
-	if len(set) != 2 {
-		t.Fatalf("ForGrant = %d tools, want 2", len(set))
+	if len(set) != 1 {
+		t.Fatalf("ForGrant = %d tools, want 1 (git.status is declared but not executable)", len(set))
 	}
 	for _, tool := range set {
 		if len(tool.ParamsSchema) == 0 {
@@ -362,8 +420,29 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 			t.Errorf("%s schema lacks an explicit required list", tool.Name)
 		}
 	}
-	if string(set[0].ParamsSchema) != filesReadSchema {
-		t.Error("files.read carries a schema different from the one that assembled")
+	// NOT the document byte for byte: the document declares both shapes, and
+	// ParamsSchema is the half addressed to the model. It used to be the whole
+	// file, and this assertion is what said so — which is why the return
+	// contract reached the model inside every tool's parameters and no test
+	// objected (nocx-ydu92). What must hold is that the params survive intact
+	// and the return shape is gone.
+	var got struct {
+		Type       string                     `json:"type"`
+		Required   []string                   `json:"required"`
+		Properties map[string]json.RawMessage `json:"properties"`
+		Defs       json.RawMessage            `json:"$defs"`
+	}
+	if err := json.Unmarshal(set[0].ParamsSchema, &got); err != nil {
+		t.Fatalf("files.read params do not parse: %v", err)
+	}
+	if got.Defs != nil {
+		t.Errorf("files.read params still carry $defs: %s", got.Defs)
+	}
+	if got.Type != "object" || len(got.Required) != 1 || got.Required[0] != "path" {
+		t.Errorf("files.read params lost their own shape: %s", set[0].ParamsSchema)
+	}
+	if _, ok := got.Properties["path"]; !ok {
+		t.Errorf("files.read params lost the path property: %s", set[0].ParamsSchema)
 	}
 }
 
@@ -585,5 +664,76 @@ func TestDeclaration_FrameToolResultDerivesReadabilityFromEffect(t *testing.T) {
 	mutate := Declaration{Effect: content.EffectMutateReversible}
 	if got := mutate.FrameToolResult(raw); got != raw {
 		t.Fatalf("mutating result = %q, want unchanged output", got)
+	}
+}
+
+// AN EXECUTABLE TOOL DECLARES WHAT IT RETURNS, and a row that does not is
+// refused at assembly exactly as a row with no params schema is
+// (nocx-d6gn4.8.1). The rule is worth a test because its absence was
+// invisible: under a declared call the framework hands the result back as
+// text a model reads, so nothing broke until a program indexed the dict and
+// a live model spent two turns guessing key names.
+func TestAssemble_AnExecutableToolWithNoDeclaredResultDoesNotAssemble(t *testing.T) {
+	const noResult = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path"],
+  "properties": {"path": {"type": "string"}}
+}`
+	reg, err := assemble(schemaFS(t, map[string]string{"x.schema.json": noResult}), []Declaration{{
+		Name:        "x",
+		Description: "a tool that does not say what it returns",
+		Effect:      content.EffectObserve,
+		Resources:   []content.ResourceKind{content.ResourcePath},
+		Executes:    InGo,
+		Params:      "x.schema.json",
+		Narrow:      func(content.Grant) (Capability, error) { return nil, nil },
+	}})
+	if err == nil {
+		t.Fatal("Assemble returned nil error for a tool that never says what it returns")
+	}
+	if !strings.Contains(err.Error(), "$defs/result") {
+		t.Fatalf("error does not name the missing declaration: %v", err)
+	}
+	if len(reg.All()) != 0 {
+		t.Fatalf("the tool assembled anyway: %v", reg.All())
+	}
+}
+
+// AND A ROW THAT CANNOT EXECUTE IS NOT ASKED FOR ONE. git.status is declared
+// and not executable (Narrow nil); demanding a result shape from it would be
+// demanding a description of something that never happens.
+func TestAssemble_ANonExecutableRowNeedsNoResult(t *testing.T) {
+	reg, err := Assemble(mustDirFS(t))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	for _, tool := range reg.All() {
+		if tool.Name != "git.status" {
+			continue
+		}
+		if len(tool.ResultSchema) != 0 {
+			t.Fatalf("git.status carries a result schema but cannot execute")
+		}
+		return
+	}
+	t.Fatal("git.status did not assemble")
+}
+
+// EVERY EXECUTABLE TOOL IN THE REAL TREE CARRIES ONE. The two tests above
+// state the rule; this one is the sweep that catches a row added later
+// without it.
+func TestAssemble_EveryExecutableToolDeclaresItsResult(t *testing.T) {
+	reg, err := Assemble(mustDirFS(t))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	for _, tool := range reg.All() {
+		if tool.Narrow == nil {
+			continue
+		}
+		if len(tool.ResultSchema) == 0 {
+			t.Fatalf("%s executes and does not declare what it returns", tool.Name)
+		}
 	}
 }

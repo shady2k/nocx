@@ -118,7 +118,7 @@ export async function clickIntoEditor(
 // the second entry point this arrangement removed.
 //
 // A spec that needs its OWN backend overrides this afterwards with
-// bindEndpoint(); init scripts apply in order, so the later one wins.
+// bindEndpoint(); its accessor wins whether the page shim runs before or after it.
 async function injectWailsShim(page: Page): Promise<void> {
   const stand = readStand()
   await page.addInitScript(
@@ -423,6 +423,32 @@ export interface BackendEndpoint {
   port: number
   token: string
 }
+/**
+ * Read the vault lifecycle from the backend the spec is actually exercising.
+ *
+ * Specs that depend on a fresh or sealed vault must state that precondition
+ * against the wire, not infer it from whichever offer row happens to render.
+ * The shared stand deliberately keeps vault state across specs, so a UI-only
+ * assertion can otherwise turn a stale home into a different activation path.
+ */
+export async function readVaultState(
+  endpoint: BackendEndpoint,
+): Promise<'uninitialized' | 'sealed' | 'unsealed'> {
+  const wire = await openControlPlane(endpoint.port, endpoint.token)
+  try {
+    const result = await wire.call('vault.status', {})
+    if (typeof result !== 'object' || result === null || !('state' in result)) {
+      throw new Error('e2e: vault.status returned no lifecycle state')
+    }
+    const state = result.state
+    if (state !== 'uninitialized' && state !== 'sealed' && state !== 'unsealed') {
+      throw new Error(`e2e: vault.status returned invalid lifecycle state: ${String(state)}`)
+    }
+    return state
+  } finally {
+    wire.close()
+  }
+}
 
 /**
  * Where the backend keeps its documents — settings, profiles, the vault — under
@@ -528,8 +554,7 @@ export function collectionsDir(isolatedHome: string, name: string): string {
 export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promise<void> {
   await page.context().addInitScript(
     (opts: { p: number; t: string }) => {
-      const w = window as unknown as { go?: Record<string, unknown> }
-      w.go = {
+      const workbenchGo = {
         main: {
           WailsApp: {
             GetWSPort: () => Promise.resolve(opts.p),
@@ -540,6 +565,15 @@ export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promi
           },
         },
       }
+      // The fixture installs its default shim at page scope. The relative
+      // order of page- and context-init scripts is unspecified; a no-op setter
+      // prevents the default assignment from winning when it runs later.
+      Object.defineProperty(window, 'go', {
+        configurable: true,
+        enumerable: true,
+        get: () => workbenchGo,
+        set: () => undefined,
+      })
     },
     { p: endpoint.port, t: endpoint.token },
   )

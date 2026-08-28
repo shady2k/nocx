@@ -11,14 +11,15 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["name", "value", "scope", "from", "overridden", "refused"],
+        "required": ["name", "value", "scope", "from", "overridden", "refused", "secret"],
         "properties": {
           "name": { "type": "string" },
           "value": { "type": "string" },
-          "scope": { "type": "string", "enum": ["request", "folder", "environment", "vault"] },
+          "scope": { "type": "string", "enum": ["request", "folder", "environment"] },
           "from": { "type": "string" },
           "overridden": { "type": "boolean" },
-          "refused": { "type": "string" }
+          "refused": { "type": "string" },
+          "secret": { "type": "boolean" }
         }
       }
     }

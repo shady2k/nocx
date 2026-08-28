@@ -19,11 +19,10 @@ package apisend
 // # It does not survive a restart, and that is deliberate
 //
 // A session cookie IS credential material. The only place this feature
-// keeps credential material at rest is the vault behind the binding
-// document (design §8, internal/apibind), and a jar file would be a second
-// store of credentials — on disk, outside the vault, guarded by nothing,
-// holding exactly the token an attacker wants and never named in §8's
-// threat model. That alone decides it.
+// keeps credential material at rest is the vault, and a jar file would be a
+// second store of credentials — on disk, outside the vault, guarded by
+// nothing, holding exactly the token an attacker wants and never named in
+// the threat model. That alone decides it.
 //
 // Two further reasons point the same way. A cookie with no Max-Age is
 // defined to die with the session; a jar that outlived the process would

@@ -26,6 +26,12 @@ import type {
   GroupImpactResponse,
   AuthMode,
 } from './profiles'
+import {
+  bindSecretByTyping,
+  bindSecretFromLock,
+  pressLock,
+  takePanelRow,
+} from './secret-field-test-helpers'
 
 const MOCK_PROFILES: SSHProfile[] = [
   {
@@ -160,6 +166,23 @@ function mount(
     ? ({ openFileDialog: overrides.openFileDialog } as unknown as DialogClient)
     : undefined
   const container = document.body.appendChild(document.createElement('div'))
+  // The picker panel behind every password field's lock. Structurally what
+  // main.tsx's createVaultSecretSource returns; the surface substitutes its
+  // own `list` and `requestCreate` over it (connections.tsx), which is exactly
+  // what these tests exercise.
+  const openSecretCreate = vi.fn()
+  const secretSource = {
+    status: () =>
+      Promise.resolve({ state: vaultController?.status()?.state ?? ('unsealed' as const) }),
+    list: () =>
+      Promise.resolve((overrides?.secretRows ?? []).map((r) => ({ id: r.id, name: r.name }))),
+    requestUnseal: () => Promise.resolve(),
+    requestSetup: () => Promise.resolve(true),
+    requestCreate: (name: string, value?: string) => {
+      openSecretCreate(name, value)
+      return Promise.resolve(undefined)
+    },
+  }
   render(
     () => (
       <>
@@ -168,6 +191,7 @@ function mount(
           dialogClient={dialogClient}
           vaultController={vaultController}
           vaultClient={vaultClient}
+          secretSource={secretSource}
           onConnect={overrides?.onConnect}
           onNavigateToSecrets={overrides?.onNavigateToSecrets}
         />
@@ -185,7 +209,7 @@ function mount(
     ),
     { container },
   )
-  return { container, client, connectionTest, trustHostKey }
+  return { container, client, connectionTest, trustHostKey, openSecretCreate }
 }
 
 afterEach(() => {
@@ -509,23 +533,27 @@ describe('bound password secret', () => {
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Authentication')
 
-    // A profile that already names a row opens on "Use existing secret", and
-    // the picker holds that row as its current value — the bound secret is
+    // A profile that already names a row opens with the field HOLDING that
+    // row's reference, drawn as a chip carrying its name — the bound secret is
     // visible before Connect is pressed, not remembered by the user (b5bu).
     //
     // This used to also assert the "Password: <row>" line and a "Change
     // Password" button. Both belonged to a SECOND copy of the password action
     // that AuthMethodEditor drew alongside this one, so the editor showed the
-    // control twice (nocx-azxe.6). The copy is gone; the row is still named,
-    // by the picker, which is the surface that owns the choice.
+    // control twice (nocx-azxe.6). Then the row was named by the segmented
+    // control's combobox, which is gone too (nocx-3o0ed.4). One field names
+    // it now, and the handle is its VALUE while the name is what a person
+    // reads. The row named here is 'secrow:prod-pass' and no other in
+    // MOCK_SECRET_ROWS, so the name identifies the binding exactly as the old
+    // value did. That the handle reaches the WRITE is proved by 'binding a
+    // row through the field's lock reaches the save' in this same file; this
+    // test is about what the reopened editor SHOWS.
+    const field = passwordField(container)
     await vi.waitFor(() => {
-      expect(container.textContent).toContain('Password for prod-web')
+      expect(chipText(field)).toBe('Password for prod-web')
     })
-    const picker = container
-      .querySelector('label[for="profile-auth-secret"]')!
-      .closest('.ui-field')!
-      .querySelector('.ui-select') as HTMLSelectElement
-    expect(picker.value).toBe('secrow:prod-pass')
+    expect(field.value).toBe('{{secret:secrow:prod-pass}}')
+    expect(container.textContent).not.toContain('secrow:prod-pass')
   })
 })
 
@@ -619,7 +647,7 @@ describe('inline password minting', () => {
   // returned row to the profile. There is no credential object to create or
   // name: the secret owns its name, and the profile saves with
   // options.passwordSecret holding the minted row (ADR-0017 §1).
-  it('Set Password mints the secret and binds its row to the profile', async () => {
+  it('storing a typed password mints the secret and binds its row to the profile', async () => {
     const { container, client } = mount({
       profiles: MOCK_PROFILES.slice(0, 1),
       secretRows: [{ ...MOCK_SECRET_ROWS[1], id: 'secrow:pass-1' }],
@@ -634,12 +662,7 @@ describe('inline password minting', () => {
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Password')
 
-    clickButtonByText(container, 'Set Password')
-    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
-    fireEvent.input(container.querySelector('#password-value')!, {
-      target: { value: 'hunter2' },
-    })
-    clickButtonByText(container, 'OK')
+    await storePassword(container, 'hunter2')
 
     // The mint carries the generated name — what the secret is, plus whose
     // login it is (ADR-0016).
@@ -650,7 +673,7 @@ describe('inline password minting', () => {
     // The minted row is bound on the draft before the profile save is
     // pressed: the Password action now names the bound secret.
     await vi.waitFor(() => {
-      expect(container.textContent).toContain('Password: Password for prod-web')
+      expect(chipText(passwordField(container))).toBe('Password for prod-web')
     })
 
     // Saving the profile now persists the binding.
@@ -667,6 +690,48 @@ describe('inline password minting', () => {
     expect(patchSpy.mock.calls[0][0].set).toMatchObject({
       'options.passwordSecret': 'secrow:pass-1',
     })
+  })
+
+  // THE GENERATOR DOOR. "Set Password" was a button beside the field that
+  // raised a dialog with a password generator in it. The button is gone
+  // (nocx-3o0ed.4) and the dialog is not: the panel's "Add a secret…" row is
+  // "I want a new one here", and on a connection's password field a new one
+  // is a password — so that row raises the same generator, and what it makes
+  // is minted and bound by the same call the store row uses.
+  it("the panel's create row raises the generator, and what it makes is minted and bound", async () => {
+    const { container, client } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
+    const savePasswordSpy = vi
+      .spyOn(client, 'savePassword')
+      .mockResolvedValue({ row: 'secrow:pass-gen' })
+    vi.spyOn(client, 'patchProfile').mockResolvedValue(MOCK_EFFECTIVE_CRED)
+
+    await waitForProfiles(container, 1)
+    await openProfileEditor(container, 'prod-web')
+    selectProfileSection(container, 'Authentication')
+    clickSegmentedOption(container, 'Password')
+
+    // An EMPTY field has nothing to store, so the panel is the plain list
+    // (secret-picker-field.ts) and the create row is what is left to take.
+    pressLock(passwordField(container))
+    await takePanelRow('Add a secret\u2026')
+
+    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
+    fireEvent.input(container.querySelector('#password-value')!, {
+      target: { value: 'generated-one' },
+    })
+    clickButtonByText(container, 'OK')
+
+    await vi.waitFor(() => {
+      expect(savePasswordSpy).toHaveBeenCalledWith(
+        'generated-one',
+        'Password for deploy@web.example.com',
+      )
+    })
+    // And the field ends holding the reference, not the password.
+    await vi.waitFor(() => {
+      expect(passwordField(container).value).toBe('{{secret:secrow:pass-gen}}')
+    })
+    expect(container.textContent).not.toContain('generated-one')
   })
 
   // The minted row is NOT in the inventory: the mint happens after the
@@ -690,12 +755,7 @@ describe('inline password minting', () => {
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Password')
 
-    clickButtonByText(container, 'Set Password')
-    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
-    fireEvent.input(container.querySelector('#password-value')!, {
-      target: { value: 'hunter2' },
-    })
-    clickButtonByText(container, 'OK')
+    await storePassword(container, 'hunter2')
 
     await vi.waitFor(() => {
       expect(savePasswordSpy).toHaveBeenCalled()
@@ -703,9 +763,9 @@ describe('inline password minting', () => {
     // The name the backend stored under is the generated one (ADR-0016) —
     // shown even though no inventory load has ever returned the row.
     await vi.waitFor(() => {
-      expect(container.textContent).toContain('Password: Password for deploy@web.example.com')
+      expect(chipText(passwordField(container))).toBe('Password for deploy@web.example.com')
     })
-    expect(container.textContent).not.toContain('No password set')
+    expect(passwordField(container).value).toBe('{{secret:secrow:pass-fresh}}')
 
     // The inventory is refreshed after the mint, so the pickers and any other
     // surface see the row without waiting for the next editor open.
@@ -737,12 +797,7 @@ describe('inline password minting', () => {
 
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Password')
-    clickButtonByText(container, 'Set Password')
-    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
-    fireEvent.input(container.querySelector('#password-value')!, {
-      target: { value: 'hunter2' },
-    })
-    clickButtonByText(container, 'OK')
+    await storePassword(container, 'hunter2')
 
     await vi.waitFor(() => {
       expect(container.querySelector('.ui-prompt[data-placement="top-sheet"]')).toBeTruthy()
@@ -767,12 +822,7 @@ describe('inline password minting', () => {
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Password')
-    clickButtonByText(container, 'Set Password')
-    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
-    fireEvent.input(container.querySelector('#password-value')!, {
-      target: { value: 'hunter2' },
-    })
-    clickButtonByText(container, 'OK')
+    await storePassword(container, 'hunter2')
 
     await vi.waitFor(() => {
       expect(
@@ -781,8 +831,16 @@ describe('inline password minting', () => {
         ),
       ).toBe(true)
     })
-    // The draft is untouched: no binding was made, so the action says so.
-    expect(container.textContent).toContain('No password set')
+    // The draft is untouched: no binding was made, so the field still holds
+    // the literal the person typed and there is no chip over it. "No password
+    // set" was the action row's way of saying this; an unbound field says it
+    // by being one.
+    const field = passwordField(container)
+    expect(field.value).toBe('hunter2')
+    expect(chipText(field)).toBeUndefined()
+    // And a password nobody has stored is still behind dots, as it was in the
+    // dialog this field replaced.
+    expect(field.type).toBe('password')
   })
 
   // Partial failure: the mint lands in the vault, the profile save fails.
@@ -797,15 +855,10 @@ describe('inline password minting', () => {
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Password')
-    clickButtonByText(container, 'Set Password')
-    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
-    fireEvent.input(container.querySelector('#password-value')!, {
-      target: { value: 'hunter2' },
-    })
-    clickButtonByText(container, 'OK')
+    await storePassword(container, 'hunter2')
 
     await vi.waitFor(() => {
-      expect(container.textContent).toContain('Password: Password for deploy@web.example.com')
+      expect(chipText(passwordField(container))).toBe('Password for deploy@web.example.com')
     })
 
     const dialog = findDialogByTitleContaining(container, 'prod-web')!
@@ -821,7 +874,7 @@ describe('inline password minting', () => {
     // The dialog stays open and the binding is still named: the secret is in
     // the vault and the draft still holds it; a retry persists it.
     expect(findDialogByTitleContaining(container, 'prod-web')).toBeTruthy()
-    expect(container.textContent).toContain('Password: Password for deploy@web.example.com')
+    expect(chipText(passwordField(container))).toBe('Password for deploy@web.example.com')
   })
 
   it('the connection editor no longer offers to create a credential by hand', async () => {
@@ -866,12 +919,7 @@ describe('password binding persists at the mint', () => {
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Password')
-    clickButtonByText(container, 'Set Password')
-    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
-    fireEvent.input(container.querySelector('#password-value')!, {
-      target: { value: 'hunter2' },
-    })
-    clickButtonByText(container, 'OK')
+    await storePassword(container, 'hunter2')
 
     // The binding is on the wire without any Save press: the mint is the
     // write. Inspecting the draft is what let this through the first time —
@@ -890,7 +938,7 @@ describe('password binding persists at the mint', () => {
 
     // The editor's done appearance is true: the action row names the secret
     // the store now carries.
-    expect(container.textContent).toContain('Password: Password for deploy@web.example.com')
+    expect(chipText(passwordField(container))).toBe('Password for deploy@web.example.com')
   })
 
   it('a Save pressed while the mint is still resolving still ends with the binding persisted', async () => {
@@ -908,12 +956,7 @@ describe('password binding persists at the mint', () => {
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Password')
-    clickButtonByText(container, 'Set Password')
-    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
-    fireEvent.input(container.querySelector('#password-value')!, {
-      target: { value: 'hunter2' },
-    })
-    clickButtonByText(container, 'OK')
+    await storePassword(container, 'hunter2')
 
     // The mint is now in flight behind the deferred vault save. The user
     // presses Save Connection before it resolves — the reported shape.
@@ -943,12 +986,7 @@ describe('password binding persists at the mint', () => {
     await openProfileEditor(first.container, 'prod-web')
     selectProfileSection(first.container, 'Authentication')
     clickSegmentedOption(first.container, 'Password')
-    clickButtonByText(first.container, 'Set Password')
-    await vi.waitFor(() => expect(first.container.querySelector('#password-value')).toBeTruthy())
-    fireEvent.input(first.container.querySelector('#password-value')!, {
-      target: { value: 'hunter2' },
-    })
-    clickButtonByText(first.container, 'OK')
+    await storePassword(first.container, 'hunter2')
     await vi.waitFor(() => expect(patchSpy).toHaveBeenCalled())
 
     // Reopen the editor on the profile exactly as the wire left it: the
@@ -969,26 +1007,29 @@ describe('password binding persists at the mint', () => {
     await openProfileEditor(second.container, 'prod-web')
     selectProfileSection(second.container, 'Authentication')
 
-    // The bound row is the picker's current value (passwordMode starts on
-    // 'secret' because the reopened profile carries a binding).
+    // The reopened field HOLDS the persisted reference and reads as the row's
+    // name — see the note in 'shows the bound secret under the Password
+    // method in the editor'. The subject here is that the binding SURVIVED
+    // the reopen, and the row shown is the one that was persisted.
+    const field = passwordField(second.container)
     await vi.waitFor(() => {
-      const picker = second.container
-        .querySelector('label[for="profile-auth-secret"]')!
-        .closest('.ui-field')!
-        .querySelector('.ui-select') as HTMLSelectElement
-      expect(picker, 'password picker not found').toBeTruthy()
-      expect(picker.value).toBe('secrow:prod-pass')
+      expect(chipText(field)).toBe('Password for prod-web')
     })
-    expect(second.container.textContent).not.toContain('No password set')
+    expect(field.value).toBe('{{secret:secrow:prod-pass}}')
+    expect(chipText(passwordField(second.container))).toBe('Password for prod-web')
   })
 
-  it('says on the action row that setting a password saves to the connection immediately', async () => {
+  it('says under the field that storing a password saves to the connection immediately', async () => {
     const { container } = mount({ profiles: MOCK_PROFILES.slice(0, 1) })
     await waitForProfiles(container, 1)
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Password')
 
+    // The sentence moved with the control it belonged to: it was the hint
+    // under the "Set Password" action row and it is the field's description
+    // now. It is the same promise about the same write, and it must be
+    // readable BEFORE the lock is pressed, not after.
     expect(container.textContent).toContain('saves it to the connection immediately')
   })
 
@@ -1003,12 +1044,7 @@ describe('password binding persists at the mint', () => {
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Password')
-    clickButtonByText(container, 'Set Password')
-    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
-    fireEvent.input(container.querySelector('#password-value')!, {
-      target: { value: 'hunter2' },
-    })
-    clickButtonByText(container, 'OK')
+    await storePassword(container, 'hunter2')
 
     // The mint's own write failed: said out loud, with the split named — the
     // secret is in the vault, the connection does not reference it yet, and
@@ -1020,7 +1056,7 @@ describe('password binding persists at the mint', () => {
         ),
       ).toBe(true)
     })
-    expect(container.textContent).toContain('Password: Password for deploy@web.example.com')
+    expect(chipText(passwordField(container))).toBe('Password for deploy@web.example.com')
 
     const dialog = findDialogByTitleContaining(container, 'prod-web')!
     clickButtonByText(container, 'Save Connection', dialog)
@@ -1082,12 +1118,7 @@ describe('port resolution', () => {
     // The password flow the owner hit: mint, bind, save.
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Password')
-    clickButtonByText(container, 'Set Password')
-    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
-    fireEvent.input(container.querySelector('#password-value')!, {
-      target: { value: 'hunter2' },
-    })
-    clickButtonByText(container, 'OK')
+    await storePassword(container, 'hunter2')
     await vi.waitFor(() => {
       expect(savePasswordSpy).toHaveBeenCalled()
     })
@@ -1095,7 +1126,7 @@ describe('port resolution', () => {
     // binding to be named on screen (as the sibling minting tests do) before
     // saving, so the save carries the binding, not a race with it.
     await vi.waitFor(() => {
-      expect(container.textContent).toContain('Password: Password for deploy@alias.example.com')
+      expect(chipText(passwordField(container))).toBe('Password for deploy@alias.example.com')
     })
 
     const dialog = findDialogByTitleContaining(container, 'alias-box')!
@@ -1282,6 +1313,32 @@ async function selectKeyPathMode(container: HTMLElement) {
     expect(container.querySelector('[aria-label="Key input mode"]')).toBeTruthy()
   })
   clickSegmentedOption(container, 'Path')
+}
+
+/** The ONE password field of the profile editor (nocx-3o0ed.4). */
+function passwordField(container: HTMLElement): HTMLInputElement {
+  const el = container.querySelector<HTMLInputElement>('#profile-auth-password')
+  expect(el, 'password field not found').toBeTruthy()
+  return el!
+}
+
+/** What a bound field READS as: the chip's text, never the handle. */
+function chipText(input: HTMLInputElement): string | undefined {
+  return input
+    .closest('.ui-text-field__control')
+    ?.querySelector('.ui-text-field__mark')
+    ?.textContent?.trim()
+}
+
+/** Set a connection password the way a person does now: type it into the one
+ *  password field and take the panel's offer to keep it. This is what "Set
+ *  Password" was — the same mint, the same bind, reached through the field's
+ *  own lock instead of through a button beside it. */
+async function storePassword(container: HTMLElement, password: string): Promise<void> {
+  const field = passwordField(container)
+  fireEvent.input(field, { target: { value: password } })
+  pressLock(field)
+  await takePanelRow(`Store "${password}" in the vault\u2026`)
 }
 
 function clickSegmentedOption(container: HTMLElement, label: string) {
@@ -1700,7 +1757,7 @@ describe('four-way key input — connection editor', () => {
       expect(picker.value).toBe('secrow:kmat')
     })
   })
-  it('selecting a row in the secret picker binds it on save', async () => {
+  async function bindsOnSave(bind: (field: HTMLInputElement) => Promise<void>): Promise<void> {
     const { container, client } = mount({
       profiles: MOCK_PROFILES.slice(0, 1),
       secretRows: MOCK_SECRET_ROWS,
@@ -1711,20 +1768,16 @@ describe('four-way key input — connection editor', () => {
     await openProfileEditor(container, 'prod-web')
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Password')
-    // The password source is a two-way choice now (ADR-0017 §1): type a new
-    // one, or pick an existing secret. Pick the existing-secret side.
-    clickSegmentedOption(container, 'Use existing secret')
 
-    // Pick an existing password row.
-    const picker = await vi.waitFor(() => {
-      const el = container
-        .querySelector('label[for="profile-auth-secret"]')!
-        .closest('.ui-field')!
-        .querySelector('.ui-select') as HTMLSelectElement
-      expect(el, 'password picker not found').toBeTruthy()
-      return el
-    })
-    fireEvent.change(picker, { target: { value: 'secrow:prod-pass' } })
+    // There is no source to choose in advance any more (nocx-3o0ed.4): the
+    // person reaches for a stored secret through the field's own panel, and
+    // the field then HOLDS the reference. What is asserted below is unchanged
+    // — the handle reaches the patch — because the binding is observable at
+    // the write seam and nowhere in the value a person reads.
+    const field = passwordField(container)
+    await bind(field)
+    expect(field.value).toBe('{{secret:secrow:prod-pass}}')
+    expect(chipText(field)).toBe('Password for prod-web')
 
     const dialog = findDialogByTitleContaining(container, 'prod-web')!
     const saveBtn = Array.from(dialog.querySelectorAll('.ui-button')).find(
@@ -1739,6 +1792,21 @@ describe('four-way key input — connection editor', () => {
     expect(patchSpy.mock.calls[0][0].set).toMatchObject({
       'options.passwordSecret': 'secrow:prod-pass',
     })
+  }
+
+  it("binding a row through the field's lock reaches the save", async () => {
+    await bindsOnSave((field) => bindSecretFromLock(field, 'Password for prod-web'))
+  })
+
+  it("binding a row through the field's '@' reaches the same save", async () => {
+    // TWO DOORS, ONE BINDING. The explicit door and the passive one differ in
+    // what they do to a LOCKED vault (secret-picker.ts) and in nothing else;
+    // a binding made through either must reach the wire identically, or the
+    // two doors are two features.
+    // A space ends the trigger word, exactly as it does in an @-mention
+    // (secret-picker-field.ts), so the filter is the distinctive part of the
+    // name rather than the whole of it.
+    await bindsOnSave((field) => bindSecretByTyping(field, 'prod', 'Password for prod-web'))
   })
 
   it('preserves newlines in pasted key text on save', async () => {
@@ -2350,12 +2418,7 @@ describe('vault prompt cancellation', () => {
     // Authentication → Password → set a password
     selectProfileSection(container, 'Authentication')
     clickSegmentedOption(container, 'Password')
-    clickButtonByText(container, 'Set Password')
-    await vi.waitFor(() => expect(container.querySelector('#password-value')).toBeTruthy())
-    fireEvent.input(container.querySelector('#password-value')!, {
-      target: { value: 'hunter2' },
-    })
-    clickButtonByText(container, 'OK')
+    await storePassword(container, 'hunter2')
 
     // The mint is attempted at the action moment — the vault asks to unlock
     // before any profile is created.

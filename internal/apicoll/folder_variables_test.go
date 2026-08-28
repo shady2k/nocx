@@ -5,7 +5,6 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
-	"strings"
 	"testing"
 )
 
@@ -80,25 +79,25 @@ func TestFolderVariables_TheNearestFolderWinsOverParentAndEnvironment(t *testing
 	}
 }
 
-func TestFolderVariables_ShadowingAnEnvironmentSecretUsesTheRequestRefusal(t *testing.T) {
+func TestFolderVariables_ASecretReferenceIsAnOrdinaryValue(t *testing.T) {
 	svc, h, root := openTestCollection(t)
-	folderVariableFile(t, root, "users", `{"variables":[{"name":"token","value":"folder-secret","enabled":true}]}`)
+	folderVariableFile(t, root, "users", `{"variables":[{"name":"token","value":"{{secret:secrow:X}}","enabled":true}]}`)
 	writeFile(t, root, "users/get.json", requestJSON("1", "get", "GET", "https://example.test/{{token}}"))
 
 	r, err := svc.ReadRequest(h, "users/get.json")
 	if err != nil {
 		t.Fatalf("ReadRequest: %v", err)
 	}
-	_, err = RequestLookup(r, Environment{SecretVars: []string{"token"}})
-	if !errors.Is(err, ErrSecretShadowed) {
-		t.Fatalf("RequestLookup: %v, want ErrSecretShadowed", err)
+	own, err := RequestLookup(r, Environment{})
+	if err != nil {
+		t.Fatalf("RequestLookup: %v", err)
 	}
-	const want = "apicoll: a request variable would shadow a name this environment declares secret: \"token\""
-	if err.Error() != want {
-		t.Fatalf("shadowing error = %q, want exact sentence %q", err, want)
+	got, err := Substitute(r, Chain(own))
+	if err != nil {
+		t.Fatalf("Substitute: %v", err)
 	}
-	if strings.Contains(err.Error(), "folder-secret") {
-		t.Fatalf("shadowing error leaked the folder value: %v", err)
+	if got.URL != "https://example.test/{{secret:secrow:X}}" {
+		t.Fatalf("url = %q, want the reference to remain text for the second pass", got.URL)
 	}
 }
 

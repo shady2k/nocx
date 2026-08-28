@@ -10,21 +10,11 @@
 //
 // Two rules shape everything in this package:
 //
-//   - A COLLECTION FILE NAMES A VARIABLE, NEVER A SECRET (design §8). A
-//     Postman variable of "type": "secret", a curl line's
-//     Authorization header, a -u password: the NAME goes into the
-//     environment file, the VALUE goes to the BindWriter, and no identifier
-//     for it is written anywhere under the collection root. ImportInto is
-//     the only thing here that writes a file, so it is the only thing here
-//     that the rule binds, and it is the only one holding a BindWriter to
-//     hand a value to.
-//
-//     FromCurl writes NO FILE. It converts one line for the request form
-//     and hands the result straight back to the person who pasted it, so a
-//     credential on that line stays where the line put it — see FromCurl,
-//     and nocx-14exx for what minting an unbindable variable there cost.
-//     The two answers are one argument to one converter (parseCurl's
-//     credentials), not two converters that agree until they do not.
+//   - An imported document never yields a secret. Credential-shaped values and
+//     `{{secret:…}}` references are dropped and itemised; the person supplies
+//     the value afterwards through the ordinary collection editor. FromCurl
+//     is deliberately different because it writes no file: a curl line's
+//     own Authorization header stays on the request.
 //
 //   - CURL IS PARSED, NEVER EXECUTED (design §10). The quoting and
 //     continuation rules in curl_lex.go are our own. There is no shell, so
@@ -40,11 +30,8 @@
 package apiimport
 
 import (
-	"context"
 	"io/fs"
 	"os"
-
-	"github.com/shady2k/nocx/internal/apibind"
 )
 
 // Unsupported is one thing the import did not carry over, itemised for the
@@ -73,13 +60,4 @@ type FS interface {
 	Sync(name string) error
 	Rename(oldpath, newpath string) error
 	RemoveAll(path string) error
-}
-
-// BindWriter takes a secret VALUE out of the import and into the app's
-// binding document, which is the only place an identifier for credential
-// material exists for this feature (design §8.1). Declared here as a narrow
-// consumer contract: this package needs one method, and naming the whole of
-// apibind would make the importer depend on a lifecycle it has no part in.
-type BindWriter interface {
-	Bind(ctx context.Context, k apibind.Key, value []byte) error
 }

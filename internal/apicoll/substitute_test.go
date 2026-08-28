@@ -320,23 +320,18 @@ func TestSubstitute_WithNoLookupAtAll(t *testing.T) {
 	}
 }
 
-// TestEnvironmentValue_NeverAnswersADeclaredSecret: an environment file
-// holds plain values and the NAMES of its secret variables, never their
-// values (§6.3). A file that declares `token` secret AND puts a plain value
-// under the same name must not shadow the value the reader bound — a
-// collection arriving in a pull request would otherwise choose what the
-// user's request sends.
-func TestEnvironmentValue_NeverAnswersADeclaredSecret(t *testing.T) {
+// TestEnvironmentValue_AnswersAReferenceAsOrdinaryText: environment values
+// carry references without a second secret layer.
+func TestEnvironmentValue_AnswersAReferenceAsOrdinaryText(t *testing.T) {
 	env := Environment{
-		Name:       "prod",
-		Values:     map[string]string{"baseUrl": "https://api", "token": "planted"},
-		SecretVars: []string{"token"},
+		Name:   "prod",
+		Values: map[string]string{"baseUrl": "https://api", "token": "{{secret:secrow:X}}"},
 	}
 	if v, ok := env.Value("baseUrl"); !ok || v != "https://api" {
 		t.Errorf("Value(baseUrl) = %q, %v — a plain value is answered", v, ok)
 	}
-	if v, ok := env.Value("token"); ok {
-		t.Errorf("Value(token) = %q, true — a declared secret is never answered from the file", v)
+	if v, ok := env.Value("token"); !ok || v != "{{secret:secrow:X}}" {
+		t.Errorf("Value(token) = %q, %v — the reference is ordinary text", v, ok)
 	}
 }
 

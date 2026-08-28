@@ -100,7 +100,7 @@ func newAPIWSServerWithLeaser(t *testing.T, leaser apisend.ConnectionLeaser) *we
 		apisend.WithRoutes(apisend.NewRoutes(leaser)),
 	)
 	ws := NewWSServer(logger, newRegWithStub(logger),
-		WithAPI(apicoll.NewCollections(apiTestPaths(t)), sender))
+		WithAPI(apicoll.NewCollections(apiTestPaths(t)), sender, nil))
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

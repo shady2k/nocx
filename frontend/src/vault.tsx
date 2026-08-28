@@ -33,6 +33,7 @@ import type { StatusCardTone, BadgeTone } from './ui'
 import { CopyIcon, LockIcon, LockOpenIcon } from './ui/icons'
 import { showToast } from './ui/toast'
 import { RpcError, VaultOperationCancelledError } from './dispatcher'
+import type { SecretPickerSource } from './ui/secret-picker'
 import type {
   VaultClient,
   VaultStatus,
@@ -164,6 +165,94 @@ export interface VaultController {
   regenerateRecovery(params: { passphrase: string }): Promise<{ recoveryCode: string }>
   /** Set the default writable provider. */
   setDefaultProvider(params: { provider: string }): Promise<void>
+}
+
+/** What a picker source built on the vault needs from its host: the vault
+ *  itself, and where a create lands. */
+export interface VaultSecretSourceDeps {
+  vaultClient: VaultClient
+  vaultController: VaultController
+  /** Where "store this" goes on a surface that cannot mint a secret itself:
+   *  Settings → Secrets, with its create form already filled in. Structural
+   *  on purpose — the vault layer must not import the Settings pane, and the
+   *  composition root is what knows how to open it. */
+  openSecretCreate: (name: string, value: string) => void
+  /** Host logging seam for failures reading lifecycle or inventory state. */
+  onError?: (message: string, error: unknown) => void
+}
+
+/** The '@' picker's source for a surface with no mint seam of its own
+ *  (nocx-3o0ed.6).
+ *
+ *  The vault layer owns the lifecycle prompts already — the picker only says
+ *  which one a state calls for — and it owns this too, so the fallback exists
+ *  once and can be driven by a test. `requestCreate` resolves `undefined`
+ *  because the secret is created on another surface: nothing can be inserted
+ *  in place here, and saying so is not the same as losing the value.
+ *
+ *  BOTH the name and the value travel. There is no path left on which a
+ *  person can press the lock and have the value silently dropped: a store row
+ *  only exists where the host passed one to `SecretPicker.open`, and every
+ *  such host either mints in place (api-pane's create ask) or comes through
+ *  here. The plain "Add a secret…" row has no value by construction — that
+ *  row is reaching for a secret that does not exist yet — and arrives with
+ *  `value` absent, which opens the form on an empty field. */
+export function createVaultSecretSource(deps: VaultSecretSourceDeps): SecretPickerSource {
+  return {
+    status: async () => ({ state: (await deps.vaultClient.status()).state }),
+    list: async () => (await deps.vaultClient.inventory()).entries,
+    requestUnseal: async () => {
+      deps.vaultController.openUnlock('use its secrets')
+      await deps.vaultClient.inventory()
+    },
+    requestSetup: async () => {
+      // THE CONTRACT, HONOURED (secret-picker.ts, SecretPickerSource):
+      // silent when the OS key can carry the vault, the dialog otherwise —
+      // and `false` says nothing took the surface, so the panel reloads its
+      // list where the person is standing instead of handing them a sheet.
+      //
+      // This used to open the dialog unconditionally, which nothing noticed
+      // while the only door onto an uninitialized vault was the API
+      // workbench's. The connections editor's password field is the other
+      // one now (nocx-3o0ed.4), and there the silent path is a shipped
+      // behaviour with a spec on it: on a machine with a keyring, setting a
+      // connection password has never raised a sheet (e2e/vault.spec.ts case
+      // 3), because saveSecretWithVault does exactly this test before it
+      // asks. Two doors onto one act must not disagree about whether it needs
+      // a dialog.
+      let capable = false
+      try {
+        capable = (await deps.vaultClient.status()).osKeyCapable
+      } catch (err) {
+        // The status read is what decides the remedy, so failing it means
+        // there is no silent remedy to choose — ask.
+        deps.onError?.('secret picker could not read the vault status', err)
+      }
+      if (capable) {
+        try {
+          await deps.vaultClient.setup({})
+          await deps.vaultController.refresh()
+          return false
+        } catch (err) {
+          // A silent setup that failed is not a reason to say nothing: fall
+          // through to the sheet, which is the surface that can report it.
+          deps.onError?.('secret picker silent vault setup failed', err)
+        }
+      }
+      deps.vaultController.openSetup()
+      return true
+    },
+    requestCreate: (name, value) => {
+      // `value ?? ''`, not a branch: the destination's own default for "no
+      // value" IS the empty field, so the two rows land on the same form and
+      // differ only in what is already typed in it. Nothing here reads the
+      // value — no truncation, no guess at what kind of credential it is
+      // (nocx-0khco).
+      deps.openSecretCreate(name, value ?? '')
+      return Promise.resolve(undefined)
+    },
+    onError: deps.onError,
+  }
 }
 
 /** Create the vault reactive state for a surface. */

@@ -34,6 +34,33 @@ function harness(
   const utils = render(() => <Harness />, renderOptions)
   return { ...utils, onInput }
 }
+function boundHarness(
+  overrides: Partial<SuggestionFieldProps> = {},
+  options = [
+    { value: 'secrow:one', label: 'First secret' },
+    { value: 'secrow:two', label: 'Second secret' },
+  ],
+) {
+  const onInput = vi.fn()
+  const Harness = () => {
+    const [value, setValue] = createSignal(overrides.value ?? options[0].value)
+    return (
+      <SuggestionField
+        id="secret"
+        value={value()}
+        onInput={(next) => {
+          onInput(next)
+          setValue(next)
+        }}
+        suggestions={options}
+        variant="bound"
+        {...overrides}
+      />
+    )
+  }
+  const utils = render(() => <Harness />)
+  return { ...utils, onInput }
+}
 
 function combobox() {
   return screen.getByRole<HTMLInputElement>('combobox')
@@ -226,6 +253,67 @@ describe('SuggestionField — the combobox the datalist was not (fix-kit-rowlist
     expect(input.getAttribute('aria-invalid')).toBe('true')
     expect(input.getAttribute('aria-describedby')).toMatch(/model__error/)
     expect(input).toHaveProperty('required', true)
+  })
+  it('bound mode shows the selected label while committing its opaque option value', () => {
+    const { onInput } = boundHarness({ value: 'secrow:two' })
+    expect(combobox().value).toBe('Second secret')
+    openList()
+    fireEvent.keyDown(combobox(), { key: 'ArrowDown' })
+    fireEvent.keyDown(combobox(), { key: 'Enter' })
+    expect(onInput).toHaveBeenLastCalledWith('secrow:one')
+    expect(combobox().value).toBe('First secret')
+  })
+
+  it('bound mode narrows long lists by case-insensitive substring and keeps the bound fallback reachable', () => {
+    const rows = [
+      ...Array.from({ length: 30 }, (_, i) => ({
+        value: `secrow:${i}`,
+        label: `Secret row ${i}`,
+      })),
+      { value: 'secrow:gone', label: 'Unavailable secret' },
+    ]
+    boundHarness({ value: 'secrow:gone' }, rows)
+    openList()
+    expect(options()).toHaveLength(31)
+    fireEvent.input(combobox(), { target: { value: 'AILABLE' } })
+    expect(options().map((o) => o.textContent)).toEqual(['Unavailable secret'])
+  })
+
+  it('bound mode finds every offered kind with the same substring rule', () => {
+    boundHarness({ value: 'secrow:password' }, [
+      { value: 'secrow:password', label: 'Legacy password' },
+      { value: 'secrow:token', label: 'Production api-token' },
+    ])
+    openList()
+    fireEvent.input(combobox(), { target: { value: 'pass' } })
+    expect(options().map((o) => o.textContent)).toEqual(['Legacy password'])
+    fireEvent.input(combobox(), { target: { value: 'TOKEN' } })
+    expect(options().map((o) => o.textContent)).toEqual(['Production api-token'])
+  })
+
+  it('bound mode walks options, commits the active value, and does not commit free text on blur', () => {
+    const { onInput } = boundHarness()
+    openList()
+    fireEvent.input(combobox(), { target: { value: 'Second' } })
+    fireEvent.keyDown(combobox(), { key: 'ArrowDown' })
+    fireEvent.keyDown(combobox(), { key: 'Enter' })
+    expect(onInput).toHaveBeenLastCalledWith('secrow:two')
+    onInput.mockClear()
+    fireEvent.input(combobox(), { target: { value: 'not listed' } })
+    fireEvent.blur(combobox())
+    expect(onInput).not.toHaveBeenCalled()
+    expect(combobox().value).toBe('Second secret')
+  })
+
+  it('bound mode Escape dismisses without committing or losing the typed filter', () => {
+    const { onInput } = boundHarness()
+    openList()
+    fireEvent.input(combobox(), { target: { value: 'secret' } })
+    fireEvent.keyDown(combobox(), { key: 'Escape' })
+    expect(onInput).not.toHaveBeenCalled()
+    expect(combobox().getAttribute('aria-expanded')).toBe('false')
+    expect(combobox().value).toBe('secret')
+    expect(document.activeElement).toBe(combobox())
   })
 })
 

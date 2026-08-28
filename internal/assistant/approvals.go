@@ -30,19 +30,20 @@ type Approval struct {
 	Tool    string
 	CallID  string
 	ArgHash string
+	Effect  content.Effect
 	// EntryID is the ledger row that recorded the proposal — the entry the
 	// approved call runs as a SUBSEQUENT attempt of. It is a carrier, NOT
 	// part of the binding: the key stays the five binding fields, so a
 	// changed argument hashes differently and never resumes under the old
 	// approval (nocx-5dldy).
 	EntryID string
-	// Effect is the effect class the gate decided this proposal under — the
-	// matrix row an answer that outlives the proposal ("in this session",
-	// "always") is about (nocx-ki305). A carrier like EntryID and for the
-	// same reason: keyOf ignores it, because two proposals differing only
-	// by effect cannot exist, and putting it in the key would silently stop
-	// matching approvals recorded before the effect was known.
-	Effect content.Effect
+	// Invocation is the canonical command parse used to create an
+	// invocation rule for a standing answer. It is a carrier, not part of
+	// the exact-proposal key.
+	Invocation content.Invocation
+	// CommandInvocation preserves command-vs-non-command provenance even when
+	// a malformed command has no parsed invocation to carry.
+	CommandInvocation bool
 }
 
 type approvalKey struct {
@@ -54,8 +55,10 @@ type approvalKey struct {
 }
 
 type approvalEntry struct {
-	entryID string
-	effect  content.Effect
+	entryID           string
+	effect            content.Effect
+	invocation        content.Invocation
+	commandInvocation bool
 }
 
 // DeclineKind is what a person's no means, recorded with the declined
@@ -76,9 +79,11 @@ const (
 )
 
 type declinedEntry struct {
-	runID  string
-	kind   DeclineKind
-	effect content.Effect
+	runID             string
+	kind              DeclineKind
+	effect            content.Effect
+	invocation        content.Invocation
+	commandInvocation bool
 }
 
 // retainedValue is the withheld result of an egress finding (design §7.1):
@@ -114,11 +119,13 @@ func NewApprovalStore() *ApprovalStore {
 	}
 }
 
-// Request records that the human is being asked about this exact proposal.
 func (s *ApprovalStore) Request(ap Approval) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	s.pending[keyOf(ap)] = approvalEntry{entryID: ap.EntryID, effect: ap.Effect}
+	s.pending[keyOf(ap)] = approvalEntry{
+		entryID: ap.EntryID, effect: ap.Effect, invocation: cloneInvocation(ap.Invocation),
+		commandInvocation: ap.CommandInvocation || (ap.Invocation.Parsed && ap.Invocation.Commands != nil),
+	}
 }
 
 // Approve records a yes to this exact proposal: the pending ask is answered
@@ -138,15 +145,21 @@ func (s *ApprovalStore) Approve(ap Approval) bool {
 	}
 	delete(s.pending, keyOf(ap))
 	// The wire's approve carries only the five binding fields; the entry
-	// the proposal was recorded under, and the effect it was decided under,
-	// are the pending record's own.
+	// the proposal was recorded under, its effect and its canonical
+	// invocation are the pending record's own.
 	if ap.EntryID == "" {
 		ap.EntryID = cur.entryID
 	}
 	if ap.Effect == "" {
 		ap.Effect = cur.effect
 	}
-	s.approved[keyOf(ap)] = approvalEntry{entryID: ap.EntryID, effect: ap.Effect}
+	if len(ap.Invocation.Commands) == 0 {
+		ap.Invocation = cur.invocation
+	}
+	s.approved[keyOf(ap)] = approvalEntry{
+		entryID: ap.EntryID, effect: ap.Effect, invocation: cloneInvocation(ap.Invocation),
+		commandInvocation: cur.commandInvocation,
+	}
 	return true
 }
 
@@ -167,13 +180,11 @@ func (s *ApprovalStore) IsApproved(ap Approval) bool {
 //
 // kind is what the no means beyond this call — the standing half of the
 // answer, which the middleware's refusal text carries ("in this session",
-// "from now on", or nothing for a one-off no). The standing ROW itself is
-// written by the transport into the session overlay / global matrix; the
-// store only remembers which sentence the model was refused with, and —
-// from the pending record — the effect class the no was given on, which is
-// what lets a STANDING no also answer a retry of the same kind (the
-// declined record is keyed by the exact proposal; a retry mints a new call
-// id, so the effect is the only thing that carries across).
+// "from now on", or nothing for a one-off no). The standing part is written
+// by transport as an invocation rule for command tools or an effect row for
+// non-command tools. The store carries both the effect and canonical
+// invocation from the pending record so the resumed pipeline applies the
+// same decision without reparsing.
 func (s *ApprovalStore) Decline(ap Approval, kind DeclineKind) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -182,7 +193,11 @@ func (s *ApprovalStore) Decline(ap Approval, kind DeclineKind) bool {
 		return false
 	}
 	delete(s.pending, keyOf(ap))
-	s.declined[keyOf(ap)] = declinedEntry{runID: ap.RunID, kind: kind, effect: cur.effect}
+	s.declined[keyOf(ap)] = declinedEntry{
+		runID: ap.RunID, kind: kind, effect: cur.effect,
+		invocation:        cloneInvocation(cur.invocation),
+		commandInvocation: cur.commandInvocation,
+	}
 	return true
 }
 
@@ -210,18 +225,9 @@ func (s *ApprovalStore) DowngradeDeclined(ap Approval) {
 	}
 }
 
-// DeclinedEffect reports a STANDING no covering this effect class WITHIN
-// ONE RUN: a "deny in this session" or "deny always" answer, whose record
-// carries the run it was given in and the effect it was given on. The
-// effect-match exists so a retry of the same kind — which mints a new call
-// id and therefore misses the exact proposal — is refused with the same
-// standing sentence. It is scoped to runID because the store is
-// process-lifetime and shared by every run: a standing no in run 1 must
-// never answer a call in run 2, whose grant was minted (and, for a standing
-// no, already refuses) from the matrix the answer wrote. A one-off no
-// (DeclineCallOnce) covers only the exact proposal it was given on and
-// never matches here — a retry after a one-off no is a fresh proposal the
-// person may be asked about again.
+// DeclinedEffect reports a standing no covering a non-command effect class
+// within one run. Command tools use DeclinedInvocation instead, because an
+// effect-wide refusal would cover unrelated commands.
 func (s *ApprovalStore) DeclinedEffect(runID string, effect content.Effect) (DeclineKind, bool) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -305,6 +311,73 @@ func (s *ApprovalStore) EffectFor(ap Approval) (content.Effect, bool) {
 		return e.effect, true
 	}
 	return "", false
+}
+
+// InvocationFor returns the canonical invocation recorded with a pending,
+// approved or declined proposal, together with whether the proposal was for a
+// command tool. The second result is false for malformed command parses and
+// non-command tools; the third preserves that distinction.
+func (s *ApprovalStore) InvocationFor(ap Approval) (content.Invocation, bool, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	k := keyOf(ap)
+	if e, ok := s.pending[k]; ok {
+		return cloneInvocation(e.invocation), e.invocation.Parsed, e.commandInvocation
+	}
+	if e, ok := s.approved[k]; ok {
+		return cloneInvocation(e.invocation), e.invocation.Parsed, e.commandInvocation
+	}
+	if e, ok := s.declined[k]; ok {
+		return cloneInvocation(e.invocation), e.invocation.Parsed, e.commandInvocation
+	}
+	return content.Invocation{}, false, false
+}
+
+func cloneInvocation(inv content.Invocation) content.Invocation {
+	out := content.Invocation{Parsed: inv.Parsed, Disqualified: inv.Disqualified}
+	if inv.Commands == nil {
+		return out
+	}
+	out.Commands = make([][]string, len(inv.Commands))
+	for i, command := range inv.Commands {
+		out.Commands[i] = append([]string(nil), command...)
+	}
+	return out
+}
+
+// DeclinedInvocation reports a standing refusal matching the canonical
+// invocation. Effect-wide standing refusals are intentionally not supported:
+// unrelated commands must remain available.
+func (s *ApprovalStore) DeclinedInvocation(runID string, inv content.Invocation) (DeclineKind, bool) {
+	if !inv.Parsed {
+		return "", false
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	for _, e := range s.declined {
+		if e.runID != runID || e.kind == DeclineCallOnce || !sameInvocation(e.invocation, inv) {
+			continue
+		}
+		return e.kind, true
+	}
+	return "", false
+}
+
+func sameInvocation(a, b content.Invocation) bool {
+	if a.Parsed != b.Parsed || a.Disqualified != b.Disqualified || len(a.Commands) != len(b.Commands) {
+		return false
+	}
+	for i := range a.Commands {
+		if len(a.Commands[i]) != len(b.Commands[i]) {
+			return false
+		}
+		for j := range a.Commands[i] {
+			if a.Commands[i][j] != b.Commands[i][j] {
+				return false
+			}
+		}
+	}
+	return true
 }
 
 // Retain holds the withheld result of an egress finding (design §7.1) so the

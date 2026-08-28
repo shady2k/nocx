@@ -66,7 +66,7 @@ func TestAsk_EgressKnownVaultValueSuspends(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -126,7 +126,7 @@ func TestAsk_EgressHeuristicSuspendsDistinguishably(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -168,7 +168,7 @@ func TestAsk_EgressErrorStringScreened(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "session.read", args: `{"sessionId":"session-a"}`}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -211,7 +211,7 @@ func TestMiddleware_EgressNoFindingReturnsByteForByte(t *testing.T) {
 
 	// The reference is the executor's own bytes, untouched by the egress gate;
 	// the model-facing return adds the registry-derived frame exactly once.
-	decl, ok := mw.registry.Lookup("files.read")
+	decl, ok := mw.kernel.registry.Lookup("files.read")
 	if !ok {
 		t.Fatal("files.read not in the registry")
 	}
@@ -313,7 +313,7 @@ func TestAsk_EgressFindingStopsLaterCallsInTheBatch(t *testing.T) {
 	))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}

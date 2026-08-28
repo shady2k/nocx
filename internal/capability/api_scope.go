@@ -15,7 +15,11 @@ type RequestScopeResult struct {
 }
 
 // ScopeVariable is one effective-scope row. Scope is deliberately a closed
-// wire vocabulary: request, folder, environment or vault.
+// wire vocabulary: request, folder or environment. Secret is separate from
+// Scope because a secret is a value any layer can hold, not another layer
+// under the chain; Scope continues to answer WHERE while Secret answers WHAT
+// KIND OF ANSWER. Keeping them separate lets the Variables tab show which
+// level won when two rows have the same name.
 type ScopeVariable struct {
 	Name       string
 	Value      string
@@ -23,6 +27,7 @@ type ScopeVariable struct {
 	From       string
 	Overridden bool
 	Refused    string
+	Secret     bool
 }
 
 func (s *apiCollectionService) RequestScope(
@@ -34,8 +39,7 @@ func (s *apiCollectionService) RequestScope(
 	if err := s.guard.check(); err != nil {
 		return RequestScopeResult{}, err
 	}
-	scope, err := s.pathFor(h)
-	if err != nil {
+	if _, err := s.pathFor(h); err != nil {
 		return RequestScopeResult{}, err
 	}
 	req, err := s.svc.ReadRequest(h, relPath)
@@ -48,52 +52,39 @@ func (s *apiCollectionService) RequestScope(
 	req.Variables = append([]apicoll.Param(nil), variables...)
 
 	var env apicoll.Environment
-	var look, secrets apicoll.Lookup
+	var look apicoll.Lookup
 	if envRelPath != "" {
 		env, err = s.svc.ReadEnvironment(h, envRelPath)
 		if err != nil {
 			return RequestScopeResult{}, err
 		}
 		look = env.Lookup()
-		if s.values != nil {
-			secrets = s.values.Variables(ctx, scope, env.Name)
-		}
 	}
-
-	refused := ""
-	refusedName := ""
-	_, lookupErr := requestLookup(req, env, look, secrets)
-	if lookupErr != nil {
-		if name, ok := apicoll.SecretShadowedName(lookupErr); ok {
-			refused = lookupErr.Error()
-			refusedName = name
-		} else {
-			return RequestScopeResult{}, lookupErr
-		}
+	// Keep this call even though the scope projection does not need the
+	// resolved values: it proves the displayed chain has the same precedence
+	// and shadowing rules as Snapshot. Secret references are ordinary text and
+	// no longer form a separate lookup layer.
+	if _, err := requestLookup(req, env, look); err != nil {
+		return RequestScopeResult{}, err
 	}
+	_ = ctx
 
 	rows := make([]ScopeVariable, 0)
 	seen := make(map[string]struct{})
-	refusalAttached := false
 	appendRow := func(name, value, scopeName, from string) {
 		name = strings.TrimSpace(name)
 		if name == "" {
 			return
 		}
-		refusalForRow := name == refusedName && !refusalAttached &&
-			(scopeName == "request" || scopeName == "folder")
-		if refusalForRow {
-			refusalAttached = true
-		}
 		_, overridden := seen[name]
 		seen[name] = struct{}{}
-		rowRefusal := ""
-		if refusalForRow {
-			rowRefusal = refused
+		secret := resolveLineRefRE.MatchString(value)
+		if secret {
+			value = ""
 		}
 		rows = append(rows, ScopeVariable{
 			Name: name, Value: value, Scope: scopeName, From: from,
-			Overridden: overridden, Refused: rowRefusal,
+			Overridden: overridden, Secret: secret,
 		})
 	}
 
@@ -111,28 +102,12 @@ func (s *apiCollectionService) RequestScope(
 	if envRelPath != "" {
 		names := make([]string, 0, len(env.Values))
 		for name := range env.Values {
-			if _, ok := env.Value(name); ok {
-				names = append(names, name)
-			}
+			names = append(names, name)
 		}
 		sort.Strings(names)
 		for _, name := range names {
 			value, _ := env.Value(name)
 			appendRow(name, value, "environment", envRelPath)
-		}
-
-		secretNames := append([]string(nil), env.SecretVars...)
-		sort.Strings(secretNames)
-		for _, name := range secretNames {
-			name = strings.TrimSpace(name)
-			if secrets != nil {
-				if _, _, err := secrets(name); err != nil {
-					return RequestScopeResult{}, err
-				}
-			}
-			// Secret values are never sent to the renderer; the declared name
-			// remains visible so the Variables tab explains the full scope.
-			appendRow(name, "", "vault", "")
 		}
 	}
 	return RequestScopeResult{Variables: rows}, nil
@@ -141,10 +116,10 @@ func (s *apiCollectionService) RequestScope(
 // requestLookup is the one owner of the send order. Snapshot and the scope
 // explanation both call it, so a new scope cannot silently drift from the
 // request that actually goes out.
-func requestLookup(req apicoll.Request, env apicoll.Environment, look, secrets apicoll.Lookup) (apicoll.Lookup, error) {
+func requestLookup(req apicoll.Request, env apicoll.Environment, look apicoll.Lookup) (apicoll.Lookup, error) {
 	own, err := apicoll.RequestLookup(req, env)
 	if err != nil {
 		return nil, err
 	}
-	return apicoll.Chain(own, look, secrets), nil
+	return apicoll.Chain(own, look), nil
 }

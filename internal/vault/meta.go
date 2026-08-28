@@ -4,6 +4,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
+	"strings"
 
 	"github.com/shady2k/nocx/internal/credential"
 )
@@ -20,9 +21,8 @@ type SecretMeta struct {
 	Kind string
 }
 
-// The secret-kind vocabulary, closed (registry spec §4.1). Only password,
-// key-passphrase and private-key are created today, but the format carries
-// the set from day one so a new kind does not degrade into "unknown"
+// The secret-kind vocabulary is closed (registry spec §4.1). The format
+// carries the set from day one so a new kind does not degrade into "unknown"
 // (spec §7).
 const (
 	KindPassword      = "password"
@@ -30,15 +30,23 @@ const (
 	KindPrivateKey    = "private-key"
 	KindPublicKey     = "public-key"
 	KindOTPSeed       = "otp-seed"
+	KindAPIToken      = "api-token"
 )
 
 // validateKind rejects a kind outside the vocabulary.
 func validateKind(kind string) error {
 	switch kind {
-	case KindPassword, KindKeyPassphrase, KindPrivateKey, KindPublicKey, KindOTPSeed:
+	case KindPassword, KindKeyPassphrase, KindPrivateKey, KindPublicKey, KindOTPSeed, KindAPIToken:
 		return nil
 	}
 	return fmt.Errorf("unknown secret kind %q", kind)
+}
+
+func validateSecretName(name string) error {
+	if strings.HasPrefix(name, "secrow:") {
+		return ErrSecretNameLooksLikeRow
+	}
+	return nil
 }
 
 // kindLabel is the user-facing fallback for a nameless secret with no owner
@@ -56,6 +64,8 @@ func kindLabel(kind string) string {
 		return "Public key"
 	case KindOTPSeed:
 		return "OTP seed"
+	case KindAPIToken:
+		return "API token"
 	}
 	return "Unknown secret"
 }

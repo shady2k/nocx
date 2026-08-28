@@ -17,6 +17,9 @@
 // method, because it is a property of the surface.
 
 import type { Dispatcher } from '../dispatcher'
+import type { SecretPickerSource } from '../ui/secret-picker'
+import type { InventoryEntry } from '../vault-client'
+import type { SecretCreateVault } from '../secret-create-ask'
 import type { ApiCollectionsListResult } from '../generated/api.collections.list'
 import type { ApiCollectionsOpenResult } from '../generated/api.collections.open'
 import type { ApiCollectionsCreateResult } from '../generated/api.collections.create'
@@ -26,7 +29,6 @@ import type { ApiEnvironmentReadResult } from '../generated/api.environment.read
 import type { ApiFolderReadResult } from '../generated/api.folder.read'
 import type { ApiFolderWriteResult } from '../generated/api.folder.write'
 import type { ApiEnvironmentWriteResult } from '../generated/api.environment.write'
-import type { ApiEnvironmentBindSecretResult } from '../generated/api.environment.bindSecret'
 import type { ApiRequestDeleteResult } from '../generated/api.request.delete'
 import type { ApiRequestReadResult } from '../generated/api.request.read'
 import type { ApiRequestScopeResult } from '../generated/api.request.scope'
@@ -147,33 +149,6 @@ class ApiClient {
     })
   }
 
-  /** Give a secret variable its VALUE.
-   *
-   *  THE ONE METHOD ON THIS CLIENT THAT SENDS A CREDENTIAL. It goes one way:
-   *  the value into the vault, under the binding this collection and
-   *  environment own, while the environment FILE keeps only the name — there
-   *  is no field in that format a value could be written into (design §8).
-   *  Nothing echoes it back: the result is empty because the identifier for
-   *  stored credential material never leaves the backend (ADR-0011) and the
-   *  value came from here, so returning either would hand back the one thing
-   *  this method exists to take away.
-   *
-   *  Until this, only an IMPORT could mint a binding, so a variable a person
-   *  declared secret in the editor had no way to be given a value at all. */
-  bindSecret(
-    handle: string,
-    relPath: string,
-    variable: string,
-    value: string,
-  ): Promise<ApiEnvironmentBindSecretResult> {
-    return this.dispatcher.call<ApiEnvironmentBindSecretResult>('api.environment.bindSecret', {
-      handle,
-      relPath,
-      variable,
-      value,
-    })
-  }
-
   /** Remove one request file. The tree is what says it is gone: the folder
    *  is re-read afterwards, so the row leaves the same way a colleague's
    *  `git pull` would have taken it (§6.1). */
@@ -285,12 +260,23 @@ class ApiClient {
    *  answer what the conversion did NOT carry over — a result rather than a
    *  log line, so a soft degrade is visible in the product.
    *
-   *  The export arrives as an ImportSource: a path on the backend's machine,
-   *  the document itself, or a URL the backend fetches over a route. The
-   *  three spread onto the params as the one field each carries, so this
-   *  method never has to know which is which. */
+   * The export arrives as an ImportSource: a path on the backend's machine,
+   * the document or archive bytes themselves, or a URL the backend fetches
+   * over a route. The four spread onto the params as the one field each
+   * carries, so this method never has to know which is which. */
   importPostman(source: ImportSource, dest: string): Promise<ApiImportPostmanResult> {
     return this.dispatcher.call<ApiImportPostmanResult>('api.import.postman', { ...source, dest })
+  }
+
+  /** Inspect a Postman archive without writing it. The destination is still
+   *  carried so the preview and the eventual write use the same request shape;
+   *  the backend ignores it while previewing. */
+  previewPostman(source: ImportSource, dest: string): Promise<ApiImportPostmanResult> {
+    return this.dispatcher.call<ApiImportPostmanResult>('api.import.postman', {
+      ...source,
+      dest,
+      preview: true,
+    })
   }
 
   /** Convert one pasted curl command line into a request. The line is
@@ -315,21 +301,14 @@ class ApiClient {
 type ChosenPath = { path: string }
 
 /**
- * WHERE THE EXPORT AN IMPORT READS COMES FROM — the one question
- * `api.import.postman` asks about its source, with three answers rather than
- * one, chosen by what the gesture could answer with.
- *
- * `path` names a file on the BACKEND'S machine, which is the narrow case:
- * `apicoll.DefaultRoot()` is `paths.DataDir()` of the process running Go,
- * and `make dev-web` is documented as forwarding both ports over SSH, so
- * that machine is not always the person's. Typed into the field, or handed
- * over by the Wails window's own drop — where Go took the path off the
- * runtime and the backend IS the person's machine.
- *
  * `document` is the export itself: a browser drop and the kit's file input
  * both yield bytes, and bytes reach a backend wherever it runs (spec §1a).
  * `apiimport.ImportInto` already takes a READER; only
  * `capability.ImportPostman` opened a file first.
+ *
+ * `archiveBytes` is the base64 encoding of a browser-held ZIP. It is separate
+ * from `document` because a ZIP is binary and the backend applies its byte
+ * limit after decoding it.
  *
  * `url` names where the backend should FETCH it, and it is the general case
  * in the direction the document cannot serve: an export behind a network the
@@ -338,12 +317,15 @@ type ChosenPath = { path: string }
  * it is absent from the object rather than present and undefined, which is a
  * key `decodeAPIParams` would refuse once the source is spread.
  *
- * Never two of them. A union rather than three optional fields, because "a
- * path AND a document" is a state with no meaning and the type is where it
- * stops being expressible.
+ * Never two of them. A union rather than four optional fields, because
+ * "a path AND a document" is a state with no meaning and the type is where
+ * it stops being expressible.
  */
 export type ImportSource =
-  { path: string } | { document: string } | { url: string; route?: ApiRoute }
+  | { path: string }
+  | { document: string }
+  | { archiveBytes: string }
+  | { url: string; route?: ApiRoute }
 
 /**
  * The native directory picker, as this surface consumes it.
@@ -514,14 +496,6 @@ export interface ApiWorkbenchServices {
     relPath: string,
     variables: ApiFolderWriteResult['variables'],
   ): Promise<ApiFolderWriteResult>
-  /** Give a secret variable its value — the one call that carries a
-   *  credential, and it carries it one way (ApiClient.bindSecret). */
-  bindSecret(
-    handle: string,
-    relPath: string,
-    variable: string,
-    value: string,
-  ): Promise<ApiEnvironmentBindSecretResult>
   readRequest(handle: string, relPath: string): Promise<ApiRequestReadResult>
   requestScope(
     handle: string,
@@ -541,6 +515,7 @@ export interface ApiWorkbenchServices {
   /** Stop the exchange running under a token this surface minted. */
   cancelRequest(token: string): Promise<ApiRequestCancelResult>
   importPostman(source: ImportSource, dest: string): Promise<ApiImportPostmanResult>
+  previewPostman(source: ImportSource, dest: string): Promise<ApiImportPostmanResult>
   importCurl(line: string): Promise<ApiImportCurlResult>
   /**
    * The SSH connections this window knows about, for an environment that
@@ -603,6 +578,16 @@ export interface ApiWorkbenchServices {
    * `make dev-web` too, and this port's absence selects which route it is.
    */
   nativeDrop?: NativeDropPort
+  /** The vault-backed source for @ pickers and Auth's existing-secret mode. */
+  secretSource?: SecretPickerSource
+  /** Full vault rows for Auth's existing-secret selector. */
+  secretInventory?: () => Promise<InventoryEntry[]>
+  /** Navigate to the vault's Secrets page from a reference menu. */
+  openSecrets?: () => void
+  /** Where a secret is MINTED from inside the workbench (nocx-7mfwb): the
+   *  vault's own create seam, so both doors put a value in the vault
+   *  without the person leaving the request they were editing. */
+  secretCreate?: SecretCreateVault
 }
 
 /** One connection an environment may route through: the id the route
@@ -627,6 +612,10 @@ export function createApiWorkbenchServices(
   listConnections?: () => Promise<readonly ApiConnection[]>,
   files?: FilePicker,
   nativeDrop?: NativeDropPort,
+  secretSource?: SecretPickerSource,
+  secretInventory?: () => Promise<InventoryEntry[]>,
+  openSecrets?: () => void,
+  secretCreate?: SecretCreateVault,
 ): ApiWorkbenchServices {
   const client = new ApiClient(dispatcher)
   return {
@@ -635,6 +624,10 @@ export function createApiWorkbenchServices(
     ...(watchCollections ? { watchCollections } : {}),
     ...(listConnections ? { listConnections } : {}),
     ...(nativeDrop ? { nativeDrop } : {}),
+    ...(secretSource ? { secretSource } : {}),
+    ...(secretInventory ? { secretInventory } : {}),
+    ...(openSecrets ? { openSecrets } : {}),
+    ...(secretCreate ? { secretCreate } : {}),
     listCollections: () => client.listCollections(),
     openCollection: (path) => client.openCollection(path),
     createCollection: (name) => client.createCollection(name),
@@ -645,8 +638,6 @@ export function createApiWorkbenchServices(
       client.writeEnvironment(handle, relPath, environment),
     readFolder: (handle, relPath) => client.readFolder(handle, relPath),
     writeFolder: (handle, relPath, variables) => client.writeFolder(handle, relPath, variables),
-    bindSecret: (handle, relPath, variable, value) =>
-      client.bindSecret(handle, relPath, variable, value),
     readRequest: (handle, relPath) => client.readRequest(handle, relPath),
     requestScope: (handle, relPath, envRelPath, variables) =>
       client.requestScope(handle, relPath, envRelPath, variables),
@@ -657,6 +648,7 @@ export function createApiWorkbenchServices(
       client.sendRequest(handle, relPath, envRelPath, token),
     cancelRequest: (token) => client.cancelRequest(token),
     importPostman: (source, dest) => client.importPostman(source, dest),
+    previewPostman: (source, dest) => client.previewPostman(source, dest),
     importCurl: (line) => client.importCurl(line),
   }
 }

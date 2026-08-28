@@ -21,13 +21,13 @@ import (
 
 	"github.com/shady2k/nocx/internal/agentdriver"
 	"github.com/shady2k/nocx/internal/agenttools"
-	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apisend"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/bootstrapprogress"
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/commandnames"
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/connection"
@@ -636,7 +636,11 @@ func New(opts ...Option) (*App, error) {
 	default:
 		badLevel = levelName
 	}
-	slogger := slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: logLevel}))
+	// AddSource everywhere: every line names the module, function and line
+	// that wrote it (internal/log says why the adapter is what makes this
+	// true rather than pointing every record at the adapter itself).
+	handlerOpts := &slog.HandlerOptions{Level: logLevel, AddSource: true}
+	slogger := slog.New(slog.NewTextHandler(os.Stderr, handlerOpts))
 	if logFilePath != "" {
 		if mkErr := os.MkdirAll(filepath.Dir(logFilePath), 0o700); mkErr != nil {
 			slogger.Warn("backend log file unavailable; logging to stderr only",
@@ -653,8 +657,7 @@ func New(opts ...Option) (*App, error) {
 			// launcher redirected stderr (the P0 that landed in a temp dir
 			// nobody would look in), and still be visible on the console.
 			logFile = f
-			slogger = slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, f),
-				&slog.HandlerOptions{Level: logLevel}))
+			slogger = slog.New(slog.NewTextHandler(io.MultiWriter(os.Stderr, f), handlerOpts))
 		}
 	}
 	logger := log.NewSlogAdapter(slogger)
@@ -879,29 +882,12 @@ func New(opts ...Option) (*App, error) {
 		return errors.Is(err, vault.ErrVaultSealed)
 	}, v)
 
-	settingsRegistry := settings.New(docStore, v)
+	// API requests resolve only opaque secrow handles through the capability
+	// seam. The terminal's ResolveLine remains name-based; this adapter is
+	// deliberately restricted to collection-file references.
+	apiSecretRefs := capability.NewSecretRefs(v, apiSecretMaterial{credResolver}, profileStore, profileStore)
 
-	// The binding document (design §8, §8.1): the map from a collection's
-	// variable NAME to a value in the vault. It is constructed HERE rather
-	// than beside the collection service above because it takes the vault,
-	// and it is handed to the transport twice under two different contracts
-	// — which is apibind's own split, not a second answer to one question.
-	//
-	// apibind.Store is the WRITE half and it is what turns on
-	// api.import.postman: an import that had nowhere to put a token would
-	// have to drop it silently or write it into the collection folder, and
-	// the folder being safe to commit BY CONSTRUCTION is the whole security
-	// argument. apibind.ValueResolver is the READ half, and it is the half
-	// that never yields an identifier: a caller holding one can ask what a
-	// variable is worth and has nothing to hand an id to. The send path gets
-	// exactly that one, which is how §8's property survives the wiring as
-	// well as the format.
-	//
-	// The document store is this composition root's choice, not apibind's,
-	// and it is the same one the profiles, the snippets and the vault file
-	// provider use: one directory, one version protocol, one place a backup
-	// has to know about.
-	apiBindings := apibind.NewStore(docStore, v, apibind.WithLogger(logger))
+	settingsRegistry := settings.New(docStore, v)
 
 	// The content key opens BOTH encrypted stores — the history database
 	// and the notes one. One key, one lifecycle, two files: they differ in
@@ -1145,10 +1131,8 @@ func New(opts ...Option) (*App, error) {
 		transport.WithSnippets(snippetSvc),
 		transport.WithNotes(noteSvc),
 		transport.WithUIState(uiStateStore),
-		transport.WithAPI(apiCollections, apiSender),
+		transport.WithAPI(apiCollections, apiSender, apiSecretRefs),
 		transport.WithAPIImportFetcher(apiFetcher),
-		transport.WithAPIBindings(apiBindings),
-		transport.WithAPIVariables(apiBindings),
 		// What this binary is, for app.about (nocx-8bbp). Read here rather
 		// than inside the transport: internal/version's vars are link-time
 		// state, and the composition root is where state becomes a
@@ -1641,7 +1625,7 @@ func New(opts ...Option) (*App, error) {
 	// (nocx-jtz3q): an assistant whose registry assembled empty would offer
 	// no tools to any run and fail silently — the composition root refuses
 	// to start with a broken registry instead.
-	assistantClient, err := assistant.NewClient(logger)
+	assistantClient, err := assistant.NewClient(logger, &ledgerWireRecorder{ledger: contentDB.Ledger()})
 	if err != nil {
 		return nil, err
 	}
@@ -3026,4 +3010,27 @@ func (l *apiRouteLeaser) LeaseForProfile(ctx context.Context, profileID string) 
 	// does (ws_tunnel.go): credentials, jump route and authorized endpoints
 	// together, so the lease is pool-keyed and authorized like a tab.
 	return l.client.TunnelConn(ctx, host, func(dst *ssh.ConnectConfig) { *dst = *cfg })
+}
+
+// apiSecretMaterial is the composition root's join between the capability's
+// reference grammar and the credential package's stanced read.
+//
+// IT EXISTS RATHER THAN THE CAPABILITY HOLDING THE RESOLVER because a
+// capability may not (nocx-o3606): an operation-stance read blocks until a
+// person answers the vault's unlock, and vault.unseal needs the lane an
+// operation holds. The transport calls the reference pass after its operation
+// has released that lane, and by then this adapter may block for as long as
+// the dialog takes.
+//
+// THE STANCE IS AN OPERATION, deliberately. Report() would never raise the
+// prompt, so a sealed vault would turn a perfectly good request into an
+// unresolved reference and tell the person their collection was wrong. The
+// reason is what the vault's own dialog shows.
+type apiSecretMaterial struct{ resolver credential.Resolver }
+
+func (m apiSecretMaterial) Material(ctx context.Context, id credential.SecretID) (credential.Secret, error) {
+	if m.resolver == nil {
+		return credential.Secret{}, vault.ErrVaultSealed
+	}
+	return m.resolver.Resolve(ctx, id, credential.Operation("send an API request"))
 }

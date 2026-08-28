@@ -519,3 +519,35 @@ func TestStartupSweepUsesThePartialIndex(t *testing.T) {
 		t.Fatalf("the startup sweep scans the whole table:\n%s", plan)
 	}
 }
+
+// ── the pool is one connection, deliberately (ADR-0043) ──────────────────
+
+// The store hands SQLite exactly one connection, and this test exists because
+// that is a DECISION rather than a tuning knob somebody may raise back.
+//
+// It is not the check that would notice the defect; the one that does is
+// TestConcurrentReadersWithOneWriter, which is a stress test and therefore
+// probabilistic and slow. This one is neither. It states the invariant that
+// makes the race unreachable — SQLite never holds two handles on this file,
+// so there are no concurrent VFS calls to interleave — and it fails instantly
+// and by name if a later change reintroduces a pool.
+//
+// Read ADR-0043 before raising this number. The thing that breaks is not
+// SQLite: it is that the encrypting VFS rewrites whole 4096-byte blocks, and
+// a WAL frame does not align to one.
+func TestThePoolIsOneConnection(t *testing.T) {
+	db, err := openTestStore(t, filepath.Join(t.TempDir(), "content.db"))
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	s, ok := db.(*sqliteContent)
+	if !ok {
+		t.Fatalf("Open returned %T, not the sqlite store", db)
+	}
+	if got := s.db.Stats().MaxOpenConnections; got != 1 {
+		t.Fatalf("pool allows %d connections, want 1 — see ADR-0043; more than one "+
+			"lets a reader observe a WAL block mid-rewrite through the encrypting VFS", got)
+	}
+}

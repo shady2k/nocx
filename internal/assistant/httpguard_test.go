@@ -44,7 +44,7 @@ func TestGuardedHTTPClient_Acceptance(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	cl := newGuardedHTTPClient(nil)
+	cl := newGuardedHTTPClient(nil, nil, nil)
 	resp, err := cl.Get(srv.URL) // http://127.0.0.1:<port>
 	if err != nil {
 		t.Fatalf("loopback http get: %v", err)
@@ -90,7 +90,7 @@ func TestGuardedHTTPClient_ProxyCannotReroutePrivate(t *testing.T) {
 	t.Setenv("https_proxy", "")
 	t.Setenv("NO_PROXY", "")
 
-	cl := newGuardedHTTPClient(nil)
+	cl := newGuardedHTTPClient(nil, nil, nil)
 	resp, err := cl.Get(srv.URL)
 	if err != nil {
 		t.Fatalf("loopback http get with hostile proxy: %v", err)
@@ -120,7 +120,7 @@ func TestGuardedHTTPClient_RedirectRecheckedAsNewEndpoint(t *testing.T) {
 	}))
 	defer redirector.Close()
 
-	cl := newGuardedHTTPClient(nil)
+	cl := newGuardedHTTPClient(nil, nil, nil)
 	resp, err := cl.Get(redirector.URL)
 	if err == nil {
 		defer func() { _ = resp.Body.Close() }()
@@ -152,7 +152,7 @@ func TestGuardedHTTPClient_CredentialNeverCrossesOriginChange(t *testing.T) {
 	}))
 	defer redirector.Close()
 
-	cl := newGuardedHTTPClient(nil)
+	cl := newGuardedHTTPClient(nil, nil, nil)
 	req, _ := http.NewRequest(http.MethodGet, redirector.URL, nil)
 	req.Header.Set("Authorization", "Bearer sk-secret")
 	resp, err := cl.Do(req)
@@ -192,7 +192,7 @@ func TestGuardedHTTPClient_CustomHeadersNeverCrossOriginChange(t *testing.T) {
 	}))
 	defer redirector.Close()
 
-	cl := newGuardedHTTPClient(nil)
+	cl := newGuardedHTTPClient(nil, nil, nil)
 	req, _ := http.NewRequest(http.MethodGet, redirector.URL, nil)
 	req.Header.Set("X-Title", "nocx")
 	req.Header.Set("X-Tenant", "tenant-7")
@@ -226,7 +226,7 @@ func TestGuardedHTTPClient_CustomHeadersSurviveSameOriginRedirect(t *testing.T) 
 	}))
 	defer srv.Close()
 
-	cl := newGuardedHTTPClient(nil)
+	cl := newGuardedHTTPClient(nil, nil, nil)
 	req, _ := http.NewRequest(http.MethodGet, srv.URL+"/start", nil)
 	req.Header.Set("X-Title", "nocx")
 	req = req.WithContext(withCustomHeaderNames(req.Context(), []string{"X-Title"}))
@@ -256,7 +256,7 @@ func TestGuardedHTTPClient_CredentialStrippedOnSchemeChange(t *testing.T) {
 	}))
 	defer httpSrv.Close()
 
-	cl := newGuardedHTTPClient(nil)
+	cl := newGuardedHTTPClient(nil, nil, nil)
 	// The test's TLS server presents a self-signed cert; trusting it here is
 	// test-only and does not weaken the guard (the guard does not manage
 	// trust, only the address rule and the credential boundary).
@@ -303,7 +303,7 @@ func TestGuardedHTTPClient_RedirectBackToOriginKeepsCredential(t *testing.T) {
 	}))
 	defer hopB.Close()
 
-	cl := newGuardedHTTPClient(nil)
+	cl := newGuardedHTTPClient(nil, nil, nil)
 	req, _ := http.NewRequest(http.MethodGet, origin.URL+"/start", nil)
 	req.Header.Set("Authorization", "Bearer sk-secret")
 	resp, err := cl.Do(req)
@@ -333,9 +333,9 @@ func TestGuardedHTTPClient_DialsTheValidatedResolution(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	cl := newGuardedHTTPClientWithResolver(nil, func(ctx context.Context, name string) ([]net.IP, error) {
+	cl := newGuardedHTTPClient(nil, func(ctx context.Context, name string) ([]net.IP, error) {
 		return []net.IP{net.ParseIP("127.0.0.1")}, nil
-	})
+	}, nil)
 	req, _ := http.NewRequest(http.MethodGet, "http://resolved.invalid:"+port+"/", nil)
 	resp, err := cl.Do(req)
 	if err != nil {
@@ -360,7 +360,7 @@ func TestGuardedHTTPClient_EnvironmentProxyLeavesHTTPSAlone(t *testing.T) {
 	t.Setenv("HTTPS_PROXY", proxy.URL)
 	t.Setenv("https_proxy", proxy.URL)
 
-	cl := newGuardedHTTPClient(nil)
+	cl := newGuardedHTTPClient(nil, nil, nil)
 	tr, _ := cl.Transport.(*guardedTransport)
 	req, _ := http.NewRequest(http.MethodGet, "https://api.example.com/v1", nil)
 	u, err := tr.proxy(req)
@@ -398,7 +398,7 @@ func TestGuardedHTTPClient_IPv6Loopback(t *testing.T) {
 	go func() { _ = srv.Serve(ln) }()
 	t.Cleanup(func() { _ = srv.Close() })
 
-	cl := newGuardedHTTPClient(nil)
+	cl := newGuardedHTTPClient(nil, nil, nil)
 	resp, err := cl.Get("http://" + ln.Addr().String() + "/")
 	if err != nil {
 		t.Fatalf("http://[::1] get: %v", err)

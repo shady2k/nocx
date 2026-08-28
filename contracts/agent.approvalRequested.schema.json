@@ -5,7 +5,17 @@
   "description": "Params of the agent.approvalRequested server-to-client notification (nocx-z9hj4, design §7.2/§7.3): a question reached a person. One kind of question whether the risk was an effect coming in (a policy escalation) or a secret going out (an egress finding). Carries the full binding — run, attempt, tool, call id and the canonical-argument hash — what the person's answer on agent.approve must name, the arguments being decided about, the reason the gate asked, and the egress findings when the gate that asked was the egress gate. Findings are facts — which detector fired, the kind, where — never the secret material itself.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["runId", "attempt", "tool", "callId", "argHash", "arguments", "reason", "effect"],
+  "required": [
+    "runId",
+    "attempt",
+    "tool",
+    "callId",
+    "argHash",
+    "arguments",
+    "reason",
+    "effect",
+    "standing"
+  ],
   "properties": {
     "runId": {
       "description": "The backend-minted run id the question belongs to — the value agent.approve echoes back.",
@@ -42,7 +52,7 @@
       "enum": ["policy", "egress"]
     },
     "effect": {
-      "description": "The effect class the policy gate decided on — the row a standing answer writes. Sent by the backend because the renderer must never derive an effect from a tool name (ADR-0028 decision 4).",
+      "description": "The effect class the policy gate decided on — the row a standing answer writes when the exact invocation rule is saved. Sent by the backend because the renderer must never derive an effect from a tool name (ADR-0028 decision 4).",
       "type": "string",
       "enum": [
         "observe",
@@ -54,8 +64,19 @@
         "delegate"
       ]
     },
+    "standing": {
+      "description": "Whether the prompt can offer a standing answer. For a command proposal, rule names the exact canonical invocation the answer would save; for a non-command proposal, rule is empty and the effect field names the policy row the answer covers.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["available", "rule", "reason"],
+      "properties": {
+        "available": { "type": "boolean" },
+        "rule": { "type": "string" },
+        "reason": { "type": "string" }
+      }
+    },
     "resource": {
-      "description": "The resource the gate matched the call against, or null when the call named none. A fact for the person reading the question; a standing answer is over the effect, never over this.",
+      "description": "The resource the gate matched the call against, or null when the call named none. A fact for the person reading the question; a standing answer is over the exact invocation in standing, never over this.",
       "type": ["object", "null"],
       "additionalProperties": false,
       "required": ["kind", "id"],

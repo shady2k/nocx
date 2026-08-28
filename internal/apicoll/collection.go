@@ -2,12 +2,8 @@
 // JSON format and the folder that holds it.
 //
 // The one rule that shapes every type here: A COLLECTION FILE NAMES A
-// VARIABLE, NEVER A SECRET (design §8). There is deliberately no field in
-// which a file can spell an identifier for stored credential material, so a
-// folder arriving in a pull request has no way to reach the password behind
-// an SSH profile. The binding from a variable name to a stored value lives
-// in internal/apibind, which is the only thing that holds such an
-// identifier.
+// VARIABLE, NEVER A SECRET. A secret is ordinary text in the value map;
+// the capability layer resolves its opaque vault reference at send time.
 //
 // This file is the type skeleton, landed by the coordinator so the importers
 // and the sender could be written against it in parallel. Behaviour belongs
@@ -18,12 +14,17 @@ package apicoll
 // line later — are views of this, and the file is the truth rather than
 // either of them (design §6.4).
 type Request struct {
-	ID      string   `json:"id"`
-	Name    string   `json:"name"`
-	Method  string   `json:"method"`
-	URL     string   `json:"url"`
-	Headers []Header `json:"headers,omitempty"`
-	Query   []Param  `json:"query,omitempty"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Method string `json:"method"`
+	URL    string `json:"url"`
+	// Environment is the request's persisted environment choice. A nil
+	// pointer means the request has never chosen one, so the sender can keep
+	// the collection default (exactly one environment, otherwise none).
+	// A non-nil empty value is an explicit choice of no environment.
+	Environment *string  `json:"environment,omitempty"`
+	Headers     []Header `json:"headers,omitempty"`
+	Query       []Param  `json:"query,omitempty"`
 	// Variables are the request's OWN, and they are rows of name, value and
 	// enabled because that is the shape Query and Headers already have —
 	// the model grows by one more list of the same thing rather than by a
@@ -96,6 +97,19 @@ const (
 	BodyFile = "file"
 )
 
+// TransmitsText reports whether Text is sent as the request body. This is the
+// one owner of the body-kind list shared by capability resolution and
+// apisend composition; keeping separate lists caused the JSON secret reference
+// regression where literal bytes reached the server.
+func (b Body) TransmitsText() bool {
+	switch b.Kind {
+	case BodyRaw, BodyJSON, BodyForm:
+		return true
+	default:
+		return false
+	}
+}
+
 type Body struct {
 	Kind    string `json:"kind"`
 	Text    string `json:"text,omitempty"`
@@ -115,15 +129,9 @@ const (
 // possibly `{{variable}}` references, resolved by the same substitution as
 // the URL, a header or the body (design §6.5, nocx-6hg2w.20).
 //
-// The plain-vs-vault distinction is BY CONSTRUCTION, not by heuristic: a
-// variable the binding document answers is a secret. A literal the person
-// pasted stays text in the file, is SENT, and is written to their file —
-// the decision recorded in nocx-tg9l8: the product does not hide or move a
-// credential a person typed. Design §8 is unchanged: a file still cannot
-// NAME a secret, because there is no syntax in which a file names one — a
-// vault identifier typed here is simply the literal it is, and the binding
-// from a name to a stored value lives in internal/apibind, nowhere in this
-// folder.
+// A secret reference is ordinary text in every field, including auth. The
+// capability layer resolves it after collection-variable substitution, while
+// literals remain text in the file and are sent as typed.
 type Auth struct {
 	Kind string `json:"kind"`
 	User string `json:"user,omitempty"`
@@ -160,13 +168,12 @@ type Route struct {
 	InsecureTLS bool `json:"insecureTls,omitempty"`
 }
 
-// Environment holds plain values, the NAMES of its secret variables, and the
-// route. It holds no secret values and no identifiers for them.
+// Environment holds plain values and the route. A value may contain a
+// {{secret:secrow:…}} reference; it never holds secret material itself.
 type Environment struct {
-	Name       string            `json:"name"`
-	Values     map[string]string `json:"values,omitempty"`
-	SecretVars []string          `json:"secretVars,omitempty"`
-	Route      Route             `json:"route"`
+	Name   string            `json:"name"`
+	Values map[string]string `json:"values,omitempty"`
+	Route  Route             `json:"route"`
 }
 
 // Collection is a folder. Requests are addressed by their path within it,

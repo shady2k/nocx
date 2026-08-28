@@ -7,13 +7,14 @@
 #   scripts/ci-linux.sh --no-keyring    # without one only
 #   scripts/ci-linux.sh -- ./internal/ssh/...   # narrow the package set
 #
-# WHY THIS EXISTS, and when to reach for it instead of the hook. The pre-commit
-# hook runs `go test -race ./...` in .githooks/images/go-tests, which is Debian
-# with Go from the golang image and no Secret Service at all, on every core the
-# host has, and without -count=1 so an unchanged package is answered from the
-# test cache. Every one of those differs from the runner, and on 2026-08-10 a
-# release attempt and its follow-up PR both came back red from a job the hook
-# had just reported green. This runs the job.
+# WHY THIS EXISTS. The pre-commit hook runs no tests at all (nocx-hzsiv): it is
+# a static gate — format, lint, types, ratchets, contracts — so nothing local
+# runs the Go suite the way the runner does unless you run it here. It used to
+# run `go test -race ./...` in a Debian container, and that was worse than it
+# looked: no Secret Service, every core the host has, and no -count=1, so an
+# unchanged package came from the test cache. On 2026-08-10 a release attempt
+# and its follow-up PR both came back red from a job that hook had just
+# reported green. This runs the job.
 #
 # WHAT IT STILL DOES NOT COVER: macOS. `backend` runs on macos-latest, where
 # /bin/bash is 3.2, there is no /proc, sun_path is 104 bytes and PTY semantics
@@ -80,10 +81,10 @@ GOBUILD_VOL="nocx-ci-gobuild-${HOST_UID}-${HOST_GID}"
 # Non-root, like the runner: root bypasses mode bits, so a permission-sensitive
 # test passes there and nowhere a developer or CI would see it. Privilege is
 # dropped inside the one container after the cache mounts are chowned — the
-# same single-container pattern .githooks/containerized-tests.sh documents.
+# same single-container pattern this script documents below.
 #
-# -count=1, unlike the hook: the runner has no warm test cache, so a package the
-# hook answered from cache is a package this has not run.
+# -count=1, like the runner and unlike a developer's `go test`: a warm cache
+# answers for a package that was never run.
 # CPU_FLAG is empty for the uncapped default, so docker is given no --cpus at
 # all rather than a zero it would reject. Unquoted on purpose: an empty
 # variable must expand to no word, which is what sh's word splitting does.

@@ -20,8 +20,9 @@ import { AboutClient } from './about-client'
 import { ClipboardBannerImpl } from './banner'
 import { ProfileClient } from './profiles'
 import { VaultClient } from './vault-client'
+import type { SecretPickerSource } from './ui/secret-picker'
 import { DialogClient } from './dialog-client'
-import { createVaultState, SetupDialog, UnlockDialog } from './vault'
+import { createVaultState, createVaultSecretSource, SetupDialog, UnlockDialog } from './vault'
 import { ConnectionPasswordPrompt } from './connection-password-prompt'
 import type { ConnectionsPasswordRequest } from './generated/connections.passwordRequest'
 import { AgentApprovalPrompt } from './agent-approval-prompt'
@@ -200,6 +201,26 @@ async function main() {
     void vaultController.refresh()
   })
   void vaultController.refresh()
+
+  // The no-mint-seam fallback: this surface has no create ask of its own, so
+  // a store row lands on the Secrets page's create form — with the NAME AND
+  // THE VALUE both filled in (nocx-3o0ed.6). It was the name alone, and a
+  // person who pressed the lock over a filled field arrived at an empty one
+  // and had to go back for their own text; that detour is what this epic
+  // removes. The workbench path that can mint in place still does —
+  // api-pane.tsx, createSecretInPlace — which is what a store row reaches
+  // wherever a vault client is wired.
+  const secretSource: SecretPickerSource = createVaultSecretSource({
+    vaultClient,
+    vaultController,
+    openSecretCreate: (name, value) => openSettingsPane().startNewSecret(name, value),
+    onError: (message, error) => {
+      log.error('nocx: secret picker status failed', {
+        message,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    },
+  })
 
   // ── Backend-initiated unlock requests ──────────────────────────────
   // The dispatcher's onVaultSealed handles renderer-initiated calls.
@@ -476,6 +497,9 @@ async function main() {
         aboutClient,
         clipboard,
         policyClient,
+        // The same source the workbench takes below: one panel, one
+        // fallback, one place a store row can land (nocx-3o0ed.4).
+        secretSource,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })
@@ -704,6 +728,16 @@ async function main() {
               uploadSurface.services.subscribeDropped(handler),
           }
         : undefined,
+      secretSource,
+      () => vaultClient.inventory().then((inventory) => inventory.entries),
+      () => openSettingsPane().openPage('secrets'),
+      // Minting, bound HERE for the same reason as the inventory above: the
+      // vault client is the composition root's, and the workbench mints a
+      // secret without learning to speak that domain (AD-8, nocx-7mfwb).
+      {
+        list: () => vaultClient.inventory().then((inventory) => inventory.entries),
+        createSecret: (params) => vaultClient.createSecret(params),
+      },
     ),
   )
 

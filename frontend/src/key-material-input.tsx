@@ -66,6 +66,22 @@ const KEY_MODES: { value: KeyInputMode; label: string }[] = [
  *  is a row id, not a secret reference, and it means nothing to anybody. */
 const UNLISTED_SECRET_LABEL = 'Unavailable secret'
 
+/**
+ * THE BOUND CHOOSER IS RETIRED, not moved (nocx-3o0ed.4, criterion 5).
+ *
+ * nocx-7mfwb.5 put a `SuggestionField variant="bound"` over these options so a
+ * long vault could be narrowed by typing instead of scrolled. That chooser
+ * lived inside SecretSource, which is gone — and it is not carried into the
+ * panel, because the panel already narrows by typing (T2: '@' filters as you
+ * type, and the lock's empty-field panel does the same through its anchor).
+ * Two narrowable choosers over one inventory is the duplication this epic
+ * exists to remove, and the panel's is the one every surface reaches.
+ *
+ * What is left here is the PRIVATE-KEY select below, which is a different
+ * question ("which stored key", ADR-0017) on a control that never had the
+ * bound chooser. When that field adopts the shared text field too, this
+ * function goes with it.
+ */
 export function secretOptions(
   entries: InventoryEntry[],
   bound?: string,

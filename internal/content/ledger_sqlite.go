@@ -1392,6 +1392,15 @@ func (s *sqliteContent) Edges(ctx context.Context, entryID string) ([]Edge, erro
 // executionsFor loads one entry's executions with their pinned observation,
 // grant and artifact metadata. N+1 by design: Entry is a recall-shaped read
 // of one entry, never a page scan.
+//
+// THE CURSOR IS DRAINED BEFORE THE PER-EXECUTION READS, for the reason
+// ownArtifactsFor above already states: those reads go back to the pool, and
+// holding an open cursor across them is how a single-connection store
+// deadlocks against itself. This function used to interleave them, which was
+// survivable only while the pool had spare connections to lend — it stopped
+// being survivable the moment the pool became one (nocx-4p3l2), and every
+// caller of Entry hung. Draining first is not a workaround for the pool
+// size; it is what makes this read independent of it.
 func (s *sqliteContent) executionsFor(ctx context.Context, entryID string) ([]Execution, error) {
 	rows, err := s.db.QueryContext(ctx, `SELECT id, entry_id, lane, attempt, environment_obs_id,
 		lease_deadline, inactivity_deadline, interactivity, process_group, started_at, ended_at,
@@ -1402,6 +1411,9 @@ func (s *sqliteContent) executionsFor(ctx context.Context, entryID string) ([]Ex
 	}
 	defer func() { _ = rows.Close() }()
 	var out []Execution
+	// The observation id travels beside its execution: it is the one column
+	// that is read here and resolved after the cursor is gone.
+	var obsIDs []int64
 	for rows.Next() {
 		var ex Execution
 		var obsID int64
@@ -1419,24 +1431,33 @@ func (s *sqliteContent) executionsFor(ctx context.Context, entryID string) ([]Ex
 			v := RunState(state.String)
 			ex.State = &v
 		}
-		obs, err := s.observationByID(ctx, obsID)
-		if err != nil {
-			return nil, err
-		}
-		ex.Observation = *obs
-		grant, err := s.grantFor(ctx, ex.ID)
-		if err != nil {
-			return nil, err
-		}
-		ex.Grant = grant
-		arts, err := s.artifactsFor(ctx, ex.ID)
-		if err != nil {
-			return nil, err
-		}
-		ex.Artifacts = arts
 		out = append(out, ex)
+		obsIDs = append(obsIDs, obsID)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	// Cursor exhausted, connection returned. Only now do the reads that need
+	// one of their own.
+	for i := range out {
+		obs, err := s.observationByID(ctx, obsIDs[i])
+		if err != nil {
+			return nil, err
+		}
+		out[i].Observation = *obs
+		grant, err := s.grantFor(ctx, out[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		out[i].Grant = grant
+		arts, err := s.artifactsFor(ctx, out[i].ID)
+		if err != nil {
+			return nil, err
+		}
+		out[i].Artifacts = arts
+	}
+	return out, nil
 }
 
 func (s *sqliteContent) observationByID(ctx context.Context, id int64) (*Observation, error) {
@@ -1522,17 +1543,30 @@ func (s *sqliteContent) artifactsFor(ctx context.Context, executionID int64) ([]
 		return nil, err
 	}
 	defer func() { _ = rows.Close() }()
-	var out []Artifact
+	// Ids first, bodies after — the same shape, and for the same reason, as
+	// ownArtifactsFor: artifactByID goes back to the pool, and a cursor held
+	// across it deadlocks a single-connection store (nocx-4p3l2). These two
+	// functions differ only in the column they select on, and that is worth
+	// noticing: they are one read wearing two names, and whichever of them
+	// is next to change should probably merge them rather than diverge.
+	var ids []string
 	for rows.Next() {
 		var id string
 		if err := rows.Scan(&id); err != nil {
 			return nil, err
 		}
+		ids = append(ids, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]Artifact, 0, len(ids))
+	for _, id := range ids {
 		a, err := s.artifactByID(ctx, id)
 		if err != nil {
 			return nil, err
 		}
 		out = append(out, *a)
 	}
-	return out, rows.Err()
+	return out, nil
 }

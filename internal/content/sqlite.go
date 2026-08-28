@@ -74,10 +74,43 @@ type Config struct {
 }
 
 const (
-	// maxOpenConns bounds the pool: one connection serves the writer, the
-	// rest serve concurrent readers. WAL lets readers run alongside the
-	// single writer without blocking.
-	maxOpenConns = 16
+	// maxOpenConns is ONE, and the reason is the cipher rather than SQLite
+	// (ADR-0043, nocx-4p3l2). This store is encrypted through a VFS that
+	// enciphers whole 4096-byte blocks. A WAL frame is 24+page_size, so
+	// frames never align to those blocks: appending one rewrites the block
+	// holding the tail of the frame before it — a frame a reader on another
+	// connection is entitled to be reading. SQLite's own locking makes that
+	// safe, because it promises only that the reader's FRAMES do not change;
+	// it never promised the surrounding BYTES would not. A wide-block cipher
+	// makes that difference fatal, because a torn read garbles the whole
+	// block rather than the bytes that moved, and the reader is told the
+	// database image is malformed.
+	//
+	// So the pool is the exclusion. One connection means SQLite never has
+	// two file handles on this database at once, and the race is unreachable
+	// rather than unlikely. TestConcurrentReadersWithOneWriter is red at 16
+	// and green at 1.
+	//
+	// MEASURED, AND THE COST IS REAL. On the profile the test below runs —
+	// 5000 RecordCompleted calls against sixteen goroutines running real
+	// ledger queries flat out — sixteen connections take ~10s and one takes
+	// ~34s. That 3.4x is the honest number; a synthetic probe with light
+	// SELECTs said 1.8x and was flattering itself. What makes it acceptable
+	// is that no part of the product reads like that profile: its readers
+	// are recall search and block restore, which a person asks for.
+	//
+	// The alternative that keeps the pool is a rollback journal, and it is
+	// worse on BOTH axes: ~50-63s on that same profile, and 3.89 ms per
+	// commit against WAL's 0.03. That second number is the disqualifying
+	// one, because AppendChunk commits once per streamed assistant delta.
+	//
+	// THE PRICE PAID ELSEWHERE: a read that holds an open cursor while going
+	// back to the pool now deadlocks against itself instead of borrowing a
+	// spare connection. Every such read drains first — see executionsFor and
+	// artifactsFor, and TestEntryDoesNotDeadlockOnASingleConnection, which
+	// exists because a deadlock otherwise reports itself as a ten-minute
+	// silence.
+	maxOpenConns = 1
 	// busyTimeoutMs is the lock-wait budget for cross-process writers
 	// (multi-process safety, ADR-0018 amendment).
 	busyTimeoutMs = 5000

@@ -20,7 +20,7 @@ import (
 //
 // # It mints no variable it cannot bind (nocx-14exx)
 //
-// This entrance writes no file and holds no BindWriter: what it returns
+// This entrance writes no file and holds no credential writer: what it returns
 // goes straight back to the person who pasted the line, into the request
 // form, with no collection and no environment behind it yet. It therefore
 // leaves a credential the line carries exactly where the line put it — in
@@ -40,7 +40,7 @@ import (
 // Everything the bounded flag set does not carry comes back in
 // []Unsupported. Nothing is only logged.
 func FromCurl(line string) (apicoll.Request, []Unsupported, error) {
-	req, _, unsup, err := parseCurl(line, newVarNamer(), credentialsStayOnRequest)
+	req, unsup, err := parseCurl(line, newVarNamer(), credentialsStayOnRequest)
 	return req, unsup, err
 }
 
@@ -54,12 +54,9 @@ func FromCurl(line string) (apicoll.Request, []Unsupported, error) {
 type credentials int
 
 const (
-	// credentialsToBinder is the ImportInto route: a collection is being
-	// written, so a credential becomes a VARIABLE NAME in the files and the
-	// value goes to the BindWriter and nowhere else (§8). It is the ZERO
-	// value deliberately — a caller that forgets this argument gets the
-	// answer that never writes a secret to disk.
-	credentialsToBinder credentials = iota
+	// credentialsToImport is the ImportInto route: a collection is being
+	// written, so imported credential material is dropped and itemised.
+	credentialsToImport credentials = iota
 	// credentialsStayOnRequest is the FromCurl route: nothing here can bind
 	// a value, so nothing here mints a name for one. A variable the LINE
 	// ITSELF spells — `Authorization: Bearer {{tok}}` — is still honoured,
@@ -250,12 +247,12 @@ type dataPart struct {
 	ref   string // file reference
 }
 
-// parseCurl is FromCurl plus the secret values, which only ImportInto may
-// see. creds decides whether there is anywhere for them to go at all.
-func parseCurl(line string, namer *varNamer, creds credentials) (apicoll.Request, []secretOffer, []Unsupported, error) {
+// parseCurl is the shared converter. creds distinguishes the form entrance,
+// which preserves the line's own credential-bearing headers, from collection
+// import, which drops imported credential material.
+func parseCurl(line string, namer *varNamer, creds credentials) (apicoll.Request, []Unsupported, error) {
 	var (
 		req     apicoll.Request
-		offers  []secretOffer
 		unsup   []Unsupported
 		headers []apicoll.Header
 		parts   []dataPart
@@ -270,17 +267,17 @@ func parseCurl(line string, namer *varNamer, creds credentials) (apicoll.Request
 
 	toks, err := tokenize(line)
 	if err != nil {
-		return req, nil, nil, err
+		return req, nil, err
 	}
 	// A pasted line often carries its prompt.
 	for len(toks) > 0 && (toks[0] == "$" || toks[0] == "#" || toks[0] == ">") {
 		toks = toks[1:]
 	}
 	if len(toks) == 0 {
-		return req, nil, nil, errors.New("apiimport: empty command line")
+		return req, nil, errors.New("apiimport: empty command line")
 	}
 	if base := strings.ToLower(path.Base(toks[0])); base != "curl" && base != "curl.exe" {
-		return req, nil, nil, fmt.Errorf("apiimport: not a curl command line (starts with %q)", ellipsis(toks[0], 60))
+		return req, nil, fmt.Errorf("apiimport: not a curl command line (starts with %q)", ellipsis(toks[0], 60))
 	}
 
 	// handle applies one recognised flag. value is meaningful only when the
@@ -358,7 +355,7 @@ func parseCurl(line string, namer *varNamer, creds credentials) (apicoll.Request
 			value := inline
 			if f.arg && !hasInline {
 				if i+1 >= len(toks) {
-					return req, nil, nil, fmt.Errorf("apiimport: %s expects a value", name)
+					return req, nil, fmt.Errorf("apiimport: %s expects a value", name)
 				}
 				i++
 				value = toks[i]
@@ -385,7 +382,7 @@ func parseCurl(line string, namer *varNamer, creds credentials) (apicoll.Request
 				rest = ""
 				if value == "" {
 					if i+1 >= len(toks) {
-						return req, nil, nil, fmt.Errorf("apiimport: -%s expects a value", string(c))
+						return req, nil, fmt.Errorf("apiimport: -%s expects a value", string(c))
 					}
 					i++
 					value = toks[i]
@@ -399,7 +396,7 @@ func parseCurl(line string, namer *varNamer, creds credentials) (apicoll.Request
 	}
 
 	if len(urls) == 0 {
-		return req, nil, nil, errors.New("apiimport: the curl line names no URL")
+		return req, nil, errors.New("apiimport: the curl line names no URL")
 	}
 	for range urls[1:] {
 		itemise("second URL", "curl takes several URLs and an imported request is one; only the first was kept")
@@ -423,17 +420,17 @@ func parseCurl(line string, namer *varNamer, creds credentials) (apicoll.Request
 	// -u first, so an explicit Authorization header still wins — which is
 	// the order curl resolves them in.
 	switch creds {
-	case credentialsToBinder:
+	case credentialsToImport:
 		if hasUser {
-			auth, offer := basicFromUserArg(userArg, namer)
-			req.Auth = auth
-			if offer != nil {
-				offers = append(offers, *offer)
+			auth, bad := basicFromUserArg(userArg, namer)
+			if bad != "" {
+				itemise("-u", "the imported credential was not written into the request; supply it after import")
+			} else {
+				req.Auth = auth
 			}
 		}
-		kept, headerAuth, headerOffers, headerUnsup := absorbHeaderSecrets(headers, namer)
+		kept, headerAuth, headerUnsup := absorbHeaderSecrets(headers, namer)
 		req.Headers = kept
-		offers = append(offers, headerOffers...)
 		unsup = append(unsup, headerUnsup...)
 		if headerAuth != nil {
 			req.Auth = *headerAuth
@@ -506,7 +503,7 @@ func parseCurl(line string, namer *varNamer, creds credentials) (apicoll.Request
 	}
 
 	req.Name = requestNameFor(req.Method, req.URL)
-	return req, offers, unsup, nil
+	return req, unsup, nil
 }
 
 // assembleBody turns the -d/-F parts into the one body the model holds.
@@ -583,17 +580,10 @@ func hasHeader(hs []apicoll.Header, name string) bool {
 	return false
 }
 
-// authFromHeader maps an Authorization value onto the model. The third
-// return is the scheme we could not map, named so it can be itemised — and
-// in that case the credential is dropped rather than written anywhere.
-//
-// A credential this entrance carries into a FILE is written as a variable
-// reference, `{{name}}`, and the value is offered to the BindWriter — a
-// file never carries the value's TEXT, which is the whole of §8 (see the
-// package doc). The auth field is text like any other (nocx-6hg2w.20): the
-// reference is ordinary `{{name}}` text, resolved by the same substitution
-// as the URL.
-func authFromHeader(value string, namer *varNamer) (apicoll.Auth, *secretOffer, string) {
+// authFromHeader maps an Authorization value onto the model. The second
+// return is a refusal reason for imported credential material; ordinary
+// variable references remain text.
+func authFromHeader(value string, namer *varNamer) (apicoll.Auth, string) {
 	value = strings.TrimSpace(value)
 	scheme, cred, _ := strings.Cut(value, " ")
 	cred = strings.TrimSpace(cred)
@@ -601,52 +591,46 @@ func authFromHeader(value string, namer *varNamer) (apicoll.Auth, *secretOffer, 
 	case "bearer":
 		if name, ok := varRef(cred); ok {
 			namer.reserve(name)
-			return apicoll.Auth{Kind: apicoll.AuthBearer, Token: "{{" + name + "}}"}, nil, ""
+			return apicoll.Auth{Kind: apicoll.AuthBearer, Token: "{{" + name + "}}"}, ""
 		}
-		v := namer.take("token")
-		return apicoll.Auth{Kind: apicoll.AuthBearer, Token: "{{" + v + "}}"}, &secretOffer{Variable: v, Value: []byte(cred)}, ""
+		return apicoll.Auth{}, "Bearer credential"
 	case "basic":
 		if name, ok := varRef(cred); ok {
 			namer.reserve(name)
-			return apicoll.Auth{Kind: apicoll.AuthBasic, User: "", Password: "{{" + name + "}}"}, nil, ""
+			return apicoll.Auth{Kind: apicoll.AuthBasic, User: "", Password: "{{" + name + "}}"}, ""
 		}
 		raw, err := base64.StdEncoding.DecodeString(cred)
 		if err != nil {
-			return apicoll.Auth{}, nil, "Basic (not decodable)"
+			return apicoll.Auth{}, "Basic (not decodable)"
 		}
-		user, pass, ok := strings.Cut(string(raw), ":")
-		if !ok {
-			return apicoll.Auth{}, nil, "Basic (not user:password)"
+		if _, _, ok := strings.Cut(string(raw), ":"); !ok {
+			return apicoll.Auth{}, "Basic (not user:password)"
 		}
-		v := namer.take("password")
-		return apicoll.Auth{Kind: apicoll.AuthBasic, User: user, Password: "{{" + v + "}}"}, &secretOffer{Variable: v, Value: []byte(pass)}, ""
+		return apicoll.Auth{}, "Basic credential"
 	default:
 		if scheme == "" {
-			return apicoll.Auth{}, nil, "(empty)"
+			return apicoll.Auth{}, "(empty)"
 		}
-		return apicoll.Auth{}, nil, scheme
+		return apicoll.Auth{}, scheme
 	}
 }
 
-// basicFromUserArg maps -u for the entrance that BINDS. A -u with no colon
-// is curl's "prompt me": the variable is named and left unbound, so the
-// send blocks and says which variable is missing instead of sending an
-// empty password.
-func basicFromUserArg(arg string, namer *varNamer) (apicoll.Auth, *secretOffer) {
+// basicFromUserArg maps -u for the collection-import entrance. A literal
+// password is dropped; an explicitly named variable remains an ordinary
+// reference with an empty value for the person to fill in.
+func basicFromUserArg(arg string, namer *varNamer) (apicoll.Auth, string) {
 	user, pass, ok := strings.Cut(arg, ":")
 	auth := apicoll.Auth{Kind: apicoll.AuthBasic, User: user}
 	if !ok {
 		auth.Password = "{{" + namer.take("password") + "}}"
-		return auth, nil
+		return auth, ""
 	}
 	if name, isRef := varRef(pass); isRef {
 		namer.reserve(name)
 		auth.Password = "{{" + name + "}}"
-		return auth, nil
+		return auth, ""
 	}
-	v := namer.take("password")
-	auth.Password = "{{" + v + "}}"
-	return auth, &secretOffer{Variable: v, Value: []byte(pass)}
+	return apicoll.Auth{}, "credential"
 }
 
 // userArgOnRequest maps -u for the entrance that binds nothing, and returns

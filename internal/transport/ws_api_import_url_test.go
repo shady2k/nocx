@@ -35,7 +35,7 @@ func TestAPIImportPostmanURL_TheFetchedCollectionKeepsTheRouteItArrivedThrough(t
 	// (tcpLease): the route table, the fetch and the writer are real, so
 	// what this watches is a document that genuinely arrived through a
 	// connection route.
-	_, conn := newAPIWSServerWithPool(t, newAPIFakeBindings(), tcpLease{done: make(chan struct{})})
+	_, conn := newAPIWSServerWithPool(t, tcpLease{done: make(chan struct{})})
 	dest := filepath.Join(t.TempDir(), "fetched")
 
 	resp := vaultCall(t, conn, "api.import.postman", map[string]any{
@@ -70,7 +70,7 @@ func TestAPIImportPostmanURL_ALoginPageIsRefusedWithoutMentioningCurl(t *testing
 	}))
 	defer srv.Close()
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	dest := filepath.Join(t.TempDir(), "fetched")
 
 	resp := vaultCall(t, conn, "api.import.postman", map[string]any{"url": srv.URL, "dest": dest}, 1)
@@ -91,7 +91,7 @@ func TestAPIImportPostmanURL_ALoginPageIsRefusedWithoutMentioningCurl(t *testing
 // A scheme the fetch cannot GET is refused, and refused before any dial —
 // file:// is the one a person reaches for when they meant `path`.
 func TestAPIImportPostmanURL_RefusesASchemeItCannotGet(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	dest := filepath.Join(t.TempDir(), "fetched")
 
 	resp := vaultCall(t, conn, "api.import.postman", map[string]any{"url": "file:///etc/passwd", "dest": dest}, 1)
@@ -114,7 +114,7 @@ func TestAPIImportPostmanURL_AServerRefusalLeavesNoCollection(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	dest := filepath.Join(t.TempDir(), "fetched")
 
 	resp := vaultCall(t, conn, "api.import.postman", map[string]any{"url": srv.URL, "dest": dest}, 1)
@@ -139,7 +139,7 @@ func TestAPIImportPostmanURL_AConnectionThatCannotBeLeasedRefusesRatherThanDials
 	}))
 	defer srv.Close()
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	dest := filepath.Join(t.TempDir(), "fetched")
 
 	resp := vaultCall(t, conn, "api.import.postman", map[string]any{
@@ -163,7 +163,7 @@ func TestAPIImportPostman_URLAndDocumentProduceTheSameCollection(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	byURL := filepath.Join(t.TempDir(), "by-url")
 	byDoc := filepath.Join(t.TempDir(), "by-document")
 

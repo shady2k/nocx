@@ -39,7 +39,7 @@ func askWithGrant(t *testing.T, grant *content.Grant) *fakeOpenAIServer {
 	p := testAskParams(srv.URL)
 	p.Grant = grant
 	p.KnownMaterial = &fakeKnownMaterial{}
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -95,9 +95,9 @@ func TestAsk_DeclaresExactlyThePermittedTools(t *testing.T) {
 	}
 	f := askWithGrant(t, observePath)
 	got := toolNames(t, requestTools(t, f.body()))
-	want := []string{"files.read", "git.status"}
+	want := []string{"files.read"}
 	if len(got) != len(want) {
-		t.Fatalf("declared tools = %v, want exactly %v", got, want)
+		t.Fatalf("declared tools = %v, want exactly %v (git.status is declared but not executable)", got, want)
 	}
 	for i := range want {
 		if got[i] != want[i] {
@@ -158,7 +158,7 @@ func TestAsk_NoGrantTakesTheNoToolsPath(t *testing.T) {
 	f, srv := newFakeOpenAI(nil)
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -183,8 +183,8 @@ func TestAsk_PermittedToolCarriesItsSchema(t *testing.T) {
 		Scopes:  []content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}},
 	})
 	tools := requestTools(t, f.body())
-	if len(tools) != 2 {
-		t.Fatalf("declared %d tools, want 2", len(tools))
+	if len(tools) != 1 {
+		t.Fatalf("declared %d tools, want 1 (git.status is declared but not executable)", len(tools))
 	}
 	found := map[string]json.RawMessage{}
 	for _, tl := range tools {

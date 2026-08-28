@@ -35,13 +35,15 @@ package transport
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"slices"
+	"strings"
 	"unicode/utf8"
 
-	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apiimport"
 	"github.com/shady2k/nocx/internal/apisend"
@@ -58,16 +60,9 @@ import (
 type apiCollectionHandlers struct {
 	op     capability.APICollectionOperation
 	sender apisend.Sender
-	// values is the binding document's read half: it answers what a
-	// variable is worth and has no parameter through which an identifier
-	// could arrive (design §8). nil is a build with no binding store, and
-	// then an auth variable resolves to nothing.
-	values apibind.ValueResolver
-	// bindOp is the write half of a secret variable: the VALUE into the
-	// vault, under the binding this collection and environment own. nil is
-	// a build with no binding store, and then the method answers -32601
-	// rather than accepting a credential it has nowhere to put.
-	bindOp capability.APIBindingOperation
+	// refs is the capability-owned second pass for {{secret:secrow:…}}
+	// references. It never accepts an identifier from this handler.
+	refs capability.SecretRefs
 	// cancels is which running exchange a token names, and conn is which
 	// window minted it. Both are nil/zero for the handlers that cannot
 	// send: a read has nothing to stop (ws_api_cancel.go).
@@ -379,6 +374,32 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 		return
 	}
 
+	// THE VAULT REFERENCES ARE RESOLVED HERE, OUTSIDE THE OPERATION, and the
+	// position is the whole point (nocx-o3606). Reading material declares an
+	// operation stance, which blocks until a person answers the vault's
+	// unlock — and vault.unseal runs on the lane this handler's operation was
+	// holding a moment ago, so resolving inside the callback would wait for a
+	// dialog whose answer it was itself refusing ("Control plane busy"). The
+	// gate is released, then the material is asked for.
+	if h.refs != nil {
+		resolvedInputs, resolveErr := capability.ResolveSnapshotSecrets(sendCtx, inputs, h.refs)
+		if resolveErr != nil {
+			// The same division the auth block below draws: a reference with
+			// no answer is a thing that happened to somebody who pressed
+			// Send, so it is a run at `compose` naming the reference. Any
+			// other failure is the caller's to fix and stays an error.
+			if composeRefusal(resolveErr) {
+				_ = h.r.TryResult(req.ID, mustMarshal(wireExchange(
+					apisend.Unsent(inputs.Request, apisend.PhaseCompose, resolveErr),
+					inputs.Environment, inputs.Route)))
+				return
+			}
+			_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(resolveErr), Message: resolveErr.Error()})
+			return
+		}
+		inputs = resolvedInputs
+	}
+
 	// The route comes off the environment the snapshot read, in the same
 	// record as the address it substituted (§6.5) — so a request cannot go
 	// out at the production address around its bastion. A route this build
@@ -390,26 +411,12 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 		return
 	}
 
-	// The already-SUBSTITUTED auth text becomes a header HERE — outside the
-	// gate, and before the dial. The lookup is gone: since nocx-6hg2w.20
-	// the auth is text like every other field, resolved inside
-	// apicoll.Substitute at the snapshot, and there is exactly ONE
-	// resolver. What Apply still needs is the caller's knowledge of which
-	// auth FIELD was answered by the binding document (inputs.AuthSecrets):
-	// a variable-sourced credential reaches Send as a NAMED SECRET or it
-	// would ride the raw diagnostic in the clear (§11.2). A LITERAL the
-	// person typed places nothing and is shown — the decision recorded in
-	// nocx-tg9l8.
-	//
-	// The snapshot computed that fact field-wise, from the FILE's text
-	// against the names the binding answered — never from the resolved
-	// VALUE — so a literal that happens to equal a vault value is still not
-	// elided, which is the point of answering by construction.
-	sending, used, err := apisend.Apply(inputs.Request, inputs.AuthSecrets)
-	// The values the SUBSTITUTION placed are beside the one the auth block
-	// placed; both are handed to the sender for the same reason and end in
-	// the same place: it locates them in the text it composes and elides
-	// them, so the raw view shows a chip where a token went (§11.2).
+	// Auth text is ordinary request text: the snapshot resolved collection
+	// variables under the gate and the pass above resolved vault references
+	// after it. Secret placements are appended below so diagnostics elide
+	// the bytes.
+	var authSecrets apisend.SecretSource
+	sending, used, err := apisend.Apply(inputs.Request, authSecrets)
 	if err != nil {
 		// The SAME division as the snapshot's above: an auth block that
 		// cannot become a header — a scheme chosen with an EMPTY
@@ -512,7 +519,7 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 // is the line the epic drew and this predicate keeps in one place rather
 // than at each of the two call sites.
 func composeRefusal(err error) bool {
-	return errors.Is(err, apicoll.ErrUnresolvedVariable) || errors.Is(err, apicoll.ErrSecretShadowed)
+	return errors.Is(err, apicoll.ErrUnresolvedVariable)
 }
 
 // handleCancel is api.request.cancel: stop the exchange running under this
@@ -544,73 +551,6 @@ func (h apiCollectionHandlers) handleCancel(_ context.Context, req jsonrpcReques
 	// outcome "stopped" — two methods reporting one exchange's end would be
 	// two accounts of it (contracts/api.request.cancel.schema.json).
 	_ = h.r.TryResult(req.ID, mustMarshal(apiEmptyResponse{}))
-}
-
-// handleBindSecret is api.environment.bindSecret: give a secret variable its
-// value.
-//
-// THIS IS THE ONE api.* METHOD THAT CARRIES A CREDENTIAL INBOUND, and the
-// shape is written around that. Three properties, each with what it stops:
-//
-//  1. THE VALUE APPEARS IN NO MESSAGE THIS FUNCTION CAN PRODUCE. Every
-//     refusal below names the variable, the environment or the handle —
-//     never `p.Value`. An error is written to a log the person did not
-//     choose, and a credential in one is a credential leaked (§11 states
-//     the same rule for the diagnostic).
-//  2. TWO OPERATIONS, NOT ONE. The collection operation derives the binding
-//     key — the collection's root and the environment's NAME, read out of
-//     the file, which is what the READ half is keyed by — and the binding
-//     operation writes the vault under [vault, api], the same pair
-//     api.import.postman holds, so the two writers of the binding document
-//     exclude each other.
-//  3. NOTHING GOES INTO THE COLLECTION FOLDER. The environment file is not
-//     rewritten here at all: it declares the variable's NAME, which the
-//     editor's own save put there, and there is no field in that format a
-//     value could be written into (design §8).
-func (h apiCollectionHandlers) handleBindSecret(ctx context.Context, req jsonrpcRequest) {
-	var p apiEnvironmentBindSecretParams
-	if !h.decode(req, &p) {
-		return
-	}
-
-	// 1. The key, under the collection's own gate.
-	var collection, environment string
-	derived := false
-	err := h.op.Run(ctx, func(_ context.Context, svc capability.APICollectionService) error {
-		root, name, keyErr := svc.BindingKeyFor(apicoll.HandleID(p.Handle), p.RelPath)
-		if keyErr != nil {
-			h.fail(req, keyErr)
-			return nil
-		}
-		collection, environment = root, name
-		derived = true
-		return nil
-	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
-		return
-	}
-	if !derived {
-		return // the callback has already answered
-	}
-
-	// 2. The value, under the vault's.
-	err = h.bindOp.Run(ctx, func(ctx context.Context, svc capability.APIBindingService) error {
-		bindErr := svc.BindSecret(ctx, apibind.Key{
-			Collection:  collection,
-			Environment: environment,
-			Variable:    p.Variable,
-		}, []byte(p.Value))
-		if bindErr != nil {
-			h.fail(req, bindErr)
-			return nil
-		}
-		_ = h.r.TryResult(req.ID, mustMarshal(apiEmptyResponse{}))
-		return nil
-	})
-	if err != nil {
-		answerOperationRefusal(h.r, req, err)
-	}
 }
 
 // decode reads the method's params and answers -32602 itself when they will
@@ -645,14 +585,74 @@ func (h apiImportHandlers) handlePostman(ctx context.Context, req jsonrpcRequest
 			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: msg})
 			return nil
 		}
-		// One import, three ways in, and the choice is already made: the
+		// One import, four ways in, and the choice is already made: the
 		// validator refused several-and-none, so exactly one of these is
-		// set and there is no precedence rule here to disagree with it.
+		// selected.
 		var (
 			unsup []apiimport.Unsupported
 			err   error
 		)
 		switch {
+		case p.ArchiveBytes != "":
+			archive, decodeErr := base64.StdEncoding.DecodeString(p.ArchiveBytes)
+			if decodeErr != nil {
+				_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "archiveBytes must be base64"})
+				return nil
+			}
+			// Keep the decoded-size check beside the capability call as a
+			// defense-in-depth guard if validation is ever reused incorrectly.
+			if len(archive) > apiimport.MaxDocumentBytes {
+				_ = h.r.TryError(req.ID, RPCError{
+					Code:    -32602,
+					Message: fmt.Sprintf("archiveBytes exceeds the %d-byte limit after base64 decoding", apiimport.MaxDocumentBytes),
+				})
+				return nil
+			}
+			if p.Preview {
+				documents, previewErr := svc.PreviewPostmanArchiveBytes(ctx, archive, p.Dest)
+				if previewErr != nil {
+					_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(previewErr), Message: previewErr.Error()})
+					return nil
+				}
+				_ = h.r.TryResult(req.ID, mustMarshal(apiImportPostmanResponse{
+					Unsupported: []apiUnsupportedWire{},
+					Documents:   wireArchiveDocuments(documents),
+				}))
+				return nil
+			}
+			results, importErr := svc.ImportPostmanArchiveBytes(ctx, archive, p.Dest)
+			if importErr != nil {
+				_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(importErr), Message: importErr.Error()})
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(apiImportPostmanResponse{
+				Unsupported: []apiUnsupportedWire{},
+				Documents:   wireArchiveImportResults(results),
+			}))
+			return nil
+		case p.Path != "" && strings.HasSuffix(strings.ToLower(p.Path), ".zip"):
+			if p.Preview {
+				documents, previewErr := svc.PreviewPostmanArchive(ctx, p.Path, p.Dest)
+				if previewErr != nil {
+					_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(previewErr), Message: previewErr.Error()})
+					return nil
+				}
+				_ = h.r.TryResult(req.ID, mustMarshal(apiImportPostmanResponse{
+					Unsupported: []apiUnsupportedWire{},
+					Documents:   wireArchiveDocuments(documents),
+				}))
+				return nil
+			}
+			results, importErr := svc.ImportPostmanArchive(ctx, p.Path, p.Dest)
+			if importErr != nil {
+				_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(importErr), Message: importErr.Error()})
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(apiImportPostmanResponse{
+				Unsupported: []apiUnsupportedWire{},
+				Documents:   wireArchiveImportResults(results),
+			}))
+			return nil
 		case p.URL != "":
 			unsup, err = svc.ImportPostmanURL(ctx, p.URL, storedRoute(p.Route), p.Dest)
 		case p.Document != "":
@@ -722,7 +722,9 @@ func apiMethodErrorCode(err error) int {
 		errors.Is(err, apicoll.ErrFolderExists),
 		errors.Is(err, apicoll.ErrFolderNotFound),
 		errors.Is(err, apicoll.ErrRequestExists),
-		errors.Is(err, capability.ErrImportNotAFile):
+		errors.Is(err, capability.ErrImportNotAFile),
+		errors.Is(err, apiimport.ErrInvalidArchive),
+		errors.Is(err, os.ErrNotExist):
 		return -32602
 	default:
 		return -32603
@@ -838,23 +840,6 @@ type apiRequestCancelParams struct {
 	Token string `json:"token"`
 }
 
-// apiEnvironmentBindSecretParams carries a credential INBOUND, which no
-// other params struct on this surface does.
-//
-// Value is the only field in the whole api.* wire format that holds one, and
-// it goes one way: in. Nothing echoes it, no result carries it, and the
-// binding document answers values only through apibind's own resolver, which
-// has no parameter an identifier could arrive through (design §8).
-//
-// The variable is named rather than addressed by index: a row's position in
-// an editor is not a name, and the binding key is a triple of names.
-type apiEnvironmentBindSecretParams struct {
-	Handle   string `json:"handle"`
-	RelPath  string `json:"relPath"`
-	Variable string `json:"variable"`
-	Value    string `json:"value"`
-}
-
 // apiEnvironmentParams addresses one environment file the way every other
 // api.* method addresses a file: the backend-held handle plus a path inside
 // it, never a root (§13.1).
@@ -875,34 +860,21 @@ type apiRequestWriteParams struct {
 	Request apiRequestWire `json:"request"`
 }
 
-// apiImportPostmanParams names the export THREE ways, and exactly one of
-// them may be given (validateAPIImportPostmanRaw).
+// apiImportPostmanParams names the export four ways, and exactly one of them
+// may be given (validateAPIImportPostmanRaw). `archiveBytes` is base64-encoded
+// ZIP content from a renderer that has bytes but whose backend may be remote.
 //
-// Path names a file on the machine running THIS process. In the desktop app
-// that is also the person's machine, which is why it reads naturally there;
-// reached over a forwarded port (`make dev-web` forwards both ports over
-// SSH) it names a file on the server, which is almost never the export a
-// person just downloaded. Document carries the export's bytes instead, and
-// bytes reach a backend wherever it runs.
-//
-// This is NOT ws_upload.go's R2 in reverse. R2 says the renderer may name an
-// upload's DESTINATION and may never name its SOURCE path, because a
-// renderer that could spell a backend path could have the backend read
-// ~/.ssh/id_ed25519 and send it somewhere. `path` here is an existing
-// parameter of an existing method — design §13.1's second and last path,
-// unchanged and not widened by this — and `document` names no path at all,
-// which is strictly the safer of the two routes rather than a new way to
-// spell a source.
+// Path names a file on the machine running this process. Document carries
+// UTF-8 export bytes. URL names a location the backend fetches. Route is
+// meaningful only with URL. Dest is the one folder shared by archive members.
 type apiImportPostmanParams struct {
-	Path     string `json:"path"`
-	Document string `json:"document"`
-	// URL is the third and most general source: the document is neither on
-	// the backend's disk nor in the renderer's hands, because it is behind a
-	// network the renderer may not be on. Route says how to reach it, and
-	// means nothing without it.
-	URL   string        `json:"url"`
-	Route *apiRouteWire `json:"route"`
-	Dest  string        `json:"dest"`
+	Path         string        `json:"path"`
+	Document     string        `json:"document"`
+	ArchiveBytes string        `json:"archiveBytes"`
+	URL          string        `json:"url"`
+	Route        *apiRouteWire `json:"route"`
+	Dest         string        `json:"dest"`
+	Preview      bool          `json:"preview"`
 }
 
 type apiImportCurlParams struct {
@@ -1058,29 +1030,15 @@ type apiEnvironmentReadResponse struct {
 	Environment apiEnvironmentWire `json:"environment"`
 }
 
-// apiEnvironmentWire is ONE environment whole: what it is called, what it
-// answers, which of its variables are secret by name, and how a request
+// apiEnvironmentWire is ONE environment whole: what it is called, which
+// values it carries (including opaque secret references), and how a request
 // under it gets there.
-//
-// It carries the values that apiEnvironmentRefWire deliberately does not,
-// and the difference is the question being asked. The listing names
-// environments so a person can CHOOSE one, and a copy of every address in
-// every environment would be a second truth beside the files (§6.4). This is
-// the editor's read of ONE file, taken at the moment it is opened for
-// editing and written straight back — so the copy lives exactly as long as
-// the ask that made it.
-//
-// SecretVars holds NAMES and never values, which is §8 restated in a field
-// list: there is no field here in which a secret or an identifier for one
-// can be spelled, so the wire cannot carry one in either direction.
 type apiEnvironmentWire struct {
 	Name string `json:"name"`
-	// Values is never nil — an environment that declares none is {}, because
+	// Values is never nil — an environment with no values is {}, because
 	// the renderer's first Object.entries on a null throws.
 	Values map[string]string `json:"values"`
-	// SecretVars is never nil — none is [].
-	SecretVars []string     `json:"secretVars"`
-	Route      apiRouteWire `json:"route"`
+	Route  apiRouteWire      `json:"route"`
 }
 
 // apiRouteWire is the environment's answer to "how do I get there" (§6.5).
@@ -1129,30 +1087,22 @@ func storedRoute(w *apiRouteWire) apicoll.Route {
 }
 
 // wireEnvironment renders one environment for the renderer, filling in the
-// two collections the stored form is allowed to omit. A file may leave
-// `values` and `secretVars` out entirely — `omitempty` is right for a file —
-// and null is not what a panel can iterate.
+// collection's optional values map. A reference remains opaque text.
 func wireEnvironment(env apicoll.Environment) apiEnvironmentWire {
 	values := env.Values
 	if values == nil {
 		values = map[string]string{}
 	}
-	secrets := env.SecretVars
-	if secrets == nil {
-		secrets = []string{}
-	}
 	return apiEnvironmentWire{
-		Name:       env.Name,
-		Values:     values,
-		SecretVars: secrets,
-		Route:      wireRoute(env.Route),
+		Name:   env.Name,
+		Values: values,
+		Route:  wireRoute(env.Route),
 	}
 }
 
 // storedEnvironment is the other direction: what the file will hold. The
-// empty map and the empty slice go back to nil so the stored form is the one
-// `omitempty` produces — the same normalisation storedRequest states, and
-// for the same reason: one canonical file whoever wrote it.
+// empty map goes back to nil so the stored form is the one `omitempty`
+// produces.
 func storedEnvironment(w apiEnvironmentWire) apicoll.Environment {
 	env := apicoll.Environment{
 		Name: w.Name,
@@ -1165,9 +1115,6 @@ func storedEnvironment(w apiEnvironmentWire) apicoll.Environment {
 	if len(w.Values) > 0 {
 		env.Values = w.Values
 	}
-	if len(w.SecretVars) > 0 {
-		env.SecretVars = w.SecretVars
-	}
 	return env
 }
 
@@ -1176,12 +1123,15 @@ type apiRequestReadResponse struct {
 }
 
 type apiRequestWire struct {
-	ID      string          `json:"id"`
-	Name    string          `json:"name"`
-	Method  string          `json:"method"`
-	URL     string          `json:"url"`
-	Headers []apiHeaderWire `json:"headers"`
-	Query   []apiParamWire  `json:"query"`
+	ID     string `json:"id"`
+	Name   string `json:"name"`
+	Method string `json:"method"`
+	URL    string `json:"url"`
+	// Environment is omitted for legacy requests that have never chosen.
+	// A present empty string is the explicit "no environment" choice.
+	Environment *string         `json:"environment,omitempty"`
+	Headers     []apiHeaderWire `json:"headers"`
+	Query       []apiParamWire  `json:"query"`
 	// Variables are the request's own. Never null on the wire, like every
 	// other list here: the file may omit the key — `omitempty` is right for
 	// a file — and the renderer's first .map on a null throws.
@@ -1210,10 +1160,8 @@ type apiBodyWire struct {
 
 // apiAuthWire is TEXT like every other field the wire carries: the token,
 // the password and the username are what the file holds — a literal the
-// person typed, or a `{{variable}}` reference — never an identifier for a
-// stored secret. Design §8 still holds: there is no syntax in which a file
-// names a secret, and the binding from a name to a stored value lives in
-// the binding document, nowhere in this request.
+// person typed, or an opaque `{{secret:secrow:…}}` reference. The value is
+// resolved only by the capability layer when the request is sent.
 type apiAuthWire struct {
 	Kind string `json:"kind"`
 	User string `json:"user"`
@@ -1395,6 +1343,13 @@ type apiTimingsWire struct {
 }
 
 type apiImportPostmanResponse struct {
+	Unsupported []apiUnsupportedWire                  `json:"unsupported"`
+	Documents   []apiImportPostmanArchiveDocumentWire `json:"documents,omitempty"`
+}
+
+type apiImportPostmanArchiveDocumentWire struct {
+	Kind        string               `json:"kind"`
+	Name        string               `json:"name"`
 	Unsupported []apiUnsupportedWire `json:"unsupported"`
 }
 
@@ -1574,15 +1529,16 @@ func wireRequest(r apicoll.Request) (apiRequestWire, error) {
 		return apiRequestWire{}, err
 	}
 	return apiRequestWire{
-		ID:        r.ID,
-		Name:      r.Name,
-		Method:    r.Method,
-		URL:       r.URL,
-		Headers:   wireHeaders(r.Headers),
-		Query:     wireParams(r.Query),
-		Variables: wireParams(r.Variables),
-		Auth:      apiAuthWire{Kind: authKind, User: r.Auth.User, Token: r.Auth.Token, Password: r.Auth.Password},
-		Body:      apiBodyWire{Kind: bodyKind, Text: r.Body.Text, FileRef: r.Body.FileRef},
+		ID:          r.ID,
+		Name:        r.Name,
+		Method:      r.Method,
+		URL:         r.URL,
+		Environment: r.Environment,
+		Headers:     wireHeaders(r.Headers),
+		Query:       wireParams(r.Query),
+		Variables:   wireParams(r.Variables),
+		Auth:        apiAuthWire{Kind: authKind, User: r.Auth.User, Token: r.Auth.Token, Password: r.Auth.Password},
+		Body:        apiBodyWire{Kind: bodyKind, Text: r.Body.Text, FileRef: r.Body.FileRef},
 	}, nil
 }
 
@@ -1601,15 +1557,16 @@ func storedRequest(r apiRequestWire) apicoll.Request {
 		variables = append(variables, apicoll.Param{Name: v.Name, Value: v.Value, Enabled: v.Enabled})
 	}
 	return apicoll.Request{
-		ID:        r.ID,
-		Name:      r.Name,
-		Method:    r.Method,
-		URL:       r.URL,
-		Headers:   headers,
-		Query:     query,
-		Variables: variables,
-		Body:      apicoll.Body{Kind: r.Body.Kind, Text: r.Body.Text, FileRef: r.Body.FileRef},
-		Auth:      apicoll.Auth{Kind: r.Auth.Kind, User: r.Auth.User, Token: r.Auth.Token, Password: r.Auth.Password},
+		ID:          r.ID,
+		Name:        r.Name,
+		Method:      r.Method,
+		URL:         r.URL,
+		Environment: r.Environment,
+		Headers:     headers,
+		Query:       query,
+		Variables:   variables,
+		Body:        apicoll.Body{Kind: r.Body.Kind, Text: r.Body.Text, FileRef: r.Body.FileRef},
+		Auth:        apicoll.Auth{Kind: r.Auth.Kind, User: r.Auth.User, Token: r.Auth.Token, Password: r.Auth.Password},
 	}
 }
 
@@ -1727,6 +1684,7 @@ const (
 	// of the refusal — its tokenizer caps the line at 1 MiB — and this is
 	// the wire-cost ceiling before the parse, at the same order of
 	// magnitude so nothing legitimate sits between them.
+
 	maxAPICurlLineRunes = 1 << 20
 	// maxAPIImportDocumentRunes bounds a Postman export carried INLINE, as
 	// the `document` parameter of api.import.postman. It is deliberately
@@ -1752,16 +1710,35 @@ const (
 	// for any identifier a caller might reasonably choose and far below
 	// anything that makes a map key expensive.
 	maxAPITokenRunes = 128
-	// maxAPISecretValueRunes bounds a secret value on its way in. Generous:
-	// a bearer token, a signed JWT and a PEM private key all fit, and the
-	// bound is a wire-cost ceiling rather than an opinion about what a
-	// credential may look like.
-	maxAPISecretValueRunes = 1 << 14
 	// maxAPIRequestRows bounds how many header and query rows one request
 	// may carry. Each row is bounded individually; this bounds the count,
 	// which is the other half of the per-call work bound.
 	maxAPIRequestRows = 512
 )
+
+func wireArchiveImportResults(results []apiimport.ArchiveImportResult) []apiImportPostmanArchiveDocumentWire {
+	out := make([]apiImportPostmanArchiveDocumentWire, 0, len(results))
+	for _, result := range results {
+		out = append(out, apiImportPostmanArchiveDocumentWire{
+			Kind:        string(result.Kind),
+			Name:        result.Name,
+			Unsupported: wireUnsupported(result.Unsupported),
+		})
+	}
+	return out
+}
+
+func wireArchiveDocuments(documents []apiimport.ArchiveDocument) []apiImportPostmanArchiveDocumentWire {
+	out := make([]apiImportPostmanArchiveDocumentWire, 0, len(documents))
+	for _, document := range documents {
+		out = append(out, apiImportPostmanArchiveDocumentWire{
+			Kind:        string(document.Kind),
+			Name:        document.Name,
+			Unsupported: []apiUnsupportedWire{},
+		})
+	}
+	return out
+}
 
 // decodeAPIParams decodes an api.* params object STRICTLY: a field this
 // method does not declare is REFUSED, not ignored.
@@ -1926,43 +1903,6 @@ func validateAPISendToken(token string) string {
 	return boundedRunes("token", token, maxAPITokenRunes)
 }
 
-// validateAPIEnvironmentBindSecretRaw bounds the one params object that
-// carries a credential.
-//
-// The VALUE is bounded and never otherwise inspected: its shape is the
-// user's business and a validator that said anything about it — a pattern, a
-// character class — would be this layer forming an opinion about a
-// credential. An empty one is refused, because "bind nothing" is not a
-// gesture anybody makes and would leave a variable resolving to the empty
-// string, which is the silent degrade §6.5 exists against.
-func validateAPIEnvironmentBindSecretRaw(raw json.RawMessage) string {
-	var p apiEnvironmentBindSecretParams
-	if msg := decodeAPIParams(raw, &p); msg != "" {
-		return msg
-	}
-	if msg := validateAPIHandle(p.Handle); msg != "" {
-		return msg
-	}
-	if msg := validateAPIRelPath(p.RelPath); msg != "" {
-		return msg
-	}
-	if p.Variable == "" {
-		return "variable is required"
-	}
-	if msg := boundedRunes("variable", p.Variable, maxConfigNameRunes); msg != "" {
-		return msg
-	}
-	if p.Value == "" {
-		return "value is required"
-	}
-	// The message says the LIMIT and never the length it saw, which would be
-	// a fact about the credential.
-	if utf8.RuneCountInString(p.Value) > maxAPISecretValueRunes {
-		return fmt.Sprintf("value exceeds %d characters", maxAPISecretValueRunes)
-	}
-	return ""
-}
-
 func validateAPIEnvironmentRaw(raw json.RawMessage) string {
 	var p apiEnvironmentParams
 	if msg := decodeAPIParams(raw, &p); msg != "" {
@@ -2004,14 +1944,6 @@ func validateAPIEnvironmentBody(e apiEnvironmentWire) string {
 			return msg
 		}
 		if msg := boundedRunes("environment.values.value", value, maxHeaderValueRunes); msg != "" {
-			return msg
-		}
-	}
-	if len(e.SecretVars) > maxAPIRequestRows {
-		return fmt.Sprintf("environment.secretVars exceeds %d rows", maxAPIRequestRows)
-	}
-	for _, name := range e.SecretVars {
-		if msg := boundedRunes("environment.secretVars", name, maxHeaderNameRunes); msg != "" {
 			return msg
 		}
 	}
@@ -2140,38 +2072,67 @@ func validateAPIRequestBody(r apiRequestWire) string {
 // validateAPIImportPostmanRaw checks the import's two halves: WHICH export,
 // and where it goes.
 //
-// The export is named by `path`, by `document` or by `url`, and several or
-// none is refused BY NAME, naming all three. A precedence rule would be the
-// cheaper code and the worse answer: a caller that sent two would have one
-// of them silently do nothing, and would never learn which one the server
-// ignored. The same reasoning is why `route` beside anything but `url` is
-// refused rather than dropped — a parameter that quietly does nothing is
+// The export is named by `path`, by `document`, by `archiveBytes` or by `url`,
+// and several or none is refused BY NAME, naming all four. A precedence rule
+// would be the cheaper code and the worse answer: a caller that sent two would
+// have one of them silently do nothing, and would never learn which one the
+// server ignored. The same reasoning is why `route` beside anything but `url`
+// is refused rather than dropped — a parameter that quietly does nothing is
 // worse than an error, because the caller believes it worked.
 //
 // There is deliberately NO length or shape check on `url` here. apifetch
 // refuses a scheme it cannot GET by name and before any dial, and a second
 // URL parser in the validator would be a second answer to "is this a URL",
 // agreeing with the first everywhere anyone looked.
+// validateAPIImportArchiveBytes performs the non-allocating size half of
+// archive validation. The handler still owns the import bytes; this helper
+// only derives the decoded-size bound from the encoded length.
+func validateAPIImportArchiveBytes(encoded string) string {
+	const limit = apiimport.MaxDocumentBytes
+	maxEncoded := base64.StdEncoding.EncodedLen(limit)
+	if len(encoded) > maxEncoded {
+		return fmt.Sprintf("archiveBytes exceeds the %d-byte limit after base64 decoding", limit)
+	}
+	if len(encoded)%4 != 0 {
+		return ""
+	}
+	padding := 0
+	if strings.HasSuffix(encoded, "=") {
+		padding++
+	}
+	if strings.HasSuffix(encoded, "==") {
+		padding++
+	}
+	decoded := len(encoded)/4*3 - padding
+	if decoded > limit {
+		return fmt.Sprintf("archiveBytes exceeds the %d-byte limit after base64 decoding", limit)
+	}
+	return ""
+}
+
 func validateAPIImportPostmanRaw(raw json.RawMessage) string {
 	var p apiImportPostmanParams
 	if msg := decodeAPIParams(raw, &p); msg != "" {
 		return msg
 	}
 	named := 0
-	for _, given := range []bool{p.Path != "", p.Document != "", p.URL != ""} {
+	for _, given := range []bool{p.Path != "", p.Document != "", p.ArchiveBytes != "", p.URL != ""} {
 		if given {
 			named++
 		}
 	}
 	switch {
 	case named > 1:
-		return "path, document and url are three routes to one import — path names the export on the machine running nocx, document carries its bytes, url says where to fetch it; give one of them, not several"
+		return "path, document, archiveBytes and url are four routes to one import — give one of them, not several"
 	case named == 0:
-		return "an import needs the export: path, naming it on the machine running nocx, document, carrying its bytes, or url, naming where to fetch it"
+		return "an import needs the export: path, document, archiveBytes or url"
+	}
+	if p.Preview && p.ArchiveBytes == "" && !strings.HasSuffix(strings.ToLower(p.Path), ".zip") {
+		return "preview is only available for a Postman archive"
 	}
 	if p.Route != nil {
 		if p.URL == "" {
-			return "route says how to REACH a url and means nothing beside path or document; give it with url or leave it out"
+			return "route says how to REACH a url and means nothing beside path, document or archiveBytes; give it with url or leave it out"
 		}
 		if !slices.Contains(apiRouteKinds, p.Route.Kind) {
 			return fmt.Sprintf("route.kind must be one of %v", apiRouteKinds)
@@ -2182,6 +2143,19 @@ func validateAPIImportPostmanRaw(raw json.RawMessage) string {
 			return fmt.Sprintf(
 				"document exceeds %d characters; an export this large is imported with path, which names the file on the machine running nocx and sends no bytes over this socket",
 				maxAPIImportDocumentRunes)
+		}
+	}
+	if msg := validateAPIImportArchiveBytes(p.ArchiveBytes); msg != "" {
+		return msg
+	}
+	if p.ArchiveBytes != "" {
+		// The validator must reject malformed params before entering the
+		// handler, but paramsValidator returns only a refusal string, not
+		// parsed bytes. The bounded syntax check here therefore precedes the
+		// validator's required decode; the handler decodes once more because
+		// it needs the bytes for the capability call.
+		if _, err := base64.StdEncoding.DecodeString(p.ArchiveBytes); err != nil {
+			return "archiveBytes must be base64"
 		}
 	}
 	if p.Path != "" {
@@ -2208,64 +2182,29 @@ func validateAPIImportCurlRaw(raw json.RawMessage) string {
 
 // ── registration ─────────────────────────────────────────────────────────
 
-// apiSpecs declares the api.* control methods. The two operations are built
-// here from the wired seams (composition root for this domain).
-//
-// Three availability gates, because three things wire independently: the
-// collection service backs api.collections.* and api.request.read/write; the
-// sender additionally backs api.request.send; the binding store additionally
-// backs api.import.postman, which answers -32601 without one rather than
-// pretending it can put a secret somewhere. api.import.curl needs none of
-// the three: it converts a line into a value.
-//
-// The binding document's READ half (s.apiVariables) is NOT a fourth gate.
-// api.request.send answers with or without it; what changes is whether a
-// request whose auth names a variable can resolve it. Without it every such
-// send is refused as an unbound variable — which is the same answer a
-// misspelled variable gets, and an honest one — so making the whole method
-// disappear would report a missing binding store as a missing send.
-func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.Admission) []methodSpec {
+// apiSpecs declares the api.* control methods. The collection and sender
+// seams are independently wired; importing is available without either
+// because it writes the chosen destination through apiimport's filesystem.
+func (s *WSServer) apiSpecs(lane control.Admission, apiGate control.Admission) []methodSpec {
 	collWired := s.apiCollections != nil
 	sendWired := collWired && s.apiSender != nil
-	importWired := s.apiBindings != nil
+	importWired := true
 
 	var collOp capability.APICollectionOperation
 	if collWired {
-		collOp = capability.NewAPICollectionOperation(apiGate, lane, s.apiCollections, s.apiVariables)
+		collOp = capability.NewAPICollectionOperation(apiGate, lane, s.apiCollections)
 	}
-	var importOp capability.APIImportOperation
-	if importWired {
-		// s.apiFetch may be nil, and that is a build without the URL
-		// entrance rather than a broken one: the other two entrances are
-		// untouched and `url` is refused by name.
-		importOp = capability.NewAPIImportOperation(vaultGate, apiGate, lane, apiimport.NewOSFS(), s.apiBindings, s.apiFetch)
-	}
-	// The binding write shares the import's gates and its store: both put a
-	// value in the vault and record it in the one binding document, so they
-	// must exclude each other, and the vault gate is what makes them.
-	var bindOp capability.APIBindingOperation
-	if importWired {
-		bindOp = capability.NewAPIBindingOperation(vaultGate, apiGate, lane, s.apiBindings)
-	}
+	importOp := capability.NewAPIImportOperation(apiGate, lane, apiimport.NewOSFS(), s.apiFetch)
 
 	sub := s.operationQueue("api")
-	// api.request.cancel gets a submission OF ITS OWN, and that is the
-	// point of it rather than tidiness. The api queue is what running sends
-	// occupy, and a Stop that queued behind them would be a Stop that could
-	// not reach the exchange it exists to end — worst exactly when a panel
-	// is busiest. It touches no store, so it shares nothing that would make
-	// a second queue unsafe.
 	cancelSub := s.operationQueue("api-cancel")
 	cancels := newSendCancels()
 	collAvailable := func() bool { return collWired }
 	collHandlers := func(r Responder) apiCollectionHandlers {
 		return apiCollectionHandlers{
-			op: collOp, sender: s.apiSender, values: s.apiVariables, bindOp: bindOp, r: r,
+			op: collOp, sender: s.apiSender, refs: s.apiSecretRefs, r: r,
 		}
 	}
-	// The sending half additionally needs to know WHICH WINDOW is asking:
-	// a token is a name the renderer chose, and two windows may choose the
-	// same one, so the registry is keyed by the connection as well.
 	sendHandlers := func(w *wsConn, r Responder) apiCollectionHandlers {
 		h := collHandlers(r)
 		h.cancels = cancels
@@ -2302,14 +2241,6 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
 		}), collAvailable, apiCollectionsUnavailable),
-		// Available only where the binding store is, and refused by name
-		// otherwise: a build with nowhere to put a value must not accept
-		// one. It is the same gate api.import.postman answers behind, and
-		// for the same reason.
-		whenAvailable(regResponder(sub, "api.environment.bindSecret", params(validateAPIEnvironmentBindSecretRaw), func(r Responder) handlerFunc {
-			h := collHandlers(r)
-			return func(ctx context.Context, req jsonrpcRequest) { h.handleBindSecret(ctx, req) }
-		}), func() bool { return collWired && importWired }, "api collection bindings not available"),
 		whenAvailable(regResponder(sub, "api.request.read", params(validateAPIRequestRaw), func(r Responder) handlerFunc {
 			h := collHandlers(r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleMethod(ctx, req) }
@@ -2337,7 +2268,7 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.A
 		whenAvailable(regResponder(sub, "api.import.postman", params(validateAPIImportPostmanRaw), func(r Responder) handlerFunc {
 			h := apiImportHandlers{op: importOp, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handlePostman(ctx, req) }
-		}), func() bool { return importWired }, "api collection bindings not available"),
+		}), func() bool { return importWired }, "api import not available"),
 		regResponder(sub, "api.import.curl", params(validateAPIImportCurlRaw), func(r Responder) handlerFunc {
 			h := apiImportHandlers{r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleCurl(ctx, req) }

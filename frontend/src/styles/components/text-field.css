@@ -33,6 +33,14 @@
   padding-right: 84px;
 }
 
+.ui-text-field__control[data-action='true'] .ui-text-field__input {
+  padding-right: 40px;
+}
+
+.ui-text-field__control[data-trailing='true'][data-action='true'] .ui-text-field__input {
+  padding-right: 124px;
+}
+
 /* A unit is not a trailing slot. 84px is the room two icon buttons need,
    and lending it to a three-letter word made the value sit a long way from
    it and the box wider than it had any reason to be — and, because the

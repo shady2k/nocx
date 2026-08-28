@@ -212,6 +212,7 @@ describe('ApiStore — the request in the form', () => {
           from: '',
           overridden: false,
           refused: '',
+          secret: false,
         },
       ],
     }
@@ -224,6 +225,7 @@ describe('ApiStore — the request in the form', () => {
           from: 'users',
           overridden: false,
           refused: '',
+          secret: false,
         },
       ],
     }
@@ -836,21 +838,20 @@ describe('ApiStore — the environment', () => {
 
   it("a person's choice of NONE survives the next listing", async () => {
     // The interval, both ends. It opens the moment setEnvironment is called
-    // and closes when the collection is closed — not when the panel re-reads
-    // the folder, which it does on every change on disk. A default that
-    // re-applied itself on a refresh would silently put an environment back
-    // under a person who deliberately took it off, and they would find out
-    // by watching a request reach it.
+    // and closes when the request is closed — not when the collection re-lists
+    // on a disk change. A default that re-applied itself on a refresh would
+    // silently put an environment back under a person who deliberately took
+    // it off, and they would find out by watching a request reach it.
     const send = vi.fn().mockResolvedValue(sendFixture())
     const { store } = storeWith({ ...withEnvironments([DEV_ENV]), sendRequest: send })
     await store.refresh()
+    await store.openRequest(HANDLE, 'users/create.json')
     expect(store.activeEnvironment()).toBe(DEV_ENV.relPath)
 
     store.setEnvironment('')
     await store.refresh()
     expect(store.activeEnvironment()).toBe('')
 
-    await store.openRequest(HANDLE, 'users/create.json')
     await store.send()
     expect(send).toHaveBeenCalledWith(HANDLE, 'users/create.json', '', expect.any(String))
   })
@@ -858,6 +859,7 @@ describe('ApiStore — the environment', () => {
   it('several environments choose nothing until somebody does', async () => {
     const { store } = storeWith(withEnvironments([DEV_ENV, PROD_ENV]))
     await store.refresh()
+    await store.openRequest(HANDLE, 'users/create.json')
     expect(store.activeEnvironment()).toBe('')
     expect(store.environments().map((e) => e.name)).toEqual([DEV_ENV.name, PROD_ENV.name])
 
@@ -907,6 +909,93 @@ describe('ApiStore — the environment', () => {
     // environment: nothing came back, so nothing confirmed one.
     expect(store.runs()[0].error).toContain('connection refused')
     expect(store.runs()[0].environment).toBe('')
+  })
+  it('persists a choice per request and restores it without sharing siblings', async () => {
+    const disk = new Map<string, ApiRequest>()
+    const readRequest = vi.fn((_handle: string, relPath: string) =>
+      Promise.resolve({
+        request: structuredClone(
+          disk.get(relPath) ?? {
+            ...REQUEST,
+            id: relPath,
+          },
+        ),
+      }),
+    )
+    const writeRequest = vi.fn((_handle: string, relPath: string, request: ApiRequest) => {
+      disk.set(relPath, structuredClone(request))
+      return Promise.resolve({ ok: true as const })
+    })
+    const services = {
+      ...withEnvironments([DEV_ENV, PROD_ENV]),
+      readRequest,
+      writeRequest,
+      sendRequest: vi.fn().mockResolvedValue(sendFixture()),
+    }
+    const first = storeWith(services, { idleMs: 0 }).store
+    await first.refresh()
+    await first.openRequest(HANDLE, 'users/create.json')
+    first.setEnvironment(PROD_ENV.relPath)
+    await vi.waitFor(() =>
+      expect(disk.get('users/create.json')?.environment).toBe(PROD_ENV.relPath),
+    )
+
+    await first.openRequest(HANDLE, 'users/list.json')
+    expect(first.activeEnvironment()).toBe('')
+    first.setEnvironment(DEV_ENV.relPath)
+    await vi.waitFor(() => expect(disk.get('users/list.json')?.environment).toBe(DEV_ENV.relPath))
+
+    const second = storeWith(services, { idleMs: 0 }).store
+    await second.refresh()
+    await second.openRequest(HANDLE, 'users/create.json')
+    expect(second.activeEnvironment()).toBe(PROD_ENV.relPath)
+    await second.openRequest(HANDLE, 'users/list.json')
+    expect(second.activeEnvironment()).toBe(DEV_ENV.relPath)
+  })
+  it('serializes environment writes and never marks an older snapshot saved', async () => {
+    const pending: Array<{ request: ApiRequest; release: () => void }> = []
+    const writeRequest = vi.fn(async (_handle: string, _relPath: string, request: ApiRequest) => {
+      const snapshot = structuredClone(request)
+      await new Promise<{ ok: true }>((resolve) => {
+        pending.push({ request: snapshot, release: () => resolve({ ok: true }) })
+      })
+      return { ok: true as const }
+    })
+    const store = storeWith({
+      ...withEnvironments([DEV_ENV, PROD_ENV]),
+      writeRequest,
+    }).store
+    await store.refresh()
+    await store.openRequest(HANDLE, 'users/create.json')
+
+    store.setEnvironment(PROD_ENV.relPath)
+    await vi.waitFor(() => expect(pending).toHaveLength(1))
+    store.setEnvironment(DEV_ENV.relPath)
+    await Promise.resolve()
+    expect(pending).toHaveLength(1)
+    expect(store.unsavedWork()).toBe(true)
+
+    pending[0].release()
+    await vi.waitFor(() => expect(pending).toHaveLength(2))
+    expect(pending[0].request.environment).toBe(PROD_ENV.relPath)
+    expect(pending[1].request.environment).toBe(DEV_ENV.relPath)
+    pending[1].release()
+    await vi.waitFor(() => expect(store.unsavedWork()).toBe(false))
+  })
+
+  it('shows an environment persistence refusal and keeps the choice unsaved', async () => {
+    const writeRequest = vi.fn().mockRejectedValue(new Error('disk full'))
+    const store = storeWith({
+      ...withEnvironments([DEV_ENV, PROD_ENV]),
+      writeRequest,
+    }).store
+    await store.refresh()
+    await store.openRequest(HANDLE, 'users/create.json')
+
+    store.setEnvironment(PROD_ENV.relPath)
+    await vi.waitFor(() => expect(store.error()).toContain('disk full'))
+    expect(store.activeEnvironment()).toBe(PROD_ENV.relPath)
+    expect(store.unsavedWork()).toBe(true)
   })
 })
 

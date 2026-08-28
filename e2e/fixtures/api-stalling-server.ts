@@ -9,13 +9,12 @@
  * and either way it would be reporting the machine. Here the exchange is
  * outstanding because this server is holding it, for exactly as long as the
  * spec chooses, so every wait in the spec is a wait on an observable state.
- *
- * IT LIVES IN THE SPEC's PROCESS, like e2e/fixtures/api-test-server.ts and
- * e2e/fake-openai.ts, and for the same reason those two state: the process
- * that dials it is the DEVHARNESS the spec starts, a separate binary, so the
- * server has to belong to the Playwright worker that shares a network
- * namespace with it. It binds 127.0.0.1 on port 0 and reads the port back off
- * the listener, so two workers cannot collide on a number somebody chose.
+ * IT LIVES IN THE SPEC's PROCESS, like the other API fixture servers and
+ * `e2e/fake-openai.ts`, and for the same reason: the process that dials it is
+ * the DEVHARNESS the spec starts, a separate binary, so the server has to
+ * belong to the Playwright worker that shares a network namespace with it.
+ * It binds 127.0.0.1 on port 0 and reads the port back off the listener, so
+ * two workers cannot collide on a number somebody chose.
  *
  * It also reports what happened to the connections it held, which is the
  * other half of a Stop: a run that came back "stopped" while the request was

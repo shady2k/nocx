@@ -1471,3 +1471,54 @@ describe('accepting a snippet row (nocx-nlhe)', () => {
     expect(dropdown.root.querySelectorAll('.ui-floating-panel__row').length).toBe(1)
   })
 })
+
+describe('hovering a row does not rebuild the list under the cursor', () => {
+  /** Row nodes by identity. A re-render replaces every one of them; `toEqual`
+   *  would deep-compare two structurally identical divs as equal and pass
+   *  through the very re-render this describes. */
+  const rowNodes = (dropdown: CompletionDropdown): HTMLElement[] => [
+    ...dropdown.root.querySelectorAll<HTMLElement>('.ui-floating-panel__row'),
+  ]
+  const same = (a: HTMLElement[], b: HTMLElement[]): boolean =>
+    a.length === b.length && a.every((el, i) => el === b[i])
+
+  it('a hover onto the already-selected row replaces no node', async () => {
+    const { dropdown, controller } = rig({
+      providers: [
+        instantProvider('a', () => [cand({ id: 'git status' }), cand({ id: 'git stash' })]),
+      ],
+    })
+    controller.open()
+    await flush()
+    const before = rowNodes(dropdown)
+    expect(before.length).toBe(2)
+
+    // What the browser reports the instant a fresh node appears under a
+    // pointer that has not moved. Without the guard this re-rendered, the new
+    // node reported itself again, and the list rebuilt itself for as long as
+    // the pointer rested on it — which also lets a row vanish under a press
+    // that began on it (nocx-vzdna).
+    controller.select(0)
+    controller.select(0)
+    expect(same(rowNodes(dropdown), before)).toBe(true)
+  })
+
+  it('a hover that moves the selection still re-renders, exactly once', async () => {
+    const { dropdown, controller } = rig({
+      providers: [
+        instantProvider('a', () => [cand({ id: 'git status' }), cand({ id: 'git stash' })]),
+      ],
+    })
+    controller.open()
+    await flush()
+    const before = rowNodes(dropdown)
+
+    controller.select(1)
+    const after = rowNodes(dropdown)
+    expect(same(after, before)).toBe(false)
+    expect(after[1].dataset.selected).toBe('true')
+
+    controller.select(1)
+    expect(same(rowNodes(dropdown), after)).toBe(true)
+  })
+})

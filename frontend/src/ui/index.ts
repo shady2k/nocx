@@ -3,8 +3,18 @@ export { Caption, type CaptionProps } from './caption'
 export { Checkbox, type CheckboxProps } from './checkbox'
 export { IconButton, type IconButtonSize } from './icon-button'
 export { Select, type SelectProps, type SelectOption } from './select'
-export { SuggestionField, type SuggestionFieldProps } from './suggestion-field'
-export { TextField, type TextFieldProps } from './text-field'
+export {
+  SuggestionField,
+  type SuggestionFieldProps,
+  type SuggestionOption,
+} from './suggestion-field'
+export {
+  TextField,
+  type TextFieldAction,
+  type TextFieldMark,
+  type TextFieldProps,
+  type TextFieldSelection,
+} from './text-field'
 export {
   SearchField,
   createSearchFieldDisplay,
@@ -78,3 +88,4 @@ export {
 export { EditableRowList, type EditableRowListProps } from './row-list'
 export { ToggleMatrix, type ToggleMatrixAxis, type ToggleMatrixProps } from './toggle-matrix'
 export { CompletionDropdown, type CompletionDropdownCallbacks } from './completion-dropdown'
+export { DumpPanel, mountDumpPanel, type DumpPanelProps } from './dump-panel'

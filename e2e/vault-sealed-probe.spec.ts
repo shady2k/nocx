@@ -28,6 +28,7 @@ import { tmpdir } from 'node:os'
 import { VaultBackend, bindEndpoint, settingsReady } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
+import { fieldChip } from './secret-field'
 
 const devharnessBin = () => readStand().devharness
 
@@ -145,11 +146,11 @@ async function openEndpointEditor(page: Page): Promise<void> {
 }
 
 /** Open the editor over a LOCKED vault and decline the unlock it raises.
- *  This endpoint's key IS a vault row, so the form opens on "Use existing
- *  secret" with a picker on screen — and a picker renders secret NAMES,
- *  which is a request for vault data (ADR-0032, nocx-5ratm). The test below
- *  owns the assertion that it asks; here the point is to get past it, so
- *  what follows measures the Test button and nothing else. */
+ *  This endpoint's key IS a vault row, so the form opens with the key field
+ *  HOLDING that row's reference — and a reference has to be drawn as the
+ *  secret's NAME, which is a request for vault data (ADR-0032, nocx-5ratm).
+ *  The test below owns the assertion that it asks; here the point is to get
+ *  past it, so what follows measures the Test button and nothing else. */
 async function openEndpointEditorDecliningTheUnlock(page: Page): Promise<void> {
   await openEndpointEditor(page)
   const unlock = unlockSheet(page)
@@ -195,12 +196,12 @@ test('a bound key asks the vault as the editor opens, and is then named (nocx-5r
   await lockVault(page)
   await openAIEndpoints(page)
 
-  // The picker itself asks: it has to render the NAME of a secret, which
-  // only the vault can answer, and this endpoint's key is a bound row so the
-  // form opens with the picker already on screen. Before this, the editor
-  // read the vault's state, decided not to ask, and showed the person the
-  // row handle — `secrow:` plus 32 hex — where the name of their own key
-  // belongs, with no way to tell why.
+  // The BOUND FIELD itself asks: it has to render the NAME of a secret,
+  // which only the vault can answer, and this endpoint's key is a bound row
+  // so the form opens holding its reference. Before this, the editor read the
+  // vault's state, decided not to ask, and showed the person the row handle —
+  // `secrow:` plus 32 hex — where the name of their own key belongs, with no
+  // way to tell why.
   await openEndpointEditor(page)
   const unlock = unlockSheet(page)
   await expect(unlock).toBeVisible({ timeout: 10_000 })
@@ -211,13 +212,38 @@ test('a bound key asks the vault as the editor opens, and is then named (nocx-5r
 
   // The endpoint was saved with a typed key, so the vault holds it under the
   // name the mint gave it (capability/config.go endpointKeyName), and the
-  // editor opens on "Use existing secret" with that row bound.
+  // editor opens with the key field holding that row's reference.
+  //
+  // The name used to be the bound combobox's DOM value; the control is gone
+  // (nocx-3o0ed.4) and the field's value IS the opaque reference, so the
+  // name-not-handle pair moves onto the chip painted over it: the chip says
+  // the name, and `secrow:` appears nowhere a person reads.
   const dialog = page.getByRole('dialog').filter({ hasText: 'Edit Endpoint' })
-  const picker = dialog.locator('select').first()
-  await expect(picker).toHaveValue(/^secrow:/)
-  await expect(picker.locator('option:checked')).toHaveText(`${endpointName} API key`, {
-    timeout: 10_000,
-  })
+  await expect(dialog).toBeVisible()
+  const keyField = dialog.locator('#endpoint-key')
+  await expect(fieldChip(keyField)).toHaveText(`${endpointName} API key`, { timeout: 10_000 })
+  await expect(keyField).toHaveValue(/^\{\{secret:.+\}\}$/)
+  await expect(dialog).not.toContainText('secrow:')
+  // The surface never exposes the opaque handle, so the probe is the
+  // surviving proof that the named row still resolves to the endpoint key.
+  const probeBase = fake.requests().length
+  const testButton = dialog.getByRole('button', { name: 'Test endpoint', exact: true })
+  await expect(testButton).toBeEnabled()
+  await testButton.click()
+  await expect
+    .poll(() =>
+      fake
+        .requests()
+        .slice(probeBase)
+        .find((request) => request.body.includes('"model":"e2e-model"')),
+    )
+    .toBeDefined()
+  const probeRequest = fake
+    .requests()
+    .slice(probeBase)
+    .find((request) => request.body.includes('"model":"e2e-model"'))
+  expect(probeRequest?.authorization).toBe(`Bearer e2e-key-${nonce}`)
+  await expect(dialog).toContainText(/e2e-model answered in \d+ ms/, { timeout: 15_000 })
 })
 
 test('dismissing the unlock fails the call cleanly — no failure is painted', async ({ page }) => {
@@ -239,4 +265,24 @@ test('dismissing the unlock fails the call cleanly — no failure is painted', a
   await expect(dialog).not.toContainText('Test failed', { timeout: 10_000 })
   // The editor still responds: the dismissal did not wedge the surface.
   await dialog.locator('#endpoint-name').fill(`${endpointName} (edited)`)
+})
+
+test('typing a bare @ in a sealed header value shows the unlock offer', async ({ page }) => {
+  await openApp(page)
+  await page.locator('.activity-bar button[data-action="api"]').click()
+  const workbench = page.locator('.api-workbench')
+  await expect(workbench).toBeVisible({ timeout: 15_000 })
+  const requestRow = workbench.locator('.api-tree__row').filter({ hasText: 'Zen' })
+  await expect(requestRow).toBeVisible({ timeout: 15_000 })
+  await requestRow.click()
+  await workbench.getByRole('tab', { name: /^Headers\b/ }).click()
+  await workbench.getByRole('button', { name: 'Add header', exact: true }).click()
+  const headerValue = workbench.locator('#api-header-value-0')
+  await headerValue.press('@')
+
+  const picker = page.getByRole('listbox', { name: 'vault secrets' })
+  await expect(picker).toBeVisible({ timeout: 10_000 })
+  await expect(
+    picker.getByRole('option', { name: 'Unlock the vault to use its secrets' }),
+  ).toBeVisible()
 })

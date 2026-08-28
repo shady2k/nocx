@@ -137,7 +137,10 @@ export class PromptVaultController {
         list: () => deps.vault.inventory().then((i) => i.entries),
         requestUnseal: () => deps.vault.inventory().then(() => undefined),
         requestSetup: () => this.setupVault(),
-        requestCreate: (name) => deps.requestCreateSecret?.(name),
+        requestCreate: (name) => {
+          deps.requestCreateSecret?.(name)
+          return Promise.resolve(undefined)
+        },
       },
       { onInsert: (name) => this.insertReference(name) },
     )

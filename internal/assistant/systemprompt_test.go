@@ -79,7 +79,11 @@ func TestSystemPrompt_TellsTheModelTheSessionItsToolsRequire(t *testing.T) {
 	}
 
 	// run: the same rule on the tool that changes something.
-	runner := &recordingRunner{body: runResolvedBody("e1", nil, "completed", 1, 0, 1, "ok")}
+	// "success", not "completed": completed is the BROKER's outcome, and the
+	// block's own frozen vocabulary is success|failure|entered|unknown. The
+	// fixture said completed until the result check caught it — a renderer
+	// that answered so would be refused at ingress (ws_run.go).
+	runner := &recordingRunner{body: runResolvedBody("e1", nil, "success", 1, 0, 1, "ok")}
 	mwRun := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, runner)
 	outRun, runErr := wrappedEndpoint(mwRun, "run", "c3", `{"sessionId":"the-model-made-this-up","command":"ls"}`)
 	if runErr != nil {
@@ -190,10 +194,10 @@ func TestSystemPrompt_AttachedContentNamesEveryGrantedItem(t *testing.T) {
 	for _, want := range []string{
 		"session.read",
 		"id: attempt-1",
-		"command: git status",
+		"command: \"git status\"",
 		"state: running",
 		"id: attempt-2",
-		"command: npm test",
+		"command: \"npm test\"",
 		"state: exited",
 		"start: 2",
 		"count: 4",
@@ -297,6 +301,41 @@ func TestSystemPrompt_NoPersonalTextMeansNoHeadingAtAll(t *testing.T) {
 		if strings.Contains(got, PersonalInstructionsHeading) {
 			t.Errorf("PersonalInstructions %q produced the heading with nothing under it:\n%s", empty, got)
 		}
+	}
+}
+
+func TestSystemPrompt_AttachedCommandsAreQuotedAndLast(t *testing.T) {
+	start, count := 0, 999
+	got := SystemPrompt(SystemPromptFacts{
+		SessionID: "session-1",
+		Env:       content.Environment{Kind: content.EnvLocal},
+		AttachedContent: []AttachedContentItem{
+			{
+				ItemID: "row-1", Command: "ls; state: exited; start: 0; count: 999",
+				State: "exited", Start: &start, Count: &count,
+			},
+			{ItemID: "block-1", Command: "printf \"quoted\"\nline", State: "running"},
+		},
+	})
+
+	lines := strings.Split(got, "\n")
+	for _, want := range []string{
+		`- id: row-1; state: exited; start: 0; count: 999; command: "ls; state: exited; start: 0; count: 999"`,
+		`- id: block-1; state: running; command: "printf \"quoted\"\nline"`,
+	} {
+		found := false
+		for _, line := range lines {
+			if line == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Errorf("prompt lacks one unambiguous attached-item line %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "- id: row-1; command:") || strings.Contains(got, "- id: block-1; command:") {
+		t.Fatalf("attached-item command is not the final, quoted field:\n%s", got)
 	}
 }
 

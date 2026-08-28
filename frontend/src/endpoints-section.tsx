@@ -40,7 +40,9 @@ import type { AgentClient } from './agent'
 // export used — the same union trick endpoints.ts documents.
 import type { EndpointsProbeResult } from './generated/agent.status'
 import { EndpointClient, type Endpoint } from './endpoints'
-import { SecretSource, type SecretSourceMode } from './secret-source'
+import { SecretTextField, secretMarks, type VaultState } from './api/secret-text-field'
+import type { SecretEntry, SecretPickerSource } from './ui/secret-picker'
+import { boundSecret, secretReference } from './secret-reference'
 import type { InventoryEntry, VaultClient } from './vault-client'
 import { VaultOperationCancelledError, type VaultController } from './vault'
 /** The schema's one value today (design §4.5, decision 2). Display label
@@ -106,32 +108,26 @@ interface ModelDraft {
   alias: string
 }
 
-/** One custom header row in the draft (bead nocx-lyyk). The value's SOURCE
- *  is chosen with the same SecretSource control the endpoint's key uses: a
- *  literal typed fresh ('new'), or an existing vault secret ('secret' with
- *  the row handle). Exactly one source per row; on the wire the row becomes
- *  {name, value, secret} with the unused side null. */
+/** One custom header row in the draft (bead nocx-lyyk). `value` is the one
+ *  field, and it says which source the row has by what it holds: a whole
+ *  `{{secret:secrow:…}}` reference is the vault's, anything else is a
+ *  literal. On the wire the row becomes {name, value, secret} with the unused
+ *  side null — the SHAPE is unchanged; only the control in front of it is
+ *  (nocx-3o0ed.4). */
 interface HeaderDraft {
   name: string
-  mode: SecretSourceMode
   value: string
-  row: string
 }
 
-/** The dialog draft. The key's source is chosen (type a new one / use an
- *  existing vault secret, nocx-rzjw) instead of inferred from a caption; a
- *  typed key is an input that never crosses back, and a referenced key is a
- *  row handle that does (ADR-0030 §3). */
+/** The dialog draft. `key` is one field for both sources: a whole reference
+ *  is an existing vault secret, and anything else is a key typed fresh — an
+ *  input that never crosses back (ADR-0030 §3). Nothing here declares a mode,
+ *  because nothing asks a person to. */
 interface EndpointDraft {
   name: string
   baseUrl: string
   noKey: boolean
-  keyMode: SecretSourceMode
-  /** A key typed fresh ('new' mode). Sent once, minted/rotated by the
-   *  backend, never read back. */
   key: string
-  /** The row handle of an existing vault secret ('secret' mode). */
-  keyRow: string
   models: ModelDraft[]
   headers: HeaderDraft[]
 }
@@ -140,9 +136,7 @@ const blankDraft = (): EndpointDraft => ({
   name: '',
   baseUrl: '',
   noKey: false,
-  keyMode: 'new',
   key: '',
-  keyRow: '',
   models: [],
   headers: [],
 })
@@ -166,6 +160,14 @@ export interface EndpointsSectionProps {
    *  the dev-web harness has no vault, and the pickers then offer nothing,
    *  exactly like the connections editor's vaultClient. */
   vaultClient?: VaultClient
+  /** The one secret picker source (nocx-3o0ed.4). The key field and every
+   *  header value are the SAME field the API workbench and the connections
+   *  editor place, and the panel behind their lock is the composition root's
+   *  — lifecycle offers, the '@' create row and the Secrets-page fallback
+   *  come from there rather than from a second source built here. Absent in
+   *  the dev-web harness and bare embeds; the fields then have no lock, and
+   *  a bound key still names its secret. */
+  secretSource?: SecretPickerSource
   /** An outside request to open the editor on a blank endpoint, as a
    *  counter: the ask refused with "no endpoint configured" and the
    *  surface is offering the repair. A counter rather than a boolean for
@@ -233,13 +235,14 @@ export function EndpointsSection(props: EndpointsSectionProps) {
    *  a dismissed unlock is a decision, not something to re-ask on the next
    *  keystroke that re-runs the effect. */
   const [pickerAsked, setPickerAsked] = createSignal(false)
-  // THE PICKER is what wants the vault. A form showing one is asking for
-  // secret NAMES, and that request goes to the vault whatever state the
-  // vault is in — the vault raises its own unlock (ADR-0032) and the
+  // A BOUND FIELD is what wants the vault. A form holding a reference has to
+  // render the secret's NAME — a chip wearing a `secrow:` handle is the
+  // defect nocx-5ratm named — and that request goes to the vault whatever
+  // state the vault is in: the vault raises its own unlock (ADR-0032) and the
   // dispatcher re-sends the call. So an endpoint whose key IS a bound row
-  // opens on "Use existing secret" and asks at once, which is the whole of
-  // nocx-5ratm; while "+ New endpoint" over a locked vault shows no picker,
-  // wants nothing, and asks for no passphrase until the source is switched.
+  // asks the moment its editor opens; "+ New endpoint" over a locked vault
+  // holds no reference, wants nothing, and asks for no passphrase until
+  // somebody presses a lock (which asks through the picker's own source).
   //
   // This is the line the ADR draws, applied to a surface rather than a call
   // site: not "an editor door may never ask" (which left the pickers empty
@@ -248,7 +251,12 @@ export function EndpointsSection(props: EndpointsSectionProps) {
   createEffect(() => {
     if (!dialogOpen() || pickerAsked()) return
     const d = draft()
-    if (d.keyMode !== 'secret' && !d.headers.some((h) => h.mode === 'secret')) return
+    if (
+      boundSecret(d.key) === undefined &&
+      !d.headers.some((h) => boundSecret(h.value) !== undefined)
+    ) {
+      return
+    }
     setPickerAsked(true)
     void loadInventory('picker')
   })
@@ -408,6 +416,39 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     }
   }
 
+  /** The name a bound field shows instead of its handle (nocx-3o0ed.4,
+   *  criterion 4). The same rows the picker offers, in the shape the mark
+   *  layer reads. */
+  const secretEntries = (): SecretEntry[] =>
+    passwordRows().map((entry) => ({ id: entry.id, name: entry.name }))
+  const vaultState = (): VaultState => props.vaultController?.status()?.state ?? 'unknown'
+  const fieldMarks = (value: string) => secretMarks(value, secretEntries(), vaultState())
+
+  /**
+   * This page's picker source: the composition root's, with ONE substitution.
+   *
+   * `list` is answered from `loadInventory`, which is already the single owner
+   * of the vault read on this page (AD-8) — the list's per-endpoint credential
+   * facts and the editor's chips are derived from the same rows the panel
+   * offers, off the same fetch. Delegating `list` to the base source instead
+   * would put a second inventory read beside the first and let the two
+   * disagree about what the vault holds a moment after a mint.
+   *
+   * Filtered to password-kind rows for the reason the pickers always were: an
+   * API key is minted as a password-kind secret (ADR-0030).
+   */
+  const pickerSource = (): SecretPickerSource | undefined => {
+    const base = props.secretSource
+    if (base === undefined) return undefined
+    return {
+      ...base,
+      list: async () => {
+        await loadInventory('picker')
+        return secretEntries()
+      },
+    }
+  }
+
   function openNew() {
     setEditing(null)
     setDraft(blankDraft())
@@ -423,22 +464,20 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     setEditing(ep)
     // The key is never pre-filled with material: a typed key is an input,
     // and the record cannot be read back (ADR-0030 §3). What CAN be
-    // pre-filled is the SOURCE: a saved credential is the row handle the
-    // result carried, so the form opens on "Use existing secret" with the
-    // bound row — keeping the key is now a choice, not a caption.
+    // pre-filled is the REFERENCE: a saved credential is the row handle the
+    // result carried, so the field opens holding `{{secret:…}}` and draws it
+    // as a chip naming the secret — keeping the key is a choice, not a
+    // caption, and it is the same field a person types a fresh key into.
     setDraft({
       name: ep.name,
       baseUrl: ep.baseUrl,
-      keyMode: ep.credential !== null ? 'secret' : 'new',
       noKey: ep.noKey,
-      key: '',
-      keyRow: ep.credential ?? '',
+      key: ep.credential !== null ? secretReference(ep.credential) : '',
       models: ep.models.map((m) => ({ name: m.name, alias: m.alias ?? '' })),
-      headers: ep.headers.map((h) =>
-        h.value !== null
-          ? { name: h.name, mode: 'new' as const, value: h.value, row: '' }
-          : { name: h.name, mode: 'secret' as const, value: '', row: h.secret ?? '' },
-      ),
+      headers: ep.headers.map((h) => ({
+        name: h.name,
+        value: h.value !== null ? h.value : h.secret !== null ? secretReference(h.secret) : '',
+      })),
     })
     validation.reset()
     setProbeResult(null)
@@ -491,29 +530,38 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     setDraft((d) => ({ ...d, headers: d.headers.filter((_, i) => i !== index) }))
   }
 
-  /** The key the WIRE carries: only a fresh 'new' mode key is material. In
-   *  'secret' mode the wire carries the row handle instead (draftKeyRow),
-   *  and a blank 'new' key keeps the existing material on update (design
-   *  §4.5.4). */
-  const draftKey = (d: EndpointDraft): string => (d.noKey ? '' : d.keyMode === 'new' ? d.key : '')
+  /** The key the WIRE carries: material only. A bound field holds a
+   *  reference, not a key, so it sends none — the handle goes in
+   *  `credential` instead (draftKeyRow) — and a blank field keeps the
+   *  existing material on update (design §4.5.4).
+   *
+   *  THIS IS THE SEAM the segmented control used to be. ADR-0017 §1 named
+   *  SecretSource the owner of "where does this secret come from"; that owner
+   *  is gone (nocx-3o0ed.4) and the question is answered by what the field
+   *  holds, read here once by `boundSecret` (secret-reference.ts) rather than
+   *  declared to a control before anybody had typed anything. */
+  const draftKey = (d: EndpointDraft): string =>
+    d.noKey || boundSecret(d.key) !== undefined ? '' : d.key
 
-  /** The row handle the WIRE carries in 'secret' mode, or '' to keep the
-   *  existing reference (or stay keyless on create). */
-  const draftKeyRow = (d: EndpointDraft): string =>
-    d.noKey ? '' : d.keyMode === 'secret' ? d.keyRow : ''
+  /** The row handle the WIRE carries when the field is bound, or '' to keep
+   *  the existing reference (or stay keyless on create). */
+  const draftKeyRow = (d: EndpointDraft): string => (d.noKey ? '' : (boundSecret(d.key) ?? ''))
 
   /** The wire form of the draft's header rows: exactly one source per row,
-   *  the unused side null. A 'secret' row with no picker selection is
-   *  dropped — it is an empty row, not a claim about material. */
+   *  the unused side null — decided by what the value holds, exactly as the
+   *  key's is. */
   function draftHeaders(
     d: EndpointDraft,
   ): { name: string; value: string | null; secret: string | null }[] {
     return d.headers
-      .map((h) => ({
-        name: h.name.trim(),
-        value: h.mode === 'new' ? h.value : null,
-        secret: h.mode === 'secret' && h.row !== '' ? h.row : null,
-      }))
+      .map((h) => {
+        const handle = boundSecret(h.value)
+        return {
+          name: h.name.trim(),
+          value: handle === undefined ? h.value : null,
+          secret: handle ?? null,
+        }
+      })
       .filter((h) => h.name !== '' || h.value !== null || h.secret !== null)
   }
 
@@ -908,11 +956,11 @@ export function EndpointsSection(props: EndpointsSectionProps) {
     )
   }
 
-  /** One custom-header row: a name, and a value whose SOURCE is chosen with
-   *  the same control the key uses (nocx-lyyk) — a literal typed fresh, or a
-   *  reference to an existing vault secret (Azure's api-key header is the
-   *  key). The rows are EditableRowList's, so a keystroke never rebuilds the
-   *  row's DOM (nocx-fngd). */
+  /** One custom-header row: a name, and a value that is the SAME field the
+   *  key is (nocx-lyyk, nocx-3o0ed.4) — a literal typed fresh, or a reference
+   *  to an existing vault secret taken through its lock (Azure's api-key
+   *  header is the key). The rows are EditableRowList's, so a keystroke never
+   *  rebuilds the row's DOM (nocx-fngd). */
   function renderHeaderRow(row: () => HeaderDraft, index: number) {
     return (
       <div class="ep-header-row">
@@ -924,26 +972,14 @@ export function EndpointsSection(props: EndpointsSectionProps) {
           onBlur={() => validation.touch('headers')}
           placeholder="X-Title"
         />
-        <SecretSource
-          id={`endpoint-header-${index}`}
+        <SecretTextField
+          id={`endpoint-header-${index}-value`}
           label="Value"
-          mode={row().mode}
-          onModeChange={(mode) => updateHeader(index, { mode })}
-          newLabel="Type a value"
-          secretLabel="Use existing secret"
-          ariaLabel={`Header ${row().name || index + 1} value source`}
-          newControl={
-            <TextField
-              id={`endpoint-header-${index}-value`}
-              label="Value"
-              value={row().value}
-              onInput={(v) => updateHeader(index, { value: v })}
-              placeholder="nocx"
-            />
-          }
-          secrets={passwordRows()}
-          value={row().row}
-          onValueChange={(v) => updateHeader(index, { row: v ?? '' })}
+          value={row().value}
+          onInput={(v) => updateHeader(index, { value: v })}
+          source={pickerSource()}
+          marks={fieldMarks(row().value)}
+          placeholder="nocx"
         />
       </div>
     )
@@ -1056,34 +1092,30 @@ export function EndpointsSection(props: EndpointsSectionProps) {
               setDraft((d) => ({
                 ...d,
                 noKey: checked,
-                keyMode: checked ? 'new' : d.keyMode,
                 key: checked ? '' : d.key,
-                keyRow: checked ? '' : d.keyRow,
               }))
             }
           />
           <Show when={!draft().noKey}>
-            <SecretSource
+            {/* ONE field, and the lock on it is the whole of "or use one you
+                already have" (nocx-3o0ed.4).
+
+                MASKED WHILE IT HOLDS A KEY, plain once it holds a reference.
+                Both halves matter and they are the same rule — show nothing
+                that should not be read over a shoulder, and show everything
+                that must be: a typed key is material, so it is dots; a
+                reference is not material, and masking it would hide the chip
+                naming the secret, which is the only thing standing between a
+                person and a `secrow:` handle. */}
+            <SecretTextField
               id="endpoint-key"
               label="API key"
-              mode={draft().keyMode}
-              onModeChange={(mode) => setDraft((d) => ({ ...d, keyMode: mode }))}
-              newLabel="Type a new one"
-              secretLabel="Use existing secret"
-              ariaLabel="API key source"
-              newControl={
-                <TextField
-                  id="endpoint-key"
-                  label="API key"
-                  type="password"
-                  value={draft().key}
-                  onInput={(v) => setDraftField('key', v)}
-                  description="The key is stored in your vault, never in the record. Choosing an existing secret references it instead of minting a second copy."
-                />
-              }
-              secrets={passwordRows()}
-              value={draft().keyRow}
-              onValueChange={(v) => setDraft((d) => ({ ...d, keyRow: v ?? '' }))}
+              type={boundSecret(draft().key) === undefined ? 'password' : 'text'}
+              value={draft().key}
+              onInput={(v) => setDraftField('key', v)}
+              source={pickerSource()}
+              marks={fieldMarks(draft().key)}
+              description="The key is stored in your vault, never in the record. Choosing an existing secret references it instead of minting a second copy."
             />
           </Show>
           {/* Custom headers belong to the CONNECTION, so they come before the

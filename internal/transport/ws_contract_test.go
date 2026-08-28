@@ -21,10 +21,10 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/santhosh-tekuri/jsonschema/v6"
 
-	"github.com/shady2k/nocx/internal/apibind"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apisend"
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/completion"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
@@ -846,7 +846,7 @@ func TestSaveKeyMaterial_DTOConformsToContract(t *testing.T) {
 		Row              string `json:"row"`
 		Fingerprint      string `json:"fingerprint"`
 		PassphraseWanted bool   `json:"passphraseWanted"`
-	}{Row: "secrow:abc", Fingerprint: "SHA256:abc123", PassphraseWanted: false}
+	}{Row: "secrow:0123456789abcdef0123456789abcdef", Fingerprint: "SHA256:abc123", PassphraseWanted: false}
 	raw, err := json.Marshal(dto)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -857,7 +857,7 @@ func TestSaveKeyMaterial_DTOConformsToContract(t *testing.T) {
 		Row              string `json:"row"`
 		Fingerprint      string `json:"fingerprint"`
 		PassphraseWanted bool   `json:"passphraseWanted"`
-	}{Row: "secrow:def", Fingerprint: "", PassphraseWanted: true}
+	}{Row: "secrow:fedcba9876543210fedcba9876543210", Fingerprint: "", PassphraseWanted: true}
 	rawEnc, err := json.Marshal(dtoEnc)
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
@@ -893,6 +893,130 @@ func TestSaveKeyMaterial_OverTheWireConformsToContract(t *testing.T) {
 	// The wire carries the row handle, never a secret reference.
 	if strings.Contains(string(envelope.Result), "sec:v1:") {
 		t.Errorf("saveKeyMaterial result leaks a secret reference: %s", envelope.Result)
+	}
+}
+
+// ── secrets.savePassword ───────────────────────────────────────────────
+
+// The DTO's own conformance: the mint result is the row handle and nothing
+// else. The schema is additionalProperties:false plus required:["row"], so
+// this fails both if a field goes missing and if one is added — which is what
+// makes it exact rather than decorative.
+func TestSavePassword_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "secrets.savePassword.schema.json")
+
+	raw, err := json.Marshal(secretMintResult{Row: "secrow:0123456789abcdef0123456789abcdef"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "savePassword DTO")
+}
+
+// The real result off the real socket. The field that must not go missing is
+// row: the editor names it on the profile's options, so a result without one
+// leaves the connection pointing at nothing and failing at connect time with
+// no secret to authenticate with (nocx-yfba, ADR-0017 §1).
+func TestSavePassword_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "secrets.savePassword.schema.json")
+	h := newInventoryHarness(t)
+	h.setupAndUnseal()
+
+	raw := jsonrpcCall(t, h.conn, "secrets.savePassword", map[string]any{
+		"password": "contract-password",
+		"name":     "contract-pw",
+	})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("savePassword: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "savePassword result")
+
+	// The wire carries the row handle, never a secret reference (ADR-0011 §2).
+	if strings.Contains(string(envelope.Result), "sec:v1:") {
+		t.Errorf("savePassword result leaks a secret reference: %s", envelope.Result)
+	}
+	// And never the password it was just handed.
+	if strings.Contains(string(envelope.Result), "contract-password") {
+		t.Errorf("savePassword result leaks the password: %s", envelope.Result)
+	}
+}
+
+// ── secrets.saveKeyPassphrase ──────────────────────────────────────────
+
+// The DTO's own conformance: the same one-field shape as savePassword. It is
+// pinned separately because it is a separate schema — two methods agreeing
+// today is not a reason for one test, it is the reason they can drift.
+func TestSaveKeyPassphrase_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "secrets.saveKeyPassphrase.schema.json")
+
+	raw, err := json.Marshal(secretMintResult{Row: "secrow:fedcba9876543210fedcba9876543210"})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, raw, "saveKeyPassphrase DTO")
+}
+
+// The real result off the real socket, through the only path that reaches it:
+// an encrypted key is minted first, and its row is what the passphrase is
+// verified against. A passphrase minted without a key to check it is not a
+// state the product has, so the test does not invent one.
+func TestSaveKeyPassphrase_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "secrets.saveKeyPassphrase.schema.json")
+	h := newInventoryHarness(t)
+	h.setupAndUnseal()
+
+	const passphrase = "contract-passphrase"
+	pem, _ := testEncryptedKeyPEM(t, passphrase)
+	keyRaw := jsonrpcCall(t, h.conn, "secrets.saveKeyMaterial", map[string]any{
+		"keyText": pem,
+		"name":    "contract-key",
+	})
+	var keyEnvelope struct {
+		Result struct {
+			Row string `json:"row"`
+		} `json:"result"`
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(keyRaw, &keyEnvelope); err != nil {
+		t.Fatalf("unmarshal key: %v\nraw: %s", err, string(keyRaw))
+	}
+	if keyEnvelope.Error != nil {
+		t.Fatalf("saveKeyMaterial: %+v", keyEnvelope.Error)
+	}
+	if keyEnvelope.Result.Row == "" {
+		t.Fatal("saveKeyMaterial returned no row, so the passphrase has nothing to verify against")
+	}
+
+	raw := jsonrpcCall(t, h.conn, "secrets.saveKeyPassphrase", map[string]any{
+		"keyRow":     keyEnvelope.Result.Row,
+		"passphrase": passphrase,
+		"name":       "contract-passphrase-secret",
+	})
+	var envelope struct {
+		Result json.RawMessage  `json:"result"`
+		Error  *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("unmarshal: %v\nraw: %s", err, string(raw))
+	}
+	if envelope.Error != nil {
+		t.Fatalf("saveKeyPassphrase: %+v", envelope.Error)
+	}
+	validateJSON(t, schema, envelope.Result, "saveKeyPassphrase result")
+
+	// The wire carries the row handle, never a secret reference (ADR-0011 §2).
+	if strings.Contains(string(envelope.Result), "sec:v1:") {
+		t.Errorf("saveKeyPassphrase result leaks a secret reference: %s", envelope.Result)
+	}
+	// And never the passphrase it just verified.
+	if strings.Contains(string(envelope.Result), passphrase) {
+		t.Errorf("saveKeyPassphrase result leaks the passphrase: %s", envelope.Result)
 	}
 }
 
@@ -6422,74 +6546,15 @@ func resultOf(t *testing.T, raw json.RawMessage) json.RawMessage {
 // (design §13.1). That rule is what makes the backend-held handle mean
 // something, and a rule nobody can fail is a rule nobody keeps.
 
-// apiFakeBindings is an in-memory apibind.Store for the import test. The
-// real one does not exist yet (internal/apibind declares the interface
-// ahead of its implementation), and api.import.postman writes secret values
-// through it, so the test supplies the seam the composition root will.
-type apiFakeBindings struct {
-	mu    sync.Mutex
-	bound map[apibind.Key]string
-	// bindErr, when set, is what Bind returns — the failure half of
-	// "every external call has a test where it fails".
-	bindErr error
-}
-
-func newAPIFakeBindings() *apiFakeBindings {
-	return &apiFakeBindings{bound: map[apibind.Key]string{}}
-}
-
-func (b *apiFakeBindings) Lookup(k apibind.Key) (string, bool, error) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	v, ok := b.bound[k]
-	return v, ok, nil
-}
-
-func (b *apiFakeBindings) Bind(_ context.Context, k apibind.Key, value []byte) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	if b.bindErr != nil {
-		return b.bindErr
-	}
-	b.bound[k] = string(value)
-	return nil
-}
-
-func (b *apiFakeBindings) Unbind(_ context.Context, k apibind.Key) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	delete(b.bound, k)
-	return nil
-}
-
-func (b *apiFakeBindings) UnbindCollection(_ context.Context, collection string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	for k := range b.bound {
-		if k.Collection == collection {
-			delete(b.bound, k)
-		}
-	}
-	return nil
-}
-
-func (b *apiFakeBindings) count() int {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	return len(b.bound)
-}
-
-// newAPIWSServer starts a server with the whole api.* surface wired, the way
-// the composition root wires it plus the binding store that does not exist
-// yet.
+// newAPIWSServer starts a server with the whole api.* surface wired.
 //
 // The import fetcher gets a route table with NO leaser, which is the shape
 // the app has whenever the SSH side is not wired: the direct route dials and
 // every connection route refuses by name. A test that needs a connection
 // route to carry bytes supplies its own pool through the variant below.
-func newAPIWSServer(t *testing.T, bindings apibind.Store) (*WSServer, *websocket.Conn) {
+func newAPIWSServer(t *testing.T) (*WSServer, *websocket.Conn) {
 	t.Helper()
-	return newAPIWSServerWithPool(t, bindings, nil)
+	return newAPIWSServerWithPool(t, nil)
 }
 
 // newAPIWSServerWithPool is the same server with the import fetcher's route
@@ -6497,24 +6562,28 @@ func newAPIWSServer(t *testing.T, bindings apibind.Store) (*WSServer, *websocket
 // fetcher, the route table, the transport, the capability and the writer are
 // all the real ones, because a fetcher double would certify the test's own
 // object instead of the seam.
-func newAPIWSServerWithPool(t *testing.T, bindings apibind.Store, leaser apisend.ConnectionLeaser) (*WSServer, *websocket.Conn) {
+func newAPIWSServerWithPool(t *testing.T, leaser apisend.ConnectionLeaser) (*WSServer, *websocket.Conn) {
 	t.Helper()
 	logger := log.NewSlogAdapter(nil)
 	opts := []WSServerOption{
-		WithAPI(apicoll.NewCollections(apiTestPaths(t)), apisend.New(apisend.WithLogger(logger))),
+		WithAPI(apicoll.NewCollections(apiTestPaths(t)), apisend.New(apisend.WithLogger(logger)), nil),
 		WithAPIImportFetcher(apifetch.New(apisend.NewRoutes(leaser), logger)),
 	}
-	if bindings != nil {
-		opts = append(opts, WithAPIBindings(bindings))
-		// The read half is a separate option because the two halves wire
-		// apart (ws.go). A store that has one gets it; apiFakeBindings does
-		// not, which is how the import tests keep exercising a build where
-		// an auth variable resolves to nothing.
-		if values, ok := bindings.(apibind.ValueResolver); ok {
-			opts = append(opts, WithAPIVariables(values))
-		}
-	}
 	ws := NewWSServer(logger, newRegWithStub(logger), opts...)
+	ctx := context.Background()
+	if err := ws.Start(ctx); err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	t.Cleanup(func() { _ = ws.Stop(ctx) })
+	return ws, connectWS(t, ws)
+}
+
+func newAPIWSServerWithSecretRefs(t *testing.T, refs capability.SecretRefs) (*WSServer, *websocket.Conn) {
+	t.Helper()
+	logger := log.NewSlogAdapter(nil)
+	ws := NewWSServer(logger, newRegWithStub(logger),
+		WithAPI(apicoll.NewCollections(apiTestPaths(t)), apisend.New(apisend.WithLogger(logger)), refs),
+	)
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -6678,7 +6747,7 @@ func TestAPICollectionsCreate_OverTheWireConformsToContract(t *testing.T) {
 	createSchema := loadSchema(t, "api.collections.create.schema.json")
 	listSchema := loadSchema(t, "api.collections.list.schema.json")
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	resp := vaultCall(t, conn, "api.collections.create", map[string]any{"name": "acme"}, 1)
 	if resp.Error != nil {
@@ -6761,7 +6830,7 @@ func TestAPICollectionsCreateFolder_OverTheWireConformsToContract(t *testing.T) 
 	folderSchema := loadSchema(t, "api.collections.createFolder.schema.json")
 	listSchema := loadSchema(t, "api.collections.list.schema.json")
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	created := vaultCall(t, conn, "api.collections.create", map[string]any{"name": "acme"}, 1)
 	if created.Error != nil {
@@ -6843,7 +6912,7 @@ func TestAPICollectionsCreateFolder_OverTheWireConformsToContract(t *testing.T) 
 // name the person did not type is a surface reporting something it did not
 // do — and every one of them is the caller's error, so every one is -32602.
 func TestAPICollectionsCreateFolder_RefusesOverTheWire(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	created := vaultCall(t, conn, "api.collections.create", map[string]any{"name": "acme"}, 1)
 	if created.Error != nil {
@@ -6927,7 +6996,7 @@ func TestAPIRequestMove_DTOConformsToContract(t *testing.T) {
 func TestAPIRequestMove_OverTheWireConformsToContract(t *testing.T) {
 	moveSchema := loadSchema(t, "api.request.move.schema.json")
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, "https://example.test/ping")
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -6996,7 +7065,7 @@ func TestAPIRequestMove_OverTheWireConformsToContract(t *testing.T) {
 // happy-path test above (AGENTS.md testing rule 3). A collision is the one
 // that matters most: the whole reason the move is a no-replace rename.
 func TestAPIRequestMove_RefusesOverTheWire(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, "https://example.test/ping")
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -7106,7 +7175,7 @@ func TestAPICollections_OverTheWireConformsToContract(t *testing.T) {
 	writeSchema := loadSchema(t, "api.request.write.schema.json")
 	closeSchema := loadSchema(t, "api.collections.close.schema.json")
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, "https://example.test/ping")
 
 	// The empty list, before anything is opened: [] and never null.
@@ -7296,7 +7365,7 @@ func TestAPICollections_OverTheWireConformsToContract(t *testing.T) {
 // that is not there, a path trying to leave the collection — and each is
 // paired with the success above.
 func TestAPICollections_FailuresAreReportedNotPaperedOver(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, "https://example.test/ping")
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -7426,7 +7495,7 @@ func TestSessionIntegrationChanged_BootstrapOutcomesAreReadableOffTheWire(t *tes
 // does not exist survives a release.
 func TestAPICollectionsList_ReportsARootThatWasReplaced(t *testing.T) {
 	listSchema := loadSchema(t, "api.collections.list.schema.json")
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	parent := t.TempDir()
 	root := filepath.Join(parent, "coll")
@@ -7478,7 +7547,7 @@ func TestAPIRequestSend_OverTheWireConformsToContract(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, srv.URL)
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -7532,7 +7601,7 @@ func TestAPIRequestSend_DoesNotHoldTheGateAcrossTheDial(t *testing.T) {
 	defer srv.Close()
 	defer letGo()
 
-	ws, conn := newAPIWSServer(t, newAPIFakeBindings())
+	ws, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, srv.URL)
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -7925,7 +7994,7 @@ func TestAPIRequestSend_AFailedExchangeIsARunOverTheWire(t *testing.T) {
 	dead := "http://" + l.Addr().String() + "/gone"
 	_ = l.Close()
 
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, dead)
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -7979,7 +8048,7 @@ func TestAPIRequestSend_AFailedExchangeIsARunOverTheWire(t *testing.T) {
 // NAME. "There was nothing to stop" and "it is stopped" are different facts,
 // and a caller that cannot tell them apart cannot report either.
 func TestAPIRequestCancel_AnUnknownTokenIsRefusedByName(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	resp := vaultCall(t, conn, "api.request.cancel", map[string]any{"token": "nothing-is-running"}, 1)
 	if resp.Error == nil {
@@ -8010,7 +8079,7 @@ func TestAPIRequestSend_RefusedWhenNothingIsWired(t *testing.T) {
 		"api.collections.list", "api.collections.open", "api.collections.close",
 		"api.request.read", "api.request.write", "api.request.move",
 		"api.folder.read", "api.folder.write",
-		"api.request.send", "api.import.postman",
+		"api.request.send",
 	} {
 		resp := vaultCall(t, conn, method, map[string]any{}, 1)
 		if resp.Error == nil {
@@ -8025,7 +8094,7 @@ func TestAPIRequestSend_RefusedWhenNothingIsWired(t *testing.T) {
 
 func TestAPIImportCurl_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "api.import.curl.schema.json")
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 
 	resp := vaultCall(t, conn, "api.import.curl", map[string]any{
 		"line": `curl -X POST https://example.test/v1/things?page=2 -H 'X-Probe: 1' -d '{"a":1}'`,
@@ -8054,10 +8123,29 @@ func TestAPIImportCurl_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
+func assertImportedSecretAbsent(t *testing.T, dest string) {
+	t.Helper()
+	walkErr := filepath.WalkDir(dest, func(p string, d fs.DirEntry, err error) error {
+		if err != nil || d.IsDir() {
+			return err
+		}
+		body, readErr := os.ReadFile(p) //nolint:gosec // a test-only path under t.TempDir()
+		if readErr != nil {
+			return readErr
+		}
+		if strings.Contains(string(body), "sk-secret-value") {
+			t.Errorf("%s contains the secret VALUE; a collection file names a variable, never a secret", p)
+		}
+		return nil
+	})
+	if walkErr != nil {
+		t.Fatalf("walk %s: %v", dest, walkErr)
+	}
+}
+
 func TestAPIImportPostman_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "api.import.postman.schema.json")
-	bindings := newAPIFakeBindings()
-	_, conn := newAPIWSServer(t, bindings)
+	_, conn := newAPIWSServer(t)
 
 	doc := filepath.Join(t.TempDir(), "export.json")
 	if err := os.WriteFile(doc, []byte(`{
@@ -8084,26 +8172,13 @@ func TestAPIImportPostman_OverTheWireConformsToContract(t *testing.T) {
 	// rather than in a test of its own.
 	openAPICollection(t, conn, dest, 2)
 
-	// The secret value went to the binding store and NOT into the folder.
-	if bindings.count() != 1 {
-		t.Errorf("bound values = %d, want 1 — the secret must reach the binding store", bindings.count())
+	// The secret value is not carried and must not appear in the folder.
+	// Imported credential material is deliberately not carried. The existing
+	// Unsupported vocabulary reports that loss to the person.
+	if !strings.Contains(string(resp.Result), "variable token") {
+		t.Errorf("result = %s, want the dropped credential reported", resp.Result)
 	}
-	walkErr := filepath.WalkDir(dest, func(p string, d fs.DirEntry, err error) error {
-		if err != nil || d.IsDir() {
-			return err
-		}
-		body, readErr := os.ReadFile(p) //nolint:gosec // a test-only path under t.TempDir()
-		if readErr != nil {
-			return readErr
-		}
-		if strings.Contains(string(body), "sk-secret-value") {
-			t.Errorf("%s contains the secret VALUE; a collection file names a variable, never a secret", p)
-		}
-		return nil
-	})
-	if walkErr != nil {
-		t.Fatalf("walk %s: %v", dest, walkErr)
-	}
+	assertImportedSecretAbsent(t, dest)
 
 	// AND THE THIRD ENTRANCE, off the same socket. A conformance test that
 	// certifies two entrances out of three certifies the wrong thing: the
@@ -8129,32 +8204,23 @@ func TestAPIImportPostman_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("api.import.postman by url: %+v", fetched.Error)
 	}
 	validateJSON(t, schema, fetched.Result, "api.import.postman result (url)")
-	// `unsupported: []` and not `null`: an export that converts whole says
-	// so with an empty LIST, which is what the renderer's first .map walks.
-	if !strings.Contains(string(fetched.Result), `"unsupported":[]`) {
-		t.Errorf("result = %s, want an empty unsupported list on an export that converts whole", fetched.Result)
+	// A credential-shaped variable is omitted and reported; `unsupported` is
+	// the existing vocabulary for material the importer deliberately cannot carry.
+	if !strings.Contains(string(fetched.Result), "variable token") {
+		t.Errorf("result = %s, want the dropped credential reported", fetched.Result)
 	}
 	openAPICollection(t, conn, byURL, 4)
-	if bindings.count() != 2 {
-		t.Errorf("bound values = %d, want 2 — the secret must reach the binding store on this route too", bindings.count())
-	}
+	assertImportedSecretAbsent(t, byURL)
 }
 
-// The import's failure half, both external calls that can fail: the document
-// that is not there, and the binding store that refuses. The second one
-// matters most — the folder must not survive a binding that failed.
+// The import's failure half: a source that is not there and a malformed
+// Postman document. Both fail before staging, so neither leaves a collection.
 func TestAPIImportPostman_FailuresLeaveNoCollection(t *testing.T) {
-	bindings := newAPIFakeBindings()
-	bindings.bindErr = errors.New("no vault")
-	_, conn := newAPIWSServer(t, bindings)
+	_, conn := newAPIWSServer(t)
 
-	doc := filepath.Join(t.TempDir(), "export.json")
-	if err := os.WriteFile(doc, []byte(`{
-      "info": {"name": "acme", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
-      "variable": [{"key": "token", "value": "sk-secret-value", "type": "secret"}],
-      "item": [{"name": "ping", "request": {"method": "GET", "url": "https://example.test/ping"}}]
-    }`), 0o600); err != nil {
-		t.Fatalf("write export: %v", err)
+	doc := filepath.Join(t.TempDir(), "malformed.json")
+	if err := os.WriteFile(doc, []byte(`{"info":`), 0o600); err != nil {
+		t.Fatalf("write malformed export: %v", err)
 	}
 
 	missing := filepath.Join(t.TempDir(), "not-there.json")
@@ -8165,9 +8231,9 @@ func TestAPIImportPostman_FailuresLeaveNoCollection(t *testing.T) {
 		t.Fatal("importing a document that is not there succeeded")
 	}
 
-	refused := vaultCall(t, conn, "api.import.postman", map[string]any{"path": doc, "dest": dest}, 2)
-	if refused.Error == nil {
-		t.Fatal("an import whose binding store refused reported success")
+	malformed := vaultCall(t, conn, "api.import.postman", map[string]any{"path": doc, "dest": dest}, 2)
+	if malformed.Error == nil {
+		t.Fatal("importing a malformed Postman document succeeded")
 	}
 	if _, err := os.Lstat(dest); !errors.Is(err, os.ErrNotExist) {
 		t.Errorf("Lstat(%s) = %v, want not-exist — a failed import leaves no collection behind", dest, err)
@@ -8183,7 +8249,7 @@ func TestAPIImportPostman_FailuresLeaveNoCollection(t *testing.T) {
 // habit somebody has to keep. Every api.* method but collections.open and
 // import.postman is asserted here to refuse a path outright.
 func TestAPIMethods_OnlyOpenAndImportPostmanAcceptAPath(t *testing.T) {
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, "https://example.test/ping")
 	handle := openAPICollection(t, conn, root, 1)
 
@@ -8759,7 +8825,7 @@ func TestAPIFolderReadAndWrite_DTOConformToContracts(t *testing.T) {
 func TestAPIFolderReadAndWrite_OverTheWireConformToContracts(t *testing.T) {
 	readSchema := loadSchema(t, "api.folder.read.schema.json")
 	writeSchema := loadSchema(t, "api.folder.write.schema.json")
-	_, conn := newAPIWSServer(t, newAPIFakeBindings())
+	_, conn := newAPIWSServer(t)
 	root := apiCollectionFolder(t, "https://example.test/ping")
 	handle := openAPICollection(t, conn, root, 1)
 

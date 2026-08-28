@@ -18,13 +18,17 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
 	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/contracts/tools"
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/waittest"
 )
@@ -53,6 +57,49 @@ func autonomousMatrixForTests() content.EffectPolicy {
 		Observe: r, MutateReversible: r, MutateDestructive: r,
 		PrivilegeChange: r, Disclose: r, CrossBoundary: r, Delegate: r,
 	}
+}
+
+func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
+	logger := log.NewSlogAdapter(nil)
+	policy := assistant.NewGlobalPolicyStore(storage.NewDocumentStore(t.TempDir()), "agent-policy.json")
+	server := NewWSServer(logger, newRegWithStub(logger), WithAgentPolicy(policy))
+	const sid = "session-a"
+
+	grant := server.runGrantFor(sid)
+	if grant == nil {
+		t.Fatal("runGrantFor returned nil grant")
+	}
+	if !hasGrantScope(grant.Scopes, content.ResourcePath, "/") {
+		t.Fatalf("grant scopes = %+v, want the whole filesystem path scope", grant.Scopes)
+	}
+	if !hasGrantScope(grant.Scopes, content.ResourceSession, sid) {
+		t.Fatalf("grant scopes = %+v, want the run's session scope", grant.Scopes)
+	}
+	if len(grant.Scopes) != 2 {
+		t.Fatalf("grant scopes = %+v, want exactly one path and one session scope", grant.Scopes)
+	}
+
+	reg, err := agenttools.Assemble(tools.Schemas)
+	if err != nil {
+		t.Fatalf("assemble tool registry: %v", err)
+	}
+	var names []string
+	for _, tool := range reg.ForGrant(*grant) {
+		names = append(names, tool.Name)
+	}
+	want := []string{"files.read", "session.list", "session.read", "run"}
+	if !reflect.DeepEqual(names, want) {
+		t.Fatalf("tools offered by the product-minted grant = %v, want %v", names, want)
+	}
+}
+
+func hasGrantScope(scopes []content.GrantScope, kind content.ResourceKind, id string) bool {
+	for _, scope := range scopes {
+		if scope.Kind == kind && scope.ID == id {
+			return true
+		}
+	}
+	return false
 }
 
 type toolCallingServer struct {
@@ -169,6 +216,50 @@ func readScreenFrameWire(t *testing.T, rid string, texts ...string) map[string]a
 	}
 }
 
+func TestReadScreen_ErrorSentences(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "resolution decode",
+			raw:  `{`,
+			want: "resolution: unexpected end of JSON input",
+		},
+		{
+			name: "failed capture",
+			raw:  `{"outcome":"failed","error":"no such session: gone-session"}`,
+			want: "the renderer could not capture the screen: no such session: gone-session",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := resolveReadScreen(json.RawMessage(tt.raw))
+			if err == nil {
+				t.Fatal("resolveReadScreen returned nil error")
+			}
+			if err.Error() != tt.want {
+				t.Fatalf("resolveReadScreen error = %q, want %q", err, tt.want)
+			}
+		})
+	}
+}
+
+func TestRequestScreen_ErrorSentences(t *testing.T) {
+	_, err := (&WSServer{}).RequestScreen(context.Background(), "sid", nil)
+	if err == nil || err.Error() != "no renderer request broker is wired" {
+		t.Fatalf("unwired RequestScreen error = %v, want %q", err, "no renderer request broker is wired")
+	}
+
+	ws, _, stop := newAgentWSServer(t)
+	defer stop()
+	_, err = ws.RequestScreen(context.Background(), "sid", nil)
+	if err == nil || err.Error() != "no renderer connected to read the screen" {
+		t.Fatalf("no-client RequestScreen error = %v, want %q", err, "no renderer connected to read the screen")
+	}
+}
+
 // createEndpointAt points the ask run at the given provider URL (the
 // harness's own createEndpoint hardcodes the loopback URL; the readScreen
 // test needs the fake provider).
@@ -203,7 +294,7 @@ func TestReadScreen_EndToEndOverTheRealSocket(t *testing.T) {
 	defer srv.Close()
 
 	// The REAL engine: the embedded schemas include readScreen.
-	client, err := assistant.NewClient(nil)
+	client, err := assistant.NewClient(nil, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -321,7 +412,7 @@ func TestReadScreen_EndToEndOverTheRealSocket(t *testing.T) {
 // direction: a renderer that cannot produce the frame (a session it does
 // not know) answers "failed" and the run is not left hanging — the failure
 func TestReadScreen_FailedCaptureAnswersHonestly(t *testing.T) {
-	client, err := assistant.NewClient(nil)
+	client, err := assistant.NewClient(nil, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -398,8 +489,9 @@ func TestReadScreen_FailedCaptureAnswersHonestly(t *testing.T) {
 	if st.State != "failed" {
 		t.Fatalf("runState = %q, want failed (the renderer's failed outcome is a terminal tool error)", st.State)
 	}
-	if !strings.Contains(st.Error, "could not capture the screen") {
-		t.Fatalf("runState error = %q, want the renderer's failure sentence", st.Error)
+	want := "the assistant's session.read call did not finish: the renderer could not capture the screen: no such session: gone-session"
+	if st.Error != want {
+		t.Fatalf("runState error = %q, want %q", st.Error, want)
 	}
 }
 
@@ -409,7 +501,7 @@ func TestReadScreen_FailedCaptureAnswersHonestly(t *testing.T) {
 // leaking a pending request. The ledger is the record: the run reaches a
 // terminal state.
 func TestReadScreen_DisconnectedRendererTerminalizes(t *testing.T) {
-	client, err := assistant.NewClient(nil)
+	client, err := assistant.NewClient(nil, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

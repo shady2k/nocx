@@ -16,6 +16,7 @@ import { render } from 'solid-js/web'
 import { SolidPaneContent, type PaneHost } from '../solid-pane-content'
 import type { SingletonKey, SurfaceType } from '../pane-content'
 import { ApiPane } from './api-pane'
+import type { SecretCreateVault } from '../secret-create-ask'
 import { createApiStore, type ApiStore } from './api-store'
 import type {
   ApiWorkbenchServices,
@@ -23,6 +24,8 @@ import type {
   FilePicker,
   NativeDropPort,
 } from './api-client'
+import type { SecretPickerSource } from '../ui/secret-picker'
+import type { InventoryEntry } from '../vault-client'
 
 // ── Registered surface constants (B.7) ─────────────────────────────────────
 
@@ -50,6 +53,11 @@ export class ApiContent extends SolidPaneContent {
    *  pickers and never merged with them: no Wails runtime means no drop, and
    *  that is independent of whether either picker exists. */
   private readonly nativeDrop?: NativeDropPort
+  /** Vault source mounted by request fields; the API surface does not own it. */
+  private readonly secretSource?: SecretPickerSource
+  private readonly secretInventory?: () => Promise<InventoryEntry[]>
+  private readonly openSecrets?: () => void
+  private readonly secretCreate?: SecretCreateVault
 
   constructor(services: ApiWorkbenchServices) {
     super()
@@ -57,6 +65,10 @@ export class ApiContent extends SolidPaneContent {
     this.openDirectory = services.openDirectory
     this.openFile = services.openFile
     this.nativeDrop = services.nativeDrop
+    this.secretSource = services.secretSource
+    this.secretInventory = services.secretInventory
+    this.openSecrets = services.openSecrets
+    this.secretCreate = services.secretCreate
   }
 
   renderContent(root: HTMLElement): () => void {
@@ -67,6 +79,10 @@ export class ApiContent extends SolidPaneContent {
           openDirectory: this.openDirectory,
           openFile: this.openFile,
           nativeDrop: this.nativeDrop,
+          secretSource: this.secretSource,
+          openSecrets: this.openSecrets,
+          secretInventory: this.secretInventory,
+          secretCreate: this.secretCreate,
         }),
       root,
     )

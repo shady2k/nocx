@@ -5,8 +5,7 @@ import (
 	"fmt"
 )
 
-// The five typed errors. Each maps to exactly one UI action; a longer list
-// described a runtime external provider this design does not have (spec §6).
+// The typed errors each map to a distinct UI action or refusal.
 var (
 	ErrVaultUninitialized = errors.New("vault is not initialized")
 	ErrVaultSealed        = errors.New("vault is sealed")
@@ -23,6 +22,7 @@ var (
 	ErrProviderUnavailable    = errors.New("storage provider unavailable")
 	ErrSecretNotFound         = errors.New("secret not found")
 	ErrUnsealFailed           = errors.New("unseal failed")
+	ErrSecretNameLooksLikeRow = errors.New("secret name must not begin with secrow:")
 )
 
 // ProviderError carries the reason discriminator alongside the sentinel.

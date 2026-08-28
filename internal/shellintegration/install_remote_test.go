@@ -232,7 +232,7 @@ func TestEnsureInstalledRemote_PublishesBundleOverSFTP(t *testing.T) {
 		t.Errorf("active generation = %q, want %q", vr.Generation, genDir(version))
 	}
 
-	// The launch carrier is installed once (0700), never rewritten.
+	// The launch carrier on the host is the one this build ships (0700).
 	launchData := readFileT(t, filepath.Join(root, launchName))
 	if !bytes.Equal(launchData, []byte(launchCarrier())) {
 		t.Error("launch carrier content differs from the bundle's")

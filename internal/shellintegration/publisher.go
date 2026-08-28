@@ -1,6 +1,7 @@
 package shellintegration
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -27,7 +28,7 @@ const ProtocolVersion = 1
 // the host is created or modified, and no rc file is ever touched (N4).
 const (
 	manifestName   = "manifest.json" // the activation pointer, published by atomic rename
-	launchName     = "launch"        // the stable 0700 carrier, installed once, never rewritten
+	launchName     = "launch"        // the stable 0700 carrier, kept identical to the one we ship
 	lockName       = "lock"          // atomic-mkdir lock directory
 	lockNonceFile  = "nonce"         // the lock holder's identifying nonce
 	tmpName        = "tmp"           // staging for unpublished generations and the manifest temp
@@ -225,8 +226,9 @@ func publishFSOpBudget(f int) int {
 
 // Bundle is the descriptor both carriers hand to the publisher (AD-8: one
 // owner of the behaviour, two carriers). It carries the generation files
-// (data, 0600) and optionally the launch carrier (0700), which is installed
-// only when absent — never rewritten by a generation publish.
+// (data, 0600) and optionally the launch carrier (0700), which is written when
+// absent and replaced when what is installed is not the bytes we ship — before
+// the version check, which may skip everything else (ensureLaunch).
 type Bundle struct {
 	Protocol int          // manifest contract version; must equal ProtocolVersion
 	Version  string       // script version; safe name; names the generation dir v<version>
@@ -655,6 +657,20 @@ func (p *Publisher) publish(bundle Bundle) (res PublishResult, err error) {
 	}
 	defer release()
 
+	// The launch carrier is reconciled BEFORE the version check, and that
+	// order is the whole of nocx-carrier: the check below skips everything
+	// that follows it whenever the manifest already names this version or a
+	// newer one, and the carrier is not part of a generation — so the host
+	// that is "already-installed" was exactly the host whose carrier could
+	// never be replaced. It is also the host most likely to need it: one
+	// that has been connected to for long enough to be current is one whose
+	// carrier may predate the bootstrap protocol it is about to speak.
+	if f, ok := bundle.file(launchName); ok {
+		if lerr := p.ensureLaunch(f); lerr != nil {
+			return PublishResult{}, lerr
+		}
+	}
+
 	// The version check is repeated after the lock is held (design §4 and
 	// §6.3): the lock is released between attempts, so holding it is not
 	// by itself a guarantee of a single commit — between any earlier read
@@ -673,15 +689,6 @@ func (p *Publisher) publish(bundle Bundle) (res PublishResult, err error) {
 		}
 		p.cleanupOrphans(installed.Generation)
 		return installed, nil
-	}
-
-	// The launch carrier is a stable 0700 file installed before the first
-	// activation and never rewritten as part of publishing a generation
-	// (design §4).
-	if f, ok := bundle.file(launchName); ok {
-		if lerr := p.ensureLaunch(f); lerr != nil {
-			return PublishResult{}, lerr
-		}
 	}
 
 	nonce, err := p.stageGeneration(bundle)
@@ -1273,8 +1280,26 @@ func (p *Publisher) readManifest() (*Manifest, error) {
 	return m, nil
 }
 
-// ensureLaunch installs the launch carrier when absent; an existing launch
-// is checked for symlinks but never rewritten.
+// ensureLaunch makes the installed launch carrier the one this build ships:
+// it writes the carrier when absent, and replaces it when what is on disk is
+// not byte-for-byte ours.
+//
+// It used to install once and never rewrite, on the argument that the carrier
+// is "a stable carrier over a changing bundle" — a file whose content does not
+// depend on the generation it activates. The argument was true of the carrier's
+// PURPOSE and false of its BYTES: the carrier changed four times in one month,
+// once with the bootstrap protocol itself, and a host first connected before
+// that change went on exec'ing the old one against the new frames for as long
+// as the file existed. Nothing could notice, either — the manifest does not
+// record the carrier (buildManifest skips it), the version check skips the
+// whole publish when the generation is current, and stage-1 asks only whether
+// the file is executable. Three mechanisms, one outcome: install once meant
+// install forever.
+//
+// So identity is read off the DISK rather than off the manifest. It costs one
+// read of ~10 KB per connection and it is the only check that answers the
+// question actually being asked — what will stage-1 exec — for a file the
+// manifest never described and a user may have edited.
 func (p *Publisher) ensureLaunch(f BundleFile) error {
 	path := p.join(launchName)
 	info, err := p.fs.Lstat(path)
@@ -1290,8 +1315,43 @@ func (p *Publisher) ensureLaunch(f BundleFile) error {
 	if !info.Mode().IsRegular() {
 		return &PublishError{Op: "launch", Path: path, Err: fmt.Errorf("exists and is not a regular file")}
 	}
-	p.log.Debug("shellintegration: launch carrier present, not rewritten")
-	return nil
+	installed, err := p.fs.ReadFile(path)
+	if err != nil {
+		return boundaryErr("read", path, err)
+	}
+	if bytes.Equal(installed, f.Data) && info.Mode().Perm() == 0o700 {
+		p.log.Debug("shellintegration: launch carrier is current, not rewritten")
+		return nil
+	}
+	p.log.Info("shellintegration: launch carrier replaced",
+		"path", path, "was", len(installed), "now", len(f.Data), "mode", fmt.Sprintf("%04o", info.Mode().Perm()))
+	return p.replaceLaunch(path, f.Data)
+}
+
+// replaceLaunch writes the carrier beside itself and renames it into place.
+//
+// Never a truncate-in-place: another session on this host may be executing the
+// carrier at this moment, and a shell reads its script incrementally — writing
+// through the same inode would feed that shell the second half of a different
+// file. The rename gives the new bytes a new inode and leaves every open
+// handle reading what it started with.
+//
+// The staging name is a plain file inside tmp/ rather than a staging SLOT: a
+// slot is a directory, an attempt may create exactly one (bound 1), and
+// stageGeneration is entitled to that one on the publishing path.
+func (p *Publisher) replaceLaunch(path string, data []byte) error {
+	staged := p.join(tmpName, launchName+"."+newNonce())
+	if err := p.writeFile(staged, data, 0o700); err != nil {
+		return err
+	}
+	if err := p.fs.Rename(staged, path); err != nil {
+		// Leave nothing behind that the next attempt would have to clear.
+		if rmErr := p.fs.Remove(staged); rmErr != nil && !errors.Is(rmErr, fs.ErrNotExist) {
+			p.log.Warn("shellintegration: staged carrier not cleared", "path", staged, "err", rmErr)
+		}
+		return boundaryErr("rename", staged, err)
+	}
+	return p.syncDir(p.root)
 }
 
 // stageGeneration writes every generation file under a fresh tmp/<nonce>/

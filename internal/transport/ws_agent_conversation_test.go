@@ -290,10 +290,15 @@ func TestAgentAsk_AnEvictedEarlierAnswerSaysSoRatherThanLeavingAHole(t *testing.
 
 	askAndSettle(t, h, sid, "ask-3", "and now?", 4)
 	third := client.nth(t, 2)
-	answer := theAnswerIn(t, third.Messages)
+	var answer string
+	for _, m := range third.Messages {
+		if m.Role == "assistant" && strings.Contains(m.Content, proseGoneNotice) {
+			answer = proseGoneNotice
+		}
+	}
 	if answer != proseGoneNotice {
-		t.Fatalf("after eviction the earlier answer reads %q, want the sentence that says the text is gone (%q)",
-			answer, proseGoneNotice)
+		t.Fatalf("after eviction the earlier answer is absent from %v, want the sentence that says the text is gone (%q)",
+			third.Messages, proseGoneNotice)
 	}
 	// Nothing was invented in its place: none of the evicted words survive
 	// anywhere in the context the model is handed.
@@ -302,10 +307,16 @@ func TestAgentAsk_AnEvictedEarlierAnswerSaysSoRatherThanLeavingAHole(t *testing.
 			t.Fatalf("the evicted text reappeared in a %s message: %q", m.Role, m.Content)
 		}
 	}
-	// And the question it was an answer to is still there — which is what
-	// makes saying so possible rather than merely honest.
-	if third.Messages[1].Content != "sure?" {
-		t.Errorf("the earlier question reads %q after eviction, want it intact", third.Messages[1].Content)
+	// Both earlier questions remain in the whole thread, including the one
+	// whose answer was evicted.
+	questions := make(map[string]bool)
+	for _, m := range third.Messages {
+		if m.Role == "user" {
+			questions[m.Content] = true
+		}
+	}
+	if !questions["what does the config say?"] || !questions["sure?"] {
+		t.Errorf("earlier questions after eviction = %v, want both questions intact", questions)
 	}
 }
 
@@ -359,6 +370,167 @@ func TestAgentAsk_AnEarlierAnswerThatFinishedIsNotMarkedPartial(t *testing.T) {
 
 	if answer := theAnswerIn(t, client.nth(t, 1).Messages); answer != "all of it." {
 		t.Fatalf("a finished answer reads %q, want exactly what was said and no marker", answer)
+	}
+}
+
+// The thread is not a one-turn cache: the third question receives both
+// completed earlier turns, in their ledger order, before the current question.
+func TestAgentAsk_ThirdQuestionCarriesAllEarlierTurnsOldestFirst(t *testing.T) {
+	client := &conversationClient{scripts: [][]assistant.AskEvent{
+		{answerEvent("answer one")},
+		{answerEvent("answer two")},
+		{answerEvent("answer three")},
+	}}
+	h := newAskHarness(t, client)
+	h.createEndpoint()
+	sid := openSessionInAskPane(t, h.conn, 1)
+
+	askAndSettle(t, h, sid, "ask-1", "question one", 2)
+	askAndSettle(t, h, sid, "ask-2", "question two", 3)
+	askAndSettle(t, h, sid, "ask-3", "question three", 4)
+
+	messages := client.nth(t, 2).Messages
+	var contents []string
+	for _, message := range messages {
+		if message.Role != "system" {
+			contents = append(contents, message.Content)
+		}
+	}
+	want := []string{"question one", "answer one", "question two", "answer two", "question three"}
+	if len(contents) != len(want) {
+		t.Fatalf("third context = %#v, want %d non-system messages", contents, len(want))
+	}
+	for i := range want {
+		if contents[i] != want[i] {
+			t.Errorf("third context message %d = %q, want %q", i, contents[i], want[i])
+		}
+	}
+}
+
+func TestAgentAsk_ConversationBudgetDropsOldestTurnsWithNotice(t *testing.T) {
+	oldAnswer := strings.Repeat("old answer ", 400)
+	client := &conversationClient{scripts: [][]assistant.AskEvent{
+		{answerEvent(oldAnswer)},
+		{answerEvent(strings.Repeat("new answer ", 1000))},
+		{answerEvent("final answer")},
+	}}
+	h := newAskHarness(t, client)
+	h.createEndpoint()
+	sid := openSessionInAskPane(t, h.conn, 1)
+
+	askAndSettle(t, h, sid, "ask-1", "old question", 2)
+	askAndSettle(t, h, sid, "ask-2", "new question", 3)
+	askAndSettle(t, h, sid, "ask-3", "final question", 4)
+
+	messages := client.nth(t, 2).Messages
+	var sawNotice, sawNewQuestion bool
+	for _, message := range messages {
+		sawNotice = sawNotice || strings.Contains(message.Content, "older turns of this conversation are not included")
+		sawNewQuestion = sawNewQuestion || message.Content == "new question"
+		if strings.Contains(message.Content, oldAnswer) {
+			t.Fatalf("oldest turn survived the conversation budget: %q", message.Content)
+		}
+	}
+	if !sawNotice || !sawNewQuestion {
+		t.Fatalf("budgeted context = %+v, want trim notice and newest prior turn", messages)
+	}
+}
+
+// The action and command are written through the real ledger used by the
+// WebSocket harness, then the next ask observes only the derived summary.
+func TestAgentAsk_DestructiveCommandEvidenceSurvivesIntoNextTurn(t *testing.T) {
+	client := &conversationClient{scripts: [][]assistant.AskEvent{
+		{answerEvent("the file is deleted.")},
+		{answerEvent("I can see the recorded action.")},
+	}}
+	h := newAskHarness(t, client)
+	h.createEndpoint()
+	sid := openSessionInAskPane(t, h.conn, 1)
+	turnID := askAndSettle(t, h, sid, "ask-1", "delete the file", 2)
+
+	ctx := context.Background()
+	led := h.db.Ledger()
+	envID := content.EnvironmentIDFor(content.EnvLocal, "")
+	if err := led.EnsureEnvironment(ctx, content.Environment{ID: envID, Kind: content.EnvLocal}); err != nil {
+		t.Fatalf("EnsureEnvironment: %v", err)
+	}
+	if _, err := led.RecordObservation(ctx, content.Observation{
+		EnvironmentID: envID, Criticality: content.CriticalityRoutine,
+	}); err != nil {
+		t.Fatalf("RecordObservation: %v", err)
+	}
+	actionID := "11111111-1111-7111-8111-111111111111"
+	actionPayload := `{"tool":"run","effect":"mutate-destructive","args":{"command":"rm -f target.txt"},"opensBlock":true}`
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: actionID, Client: "agent", EnvironmentID: envID, Cwd: "/repo",
+		Kind: content.EntryAction, Source: content.SourceAssistant,
+		Intent: "run", Payload: actionPayload,
+	}); err != nil {
+		t.Fatalf("Submit action: %v", err)
+	}
+	if _, err := led.AddCause(ctx, turnID, actionID); err != nil {
+		t.Fatalf("AddCause action: %v", err)
+	}
+	commandID := "22222222-2222-7222-8222-222222222222"
+	if _, err := led.Submit(ctx, content.SubmitEntry{
+		ID: commandID, Client: "renderer", EnvironmentID: envID, Cwd: "/repo",
+		Kind: content.EntryShell, Intent: "rm -f target.txt",
+	}); err != nil {
+		t.Fatalf("Submit command: %v", err)
+	}
+	if _, err := led.AddCause(ctx, turnID, commandID); err != nil {
+		t.Fatalf("AddCause command: %v", err)
+	}
+	shellExec, err := led.StartExecution(ctx, content.StartExecution{EntryID: commandID})
+	if err != nil {
+		t.Fatalf("StartExecution command: %v", err)
+	}
+	artifactID := "33333333-3333-7333-8333-333333333333"
+	if _, appendErr := led.AppendArtifact(ctx, content.AppendArtifact{
+		EntryID: commandID, ExecutionID: &shellExec, ID: artifactID,
+		MediaType: content.MediaText, CaptureMethod: content.CaptureRawOutput,
+	}); appendErr != nil {
+		t.Fatalf("AppendArtifact command: %v", appendErr)
+	}
+	if chunkErr := led.AppendChunk(ctx, artifactID, 1, []byte("removed\n")); chunkErr != nil {
+		t.Fatalf("AppendChunk command: %v", chunkErr)
+	}
+	if finishShellErr := led.FinishExecution(ctx, shellExec, content.FinishExecution{
+		EndedAt: 2, TerminationReason: content.TermCompleted, Status: content.EntrySuccess,
+	}); finishShellErr != nil {
+		t.Fatalf("FinishExecution command: %v", finishShellErr)
+	}
+	actionExec, err := led.StartExecution(ctx, content.StartExecution{EntryID: actionID, Attempt: 1})
+	if err != nil {
+		t.Fatalf("StartExecution action: %v", err)
+	}
+	if finishActionErr := led.FinishExecution(ctx, actionExec, content.FinishExecution{
+		EndedAt: 3, TerminationReason: content.TermCompleted, Status: content.EntrySuccess,
+	}); finishActionErr != nil {
+		t.Fatalf("FinishExecution action: %v", finishActionErr)
+	}
+
+	askAndSettle(t, h, sid, "ask-2", "what happened?", 3)
+	messages := client.nth(t, 1).Messages
+	var evidence string
+	for _, message := range messages {
+		if message.Role == "assistant" && strings.Contains(message.Content, "ran rm -f target.txt") {
+			evidence = message.Content
+		}
+		if strings.Contains(message.Content, "removed") {
+			t.Fatalf("tool output leaked into conversation context: %q", message.Content)
+		}
+	}
+	if !strings.Contains(evidence, "ran rm -f target.txt → 1 lines") {
+		t.Fatalf("next turn lacks completed destructive-call evidence: %q", evidence)
+	}
+	action, err := led.Entry(ctx, actionID)
+	if err != nil || action == nil || action.ParentID == nil || *action.ParentID != turnID {
+		t.Fatalf("action linkage = %+v (err=%v), want same turn", action, err)
+	}
+	command, err := led.Entry(ctx, commandID)
+	if err != nil || command == nil || command.ParentID == nil || *command.ParentID != turnID {
+		t.Fatalf("command linkage = %+v (err=%v), want same turn", command, err)
 	}
 }
 

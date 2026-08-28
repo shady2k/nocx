@@ -52,7 +52,7 @@ func TestAsk_ApprovedProposalResumesWhenTheModelReRolls(t *testing.T) {
 	_, srv := newFakeOpenAI(reProposingModel("files.read", args))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -139,7 +139,7 @@ func TestAsk_ASessionAnswerStopsTheNextProposalAsking(t *testing.T) {
 	_, srv := newFakeOpenAI(twoProposalsThenAnswer("files.read", firstArgs, secondArgs))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -165,7 +165,7 @@ func TestAsk_ASessionAnswerStopsTheNextProposalAsking(t *testing.T) {
 		t.Fatal("the exact proposal the middleware asked about was not pending")
 	}
 	answered := content.ResolvePolicy(askEveryTimeMatrix(), nil, content.SessionOverrides{
-		content.EffectObserve: content.DecisionPermit,
+		Decisions: map[content.Effect]content.Decision{content.EffectObserve: content.DecisionPermit},
 	}).AsGrant([]content.GrantScope{{Kind: content.ResourcePath, ID: dir}})
 
 	// The resume, under the re-minted grant: the restored call runs, the
@@ -203,7 +203,7 @@ func TestAsk_TerminalRunsLeaveNoCheckpoint(t *testing.T) {
 	_, srv := newFakeOpenAI(reProposingModel("files.read", args))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -268,7 +268,7 @@ func TestAsk_TwoQuestionsInOneRunBothGetPast(t *testing.T) {
 	_, srv := newFakeOpenAI(twoProposalsThenAnswer("files.read", firstArgs, secondArgs))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}

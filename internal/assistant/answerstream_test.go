@@ -125,7 +125,7 @@ func TestAsk_TheToolResultNeverReachesTheAnswerText(t *testing.T) {
 	_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: args}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -160,7 +160,7 @@ func TestAsk_TheToolCallPrecedesTheAnswerWrittenFromIt(t *testing.T) {
 	_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: args}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -228,7 +228,7 @@ func TestAsk_ReasoningIsItsOwnEventAndNeverTheAnswerText(t *testing.T) {
 	_, srv := newFakeOpenAI(func(w http.ResponseWriter, _ *http.Request) { streamReasoningThenAnswer(w) })
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -255,7 +255,7 @@ func TestAsk_NoReasoningNoToolsEmitsAnswerEventsOnly(t *testing.T) {
 	_, srv := newFakeOpenAI(nil) // the default: one streamed "ok"
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -340,7 +340,7 @@ func TestAsk_ProseBeforeTheCallStaysBeforeTheCall(t *testing.T) {
 	_, srv := newFakeOpenAI(streamProseThenToolCalls("Let me check.", toolCallSpec{name: "files.read", args: args}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -391,7 +391,7 @@ func TestAsk_ProseBeforeTheCallStaysBeforeTheCall_WithId(t *testing.T) {
 	_, srv := newFakeOpenAI(streamProseThenToolCalls("Let me check.", toolCallSpec{name: "files.read", args: args, id: "call_diag"}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}

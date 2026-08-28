@@ -77,7 +77,7 @@ func (f *fakeAgentService) FinishAgentRun(_ context.Context, _ int64, in content
 	return nil
 }
 
-func (f *fakeAgentService) PriorTurn(_ context.Context, _, _ string) (*content.PriorTurn, error) {
+func (f *fakeAgentService) PriorTurns(_ context.Context, _, _ string) ([]content.PriorTurn, error) {
 	return nil, nil
 }
 

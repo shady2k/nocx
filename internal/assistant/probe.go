@@ -57,7 +57,7 @@ func (c *client) Probe(ctx context.Context, p ProbeParams) (ProbeResult, error) 
 	// checkpoint by. It passes the client's store with an empty id: nothing
 	// is written, nothing is looked up.
 	streamErr := streamModelAnswer(probeCtx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers,
-		[]*schema.Message{schema.UserMessage(probePrompt)}, nil, nil, c.checkpoints, "",
+		[]*schema.Message{schema.UserMessage(probePrompt)}, nil, nil, nil, c.checkpoints, "",
 		// The probe asks "does this model answer", so only the ANSWER
 		// counts: a reasoning model that thought and said nothing has not
 		// answered, and a probe that accepted its thinking would report a

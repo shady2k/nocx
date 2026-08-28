@@ -65,6 +65,7 @@
 @import './styles/components/toast.css';
 @import './styles/components/marker-list.css';
 @import './styles/components/code-block.css';
+@import './styles/components/dump-panel.css';
 @import './styles/components/spinner.css';
 @import './styles/components/collection-view.css';
 @import './styles/components/file-status-row.css';
@@ -168,6 +169,28 @@
   border-top: 1px solid var(--color-surface-raised);
   border-left: 3px solid var(--color-accent);
   padding: 10px 14px 12px;
+}
+
+.nocx-editor[data-placement='overlay'] {
+  position: absolute;
+  left: var(--pane-inline-padding);
+  right: var(--pane-inline-padding);
+  bottom: 0;
+  z-index: 10;
+  box-sizing: border-box;
+}
+
+/* An answer asked over a running program stays visible after the editor
+   submits. It is a view until the command ends, then the same node is moved
+   into the scrollback by the terminal content owner (nocx-7l4ex.4). */
+.nocx-answer-overlay {
+  position: absolute;
+  left: var(--pane-inline-padding);
+  right: var(--pane-inline-padding);
+  bottom: 0;
+  z-index: 9;
+  max-height: min(50vh, calc(36em + 6px));
+  overflow-y: auto;
 }
 
 /* Every presentation that is not a prompt REMOVES this card and its box: the

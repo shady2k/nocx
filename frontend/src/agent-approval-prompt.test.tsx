@@ -42,6 +42,7 @@ const POLICY_ASK: AgentApprovalRequested = {
   // surface must never work it out from the tool name — that would be a rule
   // keyed by a tool name in everything but storage (ADR-0028 decision 4).
   effect: 'observe',
+  standing: { available: false, rule: '', reason: '' },
   resource: { kind: 'path', id: '/repo/a.txt' },
 }
 
@@ -53,6 +54,13 @@ const EGRESS_ASK: AgentApprovalRequested = {
     { source: 'known', secretName: 'github-token', start: 0, end: 5 },
     { source: 'heuristic', kind: 'openai-api-key', start: 11, end: 40 },
   ],
+}
+
+const STANDING_ASK: AgentApprovalRequested = {
+  ...POLICY_ASK,
+  tool: 'run',
+  arguments: '{"command":"df -h"}',
+  standing: { available: true, rule: 'df -h', reason: '' },
 }
 
 function renderPrompt(overrides?: Partial<Parameters<typeof AgentApprovalPrompt>[0]>) {
@@ -508,7 +516,10 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
   })
 
   it('puts the decision facts before the policy prose', () => {
-    const { container } = renderPrompt({ ask: SESSION_ASK, sessionWhere: () => HERE })
+    const { container } = renderPrompt({
+      ask: { ...SESSION_ASK, standing: STANDING_ASK.standing },
+      sessionWhere: () => HERE,
+    })
     const text = container.textContent ?? ''
     const facts = text.indexOf('effect')
     const covers = text.indexOf('Approving covers this call')
@@ -516,6 +527,18 @@ describe('AgentApprovalPrompt — the facts, not the JSON (nocx-n7xha)', () => {
     expect(facts).toBeGreaterThan(-1)
     expect(covers).toBeGreaterThan(facts)
     expect(lasts).toBeGreaterThan(covers)
+  })
+
+  it('names the effect row a standing answer covers in product words', () => {
+    const { container } = renderPrompt({
+      ask: {
+        ...POLICY_ASK,
+        standing: { available: true, rule: '', reason: '' },
+      },
+    })
+    expect(container.textContent ?? '').toContain(
+      `is a standing answer for ${EFFECT_LABEL.observe}`,
+    )
   })
 })
 
@@ -560,15 +583,15 @@ describe('AgentApprovalPrompt', () => {
 
   it('a policy question offers three allowances and three refusals, each with its scope', () => {
     const { decisions, onDecide } = recordDecisions()
-    const ui = renderPrompt({ onDecide })
+    const ui = renderPrompt({ ask: STANDING_ASK, onDecide })
 
     for (const name of [
       'Allow once — this proposal only',
-      'Allow in this session — every read and inspect call in this session',
-      'Allow always — every read and inspect call, in every session, from now on',
+      'Allow in this session — df -h — until this terminal session ends',
+      'Allow always — df -h — in every session, from now on',
       'Deny once — this proposal only',
-      'Deny in this session — every read and inspect call in this session',
-      'Deny always — every read and inspect call, in every session, from now on',
+      'Deny in this session — df -h — until this terminal session ends',
+      'Deny always — df -h — in every session, from now on',
     ]) {
       fireEvent.click(ui.getByRole('button', { name }))
     }
@@ -582,38 +605,58 @@ describe('AgentApprovalPrompt', () => {
       [false, 'always'],
     ])
   })
-  it('each answer says its own scope, and carries no second line', () => {
-    // The owner's correction, 2026-08-26: the scope belongs IN the button's
-    // text. What came off is the per-button description line, not the word a
-    // person needs in order to tell the six answers apart — a column heading
-    // is one more thing to look up while deciding.
-    const { container } = renderPrompt()
+  it('keeps the scope on the primary line and carries coverage on a readable second line', () => {
+    const { container } = renderPrompt({ ask: STANDING_ASK })
     const buttons = Array.from(container.querySelectorAll<HTMLButtonElement>('.ui-button'))
     expect(buttons.map((button) => button.textContent)).toEqual([
-      'Allow once',
-      'Allow in this session',
-      'Allow always',
-      'Deny once',
-      'Deny in this session',
-      'Deny always',
+      'Allow once — this proposal only',
+      'Allow in this session — df -h — until this terminal session ends',
+      'Allow always — df -h — in every session, from now on',
+      'Deny once — this proposal only',
+      'Deny in this session — df -h — until this terminal session ends',
+      'Deny always — df -h — in every session, from now on',
     ])
-    expect(buttons.every((button) => !button.querySelector('.ui-button__secondary'))).toBe(true)
+    expect(
+      buttons.map((button) => [
+        button.querySelector('.ui-button__label')?.textContent,
+        button.querySelector('.ui-button__secondary')?.textContent,
+      ]),
+    ).toEqual([
+      ['Allow once', '— this proposal only'],
+      ['Allow in this session', '— df -h — until this terminal session ends'],
+      ['Allow always', '— df -h — in every session, from now on'],
+      ['Deny once', '— this proposal only'],
+      ['Deny in this session', '— df -h — until this terminal session ends'],
+      ['Deny always', '— df -h — in every session, from now on'],
+    ])
+    expect(buttons.every((button) => button.querySelector('.ui-button__secondary'))).toBe(true)
     expect(buttons[0]?.getAttribute('aria-label')).toBe('Allow once — this proposal only')
+    expect(buttons[1]?.getAttribute('aria-label')).toBe(
+      'Allow in this session — df -h — until this terminal session ends',
+    )
     expect(buttons[2]?.getAttribute('aria-label')).toBe(
-      'Allow always — every read and inspect call, in every session, from now on',
+      'Allow always — df -h — in every session, from now on',
     )
   })
 
   it('groups allowances and refusals into two rows of three', () => {
-    const { container } = renderPrompt()
+    const { container } = renderPrompt({ ask: STANDING_ASK })
     const groups = Array.from(container.querySelectorAll('.ui-action-group'))
     expect(groups).toHaveLength(2)
     const names = groups.map((g) =>
       Array.from(g.querySelectorAll('.ui-button')).map((b) => b.textContent),
     )
     expect(names).toEqual([
-      ['Allow once', 'Allow in this session', 'Allow always'],
-      ['Deny once', 'Deny in this session', 'Deny always'],
+      [
+        'Allow once — this proposal only',
+        'Allow in this session — df -h — until this terminal session ends',
+        'Allow always — df -h — in every session, from now on',
+      ],
+      [
+        'Deny once — this proposal only',
+        'Deny in this session — df -h — until this terminal session ends',
+        'Deny always — df -h — in every session, from now on',
+      ],
     ])
   })
 
@@ -631,7 +674,7 @@ describe('AgentApprovalPrompt', () => {
   })
 
   it('says how long a session answer lasts, and never promises the pane', () => {
-    const { container } = renderPrompt()
+    const { container } = renderPrompt({ ask: STANDING_ASK })
     const text = container.textContent ?? ''
     expect(text).toContain('in this session')
     // The permission binds to the terminal SESSION: restarting the shell in
@@ -679,33 +722,67 @@ describe('AgentApprovalPrompt', () => {
   })
 
   it('disables every answer while the decision is in flight', () => {
-    const { container } = renderPrompt({ busy: true })
+    const { container } = renderPrompt({ ask: STANDING_ASK, busy: true })
     const buttons = Array.from(container.querySelectorAll('.ui-button'))
     expect(buttons).toHaveLength(6)
     for (const b of buttons) expect((b as HTMLButtonElement).disabled).toBe(true)
   })
 
-  it('states each answer coverage by the control name, using the effect vocabulary', () => {
+  it('states the scope and carried rule in each answer control', () => {
     const effect = 'mutate-destructive'
     const view = renderPrompt({
-      ask: { ...POLICY_ASK, effect },
+      ask: { ...STANDING_ASK, effect },
     })
     const coverage = [
-      `Allow once — this proposal only`,
-      `Allow in this session — every ${EFFECT_LABEL[effect]} call in this session`,
-      `Allow always — every ${EFFECT_LABEL[effect]} call, in every session, from now on`,
-      `Deny once — this proposal only`,
-      `Deny in this session — every ${EFFECT_LABEL[effect]} call in this session`,
-      `Deny always — every ${EFFECT_LABEL[effect]} call, in every session, from now on`,
+      'Allow once — this proposal only',
+      'Allow in this session — df -h — until this terminal session ends',
+      'Allow always — df -h — in every session, from now on',
+      'Deny once — this proposal only',
+      'Deny in this session — df -h — until this terminal session ends',
+      'Deny always — df -h — in every session, from now on',
     ]
     for (const name of coverage) expect(view.getByRole('button', { name })).toBeTruthy()
 
     const egress = renderPrompt({ ask: { ...EGRESS_ASK, effect } })
-    expect(egress.queryByRole('button', { name: /every .* call in this session/ })).toBeNull()
-    expect(
-      egress.queryByRole('button', { name: /every .* call, in every session, from now on/ }),
-    ).toBeNull()
+    expect(egress.queryByRole('button', { name: /in this session/ })).toBeNull()
+    expect(egress.queryByRole('button', { name: /always/ })).toBeNull()
     expect(view.queryByRole('button', { name: 'Allow once' })).toBeNull()
     expect(view.container.textContent).toContain(EFFECT_LABEL[effect])
+  })
+})
+
+describe('AgentApprovalPrompt — standing answers name the carried rule (nocx-takqr.2)', () => {
+  afterEach(cleanup)
+
+  it('puts the backend rule sentence in each standing control', () => {
+    const rule = 'df -h'
+    const { container } = renderPrompt({
+      ask: {
+        ...POLICY_ASK,
+        tool: 'run',
+        arguments: '{"command":"df -h"}',
+        standing: { available: true, rule, reason: '' },
+      },
+    })
+    expect(container.querySelector('.ui-button:nth-of-type(2)')?.textContent).toContain(rule)
+    expect(container.textContent).toContain(`Allow in this session — ${rule}`)
+    expect(container.textContent).toContain(`Allow always — ${rule}`)
+    expect(container.textContent).toContain(`Deny in this session — ${rule}`)
+    expect(container.textContent).toContain(`Deny always — ${rule}`)
+  })
+
+  it('offers only once when the backend says the rule cannot be shown', () => {
+    const reason = 'the command uses an indirect wrapper'
+    const { container } = renderPrompt({
+      ask: {
+        ...POLICY_ASK,
+        tool: 'run',
+        arguments: '{"command":"sudo df -h"}',
+        standing: { available: false, rule: '', reason },
+      },
+    })
+    expect(container.querySelectorAll('.ui-button')).toHaveLength(2)
+    expect(container.textContent).toContain(reason)
+    expect(names(container)).toContain('standing')
   })
 })

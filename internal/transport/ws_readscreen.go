@@ -119,16 +119,16 @@ func readScreenKind() RequestKind {
 func resolveReadScreen(raw json.RawMessage) (json.RawMessage, error) {
 	var p readScreenResolvedParams
 	if err := json.Unmarshal(raw, &p); err != nil {
-		return nil, fmt.Errorf("readScreen: resolution: %w", err)
+		return nil, fmt.Errorf("resolution: %w", err)
 	}
 	if p.Outcome == "failed" {
-		return nil, fmt.Errorf("readScreen: the renderer could not capture the screen: %s", p.Error)
+		return nil, fmt.Errorf("the renderer could not capture the screen: %s", p.Error)
 	}
 	body, err := json.Marshal(readScreenFrameBody{
 		Rows: p.Rows, Cursor: p.Cursor, Identity: p.Identity, Range: p.Range,
 	})
 	if err != nil {
-		return nil, fmt.Errorf("readScreen: frame body: %w", err)
+		return nil, fmt.Errorf("frame body: %w", err)
 	}
 	return body, nil
 }
@@ -180,7 +180,7 @@ func validateReadScreenResolvedRaw(raw json.RawMessage) string {
 // the death of the renderers if none answers.
 func (s *WSServer) RequestScreen(ctx context.Context, sessionID string, region *assistant.FrameRegion) (json.RawMessage, error) {
 	if s.broker == nil {
-		return nil, errors.New("readScreen: no renderer request broker is wired")
+		return nil, errors.New("no renderer request broker is wired")
 	}
 	params := readScreenRequestParams{SessionID: sessionID}
 	if region != nil {
@@ -188,7 +188,7 @@ func (s *WSServer) RequestScreen(ctx context.Context, sessionID string, region *
 	}
 	var body json.RawMessage
 	if err := s.broker.Request(ctx, readScreenKind(), params, &body); err != nil {
-		return nil, fmt.Errorf("readScreen: %w", err)
+		return nil, err
 	}
 	return body, nil
 }
@@ -222,10 +222,12 @@ func (s *WSServer) brokerSpecs(immediate control.ImmediateSubmission) []methodSp
 // is the matrix of the amended §7, resolved by content.ResolvePolicy — the
 // ONE place the order is stated: the workspace override when nocx-mp2vd
 // lands, the global default now (the store the composition root wired).
-// The mint adds the run's OWN session as the base scope of every row — a run
-// can touch the lane it lives in, and nothing else unless the policy says
-// so — and the matrix derives the grant's effects and the declaration
-// filter's scope union (EffectPolicy.AsGrant).
+// The mint adds the run's OWN session as a base scope of every row and the
+// whole accessible local filesystem as its path scope. The path fence is wide
+// on purpose: the policy matrix is the narrowing surface, so a row can still
+// refuse or ask for a path without a second, weaker per-run path rule. The
+// matrix derives the grant's effects and the declaration filter's scope union
+// (EffectPolicy.AsGrant).
 //
 // This is the workspace's default grant: the workspace concept (which
 // sessions read as one story) is not wired yet, so the single-session
@@ -245,6 +247,9 @@ func (s *WSServer) runGrantFor(sessionID string) *content.Grant {
 	// scope is already this session, so the overlay carries no scope of its
 	// own: the run cannot reach outside its session anyway.
 	p := content.ResolvePolicy(s.agentPolicy.Policy(), nil, s.sessionPolicy.For(session.ID(sessionID)))
-	g := p.AsGrant([]content.GrantScope{{Kind: content.ResourceSession, ID: sessionID}})
+	g := p.AsGrant([]content.GrantScope{
+		{Kind: content.ResourceSession, ID: sessionID},
+		{Kind: content.ResourcePath, ID: "/"},
+	})
 	return &g
 }

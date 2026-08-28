@@ -38,6 +38,7 @@
 import {
   createEffect,
   createSignal,
+  createUniqueId,
   onCleanup,
   onMount,
   type Component,
@@ -121,8 +122,9 @@ function focusInitial(d: HTMLDialogElement): void {
 
 export const Dialog: Component<DialogProps> = (props) => {
   let ref: HTMLDialogElement | undefined
-  const [entry, setEntry] = createSignal<ReturnType<typeof pushOverlay> | null>(null)
+  const titleId = createUniqueId()
   let panel: HTMLDivElement | undefined
+  const [entry, setEntry] = createSignal<ReturnType<typeof pushOverlay> | null>(null)
 
   /* ── Panel height animation ──────────────────────────────────────────
      The panel's height is `auto` and content-driven: it grows and shrinks
@@ -376,6 +378,7 @@ export const Dialog: Component<DialogProps> = (props) => {
     <dialog
       ref={ref}
       class="nocx-dialog"
+      aria-labelledby={props.title ? titleId : undefined}
       onCancel={onCancel}
       onMouseDown={onPointerDown}
       onKeyDown={onKeyDown}
@@ -388,7 +391,9 @@ export const Dialog: Component<DialogProps> = (props) => {
         onTransitionCancel={onPanelTransitionCancel}
       >
         <Show when={props.title}>
-          <h2 class="nocx-dialog__title">{props.title}</h2>
+          <h2 id={titleId} class="nocx-dialog__title">
+            {props.title}
+          </h2>
         </Show>
         {/* The body is a slot with rhythm of its own, not a place children are
             dropped. They used to be panel children directly, and the panel is a

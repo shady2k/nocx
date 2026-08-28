@@ -31,12 +31,14 @@ func TestAgentApprovalRequested_DTOConformsToContract(t *testing.T) {
 			RunID: "7", Attempt: 1, Tool: "files.read", CallID: "call_1",
 			ArgHash: "hash-a", Arguments: `{"path":"/repo/a.txt"}`,
 			Reason: "policy", Effect: "observe",
+			Standing: agentApprovalStanding{Reason: "the call has no invocation to show"},
 			Resource: &content.GrantScope{Kind: content.ResourcePath, ID: "/repo/a.txt"},
 		},
 		"egress with findings": {
 			RunID: "7", Attempt: 1, Tool: "files.read", CallID: "call_1",
 			ArgHash: "hash-a", Arguments: `{"path":"/repo/a.txt"}`,
 			Reason: "egress", Effect: "observe", WasError: true,
+			Standing: agentApprovalStanding{Reason: "standing answers are not offered for result disclosure"},
 			Findings: []assistant.EgressFinding{{
 				Source: assistant.EgressFindingKnown, SecretName: "github-token", Start: 0, End: 5,
 			}},
@@ -171,7 +173,7 @@ func TestAgentApprovalRequested_RealEscalationOverTheWireNamesItsEffect(t *testi
 
 	fake, srv := newToolCallingServer("") // session filled per ask below
 	defer srv.Close()
-	client, err := assistant.NewClient(nil)
+	client, err := assistant.NewClient(nil, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

@@ -88,3 +88,4 @@ export {
 export { EditableRowList, type EditableRowListProps } from './row-list'
 export { ToggleMatrix, type ToggleMatrixAxis, type ToggleMatrixProps } from './toggle-matrix'
 export { CompletionDropdown, type CompletionDropdownCallbacks } from './completion-dropdown'
+export { DumpPanel, mountDumpPanel, type DumpPanelProps } from './dump-panel'

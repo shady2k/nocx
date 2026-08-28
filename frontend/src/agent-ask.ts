@@ -24,6 +24,11 @@ export interface AgentAskSeams {
   cwd: () => string
   openAnswer: (question: string, cwd: string, running?: RunningBlockActions) => AnswerBlockHandle
   onRefusal: (message: string) => void
+  /** Called only after the backend accepts the turn, so a speculative
+   *  overlay can change presentation without hiding itself on refusal. */
+  onTurnAccepted?: (askId: string) => void
+  onTurnStart?: (askId: string) => void
+  onTurnEnd?: (askId: string) => void
   onNoEndpoint?: () => void
   status?: () => Promise<AgentStatusResult>
   editorExtensions?: () => Extension[]
@@ -48,7 +53,10 @@ export class AgentInputTarget implements InputTarget {
   readonly label = 'Agent'
   readonly author = 'agent'
   readonly routesToShell = false
-  private readonly runs = new Map<number, { handle: AnswerBlockHandle; settle: () => void }>()
+  private readonly runs = new Map<
+    number,
+    { handle: AnswerBlockHandle; settle: () => void; askId: string }
+  >()
   private subscribed = false
 
   constructor(private readonly seams: AgentAskSeams) {}
@@ -77,8 +85,9 @@ export class AgentInputTarget implements InputTarget {
       state,
       ...(start !== undefined && count !== undefined ? { start, count } : {}),
     }))
+    const askId = crypto.randomUUID()
     const askParams: AskParams = {
-      askId: crypto.randomUUID(),
+      askId,
       sessionId,
       question: doc,
       cwd,
@@ -97,19 +106,22 @@ export class AgentInputTarget implements InputTarget {
       isActive: (): boolean => runId !== null && !settled && !cancellationRequested,
     }
     const handle = this.seams.openAnswer(doc, cwd, running)
+    this.seams.onTurnStart?.(askId)
     const ask = await this.seams.dispatcher
       .call<AgentAsk>('agent.ask', askParams)
       .catch((err: unknown) => {
+        this.seams.onTurnEnd?.(askId)
         handle.el.remove()
         const message = err instanceof Error ? err.message : String(err)
         this.seams.onRefusal(message)
         void this.offerEndpointRepair()
         throw err
       })
+    this.seams.onTurnAccepted?.(askId)
     runId = ask.runId
     handle.el.dataset.entryId = ask.entryId
     handle.el.dataset.answeredBy = ask.model
-    this.runs.set(ask.runId, { handle, settle: () => (settled = true) })
+    this.runs.set(ask.runId, { handle, askId, settle: () => (settled = true) })
   }
 
   /** Subscribe once: deltas append to the run's block; the terminal state
@@ -185,6 +197,14 @@ export class AgentInputTarget implements InputTarget {
       const s = params as AgentRunState
       const run = this.runs.get(s.runId)
       if (!run) return
+      if (
+        s.state === 'completed' ||
+        s.state === 'cancelled' ||
+        s.state === 'failed' ||
+        s.state === 'interrupted'
+      ) {
+        this.seams.onTurnEnd?.(run.askId)
+      }
       const handle = run.handle
       if (handle.el.dataset.entryId === undefined) {
         // A run that failed before its first delta never carried the entry
@@ -211,7 +231,7 @@ export class AgentInputTarget implements InputTarget {
         handle.close('success', undefined, handle.el.dataset.answeredBy)
       } else if (s.state === 'cancelled') {
         run.settle()
-        handle.close('cancelled')
+        handle.close('cancelled', s.error)
       } else if (s.state === 'failed' || s.state === 'interrupted') {
         run.settle()
         handle.close('failure', s.error ?? s.state)

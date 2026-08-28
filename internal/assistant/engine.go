@@ -78,7 +78,7 @@ func buildModel(httpClient *http.Client, key credential.Secret, baseURL, model s
 // Every error this returns is a stream failure the caller maps into a probe
 // outcome or a terminal run state; a nil return means a response was
 // received in full.
-func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, headers []Header, msgs []*schema.Message, tools []tool.BaseTool, handlers []adk.ChatModelAgentMiddleware, checkpoints *runCheckpoints, checkpointID string, onEvent func(AskEvent) error) error {
+func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.Client, key credential.Secret, baseURL, model string, headers []Header, msgs []*schema.Message, tools []tool.BaseTool, unknownTool func(ctx context.Context, name, rawArgs string) (string, error), handlers []adk.ChatModelAgentMiddleware, checkpoints *runCheckpoints, checkpointID string, onEvent func(AskEvent) error) error {
 	cm, err := buildModel(httpClient, key, baseURL, model)
 	if err != nil {
 		return err
@@ -100,8 +100,20 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 		// means in order, NOT stop on failure — sequentialRunToolCall loops
 		// every task and never inspects tasks[i].err, so the latch is what
 		// makes a refused call stop the ones after it.
+		//
+		// UnknownToolsHandler is the framework's seam for a name we never
+		// declared, and without it the node FAILS: eino resolves the call
+		// before any middleware of ours runs, so a model reaching for a tool
+		// that does not exist ended the run with a framework error nothing
+		// could name — over the most ordinary mistake a model makes. The
+		// carrier answers it, because what to say depends on which one is
+		// driving (carrier.go's UnknownTool).
 		cfg.ToolsConfig = adk.ToolsConfig{
-			ToolsNodeConfig: compose.ToolsNodeConfig{Tools: tools, ExecuteSequentially: true},
+			ToolsNodeConfig: compose.ToolsNodeConfig{
+				Tools:               tools,
+				ExecuteSequentially: true,
+				UnknownToolsHandler: unknownTool,
+			},
 		}
 	}
 	// The policy middleware (nocx-lndv): the run's grant decides what the
@@ -293,11 +305,26 @@ func streamModelAnswer(ctx context.Context, logger log.Logger, httpClient *http.
 // StreamError — the endpoint answered; it did not answer. Reasoning alone
 // does not count: a model that only thought did not reply.
 func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) error) error {
+	// The chain the transport put in the context becomes the chain
+	// everything under this ask logs with — the kernel and the declared-call
+	// carrier are both handed THIS logger. Binding it once here is what makes
+	// an effect three layers down say which run and which wire frame it belongs
+	// to without being told either.
+	askLog := c.log
+	if askLog != nil {
+		askLog = askLog.WithContext(ctx)
+	}
 	if strings.TrimSpace(p.BaseURL) == "" {
 		return fmt.Errorf("ask: base URL is required")
 	}
 	if strings.TrimSpace(p.Model) == "" {
 		return fmt.Errorf("ask: model is required")
+	}
+	if p.RunID != "" && p.TurnEntryID != "" {
+		// The HTTP recorder is below eino and can only learn which turn owns
+		// these bytes through the context that crosses the model boundary.
+		// Keep the unbound probe/test shape untouched.
+		ctx = WithWireIdentity(ctx, p.RunID, p.TurnEntryID)
 	}
 	msgs := make([]*schema.Message, 0, len(p.Messages))
 	for _, m := range p.Messages {
@@ -355,46 +382,52 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	}
 
 	var declared []tool.BaseTool
+	var runTools []tool.BaseTool
+	var unknownTool func(ctx context.Context, name, rawArgs string) (string, error)
 	var handlers []adk.ChatModelAgentMiddleware
 	if p.Grant != nil {
 		permitted := c.tools.ForGrant(*p.Grant)
-		if len(permitted) > 0 {
-			var err error
-			declared, err = declaredTools(permitted)
-			if err != nil {
-				return err
-			}
-			// The approval store is the client's own (process-lifetime, one
-			// per client, keyed by run id — ADR-0028: checkpoints are
-			// process-lifetime state); a caller may pass one explicitly.
-			approvals := p.Approvals
-			if approvals == nil {
-				approvals = c.approvals
-			}
-			// The classifier (bead nocx-kpy23): the middleware consults a
-			// SECOND model for every permitted proposal. The engine builds
-			// the classifier over ITS guarded client and the caller's role
-			// resolver — the model call is the engine's (design §6: usage
-			// has an owner); nil without a resolver is the feature off.
-			var classifier CallClassifier
-			if p.Classifier != nil {
-				classifier = newClassifierEngine(c.log, c.http, p.Classifier)
-			}
-			mw, err := newPolicyMiddleware(c.log, *p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.TurnEntryID, p.Requester, classifier, func(call ToolCall) error {
-				return sink(AskEvent{Kind: AskToolCall, Call: &call})
-			})
-			if err != nil {
-				return err
-			}
-			// FIRST, so it is the outermost user wrapper: its Stream runs
-			// before the policy middleware's and before the framework's
-			// event sender forwards the response, which is what puts every
-			// chunk of a response ahead of its tool-call event (the
-			// transport's prose boundary depends on that order — see
-			// answer_order.go). The policy middleware does not wrap the
-			// model, so the two orders are equivalent; this one is stated.
-			handlers = append(handlers, newOrderedAnswerMiddleware(sink), mw)
+		// The approval store is the client's own (process-lifetime, one
+		// per client, keyed by run id — ADR-0028: checkpoints are
+		// process-lifetime state); a caller may pass one explicitly.
+		approvals := p.Approvals
+		if approvals == nil {
+			approvals = c.approvals
 		}
+		// The classifier (bead nocx-kpy23): the middleware consults a
+		// SECOND model for every permitted proposal. The engine builds
+		// the classifier over ITS guarded client and the caller's role
+		// resolver — the model call is the engine's (design §6: usage
+		// has an owner); nil without a resolver is the feature off.
+		var classifier CallClassifier
+		if p.Classifier != nil {
+			classifier = newClassifierEngine(askLog, c.http, p.Classifier)
+		}
+		mw, err := newPolicyMiddleware(askLog, *p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.TurnEntryID, p.Requester, classifier, func(call ToolCall) error {
+			return sink(AskEvent{Kind: AskToolCall, Call: &call})
+		})
+		if err != nil {
+			return err
+		}
+		declared, err = mw.Declare(permitted)
+		if err != nil {
+			return err
+		}
+		// Keep ADK on its ToolsNode path even when every real tool is
+		// refused. The policy middleware removes this internal anchor from
+		// ToolInfos before every model call, so it is never declared.
+		runTools = append(append([]tool.BaseTool(nil), declared...), &unknownToolAnchor{})
+		unknownTool = func(_ context.Context, name, rawArgs string) (string, error) {
+			return mw.UnknownTool(name, rawArgs)
+		}
+		// FIRST, so it is the outermost user wrapper: its Stream runs
+		// before the policy middleware's and before the framework's
+		// event sender forwards the response, which is what puts every
+		// chunk of a response ahead of its tool-call event (the
+		// transport's prose boundary depends on that order — see
+		// answer_order.go). The policy middleware does not wrap the
+		// model, so the two orders are equivalent; this one is stated.
+		handlers = append(handlers, newOrderedAnswerMiddleware(sink), mw)
 	}
 
 	// The checkpoint is keyed by the run id, because that is what a drive
@@ -402,7 +435,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	// So an Ask whose run has a live checkpoint IS the resume of it —
 	// there is no second flag to keep in step with the store, and no way
 	// to ask for a resume of a run that is not suspended.
-	err := streamModelAnswer(ctx, c.log, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, declared, handlers, c.checkpoints, p.RunID, sink)
+	err := streamModelAnswer(ctx, askLog, c.http, p.Key, p.BaseURL, p.Model, p.Headers, msgs, runTools, unknownTool, handlers, c.checkpoints, p.RunID, sink)
 	if err != nil {
 		// A suspension is the ONE outcome that keeps the checkpoint: the
 		// run is not over, and the checkpoint is the only thing that can
@@ -497,4 +530,20 @@ func (d *declaredTool) Info(context.Context) (*schema.ToolInfo, error) {
 
 func (d *declaredTool) InvokableRun(_ context.Context, _ string, _ ...tool.Option) (string, error) {
 	return "", fmt.Errorf("tool %q is declared but not executable: nocx-lndv wires execution", d.info.Name)
+}
+
+const unknownToolAnchorName = "nocx.internal.unknown-tool-anchor"
+
+// unknownToolAnchor is an internal, non-advertised tool that keeps ADK on its
+// ToolsNode path when a grant permits no real tools. policyMiddleware removes
+// its ToolInfo before every model call and handles a call naming it without
+// invoking this method.
+type unknownToolAnchor struct{}
+
+func (*unknownToolAnchor) Info(context.Context) (*schema.ToolInfo, error) {
+	return &schema.ToolInfo{Name: unknownToolAnchorName, Desc: "internal"}, nil
+}
+
+func (*unknownToolAnchor) InvokableRun(context.Context, string, ...tool.Option) (string, error) {
+	return "", errors.New("internal unknown-tool anchor must not execute")
 }

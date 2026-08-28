@@ -70,6 +70,7 @@ When a collision is cited by number alone, disambiguate by filename.
 | 0042 | [A collection file names a secret by handle](0042-a-collection-file-names-a-secret-by-handle.md)                                  | Accepted (2026-08-26)                |
 | 0043 | [One connection to the encrypted store](0043-one-connection-to-the-encrypted-store.md)                                            | Accepted (2026-08-26)                |
 | 0044 | [Request files carry the environment choice](0044-request-files-carry-environment-choice.md)                                      | Accepted (2026-08-27)                |
+| 0045 | [Declared tool calls are the assistant's only carrier](0045-declared-calls-are-the-only-carrier.md)                               | Accepted (2026-08-27)                |
 
 ## Adding one
 

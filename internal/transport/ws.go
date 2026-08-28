@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -2495,6 +2496,12 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 		_ = respond(wconn, resp)
 		return
 	}
+	// THE CHAIN STARTS HERE (nocx-d6gn4.8.1): the frame names itself in the
+	// context, so every log line the handler and everything it calls
+	// produces says which request it came from — without a single one of
+	// them being passed the method or the id. A handler that goes on to
+	// drive an EXCHANGE (an agent run) adds the trace beside it.
+	ctx = log.WithRequestID(ctx, requestTag(wconn, req))
 	rej := m.submission.TrySubmit(ctx, control.Task{Run: func(pctx context.Context) {
 		m.handle(pctx, req)
 	}})
@@ -3377,4 +3384,15 @@ func (s *WSServer) rendererDeliver(conn Conn, method string, params json.RawMess
 		return fmt.Errorf("renderer deliver: connection %T is not a *wsConn", conn)
 	}
 	return wc.TryNotify(method, params)
+}
+
+// requestTag names one wire frame: the connection it arrived on, the method
+// and the JSON-RPC id — "3/agent.approve#7". A notification has no id and is
+// named without one.
+func requestTag(wconn *wsConn, req jsonrpcRequest) string {
+	tag := strconv.FormatUint(wconn.id, 10) + "/" + req.Method
+	if len(req.ID) > 0 {
+		tag += "#" + string(req.ID)
+	}
+	return tag
 }

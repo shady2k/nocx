@@ -21,23 +21,41 @@ import (
 // effect is retained. This is the existing content.Effect lattice's join:
 // each subcommand is either observe or the declared effect, and observe is the
 // least member, so no second local ordering can disagree with content.Effect.
-func CommandEffect(command string, declared content.Effect) content.Effect {
+// CommandInvocation is the parser result shared by effect classification and
+// invocation-rule policy. The parser is deliberately owned here: policy
+// consumers receive this result instead of tokenizing the command again.
+func parseCanonicalInvocation(command string) content.Invocation {
 	subcommands, disqualified, ok := splitCommand(command)
-	if !ok || disqualified {
+	inv := content.Invocation{Parsed: ok, Disqualified: disqualified}
+	if !ok {
+		return inv
+	}
+	inv.Commands = make([][]string, 0, len(subcommands))
+	for _, subcommand := range subcommands {
+		words, wordsOK := commandWords(subcommand)
+		if !wordsOK || len(words) == 0 {
+			inv.Parsed = false
+			inv.Commands = nil
+			return inv
+		}
+		inv.Commands = append(inv.Commands, words)
+		if disqualifyingWords(words) {
+			inv.Disqualified = true
+		}
+	}
+	return inv
+}
+
+func commandEffect(inv content.Invocation, declared content.Effect) content.Effect {
+	if !inv.Parsed || inv.Disqualified {
 		return declared
 	}
-
-	for _, subcommand := range subcommands {
-		words, ok := commandWords(subcommand)
-		if !ok || len(words) == 0 || disqualifyingWords(words) {
-			return declared
-		}
+	for _, words := range inv.Commands {
 		rule, ok := readPrograms[words[0]]
 		if !ok || (rule.disqualifies != nil && rule.disqualifies(words[1:])) {
 			return declared
 		}
 	}
-
 	return content.EffectObserve
 }
 

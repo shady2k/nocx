@@ -8,8 +8,21 @@
 // belongs to DRIVE), and no surface may present drift as "stale".
 
 import { describe, expect, it } from 'vitest'
-import { CaptureAbortedError, CaptureIdentityTracker } from './capture-identity'
+import {
+  CaptureAbortedError,
+  CaptureIdentityTracker,
+  ReadScreenRangeError,
+} from './capture-identity'
 import { FakeSource } from './test-source'
+
+describe('ReadScreenRangeError', () => {
+  it('preserves the range facts without naming the retired tool', () => {
+    const error = new ReadScreenRangeError('requested rows [10,12) exceed the buffer with 5 rows')
+
+    expect(error.message).toBe('requested rows [10,12) exceed the buffer with 5 rows')
+    expect(error.name).toBe('ReadScreenRangeError')
+  })
+})
 
 describe('CaptureIdentityTracker — the generation', () => {
   it('advances when a write parses — even one that repaints IDENTICAL cells, and that reads as "moved" (the deliberate false positive)', () => {

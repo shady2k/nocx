@@ -71,7 +71,7 @@ func TestAgentRunToolCall_ArgumentsOverTheWireConformToContract(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(prov.serve))
 	defer srv.Close()
 
-	client, err := assistant.NewClient(nil)
+	client, err := assistant.NewClient(nil, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

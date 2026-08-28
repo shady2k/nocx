@@ -60,6 +60,11 @@
         "delegate": {
           "$ref": "#/$defs/row",
           "description": "delegate — launching further agents or workers."
+        },
+        "rules": {
+          "type": "array",
+          "items": { "$ref": "#/$defs/rule" },
+          "description": "Invocation-specific standing answers. Rules never name tools and match the canonical command invocation."
         }
       }
     }
@@ -96,6 +101,26 @@
           "type": "string",
           "minLength": 1,
           "description": "The scope's id: an absolute path for kind 'path', an opaque identity otherwise."
+        }
+      }
+    },
+    "rule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["pattern", "decision"],
+      "properties": {
+        "pattern": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "array",
+            "minItems": 1,
+            "items": { "type": "string", "minLength": 1 }
+          }
+        },
+        "decision": {
+          "type": "string",
+          "enum": ["permit", "ask", "refuse"]
         }
       }
     }

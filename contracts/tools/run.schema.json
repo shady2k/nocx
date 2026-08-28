@@ -17,5 +17,82 @@
       "minLength": 1,
       "description": "The command to submit, exactly as a person would type it."
     }
+  },
+  "$defs": {
+    "result": {
+      "title": "RunResult",
+      "description": "What the run tool hands back to whoever asked for it — the model under a declared call. The command's output is `text`; there is no `output` and no `stdout` (a live model guessed both). The window contract of design §4.4 is stated here rather than in the params: the renderer clamps a long output and says which span it actually returned, so a truncation is visible instead of silent.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sessionId",
+        "entryId",
+        "exitCode",
+        "status",
+        "total",
+        "window",
+        "returned",
+        "text"
+      ],
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "description": "The session the command ran in."
+        },
+        "entryId": {
+          "type": "string",
+          "description": "The ledger entry the command was recorded as. Empty when the store wrote no row (history off), which is an honest answer and not an error."
+        },
+        "exitCode": {
+          "type": ["integer", "null"],
+          "description": "The process exit status, or null when the block has none."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["success", "failure", "entered", "unknown"],
+          "description": "The block's frozen status vocabulary. `entered` means the command was submitted to a program that owns the terminal rather than run to completion."
+        },
+        "total": {
+          "type": "integer",
+          "description": "Total lines of output the block holds."
+        },
+        "window": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start", "end"],
+          "properties": {
+            "start": {
+              "type": "integer",
+              "description": "First line of the window that was asked for, counting from 0."
+            },
+            "end": {
+              "type": "integer",
+              "description": "One past the last line of the window that was asked for."
+            }
+          },
+          "description": "The span asked for: the whole output."
+        },
+        "returned": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start", "end"],
+          "properties": {
+            "start": {
+              "type": "integer",
+              "description": "First line of the window actually returned, counting from 0."
+            },
+            "end": {
+              "type": "integer",
+              "description": "One past the last line of the window actually returned."
+            }
+          },
+          "description": "The span actually returned. Narrower than `window` when the output was clamped; `total` says how much more there is."
+        },
+        "text": {
+          "type": "string",
+          "description": "The output itself, over the returned span."
+        }
+      }
+    }
   }
 }

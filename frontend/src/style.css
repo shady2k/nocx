@@ -506,6 +506,113 @@
   padding: 2px 8px 4px;
 }
 
+/* THE GHOST MAY NOT CHANGE THE HEIGHT OF THE LINE IT SITS ON.
+
+   CM6 draws an `<img class="cm-widgetBuffer">` beside every inline widget —
+   its own workaround for browser caret bugs next to uneditable content — and
+   styles it `height: 1em; vertical-align: text-top`. `text-top` puts that box
+   at the top of the line's CONTENT AREA, so whether it fits is a question
+   about the font's ascent and descent, not about the line height: with a font
+   whose content area is shorter than 1em the box hangs below it and the line
+   box grows to cover it.
+
+   The completion ghost is the only inline widget this editor draws, so the
+   growth arrives exactly when a suggestion appears — a card that twitches by
+   a pixel under the caret, taking the Run token and the whole scrollback
+   above it along. Measured across seven mono fonts at 11–18px, in WebKit and
+   Chromium: every stack is 0.000 except one, and the one is whatever
+   `ui-monospace` resolves to inside WKWebView (+0.34px there; Monaco is the
+   nearest reproducible stand-in and gives +0.344 in WebKit, +1.000 in
+   Chromium). Which is why it showed in the shipped macOS app and in no
+   browser the dev stand runs — the same shape as the scrollbar gutter above.
+
+   `top` rather than `text-top` — the box is aligned to the top of the LINE
+   BOX instead, and the buffer's box is its line-height, which is this line's
+   line-height, so it can never be the taller of the two and can never grow
+   it. That is a fact about the box model rather than about the font, and it
+   is what makes the rule font-independent: the same seven fonts all measure
+   0.000 with it, on both engines. The buffer stays in the DOM — deleting it
+   would take CM6's caret workaround with it. */
+.nocx-editor .cm-widgetBuffer {
+  vertical-align: top;
+}
+
+/* ── The cursor: the terminal's block, in the prompt ───────────────────
+   block-cursor.ts says why it is a block and why it is decorations. These
+   are the two shapes it takes, plus the bar it replaces.
+
+   The character the cursor stands on. `color` must beat the syntax token's
+   own colour and the mark span is nested inside it, so the two-class
+   selector is what wins — an `!important` here would be a rule whose
+   correctness nothing states. */
+.nocx-editor .nocx-block-cursor {
+  background: var(--terminal-cursor);
+  color: var(--terminal-cursor-accent);
+}
+
+/* …and it blinks, on the period CM6's cursor layer is blinking the other half
+   on. `--nocx-cursor-blink` is set by the editor's own theme from the single
+   declaration in block-cursor.ts. The fallback is that number written twice,
+   which is what the CSS-integrity gate requires of a property that arrives
+   from outside the cascade (the same shape as `--sidebar-width`), so the
+   duplicate is CHECKED rather than trusted: block-cursor.test.ts reads this
+   fallback and asserts it equals CURSOR_BLINK_MS. Change one and the other
+   fails.
+
+   The off phase restores the ordinary line — transparent behind, the syntax
+   token's own colour on top — because that is what a terminal shows between
+   blinks: the character, not a gap. `steps(1)` and two stops rather than a
+   fade, for the same reason.
+
+   Guarded by the motion query like every other animation in this file. CM6's
+   half cannot be guarded here — its animation is inline — so the rate handed
+   to drawSelection carries the same answer (block-cursor.ts). */
+@media (prefers-reduced-motion: no-preference) {
+  .nocx-editor .nocx-block-cursor {
+    animation: nocx-block-cursor-blink var(--nocx-cursor-blink, 1200ms) steps(1) infinite;
+  }
+}
+
+@keyframes nocx-block-cursor-blink {
+  0% {
+    background: var(--terminal-cursor);
+    color: var(--terminal-cursor-accent);
+  }
+
+  50% {
+    background: transparent;
+    color: inherit;
+  }
+}
+
+/* The end of the line, where there is no character to mark: CM6's own cursor
+   element, widened from a bar into the same block. It is the right mechanism
+   for exactly the two reasons the alternatives are the wrong ones — it lives
+   in an absolutely positioned layer, so no line box can grow around it, and
+   CM places it AT THE CARET rather than at the end of the line's content, so
+   a completion ghost stays behind it (`unam█e`, not `unam[e]█`).
+
+   `1ch` is one cell of the composer's monospace font, which is what makes it
+   the terminal's block rather than a wide bar. Nothing sets its height: CM
+   writes the line's height on the element itself.
+
+   The blink comes from CM6's base theme at the period editor.ts hands to
+   drawSelection — the same period the mark above animates on. It is not
+   controlled from this file, and cannot be: the layer writes an inline
+   `animation-name` on itself, which no rule here could ever outrank. */
+.nocx-editor .cm-cursorLayer .cm-cursor {
+  width: 1ch;
+  border-left: none;
+  background: var(--terminal-cursor);
+}
+
+/* …and it steps aside for the mark, which is the block whenever the caret has
+   a character to stand on. Two cursors on screen is the defect this whole
+   surface has already had once (nocx-dvdfx). */
+.nocx-editor .cm-editor:has(.nocx-block-cursor) .cm-cursorLayer .cm-cursor {
+  display: none;
+}
+
 /* No hanging indent, and no measured token width: the token is a GUTTER
    now (ask-entry.ts), so every line — a second document line, a wrapped
    row — begins after the same reserved column by construction. The rules

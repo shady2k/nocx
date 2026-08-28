@@ -3,8 +3,10 @@ package shellintegration
 import "strings"
 
 // The compact carrier ~/.nocx/launch (design §3.3): a stable POSIX sh
-// script, mode 0700, installed once and never rewritten by a generation
-// publish. It reads ONLY manifest.json — the activation pointer — and
+// script, mode 0700, whose CONTENT does not depend on the generation it
+// activates — but which is kept identical to the one the running build ships,
+// because "stable" turned out to describe its job and not its bytes (see
+// ensureLaunch). It reads ONLY manifest.json — the activation pointer — and
 // re-proves the activation (every generation file exists with the recorded
 // hash) before exec'ing the integrated shell. Any refusal — a missing,
 // truncated, hash-mismatched or protocol-incompatible manifest — execs a

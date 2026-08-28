@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/bootstrapstream"
 	"github.com/shady2k/nocx/internal/log"
 )
 
@@ -43,14 +44,14 @@ func (f *scriptedFarSide) ReadLine(ctx context.Context, timeout time.Duration) (
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	if len(f.steps) == 0 {
-		return "", ErrBootstrapDeadline
+		return "", bootstrapstream.ErrDeadline
 	}
 	step := f.steps[0]
 	f.steps = f.steps[1:]
 	f.stepWrites = append(f.stepWrites, len(f.writes))
 	switch {
 	case step.deadline:
-		return "", ErrBootstrapDeadline
+		return "", bootstrapstream.ErrDeadline
 	case step.eof:
 		return "", context.Canceled
 	default:

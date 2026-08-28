@@ -6,6 +6,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/shady2k/nocx/internal/bootstrapstream"
 	"github.com/shady2k/nocx/internal/log"
 )
 
@@ -73,18 +74,19 @@ func AbortFrame() []byte { return append([]byte(nil), abortHeader...) }
 // implementation satisfies both.
 type BootstrapStream interface {
 	// ReadLine returns the next line with its line ending removed, or an
-	// error. A timeout returns ErrBootstrapDeadline and leaves whatever
-	// has been read where the next reader will find it: a deadline may
-	// never consume the user's bytes.
+	// error. A timeout returns bootstrapstream.ErrDeadline and a far side
+	// that wrote past the reader's bound with no line ending returns
+	// bootstrapstream.ErrLineTooLong; both leave whatever has been read
+	// where the next reader will find it, because a deadline may never
+	// consume the user's bytes. Those two values are the LEAF PACKAGE's and
+	// not this one's on purpose — a sentinel declared beside the errors.Is
+	// that tests it, with the producers declaring their own, is a comparison
+	// that is false for every session ever opened.
 	ReadLine(ctx context.Context, timeout time.Duration) (string, error)
 	// Write writes to the session's input. It bypasses the input
 	// quarantine, which exists to refuse the USER's bytes, not ours.
 	Write(p []byte) (int, error)
 }
-
-// ErrBootstrapDeadline is what a BootstrapStream returns when the deadline
-// passed before a line completed.
-var ErrBootstrapDeadline = errors.New("shellintegration: bootstrap deadline")
 
 // SecretSource mints the pair, at the one point in §6.1 where it may be
 // minted.
@@ -345,7 +347,18 @@ func (w *bootstrapWriter) awaitToken(ctx context.Context, want string, timeout t
 	for {
 		line, err := w.s.ReadLine(ctx, timeout)
 		if err != nil {
-			if errors.Is(err, ErrBootstrapDeadline) {
+			if errors.Is(err, bootstrapstream.ErrLineTooLong) {
+				// Not a connection that ended: a far side that
+				// wrote past the reader's bound with no line
+				// ending. That is output which is not this
+				// protocol, and bootstrap-protocol is what the
+				// product already calls it. The error carries
+				// the counts; the bytes are never logged (AD-6).
+				w.lg.Warn("shellintegration: unframed output during bootstrap",
+					"waiting_for", want, "error", err)
+				return w.seal(OutcomeBootstrapProtocol), false
+			}
+			if errors.Is(err, bootstrapstream.ErrDeadline) {
 				// The far side is waiting for bytes that are not
 				// coming. Unblock it with something it must
 				// refuse, so it reaches a prompt.
@@ -396,7 +409,11 @@ func (w *bootstrapWriter) awaitOutcome(ctx context.Context, timeout time.Duratio
 	for {
 		line, err := w.s.ReadLine(ctx, timeout)
 		if err != nil {
-			if errors.Is(err, ErrBootstrapDeadline) {
+			if errors.Is(err, bootstrapstream.ErrLineTooLong) {
+				w.lg.Warn("shellintegration: unframed output while awaiting the outcome", "error", err)
+				return w.seal(OutcomeBootstrapProtocol)
+			}
+			if errors.Is(err, bootstrapstream.ErrDeadline) {
 				w.lg.Warn("shellintegration: no terminal outcome inside the frame deadline")
 				return w.seal(OutcomeBootstrapTimeout)
 			}

@@ -3328,6 +3328,14 @@ export class TerminalContent extends BasePaneContent {
     // the live-region output driver never re-fit the same rectangle.
     if (this._mounted) {
       this.fitUsableViewport(this.usableViewport(viewport))
+      // And the live BOX, not only the grid inside it. The pane changing size
+      // is the one resize the live-region path never heard about: it runs off
+      // parsed output, and a resize produces none until the program repaints.
+      // A terminal that owns the pane — a markerless session, an alt-screen
+      // program — is sized from the scroller, so without this the box kept the
+      // height the pane had when its mode began while the grid was refitted
+      // against the new one: rows the pty has and the box cannot show.
+      this.scheduleLiveResize()
     }
   }
 

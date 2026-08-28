@@ -23,10 +23,19 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem"
 )
 
-// filesReadWindowBytes is the window the files.read tool returns: the first
-// this-many bytes of the file. It is a context budget, not a file limit —
-// the window statement tells the model how much more the file holds.
-const filesReadWindowBytes = 64 << 10
+type toolBoundContextKey struct{}
+
+func withToolBound(ctx context.Context, bound agenttools.ResultBound) context.Context {
+	return context.WithValue(ctx, toolBoundContextKey{}, bound)
+}
+
+func toolBound(ctx context.Context) (agenttools.ResultBound, error) {
+	bound, ok := ctx.Value(toolBoundContextKey{}).(agenttools.ResultBound)
+	if !ok || !bound.Valid() {
+		return agenttools.ResultBound{}, errors.New("agent tool: missing result bound")
+	}
+	return bound, nil
+}
 
 // executors maps tool name to the function that runs it against its narrowed
 // capability. One entry per executable tool. The middleware consults it only
@@ -62,14 +71,17 @@ func executeSessionListTool(ctx context.Context, cap agenttools.Capability, args
 // end is answered honestly, never as an error), and the text. Binary content
 // is reported as data, not pasted: Binary=true and no text.
 type filesReadResult struct {
-	Path     string          `json:"path"`
-	Total    int64           `json:"total"`
-	Revision string          `json:"revision"`
-	Window   filesReadWindow `json:"window"`
-	Seen     filesReadSeen   `json:"seen"`
-	Returned int64           `json:"returned"`
-	Binary   bool            `json:"binary,omitempty"`
-	Text     string          `json:"text,omitempty"`
+	Path      string          `json:"path"`
+	Total     int64           `json:"total"`
+	Revision  string          `json:"revision"`
+	Window    filesReadWindow `json:"window"`
+	Seen      filesReadSeen   `json:"seen"`
+	Returned  int64           `json:"returned"`
+	Truncated bool            `json:"truncated,omitempty"`
+	Dropped   int64           `json:"dropped,omitempty"`
+	Remaining int64           `json:"remaining,omitempty"`
+	Binary    bool            `json:"binary,omitempty"`
+	Text      string          `json:"text,omitempty"`
 }
 
 type filesReadWindow struct {
@@ -98,19 +110,29 @@ func executeFilesRead(ctx context.Context, cap agenttools.Capability, args json.
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", fmt.Errorf("files.read: args: %w", err)
 	}
-	snapshot, err := scoped.ReadSnapshot(ctx, p.Path, filesReadWindowBytes)
+	bound, err := toolBound(ctx)
 	if err != nil {
 		return "", err
 	}
+	snapshot, err := scoped.ReadSnapshot(ctx, p.Path, bound.MaxBytes)
+	if err != nil {
+		return "", err
+	}
+	truncated := snapshot.WindowEnd < snapshot.Total
 	out := filesReadResult{
-		Path:     p.Path,
-		Total:    snapshot.Total,
-		Revision: snapshot.Revision,
-		Window:   filesReadWindow{Start: 0, End: snapshot.WindowEnd},
-		Seen:     filesReadSeen{Start: snapshot.SeenStart, End: snapshot.SeenEnd},
-		Returned: snapshot.WindowEnd,
-		Binary:   snapshot.Binary,
-		Text:     snapshot.Text,
+		Path:      p.Path,
+		Total:     snapshot.Total,
+		Revision:  snapshot.Revision,
+		Window:    filesReadWindow{Start: 0, End: snapshot.WindowEnd},
+		Seen:      filesReadSeen{Start: snapshot.SeenStart, End: snapshot.SeenEnd},
+		Returned:  snapshot.WindowEnd,
+		Truncated: truncated,
+		Binary:    snapshot.Binary,
+		Text:      snapshot.Text,
+	}
+	if truncated {
+		out.Dropped = snapshot.Total - snapshot.WindowEnd
+		out.Remaining = out.Dropped
 	}
 	b, err := json.Marshal(out)
 	if err != nil {
@@ -127,6 +149,9 @@ type filesMutationResult struct {
 }
 
 func executeFilesEdit(ctx context.Context, cap agenttools.Capability, args json.RawMessage, _ toolSeams) (string, error) {
+	if _, err := toolBound(ctx); err != nil {
+		return "", err
+	}
 	editor, ok := cap.(*filesystem.ScopedEditor)
 	if !ok {
 		return "", fmt.Errorf("files.edit: capability is %T, not *filesystem.ScopedEditor", cap)
@@ -147,6 +172,9 @@ func executeFilesEdit(ctx context.Context, cap agenttools.Capability, args json.
 }
 
 func executeFilesCreate(ctx context.Context, cap agenttools.Capability, args json.RawMessage, _ toolSeams) (string, error) {
+	if _, err := toolBound(ctx); err != nil {
+		return "", err
+	}
 	editor, ok := cap.(*filesystem.ScopedEditor)
 	if !ok {
 		return "", fmt.Errorf("files.create: capability is %T, not *filesystem.ScopedEditor", cap)
@@ -236,17 +264,9 @@ type frameBodyWire struct {
 }
 
 // ── run (design §4.1: the agent runs a command through the same submit
-//    path a person uses, executed by the renderer — the backend never
-//    writes to the PTY, design §2.1) ──────────────────────────────────────
-
-// runResult is the run tool's return contract (design §4.4 — every tool
-// that returns text returns a window): the entry id the command was
-// accepted under, the exit status of the completed block (null when it
-// froze without one — an entered environment), total (the block's output
-// line count), the window that was asked for (run asks for the whole
-// output — [0, total)), the window that was actually returned (the
-// renderer clamps to what it can carry; a longer output is answered
-// honestly, never as an error), and the text of the returned window.
+//
+//	path a person uses, executed by the renderer — the backend never
+//	writes to the PTY, design §2.1) ──────────────────────────────────────
 type runResult struct {
 	SessionID string           `json:"sessionId"`
 	EntryID   string           `json:"entryId"`
@@ -256,6 +276,9 @@ type runResult struct {
 	Window    readScreenWindow `json:"window"`
 	Returned  readScreenWindow `json:"returned"`
 	Text      string           `json:"text"`
+	Truncated bool             `json:"truncated,omitempty"`
+	Dropped   int64            `json:"dropped,omitempty"`
+	Remaining int64            `json:"remaining,omitempty"`
 }
 
 // runBodyWire is this tool's consumer view of the resolved run body the
@@ -291,14 +314,18 @@ type runBodyWire struct {
 // is decoded exactly once, here, where the wire shape is owned. Nil for a
 // caller that is not recording causes.
 func executeRun(ctx context.Context, runner *agenttools.Runner, requester RendererRequester, args json.RawMessage, caused func(entryID string)) (string, error) {
+	bound, err := toolBound(ctx)
+	if err != nil {
+		return "", err
+	}
 	var p struct {
 		SessionID string `json:"sessionId"`
 		Command   string `json:"command"`
 	}
-	if err := json.Unmarshal(args, &p); err != nil {
+	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
 		// Unreachable through the middleware (validation precedes policy,
 		// let alone execution); the direct-call seam still answers honestly.
-		return "", fmt.Errorf("run: args: %w", err)
+		return "", fmt.Errorf("run: args: %w", unmarshalErr)
 	}
 	if p.Command == "" {
 		return "", errors.New("run: an empty command is a bare newline, not an execution")
@@ -334,20 +361,15 @@ func executeRun(ctx context.Context, runner *agenttools.Runner, requester Render
 		caused(b.EntryID)
 	}
 
-	// The window: run asks for the whole output — [0, total) — and the
-	// renderer states the span it actually returned (it clamps a long
-	// output rather than erroring, and the window says how much more the
-	// block holds). The wire span is authoritative: a zero-length window
-	// (an empty block) is a legitimate answer, not an absent one, so
-	// returned is never invented when the span is empty — only a span that
-	// contradicts the block (outside [0, total]) is refused as a corrupt
-	// resolution.
 	total := b.Total
 	asked := readScreenWindow{Start: 0, End: total}
 	if total < 0 || b.Start < 0 || b.End < b.Start || b.End > total {
 		return "", fmt.Errorf("run: the renderer's window [%d,%d) is outside the block's [0,%d)", b.Start, b.End, total)
 	}
 	returned := readScreenWindow{Start: b.Start, End: b.End}
+	text, returnedEnd := boundBlockText(b.Text, b.Start, b.End, bound.MaxBytes)
+	returned.End = returnedEnd
+	truncated := len(text) < len(b.Text)
 
 	out := runResult{
 		SessionID: p.SessionID,
@@ -357,7 +379,12 @@ func executeRun(ctx context.Context, runner *agenttools.Runner, requester Render
 		Total:     total,
 		Window:    asked,
 		Returned:  returned,
-		Text:      b.Text,
+		Text:      text,
+		Truncated: truncated,
+	}
+	if truncated {
+		out.Dropped = int64(len(b.Text) - len(text))
+		out.Remaining = out.Dropped
 	}
 	res, err := json.Marshal(out)
 	if err != nil {

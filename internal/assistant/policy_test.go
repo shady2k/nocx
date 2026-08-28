@@ -31,6 +31,15 @@ import (
 	"github.com/shady2k/nocx/internal/hashline"
 )
 
+func toolResultJSON(content string) []byte {
+	start := strings.Index(content, "{")
+	end := strings.LastIndex(content, "}")
+	if start < 0 || end < start {
+		return nil
+	}
+	return []byte(content[start : end+1])
+}
+
 // ── helpers ───────────────────────────────────────────────────────────────
 
 // fakeLedger is the attempt seam with a scriptable failure and a call log —
@@ -943,7 +952,7 @@ func TestAsk_PermittedEditChangesFile(t *testing.T) {
 	grant, dir := testDirGrant(t, autonomousMatrix())
 	path := filepath.Join(dir, "a.txt")
 	writeFile(t, path, "before\n")
-	snapshot, err := hashline.Read(path, filesReadWindowBytes)
+	snapshot, err := hashline.Read(path, testResultMaxBytes())
 	if err != nil {
 		t.Fatalf("hashline.Read: %v", err)
 	}
@@ -983,7 +992,7 @@ func TestAsk_PermittedEditChangesFile(t *testing.T) {
 		}
 		content, _ := message["content"].(string)
 		var result filesMutationResult
-		if err := json.Unmarshal([]byte(content), &result); err != nil {
+		if err := json.Unmarshal(toolResultJSON(content), &result); err != nil {
 			t.Fatalf("tool result: %v", err)
 		}
 		if result.Status == "applied" {
@@ -1105,7 +1114,7 @@ func TestAsk_StaleEditIsRefusedAsToolResult(t *testing.T) {
 		}
 		content, _ := message["content"].(string)
 		var result filesMutationResult
-		if err := json.Unmarshal([]byte(content), &result); err != nil {
+		if err := json.Unmarshal(toolResultJSON(content), &result); err != nil {
 			continue
 		}
 		if result.Status == "refused" {
@@ -1146,7 +1155,7 @@ func TestExecuteFilesRead_WindowIsHonest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Narrow: %v", err)
 	}
-	out, err := executeFilesRead(context.Background(), narrowed, json.RawMessage(fmt.Sprintf(`{"path":%q}`, short)), toolSeams{})
+	out, err := executeFilesRead(toolTestContext(), narrowed, json.RawMessage(fmt.Sprintf(`{"path":%q}`, short)), toolSeams{})
 	if err != nil {
 		t.Fatalf("executeFilesRead: %v", err)
 	}
@@ -1176,7 +1185,7 @@ func TestExecuteFilesRead_WindowIsHonest(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Narrow(empty): %v", err)
 	}
-	out, err = executeFilesRead(context.Background(), emptyNarrowed, json.RawMessage(fmt.Sprintf(`{"path":%q}`, empty)), toolSeams{})
+	out, err = executeFilesRead(toolTestContext(), emptyNarrowed, json.RawMessage(fmt.Sprintf(`{"path":%q}`, empty)), toolSeams{})
 	if err != nil {
 		t.Fatalf("executeFilesRead on an empty file: %v — a window past the end is answered honestly, not as an error", err)
 	}

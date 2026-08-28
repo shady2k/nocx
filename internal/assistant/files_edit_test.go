@@ -1,7 +1,6 @@
 package assistant
 
 import (
-	"context"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -44,7 +43,7 @@ func TestExecuteFilesEditChangesTheScopedFile(t *testing.T) {
 	if narrowErr != nil {
 		t.Fatalf("Narrow read: %v", narrowErr)
 	}
-	readOut, readErr := executeFilesRead(context.Background(), capRead, json.RawMessage(`{"path":"`+path+`"}`), toolSeams{})
+	readOut, readErr := executeFilesRead(toolTestContext(), capRead, json.RawMessage(`{"path":"`+path+`"}`), toolSeams{})
 	if readErr != nil {
 		t.Fatalf("executeFilesRead: %v", readErr)
 	}
@@ -62,7 +61,7 @@ func TestExecuteFilesEditChangesTheScopedFile(t *testing.T) {
 	if marshalErr != nil {
 		t.Fatal(marshalErr)
 	}
-	out, execErr := executeFilesEdit(context.Background(), capEdit, args, toolSeams{})
+	out, execErr := executeFilesEdit(toolTestContext(), capEdit, args, toolSeams{})
 	if execErr != nil {
 		t.Fatalf("executeFilesEdit: %v", execErr)
 	}
@@ -110,7 +109,7 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	out, err := executeFilesCreate(context.Background(), capability, args, toolSeams{})
+	out, err := executeFilesCreate(toolTestContext(), capability, args, toolSeams{})
 	if err != nil {
 		t.Fatalf("executeFilesCreate: %v", err)
 	}
@@ -153,7 +152,7 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Narrow(read escape): %v", err)
 	}
-	if _, readErr := executeFilesRead(context.Background(), readCapability, mustJSON(t, map[string]string{"path": escapeExistingPath}), toolSeams{}); readErr == nil {
+	if _, readErr := executeFilesRead(toolTestContext(), readCapability, mustJSON(t, map[string]string{"path": escapeExistingPath}), toolSeams{}); readErr == nil {
 		t.Fatal("files.read escaped the grant")
 	}
 
@@ -161,7 +160,7 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 	if !ok {
 		t.Fatal("files.edit not registered")
 	}
-	snapshot, err := hashline.Read(escapeTarget, filesReadWindowBytes)
+	snapshot, err := hashline.Read(escapeTarget, testResultMaxBytes())
 	if err != nil {
 		t.Fatalf("hashline.Read(escape): %v", err)
 	}
@@ -173,7 +172,7 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Narrow(edit escape): %v", err)
 	}
-	editOut, err := executeFilesEdit(context.Background(), editCapability, mustJSON(t, map[string]string{
+	editOut, err := executeFilesEdit(toolTestContext(), editCapability, mustJSON(t, map[string]string{
 		"path": escapeExistingPath, "revision": snapshot.Revision, "patch": "PUT 1.=1:\n+changed",
 	}), toolSeams{})
 	if err != nil {
@@ -208,7 +207,7 @@ func TestExecuteFilesCreateCreatesScopedFile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	escapeOut, err := executeFilesCreate(context.Background(), escapeCapability, escapeArgs, toolSeams{})
+	escapeOut, err := executeFilesCreate(toolTestContext(), escapeCapability, escapeArgs, toolSeams{})
 	if err != nil {
 		t.Fatalf("executeFilesCreate(escape): %v", err)
 	}

@@ -223,7 +223,7 @@ func TestMiddleware_EgressNoFindingReturnsByteForByte(t *testing.T) {
 	if capErr != nil {
 		t.Fatalf("Narrow: %v", capErr)
 	}
-	ref, refErr := executors["files.read"](context.Background(), cap, []byte(args), toolSeams{})
+	ref, refErr := executors["files.read"](toolTestContext(), cap, []byte(args), toolSeams{})
 	if refErr != nil {
 		t.Fatalf("executor: %v", refErr)
 	}

@@ -62,6 +62,20 @@
           "type": "integer",
           "description": "Source bytes represented by the returned complete-line window; less than total means the window is partial."
         },
+        "truncated": {
+          "type": "boolean",
+          "description": "True when the result retained only part of the source window."
+        },
+        "dropped": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Source bytes omitted from this result because of the declared bound."
+        },
+        "remaining": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Source bytes still omitted after this result."
+        },
         "binary": {
           "type": "boolean",
           "description": "True when the content is binary or invalid UTF-8. Absent means false."

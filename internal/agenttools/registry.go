@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io/fs"
 	"strings"
+	"time"
 
 	"github.com/shady2k/nocx/internal/content"
 )
@@ -108,6 +109,17 @@ type Declaration struct {
 	// (the ledger's vocabulary — content.Effect). A validated command carrier
 	// may lower the proposal's effective class in the backend policy gate.
 	Effect content.Effect
+	// OutputTrust is independent from Effect: any result may contain text
+	// influenced by the program or data it observed. It must be explicit so
+	// adding a row cannot silently choose an unsafe default.
+	OutputTrust OutputTrust
+	// ResultBound is the source window each executor must enforce. Its
+	// truncation policy requires the returned result to describe omitted data.
+	ResultBound ResultBound
+	// Deadline bounds the execution context, including renderer requests.
+	Deadline time.Duration
+	// Cancellation states the result of cancelling that execution context.
+	Cancellation CancellationPolicy
 	// ResourceKinds is the presentation-time upper bound of the resource
 	// kinds a call may resolve to. The policy checks the resolved resources.
 	ResourceKinds []content.ResourceKind
@@ -152,12 +164,11 @@ type Declaration struct {
 	Narrow Narrow
 }
 
-// FrameToolResult marks observe-tool output as untrusted data before it is
-// returned to the model. The effect on the declaration is the registry's
-// existing reading-tool classification, so a new observe tool inherits this
-// control without adding its name to another list.
+// FrameToolResult marks output according to the declaration's own trust
+// metadata before it is returned to the model. Trust is deliberately not
+// inferred from the effect lattice: mutating tools return untrusted text too.
 func (d Declaration) FrameToolResult(result string) string {
-	if d.Effect != content.EffectObserve {
+	if d.OutputTrust != OutputTrustUntrusted {
 		return result
 	}
 	return FrameUntrusted(result)
@@ -233,6 +244,10 @@ var declarations = []Declaration{
 		Name:             "files.read",
 		Description:      "Read the text of a file on this machine and return a window of it; reach for this when the answer depends on what is actually in a file rather than on what the person has told you about it.",
 		Effect:           content.EffectObserve,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourcePath},
 		ResolveResources: resourceArgument("path", content.ResourcePath),
 		Executes:         InGo,
@@ -243,6 +258,10 @@ var declarations = []Declaration{
 		Name:             "session.list",
 		Description:      "List what can be addressed in a terminal session right now — each item has an id, the command or program, and whether it is running or exited; an empty list is honest for a pane with no recorded blocks.",
 		Effect:           content.EffectObserve,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
 		ResolveResources: resourceArgument("sessionId", content.ResourceSession),
 		Executes:         InGo,
@@ -253,6 +272,10 @@ var declarations = []Declaration{
 		Name:             "session.read",
 		Description:      "Read an item in a terminal session, or the screen now when no item id is supplied; the answer carries whether the item is running or exited and its exit code when it has one. A full-screen program returns the current alternate screen, not a window into scrollback.",
 		Effect:           content.EffectObserve,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
 		ResolveResources: resourceArgument("sessionId", content.ResourceSession),
 		Executes:         Dynamic,
@@ -263,6 +286,10 @@ var declarations = []Declaration{
 		Name:             "run",
 		Description:      "Run a shell command in a terminal session exactly as the person would type it, and get back its exit status and a window of its output; reach for this to find something out about the machine, or to change it, when no narrower tool will do — the person may be asked to approve the command first, and a refusal is an answer.",
 		Effect:           content.EffectMutateDestructive,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
 		ResolveResources: resourceArgument("sessionId", content.ResourceSession),
 		CommandArg:       "command",
@@ -275,6 +302,10 @@ var declarations = []Declaration{
 		Name:             "files.edit",
 		Description:      "Apply a strict line-addressed patch to a file you have read; reach for this to change the file directly, and the call is refused if the file changed or a line was not displayed.",
 		Effect:           content.EffectMutateReversible,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourcePath},
 		ResolveResources: resourceArgument("path", content.ResourcePath),
 		Executes:         InGo,
@@ -285,6 +316,10 @@ var declarations = []Declaration{
 		Name:             "files.create",
 		Description:      "Create a new file if it does not already exist; reach for this instead of composing a shell redirection when a file must be created.",
 		Effect:           content.EffectMutateReversible,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourcePath},
 		ResolveResources: resourceArgument("path", content.ResourcePath),
 		Executes:         InGo,
@@ -295,6 +330,10 @@ var declarations = []Declaration{
 		Name:          "git.status",
 		Description:   "Report the state of the git working tree you are working in — the current branch and which files are staged, modified or untracked; reach for this before saying anything about uncommitted work.",
 		Effect:        content.EffectObserve,
+		OutputTrust:   OutputTrustUntrusted,
+		ResultBound:   ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:      30 * time.Second,
+		Cancellation:  CancellationReturnError,
 		ResourceKinds: []content.ResourceKind{content.ResourcePath},
 		Executes:      InGo,
 		Params:        "git.status.schema.json",
@@ -368,6 +407,20 @@ func validateDeclaration(d Declaration) string {
 	}
 	if !supportedEffect(d.Effect) {
 		bad = append(bad, fmt.Sprintf("unsupported effect %q", d.Effect))
+	}
+	if !supportedOutputTrust(d.OutputTrust) {
+		bad = append(bad, fmt.Sprintf("unsupported output trust %q", d.OutputTrust))
+	}
+	if d.ResultBound.MaxBytes <= 0 {
+		bad = append(bad, "missing result bound")
+	} else if !supportedTruncation(d.ResultBound.Truncation) {
+		bad = append(bad, fmt.Sprintf("unsupported truncation policy %q", d.ResultBound.Truncation))
+	}
+	if !validToolDeadline(d.Deadline) {
+		bad = append(bad, "missing deadline")
+	}
+	if !supportedCancellation(d.Cancellation) {
+		bad = append(bad, fmt.Sprintf("unsupported cancellation policy %q", d.Cancellation))
 	}
 	for _, k := range d.ResourceKinds {
 		if !supportedResourceKind(k) {

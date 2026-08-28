@@ -88,6 +88,20 @@
           },
           "description": "The span actually returned. Narrower than `window` when the output was clamped; `total` says how much more there is."
         },
+        "truncated": {
+          "type": "boolean",
+          "description": "True when the returned text was shortened by the declaration's byte bound."
+        },
+        "dropped": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Output bytes omitted from the returned text."
+        },
+        "remaining": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Output bytes still omitted from this response."
+        },
         "text": {
           "type": "string",
           "description": "The output itself, over the returned span."

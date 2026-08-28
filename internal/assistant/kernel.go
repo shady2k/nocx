@@ -244,12 +244,6 @@ type AttemptLedger interface {
 // design §6.2. A path is a few hundred bytes; anything larger is malformed.
 const maxArgsBytes = 64 << 10
 
-// maxToolResultBytes is the ingest bound of design §6.7, a defense for a
-// tool that violates the window contract (§4.4: every tool that returns text
-// returns a window) — files.read's window is filesReadWindowBytes, far below
-// this.
-const maxToolResultBytes = 1 << 20
-
 // effectKernel is the pipeline for ONE run (one Ask): it holds the run's
 // grant, the assembled registry, the ledger seam, the approval store, the
 // egress vault comparison and the run's identity — everything the
@@ -1107,6 +1101,12 @@ func terminationReasonOf(err error) content.TerminationReason {
 // tool runs against its narrowed capability in-process; an InRenderer tool
 // is asked of the renderer through the run's requester seam.
 func (m *effectKernel) run(decl agenttools.Tool, ctx context.Context, capability agenttools.Capability, rawArgs []byte) (string, error) {
+	if !decl.ResultBound.Valid() {
+		return "", fmt.Errorf("tool %q has no valid result bound", decl.Name)
+	}
+	runCtx, cancel := context.WithTimeout(ctx, decl.Deadline)
+	defer cancel()
+	runCtx = withToolBound(runCtx, decl.ResultBound)
 	switch decl.Executes {
 	case agenttools.Dynamic:
 		reader, ok := capability.(*agenttools.SessionReader)
@@ -1117,15 +1117,15 @@ func (m *effectKernel) run(decl agenttools.Tool, ctx context.Context, capability
 		if m.requester != nil {
 			sessions, _ = m.requester.(SessionSource)
 		}
-		return executeSessionRead(ctx, reader, sessions, m.requester, rawArgs)
+		return executeSessionRead(runCtx, reader, sessions, m.requester, rawArgs)
 	case agenttools.InRenderer:
-		return m.executeInRenderer(ctx, decl, capability, rawArgs)
+		return m.executeInRenderer(runCtx, decl, capability, rawArgs)
 	}
 	fn, ok := executors[decl.Name]
 	if !ok {
 		return "", fmt.Errorf("tool %q has a capability constructor but no executor — a registration that cannot run", decl.Name)
 	}
-	return fn(ctx, capability, rawArgs, m.seams())
+	return fn(runCtx, capability, rawArgs, m.seams())
 }
 
 // seams is the run's wiring handed to an InGo executor: what a tool needs
@@ -1487,18 +1487,6 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		return modelResult{}, &ToolFailedError{Tool: decl.Name, Err: runErr}
 	}
 
-	if len(out) > maxToolResultBytes {
-		_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
-		return modelResult{}, fmt.Errorf("agent tool %q: result exceeds the %d-byte bound — a tool that returns text must return a window (design §4.4)", decl.Name, maxToolResultBytes)
-	}
-
-	// The window and the size bound. The executor windows its own
-	// return (design §4.4); this is the bound that holds even when a
-	// tool forgets.
-	if len(out) > maxToolResultBytes {
-		_ = k.closeAttempt(ctx, execID, content.TermFailed, content.EntryFailure)
-		return modelResult{}, fmt.Errorf("agent tool %q: result exceeds the %d-byte bound — a tool that returns text must return a window (design §4.4)", decl.Name, maxToolResultBytes)
-	}
 	if err := k.closeAttempt(ctx, execID, content.TermCompleted, content.EntrySuccess); err != nil {
 		return modelResult{}, fmt.Errorf("agent tool %q: record outcome: %w", decl.Name, err)
 	}

@@ -113,8 +113,12 @@ type WSServer struct {
 
 	// Override the listen address. Default 127.0.0.1:0.
 	listenAddr string
-	listener   net.Listener
-	upgrader   websocket.Upgrader
+	// listenAddress is the address the listener actually bound, resolved
+	// once in Start. Port alone cannot answer "where is the WS server",
+	// because the host half is a configuration choice — see Addr.
+	listenAddress string
+	listener      net.Listener
+	upgrader      websocket.Upgrader
 	// Optional profile/group stores for the connection-manager control
 	// plane (profiles.*, groups.*). When nil, those methods return a
 	// JSON-RPC error.
@@ -1506,6 +1510,7 @@ func (s *WSServer) Start(ctx context.Context) error {
 		return fmt.Errorf("ws listen: not a TCP address")
 	}
 	s.port = tcpAddr.Port
+	s.listenAddress = listener.Addr().String()
 
 	s.server = &http.Server{
 		Handler: mux,
@@ -1630,6 +1635,15 @@ func (s *WSServer) Stop(ctx context.Context) error {
 
 func (s *WSServer) Port() int {
 	return s.port
+}
+
+// Addr returns the address the WS server actually bound, host and port, or
+// "" before Start. The default is loopback with an OS-chosen port
+// (WithListenAddr), so the port alone is not the answer to "where is it" —
+// and a discovery handshake that told a client a port and let it guess the
+// host would be guessing on the client's behalf.
+func (s *WSServer) Addr() string {
+	return s.listenAddress
 }
 
 // --- ring helpers (connection-independent, keyed by session.ID) ----------

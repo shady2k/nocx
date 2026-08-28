@@ -53,12 +53,13 @@ frontend/node_modules/
 # own module. They existed on the machine that generated them and nowhere else.
 /nocx
 node_modules/
-# The other two cmd/ binaries, for the same reason as `nocx` above: a bare
+# The other cmd/ binaries, for the same reason as `nocx` above: a bare
 # `go build ./cmd/e2e-sshd` drops its output in the working directory, and a
 # 6 MB Mach-O in the repo root is one `git add -A` away from being committed.
 # The e2e specs build these into a temp dir; these are what a hand-run leaves.
 /e2e-sshd
 /devharness
+/nocx-server
 Thumbs.db
 vendor/
 

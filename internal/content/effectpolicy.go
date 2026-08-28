@@ -147,14 +147,18 @@ func validResourceKind(k ResourceKind) bool {
 // EffectPolicy is the matrix: one row per effect class of the ADR-0020
 // lattice. Zero rows decide ask (fail toward asking), so an unstated, empty
 // or unparseable policy is a policy that asks — never one that permits.
+// EffectPolicy is the matrix plus invocation-specific exceptions. The matrix
+// remains the default; matching rules are evaluated against the same
+// canonical invocation the assistant effect kernel parsed.
 type EffectPolicy struct {
-	Observe           EffectRow `json:"observe"`
-	MutateReversible  EffectRow `json:"mutate-reversible"`
-	MutateDestructive EffectRow `json:"mutate-destructive"`
-	PrivilegeChange   EffectRow `json:"privilege-change"`
-	Disclose          EffectRow `json:"disclose"`
-	CrossBoundary     EffectRow `json:"cross-boundary"`
-	Delegate          EffectRow `json:"delegate"`
+	Observe           EffectRow        `json:"observe"`
+	MutateReversible  EffectRow        `json:"mutate-reversible"`
+	MutateDestructive EffectRow        `json:"mutate-destructive"`
+	PrivilegeChange   EffectRow        `json:"privilege-change"`
+	Disclose          EffectRow        `json:"disclose"`
+	CrossBoundary     EffectRow        `json:"cross-boundary"`
+	Delegate          EffectRow        `json:"delegate"`
+	Rules             []InvocationRule `json:"rules,omitempty"`
 }
 
 // rowFor returns the row of one effect; an effect outside the lattice has no
@@ -189,6 +193,65 @@ func (p EffectPolicy) DecisionFor(e Effect) Decision {
 		return DecisionAsk
 	}
 	return d
+}
+
+// DecisionForInvocation resolves one validated command against the matrix and
+// every matching invocation rule. An unparsed command asks; a disqualified
+// command receives the matrix answer but can never receive a rule exception.
+// A matching permit is an exception to an ask row, while refusal remains
+// final. Among overlapping matching rules, the most restrictive wins.
+func (p EffectPolicy) DecisionForInvocation(e Effect, inv Invocation) Decision {
+	if !inv.Parsed {
+		return DecisionAsk
+	}
+	base := p.DecisionFor(e)
+	if base == DecisionRefuse || inv.Disqualified {
+		return base
+	}
+	matched := false
+	ruleDecision := DecisionPermit
+	for _, rule := range p.Rules {
+		if !rule.Matches(inv) {
+			continue
+		}
+		matched = true
+		if restrictiveRank(rule.Decision) > restrictiveRank(ruleDecision) {
+			ruleDecision = rule.Decision
+		}
+	}
+	if !matched {
+		return base
+	}
+	if base == DecisionAsk && ruleDecision == DecisionPermit {
+		return DecisionPermit
+	}
+	if restrictiveRank(ruleDecision) > restrictiveRank(base) {
+		return ruleDecision
+	}
+	return base
+}
+
+func restrictiveRank(d Decision) int {
+	switch d {
+	case DecisionPermit:
+		return 0
+	case DecisionAsk:
+		return 1
+	case DecisionRefuse:
+		return 2
+	default:
+		return 1
+	}
+}
+
+// WithRule returns a copy with one invocation rule appended. Invalid rules
+// are ignored so an operator-supplied invalid decision cannot widen policy.
+func (p EffectPolicy) WithRule(rule InvocationRule) EffectPolicy {
+	if err := validateInvocationRules([]InvocationRule{rule}); err != nil {
+		return p
+	}
+	p.Rules = append(append([]InvocationRule(nil), p.Rules...), rule)
+	return p
 }
 
 // RowScopes returns the effective scopes of ONE effect's row — the resource
@@ -288,34 +351,31 @@ func appendScopeSet(a, b []GrantScope) []GrantScope {
 	return out
 }
 
-// SessionOverrides is the per-session overlay: what a person answered "in
-// this session" to, one decision per effect class. It is NOT a third matrix
-// — it is produced by clicks rather than authored, so it carries no scopes
-// and has no notion of an unstated row. An effect absent from the map is
-// not an answer, and therefore never a permit.
-type SessionOverrides map[Effect]Decision
+// SessionOverrides is the per-session overlay: effect decisions and
+// invocation rules produced by clicks. It expires with the session and is
+// resolved alongside global rules; it is never persisted as a global rule.
+type SessionOverrides struct {
+	Decisions map[Effect]Decision
+	Rules     []InvocationRule
+}
 
-// ResolvePolicy is the ONE place the resolution order is stated (ADR-0020 §7
-// as amended): the session overlay over the workspace policy over the global
-// default. The workspace, when one exists, REPLACES the global wholesale; the
-// session overlay then applies per row on top of whichever won, changing that
-// row's decision and nothing else — never its scopes, which the overlay has
-// no way to express. Today there is no workspace grant source — nocx-mp2vd
-// owns that seam — so callers pass nil and the global resolves.
-//
-// An override whose decision is outside the enum is ignored rather than
-// applied: this function fails toward asking like every other layer, and an
-// invalid value must never be able to widen a row.
+// ResolvePolicy is the ONE place the resolution order is stated (ADR-0020
+// §7): the session overlay over the workspace policy over the global default.
+// The workspace, when one exists, replaces the global matrix wholesale.
+// Matching rules from the selected matrix and the session overlay are retained
+// together so DecisionForInvocation can apply most-restrictive-wins.
 func ResolvePolicy(global EffectPolicy, workspace *EffectPolicy, session SessionOverrides) EffectPolicy {
 	out := global
 	if workspace != nil {
 		out = *workspace
 	}
+	out.Rules = append([]InvocationRule(nil), out.Rules...)
+	out.Rules = append(out.Rules, session.Rules...)
 	for _, e := range []Effect{
 		EffectObserve, EffectMutateReversible, EffectMutateDestructive,
 		EffectPrivilegeChange, EffectDisclose, EffectCrossBoundary, EffectDelegate,
 	} {
-		d, ok := session[e]
+		d, ok := session.Decisions[e]
 		if !ok || !d.valid() {
 			continue
 		}
@@ -383,6 +443,9 @@ func ParseEffectPolicy(b []byte) (EffectPolicy, error) {
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(&p); err != nil {
 		return p, fmt.Errorf("%w: %v", ErrPolicySyntax, err)
+	}
+	if err := validateInvocationRules(p.Rules); err != nil {
+		return EffectPolicy{}, fmt.Errorf("%w: %v", ErrPolicySyntax, err)
 	}
 	return p, nil
 }

@@ -531,6 +531,33 @@ func TestPersistenceRoundTrip(t *testing.T) {
 	}
 }
 
+// A removed setting may remain in an older persisted document. Startup must
+// ignore that stale value while continuing to load declared settings.
+func TestNew_IgnoresRemovedSettingInPersistedDocument(t *testing.T) {
+	doc := &fakeDoc{data: map[string][]byte{
+		"settings.json": []byte(`{
+			"schemaVersion": 1,
+			"values": {
+				"assistant.carrier": "program",
+				"history.enabled": false
+			},
+			"secretRefs": {}
+		}`),
+	}}
+
+	reg := settings.New(doc, &fakeSecretStore{})
+	snap, err := reg.GetSnapshot()
+	if err != nil {
+		t.Fatalf("GetSnapshot after loading stale setting: %v", err)
+	}
+	if _, ok := snap.Values["assistant.carrier"]; ok {
+		t.Fatal("removed assistant.carrier setting was loaded")
+	}
+	if got := snap.Values["history.enabled"]; got != false {
+		t.Fatalf("declared setting failed to load after stale setting: got %v", got)
+	}
+}
+
 // ── Schema version ─────────────────────────────────────────────────────
 
 func TestSchemaVersion(t *testing.T) {

@@ -405,6 +405,11 @@
     },
     {
       "kind": "types",
+      "file": "src/generated/policy.get.ts",
+      "symbol": "Rule"
+    },
+    {
+      "kind": "types",
       "file": "src/generated/shell.complete.ts",
       "symbol": "ShellEntry"
     },

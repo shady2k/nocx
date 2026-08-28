@@ -231,15 +231,23 @@ builds a history divergent from the remote, so keep it for recovery, not setup.
 
 The e2e suite additionally needs its browser once: `npx playwright install chromium`.
 
-The pre-commit hook runs on every `git commit` and enforces:
+The pre-commit hook runs on every `git commit` and enforces **static** checks
+only — nothing below is executed, only read (`nocx-hzsiv`):
 
 - `gofumpt` — format check (fails if any file needs formatting)
 - `golangci-lint` — lint
-- `go test -race -count=1 ./...` — tests with race detector
-- `prettier --check` — frontend format check
-- `eslint` — frontend lint
-- `tsc --noEmit` — frontend type check
-- `vitest` — frontend tests
+- the control-goroutine ratchet — Go changes only
+- `prettier --check` and root `eslint` — the whole repository
+- `eslint` — frontend lint, plus the fixture and dead-export ratchets
+- `contracts:check` — the generated wire types match the schemas
+- `tsc --noEmit` — the frontend and the e2e suite
+
+**No test runs on commit**, and no container is started: the hook needs no
+docker daemon. Tests live at three addresses instead — `make test` on demand,
+`make ci-full` which the integrator runs once on the merged tree, and CI on
+every pull request. The trade is deliberate: a commit can be made whose tests
+do not pass, in exchange for a gate that takes seconds and cannot be starved
+into misreporting which check failed (`nocx-y6d9j`).
 
 It then writes `.beads/issues.jsonl` and stages it, so a commit carries the issue
 state it describes. That step runs last, so a failed gate never leaves the
@@ -282,10 +290,11 @@ brew install dash                       # macOS (zsh ships with the OS)
 go test -race -count=1 ./internal/shellintegration/...
 ```
 
-Both gates provision the shells so they prove them: the pre-commit hook runs
-the suite in a container image that carries dash and zsh
-(`.githooks/images/go-tests/Dockerfile`), and CI's macOS backend job runs
-`brew install dash` (ubuntu-latest ships both shells already).
+The gates that run this suite provision the shells so they prove them:
+`scripts/ci-linux.sh` uses an image carrying dash, zsh and a real bash 3.2
+(`.githooks/images/ci-linux/Dockerfile`), and CI's macOS job runs
+`brew install dash` (ubuntu-latest ships both shells already). The pre-commit
+hook does not: it runs no tests at all.
 
 ## Quality gates
 
@@ -295,13 +304,17 @@ Every commit must pass:
 | ------------------ | ---------- | --------- | ------------------- |
 | gofumpt (format)   | ✓          | ✓         | ✓                   |
 | golangci-lint      | v1.64.8    | v1.64.8   | v1.64.8             |
-| `go test -race`    | ✓          | ✓         | ✓                   |
+| `go test -race`    | —          | ✓         | ✓                   |
 | `go build ./...`   | —          | ✓         | ✓ (macos-latest)    |
 | `prettier --check` | ✓          | ✓         | ✓                   |
 | `eslint`           | ✓          | ✓         | ✓                   |
 | `tsc --noEmit`     | ✓          | ✓         | ✓                   |
-| `vitest`           | ✓          | ✓         | ✓                   |
+| `vitest`           | —          | ✓         | ✓                   |
 | `npm run build`    | —          | ✓         | ✓                   |
+
+The two dashes in the Pre-commit column are the whole of `nocx-hzsiv`: the
+per-commit gate is static, and a green commit says the tree is formatted,
+linted, type-checked and contract-current — nothing about whether it works.
 
 CI (`ci.yml`) runs on every pull request to `main`, on release branches
 (`release/**`) and manual dispatch, and is called by `release.yml` on a version

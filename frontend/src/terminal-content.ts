@@ -70,7 +70,12 @@ import { isInteractiveTransition, extractDestination } from './ssh-transition'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
-import type { AnswerToolCall, BlockRecord, RunningBlockActions } from './scrollback/blocks'
+import type {
+  AnswerToolCall,
+  BlockRecord,
+  DumpSource,
+  RunningBlockActions,
+} from './scrollback/blocks'
 import {
   CommandLedger,
   type CommandAuthor,
@@ -101,6 +106,7 @@ import {
 } from './pane-content'
 import { type CapturedFrame } from './frame/types'
 import { CaptureAbortedError } from './frame/capture-identity'
+import { createCapturedFrameView, createFreezeMarker } from './frame/display'
 import { type ProfileClient } from './profiles'
 import { RpcError } from './dispatcher'
 import { NotifyClient } from './notify-client'
@@ -218,9 +224,14 @@ function hostKeyEvidenceFromOpenError(
  * Used to keep the terminal's document-level key rescue off other people's
  * fields. `isContentEditable` is checked too: a rich-text surface is a text
  * entry even though it is neither an input nor a textarea.
+ *
+ * When `terminalSurface` is supplied, controls inside that surface belong to
+ * the terminal rather than to another text-owning surface. Paste deliberately
+ * omits it: the browser still needs xterm's helper textarea to own paste.
  */
-function isTextEntry(el: Element | null): boolean {
+function isTextEntry(el: Element | null, terminalSurface: Element | null = null): boolean {
   if (!(el instanceof HTMLElement)) return false
+  if (terminalSurface?.contains(el)) return false
   if (el.isContentEditable) return true
   const tag = el.tagName
   return tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT'
@@ -350,6 +361,27 @@ export interface TerminalContentHooks {
   onOpenRoles?: () => void
 }
 
+type SummonDecision =
+  | {
+      kind: 'ok'
+      editor: CommandEditor
+      targets: InputTargetRegistry
+      agentId: string
+    }
+  | {
+      kind: 'silent'
+      reason: 'editor-visible' | 'no-running-command' | 'summon-pending'
+    }
+  | {
+      kind: 'speak'
+      reason: 'native-mode' | 'missing-assistant-target'
+      message: string
+    }
+  | {
+      kind: 'invariant'
+      reason: 'editor-missing' | 'missing-live-container' | 'missing-marker-host'
+    }
+
 // No placeholder title — see the descriptor in tabs.ts for why. A tab with no
 // name yet shows nothing rather than a word that is never the answer.
 const FALLBACK_TITLE = ''
@@ -463,6 +495,21 @@ export class TerminalContent extends BasePaneContent {
    *  the invariant `_syncLifecycleOwnership` states about itself — editor
    *  shown ⟺ grid read-only — is untouched. It is spent the moment the
    *  command stops running, whichever way it stops. */
+  /** The one live frame displayed while the summoned editor is open. The
+   *  renderer keeps parsing underneath it; this is presentation state only. */
+  private _pinnedFrame: CapturedFrame | null = null
+  /** A captured frame waiting for the ask submit seam to mint its askId.
+   *  This is distinct from the display pin: Escape ends the display, but
+   *  cannot end a turn that is already answering. */
+  private _pendingReadFrame: CapturedFrame | null = null
+  private _readPinnedFrame: { askId: string; frame: CapturedFrame } | null = null
+  private _freezeFrameView: HTMLElement | null = null
+  /** Inline position is temporarily set because alternate/fullscreen live
+   *  containers do not otherwise establish the frame view's containing block. */
+  private _freezeFrameParentPosition: string | null = null
+  private _freezeMarker: HTMLElement | null = null
+  /** Prevent two concurrent capture transactions from both summoning. */
+  private _summonPending = false
   private _summoned = false
   /** The target the summon displaced, restored when the summon ends and the
    *  draft is empty.
@@ -474,7 +521,13 @@ export class TerminalContent extends BasePaneContent {
    *  in Ask. Forcing shell there would undo a choice the person made and
    *  the summon never touched. */
   private _summonRestoreTargetId: string | null = null
+  /** The answer view opened by a summon. It stays a view over the running
+   *  command until that command reaches a terminal state, then the same DOM
+   *  node takes the next scrollback seat. */
+  private _summonedAnswer: HTMLElement | null = null
+  private _summonedCommand: BlockRecord | null = null
   private scrollback: ScrollbackController | null = null
+  private dumpSource: DumpSource | null = null
   private ledger: CommandLedger | null = null
   /** The vault RPC client, built over this tab's WS client (the shared
    *  dispatcher — the sealed-access seam it carries is already installed at
@@ -1373,7 +1426,8 @@ export class TerminalContent extends BasePaneContent {
 
       log.info('nocx: creating renderer')
       const renderer = new XtermRenderer()
-
+      const agentClient = new AgentClient(this.client.dispatcher)
+      this.dumpSource = (entryId) => agentClient.dump(entryId)
       // The snippet palette chord (⌥⌘P) at the xterm boundary: the renderer
       // consumes it before xterm encodes it (zero bytes to the pty) and
       // delegates here — the same handler the editor's arbiter calls, so
@@ -1405,6 +1459,7 @@ export class TerminalContent extends BasePaneContent {
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
         sessionName: (id) => this.hooks.sessionName?.(id) ?? null,
         answerText: (entryId) => answerTextForEntry(this.client, entryId),
+        dump: (entryId) => agentClient.dump(entryId),
         runningActions: this.runningActions,
       })
 
@@ -1509,7 +1564,6 @@ export class TerminalContent extends BasePaneContent {
       // to be here was `() => new AgentClient(…).status()` handed to the
       // ask target — a function called at refusal time, which no surface
       // can render and nothing can repaint.
-      const agentClient = new AgentClient(this.client.dispatcher)
       const readiness = new AgentReadiness(agentClient)
       this.readiness = readiness
       this._readinessUnsub = readiness.subscribe(() => this.renderTargetChips())
@@ -1571,6 +1625,12 @@ export class TerminalContent extends BasePaneContent {
         // DOM selection at submit time (AD-8: selection is copy; the grant is
         // the record).
         grants: () => this.grantedBlocks,
+        onTurnAccepted: () => {
+          // Agent asks keep the editor visible by default. A summoned answer
+          // is the one accepted case where the submitted question must give
+          // the overlay to its answer without exposing it to a refusal.
+          if (this._summoned && this._summonedAnswer !== null) this.editor?.hide()
+        },
         // A new answer block, kept at the bottom of the view — the same
         // rule a command's output lives by, which the ask path never had:
         // nothing scrolled when a block was ADDED, so a question landed
@@ -1580,6 +1640,14 @@ export class TerminalContent extends BasePaneContent {
         // the person has scrolled away to read, so this follows without
         openAnswer: (question, cwd, running?: RunningBlockActions) => {
           const handle = this.scrollback!.blockManager.addAnswerBlock(question, cwd, running)
+          if (this._summoned && this._summonedCommand !== null) {
+            // The editor hides itself when the question submits. Keep the
+            // answer readable in the summon overlay rather than putting it
+            // above the command it describes.
+            handle.el.classList.add('nocx-answer-overlay')
+            this._paneTarget?.appendChild(handle.el)
+            this._summonedAnswer = handle.el
+          }
           this.scrollback?.scrollToBottom()
           // The streamed answer grows the block, and growth is the same
           // situation as arrival: stay at the bottom unless the reader has
@@ -1623,6 +1691,8 @@ export class TerminalContent extends BasePaneContent {
         // a log (AGENTS.md: a soft degrade the UI contradicts is how a
         // feature that does not exist survives a release).
         onRefusal: (message) => showToast({ level: 'warning', message }),
+        onTurnStart: (askId) => this.bindReadTurn(askId),
+        onTurnEnd: (askId) => this.endReadTurn(askId),
         // The typed readiness fact behind a refusal (agent.status), so the
         // target never has to read the reason out of the message text.
         // Through the store, not around it: a refusal is exactly when the
@@ -2185,7 +2255,6 @@ export class TerminalContent extends BasePaneContent {
       })
       this._lifecycleChangeUnsub = this.lifecycle.onChange(() => {
         this._syncLifecycleOwnership()
-        this._updateCapability()
         // A conventional terminal stays unstructured: the scrollback-block
         // model never takes over (ADR-0024 §4). Conventional means no live
         // authenticated domain — Native, Lost, and a Desynchronized domain
@@ -2410,8 +2479,9 @@ export class TerminalContent extends BasePaneContent {
         // of the same keystroke (AGENTS.md: two surfaces may never own one
         // input):
         //
-        //  - a real selection anywhere: Ctrl+C is COPY, and always was;
-        //  - somebody else's text control: their copy, their interrupt;
+        //  - a live selection in this pane's scrollback while it owns focus:
+        //    Ctrl+C is COPY; stale text after focus moves is not.
+        //  - somebody else's text control: its own handler owns the key;
         //  - the editor on screen: its own handler clears the draft and
         //    decides about the pty from the active target (see `cancel`);
         //  - the live grid with the editor hidden: xterm is already turning
@@ -2422,25 +2492,51 @@ export class TerminalContent extends BasePaneContent {
         // alone — signalActiveCommand is the one owner of that check too.
         if (e.ctrlKey && !e.metaKey && !e.altKey && (e.key === 'c' || e.key === 'C')) {
           if (!this.hasRunningCommand()) return
-          const sel = window.getSelection()
-          if (sel && !sel.isCollapsed && sel.toString() !== '') return
           const active = document.activeElement
-          if (isTextEntry(active)) return
+          const sel = window.getSelection()
+          // Ctrl+C remains copy only for a live selection in this pane that
+          // no other surface has taken the focus away from. The anchor and
+          // focus nodes tie the selection to this pane; once focus moves to
+          // chrome or a menu, stale scrollback text cannot swallow the
+          // interrupt.
+          //
+          // "No other surface" includes the BODY, and that is not a
+          // technicality: claiming a selection for the scrollback releases
+          // the composer's focus and puts nothing else in its place
+          // (nocx-45vkz — blurring an editing host is itself a selection
+          // change on WebKit, so the claim is re-asserted there rather than
+          // assumed). The person who just dragged across a running command's
+          // output has focus on the body and a live highlight in front of
+          // them; answering their Ctrl+C with a SIGINT would be the worst
+          // reading of the gesture available.
+          const scrollbackArea = this.scrollback?.scrollbackArea
+          const focusElsewhere =
+            active !== null && active !== document.body && scrollbackArea?.contains(active) !== true
+          const selectionOwnedByFocus =
+            sel !== null &&
+            !sel.isCollapsed &&
+            sel.toString() !== '' &&
+            sel.anchorNode !== null &&
+            sel.focusNode !== null &&
+            scrollbackArea?.contains(sel.anchorNode) === true &&
+            scrollbackArea.contains(sel.focusNode) &&
+            !focusElsewhere
+          if (selectionOwnedByFocus) return
+          if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
           if (this.editor?.isVisible && active && this.editor.rootContains(active)) return
           if (active && this.scrollback?.xtermLiveContainer.contains(active) === true) return
           e.preventDefault()
           this.signalActiveCommand('interrupt')
           return
         }
-        // Paste (Cmd/Ctrl+V) belongs to the same rescue policy: wherever in
-        // the pane the user clicked — a frozen block, the scrollback, the
-        // running grid — the paste must reach the command editor, and it
-        // must never reach the shell as a literal \x16. The same isTextEntry
-        // guard keeps other surfaces' paste to themselves (a settings field,
-        // quick connect, a dialog). When the overlay is open, its arbiter
-        // runs before this document listener on the editor's own keys and
-        // decides first; when the editor itself has focus this branch is
-        // skipped by the guard and the editor's own paste path runs.
+        // Paste (Cmd/Ctrl+V) follows the same ownership policy: a frozen
+        // block or scrollback hands the gesture to the command editor, while
+        // a focused text control — including xterm's helper textarea — keeps
+        // its native paste. The generic isTextEntry guard intentionally has
+        // no terminal-surface carve-out here. When the overlay is open, its
+        // arbiter runs before this document listener on the editor's own keys
+        // and decides first; when the editor itself has focus this branch is
+        // skipped and the editor's own paste path runs.
         // Focus-only, deliberately: leave the keydown uncancelled so the
         // browser emits its paste event at the now-focused editor and CM6's
         // own paste inserts at the caret — reading the clipboard here would
@@ -2451,6 +2547,19 @@ export class TerminalContent extends BasePaneContent {
             this.scrollback?.deselectBlocks()
             this.editor.focus()
           }
+          return
+        }
+        // Once an accepted summoned answer owns the overlay, the editor is
+        // intentionally hidden so the answer is readable. Escape still
+        // dismisses the summon through the document path: the answer remains
+        // a view over the live screen and keeps receiving deltas until the
+        // running command ends, when it takes its scrollback seat.
+        if (e.key === 'Escape' && this._summoned && this._summonedAnswer !== null) {
+          const active = document.activeElement
+          if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
+          if (hasOpenOverlays()) return
+          if (document.querySelector('.cmd-overflow-menu')) return
+          if (this.dismissSummonedEditor()) e.preventDefault()
           return
         }
         // Escape with the editor on screen but out of focus: the editor's
@@ -2476,9 +2585,7 @@ export class TerminalContent extends BasePaneContent {
           // space, so the rescue runs here too (when the editor is hidden
           // this branch never runs and the key reaches the shell as
           // before).
-          const onLiveGrid =
-            active !== null && this.scrollback?.xtermLiveContainer.contains(active) === true
-          if (!onLiveGrid && isTextEntry(active)) return
+          if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
           if (hasOpenOverlays()) return
           if (document.querySelector('.cmd-overflow-menu')) return
           if (this.editor.handleExternalEscape(e)) e.preventDefault()
@@ -3077,12 +3184,21 @@ export class TerminalContent extends BasePaneContent {
         'keydown',
         (e: KeyboardEvent) => {
           if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return
-          // The editor on screen owns this chord: it is the explicit target
-          // switch there, and the editor's own handler decides.
-          if (this.editor?.isVisible) return
-          if (!this.summonEditor()) return
+          const decision = this.canSummonEditor()
+          // Editor-visible and no-running states are silent and unconsumed;
+          // the pending state is silent but must still consume the chord so
+          // it cannot become a CR while the existing capture finishes.
+          if (
+            (decision.kind === 'silent' && decision.reason !== 'summon-pending') ||
+            decision.kind === 'invariant'
+          )
+            return
+          // Every spoken refusal and successful summon consumes the chord
+          // before capture awaits the parse fence, so it cannot become a CR
+          // in the running program.
           e.preventDefault()
           e.stopPropagation()
+          void this.summonEditor(decision)
         },
         true,
       )
@@ -3518,6 +3634,7 @@ export class TerminalContent extends BasePaneContent {
             () => {},
             snapshotStore,
             this.runningActions,
+            this.dumpSource ?? undefined,
           ),
         )
         continue
@@ -3575,6 +3692,7 @@ export class TerminalContent extends BasePaneContent {
                 () => {},
                 snapshotStore,
                 this.runningActions,
+                this.dumpSource ?? undefined,
               )
             }
             // An ACTION child is a tool line — a header naming what was
@@ -3611,6 +3729,7 @@ export class TerminalContent extends BasePaneContent {
                 () => {},
                 snapshotStore,
                 this.runningActions,
+                this.dumpSource ?? undefined,
               )
             }
             // A block the turn RAN (or a person's, if the ledger
@@ -3626,9 +3745,11 @@ export class TerminalContent extends BasePaneContent {
               () => {},
               snapshotStore,
               this.runningActions,
+              this.dumpSource ?? undefined,
             )
           },
           this.runningActions,
+          this.dumpSource ?? undefined,
         ),
       )
     }
@@ -3736,11 +3857,36 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /** Capture this session's live frame (the readScreen pull): the renderer
-   *  produces the frame because it owns the grid (AD-6). Rejects with
+   *  produces the frame because it owns the grid (AD-6). A whole-screen read
+   *  in an active ask turn returns that turn's frame, even if its summoned
+   *  editor has since been dismissed; before the ask is submitted, the
+   *  display pin is the equivalent fallback. Neither path waits on the live
+   *  capture fence or describes a later repaint. Region reads remain live so
+   *  their requested bounds keep their existing meaning. Rejects with
    *  CaptureAbortedError when no renderer is mounted (yet or anymore). */
   captureLiveFrame(region?: { start: number; end: number }): Promise<CapturedFrame> {
+    if (region === undefined) {
+      if (this._readPinnedFrame !== null) return Promise.resolve(this._readPinnedFrame.frame)
+      if (this._pinnedFrame !== null) return Promise.resolve(this._pinnedFrame)
+    }
     if (!this.renderer) return Promise.reject(new CaptureAbortedError())
     return this.renderer.captureLiveFrame(region)
+  }
+
+  /** The frame displayed by the active summoned editor, or null otherwise.
+   *  This display seam ends with the overlay; the read-turn pin is separate so
+   *  session.read can keep describing the same turn after Escape. */
+  pinnedFrame(): CapturedFrame | null {
+    return this._pinnedFrame
+  }
+  private bindReadTurn(askId: string): void {
+    const frame = this._pendingReadFrame
+    this._pendingReadFrame = null
+    this._readPinnedFrame = frame === null ? null : { askId, frame }
+  }
+
+  private endReadTurn(askId: string): void {
+    if (this._readPinnedFrame?.askId === askId) this._readPinnedFrame = null
   }
 
   /** Report the lane's buffer kind to the backend (agent.laneInteractivity,
@@ -3856,7 +4002,6 @@ export class TerminalContent extends BasePaneContent {
     // The kernel is the authority; the sync shows the editor because the
     // axis says PromptReady — and the user's own escape latch is now off.
     this._syncLifecycleOwnership()
-    this._updateCapability()
   }
 
   /** The current input presentation, exposed for context menu and palette
@@ -3949,38 +4094,129 @@ export class TerminalContent extends BasePaneContent {
     return running !== null && running !== undefined && this.agentRuns.has(running)
   }
 
-  /** Summon the editor over a running command, in ask mode (nocx-92gfl).
-   *
-   *  Two gestures land here and nowhere else: ⌘/Ctrl+Enter from the grid,
-   *  and "ask about this block" on the block's ⋮ menu. The menu item exists
-   *  because a chord nobody can see is a gesture nobody uses; it is a second
-   *  DOOR, never a second implementation.
-   *
-   *  Refused unless there is something to ask about and the pane is in a
-   *  state where an editor belongs: no running command (the editor is
-   *  already there, or will be), the ALTERNATE buffer (a full-screen program
-   *  owns the pane, and that is its own conversation), or the native-input
-   *  latch (the person's own one-way choice, which nothing may reverse for
-   *  them).
-   *
-   *  Returns whether it summoned, so a caller can leave the key alone. */
-  private summonEditor(): boolean {
+  /** Whether the editor can begin a capture transaction. No presentation
+   *  state changes here: the frame and marker are installed only after the
+   *  renderer has produced a settled snapshot. */
+  private canSummonEditor(): SummonDecision {
     const editor = this.editor
-    if (editor === null || editor.isVisible) return false
-    if (!this.hasRunningCommand()) return false
-    if (this.lifecycle.buffer !== 'normal' || this.nativeMode) return false
+    if (editor === null) {
+      // The gesture listener is installed after the editor, so this is a
+      // silent DOM invariant rather than a user-reachable refusal.
+      return { kind: 'invariant', reason: 'editor-missing' }
+    }
+    if (editor.isVisible) return { kind: 'silent', reason: 'editor-visible' }
+    if (this._summonPending) return { kind: 'silent', reason: 'summon-pending' }
+    if (!this.hasRunningCommand()) return { kind: 'silent', reason: 'no-running-command' }
+    if (this.nativeMode) {
+      return {
+        kind: 'speak',
+        reason: 'native-mode',
+        message: 'Native input is active — enable command editor to ask the assistant.',
+      }
+    }
     const targets = this.inputTargets
     const agentId = this.agentTarget?.id
-    // No assistant target registered means there is nothing to ask, and a
-    // summoned editor whose only legal target does not exist would be a box
-    // that can do nothing at all.
-    if (!targets || !agentId) return false
-    this._summonRestoreTargetId = targets.active().id
-    this._summoned = true
-    if (targets.active().id !== agentId) targets.setActive(agentId)
-    this._syncLifecycleOwnership()
-    editor.focus()
-    return true
+    if (targets === null || agentId === undefined) {
+      return {
+        kind: 'speak',
+        reason: 'missing-assistant-target',
+        message: 'This pane has no assistant.',
+      }
+    }
+    const frameHost = this.scrollback?.xtermLiveContainer
+    if (frameHost === undefined) {
+      // The mounted gesture listener always has a live xterm host; this is a
+      // silent DOM invariant, not a refusal a person can reach.
+      return { kind: 'invariant', reason: 'missing-live-container' }
+    }
+    const markerHost = editor.root.querySelector<HTMLElement>('.nocx-editor-chrome-left')
+    if (markerHost === null) {
+      // The mounted editor always has its chrome row; this is a silent DOM
+      // invariant, not a refusal a person can reach.
+      return { kind: 'invariant', reason: 'missing-marker-host' }
+    }
+    return { kind: 'ok', editor, targets, agentId }
+  }
+
+  /** Summon the editor over a running command, in ask mode (nocx-92gfl).
+   *
+   *  The renderer is the one owner of the grid (AD-6). Capture therefore
+   *  happens before this transaction changes editor visibility or target
+   *  state. The live renderer keeps receiving and parsing bytes while the
+   *  captured DOM view is shown over it.
+   *
+   *  Returns whether it summoned, so a caller can consume a successful
+   *  gesture without creating a second input path. */
+  private async summonEditor(decision: SummonDecision): Promise<boolean> {
+    if (decision.kind === 'silent' || decision.kind === 'invariant') return false
+    if (decision.kind === 'speak') {
+      showToast({ level: 'warning', message: decision.message })
+      return false
+    }
+    const { editor, targets, agentId } = decision
+    // Alternate-buffer programs are not a refusal: the editor is an overlay,
+    // so their grid keeps its size and the program receives no resize.
+
+    this._summonPending = true
+    try {
+      const frame = await this.captureLiveFrame()
+      // The command may have finished, the tab may have closed, or another
+      // path may have shown the editor while capture was in flight. All are
+      // refusals: no stale frame, marker, placement or target mutation.
+      if (
+        this._disposed ||
+        this.editor !== editor ||
+        editor.isVisible ||
+        !this.hasRunningCommand() ||
+        this.nativeMode ||
+        this.scrollback?.xtermLiveContainer === undefined
+      ) {
+        return false
+      }
+
+      const markerHost = editor.root.querySelector<HTMLElement>('.nocx-editor-chrome-left')
+      const frameHost = this.scrollback?.xtermLiveContainer
+      if (markerHost === null || frameHost === undefined) return false
+
+      const view = createCapturedFrameView(frame)
+      this._freezeFrameParentPosition = frameHost.style.position
+      frameHost.style.position = 'relative'
+      frameHost.appendChild(view)
+      this._pinnedFrame = frame
+      this._pendingReadFrame = frame
+      this._freezeFrameView = view
+
+      const marker = createFreezeMarker()
+      markerHost.appendChild(marker)
+      this._freezeMarker = marker
+      this._summonedCommand = this.scrollback?.blockManager.runningBlock ?? null
+
+      this._summonRestoreTargetId = targets.active().id
+      this._summoned = true
+      targets.setActive(agentId)
+      // Set placement before showing or focusing: the visible editor must
+      // never spend a frame in the pane's flex layout.
+      this._setEditorPlacement('overlay')
+      this._syncLifecycleOwnership()
+      editor.focus()
+      return true
+    } catch {
+      // CaptureAbortedError and renderer refusal both leave the pane exactly
+      // as it was. In particular, no display marker is a claim about a frame
+      // that was never captured.
+      return false
+    } finally {
+      this._summonPending = false
+    }
+  }
+
+  /** Keep the editor's one DOM surface in either the prompt flow or the
+   *  overlay layer. The placement is presentation only; target and draft
+   *  ownership remain in the registry and editor. */
+  private _setEditorPlacement(placement: 'inline' | 'overlay'): void {
+    const root = this.editor?.root
+    if (!root) return
+    root.dataset.placement = placement
   }
 
   /** Dismiss a summoned editor: the keys go back to the process (nocx-92gfl).
@@ -4007,6 +4243,41 @@ export class TerminalContent extends BasePaneContent {
     return true
   }
 
+  /** Move the existing turn node from the answer overlay to the seat directly
+   *  after the command it describes. Reparenting, rather than rebuilding,
+   *  keeps the streaming AnswerBody and ledger identity intact. */
+  private _seatSummonedAnswer(): void {
+    const answer = this._summonedAnswer
+    const command = this._summonedCommand
+    if (answer === null || command === null) return
+    const parent = command.el.parentElement
+    if (parent === null) return
+    const settle = this.scrollback
+    const seat = () => {
+      parent.insertBefore(answer, command.el.nextSibling)
+      answer.classList.remove('nocx-answer-overlay')
+      // Reparenting extends the scrollback after the command-end settle has
+      // already positioned the command. Follow the new answer tail as well,
+      // or a long streamed answer remains below the fold.
+      settle?.scrollToBottomIfFollowing()
+      // WebKit can apply the class/style change after this task's scroll
+      // height read. Its initial ResizeObserver delivery is the first
+      // observable point at which the reparented answer owns its final box;
+      // follow there too, without moving a reader who scrolled away.
+      if (settle && typeof ResizeObserver !== 'undefined') {
+        const observer = new ResizeObserver(() => {
+          observer.disconnect()
+          settle.scrollToBottomIfFollowing()
+        })
+        observer.observe(answer)
+      }
+    }
+    if (settle) settle.settleAround(seat)
+    else seat()
+    this._summonedAnswer = null
+    this._summonedCommand = null
+  }
+
   /** The summon is over — dismissed by Escape, or outlived by the command
    *  it was opened over. Both exits come through here.
    *
@@ -4014,14 +4285,32 @@ export class TerminalContent extends BasePaneContent {
    *  empty. A half-typed question re-pointed at the shell would turn the
    *  person's next Enter into a command they never wrote — the exact reason
    *  the dropped auto-switching design was dropped. */
+
   private _endSummon(): void {
     this._summoned = false
     const restore = this._summonRestoreTargetId
     this._summonRestoreTargetId = null
+    this._pendingReadFrame = null
+    this._clearFreezePresentation()
     if (restore === null || this.editor === null) return
     if (this.editor.getDoc() !== '') return
     if (this.inputTargets?.active().id === restore) return
     this.inputTargets?.setActive(restore)
+  }
+
+  /** Remove the static frame, marker, and temporary containing-block style. */
+  private _clearFreezePresentation(): void {
+    this._setEditorPlacement('inline')
+    const frameParent = this._freezeFrameView?.parentElement
+    if (frameParent && this._freezeFrameParentPosition !== null) {
+      frameParent.style.position = this._freezeFrameParentPosition
+    }
+    this._freezeFrameParentPosition = null
+    this._freezeFrameView?.remove()
+    this._freezeFrameView = null
+    this._pinnedFrame = null
+    this._freezeMarker?.remove()
+    this._freezeMarker = null
   }
 
   /** The person's ONE explicit target switch: the caret indicator's click
@@ -4292,17 +4581,20 @@ export class TerminalContent extends BasePaneContent {
     // rather than on the completion fact alone, because this is the one
     // place every lifecycle change already arrives, and a second place that
     // cleared it would be a second owner of the same flag.
-    if (this._summoned && !this.hasRunningCommand()) this._endSummon()
+    if (!this.hasRunningCommand()) {
+      this._seatSummonedAnswer()
+      if (this._summoned) this._endSummon()
+    }
     // Two ways the editor can be on screen, and the difference is who asked:
     // the LIFECYCLE says PromptReady (ADR-0024 §6, the ordinary case), or the
-    // PERSON summoned it over a running command (nocx-92gfl). The other two
-    // axes gate both alike — the buffer axis is presentation and can never
-    // restore authority, and the native latch is the person's own one-way
-    // choice — so a summon reaches neither an alternate-screen program nor a
-    // pane whose owner has opted out of the editor entirely.
+    // PERSON summoned it over a running command (nocx-92gfl). A summoned
+    // editor is an overlay even while the alternate-screen program owns the
+    // pane; the native latch still gates both because it is the person's own
+    // one-way choice.
+    const summoned = this._summoned
     const show =
-      (shouldShowEditor(this.lifecycle.state) || this._summoned) &&
-      this.lifecycle.buffer === 'normal' &&
+      (shouldShowEditor(this.lifecycle.state) || summoned) &&
+      (summoned || this.lifecycle.buffer === 'normal') &&
       !this.nativeMode
     // The grid's writability follows ownership, not the visibility
     // transition: the editor hides ITSELF at submit (the atomic handoff),
@@ -4311,20 +4603,30 @@ export class TerminalContent extends BasePaneContent {
     // stays read-only, typed input is dropped, and a program waiting on
     // stdin (read, ssh, less) hangs with no editor and no input surface
     // (nocx-u7uh.23). The invariant: editor shown ⟺ grid read-only.
+    const answerInSummon = this._summoned && this._summonedAnswer !== null
     if (show) {
-      // The composer coming BACK is a displacement of its own — the prompt
-      // returns, the box re-enters the layout, and the scrollback moves by its
-      // height. It is glided; the freeze that precedes it has its own.
-      if (!editor.isVisible) {
-        const sb = this.scrollback
-        if (sb) {
-          sb.settleAround(() => {
-            editor.show()
-            // The scroller just lost the composer's height. Inside the
-            // mutation, so the glide measures the settled position once.
-            sb.scrollToBottomIfFollowing()
-          })
-        } else editor.show()
+      if (summoned) {
+        // The attribute is set before show/focus and CSS takes the editor out
+        // of flow, so this branch never settles or measures the scrollback.
+        this._setEditorPlacement('overlay')
+        if (answerInSummon) editor.hide()
+        else if (!editor.isVisible) editor.show()
+      } else {
+        // The composer coming BACK is a displacement of its own — the prompt
+        // returns, the box re-enters the layout, and the scrollback moves by
+        // its height. It is glided; the freeze that precedes it has its own.
+        this._setEditorPlacement('inline')
+        if (!editor.isVisible) {
+          const sb = this.scrollback
+          if (sb) {
+            sb.settleAround(() => {
+              editor.show()
+              // The scroller just lost the composer's height. Inside the
+              // mutation, so the glide measures the settled position once.
+              sb.scrollToBottomIfFollowing()
+            })
+          } else editor.show()
+        }
       }
       this.renderer?.setReadOnly(true)
     } else {
@@ -4346,9 +4648,14 @@ export class TerminalContent extends BasePaneContent {
       // cancels in-flight settles before it measures. A no-op mutation would
       // therefore kill a live animation mid-flight and snap the stack, which
       // is the jitter it was meant to remove.
+      this._setEditorPlacement('inline')
       editor.hide()
       this.renderer?.setReadOnly(false)
     }
+    // Visibility is the presentation axis; refresh it after the ownership
+    // projection has shown or hidden the editor so recovery actions cannot
+    // describe the state from before this reconciliation.
+    this._updateCapability()
   }
 
   /** A selection is a quote and a grant whose window follows the selected
@@ -4378,13 +4685,16 @@ export class TerminalContent extends BasePaneContent {
     const grant = grantBlockFromElement(blockEl)
     if (!grant) return
     const index = this.grantedBlocks.findIndex((item) => item.itemId === grant.itemId)
-    this.grantedBlocks =
-      index < 0
-        ? [...this.grantedBlocks, grant]
-        : this.grantedBlocks.filter((_, candidateIndex) => candidateIndex !== index)
+    const adding = index < 0
+    const isRunningBlock = this.scrollback?.blockManager.runningBlock?.el === blockEl
+    this.grantedBlocks = adding
+      ? [...this.grantedBlocks, grant]
+      : this.grantedBlocks.filter((_, candidateIndex) => candidateIndex !== index)
     this.grantController?.setBlocks(this.grantedBlocks)
+    // The menu's Ask action is the mouse door to the same summon path as
+    // Ctrl+Enter. Unmarking remains a pure toggle and never summons.
+    if (adding && isRunningBlock) void this.summonEditor(this.canSummonEditor())
   }
-
   private refreshGrant(blockEl: HTMLElement): void {
     const refreshed = grantBlockFromElement(blockEl)
     if (!refreshed) return
@@ -4406,6 +4716,8 @@ export class TerminalContent extends BasePaneContent {
 
   dispose(): void {
     this._disposed = true
+    this._pendingReadFrame = null
+    this._readPinnedFrame = null
     this._mounted = false
     this.mountAbortController?.abort()
     clearTimeout(this._settleTimer)
@@ -4435,6 +4747,12 @@ export class TerminalContent extends BasePaneContent {
       document.removeEventListener('keydown', this._globalKeydown)
       this._globalKeydown = null
     }
+    this._summoned = false
+    this._summonRestoreTargetId = null
+    this._summonedAnswer?.remove()
+    this._summonedAnswer = null
+    this._summonedCommand = null
+    this._clearFreezePresentation()
     this.session?.close()
     this.renderer?.dispose()
     this.editor?.dispose()

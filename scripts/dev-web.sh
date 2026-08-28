@@ -110,8 +110,17 @@ session_bus="/run/user/$(id -u)/bus"
 if [[ ( -z "$backend_dbus_address" || "$backend_dbus_address" == "disabled:" ) && -S "$session_bus" ]]; then
 	backend_dbus_address="unix:path=$session_bus"
 fi
+# THE RAW EXCHANGE WITH THE MODEL, on by default HERE and nowhere else.
+# This stand exists to be looked at, and three live failures in a row were
+# each diagnosed by guessing because nothing recorded what was sent and what
+# came back. The file holds the person's question and whatever their tools
+# read, which is why it is off in the shipped app and why it lives in this
+# run's throwaway directory rather than anywhere that outlives it. The API key
+# is never written to it (internal/assistant/wiretap.go). Point NOCX_WIRE_LOG
+# somewhere else to keep one, or set it empty to turn the tap off.
 DBUS_SESSION_BUS_ADDRESS="$backend_dbus_address" \
 	NOCX_WS_ADDR="127.0.0.1:$WS_PORT" \
+	NOCX_WIRE_LOG="${NOCX_WIRE_LOG-$work/wire.log}" \
 	"$work/devharness" >"$work/backend.log" 2>&1 &
 backend_pid=$!
 
@@ -144,6 +153,10 @@ Backend up. From your machine:
   ssh -L $WEB_PORT:127.0.0.1:$WEB_PORT -L $port:127.0.0.1:$port <this-host>
 
 then open http://localhost:$WEB_PORT
+
+What was sent to the model and what it said back, verbatim:
+
+  ${NOCX_WIRE_LOG-$work/wire.log}
 
 The remote side of both forwards is spelled 127.0.0.1, not localhost: both
 servers bind IPv4 loopback, and localhost resolves to ::1 first here — a

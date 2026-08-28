@@ -27,6 +27,10 @@
  * question (nocx-kdawd). Long content is then reached by scrolling sideways
  * inside the block, which already has its own scroll box.
  *
+ * `variant="answer"` is the streamed assistant fence's bordered form. It
+ * shares this component's appearance rather than letting the answer surface
+ * repaint a second code block.
+ *
  * `children` is a JSX element rather than a string, so a block may carry an
  * inline component where the machine output does: the API workbench's raw
  * request text renders `SecretChip` in place of a secret's bytes (ADR-0021 —
@@ -61,6 +65,8 @@ export interface CodeBlockProps {
   /** Whether a long line wraps. Default true; see the note above for when a
    *  block says false. */
   wrap?: boolean
+  /** Surface-specific bordered form used by streamed assistant answers. */
+  variant?: 'answer'
   /** Injected platform clipboard operation. Existing callers with their own copy
    * affordance may omit this and render only the read-only block. */
   copy?: (text: string) => Promise<void>
@@ -132,6 +138,7 @@ export function CodeBlock(props: CodeBlockProps) {
     >
       <pre
         class="ui-code-block"
+        data-variant={props.variant}
         data-wrap={props.wrap === false ? 'false' : undefined}
         aria-label={props.ariaLabel}
         tabIndex={0}

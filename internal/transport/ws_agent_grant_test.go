@@ -77,7 +77,7 @@ func TestAgentAsk_GrantsAreNamedWithoutInlining_OverTheWire(t *testing.T) {
 	if strings.Contains(prompt, "first block output") || strings.Contains(prompt, "second block output") {
 		t.Fatalf("system prompt inlined marked output:\n%s", prompt)
 	}
-	if !strings.Contains(prompt, "id: "+third) || !strings.Contains(prompt, "command: make ci") {
+	if !strings.Contains(prompt, "id: "+third) || !strings.Contains(prompt, `command: "make ci"`) {
 		t.Fatalf("system prompt dropped the missing granted item:\n%s", prompt)
 	}
 	for _, itemID := range []string{first, second} {

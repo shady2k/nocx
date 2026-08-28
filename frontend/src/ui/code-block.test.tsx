@@ -152,3 +152,29 @@ describe('CodeBlock', () => {
     expect(toasts()[0].level).toBe('danger')
   })
 })
+
+describe('CodeBlock answer variant', () => {
+  it('marks an answer code block as the bordered answer variant', () => {
+    const el = block()
+    expect(el.dataset.variant).toBeUndefined()
+
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    render(
+      () => (
+        <CodeBlock variant="answer" ariaLabel="Answer code">
+          {'fenced answer'}
+        </CodeBlock>
+      ),
+      { container: host },
+    )
+
+    const answer = host.querySelector<HTMLElement>('.ui-code-block')
+    expect(answer?.dataset.variant).toBe('answer')
+    expect(answer?.classList.contains('ui-code-block')).toBe(true)
+  })
+
+  it('defines the answer border in the CodeBlock stylesheet', () => {
+    expect(CSS).toMatch(/\.ui-code-block\[data-variant='answer'\][^}]*border:\s*1px solid/s)
+  })
+})

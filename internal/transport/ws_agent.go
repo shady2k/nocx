@@ -179,15 +179,16 @@ type agentAskResponse struct {
 }
 
 type agentRunControl struct {
-	mu             sync.Mutex
-	eventsMu       sync.Mutex
-	cancelFn       context.CancelFunc
-	cancelled      bool
-	terminalized   bool
-	cancelState    content.RunState
-	cancelReason   content.TerminationReason
-	cancelSentence string
-	cancelDone     chan struct{}
+	mu               sync.Mutex
+	eventsMu         sync.Mutex
+	cancelFn         context.CancelFunc
+	cancelled        bool
+	terminalized     bool
+	cancelState      content.RunState
+	cancelReason     content.TerminationReason
+	cancelSentence   string
+	cancelHasDetails bool
+	cancelDone       chan struct{}
 }
 
 func (c *agentRunControl) beginCancel() bool {
@@ -209,22 +210,23 @@ func (c *agentRunControl) cancelContext() {
 	}
 }
 
-func (c *agentRunControl) finishCancel(state content.RunState, reason content.TerminationReason, sentence string) {
+func (c *agentRunControl) finishCancel(state content.RunState, reason content.TerminationReason, sentence string, hasDetails bool) {
 	c.mu.Lock()
 	c.cancelState = state
 	c.cancelReason = reason
 	c.cancelSentence = sentence
+	c.cancelHasDetails = hasDetails
 	close(c.cancelDone)
 	c.mu.Unlock()
 }
 
-func (c *agentRunControl) cancelOutcome() (content.RunState, content.TerminationReason, string) {
+func (c *agentRunControl) cancelOutcome() (content.RunState, content.TerminationReason, string, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.cancelState == "" {
-		return content.RunCancelled, content.TermUserKilled, "the person stopped this answer"
+		return content.RunCancelled, content.TermUserKilled, "the person stopped this answer", false
 	}
-	return c.cancelState, c.cancelReason, c.cancelSentence
+	return c.cancelState, c.cancelReason, c.cancelSentence, c.cancelHasDetails
 }
 
 func (c *agentRunControl) beginEvent() func() {
@@ -334,7 +336,8 @@ type agentRunReasoning struct {
 }
 
 // agentRunState is the agent.runState notification: the run's terminal
-// state. error is present only for failed, and it is a sentence a person
+// state. error is present for failed runs and for cancelled runs only when
+// cancellation could not stop the host command; it is a sentence a person
 // reads, never a Go error string (design §7). droppedDeltas is present only
 // when the live view is incomplete: the wire refused one or more
 // agent.runDelta frames (a full outbound queue — outbound's deliberate
@@ -375,6 +378,31 @@ type agentApprovalRequested struct {
 	Resource *content.GrantScope       `json:"resource,omitempty"`
 	WasError bool                      `json:"wasError,omitempty"`
 	Findings []assistant.EgressFinding `json:"findings,omitempty"`
+	Standing agentApprovalStanding     `json:"standing"`
+}
+
+type agentApprovalStanding struct {
+	Available bool   `json:"available"`
+	Rule      string `json:"rule"`
+	Reason    string `json:"reason"`
+}
+
+func standingOffer(inv content.Invocation, hasInvocation, commandInvocation bool, effect content.Effect) agentApprovalStanding {
+	if !commandInvocation {
+		if effect == "" {
+			return agentApprovalStanding{Reason: "the question named no effect class"}
+		}
+		return agentApprovalStanding{Available: true}
+	}
+	if !hasInvocation {
+		_, reason := content.StandingRule(inv)
+		return agentApprovalStanding{Reason: reason}
+	}
+	rule, reason := content.StandingRule(inv)
+	if reason != "" {
+		return agentApprovalStanding{Reason: reason}
+	}
+	return agentApprovalStanding{Available: true, Rule: rule.Label()}
 }
 
 // The three widths an answer can have (nocx-ki305, design "The prompt grows
@@ -432,8 +460,8 @@ type agentApproveResponse struct {
 // ask ids — per connection, so a reconnect mints a new one) and the
 // Responder; never the *WSServer.
 type agentHandlers struct {
-	op capability.AgentOperation // nil → content store not wired
-	// stopForeground is the parent-cancel seam. It resolves a connection-owned
+	op     capability.AgentOperation // nil → content store not wired
+	dumpOp capability.LedgerOperation
 	// session and runs the shared stop ladder without holding the content
 	// queue or pending-runs mutex.
 	stopForeground func(session.ID) foregroundOutcome
@@ -730,7 +758,11 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// terminalizes — a refused socket write never wedges it. A refused
 	// submit (the stream capacity is exhausted) terminalizes the run
 	// failed with a renderable reason; the run is never left prepared.
-	runCtx, runCancel := context.WithCancel(ctx)
+	// The EXCHANGE names itself for everything downstream: this ask, the
+	// approval that suspends it, the resume that finishes it and every
+	// effect any of them run all log under one trace, across the several
+	// wire frames it takes (internal/log).
+	runCtx, runCancel := context.WithCancel(log.WithTraceID(ctx, runTrace(askRes.RunID)))
 	runControl := &agentRunControl{cancelFn: runCancel, cancelDone: make(chan struct{})}
 	rc := askRunContext{
 		runID:    askRes.RunID,
@@ -952,6 +984,16 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// attempt recorded — the visible gap describes the whole answer, never
 	// just the last Ask invocation.
 	dropped := rc.droppedBefore
+	// WHAT THE RUN SPENT ITSELF ON (nocx-d6gn4.8.1). A run that thinks for
+	// four minutes and emits nothing logs NOTHING today — the lines below
+	// are written when a program runs or when the run dies, so the owner
+	// watched a spinner and the log had no word for it. These three counters
+	// and the pair of lines around the stream make "it went off into
+	// reasoning" a number instead of an impression.
+	var reasoningChars, answerChars, toolCalls int
+	streamStarted := time.Now()
+	h.log.Info("agent ask: streaming", "run", rc.runID, "model", rc.model,
+		"question", len(rc.question))
 	// The gate deltas may not pass before: a delta persisted before the
 	// streaming transition commits would be a delta outside the run's
 	// non-terminal span.
@@ -973,36 +1015,58 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// pinned when the ask arrived, and never stored: the same run resumed
 	// after an approval rebuilds the same text from the same facts.
 	promptFacts := rc.promptFacts
-	msgs := make([]assistant.Message, 0, 4)
-	//
+	msgs := make([]assistant.Message, 0, 8)
 	msgs = append(msgs, assistant.Message{
 		Role:    "system",
 		Content: assistant.SystemPrompt(promptFacts),
 	})
-	// THE CONVERSATION, and it is read from the ledger rather than remembered
-	// in this process (ADR-0040's closing consequence). The turn before this
-	// one in this pane is what "what did we just say" means: its question, and
-	// the prose of the run that answered it, in seat order and as ONE message.
-	//
-	// It is one turn and not the whole thread on purpose — the whole
-	// conversation assembled from the ledger is nocx-0s2gh.2, and it is the
-	// same read at a larger scale rather than a second one. What this must not
-	// do is grow a second assembler beside that; the arrangement stays in the
-	// ledger (PriorTurn), and what happens here is only the mapping from a
-	// stored turn to two Messages.
-	//
-	// A FAILED READ of the previous turn is not fatal: it is context the
-	// backend added, so losing it degrades the answer instead of invalidating
-	// the question. It is logged rather than swallowed — a conversation that
-	// silently stopped being multi-turn is the failure that would take
-	// longest to notice.
-	if prior, priorErr := h.priorTurn(ctx, rc); priorErr != nil {
-		h.log.Warn("the previous turn could not be read; answering without it",
+
+	// The conversation is a pane-scoped thread owned by the ledger. A
+	// tool line rides the assistant message for its turn: Message deliberately
+	// has only the three engine roles, so inventing a tool role or synthetic
+	// OpenAI tool_calls would create a second wire contract. The line is still
+	// separate from prose inside that message, and is never the tool output.
+	const conversationBudget = 12000
+	priorTurns, priorErr := h.priorTurns(ctx, rc)
+	if priorErr != nil {
+		h.log.Warn("the previous conversation could not be read; answering without it",
 			"run", rc.runID, "entry", rc.entryID, "error", priorErr)
-	} else if prior != nil {
-		msgs = append(msgs, assistant.Message{Role: "user", Content: prior.Question})
-		if answer, ok := priorAnswerMessage(prior.Prose); ok {
-			msgs = append(msgs, assistant.Message{Role: "assistant", Content: answer})
+	} else {
+		turnMessages := make([][]assistant.Message, len(priorTurns))
+		total := 0
+		for i, prior := range priorTurns {
+			turnMessages[i] = append(turnMessages[i],
+				assistant.Message{Role: "user", Content: prior.Question})
+			if answer, ok := priorAnswerMessage(prior.Prose); ok {
+				content := answer
+				if len(prior.ToolLines) > 0 {
+					content += "\n\n" + strings.Join(prior.ToolLines, "\n")
+				}
+				turnMessages[i] = append(turnMessages[i],
+					assistant.Message{Role: "assistant", Content: content})
+			} else if len(prior.ToolLines) > 0 {
+				turnMessages[i] = append(turnMessages[i],
+					assistant.Message{Role: "assistant", Content: strings.Join(prior.ToolLines, "\n")})
+			}
+			for _, message := range turnMessages[i] {
+				total += len(message.Content)
+			}
+		}
+		trimmed := false
+		for len(turnMessages) > 0 && total > conversationBudget {
+			for _, message := range turnMessages[0] {
+				total -= len(message.Content)
+			}
+			turnMessages = turnMessages[1:]
+			trimmed = true
+		}
+		if trimmed {
+			msgs = append(msgs, assistant.Message{
+				Role: "system", Content: "[older turns of this conversation are not included]",
+			})
+		}
+		for _, turn := range turnMessages {
+			msgs = append(msgs, turn...)
 		}
 	}
 	msgs = append(msgs, assistant.Message{Role: "user", Content: rc.question})
@@ -1016,6 +1080,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// numbering (askRunContext.prose). Empty on a fresh run and after every
 	// tool call: the first delta then opens the next block.
 	prose := rc.prose
+	ctx = assistant.WithWireIdentity(ctx, strconv.FormatInt(rc.runID, 10), rc.entryID)
 	err := h.client.Ask(ctx, assistant.AskParams{
 		Key:           secret,
 		BaseURL:       rc.endpoint.BaseURL,
@@ -1054,6 +1119,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// delivers what this callback emits in the order it emits it.
 		switch ev.Kind {
 		case assistant.AskToolCall:
+			toolCalls++
 			// NOT PERSISTED AS PROSE, and that is not an omission: the
 			// durable account of a tool call is the LEDGER's action entry,
 			// which the middleware wrote before the call ran and whose id
@@ -1120,6 +1186,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			}
 			return nil
 		case assistant.AskReasoning:
+			reasoningChars += len(ev.Text)
 			// Also not persisted, and for the stronger reason: the durable
 			// answer is the ANSWER, and appending the thinking to the open
 			// prose block would put it back inside the answer by another
@@ -1137,6 +1204,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			return nil
 		}
 		text := ev.Text
+		answerChars += len(text)
 		// The other half of the boundary: the FIRST delta after a call opens
 		// the next run of prose — a `text` child of the turn at the next free
 		// seat, with a body of its own (ADR-0040). Opened lazily and never up
@@ -1202,6 +1270,10 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		seq++
 		return nil
 	})
+	h.log.Info("agent ask: the stream ended", "run", rc.runID,
+		"elapsed", time.Since(streamStarted).Round(time.Millisecond).String(),
+		"reasoning", reasoningChars, "answer", answerChars, "calls", toolCalls,
+		"outcome", askOutcome(err))
 	if err != nil {
 		// A suspension is NOT a failure (criterion 1): the policy or the
 		// egress gate asked a person a question, the run moves to
@@ -1226,7 +1298,8 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// and whatever else the engine wrapped, which is the only place
 		// that trace survives at all.
 		h.log.Warn("agent ask: the run failed",
-			"run", rc.runID, "reason", string(reason), "sentence", sentence, "error", err)
+			"run", rc.runID, "reason", string(reason), "sentence", sentence,
+			"error", err, "callPath", log.CallPath(0))
 		h.terminalize(ctx, rc, dropped, content.RunFailed, reason, sentence, r)
 		return
 	}
@@ -1288,6 +1361,7 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 		// declaration: the surface ignores them here, but the wire is not
 		// two shapes and the schema requires the effect on both.
 		n.Effect, n.Resource = string(eg.Effect), eg.Resource
+		n.Standing = agentApprovalStanding{Reason: "standing answers are not offered for result disclosure"}
 	}
 	// Carry the drops across the suspension: the resume re-drives this
 	// same context (runAskStream starts from rc.droppedBefore), and the
@@ -1315,6 +1389,10 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 		RunID: n.RunID, Attempt: n.Attempt, Tool: n.Tool, CallID: n.CallID, ArgHash: n.ArgHash,
 		Effect: content.Effect(n.Effect),
 	}
+	if ap != nil {
+		proposal.Invocation = ap.Invocation
+		proposal.CommandInvocation = ap.CommandInvocation
+	}
 	if !h.approvals.IsPending(proposal) {
 		if ap != nil {
 			proposal.EntryID = ap.EntryID
@@ -1330,6 +1408,10 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	// scripted-suspension test exercises and missing in the real one, which
 	// is a green suite over an "always" that writes no row.
 	h.approvals.NoteEffect(proposal)
+	if ap != nil {
+		invocation, hasInvocation, commandInvocation := h.approvals.InvocationFor(proposal)
+		n.Standing = standingOffer(invocation, hasInvocation, commandInvocation, proposal.Effect)
+	}
 	_ = r.TryNotify("agent.approvalRequested", mustMarshal(n))
 }
 
@@ -1347,6 +1429,7 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: params must be an object"})
 		return
 	}
+	ctx = log.WithTraceID(ctx, runTrace(p.RunID))
 	h.pendingRunsMu.Lock()
 	rc, ok := h.pendingRuns[p.RunID]
 	h.pendingRunsMu.Unlock()
@@ -1375,7 +1458,7 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 		h.log.Warn("agent cancel: foreground command could not be stopped",
 			"run", rc.runID, "session", rc.sessionID)
 	}
-	rc.control.finishCancel(state, reason, sentence)
+	rc.control.finishCancel(state, reason, sentence, outcome == foregroundUnsupported)
 	rc.control.cancelContext()
 	h.terminalize(ctx, rc, rc.droppedBefore, state, reason, sentence, h.r)
 	_ = h.r.TryResult(req.ID, mustMarshal(agentCancelResponse{
@@ -1422,6 +1505,9 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: runId must be the backend-minted run id"})
 		return
 	}
+	// The person's answer belongs to the run's exchange, not to a new one:
+	// the resume and everything it drives log under the ask's trace.
+	ctx = log.WithTraceID(ctx, runTrace(runID))
 	h.pendingRunsMu.Lock()
 	rc, ok := h.pendingRuns[runID]
 	h.pendingRunsMu.Unlock()
@@ -1528,49 +1614,52 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 }
 
 // applyStandingAnswer records the part of a decision that outlives the
-// proposal it was given on: "in this session" writes the run's session's
-// overlay, "always" writes ONE row of the global matrix. "once" writes
-// nothing anywhere, which is the behaviour every answer had before this
-// existed. The row is the one the BACKEND classified the proposal under —
-// never anything the wire named, so no answer can express a rule over a tool
-// name (ADR-0028 decision 4).
-//
-// It returns the sentence to report when the standing part could not be
-// recorded, and empty when there was nothing to record or it was recorded.
-// A failure here never refuses the call: the person said yes, and punishing
-// them for a store problem is the wrong end to fail toward. The run resumes,
-// or the decline stands, and the result says the standing part did not
-// stick.
+// proposal it was given on: command proposals save an invocation rule, while
+// non-command proposals save the classified effect row. "in this session"
+// writes to the run's session overlay, "always" writes to the global policy,
+// and "once" writes nothing anywhere.
 func (h agentHandlers) applyStandingAnswer(p approveParams, ap assistant.Approval, sid session.ID) string {
 	if p.Scope == approveScopeOnce {
 		return ""
 	}
-	effect, ok := h.approvals.EffectFor(ap)
-	if !ok {
-		// No row was recorded for this proposal, so there is no row to
-		// write. Fail toward asking: the answer covers this call, and the
-		// next call of the same kind asks again.
-		h.log.Warn("agent.approve: the proposal names no effect class; the standing part of the answer was not recorded",
-			"run", p.RunID, "tool", p.Tool, "scope", p.Scope)
-		return "the decision was applied to this call, but could not be saved as a standing answer: the question named no effect class"
-	}
+	invocation, _, commandInvocation := h.approvals.InvocationFor(ap)
 	d := content.DecisionRefuse
 	if p.Approved {
 		d = content.DecisionPermit
 	}
+	if !commandInvocation {
+		effect, ok := h.approvals.EffectFor(ap)
+		if !ok {
+			return "the decision was applied to this call, but could not be saved as a standing answer: the question named no effect class"
+		}
+		if p.Scope == approveScopeSession {
+			h.sessionPolicy.Set(sid, effect, d)
+			return ""
+		}
+		if h.globalPolicy == nil {
+			return "the decision was applied to this call, but there is no policy store to save it as a standing answer in"
+		}
+		next := h.globalPolicy.Policy().SetRowDecision(effect, d)
+		if err := h.globalPolicy.SetPolicy(next); err != nil {
+			return "the decision was applied to this call, but could not be saved as a standing answer: " + err.Error()
+		}
+		return ""
+	}
+	rule, standingReason := content.StandingRule(invocation)
+	if standingReason != "" {
+		h.log.Warn("agent.approve: the standing answer was not recorded",
+			"run", p.RunID, "tool", p.Tool, "scope", p.Scope, "reason", standingReason)
+		return "the decision was applied to this call, but could not be saved as a standing answer: " + standingReason
+	}
+	rule.Decision = d
 	if p.Scope == approveScopeSession {
-		h.sessionPolicy.Set(sid, effect, d)
+		h.sessionPolicy.SetRule(sid, rule)
 		return ""
 	}
 	if h.globalPolicy == nil {
 		return "the decision was applied to this call, but there is no policy store to save it as a standing answer in"
 	}
-	// SetRowDecision replaces the row's DECISION and keeps its scopes: a
-	// standing answer changes what happens, never what the row is bound to.
-	// The write goes through the store the settings page writes through, so
-	// the two surfaces are one owner of one document rather than a
-	// read-modify-write race between them.
-	next := h.globalPolicy.Policy().SetRowDecision(effect, d)
+	next := h.globalPolicy.Policy().WithRule(rule)
 	if err := h.globalPolicy.SetPolicy(next); err != nil {
 		return "the decision was applied to this call, but could not be saved as a standing answer: " + err.Error()
 	}
@@ -1708,6 +1797,7 @@ func declineKindForScope(scope string) assistant.DeclineKind {
 // live-view bound, never a terminal-state change — the durable answer is
 // whole, so the run still closes with the state it earned.
 func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, dropped int, state content.RunState, reason content.TerminationReason, sentence string, r Responder) {
+	wireError := state != content.RunCancelled
 	cancelled := false
 	if rc.control != nil {
 		// Declared HERE and nowhere else: outside this branch there is no
@@ -1724,7 +1814,7 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, droppe
 		if rc.control.cancelDone != nil {
 			<-rc.control.cancelDone
 		}
-		state, reason, sentence = rc.control.cancelOutcome()
+		state, reason, sentence, wireError = rc.control.cancelOutcome()
 	}
 	// The run is closing: nothing may resume it. Drop the stored stream
 	// context so a late agent.approve finds no pending question — and the
@@ -1758,12 +1848,15 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, droppe
 			"run", rc.runID, "state", string(state), "error", err)
 		return
 	}
-	_ = r.TryNotify("agent.runState", mustMarshal(agentRunState{
+	notification := agentRunState{
 		RunID:         rc.runID,
 		State:         string(state),
-		Error:         sentence,
 		DroppedDeltas: dropped,
-	}))
+	}
+	if wireError {
+		notification.Error = sentence
+	}
+	_ = r.TryNotify("agent.runState", mustMarshal(notification))
 }
 
 // classifyAskFailure turns any Ask error into the run's termination reason
@@ -1861,6 +1954,15 @@ func classifyAskFailure(err error, model string) (content.TerminationReason, str
 	// properly needs a handle eino does not give us, and is its own task.
 	if errors.Is(err, assistant.ErrMalformedModelOutput) {
 		return content.TermFailed, "the model asked for a tool call nocx could not act on: it did not match any tool the model was offered. Ask again — a different model may handle tools better."
+	}
+	// A cancellation this process CAUSED says which one it was. Checked
+	// before the context.Canceled arm below, and the arm is what that one
+	// could never be: context.Canceled cannot tell "the socket went away"
+	// from "we killed the program on purpose", and it answered the first
+	// for both — a run ended by an approval resume told the person their
+	// connection had dropped (nocx-d6gn4.8.1).
+	if sentence, ok := assistant.ProgramEndedSentence(err); ok {
+		return content.TermFailed, sentence
 	}
 	switch {
 	case errors.Is(err, context.Canceled):
@@ -2060,23 +2162,18 @@ func validateAgentAsk(p agentAskParams) (content.AgentAsk, []assistant.AttachedC
 	return in, attached, ""
 }
 
-// priorTurn reads the turn before this one in this run's pane — the
-// conversation the follow-up question is a follow-up TO. Nil, and no error,
-// when there is nothing before it, and nil when the session is the pipe of no
-// recorded pane: a turn with no anchor has no thread, and answering from every
-// pane's turns would put another tab's conversation into this one.
-//
-// The read goes through the operation like every other store touch on this
-// path — one short acquisition, the gate never held across the stream.
-func (h agentHandlers) priorTurn(ctx context.Context, rc askRunContext) (*content.PriorTurn, error) {
+// priorTurns reads the pane's thread before this run, oldest first. The
+// ledger owns the complete read and its ordering; transport only crosses the
+// capability seam once and returns that projection to context assembly.
+func (h agentHandlers) priorTurns(ctx context.Context, rc askRunContext) ([]content.PriorTurn, error) {
 	if rc.paneID == nil || *rc.paneID == "" {
 		return nil, nil
 	}
-	var prior *content.PriorTurn
+	var prior []content.PriorTurn
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
-		var e error
-		prior, e = svc.PriorTurn(ctx, *rc.paneID, rc.entryID)
-		return e
+		var err error
+		prior, err = svc.PriorTurns(ctx, *rc.paneID, rc.entryID)
+		return err
 	})
 	if err != nil {
 		return nil, err
@@ -2154,6 +2251,10 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 	if s.contentDB != nil {
 		agentOp = capability.NewAgentOperation(contentGate, lane, s.contentDB)
 	}
+	var dumpOp capability.LedgerOperation
+	if s.contentDB != nil {
+		dumpOp = capability.NewLedgerOperation(contentGate, lane, s.contentDB)
+	}
 	var attemptLedger assistant.AttemptLedger
 	if s.contentDB != nil {
 		attemptLedger = s.contentDB.Ledger()
@@ -2174,7 +2275,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 				}
 				return stopForeground(s.log, sid, leaseSess, s.effectiveRunLease().SignalGrace)
 			},
-			op: agentOp, configOp: configOp, endpointWired: endpointWired,
+			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
 			credentials: credentials, client: client, askSub: askSub,
 			attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, knownMaterial: s.agentKnownMaterial,
@@ -2198,5 +2299,29 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleApprove(ctx, req) }
 		}),
+		regResponder(contentSub, "agent.dump", params(validateAgentDumpRaw), func(r Responder) handlerFunc {
+			h := agentDumpHandlers{op: dumpOp, r: r}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handle(ctx, req) }
+		}),
 	}
+}
+
+// runTrace is the id of one agent exchange — the run — as every log line
+// belonging to it names it. One derivation, so the ask, the approval and
+// the resume cannot disagree about which exchange they are part of.
+func runTrace(runID int64) string { return "run-" + strconv.FormatInt(runID, 10) }
+
+// askOutcome names how a stream ended in one word, so the line that carries
+// the counters says which of the three it was without a reader matching an
+// error string.
+func askOutcome(err error) string {
+	if err == nil {
+		return "answered"
+	}
+	var apErr *assistant.ApprovalRequestedError
+	var egErr *assistant.EgressRequestedError
+	if errors.As(err, &apErr) || errors.As(err, &egErr) {
+		return "suspended"
+	}
+	return "failed"
 }

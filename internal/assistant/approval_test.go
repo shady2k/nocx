@@ -129,7 +129,7 @@ func TestAsk_EscalationRecordsTheProposalThread(t *testing.T) {
 	_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: args}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -221,7 +221,7 @@ func TestAsk_ApprovedResumeRunsAsSubsequentAttempt(t *testing.T) {
 	f, srv := newFakeOpenAI(handler)
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -312,7 +312,7 @@ func TestMiddleware_ApprovedEgressResumeSendsRetained(t *testing.T) {
 	approvals.Retain(ap, "withheld: sk-proj-abcdefghijklmnopqrstuvwx", false)
 
 	ran := false
-	out, err := mw.runWithRetained(agenttools.Tool{Declaration: agenttools.Declaration{Name: "files.read"}}, "call_1", context.Background(), &countingCapability{called: &ran}, []byte(args))
+	out, err := mw.kernel.runWithRetained(agenttools.Tool{Declaration: agenttools.Declaration{Name: "files.read"}}, "call_1", context.Background(), &countingCapability{called: &ran}, []byte(args))
 	if err != nil {
 		t.Fatalf("runWithRetained: %v", err)
 	}
@@ -362,7 +362,7 @@ func TestAsk_ApprovedEgressResumeThread(t *testing.T) {
 	_, srv := newFakeOpenAI(handler)
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS))
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}

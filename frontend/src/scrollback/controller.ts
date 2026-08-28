@@ -14,6 +14,7 @@ import { BlockManager, type BlockRecord, type GetLineFn, type RunningBlockAction
 import type { CommandSnapshotStore } from '../command-snapshot'
 import { publishCellMetric, publishRowPitch } from './cell-metric'
 import type { ExecutionAttempt } from '../lifecycle/state'
+import type { AgentDump } from '../generated/agent.dump'
 export type LiveRegionMode = 'idle' | 'running' | 'fullscreen' | 'unstructured'
 
 /** How long the pane takes to settle after a block opens or freezes. Short
@@ -49,6 +50,8 @@ export interface ScrollbackControllerOpts {
    *  manager, which hands it to the copy menu of every answer block it
    *  frames (nocx-v13pd). This controller neither fetches nor caches it. */
   answerText?: (entryId: string) => Promise<string | null>
+  /** The recorded provider drives for one finished answer turn. */
+  dump?: (entryId: string) => Promise<AgentDump>
   /** What a RUNNING block's ⋮ menu can do about the command in it — passed
    *  straight to the block manager (nocx-92gfl, nocx-23rph). This controller
    *  neither summons the editor nor signals a session. */
@@ -177,7 +180,7 @@ export class ScrollbackController {
       // the FENCE_DEFER_MS window elapsed): hand the block's rows to the
       // DOM and settle the live region exactly like a direct freeze, since
       // freezeFromAttempt already returned.
-      onDeferredFreeze: () => this._settleFrozen(),
+      onDeferredFreeze: (rec) => this._settleFrozen(rec),
       onBlockFrozen: opts.onBlockFrozen,
       // Read at freeze time rather than captured at construction: a pane is
       // resized, and the provenance must say what the serializer actually
@@ -185,6 +188,7 @@ export class ScrollbackController {
       dimensions: () => ({ cols: this._renderer.cols, rows: this._renderer.rows }),
       sessionName: opts.sessionName,
       answerText: opts.answerText,
+      dump: opts.dump,
       runningActions: opts.runningActions,
     })
 
@@ -353,9 +357,16 @@ export class ScrollbackController {
     // leaves the box size unchanged still releases the shift.
     this._applyEchoShift()
     // Null is the renderer saying it cannot measure; the class's fallback
-    // height stands. Zero is a grid nobody has written to, and it sizes the
-    // region like any other measurement — to nothing but the body's padding.
+    // height stands. Zero is a grid nobody has written to yet. While the
+    // running block still owns its waiting stand-in, keep that fallback:
+    // the indicator is absolutely positioned and the padding-only,
+    // border-box-sized live region would clip it before the editor's next
+    // layout pass. Once output retires the stand-in, zero may size the
+    // region to the body's padding again.
     if (px === null) return
+    if (px === 0 && this.xtermLiveContainer.querySelector(':scope > .cmd-answer-typing') !== null) {
+      return
+    }
     const max = this.runningLiveCap
     if (max === null) return
     const pad = this._bodyPaddingPx()
@@ -624,44 +635,43 @@ export class ScrollbackController {
   onCommandEnd(getLine: GetLineFn, endLine: number, exitCode: number | null): void {
     const rec = this._blockManager.freezeBlock(getLine, endLine, exitCode)
     if (rec) {
-      this._settleFrozen()
+      this._settleFrozen(rec)
     }
   }
 
   /**
-   * Put the top of the finished command's block at the top of the view.
+   * Put the END of the finished command's block at the bottom of the view.
    *
    * Nothing scrolled here at all before, so the view stayed wherever the
-   * running command had left it — and a program that had filled the pane left
-   * it at the top of a block taller than the viewport, showing its first screen
-   * with the prompt somewhere far below. Neither "stay put" nor "jump to the
-   * bottom" is right for a block UI: what you want to read when a command
-   * finishes is the command and the start of what it printed.
+   * running command had left it. A block taller than the viewport therefore
+   * left its prompt far below the fold. The current decision is to land at the
+   * block's END instead: the prompt is immediately visible, at the cost of
+   * making the first lines of long output require an upward scroll. This
+   * reverses the former start-anchor decision, which showed the first screen
+   * but left the prompt far below.
    *
    * A frame late on purpose. `setIdle` has just collapsed the live region and
    * the block was inserted in the same tick, so the scroller's height is still
    * the old one until layout runs.
    */
-  private _scrollToLastBlockStart(): void {
+  private _scrollToLastBlockEnd(target: HTMLElement): void {
     requestAnimationFrame(() => {
-      const blocks = this.scrollbackInner.querySelectorAll('.cmd-block')
-      const last = blocks[blocks.length - 1]
-      if (!last) return
-      // ONLY FOR A BLOCK THAT DOES NOT FIT, which is the case this was
-      // written for: a program that filled the pane leaves the view at the top
-      // of a block taller than the viewport, showing its first screen with the
-      // prompt far below. A block that fits is already whole on screen — the
-      // stack hangs from the bottom edge and we are following it — so there is
-      // nothing to bring into view, and asking anyway put a second owner on
-      // the scroll position beside the settle that was still unwinding
-      // (nocx-i4h04.2: `scrollIntoView` reads the transformed box, and in the
-      // container it scrolled a row it then had to give back).
+      if (!this._following) return
+      const last = target
+      if (!last || !this.scrollbackInner.contains(last)) return
+      // ONLY FOR A BLOCK THAT DOES NOT FIT. A block that fits is already
+      // whole on screen — the stack hangs from the bottom edge and we are
+      // following it — so there is nothing to bring into view, and asking
+      // anyway would put a second owner on the scroll position beside the
+      // settle that was still unwinding (nocx-i4h04.2:
+      // `scrollIntoView` reads the transformed box, and in the container it
+      // scrolled a row it then had to give back).
       if (last.getBoundingClientRect().height <= this.scrollbackArea.clientHeight) return
-      // Through the glide: the freeze's own settle may still be unwinding, and
-      // a scroll that lands as a jump in the middle of it is the twitch this
-      // whole seam exists to remove.
+      // Through the glide: the freeze's own settle may still be unwinding,
+      // and a scroll that lands as a jump in the middle of it is the twitch
+      // this whole seam exists to remove.
       this._glide(() => {
-        last.scrollIntoView({ block: 'start', behavior: 'instant' })
+        last.scrollIntoView({ block: 'end', behavior: 'instant' })
       })
     })
   }
@@ -894,12 +904,12 @@ export class ScrollbackController {
    * behaviour with six copies: the glide had to be added in six places, and
    * the seventh path to arrive would have been written without it.
    */
-  private _settleFrozen(): void {
+  private _settleFrozen(rec: BlockRecord): void {
     this._glide(() => {
       this._clearFrozenRows()
       this.setIdle()
     })
-    this._scrollToLastBlockStart()
+    this._scrollToLastBlockEnd(rec.el)
   }
 
   private _updateSeparator(): void {
@@ -922,7 +932,7 @@ export class ScrollbackController {
       this._renderer.cursorLine(),
     )
     if (rec) {
-      this._settleFrozen()
+      this._settleFrozen(rec)
       return true
     }
     return false
@@ -934,7 +944,7 @@ export class ScrollbackController {
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.abandonAttempt(attempt, getLine, endLine)
     if (rec) {
-      this._settleFrozen()
+      this._settleFrozen(rec)
       return true
     }
     return false
@@ -947,7 +957,7 @@ export class ScrollbackController {
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.abandonUnbound(getLine, endLine)
     if (rec) {
-      this._settleFrozen()
+      this._settleFrozen(rec)
       return true
     }
     return false
@@ -960,7 +970,7 @@ export class ScrollbackController {
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.freezeEntered(getLine, endLine)
     if (rec) {
-      this._settleFrozen()
+      this._settleFrozen(rec)
       return true
     }
     return false

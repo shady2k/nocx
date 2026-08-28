@@ -13,6 +13,8 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // A real assistant run owns the renderer request until the renderer resolves
@@ -120,8 +122,12 @@ func TestAgentCancel_StopsStreamingRunAndKeepsReceivedProse(t *testing.T) {
 	if state.State != string(content.RunCancelled) {
 		t.Fatalf("cancel notifications = %s, want cancelled runState", notifications)
 	}
-	if !strings.Contains(strings.ToLower(state.Error), "person") || !strings.Contains(strings.ToLower(state.Error), "stop") {
-		t.Fatalf("runState error = %q, want a sentence saying a person stopped it", state.Error)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(notifications[len(notifications)-1], &fields); err != nil {
+		t.Fatalf("decode cancelled runState fields: %v", err)
+	}
+	if _, ok := fields["error"]; ok {
+		t.Fatalf("ordinary cancelled runState = %s, want no error sentence", notifications[len(notifications)-1])
 	}
 
 	select {
@@ -298,10 +304,84 @@ func TestAgentCancel_StopsRendererRunCommand(t *testing.T) {
 	if state.RunID != res.RunID || state.State != string(content.RunCancelled) {
 		t.Fatalf("runState = %+v, want cancelled run %d", state, res.RunID)
 	}
-	if !strings.Contains(strings.ToLower(state.Error), "stop") {
-		t.Fatalf("runState error = %q, want a stop sentence", state.Error)
+	if state.Error != "" {
+		t.Fatalf("ordinary cancelled runState error = %q, want empty", state.Error)
 	}
 	waitChildDead(t, pid)
+}
+
+// TestAgentCancel_RemoteHostWarningArrivesOnTheRealWire proves the renderer
+// can learn that cancellation did not stop the command from a real
+// agent.cancel flow. The remote session kind makes the composition-root
+// stopForeground closure return foregroundUnsupported; the test never builds
+// an agent.runState payload.
+func TestAgentCancel_RemoteHostWarningArrivesOnTheRealWire(t *testing.T) {
+	client := newCancelBlockingClient()
+	h := newAskHarnessWithOpts(t, client,
+		WithProfileResolver(&fakeResolver{
+			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
+				return "remote.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
+			},
+		}),
+	)
+	reg, ok := h.ws.registry.(*session.Reg)
+	if !ok {
+		t.Fatal("ask harness registry is not a session registry")
+	}
+	reg.WithSSHFactory(&stubSSHFactory{
+		connectFn: func(context.Context, string, ...ssh.ConnectOption) (ssh.Channel, error) {
+			return ssh.NewStubChannel(h.ws.log), nil
+		},
+	})
+	h.createEndpoint()
+	sid := openRemoteSessionOnConn(t, h.ws, h.conn, 1)
+	res, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "remote-cancel-1", "sessionId": sid, "question": "stop this", "cwd": "/repo", "attachedContent": []any{},
+	}, 1)
+	if errObj != nil {
+		t.Fatalf("agent.ask: %+v", errObj)
+	}
+	select {
+	case <-client.started:
+	case <-time.After(time.Second):
+		t.Fatal("assistant did not start streaming")
+	}
+	select {
+	case <-client.emitted:
+	case <-time.After(time.Second):
+		t.Fatal("assistant did not emit the prose before cancellation")
+	}
+	raw, notifications := cancelCallPreservingNotifications(t, h.conn, res.RunID, 2)
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		t.Fatalf("decode agent.cancel: %v\nraw: %s", err, raw)
+	}
+	if env.Error != nil {
+		t.Fatalf("agent.cancel: %+v", env.Error)
+	}
+	var state agentRunState
+	var stateRaw json.RawMessage
+	for _, notification := range notifications {
+		var candidate agentRunState
+		if json.Unmarshal(notification, &candidate) == nil && candidate.RunID == res.RunID {
+			state = candidate
+			stateRaw = append(json.RawMessage(nil), notification...)
+			break
+		}
+	}
+	if state.State == "" {
+		stateRaw = readNotification(t, h.conn, "agent.runState", time.Second)
+		if err := json.Unmarshal(stateRaw, &state); err != nil {
+			t.Fatalf("decode cancelled runState: %v\nraw: %s", err, stateRaw)
+		}
+	}
+	validateJSON(t, loadSchema(t, "agent.runState.schema.json"), stateRaw, "agent.runState remote cancellation (real socket)")
+	const want = "the person stopped this answer, but its command could not be stopped on the host"
+	if state.State != string(content.RunCancelled) || state.Error != want {
+		t.Fatalf("remote cancelled runState = %+v, want sentence %q", state, want)
+	}
 }
 
 func TestAgentCancel_SuspendedApprovalClosesQuestion(t *testing.T) {

@@ -17,10 +17,12 @@
 # /lib, where a musl libncursesw.so.6 would sit beside the system's glibc copy
 # of the same soname. Nothing links against it; it is only ever exec'd.
 #
-# The pre-commit test image does the same thing in its own Dockerfile layers
-# (.githooks/images/go-tests/Dockerfile) rather than calling this script,
-# because a container build cannot reach the repo working tree — that is one
-# duplication, deliberate, and both are checked by the same test.
+# The CI Linux image (.githooks/images/ci-linux/Dockerfile) does the same thing
+# in its own layers rather than calling this script, because a container build
+# cannot reach the repo working tree — one duplication, deliberate, and both
+# are checked by the same test. This script itself is what CI's Linux runner
+# calls (ci.yml). The pre-commit test image was a third copy and went with the
+# hook's containerized tests (nocx-hzsiv).
 #
 # Usage: scripts/install-bash32.sh [prefix]   (default prefix: /usr/local)
 set -eu

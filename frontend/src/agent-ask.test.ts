@@ -317,7 +317,18 @@ describe('AgentInputTarget', () => {
     expect(cancel).toHaveBeenCalledWith(7)
     expect(dispatcher.calls.some((call) => call.method === 'agent.cancel')).toBe(false)
     dispatcher.emit('agent.runState', { runId: 7, state: 'cancelled' })
-    expect(handle.close).toHaveBeenCalledWith('cancelled')
+    expect(handle.close).toHaveBeenCalledWith('cancelled', undefined)
+  })
+
+  it('renders the cancellation sentence when the host could not stop the command', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('stop the remote command')
+
+    const warning =
+      'the person stopped this answer, but its command could not be stopped on the host'
+    dispatcher.emit('agent.runState', { runId: 7, state: 'cancelled', error: warning })
+
+    expect(handle.close).toHaveBeenCalledWith('cancelled', warning)
   })
 
   it('closes the block completed on the terminal state; failed carries the renderable reason', async () => {
@@ -338,7 +349,7 @@ describe('AgentInputTarget', () => {
 
     await target.submit('q3')
     dispatcher.emit('agent.runState', { runId: 9, state: 'cancelled' })
-    expect(handle.close).toHaveBeenLastCalledWith('cancelled')
+    expect(handle.close).toHaveBeenLastCalledWith('cancelled', undefined)
   })
 
   it('closes the block on a runState with NO prior delta (failure before any text)', async () => {

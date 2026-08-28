@@ -109,7 +109,7 @@ func TestRun_EndToEndOverTheRealSocket(t *testing.T) {
 	fake, srv := newRunToolCallingServer("")
 	defer srv.Close()
 
-	client, err := assistant.NewClient(nil)
+	client, err := assistant.NewClient(nil, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestRun_EndToEndOverTheRealSocket(t *testing.T) {
 func TestRun_GrantRefusesBeforeAnySubmission(t *testing.T) {
 	fake, srv := newRunToolCallingServer(`{"sessionId":"foreign-session","command":"rm -rf /"}`)
 	defer srv.Close()
-	client, err := assistant.NewClient(nil)
+	client, err := assistant.NewClient(nil, nil)
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

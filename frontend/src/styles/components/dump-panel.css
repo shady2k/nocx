@@ -1,0 +1,46 @@
+/* DumpPanel — the raw request/response capture presented after an assistant turn.
+   Dialog, Stack and CodeBlock keep their own appearance; this file owns only
+   the dump panel's type hierarchy and the rhythm between its own parts. */
+
+.ui-dump-panel {
+  font-size: var(--font-size-md);
+  line-height: 1.5;
+}
+
+.ui-dump-panel__intro {
+  margin: 0;
+  color: var(--color-text-muted);
+}
+
+.ui-dump-panel__drive {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.ui-dump-panel__drive > h3 {
+  margin: 0;
+  color: var(--color-text);
+  font-size: var(--font-size-md);
+  font-weight: 600;
+}
+
+.ui-dump-panel__drive > p,
+.ui-dump-panel__entry > p {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.ui-dump-panel__entry {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.ui-dump-panel__entry > h4 {
+  margin: 0;
+  color: var(--color-text-muted);
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+}

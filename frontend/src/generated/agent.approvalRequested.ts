@@ -42,7 +42,7 @@ export interface AgentApprovalRequested {
    */
   reason: 'policy' | 'egress'
   /**
-   * The effect class the policy gate decided on — the row a standing answer writes. Sent by the backend because the renderer must never derive an effect from a tool name (ADR-0028 decision 4).
+   * The effect class the policy gate decided on — the row a standing answer writes when the exact invocation rule is saved. Sent by the backend because the renderer must never derive an effect from a tool name (ADR-0028 decision 4).
    */
   effect:
     | 'observe'
@@ -53,7 +53,15 @@ export interface AgentApprovalRequested {
     | 'cross-boundary'
     | 'delegate'
   /**
-   * The resource the gate matched the call against, or null when the call named none. A fact for the person reading the question; a standing answer is over the effect, never over this.
+   * Whether the prompt can offer a standing answer. For a command proposal, rule names the exact canonical invocation the answer would save; for a non-command proposal, rule is empty and the effect field names the policy row the answer covers.
+   */
+  standing: {
+    available: boolean
+    rule: string
+    reason: string
+  }
+  /**
+   * The resource the gate matched the call against, or null when the call named none. A fact for the person reading the question; a standing answer is over the exact invocation in standing, never over this.
    */
   resource?: {
     /**

@@ -24,7 +24,7 @@ import (
 func decideOutcome(t *testing.T, grant content.Grant, tool agenttools.Tool, args map[string]any) policyOutcome {
 	t.Helper()
 	mw := middlewareFor(t, grant, &fakeLedger{}, nil)
-	outcome, _ := mw.decide(tool, args)
+	outcome, _ := mw.kernel.decideInvocation(tool, args, content.Invocation{Parsed: true})
 	return outcome
 }
 

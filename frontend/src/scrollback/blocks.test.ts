@@ -1061,6 +1061,52 @@ describe('overflow menu (P1-6)', () => {
 
     document.body.removeChild(container)
   })
+  it('loads a finished answer dump through the menu with its entry id', async () => {
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    const seen: string[] = []
+    const dump = (entryId: string) => {
+      seen.push(entryId)
+      return Promise.resolve({
+        request: [{ text: 'request bytes', truncated: false }],
+        response: [],
+      })
+    }
+    const el = createCommandBlock(
+      'ask',
+      1,
+      'what happened?',
+      '~',
+      '',
+      '',
+      null,
+      null,
+      'settled',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      undefined,
+      undefined,
+      'turn-entry-1',
+      dump,
+    )
+    el.dataset.turnState = 'success'
+    container.appendChild(el)
+
+    ;(el.querySelector('.cmd-overflow-btn') as HTMLElement).click()
+    const item = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('.cmd-overflow-menu-item'),
+    ).find((button) => button.textContent === 'Show dump')
+    expect(item).toBeDefined()
+    item!.click()
+    await new Promise<void>((resolve) => queueMicrotask(resolve))
+
+    expect(seen).toEqual(['turn-entry-1'])
+    document.querySelector('.cmd-overflow-menu')?.remove()
+    document.querySelector('.nocx-dialog')?.remove()
+    document.body.removeChild(container)
+  })
 })
 
 describe('frozen block header highlighting', () => {
@@ -2046,6 +2092,25 @@ describe('BlockManager.addAnswerBlock', () => {
     expect(flowOf(h)).toEqual(['text:hello world'])
   })
 
+  it('leaves no empty seat across an escalated decline and resumed prose', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('what is on disk?', '/repo')
+
+    h.append('Давайте проверю, что на самом деле находится в системе:', 'text-before')
+    // The declined proposal has no agent.runToolCall notification: the call
+    // never happened. The resumed stream may still expose a fresh text piece
+    // whose only first chunk is whitespace before the answer continues.
+    h.append(' \t', 'text-resume')
+    h.append('Проверю наличие файла напрямую:', 'text-after')
+    h.close('success')
+
+    expect(flowOf(h)).toEqual([
+      'text:Давайте проверю, что на самом деле находится в системе:',
+      'text:Проверю наличие файла напрямую:',
+    ])
+    expect(h.el.querySelectorAll('.cmd-block[data-block-kind="text"]')).toHaveLength(2)
+  })
+
   it('a call in flight returns the stand-in where the answer will be written', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
@@ -2194,41 +2259,70 @@ describe('BlockManager.addAnswerBlock', () => {
 // cancellation. The owner's words: "вообще поведение должно быть
 // одинаковое" — the behavior should be the same.
 describe('the working stand-in (nocx-vnirv.1)', () => {
+  it('shows a running command indicator immediately', () => {
+    const { xtermContainer, inner, manager } = newManager()
+    manager.startBlock('make', '~', 0)
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
+    manager.dispose()
+    inner.remove()
+  })
+
   it('the turn and the running command wear the SAME indicator — one class, one owner', () => {
     const { inner, xtermContainer, manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
     manager.startBlock('make', '~', 0)
+    expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
+
     const turn = h.el.querySelector('.cmd-answer-typing')
     const command = xtermContainer.querySelector('.cmd-answer-typing')
-    expect(turn).not.toBeNull()
     expect(command).not.toBeNull()
     // AD-8: NOT two indicators that merely look alike — the same class.
     expect(command!.className).toBe(turn!.className)
+    manager.dispose()
     inner.remove()
   })
 
-  it('a running command shows the stand-in in the live region until the first byte', () => {
-    const { xtermContainer, manager } = newManager()
+  it('a running command shows the stand-in immediately until the first byte', () => {
+    const { xtermContainer, inner, manager } = newManager()
     manager.startBlock('sleep 5', '~', 0)
     expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
+
     // The seam: the first parsed output byte stands it down. Idempotent —
     // every later chunk calls the seam again and nothing changes.
     manager.noteCommandOutput()
     expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
     manager.noteCommandOutput()
     expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.dispose()
+    inner.remove()
   })
 
-  it('a terminal freeze removes the stand-in — no dots type a command that ended', () => {
-    const { xtermContainer, manager } = newManager()
+  it('a command that completes with no output leaves no dots behind', () => {
+    const { xtermContainer, inner, manager } = newManager()
+    manager.startBlock('true', '~', 0)
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
+    manager.freezeBlock(() => undefined, 2, 0)
+
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.dispose()
+    inner.remove()
+  })
+
+  it('a terminal freeze removes an indicator after output has started', () => {
+    const { xtermContainer, inner, manager } = newManager()
     manager.startBlock('sleep 5', '~', 0)
     expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
     manager.freezeBlock(() => undefined, 2, 0)
     expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+    expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.dispose()
+    inner.remove()
   })
 
   it('an abandoned command removes the stand-in too — cancellation is a close', () => {
-    const { xtermContainer, manager } = newManager()
+    const { xtermContainer, inner, manager } = newManager()
     manager.startBlock('ssh host', '~', 0)
     manager.bindAttempt('att-1')
     manager.abandonAttempt(
@@ -2237,25 +2331,31 @@ describe('the working stand-in (nocx-vnirv.1)', () => {
       6,
     )
     expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.dispose()
+    inner.remove()
   })
 
   it('clearAll removes the stand-in with everything else', () => {
-    const { xtermContainer, manager } = newManager()
+    const { xtermContainer, inner, manager } = newManager()
     manager.startBlock('make', '~', 0)
-    expect(xtermContainer.querySelector('.cmd-answer-typing')).not.toBeNull()
     manager.clearAll()
     expect(xtermContainer.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.dispose()
+    inner.remove()
   })
 
-  it('a second command replaces the stand-in rather than stacking a second one', () => {
-    const { xtermContainer, manager } = newManager()
+  it('a second command replaces the first stand-in rather than reviving it', () => {
+    const { xtermContainer, inner, manager } = newManager()
     manager.startBlock('one', '~', 0)
     manager.startBlock('two', '~', 1)
+
     expect(xtermContainer.querySelectorAll('.cmd-answer-typing').length).toBe(1)
+    manager.dispose()
+    inner.remove()
   })
 
   it('a turn shows the stand-in at open, loses it at a delta, regains it during a call, loses it at the next delta', () => {
-    const { manager } = newManager()
+    const { inner, manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
     expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
     h.append('let me look')
@@ -2266,10 +2366,12 @@ describe('the working stand-in (nocx-vnirv.1)', () => {
     expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
     h.append('line 3 is wrong')
     expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.dispose()
+    inner.remove()
   })
 
-  it('a run call\u2019s command block lands ABOVE the stand-in, which keeps the tail', () => {
-    const { manager } = newManager()
+  it('a run call’s command block lands ABOVE the stand-in, which keeps the tail', () => {
+    const { inner, manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
     h.toolCall({ callId: 'c1', tool: 'run', effect: 'mutate-destructive', opensBlock: true })
     manager.startBlock('make', '/repo', 0, 0, 'agent')
@@ -2278,20 +2380,26 @@ describe('the working stand-in (nocx-vnirv.1)', () => {
     // the call opened, never pushed aside by it.
     expect(children.lastElementChild?.classList.contains('cmd-answer-typing')).toBe(true)
     expect(children.querySelector('.cmd-block-running')).not.toBeNull()
+    manager.dispose()
+    inner.remove()
   })
 
   it('a failing turn with no output leaves no dots typing an answer that will never arrive', () => {
-    const { manager } = newManager()
+    const { inner, manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
     h.close('failure', 'the model returned no text')
     expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.dispose()
+    inner.remove()
   })
 
   it('reasoning is content: it stands the stand-in down', () => {
-    const { manager } = newManager()
+    const { inner, manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
     h.reasoning('weighing the two options')
     expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
+    manager.dispose()
+    inner.remove()
   })
 
   it('the live-region stand-in is OUT OF FLOW — the height constraint holds by construction', () => {

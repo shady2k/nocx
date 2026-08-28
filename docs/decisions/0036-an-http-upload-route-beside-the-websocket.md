@@ -1,4 +1,4 @@
-# ADR-0039 — an HTTP upload route beside the WebSocket
+# ADR-0036 — an HTTP upload route beside the WebSocket
 
 - **Status:** accepted (2026-08-21)
 - **Amends:** `AD-1` (what may travel beside its two planes) —
@@ -14,6 +14,7 @@
   ([`.internal/specs/2026-08-21-upload-to-the-active-tab-design.md`](../../.internal/specs/2026-08-21-upload-to-the-active-tab-design.md)),
   decisions **D3** and **D4**, endpoint **§5.4**.
 - **Related:** `nocx-9le.5`, `nocx-9le.5.12`.
+- **Heading corrected 2026-08-28 (`nocx-yjvg5`):** this file's heading read `ADR-0039`, a number [another record](0039-an-assistant-turn-is-one-entry.md) already holds. The filename was never in conflict, so the filename won and the heading was brought to it. A citation of "ADR-0039" written before that date may mean this document.
 
 ## Context
 

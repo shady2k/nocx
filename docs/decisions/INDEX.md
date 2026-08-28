@@ -28,6 +28,25 @@ in its header.
 An `ADR-00NN` citation written before that date may still mean the moved record. The
 **Formerly** line in each moved file, and the table above, are what resolve it.
 
+Two files also **disagreed with their own filenames**, and the numbers their headings
+claimed were already taken: `0036-an-http-upload-route-beside-the-websocket.md` was headed
+`ADR-0039` and `0037-an-http-download-route-beside-the-websocket.md` was headed `ADR-0040`,
+while ADR-0039 and ADR-0040 are the assistant-turn and block-tree records. The filenames
+were free of conflict, so the filenames won: both headings were brought to 0036 and 0037 on
+the same date, and each file records the correction in its header. Every other citation of
+ADR-0039 and ADR-0040 in the repository means the assistant-turn or block-tree record and
+was left alone.
+
+**When adding a record, the heading and the filename must agree.** Two checks hold that,
+and both must print nothing:
+
+```bash
+ls docs/decisions | grep -oE '^[0-9]{4}' | sort | uniq -d
+for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
+  h=$(head -3 $f | grep -oE 'ADR[- ]?[0-9]{4}' | head -1 | grep -oE '[0-9]{4}'); \
+  [ -n "$h" ] && [ "$n" != "$h" ] && echo "file=$n heading=$h $f"; done
+```
+
 ## The records
 
 | #    | Title                                                                                                                             | Status                                |

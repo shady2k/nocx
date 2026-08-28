@@ -1,6 +1,19 @@
 #!/bin/sh
-# Container-backed test runners for the pre-commit hook. Sourced by
-# .githooks/pre-commit.
+# Container-backed test runners. NO GIT HOOK CALLS THEM any more: pre-push was
+# the caller and it stopped running tests (nocx-fwsw2 — its scoping never fired,
+# so every push paid for both suites). They stayed because they are still the
+# only way to run either suite against Linux from a Mac, and three test failure
+# messages already tell a developer to reach for them
+# (internal/app/live_sshd_test.go, internal/shellintegration). Invoke by hand:
+#
+#   sh -c '. ./.githooks/containerized-tests.sh; go_test_containerized'
+#   sh -c '. ./.githooks/containerized-tests.sh; vitest_containerized'
+#
+# This file is still SOURCED by scripts/test-gate-lock.sh, which tests the gate
+# lock it re-exports from scripts/gate-lock.sh (bottom of this file). That lock
+# is unaffected by the hook change: ci-linux, ci-frontend and the e2e runner
+# take it, and so does a hand-invoked runner above — what no longer takes it is
+# a push, because a push no longer starts a container.
 #
 # Policy: linters and type-checks (gofumpt, golangci-lint, prettier, eslint,
 # tsc) run on the host, but *tests* — `go test` and `vitest` — run inside an

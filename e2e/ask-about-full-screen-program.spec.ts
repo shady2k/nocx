@@ -7,9 +7,11 @@
  * enters the alternate screen, and records SIGWINCH so a resize cannot hide in
  * a screenshot. It also writes a second marker only after the summoned frame
  * is pinned. That marker must be absent from the answer's frame and become
- * visible in the live grid after Escape thaws it.
+ * visible in the live grid after Escape thaws it. The first terminal answer
+ * returns the same composer; a held follow-up proves both answers remain in a
+ * non-overlapping ordered stack before Escape and seat once after normal exit.
  *
- * The answer is derived from the model request. A fixed response could repeat a
+ * The first answer is derived from the model request. A fixed response could repeat a
  * marker typed into this fixture and would prove only the fixture. The answer
  * names the initial marker only when the renderer's pinned frame reached the
  * model, and it refuses to name the later marker when the frame was captured
@@ -263,6 +265,37 @@ async function answerFinished(page: Page, question: string): Promise<void> {
   })
 }
 
+function summonedAnswers(page: Page) {
+  return page.locator('.pane.active .nocx-summon-answers > .cmd-block[data-block-kind="ask"]')
+}
+
+async function summonStackGeometry(page: Page): Promise<{
+  position: string
+  answersTop: number
+  answersBottom: number
+  lastAnswerBottom: number
+  composerTop: number
+}> {
+  return page.locator('.pane.active .nocx-summon-stack').evaluate((stack) => {
+    const answers = stack.querySelector<HTMLElement>('.nocx-summon-answers')
+    const composer = stack.querySelector<HTMLElement>(
+      '.nocx-editor[data-placement="overlay"]:not([style*="display: none"])',
+    )
+    const lastAnswer = answers?.lastElementChild as HTMLElement | null
+    if (!answers || !composer || !lastAnswer) {
+      throw new Error('settled summon stack is incomplete')
+    }
+    const answerListRect = answers.getBoundingClientRect()
+    return {
+      position: getComputedStyle(stack).position,
+      answersTop: answerListRect.top,
+      answersBottom: answerListRect.bottom,
+      lastAnswerBottom: lastAnswer.getBoundingClientRect().bottom,
+      composerTop: composer.getBoundingClientRect().top,
+    }
+  })
+}
+
 async function configureAssistant(page: Page): Promise<void> {
   await openSettings(page, SETTINGS_AI_NAV)
   await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
@@ -307,9 +340,7 @@ function answerFromPinnedFrame(body: string): string[] {
 test.describe('asking about a full-screen program without leaving it (nocx-7l4ex)', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
 
-  test('freezes, answers, thaws, and quits the alternate-buffer program normally', async ({
-    page,
-  }) => {
+  test('freezes, answers twice with one composer, thaws, and quits normally', async ({ page }) => {
     test.setTimeout(120_000)
     await recordFrames(page)
     await openApp(page)
@@ -428,20 +459,79 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
     expect(chatRequests[1].body).toContain(INITIAL)
     expect(chatRequests[1].body).not.toContain(DURING)
 
-    // Escape is the door back to the program. The static frame disappears,
-    // the live xterm becomes visible, and the output written under the pin is
-    // now on screen. The answer is still streaming until explicitly released.
+    // Terminalizing the first answer returns the SAME composer while the TUI
+    // remains active. The pinned frame and first answer stay in the one
+    // absolute stack; terminal settlement, not elapsed time or text, is the
+    // return seam.
+    fake.release(answerRequest.id)
+    await answerFinished(page, question)
+    await expect(page.locator(INPUT)).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator(FREEZE)).toBeVisible()
+    await expect(answer).toBeVisible()
+    await expect(answer).toHaveClass(/nocx-answer-overlay/)
+    await expect(modeIndicator(page)).toHaveAttribute('data-target', 'agent')
+    const firstGeometry = await summonStackGeometry(page)
+    expect(firstGeometry.position).toBe('absolute')
+    expect(firstGeometry.answersBottom).toBeLessThanOrEqual(firstGeometry.composerTop + 1)
+    expect(firstGeometry.lastAnswerBottom).toBeLessThanOrEqual(firstGeometry.answersBottom + 1)
+    expect(firstGeometry.lastAnswerBottom).toBeGreaterThan(firstGeometry.answersTop)
+    expect(fileText(resizePath)).toBe(fileText(baselinePath))
+
+    // Submit and finish a follow-up through that returned composer. Hold its
+    // stream so the product must hide the composer for a current turn, retain
+    // the first answer, and then reconcile the composer from the terminal
+    // runState while the alternate-buffer program still owns its PTY.
+    const followUpQuestion = 'What should I inspect next?'
+    const followUpText = `The follow-up remains over ${INITIAL}.`
+    fake.setScript({ chunks: [followUpText, ' The composer is still usable.'], holdAfter: 1 })
+    const followUpRequestBase = fake.requests().length
+    await page.locator(INPUT).fill(followUpQuestion)
+    await page.keyboard.press('Enter')
+    const followUpAnswer = answerBlock(page, followUpQuestion)
+    await expect(followUpAnswer).toBeVisible({ timeout: 15_000 })
+    await expect(followUpAnswer.locator('[data-answer-body]')).toContainText(followUpText, {
+      timeout: 15_000,
+    })
+    const followUpRequests = await fake.waitForRequests(followUpRequestBase + 1, 30_000)
+    const followUpRequest = followUpRequests.at(-1)!
+    await fake.waitForState(followUpRequest.id, 'streaming', 15_000)
+    await expect(page.locator(INPUT)).toBeHidden()
+    const overlayAnswers = summonedAnswers(page)
+    await expect(overlayAnswers).toHaveCount(2)
+    await expect(overlayAnswers.nth(0)).toContainText(question)
+    await expect(overlayAnswers.nth(1)).toContainText(followUpQuestion)
+
+    fake.release(followUpRequest.id)
+    await answerFinished(page, followUpQuestion)
+    await expect(page.locator(INPUT)).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator(FREEZE)).toBeVisible()
+    await expect(overlayAnswers).toHaveCount(2)
+    const followUpGeometry = await summonStackGeometry(page)
+    expect(followUpGeometry.position).toBe('absolute')
+    expect(followUpGeometry.answersBottom).toBeLessThanOrEqual(followUpGeometry.composerTop + 1)
+    expect(followUpGeometry.lastAnswerBottom).toBeLessThanOrEqual(
+      followUpGeometry.answersBottom + 1,
+    )
+    expect(followUpGeometry.lastAnswerBottom).toBeGreaterThan(followUpGeometry.answersTop)
+    expect(fileText(resizePath)).toBe(fileText(baselinePath))
+    await expect(page.locator(GRID)).toHaveClass(/live-fullscreen/)
+
+    // Escape is the door back to the program after either a streaming or a
+    // settled turn. It thaws without discarding either answer; both remain in
+    // ask order until the command owns no foreground program.
     await page.keyboard.press('Escape')
     await expect(page.locator(FREEZE)).toHaveCount(0, { timeout: 10_000 })
     await expect(page.locator(INPUT)).toBeHidden({ timeout: 10_000 })
     await expect(page.locator(GRID)).toHaveClass(/live-fullscreen/)
     await expect(page.locator(GRID)).toBeVisible()
-    fake.release(answerRequest.id)
-    await answerFinished(page, question)
+    await expect(overlayAnswers).toHaveCount(2)
+    await expect(overlayAnswers.nth(0)).toContainText(question)
+    await expect(overlayAnswers.nth(1)).toContainText(followUpQuestion)
+    expect(fileText(resizePath)).toBe(fileText(baselinePath))
 
-    // The program exits normally after the answer is released. The final
-    // dimensions are recorded for diagnostics; the summon boundary above is
-    // the no-resize assertion because returning the editor may change layout.
+    // The program exits normally. Both exact answer nodes then take one
+    // consecutive seat after the command, preserving ask order, and ordinary
+    // shell/editor ownership returns.
     writeFileSync(exitPath, 'exit\n')
     await expect(page.locator(RUNNING_BLOCK)).toHaveCount(0, { timeout: 30_000 })
     await expect(page.locator(INPUT)).toBeVisible({ timeout: 20_000 })
@@ -454,11 +544,40 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
         .first(),
     ).toContainText(`FULLSCREEN-THAWED-${nonce}`)
     await expect(answer).toBeVisible({ timeout: 15_000 })
+    await expect(followUpAnswer).toBeVisible({ timeout: 15_000 })
     await expect(answer).not.toHaveClass(/nocx-answer-overlay/)
+    await expect(followUpAnswer).not.toHaveClass(/nocx-answer-overlay/)
     await expect(answer.locator('[data-answer-body]')).toContainText(INITIAL)
+    await expect(followUpAnswer.locator('[data-answer-body]')).toContainText(followUpText)
+    await expect(page.locator('.cmd-block').filter({ hasText: question })).toHaveCount(1)
+    await expect(page.locator('.cmd-block').filter({ hasText: followUpQuestion })).toHaveCount(1)
+
+    const seating = await followUpAnswer.evaluate(
+      (second, expected) => {
+        const inner = second.parentElement
+        if (!inner) return null
+        const children = Array.from(inner.children)
+        const command = children.find((el) => el.textContent?.includes(expected.command))
+        const first = children.find((el) => el.textContent?.includes(expected.first))
+        const secondAnswer = children.find((el) => el.textContent?.includes(expected.second))
+        return {
+          command: command ? children.indexOf(command) : -1,
+          first: first ? children.indexOf(first) : -1,
+          second: secondAnswer ? children.indexOf(secondAnswer) : -1,
+          firstCount: children.filter((el) => el.textContent?.includes(expected.first)).length,
+          secondCount: children.filter((el) => el.textContent?.includes(expected.second)).length,
+        }
+      },
+      { command: scriptPath, first: question, second: followUpQuestion },
+    )
+    expect(seating).not.toBeNull()
+    expect(seating).toMatchObject({ firstCount: 1, secondCount: 1 })
+    expect(seating!.first).toBe(seating!.command + 1)
+    expect(seating!.second).toBe(seating!.first + 1)
+
     await expect
       .poll(() =>
-        answer.evaluate((el) => {
+        followUpAnswer.evaluate((el) => {
           const area = el.closest('.pane')?.querySelector<HTMLElement>('.scrollback-area')
           if (!area) return { seated: false, atBottom: false, tailVisible: false }
           const answerRect = el.getBoundingClientRect()

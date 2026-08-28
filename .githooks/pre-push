@@ -1,105 +1,61 @@
 #!/bin/sh
 set -eu
 
-# THE SLOW GATE, once per push rather than once per commit.
+# PUSHING IS CHEAP. THE GATE IS CI.
 #
-# The two containerized suites — the whole Go module under -race, the whole
-# vitest suite — used to run in pre-commit on every commit that touched a .go
-# or a frontend/ file. That is minutes per commit, paid again on every amend
-# and on every small step of a refactor, and it made the cheap habit (commit
-# often, in small steps) the expensive one. Here they are paid once, at the
-# last moment before the work leaves this machine, which is the first moment
-# being wrong costs anybody else anything. CI is still the source of truth,
-# and the merge gate (make ci-full, on the merged tree) is still whoever
-# integrates.
+# This hook used to run the two containerized suites before letting a push
+# leave the machine — the whole Go module under -race, the whole vitest suite.
+# They are gone. What is left is the issue tracker, which is not a test and
+# costs a second.
 #
-# SCOPING IS CONSERVATIVE IN ONE DIRECTION ONLY: anything that cannot be
-# classified runs everything. A push we cannot classify is cheap; a push that
-# skipped the gate it needed is a broken commit in a history AGENTS.md expects
-# to bisect.
+# Measured here on 2026-08-28 (12 cores, 16 GiB, the OrbStack VM capped at
+# 7.8 GiB), pushing a branch whose entire diff was frontend/ and
+# .beads/issues.jsonl:
+#
+#   go test -race (container)    273 %CPU   1.99 GiB
+#   vitest        (container)    455 %CPU   1.72 GiB
+#   another worktree's vitest    369 %CPU   2.10 GiB
+#   load average                 4.3 -> 21.6 over four minutes, still running
+#
+# Two of those three were this hook, and the Go one had no business running at
+# all: there is no .go file in that diff. The scoping could not see it. git
+# hands a pre-push hook the REMOTE's sha for every ref, and for a branch the
+# remote has never seen that sha is forty zeros — no range, nothing to diff, so
+# the hook took its conservative branch and ran everything. Every task in this
+# repo gets its own worktree and its own branch, so the first push of a branch
+# IS the push, and "scoped to what the push actually changes" described a code
+# path that almost never executed.
+#
+# That was fixable — the commits being pushed are `git rev-list <tip> --not
+# --remotes=<remote>` whether or not the remote knows the branch. It was not
+# fixed, because fixing it would only have made a heavy gate fire half as
+# often, and a push has to be cheap for a reason that has nothing to do with
+# how well it is scoped: a gate a person waits four minutes for is a gate they
+# learn to pass with --no-verify, and then it guards nothing at all.
+#
+# WHAT CATCHES A BREAK INSTEAD, in the order it bites:
+#
+#   - pre-commit, untouched. Static, seconds: formatting, linting, the
+#     ratchets, the wire contracts, the type checkers. That is what keeps a
+#     commit both cheap and honest.
+#   - CI, which is the source of truth and always was. It runs the four jobs in
+#     the environments they belong to, and a developer Mac is not one of them —
+#     AGENTS.md records internal/pty hanging to its 600s panic here while green
+#     on the runner.
+#   - `make ci-full` on the MERGED tree, by whoever integrates, before main.
+#
+# And the suites are still one command away when you want them by hand — the
+# runners stayed, and three test failure messages already point at them:
+#
+#   sh -c '. ./.githooks/containerized-tests.sh; go_test_containerized'
+#   sh -c '. ./.githooks/containerized-tests.sh; vitest_containerized'
 
-warn() { printf "FAIL: %s\n" "$1"; }
-ok()   { printf "OK:   %s\n" "$1"; }
-
+# Some developers install bd with `go install`, which puts it in GOPATH/bin
+# rather than on the default PATH. beads-hook.sh returns 0 when bd is missing —
+# a deliberate skip for someone contributing without beads — so without this
+# line their pushes would silently stop syncing the tracker, which is the exact
+# failure the block below exists to prevent.
 command -v go >/dev/null 2>&1 && PATH="$(go env GOPATH)/bin:$PATH"
-
-. "$(dirname "$0")/containerized-tests.sh"
-
-# --- what is being pushed? --------------------------------------------------
-# stdin carries "<local ref> <local sha> <remote ref> <remote sha>" per ref. A
-# remote sha of all zeros is a branch the remote has never seen, so there is no
-# range to diff and everything runs.
-RUN_GO=0
-RUN_FE=0
-CLASSIFIED=1
-RANGES=""
-while read -r _localref localsha _remoteref remotesha; do
-    [ -n "${localsha:-}" ] || continue
-    case "$localsha" in *[!0]*) ;; *) continue ;; esac   # deleting a ref: nothing to test
-    case "$remotesha" in
-        *[!0]*) RANGES="$RANGES $remotesha..$localsha" ;;
-        *)      CLASSIFIED=0 ;;
-    esac
-done
-
-if [ "$CLASSIFIED" = 0 ] || [ -z "$RANGES" ]; then
-    RUN_GO=1
-    RUN_FE=1
-else
-    for r in $RANGES; do
-        CHANGED=$(git diff --name-only "$r" 2>/dev/null || echo UNCLASSIFIED)
-        case "$CHANGED" in UNCLASSIFIED) RUN_GO=1; RUN_FE=1; continue ;; esac
-        for f in $CHANGED; do
-            case "$f" in
-                .githooks/*|Makefile|.golangci.yml) RUN_GO=1; RUN_FE=1 ;;
-                *.go|go.mod|go.sum)                 RUN_GO=1 ;;
-                frontend/*)                         RUN_FE=1 ;;
-            esac
-        done
-    done
-fi
-
-# --- both suites at once ----------------------------------------------------
-# They share nothing — one is a Go toolchain, the other a Node one — and in
-# sequence they were 72% of the old hook's wall time.
-GO_LOG=$(mktemp) || exit 1
-FE_LOG=$(mktemp) || exit 1
-GO_PID=""
-FE_PID=""
-cleanup() {
-    [ -n "$GO_PID" ] && kill "$GO_PID" 2>/dev/null || true
-    [ -n "$FE_PID" ] && kill "$FE_PID" 2>/dev/null || true
-    rm -f "$GO_LOG" "$FE_LOG"
-}
-trap cleanup EXIT INT TERM
-
-if [ "$RUN_GO" = 1 ]; then
-    go_test_containerized >"$GO_LOG" 2>&1 &
-    GO_PID=$!
-fi
-if [ "$RUN_FE" = 1 ]; then
-    vitest_containerized >"$FE_LOG" 2>&1 &
-    FE_PID=$!
-fi
-
-FAILED=0
-if [ -n "$GO_PID" ]; then
-    if wait "$GO_PID"; then ok "go test -race (container)"; else warn "go test -race (container)"; cat "$GO_LOG"; FAILED=1; fi
-    GO_PID=""
-else
-    ok "go test -race — skipped (no Go changes in this push)"
-fi
-if [ -n "$FE_PID" ]; then
-    if wait "$FE_PID"; then ok "vitest (container)"; else warn "vitest (container)"; cat "$FE_LOG"; FAILED=1; fi
-    FE_PID=""
-else
-    ok "vitest — skipped (no frontend/ changes in this push)"
-fi
-
-if [ "$FAILED" != 0 ]; then
-    printf "\nPre-push hook FAILED. Fix the issues above and try again.\n"
-    exit 1
-fi
 
 # Push the issue tracker along with the code.
 #

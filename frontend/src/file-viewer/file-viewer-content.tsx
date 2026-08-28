@@ -21,6 +21,7 @@ import { Button } from '../ui'
 import type { FilesReadResult } from '../generated/files.read'
 import { BasePaneContent, type ActiveOrigin, type PaneHost } from '../pane-content'
 import { languageForPath, viewerHighlighting } from './language-registry'
+import { highlightActiveLine } from '@codemirror/view'
 
 // ── The seam (injected at registration; never imported) ────────────────────
 
@@ -45,6 +46,17 @@ export interface FileViewerTarget {
    *  viewer's read — alive. `paneId` is deliberately absent: the viewer
    *  does not know its tab; PaneManager adds it. */
   readonly origin: Omit<ActiveOrigin, 'paneId'> | null
+  /**
+   * The 1-based line to open at, when the opener knew one — a terminal link
+   * written `docs/architecture.md:101` (terminal-links/) is the only thing
+   * that does today.
+   *
+   * Absent is not "line 1": a viewer opened from the Files panel has no line
+   * to go to, and it must not be scrolled or have a line emphasised as
+   * though it did. The distinction is what keeps the active-line decoration
+   * off every file that was opened by name.
+   */
+  readonly line?: number
 }
 
 /**
@@ -156,7 +168,14 @@ export class FileViewerContent extends BasePaneContent {
     this.root.append(this.noticeEl, editorHost)
     target.append(this.root)
 
-    this.host.mount(editorHost, signal, [viewerHighlighting, languageForPath(this.target.path)])
+    // The active-line decoration is added ONLY when a line was asked for:
+    // it is how the line the user clicked stays findable after the scroll,
+    // and on a file opened by name it would just be a stripe over line 1.
+    this.host.mount(editorHost, signal, [
+      viewerHighlighting,
+      languageForPath(this.target.path),
+      ...(this.target.line === undefined ? [] : [highlightActiveLine()]),
+    ])
 
     signal.addEventListener('abort', () => this.dispose(), { once: true })
 
@@ -179,6 +198,24 @@ export class FileViewerContent extends BasePaneContent {
   }
   viewportChanged(): void {
     // The CM6 view measures itself; there is nothing to do here.
+  }
+
+  /**
+   * Scroll to `line` and mark it — the same jump the target's own `line`
+   * performs at mount, exposed because a SECOND click on the same file at a
+   * different line is deduplicated onto this very tab (openFileViewer's
+   * singletonKey is the canonical path, deliberately not the path plus a
+   * line: one file is one tab). Without this, `x.ts:10` then `x.ts:200`
+   * would activate the tab and leave the user staring at line 10, which
+   * reads as the click having done nothing at all.
+   *
+   * Inert before the document arrives: `applyDoc` performs the jump for the
+   * mount case, and a reveal against an empty doc would clamp to line 1 and
+   * then be overwritten anyway.
+   */
+  revealLine(line: number): void {
+    if (this.state.kind !== 'content') return
+    this.host.revealLine(line)
   }
 
   focus(): void {
@@ -263,6 +300,9 @@ export class FileViewerContent extends BasePaneContent {
    *  still paint content (the wire's bytes are the only writer). */
   private applyDoc(text: string): void {
     this.host.setDoc(text)
+    // After the document, never before: `revealLine` clamps to the doc's
+    // length, and an empty doc clamps every line to 1.
+    if (this.target.line !== undefined) this.host.revealLine(this.target.line)
   }
 
   // ── Notice bar ──────────────────────────────────────────────────────────

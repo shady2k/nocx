@@ -21,7 +21,7 @@ import { createSignal, Show } from 'solid-js'
 import type { Component } from 'solid-js'
 import type { SidebarViewDescriptor } from '../sidebar'
 import { IconButton } from '../ui/icon-button'
-import { PlusIcon, TextQuoteIcon } from '../ui/icons'
+import { PlusIcon, StickyNoteIcon } from '../ui/icons'
 import { SearchField } from '../ui/search-field'
 import { NotesPanel } from './notes-panel'
 import type { NotesState, NotesStore } from './notes-store'
@@ -109,7 +109,7 @@ export function createNotesView(deps: NotesViewDeps): SidebarViewDescriptor {
   return {
     id: NOTES_VIEW_ID,
     title: 'Notes',
-    icon: TextQuoteIcon,
+    icon: StickyNoteIcon,
     actions: NotesActions,
     filter: NotesFilter,
     view: () => (

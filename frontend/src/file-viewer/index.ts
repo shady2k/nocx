@@ -106,5 +106,14 @@ export function openFileViewer(target: FileViewerTarget): void {
     // spent on the local case.
     defaultTitle: target.displayHost ? `${target.displayHost} · ${target.name}` : target.name,
   }
-  wiring.tm.openPane(new FileViewerContent(target, wiring.deps), descriptor)
+  const content = new FileViewerContent(target, wiring.deps)
+  const pane = wiring.tm.openPane(content, descriptor)
+  // A file is ONE tab (the singleton key is the canonical path), so a second
+  // link to the same file at a different line lands here with the tab already
+  // open and `content` thrown away. The jump then has to be asked for
+  // explicitly — openPane only activated the tab, and a tab that comes to the
+  // front still showing line 10 is how "click did nothing" looks.
+  if (target.line !== undefined && pane.content !== content) {
+    if (pane.content instanceof FileViewerContent) pane.content.revealLine(target.line)
+  }
 }

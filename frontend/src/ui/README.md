@@ -390,6 +390,8 @@ meaning already spoken for is not spoken for twice.
 | Icon                   | Lucide             | What it means, and where                                                                                                                                                                                                                                    |
 | ---------------------- | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | **ArrowRightLeftIcon** | `arrow-right-left` | An exchange: a request going out and a response coming back. The API testing surface's activity-bar entry (nocx-zccer). Deliberately **not** `ArrowRightIcon`, which means "go there" everywhere else in the product and made the entry read as navigation. |
+| **TextQuoteIcon**      | `text-quote`       | A SAVED PHRASE: the snippets library, on the tab strip's menu row and wherever a snippet is offered. Not "a note" — see StickyNoteIcon.                                                                                                                     |
+| **StickyNoteIcon**     | `sticky-note`      | A note the user wrote: the Notes panel's activity-bar entry and the strip menu's "New note" row. It took that job off `TextQuoteIcon`, which held both and put one mark on two rows of the same menu.                                                       |
 
 ### Platform primitives (no wrapper needed per ADR-0014)
 

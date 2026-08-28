@@ -1,0 +1,39 @@
+/* ── Terminal links (nocx-8yg.8) ──────────────────────────────────────
+   A path or url in terminal output, made reachable.
+
+   INVISIBLE UNTIL ARMED, and that is the whole design. Terminal output is
+   the program's, not ours: underlining every path in every `ls`, every
+   stack trace and every diff would repaint the user's output with our
+   opinion of which words are special, permanently, on every line. So the
+   decoration appears exactly while ⌘/⌃ is held — which is also precisely
+   when a click would do something, so the affordance and the capability
+   arrive and leave together instead of one advertising the other.
+
+   `color` is deliberately NOT set: the program chose the colour of these
+   characters and it stays chosen. Only the underline and the cursor are
+   ours. */
+
+.term-link {
+  /* The anchor is a wrapper around existing colour runs; it must add no
+     box of its own, or a link would break the row's cell alignment. */
+  text-decoration: none;
+  color: inherit;
+  cursor: inherit;
+}
+
+.links-armed .term-link {
+  cursor: pointer;
+  text-decoration: underline;
+  text-decoration-style: solid;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 2px;
+  /* The program's colour still wins for the glyphs; the line under them is
+     ours, dimmed so it reads as chrome rather than as syntax. */
+  text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
+}
+
+.links-armed .term-link:hover {
+  text-decoration-color: currentColor;
+  background: var(--color-surface-raised);
+  border-radius: 2px;
+}

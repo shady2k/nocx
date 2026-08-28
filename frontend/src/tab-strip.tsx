@@ -21,6 +21,7 @@ import {
   PinIcon,
   PlugIcon,
   PlusIcon,
+  StickyNoteIcon,
   TextQuoteIcon,
 } from './ui/icons'
 import type { JSX, Setter } from 'solid-js'
@@ -243,6 +244,11 @@ export interface TabStrip {
    *  palette, in its snippets variant (design §10.3). The strip knows
    *  nothing about a library. */
   onSnippets: (() => void) | null
+  /** A NOTE was asked for. Shaped like the three above and unlike them in one
+   *  way: there is nothing further to ask, so the row that raises it carries
+   *  no ellipsis — the note exists and its tab is open by the time the menu
+   *  has finished closing. The strip knows nothing about a store. */
+  onNewNote: (() => void) | null
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -291,6 +297,7 @@ abstract class TabStripBase implements TabStrip {
   onQuickConnect: (() => void) | null = null
   onInsertSecret: (() => void) | null = null
   onSnippets: (() => void) | null = null
+  onNewNote: (() => void) | null = null
   onSwitchWorkspace: ((workspaceId: string) => void) | null = null
   onNewWorkspace: (() => void) | null = null
   onOpenOverview: (() => void) | null = null
@@ -890,6 +897,17 @@ abstract class TabStripBase implements TabStrip {
                     label: 'Snippets…',
                     icon: TextQuoteIcon,
                     onSelect: () => this.onSnippets?.(),
+                  },
+                  {
+                    // NO ELLIPSIS, and the three rows above it have one: an
+                    // ellipsis promises a further ask, and this row makes the
+                    // note and opens its tab with nothing in between. Same
+                    // action as ⌥⌘N (notes/chord.ts), reachable by someone
+                    // who has never met the chord.
+                    id: 'new-note',
+                    label: 'New note',
+                    icon: StickyNoteIcon,
+                    onSelect: () => this.onNewNote?.(),
                   },
                   {
                     id: 'new-workspace',

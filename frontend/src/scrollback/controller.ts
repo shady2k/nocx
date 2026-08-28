@@ -321,8 +321,7 @@ export class ScrollbackController {
     this.xtermInner.className = 'xterm-inner inner-fullscreen'
     this._setFilledPane(true)
     this._applyEchoShift()
-    const max = this.scrollbackArea.clientHeight
-    if (max > 0) this.xtermLiveContainer.style.height = `${max}px`
+    this._fillPane()
   }
 
   /**
@@ -350,6 +349,17 @@ export class ScrollbackController {
    * fast command freezes, turning one layout change into two movements.
    */
   setLiveHeight(px: number | null): void {
+    // The two modes where the terminal owns the pane are re-measured from the
+    // scroller, and `px` — the running region's measured content — is not
+    // consulted there: the box is the pane, whatever the grid holds. This is
+    // the seam terminal-content's scheduleLiveResize already calls on every
+    // re-measure, which is why the fill belongs here rather than in a method
+    // every caller has to remember to call (the version that had to be
+    // remembered was called exactly twice, at the two mode entries).
+    if (this._mode === 'unstructured' || this._mode === 'fullscreen') {
+      this._fillPane()
+      return
+    }
     if (this._mode !== 'running') return
     // nocx-w1n4: the echoed command line leaves the LIVE region the same way
     // it leaves the frozen body — the first shown row is the running block's
@@ -528,6 +538,26 @@ export class ScrollbackController {
     this.xtermInner.className = 'xterm-inner inner-fullscreen'
     this._setFilledPane(true)
     this._applyEchoShift()
+    this._fillPane()
+  }
+
+  /** The live box IS the scroller, in the two modes where the terminal owns
+   *  the pane: `unstructured` (a markerless session — there are no blocks to
+   *  show) and `fullscreen` (an alt-screen program has taken it).
+   *
+   *  One owner, reached from every re-measure rather than once at mode entry.
+   *  It used to be two copies of these two lines, run only as the mode was
+   *  entered, and nothing re-ran them — so a pane that changed size afterwards
+   *  kept the box it had when the mode began. The integration card is the
+   *  everyday way that happens: it takes its own height off the top of the
+   *  pane while it is up, a markerless session enters `unstructured`
+   *  underneath it, and dismissing it gave the pixels back to the SCROLLER and
+   *  to the grid fitted against it, but not to the box between them.
+   *  `.scrollback-inner` hangs from the scroller's bottom edge, so the
+   *  difference showed up as a blank strip above the prompt, and the rows past
+   *  the box were clipped by its overflow — `top` drawing 34 of the 40 rows it
+   *  had been given. A window resize is the same defect with no card in it. */
+  private _fillPane(): void {
     const max = this.scrollbackArea.clientHeight
     if (max > 0) this.xtermLiveContainer.style.height = `${max}px`
   }

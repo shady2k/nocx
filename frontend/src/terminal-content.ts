@@ -1879,9 +1879,13 @@ export class TerminalContent extends BasePaneContent {
             if (target?.routesToShell === false) {
               // Ctrl-C never stops an assistant turn. In the one state where
               // an Agent composer sits over a running command, it delegates
-              // to that command's existing interrupt owner and nothing else.
-              if (this._summoned && this.hasRunningCommand()) this.signalActiveCommand('interrupt')
-              return
+              // to that command's existing interrupt owner and preserves the
+              // half-typed question. Ordinary Ask still clears normally.
+              if (this._summoned && this.hasRunningCommand()) {
+                this.signalActiveCommand('interrupt')
+                return false
+              }
+              return true
             }
             // Ctrl-C at a prompt is a keystroke to the SHELL — its line
             // editor discards the line and prints a fresh prompt — and the
@@ -1890,6 +1894,7 @@ export class TerminalContent extends BasePaneContent {
             // active block's business and goes through the one owner of it.
             if (this.hasRunningCommand()) this.signalActiveCommand('interrupt')
             else this.session?.send('\x03')
+            return true
           },
           // The editor's own overlay/IME arbiters run first. An unclaimed
           // Escape then stops the current summoned turn through its answer's
@@ -4375,14 +4380,18 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /** Return the newest non-terminal turn. Two submits can overlap only in the
-   * pre-ack window, before the first acceptance hides the composer; terminal
-   * ordering must therefore keep it hidden until every accepted turn settles. */
-  private _currentSummonedAnswer(): HTMLElement | null {
+   * pre-ack window, before the first acceptance hides the composer; every key
+   * path uses this one ordering decision rather than re-deriving a target. */
+  private _newestActiveSummonedAnswer(): (typeof this._summonedAnswers)[number] | null {
     for (let i = this._summonedAnswers.length - 1; i >= 0; i -= 1) {
       const answer = this._summonedAnswers[i]
-      if (!answer.terminal) return answer.el
+      if (!answer.terminal) return answer
     }
     return null
+  }
+
+  private _currentSummonedAnswer(): HTMLElement | null {
+    return this._newestActiveSummonedAnswer()?.el ?? null
   }
 
   /** Stop the newest active summoned turn, then thaw its presentation.
@@ -4392,14 +4401,10 @@ export class TerminalContent extends BasePaneContent {
    * dismissing through the existing unwind makes repeated Escape a no-op. */
   private stopCurrentSummonedAnswerAndDismiss(): boolean {
     if (!this._summoned) return false
-    for (let i = this._summonedAnswers.length - 1; i >= 0; i -= 1) {
-      const answer = this._summonedAnswers[i]
-      if (answer.terminal) continue
-      if (answer.running?.isActive(answer.el) === true) answer.running.stop()
-      // A newer pre-ack or already-stopping turn still owns Escape. Never
-      // fall through and cancel an older conversation the person did not aim at.
-      break
-    }
+    const answer = this._newestActiveSummonedAnswer()
+    if (answer?.running?.isActive(answer.el) === true) answer.running.stop()
+    // A newer pre-ack or already-stopping turn still owns Escape. Never fall
+    // through and cancel an older conversation the person did not aim at.
     return this.dismissSummonedEditor()
   }
 

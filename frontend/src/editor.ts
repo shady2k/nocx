@@ -69,11 +69,10 @@ export interface EditorActions {
    *  Separate from submit() because the two differ in exactly that: one
    *  opens an execution, the other only echoes a line (nocx-292k). */
   submitEmpty?: () => void
-  // cancel discards the composed line the way Ctrl-C does at a shell prompt:
-  // the editor clears and the shell is interrupted so a fresh prompt returns.
-  // Without it, Ctrl-C in the editor is a no-op and the stale text corrupts
-  // the next command.
-  cancel: () => void
+  /** Address Ctrl-C, then return whether the editor should clear the draft.
+   *  The host owns that decision because a summoned running command receives
+   *  the interrupt while the half-typed question must remain intact. */
+  cancel: () => boolean
   /** The host's first refusal on Escape, before the editor clears the draft.
    *  Return true to consume the key.
    *
@@ -953,8 +952,7 @@ export class CommandEditor {
       if (sel.from !== sel.to) return
       e.preventDefault()
       e.stopPropagation()
-      this.clearDoc()
-      this.actions.cancel()
+      if (this.actions.cancel()) this.clearDoc()
     }
   }
 

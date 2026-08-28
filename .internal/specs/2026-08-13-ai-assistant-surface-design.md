@@ -196,15 +196,17 @@ follow-ups. The existing editor and every summoned answer are reparented into on
 presentation stack: the current streaming answer hides the composer; any wire-terminal state
 returns the composer below all readable answers; and a new follow-up repeats that transition.
 
-The owner's final key scope is deliberately two gestures because the command and the assistant
-turn are independent executions. **Escape stops only the newest active summoned answer**, through
-the exact `RunningBlockActions.stop` object that powers that answer's menu, then dismisses and
-thaws the summon. A settled or absent turn keeps the prior dismiss-only Escape. **Ctrl+C stops no
-assistant turn**: the editor delegates to the active command's interrupt signal while summoned,
-terminal chrome uses the existing global signal owner, and a focused live grid keeps xterm's one
-`0x03`. Selection/copy, text controls, overlays, menus and IME retain their higher-priority
-ownership. Consequently `agent.cancel` terminalizes only its addressed turn; it never escalates
-into the foreground command. Stopping both requires both keys.
+The owner's final key scope is deliberately two gestures because the user-started command and the
+assistant turn are independent executions. **Escape stops only the newest active summoned answer**,
+through the exact `RunningBlockActions.stop` object that powers that answer's menu, then dismisses
+and thaws the summon. A settled or absent turn keeps the prior dismiss-only Escape. `agent.cancel`
+also synchronously stops any command the addressed turn itself started through `run`, using that
+request's execution-specific lease; a user-started or summoned host command has no such registration
+and survives. **Ctrl+C stops no assistant turn**: while summoned, the editor delegates to the
+user-started command's interrupt owner and preserves the half-typed question; terminal chrome uses
+the existing global signal owner, and a focused live grid keeps xterm's one `0x03`. Selection/copy,
+text controls, overlays, menus and IME retain their higher-priority ownership. Stopping both the
+summoned host command and its independent answer requires both keys.
 
 Escape preserves arrived answer nodes, and command completion moves each node once into
 consecutive scrollback seats in ask order. Because the stack is absolute and only reparents
@@ -825,16 +827,19 @@ Assertions, in the bead, authored before the implementation.
   once after the command, in the same order.
 - A summoned answer is held after partial prose. Press real Ctrl+C from editor, chrome/body and
   live-grid focus: **assert** exactly one existing command owner acts, xterm emits no duplicate,
-  no `agent.cancel` frame exists, and the turn still streams. Selection/copy, another text
-  control and no-command states remain untouched.
+  no `agent.cancel` frame exists, the turn still streams, and a half-typed summoned question stays
+  intact. An ordinary prompt draft still clears. Selection/copy, another text control and
+  no-command states remain untouched.
 - With that command and turn still active, press real Escape after selection, text-control,
   overlay and menu guards: **assert** the exact answer Stop fires once, the partial answer says
   `stopped` rather than `failed`, the summon thaws, and the command remains alive. Re-summon,
   complete another ask, then release the command normally. A settled/no-turn Escape remains
   dismiss-only.
-- On the real backend socket, `agent.cancel` terminalizes the addressed turn and preserves arrived
-  prose while a renderer-run child process remains alive; the test explicitly stops that child
-  afterward. The command's signal ladder is exercised separately.
+- On the real backend socket, `agent.cancel` synchronously stops the addressed turn's registered
+  renderer-run child through the existing INT → TERM → KILL ladder, then terminalizes the turn,
+  preserves arrived prose, and only then answers. A user-started/summoned command has no lease in
+  that turn and remains alive. Unsupported remote signalling leaves its warning visible while the
+  turn still closes.
 - Two asks in flight: cancelling one leaves the other streaming, and deltas land on the right
   entry. Cancel is by run id.
 - **The backend restarts mid-answer.** On start, the run is `interrupted`, the block says so,

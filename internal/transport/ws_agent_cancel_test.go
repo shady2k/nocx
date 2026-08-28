@@ -13,6 +13,7 @@ import (
 	"github.com/gorilla/websocket"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/session"
 )
 
 // A real assistant run owns the renderer request until the renderer resolves
@@ -61,6 +62,8 @@ func TestAgentCancel_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.cancel.schema.json")
 	validateJSON(t, schema, mustMarshal(agentCancelResponse{
 		RunID: 7, State: string(content.RunCancelled), Cancelled: true,
+		Error:         "no local process group to signal — the execution keeps running",
+		DroppedDeltas: 2,
 	}), "agent.cancel DTO")
 }
 
@@ -152,6 +155,68 @@ func TestAgentCancel_StopsStreamingRunAndKeepsReceivedProse(t *testing.T) {
 	}
 	if secondEnv.Error == nil || !strings.Contains(secondEnv.Error.Message, "not active") {
 		t.Fatalf("repeated cancel = %s, want an honest not-active error", second)
+	}
+}
+
+func TestAgentCancel_UnsupportedOwnedRunStillClosesWithPresentation(t *testing.T) {
+	client := newCancelBlockingClient()
+	h := newAskHarness(t, client)
+	h.createEndpoint()
+	sid := openLocalSession(t, h.conn)
+	res, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "cancel-unsupported-1", "sessionId": sid, "question": "stop remote work", "cwd": "/repo", "attachedContent": []any{},
+	}, 1)
+	if errObj != nil {
+		t.Fatalf("agent.ask: %+v", errObj)
+	}
+	select {
+	case <-client.emitted:
+	case <-time.After(time.Second):
+		t.Fatal("assistant did not emit before cancellation")
+	}
+
+	h.ws.pendingRunsMu.Lock()
+	rc := h.ws.pendingRuns[res.RunID]
+	lease := h.ws.newRunLease(session.ID(sid), RunLeaseConfig{})
+	lease.sess = nil
+	lease.cancel = func() {} // armed RequestRun: the renderer execution exists
+	if !rc.control.attachRunLease(lease) {
+		h.ws.pendingRunsMu.Unlock()
+		t.Fatal("active run refused its exact lease")
+	}
+	rc.control.recordDroppedDelta()
+	rc.control.recordDroppedDelta()
+	h.ws.pendingRunsMu.Unlock()
+
+	resp, notifications := cancelCallPreservingNotifications(t, h.conn, res.RunID, 2)
+	var env struct {
+		Result agentCancelResponse `json:"result"`
+		Error  *jsonrpcErrorObj    `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("decode agent.cancel: %v\nraw: %s", err, resp)
+	}
+	warning := "no local process group to signal — the execution keeps running"
+	if env.Error != nil || env.Result.Error != warning || env.Result.DroppedDeltas != 2 {
+		t.Fatalf("agent.cancel = %+v, want warning and two dropped deltas", env)
+	}
+	if len(notifications) == 0 {
+		notifications = append(notifications, readNotification(t, h.conn, "agent.runState", time.Second))
+	}
+	var state agentRunState
+	for _, raw := range notifications {
+		var candidate agentRunState
+		if json.Unmarshal(raw, &candidate) == nil && candidate.RunID == res.RunID {
+			state = candidate
+		}
+	}
+	if state.State != string(content.RunCancelled) || state.Error != warning || state.DroppedDeltas != 2 {
+		t.Fatalf("runState = %+v, want cancelled with matching presentation", state)
+	}
+	select {
+	case <-client.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("provider stream did not close when signalling was unsupported")
 	}
 }
 
@@ -258,12 +323,11 @@ func tapCancelCall(t *testing.T, conn *websocket.Conn, tap *socketTap, id int, r
 	return nil, state
 }
 
-// TestAgentCancel_TerminalizesTurnButLeavesRendererRunCommandAlive is the
-// backend half of the two-key contract. Cancellation terminalizes only the
-// assistant turn; the renderer-run child remains alive until session.signal
-// explicitly owns command cleanup. The paired streaming test above proves
-// arrived prose survives the same agent.cancel path.
-func TestAgentCancel_TerminalizesTurnButLeavesRendererRunCommandAlive(t *testing.T) {
+// TestAgentCancel_StopsAssistantRunChildBeforeResponse proves the backend's
+// exact ownership contract: agent.cancel stops the child started by this
+// turn's RequestRun lease before the reserved response, while the paired
+// streaming test proves arrived prose survives the same terminal close.
+func TestAgentCancel_StopsAssistantRunChildBeforeResponse(t *testing.T) {
 	h := newRunLeaseHarness(t, RunLeaseConfig{
 		WallClock:   time.Minute,
 		Inactivity:  time.Minute,
@@ -296,6 +360,10 @@ func TestAgentCancel_TerminalizesTurnButLeavesRendererRunCommandAlive(t *testing
 	if env.Error != nil || !env.Result.Cancelled || env.Result.State != string(content.RunCancelled) {
 		t.Fatalf("agent.cancel = %s, want cancelled result", raw)
 	}
+	// The reserved response is written only after the synchronous stop ladder.
+	// There is no cleanup signal after this assertion: the PID must already be
+	// gone as part of agent.cancel itself.
+	waitChildDead(t, pid)
 	if state.State == "" {
 		stateRaw := tapNotify(t, tap, "agent.runState", time.Second)
 		if err := json.Unmarshal(stateRaw, &state); err != nil {
@@ -308,26 +376,6 @@ func TestAgentCancel_TerminalizesTurnButLeavesRendererRunCommandAlive(t *testing
 	if state.Error != "" {
 		t.Fatalf("ordinary cancelled runState error = %q, want empty", state.Error)
 	}
-	waitChildAlive(t, pid)
-
-	// Cleanup belongs to the command's existing signal ladder, not to
-	// agent.cancel. Drive it explicitly so this regression cannot leak the
-	// foreground child it deliberately proves remains alive.
-	raw = tapCall(t, h.conn, tap, 3, "session.signal", map[string]any{
-		"sessionId": sid,
-		"signal":    signalStop,
-	})
-	var signalEnv struct {
-		Result signalResult     `json:"result"`
-		Error  *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(raw, &signalEnv); err != nil {
-		t.Fatalf("decode cleanup session.signal: %v\nraw: %s", err, raw)
-	}
-	if signalEnv.Error != nil || signalEnv.Result.Outcome != string(foregroundDelivered) {
-		t.Fatalf("cleanup session.signal = %s, want stop/delivered", raw)
-	}
-	waitChildDead(t, pid)
 }
 
 func TestAgentCancel_SuspendedApprovalClosesQuestion(t *testing.T) {

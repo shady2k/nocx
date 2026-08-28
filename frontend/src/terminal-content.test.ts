@@ -8323,9 +8323,9 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         }),
       )
 
-      // The draft is cancelled locally, while the command — not the turn —
-      // receives exactly one ordinary interrupt through its signal ladder.
-      expect(ed.getDoc()).toBe('')
+      // The command — not the turn — receives exactly one ordinary interrupt
+      // through its signal ladder, and the half-typed question survives.
+      expect(ed.getDoc()).toBe('what is it waiting on')
       expect(signalsSent(content)).toEqual(['interrupt'])
       expect(session.send).not.toHaveBeenCalledWith('\x03')
       expect(

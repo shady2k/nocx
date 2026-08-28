@@ -361,6 +361,15 @@ test.describe('asking about a command that is still running (nocx-92gfl)', () =>
     // here, so there is no state in which Enter would run something.
     await expect(modeIndicator(page)).toHaveAttribute('data-target', 'agent', { timeout: 10_000 })
 
+    // Ctrl+C in the summoned composer still addresses the running command,
+    // but the question draft belongs to the composer and survives intact.
+    const HALF_TYPED = 'A half-typed question must stay'
+    await page.locator(INPUT).fill(HALF_TYPED)
+    await page.keyboard.press('Control+C')
+    await expect(page.locator(INPUT)).toHaveText(HALF_TYPED)
+    await expect.poll(async () => (await recorded(page)).signals).toEqual(['interrupt'])
+    expect((await recorded(page)).cancels).toHaveLength(0)
+
     // ── The question, while it is still running ──────────────────────────
     // Two model responses, because a real tool-calling run is two: the
     // proposal, then the answer written from the result. The second is
@@ -420,13 +429,16 @@ test.describe('asking about a command that is still running (nocx-92gfl)', () =>
     expect(runBodies[0]).not.toContain(MARKER)
     expect(runBodies[1]).toContain(MARKER)
 
-    // 4. Ctrl+C belongs only to the command. Focus a real pane control so the
-    //    existing global owner emits the ordinary session.signal intent; the
-    //    answer remains streaming and no agent.cancel frame exists. Focused
-    //    grid delivery is already the xterm/raw path and is covered separately.
+    // 4. Ctrl+C still belongs only to the command while the answer is up.
+    //    Focus a real pane control so the existing global owner emits the
+    //    ordinary session.signal intent; the answer remains streaming and no
+    //    agent.cancel frame exists. Focused grid delivery is already the
+    //    xterm/raw path and is covered separately.
     await turn.locator(':scope > .cmd-header .cmd-overflow-btn').focus()
     await page.keyboard.press('Control+C')
-    await expect.poll(async () => (await recorded(page)).signals).toEqual(['interrupt'])
+    await expect
+      .poll(async () => (await recorded(page)).signals)
+      .toEqual(['interrupt', 'interrupt'])
     expect((await recorded(page)).cancels).toHaveLength(0)
     await fake.waitForState(held.id, 'streaming')
     await expect(page.locator(RUNNING_BLOCK)).toHaveCount(1)

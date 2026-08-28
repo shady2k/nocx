@@ -10,13 +10,11 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 )
 
-func TestScopedParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
+func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 	server := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)))
 	registered := make(map[string]methodSpec)
 	for method, spec := range server.methods {
-		if isParamsContractScope(method) {
-			registered[method] = spec
-		}
+		registered[method] = spec
 	}
 
 	entries, entriesErr := os.ReadDir(contractDir)
@@ -26,7 +24,7 @@ func TestScopedParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 	contracts := make(map[string]struct{})
 	for _, entry := range entries {
 		name := entry.Name()
-		if !strings.HasSuffix(name, ".params.schema.json") || !isParamsContractScope(strings.TrimSuffix(name, ".params.schema.json")) {
+		if !strings.HasSuffix(name, ".params.schema.json") {
 			continue
 		}
 		method := strings.TrimSuffix(name, ".params.schema.json")
@@ -354,6 +352,301 @@ func TestScopedParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"uistate.set": {
 			[]byte(`{"sidebar":{"activeViewId":"home","width":240},"activeTab":"tab-1"}`),
 		},
+		"agent.approve": {
+			[]byte(`{"runId":"run-1","attempt":1,"tool":"run","callId":"call-1","argHash":"hash","scope":"once"}`),
+		},
+		"agent.ask": {
+			[]byte(`{"askId":"ask-1","sessionId":"session-1","question":"What happened?","attachedContent":[{"itemId":"item-1","command":"echo hi","state":"exited"}],"cwd":"/tmp"}`),
+			[]byte(`{"askId":"ask-2","sessionId":"session-1","question":"Show output","attachedContent":[{"itemId":"item-2","command":"printf hi","state":"running","start":0,"count":20}],"cwd":"/tmp"}`),
+		},
+		"agent.cancel": {
+			[]byte(`{"runId":1}`),
+		},
+		"agent.dump": {
+			[]byte(`{"entryId":"entry-1"}`),
+		},
+		"agent.laneInteractivity": {
+			[]byte(`{"sessionId":"session-1","bufferKind":"normal"}`),
+		},
+		"agent.readScreenResolved": {
+			[]byte(`{"requestId":"request-1","outcome":"failed","error":"capture failed"}`),
+		},
+		"agent.runResolved": {
+			[]byte(`{"requestId":"request-1","outcome":"failed","error":"run failed"}`),
+		},
+		"agent.status": {
+			[]byte(`{}`),
+		},
+		"api.collections.close": {
+			[]byte(`{"handle":"0123456789abcdef0123456789abcdef"}`),
+		},
+		"api.collections.create": {
+			[]byte(`{"name":"Local"}`),
+		},
+		"api.collections.createFolder": {
+			[]byte(`{"handle":"0123456789abcdef0123456789abcdef","name":"folder"}`),
+		},
+		"api.collections.list": {
+			[]byte(`{}`),
+		},
+		"api.collections.open": {
+			[]byte(`{"path":"/tmp"}`),
+		},
+		"api.environment.read": {
+			[]byte(`{"handle":"0123456789abcdef0123456789abcdef","relPath":"environments/dev.json"}`),
+		},
+		"api.environment.write": {
+			[]byte(`{"handle":"0123456789abcdef0123456789abcdef","relPath":"environments/dev.json","environment":{"name":"dev","values":{},"route":{"kind":"direct","profileId":"","insecureTls":false}}}`),
+		},
+		"api.folder.read": {
+			[]byte(`{"handle":"0123456789abcdef0123456789abcdef","relPath":"folder"}`),
+		},
+		"api.folder.write": {
+			[]byte(`{"handle":"0123456789abcdef0123456789abcdef","relPath":"folder","variables":[]}`),
+		},
+		"api.import.curl": {
+			[]byte(`{"line":"curl https://example.com"}`),
+		},
+		"api.import.postman": {
+			[]byte(`{"document":"{}","dest":"/tmp"}`),
+		},
+		"api.request.cancel": {
+			[]byte(`{"token":"token-1"}`),
+		},
+		"api.request.delete": {
+			[]byte(`{"handle":"0123456789abcdef0123456789abcdef","relPath":"requests/get.json"}`),
+		},
+		"api.request.move": {
+			[]byte(`{"handle":"0123456789abcdef0123456789abcdef","relPath":"requests/get.json","toRelPath":"requests/post.json"}`),
+		},
+		"api.request.read": {
+			[]byte(`{"handle":"0123456789abcdef0123456789abcdef","relPath":"requests/get.json"}`),
+		},
+		"api.request.scope": {
+			[]byte(`{"handle":"0123456789abcdef0123456789abcdef","relPath":"requests/get.json","envRelPath":"","variables":[]}`),
+		},
+		"api.request.send": {
+			[]byte(`{"handle":"0123456789abcdef0123456789abcdef","relPath":"requests/get.json","token":"token-1"}`),
+		},
+		"api.request.write": {
+			[]byte(`{"handle":"0123456789abcdef0123456789abcdef","relPath":"requests/get.json","request":{"id":"get","name":"Get","method":"GET","url":"https://example.com","headers":[],"query":[],"variables":[],"body":{"kind":"none","text":"","fileRef":""},"auth":{"kind":"none","user":"","token":"","password":""}}}`),
+		},
+		"files.close": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		"files.download": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","path":"/tmp/file.txt"}`),
+		},
+		"files.downloadCancel": {
+			[]byte(`{"transferId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		"files.list": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","path":"/tmp","offset":0,"limit":20}`),
+		},
+		"files.open": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		"files.read": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","path":"/tmp/file.txt","maxBytes":0}`),
+		},
+		"files.reveal": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","path":"/tmp/file.txt"}`),
+		},
+		"files.upload": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","destDir":"/tmp","name":"file.txt","size":0}`),
+		},
+		"files.uploadCancel": {
+			[]byte(`{"transferId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		"files.watch": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","paths":[]}`),
+		},
+		"git.close": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		"git.commit": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","message":"update","amend":false}`),
+		},
+		"git.diff": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","path":"file.txt","side":"unstaged","maxBytes":1024}`),
+		},
+		"git.headMessage": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		"git.log": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		"git.open": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","cwd":"/tmp"}`),
+		},
+		"git.remote": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		"git.stage": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","paths":[]}`),
+		},
+		"git.stageAll": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		"git.status": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		"git.unstage": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","paths":[]}`),
+		},
+		"git.unstageAll": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		"secrets.captureDismiss": {
+			[]byte(`{"captureId":"cap_0123456789abcdef0123456789abcdef"}`),
+		},
+		"secrets.captureSave": {
+			[]byte(`{"captureId":"cap_0123456789abcdef0123456789abcdef"}`),
+		},
+		"secrets.detect": {
+			[]byte(`{"line":"echo hello","revision":1}`),
+		},
+		"secrets.paneClosed": {
+			[]byte(`{"paneId":"pane-1"}`),
+		},
+		"secrets.saveKeyMaterial": {
+			[]byte(`{"keyText":"private-key"}`),
+		},
+		"secrets.saveKeyPassphrase": {
+			[]byte(`{"keyRow":"secrow:0123456789abcdef0123456789abcdef","passphrase":""}`),
+		},
+		"secrets.savePassword": {
+			[]byte(`{"password":"password"}`),
+		},
+		"secrets.usage": {
+			[]byte(`{"row":"secrow:0123456789abcdef0123456789abcdef"}`),
+		},
+		"vault.activity": {
+			[]byte(`{}`),
+		},
+		"vault.changePassphrase": {
+			[]byte(`{"oldPassphrase":"old","newPassphrase":"new"}`),
+		},
+		"vault.createSecret": {
+			[]byte(`{"name":"token","kind":"api-token","value":""}`),
+		},
+		"vault.deleteSecret": {
+			[]byte(`{"id":"secrow:0123456789abcdef0123456789abcdef"}`),
+		},
+		"vault.inventory": {
+			[]byte(`{}`),
+		},
+		"vault.regenerateRecovery": {
+			[]byte(`{"passphrase":"passphrase"}`),
+		},
+		"vault.renameSecret": {
+			[]byte(`{"id":"secrow:0123456789abcdef0123456789abcdef","name":"renamed"}`),
+		},
+		"vault.replaceSecret": {
+			[]byte(`{"id":"secrow:0123456789abcdef0123456789abcdef","value":""}`),
+		},
+		"vault.reset": {
+			[]byte(`{}`),
+		},
+		"vault.resetPreview": {
+			[]byte(`{}`),
+		},
+		"vault.resolveLine": {
+			[]byte(`{"line":"echo hello"}`),
+		},
+		"vault.seal": {
+			[]byte(`{}`),
+		},
+		"vault.setAutoSeal": {
+			[]byte(`{"minutes":0}`),
+		},
+		"vault.setDefaultProvider": {
+			[]byte(`{"provider":"file"}`),
+		},
+		"vault.setup": {
+			[]byte(`{}`),
+		},
+		"vault.status": {
+			[]byte(`{}`),
+		},
+		"vault.unlockResolved": {
+			[]byte(`{"requestId":"request-1","outcome":"cancelled"}`),
+		},
+		"vault.unseal": {
+			[]byte(`{"means":"os"}`),
+		},
+		"open": {
+			[]byte(`{"cols":80,"rows":24}`),
+		},
+		"resize": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","cols":80,"rows":24}`),
+		},
+		"close": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
+		},
+		"attach": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","offset":0}`),
+		},
+		"ack": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","offset":0}`),
+		},
+		"sshConfig.aliases": {
+			[]byte(`{}`),
+			[]byte(`null`),
+		},
+		"sshConfig.path": {
+			[]byte(`{}`),
+			[]byte(`null`),
+		},
+		"layout.read": {
+			[]byte(`{}`),
+			[]byte(`null`),
+		},
+		"workspaces.create": {
+			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c001","name":"Workspace","firstTab":{"id":"0198f2b0-0000-7000-8000-00000000c002","layout":"row"},"firstPane":{"id":"0198f2b0-0000-7000-8000-00000000c003","kind":"local","sizeShare":1}}`),
+		},
+		"workspaces.rename": {
+			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c001","name":"Workspace"}`),
+		},
+		"workspaces.recolour": {
+			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c001","colour":null}`),
+		},
+		"workspaces.reorder": {
+			[]byte(`{"ids":["0198f2b0-0000-7000-8000-00000000c001"]}`),
+		},
+		"workspaces.close": {
+			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c001"}`),
+		},
+		"tabs.create": {
+			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c004","workspaceId":"workspace:default","layout":"column","firstPane":{"id":"0198f2b0-0000-7000-8000-00000000c005","kind":"local","sizeShare":1}}`),
+		},
+		"tabs.rename": {
+			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c004","name":null}`),
+		},
+		"tabs.recolour": {
+			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c004","colour":null}`),
+		},
+		"tabs.pin": {
+			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c004"}`),
+		},
+		"tabs.reorder": {
+			[]byte(`{"workspaceId":"workspace:default","ids":["0198f2b0-0000-7000-8000-00000000c004"]}`),
+		},
+		"tabs.close": {
+			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c004"}`),
+		},
+		"panes.create": {
+			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c006","tabId":"0198f2b0-0000-7000-8000-00000000c004","kind":"local","sizeShare":1}`),
+		},
+		"panes.move": {
+			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c006","tabId":"0198f2b0-0000-7000-8000-00000000c004"}`),
+		},
+		"panes.setCwd": {
+			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c006","cwd":"/tmp"}`),
+		},
+		"panes.close": {
+			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c006"}`),
+		},
 	}
 	for method := range registered {
 		if _, ok := valid[method]; !ok {
@@ -373,7 +666,15 @@ func TestScopedParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			continue
 		}
 		schema := loadSchema(t, name)
-		for _, raw := range invalid {
+		probes := invalid
+		switch method {
+		case "secrets.detect", "vault.resolveLine", "vault.setup":
+			// These methods intentionally accept an empty object and use a
+			// tolerant decoder for optional input; malformed JSON values
+			// remain the shared shape rejection for them.
+			probes = [][]byte{[]byte(`[]`), []byte(`"scalar"`), []byte(`true`)}
+		}
+		for _, raw := range probes {
 			raw := raw
 			t.Run(method+"/"+string(raw), func(t *testing.T) {
 				if err := validateJSONErr(schema, raw); err == nil {
@@ -447,18 +748,4 @@ func TestDecodeObjectRejectsUnknownTrailingAndNamedNull(t *testing.T) {
 			}
 		})
 	}
-}
-
-func isParamsContractScope(method string) bool {
-	for _, prefix := range []string{
-		"app.", "backup.", "connections.", "dialog.", "endpoints.", "fs.",
-		"groups.", "history.", "ledger.", "lifecycle.", "notify.", "notes.",
-		"policy.", "ports.", "profiles.", "roles.", "session.",
-		"sessions.", "settings.", "shell.", "snippets.", "tunnel.", "uistate.",
-	} {
-		if strings.HasPrefix(method, prefix) {
-			return true
-		}
-	}
-	return false
 }

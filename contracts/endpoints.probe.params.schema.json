@@ -21,7 +21,8 @@
     },
     "key": {
       "type": "string",
-      "maxLength": 8000
+      "maxLength": 8000,
+      "description": "Credential material used to authenticate requests to the endpoint."
     },
     "model": {
       "type": "string",

@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/ack.params.schema.json",
+  "title": "AckParams",
+  "description": "Params for acknowledging consumed terminal output.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId"],
+  "properties": {
+    "sessionId": { "type": "string", "pattern": "^[0-9a-fA-F]{32}$" },
+    "offset": { "type": "integer", "minimum": 0 }
+  }
+}

@@ -24,6 +24,9 @@ form describes that method's result.
   generating Go wire DTOs would either infect the domain types or need a mapping layer
   neither of which this seam has earned. `additionalProperties: false` plus `required`
   makes the check exact in both directions: an extra field fails, a missing one fails.
+- **Request params.** Every registered JSON-RPC method has a corresponding
+  `.params.schema.json`; `internal/transport` cross-checks each schema's accepted and
+  rejected payloads against that method's registered validator.
 
 ## What runs, and where
 
@@ -78,10 +81,6 @@ is the same class of bug as `nocx-25k9.14` and would have thrown on the renderer
 ## Deliberately out of scope
 
 - **The binary data plane** (AD-1). It has no JSON shape to pin.
-- _*Params, except for the initial notes.* and snippets._ slice.** Params contracts now
-  exist for those eleven registered methods, and `internal/transport` proves each
-  schema's rejected shapes are rejected by that method's registered validator. The
-  remaining registered methods are listed in `params-unswept.txt` for the later sweep.
 - **OpenRPC.** It is the protocol-native way to describe a whole JSON-RPC surface and is
   worth adopting when method-level metadata starts being duplicated — not to fix one
   response shape.

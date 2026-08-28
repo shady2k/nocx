@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.request.read.params.schema.json",
+  "title": "APIRequestReadParams",
+  "description": "Params for api.request.read.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["handle", "relPath"],
+  "properties": {
+    "handle": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "relPath": { "type": "string", "minLength": 1, "maxLength": 4096 }
+  }
+}

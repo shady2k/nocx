@@ -26,11 +26,13 @@
     },
     "key": {
       "type": "string",
-      "maxLength": 8000
+      "maxLength": 8000,
+      "description": "Credential material used to authenticate requests to the endpoint."
     },
     "credential": {
       "type": "string",
-      "maxLength": 512
+      "maxLength": 512,
+      "description": "Stored credential reference used by the endpoint."
     },
     "models": {
       "type": "array",

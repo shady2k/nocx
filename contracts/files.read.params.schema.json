@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files.read.params.schema.json",
+  "title": "FilesReadParams",
+  "description": "Params for files.read.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bindingId", "path", "maxBytes"],
+  "properties": {
+    "bindingId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "path": { "type": "string", "pattern": "^/", "maxLength": 4096 },
+    "maxBytes": { "type": "integer", "minimum": 0 }
+  }
+}

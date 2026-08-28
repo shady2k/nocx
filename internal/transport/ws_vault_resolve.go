@@ -29,8 +29,9 @@ import (
 )
 
 // vaultResolveLineParams is the request: the line to substitute references
-// in. There is deliberately no params schema (contracts/README.md): the
-// handler is the check.
+// in. The earlier decision to leave this thin request unpinned was wrong:
+// vault.resolveLine.params.schema.json is now the wire contract, and its
+// registered validator remains runtime enforcement.
 type vaultResolveLineParams struct {
 	Line string `json:"line"`
 }

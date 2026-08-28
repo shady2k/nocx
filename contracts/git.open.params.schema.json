@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/git.open.params.schema.json",
+  "title": "GitOpenParams",
+  "description": "Params for git.open.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId"],
+  "properties": {
+    "sessionId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "cwd": { "type": "string", "pattern": "^/", "maxLength": 4096 }
+  }
+}

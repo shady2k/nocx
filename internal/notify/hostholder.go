@@ -10,7 +10,7 @@ import (
 // correct answer.
 //
 // The table is fixed at NewRouter: the router is the only holder of "where"
-// (ADR-0029 §2.3), and a table that could grow rows later would put that
+// (ADR-0047 §2.3), and a table that could grow rows later would put that
 // authority somewhere else. But the desktop attention surface cannot be
 // constructed at the same moment — the Wails runtime locates the frontend
 // through a context value that exists only inside the lifecycle hooks, so

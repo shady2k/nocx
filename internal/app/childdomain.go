@@ -27,7 +27,7 @@ package app
 //     stillborn-activates (§9) — asserted by the fd-closed su test. The
 //     full reasoning lives at the launcher site in nocx.bash/nocx.zsh.
 //   - ssh: the bootstrap is the user's OWN `ssh` invocation with two
-//     multiplex options added — ADR-0035, "the channel we own is the
+//     multiplex options added — ADR-0049, "the channel we own is the
 //     carrier" — carrying the child's forwarded lifecycle port as a -R
 //     reverse forward on that same connection and, as its remote command,
 //     the bounded loader. Nothing of variable size and no secret travels in

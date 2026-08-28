@@ -62,7 +62,7 @@ const assemblySID = "aabbccddeeff00112233445566778899"
 
 var (
 	// childCapRe finds a per-epoch capability. It is no longer looked for in
-	// the composed LINE — ADR-0035 took both bearers out of the command, and
+	// the composed LINE — ADR-0049 took both bearers out of the command, and
 	// requestChild now asserts their absence — but in FRAME 2, which the
 	// delivery writes onto the parent's terminal after ownership of the
 	// multiplex socket has been proven. That is where the harness learns the
@@ -352,7 +352,7 @@ type sshChildHarness struct {
 	childCap   lifecycle.Capability
 	// win is the parent's terminal as the typed delivery sees it: the
 	// window the frames travel on, and where the harness learns the child's
-	// capability from (ADR-0035 took it out of the composed line).
+	// capability from (ADR-0049 took it out of the composed line).
 	win        *harnessWindow
 	childLPort int // the listener transport's local port (the -R target)
 	childRPort int // the remote bind the sshd opens (CPORT)
@@ -575,7 +575,7 @@ func (h *sshChildHarness) requestChild(host string, port int, user string) {
 	h.childEpoch = grant.Epoch
 	h.bootstrap = grant.Bootstrap
 
-	// ADR-0035's whole subject: neither bearer travels in the command, and
+	// ADR-0049's whole subject: neither bearer travels in the command, and
 	// neither does the bundle. The line's only 64-hex value is the stage-1
 	// DIGEST, which names public bytes; a capability there would reach the
 	// far host's process arguments and every recorder of the exec request,

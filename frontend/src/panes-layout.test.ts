@@ -536,7 +536,7 @@ describe('the session names the pane it is the pipe of (nocx-rtg0.29)', () => {
   })
 })
 
-// ── WHICH TAB IS IN FRONT (nocx-mqie.4, ADR-0033) ──────────────────────────
+// ── WHICH TAB IS IN FRONT (nocx-mqie.4, ADR-0048) ──────────────────────────
 //
 // The chain says which tabs exist; it does not say which one a person was
 // looking at, and it must not — a window is a viewport and two windows on one

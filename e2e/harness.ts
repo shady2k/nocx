@@ -29,7 +29,7 @@ export async function promptReady(page: Page): Promise<void> {
  * Put the sidebar on `viewId` and leave it there.
  *
  * IDEMPOTENT ON PURPOSE, because the activity-bar button is a TOGGLE and the
- * sidebar's active view is now PERSISTED (nocx-mqie.1, ADR-0033): a spec that
+ * sidebar's active view is now PERSISTED (nocx-mqie.1, ADR-0048): a spec that
  * reloads mid-test comes back with its view ALREADY showing, and a second
  * unconditional click is then the thing that closes the panel it was asked to
  * open. That is what the notes spec did across its `page.reload()`, and it is
@@ -279,7 +279,7 @@ async function resetStand(): Promise<void> {
     // which is what a toggled-shut panel looks like.
     //
     // Written as the whole document, because `uistate.set` takes the whole
-    // renderer half (ADR-0033) — and to the DECLARED defaults rather than to
+    // renderer half (ADR-0048) — and to the DECLARED defaults rather than to
     // "no view", because they are what a fresh profile has: the panel open on
     // the first registered view. `activeViewId: ''` is repaired to that same
     // first view on mount, so the two agree.

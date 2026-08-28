@@ -93,7 +93,7 @@ unidentifiable while sealed.
 
 ## 3. Binding, and the one data-model change
 
-ADR-0006 exists so that one login can be reused by many connections; that value is kept.
+ADR-0046 exists so that one login can be reused by many connections; that value is kept.
 A card is therefore **not** bound to a host. What binds is the set of connections that
 reference it:
 
@@ -107,7 +107,7 @@ not one card.** A single reference becomes the one-element case, so the migratio
 mechanical.
 
 The alternative — duplicating a card per host so it can carry that host's OTP — destroys
-exactly the reuse ADR-0006 was written for, and is rejected.
+exactly the reuse ADR-0046 was written for, and is rejected.
 
 ### 3.1 Why the owning record has to exist at all
 
@@ -117,7 +117,7 @@ is worth writing down why it does not work, because the record is otherwise easy
 for an extra file somebody chose.
 
 Note first that the simplification is not hypothetical — it is what nocx did originally.
-ADR-0006's Context: "The initial connection manager UI stored authentication settings
+ADR-0046's Context: "The initial connection manager UI stored authentication settings
 (passwords, private keys) inline within each SSH profile. This led to duplication: if a user
 had the same credentials for 10 servers, they had to enter the password 10 times."
 
@@ -437,7 +437,7 @@ _protection is not set up yet_.
 | ADR-0011 §2 / vault §3.1 — no plaintext to the renderer              | unchanged                                                                               |
 | vault §4.1 — opaque minted references, no user-facing entry identity | unchanged; the registry holds no name and no locator                                    |
 | vault §4.1 — no catalogue                                            | **amended**: the vault keeps a registry of its own allocations, for the reason §4 gives |
-| ADR-0006 — reusable credentials                                      | unchanged in value; a connection gains a set of references instead of one               |
+| ADR-0046 — reusable credentials                                      | unchanged in value; a connection gains a set of references instead of one               |
 | vault §5.5 — three vault states                                      | unchanged, and sharpened: sealing is ours and global, reachability is per-provider      |
 | nocx-jb20.1 (P0)                                                     | unchanged and unweakened; provider config and secret references are different things    |
 | nocx-25k9.13                                                         | promoted from a wording defect to a prerequisite                                        |

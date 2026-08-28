@@ -45,7 +45,7 @@ const NEW_TAB = '[aria-label="New tab"]'
 const test = base
 
 /** The persisted active tab in the backend's uistate.json — the durable
- *  seam. It is a UI-state document and not a setting (ADR-0033): which tab
+ *  seam. It is a UI-state document and not a setting (ADR-0048): which tab
  *  was in front is not a decision anybody made. */
 function persistedActiveTab(backend: VaultBackend): unknown {
   try {

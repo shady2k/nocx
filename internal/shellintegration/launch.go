@@ -160,7 +160,7 @@ func launchSourceLine(name string) string {
 // does not (AD-8). Neither bearer appears in any of the three: the capability
 // and the fence reach the far shell through an inherited descriptor, which is
 // what capabilityFromDescriptor renders and what the per-tier ARG METHODS
-// that used to build these payloads did not (ADR-0035).
+// that used to build these payloads did not (ADR-0049).
 //
 // envBlock is the session environment the tier exports. The carrier passes ""
 // — it is published once and reused by every session, so it can carry nothing

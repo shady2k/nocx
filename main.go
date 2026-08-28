@@ -79,7 +79,7 @@ func main() {
 	// minimising (nocx-dqg; cf. wailsapp/wails#1319). We keep the hidden
 	// title and full-size content, and lose only the extra inset of the
 	// traffic lights.
-	// THE SIZE THE WINDOW OPENS AT, from the UI-state document (ADR-0033).
+	// THE SIZE THE WINDOW OPENS AT, from the UI-state document (ADR-0048).
 	// Wails wants it before there is a window, and therefore before the screen
 	// manager can say what is attached — so this pass takes the saved size and
 	// the minimum, and `restoreWindow` does the display-aware half once the
@@ -255,7 +255,7 @@ func (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOpti
 	w.backend.SetUrlOpener(&wailsUrlOpener{app: application.Get()})
 
 	// The desktop attention surface, behind the notify router's banner route
-	// (ADR-0029). Same shape as the two above and for the same reason: the
+	// (ADR-0047). Same shape as the two above and for the same reason: the
 	// v3 notifications service locates its D-Bus connection here. Wired
 	// before Start, so no raise can observe the unset state; the dev-web
 	// harness and cmd/devharness never run this, and their raises stay

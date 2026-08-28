@@ -1,4 +1,4 @@
-// Notify RPC client — the renderer's path to notify.raise (ADR-0029).
+// Notify RPC client — the renderer's path to notify.raise (ADR-0047).
 // Sibling of DialogClient/LifecycleClient over the same Dispatcher.
 //
 // A program in a pane asks nocx to present a message by writing OSC 9 or
@@ -38,7 +38,7 @@ export class NotifyClient {
    *  the pipeline refusing the delivery.
    *
    *  A SECOND METHOD, not a kind argument on raise(). The event's kind is
-   *  stamped from the method invoked (ADR-0029 §2.2), and ingress authority
+   *  stamped from the method invoked (ADR-0047 §2.2), and ingress authority
    *  is closed: no renderer-callable method may produce an attested event.
    *  A `kind` parameter would hand the choice to the caller, which is the
    *  same forging one level up — so the method name is the choice, and this
@@ -60,7 +60,7 @@ export class NotifyClient {
    *  pipeline refusing the delivery.
    *
    *  A THIRD METHOD, for the reason there is a second: the event's kind is
-   *  stamped from the method invoked (ADR-0029 §2.2), and here that also
+   *  stamped from the method invoked (ADR-0047 §2.2), and here that also
    *  stamps its TRUST. This is the pipeline's only heuristic source, and
    *  heuristic is what confines it to local attention and keeps it off push
    *  (§3.1) — so a caller able to choose its kind could have chosen one

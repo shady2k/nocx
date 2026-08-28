@@ -9,7 +9,7 @@
 - **Reads:** AD-5, AD-6, AD-8, [`ADR-0015`](../../docs/decisions/0015-ssh-g-as-the-ssh-config-oracle.md),
   [`ADR-0025`](../../docs/decisions/0025-domain-request-carries-the-destination-not-the-options.md),
   [the multiplex spike](../reports/nocx-mlm7-spike-multiplex.md)
-- **Superseding ADR:** [`ADR-0035`](../../docs/decisions/0035-the-channel-we-own-is-the-carrier.md)
+- **Superseding ADR:** [`ADR-0049`](../../docs/decisions/0049-the-channel-we-own-is-the-carrier.md)
   (accepted 2026-08-20) — ADR-0022 is superseded there, ADR-0024 amended in its own file.
 - **Approved 2026-08-21:** two amendments proposed 2026-08-20 by `nocx-m8jwn.7`
   from measurements taken since this document was approved — **A** in §6.4 (the

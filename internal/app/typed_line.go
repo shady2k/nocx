@@ -21,7 +21,7 @@ import (
 )
 
 // The typed-`ssh` path: a host reached by typing `ssh` by hand comes up
-// integrated, through a connection nocx owns (ADR-0035, design §4.3).
+// integrated, through a connection nocx owns (ADR-0049, design §4.3).
 //
 // What the binding texts already decided, before this says what it builds.
 // AD-6 gives the backend the PTY and forbids it to sniff the byte stream;

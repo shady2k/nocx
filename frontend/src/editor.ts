@@ -13,7 +13,7 @@
 // keymap at Prec.highest is W2's job; W1 only preserves today's behaviour.
 
 import { Compartment, EditorState, Extension } from '@codemirror/state'
-import { EditorView, keymap } from '@codemirror/view'
+import { drawSelection, EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
 import { setSecretCandidate } from './secret-candidate'
 import {
@@ -256,14 +256,24 @@ export class CommandEditor {
   /**
    * The editor's own surface styling. Kept as a CM6 theme (not style.css)
    * because a theme extension deterministically overrides the base theme,
-   * which is what these two rules must do: kill the base theme's dotted focus
-   * outline (the textarea had `outline: none`) and paint the caret in the
-   * app's text colour (the base theme uses black/white).
+   * which is what these rules must do: kill the base theme's dotted focus
+   * outline (the textarea had `outline: none`) and paint the caret and the
+   * selection in the app's own colours (the base theme uses black/white and
+   * a pair of hard-coded greys).
+   *
+   * The selection colour is `--terminal-selection` and not a second token of
+   * its own: the composer is a surface INSIDE the terminal, sharing its font
+   * and its colours, and "what a selection looks like here" already has an
+   * owner. A new token would be a second answer to that question, per theme.
    */
   private static readonly editorTheme = EditorView.theme({
     '&.cm-focused': { outline: 'none' },
     '.cm-content': { caretColor: 'var(--color-text)' },
     '.cm-cursor': { borderLeftColor: 'var(--color-text)' },
+    '.cm-selectionBackground': { background: 'var(--terminal-selection)' },
+    '&.cm-focused > .cm-scroller > .cm-selectionLayer .cm-selectionBackground': {
+      background: 'var(--terminal-selection)',
+    },
   })
 
   /**
@@ -394,6 +404,25 @@ export class CommandEditor {
         doc: '',
         extensions: [
           EditorView.lineWrapping,
+          // THE COMPOSER DRAWS ITS OWN CARET, and the engine draws none.
+          //
+          // A native caret is painted by the browser, outside the DOM, and
+          // WKWebView does not always invalidate the rectangle it painted it
+          // in: remove the inline widget the caret was standing next to — the
+          // completion ghost, the only one this editor has — and the pixels
+          // stay behind. What the owner saw was a second caret that did not
+          // blink and did not move, at the position the caret held before the
+          // erase, cleared by any repaint of the content and by nothing else
+          // (nocx-dvdfx: the bead assumed a second caret-owning surface; the
+          // evidence says there is only one caret and one stale painting).
+          //
+          // drawSelection makes the caret a DOM element CM positions from its
+          // own state and hides the native one (`caret-color: transparent`),
+          // so there is no browser-painted rectangle to be left behind — the
+          // defect is removed rather than repainted over. It also makes the
+          // `.cm-cursor` rule in editorTheme live: it was written for this
+          // extension and had been vestigial since.
+          drawSelection(),
           // Undo, and it belongs to the editor's own identity rather than to
           // whatever the caller installs: `@codemirror/commands` was a
           // dependency and `history()` was installed nowhere, so Ctrl+Z in

@@ -187,3 +187,8 @@ vitest_containerized() {
             exec setpriv --reuid="$RUN_UID" --regid="$RUN_GID" --clear-groups sh -euc "$INNER"
         '
 }
+
+# --- one containerized gate at a time, machine-wide --------------------------
+# Shared with scripts/ci-linux.sh, scripts/ci-frontend.sh and
+# e2e/run-in-container.sh; see scripts/gate-lock.sh for why it is shared.
+. "$(dirname "$0")/../scripts/gate-lock.sh"

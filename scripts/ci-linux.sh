@@ -50,7 +50,19 @@ REPO="$(CDPATH='' cd -- "$(dirname -- "$0")/.." && pwd)"
 #
 # Set NOCX_CI_CPUS to a number to cap it again while bisecting a suspected
 # concurrency defect. That is a debugging tool, not the gate.
-CPUS="${NOCX_CI_CPUS:-0}"
+# Capped by default. AGENTS.md argues at length that a cap "does not produce
+# the runner, it produces a third machine", and that argument still holds for
+# what the gate MEASURES. It says nothing about what the gate COSTS the person
+# running it: uncapped, this job takes every core on a laptop that is also
+# running five agents. NOCX_CI_CPUS=0 restores the uncapped run when the
+# machine is yours alone or a timing bug is being bisected.
+CPUS="${NOCX_CI_CPUS:-4}"
+
+# One heavy containerized run at a time on this machine.
+. "$(dirname "$0")/gate-lock.sh"
+trap gate_lock_release EXIT INT TERM
+gate_lock_acquire
+
 
 RUN_KEYRING=1
 RUN_NO_KEYRING=1
@@ -93,7 +105,7 @@ if [ "$CPUS" = 0 ]; then
     CPU_LABEL="every core"
 else
     CPU_FLAG="--cpus=$CPUS"
-    CPU_LABEL="$CPUS cpus (capped by NOCX_CI_CPUS — a debugging aid, not the gate)"
+    CPU_LABEL="$CPUS cpus (NOCX_CI_CPUS; 0 to uncap)"
 fi
 
 run_variant() {

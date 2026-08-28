@@ -565,8 +565,9 @@ func (f *fakeContentDB) Ledger() content.LedgerRepository              { return 
 
 // Layout is unused by these tests: the fake predates the layout chain and no
 // capability reaches it (nocx-isoph.1).
-func (f *fakeContentDB) Layout() content.LayoutRepository  { return nil }
-func (f *fakeContentDB) APIRuns() content.APIRunRepository { return nil }
+func (f *fakeContentDB) Layout() content.LayoutRepository               { return nil }
+func (f *fakeContentDB) APIRuns() content.APIRunRepository              { return nil }
+func (f *fakeContentDB) SessionOutput() content.SessionOutputRepository { return nil }
 
 // fakeReset is a capability.VaultReset recorder.
 type fakeReset struct {

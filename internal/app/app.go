@@ -997,6 +997,15 @@ func New(opts ...Option) (*App, error) {
 				if v, getErr := settingsRegistry.GetNumber(settings.HistoryOutputCapKB); getErr == nil {
 					historyPolicy.SetOutputCapBytes(int(v) << 10)
 				}
+				// AFTER the policy, and in this order deliberately: what
+				// history.status says about a detached session's output is
+				// read live off the policy, so announcing first would carry
+				// the value the person just replaced. Two of these switches
+				// decide whether a session with no window keeps running at
+				// all, and a person flipping one is owed the consequence on
+				// the screen in front of them rather than in a log
+				// (ws_history_status.go, Restate).
+				historyStatus.Restate()
 			}
 		}
 	})
@@ -1094,6 +1103,13 @@ func New(opts ...Option) (*App, error) {
 		transport.WithLiveEffects(agenttools.LiveEffects()),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithContentDB(contentDB),
+		// The durable sink for what a session prints while nothing is
+		// attached (nocx-22k1c.1). It is the replay ring's consumer in that
+		// interval, so a session whose window is closed keeps running past
+		// the ring's 256 KiB instead of throttling on acks that will never
+		// come. With the store stubbed — no content key — the stub records
+		// nothing and says so, and history.status carries the consequence.
+		transport.WithSessionOutputRecorder(contentDB.SessionOutput()),
 		transport.WithHistoryStatus(historyStatus),
 		transport.WithProber(&proberAdapter{client: sshClient}),
 		transport.WithProfileService(profileSvc),

@@ -90,6 +90,12 @@ func (rx *sessionRx) setSubscriber(wconn *wsConn, state *connState) (*wsConn, *c
 	prevConn, prevState := rx.subscriber, rx.subState
 	rx.subscriber = wconn
 	rx.subState = state
+	// The ring is told, because it has two consumers now and only one of
+	// them is allowed to free it on nobody's behalf (nocx-22k1c.1). This
+	// mutator and clearSubscriber are the flag's only writers, which is what
+	// keeps it a mirror of the slot rather than a second answer to "is
+	// anybody attached".
+	rx.ring.setAttached(true)
 	return prevConn, prevState
 }
 
@@ -111,6 +117,11 @@ func (rx *sessionRx) clearSubscriber(wconn *wsConn) {
 	if rx.subscriber == wconn {
 		rx.subscriber = nil
 		rx.subState = nil
+		// THE MOMENT THE INTERVAL OPENS. From here until a subscriber is
+		// installed again, the ring's consumer is the recorder, and a writer
+		// already parked against a client that will never ack is released by
+		// the signal this sends.
+		rx.ring.setAttached(false)
 	}
 }
 
@@ -507,6 +518,12 @@ type WSServer struct {
 	// last-used timestamps are unavailable (nocx-uxs5.4).
 	profileUsage session.ProfileUsageTracker
 
+	// sessionRecorder is the durable sink for what a session printed
+	// (ws_session_record.go). Nil means nothing records, the ring is freed
+	// by client acks alone, and a detached session throttles once the ring
+	// fills — which the History settings section states rather than only a
+	// log line.
+	sessionRecorder SessionOutputRecorder
 	// contentDB is the durable content store backing history.query. When
 	// nil, the method answers source=unavailable — the overlay then says
 	// durable history is not running instead of presenting the in-memory
@@ -2809,6 +2826,15 @@ func (s *WSServer) pumpToRing(ctx context.Context, sess session.Session, ring *o
 	// lives connection-independently, so "closing the frontend does not stop
 	// it being fed" is a property of the placement rather than a promise
 	// (nocx-szb40.2). An unenrolled session drops the bytes at a map lookup.
+	// The recorder is started HERE, beside the pump and for the same reason
+	// the grid is fed here: this call is per session and connection-
+	// independent, so "the recording does not stop when the window closes"
+	// is a property of the placement rather than a promise (nocx-22k1c.1).
+	// It is the consumer that keeps ring.write from blocking with nobody
+	// attached, so it has to exist before the first byte, not after the
+	// first attach. It ends itself when the ring closes.
+	go s.recordSessionOutput(ctx, sess.ID(), ring)
+
 	err := sess.StartOutput(ctx, func(data []byte) error {
 		s.feedPaneGrid(sess.ID(), data)
 		return ring.write(data)
@@ -2864,7 +2890,7 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 		// Wait until the in-flight window has room (AD-10). The ring owns
 		// the predicate; acked may legitimately exceed pos after a large
 		// ack on reattach, which counts as no bytes unacked.
-		if ring.waitForCredit(ctx, pos, CreditLimit) {
+		if ring.waitForCredit(ctx, startOffset, pos, CreditLimit) {
 			return
 		}
 

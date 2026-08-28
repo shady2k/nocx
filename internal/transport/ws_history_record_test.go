@@ -52,10 +52,11 @@ func (f *fakeRecordHistoryDB) Conversations() content.ConversationRepository { r
 func (f *fakeRecordHistoryDB) Backup(_ context.Context, _ string) error {
 	return content.ErrNotImplemented
 }
-func (f *fakeRecordHistoryDB) Close() error                      { return nil }
-func (f *fakeRecordHistoryDB) Ledger() content.LedgerRepository  { return f }
-func (f *fakeRecordHistoryDB) Layout() content.LayoutRepository  { return nil }
-func (f *fakeRecordHistoryDB) APIRuns() content.APIRunRepository { return nil }
+func (f *fakeRecordHistoryDB) Close() error                                   { return nil }
+func (f *fakeRecordHistoryDB) Ledger() content.LedgerRepository               { return f }
+func (f *fakeRecordHistoryDB) Layout() content.LayoutRepository               { return nil }
+func (f *fakeRecordHistoryDB) APIRuns() content.APIRunRepository              { return nil }
+func (f *fakeRecordHistoryDB) SessionOutput() content.SessionOutputRepository { return nil }
 
 // RecordCompleted mints the entry id the backend owns (the renderer sends
 // none) and keeps the row the way the store does: the intent, its resolved

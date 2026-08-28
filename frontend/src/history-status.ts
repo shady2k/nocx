@@ -128,6 +128,44 @@ export function historyDiscardSentence(
 }
 
 /**
+ * What to say about a DETACHED session's output, or null when it is being
+ * kept (nocx-22k1c.1).
+ *
+ * A THIRD FACT, kept apart from the two above for the reason they are kept
+ * apart from each other. The first says durable history is down; the second
+ * says a working history starts from nothing; this one says a session whose
+ * window is closed will STOP — which is a statement about the terminal, not
+ * about the history panel, and the only place the person can learn it is
+ * beside the switch that caused it.
+ *
+ * The mechanism, in one line: the backend buffers a detached session's output
+ * and frees that buffer either when a client acknowledges the bytes or when
+ * the recorder writes them down. With no client and no recorder there is
+ * nobody to free it, so the session throttles once it fills. That is the
+ * deliberate choice — nothing is ever dropped — and it is exactly why it has
+ * to be said out loud.
+ */
+export function detachedOutputSentence(
+  status: HistoryStatus | null,
+): HistoryUnavailableSentence | null {
+  if (status === null || status.detachedOutput.recorded) return null
+  const cause =
+    status.detachedOutput.reason === 'outputOff'
+      ? 'Command output is not being kept'
+      : 'History is turned off'
+  return {
+    // Said in the terms the person is in: they are looking at switches about
+    // keeping things, and this is the one consequence of those switches that
+    // is not about keeping things at all.
+    title: 'Sessions keep running only while a window is open',
+    description:
+      `${cause}, so there is nowhere to write what a session prints while its window is closed. ` +
+      'Such a session pauses once its output buffer fills and continues when a window is opened on it again. ' +
+      'Nothing it printed is lost.',
+  }
+}
+
+/**
  * What the recall panel puts in its empty list when there is no store to
  * answer from — the third state of `source`, distinct from "the store
  * answered and had nothing".
@@ -228,7 +266,9 @@ function sameStatus(a: HistoryStatus | null, b: HistoryStatus | null): boolean {
     a.available === b.available &&
     a.reason === b.reason &&
     a.detail === b.detail &&
-    a.discarded === b.discarded
+    a.discarded === b.discarded &&
+    a.detachedOutput.recorded === b.detachedOutput.recorded &&
+    a.detachedOutput.reason === b.detachedOutput.reason
   )
 }
 
@@ -250,5 +290,26 @@ function asHistoryStatus(params: unknown): HistoryStatus | null {
     // commands you lost" is a number or it is nothing, and a NaN rendered
     // into that sentence would be worse than not saying it.
     discarded: typeof discarded === 'number' && Number.isInteger(discarded) ? discarded : null,
+    detachedOutput: asDetachedOutput(p.detachedOutput),
+  }
+}
+
+/** Narrow the detached-output half of an untrusted payload.
+ *
+ *  A malformed or absent one reads as "being recorded", which is the quiet
+ *  answer: this surface exists to WARN, and a warning invented from a
+ *  payload nobody could parse would put a sentence about a stopped session in
+ *  front of somebody whose sessions are fine. The push is dropped whole a few
+ *  lines above when it is not an object at all; this is the field-level
+ *  version of the same rule. */
+function asDetachedOutput(raw: unknown): HistoryStatus['detachedOutput'] {
+  if (typeof raw !== 'object' || raw === null) return { recorded: true, reason: null }
+  const d = raw as Record<string, unknown>
+  if (typeof d.recorded !== 'boolean') return { recorded: true, reason: null }
+  const reason = d.reason
+  return {
+    recorded: d.recorded,
+    reason:
+      typeof reason === 'string' ? (reason as HistoryStatus['detachedOutput']['reason']) : null,
   }
 }

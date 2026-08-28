@@ -14,11 +14,13 @@ import (
 	"context"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/bootstrapstream"
 	"github.com/shady2k/nocx/internal/log"
 )
 
@@ -64,8 +66,8 @@ func TestBootstrapWindow_ADeadlineConsumesNothing(t *testing.T) {
 	defer func() { _ = w.Close() }()
 
 	feed("half a li")
-	if _, err := w.ReadLine(context.Background(), time.Millisecond); !errors.Is(err, ErrBootstrapDeadline) {
-		t.Fatalf("ReadLine returned %v, want ErrBootstrapDeadline", err)
+	if _, err := w.ReadLine(context.Background(), time.Millisecond); !errors.Is(err, bootstrapstream.ErrDeadline) {
+		t.Fatalf("ReadLine returned %v, want bootstrapstream.ErrDeadline", err)
 	}
 	feed("ne\n")
 	got, err := w.ReadLine(context.Background(), time.Second)
@@ -243,4 +245,23 @@ func windowSession(t *testing.T, w BootstrapWindow) *realSession {
 		t.Fatalf("window is %T, want *bootstrapWindow", w)
 	}
 	return bw.sess
+}
+
+// TestBootstrapWindow_AnOverBoundLineSaysWhatItIs is internal/ssh's assertion
+// one transport over: a local far side that writes past the bound with no line
+// ending has not ended anything, and the error the driver reads with errors.Is
+// must say so. Both readers raise one shared value, because a private copy of
+// a sentinel is a comparison that is false for every session ever opened.
+func TestBootstrapWindow_AnOverBoundLineSaysWhatItIs(t *testing.T) {
+	w, feed, _ := newWindowFixture(t)
+	defer func() { _ = w.Close() }()
+
+	feed(strings.Repeat("x", maxWindowLine+1))
+	_, err := w.ReadLine(context.Background(), time.Second)
+	if !errors.Is(err, bootstrapstream.ErrLineTooLong) {
+		t.Fatalf("ReadLine err = %v, want it to be bootstrapstream.ErrLineTooLong", err)
+	}
+	if got := err.Error(); !strings.Contains(got, strconv.Itoa(maxWindowLine)) {
+		t.Errorf("error %q does not name the bound; the log cannot say how much arrived", got)
+	}
 }

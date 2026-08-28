@@ -68,6 +68,7 @@ import { KIND_LABELS } from './secret-kind'
 import { NATIVE_RESTORE } from './native-mode'
 import { isInteractiveTransition, extractDestination } from './ssh-transition'
 import { shouldCopy, type ClipboardAccess, type ClipboardGate } from './clipboard'
+import { attachTerminalLinks } from './terminal-links'
 import type { ClipboardBanner } from './banner'
 import { ScrollbackController } from './scrollback/controller'
 import type {
@@ -861,6 +862,9 @@ export class TerminalContent extends BasePaneContent {
 
   // _readyPromise resolves true when the renderer mounts and the PTY session
   // opens; resolves false when mount() throws. Never rejects.
+  /** Detaches this tab's link surfaces (terminal-links/): the scrollback's
+   *  click listeners and the renderer's link policy. */
+  private _detachLinks: (() => void) | null = null
   private readonly _readyPromise: Promise<boolean>
   /** The drop gesture's detach, held for dispose. */
   private _dropDetach: (() => void) | null = null
@@ -3157,6 +3161,18 @@ export class TerminalContent extends BasePaneContent {
 
       this.renderer = renderer
 
+      // ── Clickable paths and urls (nocx-8yg.8) ─────────────────────────
+      // Both halves of the terminal at once: the DOM scrollback's ⌘-click
+      // and the live grid's link policy. Attached here because this is the
+      // first point where the renderer and the scrollback both exist, and
+      // detached in dispose() — the listeners close over THIS tab's origin,
+      // and a pane that leaked them would resolve a later click against a
+      // session that is gone.
+      const scrollbackArea = this.scrollback?.scrollbackArea
+      if (scrollbackArea) {
+        this._detachLinks = attachTerminalLinks(scrollbackArea, renderer, () => this.activeOrigin())
+      }
+
       // ── Native-mode escape (Ctrl/Cmd+Shift+.) ─────────────────────────
       target.addEventListener('keydown', (e: KeyboardEvent) => {
         if (e.key === '.' && (e.metaKey || e.ctrlKey) && e.shiftKey) {
@@ -4756,6 +4772,8 @@ export class TerminalContent extends BasePaneContent {
 
   dispose(): void {
     this._disposed = true
+    this._detachLinks?.()
+    this._detachLinks = null
     this._pendingReadFrame = null
     this._readPinnedFrame = null
     this._mounted = false

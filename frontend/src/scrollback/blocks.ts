@@ -25,6 +25,7 @@ import { createAnswerBody, type AnswerBody } from './answer-body'
 import { toolCallTitle } from './tool-call-title'
 import { paintShellInto } from './shell-paint'
 import { mountDumpPanel } from '../ui/dump-panel'
+import { decorateLinks } from '../terminal-links/decorate'
 // ── Clipboard helper ────────────────────────────────────────────────────────
 
 async function copyToClipboardImpl(text: string): Promise<void> {
@@ -1347,6 +1348,13 @@ export function createCommandBlock(
     outputEl = document.createElement('div')
     outputEl.className = rules.outputClass
     outputEl.innerHTML = outputHtml
+    // Paths and urls become clickable HERE, once, at freeze — the rows are
+    // fixed from this moment and never re-serialized, so a pass per block
+    // beats a pass per click. The gesture itself is attached once per tab
+    // (terminal-links/surface.ts); this only puts the elements in reach of
+    // it. The grammar is shared with the live xterm surface rather than
+    // spelled twice — see terminal-links/detect.ts for why that matters.
+    decorateLinks(outputEl)
   }
 
   // A kind that draws no header draws no ⋮ either — the button lives in the

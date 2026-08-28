@@ -60,8 +60,12 @@ import (
 // request exactly once, on whichever goroutine settles the op (the read loop
 // for a superseded op, the lane worker for an applied or cancelled one).
 type resizeOp struct {
-	cols, rows, xpixel, ypixel uint16
-	done                       func(err error) // err nil = success
+	// reported is the geometry the CLIENT measured. It is not the size the
+	// session will take: the session decides that (session.Size,
+	// nocx-eidfb.1), and what it decided is read back off the session after
+	// the apply rather than assumed here.
+	reported session.Size
+	done     func(err error) // err nil = success
 }
 
 // sessionLane serializes one session's resize work behind a terminal close
@@ -190,9 +194,14 @@ func (l *sessionLane) worker() {
 // out from under a running apply without a race; the local copy keeps the
 // session alive until the resize returns.
 func (l *sessionLane) apply(sess session.Session, op *resizeOp) {
-	err := sess.Resize(l.ctx, op.cols, op.rows, op.xpixel, op.ypixel)
+	err := sess.Resize(l.ctx, op.reported)
 	if err == nil && l.resized != nil {
-		l.resized(op.cols, op.rows)
+		// The size the session TOOK, not the one the client reported: the
+		// backend owns the decision (nocx-eidfb.1) and the grid follows the
+		// pane's real geometry, so a report the session did not adopt must
+		// not be what the grid is resized to.
+		applied := sess.EffectiveSize()
+		l.resized(applied.Cols, applied.Rows)
 	}
 
 	l.mu.Lock()

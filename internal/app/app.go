@@ -24,6 +24,7 @@ import (
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apisend"
+	"github.com/shady2k/nocx/internal/app/clienthost"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/bootstrapprogress"
@@ -174,14 +175,14 @@ type App struct {
 	UIState *uistate.Store
 
 	// slogger is the same logger Logger wraps, kept so an adapter built
-	// outside this package (main.go's attention host) writes to the log file
-	// rather than to slog.Default(), which nothing here installs.
+	// outside this package (the client-host attention surface) writes to the
+	// log file rather than to slog.Default(), which nothing here installs.
 	slogger *slog.Logger
 }
 
-// Slog returns the backend's structured logger, for adapters constructed in
-// main.go that take a *slog.Logger directly. Prefer the Logger interface
-// everywhere else.
+// Slog returns the backend's structured logger, for adapters built outside
+// this package that take a *slog.Logger directly — the client-host attention
+// surface is the one that does. Prefer the Logger interface everywhere else.
 func (a *App) Slog() *slog.Logger { return a.slogger }
 
 // contentCompactionFloor is the hysteresis fraction of the disk ceiling at
@@ -280,27 +281,34 @@ func clearWindowOnCleanStart(ctx context.Context, reg *settings.Registry, db con
 
 // SetDialogService attaches the native dialog capability (dialog.openFile and
 // dialog.openDirectory — one service, because one native dialog is open at a
-// time). It is wired from main.go's WailsApp.startup — the Wails context it
-// needs only exists there, after the transport was built — and must be called
-// before Start, so no renderer request can observe the unset state.
+// time). It is wired by New, after the transport was built and before Start,
+// so no renderer request can observe the unset state.
+//
+// THE CALLER MOVED AND THE CONTRACT DID NOT. It used to be main.go's
+// WailsApp.startup, because the Wails context the picker needed existed only
+// there and main.go was this process. main.go is another process now (design
+// D3), so the implementation New wires is the client-backed one — it asks an
+// attached client for the picker — and the seam is still what a host without
+// one leaves unset: dialog.* then answers -32601, which is the dev-web
+// harness and the headless suites.
 func (a *App) SetDialogService(ds transport.DialogService) {
 	a.Transport.SetDialogService(ds)
 }
 
 // SetUrlOpener attaches the native URL-open capability (shell.openUrl RPCs).
-// Like SetDialogService it is wired from main.go's WailsApp.startup — the
-// Wails context it needs only exists there, after the transport was built —
-// and must be called before Start, so no renderer request can observe the
-// unset state.
+// Like SetDialogService it is wired by New, after the transport was built and
+// before Start, so no renderer request can observe the unset state, and for
+// the same reason it is now a client-backed implementation rather than a
+// Wails-backed one.
 func (a *App) SetUrlOpener(opener transport.UrlOpener) {
 	a.Transport.SetUrlOpener(opener)
 }
 
 // SetAttentionHost binds the desktop attention surface behind the notify
-// router's banner route (ADR-0047). Like SetDialogService it is wired from
-// main.go's WailsApp.startup — the Wails context the adapter needs exists
-// only there, after the router was built — and must be called before Start,
-// so no raise can observe the unset state.
+// router's banner route (ADR-0047). Like SetDialogService it is wired by New,
+// after the router was built and before Start, so no raise can observe the
+// unset state, and it binds the client-backed surface: the coordinator has no
+// desktop of its own to raise a banner on.
 //
 // It binds an implementation, never a destination. The route was decided when
 // the routing table was built and is not reachable from here; a host that
@@ -323,11 +331,6 @@ func (a *App) SetAttentionHost(host notify.AttentionHost) {
 // the click callback to report that would be worse than dropping it.
 func (a *App) FocusSession(sessionID string) {
 	a.Transport.FocusSession(sessionID)
-}
-
-// Log logs a message from the frontend.
-func (a *App) Log(message string) {
-	a.Logger.Info("frontend: " + message)
 }
 
 type Option func(*optionSet)
@@ -1804,6 +1807,30 @@ func New(opts ...Option) (*App, error) {
 		UIState:          uiStateStore,
 		slogger:          slogger,
 	}
+
+	// ── the client host (nocx-uo1k6, design D3) ────────────────────────
+	//
+	// The native-host capabilities — a file picker, a browser open, a
+	// desktop banner, a window raise — used to be injected here from
+	// main.go, because main.go WAS this process and held the Wails
+	// runtime. It is not this process any more: the coordinator has no
+	// window, only zero or more attached clients. So the same three seams
+	// are wired with implementations that ASK a client (internal/app/
+	// clienthost) and answer honestly when none is attached.
+	//
+	// Wired before Start, exactly as the setters have always required, so
+	// no renderer request and no raise can observe the unset state. The
+	// setters kept their names and their contract; only the caller moved,
+	// from a shell that could inject to the composition root that can.
+	app.SetDialogService(clienthost.NewDialogs(tp))
+	app.SetUrlOpener(clienthost.NewURLs(tp))
+	attention := clienthost.NewAttention(tp, app.Slog(), app.FocusSession)
+	app.SetAttentionHost(attention)
+	// The other half of a banner. The click lands in the client, which is
+	// where the OS delivers it; what it MEANS — raise a window, focus the
+	// pane holding that session — is decided here, on the far side of the
+	// wire from the shell that reported it (AD-3).
+	tp.SetAttentionActivation(attention)
 
 	logger.Info("application initialized")
 	return app, nil

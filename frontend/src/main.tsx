@@ -47,6 +47,7 @@ import { IconButton } from './ui/icon-button'
 import { BellIcon, CheckCircleIcon, PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { mountReadScreenHandler } from './read-screen'
+import { mountClientHost } from './client-host'
 import { mountRunCommandHandler } from './run-command'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
@@ -451,6 +452,15 @@ async function main() {
   // pane that owns its grid; a request for a session no pane holds is
   // answered failed, honestly — never a hang.
   mountReadScreenHandler(dispatcher, (sessionId) => tm.terminalContentForSession(sessionId))
+
+  // -- The client host (nocx-uo1k6, design D3) -------------------------
+  // The coordinator runs as a daemon with no window of its own, so the
+  // native-host capabilities it cannot perform -- a file picker, a browser
+  // open, a desktop banner, a window raise -- are asked of this client and
+  // performed through the Wails bindings. Mounted unconditionally: a client
+  // with no Wails runtime still answers, saying so, because the coordinator
+  // must never be left waiting on a client that cannot act.
+  mountClientHost(dispatcher)
 
   // ── Backend-initiated run requests (nocx-tjppv) ─────────────────────
   // The broker's pull for the headline tool: the backend asks the renderer

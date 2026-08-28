@@ -15,9 +15,12 @@ import (
 	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
+	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 
 	"github.com/shady2k/nocx/internal/coordinator"
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/notify"
+	"github.com/shady2k/nocx/internal/notify/wailsadapter"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/update"
@@ -166,6 +169,19 @@ type WailsApp struct {
 	// updateInfo holds the most recent Check result. Apply takes no
 	// arguments — it applies the update that Check already verified.
 	updateInfo *update.UpdateInfo
+
+	// notifications is the v3 notifications service, started by hand rather
+	// than registered (see ServiceStartup), and torn down in
+	// ServiceShutdown. nil when it never started.
+	notifications *notifications.NotificationService
+
+	// attention is the desktop attention surface this window IMPLEMENTS for
+	// the coordinator (design D3, A1.2). The coordinator has no desktop, so
+	// it asks a client to raise a banner; this is what raises it. nil until
+	// ServiceStartup has built it, and on a host whose notification service
+	// would not start it is still built — every raise then fails loudly per
+	// call, which is the contract that predates the split.
+	attention *wailsadapter.Host
 }
 
 // Log logs a message from the frontend.
@@ -254,10 +270,134 @@ func (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOpti
 		"spawned", launch.Spawned,
 		"replaced", launch.Replaced,
 	)
+	// The desktop attention surface this window implements for the
+	// coordinator (design D3). Built AFTER the launcher, because a window
+	// with no backend quits and never presents anything.
+	w.startAttention(ctx)
+
 	// Whatever the launcher said a person must be told, said. After the
 	// startup path rather than inside it, for the same main-thread reason as
 	// the fatal dialog above.
 	go w.showNotices()
+	return nil
+}
+
+// startAttention brings up the notification surface this window offers the
+// coordinator.
+//
+// The notifications service is started BY HAND rather than registered as a
+// Wails service: a registered service whose ServiceStartup fails aborts
+// app.Run (v3 services.go), and on Linux the service's startup connects the
+// session D-Bus, which a bus-less host lacks. Failing per call is the older
+// contract and the right one — the app starts, and banners on a bus-less host
+// fail loudly per raise. ServiceShutdown is called by the framework because
+// WailsApp is itself a registered service.
+func (w *WailsApp) startAttention(ctx context.Context) {
+	ns := notifications.New()
+	w.notifications = ns
+	notificationsUp := true
+	if err := ns.ServiceStartup(ctx, application.ServiceOptions{}); err != nil {
+		notificationsUp = false
+		w.logger.Warn("notification service unavailable; banners will fail per raise", "error", err)
+	}
+	w.attention = wailsadapter.New(wailsadapter.Deps{
+		Service: ns,
+		Log:     w.logger,
+		// THE ROOT IS THE CALLER WITH REAL KNOWLEDGE, and the adapter's
+		// default says so: v3.0.0-beta.9 exposes no availability probe, so
+		// the default assumes a surface exists and lets every failure land
+		// at send time. This is the caller that has just watched
+		// ServiceStartup fail and written the reason into the log; passing
+		// that verdict on is what stops the host being born NotDetermined
+		// over a service that never started — on macOS that reached
+		// +[UNUserNotificationCenter currentNotificationCenter] in a process
+		// with no bundle, an Objective-C exception Go cannot recover, and
+		// the whole application aborted.
+		IsAvailable: func() bool { return notificationsUp },
+		Focus:       w.reportAttentionActivated,
+	})
+
+	// Resolve the OS's authorization state, and ask for it once when it has
+	// never been asked. Without this the host stays PermissionNotDetermined
+	// for the life of the process and every banner is refused with
+	// ErrNotRequested — including on a machine that has already authorized
+	// nocx.
+	//
+	// Off the startup path deliberately. On macOS the check waits on the OS
+	// for up to 15s and the request for as long as the user takes to answer,
+	// and ServiceStartup runs before the webview loads — inline, either one
+	// would hold the window shut.
+	go w.resolveNotificationPermission(w.attention)
+}
+
+// reportAttentionActivated is what a banner click does in this process, and
+// it is deliberately almost nothing: it tells the renderer, which tells the
+// coordinator (host.attentionActivated).
+//
+// THE SHELL DOES NOT DECIDE WHAT A CLICK MEANS. Which window is raised and
+// which pane is focused depend on which connection holds that session, and
+// only the coordinator knows that — this window may not even be the one
+// showing the pane. Raising the window here would be the shell owning a
+// decision AD-3 keeps on the other side; the coordinator asks for the raise
+// back through window.focus when it has decided.
+//
+// The Wails event is the only channel available: the WebSocket belongs to the
+// renderer, and this callback runs in the shell.
+func (w *WailsApp) reportAttentionActivated(sessionID string) error {
+	if w.window == nil {
+		return fmt.Errorf("notification click: window %q is gone", mainWindowName)
+	}
+	w.window.EmitEvent(attentionActivatedEvent, sessionID)
+	return nil
+}
+
+// resolveNotificationPermission moves the host out of PermissionNotDetermined,
+// which is the state it is born in and the state in which every banner is
+// refused.
+//
+// Refresh first: it never prompts, and on a machine that already authorized
+// nocx — a reinstall, an upgrade, a second launch — it is the whole answer.
+// Only when the OS says authorization was never requested does this prompt,
+// and macOS shows that prompt once per install; an app that never requests
+// also never appears in System Settings > Notifications, so skipping it would
+// leave the user no way to authorize nocx at all.
+//
+// A denial is an outcome, not a failure: it is recorded and the banner route
+// then fails with ErrDenied per raise, which is what the router surfaces as a
+// failed delivery.
+func (w *WailsApp) resolveNotificationPermission(host *wailsadapter.Host) {
+	ctx := context.Background()
+	perm, err := host.Refresh(ctx)
+	if err != nil {
+		// No surface is a STATED outcome, not a failure to read one: the
+		// warning naming the reason has already been logged above, and
+		// repeating it as "could not read" would describe a call that was
+		// deliberately never made.
+		if errors.Is(err, notify.ErrUnavailable) {
+			w.logger.Info("notifications unavailable; no authorization to resolve")
+			return
+		}
+		w.logger.Warn("could not read notification authorization", "error", err)
+		return
+	}
+	if perm == wailsadapter.PermissionNotDetermined {
+		perm, err = host.RequestAuthorization(ctx)
+		if err != nil && !errors.Is(err, wailsadapter.ErrDenied) {
+			w.logger.Warn("notification authorization request failed", "error", err)
+			return
+		}
+	}
+	w.logger.Info("notification authorization resolved", "permission", perm.String())
+}
+
+// ServiceShutdown tears down the manually-started notifications service. The
+// framework calls it because WailsApp is itself a registered service.
+//
+//wails:ignore
+func (w *WailsApp) ServiceShutdown() error {
+	if w.notifications != nil {
+		return w.notifications.ServiceShutdown()
+	}
 	return nil
 }
 
@@ -420,6 +560,118 @@ func (w *WailsApp) GetWSPort() int {
 // daemon's environment (design §6).
 func (w *WailsApp) GetWSToken() string {
 	return w.ws.WSToken
+}
+
+// ── the client host: what this window IMPLEMENTS for the coordinator ──────
+//
+// The coordinator has no window (design §1). A native file picker, a browser
+// open, a desktop banner, a dock badge and a window raise are things only a
+// shell can do, so the coordinator ASKS an attached client for them
+// (host.request) and the client answers (host.resolved). The renderer is the
+// half that speaks the WebSocket; these bindings are the half that speaks the
+// platform, and between them is one hop through the Wails runtime.
+//
+// NOTHING HERE DECIDES ANYTHING (AD-3). Whether a URL may be opened, whether
+// a second picker may stack, which pane a click focuses — every one of those
+// is settled on the coordinator's side before the ask is sent. These methods
+// perform the effect and report what happened, and their errors are the
+// platform's own words.
+
+// attentionActivatedEvent is the Wails event this window emits when a person
+// clicks a banner. The renderer forwards it to the coordinator; see
+// reportAttentionActivated for why the shell does not act on it itself.
+const attentionActivatedEvent = "nocx:attentionActivated"
+
+// HostOpenFile opens the platform file picker and returns the chosen ABSOLUTE
+// path, or "" when the person cancelled.
+//
+// It cannot be dismissed from here — the v3 open dialog has no cancel handle
+// once shown — so the call returns only when the person acts. That is the
+// contract transport.DialogService has always documented for a
+// non-cooperative adapter, and the coordinator's capacity-one waiting gate is
+// what keeps a second picker from stacking meanwhile.
+func (w *WailsApp) HostOpenFile() (string, error) {
+	app := application.Get()
+	if app == nil {
+		return "", errors.New("no Wails application in this process")
+	}
+	return app.Dialog.OpenFile().
+		CanChooseFiles(true).
+		SetTitle("Choose a file").
+		AddFilter("All files", "*").
+		PromptForSingleSelection()
+}
+
+// HostOpenDirectory is the same v3 open dialog restricted to directories:
+// CanChooseFiles(false) is what makes a file unselectable, so a caller
+// expecting a folder cannot be handed one. Same cancellation contract as
+// HostOpenFile.
+func (w *WailsApp) HostOpenDirectory() (string, error) {
+	app := application.Get()
+	if app == nil {
+		return "", errors.New("no Wails application in this process")
+	}
+	return app.Dialog.OpenFile().
+		CanChooseFiles(false).
+		CanChooseDirectories(true).
+		CanCreateDirectories(true).
+		SetTitle("Choose a folder").
+		PromptForSingleSelection()
+}
+
+// HostOpenUrl opens a URL in the system browser. The coordinator has already
+// refused anything that is not an http(s) URL with a host (ws_openurl.go);
+// this side adds no second gate, because a second answer to one question is
+// how the two drift apart.
+func (w *WailsApp) HostOpenUrl(url string) error {
+	app := application.Get()
+	if app == nil {
+		return errors.New("no Wails application in this process")
+	}
+	return app.Browser.OpenURL(url)
+}
+
+// HostBanner presents one desktop notification banner. Title and body reach
+// the OS verbatim; sessionId rides in the notification's payload and comes
+// back on a click.
+func (w *WailsApp) HostBanner(title, body, sessionID string) error {
+	if w.attention == nil {
+		return errors.New("this window has no notification surface")
+	}
+	return w.attention.Banner(context.Background(), notify.Event{
+		Title:     title,
+		Body:      body,
+		SessionID: sessionID,
+	})
+}
+
+// HostBadge sets the dock badge count; 0 clears it. The Wails host does not
+// implement it (nocx-3a40), and it says so loudly rather than pretending to
+// have delivered.
+func (w *WailsApp) HostBadge(count int) error {
+	if w.attention == nil {
+		return errors.New("this window has no notification surface")
+	}
+	return w.attention.Badge(context.Background(), count)
+}
+
+// HostBounce requests the attention bounce. Same absence as HostBadge, same
+// loud error.
+func (w *WailsApp) HostBounce() error {
+	if w.attention == nil {
+		return errors.New("this window has no notification surface")
+	}
+	return w.attention.Bounce(context.Background())
+}
+
+// HostFocusWindow brings this window to the front. The coordinator asks for
+// it when it has decided a click should land here; the shell only raises.
+func (w *WailsApp) HostFocusWindow() error {
+	if w.window == nil {
+		return fmt.Errorf("window %q is gone", mainWindowName)
+	}
+	w.window.Focus()
+	return nil
 }
 
 // CheckForUpdate fetches and verifies the signed release manifest.

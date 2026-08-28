@@ -169,6 +169,15 @@ type WSServer struct {
 	urlMu     sync.RWMutex
 	urlOpener UrlOpener
 
+	// The client-host activation seam (nocx-uo1k6, design D3): what happens
+	// when a person clicks a desktop banner an attached client presented for
+	// this coordinator. Bound post-construction at the composition root,
+	// guarded like the two seams above because a click can arrive while the
+	// root is still wiring. When nil the click is logged and dropped — the
+	// honest degrade for a host with no notification surface.
+	attentionActivationMu sync.RWMutex
+	attentionActivation   AttentionActivation
+
 	// Profile resolver maps profile IDs to SSH connect configs. The holder
 	// is set post-construction (SetProfileResolver): the resolver depends on
 	// the transport, so the operations and handlers built at construction
@@ -1385,6 +1394,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.askResolverSpecs(immediate)...)
 	specs = append(specs, s.laneInteractivitySpec(immediate))
 	specs = append(specs, s.brokerSpecs(immediate)...)
+	specs = append(specs, s.clientHostSpecs(immediate, s.lane)...)
 	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired)...)
 	specs = append(specs, s.backupSpecs(lane, gates.config)...)
 	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)

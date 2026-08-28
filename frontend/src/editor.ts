@@ -15,6 +15,7 @@
 import { Compartment, EditorState, Extension } from '@codemirror/state'
 import { drawSelection, EditorView, keymap } from '@codemirror/view'
 import { defaultKeymap, history, historyKeymap } from '@codemirror/commands'
+import { blockCursor, CURSOR_BLINK_MS, cursorBlinkRate } from './block-cursor'
 import { setSecretCandidate } from './secret-candidate'
 import {
   firstUnresolved,
@@ -267,6 +268,11 @@ export class CommandEditor {
    * owner. A new token would be a second answer to that question, per theme.
    */
   private static readonly editorTheme = EditorView.theme({
+    // The blink period the mark half animates on, handed to the stylesheet
+    // from the one place it is declared (block-cursor.ts). Reduced motion is
+    // NOT handled here — style.css guards its own animation with the media
+    // query, the way the rest of this app's animations are guarded.
+    '&': { '--nocx-cursor-blink': `${CURSOR_BLINK_MS}ms` },
     '&.cm-focused': { outline: 'none' },
     '.cm-content': { caretColor: 'var(--color-text)' },
     '.cm-cursor': { borderLeftColor: 'var(--color-text)' },
@@ -422,7 +428,18 @@ export class CommandEditor {
           // defect is removed rather than repainted over. It also makes the
           // `.cm-cursor` rule in editorTheme live: it was written for this
           // extension and had been vestigial since.
-          drawSelection(),
+          //
+          // The blink rate is passed rather than defaulted because the OTHER
+          // half of this cursor blinks from a stylesheet, and the two must
+          // agree: block-cursor.ts declares the period once and this hands it
+          // to CM6, while editorTheme below hands the same number to the CSS.
+          // It also carries the reduced-motion answer, which has to be
+          // decided here: the layer's animation is an inline `animation-name`
+          // it writes on itself, so no rule in a stylesheet can reach it.
+          drawSelection({ cursorBlinkRate: cursorBlinkRate() }),
+          // …and the cursor it draws is the terminal's block, not a bar
+          // (block-cursor.ts owns the rule and the reason).
+          blockCursor(),
           // Undo, and it belongs to the editor's own identity rather than to
           // whatever the caller installs: `@codemirror/commands` was a
           // dependency and `history()` was installed nowhere, so Ctrl+Z in

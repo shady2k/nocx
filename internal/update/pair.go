@@ -41,8 +41,11 @@ type CoordinatorBuild struct {
 // handshakes — none of which are the updater's business (AD-8).
 //
 // The production implementation lives with the launcher, which already
-// holds the discovery socket's Hello. [NewInProcessCoordinatorProbe] is
-// for a build whose backend is the window's own process.
+// holds the discovery socket's Hello: coordinator.LaunchProbe. There is
+// deliberately no "assume this process is the backend" implementation —
+// every build in this repo raises a coordinator, so such a probe would
+// have no honest caller, and an updater given one would certify exactly
+// the mixed pair this file exists to refuse.
 type CoordinatorProbe interface {
 	// AnsweringCoordinator returns the build of the coordinator serving
 	// this client. An error means the question could not be answered,
@@ -65,26 +68,3 @@ var (
 	// message needs to be told which of the two happened.
 	ErrPairMismatch = errors.New("update: the coordinator answering is not the version this update installed")
 )
-
-// inProcessProbe answers with a build the caller states, for the case
-// where there is no separate coordinator to ask: the backend is this
-// process, so its version is the running binary's.
-//
-// It exists so that "there is no daemon" is something the composition
-// root SAYS rather than something the updater infers from a nil field. A
-// nil probe means nobody decided, and the whole defect above is what
-// happens when an unstated assumption about the backend's identity is
-// allowed to certify an update.
-type inProcessProbe struct{ build CoordinatorBuild }
-
-// NewInProcessCoordinatorProbe returns a probe for a build whose backend
-// runs inside the window's own process. Pass internal/version's Version
-// and Commit: they describe the binary that is executing this call, which
-// in that arrangement is also the backend.
-func NewInProcessCoordinatorProbe(version, commit string) CoordinatorProbe {
-	return inProcessProbe{build: CoordinatorBuild{Version: version, Commit: commit}}
-}
-
-func (p inProcessProbe) AnsweringCoordinator(context.Context) (CoordinatorBuild, error) {
-	return p.build, nil
-}

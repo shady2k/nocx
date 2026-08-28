@@ -172,26 +172,55 @@
   padding: 10px 14px 12px;
 }
 
-.nocx-editor[data-placement='overlay'] {
+/* One absolute presentation stack keeps the running program's pane geometry
+   untouched. Answer nodes stay ordered in the scrollable upper child and the
+   one existing composer takes the final flex seat when no answer is streaming. */
+.nocx-summon-stack {
   position: absolute;
   left: var(--pane-inline-padding);
   right: var(--pane-inline-padding);
   bottom: 0;
   z-index: 10;
+  display: flex;
+  flex-direction: column;
+  max-height: 100%;
+  min-height: 0;
   box-sizing: border-box;
 }
 
-/* An answer asked over a running program stays visible after the editor
-   submits. It is a view until the command ends, then the same node is moved
-   into the scrollback by the terminal content owner (nocx-7l4ex.4). */
-.nocx-answer-overlay {
-  position: absolute;
-  left: var(--pane-inline-padding);
-  right: var(--pane-inline-padding);
-  bottom: 0;
-  z-index: 9;
+/* The cap is the feature: this is "ask ABOUT a full-screen program WITHOUT
+   leaving it", so the answers may never grow into the whole pane and hide the
+   program the question is about. The stack's own `max-height: 100%` is only
+   the outer bound — `.pane` is `position: absolute; inset: 0`, so 100% is the
+   entire pane, and after Escape (which keeps these nodes and takes the
+   composer away) nothing else would stop them. Same value the single
+   bottom-pinned answer carried before the stack existed. */
+.nocx-summon-answers {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
   max-height: min(50vh, calc(36em + 6px));
   overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.nocx-summon-stack > .nocx-editor[data-placement='overlay'] {
+  position: relative;
+  left: auto;
+  right: auto;
+  bottom: auto;
+  z-index: auto;
+  flex: none;
+  box-sizing: border-box;
+}
+
+/* A summoned answer is a flex item, not a second bottom-pinned overlay. It is
+   a view until the command ends, then the terminal content owner reparents the
+   same node into scrollback (nocx-7l4ex.4/.8). */
+.nocx-answer-overlay {
+  position: relative;
+  flex: none;
 }
 
 /* Every presentation that is not a prompt REMOVES this card and its box: the

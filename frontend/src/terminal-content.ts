@@ -371,7 +371,7 @@ type SummonDecision =
     }
   | {
       kind: 'silent'
-      reason: 'editor-visible' | 'no-running-command' | 'summon-pending'
+      reason: 'editor-visible' | 'no-running-command' | 'summon-pending' | 'summon-active'
     }
   | {
       kind: 'speak'
@@ -490,12 +490,11 @@ export class TerminalContent extends BasePaneContent {
    *  is not running a second one: `agent.ask` travels the control plane and
    *  never touches the pty, so a busy shell is no obstacle to it.
    *
-   *  It is an axis of the SHOW question only, never of authority: while it
-   *  is true the editor is visible and the grid is read-only, exactly as at
-   *  a prompt, so `inputOwner()` keeps deriving from `editor.isVisible` and
-   *  the invariant `_syncLifecycleOwnership` states about itself — editor
-   *  shown ⟺ grid read-only — is untouched. It is spent the moment the
-   *  command stops running, whichever way it stops. */
+   *  It is an axis of the SHOW question only, never a second authority. The
+   *  current answer temporarily occupies the frozen stack alone; its terminal
+   *  close returns the same editor and read-only grid beneath every answer.
+   *  `inputOwner()` still derives from `editor.isVisible`, and the summon is
+   *  spent the moment the command stops running, whichever way it stops. */
   /** The one live frame displayed while the summoned editor is open. The
    *  renderer keeps parsing underneath it; this is presentation state only. */
   private _pinnedFrame: CapturedFrame | null = null
@@ -522,11 +521,17 @@ export class TerminalContent extends BasePaneContent {
    *  in Ask. Forcing shell there would undo a choice the person made and
    *  the summon never touched. */
   private _summonRestoreTargetId: string | null = null
-  /** The answer view opened by a summon. It stays a view over the running
-   *  command until that command reaches a terminal state, then the same DOM
-   *  node takes the next scrollback seat. */
-  private _summonedAnswer: HTMLElement | null = null
+  /** Every answer opened by this command's summon, in ask order. A terminal
+   *  answer stays in the absolute stack so the same composer can return below
+   *  it; command completion reparents these exact nodes into scrollback. */
+  private _summonedAnswers: { el: HTMLElement; terminal: boolean }[] = []
   private _summonedCommand: BlockRecord | null = null
+  /** The one presentation-owned stack. Answers scroll in its first child and
+   *  the existing editor occupies its final flex seat while the summon is
+   *  active; neither surface is rebuilt. */
+  private _summonStack: HTMLElement | null = null
+  private _summonAnswerList: HTMLElement | null = null
+  private _summonEditorHome: { parent: Node; nextSibling: ChildNode | null } | null = null
   private scrollback: ScrollbackController | null = null
   private dumpSource: DumpSource | null = null
   private ledger: CommandLedger | null = null
@@ -1632,8 +1637,8 @@ export class TerminalContent extends BasePaneContent {
         onTurnAccepted: () => {
           // Agent asks keep the editor visible by default. A summoned answer
           // is the one accepted case where the submitted question must give
-          // the overlay to its answer without exposing it to a refusal.
-          if (this._summoned && this._summonedAnswer !== null) this.editor?.hide()
+          // the overlay to its current answer without exposing it to a refusal.
+          if (this._summoned && this._currentSummonedAnswer() !== null) this.editor?.hide()
         },
         // A new answer block, kept at the bottom of the view — the same
         // rule a command's output lives by, which the ask path never had:
@@ -1645,12 +1650,18 @@ export class TerminalContent extends BasePaneContent {
         openAnswer: (question, cwd, running?: RunningBlockActions) => {
           const handle = this.scrollback!.blockManager.addAnswerBlock(question, cwd, running)
           if (this._summoned && this._summonedCommand !== null) {
-            // The editor hides itself when the question submits. Keep the
-            // answer readable in the summon overlay rather than putting it
-            // above the command it describes.
-            handle.el.classList.add('nocx-answer-overlay')
-            this._paneTarget?.appendChild(handle.el)
-            this._summonedAnswer = handle.el
+            // The editor hides itself when the question submits. Keep every
+            // answer in ask order above the one existing composer rather than
+            // putting it above the command it describes.
+            const surface = this._ensureSummonStack()
+            if (surface !== null) {
+              handle.el.classList.add('nocx-answer-overlay')
+              surface.answers.appendChild(handle.el)
+              this._summonedAnswers.push({ el: handle.el, terminal: false })
+              // A deliberate follow-up moves the answer scroller to its new
+              // current turn; subsequent content grows in that visible seat.
+              surface.answers.scrollTop = surface.answers.scrollHeight
+            }
           }
           this.scrollback?.scrollToBottom()
           // The streamed answer grows the block, and growth is the same
@@ -1659,7 +1670,7 @@ export class TerminalContent extends BasePaneContent {
           return {
             ...handle,
             append: (text: string, blockId?: string) => {
-              handle.append(text, blockId)
+              this._mutateSummonAnswers(() => handle.append(text, blockId))
               this.scrollback?.scrollToBottom()
             },
             // A tool call and a chunk of thinking grow the block exactly as
@@ -1669,11 +1680,11 @@ export class TerminalContent extends BasePaneContent {
             // follow, which is the kind of gap nobody notices until an
             // answer stops scrolling for one of its three event kinds.
             toolCall: (call: AnswerToolCall) => {
-              handle.toolCall(call)
+              this._mutateSummonAnswers(() => handle.toolCall(call))
               this.scrollback?.scrollToBottom()
             },
             reasoning: (text: string) => {
-              handle.reasoning(text)
+              this._mutateSummonAnswers(() => handle.reasoning(text))
               this.scrollback?.scrollToBottom()
             },
             // `model` is forwarded, and it was not: this wrapper took two
@@ -1686,7 +1697,10 @@ export class TerminalContent extends BasePaneContent {
               error?: string,
               model?: string,
             ) => {
-              handle.close(status, error, model)
+              this._mutateSummonAnswers(() => {
+                handle.close(status, error, model)
+                this._terminalizeSummonedAnswer(handle.el)
+              })
               this.scrollback?.scrollToBottom()
             },
           }
@@ -1694,7 +1708,10 @@ export class TerminalContent extends BasePaneContent {
         // The no-endpoint refusal is visible in the product, never only in
         // a log (AGENTS.md: a soft degrade the UI contradicts is how a
         // feature that does not exist survives a release).
-        onRefusal: (message) => showToast({ level: 'warning', message }),
+        onRefusal: (message) => {
+          this._discardRefusedSummonedAnswer()
+          showToast({ level: 'warning', message })
+        },
         onTurnStart: (askId) => this.bindReadTurn(askId),
         onTurnEnd: (askId) => this.endReadTurn(askId),
         // The typed readiness fact behind a refusal (agent.status), so the
@@ -2555,10 +2572,10 @@ export class TerminalContent extends BasePaneContent {
         }
         // Once an accepted summoned answer owns the overlay, the editor is
         // intentionally hidden so the answer is readable. Escape still
-        // dismisses the summon through the document path: the answer remains
-        // a view over the live screen and keeps receiving deltas until the
-        // running command ends, when it takes its scrollback seat.
-        if (e.key === 'Escape' && this._summoned && this._summonedAnswer !== null) {
+        // dismisses the summon through the document path: every answer remains
+        // a view over the live screen and the current one keeps receiving
+        // deltas until the running command ends, when all take ordered seats.
+        if (e.key === 'Escape' && this._summoned && this._currentSummonedAnswer() !== null) {
           const active = document.activeElement
           if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
           if (hasOpenOverlays()) return
@@ -3202,10 +3219,13 @@ export class TerminalContent extends BasePaneContent {
           if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return
           const decision = this.canSummonEditor()
           // Editor-visible and no-running states are silent and unconsumed;
-          // the pending state is silent but must still consume the chord so
-          // it cannot become a CR while the existing capture finishes.
+          // a capture in flight and a summon already open are silent but must
+          // still consume the chord so it cannot become a CR in the running
+          // program while the first one finishes.
           if (
-            (decision.kind === 'silent' && decision.reason !== 'summon-pending') ||
+            (decision.kind === 'silent' &&
+              decision.reason !== 'summon-pending' &&
+              decision.reason !== 'summon-active') ||
             decision.kind === 'invariant'
           )
             return
@@ -4162,6 +4182,13 @@ export class TerminalContent extends BasePaneContent {
     }
     if (editor.isVisible) return { kind: 'silent', reason: 'editor-visible' }
     if (this._summonPending) return { kind: 'silent', reason: 'summon-pending' }
+    // A hidden editor can still belong to the current streaming answer. Treat
+    // that interval like the capture already in flight: consume the chord, but
+    // never start a second transaction that could overwrite the sole frame and
+    // marker cleanup references. Its own reason, because the two facts are not
+    // the same one — a refusal that names the wrong state is a wrong answer to
+    // whoever reads it next.
+    if (this._summoned) return { kind: 'silent', reason: 'summon-active' }
     if (!this.hasRunningCommand()) return { kind: 'silent', reason: 'no-running-command' }
     if (this.nativeMode) {
       return {
@@ -4233,6 +4260,7 @@ export class TerminalContent extends BasePaneContent {
       const markerHost = editor.root.querySelector<HTMLElement>('.nocx-editor-chrome-left')
       const frameHost = this.scrollback?.xtermLiveContainer
       if (markerHost === null || frameHost === undefined) return false
+      if (!this._placeEditorInSummonStack(editor)) return false
 
       const view = createCapturedFrameView(frame)
       this._freezeFrameParentPosition = frameHost.style.position
@@ -4260,6 +4288,10 @@ export class TerminalContent extends BasePaneContent {
       // CaptureAbortedError and renderer refusal both leave the pane exactly
       // as it was. In particular, no display marker is a claim about a frame
       // that was never captured.
+      if (!this._summoned) {
+        this._restoreEditorHome()
+        this._removeSummonStackIfEmpty()
+      }
       return false
     } finally {
       this._summonPending = false
@@ -4273,6 +4305,104 @@ export class TerminalContent extends BasePaneContent {
     const root = this.editor?.root
     if (!root) return
     root.dataset.placement = placement
+  }
+
+  /** Create (once) the presentation-owned absolute stack. The answer list is
+   * the scrollable flex child; the existing editor is moved beside it only
+   * while the summon is active. */
+  private _ensureSummonStack(): { stack: HTMLElement; answers: HTMLElement } | null {
+    if (this._summonStack !== null && this._summonAnswerList !== null) {
+      return { stack: this._summonStack, answers: this._summonAnswerList }
+    }
+    const pane = this._paneTarget
+    if (pane === null) return null
+    const stack = document.createElement('div')
+    stack.className = 'nocx-summon-stack'
+    const answers = document.createElement('div')
+    answers.className = 'nocx-summon-answers'
+    stack.appendChild(answers)
+    pane.appendChild(stack)
+    this._summonStack = stack
+    this._summonAnswerList = answers
+    return { stack, answers }
+  }
+
+  /** Reparent, never recreate, the editor into the stack's final flex seat. */
+  private _placeEditorInSummonStack(editor: CommandEditor): boolean {
+    const surface = this._ensureSummonStack()
+    if (surface === null) return false
+    if (editor.root.parentNode === surface.stack) return true
+    const parent = editor.root.parentNode
+    if (parent === null) {
+      // `_ensureSummonStack` just built the stack; a detached editor means no
+      // summon, so it must not outlive this refusal.
+      this._removeSummonStackIfEmpty()
+      return false
+    }
+    this._summonEditorHome = { parent, nextSibling: editor.root.nextSibling }
+    surface.stack.appendChild(editor.root)
+    return true
+  }
+
+  /** Put the same editor back at the exact pane-flow seat it left. */
+  private _restoreEditorHome(): void {
+    const home = this._summonEditorHome
+    const root = this.editor?.root
+    this._summonEditorHome = null
+    if (home === null || root === undefined) return
+    const before = home.nextSibling?.parentNode === home.parent ? home.nextSibling : null
+    home.parent.insertBefore(root, before)
+  }
+
+  private _removeSummonStackIfEmpty(): void {
+    if (this._summonAnswerList?.childElementCount !== 0) return
+    if (this.editor?.root.parentNode === this._summonStack) return
+    this._summonStack?.remove()
+    this._summonStack = null
+    this._summonAnswerList = null
+  }
+
+  /** Return the newest non-terminal turn. Two submits can overlap only in the
+   * pre-ack window, before the first acceptance hides the composer; terminal
+   * ordering must therefore keep it hidden until every accepted turn settles. */
+  private _currentSummonedAnswer(): HTMLElement | null {
+    for (let i = this._summonedAnswers.length - 1; i >= 0; i -= 1) {
+      const answer = this._summonedAnswers[i]
+      if (!answer.terminal) return answer.el
+    }
+    return null
+  }
+
+  /** Keep the current answer tail visible only while the person was already
+   * following it. The stack's nested answer list is the actual scroller; the
+   * outer scrollback cannot move content inside this absolute surface. */
+  private _mutateSummonAnswers(mutation: () => void): void {
+    const list = this._summonAnswerList
+    const following = list !== null && list.scrollTop + list.clientHeight >= list.scrollHeight - 2
+    mutation()
+    if (list !== null && following) list.scrollTop = list.scrollHeight
+  }
+
+  private _terminalizeSummonedAnswer(answer: HTMLElement): void {
+    const owned = this._summonedAnswers.find((candidate) => candidate.el === answer)
+    if (owned === undefined || owned.terminal) return
+    owned.terminal = true
+    // The close is the authoritative terminal seam. Returning the composer
+    // from here avoids deriving completion from text, time, or DOM classes.
+    if (this._summoned) this._syncLifecycleOwnership()
+  }
+
+  /** AgentInputTarget removes a refused handle before reporting the refusal.
+   * Drop exactly those detached provisional nodes: another ask may already be
+   * accepted in the same pre-ack window and must keep its own answer. */
+  private _discardRefusedSummonedAnswer(): void {
+    const list = this._summonAnswerList
+    const before = this._summonedAnswers.length
+    this._summonedAnswers = this._summonedAnswers.filter(
+      (answer) => answer.el.parentElement === list,
+    )
+    if (this._summonedAnswers.length === before) return
+    if (this._summoned) this._syncLifecycleOwnership()
   }
 
   /** Dismiss a summoned editor: the keys go back to the process (nocx-92gfl).
@@ -4299,39 +4429,57 @@ export class TerminalContent extends BasePaneContent {
     return true
   }
 
-  /** Move the existing turn node from the answer overlay to the seat directly
-   *  after the command it describes. Reparenting, rather than rebuilding,
-   *  keeps the streaming AnswerBody and ledger identity intact. */
-  private _seatSummonedAnswer(): void {
-    const answer = this._summonedAnswer
+  /** Move every existing turn node from the answer stack to consecutive seats
+   * after the command it describes. Reparenting, rather than rebuilding, keeps
+   * each streaming AnswerBody and ledger identity intact. */
+  private _seatSummonedAnswers(): void {
     const command = this._summonedCommand
-    if (answer === null || command === null) return
-    const parent = command.el.parentElement
-    if (parent === null) return
+    if (this._summonedAnswers.length === 0) {
+      this._summonedCommand = null
+      this._removeSummonStackIfEmpty()
+      return
+    }
+    const parent = command?.el.parentElement ?? null
+    if (command === null || parent === null) {
+      // Clear/reset can remove the running command before its terminal fact.
+      // Its overlay answers belong to that command and must not be resurrected
+      // by a later summon or lifecycle transition.
+      for (const answer of this._summonedAnswers) answer.el.remove()
+      this._summonedAnswers = []
+      this._summonedCommand = null
+      this._removeSummonStackIfEmpty()
+      return
+    }
     const settle = this.scrollback
+    const owned = this._summonedAnswers
+    const tail = owned[owned.length - 1].el
     const seat = () => {
-      parent.insertBefore(answer, command.el.nextSibling)
-      answer.classList.remove('nocx-answer-overlay')
+      let anchor = command.el
+      for (const answer of owned) {
+        parent.insertBefore(answer.el, anchor.nextSibling)
+        answer.el.classList.remove('nocx-answer-overlay')
+        anchor = answer.el
+      }
       // Reparenting extends the scrollback after the command-end settle has
       // already positioned the command. Follow the new answer tail as well,
       // or a long streamed answer remains below the fold.
       settle?.scrollToBottomIfFollowing()
       // WebKit can apply the class/style change after this task's scroll
       // height read. Its initial ResizeObserver delivery is the first
-      // observable point at which the reparented answer owns its final box;
-      // follow there too, without moving a reader who scrolled away.
+      // observable point at which the final answer owns its seated box.
       if (settle && typeof ResizeObserver !== 'undefined') {
         const observer = new ResizeObserver(() => {
           observer.disconnect()
           settle.scrollToBottomIfFollowing()
         })
-        observer.observe(answer)
+        observer.observe(tail)
       }
     }
     if (settle) settle.settleAround(seat)
     else seat()
-    this._summonedAnswer = null
+    this._summonedAnswers = []
     this._summonedCommand = null
+    this._removeSummonStackIfEmpty()
   }
 
   /** The summon is over — dismissed by Escape, or outlived by the command
@@ -4341,13 +4489,14 @@ export class TerminalContent extends BasePaneContent {
    *  empty. A half-typed question re-pointed at the shell would turn the
    *  person's next Enter into a command they never wrote — the exact reason
    *  the dropped auto-switching design was dropped. */
-
   private _endSummon(): void {
     this._summoned = false
     const restore = this._summonRestoreTargetId
     this._summonRestoreTargetId = null
     this._pendingReadFrame = null
     this._clearFreezePresentation()
+    this._restoreEditorHome()
+    this._removeSummonStackIfEmpty()
     if (restore === null || this.editor === null) return
     if (this.editor.getDoc() !== '') return
     if (this.inputTargets?.active().id === restore) return
@@ -4638,8 +4787,10 @@ export class TerminalContent extends BasePaneContent {
     // place every lifecycle change already arrives, and a second place that
     // cleared it would be a second owner of the same flag.
     if (!this.hasRunningCommand()) {
-      this._seatSummonedAnswer()
+      // Restore the editor before removing its stack, then seat all answer
+      // nodes consecutively after the command.
       if (this._summoned) this._endSummon()
+      this._seatSummonedAnswers()
     }
     // Two ways the editor can be on screen, and the difference is who asked:
     // the LIFECYCLE says PromptReady (ADR-0024 §6, the ordinary case), or the
@@ -4659,7 +4810,7 @@ export class TerminalContent extends BasePaneContent {
     // stays read-only, typed input is dropped, and a program waiting on
     // stdin (read, ssh, less) hangs with no editor and no input surface
     // (nocx-u7uh.23). The invariant: editor shown ⟺ grid read-only.
-    const answerInSummon = this._summoned && this._summonedAnswer !== null
+    const answerInSummon = this._summoned && this._currentSummonedAnswer() !== null
     if (show) {
       if (summoned) {
         // The attribute is set before show/focus and CSS takes the editor out
@@ -4809,10 +4960,14 @@ export class TerminalContent extends BasePaneContent {
     }
     this._summoned = false
     this._summonRestoreTargetId = null
-    this._summonedAnswer?.remove()
-    this._summonedAnswer = null
-    this._summonedCommand = null
     this._clearFreezePresentation()
+    this._restoreEditorHome()
+    for (const answer of this._summonedAnswers) answer.el.remove()
+    this._summonedAnswers = []
+    this._summonedCommand = null
+    this._summonStack?.remove()
+    this._summonStack = null
+    this._summonAnswerList = null
     this.session?.close()
     this.renderer?.dispose()
     this.editor?.dispose()

@@ -2208,21 +2208,37 @@ describe('the command editor chrome pins the clock to the right edge without dis
 })
 
 describe('summoned editor overlay stylesheet contract (nocx-92gfl)', () => {
-  it('shares the pane padding band and pins the overlay to its bottom edge', () => {
+  it('keeps ordered answers scrolling above the composer in one absolute pane stack', () => {
     const css = stripComments(readFileSync(STYLE_ENTRY, 'utf8'))
     const baseCss = stripComments(readFileSync(BASE_STYLE_ENTRY, 'utf8'))
-    const match = css.match(/\.nocx-editor\[data-placement=['"]overlay['"]\]\s*\{([^}]*)\}/)
+    const stack = stripComments(extractRuleBlock(css, 'nocx-summon-stack') ?? '')
+    const answers = stripComments(extractRuleBlock(css, 'nocx-summon-answers') ?? '')
+    const editor =
+      css.match(
+        /\.nocx-summon-stack\s*>\s*\.nocx-editor\[data-placement=['"]overlay['"]\]\s*\{([^}]*)\}/,
+      )?.[1] ?? ''
     const pane = baseCss.match(/\.pane\s*\{([^}]*)\}/)
-    expect(match).not.toBeNull()
+    expect(stack).not.toBe('')
+    expect(answers).not.toBe('')
+    expect(editor).not.toBe('')
     expect(pane).not.toBeNull()
-    const declarations = match?.[1] ?? ''
-    const paneDeclarations = pane?.[1] ?? ''
-    expect(paneDeclarations).toMatch(/--pane-inline-padding\s*:\s*10px/)
-    expect(paneDeclarations).toMatch(/padding\s*:\s*0\s+var\(--pane-inline-padding\)/)
-    expect(declarations).toMatch(/position\s*:\s*absolute/)
-    expect(declarations).toMatch(/left\s*:\s*var\(--pane-inline-padding\)/)
-    expect(declarations).toMatch(/right\s*:\s*var\(--pane-inline-padding\)/)
-    expect(declarations).toMatch(/bottom\s*:\s*0/)
+    expect(pane?.[1] ?? '').toMatch(/--pane-inline-padding\s*:\s*10px/)
+    expect(stack).toMatch(/position\s*:\s*absolute/)
+    expect(stack).toMatch(/left\s*:\s*var\(--pane-inline-padding\)/)
+    expect(stack).toMatch(/right\s*:\s*var\(--pane-inline-padding\)/)
+    expect(stack).toMatch(/bottom\s*:\s*0/)
+    expect(stack).toMatch(/display\s*:\s*flex/)
+    expect(stack).toMatch(/flex-direction\s*:\s*column/)
+    expect(stack).toMatch(/max-height\s*:\s*100%/)
+    expect(answers).toMatch(/overflow-y\s*:\s*auto/)
+    expect(answers).toMatch(/min-height\s*:\s*0/)
+    // The stack's `max-height: 100%` is the pane, so the answers carry the
+    // real cap. Without it a long answer covers the program the question is
+    // about — and after Escape, which keeps these nodes and takes the composer
+    // away, nothing else bounds them (nocx-7l4ex.8).
+    expect(answers).toMatch(/max-height\s*:\s*min\(50vh,\s*calc\(36em \+ 6px\)\)/)
+    expect(editor).toMatch(/position\s*:\s*relative/)
+    expect(editor).toMatch(/flex\s*:\s*none/)
   })
 })
 
@@ -7660,6 +7676,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       expect(frame?.isConnected).toBe(false)
       expect(marker?.isConnected).toBe(false)
       expect(frameHost.style.position).toBe('sticky')
+      expect(paneOf(content).querySelector('.nocx-summon-stack')).toBeNull()
     } finally {
       restore()
       teardown()
@@ -9175,8 +9192,10 @@ describe('summoning answers instead of vanishing (nocx-og42r)', () => {
     }
   })
 })
-describe('the summoned answer takes its seat after the program (nocx-7l4ex.4)', () => {
+describe('summoned answers return one composer and take ordered seats (nocx-7l4ex.4/.8)', () => {
   const commandFence = 'd'.repeat(64)
+  const rendererReadOnly = (content: TerminalContent): ReturnType<typeof vi.fn> =>
+    (rendererOf(content) as unknown as { setReadOnly: ReturnType<typeof vi.fn> }).setReadOnly
 
   function startCommand(client: ClientFake): (params: unknown) => void {
     const handler = lifecycleHandler(client)
@@ -9189,6 +9208,19 @@ describe('the summoned answer takes its seat after the program (nocx-7l4ex.4)', 
       attempt: { id: 'att-run', state: 'open', origin: 'app', command: 'top' },
     })
     return handler
+  }
+
+  function dispatchSummon(content: TerminalContent): KeyboardEvent {
+    const grid = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      .xtermLiveContainer
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter',
+      ctrlKey: true,
+      bubbles: true,
+      cancelable: true,
+    })
+    grid.dispatchEvent(event)
+    return event
   }
 
   async function summon(content: TerminalContent): Promise<void> {
@@ -9227,18 +9259,23 @@ describe('the summoned answer takes its seat after the program (nocx-7l4ex.4)', 
     question: string,
   ): Promise<HTMLElement> {
     const editor = editorOf(content)
+    const askCount = client.dispatcher.call.mock.calls.filter(
+      ([method]) => method === 'agent.ask',
+    ).length
     editor.insertText(question)
     viewOf(editor).contentDOM.dispatchEvent(
       new KeyboardEvent('keydown', { key: 'Enter', bubbles: true, cancelable: true }),
     )
     await vi.waitFor(() =>
-      expect(client.dispatcher.call.mock.calls.some(([method]) => method === 'agent.ask')).toBe(
-        true,
-      ),
+      expect(
+        client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.ask'),
+      ).toHaveLength(askCount + 1),
     )
     const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
-    const answer = pane.querySelector<HTMLElement>('.cmd-block[data-block-kind="ask"]')
-    expect(answer).not.toBeNull()
+    const answer = Array.from(
+      pane.querySelectorAll<HTMLElement>('.cmd-block[data-block-kind="ask"]'),
+    ).find((candidate) => candidate.querySelector('.cmd-header-text')?.textContent === question)
+    expect(answer).toBeDefined()
     return answer!
   }
 
@@ -9287,6 +9324,245 @@ describe('the summoned answer takes its seat after the program (nocx-7l4ex.4)', 
       expect(typeof askParams.askId).toBe('string')
       expect(askParams.question).toBe('what is on screen?')
       expect(askCall?.[1]).not.toHaveProperty('placement')
+
+      const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
+      content.dispose()
+      expect(answer.isConnected).toBe(false)
+      expect(pane.querySelector('.nocx-summon-stack')).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('returns the same composer for ordered follow-ups and seats each answer once', async () => {
+    const client = makeClient()
+    let nextRunId = 0
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        const runId = ++nextRunId
+        return Promise.resolve({ runId, entryId: `entry-${runId}`, model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      const handler = startCommand(client)
+      const editorRoot = ed.root
+      await summon(content)
+      const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
+      const session = sessionOf(content)
+      session.send.mockClear()
+      const resizeCalls = session.sendResize.mock.calls.length
+
+      const first = await submitQuestion(content, client, 'what is the first state?')
+      const delta = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runDelta',
+      )?.[1] as ((params: unknown) => void) | undefined
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(delta).toBeDefined()
+      expect(state).toBeDefined()
+      delta!({ runId: 1, entryId: 'entry-1', text: 'first answer' })
+      expect(ed.isVisible).toBe(false)
+      const repeatedSummon = dispatchSummon(content)
+      await Promise.resolve()
+      expect(repeatedSummon.defaultPrevented).toBe(true)
+      expect(
+        (rendererOf(content).captureLiveFrame as ReturnType<typeof vi.fn>).mock.calls,
+      ).toHaveLength(1)
+      expect(pane.querySelectorAll('.nocx-freeze-frame')).toHaveLength(1)
+      state!({
+        runId: 1,
+        entryId: 'entry-1',
+        state: 'failed',
+        error: 'test terminal failure',
+        droppedDeltas: 0,
+      })
+
+      const stack = pane.querySelector<HTMLElement>('.nocx-summon-stack')
+      const answerList = stack?.querySelector<HTMLElement>('.nocx-summon-answers')
+      expect(stack).not.toBeNull()
+      expect(answerList).not.toBeNull()
+      expect(editorOf(content)).toBe(ed)
+      expect(ed.root).toBe(editorRoot)
+      expect(ed.isVisible).toBe(true)
+      expect(first.parentElement).toBe(answerList)
+      expect(ed.root.parentElement).toBe(stack)
+      expect(Array.from(stack!.children)).toEqual([answerList, editorRoot])
+      expect(rendererReadOnly(content)).toHaveBeenLastCalledWith(true)
+      expect(session.send).not.toHaveBeenCalled()
+      expect(session.sendResize).toHaveBeenCalledTimes(resizeCalls)
+
+      session.send.mockClear()
+      const followupResizeCalls = session.sendResize.mock.calls.length
+      const second = await submitQuestion(content, client, 'what changed next?')
+      delta!({ runId: 2, entryId: 'entry-2', text: 'second answer' })
+      expect(ed.isVisible).toBe(false)
+      state!({ runId: 2, entryId: 'entry-2', state: 'completed', droppedDeltas: 0 })
+
+      expect(ed.root).toBe(editorRoot)
+      expect(ed.isVisible).toBe(true)
+      expect(rendererReadOnly(content)).toHaveBeenLastCalledWith(true)
+      expect(Array.from(answerList!.children)).toEqual([first, second])
+      expect(first.textContent).toContain('first answer')
+      expect(second.textContent).toContain('second answer')
+      expect(session.send).not.toHaveBeenCalled()
+      expect(session.sendResize).toHaveBeenCalledTimes(followupResizeCalls)
+      expect(session.sendResize).toHaveBeenCalledTimes(resizeCalls)
+
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-run',
+          state: 'completed',
+          exitCode: 0,
+          fence: commandFence,
+          completedAt: '2026-08-28T12:00:00Z',
+        },
+      })
+      rendererOf(content)._fireRenderFence({ hex: commandFence, line: 3, buffer: 'normal' })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      const command = inner.querySelector<HTMLElement>('.cmd-block[data-block-kind="command"]')
+      const seated = Array.from(
+        inner.querySelectorAll<HTMLElement>('.cmd-block[data-block-kind="ask"]'),
+      )
+      const children = Array.from(inner.children)
+      expect(seated).toEqual([first, second])
+      expect(children.indexOf(command!)).toBeLessThan(children.indexOf(first))
+      expect(children.indexOf(first)).toBeLessThan(children.indexOf(second))
+      expect(first.parentElement).toBe(inner)
+      expect(second.parentElement).toBe(inner)
+      expect(pane.querySelector('.nocx-summon-stack')).toBeNull()
+      expect(ed.root.parentElement).toBe(pane)
+      expect(session.send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps overlapping pre-ack answers correlated when the earlier ask is refused', async () => {
+    const client = makeClient()
+    let rejectFirst!: (error: Error) => void
+    let resolveSecond!: (value: { runId: number; entryId: string; model: string }) => void
+    const firstAsk = new Promise<never>((_resolve, reject) => {
+      rejectFirst = reject
+    })
+    const secondAsk = new Promise<{ runId: number; entryId: string; model: string }>((resolve) => {
+      resolveSecond = resolve
+    })
+    let asks = 0
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        asks += 1
+        return asks === 1 ? firstAsk : secondAsk
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const first = await submitQuestion(content, client, 'the request that will refuse')
+      const second = await submitQuestion(content, client, 'the request that remains')
+
+      resolveSecond({ runId: 2, entryId: 'entry-2', model: 'test-model' })
+      await vi.waitFor(() => expect(second.dataset.entryId).toBe('entry-2'))
+      expect(ed.isVisible).toBe(false)
+
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(state).toBeDefined()
+      state!({ runId: 2, entryId: 'entry-2', state: 'completed', droppedDeltas: 0 })
+      // The older pre-ack turn still owns the composer even though the newer
+      // accepted turn terminalized first.
+      expect(ed.isVisible).toBe(false)
+
+      rejectFirst(new Error('first ask refused'))
+      await vi.waitFor(() => expect(first.isConnected).toBe(false))
+      const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
+      const answers = pane.querySelector<HTMLElement>('.nocx-summon-answers')
+      expect(answers).not.toBeNull()
+      expect(Array.from(answers!.children)).toEqual([second])
+      expect(second.isConnected).toBe(true)
+      expect(ed.isVisible).toBe(true)
+      expect(Array.from(answers!.children)).toEqual([second])
+      expect(sessionOf(content).send).not.toHaveBeenCalled()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('does not resurrect answers after their running command is cleared', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      const handler = startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'answer removed with clear')
+      const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      expect(answer.isConnected).toBe(true)
+
+      scrollback.blockManager.clearAll()
+      expect(answer.isConnected).toBe(false)
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-run',
+          state: 'completed',
+          exitCode: 0,
+          fence: commandFence,
+          completedAt: '2026-08-28T12:00:00Z',
+        },
+      })
+
+      expect(answer.isConnected).toBe(false)
+      expect(pane.querySelector('.nocx-summon-stack')).toBeNull()
+      expect(pane.querySelectorAll('.cmd-block[data-block-kind="ask"]')).toHaveLength(0)
     } finally {
       teardown()
     }
@@ -9403,8 +9679,9 @@ describe('the summoned answer takes its seat after the program (nocx-7l4ex.4)', 
       rendererOf(content)._fireData('q')
       expect(session.send).toHaveBeenCalledWith('q')
       // After Escape the turn remains a view over the live screen: it stays
-      // in the pane overlay until the command ends, then takes its seat.
-      expect(answer.parentElement).toBe(pane)
+      // in the pane-owned stack until the command ends, then takes its seat.
+      expect(answer.parentElement?.classList.contains('nocx-summon-answers')).toBe(true)
+      expect(answer.parentElement?.parentElement?.parentElement).toBe(pane)
       expect(answer.classList.contains('nocx-answer-overlay')).toBe(true)
 
       delta!({ runId: 42, entryId: 'entry-42', text: ' after Escape' })

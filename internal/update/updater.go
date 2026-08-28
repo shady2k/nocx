@@ -107,8 +107,8 @@ type UpdaterConfig struct {
 	// client. [Updater.ReportHealthy] refuses to finalise without it:
 	// certifying an update means certifying a UI/server PAIR, and a
 	// composition root that cannot name the backend cannot certify one
-	// (see pair.go). A build whose backend is this same process wires
-	// [NewInProcessCoordinatorProbe].
+	// (see pair.go). The production implementation is the launcher's,
+	// coordinator.LaunchProbe.
 	Coordinator CoordinatorProbe
 
 	// HTTPClient is used for artefact downloads. If nil, a

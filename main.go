@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"sync"
 	"time"
@@ -20,6 +21,7 @@ import (
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/update"
+	"github.com/shady2k/nocx/internal/update/serverbin"
 	"github.com/shady2k/nocx/internal/version"
 )
 
@@ -41,7 +43,7 @@ func main() {
 	// Checked before any window exists so CI's release smoke check
 	// (distribution design §5) and a user's `nocx --version` print the linked
 	// build metadata and exit, never opening a terminal.
-	if versionRequested() {
+	if version.Requested(os.Args[1:]) {
 		fmt.Printf("nocx %s (commit %s, built %s)\n", version.Version, version.Commit, version.Date)
 		return
 	}
@@ -152,10 +154,14 @@ type WailsApp struct {
 	// updater applies signed releases to the installed bundle. It belongs to
 	// the WINDOW rather than to the daemon in A1: it is about the files on
 	// disk, not about the sessions, and the health report that certifies an
-	// update is a renderer call that arrives here. Pairing that health
-	// report with the running coordinator's version is D4's second half and
-	// is A1.3's, not this task's.
+	// update is a renderer call that arrives here. It is wired with the
+	// probe below, so the health report certifies a PAIR (D4).
 	updater update.Updater
+
+	// probe tells the updater which coordinator answered this window. It
+	// is constructed empty, before the launcher has run, and filled by the
+	// launch — see [coordinator.LaunchProbe] for why that order is forced.
+	probe *coordinator.LaunchProbe
 
 	// updateInfo holds the most recent Check result. Apply takes no
 	// arguments — it applies the update that Check already verified.
@@ -202,12 +208,21 @@ func (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOpti
 	if err != nil {
 		w.logger.Warn("cannot determine executable path", "error", err)
 	}
+	// The pair probe (D4). This window's backend is another process, so
+	// the only honest answer to "which coordinator is serving me" is the
+	// one the discovery handshake gives — and that answer does not exist
+	// yet, because the updater has to Reconcile before the launcher runs
+	// (see coordinator.LaunchProbe). So it is wired empty here and
+	// attached below. Until it is attached it refuses to certify, which is
+	// the direction to fail in.
+	w.probe = coordinator.NewLaunchProbe()
 	w.updater = update.NewUpdater(update.UpdaterConfig{
 		Platform:       update.NewPlatform(),
 		Fetcher:        update.NewGitHubManifestFetcher(nil),
 		Keyring:        keyring,
 		CurrentVersion: version.Version,
 		InstallPath:    upgradeInstallPath(execPath),
+		Coordinator:    w.probe,
 		Logger:         log.NewSlogAdapter(w.logger),
 	})
 	// Settle any transaction in flight from a previous launch.
@@ -228,6 +243,9 @@ func (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOpti
 		return nil
 	}
 	w.ws = launch.Hello
+	// From here a health report can certify: the updater can name the
+	// backend that answered this window, and refuse anything else.
+	w.probe.Attach(launch)
 	w.logger.Info("nocx window has a backend",
 		"version", launch.Hello.Build.Version,
 		"commit", launch.Hello.Build.Commit,
@@ -254,6 +272,23 @@ func (w *WailsApp) launchCoordinator(ctx context.Context, execPath string) (coor
 	if err != nil {
 		return coordinator.Launch{}, fmt.Errorf("resolving the profile directories: %w", err)
 	}
+	// Where this build's nocx-server must be spawned from. On darwin that
+	// is the binary beside this executable inside the bundle; on Linux it
+	// is a versioned copy outside the AppImage, whose FUSE mount does not
+	// survive this process (design §4). serverbin owns that split and the
+	// reasoning for it; this is the composition root handing it the three
+	// facts it must not guess.
+	serverPath, err := serverbin.New(serverbin.NewOSFS(), log.NewSlogAdapter(w.logger)).
+		Resolve(ctx, serverbin.Target{
+			GOOS:    runtime.GOOS,
+			ExePath: execPath,
+			DataDir: paths.DataDir(),
+			Version: version.Version,
+		})
+	if err != nil {
+		return coordinator.Launch{}, fmt.Errorf("installing the coordinator binary: %w", err)
+	}
+
 	dir := coordinator.RuntimeDir(paths)
 	self := coordinator.ClientIdentity{
 		Version:  version.Version,
@@ -274,7 +309,7 @@ func (w *WailsApp) launchCoordinator(ctx context.Context, execPath string) (coor
 		Self:   self,
 		Client: client,
 		Spawner: coordinator.NewExecSpawner(coordinator.ExecSpawnerConfig{
-			Path:   serverBinaryPath(execPath),
+			Path:   serverPath,
 			Logger: w.logger,
 		}),
 		Stopper:   coordinator.NewSignalStopper(coordinator.SignalStopperConfig{Logger: w.logger}),
@@ -285,26 +320,6 @@ func (w *WailsApp) launchCoordinator(ctx context.Context, execPath string) (coor
 		return coordinator.Launch{}, err
 	}
 	return launcher.Launch(ctx)
-}
-
-// serverBinaryPath is where this build's nocx-server lives: beside the
-// executable that is running.
-//
-// That is exactly right on macOS, where the daemon ships inside the bundle
-// as nocx.app/Contents/MacOS/nocx-server, so installing the app installs the
-// server. On Linux it is right for a plain build and NOT yet right for an
-// AppImage, which unmounts its FUSE directory when the process exits and
-// would take the daemon's own executable with it — the versioned copy under
-// ~/.local/share/nocx/bin/ that design §4 requires is installation work and
-// belongs to A1.3 with the rest of packaging.
-func serverBinaryPath(execPath string) string {
-	if execPath == "" {
-		// Nothing to resolve against. Left as a bare name so the exec
-		// failure names it and PATH still has a chance of answering, rather
-		// than failing with an empty path nobody can act on.
-		return "nocx-server"
-	}
-	return filepath.Join(filepath.Dir(execPath), "nocx-server")
 }
 
 // noticeRecorder is the launcher's [coordinator.Announcer]: it collects what
@@ -439,11 +454,10 @@ func (w *WailsApp) ApplyUpdate() error {
 // Called once the initial tab's renderer mounted and its PTY session
 // opened (§7.5). Only then does the updater finalise a pending update.
 //
-// It does NOT yet check that the coordinator it is talking to is this
-// build — that pairing is D4's second half and belongs to A1.3. What A1.0
-// contributes to it is the fact this window now has: the running
-// coordinator's version, checked before the renderer was allowed to connect
-// at all.
+// It certifies a PAIR: the updater asks the launch probe which coordinator
+// answered this window, and finalises only when that backend is the version
+// this update installed (D4). A mixed pair — the old daemon surviving the
+// bundle swap — is refused here and the rollback journal is left intact.
 func (w *WailsApp) ReportHealthy() error {
 	if w.updater == nil {
 		return errors.New("the updater is not available in this window")
@@ -487,16 +501,4 @@ func upgradeInstallPath(execPath string) string {
 	}
 	// Not inside a .app — return the executable itself (Linux AppImage).
 	return execPath
-}
-
-// versionRequested reports whether the process was invoked only to print its
-// version. Both spellings that Go's flag package accepts are honoured; the app
-// takes no other flags today, so a plain launch always returns false.
-func versionRequested() bool {
-	for _, arg := range os.Args[1:] {
-		if arg == "--version" || arg == "-version" {
-			return true
-		}
-	}
-	return false
 }

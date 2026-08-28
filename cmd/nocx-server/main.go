@@ -18,6 +18,7 @@ package main
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -30,6 +31,25 @@ import (
 )
 
 func main() {
+	// Answered before anything is constructed: no app, no socket, no lock.
+	// A release smoke check needs the COORDINATOR's version, and asking the
+	// application for it answers a different question — today the two are
+	// linked from one -ldflags in one step and cannot differ, which is
+	// exactly why nobody would notice the day they did.
+	//
+	// Printed on stdout, unlike everything else this binary says. The
+	// "stdout carries nothing" rule is about the detached daemon, whose
+	// stdout is /dev/null; this invocation is not that daemon, and a person
+	// or a script running `nocx-server --version` reads stdout.
+	//
+	// [version.Requested] is a scan, not a flag parser: this binary accepts
+	// no flag that takes a value, so that a token cannot arrive by argv
+	// (design §6).
+	if version.Requested(os.Args[1:]) {
+		fmt.Printf("nocx-server %s (commit %s, built %s)\n", version.Version, version.Commit, version.Date)
+		return
+	}
+
 	// Every diagnostic goes to stderr: stdout carries nothing, because a
 	// detached daemon's stdout is /dev/null and anything written there is
 	// a fact nobody will ever read.

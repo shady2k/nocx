@@ -532,7 +532,7 @@ func TestReportHealthy_FinalisesUpdate(t *testing.T) {
 		Keyring:        nil,
 		CurrentVersion: "0.2.0",
 		InstallPath:    installPath,
-		Coordinator:    NewInProcessCoordinatorProbe("0.2.0", "testsha"),
+		Coordinator:    &stubProbe{build: CoordinatorBuild{Version: "0.2.0", Commit: "testsha"}},
 	})
 
 	if err := u.ReportHealthy(context.Background()); err != nil {
@@ -796,7 +796,7 @@ func TestUpdater_Apply_HappyPath(t *testing.T) {
 		Keyring:        pubs,
 		CurrentVersion: "0.2.0",
 		InstallPath:    installPath,
-		Coordinator:    NewInProcessCoordinatorProbe("0.2.0", "testsha"),
+		Coordinator:    &stubProbe{build: CoordinatorBuild{Version: "0.2.0", Commit: "testsha"}},
 	})
 	if err := restarted.ReportHealthy(ctx); err != nil {
 		t.Fatalf("ReportHealthy failed: %v", err)

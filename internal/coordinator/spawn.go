@@ -149,13 +149,15 @@ func (s *ExecSpawner) environ() []string {
 //     launcher never chose — and, since the variable can name any
 //     interface, potentially off loopback, which design §6 forbids
 //     outright.
-//   - NOCX_NO_SYSTEM_KEYSTORE decides whether the vault may reach the OS
-//     keystore. Design §6 says it in as many words: for a process that
-//     lives for days that stance must be a property of the build, not
-//     something any process of the user can supply — and D10 makes the
-//     stance declared rather than discovered. Until A1.2 moves it to the
-//     build, clearing it here is what stops one window's environment
-//     deciding the keystore policy for every window afterwards.
+//   - NOCX_NO_SYSTEM_KEYSTORE. The stance itself is no longer here: D10
+//     moved it to a build property (internal/app/keystore_build_*.go), so a
+//     daemon that inherited this variable would not change what it does.
+//     The strip stays anyway, and deliberately. It is the dev/test seam
+//     cmd/devharness reads, and a variable that means "keystore policy" in
+//     one binary of this repo must not silently mean something else in the
+//     one that lives for days — design §6's rule is that the stance is
+//     never something any process of the user can supply, and the cheapest
+//     way to keep that true is for the daemon never to see it.
 //
 // Deliberately NOT on the list, because the reasoning runs the other way:
 //

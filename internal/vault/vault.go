@@ -118,6 +118,36 @@ type Vault struct {
 	// its waiters) alive past the vault's own end.
 	promptCtx    context.Context
 	promptCancel context.CancelFunc
+
+	// clients is how many clients are attached, as last reported by the
+	// transport (presence.go). It is the ONE fact the seal-on-last-detach
+	// policy and the suspend-until-somebody-returns wait both read, so the
+	// two can never disagree about whether there is anybody to ask.
+	clients int
+	// clientsKnown records that presence is being REPORTED at all. Its zero
+	// value is what a vault built without a transport holds, and there
+	// "clients == 0" means "nobody has said", not "nobody is attached" — a
+	// vault that suspended on it would hang every caller in every package
+	// that constructs a vault of its own.
+	clientsKnown bool
+	// clientWait is closed when the count goes from zero to non-zero, and
+	// replaced by nil so the next suspension makes a fresh one. nil means
+	// nothing is suspended.
+	clientWait chan struct{}
+	// unlockSuspension is the ceiling on how long one operation waits for a
+	// client to come back. Zero means DefaultUnlockSuspension; only tests
+	// set it (SetUnlockSuspension).
+	unlockSuspension time.Duration
+	// unlockAttempt cancels the ask currently on the wire — one ATTEMPT at
+	// the outstanding prompt, not the prompt itself. Set while
+	// UnlockRequester.RequestUnlock is in flight; called when the last
+	// client detaches, because a notification broadcast to connections that
+	// no longer exist can never be answered.
+	unlockAttempt context.CancelFunc
+	// unlockAttemptAbandoned records that the cancellation above was ours
+	// rather than the caller's, so the raise loop suspends and re-raises
+	// instead of reporting a cancelled context to every waiter.
+	unlockAttemptAbandoned bool
 }
 
 // New loads the vault document, decides the initial state, and runs

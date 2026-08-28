@@ -3322,10 +3322,12 @@ export class TerminalContent extends BasePaneContent {
   viewportChanged(viewport: ContentViewport): void {
     if (this._disposed) return
     this._latestViewport = viewport
-    // Pass the authoritative viewport to the renderer (B.5).
-    // The renderer computes cols/rows from its own cell metrics.
-    if (this._mounted && this.renderer) {
-      this.renderer.fitViewport(this.usableViewport(viewport))
+    // Pass the authoritative viewport to the renderer (B.5). The renderer
+    // computes cols/rows from its own cell metrics; the shared guard below
+    // makes equal usable geometry a no-op, so this presentation driver and
+    // the live-region output driver never re-fit the same rectangle.
+    if (this._mounted) {
+      this.fitUsableViewport(this.usableViewport(viewport))
     }
   }
 
@@ -3365,7 +3367,12 @@ export class TerminalContent extends BasePaneContent {
    * so the pane's padding is already gone, and it excludes the scrollbar
    * whether or not the engine reserved one.
    */
-  private lastFitHeight = 0
+  /** The last usable CSS rectangle either fit driver fitted, so a fit made
+   *  by one path is visible to the other. Two independent guards — the
+   *  presentation delivery above and the live-region output path below — is
+   *  how a pane fit followed by identical output frames re-fits the same
+   *  rectangle a second time. null until the first fit. */
+  private lastFitGeometry: { width: number; height: number } | null = null
 
   /**
    * Re-fit the grid when the space it is shown in has changed size.
@@ -3381,13 +3388,38 @@ export class TerminalContent extends BasePaneContent {
    * No loop: fitting changes the row count, which changes the PTY size, which
    * produces output, which lands back here — and the usable height is the same,
    * so nothing refits.
+   *
+   * The guard covers WIDTH too since nocx-cwnz0, and that half needs its own
+   * argument, because a width the fit can move is a width that can alternate.
+   * It cannot: `usableViewport` reads `.scrollback-area`'s clientWidth, and
+   * that box is `flex: 1 1 auto` inside the pane — its width comes from the
+   * pane, never from the grid drawn in it, and `overflow-x: hidden` keeps a
+   * wide grid from widening it. The one thing that could move it is the
+   * vertical scrollbar appearing as rows change, and neither engine lets it:
+   * Chromium reserves the gutter (`scrollbar-gutter: stable`, style.css) and
+   * WebKit draws an overlay bar that occupies no width at all. Which is also
+   * why the two engines disagreed by 10px in nocx-vydj and why clientWidth,
+   * not a subtracted constant, is the number read here.
    */
   private refitIfResized(): void {
     const v = this._latestViewport
-    if (!v || !this.renderer) return
-    const usable = this.usableViewport(v)
-    if (usable.height === this.lastFitHeight) return
-    this.lastFitHeight = usable.height
+    if (!v) return
+    this.fitUsableViewport(this.usableViewport(v))
+  }
+
+  /**
+   * Fit `usable` unless it is the rectangle either driver already fitted.
+   *
+   * One width/height decision shared by both fit paths: the renderer still
+   * owns the CSS-pixel-to-grid conversion (B.5) and keeps its own cols/rows
+   * dedupe, while this guard answers only "did the usable rectangle change",
+   * so the two never disagree.
+   */
+  private fitUsableViewport(usable: ContentViewport): void {
+    if (!this.renderer) return
+    const last = this.lastFitGeometry
+    if (last && last.width === usable.width && last.height === usable.height) return
+    this.lastFitGeometry = { width: usable.width, height: usable.height }
     this.renderer.fitViewport(usable)
   }
 
@@ -4722,6 +4754,8 @@ export class TerminalContent extends BasePaneContent {
     this.mountAbortController?.abort()
     clearTimeout(this._settleTimer)
     this._settleTimer = undefined
+    clearTimeout(this.resizeTimer)
+    this.resizeTimer = undefined
     this._lifecycleUnsub?.()
     this._lifecycleUnsub = null
     this._integrationUnsub?.()

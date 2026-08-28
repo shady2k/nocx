@@ -655,8 +655,8 @@ describe('SettingsContent', () => {
     // Page owns the breakpoint via base.css @media (max-width: 640px).
     // There is no Settings-specific narrow state to test.
     // Verify the method exists and does not throw.
-    content.viewportChanged({ width: 500, height: 600, devicePixelRatio: 1 })
-    content.viewportChanged({ width: 800, height: 600, devicePixelRatio: 1 })
+    content.viewportChanged({ width: 500, height: 600 })
+    content.viewportChanged({ width: 800, height: 600 })
   })
 
   // ── Search ─────────────────────────────────────────────────────────

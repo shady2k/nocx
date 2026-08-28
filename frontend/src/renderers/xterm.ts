@@ -32,6 +32,7 @@ import type { CapturedFrame } from '../frame/types'
 import { fromITheme } from '../scrollback/serializer'
 import { isSnippetChord } from '../snippets/chord'
 import { parseOscNotification } from '../osc-notification'
+import { logDecision, isDecisionTracing } from '../log'
 type BellCallback = () => void
 type SelectionCallback = (text: string) => void
 type ClipboardWriteCallback = (text: string) => void
@@ -245,6 +246,14 @@ export class XtermRenderer implements TerminalRenderer {
   /** The device-pixel-ratio watch, kept so dispose can detach it. */
   private _dprMedia: MediaQueryList | null = null
   private _dprChangeHandler: (() => void) | null = null
+  /** One rare, renderer-internal settle frame after a DPR transition. The
+   *  pane's ResizeObserver path stays synchronous (nocx-dau); this frame waits
+   *  only for xterm's own DPR listener to publish the new cell metrics. */
+  private _dprRefitFrame = 0
+  /** The last authoritative viewport handed to fitViewport, kept so a
+   *  DPR/cell-metric change can recompute the grid INSIDE it (B.5). The
+   *  viewport is placement's rectangle; a metric change never redefines it. */
+  private _lastViewport: { width: number; height: number } | null = null
   /** This tab's command-existence store (OSC 636). Created per renderer so
    *  two tabs never share a snapshot; the editor and frozen headers of this
    *  tab read the same instance this OSC handler feeds. */
@@ -449,30 +458,76 @@ export class XtermRenderer implements TerminalRenderer {
     this._ensureFenceOsc()
     this.applyTheme(getCurrentTheme())
 
-    // Cell-dims change watch (nocx-yy9g): a device-pixel-ratio change
-    // re-snaps xterm's cell width (xterm re-measures its char size on the
-    // same resolution query), so the frozen block layout must re-publish.
-    // Guarded: jsdom's matchMedia stub may lack addEventListener.
-    if (typeof window !== 'undefined' && typeof window.matchMedia === 'function') {
-      const mql = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
-      if (typeof mql.addEventListener === 'function') {
-        this._dprChangeHandler = () => {
-          // The pitch is snapped to whole DEVICE pixels, so a new ratio is a
-          // new pitch even when the grid keeps its rows and columns — and
-          // then no resize fires and this is the only thing that clears the
-          // cache (nocx-rnrl).
-          this._cachedCellHeight = null
-          this._fireCellDimsChange()
-        }
-        mql.addEventListener('change', this._dprChangeHandler)
-        this._dprMedia = mql
-      }
-    }
+    // A resolution query reports only transitions across ITS OWN value. Re-arm
+    // it after every change so a later move between two other displays is not
+    // invisible (nocx-cwnz0).
+    this._watchDevicePixelRatio()
 
     // Publish the initial metric: fonts have loaded, the atlas is attached,
     // and the char-size measurement is real now (mount awaited
     // document.fonts.ready above).
     this._fireCellDimsChange()
+  }
+
+  /** Watch the current DPR and replace the query whenever it stops matching.
+   *
+   * A MediaQueryList created at 1dppx reports 1→2 and 2→1, but not 2→1.5:
+   * both latter values leave the original query false. Re-arming on each
+   * transition makes every display move observable while keeping exactly one
+   * live listener for disposal. */
+  private _watchDevicePixelRatio(): void {
+    if (this._dprMedia !== null && this._dprChangeHandler !== null) {
+      this._dprMedia.removeEventListener('change', this._dprChangeHandler)
+    }
+    this._dprMedia = null
+    this._dprChangeHandler = null
+    if (this._disposed || typeof window === 'undefined' || typeof window.matchMedia !== 'function')
+      return
+
+    const media = window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
+    if (typeof media.addEventListener !== 'function') return
+    const changed = (): void => {
+      if (this._disposed) return
+      // Arm the new ratio immediately: the old query cannot report a move
+      // between two other ratios.
+      this._watchDevicePixelRatio()
+      // MediaQueryList listeners on two distinct query objects have no
+      // ordering contract. Xterm owns another query and re-measures its cell
+      // pitch there, so read the metric only after every listener for this
+      // transition and the resulting layout have run. This is renderer-local
+      // DPR settling, not the presentation fit delay removed by nocx-dau.
+      if (this._dprRefitFrame !== 0) return
+      this._dprRefitFrame = requestAnimationFrame(() => {
+        this._dprRefitFrame = 0
+        if (this._disposed) return
+        this._cachedCellHeight = null
+        this._fireCellDimsChange()
+        // Recompute the grid INSIDE the last authoritative viewport (B.5):
+        // placement's CSS rectangle did not change; its cell mapping did.
+        if (this._lastViewport) this.fitViewport(this._lastViewport)
+        // The one trace this path gets. A display move happens on somebody
+        // else's second monitor, in a build nobody is attached to, and the
+        // symptom nocx-cwnz0 was filed for was a grid that would not settle
+        // — so the next report of it needs the four numbers that decide the
+        // fit, not a reconstruction. Behind the existing decision seam:
+        // `window.nocxDebug = true` in devtools turns it on live, and off it
+        // does not even build the fields.
+        if (isDecisionTracing()) {
+          const cell = this._getCellDims()
+          logDecision('dpr refit', {
+            dpr: typeof window !== 'undefined' ? window.devicePixelRatio : null,
+            cellWidth: cell?.width ?? null,
+            cellHeight: cell?.height ?? null,
+            viewport: this._lastViewport,
+            cols: this.term?.cols ?? null,
+            rows: this.term?.rows ?? null,
+          })
+        }
+      })
+    }
+    this._dprMedia = media
+    this._dprChangeHandler = changed
+    media.addEventListener('change', changed)
   }
 
   /** Register the OSC 1337 fence handler exactly once, when the terminal
@@ -509,6 +564,7 @@ export class XtermRenderer implements TerminalRenderer {
   fitViewport(viewport: { width: number; height: number }): void {
     const t = this.term
     if (!t || viewport.width <= 0 || viewport.height <= 0) return
+    this._lastViewport = { width: viewport.width, height: viewport.height }
     const cell = this._getCellDims()
     if (!cell) return
     const cols = Math.max(1, Math.floor(viewport.width / cell.width))
@@ -889,6 +945,10 @@ export class XtermRenderer implements TerminalRenderer {
       this._dprMedia.removeEventListener('change', this._dprChangeHandler)
       this._dprMedia = null
       this._dprChangeHandler = null
+    }
+    if (this._dprRefitFrame !== 0) {
+      cancelAnimationFrame(this._dprRefitFrame)
+      this._dprRefitFrame = 0
     }
     this._cellDimsSubs = []
     this.scrollDisposable?.dispose()

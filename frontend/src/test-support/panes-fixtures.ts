@@ -189,6 +189,10 @@ export interface RendererMock extends TerminalRenderer {
   /** Fire a parse settle — xterm's onWriteParsed, the event the live region
    *  measures the grid on. */
   _fireWriteParsed(): void
+  /** Fire the registered resize callback (the xterm boundary's delegation).
+   *  The renderer's onResize fan-out is what TerminalContent debounces into
+   *  the PTY resize, so a test drives it exactly as a grid change does. */
+  _fireResize(cols: number, rows: number): void
   /** Fire an OSC 1337 in-band READY (nocx-ynsx). */
   _fireInBandReady(): void
   _fireBell(): void
@@ -350,6 +354,9 @@ export function createRendererMock(): RendererMock {
      *  cares asserts on setReadOnly instead. */
     _fireData(data: string) {
       cbs.onData?.(data)
+    },
+    _fireResize(cols: number, rows: number) {
+      cbs.onResize?.(cols, rows)
     },
     /** Fire the snippet-palette chord the way xterm's custom key handler
      *  does when ⌥⌘P is pressed in the terminal (nocx-jj77). */

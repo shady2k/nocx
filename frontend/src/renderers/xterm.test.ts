@@ -32,6 +32,7 @@ import {
   ReadScreenRangeError,
 } from '../frame/capture-identity'
 import { getCurrentTheme } from './theme-adapter'
+import { setDecisionTracing, DECISION_PREFIX } from '../log'
 
 const stubBrowser = () => {
   window.matchMedia = (query: string) => ({
@@ -888,8 +889,8 @@ describe('XtermRenderer cell metric (nocx-yy9g)', () => {
     // Registered after mount so the mount-end fire is not counted.
     const cb = vi.fn()
     r.onCellDimsChange(cb)
-    for (const l of changeListeners) l()
-    expect(cb).toHaveBeenCalledTimes(1)
+    for (const l of [...changeListeners]) l()
+    await vi.waitFor(() => expect(cb).toHaveBeenCalledTimes(1))
     r.dispose()
   })
 })
@@ -1012,8 +1013,8 @@ describe('XtermRenderer cellHeight is the grid row pitch (nocx-rnrl)', () => {
     // whole device pixels, and the grid keeps its rows and columns — so no
     // resize fires and nothing else would clear the cache.
     publishDims(r, { width: 8.4, height: 19 })
-    for (const l of changeListeners) l()
-    expect(r.cellHeight).toBe(19)
+    for (const l of [...changeListeners]) l()
+    await vi.waitFor(() => expect(r.cellHeight).toBe(19))
     r.dispose()
   })
 
@@ -1424,6 +1425,160 @@ describe('XtermRenderer repaints after a grid resize (nocx-jfgb)', () => {
     r.fitViewport({ width: 800, height: 405 })
 
     expect(refresh).not.toHaveBeenCalled()
+  })
+})
+
+// ── DPR change refits INSIDE the last viewport (nocx-cwnz0) ────────────────
+//
+// A display move changes the device-pixel ratio without changing the pane's
+// CSS rectangle. The cell pitch re-snaps to whole device pixels, so the SAME
+// rectangle maps to a different grid. §B.5 puts that recomputation in the
+// renderer, within the last authoritative viewport — placement never redefines
+// the rectangle, and nothing may leave the grid at the old pitch. The test
+// drives the causal A/B cell-metric alternation: metrics A fit one grid,
+// metrics B (after the DPR event) fit another, and the grid must converge on
+// exactly one of them — no alternating rows.
+describe('XtermRenderer refits the cached viewport on a DPR change (nocx-cwnz0)', () => {
+  interface DprWatch {
+    query: string
+    listeners: Set<() => void>
+  }
+
+  const mountWithDprWatch = async (initialCell: { width: number; height: number }) => {
+    const watches: DprWatch[] = []
+    let cell: { width: number; height: number } | null = initialCell
+    window.matchMedia = (query: string) => {
+      const watch: DprWatch = { query, listeners: new Set() }
+      watches.push(watch)
+      return {
+        matches: false,
+        media: query,
+        onchange: null,
+        addListener: () => {},
+        removeListener: () => {},
+        addEventListener: (type: string, listener: EventListenerOrEventListenerObject) => {
+          if (type === 'change') watch.listeners.add(listener as () => void)
+        },
+        removeEventListener: (type: string, listener: EventListenerOrEventListenerObject) => {
+          if (type === 'change') watch.listeners.delete(listener as () => void)
+        },
+        dispatchEvent: () => false,
+      }
+    }
+    ;(globalThis as Record<string, unknown>).ResizeObserver = class {
+      observe() {}
+      unobserve() {}
+      disconnect() {}
+    }
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+    ;(r as unknown as Record<string, unknown>)._getCellDims = () => cell
+    const term = (r as unknown as Record<string, unknown>).term as {
+      rows: number
+      cols: number
+      resize: (cols: number, rows: number) => void
+    }
+    return {
+      r,
+      term,
+      watches,
+      setCell: (next: { width: number; height: number } | null): void => {
+        cell = next
+      },
+    }
+  }
+
+  const fire = (watch: DprWatch): void => {
+    for (const listener of [...watch.listeners]) listener()
+  }
+
+  it('re-arms every display-scale watch and refits only after fresh cell metrics exist', async () => {
+    const { r, term, watches, setCell } = await mountWithDprWatch({ width: 10, height: 20 })
+    const activeWatches = (): DprWatch[] => watches.filter((watch) => watch.listeners.size > 0)
+    // The presentation layer delivered one authoritative viewport (B.5).
+    r.fitViewport({ width: 800, height: 400 })
+    expect(term.cols).toBe(80)
+    expect(term.rows).toBe(20)
+    expect(activeWatches()).toHaveLength(1)
+
+    const resize = vi.spyOn(term, 'resize')
+    const dimensionsChanged = vi.fn()
+    r.onCellDimsChange(dimensionsChanged)
+    // This listener fires before xterm's independent resolution query has
+    // published B. Synchronous code would read A and leave the old grid.
+    const first = activeWatches()[0]
+    fire(first)
+    expect(first.listeners).toHaveLength(0)
+    expect(activeWatches()).toHaveLength(1)
+    expect(resize).not.toHaveBeenCalled()
+    setCell({ width: 11, height: 21 })
+    await vi.waitFor(() => expect(resize).toHaveBeenNthCalledWith(1, 72, 19))
+
+    // A second display move reaches the replacement watcher and waits for C.
+    const second = activeWatches()[0]
+    fire(second)
+    expect(second.listeners).toHaveLength(0)
+    expect(resize).toHaveBeenCalledTimes(1)
+    setCell({ width: 12, height: 22 })
+    await vi.waitFor(() => expect(resize).toHaveBeenNthCalledWith(2, 66, 18))
+
+    // An unmeasurable transition keeps the C grid and the cached viewport.
+    const changesBeforeNull = dimensionsChanged.mock.calls.length
+    fire(activeWatches()[0])
+    setCell(null)
+    await vi.waitFor(() => expect(dimensionsChanged).toHaveBeenCalledTimes(changesBeforeNull + 1))
+    expect(resize).toHaveBeenCalledTimes(2)
+
+    // The next measurable move still uses that authoritative viewport.
+    fire(activeWatches()[0])
+    setCell({ width: 13, height: 23 })
+    await vi.waitFor(() => expect(resize).toHaveBeenNthCalledWith(3, 61, 17))
+
+    // Disposal detaches the current query and cancels a queued refit.
+    const cancel = vi.spyOn(globalThis, 'cancelAnimationFrame')
+    fire(activeWatches()[0])
+    r.dispose()
+    expect(cancel).toHaveBeenCalled()
+    expect(resize).toHaveBeenCalledTimes(3)
+    expect(activeWatches()).toHaveLength(0)
+    cancel.mockRestore()
+  })
+
+  // The refit happens on somebody else's second monitor. Off by default and
+  // building nothing; on, it names the numbers the fit was made from
+  // (nocx-uus3o).
+  it('traces the refit behind the decision seam, and nothing when it is off', async () => {
+    const { r, setCell, watches } = await mountWithDprWatch({ width: 10, height: 20 })
+    const live = (): DprWatch => watches.filter((w) => w.listeners.size > 0)[0]
+    const debug = vi.spyOn(console, 'debug').mockImplementation(() => {})
+    const traces = (): string[] =>
+      debug.mock.calls.map((c) => String(c[0])).filter((line) => line.includes('dpr refit'))
+    try {
+      r.fitViewport({ width: 800, height: 400 })
+
+      // Tracing off — the default. A display move says nothing.
+      fire(live())
+      setCell({ width: 11, height: 21 })
+      await vi.waitFor(() => expect(r.cellHeight).toBe(21))
+      expect(traces()).toHaveLength(0)
+
+      setDecisionTracing(true)
+      fire(live())
+      setCell({ width: 12, height: 22 })
+      await vi.waitFor(() => expect(traces()).toHaveLength(1))
+      // The grid it settled on, and the metrics it settled on it from.
+      expect(traces()[0]).toContain(DECISION_PREFIX)
+      expect(traces()[0]).toContain('"cellWidth":12')
+      expect(traces()[0]).toContain('"cols":66')
+      expect(traces()[0]).toContain('"rows":18')
+    } finally {
+      setDecisionTracing(false)
+      debug.mockRestore()
+      r.dispose()
+    }
   })
 })
 

@@ -578,16 +578,16 @@ export class Pane implements PaneHost {
     if (this._disposed || !this._mountStarted) return
     const rect = this.pane.getBoundingClientRect()
     if (rect.width === 0 && rect.height === 0) return
-    const dpr = window.devicePixelRatio || 1
-    const vp: ContentViewport = { width: rect.width, height: rect.height, devicePixelRatio: dpr }
-    // Suppress equal consecutive rectangles (B.5).
+    const vp: ContentViewport = { width: rect.width, height: rect.height }
+    // Suppress equal consecutive rectangles (B.5) — and a display move is one
+    // of them. The device pixel ratio used to sit in this comparison, so the
+    // same rectangle on a differently-scaled monitor counted as new and was
+    // delivered. Nothing downstream acted on it: the renderer watches its own
+    // resolution query and refits inside the viewport it already has, and the
+    // fit guard in TerminalContent compares width and height. Placement was
+    // announcing a change it did not own and could not deliver (nocx-uus3o).
     const prev = this._latestViewport
-    if (
-      prev &&
-      prev.width === vp.width &&
-      prev.height === vp.height &&
-      prev.devicePixelRatio === vp.devicePixelRatio
-    ) {
+    if (prev && prev.width === vp.width && prev.height === vp.height) {
       return
     }
     this._latestViewport = vp

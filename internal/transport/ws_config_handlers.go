@@ -14,10 +14,12 @@ package transport
 // sparseFromWire, secretRowInputs, rowToSecretRef are gone).
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"unicode/utf8"
 
@@ -132,6 +134,37 @@ func decodeObject(raw json.RawMessage, dst any) string {
 	}
 	if err := json.Unmarshal(raw, dst); err != nil {
 		return "params must be a JSON object"
+	}
+	return ""
+}
+
+// decodeObjectStrict is the field-aware decoder for params with a published
+// contract. It preserves the top-level absent/null forms while refusing fields
+// the contract does not name and nulls for named non-nullable fields.
+func decodeObjectStrict(raw json.RawMessage, dst any, nonNullable ...string) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
+		return ""
+	}
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		return "params must be a JSON object carrying only this method's own fields"
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return "params must contain exactly one JSON value"
+	}
+	if len(nonNullable) == 0 {
+		return ""
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &fields); err != nil {
+		return "params must be a JSON object"
+	}
+	for _, field := range nonNullable {
+		if value, ok := fields[field]; ok && string(bytes.TrimSpace(value)) == "null" {
+			return field + " must not be null"
+		}
 	}
 	return ""
 }

@@ -164,7 +164,7 @@ const maxSnippetBodyRunes = 16_000
 // The id is minted by the backend (nocx-b7b5), so there is none to check.
 func validateSnippetCreateRaw(raw json.RawMessage) string {
 	var p snippetCreateParams
-	if msg := decodeObject(raw, &p); msg != "" {
+	if msg := decodeObjectStrict(raw, &p, "title", "body"); msg != "" {
 		return msg
 	}
 	return validateSnippetTextParams(p.Title, p.Body)
@@ -173,7 +173,7 @@ func validateSnippetCreateRaw(raw json.RawMessage) string {
 // validateSnippetUpdateRaw is the registered validator for snippets.update.
 func validateSnippetUpdateRaw(raw json.RawMessage) string {
 	var p snippetUpdateParams
-	if msg := decodeObject(raw, &p); msg != "" {
+	if msg := decodeObjectStrict(raw, &p, "id", "title", "body"); msg != "" {
 		return msg
 	}
 	if p.ID == "" {
@@ -188,7 +188,7 @@ func validateSnippetUpdateRaw(raw json.RawMessage) string {
 // validateSnippetDeleteRaw is the registered validator for snippets.delete.
 func validateSnippetDeleteRaw(raw json.RawMessage) string {
 	var p snippetDeleteParams
-	if msg := decodeObject(raw, &p); msg != "" {
+	if msg := decodeObjectStrict(raw, &p, "id"); msg != "" {
 		return msg
 	}
 	if p.ID == "" {
@@ -203,7 +203,7 @@ func validateSnippetDeleteRaw(raw json.RawMessage) string {
 // a wire validator does not have and must not read.
 func validateSnippetReorderRaw(raw json.RawMessage) string {
 	var p snippetReorderParams
-	if msg := decodeObject(raw, &p); msg != "" {
+	if msg := decodeObjectStrict(raw, &p, "ids"); msg != "" {
 		return msg
 	}
 	for _, id := range p.IDs {

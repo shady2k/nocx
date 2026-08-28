@@ -1,9 +1,9 @@
-// Generates the renderer's wire types from contracts/*.schema.json.
+// Generates the renderer's wire types from result contracts in contracts/*.schema.json.
 //
-// The schema is the single declaration of every JSON-RPC result shape; this
-// script is how the renderer gets its half. The output is committed so a build
-// never depends on a generator being installed, and `--check` is what stops the
-// committed copy drifting from the schema it came from.
+// Params contracts use the `.params.schema.json` suffix and are consumed by the
+// Go transport agreement tests; they are intentionally not renderer result types.
+// The output is committed so a build never depends on a generator being installed,
+// and `--check` is what stops the committed result copy drifting from its schema.
 //
 // Why generated rather than hand-written: `vault.status` shipped without
 // `defaultProvider` while the renderer's hand-written interface declared it and
@@ -36,7 +36,9 @@ function outputName(schemaFile) {
 
 async function main() {
   const check = process.argv.includes('--check')
-  const entries = (await readdir(contractsDir)).filter((f) => f.endsWith('.schema.json')).sort()
+  const entries = (await readdir(contractsDir))
+    .filter((f) => f.endsWith('.schema.json') && !f.endsWith('.params.schema.json'))
+    .sort()
 
   if (entries.length === 0) {
     console.error('no *.schema.json under contracts/')

@@ -20,7 +20,7 @@
  * elapsed-time assertions.
  */
 import { test as base, expect, type Page } from '@playwright/test'
-import { mkdtempSync, readFileSync, writeFileSync } from 'node:fs'
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
@@ -64,6 +64,7 @@ let probePath = ''
 let probeResultPath = ''
 let armPath = ''
 let summonPath = ''
+let summonRequestPath = ''
 let baselinePath = ''
 let exitPath = ''
 let resizePath = ''
@@ -92,6 +93,7 @@ test.beforeAll(async () => {
   probeResultPath = join(fixtureDir, 'probe-result')
   armPath = join(fixtureDir, 'arm')
   summonPath = join(fixtureDir, 'summon')
+  summonRequestPath = join(fixtureDir, 'summon-request')
   baselinePath = join(fixtureDir, 'resize-baseline')
   exitPath = join(fixtureDir, 'exit')
   resizePath = join(fixtureDir, 'sigwinch')
@@ -112,9 +114,10 @@ test.beforeAll(async () => {
       `printf '%s' '${INITIAL}'`,
       `printf '\\033]9;%s\\007' '${READY}'`,
       `while [ ! -e '${armPath}' ]; do sleep 0.1; done`,
+      `printf '\\033]9;%s\\007' '${ARMED}'`,
+      `while [ ! -e '${summonRequestPath}' ]; do sleep 0.1; done`,
       `printf '%s\n' "$(stty size)" > '${baselineSizePath}'`,
       `cp '${resizePath}' '${baselinePath}'`,
-      `printf '\\033]9;%s\\007' '${ARMED}'`,
       `while [ ! -e '${summonPath}' ]; do sleep 0.1; done`,
       `printf '%s\n' "$(stty size)" > '${summonedSizePath}'`,
       `while [ ! -e '${probePath}' ]; do sleep 0.1; done`,
@@ -129,6 +132,23 @@ test.beforeAll(async () => {
       '',
     ].join('\n'),
   )
+})
+test.beforeEach(() => {
+  for (const path of [
+    armPath,
+    summonPath,
+    summonRequestPath,
+    baselinePath,
+    probePath,
+    probeResultPath,
+    exitPath,
+    baselineSizePath,
+    summonedSizePath,
+    finalSizePath,
+  ]) {
+    rmSync(path, { force: true })
+  }
+  writeFileSync(resizePath, '')
 })
 
 test.afterAll(async () => {
@@ -332,6 +352,12 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
         message: 'the fixture never armed its post-summon resize probe',
       })
       .toBe(true)
+
+    // Request the geometry snapshot immediately before the summon action.
+    // WebKit may finish an earlier fit after the grid is already visible; a
+    // snapshot taken at arm time would turn that delayed setup work into a
+    // false summon-resize failure.
+    writeFileSync(summonRequestPath, 'summon-request\n')
 
     // The user presses the summon chord on the full-screen grid. The overlay
     // and static frame must appear without moving the real terminal geometry.

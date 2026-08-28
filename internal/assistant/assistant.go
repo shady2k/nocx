@@ -250,6 +250,10 @@ type AskParams struct {
 	// consulted, and every classification failure escalates. The transport
 	// adapts THE ONE role resolver (e6kn2) and the vault to this seam.
 	Classifier ClassifierResolver
+	// Presentation controls the model-facing lazy tool catalog. It changes
+	// visibility only; the grant and kernel remain the authority boundary.
+	Presentation *agenttools.PresentationConfig
+
 	// RunID and Attempt are the run's identity — what approvals bind to.
 	// The transport passes the run's execution row id; empty with attempt 0
 	// is the un-bound shape every caller has today.
@@ -371,23 +375,31 @@ func newClient(logger log.Logger, toolsFS fs.FS, recorder WireRecorder) (Client,
 	if len(reg.All()) == 0 {
 		return nil, errors.New("assistant: tool registry assembled EMPTY — the tool schemas did not reach the binary; a model would be offered no tools")
 	}
-	return newClientWithRegistry(logger, reg, recorder), nil
+	searchSchema, _ := fs.ReadFile(toolsFS, "search.schema.json")
+	return newClientWithRegistry(logger, reg, recorder, searchSchema), nil
 }
 
-func newClientWithRegistry(logger log.Logger, reg agenttools.Registry, recorder WireRecorder) Client {
+func newClientWithRegistry(logger log.Logger, reg agenttools.Registry, recorder WireRecorder, searchSchema ...[]byte) Client {
+	var schema []byte
+	if len(searchSchema) > 0 {
+		schema = append([]byte(nil), searchSchema[0]...)
+	}
 	return &client{
-		log:         logger,
-		http:        newGuardedHTTPClient(logger, nil, recorder),
-		tools:       reg,
-		approvals:   NewApprovalStore(),
-		checkpoints: newRunCheckpoints(),
+		log:          logger,
+		http:         newGuardedHTTPClient(logger, nil, recorder),
+		tools:        reg,
+		searchSchema: schema,
+		approvals:    NewApprovalStore(),
+		checkpoints:  newRunCheckpoints(),
 	}
 }
 
 type client struct {
-	log         log.Logger
-	http        *http.Client
-	tools       agenttools.Registry
+	log          log.Logger
+	http         *http.Client
+	tools        agenttools.Registry
+	searchSchema []byte
+
 	approvals   *ApprovalStore
 	checkpoints *runCheckpoints
 }

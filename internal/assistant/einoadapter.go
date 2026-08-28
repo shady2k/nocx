@@ -28,7 +28,6 @@ import (
 	"github.com/cloudwego/eino/adk"
 	"github.com/cloudwego/eino/components/tool"
 	"github.com/cloudwego/eino/compose"
-	"github.com/cloudwego/eino/schema"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
@@ -45,7 +44,11 @@ import (
 type policyMiddleware struct {
 	adk.BaseChatModelAgentMiddleware
 	carrier
-	kernel *effectKernel
+	kernel            *effectKernel
+	grantProvider     func() content.Grant
+	presentation      agenttools.PresentationConfig
+	presentationState *presentationState
+	searchSchema      []byte
 }
 
 // newPolicyMiddleware builds the kernel for one run, wraps the declared-call
@@ -57,7 +60,12 @@ func newPolicyMiddleware(logger log.Logger, grant content.Grant, registry agentt
 	if err != nil {
 		return nil, err
 	}
-	return &policyMiddleware{carrier: &callsCarrier{effectKernel: k}, kernel: k}, nil
+	return &policyMiddleware{
+		carrier:           &callsCarrier{effectKernel: k},
+		kernel:            k,
+		grantProvider:     func() content.Grant { return grant },
+		presentationState: newPresentationState(nil),
+	}, nil
 }
 
 // WrapInvokableToolCall installs the pipeline on one tool call.
@@ -68,6 +76,16 @@ func (m *policyMiddleware) WrapInvokableToolCall(ctx context.Context, endpoint a
 			// tool is refused. It is never offered to the model and must
 			// not execute if a model guesses its internal name.
 			return m.UnknownTool(tCtx.Name, rawArgs)
+		}, nil
+	}
+	if tCtx != nil && tCtx.Name == toolsSearchName {
+		return func(ctx context.Context, rawArgs string, _ ...tool.Option) (string, error) {
+			if l := latchFrom(ctx); l != nil {
+				if reason := l.tripped(); reason != nil {
+					return "", m.deferred(ctx, tCtx, reason)
+				}
+			}
+			return m.searchTools(ctx, rawArgs)
 		}, nil
 	}
 	return func(ctx context.Context, rawArgs string, _ ...tool.Option) (string, error) {
@@ -117,29 +135,27 @@ func (m *policyMiddleware) BeforeAgent(ctx context.Context, runCtx *adk.ChatMode
 	return withLatch(ctx, &batchLatch{}), runCtx, nil
 }
 
-// BeforeModelRewriteState hides the internal anchor from every model request.
-// The actual ToolsNode keeps it so ADK can route a tool call through
-// UnknownToolsHandler even when the grant has no permitted tools.
+// BeforeModelRewriteState rebuilds the model-facing projection from the
+// canonical registry on every model request. The ToolsNode still owns every
+// currently eligible executable tool, so a hidden name reaches the ordinary
+// middleware and kernel path; only ToolInfos is presentation state.
 func (m *policyMiddleware) BeforeModelRewriteState(ctx context.Context, state *adk.ChatModelAgentState, _ *adk.ModelContext) (context.Context, *adk.ChatModelAgentState, error) {
 	if state == nil {
 		return ctx, state, nil
 	}
-	var filtered []*schema.ToolInfo
-	for i, info := range state.ToolInfos {
-		if info == nil || info.Name != unknownToolAnchorName {
-			if filtered != nil {
-				filtered = append(filtered, info)
-			}
-			continue
-		}
-		if filtered == nil {
-			filtered = make([]*schema.ToolInfo, 0, len(state.ToolInfos)-1)
-			filtered = append(filtered, state.ToolInfos[:i]...)
-		}
+	projection := m.presentationProjection()
+	infos, err := declaredToolInfos(projection.Visible)
+	if err != nil {
+		return ctx, state, err
 	}
-	if filtered != nil {
-		state.ToolInfos = filtered
+	if projection.Lazy {
+		searchInfo, err := searchToolInfo(m.searchSchema)
+		if err != nil {
+			return ctx, state, err
+		}
+		infos = append(infos, searchInfo)
 	}
+	state.ToolInfos = infos
 	return ctx, state, nil
 }
 

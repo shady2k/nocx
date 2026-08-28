@@ -67,6 +67,13 @@ type Updater interface {
 	// This is the gate that prevents an auto-rollback after a
 	// successful update. Must only be called after the initial tab's
 	// renderer mounted and its PTY session opened.
+	//
+	// Health is a claim about a PAIR: it finalises only when the UI
+	// making the claim AND the coordinator answering it are both the
+	// version this update installed. Anything else — a surviving old
+	// daemon, a report from the pre-restart process, an unanswerable
+	// probe — returns an error and leaves the rollback journal intact
+	// (pair.go).
 	ReportHealthy(ctx context.Context) error
 }
 
@@ -96,6 +103,14 @@ type UpdaterConfig struct {
 	// file on linux.
 	InstallPath string
 
+	// Coordinator answers which backend build is actually serving this
+	// client. [Updater.ReportHealthy] refuses to finalise without it:
+	// certifying an update means certifying a UI/server PAIR, and a
+	// composition root that cannot name the backend cannot certify one
+	// (see pair.go). A build whose backend is this same process wires
+	// [NewInProcessCoordinatorProbe].
+	Coordinator CoordinatorProbe
+
 	// HTTPClient is used for artefact downloads. If nil, a
 	// 30-second-timeout default is used.
 	HTTPClient *http.Client
@@ -111,6 +126,7 @@ type updater struct {
 	keyring        []ed25519.PublicKey
 	currentVersion string
 	installPath    string
+	coordinator    CoordinatorProbe
 	httpClient     *http.Client
 	log            log.Logger
 	lockPath       string // path to the flock file
@@ -134,6 +150,7 @@ func NewUpdater(cfg UpdaterConfig) Updater {
 		keyring:        cfg.Keyring,
 		currentVersion: cfg.CurrentVersion,
 		installPath:    cfg.InstallPath,
+		coordinator:    cfg.Coordinator,
 		httpClient:     hc,
 		log:            l,
 		lockPath:       lockPath,

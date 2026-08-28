@@ -1,4 +1,4 @@
-.PHONY: all init build dev dev-web lint format test clean hooks ci ci-full \
+.PHONY: all init build build-server dev dev-web lint format test clean hooks ci ci-full \
         ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e helpers \
         print-os-pkgs print-portable-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci
@@ -90,9 +90,23 @@ all: lint test build
 # cannot read or clobber the documents an installed nocx owns
 # (internal/storage/appdir.go). Use build-release to produce the shipped
 # artefact; CI does that from a tag.
-build:
+build: build-server
 	$(FRONTEND_BUILD)
 	$(GO) build $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") -ldflags "$(LDFLAGS)" -o build/bin/nocx .
+
+# The coordinator, built BESIDE the application binary and never instead of
+# it. Both bundles put the two in one directory — nocx.app/Contents/MacOS on
+# macOS, AppDir/usr/bin inside the AppImage — and internal/update/serverbin's
+# SiblingPath is that fact stated once, so a local `make build` has to
+# reproduce the layout or the launcher cannot be exercised outside a release.
+#
+# CGO_ENABLED=0 and no wails tags: the coordinator has no window, no GTK and
+# no WebKit (cmd/nocx-server), and building it against them would drag the
+# desktop shell's dependency surface into a headless daemon for nothing.
+# Same -ldflags as the app, because a pair that cannot report one version is
+# the defect the update health check exists to catch.
+build-server:
+	CGO_ENABLED=0 $(GO) build -ldflags "$(LDFLAGS)" -o build/bin/nocx-server ./cmd/nocx-server
 
 # The shipped artefact. `-tags release` is what selects the real profile
 # directory, and it is deliberately the side that needs the flag: a build made
@@ -101,9 +115,17 @@ build:
 # `helpers` is a prerequisite because the shipped binary embeds the
 # cross-compiled helper artefacts; without them Artifact answers
 # ErrArtifactsNotBuilt and the remote panel has nothing to install.
+#
+# The coordinator is built here too, and with `release` and nothing else:
+# that tag is what selects the shipped profile directory (appdir.go), and a
+# coordinator resolving nocx-dev while the app resolved nocx would hold a
+# different vault and a different settings document from the window attached
+# to it. It is NOT built through build-server, which is the development
+# build of the same binary.
 build-release: helpers
 	$(FRONTEND_BUILD)
 	$(GO) build -tags "$(strip release production $(WAILS_PLATFORM_TAGS))" -ldflags "$(LDFLAGS)" -o build/bin/nocx .
+	CGO_ENABLED=0 $(GO) build -tags release -ldflags "$(LDFLAGS)" -o build/bin/nocx-server ./cmd/nocx-server
 
 # A local dev loop: build the embedded frontend and run the app with the dev
 # profile. `wails dev` used to provide a hot-reloading asset server; v3 has

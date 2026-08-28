@@ -251,6 +251,26 @@ func zshRcfile(envBlock, scriptSource, capSource string) string {
 	return stripShellComments(rc)
 }
 
+// zshEnvFile and zshProfileFile render the two login-phase files that go into
+// the transient ZDOTDIR beside the .zshrc. They are functions rather than two
+// call sites because BOTH tiers write those files and there is one answer to
+// "how a transient ZDOTDIR replays the user's phases": the remote tier prints
+// them onto the far host from zshArgFor, the local tier writes them here on
+// disk from WriteLocalZDOTDIR. The local tier used to write neither, so on the
+// common macOS layout — Homebrew's documented install puts its shellenv eval in
+// ~/.zprofile — a local tab reached the user's own ~/.zshrc with none of the
+// PATH their login shell would have had (nocx-2ka0).
+//
+// Comment-stripped for the same reason zshRcfile strips its own render: the
+// remote copy travels inside the bootstrap payload (nocx-z9s9.17), and the two
+// tiers must ship the same bytes or the shared render is a shared name over two
+// texts.
+func zshEnvFile() string {
+	return stripShellComments(strings.ReplaceAll(zshEnvTemplate, "@TRAP@", zshCleanupTrap))
+}
+
+func zshProfileFile() string { return stripShellComments(zshProfileTemplate) }
+
 // zshArgFor wraps a rendered .zshrc in the zsh tier's pinned transport: the
 // POSIX outer script writes it, and the two login-phase files beside it,
 // into a transient ZDOTDIR and execs a login zsh. The three are written
@@ -260,10 +280,8 @@ func zshRcfile(envBlock, scriptSource, capSource string) string {
 // nothing at all, which is the very gap these two files close. The result is one physical line with no single quotes, so it can
 // travel inside the launch carrier and the argv launchers' shellQuote.
 func zshArgFor(rc string) string {
-	outer := strings.ReplaceAll(zshOuterScript, "@ZSHENV@",
-		printfBEscape(stripShellComments(strings.ReplaceAll(zshEnvTemplate, "@TRAP@", zshCleanupTrap))))
-	outer = strings.ReplaceAll(outer, "@ZPROFILE@",
-		printfBEscape(stripShellComments(zshProfileTemplate)))
+	outer := strings.ReplaceAll(zshOuterScript, "@ZSHENV@", printfBEscape(zshEnvFile()))
+	outer = strings.ReplaceAll(outer, "@ZPROFILE@", printfBEscape(zshProfileFile()))
 	outer = strings.ReplaceAll(outer, "@ZSHCRC@", printfBEscape(rc))
 	// One physical line: a csh login shell splits multi-line quoted
 	// tokens, so the payload must survive that parse (see singleLine).

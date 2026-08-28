@@ -3,11 +3,13 @@ package shellintegration
 import (
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -752,4 +754,368 @@ func TestLocalZshSession_KeepsAFrameworkAcceptLineWrapper(t *testing.T) {
 	if !strings.Contains(s.output(), "FIXTURE_WRAPPER_RAN") {
 		t.Errorf("the framework's own accept-line wrapper was bypassed — nocx took a surface it does not own: %q", s.output())
 	}
+}
+
+// TestWriteLocalZDOTDIR_CarriesEveryLoginPhaseFile is nocx-2ka0 at the cheapest
+// seam that can report it. ZDOTDIR names a DIRECTORY, so pointing it at ours
+// shadows all four of the user's startup files at once; a transient directory
+// holding only .zshrc means the .zshenv and .zprofile phases find nothing and
+// the user's own files for those phases are never read. The remote tier has
+// written all three since nocx-m8jwn (zshArgFor); the local one wrote one.
+//
+// The assertion is on the FILES rather than on their text because that is the
+// whole mechanism: zsh reads a phase's file if and only if it exists in the
+// directory ZDOTDIR names.
+func TestWriteLocalZDOTDIR_CarriesEveryLoginPhaseFile(t *testing.T) {
+	dir, err := WriteLocalZDOTDIR("# test zshrc\n")
+	if err != nil {
+		t.Fatalf("WriteLocalZDOTDIR: %v", err)
+	}
+	defer func() { _ = os.RemoveAll(dir) }()
+
+	for _, f := range []string{".zshenv", ".zprofile", ".zshrc"} {
+		st, serr := os.Stat(filepath.Join(dir, f))
+		if serr != nil {
+			t.Errorf("the transient ZDOTDIR has no %s, so zsh reads nothing at that phase "+
+				"and the user's own %s is shadowed by an absent file: %v", f, f, serr)
+			continue
+		}
+		if st.Mode().Perm() != 0o600 {
+			t.Errorf("%s mode = %o, want 0600", f, st.Mode().Perm())
+		}
+	}
+	// The two login-phase files are the SAME text the remote tier ships, not a
+	// second spelling of it: one owner for "how a transient ZDOTDIR replays the
+	// user's phases", or the two tiers drift and agree only where anybody looks.
+	env, err := os.ReadFile(filepath.Join(dir, ".zshenv")) //nolint:gosec // test-owned temp path
+	if err != nil {
+		t.Fatalf("read .zshenv: %v", err)
+	}
+	if string(env) != zshEnvFile() {
+		t.Errorf(".zshenv is not the shared render:\n got %q\nwant %q", env, zshEnvFile())
+	}
+	prof, err := os.ReadFile(filepath.Join(dir, ".zprofile")) //nolint:gosec // test-owned temp path
+	if err != nil {
+		t.Fatalf("read .zprofile: %v", err)
+	}
+	if string(prof) != zshProfileFile() {
+		t.Errorf(".zprofile is not the shared render:\n got %q\nwant %q", prof, zshProfileFile())
+	}
+}
+
+// TestLocalZshSession_RunsTheUsersLoginPhases is nocx-2ka0's acceptance
+// criterion, driven end to end on a real zsh on a real pty through the exact
+// call the composition root makes.
+//
+// What a user can do that they could not before: open a local tab on the
+// common macOS layout — Homebrew's own documented install puts
+// `eval "$(brew shellenv)"` in ~/.zprofile — and have brew on PATH by the time
+// their own ~/.zshrc runs. The owner's machine reported it as
+// `~/.zshrc:33: command not found: bao`: the tool was in /opt/homebrew/bin,
+// ~/.zprofile is what puts that on PATH, and ~/.zprofile was never read.
+//
+// The probe is taken AT .zshrc TIME, not at prompt time, because that is where
+// the defect lived: this machine re-added /opt/homebrew/bin from its own
+// ~/.zshrc a few lines later, so a prompt-time PATH assertion passes on a
+// session whose ~/.zshrc failed. Order is asserted with it — a file read in
+// the wrong phase sets a variable a later phase was supposed to see first.
+func TestLocalZshSession_RunsTheUsersLoginPhases(t *testing.T) {
+	zsh := requireShell(t, "zsh")
+
+	home := t.TempDir()
+	// The tool the user's ~/.zshrc reaches for, on a PATH entry that exists
+	// only in ~/.zprofile — the Homebrew shape, reduced to its mechanism.
+	bin := filepath.Join(home, "brewbin")
+	if err := os.Mkdir(bin, 0o700); err != nil {
+		t.Fatalf("mkdir brewbin: %v", err)
+	}
+	//nolint:gosec // a fixture tool the shell must be able to EXECUTE; 0600 would
+	// make `command -v` succeed and the probe still fail, which is a test that
+	// cannot report the defect it exists for.
+	if err := os.WriteFile(filepath.Join(bin, "nocxprobe"), []byte("#!/bin/sh\necho probe\n"), 0o700); err != nil {
+		t.Fatalf("write probe tool: %v", err)
+	}
+	write := func(name, body string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(home, name), []byte(body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", name, err)
+		}
+	}
+	write(".zshenv", "echo PHASEZSHENV\n")
+	write(".zprofile", "echo PHASEZPROFILE\nexport PATH="+ShellQuote(bin)+":$PATH\n")
+	// Resolved at .zshrc time and kept, so the assertion cannot be satisfied
+	// by anything that happens to PATH afterwards.
+	write(".zshrc", "echo PHASEZSHRC\nexport PROBE_AT_ZSHRC=\"$(command -v nocxprobe || echo MISSING)\"\n")
+	write(".zlogin", "echo PHASEZLOGIN\n")
+	unsetZDOTDIR(t)
+
+	launch, err := LocalEnhancedLaunch(zsh, ShellZsh, localTestOpts())
+	if err != nil {
+		t.Fatalf("LocalEnhancedLaunch: %v", err)
+	}
+
+	kernelFile, shellFile := lifecycleSocketpair(t)
+
+	// #nosec G204 — launch.Command is the requireShell-resolved zsh.
+	cmd := exec.Command(launch.Command, launch.Args...)
+	cmd.ExtraFiles = []*os.File{shellFile}
+	cmd.Env = append(
+		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
+		append(launch.Env, "NOCX_LIFECYCLE_TIMEOUT_MS=5000")...,
+	)
+
+	k := newFakeKernel(t, testCap)
+	go k.serveFile(kernelFile)
+
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		launch.Cleanup()
+		t.Fatalf("pty start: %v", err)
+	}
+	s := &channelShell{t: t, cmd: cmd, ptmx: ptmx, kernel: k}
+	go s.readPump()
+	defer func() {
+		_ = ptmx.Close()
+		_ = cmd.Process.Kill()
+		launch.Cleanup()
+	}()
+
+	s.waitForHandshake()
+	s.run(`echo "PROBE=[$PROBE_AT_ZSHRC]"`)
+	out := s.output()
+
+	if !strings.Contains(out, "PROBE=["+filepath.Join(bin, "nocxprobe")+"]") {
+		t.Errorf("a tool on a PATH entry the user sets in ~/.zprofile was not found by their own "+
+			"~/.zshrc — this is `command not found` on the ordinary macOS Homebrew layout; output:\n%q", out)
+	}
+
+	want := []string{"PHASEZSHENV", "PHASEZPROFILE", "PHASEZSHRC", "PHASEZLOGIN"}
+	at := make([]int, len(want))
+	for i, w := range want {
+		at[i] = strings.Index(out, w)
+		if at[i] < 0 {
+			t.Errorf("the user's %s phase did not run; output:\n%q", w, out)
+		}
+	}
+	for i := 1; i < len(at); i++ {
+		if at[i] >= 0 && at[i-1] >= 0 && at[i] < at[i-1] {
+			t.Errorf("%s ran before %s; a native login runs them in the order %v; output:\n%q",
+				want[i], want[i-1], want, out)
+		}
+	}
+}
+
+// TestLocalZshSession_AZprofileThatExitsLeavesNothingBehind is the failure path
+// the new phase opens, stated with both ends: from the moment the transient
+// directory is written until the shell is gone, the capability inside it must
+// not outlive the process. The .zshrc erases it — but a ~/.zprofile that exits
+// runs BEFORE the .zshrc phase, so that eraser never runs, and the EXIT trap
+// armed in the .zshenv phase is the only thing left. This is why the trap is
+// set there rather than in the .zshrc.
+func TestLocalZshSession_AZprofileThatExitsLeavesNothingBehind(t *testing.T) {
+	zsh := requireShell(t, "zsh")
+
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".zprofile"), []byte("exit 0\n"), 0o600); err != nil {
+		t.Fatalf("write user .zprofile: %v", err)
+	}
+	unsetZDOTDIR(t)
+
+	launch, err := LocalEnhancedLaunch(zsh, ShellZsh, localTestOpts())
+	if err != nil {
+		t.Fatalf("LocalEnhancedLaunch: %v", err)
+	}
+	defer launch.Cleanup()
+	transient := ""
+	for _, kv := range launch.Env {
+		if rest, ok := strings.CutPrefix(kv, "ZDOTDIR="); ok {
+			transient = rest
+		}
+	}
+
+	// #nosec G204 — launch.Command is the requireShell-resolved zsh.
+	cmd := exec.Command(launch.Command, launch.Args...)
+	cmd.Env = append(
+		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
+		launch.Env...,
+	)
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatalf("pty start: %v", err)
+	}
+	go func() { _, _ = io.Copy(io.Discard, ptmx) }()
+	defer func() { _ = ptmx.Close() }()
+
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	select {
+	case <-done:
+	case <-time.After(20 * time.Second):
+		_ = cmd.Process.Kill()
+		t.Fatal("a ~/.zprofile that exits left the shell running: the session never came up and never went away")
+	}
+
+	if _, err := os.Stat(transient); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("a ~/.zprofile that exits left the transient ZDOTDIR — and the capability in it — "+
+			"on disk (%v); the EXIT trap armed in the .zshenv phase is what must cover this", err)
+	}
+}
+
+// TestLocalZshSession_HonoursAZdotdirChosenInTheUsersZshenv covers a branch
+// that only became reachable from the LOCAL tier when it started writing a
+// .zshenv: ~/.zshenv is the one user file zsh lets choose ZDOTDIR, and a
+// native zsh then reads every later phase from wherever it pointed. The
+// template handles it — but the values it reads (NOCX_ZDOTDIR_ORIG,
+// NOCX_ZDOTDIR_WAS_SET, ZDOTDIR) are computed by the remote tier's outer shell
+// script and by localZshEnv in Go, two implementations of one contract. The
+// carrier's counterpart is TestStartupFidelity_ZshHonoursAUserChosenZdotdir;
+// this is the half that would catch the two drifting apart.
+func TestLocalZshSession_HonoursAZdotdirChosenInTheUsersZshenv(t *testing.T) {
+	zsh := requireShell(t, "zsh")
+
+	home := t.TempDir()
+	chosen := filepath.Join(home, "zdotdir")
+	if err := os.Mkdir(chosen, 0o700); err != nil {
+		t.Fatalf("mkdir chosen zdotdir: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(home, ".zshenv"),
+		[]byte("export ZDOTDIR="+ShellQuote(chosen)+"\n"), 0o600); err != nil {
+		t.Fatalf("write user .zshenv: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(chosen, ".zprofile"),
+		[]byte("export FROM_CHOSEN_ZPROFILE=yes\n"), 0o600); err != nil {
+		t.Fatalf("write chosen .zprofile: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(chosen, ".zshrc"),
+		[]byte("export FROM_CHOSEN_ZSHRC=yes\n"), 0o600); err != nil {
+		t.Fatalf("write chosen .zshrc: %v", err)
+	}
+	// $HOME's own files must NOT be the ones read once ~/.zshenv has moved
+	// ZDOTDIR — reading both is as wrong as reading neither.
+	if err := os.WriteFile(filepath.Join(home, ".zshrc"),
+		[]byte("export FROM_HOME_ZSHRC=yes\n"), 0o600); err != nil {
+		t.Fatalf("write home .zshrc: %v", err)
+	}
+	unsetZDOTDIR(t)
+
+	launch, err := LocalEnhancedLaunch(zsh, ShellZsh, localTestOpts())
+	if err != nil {
+		t.Fatalf("LocalEnhancedLaunch: %v", err)
+	}
+
+	kernelFile, shellFile := lifecycleSocketpair(t)
+
+	// #nosec G204 — launch.Command is the requireShell-resolved zsh.
+	cmd := exec.Command(launch.Command, launch.Args...)
+	cmd.ExtraFiles = []*os.File{shellFile}
+	cmd.Env = append(
+		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
+		append(launch.Env, "NOCX_LIFECYCLE_TIMEOUT_MS=5000")...,
+	)
+
+	k := newFakeKernel(t, testCap)
+	go k.serveFile(kernelFile)
+
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		launch.Cleanup()
+		t.Fatalf("pty start: %v", err)
+	}
+	s := &channelShell{t: t, cmd: cmd, ptmx: ptmx, kernel: k}
+	go s.readPump()
+	defer func() {
+		_ = ptmx.Close()
+		_ = cmd.Process.Kill()
+		launch.Cleanup()
+	}()
+
+	s.waitForHandshake()
+	s.run(`echo "ZD=[${ZDOTDIR-UNSET}] PROF=[${FROM_CHOSEN_ZPROFILE-no}] ` +
+		`RC=[${FROM_CHOSEN_ZSHRC-no}] HOMERC=[${FROM_HOME_ZSHRC-no}]"`)
+	out := s.output()
+
+	if !strings.Contains(out, "ZD=["+chosen+"]") {
+		t.Errorf("ZDOTDIR was not restored to the one the user's ~/.zshenv chose: %q", out)
+	}
+	if !strings.Contains(out, "PROF=[yes]") {
+		t.Errorf("the .zprofile under the ZDOTDIR the user's ~/.zshenv chose was not read: %q", out)
+	}
+	if !strings.Contains(out, "RC=[yes]") {
+		t.Errorf("the .zshrc under the ZDOTDIR the user's ~/.zshenv chose was not read: %q", out)
+	}
+	if !strings.Contains(out, "HOMERC=[no]") {
+		t.Errorf("$HOME/.zshrc was read as well, so the session ran two rc files: %q", out)
+	}
+}
+
+// TestLocalZshSession_AZprofileThatExecsStillRuns is the other half of the
+// acceptance criterion the exit test opens: a startup file that replaces the
+// shell must still do what it says. Fail-open is absolute (ADR-0004) — the
+// tier's own files run before the user's and must never turn a working
+// ~/.zprofile into a dead session.
+//
+// What it deliberately does NOT assert is the transient directory. `exec`
+// replaces the process image without running EXIT traps and without ever
+// reaching the .zshrc phase that erases it, so the capability is left in
+// TMPDIR. That is real, it is filed as nocx-r9ruy, and it is a different
+// defect from this one; asserting the leak here would pin the broken
+// behaviour in place.
+func TestLocalZshSession_AZprofileThatExecsStillRuns(t *testing.T) {
+	zsh := requireShell(t, "zsh")
+
+	home := t.TempDir()
+	if err := os.WriteFile(filepath.Join(home, ".zprofile"),
+		[]byte("exec /bin/echo NOCX_EXEC_PROBE\n"), 0o600); err != nil {
+		t.Fatalf("write user .zprofile: %v", err)
+	}
+	unsetZDOTDIR(t)
+
+	launch, err := LocalEnhancedLaunch(zsh, ShellZsh, localTestOpts())
+	if err != nil {
+		t.Fatalf("LocalEnhancedLaunch: %v", err)
+	}
+	defer launch.Cleanup()
+
+	// #nosec G204 — launch.Command is the requireShell-resolved zsh.
+	cmd := exec.Command(launch.Command, launch.Args...)
+	cmd.Env = append(
+		cleanEnv("HOME="+home, "TMPDIR="+t.TempDir(), "TERM=xterm", "HISTFILE=/dev/null"),
+		launch.Env...,
+	)
+	ptmx, err := pty.Start(cmd)
+	if err != nil {
+		t.Fatalf("pty start: %v", err)
+	}
+	defer func() {
+		_ = ptmx.Close()
+		_ = cmd.Process.Kill()
+	}()
+
+	var mu sync.Mutex
+	var seen strings.Builder
+	go func() {
+		buf := make([]byte, 4096)
+		for {
+			n, rerr := ptmx.Read(buf)
+			if n > 0 {
+				mu.Lock()
+				seen.Write(buf[:n])
+				mu.Unlock()
+			}
+			if rerr != nil {
+				return
+			}
+		}
+	}()
+
+	// Waiting on the marker rather than on the process: what the criterion
+	// asks is that the exec'd program RAN, and a duration would only say how
+	// fast this machine is.
+	waittest.WaitForTimeoutDetail(t, "the program the user's ~/.zprofile exec'd", 20*time.Second,
+		func() string { mu.Lock(); defer mu.Unlock(); return fmt.Sprintf("output=%q", seen.String()) },
+		func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return strings.Contains(seen.String(), "NOCX_EXEC_PROBE")
+		})
 }

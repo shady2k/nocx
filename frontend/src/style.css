@@ -476,6 +476,37 @@
   padding: 2px 8px 4px;
 }
 
+/* THE GHOST MAY NOT CHANGE THE HEIGHT OF THE LINE IT SITS ON.
+
+   CM6 draws an `<img class="cm-widgetBuffer">` beside every inline widget —
+   its own workaround for browser caret bugs next to uneditable content — and
+   styles it `height: 1em; vertical-align: text-top`. `text-top` puts that box
+   at the top of the line's CONTENT AREA, so whether it fits is a question
+   about the font's ascent and descent, not about the line height: with a font
+   whose content area is shorter than 1em the box hangs below it and the line
+   box grows to cover it.
+
+   The completion ghost is the only inline widget this editor draws, so the
+   growth arrives exactly when a suggestion appears — a card that twitches by
+   a pixel under the caret, taking the Run token and the whole scrollback
+   above it along. Measured across seven mono fonts at 11–18px, in WebKit and
+   Chromium: every stack is 0.000 except one, and the one is whatever
+   `ui-monospace` resolves to inside WKWebView (+0.34px there; Monaco is the
+   nearest reproducible stand-in and gives +0.344 in WebKit, +1.000 in
+   Chromium). Which is why it showed in the shipped macOS app and in no
+   browser the dev stand runs — the same shape as the scrollbar gutter above.
+
+   `top` rather than `text-top` — the box is aligned to the top of the LINE
+   BOX instead, and the buffer's box is its line-height, which is this line's
+   line-height, so it can never be the taller of the two and can never grow
+   it. That is a fact about the box model rather than about the font, and it
+   is what makes the rule font-independent: the same seven fonts all measure
+   0.000 with it, on both engines. The buffer stays in the DOM — deleting it
+   would take CM6's caret workaround with it. */
+.nocx-editor .cm-widgetBuffer {
+  vertical-align: top;
+}
+
 /* No hanging indent, and no measured token width: the token is a GUTTER
    now (ask-entry.ts), so every line — a second document line, a wrapped
    row — begins after the same reserved column by construction. The rules

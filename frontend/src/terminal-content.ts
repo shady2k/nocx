@@ -607,6 +607,7 @@ export class TerminalContent extends BasePaneContent {
     isActive: (blockEl) =>
       this.hasRunningCommand() && this.scrollback?.blockManager.runningBlock?.el === blockEl,
     isGranted: (blockEl) => this.grantedBlocks.some((grant) => grant.blockEl === blockEl),
+    grantsAvailable: () => this.grantsAvailable(),
     toggleGrant: (blockEl) => this.toggleGrant(blockEl),
     stop: () => this.signalActiveCommand('stop'),
   }
@@ -687,6 +688,13 @@ export class TerminalContent extends BasePaneContent {
         held.removeAllRanges()
         held.addRange(range)
       }
+    }
+    // Run cannot consume a mark, but it still owns the scrollback selection:
+    // preserving the exact range is what lets the target chord reveal the
+    // offer without asking the person to select again.
+    if (!this.grantsAvailable()) {
+      this.markAffordance?.hide()
+      return
     }
     this.markAffordance?.show(
       {
@@ -1616,6 +1624,10 @@ export class TerminalContent extends BasePaneContent {
         // signal (ask-entry.ts). The indicator derives its own WORD from
         // the target id — the registry's label stays the registry's.
         this.indicator?.set(target.id, target.label)
+        // Completion candidates belong to the target that produced them.
+        // A selection can move focus away before the chord, so dismiss here
+        // at the registry transition rather than relying on editor key order.
+        if (prevId !== null && prevId !== target.id) this.completion?.dismiss()
         // And the editor wears the target's own layer: the shell's
         // highlighting and completion surface belong to the shell, so a
         // question typed at Ask is plain prose — never `Привет!` painted
@@ -1628,6 +1640,7 @@ export class TerminalContent extends BasePaneContent {
         // repaints — a Run pane pays no readiness call.
         if (target.id === this.agentTarget?.id) this.refreshReadiness()
         this.renderTargetChips()
+        this.reconcileGrantPresentation()
       })
       this.inputTargets.register(this.shellTarget)
       this.agentTarget = new AgentInputTarget({
@@ -2482,10 +2495,36 @@ export class TerminalContent extends BasePaneContent {
           e.shiftKey &&
           !e.altKey &&
           e.key.toLowerCase() === 'a' &&
+          this.grantsAvailable() &&
           this.grantCurrentSelection()
         ) {
           e.preventDefault()
           e.stopPropagation()
+          return
+        }
+        // The target chord keeps its one meaning when a scrollback selection
+        // has released editor focus: switch where the next document goes.
+        // Editor-root events are already consumed by CommandEditor; unrelated
+        // text controls and higher overlays keep their own key stream.
+        if (
+          e.key === 'Enter' &&
+          (e.ctrlKey || e.metaKey) &&
+          !e.altKey &&
+          !e.shiftKey &&
+          this.editor?.isVisible
+        ) {
+          const active = document.activeElement
+          if (active && this.editor.rootContains(active)) return
+          if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
+          if (
+            active instanceof HTMLElement &&
+            active.closest('button, a[href], [role="button"]') !== null
+          )
+            return
+          if (hasOpenOverlays() || document.querySelector('.cmd-overflow-menu')) return
+          e.preventDefault()
+          e.stopPropagation()
+          this.toggleInputTarget()
           return
         }
         if (this.scrollback && this.scrollback.selectedBlockId !== null) {
@@ -3262,6 +3301,7 @@ export class TerminalContent extends BasePaneContent {
           this.grantedBlocks = [...blocks]
         },
       })
+      this.grantController.setVisible(this._active && this.grantsAvailable())
       const chipRow = this.editor.root.querySelector<HTMLElement>('.nocx-editor-chrome-left')
       if (chipRow) this.grantController.mount(chipRow)
       this.editor.onGrantChipClick(() => this.grantController?.toggle())
@@ -3270,6 +3310,7 @@ export class TerminalContent extends BasePaneContent {
         this.ensureGrant(grant)
         this.markAffordance?.hide()
       })
+      this.reconcileGrantPresentation()
       document.addEventListener('selectionchange', this.onSelectionChange)
       this._mounted = true
       this._readyResolve(true)
@@ -3556,6 +3597,15 @@ export class TerminalContent extends BasePaneContent {
     if (visible && this.inputTargets?.active().id === this.agentTarget?.id) {
       this.refreshReadiness()
     }
+    // The mark affordance is portaled to body, so pane CSS cannot hide it.
+    // Reconcile on return from the current selection; hide immediately when
+    // this pane leaves the front.
+    if (visible) this.reconcileGrantPresentation()
+    else {
+      this.markAffordance?.hide()
+      this.grantController?.setVisible(false)
+      this.scrollback?.blockManager.closeOverflowMenus()
+    }
     // The pane's past, drawn the first time somebody looks at it
     // (nocx-m3fqk). On first SHOW rather than at boot: eight panes at fifty
     // blocks is four hundred blocks of DOM before the first frame, and a pane
@@ -3582,24 +3632,35 @@ export class TerminalContent extends BasePaneContent {
     })
   }
 
+  /** Whether the active input target can consume marks on its next submit. */
+  private grantsAvailable(): boolean {
+    return this.inputTargets?.active().routesToShell === false
+  }
+
   /**
-   * The ONE writer in this pane for every chip that depends on which target
-   * Enter reaches. Both the model chip and the grant chip are meaningful only
-   * when a submit reaches the assistant — a Run pane names no model, because
-   * none answers anything, and marks no blocks, because there is no question
-   * for them to be about — so both read `isAsk` here rather than each site
-   * remembering to combine the target with the readiness store.
-   *
-   * Presentation only. The grant's LIST stays owned by GrantController and is
-   * untouched by this: marks made in Ask survive a flip to Run and are on
-   * screen again on return, which is the criterion a careless fix breaks.
+   * Reconcile every grant manifestation from the one active-target
+   * capability. GrantController owns stored-mark projection; the affordance
+   * is re-evaluated on entry so a selection made in Run needs no new event.
+   */
+  private reconcileGrantPresentation(): void {
+    const available = this._active && this.grantsAvailable()
+    this.grantController?.setVisible(available)
+    if (!available) {
+      this.markAffordance?.hide()
+      return
+    }
+    this.onSelectionChange()
+  }
+
+  /**
+   * The ONE writer in this pane for model chips that depend on which target
+   * Enter reaches. A target that routes to the shell has no answering model.
    */
   private renderTargetChips(): void {
     if (!this.editor) return
-    const active = this.inputTargets?.active()
-    const isAsk = active !== undefined && active.id === this.agentTarget?.id
-    this.editor.setGrantChipVisible(isAsk)
-    this.editor.setModelChip(isAsk ? modelChipState(this.readiness?.status ?? null) : null)
+    this.editor.setModelChip(
+      this.grantsAvailable() ? modelChipState(this.readiness?.status ?? null) : null,
+    )
   }
 
   /** One shot. A pane is shown many times — every tab switch — and its past

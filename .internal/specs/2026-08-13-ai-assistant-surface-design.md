@@ -183,6 +183,13 @@ So the assistant is expressed as **states of the existing machine** — the pane
 active input target is the assistant — and everything else (editor visibility, `disableStdin`,
 focus, the focus ring, what a click on the live region does) derives from that one state.
 
+Context marks follow that same active target. The sole availability fact is
+`!InputTargetRegistry.active().routesToShell`: while the target routes to the shell, selection
+remains available for reading and copy but there is no Mark affordance or block-menu action, and
+the grant chip, panel, block fill and row fill are absent. `GrantController` retains the exact
+grant objects and remains the only owner of those manifestations. When a non-shell target becomes
+active, it reprojects the saved grants and re-evaluates the current selection immediately, so the
+offer appears after the target chord without requiring another drag or selection event.
 Two rules fall out and both are load-bearing:
 
 - **Program exit invalidates "hand the keys back to the program".** There may be no
@@ -226,7 +233,9 @@ macOS, Shift elsewhere**, forcing selection inside mouse-tracking programs. The 
 picker extends that path — it does not add a parallel pointer listener, which would be a
 second claimant on one mouse event.
 
-- **In the flow:** drag across part of a block's output → a chip in the editor.
+- **In the flow:** while Ask is active, drag across part of a block's output → a chip in the
+  editor. The same selection in Run remains ordinary selectable text and creates no assistant
+  surface.
 - **On the alternate screen:** mouse-down mints the frame at that instant (you cannot circle
   something that is moving), drag on the frozen frame, release → the same chip.
 

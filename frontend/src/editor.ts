@@ -558,11 +558,6 @@ export class CommandEditor {
     this._onModelChipClick = handler
   }
 
-  /** Show the grant chip only for the target that can use its marks. */
-  setGrantChipVisible(visible: boolean): void {
-    this.grantChip.style.display = visible ? '' : 'none'
-  }
-
   /**
    * The model chip's ONE writer (nocx-rikz5). Null hides both chips — the
    * state a Run target is in, where no model answers anything and a chip

@@ -264,33 +264,35 @@ async function runCommand(
   return { block }
 }
 
-/** THE GESTURE (nocx-4wtlh, nocx-wcswn, nocx-a7mw7.4): select a region of a
- *  finished block's output and the product OFFERS to mark it; pressing the
- *  offer marks the WHOLE BLOCK for the next question — "if you ask, this
- *  comes with you". A selection is a quote and a grant, never a row range:
- *  the payload is the block, so the mark is on the block. Nothing else
- *  moves — the active target is untouched, so plain Enter still runs the
- *  line as a command.
+/** THE GESTURE (nocx-4wtlh, nocx-wcswn, nocx-a7mw7.4, nocx-a7mw7.5):
+ * select a finished block's output and confirm the offer. A Run selection
+ * remains ordinary selectable/copyable text: neither the affordance nor the
+ * block menu offers a grant. The real target chord then changes the active
+ * capability, and the existing selection is re-evaluated without another
+ * selection event; only Ask presents Mark.
  *
- *  THE SELECTION ALONE MARKS NOTHING, and that is the point of the second
- *  half of this helper (nocx-a7mw7.4). Selecting output to read it, or to
- *  copy it, used to mark it, with nothing confirmed; the button is the
- *  confirmation, and a spec that skipped it would go on passing after the
- *  offer stopped being offered.
- *
- *  The selection is made through a real DOM Range over the block's rows and
- *  announced with the `selectionchange` event the product listens for,
- *  because a synthetic drag across rows is a geometry test in disguise —
- *  what this spec is about is what a selection MEANS, and the range is the
- *  same object a mouse would leave behind. */
+ * The selection is a real DOM Range over the block rows, the same object a
+ * mouse drag leaves behind. The confirmation marks the block for the next
+ * question; selection alone never changes grant state. */
 async function pointAt(block: Locator): Promise<void> {
   const page = block.page()
   await expect(block.locator('.cmd-output .term-line').first()).toBeVisible({ timeout: 15_000 })
-  // The state a person points FROM: mid-draft, so the composer holds the
-  // focus. Put there deliberately rather than left to whatever the previous
-  // step happened to focus, because it is the whole difficulty — see the
-  // wait below.
-  await page.locator(INPUT).click()
+  const input = page.locator(INPUT)
+  const indicator = page.locator('.pane.active .ui-mode-indicator:visible')
+  const startedInRun = (await indicator.getAttribute('data-target')) !== 'agent'
+
+  if (startedInRun) {
+    await block.locator('.cmd-overflow-btn').click()
+    await expect(page.locator('.cmd-overflow-menu-item[data-action="grant"]')).toHaveCount(0)
+    const copyCommand = page.locator('.cmd-overflow-menu-item').filter({ hasText: 'Copy command' })
+    await expect(copyCommand).toBeVisible()
+    await copyCommand.click()
+    await expect(page.locator('.cmd-overflow-menu')).toHaveCount(0)
+  }
+
+  // Put the composer in the exact state from which the target chord is
+  // handled, then leave a real scrollback Range while retaining its focus.
+  await input.click()
   await block.evaluate((el) => {
     const lines = Array.from(el.querySelectorAll<HTMLElement>('.cmd-output .term-line'))
     if (lines.length === 0) throw new Error('block has no output rows to point at')
@@ -304,21 +306,24 @@ async function pointAt(block: Locator): Promise<void> {
     sel?.addRange(range)
     document.dispatchEvent(new Event('selectionchange'))
   })
-  // The offer, then the confirmation. `.mark-affordance` is the surface's
-  // wrapper and `.ui-button` inside it is the kit control a person presses.
+
   const offer = page.locator('.mark-affordance .ui-button')
+  if (startedInRun) {
+    await expect(offer).toBeHidden()
+    await expect
+      .poll(() => page.evaluate(() => window.getSelection()?.toString() ?? ''))
+      .not.toBe('')
+
+    // No reselection and no second selectionchange: the registry callback
+    // reuses the Range already on the document when the real chord flips.
+    await page.keyboard.press('ControlOrMeta+Enter')
+    await expect(indicator).toHaveAttribute('data-target', 'agent', { timeout: 10_000 })
+    await expect
+      .poll(() => page.evaluate(() => window.getSelection()?.toString() ?? ''))
+      .not.toBe('')
+  }
+
   await expect(offer).toBeVisible({ timeout: 10_000 })
-  // THE OFFER MUST OUTLIVE THE COMPOSER, NOT OUTRUN IT (nocx-45vkz).
-  //
-  // CodeMirror restores the DOM selection into its own document while its
-  // contentDOM is the active element, and a selection made without taking
-  // focus off it was collapsed a frame or two later — the offer vanished,
-  // and this helper passed only because it clicked within a few
-  // milliseconds. The scrollback now takes the focus when it claims the
-  // selection, so the observable to wait on is that transfer: with the
-  // composer unfocused there is nothing left to restore. Then a pair of
-  // frames, which is when the restore would have run, and the offer is
-  // still there to press. Frames and a DOM state, never a duration.
   await expect
     .poll(() => page.evaluate(() => String(document.activeElement?.className ?? '')), {
       timeout: 10_000,

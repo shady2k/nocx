@@ -69,7 +69,6 @@ import (
 	"github.com/shady2k/nocx/internal/update"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vault/file"
-	"github.com/shady2k/nocx/internal/vault/system"
 	"github.com/shady2k/nocx/internal/vaultreset"
 	"github.com/shady2k/nocx/internal/version"
 )
@@ -350,64 +349,6 @@ type optionSet struct {
 	keystoreReason string
 }
 
-// keystoreStance is what a caller has decided about the OS keystore — the
-// per-user OS service the vault's system provider talks to, and the one piece
-// of a machine's state that $HOME isolation cannot move.
-//
-// The zero value is "undeclared", and undeclared means the production stance:
-// the shipped app builds the real provider and probes it once at startup, so
-// a machine with no secret store says so in the log rather than failing
-// mysteriously later. Under `go test` undeclared is refused instead — see
-// resolveKeystoreStance.
-type keystoreStance int
-
-const (
-	// keystoreUndeclared is production's stance and no test's.
-	keystoreUndeclared keystoreStance = iota
-	// keystoreAbsent builds the provider over a keyring that fails every
-	// operation and skips the startup probe: there is nothing to call.
-	keystoreAbsent
-	// keystoreReal reaches the real per-user store, with a stated reason.
-	keystoreReal
-)
-
-// resolveKeystoreStance decides whether this backend may reach the real OS
-// keystore, and refuses a test that has not said.
-//
-// The refusal lives here — inside the composition root, at run time, keyed on
-// testing.Testing() — rather than in a linter or a ratchet, for the reason
-// storage.NewAppPaths puts the same kind of refusal in the same place: it
-// cannot be routed around. It fires for every construction from every test
-// binary, in packages that have never heard of internal/app's test helper,
-// under a renamed constructor, and in code a grep-based ratchet would not
-// recognise. It costs one comparison on the production path.
-func resolveKeystoreStance(inTest bool, o *optionSet) (reachReal bool, err error) {
-	switch o.keystore {
-	case keystoreAbsent:
-		return false, nil
-	case keystoreReal:
-		if strings.TrimSpace(o.keystoreReason) == "" {
-			return false, fmt.Errorf(
-				"app: WithRealSystemKeystore needs a reason — it writes to the " +
-					"login keychain of whoever runs the suite, and the reason is " +
-					"what tells the next reader why this test may")
-		}
-		return true, nil
-	default:
-		if inTest {
-			return false, fmt.Errorf(
-				"app: this test has not said whether it may reach the OS keystore, " +
-					"and building the app reaches it: the startup probe is a real " +
-					"keyring write, which on macOS is a keychain dialog per backend " +
-					"start (nocx-o4hg). Build it with newTestApp(t), which keeps the " +
-					"keystore out of reach, or state the exception with " +
-					"app.WithRealSystemKeystore(reason). $HOME isolation cannot cover " +
-					"this: go-keyring talks to a per-user OS service, not to a directory")
-		}
-		return true, nil
-	}
-}
-
 // WithWSAddr pins the WebSocket listen address instead of the default
 // 127.0.0.1:0. Dev-only; shipped code should never set this.
 func WithWSAddr(addr string) Option {
@@ -430,20 +371,31 @@ func WithWSAddr(addr string) Option {
 // It also skips the startup probe, because a probe is a real keystore call and
 // there is nothing here to call. It is what newTestApp applies, so it is the
 // stance almost every test has.
+//
+// Since D10 it is no longer the only way to get there: it now states
+// explicitly what buildKeystoreStance already says by default (keystore.go).
+// It survives because a dev binary and a test must be able to say it without
+// depending on which tags the build happened to carry.
 func WithoutSystemKeystore() Option {
 	return func(o *optionSet) { o.keystore = keystoreAbsent }
 }
 
 // WithRealSystemKeystore reaches the real OS keystore, and says why.
 //
-// Test-only, and the exception rather than the rule: the store is a per-user
-// OS service, so this writes into the login keychain of whoever is running the
-// suite — on macOS a modal dialog per backend start (nocx-o4hg). Production
-// needs nothing here; reaching the real store is what an undeclared stance
-// already means off `go test`.
+// The exception rather than the rule, in both the places that may use it. In
+// a TEST it writes into the login keychain of whoever is running the suite —
+// on macOS a modal dialog per backend start (nocx-o4hg). In a LAUNCHER it is
+// the desktop declaration D10 describes: a composition root that knows it is
+// starting a backend inside a login session says so here, and the build
+// property (keystore.go) is what answers for everything that does not.
+//
+// It no longer describes what saying nothing means: an undeclared stance off
+// `go test` takes buildKeystoreStance, which by default is "out of play",
+// because a coordinator that lives for days on a headless host must not
+// discover its keystore by writing to one.
 //
 // The reason is required and is logged at startup, so a keychain prompt seen
-// during a run leads back to the test that asked for it.
+// during a run leads back to whatever asked for it.
 func WithRealSystemKeystore(reason string) Option {
 	return func(o *optionSet) {
 		o.keystore = keystoreReal
@@ -589,10 +541,14 @@ func New(opts ...Option) (*App, error) {
 	for _, opt := range opts {
 		opt(&o)
 	}
-	// Before anything is built: may this backend reach the OS keystore? A
-	// test that has not said is refused here rather than silently writing
-	// to the login keychain of whoever is running the suite (nocx-o4hg).
-	reachRealKeystore, stanceErr := resolveKeystoreStance(testing.Testing(), &o)
+	// Before anything is built: what is this backend's stance on the OS
+	// keystore, and what follows from it? Declared, never discovered
+	// (keystore.go, design D10) — the probe that would discover it is a
+	// keychain write, and on a host with no keychain that write is a modal
+	// nobody can dismiss. A test that has not said is refused here rather
+	// than silently writing to the login keychain of whoever is running the
+	// suite (nocx-o4hg).
+	keystore, stanceErr := decideKeystore(testing.Testing(), &o)
 	if stanceErr != nil {
 		return nil, stanceErr
 	}
@@ -840,10 +796,10 @@ func New(opts ...Option) (*App, error) {
 	// honestly).
 	var contentDB content.ContentDB = content.NewStub(logger)
 
-	sysProv := system.New()
-	if !reachRealKeystore {
-		sysProv = system.New(system.WithKeyring(system.AbsentKeyring{}))
-	}
+	// The provider comes from the stance and from nowhere else: building one
+	// here would be the second opinion keystore.go exists to make
+	// impossible.
+	sysProv := keystore.provider
 	fileProv := file.New(docStore, "vault-file.json")
 	reg, err := vault.NewRegistry(sysProv, fileProv)
 	if err != nil {
@@ -859,17 +815,21 @@ func New(opts ...Option) (*App, error) {
 	// at all from a test that has not asked for it (nocx-o4hg).
 	probeStatus := vault.Status{}
 	systemReady := false
-	if reachRealKeystore {
-		if o.keystore == keystoreReal {
-			slogger.Info("reaching the real OS keystore by request",
-				"reason", o.keystoreReason)
-		}
+	if keystore.probe {
+		slogger.Info("the OS keystore is in play",
+			"stance", keystore.stance.String(),
+			"declaredBy", keystore.source,
+			"reason", keystore.reason)
 		probeStatus = sysProv.Probe(ctx)
 		systemReady = probeStatus.Ready
 	} else {
-		// Nothing to probe: the provider is absent by construction, and a
-		// probe is a real keystore call.
-		probeStatus = vault.Status{Reason: "no system keystore (dev override)"}
+		// Nothing is asked. The provider answers "excluded" without touching
+		// the keyring, which is what makes "no modal on a headless host" a
+		// property of construction rather than of error handling.
+		slogger.Info("the OS keystore is out of play; the file provider is the vault's store",
+			"stance", keystore.stance.String(),
+			"declaredBy", keystore.source)
+		probeStatus = sysProv.Status(ctx)
 	}
 	slogger.Info("vault system-provider availability probe",
 		"ready", systemReady, "reason", probeStatus.Reason)
@@ -1115,6 +1075,12 @@ func New(opts ...Option) (*App, error) {
 		// share the vault's unlock semantics.
 		transport.WithVaultUnsealer(v),
 		transport.WithVaultLifecycle(v),
+		// D9, and the whole of its plumbing: the transport counts attached
+		// clients, the vault decides what a count of zero means. Without
+		// this line quitting the window leaves the root key in a
+		// coordinator that outlives it by days — an exposure that did not
+		// exist while quitting the window WAS stopping the backend.
+		transport.WithClientPresence(v),
 		transport.WithAgentKnownMaterial(transport.NewVaultKnownMaterial(v, credResolver, v)),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
 		transport.WithAgentPolicy(policyStore),

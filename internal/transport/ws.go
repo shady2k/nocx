@@ -615,6 +615,14 @@ type WSServer struct {
 	connsMu sync.Mutex
 	conns   map[*wsConn]struct{}
 
+	// presence is told how many clients are attached whenever that changes
+	// (client_presence.go). nil when nobody asked; the vault is what asks,
+	// because the count is what D9's seal-on-last-detach rule reads.
+	presence ClientPresence
+	// presenceNotify serializes those deliveries so the observer's last
+	// value is the truth and not whichever goroutine happened to win.
+	presenceNotify presenceNotifier
+
 	// outboundBudget is the process-wide cap on queued outbound bytes,
 	// shared by every connection's outbound queue (the per-connection
 	// queue depth is the primary bound; this is the additional one).
@@ -1572,6 +1580,13 @@ func (s *WSServer) Start(ctx context.Context) error {
 	}()
 
 	s.log.Info("ws server started", "port", s.port)
+	// The first presence report, and the one that makes every later one
+	// mean something: the server is listening and nobody is attached. A
+	// vault that has never been told anything cannot tell "nobody is here"
+	// from "nobody has said", so it does not suspend — which would leave a
+	// coordinator that restored sessions before the first window opened
+	// answering "no client connected" instead of waiting for one (D9).
+	s.notePresence()
 	return nil
 }
 
@@ -3396,6 +3411,9 @@ func (s *WSServer) registerConn(wc *wsConn) {
 	s.connsMu.Lock()
 	s.conns[wc] = struct{}{}
 	s.connsMu.Unlock()
+	// A client is here again. Whatever is suspended waiting for somebody to
+	// show a dialog to can now be shown one (D9).
+	s.notePresence()
 }
 
 // unregisterConn removes a connection from the broadcast set and destroys
@@ -3424,6 +3442,11 @@ func (s *WSServer) unregisterConn(wc *wsConn) {
 		s.broker.ConnectionLost(wc)
 	}
 	s.stopOwnerTunnels(wc)
+	// And the presence signal (D9): when this was the last one, the vault
+	// seals rather than leaving the root key in a coordinator that outlives
+	// every window. Last, so a connection that is still tearing down is
+	// already out of the set when the count is read.
+	s.notePresence()
 }
 
 // broadcastSettingsChanged sends a settings.changed notification to every

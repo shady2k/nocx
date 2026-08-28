@@ -45,6 +45,15 @@ const (
 	ReasonDenied              Reason = "denied"
 	ReasonTimeout             Reason = "timeout"
 	ReasonUnsupportedPlatform Reason = "unsupported-platform"
+	// ReasonExcluded means this build was never going to use the store, so
+	// nothing was asked of it. It is NOT "no-service": that is a claim about
+	// the machine, made after looking, and looking is the very thing D10
+	// forbids on a host whose stance says the OS keystore is out of play —
+	// the probe opens with a keychain WRITE, which under a $HOME with no
+	// keychain raises a modal nobody can dismiss. A host that declined to
+	// look must say so, or the product reports a machine fact it never
+	// established.
+	ReasonExcluded Reason = "excluded"
 )
 
 // Status is what a provider reports about itself.

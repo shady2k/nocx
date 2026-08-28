@@ -180,11 +180,24 @@ describe('the Ask token is a gutter, not text in the input (nocx-ex636)', () => 
     // The widget needed `padding-left` + a negative `text-indent` computed
     // from a measured token width. A gutter reserves the column on every
     // line, so those rules are gone and must not creep back.
+    //
+    // The buffer rule is checked by what it MAY SAY rather than by its
+    // absence. This assertion used to be "no rule mentions cm-widgetBuffer at
+    // all", and that forbade one legitimate declaration along with the hack:
+    // CM6 draws that image beside every inline widget, and its shipped
+    // `vertical-align: text-top` grows the line box with some fonts — which
+    // is a pixel of height the composer gained whenever a completion ghost
+    // appeared, on macOS only (style.css says why `top` fixes it). What must
+    // not come back is the ALIGNMENT arithmetic: a width, an indent, a
+    // padding or a margin on the buffer is the old token widget returning
+    // through the same door.
     const line = RULES.find((r) => r.selectors.includes('.nocx-editor .cm-line'))
     expect(line).toBeDefined()
     expect(line!.body).not.toMatch(/nocx-target-token-width/)
-    expect(RULES.some((r) => r.selectors.some((sel) => sel.includes('cm-widgetBuffer')))).toBe(
-      false,
-    )
+    const buffers = RULES.filter((r) => r.selectors.some((sel) => sel.includes('cm-widgetBuffer')))
+    for (const rule of buffers) {
+      expect(rule.body).not.toMatch(/nocx-target-token-width/)
+      expect(rule.body).not.toMatch(/(^|[\s;])(width|text-indent|padding|margin)\s*:/)
+    }
   })
 })

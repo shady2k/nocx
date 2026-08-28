@@ -11,9 +11,30 @@ on:
       - 'scripts/check-site.sh'
       - 'scripts/site-forbidden-phrases.txt'
       - '.github/workflows/pages.yml'
-  # A release alone must be able to refresh the page: the version and date are
-  # written into the HTML, so without this trigger the site keeps advertising
+  # A release alone must refresh the page: the version and date are written
+  # into the HTML, so without a release-side trigger the site keeps advertising
   # the previous release until somebody happens to touch site/.
+  #
+  # THAT NEEDS TWO TRIGGERS, AND THE OBVIOUS ONE IS THE DEAD ONE. `release:
+  # published` never fires for our own releases: release.yml creates them with
+  # `gh release create` under GH_TOKEN: ${{ github.token }}, and GitHub does
+  # not start a workflow from an event a GITHUB_TOKEN produced — the documented
+  # anti-recursion rule. So the trigger written for exactly this purpose was
+  # inert for the only way this repository actually ships. Measured on v0.3.0:
+  # the release published at 2026-08-28T12:45:04Z, no pages run followed, and
+  # the live page went on serving v0.2.0 while the repository held v0.3.0.
+  #
+  # `workflow_run` is about a WORKFLOW finishing rather than a release being
+  # published, so the anti-recursion rule does not reach it. It checks out the
+  # default branch, which is what this job wants anyway: the page it deploys is
+  # main's, and the tag the stamp reads is the one release.yml just built from.
+  # The conclusion guard is on the job — workflow_run fires on completion, not
+  # on success, and a failed release must not redeploy anything.
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  # Kept for a release published BY HAND through the UI, where the actor is a
+  # person and the event does fire. Harmless when it does not.
   release:
     types: [published]
   workflow_dispatch:
@@ -31,6 +52,12 @@ concurrency:
 
 jobs:
   deploy:
+    # workflow_run fires on completion whatever the conclusion, so a release
+    # that failed in build-macos must not publish a page claiming the version
+    # it never finished. Every other trigger is unconditional.
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-24.04
     environment:
       name: github-pages

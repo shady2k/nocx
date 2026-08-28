@@ -1,4 +1,5 @@
-// Generates the renderer's wire types from result contracts in contracts/*.schema.json.
+// Generates the renderer's wire types from result contracts named by the
+// OpenRPC surface manifest in contracts/openrpc.json.
 //
 // Params contracts use the `.params.schema.json` suffix and are consumed by the
 // Go transport agreement tests; they are intentionally not renderer result types.
@@ -10,8 +11,8 @@
 // read it on every render. A hand-written type can want a field the wire does
 // not carry. A generated one cannot.
 
-import { readdir, readFile, writeFile, mkdir } from 'node:fs/promises'
-import { dirname, join, resolve } from 'node:path'
+import { readFile, writeFile, mkdir } from 'node:fs/promises'
+import { basename, dirname, join, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { compileFromFile } from 'json-schema-to-typescript'
 
@@ -36,7 +37,9 @@ function outputName(schemaFile) {
 
 async function main() {
   const check = process.argv.includes('--check')
-  const entries = (await readdir(contractsDir))
+  const manifest = JSON.parse(await readFile(resolve(contractsDir, 'openrpc.json'), 'utf8'))
+  const entries = (manifest['x-nocx-schemaRefs'] ?? [])
+    .map((schema) => basename(new URL(schema.$ref).pathname))
     .filter((f) => f.endsWith('.schema.json') && !f.endsWith('.params.schema.json'))
     .sort()
 

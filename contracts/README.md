@@ -41,6 +41,30 @@ that validates a payload the test itself constructed proves the struct is well-f
 not that the server sends it. Only driving the real method through the real socket does
 that.
 
+## OpenRPC surface manifest
+
+`openrpc.json` is the one method-level index. Each method references its existing
+params and result schemas by `$ref`; schema bodies are never copied into the
+manifest. Methods without a result schema are marked explicitly with
+`x-nocx-noResultSchema` rather than receiving an invented response shape. The
+`x-nocx-schemaRefs` list also names standalone notification result schemas so the
+renderer generator does not need a directory glob.
+
+`internal/transport/TestOpenRPCManifestMatchesRegisteredMethods` compares the
+manifest's method set with the actual `buildControlPlane` registration output in
+both directions. It also verifies every referenced schema exists. Therefore a
+new registration absent from the manifest, or a manifest entry without a
+registration, fails the transport gate.
+
+`cd frontend && npm run contracts` regenerates the manifest and renderer types.
+`npm run contracts:check` checks both generated artifacts. OpenRPC is used because
+it is the standard method-level description for JSON-RPC and provides a stable
+place for nocx-specific agent disposition metadata without duplicating schemas.
+
+The shared `rpc.error.schema.json` is referenced by every method's common
+JSON-RPC error entries. Domain-specific error data continues to use its existing
+schema where one exists.
+
 ## Adding a method
 
 1. Write `contracts/<method>.schema.json` for a result or
@@ -81,7 +105,4 @@ is the same class of bug as `nocx-25k9.14` and would have thrown on the renderer
 ## Deliberately out of scope
 
 - **The binary data plane** (AD-1). It has no JSON shape to pin.
-- **OpenRPC.** It is the protocol-native way to describe a whole JSON-RPC surface and is
-  worth adopting when method-level metadata starts being duplicated — not to fix one
-  response shape.
 - **Runtime validation in production.** Both ends of this socket are ours.

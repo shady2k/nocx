@@ -36,3 +36,11 @@ func ownerUID(path string) (uint32, error) {
 	}
 	return st.Uid, nil
 }
+
+// peerPID is the darwin half of the pair. LOCAL_PEERCRED's xucred carries
+// no pid, so the pid is a second socket option — LOCAL_PEERPID, at the same
+// SOL_LOCAL level. See peer_linux.go for why the client needs it and the
+// server must not use it.
+func peerPID(fd uintptr) (int, error) {
+	return unix.GetsockoptInt(int(fd), unix.SOL_LOCAL, unix.LOCAL_PEERPID)
+}

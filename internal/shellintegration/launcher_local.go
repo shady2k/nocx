@@ -117,20 +117,39 @@ func LocalZshRcfile(opts LaunchOptions) (string, error) {
 		capabilityLiteral(zshUnsetExport, opts.Capability, opts.Recovery)), nil
 }
 
-// WriteLocalZDOTDIR writes the rendered .zshrc into a transient directory and
-// returns the directory — the value ZDOTDIR is pointed at.
+// WriteLocalZDOTDIR writes the rendered .zshrc into a transient directory,
+// together with the two login-phase files that must sit beside it, and returns
+// the directory — the value ZDOTDIR is pointed at.
 //
 // A DIRECTORY rather than a file because zsh has no --rcfile: ZDOTDIR names a
 // directory, which is why the transient directory is structural for this tier
-// where the bash tier needs only a transient file. Its name matches the
-// template's self-delete guard (`*/nocx-zsh.??????` — exactly six characters
+// where the bash tier needs only a transient file.
+//
+// And because it names a directory, it shadows the user's ~/.zshenv,
+// ~/.zprofile and ~/.zlogin as well as their ~/.zshrc — zsh looks for every
+// phase's file HERE. A directory holding only .zshrc therefore does not merely
+// fail to replay those phases, it deletes them: zsh finds no file and runs
+// nothing. So all three of ours go in, each replaying the user's file of the
+// same phase from their own location, which is what makes the sequence a
+// native login's. (~/.zlogin needs no file of ours: the .zshrc phase restores
+// ZDOTDIR before the user's rc, and zsh resolves $ZDOTDIR again at every
+// phase, so by then it is already found in its native place.)
+//
+// The remote tier has written the same three since nocx-m8jwn, from the same
+// two renderers (zshEnvFile, zshProfileFile); this one wrote one of them, so
+// on the ordinary macOS layout — Homebrew's documented install puts its
+// shellenv eval in ~/.zprofile — a local tab reached the user's own ~/.zshrc
+// with none of the PATH their login shell would have had, and a tool invoked
+// there was `command not found` (nocx-2ka0).
+//
+// The directory's name matches the template's self-delete guard (`*/nocx-zsh.??????` — exactly six characters
 // after the prefix, the mktemp shape the guard was written for), because the
 // guard is what stops an empty or unexpected variable from taking a recursive
 // delete somewhere else, and a directory the guard does not match would be left
 // behind by every session with the capability inside it.
 //
-// The directory is 0700 and the file 0600, both from the start (no
-// create-then-chmod window) and both refusing a name that already exists (no
+// The directory is 0700 and every file in it 0600, all from the start (no
+// create-then-chmod window) and all refusing a name that already exists (no
 // pre-emption by a symlink or a squatted name), so the capability the .zshrc
 // carries is never readable by another user. The shell removes the whole
 // directory at the top of the .zshrc, before any user code runs; the caller
@@ -144,25 +163,39 @@ func WriteLocalZDOTDIR(rc string) (string, error) {
 	if err := os.Mkdir(dir, 0o700); err != nil {
 		return "", fmt.Errorf("shellintegration: local zdotdir: %w", err)
 	}
-	path := filepath.Join(dir, ".zshrc")
-	//nolint:gosec // dir is os.TempDir() plus a random name minted here inside a
-	// 0700 directory, and O_EXCL with mode 0600 is the defence: no pre-existing
-	// file is opened and no other user can read the capability it carries.
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		_ = os.RemoveAll(dir)
-		return "", fmt.Errorf("shellintegration: local zshrc: %w", err)
-	}
-	if _, err := f.WriteString(rc); err != nil {
-		_ = f.Close()
-		_ = os.RemoveAll(dir)
-		return "", fmt.Errorf("shellintegration: local zshrc write: %w", err)
-	}
-	if err := f.Close(); err != nil {
-		_ = os.RemoveAll(dir)
-		return "", fmt.Errorf("shellintegration: local zshrc close: %w", err)
+	// Written in the order zsh reads them, and all-or-nothing: a directory
+	// holding only some of the phases would shadow the user's other files with
+	// nothing at all, which is the very gap these files close. A partial write
+	// therefore takes the whole directory with it and the caller falls open to
+	// a conventional session, exactly as the remote tier's outer script does.
+	for _, file := range []struct{ name, body string }{
+		{".zshenv", zshEnvFile()},
+		{".zprofile", zshProfileFile()},
+		{".zshrc", rc},
+	} {
+		if err := writeTransientFile(filepath.Join(dir, file.name), file.body); err != nil {
+			_ = os.RemoveAll(dir)
+			return "", fmt.Errorf("shellintegration: local %s: %w", file.name[1:], err)
+		}
 	}
 	return dir, nil
+}
+
+// writeTransientFile creates one file of the transient ZDOTDIR. O_EXCL with
+// mode 0600 from the start is the defence the .zshrc needs and the other two
+// inherit: no pre-existing file is opened, no create-then-chmod window, and no
+// other user can read the capability the .zshrc carries.
+func writeTransientFile(path, body string) error {
+	//nolint:gosec // path is the caller's 0700 temp directory plus a fixed name.
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := f.WriteString(body); err != nil {
+		_ = f.Close()
+		return err
+	}
+	return f.Close()
 }
 
 // localZshEnv builds the three variables the transient ZDOTDIR bootstrap needs.

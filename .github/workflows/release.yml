@@ -187,9 +187,26 @@ jobs:
             CGO_CFLAGS="-arch arm64" CGO_LDFLAGS="-arch arm64" \
             go build -tags "release production" -ldflags "$LDFLAGS" \
             -o build/bin/darwin-arm64/nocx .
+          # The coordinator is a SECOND executable in the bundle: the desktop
+          # app finds, spawns and attaches to it, so installing the app is
+          # what installs the server (design §4, "Where the binary lives").
+          # It is built here rather than fetched or generated later because
+          # of the codesign line at the end of this step — see below.
+          #
+          # CGO_ENABLED=0 and no wails tags: cmd/nocx-server has no window.
+          # It still needs both slices, because the app it is spawned by is
+          # universal and a user on either architecture runs the same bundle.
+          CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 \
+            go build -tags release -ldflags "$LDFLAGS" \
+            -o build/bin/darwin-amd64/nocx-server ./cmd/nocx-server
+          CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 \
+            go build -tags release -ldflags "$LDFLAGS" \
+            -o build/bin/darwin-arm64/nocx-server ./cmd/nocx-server
           mkdir -p build/bin/nocx.app/Contents/MacOS build/bin/nocx.app/Contents/Resources
           lipo -create -output build/bin/nocx.app/Contents/MacOS/nocx \
             build/bin/darwin-amd64/nocx build/bin/darwin-arm64/nocx
+          lipo -create -output build/bin/nocx.app/Contents/MacOS/nocx-server \
+            build/bin/darwin-amd64/nocx-server build/bin/darwin-arm64/nocx-server
           cp build/assets/darwin/Info.plist build/bin/nocx.app/Contents/Info.plist
           cp build/darwin/icons.icns build/bin/nocx.app/Contents/Resources/icons.icns
           # Ad-hoc sign the assembled bundle. This is not an extra hardening
@@ -208,6 +225,13 @@ jobs:
           # seals Info.plist, the icon and the binary, so any copy after this
           # line invalidates it. The steps that follow only read, execute and
           # copy the tree wholesale.
+          #
+          # --deep is why nocx-server has to be in place BEFORE this line and
+          # is what signs it. Under ADR-0003 there is no Developer ID and the
+          # ad-hoc signature is the only one the bundle carries; a second
+          # executable dropped in afterwards would be the one file in the
+          # bundle Gatekeeper meets unsigned, and it is the one that runs
+          # detached and outlives the window.
           codesign --force --deep --sign - build/bin/nocx.app
 
       - name: Smoke checks
@@ -238,6 +262,23 @@ jobs:
           #    under v2 the wails CLI applied it, which is why this check long
           #    predates any explicit codesign call in this file.
           codesign --verify --deep --strict "$APP"
+          # 5. The coordinator ships in the bundle, carries both slices, and
+          #    carries the ad-hoc signature of its own.
+          #
+          #    There is deliberately no `--version` check here to match the
+          #    one on nocx above: cmd/nocx-server takes no flags, and running
+          #    it in CI would start a daemon rather than print a line. The
+          #    two binaries are linked in the same step from the same
+          #    $LDFLAGS, so the version they report cannot differ; when the
+          #    coordinator grows a --version, assert it here and delete this
+          #    paragraph.
+          SRV="$APP/Contents/MacOS/nocx-server"
+          test -x "$SRV"
+          srv_archs="$(lipo -archs "$SRV")"
+          echo "nocx-server archs: $srv_archs"
+          echo "$srv_archs" | grep -qw x86_64
+          echo "$srv_archs" | grep -qw arm64
+          codesign --verify --strict "$SRV"
 
       - name: Package .dmg and .zip
         run: |
@@ -318,6 +359,15 @@ jobs:
           # production semantics; `release` selects the shipped profile
           # directory (appdir.go).
           go build -tags "release production gtk3" -ldflags "$LDFLAGS" -o build/bin/nocx .
+          # The coordinator, which the AppImage must carry: on Linux the
+          # daemon is copied out of the image on first run and spawned from a
+          # versioned path, because the image's FUSE mount goes away with the
+          # process that started it (internal/update/serverbin). An AppImage
+          # that does not contain it has nothing to copy.
+          #
+          # CGO_ENABLED=0: no GTK, no WebKit, and a static binary is one the
+          # AppImage's bundled library set is irrelevant to.
+          CGO_ENABLED=0 go build -tags release -ldflags "$LDFLAGS" -o build/bin/nocx-server ./cmd/nocx-server
 
       - name: Smoke checks (binary)
         run: |
@@ -328,6 +378,13 @@ jobs:
           reported="$("$BIN" --version)"
           echo "reported: $reported"
           echo "$reported" | grep -qw "$VERSION"
+          # The coordinator is not run here: it takes no flags and would
+          # start a daemon. Same $LDFLAGS, same step — see the macOS job's
+          # smoke check for the whole of the reasoning.
+          SRV="build/bin/nocx-server"
+          test -x "$SRV"
+          file "$SRV" | grep -q 'ELF 64-bit'
+          file "$SRV" | grep -q 'statically linked'
 
       # The packaging itself lives in scripts/appimage/package-appimage.sh so it
       # can be run against a real build outside a tag push. Packaging that only

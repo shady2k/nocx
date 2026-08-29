@@ -4,6 +4,7 @@ import { createSignal } from 'solid-js'
 import { render, fireEvent } from '@solidjs/testing-library'
 import { NotificationsPanel } from './notifications-panel'
 import { createFeedStore, type FeedStore } from './feed-store'
+import type { NotifyCatalogue } from '../generated/notify.catalogue'
 import type { NotifyFeedRead, Occurrence, RunMember } from '../generated/notify.feed.read'
 
 function member(over: Partial<RunMember> = {}): RunMember {
@@ -57,7 +58,9 @@ function fakeStore(over: Partial<NotifyFeedRead> = {}) {
   const markRead = vi.fn()
   const store: FeedStore = {
     occurrences: () => snapshot.occurrences,
+    visibleOccurrences: () => snapshot.occurrences,
     unreadCount: () => snapshot.unreadCount,
+    readKnown: () => true,
     dropped: () => snapshot.dropped,
     markRead,
     destroy: () => {},
@@ -154,6 +157,27 @@ describe('NotificationsPanel', () => {
     ))
     expect(container.querySelector('.ui-empty-state')).not.toBeNull()
     expect(container.querySelector('.notifications-panel__list')).toBeNull()
+  })
+
+  it('distinguishes an unreadable feed from a successfully empty feed', () => {
+    const store: FeedStore = {
+      occurrences: () => [],
+      visibleOccurrences: () => [],
+      unreadCount: () => 0,
+      readKnown: () => false,
+      dropped: () => ({ count: 0, oldest: '', newest: '' }),
+      markRead: vi.fn(),
+      destroy: () => {},
+    }
+    const { container } = render(() => (
+      <NotificationsPanel store={store} onActivate={() => {}} canActivate={() => true} />
+    ))
+    expect(container.querySelector('.ui-empty-state')?.textContent).toContain(
+      'Could not read notifications',
+    )
+    expect(container.querySelector('.ui-empty-state')?.textContent).not.toContain(
+      'Nothing to catch up on',
+    )
   })
 
   it('activating a row resolves its session in the RENDERER', () => {
@@ -290,7 +314,9 @@ function mutableStore(initial: Occurrence[]) {
   const [occurrences, setOccurrences] = createSignal<Occurrence[]>(initial)
   const store: FeedStore = {
     occurrences,
+    visibleOccurrences: occurrences,
     unreadCount: () => 0,
+    readKnown: () => true,
     dropped: () => ({ count: 0, oldest: '', newest: '' }),
     markRead: vi.fn(),
     destroy: () => {},
@@ -561,7 +587,12 @@ describe('the panel narrows the feed, and the bell goes on counting (D3)', () =>
       ],
     })
     const { container } = render(() => (
-      <NotificationsPanel store={store} onActivate={() => {}} canActivate={() => true} />
+      <NotificationsPanel
+        store={store}
+        sessionNameOf={(_backendId, sessionId) => (sessionId === 'sess-a' ? 'A tab' : 'B tab')}
+        onActivate={() => {}}
+        canActivate={() => true}
+      />
     ))
     // One host on both rows, so that axis offers nothing.
     expect(filterSelect(container, 'Host')).toBeNull()
@@ -569,16 +600,17 @@ describe('the panel narrows the feed, and the bell goes on counting (D3)', () =>
     fireEvent.change(filterSelect(container, 'Session')!, { target: { value: 'v:local/sess-b' } })
     expect(titles(container)).toEqual(['b'])
     expect(shownCount(container)).toBe('1 of 2 shown')
-
-    fireEvent.change(filterSelect(container, 'Session')!, { target: { value: '' } })
-    fireEvent.change(filterSelect(container, 'Kind')!, { target: { value: 'v:bell' } })
-    expect(titles(container)).toEqual(['a'])
   })
 
   it('two axes narrow together, and a combination nothing satisfies says so', () => {
     const { store } = fakeStore({ occurrences: twoHosts() })
     const { container } = render(() => (
-      <NotificationsPanel store={store} onActivate={() => {}} canActivate={() => true} />
+      <NotificationsPanel
+        store={store}
+        sessionNameOf={(_backendId, sessionId) => `Tab ${sessionId}`}
+        onActivate={() => {}}
+        canActivate={() => true}
+      />
     ))
     fireEvent.change(filterSelect(container, 'Host')!, { target: { value: 'v:web-1' } })
     fireEvent.change(filterSelect(container, 'Session')!, { target: { value: 'v:local/sess-b' } })
@@ -627,5 +659,140 @@ describe('the panel narrows the feed, and the bell goes on counting (D3)', () =>
     fireEvent.change(host, { target: { value: 'v:' } })
     expect(titles(container)).toEqual(['here'])
     expect(shownCount(container)).toBe('1 of 2 shown')
+  })
+  it('uses catalogue words and descriptions for badges and kind options', () => {
+    const { store } = fakeStore({
+      occurrences: [
+        occurrence({ id: 'a', kind: 'pane.workFinished' }),
+        occurrence({ id: 'b', kind: 'bell' }),
+      ],
+    })
+    const catalogue: NotifyCatalogue = {
+      kinds: [
+        {
+          kind: 'pane.workFinished',
+          label: 'Work seems finished',
+          description: 'A pane became idle.',
+        },
+        { kind: 'bell', label: 'Terminal bell', description: 'A program printed BEL.' },
+      ],
+    }
+    const { container } = render(() => (
+      <NotificationsPanel
+        store={store}
+        catalogue={() => catalogue}
+        onActivate={() => {}}
+        canActivate={() => true}
+      />
+    ))
+
+    expect(
+      [...container.querySelectorAll('.notifications-panel__list .ui-badge')].map(
+        (badge) => badge.textContent,
+      ),
+    ).toEqual(['Work seems finished', 'Terminal bell'])
+    expect(container.querySelector('.ui-badge')?.getAttribute('title')).toBe('A pane became idle.')
+    expect(
+      [...filterSelect(container, 'Kind')!.options].map((option) => option.textContent),
+    ).toEqual(['All kinds', 'Work seems finished', 'Terminal bell'])
+  })
+
+  it('uses a readable fallback until the catalogue arrives', () => {
+    const [catalogue, setCatalogue] = createSignal<NotifyCatalogue | null>(null)
+    const { store } = fakeStore({
+      occurrences: [
+        occurrence({ kind: 'pane.workFinished' }),
+        occurrence({ id: 'bell', kind: 'bell' }),
+      ],
+    })
+    const { container } = render(() => (
+      <NotificationsPanel
+        store={store}
+        catalogue={catalogue}
+        onActivate={() => {}}
+        canActivate={() => true}
+      />
+    ))
+
+    expect(container.querySelector('.ui-badge')?.textContent).toBe('Pane work finished')
+    expect(
+      [...filterSelect(container, 'Kind')!.options].map((option) => option.textContent),
+    ).toContain('Pane work finished')
+
+    setCatalogue({
+      kinds: [
+        {
+          kind: 'pane.workFinished',
+          label: 'Work seems finished',
+          description: 'A pane became idle.',
+        },
+        { kind: 'bell', label: 'Terminal bell', description: 'A program printed BEL.' },
+      ],
+    })
+    expect(container.querySelector('.ui-badge')?.textContent).toBe('Work seems finished')
+  })
+
+  it('collapses unnamed sessions into one option and relabels on rename', () => {
+    const [names, setNames] = createSignal<Record<string, string | null>>({
+      'local/sess-a': null,
+      'local/sess-b': null,
+      'local/sess-c': 'Build tab',
+    })
+    const { store } = fakeStore({
+      occurrences: [
+        occurrence({ id: 'a', sessionId: 'sess-a' }),
+        occurrence({ id: 'b', sessionId: 'sess-b' }),
+        occurrence({ id: 'c', sessionId: 'sess-c' }),
+      ],
+    })
+    const { container } = render(() => (
+      <NotificationsPanel
+        store={store}
+        sessionNameOf={(backendId, sessionId) => names()[`${backendId}/${sessionId}`] ?? null}
+        onActivate={() => {}}
+        canActivate={() => true}
+      />
+    ))
+
+    expect(
+      [...filterSelect(container, 'Session')!.options].map((option) => option.textContent),
+    ).toEqual(['All sessions', 'Unavailable sessions', 'Build tab'])
+
+    setNames((previous) => ({ ...previous, 'local/sess-a': 'New tab' }))
+    expect(
+      [...filterSelect(container, 'Session')!.options].map((option) => option.textContent),
+    ).toEqual(['All sessions', 'New tab', 'Unavailable sessions', 'Build tab'])
+  })
+
+  it('clears a kind filter when that kind becomes hidden', async () => {
+    const [hidden, setHidden] = createSignal<ReadonlySet<string>>(new Set())
+    const read = vi.fn().mockResolvedValue({
+      revision: 1,
+      unreadCount: 2,
+      occurrences: [
+        occurrence({ id: 'bell', kind: 'bell' }),
+        occurrence({ id: 'session', title: 'session.ended', kind: 'session.ended' }),
+      ],
+      dropped: { count: 0, oldest: '', newest: '' },
+    })
+    const store = createFeedStore(
+      { read, markRead: vi.fn().mockResolvedValue({ revision: 2 }) },
+      { subscribe: () => () => {}, onConnect: () => () => {} },
+      hidden,
+    )
+    const { container } = render(() => (
+      <NotificationsPanel store={store} onActivate={() => {}} canActivate={() => true} />
+    ))
+    await vi.waitFor(() => expect(filterSelect(container, 'Kind')).not.toBeNull())
+    const kind = filterSelect(container, 'Kind')!
+    fireEvent.change(kind, { target: { value: 'v:bell' } })
+    expect(kind.value).toBe('v:bell')
+
+    setHidden(new Set(['bell']))
+    expect(filterSelect(container, 'Kind')).toBeNull()
+    expect(titles(container)).toEqual(['session.ended'])
+    setHidden(new Set())
+    expect(titles(container)).toEqual(['build finished', 'session.ended'])
+    store.destroy()
   })
 })

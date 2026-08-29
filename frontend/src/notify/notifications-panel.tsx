@@ -36,13 +36,14 @@
  * So the panel states the narrowed count itself — "3 of 12 shown" — which is
  * the epic's criterion answered with its second half deliberately.
  */
-import { For, Show, createSignal } from 'solid-js'
+import { For, Show, createEffect, createSignal } from 'solid-js'
 import { EmptyState } from '../ui/empty-state'
 import { Field } from '../ui/field'
 import { RecordRow } from '../ui/record-row'
 import { Select } from '../ui/select'
 import type { BadgeTone } from '../ui/badge'
 import type { FeedStore } from './feed-store'
+import type { NotifyCatalogue } from '../generated/notify.catalogue'
 import type { NotifyFeedRead } from '../generated/notify.feed.read'
 
 type Occurrence = NotifyFeedRead['occurrences'][number]
@@ -71,6 +72,17 @@ function formatWhen(at: string): string {
   const ms = Date.parse(at)
   if (Number.isNaN(ms)) return at
   return new Date(ms).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })
+}
+
+/** Human-readable fallback used until the backend catalogue is available. */
+export function fallbackKindLabel(kind: string): string {
+  const words = kind
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/\./g, ' ')
+    .trim()
+    .toLowerCase()
+  if (words === '') return 'Notification'
+  return `${words[0].toUpperCase()}${words.slice(1)}`
 }
 
 /** Two parts joined only where there are two parts to join. A LOCAL session
@@ -113,35 +125,18 @@ interface Axis {
   optionLabel: (o: Occurrence) => string
 }
 
-const AXES: readonly Axis[] = [
-  {
-    id: 'host',
-    label: 'Host',
-    placeholder: 'All hosts',
-    identity: (o) => o.host,
-    optionLabel: (o) => (o.host === '' ? 'This machine' : o.host),
-  },
-  {
-    id: 'session',
-    label: 'Session',
-    placeholder: 'All sessions',
-    // A session id is only unique within its backend, so the identity is the
-    // pair. nocx-if6 phase A is what makes session identity (backendId,
-    // sessionId), and a filter that forgot the first half would merge two
-    // machines' sessions the moment their ids collided.
-    identity: (o) => `${o.backendId}/${o.sessionId}`,
-    optionLabel: (o) => dotted(o.host, o.sessionId),
-  },
-  {
-    id: 'kind',
-    label: 'Kind',
-    placeholder: 'All kinds',
-    identity: (o) => o.kind,
-    // The same word the row's kind badge shows. A filter that renamed what
-    // the rows are labelled with would be a second vocabulary for one concept.
-    optionLabel: (o) => o.kind,
-  },
-]
+const UNAVAILABLE_SESSION = '\u0000unavailable'
+
+export function kindLabel(kind: string, catalogue: NotifyCatalogue | null | undefined): string {
+  return catalogue?.kinds.find((entry) => entry.kind === kind)?.label ?? fallbackKindLabel(kind)
+}
+
+export function kindDescription(
+  kind: string,
+  catalogue: NotifyCatalogue | null | undefined,
+): string | undefined {
+  return catalogue?.kinds.find((entry) => entry.kind === kind)?.description
+}
 
 type Picked = Record<Axis['id'], string>
 const NOTHING_PICKED: Picked = { host: ALL, session: ALL, kind: ALL }
@@ -153,11 +148,41 @@ export interface NotificationsPanelProps {
   /** Whether that tab still exists — a row whose session is gone is not
    *  activatable, and says so rather than doing nothing when clicked. */
   canActivate: (backendId: string, sessionId: string) => boolean
+  /** The backend-owned kind vocabulary, or null before its first success. */
+  catalogue?: () => NotifyCatalogue | null
+  /** Renderer-owned session-to-tab display name lookup. */
+  sessionNameOf?: (backendId: string, sessionId: string) => string | null
 }
 
 export function NotificationsPanel(props: NotificationsPanelProps) {
   const dropped = () => props.store.dropped()
-  const all = () => props.store.occurrences()
+  const all = () => props.store.visibleOccurrences()
+  const catalogue = () => props.catalogue?.() ?? null
+  const sessionName = (o: Occurrence) => props.sessionNameOf?.(o.backendId, o.sessionId) ?? null
+  const axes: readonly Axis[] = [
+    {
+      id: 'host',
+      label: 'Host',
+      placeholder: 'All hosts',
+      identity: (o) => o.host,
+      optionLabel: (o) => (o.host === '' ? 'This machine' : o.host),
+    },
+    {
+      id: 'session',
+      label: 'Session',
+      placeholder: 'All sessions',
+      identity: (o) =>
+        sessionName(o) === null ? UNAVAILABLE_SESSION : `${o.backendId}/${o.sessionId}`,
+      optionLabel: (o) => sessionName(o) ?? 'Unavailable sessions',
+    },
+    {
+      id: 'kind',
+      label: 'Kind',
+      placeholder: 'All kinds',
+      identity: (o) => o.kind,
+      optionLabel: (o) => kindLabel(o.kind, catalogue()),
+    },
+  ]
 
   /** Which rows are open, by occurrence id. Ephemeral (D4): a feed that does
    *  not survive a restart cannot have an expansion that does. Keyed by id
@@ -196,12 +221,24 @@ export function NotificationsPanel(props: NotificationsPanelProps) {
     if (value === ALL) return ALL
     return optionsFor(axis).some((o) => o.value === value) ? value : ALL
   }
+  createEffect(() => {
+    const current = picked()
+    const next = { ...current }
+    let changed = false
+    for (const axis of axes) {
+      if (current[axis.id] !== ALL && activeOn(axis) === ALL) {
+        next[axis.id] = ALL
+        changed = true
+      }
+    }
+    if (changed) setPicked(next)
+  })
 
-  const narrowed = () => AXES.some((axis) => activeOn(axis) !== ALL)
+  const narrowed = () => axes.some((axis) => activeOn(axis) !== ALL)
 
   const visible = () =>
     all().filter((o) =>
-      AXES.every((axis) => {
+      axes.every((axis) => {
         const value = activeOn(axis)
         return value === ALL || value === pick(axis.identity(o))
       }),
@@ -212,9 +249,9 @@ export function NotificationsPanel(props: NotificationsPanelProps) {
       {/* An axis with one value can narrow nothing: an offer that cannot be
           honoured is a lie (design §8), and three dead controls at the top of
           a 240px panel is most of the list. */}
-      <Show when={AXES.some((axis) => optionsFor(axis).length > 1)}>
+      <Show when={axes.some((axis) => optionsFor(axis).length > 1)}>
         <div class="notifications-panel__filters">
-          <For each={AXES}>
+          <For each={axes}>
             {(axis) => (
               <Show when={optionsFor(axis).length > 1}>
                 <Field for={`notifications-filter-${axis.id}`} label={axis.label}>
@@ -243,53 +280,67 @@ export function NotificationsPanel(props: NotificationsPanelProps) {
       </Show>
 
       <Show
-        when={all().length > 0}
+        when={props.store.readKnown()}
         fallback={
           <EmptyState
-            title="Nothing to catch up on"
-            description="Notifications raised while you are elsewhere collect here."
+            title="Could not read notifications"
+            description="Reconnect or try again to check for notifications."
           />
         }
       >
         <Show
-          when={visible().length > 0}
+          when={all().length > 0}
           fallback={
             <EmptyState
-              title="Nothing matches"
-              description="No notification is from every one of the things you narrowed to."
+              title="Nothing to catch up on"
+              description="Notifications raised while you are elsewhere collect here."
             />
           }
         >
-          <div class="notifications-panel__list" role="list" aria-label="Notifications">
-            <For each={visible()}>
-              {(o) => {
-                const live = () => props.canActivate(o.backendId, o.sessionId)
-                return (
-                  <RecordRow
-                    density="dense"
-                    title={o.count > 1 ? `${o.title} ×${o.count}` : o.title}
-                    kind={{ label: o.kind, tone: toneOf(o.level) }}
-                    meta={metaLine(o.host, live() ? formatWhen(o.at) : 'session closed')}
-                    detail={o.body === '' ? undefined : o.body}
-                    selected={!o.read}
-                    onActivate={
-                      live() ? () => props.onActivate(o.backendId, o.sessionId) : undefined
-                    }
-                    // A row of one is a LEAF, not a row that never heard of the
-                    // disclosure: it holds the chevron's width so every title in
-                    // this list stands in one column (record-row.tsx's three
-                    // states, the middle one).
-                    expandable={o.count > 1}
-                    expanded={isExpanded(o.id)}
-                    onToggle={() => toggle(o.id)}
-                    actions={<></>}
-                  >
-                    <Run occurrence={o} />
-                  </RecordRow>
-                )
-              }}
-            </For>
-          </div>
+          <Show
+            when={visible().length > 0}
+            fallback={
+              <EmptyState
+                title="Nothing matches"
+                description="No notification is from every one of the things you narrowed to."
+              />
+            }
+          >
+            <div class="notifications-panel__list" role="list" aria-label="Notifications">
+              <For each={visible()}>
+                {(o) => {
+                  const live = () => props.canActivate(o.backendId, o.sessionId)
+                  return (
+                    <RecordRow
+                      density="dense"
+                      title={o.count > 1 ? `${o.title} ×${o.count}` : o.title}
+                      kind={{
+                        label: kindLabel(o.kind, catalogue()),
+                        description: kindDescription(o.kind, catalogue()),
+                        tone: toneOf(o.level),
+                      }}
+                      meta={metaLine(o.host, live() ? formatWhen(o.at) : 'session closed')}
+                      detail={o.body === '' ? undefined : o.body}
+                      selected={!o.read}
+                      onActivate={
+                        live() ? () => props.onActivate(o.backendId, o.sessionId) : undefined
+                      }
+                      // A row of one is a LEAF, not a row that never heard of the
+                      // disclosure: it holds the chevron's width so every title in
+                      // this list stands in one column (record-row.tsx's three
+                      // states, the middle one).
+                      expandable={o.count > 1}
+                      expanded={isExpanded(o.id)}
+                      onToggle={() => toggle(o.id)}
+                      actions={<></>}
+                    >
+                      <Run occurrence={o} />
+                    </RecordRow>
+                  )
+                }}
+              </For>
+            </div>
+          </Show>
         </Show>
       </Show>
 
@@ -297,8 +348,8 @@ export function NotificationsPanel(props: NotificationsPanelProps) {
         {/* Outside the list and never activatable: a soft degrade must be
             visible in the product, not only in a log. */}
         <div class="notifications-panel__dropped" data-testid="notifications-dropped">
-          {dropped().count} notifications dropped between {formatWhen(dropped().oldest)} and{' '}
-          {formatWhen(dropped().newest)}
+          {dropped().count} notifications dropped from the feed between{' '}
+          {formatWhen(dropped().oldest)} and {formatWhen(dropped().newest)}
         </div>
       </Show>
     </div>

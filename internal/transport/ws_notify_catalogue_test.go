@@ -34,6 +34,7 @@ func TestNotifyCatalogue_OverTheWireConformsToContract(t *testing.T) {
 	validateJSON(t, schema, envelope.Result, "notify.catalogue result")
 
 	type catalogueKind struct {
+		ID          string `json:"id"`
 		Kind        string `json:"kind"`
 		Label       string `json:"label"`
 		Description string `json:"description"`
@@ -45,12 +46,12 @@ func TestNotifyCatalogue_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("decode result: %v", err)
 	}
 	want := []catalogueKind{
-		{Kind: "block.finished", Label: "Command finished", Description: "nocx's own block ledger recorded that a command finished."},
-		{Kind: "session.ended", Label: "Session ended", Description: "nocx's own session registry recorded that a session ended."},
-		{Kind: "transfer.finished", Label: "File transfer finished", Description: "nocx's own transfer registry recorded that an upload or a download reached its end."},
-		{Kind: "program.notify", Label: "Program notification request", Description: "A program printed OSC 9 or OSC 777 to ask for one."},
-		{Kind: "bell", Label: "Terminal bell", Description: "A program printed BEL."},
-		{Kind: "pane.workFinished", Label: "Work seems to have finished", Description: "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine."},
+		{ID: "blockFinished", Kind: "block.finished", Label: "Command finished", Description: "nocx's own block ledger recorded that a command finished."},
+		{ID: "sessionEnded", Kind: "session.ended", Label: "Session ended", Description: "nocx's own session registry recorded that a session ended."},
+		{ID: "transferFinished", Kind: "transfer.finished", Label: "File transfer finished", Description: "nocx's own transfer registry recorded that an upload or a download reached its end."},
+		{ID: "programNotify", Kind: "program.notify", Label: "Program notification request", Description: "A program printed OSC 9 or OSC 777 to ask for one."},
+		{ID: "bell", Kind: "bell", Label: "Terminal bell", Description: "A program printed BEL."},
+		{ID: "paneWorkFinished", Kind: "pane.workFinished", Label: "Work seems to have finished", Description: "nocx inferred from a pane's title that its work finished. It is an inference, so it may never leave this machine."},
 	}
 	if !reflect.DeepEqual(got.Kinds, want) {
 		t.Errorf("notify.catalogue kinds = %+v, want shipped presented kinds %+v", got.Kinds, want)

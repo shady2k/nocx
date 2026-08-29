@@ -14,6 +14,7 @@ type notifyCatalogueResult struct {
 }
 
 type notifyCatalogueKind struct {
+	ID          string      `json:"id"`
 	Kind        notify.Kind `json:"kind"`
 	Label       string      `json:"label"`
 	Description string      `json:"description"`
@@ -24,6 +25,7 @@ func notifyCatalogueResultFor(c *notify.Catalogue) notifyCatalogueResult {
 	result := notifyCatalogueResult{Kinds: make([]notifyCatalogueKind, 0, len(kinds))}
 	for _, kind := range kinds {
 		result.Kinds = append(result.Kinds, notifyCatalogueKind{
+			ID:          kind.ID,
 			Kind:        kind.Kind,
 			Label:       kind.Label,
 			Description: kind.Description,

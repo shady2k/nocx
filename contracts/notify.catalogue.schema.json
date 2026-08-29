@@ -17,8 +17,13 @@
     "kind": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["kind", "label", "description"],
+      "required": ["id", "kind", "label", "description"],
       "properties": {
+        "id": {
+          "description": "The stable id the notifications.centre.<id> setting key is built from.",
+          "type": "string",
+          "minLength": 1
+        },
         "kind": {
           "description": "The wire value stamped on a notification occurrence.",
           "type": "string",

@@ -71,7 +71,9 @@ function storeOf(o: Occurrence): FeedStore {
   }
   return {
     occurrences: () => snapshot.occurrences,
+    visibleOccurrences: () => snapshot.occurrences,
     unreadCount: () => snapshot.unreadCount,
+    readKnown: () => true,
     dropped: () => snapshot.dropped,
     markRead: vi.fn(),
     destroy: () => {},

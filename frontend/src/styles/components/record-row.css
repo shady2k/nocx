@@ -15,6 +15,37 @@
   white-space: nowrap;
 }
 
+/* ── The name as the control (nocx-5xwub) ────────────────────────────────
+   A record that can be opened renders its name as a native button, because
+   the ROW cannot announce the action: it is the `listitem` its list requires
+   and it holds real buttons of its own. Everything here is the button UA
+   default being undone — the name must look exactly as it did as a div, and
+   `display: block` keeps the ellipsis above working on it. No colour, no
+   background and no border of its own: the row paints the record, and this
+   is the same text it always was.
+
+   The focus ring is the row's, moved to the control that now owns the
+   keyboard. focus-visible only, for the same reason it was: a mouse click
+   that happens to focus must not paint one. */
+.ui-record-row__open {
+  display: block;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  border: none;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  border-radius: var(--border-radius-sm, 4px);
+}
+
+.ui-record-row__open:focus-visible {
+  outline: 2px solid var(--color-focus-ring);
+  outline-offset: 2px;
+}
+
 /* The descriptive line: the kind badge, the meta text, and the status, on
    one row. The gap is the meta line's own rhythm; the badge keeps its own
    padding and the status its own dot. */

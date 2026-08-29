@@ -34,6 +34,20 @@ site. The file is ignored now. The backlog lives in Dolt and syncs through
 `refs/beads/snapshot` on the same remote, from your local database. Recovering it is
 three lines in [README](README.md#agent-tooling).
 
+**A branch cut before this will conflict once, and the resolution is one command.**
+Every branch in flight has commits that modified the file, because the old hook staged
+it on every commit; against a `main` where it is deleted, that is a modify/delete
+conflict, which no merge driver can help with — drivers run only when both sides
+changed content, and this one is resolved in the tree. Measured on 2026-08-29: 14 of
+the then-open branches. Take the deletion and move on:
+
+```bash
+git rm .beads/issues.jsonl
+```
+
+Once a branch carries that merge it never happens again, because nothing writes the
+file any more.
+
 **Your dev profile is not the installed app's.** Anything you build or run from
 this repo — `wails dev`, `make dev-web`, `make build`, and the Playwright suite,
 which launches a backend of its own — resolves `nocx-dev` rather than `nocx`,

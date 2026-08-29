@@ -37,6 +37,7 @@ import { Button } from '../ui/button'
 import { Dialog } from '../ui/dialog'
 import { DropZone } from '../ui/drop-zone'
 import { Spinner } from '../ui/spinner'
+import { Checkbox } from '../ui/checkbox'
 import { Field } from '../ui/field'
 import { IconButton } from '../ui/icon-button'
 import { CloseIcon, FolderOpenIcon, PencilIcon } from '../ui/icons'
@@ -150,9 +151,19 @@ export interface PostmanImportDialogProps {
   onFiles?: (files: File[]) => void
   /** Inventory returned by the archive preview, or '' for non-archives. */
   archiveSummary?: string
-  /** Whether an archive just handed over is being READ — the wait a person
+  /** Whether an export just handed over is being READ — the wait a person
    *  is sitting through, and the only one this ask draws. */
   reading?: boolean
+  /** The pasted text, once the person is finished with it: reading a
+   *  document on every keystroke would be the destination field's old
+   *  defect in the other control. */
+  onCommitPaste?: (value: string) => void
+  /** The variables the export marked `type: secret`, by NAME. Empty draws
+   *  nothing at all — which is almost every import. */
+  offeredSecrets?: readonly string[]
+  /** Whether the offer has been taken. */
+  storeSecrets?: boolean
+  onStoreSecrets?: (store: boolean) => void
   /** The destination, once the person is finished with it (TextField's
    *  onCommit). Separate from `onDest` because what a keystroke changes and
    *  what a settled value changes are two different questions: one is the
@@ -260,6 +271,7 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
         value={props.pasted}
         error={pasteRefusal()}
         onInput={props.onPaste}
+        onCommit={props.onCommitPaste}
         autoFocus
       />
       {/* AND, FOR A URL, WHICH CONNECTION IT TRAVELS THROUGH. Only a URL is
@@ -395,6 +407,33 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
         }
       >
         <p class="api-import-summary">{props.archiveSummary}</p>
+      </Show>
+      {/* THE OFFER, and only where there is one to make. Postman marks few
+          variables `secret` — nought of six in the export that bought
+          nocx-zn386 — so this region is absent from almost every import, and
+          absence is the capability here as everywhere else in this ask.
+
+          IT IS AN OFFER AND NOT A DECISION (ADR-0047). Unticked, the value
+          the export carried is written into the environment file, which is
+          what happens to every other value and is the state the person's
+          data was already in. Ticked, the value goes to the vault and the
+          file holds `{{secret:secrow:…}}` — the same reference every other
+          field in this product uses, reached here in one act instead of one
+          per variable afterwards.
+
+          The values are not on this side: what the preview sent is the
+          NAMES, so this control can say what it is about without the
+          renderer ever holding a credential. */}
+      <Show when={(props.offeredSecrets ?? []).length > 0}>
+        <Checkbox
+          checked={props.storeSecrets === true}
+          onChange={(checked) => props.onStoreSecrets?.(checked)}
+          label={
+            (props.offeredSecrets ?? []).length === 1
+              ? `Store ${(props.offeredSecrets ?? [])[0]} in the vault — the file keeps the name, never the value`
+              : `Store ${(props.offeredSecrets ?? []).length} secret variables in the vault — the files keep their names, never the values`
+          }
+        />
       </Show>
       <Show when={!editing()}>
         <p class="api-import-dest">

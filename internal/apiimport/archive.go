@@ -37,6 +37,11 @@ type ArchiveDocument struct {
 	Name     string
 	Path     string
 	Document []byte
+	// Secrets are the variables this document marked `type: secret`, with
+	// the values it carried. They are what the import OFFERS to store in
+	// the vault; nothing here decides that, and the wire sends only their
+	// NAMES (nocx-zn386).
+	Secrets []SecretVariable
 }
 
 // manifestName is the one member every Postman archive has, and the member
@@ -182,6 +187,7 @@ func ReadPostmanArchive(r io.Reader) ([]ArchiveDocument, error) {
 			Name:     name,
 			Path:     memberPath,
 			Document: contents,
+			Secrets:  converted.Secrets,
 		})
 	}
 	return documents, nil

@@ -805,6 +805,11 @@ export function ApiPane(props: ApiPaneProps) {
    */
   const [importRoute, setImportRoute] = createSignal<ApiRoute>(DIRECT_ROUTE)
   const [postmanDest, setPostmanDest] = createSignal('')
+  /** Whether the person took the offer over the variables Postman marked
+   *  `secret`. False from the moment the ask opens: the program may ask and
+   *  may not choose (ADR-0047), and minting vault records because nobody
+   *  said otherwise is choosing. */
+  const [storeSecrets, setStoreSecrets] = createSignal(false)
   /**
    * HOW THIS ASK REFUSES — a toast, and never a line in its own layout.
    *
@@ -1728,20 +1733,58 @@ export function ApiPane(props: ApiPaneProps) {
     setArchivePreview(null)
     clearPaste()
     proposeDestination(path)
-    // AND AN ARCHIVE IS READ BEFORE IT IS WRITTEN, on this route as much as
+    // AND THE EXPORT IS READ BEFORE IT IS WRITTEN, on this route as much as
     // on the one carrying bytes. The system picker and a native drop both
     // answer with a path, and they are the ONLY pair the shipped app has —
     // so a preview wired to the bytes alone existed in `make dev-web` and in
-    // the suite, and nowhere a person works (nocx-bvxf2.5).
-    if (path === '' || !isArchiveName(path)) return
+    // the suite, and nowhere a person works (nocx-bvxf2.5). A single
+    // document is read the same way: it is what says whether there is
+    // anything to offer (nocx-zn386).
+    if (path === '') return
     const dest = untrack(() => {
       const proposed = proposedDestination(store.defaultRoot(), path)
       return postmanDest().trim() || proposed
     })
     setImportingBusy(true)
     setReadingArchive(true)
-    void previewArchive({ path }, dest, requestId, true)
+    void previewSource({ path }, dest, requestId, true)
   }
+
+  /**
+   * WHAT CAN BE READ WITHOUT GOING TO THE NETWORK, as the one derivation of
+   * it.
+   *
+   * Every source but a URL is bytes somebody already has: the renderer's, or
+   * a file on the machine running Go. A URL is not previewed, and that is
+   * not an oversight — reading it means FETCHING it, and a surface that
+   * quietly calls somebody's server because a field lost focus is doing
+   * something nobody asked for. Its export is read once, by the import.
+   */
+  const readableSource = (held: HeldSource): ImportSource | null => {
+    switch (held.kind) {
+      case 'archive':
+        return { archiveBytes: held.bytes }
+      case 'path':
+        return { path: held.path }
+      case 'document':
+        return { document: held.text }
+      case 'file':
+        return null // its bytes are read at the gesture; see chooseDocument
+      default:
+        return null
+    }
+  }
+
+  /**
+   * The variables the preview says this export marked `type: secret` — the
+   * OFFER's whole input, and empty for almost every export (nought of six in
+   * the one that bought nocx-zn386).
+   *
+   * NAMES only: the values stay on the backend's side of the socket, which
+   * is what lets the ask offer without ever holding a credential.
+   */
+  const offeredSecrets = (): string[] =>
+    (archivePreview() ?? []).flatMap((document) => document.secrets ?? [])
 
   /** Empty the paste box and its refusal, without touching the held source —
    *  the half every OTHER entrance performs when it takes the answer over. */
@@ -1796,6 +1839,7 @@ export function ApiPane(props: ApiPaneProps) {
   const clearSource = (): void => {
     archivePreviewRequest++
     setPostmanSource({ kind: 'none' })
+    setStoreSecrets(false)
     setArchivePreview(null)
     clearPaste()
     clearImportRefusal()
@@ -1806,8 +1850,8 @@ export function ApiPane(props: ApiPaneProps) {
   }
 
   /**
-   * READ THE ARCHIVE, AND WITH IT THE DESTINATION — one preview, whichever
-   * currency the archive arrived in and whichever of the two questions moved.
+   * READ THE EXPORT, AND WITH IT THE DESTINATION — one preview, whichever
+   * currency the export arrived in and whichever of the two questions moved.
    *
    * `api.import.postman` with `preview` answers both at once: what the
    * archive holds, which depends only on the archive, and whether the
@@ -1823,7 +1867,7 @@ export function ApiPane(props: ApiPaneProps) {
    * re-check of the DESTINATION says nothing and keeps the source, because
    * the archive is fine and the place is not.
    */
-  const previewArchive = (
+  const previewSource = (
     source: ImportSource,
     dest: string,
     requestId: number,
@@ -1886,6 +1930,32 @@ export function ApiPane(props: ApiPaneProps) {
     if (!isArchiveFile(file)) {
       setPostmanSource({ kind: 'file', file })
       proposeDestination(file.name)
+      // A single document is read too, for what it says about ITSELF: the
+      // offer over a `type: secret` variable needs to know there is one
+      // before anything is written, and an offer that existed for archives
+      // alone would be an offer decided by how the export arrived
+      // (nocx-zn386). The held source stays the FILE — the bytes travel
+      // again at import, as they always did — because a document read into
+      // the ask is a second copy of the same export.
+      setImportingBusy(true)
+      setReadingArchive(true)
+      void file
+        .text()
+        .then((text) =>
+          untrack(() => {
+            if (requestId !== archivePreviewRequest) return
+            const dest = postmanDest().trim() || proposedDestination(store.defaultRoot(), file.name)
+            return previewSource({ document: text }, dest, requestId, true)
+          }),
+        )
+        .catch((err: unknown) =>
+          untrack(() => {
+            if (requestId !== archivePreviewRequest) return
+            setImportingBusy(false)
+            setReadingArchive(false)
+            refuseImport(err instanceof Error ? err.message : String(err))
+          }),
+        )
       return
     }
     setImportingBusy(true)
@@ -1903,7 +1973,7 @@ export function ApiPane(props: ApiPaneProps) {
           )
           proposeDestination(file.name)
           const dest = postmanDest().trim() || proposed
-          return previewArchive({ archiveBytes }, dest, requestId, true)
+          return previewSource({ archiveBytes }, dest, requestId, true)
         }),
       )
       .catch((err: unknown) =>
@@ -1980,6 +2050,7 @@ export function ApiPane(props: ApiPaneProps) {
 
   const askForImport = (): void => {
     setPostmanSource({ kind: 'none' })
+    setStoreSecrets(false)
     setPostmanPasted('')
     setPasteRefused('')
     // The destination opens as a SENTENCE, whatever the last ask left it as:
@@ -2417,8 +2488,12 @@ export function ApiPane(props: ApiPaneProps) {
                   ? { document: held.text }
                   : urlSource(held.url),
             )
+    // Read HERE, where the person pressed Import, rather than inside the
+    // promise: the answer that travels is the one the ask was holding when
+    // they pressed it.
+    const offerTaken = storeSecrets()
     void source
-      .then((chosen) => store.importPostman(chosen, dest))
+      .then((chosen) => store.importPostman(chosen, dest, offerTaken))
       .then(async (): Promise<void> => {
         const refused = store.error()
         if (refused !== '') {
@@ -3006,17 +3081,11 @@ export function ApiPane(props: ApiPaneProps) {
           // (TextField's onCommit: focus left, or Enter), so this is one
           // call per settled destination (nocx-bvxf2.5).
           onCommitDest={(value) => {
-            const held = postmanSource()
-            if (held.kind !== 'archive' && held.kind !== 'path') return
-            if (held.kind === 'path' && !isArchiveName(held.path)) return
+            const readable = readableSource(postmanSource())
+            if (readable === null) return
             const requestId = ++archivePreviewRequest
             setImportingBusy(true)
-            void previewArchive(
-              held.kind === 'archive' ? { archiveBytes: held.bytes } : { path: held.path },
-              value.trim(),
-              requestId,
-              false,
-            )
+            void previewSource(readable, value.trim(), requestId, false)
           }}
           defaultRoot={store.defaultRoot()}
           dropSession={nativeDrop?.session() ?? null}
@@ -3029,6 +3098,22 @@ export function ApiPane(props: ApiPaneProps) {
           onFiles={chooseDocument}
           busy={importingBusy()}
           reading={readingArchive()}
+          offeredSecrets={offeredSecrets()}
+          storeSecrets={storeSecrets()}
+          onStoreSecrets={setStoreSecrets}
+          onCommitPaste={() => {
+            // The paste box classifies on every keystroke (that is what
+            // fills the field and proposes the destination); READING the
+            // document is a call, so it waits until the person is finished
+            // with the value — the destination field's rule, in the other
+            // control.
+            const readable = readableSource(postmanSource())
+            if (readable === null || !('document' in readable)) return
+            const requestId = ++archivePreviewRequest
+            setImportingBusy(true)
+            setReadingArchive(true)
+            void previewSource(readable, postmanDest().trim(), requestId, true)
+          }}
           onBrowseFile={filePickerLive() ? browseForExport : undefined}
           onBrowse={pickerLive() ? browseForImportDest : undefined}
           onCancel={() => setImporting(false)}

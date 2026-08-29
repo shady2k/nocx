@@ -585,6 +585,30 @@ func (h apiImportHandlers) handlePostman(ctx context.Context, req jsonrpcRequest
 			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: msg})
 			return nil
 		}
+		archive, decodeErr := decodeArchiveBytes(p.ArchiveBytes)
+		if decodeErr != "" {
+			_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: decodeErr})
+			return nil
+		}
+
+		// READING IS NOT WRITING, and it is the same question on every
+		// entrance: what does this export hold, and is there anything in it
+		// to offer. It used to be answered for an archive alone, so in the
+		// shipped app — where a pick and a drop both answer with a path —
+		// the ask learned nothing at all (nocx-bvxf2.5, nocx-zn386).
+		if p.Preview {
+			documents, previewErr := h.preview(ctx, svc, p, archive)
+			if previewErr != nil {
+				_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(previewErr), Message: previewErr.Error()})
+				return nil
+			}
+			_ = h.r.TryResult(req.ID, mustMarshal(apiImportPostmanResponse{
+				Unsupported: []apiUnsupportedWire{},
+				Documents:   wireArchiveDocuments(documents),
+			}))
+			return nil
+		}
+
 		// One import, four ways in, and the choice is already made: the
 		// validator refused several-and-none, so exactly one of these is
 		// selected.
@@ -594,33 +618,7 @@ func (h apiImportHandlers) handlePostman(ctx context.Context, req jsonrpcRequest
 		)
 		switch {
 		case p.ArchiveBytes != "":
-			archive, decodeErr := base64.StdEncoding.DecodeString(p.ArchiveBytes)
-			if decodeErr != nil {
-				_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "archiveBytes must be base64"})
-				return nil
-			}
-			// Keep the decoded-size check beside the capability call as a
-			// defense-in-depth guard if validation is ever reused incorrectly.
-			if len(archive) > apiimport.MaxDocumentBytes {
-				_ = h.r.TryError(req.ID, RPCError{
-					Code:    -32602,
-					Message: fmt.Sprintf("archiveBytes exceeds the %d-byte limit after base64 decoding", apiimport.MaxDocumentBytes),
-				})
-				return nil
-			}
-			if p.Preview {
-				documents, previewErr := svc.PreviewPostmanArchiveBytes(ctx, archive, p.Dest)
-				if previewErr != nil {
-					_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(previewErr), Message: previewErr.Error()})
-					return nil
-				}
-				_ = h.r.TryResult(req.ID, mustMarshal(apiImportPostmanResponse{
-					Unsupported: []apiUnsupportedWire{},
-					Documents:   wireArchiveDocuments(documents),
-				}))
-				return nil
-			}
-			results, importErr := svc.ImportPostmanArchiveBytes(ctx, archive, p.Dest)
+			results, importErr := svc.ImportPostmanArchiveBytes(ctx, archive, p.Dest, p.StoreSecrets)
 			if importErr != nil {
 				_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(importErr), Message: importErr.Error()})
 				return nil
@@ -630,20 +628,8 @@ func (h apiImportHandlers) handlePostman(ctx context.Context, req jsonrpcRequest
 				Documents:   wireArchiveImportResults(results),
 			}))
 			return nil
-		case p.Path != "" && strings.HasSuffix(strings.ToLower(p.Path), ".zip"):
-			if p.Preview {
-				documents, previewErr := svc.PreviewPostmanArchive(ctx, p.Path, p.Dest)
-				if previewErr != nil {
-					_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(previewErr), Message: previewErr.Error()})
-					return nil
-				}
-				_ = h.r.TryResult(req.ID, mustMarshal(apiImportPostmanResponse{
-					Unsupported: []apiUnsupportedWire{},
-					Documents:   wireArchiveDocuments(documents),
-				}))
-				return nil
-			}
-			results, importErr := svc.ImportPostmanArchive(ctx, p.Path, p.Dest)
+		case p.Path != "" && isArchivePath(p.Path):
+			results, importErr := svc.ImportPostmanArchive(ctx, p.Path, p.Dest, p.StoreSecrets)
 			if importErr != nil {
 				_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(importErr), Message: importErr.Error()})
 				return nil
@@ -654,11 +640,11 @@ func (h apiImportHandlers) handlePostman(ctx context.Context, req jsonrpcRequest
 			}))
 			return nil
 		case p.URL != "":
-			unsup, err = svc.ImportPostmanURL(ctx, p.URL, storedRoute(p.Route), p.Dest)
+			unsup, err = svc.ImportPostmanURL(ctx, p.URL, storedRoute(p.Route), p.Dest, p.StoreSecrets)
 		case p.Document != "":
-			unsup, err = svc.ImportPostmanDocument(ctx, p.Document, p.Dest)
+			unsup, err = svc.ImportPostmanDocument(ctx, p.Document, p.Dest, p.StoreSecrets)
 		default:
-			unsup, err = svc.ImportPostman(ctx, p.Path, p.Dest)
+			unsup, err = svc.ImportPostman(ctx, p.Path, p.Dest, p.StoreSecrets)
 		}
 		if err != nil {
 			_ = h.r.TryError(req.ID, RPCError{Code: apiMethodErrorCode(err), Message: err.Error()})
@@ -670,6 +656,53 @@ func (h apiImportHandlers) handlePostman(ctx context.Context, req jsonrpcRequest
 	if err != nil {
 		answerOperationRefusal(h.r, req, err)
 	}
+}
+
+// preview routes one read to the entrance the caller used. An archive
+// preview validates the DESTINATION as well, because an archive becomes N
+// folders under it and any of them may collide; a single document's
+// destination is the one Lstat the import itself makes.
+func (h apiImportHandlers) preview(
+	ctx context.Context,
+	svc capability.APIImportService,
+	p apiImportPostmanParams,
+	archive []byte,
+) ([]apiimport.ArchiveDocument, error) {
+	switch {
+	case p.ArchiveBytes != "":
+		return svc.PreviewPostmanArchiveBytes(ctx, archive, p.Dest)
+	case p.Path != "" && isArchivePath(p.Path):
+		return svc.PreviewPostmanArchive(ctx, p.Path, p.Dest)
+	case p.Path != "":
+		return svc.PreviewPostmanPath(ctx, p.Path)
+	default:
+		return svc.PreviewPostmanDocument(ctx, p.Document)
+	}
+}
+
+// decodeArchiveBytes turns the base64 the renderer sent into bytes, bounded
+// the way the writer is. The empty string is not an archive and not an
+// error: every other entrance leaves it empty.
+func decodeArchiveBytes(encoded string) ([]byte, string) {
+	if encoded == "" {
+		return nil, ""
+	}
+	archive, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		return nil, "archiveBytes must be base64"
+	}
+	// Keep the decoded-size check beside the capability call as a
+	// defense-in-depth guard if validation is ever reused incorrectly.
+	if len(archive) > apiimport.MaxDocumentBytes {
+		return nil, fmt.Sprintf("archiveBytes exceeds the %d-byte limit after base64 decoding", apiimport.MaxDocumentBytes)
+	}
+	return archive, ""
+}
+
+// isArchivePath is the one derivation of "this path names a ZIP", asked by
+// the preview and the import alike.
+func isArchivePath(path string) bool {
+	return strings.HasSuffix(strings.ToLower(path), ".zip")
 }
 
 func (h apiImportHandlers) handleCurl(_ context.Context, req jsonrpcRequest) {
@@ -875,6 +908,12 @@ type apiImportPostmanParams struct {
 	Route        *apiRouteWire `json:"route"`
 	Dest         string        `json:"dest"`
 	Preview      bool          `json:"preview"`
+	// StoreSecrets answers the OFFER: store every variable the export
+	// marked `type: secret` in the vault, and write a reference in its
+	// place. Absent is a person who did not take the offer, and their
+	// values are written as the export carried them — never destroyed
+	// (nocx-zn386).
+	StoreSecrets bool `json:"storeSecrets"`
 }
 
 type apiImportCurlParams struct {
@@ -1351,6 +1390,11 @@ type apiImportPostmanArchiveDocumentWire struct {
 	Kind        string               `json:"kind"`
 	Name        string               `json:"name"`
 	Unsupported []apiUnsupportedWire `json:"unsupported"`
+	// Secrets NAMES the variables this document marked `type: secret`, so
+	// the ask can offer to store them. The VALUES stay on this side of the
+	// socket: what the renderer needs in order to ask is which variables
+	// there are, and a value it never receives is a value it cannot leak.
+	Secrets []string `json:"secrets,omitempty"`
 }
 
 type apiImportCurlResponse struct {
@@ -1731,10 +1775,15 @@ func wireArchiveImportResults(results []apiimport.ArchiveImportResult) []apiImpo
 func wireArchiveDocuments(documents []apiimport.ArchiveDocument) []apiImportPostmanArchiveDocumentWire {
 	out := make([]apiImportPostmanArchiveDocumentWire, 0, len(documents))
 	for _, document := range documents {
+		names := make([]string, 0, len(document.Secrets))
+		for _, secret := range document.Secrets {
+			names = append(names, secret.Name)
+		}
 		out = append(out, apiImportPostmanArchiveDocumentWire{
 			Kind:        string(document.Kind),
 			Name:        document.Name,
 			Unsupported: []apiUnsupportedWire{},
+			Secrets:     names,
 		})
 	}
 	return out
@@ -2127,8 +2176,11 @@ func validateAPIImportPostmanRaw(raw json.RawMessage) string {
 	case named == 0:
 		return "an import needs the export: path, document, archiveBytes or url"
 	}
-	if p.Preview && p.ArchiveBytes == "" && !strings.HasSuffix(strings.ToLower(p.Path), ".zip") {
-		return "preview is only available for a Postman archive"
+	// A URL is not previewed: reading one means fetching it, and a fetch is
+	// a call to somebody's server that nobody asked for. Refused by name
+	// rather than silently answered with nothing.
+	if p.Preview && p.URL != "" {
+		return "a url is fetched by the import; there is nothing to preview without fetching it"
 	}
 	if p.Route != nil {
 		if p.URL == "" {
@@ -2185,7 +2237,7 @@ func validateAPIImportCurlRaw(raw json.RawMessage) string {
 // apiSpecs declares the api.* control methods. The collection and sender
 // seams are independently wired; importing is available without either
 // because it writes the chosen destination through apiimport's filesystem.
-func (s *WSServer) apiSpecs(lane control.Admission, apiGate control.Admission) []methodSpec {
+func (s *WSServer) apiSpecs(lane control.Admission, apiGate, vaultGate control.Admission) []methodSpec {
 	collWired := s.apiCollections != nil
 	sendWired := collWired && s.apiSender != nil
 	importWired := true
@@ -2194,7 +2246,10 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate control.Admission) [
 	if collWired {
 		collOp = capability.NewAPICollectionOperation(apiGate, lane, s.apiCollections)
 	}
-	importOp := capability.NewAPIImportOperation(apiGate, lane, apiimport.NewOSFS(), s.apiFetch)
+	importOp := capability.NewAPIImportOperation(
+		apiGate, vaultGate, lane, apiimport.NewOSFS(), s.apiFetch,
+		s.apiImportVaultSeam(),
+	)
 
 	sub := s.operationQueue("api")
 	cancelSub := s.operationQueue("api-cancel")
@@ -2292,3 +2347,16 @@ func (s *WSServer) apiSpecs(lane control.Admission, apiGate control.Admission) [
 // service is wired. Each domain keeps its own words rather than flattening
 // to one string: callers read them.
 const apiCollectionsUnavailable = "api collections not available"
+
+// apiImportVaultSeam is the vault an import mints into, or nil where this
+// build has none — the offer is then never taken and every value is written
+// as the export carried it.
+func (s *WSServer) apiImportVaultSeam() capability.APIImportVault {
+	if s.vaultLifecycle == nil {
+		return nil
+	}
+	if v, ok := s.vaultLifecycle.(capability.APIImportVault); ok {
+		return v
+	}
+	return nil
+}

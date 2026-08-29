@@ -1437,7 +1437,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
 	specs = append(specs, s.gitSpecs(lane, gates.session, gates.git)...)
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
-	specs = append(specs, s.apiSpecs(lane, gates.api)...)
+	specs = append(specs, s.apiSpecs(lane, gates.api, gates.vault)...)
 	contentSub := s.operationQueue("content")
 	specs = append(specs, s.contentSpecs(lane, gates.content, contentSub)...)
 	// history.status rides the plain lane, not the content queue: it is a

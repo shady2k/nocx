@@ -118,6 +118,17 @@ Nested folders are real directories. `environments/` sits beside the requests.
 
 ### 6.3 Secrets are not in the files
 
+> **Superseded on 2026-08-29 by ADR-0051, and the paragraph below is kept for the record
+> rather than as a rule.** Its destination no longer exists: `apibind` and the binding
+> document were removed with `nocx-jjnch`, so "the value goes to the vault" became "the
+> value is dropped", and a person importing a workspace retyped every credential in it.
+> Today an imported credential is CARRIED, exactly as a curl-imported one is when the
+> request is saved (`nocx-14exx`, `nocx-flidy`); a variable the export marked
+> `type: secret` is OFFERED to the vault and never moved there without a person saying
+> so; and `{{secret:…}}` arriving inside a document is still dropped and reported. §8's
+> guarantee holds for the values a variable BINDS, which is what the collections panel
+> now says.
+
 An imported Postman environment variable of `"type": "secret"` becomes a **declared secret
 variable**: the file records its name and that it is secret, and nothing else. The value
 goes to the vault, and the identifier that points at it goes into the app's binding

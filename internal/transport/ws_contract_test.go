@@ -8191,8 +8191,17 @@ func TestAPIImportCurl_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
-func assertImportedSecretAbsent(t *testing.T, dest string) {
+// assertImportedSecretCarried walks what the import wrote and finds the
+// value the export was carrying.
+//
+// It used to assert the opposite, on §8's rule that a collection file may
+// never spell a token. The product stopped answering that way at the other
+// door first — a curl line's credential is saved into the request file, and
+// nocx-flidy rewrote the panel's promise to say so — and this door went on
+// destroying values nobody could get back (nocx-zn386).
+func assertImportedSecretCarried(t *testing.T, dest string) {
 	t.Helper()
+	found := false
 	walkErr := filepath.WalkDir(dest, func(p string, d fs.DirEntry, err error) error {
 		if err != nil || d.IsDir() {
 			return err
@@ -8202,12 +8211,15 @@ func assertImportedSecretAbsent(t *testing.T, dest string) {
 			return readErr
 		}
 		if strings.Contains(string(body), "sk-secret-value") {
-			t.Errorf("%s contains the secret VALUE; a collection file names a variable, never a secret", p)
+			found = true
 		}
 		return nil
 	})
 	if walkErr != nil {
 		t.Fatalf("walk %s: %v", dest, walkErr)
+	}
+	if !found {
+		t.Errorf("no file under %s carries the value the export held", dest)
 	}
 }
 
@@ -8240,13 +8252,12 @@ func TestAPIImportPostman_OverTheWireConformsToContract(t *testing.T) {
 	// rather than in a test of its own.
 	openAPICollection(t, conn, dest, 2)
 
-	// The secret value is not carried and must not appear in the folder.
-	// Imported credential material is deliberately not carried. The existing
-	// Unsupported vocabulary reports that loss to the person.
-	if !strings.Contains(string(resp.Result), "variable token") {
-		t.Errorf("result = %s, want the dropped credential reported", resp.Result)
+	// The value the export carried is in the folder, and nothing is reported
+	// as lost: a carried value is not a loss.
+	if strings.Contains(string(resp.Result), "variable token") {
+		t.Errorf("result = %s, want no loss reported for a carried variable", resp.Result)
 	}
-	assertImportedSecretAbsent(t, dest)
+	assertImportedSecretCarried(t, dest)
 
 	// AND THE THIRD ENTRANCE, off the same socket. A conformance test that
 	// certifies two entrances out of three certifies the wrong thing: the
@@ -8272,13 +8283,13 @@ func TestAPIImportPostman_OverTheWireConformsToContract(t *testing.T) {
 		t.Fatalf("api.import.postman by url: %+v", fetched.Error)
 	}
 	validateJSON(t, schema, fetched.Result, "api.import.postman result (url)")
-	// A credential-shaped variable is omitted and reported; `unsupported` is
-	// the existing vocabulary for material the importer deliberately cannot carry.
-	if !strings.Contains(string(fetched.Result), "variable token") {
-		t.Errorf("result = %s, want the dropped credential reported", fetched.Result)
+	// Same answer on this entrance: the value arrives and nothing is
+	// reported as lost.
+	if strings.Contains(string(fetched.Result), "variable token") {
+		t.Errorf("result = %s, want no loss reported for a carried variable", fetched.Result)
 	}
 	openAPICollection(t, conn, byURL, 4)
-	assertImportedSecretAbsent(t, byURL)
+	assertImportedSecretCarried(t, byURL)
 }
 
 // The import's failure half: a source that is not there and a malformed

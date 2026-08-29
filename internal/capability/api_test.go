@@ -423,23 +423,26 @@ func TestAPICollectionService_ListOpenReportsADeadFolderBesideALiveOne(t *testin
 func TestAPIImportService_RefusesADocumentThatIsNotAFile(t *testing.T) {
 	op := capability.NewAPIImportOperation(
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
+		capability.Gate(capability.GateVault, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apiimport.NewOSFS(),
 		// No fetcher: this test is about the two entrances that reach no
 		// network, and a build without one is a coherent build (it refuses
-		// the URL entrance by name — api_import_url_test.go).
+		// the URL entrance by name — api_import_url_test.go). No vault
+		// either: the offer is simply never taken.
+		nil,
 		nil,
 	)
 	dir := t.TempDir()
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.APIImportService) error {
 		// A directory: nothing to parse.
-		if _, err := svc.ImportPostman(ctx, dir, filepath.Join(t.TempDir(), "dest")); !errors.Is(err, capability.ErrImportNotAFile) {
+		if _, err := svc.ImportPostman(ctx, dir, filepath.Join(t.TempDir(), "dest"), false); !errors.Is(err, capability.ErrImportNotAFile) {
 			t.Errorf("ImportPostman(a directory) = %v, want ErrImportNotAFile", err)
 		}
 		// A document that is not there at all.
 		missing := filepath.Join(dir, "not-there.json")
-		if _, err := svc.ImportPostman(ctx, missing, filepath.Join(t.TempDir(), "dest")); err == nil {
+		if _, err := svc.ImportPostman(ctx, missing, filepath.Join(t.TempDir(), "dest"), false); err == nil {
 			t.Error("ImportPostman(a missing document) succeeded")
 		} else if errors.Is(err, capability.ErrImportNotAFile) {
 			t.Errorf("a missing document was reported as a non-file: %v", err)
@@ -454,7 +457,7 @@ func TestAPIImportService_RefusesADocumentThatIsNotAFile(t *testing.T) {
 			t.Fatalf("write export: %v", err)
 		}
 		dest := filepath.Join(t.TempDir(), "dest")
-		unsup, err := svc.ImportPostman(ctx, doc, dest)
+		unsup, err := svc.ImportPostman(ctx, doc, dest, false)
 		if err != nil {
 			t.Fatalf("ImportPostman(an ordinary export): %v", err)
 		}
@@ -484,11 +487,14 @@ func TestAPIImportService_RefusesADocumentThatIsNotAFile(t *testing.T) {
 func TestAPIImportService_ImportsADocumentItWasHandedTheBytesOf(t *testing.T) {
 	op := capability.NewAPIImportOperation(
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
+		capability.Gate(capability.GateVault, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apiimport.NewOSFS(),
 		// No fetcher: this test is about the two entrances that reach no
 		// network, and a build without one is a coherent build (it refuses
-		// the URL entrance by name — api_import_url_test.go).
+		// the URL entrance by name — api_import_url_test.go). No vault
+		// either: the offer is simply never taken.
+		nil,
 		nil,
 	)
 	const export = `{"info":{"name":"acme",` +
@@ -497,7 +503,7 @@ func TestAPIImportService_ImportsADocumentItWasHandedTheBytesOf(t *testing.T) {
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.APIImportService) error {
 		dest := filepath.Join(t.TempDir(), "dest")
-		unsup, err := svc.ImportPostmanDocument(ctx, export, dest)
+		unsup, err := svc.ImportPostmanDocument(ctx, export, dest, false)
 		if err != nil {
 			t.Fatalf("ImportPostmanDocument(an ordinary export): %v", err)
 		}
@@ -512,7 +518,7 @@ func TestAPIImportService_ImportsADocumentItWasHandedTheBytesOf(t *testing.T) {
 		// destination must not survive it — an import is one atomic
 		// arrival on this route too.
 		bad := filepath.Join(t.TempDir(), "bad")
-		if _, err := svc.ImportPostmanDocument(ctx, "not a postman export", bad); err == nil {
+		if _, err := svc.ImportPostmanDocument(ctx, "not a postman export", bad, false); err == nil {
 			t.Error("ImportPostmanDocument(bytes that are not an export) succeeded")
 		}
 		if _, statErr := os.Lstat(bad); !errors.Is(statErr, os.ErrNotExist) {

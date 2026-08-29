@@ -126,7 +126,7 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 		{
 			name:   "api",
 			gate:   "api",
-			specs:  server.apiSpecs(lane, gates["api"]),
+			specs:  server.apiSpecs(lane, gates["api"], gates["vault"]),
 			method: "api.collections.list",
 			raw:    `{}`,
 		},

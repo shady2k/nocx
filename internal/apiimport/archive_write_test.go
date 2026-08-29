@@ -20,7 +20,7 @@ func TestImportPostmanArchive_WritesNamedDocumentsThatOpen(t *testing.T) {
 		"collection/col-2.json":  `{"info":{"name":"Billing"},"item":[{"name":"List","request":{"method":"GET","url":"https://example.test/billing"}}]}`,
 	})
 
-	got, err := ImportPostmanArchive(t.Context(), NewOSFS(), dest, bytes.NewReader(archive), apicoll.Route{})
+	got, err := ImportPostmanArchive(t.Context(), NewOSFS(), dest, bytes.NewReader(archive), apicoll.Route{}, nil)
 	if err != nil {
 		t.Fatalf("ImportPostmanArchive: %v", err)
 	}
@@ -58,7 +58,7 @@ func TestImportPostmanArchive_RefusesInvalidDestinationNameBeforeWriting(t *test
 	})
 	p := newProbeFS()
 
-	if _, err := ImportPostmanArchive(t.Context(), p, dest, bytes.NewReader(archive), apicoll.Route{}); err == nil {
+	if _, err := ImportPostmanArchive(t.Context(), p, dest, bytes.NewReader(archive), apicoll.Route{}, nil); err == nil {
 		t.Fatal("ImportPostmanArchive accepted a traversal document name")
 	}
 	if _, err := os.Lstat(dest); !errors.Is(err, os.ErrNotExist) {
@@ -88,7 +88,7 @@ func TestImportPostmanArchive_RollsBackEarlierDocumentsWhenLaterWriteFails(t *te
 		return nil
 	}
 
-	if _, err := ImportPostmanArchive(t.Context(), p, dest, bytes.NewReader(archive), apicoll.Route{}); err == nil {
+	if _, err := ImportPostmanArchive(t.Context(), p, dest, bytes.NewReader(archive), apicoll.Route{}, nil); err == nil {
 		t.Fatal("ImportPostmanArchive succeeded despite second-document write failure")
 	}
 	assertGone(t, dest)
@@ -131,7 +131,7 @@ func TestImportPostmanArchive_RefusesDuplicateAndOccupiedTargetsBeforeWriting(t 
 				}
 			}
 			p := newProbeFS()
-			_, err := ImportPostmanArchive(t.Context(), p, dest, bytes.NewReader(makePostmanArchive(t, tc.files)), apicoll.Route{})
+			_, err := ImportPostmanArchive(t.Context(), p, dest, bytes.NewReader(makePostmanArchive(t, tc.files)), apicoll.Route{}, nil)
 			if err == nil || !strings.Contains(err.Error(), tc.wantError) {
 				t.Fatalf("error = %v, want %q", err, tc.wantError)
 			}

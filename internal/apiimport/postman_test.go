@@ -2,16 +2,16 @@ package apiimport
 
 import (
 	"encoding/json"
-	"errors"
 	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/apicoll"
 )
 
-// The secret and its identifier. Both are asserted absent from everything
-// the import produces; the value is what the vault holds and the id is what
-// Postman's export calls it, and neither may reach a file (§8).
+// The secret and its identifier. The VALUE is now carried — a credential the
+// export held is the person's, and destroying it only made them find it
+// again (nocx-zn386) — while the ID is Postman's own and still reaches no
+// file, because nothing in this model is addressed by it.
 //
 // gosec is right that these are hardcoded credential-shaped strings, and
 // that is the point: a fixture that did not look like a credential could
@@ -161,6 +161,17 @@ func mustPostman(t *testing.T, doc string) (apicoll.Collection, []apicoll.Reques
 	return res.Collection, res.Requests, res.Environments, res.Unsupported
 }
 
+// mustPostmanResult is the same parse, for a test that also reads what the
+// import OFFERS rather than only what it wrote.
+func mustPostmanResult(t *testing.T, doc string) (apicoll.Collection, []apicoll.Request, []apicoll.Environment, postmanResult) {
+	t.Helper()
+	res, err := parsePostman(strings.NewReader(doc), apicoll.Route{})
+	if err != nil {
+		t.Fatalf("parsePostman: %v", err)
+	}
+	return res.Collection, res.Requests, res.Environments, res
+}
+
 func findRequest(t *testing.T, coll apicoll.Collection, reqs []apicoll.Request, name string) (apicoll.Request, apicoll.RequestRef) {
 	t.Helper()
 	for i, r := range reqs {
@@ -262,8 +273,8 @@ func TestPostmanTemplatesSurvive(t *testing.T) {
 	}
 }
 
-func TestPostmanSecretVariableIsAbsentFromEnvironment(t *testing.T) {
-	_, reqs, envs, _ := mustPostman(t, postmanFixture)
+func TestPostmanSecretVariableKeepsItsValueAndIsOffered(t *testing.T) {
+	_, reqs, envs, res := mustPostmanResult(t, postmanFixture)
 	if len(envs) != 1 {
 		t.Fatalf("%d environments, want 1", len(envs))
 	}
@@ -271,11 +282,18 @@ func TestPostmanSecretVariableIsAbsentFromEnvironment(t *testing.T) {
 	if env.Route.Kind != apicoll.RouteDirect {
 		t.Fatalf("route = %+v, want direct", env.Route)
 	}
-	if _, ok := env.Values["apiToken"]; ok {
-		t.Fatal("apiToken is present in the environment; an imported credential must be absent so the send refuses by name rather than sending an empty value")
+	if env.Values["apiToken"] != pmSecretValue {
+		t.Fatalf("apiToken = %q, want the value the export carried", env.Values["apiToken"])
 	}
 	if env.Values["baseUrl"] != "https://api.acme.test" {
 		t.Fatalf("baseUrl = %q", env.Values["baseUrl"])
+	}
+	// AND IT IS NAMED AS AN OFFER. Postman said this one is a secret, so the
+	// import says so too and lets a person move it to the vault; it does not
+	// decide that for them, and it does not throw the value away to make the
+	// decision for them either.
+	if len(res.Secrets) != 1 || res.Secrets[0].Name != "apiToken" || res.Secrets[0].Value != pmSecretValue {
+		t.Fatalf("offered secrets = %+v, want apiToken with its value", res.Secrets)
 	}
 
 	blob, err := json.Marshal(struct {
@@ -285,25 +303,22 @@ func TestPostmanSecretVariableIsAbsentFromEnvironment(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if strings.Contains(string(blob), pmSecretValue) {
-		t.Fatal("the secret VALUE is in the converted model")
-	}
 	if strings.Contains(string(blob), pmSecretID) {
 		t.Fatal("an IDENTIFIER for the secret is in the converted model")
 	}
 }
 
 // A collection whose request auth carries a live token — not a template —
-// drops the credential rather than writing a reference with no value behind it.
-func TestPostmanLiteralTokenIsDropped(t *testing.T) {
+// carries it into the model's auth, where a person can see it, change it, or
+// turn it into a secret through the door every other field has.
+func TestPostmanLiteralTokenIsCarried(t *testing.T) {
 	coll, reqs, _, unsup := mustPostman(t, postmanFixture)
 	req, _ := findRequest(t, coll, reqs, "Literal token")
-	if req.Auth.Kind != apicoll.AuthNone {
-		t.Fatalf("auth = %+v, want no auth", req.Auth)
+	if req.Auth.Kind != apicoll.AuthBearer || req.Auth.Token != pmSecretValue {
+		t.Fatalf("auth = %+v, want the bearer token the export carried", req.Auth)
 	}
-	assertAbsent(t, req, pmSecretValue)
-	if !anyUnsupportedContaining(unsup, "Literal token") {
-		t.Fatalf("unsupported = %v, want the dropped credential named", unsupportedWhat(unsup))
+	if anyUnsupportedContaining(unsup, "Literal token") {
+		t.Fatalf("unsupported = %v, want nothing reported: the token was carried", unsupportedWhat(unsup))
 	}
 }
 
@@ -475,15 +490,15 @@ func TestPostmanEnvironmentExport(t *testing.T) {
 	if envs[0].Values["baseUrl"] != "https://api.acme.test" {
 		t.Fatalf("values = %+v", envs[0].Values)
 	}
-	if _, ok := envs[0].Values["apiToken"]; ok {
-		t.Fatal("apiToken is present in the environment; an imported credential must be absent")
+	if envs[0].Values["apiToken"] != pmSecretValue {
+		t.Fatalf("apiToken = %q, want the value the export carried", envs[0].Values["apiToken"])
 	}
 	if !anyUnsupportedContaining(unsup, "disabled variable") {
 		t.Fatalf("unsupported = %v", unsupportedWhat(unsup))
 	}
 	blob, _ := json.Marshal(envs)
-	if strings.Contains(string(blob), pmSecretValue) || strings.Contains(string(blob), "eeee-1111") {
-		t.Fatalf("the environment carries a value or an id: %s", blob)
+	if strings.Contains(string(blob), "eeee-1111") {
+		t.Fatalf("the environment carries Postman's own id: %s", blob)
 	}
 }
 
@@ -607,10 +622,13 @@ func TestPostmanRequestIDsAreDeterministicAndUnique(t *testing.T) {
 	}
 }
 
-// Postman marks perhaps half of the tokens people keep in it as "secret".
-// A collection is meant to be committed, so a live token is dropped even
-// when the export forgot to mark it, and the loss is said out loud.
-func TestPostmanUnmarkedCredentialIsDroppedAndSaidOutLoud(t *testing.T) {
+// Postman marks perhaps half of the tokens people keep in it as "secret",
+// and the import no longer treats the other half differently: a value is a
+// value, and the surface that reads the folder is what says a credential is
+// in it (nocx-flidy). There used to be a detector here promoting anything
+// credential-SHAPED to the same destruction, which meant a variable was kept
+// or destroyed by a heuristic nobody could see (nocx-zn386).
+func TestPostmanUnmarkedCredentialIsCarriedLikeAnyOtherValue(t *testing.T) {
 	const pat = "ghp_0123456789abcdefghijklmnopqrstuvwx"
 	doc := `{"info":{"name":"P"},"variable":[
 	    {"key":"legacyToken","value":"` + pat + `","type":"default"},
@@ -620,18 +638,14 @@ func TestPostmanUnmarkedCredentialIsDroppedAndSaidOutLoud(t *testing.T) {
 	if len(envs) != 1 {
 		t.Fatalf("envs = %+v", envs)
 	}
-	if _, ok := envs[0].Values["legacyToken"]; ok {
-		t.Fatalf("legacyToken is present in the environment; an imported credential must be absent")
+	if envs[0].Values["legacyToken"] != pat {
+		t.Fatalf("legacyToken = %q, want the value the export carried", envs[0].Values["legacyToken"])
 	}
 	if envs[0].Values["baseUrl"] != "https://api.acme.test" {
-		t.Fatalf("the ordinary variable was dropped too: %+v", envs[0].Values)
+		t.Fatalf("the ordinary variable was dropped: %+v", envs[0].Values)
 	}
-	if !anyUnsupportedContaining(unsup, "legacyToken") {
-		t.Fatalf("the dropped credential was silent: %v", unsupportedWhat(unsup))
-	}
-	blob, _ := json.Marshal(envs)
-	if strings.Contains(string(blob), pat) {
-		t.Fatalf("the environment carries the credential: %s", blob)
+	if anyUnsupportedContaining(unsup, "legacyToken") {
+		t.Fatalf("a carried variable was reported as a loss: %v", unsupportedWhat(unsup))
 	}
 }
 
@@ -761,7 +775,7 @@ func TestImportIntoEnvironmentCarriesTheRouteTheDocumentArrivedThrough(t *testin
 	doc := `{"info":{"name":"acme","schema":"https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},"item":[],"variable":[{"key":"baseUrl","value":"https://acme.test"}]}`
 
 	if _, err := ImportInto(t.Context(), newProbeFS(), dest, strings.NewReader(doc),
-		apicoll.Route{Kind: apicoll.RouteConnection, ProfileID: "prod-bastion", InsecureTLS: true}); err != nil {
+		apicoll.Route{Kind: apicoll.RouteConnection, ProfileID: "prod-bastion", InsecureTLS: true}, nil); err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
 
@@ -794,7 +808,7 @@ func TestImportIntoZeroRouteWritesDirect(t *testing.T) {
 	dest := destUnder(t)
 	doc := `{"info":{"name":"acme","schema":"https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},"item":[],"variable":[{"key":"baseUrl","value":"https://acme.test"}]}`
 
-	if _, err := ImportInto(t.Context(), newProbeFS(), dest, strings.NewReader(doc), apicoll.Route{}); err != nil {
+	if _, err := ImportInto(t.Context(), newProbeFS(), dest, strings.NewReader(doc), apicoll.Route{}, nil); err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
 
@@ -810,7 +824,7 @@ func TestImportIntoZeroRouteWritesDirect(t *testing.T) {
 	}
 }
 
-func TestImportPostmanSecretsBecomeAbsentAndReportedReferencesAreDropped(t *testing.T) {
+func TestImportPostmanDropsVaultReferencesAndKeepsTheValuesTheExportHeld(t *testing.T) {
 	const ref = "{{secret:whatever}}"
 	doc := `{
 	  "info": {"name": "secret refs", "schema": "https://schema.getpostman.com/json/collection/v2.1.0/collection.json"},
@@ -826,7 +840,7 @@ func TestImportPostmanSecretsBecomeAbsentAndReportedReferencesAreDropped(t *test
 	  }]
 	}`
 	dest := destUnder(t)
-	unsupported, err := ImportInto(t.Context(), NewOSFS(), dest, strings.NewReader(doc), apicoll.Route{})
+	unsupported, err := ImportInto(t.Context(), NewOSFS(), dest, strings.NewReader(doc), apicoll.Route{}, nil)
 	if err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
@@ -841,8 +855,8 @@ func TestImportPostmanSecretsBecomeAbsentAndReportedReferencesAreDropped(t *test
 	if !ok {
 		t.Fatalf("no default environment; have %v", keysOf(files))
 	}
-	if strings.Contains(env, `"token"`) {
-		t.Fatalf("secret variable was written to the environment; an imported credential must be absent: %s", env)
+	if !strings.Contains(env, `"token"`) {
+		t.Fatalf("the variable the export carried is missing from the environment: %s", env)
 	}
 
 	var named int
@@ -856,7 +870,12 @@ func TestImportPostmanSecretsBecomeAbsentAndReportedReferencesAreDropped(t *test
 	}
 }
 
-func TestImportedSecretCredentialRefusesResolutionByName(t *testing.T) {
+// AND THE IMPORT ENDS SENDABLE. The whole cost of the old rule is here: the
+// collection's auth is `{{apiToken}}`, the variable was destroyed on the way
+// in, and the first Send after an import refused with "the auth variable
+// apiToken is not bound in this environment" — about a name the person never
+// chose, for a value their export had been carrying all along.
+func TestImportedCredentialResolvesFromTheEnvironmentItWasCarriedInto(t *testing.T) {
 	coll, reqs, envs, _ := mustPostman(t, postmanFixture)
 	if len(envs) != 1 {
 		t.Fatalf("environments = %d, want 1", len(envs))
@@ -866,14 +885,11 @@ func TestImportedSecretCredentialRefusesResolutionByName(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RequestLookup: %v", err)
 	}
-	if _, err := apicoll.Substitute(req, apicoll.Chain(own, envs[0].Lookup())); err == nil {
-		t.Fatal("an imported secret resolved successfully; the send must refuse by variable name")
-	} else {
-		if !errors.Is(err, apicoll.ErrUnresolvedVariable) {
-			t.Fatalf("error = %v, want ErrUnresolvedVariable", err)
-		}
-		if !strings.Contains(err.Error(), "apiToken") {
-			t.Fatalf("error = %q, want it to name apiToken", err)
-		}
+	sent, err := apicoll.Substitute(req, apicoll.Chain(own, envs[0].Lookup()))
+	if err != nil {
+		t.Fatalf("Substitute: %v", err)
+	}
+	if sent.Auth.Token != pmSecretValue {
+		t.Fatalf("resolved token = %q, want the value the export carried", sent.Auth.Token)
 	}
 }

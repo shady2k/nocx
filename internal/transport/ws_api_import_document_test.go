@@ -46,9 +46,9 @@ func TestAPIImportPostmanDocument_OverTheWireConformsToContract(t *testing.T) {
 	// happy path makes: you import an export in order to work in it.
 	openAPICollection(t, conn, dest, 2)
 
-	assertImportedSecretAbsent(t, dest)
-	if !strings.Contains(string(resp.Result), "variable token") {
-		t.Errorf("result = %s, want the dropped credential reported", resp.Result)
+	assertImportedSecretCarried(t, dest)
+	if strings.Contains(string(resp.Result), "variable token") {
+		t.Errorf("result = %s, want no loss reported for a carried variable", resp.Result)
 	}
 }
 

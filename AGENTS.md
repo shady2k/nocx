@@ -20,16 +20,19 @@ this file.
 
 **Fresh clone:** install the tooling, then `make init`. Git carries neither the issue
 database nor its ref, so until `make init` runs there is no backlog — `bd ready` answers
-"no beads database found", and `.beads/issues.jsonl` is a passive export that may lag it.
-Afterwards `git commit` stages the export and `git push` runs `bd dolt push`. If a push
-fails on beads, fix the sync; `--no-verify` leaves everyone on a backlog that looks
-current and is not.
+"no beads database found". `git push` runs `bd dolt push`; if a push fails on beads, fix
+the sync, because `--no-verify` leaves everyone on a backlog that looks current and is
+not.
 
-**Never resolve a conflict in `.beads/issues.jsonl` by hand** — neither side is the
-answer. The backlog is merged in Dolt by `bd dolt pull`; the file only restates what the
-database says, so the resolution is to regenerate it. `make hooks` installs a merge
-driver that does exactly that, and `.gitattributes` says when it lags by a commit. If you
-ever see this file in a conflict, your clone is missing the driver — run `make hooks`.
+**`.beads/issues.jsonl` is not in git, deliberately.** `.githooks/pre-commit` used to
+regenerate and stage it on every commit, so every branch touched all 2707 lines of it and
+almost every pull request came back conflicted. A merge driver fixed only half of that: it
+is per-clone git config, and GitHub computes mergeability server-side without running
+custom drivers at all — which is why PR #129 was clean locally and CONFLICTING on the
+site. The file is ignored now. The backlog lives in Dolt and syncs through
+`refs/dolt/data`; the spare copy is published by `.githooks/pre-push` to
+`refs/beads/snapshot` on the same remote, from your local database. Recovering it is
+three lines in [README](README.md#agent-tooling).
 
 **Your dev profile is not the installed app's.** Anything you build or run from
 this repo — `wails dev`, `make dev-web`, `make build`, and the Playwright suite,

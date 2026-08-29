@@ -161,9 +161,9 @@ rm -f ~/.local/bin/.nocx-update-journal.json
 
 > ⚠️ `bd` must be **≥ 1.1.0**. Older builds (e.g. 1.0.3, which some distros and
 > nixpkgs still ship) misread the tracker's dependency schema: `bd stats` errors,
-> and — worse — the auto-export strips every dependency edge from
-> `.beads/issues.jsonl`, which the pre-commit hook then commits. Check with
-> `bd version` before enabling hooks.
+> and — worse — the export strips every dependency edge, which would put a
+> dependency-free backlog into the snapshot the pre-push hook publishes. Check
+> with `bd version` before enabling hooks.
 
 **On NixOS / without Homebrew.** `brew` and `npm i -g` don't work here — the
 latter writes into the read-only Nix store. Install `go`, `nodejs_24`, `gofumpt`,
@@ -227,10 +227,11 @@ all:frontend/dist` needs populated before the Go compiler runs, and then runs
 
 `bd bootstrap`, not `bd init`: the backlog lives in a Dolt database that git does
 not carry, and bootstrap is the command that knows where to get it — it clones
-from the configured remote and falls back to the tracked `.beads/issues.jsonl`
-only if that is unavailable. A clone without this step has no issue database at
-all, and `bd ready` will tell you so. `bd init --from-jsonl` exists, but it
-builds a history divergent from the remote, so keep it for recovery, not setup.
+from the configured remote. There is no tracked JSONL in this repository to fall
+back to; if the remote itself is unusable, recover from the snapshot ref below. A
+clone without this step has no issue database at all, and `bd ready` will tell you
+so. `bd init --from-jsonl` exists, but it builds a history divergent from the
+remote, so keep it for recovery, not setup.
 
 The e2e suite additionally needs its browser once: `npx playwright install chromium`.
 
@@ -252,14 +253,35 @@ every pull request. The trade is deliberate: a commit can be made whose tests
 do not pass, in exchange for a gate that takes seconds and cannot be starved
 into misreporting which check failed (`nocx-y6d9j`).
 
-It then writes `.beads/issues.jsonl` and stages it, so a commit carries the issue
-state it describes. That step runs last, so a failed gate never leaves the
-tracker export staged for a commit that does not happen.
-
 The pre-push hook pushes the issue database itself with `bd dolt push`. That is
-what a fresh clone reads — the tracked JSONL is only bootstrap's last resort — so
-skipping it leaves collaborators on a backlog that looks current and is not. If
-`bd` is missing or this clone has no database, both hooks step aside silently; a
+what a fresh clone reads, so skipping it leaves collaborators on a backlog that
+looks current and is not. It also publishes a spare copy of the export to
+`refs/beads/snapshot` on the same remote — a ref, not a branch, so it stays out of
+the branch list and out of every pull request.
+
+`.beads/issues.jsonl` is **not** tracked. It used to be, regenerated and staged on
+every commit, and it conflicted in almost every pull request: GitHub decides
+mergeability server-side and never runs the repository's merge driver. The
+snapshot ref replaces it, and unlike a CI job it is written from your local
+database — which matters, because the failure it insures against is a stranded
+history on the remote itself.
+
+Recovering the backlog from the snapshot:
+
+```bash
+git fetch origin refs/beads/snapshot:refs/beads/snapshot
+git cat-file -p refs/beads/snapshot:issues.jsonl > .beads/issues.jsonl
+bd init --from-jsonl --discard-remote
+```
+
+`bd init`, not `bd bootstrap`. Bootstrap prefers the configured remote and only
+reaches a local JSONL fourth, so in the failure this snapshot exists for — a
+remote that answers but whose history is stranded — it would faithfully restore
+the broken state. `--from-jsonl` is a boolean flag that reads `import.path`;
+`--discard-remote` is what authorizes replacing that stranded history, and it is
+required rather than convenient.
+
+If `bd` is missing or this clone has no database, both hooks step aside silently; a
 genuine sync failure stops the push and says so, and `git push --no-verify`
 overrides it.
 

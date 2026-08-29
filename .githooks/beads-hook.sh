@@ -65,7 +65,7 @@ push_beads_state() {
 
     printf "\nFAIL: bd dolt push exited %s.\n" "$bd_exit" >&2
     printf "      Issue state did NOT sync. A fresh clone would see a stale backlog,\n" >&2
-    printf "      because bd bootstrap prefers the Dolt remote over the tracked JSONL.\n" >&2
+    printf "      because the Dolt remote is the only copy a fresh clone can read.\n" >&2
     printf "      Fix it (often: bd dolt pull, resolve, bd dolt push) and retry.\n" >&2
     printf "      To push code anyway, knowing the tracker lags: git push --no-verify\n" >&2
     return "$bd_exit"

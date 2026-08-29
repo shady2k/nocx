@@ -20,6 +20,7 @@ var allResourceKinds = []content.ResourceKind{
 	content.ResourceCredential,
 	content.ResourceDestination,
 	content.ResourceTool,
+	content.ResourceContent,
 }
 
 // supportedResourceKind reports whether k is a member this package knows how
@@ -28,7 +29,8 @@ var allResourceKinds = []content.ResourceKind{
 func supportedResourceKind(k content.ResourceKind) bool {
 	switch k {
 	case content.ResourceEnvironment, content.ResourceSession, content.ResourcePath,
-		content.ResourceCredential, content.ResourceDestination, content.ResourceTool:
+		content.ResourceCredential, content.ResourceDestination, content.ResourceTool,
+		content.ResourceContent:
 		return true
 	default:
 		return false

@@ -153,11 +153,12 @@ func TestPolicyGet_UnwiredIsUnavailable(t *testing.T) {
 }
 
 // TestPolicyGet_ReportsWhichEffectClassesAreLive: the settings page draws
-// seven rows and only two of them govern anything today. It cannot know
-// which, so policy.get says — and it says what the DECLARATION TABLE carries,
-// read off the real socket rather than off a payload this test built. The
-// harness names the seam exactly as the composition root does, so the value
-// under test is production's, not one invented for the test.
+// seven rows and three of them govern tools today. Mutate-reversible stopped
+// being an effect class with no tool behind it, so the expected live list grew.
+// It cannot know which, so policy.get says — and it says what the DECLARATION
+// TABLE carries, read off the real socket rather than off a payload this test
+// built. The harness names the seam exactly as the composition root does, so
+// the value under test is production's, not one invented for the test.
 func TestPolicyGet_ReportsWhichEffectClassesAreLive(t *testing.T) {
 	h, _ := newPolicyHarness(t)
 
@@ -172,7 +173,7 @@ func TestPolicyGet_ReportsWhichEffectClassesAreLive(t *testing.T) {
 	if env.Error != nil {
 		t.Fatalf("policy.get error: %+v (%s)", env.Error, raw)
 	}
-	want := []content.Effect{content.EffectObserve, content.EffectMutateDestructive}
+	want := []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive}
 	if !reflect.DeepEqual(env.Result.Live, want) {
 		t.Fatalf("live = %v, want %v", env.Result.Live, want)
 	}
@@ -187,6 +188,8 @@ func TestPolicyGet_ReportsWhichEffectClassesAreLive(t *testing.T) {
 // REAL socket satisfies the contract now that "live" is required and the
 // result object is closed — and the bytes really do carry the key, which a
 // decode into a struct with a nil-able slice would not have shown.
+// Mutate-reversible stopped being an effect class with no tool behind it, so
+// the expected wire value includes it.
 func TestPolicyGetLive_OverTheWireConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "policy.get.schema.json")
 	h, _ := newPolicyHarness(t)
@@ -212,8 +215,8 @@ func TestPolicyGetLive_OverTheWireConformsToContract(t *testing.T) {
 	if !ok {
 		t.Fatalf("result carries no live key: %s", env.Result)
 	}
-	if string(live) != `["observe","mutate-destructive"]` {
-		t.Fatalf("live bytes = %s, want [\"observe\",\"mutate-destructive\"]", live)
+	if string(live) != `["observe","mutate-reversible","mutate-destructive"]` {
+		t.Fatalf("live bytes = %s, want [\"observe\",\"mutate-reversible\",\"mutate-destructive\"]", live)
 	}
 }
 

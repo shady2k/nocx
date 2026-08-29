@@ -44,6 +44,7 @@ type FilesystemOpenService interface {
 // are [session, filesystem]: opening resolves the session and registers
 // the provider.
 type FilesystemOpenOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, FilesystemOpenService) error) error
 }
 
@@ -58,6 +59,7 @@ func NewFilesystemOpenOperation(
 ) FilesystemOpenOperation {
 	g := &guard{}
 	return newOperation[FilesystemOpenService](
+		Adapted("files.browse", "opening a filesystem resolves and registers a connection-bound provider"),
 		control.NewComposite(sessionGate, filesystemGate, lane),
 		g,
 		newFilesystemOpenService(g, registry, factory, reg),
@@ -150,6 +152,7 @@ type FilesystemBindingService interface {
 // FilesystemBindingOperation is the typed operation for the
 // filesystem-binding domain. Its gate is [filesystem].
 type FilesystemBindingOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, FilesystemBindingService) error) error
 }
 
@@ -157,7 +160,7 @@ type FilesystemBindingOperation interface {
 // acquiring the filesystem gate before the execution lane.
 func NewFilesystemBindingOperation(filesystemGate, lane control.Admission, reg *filesystem.Registry) FilesystemBindingOperation {
 	g := &guard{}
-	return newOperation[FilesystemBindingService](control.NewComposite(filesystemGate, lane), g, newFilesystemBindingService(g, reg))
+	return newOperation[FilesystemBindingService](Adapted("files.browse", "filesystem calls require an assistant-owned binding lease"), control.NewComposite(filesystemGate, lane), g, newFilesystemBindingService(g, reg))
 }
 
 // newFilesystemBindingService builds the concrete filesystem-binding service

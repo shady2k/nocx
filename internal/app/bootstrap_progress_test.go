@@ -62,7 +62,7 @@ func openLocalIntegration(t *testing.T, conn *websocket.Conn) string {
 	t.Helper()
 	resp := reachJSONRPCCall(t, conn, "open", map[string]any{
 		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
-		"kind": "local", "enhanced": true,
+		"kind": "local",
 	})
 	var envelope struct {
 		Result struct {

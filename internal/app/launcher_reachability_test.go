@@ -358,11 +358,15 @@ func reachJSONRPCCall(t *testing.T, conn *websocket.Conn, method string, params 
 // after the ack, and a one-shot field could never report either. An empty
 // return still means "no refusal": a session that asked for integration and
 // has not failed reports `starting`, which carries no reason at all.
-func reachOpenSSH(t *testing.T, conn *websocket.Conn, enhanced bool) (sid string, reason string) {
+// The `enhanced` argument is gone, not defaulted: nocx-tr2n removed it from
+// the wire when the backend began asking for integration on EVERY session, so
+// the value this helper used to pass had decided nothing since. The strict
+// params decoder is what surfaced it — the field was accepted and ignored.
+func reachOpenSSH(t *testing.T, conn *websocket.Conn) (sid string, reason string) {
 	t.Helper()
 	resp := reachJSONRPCCall(t, conn, "open", map[string]any{
 		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
-		"kind": "ssh", "profileId": "p1", "enhanced": enhanced,
+		"kind": "ssh", "profileId": "p1",
 	})
 	var envelope struct {
 		Result struct {
@@ -491,7 +495,7 @@ func TestRemoteLauncher_ReachableThroughRealTransport(t *testing.T) {
 	ws, conn := reachStack(t, srv, &remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: log.NewSlogAdapter(nil)})
 	_ = ws
 
-	sid, reason := reachOpenSSH(t, conn, true)
+	sid, reason := reachOpenSSH(t, conn)
 	if reason != "" {
 		t.Errorf("shellIntegrationReason = %q, want empty (launcher accepted)", reason)
 	}
@@ -527,7 +531,7 @@ func TestRemoteLauncher_DeclineLeavesUsableSessionWithReasonOnWire(t *testing.T)
 	declining := &remoteLauncherAdapter{inner: decliningSILauncher{reason: shellintegration.ReasonNoSecureTemp}, logger: log.NewSlogAdapter(nil)}
 	_, conn := reachStack(t, srv, declining)
 
-	sid, reason := reachOpenSSH(t, conn, false)
+	sid, reason := reachOpenSSH(t, conn)
 	if reason != "no-secure-temp" {
 		t.Errorf("shellIntegrationReason = %q, want %q", reason, "no-secure-temp")
 	}
@@ -547,7 +551,7 @@ func TestRemoteLauncher_NotWired_PlainShellNoReason(t *testing.T) {
 	srv := startReachSSHServer(t)
 	_, conn := reachStack(t, srv, nil)
 
-	sid, reason := reachOpenSSH(t, conn, false)
+	sid, reason := reachOpenSSH(t, conn)
 	if reason != "" {
 		t.Errorf("shellIntegrationReason = %q, want empty (no launcher wired)", reason)
 	}
@@ -579,7 +583,7 @@ func TestRemoteLauncher_UnmappedReason_UnknownOnWire(t *testing.T) {
 	declining := &remoteLauncherAdapter{inner: decliningSILauncher{reason: shellintegration.RefusalReason("brand-new-reason")}, logger: logger}
 	_, conn := reachStack(t, srv, declining)
 
-	sid, reason := reachOpenSSH(t, conn, false)
+	sid, reason := reachOpenSSH(t, conn)
 	if reason != "unknown" {
 		t.Errorf("shellIntegrationReason = %q, want %q", reason, "unknown")
 	}
@@ -602,7 +606,7 @@ func TestRemoteLauncher_AcceptedWithReason_DeclinesOnWire(t *testing.T) {
 	contradicting := &remoteLauncherAdapter{inner: contradictingSILauncher{}, logger: logger}
 	_, conn := reachStack(t, srv, contradicting)
 
-	sid, reason := reachOpenSSH(t, conn, false)
+	sid, reason := reachOpenSSH(t, conn)
 	if reason != "unsupported-shell" {
 		t.Errorf("shellIntegrationReason = %q, want %q", reason, "unsupported-shell")
 	}

@@ -215,11 +215,15 @@ func TestMiddleware_EgressNoFindingReturnsByteForByte(t *testing.T) {
 	if !ok {
 		t.Fatal("files.read not in the registry")
 	}
-	cap, capErr := decl.Narrow(grant)
+	refs, refErr := decl.ResolveResources(map[string]any{"path": path}, agenttools.RunContext{})
+	if refErr != nil {
+		t.Fatalf("ResolveResources: %v", refErr)
+	}
+	cap, capErr := decl.Narrow(grant, refs, agenttools.RunContext{})
 	if capErr != nil {
 		t.Fatalf("Narrow: %v", capErr)
 	}
-	ref, refErr := executors["files.read"](context.Background(), cap, []byte(args), toolSeams{})
+	ref, refErr := executors["files.read"](toolTestContext(), cap, []byte(args), toolSeams{})
 	if refErr != nil {
 		t.Fatalf("executor: %v", refErr)
 	}

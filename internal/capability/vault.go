@@ -47,6 +47,7 @@ type VaultService interface {
 // Its gate is [vault]. See the package doc for the conservative-grain
 // rationale (vault-secret operations are a separate SecretOperation).
 type VaultOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, VaultService) error) error
 }
 
@@ -54,7 +55,7 @@ type VaultOperation interface {
 // before the execution lane.
 func NewVaultOperation(vaultGate, lane control.Admission, lifecycle VaultLifecycle) VaultOperation {
 	g := &guard{}
-	return newOperation[VaultService](control.NewComposite(vaultGate, lane), g, newVaultService(g, lifecycle))
+	return newOperation[VaultService](Direct("VaultOperation"), control.NewComposite(vaultGate, lane), g, newVaultService(g, lifecycle))
 }
 
 // newVaultService builds the concrete vault-lifecycle service bound to
@@ -162,6 +163,7 @@ type VaultResetService interface {
 // vault.resetPreview. Its gates are [config, vault]: a reset destroys
 // profile references and the vault together.
 type VaultResetOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, VaultResetService) error) error
 }
 
@@ -170,7 +172,7 @@ type VaultResetOperation interface {
 // lane, for every Run.
 func NewVaultResetOperation(configGate, vaultGate, lane control.Admission, reset VaultReset) VaultResetOperation {
 	g := &guard{}
-	return newOperation[VaultResetService](control.NewComposite(configGate, vaultGate, lane), g, newVaultResetService(g, reset))
+	return newOperation[VaultResetService](Direct("VaultResetOperation"), control.NewComposite(configGate, vaultGate, lane), g, newVaultResetService(g, reset))
 }
 
 // newVaultResetService builds the concrete reset service bound to guard g.

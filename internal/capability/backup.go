@@ -18,6 +18,7 @@ type BackupService interface {
 // BackupOperation serializes backup reads and restore writes with the config
 // domain and the bounded control lane.
 type BackupOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, BackupService) error) error
 }
 
@@ -52,5 +53,5 @@ func (s *backupService) Restore(contents string, strategy backup.RestoreStrategy
 // canonical order used by every config operation.
 func NewBackupOperation(configGate, lane control.Admission, service *backup.Service) BackupOperation {
 	g := &guard{}
-	return newOperation[BackupService](control.NewComposite(configGate, lane), g, &backupService{guard: g, service: service})
+	return newOperation[BackupService](Direct("BackupOperation"), control.NewComposite(configGate, lane), g, &backupService{guard: g, service: service})
 }

@@ -8,12 +8,10 @@ package agenttools
 // construct — nocx-lndv), and the schema the model is shown and its arguments
 // validated against.
 //
-// This slice is declaration-only: nothing executes, the constructor for the
-// narrowed capability (Narrow) is deliberately absent until nocx-lndv owns
-// the capability types, and the engine that consumes the set is
-// internal/assistant (the same commit that makes this package reachable from
-// main). The three tests of design §5 are what keep the table honest, not the
-// table itself.
+// Each executable row also carries its Narrow constructor; the assistant's
+// middleware invokes the resulting capability after policy evaluation. The
+// registry remains the sole declaration table, and the executor table in
+// internal/assistant is checked against its executable rows.
 
 import (
 	"encoding/json"
@@ -21,9 +19,80 @@ import (
 	"fmt"
 	"io/fs"
 	"strings"
+	"time"
 
 	"github.com/shady2k/nocx/internal/content"
 )
+
+// ResourceRef is one resource a validated call resolves to. ID is the
+// canonical identity used by the capability and policy scope checks.
+type ResourceRef struct {
+	Kind content.ResourceKind `json:"kind"`
+	ID   string               `json:"id"`
+}
+
+// RunContext carries only immutable identities of the run. It is passed to
+// resource resolvers for resources whose parent scope comes from the run,
+// never for mutable UI state.
+type RunContext struct {
+	RunID     string
+	Workspace string
+	Session   string
+}
+
+// ResolveResources derives every resource touched by one validated call.
+// A nil resolver means the declaration names no resource in its parameters.
+type ResolveResources func(args map[string]any, runCtx RunContext) ([]ResourceRef, error)
+
+func resourceArgument(arg string, kind content.ResourceKind) ResolveResources {
+	return func(args map[string]any, _ RunContext) ([]ResourceRef, error) {
+		id, ok := args[arg].(string)
+		if !ok || id == "" {
+			return nil, fmt.Errorf("resource argument %q is absent", arg)
+		}
+		return []ResourceRef{{Kind: kind, ID: id}}, nil
+	}
+}
+
+// Narrow is a capability constructor: grant → capability. It is the
+// declaration's own builder, so the middleware needs no per-tool switch to
+// know how to narrow a tool — the row carries it.
+type Narrow func(grant content.Grant, resources []ResourceRef, runCtx RunContext) (Capability, error)
+
+// resourceInGrant delegates policy-time containment to content.GrantScope.
+// ResourcePath containment here is lexical only; filesystem authorization
+// remains the provider-backed capability's responsibility.
+func resourceInGrant(grant content.Grant, ref ResourceRef) bool {
+	child := content.GrantScope{Kind: ref.Kind, ID: ref.ID}
+	for _, scope := range grant.Scopes {
+		parent := content.GrantScope{Kind: scope.Kind, ID: scope.ID}
+		if parent.Contains(child) {
+			return true
+		}
+	}
+	return false
+}
+
+func grantedResources(grant content.Grant, resources []ResourceRef) []ResourceRef {
+	out := make([]ResourceRef, 0, len(resources))
+	for _, ref := range resources {
+		if resourceInGrant(grant, ref) {
+			out = append(out, ref)
+		}
+	}
+	return out
+}
+
+func resourceIDs(grant content.Grant, resources []ResourceRef, kind content.ResourceKind) []string {
+	scoped := grantedResources(grant, resources)
+	ids := make([]string, 0, len(scoped))
+	for _, ref := range scoped {
+		if ref.Kind == kind && ref.ID != "" {
+			ids = append(ids, ref.ID)
+		}
+	}
+	return ids
+}
 
 type Declaration struct {
 	// Name is the tool name the model calls, e.g. "files.read".
@@ -40,16 +109,24 @@ type Declaration struct {
 	// (the ledger's vocabulary — content.Effect). A validated command carrier
 	// may lower the proposal's effective class in the backend policy gate.
 	Effect content.Effect
-	// Resources are the resource kinds the tool touches, from the ledger's
-	// closed set. A tool declaring none is offered whenever its effect is
-	// permitted — the filter below has nothing to exclude it with.
-	Resources []content.ResourceKind
-	// ResourceArg names the argument that identifies the resource the call
-	// touches — the parameter the policy's scope check reads ("is this call
-	// inside the grant"). Empty when the tool names no resource in its
-	// parameters: its scope is the grant's own scope for the kinds it
-	// declares (git.status's repository is the grant's path scope itself).
-	ResourceArg string
+	// OutputTrust is independent from Effect: any result may contain text
+	// influenced by the program or data it observed. It must be explicit so
+	// adding a row cannot silently choose an unsafe default.
+	OutputTrust OutputTrust
+	// ResultBound is the source window each executor must enforce. Its
+	// truncation policy requires the returned result to describe omitted data.
+	ResultBound ResultBound
+	// Deadline bounds the execution context, including renderer requests.
+	Deadline time.Duration
+	// Cancellation states the result of cancelling that execution context.
+	Cancellation CancellationPolicy
+	// ResourceKinds is the presentation-time upper bound of the resource
+	// kinds a call may resolve to. The policy checks the resolved resources.
+	ResourceKinds []content.ResourceKind
+	// ResolveResources derives the resources named by validated arguments.
+	// Nil means the declaration names no resource at all; a non-nil resolver
+	// returning no refs is a distinct zero-resource call.
+	ResolveResources ResolveResources
 	// CommandArg names the argument carrying a shell command whose call effect
 	// may be lowered from the declaration's worst case by the backend parser.
 	// Empty for tools with no command carrier.
@@ -87,12 +164,11 @@ type Declaration struct {
 	Narrow Narrow
 }
 
-// FrameToolResult marks observe-tool output as untrusted data before it is
-// returned to the model. The effect on the declaration is the registry's
-// existing reading-tool classification, so a new observe tool inherits this
-// control without adding its name to another list.
+// FrameToolResult marks output according to the declaration's own trust
+// metadata before it is returned to the model. Trust is deliberately not
+// inferred from the effect lattice: mutating tools return untrusted text too.
 func (d Declaration) FrameToolResult(result string) string {
-	if d.Effect != content.EffectObserve {
+	if d.OutputTrust != OutputTrustUntrusted {
 		return result
 	}
 	return FrameUntrusted(result)
@@ -114,11 +190,6 @@ func FrameUntrusted(result string) string {
 // by the same tool name the middleware looked the declaration up with, so a
 // capability and its executor stay paired by construction.
 type Capability any
-
-// Narrow is a capability constructor: grant → capability. It is the
-// declaration's own builder, so the middleware needs no per-tool switch to
-// know how to narrow a tool — the row carries it.
-type Narrow func(grant content.Grant) (Capability, error)
 
 // Tool is one assembled declaration: the row plus its params schema, loaded
 // and validated at assembly. ParamsSchema is the exact JSON the model is
@@ -170,54 +241,228 @@ type Registry struct {
 // behind either InGo or InRenderer.
 var declarations = []Declaration{
 	{
-		Name:        "files.read",
-		Description: "Read the text of a file on this machine and return a window of it; reach for this when the answer depends on what is actually in a file rather than on what the person has told you about it.",
-		Effect:      content.EffectObserve,
-		Resources:   []content.ResourceKind{content.ResourcePath},
-		ResourceArg: "path",
-		Executes:    InGo,
-		Params:      "files.read.schema.json",
-		Narrow:      narrowFilesRead,
+		Name:             "files.read",
+		Description:      "Read the text of a file on this machine and return a window of it; reach for this when the answer depends on what is actually in a file rather than on what the person has told you about it.",
+		Effect:           content.EffectObserve,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourcePath},
+		ResolveResources: resourceArgument("path", content.ResourcePath),
+		Executes:         InGo,
+		Params:           "files.read.schema.json",
+		Narrow:           narrowFilesRead,
 	},
 	{
-		Name:        "session.list",
-		Description: "List what can be addressed in a terminal session right now — each item has an id, the command or program, and whether it is running or exited; an empty list is honest for a pane with no recorded blocks.",
-		Effect:      content.EffectObserve,
-		Resources:   []content.ResourceKind{content.ResourceSession},
-		ResourceArg: "sessionId",
-		Executes:    InGo,
-		Params:      "session.list.schema.json",
-		Narrow:      narrowSession,
+		Name:             "session.list",
+		Description:      "List what can be addressed in a terminal session right now — each item has an id, the command or program, and whether it is running or exited; an empty list is honest for a pane with no recorded blocks.",
+		Effect:           content.EffectObserve,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceArgument("sessionId", content.ResourceSession),
+		Executes:         InGo,
+		Params:           "session.list.schema.json",
+		Narrow:           narrowSession,
 	},
 	{
-		Name:        "session.read",
-		Description: "Read an item in a terminal session, or the screen now when no item id is supplied; the answer carries whether the item is running or exited and its exit code when it has one. A full-screen program returns the current alternate screen, not a window into scrollback.",
-		Effect:      content.EffectObserve,
-		Resources:   []content.ResourceKind{content.ResourceSession},
-		ResourceArg: "sessionId",
-		Executes:    Dynamic,
-		Params:      "session.read.schema.json",
-		Narrow:      narrowSession,
+		Name:             "session.read",
+		Description:      "Read an item in a terminal session, or the screen now when no item id is supplied; the answer carries whether the item is running or exited and its exit code when it has one. A full-screen program returns the current alternate screen, not a window into scrollback.",
+		Effect:           content.EffectObserve,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceArgument("sessionId", content.ResourceSession),
+		Executes:         Dynamic,
+		Params:           "session.read.schema.json",
+		Narrow:           narrowSession,
 	},
 	{
-		Name:        "run",
-		Description: "Run a shell command in a terminal session exactly as the person would type it, and get back its exit status and a window of its output; reach for this to find something out about the machine, or to change it, when no narrower tool will do — the person may be asked to approve the command first, and a refusal is an answer.",
-		Effect:      content.EffectMutateDestructive,
-		Resources:   []content.ResourceKind{content.ResourceSession},
-		ResourceArg: "sessionId",
-		CommandArg:  "command",
-		Executes:    InRenderer,
-		Params:      "run.schema.json",
-		Narrow:      narrowRun,
-		OpensBlock:  true,
+		Name:             "run",
+		Description:      "Run a shell command in a terminal session exactly as the person would type it, and get back its exit status and a window of its output; reach for this to find something out about the machine, or to change it, when no narrower tool will do — the person may be asked to approve the command first, and a refusal is an answer.",
+		Effect:           content.EffectMutateDestructive,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
+		ResolveResources: resourceArgument("sessionId", content.ResourceSession),
+		CommandArg:       "command",
+		Executes:         InRenderer,
+		Params:           "run.schema.json",
+		Narrow:           narrowRun,
+		OpensBlock:       true,
 	},
 	{
-		Name:        "git.status",
-		Description: "Report the state of the git working tree you are working in — the current branch and which files are staged, modified or untracked; reach for this before saying anything about uncommitted work.",
-		Effect:      content.EffectObserve,
-		Resources:   []content.ResourceKind{content.ResourcePath},
-		Executes:    InGo,
-		Params:      "git.status.schema.json",
+		Name:             "files.edit",
+		Description:      "Apply a strict line-addressed patch to a file you have read; reach for this to change the file directly, and the call is refused if the file changed or a line was not displayed.",
+		Effect:           content.EffectMutateReversible,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourcePath},
+		ResolveResources: resourceArgument("path", content.ResourcePath),
+		Executes:         InGo,
+		Params:           "files.edit.schema.json",
+		Narrow:           narrowFilesEdit,
+	},
+	{
+		Name:             "files.create",
+		Description:      "Create a new file if it does not already exist; reach for this instead of composing a shell redirection when a file must be created.",
+		Effect:           content.EffectMutateReversible,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourcePath},
+		ResolveResources: resourceArgument("path", content.ResourcePath),
+		Executes:         InGo,
+		Params:           "files.create.schema.json",
+		Narrow:           narrowFilesCreate,
+	},
+	{
+		Name:          "git.status",
+		Description:   "Report the state of the git working tree you are working in — the current branch and which files are staged, modified or untracked; reach for this before saying anything about uncommitted work.",
+		Effect:        content.EffectObserve,
+		OutputTrust:   OutputTrustUntrusted,
+		ResultBound:   ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:      30 * time.Second,
+		Cancellation:  CancellationReturnError,
+		ResourceKinds: []content.ResourceKind{content.ResourcePath},
+		Executes:      InGo,
+		Params:        "git.status.schema.json",
+	},
+	{
+		Name:             "notes.search",
+		Description:      "Find notes by the text they contain and return bounded rows without exposing unrelated note bodies.",
+		Effect:           content.EffectObserve,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ResolveResources: contentRootResources,
+		Executes:         InGo,
+		Params:           "notes.search.schema.json",
+		Narrow:           narrowContent,
+	},
+	{
+		Name:             "notes.create",
+		Description:      "Create a note with a backend-minted id and return the saved note.",
+		Effect:           content.EffectMutateReversible,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ResolveResources: contentRootResources,
+		Executes:         InGo,
+		Params:           "notes.create.schema.json",
+		Narrow:           narrowContent,
+	},
+	{
+		Name:             "notes.update",
+		Description:      "Replace the body of an existing note by its backend-minted id and return the saved note.",
+		Effect:           content.EffectMutateReversible,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ResolveResources: contentItemResource("id", "note"),
+		Executes:         InGo,
+		Params:           "notes.update.schema.json",
+		Narrow:           narrowContent,
+	},
+	{
+		Name:             "notes.delete",
+		Description:      "Remove one note by its backend-minted id and report the removal.",
+		Effect:           content.EffectMutateReversible,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ResolveResources: contentItemResource("id", "note"),
+		Executes:         InGo,
+		Params:           "notes.delete.schema.json",
+		Narrow:           narrowContent,
+	},
+	{
+		Name:             "snippets.list",
+		Description:      "List the person's reusable snippets, including their text, as bounded untrusted data.",
+		Effect:           content.EffectObserve,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ResolveResources: contentRootResources,
+		Executes:         InGo,
+		Params:           "snippets.list.schema.json",
+		Narrow:           narrowContent,
+	},
+	{
+		Name:             "snippets.create",
+		Description:      "Create a reusable snippet with a backend-minted id and return the saved text.",
+		Effect:           content.EffectMutateReversible,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ResolveResources: contentRootResources,
+		Executes:         InGo,
+		Params:           "snippets.create.schema.json",
+		Narrow:           narrowContent,
+	},
+	{
+		Name:             "snippets.update",
+		Description:      "Replace an existing reusable snippet by its backend-minted id and return the saved text.",
+		Effect:           content.EffectMutateReversible,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ResolveResources: contentItemResource("id", "snippet"),
+		Executes:         InGo,
+		Params:           "snippets.update.schema.json",
+		Narrow:           narrowContent,
+	},
+	{
+		Name:             "snippets.delete",
+		Description:      "Remove one reusable snippet by its backend-minted id and report the removal.",
+		Effect:           content.EffectMutateReversible,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ResolveResources: contentItemResource("id", "snippet"),
+		Executes:         InGo,
+		Params:           "snippets.delete.schema.json",
+		Narrow:           narrowContent,
+	},
+	{
+		Name:             "snippets.reorder",
+		Description:      "Replace the entire snippet order with an explicit permutation of backend-minted ids.",
+		Effect:           content.EffectMutateReversible,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ResolveResources: contentRootResources,
+		Executes:         InGo,
+		Params:           "snippets.reorder.schema.json",
+		Narrow:           narrowContent,
 	},
 }
 
@@ -289,7 +534,21 @@ func validateDeclaration(d Declaration) string {
 	if !supportedEffect(d.Effect) {
 		bad = append(bad, fmt.Sprintf("unsupported effect %q", d.Effect))
 	}
-	for _, k := range d.Resources {
+	if !supportedOutputTrust(d.OutputTrust) {
+		bad = append(bad, fmt.Sprintf("unsupported output trust %q", d.OutputTrust))
+	}
+	if d.ResultBound.MaxBytes <= 0 {
+		bad = append(bad, "missing result bound")
+	} else if !supportedTruncation(d.ResultBound.Truncation) {
+		bad = append(bad, fmt.Sprintf("unsupported truncation policy %q", d.ResultBound.Truncation))
+	}
+	if !validToolDeadline(d.Deadline) {
+		bad = append(bad, "missing deadline")
+	}
+	if !supportedCancellation(d.Cancellation) {
+		bad = append(bad, fmt.Sprintf("unsupported cancellation policy %q", d.Cancellation))
+	}
+	for _, k := range d.ResourceKinds {
 		if !supportedResourceKind(k) {
 			bad = append(bad, fmt.Sprintf("unsupported resource kind %q", k))
 		}
@@ -343,7 +602,7 @@ func (r Registry) ForGrant(g content.Grant) []Tool {
 			continue
 		}
 		covered := true
-		for _, k := range t.Resources {
+		for _, k := range t.ResourceKinds {
 			if !kindCovered[k] {
 				covered = false
 				break

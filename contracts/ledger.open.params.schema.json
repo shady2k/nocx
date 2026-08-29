@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/ledger.open.params.schema.json",
+  "title": "LedgerOpenParams",
+  "description": "Params for ledger.open.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["envelope"],
+  "properties": {
+    "envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["shell", "ask", "action", "text", "frame"]
+        },
+        "intent": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "sensitivity": {
+          "type": "string",
+          "enum": ["normal", "sensitive"]
+        },
+        "clientSeq": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": ["id", "sessionId", "cwd", "kind", "sensitivity"]
+    }
+  }
+}

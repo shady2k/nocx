@@ -153,6 +153,7 @@ type ResolvedLineRef struct {
 // are [config, vault]: the secret operations compute their inventory
 // inputs from profile reads and deleteSecret writes profile references.
 type SecretOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, SecretService) error) error
 }
 
@@ -209,6 +210,7 @@ func (f *SecretOperations) ForSecret(ctx context.Context, id credential.SecretID
 	}
 	g := &guard{}
 	return newOperation[SecretService](
+		Direct("SecretOperation"),
 		control.NewComposite(f.configGate, f.vaultGate, f.lane),
 		g,
 		newSecretService(g, f.profiles, f.groups, f.vault, f.store),
@@ -227,6 +229,7 @@ func NewSecretOperation(
 ) SecretOperation {
 	g := &guard{}
 	return newOperation[SecretService](
+		Direct("SecretOperation"),
 		control.NewComposite(configGate, vaultGate, lane),
 		g,
 		newSecretService(g, profiles, groups, v, store),

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/panes.setCwd.params.schema.json",
+  "title": "PanesSetCwdParams",
+  "description": "Params for recording a pane shell's current directory.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "cwd"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "cwd": { "type": "string", "pattern": ".*\\S.*", "maxLength": 4096 }
+  }
+}

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/roles.setDefault.params.schema.json",
+  "title": "RolesSetdefaultParams",
+  "description": "Params for roles.setDefault.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["endpointId", "model"],
+  "properties": {
+    "endpointId": {
+      "type": "string"
+    },
+    "model": {
+      "type": "string"
+    }
+  }
+}

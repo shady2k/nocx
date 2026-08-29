@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/close.params.schema.json",
+  "title": "CloseParams",
+  "description": "Params for closing a terminal session.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId"],
+  "properties": { "sessionId": { "type": "string", "pattern": "^[0-9a-fA-F]{32}$" } }
+}

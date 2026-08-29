@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["query"],
+  "properties": {
+    "query": { "type": "string" },
+    "id": {
+      "type": "string",
+      "description": "Optional backend-minted note id; when present, return that note's body."
+    }
+  },
+  "$defs": {
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["notes", "truncated", "dropped"],
+      "properties": {
+        "notes": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "required": ["id", "title", "excerpt", "updatedAt"],
+            "properties": {
+              "id": { "type": "string" },
+              "title": { "type": "string" },
+              "excerpt": { "type": "string" },
+              "updatedAt": { "type": "integer" },
+              "body": { "type": "string" }
+            }
+          }
+        },
+        "truncated": { "type": "boolean" },
+        "dropped": { "type": "integer", "minimum": 0 }
+      }
+    }
+  }
+}

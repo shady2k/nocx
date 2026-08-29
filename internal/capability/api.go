@@ -401,6 +401,7 @@ type APICollectionService interface {
 // folder of the user's, so it conflicts with other collection work and with
 // nothing else.
 type APICollectionOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, APICollectionService) error) error
 }
 
@@ -418,6 +419,7 @@ type APICollectionOperation interface {
 func NewAPICollectionOperation(apiGate, lane control.Admission, svc apicoll.Collections) APICollectionOperation {
 	g := &guard{}
 	return newOperation[APICollectionService](
+		Direct("APICollectionOperation"),
 		control.NewComposite(apiGate, lane),
 		g,
 		newAPICollectionService(g, svc),
@@ -999,6 +1001,7 @@ type APIImportService interface {
 // document yields no secret, so it does not take charge of credential
 // material and has no vault gate to protect.
 type APIImportOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, APIImportService) error) error
 }
 
@@ -1017,6 +1020,7 @@ func NewAPIImportOperation(
 ) APIImportOperation {
 	g := &guard{}
 	return newOperation[APIImportService](
+		Direct("APIImportOperation"),
 		control.NewComposite(apiGate, lane),
 		g,
 		&apiImportService{guard: g, fsys: fsys, fetch: fetch},

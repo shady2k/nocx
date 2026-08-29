@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/ports.pause.params.schema.json",
+  "title": "PortsPauseParams",
+  "description": "Params for ports.pause.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profileId"],
+  "properties": {
+    "profileId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512
+    },
+    "paused": {
+      "type": "boolean"
+    },
+    "visible": {
+      "type": "boolean"
+    }
+  }
+}

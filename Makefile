@@ -170,16 +170,18 @@ init: hooks
 	@echo ""
 	@echo "Ready. Run 'make dev' to start the app, 'bd ready' for the backlog."
 
-# Per-clone git configuration. Both lines are the same kind of thing: git
-# behaviour this repo needs that a clone cannot carry by itself.
+# Per-clone git configuration: git behaviour this repo needs that a clone cannot
+# carry by itself.
 #
-# The merge driver resolves `.beads/issues.jsonl` by regenerating it from the
-# issue database instead of asking which side to keep — see .gitattributes for
-# why neither side is ever the answer.
+# The --unset lines clean up after the beads merge driver, which used to resolve
+# `.beads/issues.jsonl` by regenerating it. The file is untracked now, so there
+# is nothing left to merge — and the driver never helped where it hurt most
+# anyway: GitHub computes a pull request's mergeability server-side and does not
+# run custom merge drivers at all.
 hooks:
 	git config core.hooksPath .githooks
-	git config merge.beads-export.name "regenerate the beads export from the issue database"
-	git config merge.beads-export.driver "bd export -o %A"
+	-@git config --unset merge.beads-export.driver 2>/dev/null || true
+	-@git config --unset merge.beads-export.name 2>/dev/null || true
 	@echo "git hooks installed from .githooks/"
 
 # `ci` is the HOST-SIDE half of CI: the `backend` job (macos-latest) plus the

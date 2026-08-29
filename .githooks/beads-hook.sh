@@ -245,33 +245,3 @@ publish_beads_snapshot() {
 
     return 0
 }
-
-# Write .beads/issues.jsonl and stage it, so the commit carries the issue state
-# it describes.
-#
-# This calls `bd export` rather than `bd hooks run pre-commit` on purpose. The
-# export is a plain data dump behind a documented flag, so calling it directly
-# is exact and synchronous. export.auto in .beads/config.yaml writes the same
-# file on its own, but it is throttled to once a minute and, measured here, the
-# write does not reliably land before the command returns — fine for keeping the
-# file warm between commits, not something a hook can depend on. Pushing, by
-# contrast, is protocol-level work left to the CLI's own shim.
-export_beads_snapshot() {
-    command -v bd >/dev/null 2>&1 || return 0
-
-    BD_GIT_HOOK=1
-    export BD_GIT_HOOK
-
-    bd export -o .beads/issues.jsonl >/dev/null 2>&1 && bd_exit=0 || bd_exit=$?
-
-    if [ "$bd_exit" -eq 3 ]; then
-        return 0 # no database in this clone
-    fi
-    if [ "$bd_exit" -ne 0 ]; then
-        printf "\nFAIL: bd export exited %s — the commit would carry a stale backlog.\n" \
-            "$bd_exit" >&2
-        return "$bd_exit"
-    fi
-
-    git add .beads/issues.jsonl
-}

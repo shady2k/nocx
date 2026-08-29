@@ -681,11 +681,11 @@ export class XtermRenderer implements TerminalRenderer {
     this.unsettledWrites++
     try {
       t.write(data, () => {
-        // The per-write callback fires exactly when THIS write's bytes have
-        // been parsed (WriteBuffer's per-chunk callback) — the capture
-        // fence's settle signal. onWriteParsed alone cannot be that signal:
-        // xterm fires it at the end of EVERY parse pass, which can be
-        // BETWEEN chunks of one large write.
+        // The per-write callback keeps the pending count exact: zero means a
+        // capture can read immediately, non-zero means it needs the next
+        // completed onWriteParsed boundary. The boundary, not global queue
+        // emptiness, is the fence — a continuously repainting TUI may always
+        // have a later write queued.
         this.unsettledWrites = Math.max(0, this.unsettledWrites - 1)
       })
     } catch (err) {

@@ -1,12 +1,11 @@
 // Shared test double: an xterm-shaped CaptureEventSource.
 //
 // Models WriteBuffer's real contract (verified against xterm 5.5.0 source):
-// write() QUEUES data (nothing applied, hasUnsettledWrite() true); a parse
-// pass applies a SLICE of the front write and fires onWriteParsed — the
-// write's own settle (its per-write callback) fires only on the pass that
-// EMPTIES it, so ONE write can span several passes with onWriteParsed
-// firing while the write is still pending (xterm's own doc note on the
-// event), which is exactly the trap the capture fence exists for.
+// write() queues data; a parse pass applies a slice and fires onWriteParsed;
+// the write's own settle fires only when its last byte is parsed. The split
+// lets tests distinguish one completed coherent parse boundary from global
+// queue emptiness, and instrument the continuous-repaint case where callbacks
+// fire while the exact pending count remains 1.
 
 import { BufferLine, type BufferLine as BufferLineType } from '../scrollback/test-helpers'
 import type { CaptureEventSource } from './types'
@@ -54,6 +53,13 @@ export class FakeSource implements CaptureEventSource {
   }
   hasUnsettledWrite(): boolean {
     return this.pending > 0
+  }
+
+  /** Instrumented pending count for capture-fence tests. The product seam
+   *  stays boolean; only the witness needs to distinguish 1 → 1 starvation
+   *  from a count that never receives callbacks. */
+  unsettledWriteCount(): number {
+    return this.pending
   }
 
   // ── test drivers ────────────────────────────────────────────────────────

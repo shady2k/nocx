@@ -15,14 +15,17 @@
 // wires inequality to a refusal (that arrives with DRIVE), and no surface
 // may present drift as "stale".
 //
-// The capture fence: write() queues parsing, so a snapshot taken mid-queue
-// can hold row 1 from before a write and row 20 from after it — a state that
-// never existed. awaitSettled() defers until no queued write is mid-parse.
-// xterm fires onWriteParsed at the end of EVERY parse pass, which can be
-// BETWEEN chunks of a large write, so the fence re-checks hasUnsettledWrite()
-// after every fire and only opens when the final pass has settled.
+// The capture fence: write() queues parsing, so a snapshot taken before the
+// next parse pass can miss bytes already handed to xterm. awaitSettled() waits
+// for one completed onWriteParsed boundary. That boundary is a coherent buffer
+// state even when a continuously repainting TUI has already queued a later
+// write; global queue emptiness would starve. A source that claims pending work
+// but produces neither a parse boundary nor disposal rejects on a local bound.
 
 import type { CaptureComparability, CaptureEventSource, CaptureIdentity } from './types'
+
+/** Local renderer bound, far below the broker's 30-second request timeout. */
+const DEFAULT_CAPTURE_SETTLE_TIMEOUT_MS = 1000
 
 /** Thrown by awaitSettled() when the capture source is disposed before the
  *  fence opens: the renderer is gone (tab close, renderer replacement), so
@@ -31,6 +34,16 @@ export class CaptureAbortedError extends Error {
   constructor() {
     super('frame capture aborted: the renderer was disposed before the write settled')
     this.name = 'CaptureAbortedError'
+  }
+}
+
+/** The renderer still claimed a queued write but produced no completed parse
+ *  pass within the capture bound. The pull handler turns this into an honest
+ *  failed outcome; it must never outlive the broker request in silence. */
+export class CaptureUnsettledError extends Error {
+  constructor(timeoutMs: number) {
+    super(`frame capture did not reach a parse boundary within ${timeoutMs}ms`)
+    this.name = 'CaptureUnsettledError'
   }
 }
 
@@ -52,17 +65,20 @@ export class CaptureIdentityTracker {
     kind: 'normal',
   }
   private _altSession = 0
-  /** Waiters for the next onWriteParsed fire — the fence's rendezvous. Each
-   *  carries its reject so disposal can settle (reject) a pending capture
-   *  instead of orphaning it forever. */
+  /** Waiters for the next completed xterm parse pass — the fence's
+   *  rendezvous. Each carries its reject so disposal or the local capture
+   *  bound settles a pending request instead of orphaning it. */
   private _writeParsedWaiters: Array<{
     resolve: () => void
-    reject: (err: CaptureAbortedError) => void
+    reject: (err: Error) => void
   }> = []
   /** True once the source reported disposal: the fence can never open. */
   private _disposed = false
 
-  constructor(private readonly _source: CaptureEventSource) {
+  constructor(
+    private readonly _source: CaptureEventSource,
+    private readonly _settleTimeoutMs = DEFAULT_CAPTURE_SETTLE_TIMEOUT_MS,
+  ) {
     _source.onWriteParsed(() => this._onWriteParsed())
     _source.onBufferChange((type) => this._onBufferChange(type))
     _source.onResize(() => this._onExplicitMutation())
@@ -112,24 +128,18 @@ export class CaptureIdentityTracker {
     return { status: 'same' }
   }
 
-  /** The capture fence. Resolves once no queued write is mid-parse; if
-   *  nothing is queued it resolves immediately (no event may ever come).
+  /** The capture fence. With no queued write, resolves immediately. Otherwise
+   *  it waits for ONE completed xterm parse pass: JavaScript cannot inspect
+   *  the buffer during a pass, so that boundary is a coherent state that
+   *  existed even when a continuously repainting TUI already queued the next
+   *  write. Requiring global queue emptiness starves exactly that workload.
    *
-   *  Because the fire can land BETWEEN chunks of one large write, the loop
-   *  re-checks hasUnsettledWrite() after every fire and waits for the pass
-   *  that actually settles the queue. */
+   *  A claimed pending write that produces neither a pass nor disposal is a
+   *  failed capture after the local bound, never a 30-second broker hang. */
   async awaitSettled(): Promise<void> {
-    while (this._source.hasUnsettledWrite()) {
-      // A write can outlive its source: disposal mid-parse leaves the
-      // pending count stuck forever. That is a refusal, not a wait —
-      // rejecting is chosen over resolving-as-not-capturable: "settled"
-      // would let a caller mint a frame from a dead renderer, a refusal
-      // that looks like success is the exact silence the fence exists to
-      // prevent. A caller that sees the rejection knows the capture cannot
-      // happen and can decide (re-ask, tell the person).
-      this._throwIfDisposed()
-      await this._waitForWriteParsed()
-    }
+    this._throwIfDisposed()
+    if (!this._source.hasUnsettledWrite()) return
+    await this._waitForWriteParsed()
   }
 
   private _throwIfDisposed(): void {
@@ -137,25 +147,34 @@ export class CaptureIdentityTracker {
   }
 
   private _waitForWriteParsed(): Promise<void> {
+    if (this._disposed) return Promise.reject(new CaptureAbortedError())
     // Promise.withResolvers needs an ES2024 lib and this project targets
-    // ES2021, so the resolvers are captured via the executor form (the
-    // codebase pattern).
+    // ES2021, so the resolvers are captured via the executor form.
     let resolve!: () => void
-    let reject!: (err: CaptureAbortedError) => void
+    let reject!: (err: Error) => void
     const promise = new Promise<void>((done, fail) => {
       resolve = done
       reject = fail
     })
-    // Subscribing a waiter is synchronous with the hasUnsettledWrite()
-    // check that led here (both run in the same task), and a fire can only
-    // arrive in a later task — so this waiter can never miss its event,
-    // and a disposal that lands before this registration is caught here
-    // instead of orphaning the waiter.
-    if (this._disposed) {
-      reject(new CaptureAbortedError())
-      return promise
+    const waiter = {
+      resolve: (): void => {
+        clearTimeout(timer)
+        resolve()
+      },
+      reject: (err: Error): void => {
+        clearTimeout(timer)
+        reject(err)
+      },
     }
-    this._writeParsedWaiters.push({ resolve, reject })
+    // Subscribing is synchronous with the unsettled check; parse/dispose can
+    // only arrive in a later task, so the boundary cannot be missed.
+    this._writeParsedWaiters.push(waiter)
+    const timer = setTimeout(() => {
+      const index = this._writeParsedWaiters.indexOf(waiter)
+      if (index < 0) return
+      this._writeParsedWaiters.splice(index, 1)
+      waiter.reject(new CaptureUnsettledError(this._settleTimeoutMs))
+    }, this._settleTimeoutMs)
     return promise
   }
 

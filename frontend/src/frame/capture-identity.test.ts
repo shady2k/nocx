@@ -7,10 +7,11 @@
 // staleness. Nothing here wires generation inequality to a refusal (that
 // belongs to DRIVE), and no surface may present drift as "stale".
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   CaptureAbortedError,
   CaptureIdentityTracker,
+  CaptureUnsettledError,
   ReadScreenRangeError,
 } from './capture-identity'
 import { FakeSource } from './test-source'
@@ -158,43 +159,79 @@ describe('CaptureIdentityTracker — comparability, not staleness', () => {
 })
 
 describe('CaptureIdentityTracker — the capture fence', () => {
-  it('defers a capture while ONE write is still mid-parse, and waits for the FINAL parse pass, not the first onWriteParsed', async () => {
+  it('waits for the next completed parse pass even when the same write spans another pass', async () => {
     const source = new FakeSource()
     source.seed(['AAAA'])
     const tracker = new CaptureIdentityTracker(source)
     const before = tracker.identity()
 
-    // ONE write, split by xterm's WriteBuffer across parse passes (the
-    // per-write callback fires only on the pass that empties it). So
-    // onWriteParsed CAN fire while the write's own callback is still
-    // pending — the exact interleaving the fence exists for. The old model
-    // equated one write with one pass and issued two writes instead.
     source.write('BBBBCCCC')
-    expect(source.hasUnsettledWrite()).toBe(true)
+    const capture = tracker.awaitSettled()
 
+    // Pass 1 is a complete xterm parse pass and therefore a coherent buffer
+    // boundary, even though the write's remaining bytes stay queued.
+    source.parseOnePass(4)
+    await capture
+    expect(source.hasUnsettledWrite()).toBe(true)
+    expect(tracker.identity().generation).toBe(before.generation + 1)
+
+    // Drain the remainder for test isolation. It advances identity again but
+    // does not retroactively change the frame boundary the capture selected.
+    source.parseOnePass(4)
+    expect(source.hasUnsettledWrite()).toBe(false)
+    expect(tracker.identity().generation).toBe(before.generation + 2)
+  })
+
+  it('captures at a completed parse pass even when a continuous writer keeps one later write pending', async () => {
+    const source = new FakeSource()
+    const tracker = new CaptureIdentityTracker(source)
+    source.write('first repaint')
     let settled = false
-    const settledPromise = tracker.awaitSettled().then(() => {
+    const capture = tracker.awaitSettled().then(() => {
       settled = true
     })
 
-    // Pass 1 parses PART of the write: onWriteParsed fires with the write
-    // still pending. A naive "wait for the next onWriteParsed" would mint
-    // now, mid-write.
-    source.parseOnePass(4)
-    await Promise.resolve()
-    expect(settled).toBe(false)
-    expect(source.hasUnsettledWrite()).toBe(true)
+    // The TUI queues its next repaint before xterm finishes this one. Every
+    // pass fires, the generation advances, and the pending count is exact —
+    // but global emptiness never occurs: 1 settles while 1 replaces it.
+    source.write('next repaint')
+    const before = tracker.identity().generation
+    source.parseOnePass()
+    await capture
+    const evidence = {
+      pending: source.unsettledWriteCount(),
+      generationDelta: tracker.identity().generation - before,
+    }
 
-    // The final pass empties the write: its callback settles and the fence
-    // opens.
-    source.parseOnePass(4)
-    await settledPromise
-    expect(settled).toBe(true)
+    try {
+      expect(evidence).toEqual({ pending: 1, generationDelta: 1 })
+      expect(settled, `instrumented fence evidence: ${JSON.stringify(evidence)}`).toBe(true)
+    } finally {
+      // Drain the replacement write for test isolation; the capture already
+      // resolved at the preceding coherent pass.
+      source.flush()
+      await capture
+    }
+  })
 
-    const after = tracker.identity()
-    // The one write was parsed across two passes: each pass advanced the
-    // generation (conservative — a false "moved" costs a re-ask).
-    expect(after.generation).toBe(before.generation + 2)
+  it('rejects a claimed pending write that produces no parse boundary', async () => {
+    vi.useFakeTimers()
+    try {
+      const source = new FakeSource()
+      const tracker = new CaptureIdentityTracker(source, 1000)
+      source.write('a callback that never arrives')
+      const failure = expect(tracker.awaitSettled()).rejects.toThrow(CaptureUnsettledError)
+
+      await vi.advanceTimersByTimeAsync(1000)
+
+      await failure
+      expect(source.unsettledWriteCount()).toBe(1)
+      // The timed-out waiter was removed: a later parse is ordinary cleanup,
+      // not a late resolution of the request that already failed.
+      source.parseOnePass()
+    } finally {
+      vi.useRealTimers()
+    }
   })
 
   it('takes a frame immediately when nothing is queued — no wait for an event that never comes', async () => {
@@ -217,6 +254,14 @@ describe('CaptureIdentityTracker — the capture fence', () => {
     const pending = tracker.awaitSettled()
     source.dispose()
     await expect(pending).rejects.toThrow(CaptureAbortedError)
+  })
+
+  it('rejects a disposed source even when its pending count is already zero', async () => {
+    const source = new FakeSource()
+    const tracker = new CaptureIdentityTracker(source)
+    source.dispose()
+
+    await expect(tracker.awaitSettled()).rejects.toThrow(CaptureAbortedError)
   })
 
   it('an awaitSettled issued AFTER disposal rejects immediately — a stuck counter cannot hang a later capture', async () => {

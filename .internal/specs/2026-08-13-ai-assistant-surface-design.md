@@ -108,18 +108,19 @@ generation, so a screen can be reported as moved when it did not. **We prefer a 
 moved" to a false "unchanged"** — the first costs a re-ask, the second delivers advice about
 a screen that is gone.
 
-**There is also a capture fence, and `onWriteParsed` alone cannot be it.** `write()` queues
-parsing, so "the frame at that instant" is meaningless without one: a snapshot taken mid-queue
-can hold row 1 from before a write and row 20 from after it, and its generation would then
-describe no state that ever existed. The frame is taken after the parse settles.
+**There is also a capture fence, and global queue emptiness cannot be it.** `write()` queues
+parsing, so a request that arrives with pending work waits for a completed
+`onWriteParsed` pass. JavaScript cannot read the buffer during that pass: its end is a
+coherent state that existed, even when one large write has another chunk left or a
+continuously repainting TUI already queued its next write.
 
-But **`onWriteParsed` fires at the end of every parse pass, and a pass can land between the
-chunks of one large write** — so waiting for one fire settles nothing, and this paragraph said
-otherwise until the implementation found it (`nocx-3j9b`). The exact signal is xterm's
-**per-write callback**, `write(data, cb)`, which fires when _that_ write's bytes have been
-parsed: the renderer keeps a count of unsettled writes from it, and the fence waits until the
-count is zero, re-checking after every `onWriteParsed` fire. `onWriteParsed` keeps the two jobs
-it can do — advancing the generation, and waking the waiter.
+The renderer's per-write callbacks still keep the unsettled count exact, but the count has
+one job: zero means capture immediately; non-zero means wait for the next parse boundary.
+Waiting for it to return to zero starves `top`: each callback can settle one repaint while
+the next keeps the count at one forever. If a source claims pending work but produces
+neither a parse boundary nor disposal within the renderer's local bound, capture rejects
+and `agent.readScreenResolved` reports `failed` — it never waits for the broker's 30-second
+timeout.
 
 A frozen block is the degenerate case: its identity is closed and its generation never
 advances again.
@@ -827,9 +828,10 @@ Assertions, in the bead, authored before the implementation.
   stale, and the UI says the different sentence.
 - A write that repaints **identical cells still advances** the generation, and the UI reports
   "moved" — the deliberate false positive of §2.3, asserted so it cannot be silently
-  "optimised" into a false negative later.
-- A frame is taken while a multi-chunk write is still queued: **assert** it is taken after the
-  parse settles, and that no frame mixes rows from before and after one write.
+  optimized away.
+- A frame is requested while a continuous repaint always leaves another write queued:
+  **assert** it is taken at the next completed parse pass, never waits for global
+  emptiness, and a source with no future pass answers `failed` within the local bound.
 - The same gesture on a frozen block mints a frame whose provenance records source `frozen`
   and the serializer version, and on a live surface records `live` and the buffer identity —
   **two sources, both recorded**, and neither silently substituted for the other.

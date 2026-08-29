@@ -1,6 +1,6 @@
 /**
  * e2e: a person asks the assistant to look at THEIR screen, and the answer
- * names what was on it (nocx-z4hgm, closing nocx-avogl).
+ * names what was on it (nocx-z4hgm, nocx-2ryxf.3, closing nocx-avogl).
  *
  * WHAT THIS FILE IS FOR, AND WHY THE GO TEST BESIDE IT IS NOT ENOUGH.
  * internal/transport/ws_agent_locates_itself_test.go already watches the
@@ -35,20 +35,18 @@
  * the time the editor is back, the output is DOM and the screen is empty.
  *
  * What CAN be on the screen is output that arrives after the last freeze,
- * from something the shell is no longer waiting on. So a background job
- * prints the marker — and the two orderings that could make this a timing
- * bet are both closed by an observable:
+ * from something the shell is no longer waiting on. A background TUI-like
+ * loop repaints one row continuously — and the two orderings that could make
+ * this a timing bet are both closed by an observable:
  *
- * - IT MUST PRINT AFTER THE CLEAR, or the clear wipes it. The job waits for
- *   a file this spec creates, and this spec creates it only once the block
- *   has frozen and the editor is back — and those are the same event:
- *   _settleFrozen runs clearViewport and setIdle in ONE callback, so an
- *   editor that has the line again is an editor whose clear has happened.
- * - THE ASK MUST HAPPEN AFTER IT LANDS, or the read returns a blank grid.
- *   The job writes the marker and then an OSC 9, on the same byte stream,
- *   through the same parser: the notify.raise the renderer sends for that
- *   OSC cannot precede the cells it follows. So the raise is the signal that
- *   the marker is on the grid — an ordering fact, not a duration.
+ * - IT MUST START AFTER THE CLEAR. The job waits for a release file created
+ *   only once the block has frozen and the editor is back.
+ * - THE ASK MUST START AFTER ITS FIRST REPAINT. The job writes the marker and
+ *   then OSC 9 on the same byte stream; notify.raise cannot precede the cells.
+ *
+ * The loop keeps repainting until the answer lands. This is the `top` case:
+ * xterm may always have a later write queued, so session.read must capture at
+ * a completed parse-pass boundary rather than wait for global queue emptiness.
  *
  * Nothing here sleeps and nothing waits out a clock (AGENTS.md: "a test may
  * not depend on timing").
@@ -97,6 +95,7 @@ let endpoint: { port: number; token: string }
 let fixtureDir = ''
 let scriptPath = ''
 let flagPath = ''
+let stopPath = ''
 
 test.beforeAll(async () => {
   fake = new FakeOpenAI()
@@ -108,24 +107,27 @@ test.beforeAll(async () => {
   fixtureDir = mkdtempSync(join(tmpdir(), 'nocx-z4hgm-screen-'))
   scriptPath = join(fixtureDir, 'put-marker-on-screen.sh')
   flagPath = join(fixtureDir, 'release')
-  // POSIX sh, and deliberately dull. The wait is a CONDITION, not a delay:
-  // it ends when this spec creates the file, which it does only after the
-  // grid has been cleared. The marker is printed with NO trailing newline so
-  // the cursor stays on its row — a captured frame is the window around the
-  // cursor, so a row the cursor is on is a row the frame contains, whatever
-  // the live region's height happens to be.
+  stopPath = join(fixtureDir, 'stop')
+  // POSIX sh continuously repaints one row like a normal-buffer TUI. The
+  // release is a condition opened only after freeze/clear; the stop is opened
+  // only after session.read has answered. No sleep creates a false quiet gap
+  // in which a global-empty fence could accidentally pass.
   writeFileSync(
     scriptPath,
     [
       `while [ ! -e '${flagPath}' ]; do sleep 1; done`,
+      `i=0`,
       `printf '%s' '${MARKER}'`,
       `printf '\\033]9;%s\\007' '${SIGNAL}'`,
+      `while [ ! -e '${stopPath}' ]; do printf '\\r%s-%08d' '${MARKER}' "$i"; i=$((i + 1)); done`,
       '',
     ].join('\n'),
   )
 })
 
 test.afterAll(async () => {
+  writeFileSync(flagPath, 'go\n')
+  writeFileSync(stopPath, 'stop\n')
   backend?.stop()
   await fake?.stop()
 })
@@ -344,9 +346,9 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     const sessionId = asks[asks.length - 1]
     expect(sessionId).not.toBe('')
 
-    // ── Put the marker on that pane's screen ─────────────────────────────
-    // The job is started and then WAITS; it prints nothing until this spec
-    // releases it, which is only after the grid has been cleared.
+    // ── Put a continuously repainting marker on that pane's screen ───────
+    // The background command returns the prompt, then waits for the release
+    // file before its TUI-like loop starts repainting.
     await useTarget(page, 'shell')
     await page.keyboard.type(`sh ${scriptPath} &`)
     await page.keyboard.press('Enter')
@@ -433,6 +435,9 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     expect(frame.outcome, frame.error ?? 'the renderer reported no error').toBe('frame')
     expect(frame.requestId).toBeTruthy()
     expect(frameText(frame)).toContain(MARKER)
+    // The capture answered while repainting continued; stop the fixture only
+    // after the renderer's frame has been observed.
+    writeFileSync(stopPath, 'stop\n')
 
     // 4. And the model was told the marker by the TOOL and by nothing else.
     //    This run sent two requests: the first carries the system prompt and

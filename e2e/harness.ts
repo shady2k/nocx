@@ -1,4 +1,4 @@
-import { test as base, expect as baseExpect, type Page } from '@playwright/test'
+import { test as base, expect as baseExpect, type Locator, type Page } from '@playwright/test'
 
 import { BASE_URL } from './base-url'
 import { readStand } from './stand'
@@ -919,4 +919,40 @@ export class VaultBackend {
     if (!this.isolation) throw new Error('backend has not been started yet')
     return this.isolation.isolatedHome
   }
+}
+
+/**
+ * Reach the import ask's DESTINATION FIELD, whatever put it on screen.
+ *
+ * Six specs used to click the pencil unconditionally and then fill the field,
+ * which reads as one step and is two claims: that the field is closed, and
+ * that the person opens it. Only the second is the spec's business. The dialog
+ * itself says so — `editing()` in api/import-dialogs.tsx is
+ *
+ *     props.editingDest || refusal() !== undefined || (sourceLabel !== '' && !nameable())
+ *
+ * so a source that proposes no usable name opens the field BY ITSELF, and the
+ * pencil is then correctly absent because there is nothing collapsed to
+ * expand. A spec that insists on clicking it is asserting the app is in a
+ * state the app never promised, and it fails by waiting out the full timeout
+ * on a button that is not coming — which is what happened to
+ * api-secret-in-any-field on WebKit (nocx-92gfl.4's gate, 2026-08-29).
+ *
+ * So this waits for the ask to SETTLE into one of its two legitimate shapes —
+ * pencil visible, or field already open — and then guarantees the field. That
+ * is a state change, never a duration, which is the rule a spec may not
+ * break.
+ */
+export async function openImportDestination(ask: Locator, page: Page): Promise<Locator> {
+  const pencil = ask.getByRole('button', { name: 'Change where this goes' })
+  const field = page.locator('#api-import-postman-dest')
+  // `.or()` unions DOM MATCHES, and the field is always rendered — the dialog
+  // hides it in a `hidden` container rather than dropping it — so the union is
+  // two nodes whichever shape the ask is in. Filtering to the visible one is
+  // what makes "exactly one of these is on screen" the settled state to wait
+  // for, and a strict-mode violation is what asking without it costs.
+  await baseExpect(pencil.or(field).filter({ visible: true })).toHaveCount(1)
+  if (await pencil.isVisible()) await pencil.click()
+  await baseExpect(field).toBeVisible()
+  return field
 }

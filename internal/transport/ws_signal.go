@@ -28,8 +28,10 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"time"
 
 	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -90,8 +92,9 @@ type signalHandlers struct {
 	r       Responder
 }
 
-// handleSignal addresses one signal to one session's foreground process
-// group.
+// handleSignal addresses one signal intent to one session's foreground
+// execution, through its process group or the lifecycle-confirmed terminal
+// interrupt fallback.
 //
 // The session is resolved through the same two checks resize and close use,
 // in the same order and with the same refusal: the connection must hold the
@@ -114,13 +117,13 @@ func (h signalHandlers) handleSignal(ctx context.Context, state *connState, req 
 		_ = respond(h.r, newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
 		return
 	}
-	err = op.Run(ctx, func(_ context.Context, svc capability.SessionService) error {
+	err = op.Run(ctx, func(signalCtx context.Context, svc capability.SessionService) error {
 		sess, gerr := svc.Get(sid)
 		if gerr != nil {
 			_ = respond(h.r, newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId"))
 			return nil
 		}
-		h.answer(req, sid, sess, params.Signal)
+		h.answer(signalCtx, req, sid, sess, params.Signal)
 		return nil
 	})
 	if err != nil {
@@ -128,29 +131,158 @@ func (h signalHandlers) handleSignal(ctx context.Context, state *connState, req 
 	}
 }
 
-// answer runs the intent against the session and writes the result.
+// sessionProtectedForeground is the protectedForeground the wire method
+// supplies to the one policy in foreground_signal.go: it can say whether the
+// backend's own lifecycle projection puts a started execution inside this
+// session's protected group, write the terminal's interrupt through the
+// session's ordinary input path, and watch that exact attempt.
 //
-// A REMOTE SESSION IS SAID OUT LOUD RATHER THAN COLLAPSED INTO
-// "nothing-running". realSession.SignalForeground reports pty.ErrNoForeground
-// for a remote channel just as it does for a shell at a prompt — it has no
-// local process group either way — so the two are indistinguishable by the
-// error alone, and telling a person "nothing is running" while their command
-// is plainly running on the far host is a lie they would act on. The kind is
-// the fact that separates them, and it is asked here rather than guessed.
-// Reaching a process on the far host is the remote-footprint work's, not
-// this method's.
-func (h signalHandlers) answer(req jsonrpcRequest, sid session.ID, sess session.Session, intent string) {
-	outcome := foregroundOutcome("unsupported")
+// It holds the request's context because it belongs to this one request; the
+// policy it is handed to is shared with callers that have no request.
+type sessionProtectedForeground struct {
+	ctx  context.Context
+	s    *WSServer
+	sid  session.ID
+	sess session.Session
+}
+
+// Attempt names the one authenticated, STARTED execution the backend
+// projects for this session, and refuses anything less.
+//
+// THREE THINGS IT REFUSES, each bought by a way the incident's fix could
+// have lied (nocx-7l4ex.10):
+//
+//   - An attempt that is open but NOT Started. An app attempt is created at
+//     submit, before the bytes that could cause it are written to the pty
+//     (lifecycle-protocol §7), so "open" alone would make a stalled submit
+//     look like a running program and put 0x03 into a prompt. Started flips
+//     only on an authenticated start from the shell (ADR-0024 decision 2),
+//     which is the fact that a program actually exists.
+//   - More than one candidate. lane→session is many-to-one by construction
+//     — replayLifecycleFacts collects every lane of a session and
+//     unregisterLifecycleLanes deletes every one — so "the first match" was
+//     an answer chosen by Go's map iteration order. Two running lanes have
+//     no right answer here, and inventing one would interrupt a program the
+//     person was not addressing.
+//   - A lane whose state moved while we were reading it. The lock is held
+//     across the ownership scan AND the state read, so a lane reassigned or
+//     torn down between the two cannot be answered about.
+//
+// Holding lifecycleMu across a call into the publisher is safe in that
+// direction and checked rather than assumed: the publisher emits to this
+// server OUTSIDE both its own lock and the kernel's (lifecyclepub's
+// publishLane says so and does so), and PublishLifecycle releases
+// lifecycleMu before it does any further work — so there is no path where
+// the kernel is held while this lock is wanted.
+func (p sessionProtectedForeground) Attempt() (lifecycle.AttemptID, bool) {
+	if p.s.lifecyclePub == nil {
+		return "", false
+	}
+	p.s.lifecycleMu.Lock()
+	defer p.s.lifecycleMu.Unlock()
+	var found lifecycle.AttemptID
+	for lane, owner := range p.s.lifecycleLanes {
+		if owner != p.sid {
+			continue
+		}
+		snapshot, err := p.s.lifecyclePub.State(lane)
+		if err != nil || snapshot.Lifecycle != lifecycle.LifecycleRunning || snapshot.Attempt == "" {
+			continue
+		}
+		attempt, ok := p.s.lifecyclePub.Attempt(snapshot.Attempt)
+		if !ok || attempt.State != lifecycle.AttemptOpen || !attempt.Started {
+			p.s.log.Warn("foreground signal: lane names an attempt that is not an authenticated running execution",
+				"session_id", string(p.sid), "lane", string(lane), "attempt", string(snapshot.Attempt),
+				"known", ok, "state", string(attempt.State), "started", attempt.Started)
+			continue
+		}
+		if found != "" {
+			p.s.log.Warn("foreground signal: two lanes name a started execution — refusing to guess",
+				"session_id", string(p.sid), "attempt", string(found), "other", string(snapshot.Attempt))
+			return "", false
+		}
+		found = snapshot.Attempt
+	}
+	return found, found != ""
+}
+
+// Interrupt writes the terminal's own interrupt byte on the USER's input
+// path — the same queue a focused Ctrl+C travels, and bounded and refused by
+// exactly what a keystroke is bounded and refused by, the bootstrap
+// quarantine included. It is deliberately NOT sess.Write, which is the
+// backend's own path PAST that quarantine
+// (internal/session/bootstrap_window.go): a byte that behaves like a
+// keystroke must be subject to what keystrokes are subject to.
+//
+// It is not ordered against input already in flight, and cannot be: this is
+// a gesture aimed at the pane by someone who may not hold the keyboard, so
+// there is no "before" or "after" to preserve (see EnqueueWrite).
+//
+// False means the queue refused it and nothing was written. True means it
+// was ACCEPTED, which is not the same as written — the channel write happens
+// later, and the caller's promise is worded for that.
+func (p sessionProtectedForeground) Interrupt(attempt lifecycle.AttemptID) bool {
+	return p.sess.EnqueueWrite([]byte{0x03})
+}
+
+// Ended reports whether that exact attempt has left `open`, waiting at most
+// the two cooperative graces the process-group ladder itself waits (after
+// INT and after TERM). It polls the backend-owned lifecycle read model and
+// never inspects terminal bytes (AD-6).
+//
+// "No longer open" is the whole claim. An attempt that has gone unknown
+// through transport loss also satisfies it, and that is deliberate: Stop's
+// promise is about the execution no longer being open when it answers, not
+// about an authenticated successful completion, which is the completion
+// fact's business and not this method's.
+func (p sessionProtectedForeground) Ended(attempt lifecycle.AttemptID, grace time.Duration) bool {
+	if grace <= 0 {
+		grace = defaultRunSignalGrace
+	}
+	timer := time.NewTimer(2 * grace)
+	defer timer.Stop()
+	ticker := time.NewTicker(50 * time.Millisecond)
+	defer ticker.Stop()
+	ended := func() bool {
+		current, ok := p.s.lifecyclePub.Attempt(attempt)
+		return !ok || current.State != lifecycle.AttemptOpen
+	}
+	for {
+		if ended() {
+			return true
+		}
+		select {
+		case <-p.ctx.Done():
+			return false
+		case <-ticker.C:
+		case <-timer.C:
+			return ended()
+		}
+	}
+}
+
+// answer runs the intent against the session and writes the result. A remote
+// session stays distinct from nothing-running: this process has no host-side
+// group to reach, while a local prompt has a protected shell group and no
+// authenticated execution. Reaching the far host remains remote-footprint
+// work. The choice between the process-group ladder and the terminal's own
+// interrupt is not made here — it belongs to the one policy in
+// foreground_signal.go, which reads it off the kernel's answer.
+func (h signalHandlers) answer(ctx context.Context, req jsonrpcRequest, sid session.ID, sess session.Session, intent string) {
+	outcome := foregroundUnsupported
 	if sess.Kind() != session.KindRemote {
 		sg, ok := sess.(runLeaseSession)
 		if !ok {
 			// A session whose channel cannot be signalled at all. Same
 			// honest answer as a remote one: this process cannot reach it.
-			outcome = "unsupported"
-		} else if intent == signalStop {
-			outcome = stopForeground(h.machine.log, sid, sg, h.machine.effectiveRunLease().SignalGrace)
+			outcome = foregroundUnsupported
 		} else {
-			outcome = interruptForeground(h.machine.log, sid, sg)
+			fb := sessionProtectedForeground{ctx: ctx, s: h.machine, sid: sid, sess: sess}
+			if intent == signalStop {
+				outcome = stopForeground(h.machine.log, sid, sg, h.machine.effectiveRunLease().SignalGrace, fb)
+			} else {
+				outcome = interruptForeground(h.machine.log, sid, sg, fb)
+			}
 		}
 	}
 	result, err := json.Marshal(signalResult{Signal: intent, Outcome: string(outcome)})
@@ -167,8 +299,9 @@ func (h signalHandlers) answer(req jsonrpcRequest, sid session.ID, sess session.
 // close could queue behind: `stop` waits out its escalation grace, and the
 // one operation that can tear a wedged session down must never wait for it.
 // The queue bounds how many signals may be in flight and runs each off the
-// read loop, which is the whole requirement — the work itself reads
-// TIOCGPGRP and calls kill(2), and mutates no session state.
+// read loop. The ordinary route reads TIOCGPGRP and calls kill(2); the guarded
+// shared-group route enqueues one terminal-input byte and may wait on the
+// backend-owned lifecycle read model, so neither may occupy the socket loop.
 func (s *WSServer) signalSpecs(lane control.Admission, sessionGate control.Admission) []methodSpec {
 	sessionOps := capability.NewSessionOperations(sessionGate, lane, s.registry, s.profileUsage)
 	sub := s.operationQueue("signal")

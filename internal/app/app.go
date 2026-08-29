@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -2154,6 +2155,72 @@ func (p *lifecyclePTY) WaitErr() (error, bool) {
 		return nil, false
 	}
 	return provider.WaitErr()
+}
+
+// SignalForeground forwards the signal to the pty this wraps, for exactly the
+// reason WaitErr above does and with a costlier consequence (nocx-7l4ex.13).
+//
+// Without it the optional-method assertion in realSession.SignalForeground
+// found nothing on an ENHANCED local session, answered pty.ErrNoForeground for
+// every signal, and session.signal told the person "nothing is running in this
+// pane" while their command plainly was — the incident nocx-92gfl.4 was filed
+// as. The shell's protected process group had nothing to do with it: nothing
+// ever asked the pty at all.
+//
+// ForegroundProcessGroup travels with it because it is the same seam asked a
+// question instead of told to act, and a wrapper that can signal a group it
+// cannot name is half-wired in the way that hides.
+func (p *lifecyclePTY) SignalForeground(sig syscall.Signal) error {
+	sg, ok := p.Pty.(interface {
+		SignalForeground(sig syscall.Signal) error
+	})
+	if !ok {
+		return pty.ErrNoForeground
+	}
+	return sg.SignalForeground(sig)
+}
+
+func (p *lifecyclePTY) ForegroundProcessGroup() (int, error) {
+	fg, ok := p.Pty.(interface{ ForegroundProcessGroup() (int, error) })
+	if !ok {
+		return 0, pty.ErrNoForeground
+	}
+	return fg.ForegroundProcessGroup()
+}
+
+// ForegroundJob and SignalProcessGroup travel with the two above for the
+// reason the comment on SignalForeground already gives, and they are here
+// because that reason was proved a second time (nocx-i5a1k's sibling).
+//
+// nocx-uvac6.11 split a stop into "name the addressee once" and "signal that
+// exact group", and a stop now ASKS ForegroundJob before it signals anything.
+// This wrapper forwarded SignalForeground and ForegroundProcessGroup and not
+// these two, so on an ENHANCED local session the optional-method assertion in
+// realSession.ForegroundJob found nothing, answered pty.ErrNoForeground, and
+// session.signal told the person "nothing is running in this pane" about a
+// full-screen program that plainly was — nocx-92gfl.4 word for word, through
+// a door that did not exist when it was closed.
+//
+// The rule this seam keeps: every method of the pty signal seam is forwarded
+// here, or none is. A wrapper that answers some of them is not degraded, it
+// is wrong, and it is wrong silently — nothing fails to compile and the
+// answer it gives is a plausible one.
+func (p *lifecyclePTY) ForegroundJob() (int, error) {
+	fg, ok := p.Pty.(interface{ ForegroundJob() (int, error) })
+	if !ok {
+		return 0, pty.ErrNoForeground
+	}
+	return fg.ForegroundJob()
+}
+
+func (p *lifecyclePTY) SignalProcessGroup(pgid int, sig syscall.Signal) error {
+	sg, ok := p.Pty.(interface {
+		SignalProcessGroup(pgid int, sig syscall.Signal) error
+	})
+	if !ok {
+		return pty.ErrNoForeground
+	}
+	return sg.SignalProcessGroup(pgid, sig)
 }
 
 func (p *lifecyclePTY) Close() error {

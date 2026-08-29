@@ -3012,6 +3012,32 @@ describe('no finished block renders an ask control (nocx-4wtlh)', () => {
   })
 })
 
+it('closes every body-level overflow menu when its pane is hidden', () => {
+  const inner = document.createElement('div')
+  const xtermContainer = document.createElement('div')
+  inner.appendChild(xtermContainer)
+  document.body.appendChild(inner)
+  const manager = new BlockManager(inner, xtermContainer, { snapshotStore: freshStore() })
+  try {
+    manager.startBlock('ls', '~', 0)
+    const frozen = manager.freezeBlock((y) => (y === 0 ? new BufferLine('out') : undefined), 0, 0)
+    expect(frozen).not.toBeNull()
+    const button = frozen!.el.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!
+
+    button.click()
+    expect(document.querySelector('.cmd-overflow-menu')).not.toBeNull()
+
+    manager.closeOverflowMenus()
+
+    expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+    button.click()
+    expect(document.querySelector('.cmd-overflow-menu')).not.toBeNull()
+  } finally {
+    manager.closeOverflowMenus()
+    inner.remove()
+  }
+})
+
 it('blockCommandText reads the header, and the recorded command when the ack landed', () => {
   const container = document.createElement('div')
   const el = createCommandBlock(
@@ -3493,6 +3519,51 @@ describe('the block grant menu action', () => {
     try {
       const grant = menuItems(el).find((item) => item.dataset.action === 'grant')
       expect(grant?.textContent).toBe('Unmark')
+    } finally {
+      el.remove()
+    }
+  })
+
+  it('omits the grant action when the active target cannot consume grants', () => {
+    const container = document.createElement('div')
+    let available = false
+    const grantsAvailable = vi.fn(() => available)
+    const el = createCommandBlock(
+      'command',
+      30,
+      'pwd',
+      '~',
+      '',
+      '<span class="term-line">/tmp</span>',
+      120,
+      0,
+      'success',
+      () => container,
+      noopSelect,
+      freshStore(),
+      'shell',
+      undefined,
+      {
+        stop: vi.fn(),
+        isActive: vi.fn(),
+        isGranted: () => true,
+        grantsAvailable,
+        toggleGrant: vi.fn(),
+      },
+    )
+    document.body.append(el)
+    try {
+      const unavailableItems = menuItems(el)
+      expect(unavailableItems.find((item) => item.dataset.action === 'grant')).toBeUndefined()
+      expect(unavailableItems.map((item) => item.textContent)).toContain('Copy command')
+      expect(grantsAvailable).toHaveBeenLastCalledWith()
+
+      el.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      available = true
+      const availableItems = menuItems(el)
+      expect(availableItems.find((item) => item.dataset.action === 'grant')?.textContent).toBe(
+        'Unmark',
+      )
     } finally {
       el.remove()
     }

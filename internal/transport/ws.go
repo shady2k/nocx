@@ -2836,8 +2836,10 @@ func (s *WSServer) handleDataFrame(state *connState, data []byte) {
 		// feeding EVERY session on this connection — so one dead tab
 		// froze all of them (nocx-o2le). EnqueueWrite puts the frame on
 		// a bounded per-session queue and returns immediately; the
-		// readLoop is its sole sender, which is what keeps the queue in
-		// the order the user typed.
+		// readLoop is the sole sender OF USER INPUT, which is what keeps
+		// the queue in the order the user typed. (session.signal's
+		// protected-group mechanism enqueues one byte here too and is
+		// deliberately unordered against this — see EnqueueWrite.)
 		//
 		// A full queue means the channel has stopped accepting bytes.
 		// The frame is dropped — and the tab is TOLD, because input

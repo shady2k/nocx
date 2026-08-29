@@ -6515,7 +6515,8 @@ func TestSessionSignal_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "session.signal.schema.json")
 	for _, sig := range []string{signalInterrupt, signalStop} {
 		for _, outcome := range []string{
-			string(foregroundDelivered), string(foregroundNothingRunning), "unsupported",
+			string(foregroundDelivered), string(foregroundNothingRunning),
+			string(foregroundUnsupported), string(foregroundUnreconciled),
 		} {
 			raw, err := json.Marshal(signalResult{Signal: sig, Outcome: outcome})
 			if err != nil {

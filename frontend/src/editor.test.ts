@@ -41,7 +41,10 @@ const setup = (actions: Partial<EditorActions> = {}, extensions: Extension[] = [
   document.body.appendChild(container)
   const order: string[] = []
   const submit = vi.fn((doc: string) => order.push(`submit:${doc}`))
-  const cancel = vi.fn(() => order.push('cancel'))
+  const cancel = vi.fn(() => {
+    order.push('cancel')
+    return true
+  })
   const ed = new CommandEditor({ submit, cancel, ...actions }, extensions)
   ed.mount(container)
   const view = viewOf(ed)
@@ -172,6 +175,18 @@ describe('CommandEditor', () => {
     ed.insertText('fresh')
     enter(view)
     expect(submit).toHaveBeenLastCalledWith('fresh')
+  })
+
+  it('Ctrl-C preserves the draft when the host owns an active execution', () => {
+    const cancel = vi.fn(() => false)
+    const { ed, view } = setup({ cancel })
+    ed.show()
+    ed.insertText('half-typed question')
+
+    ctrlC(view)
+
+    expect(cancel).toHaveBeenCalledTimes(1)
+    expect(ed.getDoc()).toBe('half-typed question')
   })
 
   it('Ctrl-C with a selection is left alone so copy still works', () => {

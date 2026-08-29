@@ -3,6 +3,7 @@ package pty
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"os"
 
@@ -15,6 +16,26 @@ import (
 // lease's escalation treats it as "nothing running to cancel" — never an
 // error worth failing the terminalization for.
 var ErrNoForeground = errors.New("pty: no foreground process to signal")
+
+// ErrProtectedForeground is the SPECIFIC half of ErrNoForeground: the
+// foreground process group is the launcher shell's own, so this seam refuses
+// to signal it — the shell is not part of the job it is waiting on.
+//
+// It wraps ErrNoForeground rather than replacing it because "there is
+// nothing here to cancel" remains true and is what the run lease still reads
+// (internal/transport/run_lease.go). What it adds is the fact a caller
+// deciding on a FALLBACK needs and could not previously ask for: a program
+// may be running inside that protected group. Job control off — `set +m`,
+// which ADR-0024 already names — puts a foreground command in the shell's
+// own group, and so does `exec`; the kernel's answer is then identical to
+// the one it gives at an idle prompt (nocx-7l4ex.10). Distinguishing the two
+// is the lifecycle's job, never the byte stream's (AD-6).
+//
+// The two states it must NOT be confused with, and both are why the guard
+// branch is the only place this may be returned: an ESRCH from kill(2) means
+// the group is gone, and any other kill failure means the signal did not
+// arrive and nothing may claim otherwise.
+var ErrProtectedForeground = fmt.Errorf("%w: the foreground group is the launcher shell's own", ErrNoForeground)
 
 type Pty interface {
 	io.ReadWriteCloser

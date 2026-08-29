@@ -101,7 +101,40 @@ func dialKillable(t *testing.T, conn *killableConn) *client.Client {
 	if err != nil {
 		t.Fatalf("helper dial: %v", err)
 	}
-	t.Cleanup(func() { _ = c.Close() })
+	// Closing the client is not enough: it ends the CLIENT's half, and these
+	// tests exist because the helper's half is still working when it does.
+	// `Commit` returns the moment the transport dies, while the git the peer
+	// spawned is mid-write inside the fixture repo's .git — so the test
+	// returned, t.TempDir's RemoveAll walked that directory, and files
+	// appeared under it between the readdir and the rmdir:
+	//
+	//     TempDir RemoveAll cleanup: unlinkat .../002/.git: directory not empty
+	//
+	// which is a FAILING test whose every assertion passed. It only shows up
+	// where cleanup outruns the peer, so it was green here and red on CI.
+	//
+	// `exited` is the observable that closes the gap — never a sleep, the
+	// repo's rule. The host serves frames synchronously inside Serve's read
+	// loop (internal/helper/host/host.go), so the commit runs ON that
+	// goroutine and Serve cannot reach its next Read until git is done.
+	// Closing the client closes the peer's stdin, that Read then sees EOF,
+	// Serve returns and `exited` closes — by which point nothing is writing
+	// into the repository any more.
+	//
+	// It is registered here rather than in the test bodies so no future test
+	// on a killable conn can forget it, and it runs BEFORE every t.TempDir
+	// cleanup in these tests: those directories are made in fixtureRepo and
+	// the test body, both earlier, and cleanups run last-registered-first.
+	t.Cleanup(func() {
+		_ = c.Close()
+		select {
+		case <-conn.exited:
+		case <-time.After(30 * time.Second):
+			// The deadline bounds the failure case only; the wait itself is
+			// on the observable.
+			t.Error("the helper peer never exited — a commit may still be writing into the fixture repo")
+		}
+	})
 	return c
 }
 

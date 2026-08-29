@@ -341,8 +341,24 @@ test.describe('vault secrets in Auth and header fields with no environment', () 
     await expect(authToken).toHaveValue(/^\{\{secret:secrow:[^}]+\}\}$/)
     await expect(fieldChip(authToken)).toHaveText(proposedAuthName)
 
+    // The second send needs its OWN run as the subject, and until this waited
+    // for one it did not have it. The list is newest-first (api-store.ts
+    // prepends: `[{new}, ...prev]`), so when no new run appears `.first()` is
+    // the PREVIOUS run — which is already `answered` with a 200. Both waits
+    // below were therefore satisfiable by the first send, and a second send
+    // that never started read as success all the way down to
+    // `server.headerValues()`: one recorded request against two expected,
+    // reported against the server rather than against the click that did not
+    // land (nocx-dqgik).
+    //
+    // Waiting on the COUNT is what makes the new row the subject. The first
+    // send needs no such guard — there is no earlier run for `.first()` to
+    // match, so its wait cannot be satisfied by anything but its own.
+    const runs = workbench.locator('.api-run')
+    await expect(runs).toHaveCount(1)
     await workbench.getByRole('button', { name: 'Send', exact: true }).click()
-    const authRun = workbench.locator('.api-run').first()
+    await expect(runs).toHaveCount(2, { timeout: 20_000 })
+    const authRun = runs.first()
     await expect(authRun).toHaveAttribute('data-outcome', 'answered', { timeout: 20_000 })
     await expect(authRun.locator('.api-run__stats')).toContainText('HTTP status 200')
 

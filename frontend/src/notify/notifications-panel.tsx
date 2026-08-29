@@ -43,7 +43,7 @@ import { RecordRow } from '../ui/record-row'
 import { Select } from '../ui/select'
 import type { BadgeTone } from '../ui/badge'
 import type { FeedStore } from './feed-store'
-import type { NotifyCatalogue } from '../generated/notify.catalogue'
+import type { Kind, NotifyCatalogue } from '../generated/notify.catalogue'
 import type { NotifyFeedRead } from '../generated/notify.feed.read'
 
 type Occurrence = NotifyFeedRead['occurrences'][number]
@@ -75,7 +75,7 @@ function formatWhen(at: string): string {
 }
 
 /** Human-readable fallback used until the backend catalogue is available. */
-export function fallbackKindLabel(kind: string): string {
+function fallbackKindLabel(kind: string): string {
   const words = kind
     .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
     .replace(/\./g, ' ')
@@ -127,15 +127,22 @@ interface Axis {
 
 const UNAVAILABLE_SESSION = '\u0000unavailable'
 
-export function kindLabel(kind: string, catalogue: NotifyCatalogue | null | undefined): string {
-  return catalogue?.kinds.find((entry) => entry.kind === kind)?.label ?? fallbackKindLabel(kind)
+function catalogueKind(
+  kind: string,
+  catalogue: NotifyCatalogue | null | undefined,
+): Kind | undefined {
+  return catalogue?.kinds.find((entry) => entry.kind === kind)
 }
 
-export function kindDescription(
+function kindLabel(kind: string, catalogue: NotifyCatalogue | null | undefined): string {
+  return catalogueKind(kind, catalogue)?.label ?? fallbackKindLabel(kind)
+}
+
+function kindDescription(
   kind: string,
   catalogue: NotifyCatalogue | null | undefined,
 ): string | undefined {
-  return catalogue?.kinds.find((entry) => entry.kind === kind)?.description
+  return catalogueKind(kind, catalogue)?.description
 }
 
 type Picked = Record<Axis['id'], string>

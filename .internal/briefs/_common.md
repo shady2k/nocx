@@ -30,10 +30,14 @@ not paraphrase them into prose.
 
 - Go: `go build ./...` and `go test ./internal/<your package>/...` — nothing wider.
   Note that `go build` does NOT compile `_test.go`; `go vet ./internal/<pkg>/...` does.
-- TypeScript: **`cd frontend && ./node_modules/.bin/tsc --noEmit -p tsconfig.json`**.
+- TypeScript, **BOTH projects**:
+  `cd frontend && ./node_modules/.bin/tsc --noEmit -p tsconfig.json && ./node_modules/.bin/tsc --noEmit -p tsconfig.test.json`.
   That exact binary — `npx tsc` can fail to resolve in a fresh worktree. This is not a
   repo-wide gate and you may not skip it: vitest transpiles and strips types, so your
-  tests can pass while your files do not compile.
+  tests can pass while your files do not compile. The second project is the one that
+  catches a fixture your change made stale — a test building an object the type now
+  requires another field on — and it is the one a worker who ran only the first has
+  never seen. `npm run typecheck` runs both.
 - TypeScript tests, scoped: `cd frontend && ./node_modules/.bin/vitest run <your files>`.
 - If `frontend/node_modules` is missing, run `cd frontend && npm ci` once.
 

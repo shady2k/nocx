@@ -299,14 +299,16 @@ describe('sidebar', () => {
     const ctrl = createSidebarWidthController(panel, 240, persist)
     mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION], undefined, undefined, undefined, ctrl)
 
+    // The panel sits at the window's trailing edge, so its handle is on the
+    // LEFT and dragging LEFT is what widens it (nocx-crjft).
     const sep = panel.querySelector('[role="separator"]') as HTMLElement
-    fireEvent.pointerDown(sep, { clientX: 100, pointerId: 1 })
+    fireEvent.pointerDown(sep, { clientX: 200, pointerId: 1 })
     expect(ctrl.isDragging()).toBe(true)
-    fireEvent.pointerMove(sep, { clientX: 200, pointerId: 1 })
+    fireEvent.pointerMove(sep, { clientX: 100, pointerId: 1 })
     expect(panel.style.getPropertyValue('--sidebar-width')).toBe('340px')
     expect(persist).not.toHaveBeenCalled() // still dragging
 
-    fireEvent.pointerUp(sep, { clientX: 200, pointerId: 1 })
+    fireEvent.pointerUp(sep, { clientX: 100, pointerId: 1 })
     expect(ctrl.isDragging()).toBe(false)
     expect(persist).toHaveBeenCalledWith(340)
   })
@@ -317,11 +319,14 @@ describe('sidebar', () => {
     const ctrl = createSidebarWidthController(panel, 636, persist)
     mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION], undefined, undefined, undefined, ctrl)
 
+    // ArrowLeft moves the separator left, which on this side is the growing
+    // direction — the ceiling is what it runs into. The key's physical
+    // direction did not change; which side the panel is on did (nocx-crjft).
     const sep = panel.querySelector('[role="separator"]') as HTMLElement
-    fireEvent.keyDown(sep, { key: 'ArrowRight' })
+    fireEvent.keyDown(sep, { key: 'ArrowLeft' })
     expect(panel.style.getPropertyValue('--sidebar-width')).toBe('640px')
     expect(persist).toHaveBeenLastCalledWith(640)
-    fireEvent.keyDown(sep, { key: 'ArrowRight' }) // already at the ceiling
+    fireEvent.keyDown(sep, { key: 'ArrowLeft' }) // already at the ceiling
     expect(persist).toHaveBeenCalledTimes(1)
     fireEvent.keyDown(sep, { key: 'Home' })
     expect(panel.style.getPropertyValue('--sidebar-width')).toBe('200px')
@@ -395,6 +400,38 @@ describe('sidebar — a view’s icon carries its status', () => {
     )
     expect(viewBtn(bar, 'beta').getAttribute('aria-label')).toBe('Beta — 2 running')
     expect(viewBtn(bar, 'alpha').getAttribute('aria-label')).toBe('Alpha')
+  })
+  it('shows 99+ in the badge while the accessible name keeps the full count', () => {
+    const { bar, panel } = mount()
+    mountSidebar(
+      bar,
+      panel,
+      withStatus(() => ({ count: 137, progress: null })),
+      [SETTINGS_ACTION],
+    )
+
+    // This is the second view, not a Notifications-specific path: every view
+    // gets the activity-bar count treatment.
+    expect(badge(bar, 'beta')?.textContent).toBe('99+')
+    expect(badge(bar, 'beta')?.querySelector('.ui-badge')?.getAttribute('data-variant')).toBe(
+      'solid',
+    )
+    expect(viewBtn(bar, 'beta').getAttribute('aria-label')).toBe('Beta — 137 running')
+  })
+
+  it('keeps 99 visible and clamps 100 at the activity-bar boundary', () => {
+    const { bar, panel } = mount()
+    const [count, setCount] = createSignal(99)
+    mountSidebar(
+      bar,
+      panel,
+      withStatus(() => ({ count: count(), progress: null })),
+      [SETTINGS_ACTION],
+    )
+
+    expect(badge(bar, 'beta')?.textContent).toBe('99')
+    setCount(100)
+    expect(badge(bar, 'beta')?.textContent).toBe('99+')
   })
 
   it('says what the count is ABOUT, so a bell does not report unread as running', () => {
@@ -753,6 +790,20 @@ describe('the activity bar reads as two zones without a rule between them', () =
     expect(CSS).toMatch(/\.activity-bar-spacer\s*\{[^}]*flex:\s*1 1 auto/)
     expect(CSS).toMatch(/\.activity-bar\s*\{[^}]*flex-direction:\s*column/)
     expect(CSS).toMatch(/\.activity-bar\s*\{[^}]*height:\s*100%/)
+  })
+
+  it('declares the rail background for a solid badge ring without repainting the kit', () => {
+    expect(CSS).toMatch(
+      /\.activity-bar-badge\s*\{[^}]*--badge-ring-color:\s*var\(--color-chrome-rail\)/s,
+    )
+
+    for (const match of CSS.matchAll(/([^{}]+)\{([^{}]*)\}/gs)) {
+      if (/\bui-[\w-]+/.test(match[1])) {
+        expect(match[2]).not.toMatch(
+          /\b(?:background|border(?:-[\w-]+)?|color|box-shadow|font(?:-[\w-]+)?)\s*:/,
+        )
+      }
+    }
   })
 
   it('and they are still two groups a screen reader can tell apart', () => {

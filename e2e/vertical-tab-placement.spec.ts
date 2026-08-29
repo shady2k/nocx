@@ -39,36 +39,43 @@ test.describe('vertical tab placement', () => {
     await switchPlacement(page, 'horizontal')
   })
 
-  test('vertical tab strip sits between the activity bar and the panes (nocx-82l9.3)', async ({
+  test('the activity bar keeps the trailing edge in both placements (nocx-crjft)', async ({
     page,
   }) => {
-    await switchPlacement(page, 'vertical')
+    // The invariant, asserted where a user could see it broken: whatever the
+    // tab placement, the rail is the last thing across the window and the
+    // panes come before it. Checked in BOTH placements because the whole
+    // point of the move is that the shell does NOT rearrange itself when the
+    // placement changes — an assertion in one placement would pass for a
+    // shell that swaps sides in the other.
+    //
+    // It replaces "the strip sits between the activity bar and the panes",
+    // which pinned the arrangement this bead reverses: the rail had the
+    // leading edge on the argument that it is app-level chrome, and three of
+    // the six panel views render for whatever tab is in front, so the panel
+    // sat upstream of the thing that selects the tab.
+    for (const placement of ['vertical', 'horizontal'] as const) {
+      await switchPlacement(page, placement)
 
-    // The strip lists the panes, so it belongs beside them — right of the
-    // activity bar, which is app-level chrome and keeps the window edge, and
-    // left of the panes it lists. It was a sibling of #body and therefore the
-    // leftmost thing in the window, pushing the activity bar inward.
-    const firstPane = page.locator('.nocx-tab').first()
-    const activityBar = page.locator('#activitybar')
-    const panes = page.locator('#panes')
+      const barBox = await page.locator('#activitybar').boundingBox()
+      const panesBox = await page.locator('#panes').boundingBox()
+      expect(barBox, placement).not.toBeNull()
+      expect(panesBox, placement).not.toBeNull()
 
-    await expect(firstPane).toBeVisible()
-    const paneBox = await firstPane.boundingBox()
-    const barBox = await activityBar.boundingBox()
-    const panesBox = await panes.boundingBox()
+      // The rail is past the panes...
+      expect(barBox!.x, placement).toBeGreaterThanOrEqual(panesBox!.x + panesBox!.width - 1)
+      // ...and the panes still have room (not collapsed by a misplaced strip).
+      expect(panesBox!.width, placement).toBeGreaterThan(0)
 
-    expect(paneBox).not.toBeNull()
-    expect(barBox).not.toBeNull()
-    expect(panesBox).not.toBeNull()
-
-    // Right of the activity bar...
-    expect(paneBox!.x).toBeGreaterThanOrEqual(barBox!.x + barBox!.width)
-    // ...and left of the panes.
-    expect(paneBox!.x + paneBox!.width).toBeLessThanOrEqual(panesBox!.x + 1)
-    // Below the drag bar (not at y=0 inside #tabbar).
-    expect(paneBox!.y).toBeGreaterThanOrEqual(30)
-    // #panes must keep non-zero width (not collapsed by a misplaced strip).
-    expect(panesBox!.width).toBeGreaterThan(0)
+      if (placement === 'vertical') {
+        // The strip lists the panes and now owns the leading edge.
+        const stripBox = await page.locator('#vertical-tabstrip').boundingBox()
+        expect(stripBox, placement).not.toBeNull()
+        expect(stripBox!.x + stripBox!.width, placement).toBeLessThanOrEqual(panesBox!.x + 1)
+        // Below the drag bar (not at y=0 inside #tabbar).
+        expect(stripBox!.y, placement).toBeGreaterThanOrEqual(30)
+      }
+    }
   })
 
   test('the strip actions sit above the tab list, together (nocx-82l9.3)', async ({ page }) => {

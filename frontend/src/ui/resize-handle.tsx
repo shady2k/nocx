@@ -40,8 +40,10 @@ export interface ResizeHandleProps {
    * vertical line between a left pane and a right one: the drag reads
    * clientX, and ArrowRight/ArrowLeft step it. `horizontal` is a horizontal
    * line between a top pane and a bottom one: the drag reads clientY, and
-   * ArrowDown/ArrowUp step it — DOWN grows, because what the value measures
-   * is the pane above.
+   * ArrowDown/ArrowUp step it — DOWN grows for the pane above it.
+   *
+   * WHICH of the two panes the value measures is `pane` below, not this: the
+   * axis and the side are independent, and this prop only picks the axis.
    *
    * A variant rather than a second component, because everything else about
    * a resize edge — the capture, the clamping, the commit-once rule, the
@@ -49,6 +51,28 @@ export interface ResizeHandleProps {
    * owners of one behaviour.
    */
   orientation?: 'vertical' | 'horizontal'
+  /**
+   * Which side of the separator the pane it MEASURES is on — `'before'`
+   * (the default, and every caller until the sidebar moved to the window's
+   * trailing edge) or `'after'`.
+   *
+   * It decides the mapping from a gesture to a width, and only for the
+   * gestures that MOVE THE SEPARATOR: the pointer, and the two arrow keys on
+   * this handle's own axis. Those invert. The two off-axis arrows move
+   * nothing on screen — on a vertical separator they are APG's plain "Up and
+   * Right increase" — so they keep meaning increase and decrease on both
+   * sides, and `Home`/`End` are absolute on both.
+   *
+   * The physical direction of a key never changes: with `'after'`,
+   * ArrowRight still moves the separator right, which is why it now SHRINKS
+   * the pane and `aria-valuenow` goes down. That is the WAI-ARIA
+   * window-splitter pattern — the arrow moves the splitter, the value
+   * describes the pane being controlled.
+   *
+   * A variant rather than a second component, for the same reason as
+   * `orientation` above.
+   */
+  pane?: 'before' | 'after'
   /** The settled value between interactions (px). */
   value: number
   /** Hard floor — a drag or a step can never produce less. */
@@ -120,9 +144,15 @@ export function ResizeHandle(props: ResizeHandleProps) {
   const positionOf = (e: PointerEvent): number =>
     props.orientation === 'horizontal' ? e.clientY : e.clientX
 
+  /** +1 when the measured pane is BEFORE the separator — moving the
+   *  separator away from it grows it — and -1 when it is after. The one
+   *  place `pane` reaches the arithmetic, exactly as `positionOf` is the one
+   *  place `orientation` reaches it; everything else is side-blind. */
+  const sign = (): number => (props.pane === 'after' ? -1 : 1)
+
   const endDrag = (position: number): void => {
     if (!dragging()) return
-    const final = clamp(startValue + (position - startPos))
+    const final = clamp(startValue + sign() * (position - startPos))
     // The release itself can move the pointer past the last reported point,
     // so recompute from the FINAL event's position; a no-op here means the
     // last move already reported it, and the commit below still fires once.
@@ -161,7 +191,7 @@ export function ResizeHandle(props: ResizeHandleProps) {
 
   const onPointerMove = (e: PointerEvent): void => {
     if (!dragging()) return
-    report(startValue + (positionOf(e) - startPos), false)
+    report(startValue + sign() * (positionOf(e) - startPos), false)
   }
 
   const onPointerUp = (e: PointerEvent): void => endDrag(positionOf(e))
@@ -172,22 +202,30 @@ export function ResizeHandle(props: ResizeHandleProps) {
     let next: number | null = null
     switch (e.key) {
       // The growing key is the one that points AWAY from the pane being
-      // measured: right for a left pane, down for a top one. A horizontal
-      // edge deliberately does not answer Left/Right at all — a key that
-      // moves nothing is better than a key that moves the wrong edge.
+      // measured: right for a left pane, down for a top one — and the mirror
+      // of each when `pane` says the measured pane is on the other side,
+      // which is what `sign()` carries. A horizontal edge deliberately does
+      // not answer Left/Right at all — a key that moves nothing is better
+      // than a key that moves the wrong edge.
+      //
+      // `sign()` appears only on the ON-AXIS keys of each orientation, and
+      // that is the whole rule: those are the ones that move the separator
+      // on screen, so which side the pane is on decides what they do to it.
+      // The off-axis pair moves nothing, is APG's plain increase/decrease,
+      // and therefore means the same thing on both sides.
       case 'ArrowRight':
         if (horizontal) return
-        next = live + step
+        next = live + sign() * step
         break
       case 'ArrowLeft':
         if (horizontal) return
-        next = live - step
+        next = live - sign() * step
         break
       case 'ArrowDown':
-        next = horizontal ? live + step : live - step
+        next = horizontal ? live + sign() * step : live - step
         break
       case 'ArrowUp':
-        next = horizontal ? live - step : live + step
+        next = horizontal ? live - sign() * step : live + step
         break
       case 'Home':
         next = props.min

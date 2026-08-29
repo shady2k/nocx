@@ -198,7 +198,8 @@ interface PanelRootProps {
   getActiveProfileId: () => string | null
   getActiveOrigin: () => ActiveOrigin | null
   /** The width controller (nocx-qmcu) — when present the panel renders the
-   *  kit ResizeHandle at its trailing edge and the drag resizes #sidebar. */
+   *  kit ResizeHandle at its LEADING edge, facing the panes, and the drag
+   *  resizes #sidebar (nocx-crjft). */
   resize?: SidebarWidthController
 }
 
@@ -220,18 +221,17 @@ function PanelRoot(props: PanelRootProps) {
 
   return (
     <Show when={activeDesc()}>
-      <ActiveView
-        desc={activeDesc()!}
-        collapsed={() => props.state.sidebar.collapsed}
-        getActiveProfileId={props.getActiveProfileId}
-        getActiveOrigin={props.getActiveOrigin}
-      />
-      {/* The handle is the flex row's trailing slot (see #sidebar in
+      {/* The handle is the flex row's LEADING slot (see #sidebar in
           style.css): a real flex item, never an overlay, so it can neither
-          cover the view's scrollbar nor be covered by it. */}
+          cover the view's scrollbar nor be covered by it. First in the DOM
+          because it is first on screen — the panel sits at the window's
+          trailing edge, so the edge a user drags is its left one, and
+          `pane="after"` is what tells the kit component that the width it
+          reports belongs to the pane on the far side of it. */}
       <Show when={props.resize}>
         <ResizeHandle
           ariaLabel="Resize sidebar"
+          pane="after"
           value={width()}
           min={SIDEBAR_WIDTH_MIN}
           max={SIDEBAR_WIDTH_MAX}
@@ -241,6 +241,12 @@ function PanelRoot(props: PanelRootProps) {
           onDragStateChange={(dragging) => props.resize!.setDragging(dragging)}
         />
       </Show>
+      <ActiveView
+        desc={activeDesc()!}
+        collapsed={() => props.state.sidebar.collapsed}
+        getActiveProfileId={props.getActiveProfileId}
+        getActiveOrigin={props.getActiveOrigin}
+      />
     </Show>
   )
 }
@@ -342,9 +348,15 @@ function SidebarSolid(props: SidebarSolidProps) {
   })
 
   // ── Settings-tab transient collapse (nocx-3e3b) ─────────────────────
-  // Every sidebar view speaks for the machine a terminal tab is on; a
-  // Settings tab is not a place, so arriving on one collapses the panel and
-  // the width goes to the settings content. The collapse is a consequence of
+  // The panel's tab-scoped views — Files, Ports and Git — speak for the
+  // machine a terminal tab is on; a Settings tab is not a place, so arriving
+  // on one collapses the panel and the width goes to the settings content.
+  // This used to open "Every sidebar view speaks for...", which is false:
+  // Notes, Operations and Notifications are window-scoped. They have nothing
+  // to say about a Settings tab either, so the collapse is right for the
+  // whole panel and not only for the half that reads activeOrigin — but the
+  // reason is that none of the six has anything to add there, not that they
+  // all follow the front tab (nocx-crjft). The collapse is a consequence of
   // where the user is, NEVER an edit to their preference: the pre-Settings
   // collapsed state is snapshotted on arrival and restored on departure, and
   // the collapsed-preference write below stands down while the collapse is
@@ -509,7 +521,9 @@ function SidebarSolid(props: SidebarSolidProps) {
                     target. */}
                 <Show when={count() > 0}>
                   <span class="activity-bar-badge" data-view-badge={view.id}>
-                    <Badge tone="info">{String(count())}</Badge>
+                    <Badge tone="info" variant="solid">
+                      {count() > 99 ? '99+' : String(count())}
+                    </Badge>
                   </span>
                 </Show>
                 {/* The guard is on PRESENCE and not on truthiness: zero is a

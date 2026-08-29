@@ -20,7 +20,9 @@ type fakeVaultLifecycle struct {
 	snap                  vault.Snapshot
 	setupErr              error
 	setupResult           vault.SetupResult
+	setupCalled           bool
 	unsealErr             error
+	unsealCalled          bool
 	sealCalled            bool
 	changePassphraseErr   error
 	regenerateErr         error
@@ -50,6 +52,7 @@ func (f *fakeVaultLifecycle) State() vault.State { return f.state }
 func (f *fakeVaultLifecycle) Snapshot(_ context.Context) vault.Snapshot { return f.snap }
 
 func (f *fakeVaultLifecycle) Setup(_ context.Context, _ vault.SetupRequest) (vault.SetupResult, error) {
+	f.setupCalled = true
 	if f.setupErr != nil {
 		return vault.SetupResult{}, f.setupErr
 	}
@@ -57,6 +60,7 @@ func (f *fakeVaultLifecycle) Setup(_ context.Context, _ vault.SetupRequest) (vau
 }
 
 func (f *fakeVaultLifecycle) Unseal(_ context.Context, _ vault.UnsealRequest) error {
+	f.unsealCalled = true
 	return f.unsealErr
 }
 
@@ -137,9 +141,7 @@ func newFakeVaultLifecycle() *fakeVaultLifecycle {
 	return &fakeVaultLifecycle{
 		state: vault.StateUnsealed,
 		snap: vault.Snapshot{
-			State:        vault.StateUnsealed,
-			HasOSKey:     true,
-			OSKeyCapable: true,
+			State: vault.StateUnsealed,
 			Providers: []vault.ProviderSnapshot{
 				{ID: "system", Writable: true, Ready: true},
 				{ID: "file", Writable: true, Ready: true},
@@ -221,21 +223,13 @@ func TestVaultRPC_Status_EmptyParams(t *testing.T) {
 		t.Fatal("expected result, got nil")
 	}
 	var status struct {
-		State          string `json:"state"`
-		OSKeyAvailable bool   `json:"osKeyAvailable"`
-		OSKeyCapable   bool   `json:"osKeyCapable"`
+		State string `json:"state"`
 	}
 	if err := json.Unmarshal(resp.Result, &status); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
 	}
 	if status.State != "unsealed" {
 		t.Errorf("state = %q, want %q", status.State, "unsealed")
-	}
-	if !status.OSKeyAvailable {
-		t.Error("osKeyAvailable = false, want true")
-	}
-	if !status.OSKeyCapable {
-		t.Error("osKeyCapable = false, want true")
 	}
 }
 
@@ -262,9 +256,7 @@ func TestVaultRPC_Status_NoLocators(t *testing.T) {
 func TestVaultRPC_Status_ProviderReason(t *testing.T) {
 	fake := newFakeVaultLifecycle()
 	fake.snap = vault.Snapshot{
-		State:        vault.StateUnsealed,
-		HasOSKey:     true,
-		OSKeyCapable: true,
+		State: vault.StateUnsealed,
 		Providers: []vault.ProviderSnapshot{
 			{ID: "system", Writable: true, Ready: true},
 			{ID: "file", Writable: true, Ready: false, Reason: vault.ReasonLocked},
@@ -307,13 +299,58 @@ func TestVaultRPC_Status_ProviderReason(t *testing.T) {
 
 // ── vault.setup ───────────────────────────────────────────────────────
 
-func TestVaultRPC_Setup_EmptyParams(t *testing.T) {
+// `{}` used to be the silent setup's whole request, and it answered with a
+// vault. It is now a request for a mode that does not exist, and the refusal
+// happens in the validator — before the vault is reached at all.
+func TestVaultRPC_Setup_EmptyParamsRefused(t *testing.T) {
 	fake := newFakeVaultLifecycle()
 	ws, stop := newVaultWSServer(t, fake)
 	defer stop()
 
 	conn := connectWS(t, ws)
 	resp := vaultCall(t, conn, "vault.setup", map[string]any{}, 1)
+
+	if resp.Error == nil {
+		t.Fatalf("vault.setup with no passphrase must be refused, got result %s", resp.Result)
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("code = %d, want -32602", resp.Error.Code)
+	}
+	if fake.setupCalled {
+		t.Error("the refusal must not reach the vault")
+	}
+}
+
+// EMPTINESS, not blankness: an explicit empty string is the same request and
+// gets the same answer, and a passphrase of spaces is somebody's passphrase.
+func TestVaultRPC_Setup_ExplicitEmptyPassphraseRefused(t *testing.T) {
+	fake := newFakeVaultLifecycle()
+	ws, stop := newVaultWSServer(t, fake)
+	defer stop()
+
+	conn := connectWS(t, ws)
+	resp := vaultCall(t, conn, "vault.setup", map[string]any{"passphrase": ""}, 1)
+
+	if resp.Error == nil {
+		t.Fatalf("vault.setup with an empty passphrase must be refused, got result %s", resp.Result)
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("code = %d, want -32602", resp.Error.Code)
+	}
+	if fake.setupCalled {
+		t.Error("the refusal must not reach the vault")
+	}
+}
+
+// And the paired "and on a normal machine it succeeds": a setup that carries
+// a passphrase reaches the vault and its recovery code reaches the caller.
+func TestVaultRPC_Setup_WithPassphraseReturnsRecoveryCode(t *testing.T) {
+	fake := newFakeVaultLifecycle()
+	ws, stop := newVaultWSServer(t, fake)
+	defer stop()
+
+	conn := connectWS(t, ws)
+	resp := vaultCall(t, conn, "vault.setup", map[string]any{"passphrase": "hunter2"}, 1)
 
 	if resp.Error != nil {
 		t.Fatalf("unexpected error: %+v", resp.Error)
@@ -357,25 +394,23 @@ func TestVaultRPC_Setup_Failure(t *testing.T) {
 	}
 }
 
-func TestVaultRPC_Setup_Silent(t *testing.T) {
+// The wire's maximum is enforced on the passphrase and it is not the vault's
+// job: a 64k-rune passphrase is refused before it becomes an argon2id
+// derivation somebody has to wait for.
+func TestVaultRPC_Setup_OverlongPassphraseRefused(t *testing.T) {
 	fake := newFakeVaultLifecycle()
-	fake.setupResult = vault.SetupResult{} // silent: no recovery code
-	fake.setupErr = nil
 	ws, stop := newVaultWSServer(t, fake)
 	defer stop()
 
 	conn := connectWS(t, ws)
-	resp := vaultCall(t, conn, "vault.setup", map[string]any{}, 1)
+	resp := vaultCall(t, conn, "vault.setup",
+		map[string]any{"passphrase": strings.Repeat("a", maxSecretMaterialRunes+1)}, 1)
 
-	if resp.Error != nil {
-		t.Fatalf("unexpected error: %+v", resp.Error)
+	if resp.Error == nil {
+		t.Fatal("an over-long passphrase must be refused")
 	}
-	var result map[string]any
-	if err := json.Unmarshal(resp.Result, &result); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	if _, ok := result["recoveryCode"]; ok {
-		t.Error("recoveryCode should be absent for silent setup")
+	if fake.setupCalled {
+		t.Error("the refusal must not reach the vault")
 	}
 }
 
@@ -457,7 +492,11 @@ func TestVaultRPC_Unseal_Failure(t *testing.T) {
 	}
 }
 
-func TestVaultRPC_Unseal_OSMeans(t *testing.T) {
+// "os" was a means and is not one. No vault holds an OS-held root key since
+// ADR-0050 step 1, so the enum that still carried it could only ever have
+// produced a refusal from deeper in — and a caller reading the contract would
+// have believed the mode existed.
+func TestVaultRPC_Unseal_OSMeansRefused(t *testing.T) {
 	fake := newFakeVaultLifecycle()
 	fake.state = vault.StateSealed
 	ws, stop := newVaultWSServer(t, fake)
@@ -466,8 +505,14 @@ func TestVaultRPC_Unseal_OSMeans(t *testing.T) {
 	conn := connectWS(t, ws)
 	resp := vaultCall(t, conn, "vault.unseal", map[string]any{"means": "os"}, 1)
 
-	if resp.Error != nil {
-		t.Fatalf("unexpected error: %+v", resp.Error)
+	if resp.Error == nil {
+		t.Fatal("means \"os\" must be refused")
+	}
+	if resp.Error.Code != -32602 {
+		t.Errorf("code = %d, want -32602", resp.Error.Code)
+	}
+	if fake.unsealCalled {
+		t.Error("the refusal must not reach the vault")
 	}
 }
 
@@ -687,8 +732,6 @@ func TestVaultRPC_Activity(t *testing.T) {
 func TestVaultRPC_Status_AutoSealFields(t *testing.T) {
 	snap := vault.Snapshot{
 		State:           vault.StateUnsealed,
-		HasOSKey:        false,
-		OSKeyCapable:    true,
 		HasPassphrase:   true,
 		AutoSealMinutes: 15,
 		Providers: []vault.ProviderSnapshot{
@@ -710,8 +753,6 @@ func TestVaultRPC_Status_AutoSealFields(t *testing.T) {
 	// Decode the result to check new fields.
 	var status struct {
 		State           string `json:"state"`
-		OSKeyAvailable  bool   `json:"osKeyAvailable"`
-		OSKeyCapable    bool   `json:"osKeyCapable"`
 		HasPassphrase   bool   `json:"hasPassphrase"`
 		AutoSealMinutes int    `json:"autoSealMinutes"`
 	}
@@ -723,9 +764,6 @@ func TestVaultRPC_Status_AutoSealFields(t *testing.T) {
 	}
 	if !status.HasPassphrase {
 		t.Error("hasPassphrase = false, want true")
-	}
-	if !status.OSKeyCapable {
-		t.Error("osKeyCapable = false, want true")
 	}
 }
 

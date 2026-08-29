@@ -29,8 +29,6 @@ function entry(name: string, id = name): InventoryEntry {
 
 const UNSEALED: VaultStatus = {
   state: 'unsealed',
-  osKeyAvailable: false,
-  osKeyCapable: false,
   hasPassphrase: true,
   autoSealMinutes: 0,
   defaultProvider: 'file',

@@ -3,7 +3,6 @@ package vault
 import (
 	"context"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -39,15 +38,16 @@ func (s State) String() string { return stateNames[s] }
 
 // SetupRequest carries the parameters for first-time initialization.
 type SetupRequest struct {
-	// Passphrase is the master passphrase. When empty the vault probes the
-	// system provider for silent setup (spec §5.2).
+	// Passphrase is the master passphrase. Required: Setup refuses an empty
+	// one rather than falling back to anything (ADR-0050 step 1).
 	Passphrase string
 }
 
 // SetupResult reports the outcome of initialization.
 type SetupResult struct {
-	// RecoveryCode is set only when Setup ran with a passphrase. It is empty
-	// after a silent setup.
+	// RecoveryCode is the second way into the vault, shown to the person
+	// once and never stored anywhere nocx can read. Every successful Setup
+	// returns one.
 	RecoveryCode string
 }
 
@@ -55,7 +55,6 @@ type SetupResult struct {
 type UnsealRequest struct {
 	Passphrase   string
 	RecoveryCode string
-	UseOSKey     bool
 }
 
 type autoSealTimer interface {
@@ -234,12 +233,25 @@ func (v *Vault) stateLocked() State {
 
 // Setup initialises the vault for the first time.
 //
-// When req.Passphrase is empty and the system provider is registered and
-// reports ready, setup is silent: a root key is minted and stored as an
-// OS-held copy. No passphrase envelope, no recovery code.
+// A passphrase is required. Setup mints a root key, wraps it into a
+// passphrase envelope and separately into a recovery envelope, and returns
+// the recovery code once — there is no mode in which the root key is
+// obtainable without one of the two (ADR-0050 step 1).
 //
-// When req.Passphrase is non-empty, a passphrase envelope and a recovery
-// code are created and stored in the document.
+// It used to have a second mode. With an empty passphrase and a ready system
+// provider, it put the root key itself in the OS keystore and minted neither
+// envelope, so the machine that lost that item had lost the vault. Measured
+// on macOS on 2026-08-29: the item's read ACL carries no trusted-application
+// list, so its trusted application is /usr/bin/security — the general-purpose
+// CLI nocx reaches the keystore through — and any process under the same
+// login read the root key with one command, without the passphrase and
+// without the vault being unsealed. That is the documented T4 threat, which
+// the vault does not defend; what the ADR removed is the mode whose ONLY
+// protection was T4 being out of scope.
+//
+// Setup therefore writes nothing to the keystore on any path. The system
+// provider remains a store for individual secrets a person creates —
+// ADR-0050 considered removing it and declined.
 //
 // # Exclusion and the commit-point interval
 //
@@ -251,13 +263,12 @@ func (v *Vault) stateLocked() State {
 // or metadata behind, because it fails before it mints.
 //
 // The commit point is the document write (saveDocument). The invariant has
-// two ends: BEFORE that write, a failure (a provider that refuses the OS
-// key, a cancelled context observed by a provider call) rolls the in-memory
+// two ends: BEFORE that write, a failure (a provider that refuses to unlock,
+// a cancelled context observed by a provider call) rolls the in-memory
 // document and any half-initialised providers back and returns an error —
-// the vault is left StateUninitialized, exactly where it started, and the
-// OS key, when one was already stored, is deleted (best effort by design:
-// the keychain refuses deletes only when it is unreachable, and an
-// unreachable keychain cannot hand the key out either). FROM that write ON,
+// the vault is left StateUninitialized, exactly where it started, and
+// nothing has been handed to any provider to clean up, because the only
+// thing Setup ever handed one was the OS-held root key. FROM that write ON,
 // Setup performs no further failing work and no provider calls: it returns
 // success, and a context cancelled after the commit point cannot abandon
 // half-applied state, because the operation has already completed. The
@@ -284,23 +295,37 @@ func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error
 		}
 	}()
 
-	// --- determine mode ---
+	// --- a passphrase, or nothing ---
 	//
+	// Refused before anything is minted, so the vault a caller comes back to
+	// is the one it started with rather than a half-made one.
+	if req.Passphrase == "" {
+		return SetupResult{}, errors.New("a passphrase is required to set up the vault")
+	}
+
+	// A cancelled context is refused here, before anything is minted.
+	//
+	// Setup used to discover cancellation through the system provider's Put —
+	// the one provider call it made before its commit point — and that call
+	// went with the OS-held key. Without this check the property would have
+	// gone with it silently: a Setup whose caller had already given up would
+	// run to completion and write a document. The check is what keeps
+	// "cancellation before the commit point changes nothing" true for a
+	// reason rather than by accident.
+	if err := ctx.Err(); err != nil {
+		return SetupResult{}, err
+	}
+
 	// System readiness is probed HERE, before the document lock, because a
 	// provider is never called while that lock is held (ADR-0011 §4). It also
 	// has to be probed at all: the registry answers whether a provider is
 	// REGISTERED, and app.go registers the system provider on every platform,
-	// so "registered" is true on machines with no Secret Service at all.
-	silent := req.Passphrase == ""
+	// so "registered" is true on machines with no Secret Service at all. It no
+	// longer decides whether setup can proceed — only which store the vault's
+	// secrets go to by default, below.
 	sysReady := false
 	if sys, sysOK := v.reg.Get(ProviderSystem); sysOK {
 		sysReady = sys.Status(ctx).Ready
-		if silent && !sysReady {
-			return SetupResult{}, fmt.Errorf("system provider not ready (%s): provide a passphrase",
-				sys.Status(ctx).Reason)
-		}
-	} else if silent {
-		return SetupResult{}, fmt.Errorf("silent setup requires system provider: %w", ErrProviderUnavailable)
 	}
 
 	// --- mint root key ---
@@ -311,13 +336,12 @@ func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error
 
 	// --- generate instance id ---
 	var instBuf [16]byte
-	if _, err := rand.Read(instBuf[:]); err != nil {
-		return SetupResult{}, fmt.Errorf("instance id: %w", err)
+	if _, rerr := rand.Read(instBuf[:]); rerr != nil {
+		return SetupResult{}, fmt.Errorf("instance id: %w", rerr)
 	}
 	instance := hex.EncodeToString(instBuf[:])
 
 	var result SetupResult
-	var oskID credential.SecretID
 
 	v.mu.Lock()
 	origDoc := v.doc // save for rollback on provider-init failure
@@ -325,63 +349,47 @@ func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error
 
 	sysProv, _ := v.reg.Writable(ProviderSystem)
 
-	if silent && sysProv != nil {
-		// Store root key in system provider. Release lock for the call.
-		oskID = osKeyID(instance)
-		rootSecret := credential.NewSecretBytes(root)
+	// Wrap the root key into the passphrase envelope and, separately, into a
+	// recovery envelope. Both, always: the recovery code is the only thing
+	// that survives a forgotten passphrase, and the passphrase is the only
+	// thing that survives a lost recovery code.
+	e, err := wrapWithPassphrase(root, req.Passphrase)
+	if err != nil {
+		for i := range len(root) {
+			root[i] = 0
+		}
+		v.doc = origDoc
+		v.initializing = false
 		v.mu.Unlock()
-		putErr := sysProv.Put(ctx, oskID, rootSecret)
-		v.mu.Lock()
-		if putErr != nil {
-			for i := range len(root) {
-				root[i] = 0
-			}
-			v.doc = origDoc
-			v.initializing = false
-			v.mu.Unlock()
-			return SetupResult{}, fmt.Errorf("store OS-held key: %w", putErr)
-		}
-		v.doc.HasOSKey = true
-	} else {
-		// Passphrase-based setup — wrap root key and generate recovery code.
-		e, err := wrapWithPassphrase(root, req.Passphrase)
-		if err != nil {
-			for i := range len(root) {
-				root[i] = 0
-			}
-			v.doc = origDoc
-			v.initializing = false
-			v.mu.Unlock()
-			return SetupResult{}, fmt.Errorf("wrap passphrase: %w", err)
-		}
-		v.doc.Passphrase = &e
-
-		// Generate a recovery code wrapping THE EXISTING root key.
-		// NOT newRecoveryCode, which mints a new root along with the code.
-		var raw [16]byte
-		if _, rerr := rand.Read(raw[:]); rerr != nil {
-			for i := range len(root) {
-				root[i] = 0
-			}
-			v.doc = origDoc
-			v.initializing = false
-			v.mu.Unlock()
-			return SetupResult{}, fmt.Errorf("generate recovery code: %w", rerr)
-		}
-		code := crockfordEncode(raw[:])
-		recEnv, err := wrapWithPassphrase(root, code)
-		if err != nil {
-			for i := range len(root) {
-				root[i] = 0
-			}
-			v.doc = origDoc
-			v.initializing = false
-			v.mu.Unlock()
-			return SetupResult{}, fmt.Errorf("wrap recovery: %w", err)
-		}
-		v.doc.Recovery = &recEnv
-		result.RecoveryCode = code
+		return SetupResult{}, fmt.Errorf("wrap passphrase: %w", err)
 	}
+	v.doc.Passphrase = &e
+
+	// Generate a recovery code wrapping THE EXISTING root key.
+	// NOT newRecoveryCode, which mints a new root along with the code.
+	var raw [16]byte
+	if _, rerr := rand.Read(raw[:]); rerr != nil {
+		for i := range len(root) {
+			root[i] = 0
+		}
+		v.doc = origDoc
+		v.initializing = false
+		v.mu.Unlock()
+		return SetupResult{}, fmt.Errorf("generate recovery code: %w", rerr)
+	}
+	code := crockfordEncode(raw[:])
+	recEnv, err := wrapWithPassphrase(root, code)
+	if err != nil {
+		for i := range len(root) {
+			root[i] = 0
+		}
+		v.doc = origDoc
+		v.initializing = false
+		v.mu.Unlock()
+		return SetupResult{}, fmt.Errorf("wrap recovery: %w", err)
+	}
+	v.doc.Recovery = &recEnv
+	result.RecoveryCode = code
 
 	// Set default provider.
 	//
@@ -433,10 +441,6 @@ func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error
 				for _, lk := range rollback {
 					lk.Lock()
 				}
-				// Best-effort clean up OS key stored before provider init.
-				if oskID != "" && sysProv != nil {
-					v.reportOrphanedOSKey(ctx, sysProv, oskID)
-				}
 				return SetupResult{}, fmt.Errorf("unlock provider %s: %w", p.ID(), err)
 			}
 			if lk, ok := p.(locker); ok {
@@ -461,10 +465,6 @@ func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error
 				for _, lk := range rollback {
 					lk.Lock()
 				}
-				// Best-effort clean up OS key stored before provider init.
-				if oskID != "" && sysProv != nil {
-					v.reportOrphanedOSKey(ctx, sysProv, oskID)
-				}
 				return SetupResult{}, fmt.Errorf("new data key for %s: %w", p.ID(), err)
 			}
 		}
@@ -473,12 +473,7 @@ func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error
 	// --- save document AFTER successful provider init (defect 5 fix) ---
 	v.mu.Lock()
 	if saveErr := saveDocument(v.store, v.doc); saveErr != nil {
-		// Best-effort clean up OS key (defect 6). MUST NOT call provider
-		// while holding lock — snapshot, unlock, call delete, re-lock.
 		v.mu.Unlock()
-		if oskID != "" && sysProv != nil {
-			v.reportOrphanedOSKey(ctx, sysProv, oskID)
-		}
 		// Wipe root bytes and re-lock providers before returning.
 		for i := range len(root) {
 			root[i] = 0
@@ -507,15 +502,18 @@ func (v *Vault) Setup(ctx context.Context, req SetupRequest) (SetupResult, error
 		"vault initialized",
 		"state", "unsealed",
 		"defaultProvider", v.doc.DefaultProvider,
-		"hasOSKey", v.doc.HasOSKey,
 	)
 
 	return result, nil
 }
 
 // Unseal recovers the root key using the requested means and unlocks the
-// file provider. Returns ErrUnsealFailed when the passphrase, recovery code
-// or OS-held key cannot be used.
+// file provider. Returns ErrUnsealFailed when the passphrase or the recovery
+// code cannot be used.
+//
+// There were three means and there are two. The OS-held key is gone with the
+// silent setup that minted it (ADR-0050 step 1): no vault holds one, so a
+// means that reads one could only ever fail.
 func (v *Vault) Unseal(ctx context.Context, req UnsealRequest) error {
 	v.mu.Lock()
 	switch v.stateLocked() {
@@ -534,8 +532,6 @@ func (v *Vault) Unseal(ctx context.Context, req UnsealRequest) error {
 	var err error
 
 	switch {
-	case req.UseOSKey:
-		root, err = v.unsealWithOSKey(ctx)
 	case req.Passphrase != "":
 		root, err = v.unsealWithPassphrase(req.Passphrase)
 	case req.RecoveryCode != "":
@@ -623,34 +619,11 @@ func (v *Vault) Unseal(ctx context.Context, req UnsealRequest) error {
 	return nil
 }
 
-func (v *Vault) unsealWithOSKey(ctx context.Context) ([]byte, error) {
-	if !v.doc.HasOSKey {
-		return nil, fmt.Errorf("%w: no OS-held key configured", ErrUnsealFailed)
-	}
-	sysProv, ok := v.reg.Writable(ProviderSystem)
-	if !ok {
-		return nil, fmt.Errorf("%w: system provider not available", ErrUnsealFailed)
-	}
-	oskID := osKeyID(v.doc.Instance)
-	sec, err := sysProv.Get(ctx, oskID)
-	if err != nil {
-		return nil, fmt.Errorf("%w: read OS-held key: %w", ErrUnsealFailed, err)
-	}
-	if sec.IsEmpty() {
-		return nil, fmt.Errorf("%w: OS-held key not found", ErrUnsealFailed)
-	}
-	var root []byte
-	if useErr := sec.Use(func(b []byte) error {
-		root = make([]byte, len(b))
-		copy(root, b)
-		return nil
-	}); useErr != nil {
-		return nil, fmt.Errorf("%w: read OS-held key: %w", ErrUnsealFailed, useErr)
-	}
-	return root, nil
-}
-
 func (v *Vault) unsealWithPassphrase(pass string) ([]byte, error) {
+	// An initialized vault always has this envelope (ADR-0050 step 1: there is
+	// no setup that does not mint one). The check stays as a nil guard on that
+	// invariant rather than as a mode, so a document that violates it is
+	// refused instead of dereferenced.
 	if v.doc.Passphrase == nil {
 		return nil, fmt.Errorf("%w: no passphrase envelope", ErrUnsealFailed)
 	}
@@ -888,6 +861,10 @@ func (v *Vault) ChangePassphrase(ctx context.Context, req ChangePassphraseReques
 		v.mu.Unlock()
 		return ErrVaultUninitialized
 	}
+	// An initialized vault always has this envelope (ADR-0050 step 1: there is
+	// no setup that does not mint one). The check stays as a nil guard on that
+	// invariant rather than as a mode, so a document that violates it is
+	// refused instead of dereferenced.
 	if v.doc.Passphrase == nil {
 		v.mu.Unlock()
 		return fmt.Errorf("no passphrase envelope: %w", ErrUnsealFailed)
@@ -969,6 +946,10 @@ func (v *Vault) RegenerateRecovery(ctx context.Context, req RegenerateRequest) (
 		v.mu.Unlock()
 		return "", ErrVaultUninitialized
 	}
+	// An initialized vault always has this envelope (ADR-0050 step 1: there is
+	// no setup that does not mint one). The check stays as a nil guard on that
+	// invariant rather than as a mode, so a document that violates it is
+	// refused instead of dereferenced.
 	if v.doc.Passphrase == nil {
 		v.mu.Unlock()
 		return "", fmt.Errorf("no passphrase envelope: %w", ErrUnsealFailed)
@@ -1455,14 +1436,6 @@ func (v *Vault) defaultWritableLocked() (WritableProvider, error) {
 	return p, nil
 }
 
-// osKeyID derives a deterministic SecretID for the OS-held root key from the
-// vault instance. Each installation has a unique instance, so OS key entries
-// from different vaults never collide.
-func osKeyID(instance string) credential.SecretID {
-	h := sha256.Sum256([]byte(instance))
-	return credential.SecretID(fmt.Sprintf("sec:v1:system:%x", h[:16]))
-}
-
 // unlocker is satisfied by providers that need a root key to operate (e.g.
 // the file provider). The vault discovers them by type assertion.
 type unlocker interface {
@@ -1763,28 +1736,6 @@ func (v *Vault) resolveRowLocked(row string, inputs []CredentialInventory) (cred
 	return "", "", false
 }
 
-// reportOrphanedOSKey deletes the OS-held root key written earlier in a Setup
-// that is now failing, and — this is the point of the helper — makes a failed
-// deletion visible.
-//
-// Dropping that error with `_ =` was the tempting shape, and it is the wrong
-// one here. A stranded root key in the OS store is an orphan nobody can find
-// later: go-keyring exposes Set, Get, Delete and DeleteAll and no enumeration
-// at all, so there is no sweep that could discover it (nocx-dm0). The one
-// moment its identifier is known is right now, in this function, so the
-// identifier goes into the log at WARN even though the operation the user sees
-// is already failing for another reason.
-//
-// The id is not secret — it is derived from the vault instance and appears in
-// metadata elsewhere — so logging it breaks no invariant. The key material it
-// names is never logged.
-func (v *Vault) reportOrphanedOSKey(ctx context.Context, sysProv WritableProvider, oskID credential.SecretID) {
-	if err := sysProv.Delete(ctx, oskID); err != nil {
-		v.logger.Warn("setup rollback could not remove the OS-held root key; it is now an orphan in the system store and cannot be found by any later sweep",
-			"secretID", oskID, "provider", sysProv.ID(), "error", err)
-	}
-}
-
 // ProviderSnapshot is a read-only projection of a provider for the vault.status
 // RPC. It carries no entry names, no locators and nothing from which a storage
 // location can be reconstructed.
@@ -1800,23 +1751,10 @@ type ProviderSnapshot struct {
 type Snapshot struct {
 	State State `json:"-"`
 
-	// HasOSKey is STATE: this vault holds an OS-held key and can be unsealed
-	// by one. False on every uninitialized vault, by construction.
-	HasOSKey bool `json:"osKeyAvailable"`
-
-	// OSKeyCapable is CAPABILITY: this machine has a system keyring that is
-	// ready and writable, so Setup can mint an OS-held key with no passphrase.
-	//
-	// The distinction is the whole of nocx-25k9.8. One field carried both
-	// meanings, the renderer read it to decide whether setup could be silent,
-	// and since it is false before setup the silent path never ran — which made
-	// the system provider unreachable from the UI. Before using either of
-	// these, decide whether the question is about the machine or the vault.
-	OSKeyCapable bool `json:"osKeyCapable"`
-
 	// HasPassphrase is STATE: the vault document contains a passphrase
-	// envelope. When false, ChangePassphrase and RegenerateRecovery are
-	// impossible — the vault was set up with only an OS-held key.
+	// envelope. True of every initialized vault since ADR-0050 step 1 — the
+	// mode that had none is gone — so what it now distinguishes is an
+	// initialized vault from one that has never been set up.
 	HasPassphrase bool `json:"hasPassphrase"`
 
 	// AutoSealMinutes is the configured idle auto-seal timeout. 0 = off.
@@ -1846,7 +1784,6 @@ type Snapshot struct {
 func (v *Vault) Snapshot(ctx context.Context) Snapshot {
 	v.mu.Lock()
 	state := v.stateLocked()
-	hasOSKey := v.doc.HasOSKey
 	hasPass := v.doc.Passphrase != nil
 	autoSealMins := v.doc.AutoSealMinutes
 	defaultProv := v.doc.DefaultProvider
@@ -1854,7 +1791,6 @@ func (v *Vault) Snapshot(ctx context.Context) Snapshot {
 	v.mu.Unlock()
 	snap := Snapshot{
 		State:           state,
-		HasOSKey:        hasOSKey,
 		HasPassphrase:   hasPass,
 		AutoSealMinutes: autoSealMins,
 		DefaultProvider: defaultProv,
@@ -1870,9 +1806,6 @@ func (v *Vault) Snapshot(ctx context.Context) Snapshot {
 			Reason:   status.Reason,
 		}
 		snap.Providers = append(snap.Providers, ps)
-		if ps.ID == ProviderSystem && ps.Writable && ps.Ready {
-			snap.OSKeyCapable = true
-		}
 	}
 
 	return snap
@@ -1882,16 +1815,12 @@ func (v *Vault) Snapshot(ctx context.Context) Snapshot {
 func (s Snapshot) MarshalJSON() ([]byte, error) {
 	type alias struct {
 		State           string             `json:"state"`
-		HasOSKey        bool               `json:"osKeyAvailable"`
-		OSKeyCapable    bool               `json:"osKeyCapable"`
 		HasPassphrase   bool               `json:"hasPassphrase"`
 		AutoSealMinutes int                `json:"autoSealMinutes"`
 		Providers       []ProviderSnapshot `json:"providers"`
 	}
 	return json.Marshal(alias{
 		State:           s.State.String(),
-		HasOSKey:        s.HasOSKey,
-		OSKeyCapable:    s.OSKeyCapable,
 		HasPassphrase:   s.HasPassphrase,
 		AutoSealMinutes: s.AutoSealMinutes,
 		Providers:       s.Providers,

@@ -5,12 +5,13 @@
   "description": "Params for vault.setup.",
   "type": "object",
   "additionalProperties": false,
-  "required": [],
+  "required": ["passphrase"],
   "properties": {
     "passphrase": {
       "type": "string",
+      "minLength": 1,
       "maxLength": 64000,
-      "description": "Optional vault passphrase; empty selects the OS-held key path."
+      "description": "The vault's master passphrase. Required and non-empty: an empty one used to select a setup that put the root key in the OS keystore and minted no recovery code, and ADR-0050 removed that mode. Never log or echo it."
     }
   }
 }

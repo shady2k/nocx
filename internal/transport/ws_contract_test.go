@@ -147,8 +147,6 @@ func TestVaultStatus_DTOConformsToContract(t *testing.T) {
 		// exactly the ones a sparse payload hides.
 		"populated": {
 			State:           vault.StateUnsealed,
-			HasOSKey:        true,
-			OSKeyCapable:    true,
 			HasPassphrase:   true,
 			AutoSealMinutes: 15,
 			DefaultProvider: "file",

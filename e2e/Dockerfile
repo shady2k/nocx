@@ -64,8 +64,17 @@ ENV GOTOOLCHAIN=local
 # make, because the stand builds the remote helper's artifacts by calling
 # `make helpers` on its way up (e2e/stand.ts) rather than keeping a second
 # copy of that build matrix. Without it the suite dies in globalSetup.
+#
+# gnome-keyring and dbus, because one spec is ABOUT a machine that has a
+# working OS keystore — that a vault set up there is asked for a passphrase
+# anyway (ADR-0050 step 1, e2e/vault.spec.ts case 3). Without them the case
+# skips itself honestly and the epic's happy path is never watched, which is
+# the failure mode the case's own comment warned about: "the most likely to
+# rot silently". dbus-x11 is what carries `dbus-run-session`; there is no X
+# server in this image and none is wanted.
 RUN apt-get update -qq \
-    && apt-get install -y -qq --no-install-recommends bash dash make zsh openssh-client \
+    && apt-get install -y -qq --no-install-recommends \
+       bash dash make zsh openssh-client gnome-keyring dbus dbus-x11 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /work

@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.request.write.params.schema.json",
+  "title": "APIRequestWriteParams",
+  "description": "Params for api.request.write.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["handle", "relPath", "request"],
+  "properties": {
+    "handle": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "relPath": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "request": { "$ref": "#/$defs/request" }
+  },
+  "$defs": {
+    "param": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value", "enabled"],
+      "properties": {
+        "name": { "type": "string", "maxLength": 256 },
+        "value": { "type": "string", "maxLength": 4096 },
+        "enabled": { "type": "boolean" }
+      }
+    },
+    "body": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "text", "fileRef"],
+      "properties": {
+        "kind": { "type": "string", "maxLength": 64 },
+        "text": { "type": "string", "maxLength": 262144 },
+        "fileRef": { "type": "string", "maxLength": 4096 }
+      }
+    },
+    "auth": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "user", "token", "password"],
+      "properties": {
+        "kind": { "type": "string", "maxLength": 64 },
+        "user": { "type": "string", "maxLength": 256 },
+        "token": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Credential text used for bearer or API-key authorization."
+        },
+        "password": {
+          "type": "string",
+          "maxLength": 4096,
+          "description": "Credential text used for basic authentication."
+        }
+      }
+    },
+    "request": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "name", "method", "url", "headers", "query", "variables", "body", "auth"],
+      "properties": {
+        "id": { "type": "string", "maxLength": 256 },
+        "name": { "type": "string", "maxLength": 256 },
+        "method": { "type": "string", "maxLength": 64 },
+        "url": { "type": "string", "maxLength": 4096 },
+        "environment": { "type": ["string", "null"], "maxLength": 256 },
+        "headers": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/param" } },
+        "query": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/param" } },
+        "variables": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/param" } },
+        "body": { "$ref": "#/$defs/body" },
+        "auth": { "$ref": "#/$defs/auth" }
+      }
+    }
+  }
+}

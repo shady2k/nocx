@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sshConfig.aliases.params.schema.json",
+  "title": "SSHConfigAliasesParams",
+  "description": "Params for reading SSH config aliases.",
+  "type": ["object", "null"],
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

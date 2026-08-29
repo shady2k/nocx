@@ -1,0 +1,28 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/vault.changePassphrase.params.schema.json",
+  "title": "VaultChangePassphraseParams",
+  "description": "Params for vault.changePassphrase.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["newPassphrase"],
+  "properties": {
+    "oldPassphrase": {
+      "type": "string",
+      "maxLength": 64000,
+      "description": "Current vault passphrase; secret material never appears in logs."
+    },
+    "recoveryCode": {
+      "type": "string",
+      "maxLength": 64000,
+      "description": "Recovery material for changing the vault passphrase."
+    },
+    "newPassphrase": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64000,
+      "description": "Replacement vault passphrase."
+    }
+  },
+  "anyOf": [{ "required": ["oldPassphrase"] }, { "required": ["recoveryCode"] }]
+}

@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.runResolved.params.schema.json",
+  "title": "AgentRunResolvedParams",
+  "description": "Params for agent.runResolved.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["requestId", "outcome"],
+  "properties": {
+    "requestId": { "type": "string", "minLength": 1 },
+    "outcome": { "type": "string", "enum": ["completed", "failed"] },
+    "error": { "type": ["string", "null"], "maxLength": 512 },
+    "entryId": { "type": "string", "maxLength": 256 },
+    "exitCode": { "type": ["integer", "null"] },
+    "status": { "type": "string", "enum": ["success", "failure", "entered", "unknown"] },
+    "total": { "type": "integer", "minimum": 0 },
+    "start": { "type": "integer", "minimum": 0 },
+    "end": { "type": "integer", "minimum": 0 },
+    "text": { "type": "string", "maxLength": 262144 }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "outcome": { "const": "completed" } }, "required": ["outcome"] },
+      "then": {
+        "required": ["entryId", "status", "total", "start", "end", "text"],
+        "properties": { "error": { "type": "null" } }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "failed" } }, "required": ["outcome"] },
+      "then": { "required": ["error"] }
+    }
+  ]
+}

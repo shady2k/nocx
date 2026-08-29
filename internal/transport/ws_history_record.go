@@ -14,8 +14,9 @@ package transport
 // echoed back.
 //
 // The result shape is declared once in contracts/history.record.schema.json.
-// There is deliberately no params schema (contracts/README.md): the handler
-// is the check, and rejects what it cannot parse.
+// The earlier decision to leave params unpinned was wrong:
+// history.record.params.schema.json is now the wire contract, and its registered
+// validator remains runtime enforcement for this metadata-bearing request.
 
 import (
 	"context"

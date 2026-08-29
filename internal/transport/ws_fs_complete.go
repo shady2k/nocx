@@ -15,9 +15,9 @@ import (
 	"strings"
 )
 
-// fsCompleteParams is the request the local-path provider sends. There is
-// deliberately no params schema (contracts/README.md): the handler is the
-// check, and rejects what it cannot parse.
+// fsCompleteParams is the request the local-path provider sends. The earlier
+// decision to leave params unpinned was wrong: fs.complete.params.schema.json is
+// now the wire contract, and its registered validator remains runtime enforcement.
 //
 //	text  — required; the partial path being completed (the current word)
 //	cwd   — optional; the session's working directory, used only when text

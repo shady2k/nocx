@@ -1359,6 +1359,12 @@ func (o inlineTabbyOp) Run(ctx context.Context, fn func(context.Context, capabil
 	return fn(ctx, o.svc)
 }
 
+// Disposition satisfies capability.TabbyImportOperation; see the note on
+// directAgentOp.Disposition about doubles inheriting the real classification.
+func (o inlineTabbyOp) Disposition() capability.Disposition {
+	return capability.Direct("tabby profile import")
+}
+
 // failingSecretService fails every CreateSecret — the vault-sealed shape the
 // retry exists for.
 type failingSecretService struct{ capability.TabbyImportService }

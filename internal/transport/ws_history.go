@@ -13,9 +13,9 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 )
 
-// historyQueryParams is the request the recall overlay sends. There is
-// deliberately no params schema (contracts/README.md): the handler is the
-// check, and rejects what it cannot parse.
+// historyQueryParams is the request the recall overlay sends. The earlier
+// decision to leave params unpinned was wrong: history.query.params.schema.json
+// is now the wire contract, and its registered validator remains runtime enforcement.
 //
 //	scope  — required; directory | host | everywhere
 //	cwd    — required when scope=directory; the exact directory rung

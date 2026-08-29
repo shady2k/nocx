@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.laneInteractivity.params.schema.json",
+  "title": "AgentLaneInteractivityParams",
+  "description": "Params for agent.laneInteractivity.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "bufferKind"],
+  "properties": {
+    "sessionId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "bufferKind": { "type": "string", "enum": ["normal", "alternate"] }
+  }
+}

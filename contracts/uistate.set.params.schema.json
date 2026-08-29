@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/uistate.set.params.schema.json",
+  "title": "UistateSetParams",
+  "description": "Params for uistate.set.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sidebar", "activeTab"],
+  "properties": {
+    "sidebar": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "collapsed": {
+          "type": "boolean"
+        },
+        "activeViewId": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "width": {
+          "type": "integer"
+        }
+      },
+      "required": []
+    },
+    "activeTab": {
+      "type": "string",
+      "maxLength": 256
+    }
+  }
+}

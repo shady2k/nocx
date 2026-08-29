@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.collections.create.params.schema.json",
+  "title": "APICollectionsCreateParams",
+  "description": "Params for api.collections.create.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name"],
+  "properties": { "name": { "type": "string", "minLength": 1, "maxLength": 256 } }
+}

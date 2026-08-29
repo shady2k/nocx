@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/notes.search.params.schema.json",
+  "title": "NotesSearchParams",
+  "description": "Params for notes.search. An omitted query searches with the service's empty-query behavior.",
+  "type": ["object", "null"],
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "query": {
+      "type": "string",
+      "maxLength": 1000
+    }
+  }
+}

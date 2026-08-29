@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files.open.params.schema.json",
+  "title": "FilesOpenParams",
+  "description": "Params for files.open.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId"],
+  "properties": {
+    "sessionId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "rootPath": { "type": "string", "maxLength": 4096 }
+  }
+}

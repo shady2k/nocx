@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.ask.params.schema.json",
+  "title": "AgentAskParams",
+  "description": "Params for agent.ask.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["askId", "sessionId", "question", "attachedContent", "cwd"],
+  "properties": {
+    "askId": { "type": "string", "pattern": ".*\\S.*", "maxLength": 128 },
+    "sessionId": { "type": "string", "pattern": ".*\\S.*" },
+    "question": { "type": "string", "pattern": ".*\\S.*", "maxLength": 8000 },
+    "cwd": { "type": "string", "pattern": ".*\\S.*", "maxLength": 4096 },
+    "attachedContent": {
+      "type": "array",
+      "maxItems": 32,
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["itemId", "command", "state"],
+        "properties": {
+          "itemId": { "type": "string", "pattern": ".*\\S.*", "maxLength": 128 },
+          "command": { "type": "string", "pattern": ".*\\S.*", "maxLength": 8000 },
+          "state": { "type": "string", "enum": ["running", "exited"] },
+          "start": { "type": "integer", "minimum": 0 },
+          "count": { "type": "integer", "minimum": 1, "maximum": 2000 }
+        },
+        "oneOf": [
+          { "required": ["start", "count"] },
+          { "not": { "anyOf": [{ "required": ["start"] }, { "required": ["count"] }] } }
+        ]
+      }
+    }
+  }
+}

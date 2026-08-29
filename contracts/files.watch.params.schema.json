@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files.watch.params.schema.json",
+  "title": "FilesWatchParams",
+  "description": "Params for files.watch.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bindingId", "paths"],
+  "properties": {
+    "bindingId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "paths": {
+      "type": "array",
+      "maxItems": 512,
+      "items": { "type": "string", "pattern": "^/", "maxLength": 4096 }
+    }
+  }
+}

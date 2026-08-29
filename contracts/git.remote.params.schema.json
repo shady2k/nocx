@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/git.remote.params.schema.json",
+  "title": "GitRemoteParams",
+  "description": "Params for git.remote.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bindingId"],
+  "properties": { "bindingId": { "type": "string", "pattern": "^[0-9a-f]{32}$" } }
+}

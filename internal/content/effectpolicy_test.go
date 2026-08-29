@@ -204,6 +204,30 @@ func TestNoConfigurationPathExpressesAToolName(t *testing.T) {
 	}
 }
 
+func TestPolicyAcceptsContentAndWorkspaceScopes(t *testing.T) {
+	p, err := content.ParseEffectPolicy([]byte(`{"observe":{"decision":"permit","scopes":[{"kind":"content","id":"note/note-a"},{"kind":"workspace","id":"workspace/ws-a/tab/tab-a"}]}}`))
+	if err != nil {
+		t.Fatalf("new resource scopes refused: %v", err)
+	}
+	scopes := p.RowScopes(content.EffectObserve)
+	if len(scopes) != 2 || scopes[0].Kind != content.ResourceContent || scopes[1].Kind != content.ResourceWorkspace {
+		t.Fatalf("observe scopes = %+v, want content and workspace", scopes)
+	}
+}
+
+func TestPolicyRefusesMalformedHierarchicalScopes(t *testing.T) {
+	for _, bad := range []string{
+		`{"observe":{"decision":"permit","scopes":[{"kind":"content","id":"note/"}]}}`,
+		`{"observe":{"decision":"permit","scopes":[{"kind":"content","id":"note/../secret"}]}}`,
+		`{"observe":{"decision":"permit","scopes":[{"kind":"workspace","id":"workspace/ws-a/pane/pane-a"}]}}`,
+		`{"observe":{"decision":"permit","scopes":[{"kind":"workspace","id":"workspace/ws-a/tab/tab-a/pane/"}]}}`,
+	} {
+		if _, err := content.ParseEffectPolicy([]byte(bad)); err == nil {
+			t.Fatalf("malformed hierarchical scope parsed: %s", bad)
+		}
+	}
+}
+
 func TestPolicyWireIsCanonicalSevenRows(t *testing.T) {
 	// The wire always carries all seven rows with effective decisions and a
 	// non-null scopes array — a renderer can draw the whole matrix from a

@@ -8,8 +8,9 @@ package transport
 // stops, so detection is one call per pause, never per keystroke.
 //
 // The result shape is declared once in contracts/secrets.detect.schema.json.
-// There is deliberately no params schema (contracts/README.md): the handler
-// is the check.
+// The earlier decision to leave the thin line-and-revision request unpinned was
+// wrong: secrets.detect.params.schema.json is now the wire contract, and its
+// registered validator remains runtime enforcement.
 //
 // Two wire facts matter:
 //

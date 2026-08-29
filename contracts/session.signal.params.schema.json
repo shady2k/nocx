@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/session.signal.params.schema.json",
+  "title": "SessionSignalParams",
+  "description": "Params for session.signal.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "signal"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}"
+    },
+    "signal": {
+      "type": "string",
+      "enum": ["interrupt", "stop"]
+    }
+  }
+}

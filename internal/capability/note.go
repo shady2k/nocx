@@ -42,43 +42,53 @@ type noteService struct {
 	svc   *note.Service
 }
 
-func (s *noteService) List(ctx context.Context) ([]note.Row, error) {
+func (s *noteService) check() error {
 	if err := s.guard.check(); err != nil {
+		return err
+	}
+	if s.svc == nil {
+		return ErrOperationUnavailable
+	}
+	return nil
+}
+
+func (s *noteService) List(ctx context.Context) ([]note.Row, error) {
+	if err := s.check(); err != nil {
 		return nil, err
 	}
 	return s.svc.List(ctx)
 }
 
 func (s *noteService) Get(ctx context.Context, id string) (note.Note, error) {
-	if err := s.guard.check(); err != nil {
+	if err := s.check(); err != nil {
 		return note.Note{}, err
 	}
 	return s.svc.Get(ctx, id)
 }
 
 func (s *noteService) Create(ctx context.Context, body string) (note.Note, error) {
-	if err := s.guard.check(); err != nil {
+	if err := s.check(); err != nil {
 		return note.Note{}, err
 	}
 	return s.svc.Create(ctx, body)
 }
 
 func (s *noteService) Update(ctx context.Context, id, body string) (note.Note, error) {
-	if err := s.guard.check(); err != nil {
+	if err := s.check(); err != nil {
 		return note.Note{}, err
 	}
 	return s.svc.Update(ctx, id, body)
 }
 
 func (s *noteService) Delete(ctx context.Context, id string) error {
-	if err := s.guard.check(); err != nil {
+	if err := s.check(); err != nil {
 		return err
 	}
 	return s.svc.Delete(ctx, id)
 }
 
 func (s *noteService) Search(ctx context.Context, query string) ([]note.Row, error) {
-	if err := s.guard.check(); err != nil {
+	if err := s.check(); err != nil {
 		return nil, err
 	}
 	return s.svc.Search(ctx, query)

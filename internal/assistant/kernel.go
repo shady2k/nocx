@@ -297,6 +297,7 @@ type effectKernel struct {
 	//
 	// Nil is "nobody is listening", which is every non-transport caller.
 	onCall     func(ToolCall) error
+	runSeams   toolSeams
 	validators map[string]*jsonschema.Schema
 	// results is the compiled result schema per tool — what the executor
 	// must actually produce, checked after it runs. The params validator
@@ -332,9 +333,13 @@ type effectKernel struct {
 // logger may be nil for the same callers — the only thing it reports is a
 // relation that could not be written, which is a degrade the reader already
 // handles.
-func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, turnEntryID string, requester RendererRequester, classifier CallClassifier, onCall func(ToolCall) error) (*effectKernel, error) {
+func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, turnEntryID string, requester RendererRequester, classifier CallClassifier, onCall func(ToolCall) error, seams ...toolSeams) (*effectKernel, error) {
 	if known == nil {
 		return nil, errors.New("agent run: no egress vault comparison wired — a run that may execute tools must screen its results against known vault material (design §7.1)")
+	}
+	runSeams := toolSeams{}
+	if len(seams) > 0 {
+		runSeams = seams[0]
 	}
 	m := &effectKernel{
 		log:         logger,
@@ -352,6 +357,7 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 		validators:  make(map[string]*jsonschema.Schema, len(registry.All())),
 		results:     make(map[string]*jsonschema.Schema, len(registry.All())),
 		onCall:      onCall,
+		runSeams:    runSeams,
 	}
 	for _, t := range registry.All() {
 		v, err := compileToolSchema(t)
@@ -565,6 +571,11 @@ func (m *effectKernel) inScope(t agenttools.Tool, resources []agenttools.Resourc
 			switch resource.Kind {
 			case content.ResourcePath:
 				inside = pathUnder(resource.ID, scope.ID) && scope.Kind == content.ResourcePath
+			case content.ResourceContent:
+				inside = scope.Kind == content.ResourceContent &&
+					(content.GrantScope{Kind: scope.Kind, ID: scope.ID}).Contains(
+						content.GrantScope{Kind: resource.Kind, ID: resource.ID},
+					)
 			default:
 				inside = resource.Kind == scope.Kind && resource.ID == scope.ID
 			}
@@ -1134,11 +1145,13 @@ func (m *effectKernel) run(decl agenttools.Tool, ctx context.Context, capability
 // object for both (requester.go); a run with no requester wired hands over a
 // nil source, and session.list says so rather than answering empty.
 func (m *effectKernel) seams() toolSeams {
-	if m.requester == nil {
-		return toolSeams{}
+	seams := m.runSeams
+	if m.requester != nil {
+		if sessions, ok := m.requester.(SessionSource); ok {
+			seams.sessions = sessions
+		}
 	}
-	sessions, _ := m.requester.(SessionSource)
-	return toolSeams{sessions: sessions}
+	return seams
 }
 
 // executeInRenderer runs one InRenderer tool: the capability is the narrowed

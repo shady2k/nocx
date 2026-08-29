@@ -155,6 +155,11 @@ func Gate(domain string, capacity, maxQueue int, waitTimeout time.Duration) cont
 // operation exists to provide.
 var ErrOperationInactive = errors.New("capability: service used outside its operation")
 
+// ErrOperationUnavailable is returned when an operation was constructed
+// without its domain service. The operation remains present so callers can
+// report an unavailable capability instead of dereferencing a typed nil.
+var ErrOperationUnavailable = errors.New("capability: operation service unavailable")
+
 // RefusedError is returned by Run when the operation's conflict gates
 // refused the work. It carries the control.Rejection the transport already
 // maps to the control.saturated wire error.

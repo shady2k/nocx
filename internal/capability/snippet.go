@@ -49,36 +49,46 @@ type snippetService struct {
 	svc   *snippet.Service
 }
 
-func (s *snippetService) List() ([]snippet.Snippet, error) {
+func (s *snippetService) check() error {
 	if err := s.guard.check(); err != nil {
+		return err
+	}
+	if s.svc == nil {
+		return ErrOperationUnavailable
+	}
+	return nil
+}
+
+func (s *snippetService) List() ([]snippet.Snippet, error) {
+	if err := s.check(); err != nil {
 		return nil, err
 	}
 	return s.svc.List()
 }
 
 func (s *snippetService) Create(title, body string) (snippet.Snippet, error) {
-	if err := s.guard.check(); err != nil {
+	if err := s.check(); err != nil {
 		return snippet.Snippet{}, err
 	}
 	return s.svc.Create(title, body)
 }
 
 func (s *snippetService) Update(id, title, body string) (snippet.Snippet, error) {
-	if err := s.guard.check(); err != nil {
+	if err := s.check(); err != nil {
 		return snippet.Snippet{}, err
 	}
 	return s.svc.Update(id, title, body)
 }
 
 func (s *snippetService) Delete(id string) error {
-	if err := s.guard.check(); err != nil {
+	if err := s.check(); err != nil {
 		return err
 	}
 	return s.svc.Delete(id)
 }
 
 func (s *snippetService) Reorder(ids []string) ([]snippet.Snippet, error) {
-	if err := s.guard.check(); err != nil {
+	if err := s.check(); err != nil {
 		return nil, err
 	}
 	return s.svc.Reorder(ids)

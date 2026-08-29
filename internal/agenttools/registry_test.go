@@ -156,6 +156,19 @@ const runSchema = `{
   }}
 }`
 
+const contentToolSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": [],
+    "properties": {}
+  }}
+}`
+
 // TestAssemble_MissingSchemaDoesNotAssemble is acceptance criterion 1: a tool
 // whose params schema is absent from contracts/ does not assemble into the
 // set — asserted, not documented in a comment. The tool is omitted and named
@@ -326,13 +339,22 @@ func grant(effects []content.Effect, kinds ...content.ResourceKind) content.Gran
 
 func TestForGrant_ExactPermittedSet(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
-		"files.read.schema.json":   filesReadSchema,
-		"git.status.schema.json":   gitStatusSchema,
-		"session.list.schema.json": sessionListSchema,
-		"session.read.schema.json": sessionReadSchema,
-		"files.edit.schema.json":   filesEditSchema,
-		"files.create.schema.json": filesCreateSchema,
-		"run.schema.json":          runSchema,
+		"files.read.schema.json":       filesReadSchema,
+		"git.status.schema.json":       gitStatusSchema,
+		"session.list.schema.json":     sessionListSchema,
+		"session.read.schema.json":     sessionReadSchema,
+		"files.edit.schema.json":       filesEditSchema,
+		"files.create.schema.json":     filesCreateSchema,
+		"run.schema.json":              runSchema,
+		"notes.search.schema.json":     contentToolSchema,
+		"notes.create.schema.json":     contentToolSchema,
+		"notes.update.schema.json":     contentToolSchema,
+		"notes.delete.schema.json":     contentToolSchema,
+		"snippets.list.schema.json":    contentToolSchema,
+		"snippets.create.schema.json":  contentToolSchema,
+		"snippets.update.schema.json":  contentToolSchema,
+		"snippets.delete.schema.json":  contentToolSchema,
+		"snippets.reorder.schema.json": contentToolSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -440,13 +462,22 @@ func containsName(tools []Tool, name string) bool {
 // exactly the state the code is in today — so this asserts the content.
 func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
-		"files.read.schema.json":   filesReadSchema,
-		"git.status.schema.json":   gitStatusSchema,
-		"session.list.schema.json": sessionListSchema,
-		"session.read.schema.json": sessionReadSchema,
-		"files.edit.schema.json":   filesEditSchema,
-		"files.create.schema.json": filesCreateSchema,
-		"run.schema.json":          runSchema,
+		"files.read.schema.json":       filesReadSchema,
+		"git.status.schema.json":       gitStatusSchema,
+		"session.list.schema.json":     sessionListSchema,
+		"session.read.schema.json":     sessionReadSchema,
+		"files.edit.schema.json":       filesEditSchema,
+		"files.create.schema.json":     filesCreateSchema,
+		"run.schema.json":              runSchema,
+		"notes.search.schema.json":     contentToolSchema,
+		"notes.create.schema.json":     contentToolSchema,
+		"notes.update.schema.json":     contentToolSchema,
+		"notes.delete.schema.json":     contentToolSchema,
+		"snippets.list.schema.json":    contentToolSchema,
+		"snippets.create.schema.json":  contentToolSchema,
+		"snippets.update.schema.json":  contentToolSchema,
+		"snippets.delete.schema.json":  contentToolSchema,
+		"snippets.reorder.schema.json": contentToolSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)

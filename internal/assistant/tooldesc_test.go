@@ -61,6 +61,7 @@ func TestToolDescription_IsTheDeclarationsSentence(t *testing.T) {
 		Scopes: []content.GrantScope{
 			{Kind: content.ResourcePath, ID: "/workspace"},
 			{Kind: content.ResourceSession, ID: "lane-1"},
+			{Kind: content.ResourceContent, ID: "content"},
 		},
 	})
 	got := toolDescriptions(t, f.body())

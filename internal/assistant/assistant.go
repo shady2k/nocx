@@ -27,6 +27,7 @@ import (
 
 	tools "github.com/shady2k/nocx/contracts/tools"
 	"github.com/shady2k/nocx/internal/agenttools"
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
@@ -229,6 +230,11 @@ type AskParams struct {
 	// honestly as an error — a declaration without its transport is a
 	// wiring gap, never a silent no-op.
 	Requester RendererRequester
+	// NoteOperation and SnippetOperation are the existing guard-bound domain
+	// operations used by the Notes and Snippets panels. The assistant carries
+	// them as seams; it never owns a service or a second store implementation.
+	NoteOperation    capability.NoteOperation
+	SnippetOperation capability.SnippetOperation
 	// Approvals is the process-lifetime approval store (design §7.2): the
 	// human's yes to one exact proposal, bound to run, attempt, tool, call
 	// id and a hash of the canonical arguments. Nil disables escalation's

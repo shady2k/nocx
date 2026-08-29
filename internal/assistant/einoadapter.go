@@ -55,8 +55,8 @@ type policyMiddleware struct {
 // carrier in eino's middleware interface, and dresses the pair as eino's
 // middleware. Every argument is the kernel's; see newEffectKernel for what
 // each one is and which may be nil.
-func newPolicyMiddleware(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, turnEntryID string, requester RendererRequester, classifier CallClassifier, onCall func(ToolCall) error) (*policyMiddleware, error) {
-	k, err := newEffectKernel(logger, grant, registry, ledger, approvals, known, runID, attempt, turnEntryID, requester, classifier, onCall)
+func newPolicyMiddleware(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID string, attempt int, turnEntryID string, requester RendererRequester, classifier CallClassifier, onCall func(ToolCall) error, seams ...toolSeams) (*policyMiddleware, error) {
+	k, err := newEffectKernel(logger, grant, registry, ledger, approvals, known, runID, attempt, turnEntryID, requester, classifier, onCall, seams...)
 	if err != nil {
 		return nil, err
 	}

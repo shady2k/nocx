@@ -4699,6 +4699,10 @@ export class TerminalContent extends BasePaneContent {
     // the e2e, because no unit followed a dismissal past the command's end.
     this._endSummon()
     this._syncLifecycleOwnership()
+    // Escape is the discoverable hand-back gesture. Read-only state alone
+    // does not route the next physical key: focus can remain on the hidden
+    // CodeMirror content or an answer control, where q reaches nothing.
+    if (this.hasRunningCommand()) this.takeKeyboardToGrid()
     return true
   }
 
@@ -4836,14 +4840,41 @@ export class TerminalContent extends BasePaneContent {
     if (session === null || !this.hasRunningCommand()) return
     void session.signal(signal).then(
       (result) => {
-        if (result.outcome === 'delivered') return
-        showToast({
-          level: 'warning',
-          message:
-            result.outcome === 'unsupported'
-              ? 'This command is running on the remote host, which nocx cannot signal from here.'
-              : 'Nothing is running in this pane any more, so there was nothing to stop.',
-        })
+        // A SWITCH, AND EXHAUSTIVE ON PURPOSE. The outcome set is closed by
+        // the contract and this is the branch the person reads, so a word
+        // the server learns to send and this does not must be a type error
+        // here rather than a wrong sentence there. The if/else this replaces
+        // had `nothing-running` as its fallback, which is the one message
+        // that must never be shown by accident: it is exactly the lie the
+        // incident was reported as (nocx-7l4ex.12).
+        let message: string
+        switch (result.outcome) {
+          case 'delivered':
+            return
+          case 'unsupported':
+            message =
+              'This command is running on the remote host, which nocx cannot signal from here.'
+            break
+          case 'unreconciled':
+            // Deliberately does NOT suggest Ctrl+C: over a group nocx may
+            // not kill, Ctrl+C is precisely what the backend just sent, and
+            // recommending the gesture that has already failed reads as the
+            // app not knowing what it did.
+            message =
+              'The command is still recorded as running and nocx could not stop it — the program shares the shell it was started from, so stopping it by force would take the shell too. Use the program’s own way out.'
+            break
+          case 'nothing-running':
+            message = 'Nothing is running in this pane any more, so there was nothing to stop.'
+            break
+          default: {
+            const unreachable: never = result.outcome
+            log.warn('nocx: session.signal returned an outcome this build does not know', {
+              outcome: String(unreachable),
+            })
+            message = 'nocx could not tell whether the command stopped.'
+          }
+        }
+        showToast({ level: 'warning', message })
       },
       (err: unknown) => {
         log.warn('nocx: session.signal failed', {

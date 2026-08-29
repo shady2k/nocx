@@ -211,6 +211,47 @@ Two rules fall out and both are load-bearing:
   the target as the TUI. Exit forces a visible transition.
 - **Key ownership binds to a live session generation.** After a reconnect, the same-looking
   target is a different process.
+- **A protected shell process group is not proof of an idle pane.** Some foreground
+  programs share the launcher shell's group — job control off (`set +m`, ADR-0024) or
+  `exec` — so TIOCGPGRP gives the same answer it gives at an idle prompt while a program
+  is very much running. `internal/pty` therefore names that answer separately
+  (`ErrProtectedForeground`, wrapping `ErrNoForeground`), and
+  `internal/transport/foreground_signal.go` stays the one owner of "how do you stop a
+  process": ONE policy, whose MECHANISM is chosen from that kernel answer and from
+  nothing else. An independent group is signalled with `kill(2)` and escalated through;
+  a protected group receives the terminal's own `0x03` byte and is never escalated into.
+- **What may say a program is inside a protected group.** Only an authenticated
+  lifecycle attempt that is both open and `Started` — the shell's own start, never the
+  app's submit, which opens the attempt _before_ the bytes that could cause it are
+  written (lifecycle-protocol §7). Exactly one such attempt across the session's lanes,
+  or the answer is the prompt's. Nothing here reads the byte stream (AD-6).
+- **And what the fallback does not claim.** `0x03` is a byte: the line discipline turns
+  it into SIGINT for the whole foreground group while ISIG is set — which in the
+  protected case includes the launcher shell, which ignores it — and a program that has
+  cleared ISIG receives it as input. So Stop's promise is stated on the outcome:
+  `delivered` means that exact attempt is no longer open when the response is sent,
+  `unreconciled` means nocx could not establish that. Never `nothing-running` beside a
+  running block.
+
+**The target chord has one owner, and it reads the state rather than the focus.**
+⌘/Ctrl+Enter means one thing — "I want the assistant" — and one capture-phase listener at
+the document root, per pane, recognises it: `editor.isVisible` chooses between flipping the
+active target and summoning the editor over a running command, which is the same fact
+`canSummonEditor` tests first. Capture at the root is what makes a single owner possible at
+all: it precedes xterm's helper textarea, which would otherwise turn the chord into a CR in
+the running command's stdin, and CodeMirror's `Mod-Enter` binding, which would otherwise
+insert a blank line into the draft. The editor's own surfaces keep first refusal through the
+one arbiter chain (`§8.9.4` of the command-blocks design), so an open recall, picker or
+completion dropdown still owns the keys it already owned; an overlay owns the keyboard while
+it is up; and a text control outside this pane keeps its own key stream. Nothing else in the
+renderer tests `Enter` with a Command/Ctrl modifier.
+
+Splitting that recognition across surfaces is what the rule exists against. It was split
+three ways once — a listener on the editor root, one on the xterm host, one on `document` —
+each keyed on wherever the browser had parked the focus, and between them the gesture had two
+dead states: the summon was unreachable from anywhere but the grid, so pressing the chord
+after reading the scrollback did nothing, and an open block menu swallowed the chord in
+silence.
 
 **The target chord has one owner, and it reads the state rather than the focus.**
 ⌘/Ctrl+Enter means one thing — "I want the assistant" — and one capture-phase listener at

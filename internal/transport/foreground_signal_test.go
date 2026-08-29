@@ -130,7 +130,7 @@ func TestStopForeground_SignalsOnlyTheGroupItStartedAgainst(t *testing.T) {
 	sess.diesOn, sess.successor = syscall.SIGINT, personGroup
 	sess.live[personGroup] = true
 
-	outcome := stopForeground(log.NewSlogAdapter(nil), session.ID("sid"), sess, 200*time.Millisecond)
+	outcome := stopForeground(log.NewSlogAdapter(nil), session.ID("sid"), sess, 200*time.Millisecond, nil)
 
 	if outcome != foregroundDelivered {
 		t.Fatalf("outcome = %q, want %q", outcome, foregroundDelivered)
@@ -149,7 +149,7 @@ func TestStopForeground_EscalatesOnTheSameGroupWhenNothingCooperates(t *testing.
 	const stubborn = 4300
 	sess := newHandoffSession(stubborn)
 
-	outcome := stopForeground(log.NewSlogAdapter(nil), session.ID("sid"), sess, 20*time.Millisecond)
+	outcome := stopForeground(log.NewSlogAdapter(nil), session.ID("sid"), sess, 20*time.Millisecond, nil)
 
 	if outcome != foregroundDelivered {
 		t.Fatalf("outcome = %q, want %q", outcome, foregroundDelivered)
@@ -171,7 +171,7 @@ func TestStopForeground_EscalatesOnTheSameGroupWhenNothingCooperates(t *testing.
 func TestStopForeground_AtAPromptSignalsNothing(t *testing.T) {
 	sess := newHandoffSession(0)
 
-	outcome := stopForeground(log.NewSlogAdapter(nil), session.ID("sid"), sess, 20*time.Millisecond)
+	outcome := stopForeground(log.NewSlogAdapter(nil), session.ID("sid"), sess, 20*time.Millisecond, nil)
 
 	if outcome != foregroundNothingRunning {
 		t.Fatalf("outcome = %q, want %q", outcome, foregroundNothingRunning)
@@ -189,10 +189,10 @@ func TestInterruptForeground_AddressesWhateverIsInFrontNow(t *testing.T) {
 	sess := newHandoffSession(first, second)
 	sess.diesOn, sess.successor = syscall.SIGINT, second
 
-	if got := interruptForeground(log.NewSlogAdapter(nil), session.ID("sid"), sess); got != foregroundDelivered {
+	if got := interruptForeground(log.NewSlogAdapter(nil), session.ID("sid"), sess, nil); got != foregroundDelivered {
 		t.Fatalf("first interrupt = %q, want %q", got, foregroundDelivered)
 	}
-	if got := interruptForeground(log.NewSlogAdapter(nil), session.ID("sid"), sess); got != foregroundDelivered {
+	if got := interruptForeground(log.NewSlogAdapter(nil), session.ID("sid"), sess, nil); got != foregroundDelivered {
 		t.Fatalf("second interrupt = %q, want %q", got, foregroundDelivered)
 	}
 	if got := sess.signalsTo(first); len(got) != 1 || got[0] != syscall.SIGINT {

@@ -39,7 +39,17 @@ func (lp *LocalPty) ForegroundProcessGroup() (int, error) {
 // in exactly one case, and that case is the whole reason it exists: at a
 // prompt the foreground group is the SHELL'S OWN, and the shell must never be
 // signalled — it is not part of the execution it is waiting on. That is
-// ErrNoForeground here, the same answer as no process at all.
+// ErrProtectedForeground here (nocx-7l4ex.10), which WRAPS ErrNoForeground:
+// a caller that only wants "nothing to cancel" keeps reading one error,
+// while a caller that can reach into a protected group — job control off
+// (`set +m`) or `exec` can leave a running program in there — can tell the
+// two apart.
+//
+// After nocx-uvac6.11 split the addressee from the signal, THIS IS THE ONLY
+// PLACE THE SHELL BRANCH EXISTS. SignalForeground below is a composition and
+// knows nothing about the shell; the ladder reaches the kernel through
+// SignalProcessGroup. Returning the specific error from anywhere else would
+// leave the ladder unable to see it.
 //
 // A caller that is going to signal more than once needs this, because a
 // process group is a stable addressee and "whatever is in front" is not: the
@@ -51,7 +61,7 @@ func (lp *LocalPty) ForegroundJob() (int, error) {
 		return 0, err
 	}
 	if lp.cmd.Process != nil && pgid == lp.cmd.Process.Pid {
-		return 0, ErrNoForeground
+		return 0, ErrProtectedForeground
 	}
 	return pgid, nil
 }

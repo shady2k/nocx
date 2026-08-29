@@ -11,13 +11,55 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/waittest"
 	"golang.org/x/sys/unix"
 )
+
+// waitForOutput waits until the pty has produced `want`. The pty is read on a
+// goroutine of its own because Read blocks: a test that read inline would
+// hang past its own bound rather than fail with what it did see. The bound is
+// a failure detector, never the thing being waited on — the condition is the
+// marker's arrival.
+func waitForOutput(t testing.TB, lp *LocalPty, want string) {
+	t.Helper()
+	var mu sync.Mutex
+	var seen strings.Builder
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		buf := make([]byte, 4096)
+		for {
+			n, err := lp.Read(buf)
+			if n > 0 {
+				mu.Lock()
+				seen.Write(buf[:n])
+				mu.Unlock()
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	t.Cleanup(func() { <-done })
+	waittest.WaitForTimeoutDetail(t, fmt.Sprintf("the pty to produce %q", want), 20*time.Second,
+		func() string {
+			mu.Lock()
+			defer mu.Unlock()
+			return seen.String()
+		},
+		func() bool {
+			mu.Lock()
+			defer mu.Unlock()
+			return strings.Contains(seen.String(), want)
+		})
+}
 
 // waitForeground waits until the pty reports a foreground process group at
 // all — the shell's own after spawn, the execution's while it runs. The
@@ -185,5 +227,75 @@ func TestLocalPty_SignalForegroundZeroChecksExistence(t *testing.T) {
 	// Signal 0 is the existence check: a live group answers nil.
 	if err := lp.SignalForeground(0); err != nil {
 		t.Fatalf("SignalForeground(0) on a live execution = %v, want nil", err)
+	}
+}
+
+// TestLocalPty_ProtectedShellGroupIsItsOwnAnswer separates the two facts
+// ErrNoForeground used to carry as one (nocx-7l4ex.10).
+//
+// "The foreground group is the launcher shell's own" and "there is no group
+// left to signal" are different states of the world, and the caller that
+// decides whether to fall back to the terminal's own interrupt byte has to
+// tell them apart: the first means a program may well be running INSIDE the
+// protected group, the second means nothing is running at all. They stayed
+// indistinguishable while both answered ErrNoForeground, so the specific
+// error WRAPS the general one — every existing caller reading "nothing to
+// cancel" keeps reading it, and the one caller that needs the distinction
+// can ask for it.
+func TestLocalPty_ProtectedShellGroupIsItsOwnAnswer(t *testing.T) {
+	lp := mustSpawn(t, 80, 24)
+	defer func() { _ = lp.Close() }()
+
+	pgid := waitForeground(t, lp)
+	if pgid != lp.Pid() {
+		t.Fatalf("foreground pgid = %d, want the shell's own pid %d", pgid, lp.Pid())
+	}
+	err := lp.SignalForeground(syscall.SIGINT)
+	if !errors.Is(err, ErrProtectedForeground) {
+		t.Fatalf("SignalForeground at the prompt = %v, want ErrProtectedForeground", err)
+	}
+	if !errors.Is(err, ErrNoForeground) {
+		t.Fatalf("ErrProtectedForeground must still satisfy ErrNoForeground; got %v", err)
+	}
+}
+
+// TestLocalPty_ProtectedGroupHoldsARunningProgram is the incident's topology
+// at the seam that decides about it (nocx-7l4ex.11).
+//
+// `set +m` turns job control off, and bash then runs a foreground command in
+// its OWN process group instead of creating one for it — the same shape
+// ADR-0024 names ("`set +m` puts shell and command in one group"), and the
+// shape the owner's `top` was in. So the kernel's answer is identical to the
+// answer it gives at an idle prompt, while a program is very much running:
+// this is exactly why the protected answer cannot be read as "nothing is
+// running", and why nothing here may infer otherwise from the byte stream.
+func TestLocalPty_ProtectedGroupHoldsARunningProgram(t *testing.T) {
+	lp := mustSpawn(t, 80, 24)
+	defer func() { _ = lp.Close() }()
+
+	waitForeground(t, lp)
+	dir := t.TempDir()
+	// The marker is a file's CONTENT, echoed back by the running program —
+	// so observing it means that program has completed its execve and is the
+	// one holding the terminal, and it cannot be satisfied by the shell's
+	// echo of the command line (the line names only the path).
+	marker := filepath.Join(dir, "shared-group-ready")
+	if err := os.WriteFile(marker, []byte("SHARED-GROUP-READY\n"), 0o600); err != nil {
+		t.Fatalf("write the readiness marker: %v", err)
+	}
+	if _, err := lp.Write([]byte("set +m\ntail -f '" + marker + "'\n")); err != nil {
+		t.Fatalf("Write: %v", err)
+	}
+	waitForOutput(t, lp, "SHARED-GROUP-READY")
+
+	pgid, err := lp.ForegroundProcessGroup()
+	if err != nil {
+		t.Fatalf("ForegroundProcessGroup: %v", err)
+	}
+	if pgid != lp.Pid() {
+		t.Fatalf("foreground pgid = %d, want the shell's own pid %d — job control was not off", pgid, lp.Pid())
+	}
+	if err := lp.SignalForeground(syscall.SIGINT); !errors.Is(err, ErrProtectedForeground) {
+		t.Fatalf("SignalForeground over a shared group = %v, want ErrProtectedForeground", err)
 	}
 }

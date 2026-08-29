@@ -101,17 +101,37 @@ func interruptForeground(lg log.Logger, sid session.ID, sess runLeaseSession) fo
 // KILL, went to that command. The addressee of a stop is decided when the stop
 // begins; everything after that is the same conversation with the same job.
 func stopForeground(lg log.Logger, sid session.ID, sess runLeaseSession, grace time.Duration) foregroundOutcome {
+	pgid, outcome, named := foregroundJob(lg, sid, sess)
+	if !named {
+		return outcome
+	}
+	return stopProcessGroup(lg, sid, sess, pgid, grace)
+}
+
+// foregroundJob names the group a stop is about to address, or reports why
+// there is none. Separate from the ladder because a caller can need the NAME
+// earlier than the signals: withdrawing an assistant request can let its
+// command exit, and after that "what is in front" is somebody else's
+// (nocx-uvac6.11).
+func foregroundJob(lg log.Logger, sid session.ID, sess runLeaseSession) (int, foregroundOutcome, bool) {
+	pgid, err := sess.ForegroundJob()
+	if err == nil {
+		return pgid, foregroundDelivered, true
+	}
+	if errors.Is(err, pty.ErrNoForeground) {
+		return 0, foregroundNothingRunning, false
+	}
+	lg.Warn("foreground signal: could not name the foreground job",
+		"session_id", string(sid), "error", err)
+	return 0, foregroundNothingRunning, false
+}
+
+// stopProcessGroup runs the ladder against ONE group, named by an earlier
+// foregroundJob. Everything the package comment says about a stop's addressee
+// is enforced here: this function never asks what is in front.
+func stopProcessGroup(lg log.Logger, sid session.ID, sess runLeaseSession, pgid int, grace time.Duration) foregroundOutcome {
 	if grace <= 0 {
 		grace = defaultRunSignalGrace
-	}
-	pgid, err := sess.ForegroundJob()
-	if err != nil {
-		if errors.Is(err, pty.ErrNoForeground) {
-			return foregroundNothingRunning
-		}
-		lg.Warn("foreground signal: could not name the foreground job",
-			"session_id", string(sid), "error", err)
-		return foregroundNothingRunning
 	}
 	escalation := []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL}
 	delivered := false

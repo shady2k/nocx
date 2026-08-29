@@ -367,21 +367,29 @@ func (l *runLease) cancelExecution() foregroundOutcome {
 		// unrelated foreground group happens to be in the session.
 		return foregroundNothingRunning
 	}
-	cancel()
-	// AND THE CLAIM IS RE-MADE AFTER THE WITHDRAWAL (nocx-uvac6.11). Between
-	// taking the claim above and arriving here the request can have completed
-	// on its own — supervise returns and disarm marks the lease done. An
-	// escalation started then would address whatever the session has in front
-	// of it NOW, which is the next thing the person ran. The lease's promise
-	// is an interval — inert from the moment it is done until it is collected
-	// — so the state is read again at the last instant before any signal.
-	l.mu.Lock()
-	done := l.done
-	l.mu.Unlock()
-	if done {
-		return foregroundNothingRunning
+	// THE ADDRESSEE IS NAMED BEFORE THE WITHDRAWAL (nocx-uvac6.11), and that
+	// ordering is the whole guarantee. While the broker request is still in
+	// flight the foreground job IS this request's, by construction. Cancelling
+	// first and asking afterwards inverts that: the request resolves, its
+	// command exits, and the question "what is in front" is then answered by
+	// whatever the person started next.
+	//
+	// Naming it does not commit to signalling it. If the command exits on its
+	// own between here and the first rung, the ladder's own signal to that
+	// exact group answers ESRCH and reports nothing-running — a dead addressee
+	// is still the right addressee.
+	if l.sess == nil {
+		l.log.Warn("run lease: no local process group to signal — the execution keeps running",
+			"session_id", string(l.sid))
+		cancel()
+		return foregroundUnsupported
 	}
-	return l.escalate()
+	pgid, outcome, named := foregroundJob(l.log, l.sid, l.sess)
+	cancel()
+	if !named {
+		return outcome
+	}
+	return stopProcessGroup(l.log, l.sid, l.sess, pgid, l.cfg.SignalGrace)
 }
 
 // effectiveRunLease returns the server's lease config: the config named by

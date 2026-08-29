@@ -271,15 +271,26 @@ Recovering the backlog from the snapshot:
 ```bash
 git fetch origin refs/beads/snapshot:refs/beads/snapshot
 git cat-file -p refs/beads/snapshot:issues.jsonl > .beads/issues.jsonl
-bd init --from-jsonl --discard-remote
+sed -i '/^sync\.remote:/d' .beads/config.yaml   # do not adopt the stranded remote
+bd init --from-jsonl
+bd list --status all | wc -l                    # must match what you expect
 ```
 
-`bd init`, not `bd bootstrap`. Bootstrap prefers the configured remote and only
-reaches a local JSONL fourth, so in the failure this snapshot exists for — a
-remote that answers but whose history is stranded — it would faithfully restore
-the broken state. `--from-jsonl` is a boolean flag that reads `import.path`;
-`--discard-remote` is what authorizes replacing that stranded history, and it is
-required rather than convenient.
+Verified end to end on 2026-08-29: 2720 issues out, 2720 back, ids intact.
+
+Three things this procedure is deliberately not. It is not `bd bootstrap`, which
+prefers the configured remote and reaches a local JSONL only fourth — in the one
+failure this snapshot exists for, a remote that answers but whose history is
+stranded, bootstrap would faithfully restore the broken state. It is not
+`--discard-remote` either: dropping `sync.remote` first says the same thing
+without arming the next `bd dolt push` to force-replace the remote's history.
+And it is not run from a directory of any name — a fresh `bd init` takes the
+issue prefix from the directory, so recover into one named `nocx` or new issues
+will be minted as `<dirname>-<hash>`.
+
+Once the recovered database is verified, put `sync.remote` back and push it to
+the remote to replace the stranded history — that push is the destructive step,
+and it belongs after you have checked the count, not before.
 
 If `bd` is missing or this clone has no database, both hooks step aside silently; a
 genuine sync failure stops the push and says so, and `git push --no-verify`

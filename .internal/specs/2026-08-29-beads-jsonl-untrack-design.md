@@ -112,26 +112,28 @@ push` упал, история на remote под вопросом, здоров
 возвращает 3 — тихий выход 0, как во всех остальных функциях этого файла.
 `timeout -k` — по образцу соседей, по причине из `nocx-v48vl`.
 
-**Восстановление** (в README, дословно):
+**Восстановление** (в README, дословно) — проверено сквозняком 2026-08-29,
+2720 иссуев вышло, 2720 вернулось, id сохранены:
 
 ```sh
-git fetch origin refs/beads/snapshot
-git cat-file -p FETCH_HEAD:issues.jsonl > .beads/issues.jsonl
-bd init --from-jsonl --discard-remote
+git fetch origin refs/beads/snapshot:refs/beads/snapshot
+git cat-file -p refs/beads/snapshot:issues.jsonl > .beads/issues.jsonl
+sed -i '/^sync\.remote:/d' .beads/config.yaml
+bd init --from-jsonl
 ```
 
-Не `bd bootstrap`. Проверено `bd bootstrap --dry-run` в этом клоне — отвечает
-«clone from remote»: справка перечисляет его порядок явно (sync.remote → git
-`refs/dolt/data` → `.beads/backup/*.jsonl` → `.beads/issues.jsonl`), и пока
-`sync.remote` настроен, до JSONL он не доходит никогда. А сценарий, ради которого
-снапшот и существует, — это именно доступный, но испорченный remote: bootstrap
-аккуратно восстановит из него поломанное состояние.
+Не `bd bootstrap`: проверено `--dry-run`, отвечает «clone from remote», его
+порядок (sync.remote → `refs/dolt/data` → backup → JSONL) до JSONL не доходит,
+пока remote настроен. А снапшот существует ровно для случая «remote отвечает, но
+испорчен».
 
-`bd init --from-jsonl` — булев флаг: он импортирует из `import.path`, путь ему не
-передают (`bd config get import.path` в этом репозитории уже отвечает
-`issues.jsonl`). `--discard-remote` обязателен и честно называет происходящее —
-справка: «refuses remote history unless --discard-remote authorizes
-replacement». В неинтерактивном режиме понадобится ещё `--destroy-token`.
+Не `--discard-remote`: снять `sync.remote` заранее говорит то же самое, но не
+взводит следующий `bd dolt push` на history-replacing force-push. Первая версия
+этой спеки предписывала `--discard-remote`, и это было неверно дважды — флаг
+разрушительнее необходимого, а в неинтерактивном режиме он ещё и требует токен
+`DESTROY-<issue-prefix>`, где префикс свежий `bd init` берёт ИЗ ИМЕНИ КАТАЛОГА, а
+не из восстанавливаемых данных. Восстанавливаться надо в каталог с именем `nocx`,
+иначе новые иссуи начнут называться `<dirname>-<hash>`.
 
 Процедура проверяется дословно, а не пересказом: команда, которую невозможно
 выполнить копипастой, — это не процедура восстановления.

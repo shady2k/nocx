@@ -44,9 +44,10 @@ func TestScopedReader_CannotReachOutsideScope(t *testing.T) {
 	dir := scopeDir(t)
 	ctx := context.Background()
 
-	s, err := filesystem.NewScopedReader(ctx, local.New(), []string{filepath.Join(dir, "a")})
+	s, err := filesystem.NewScopedReaderWithExactFiles(ctx, local.New(),
+		[]string{filepath.Join(dir, "a")}, []string{filepath.Join(dir, "a", "in.txt")})
 	if err != nil {
-		t.Fatalf("NewScopedReader: %v", err)
+		t.Fatalf("NewScopedReaderWithExactFiles: %v", err)
 	}
 
 	// In scope: the read returns the file.
@@ -87,9 +88,10 @@ func TestScopedReader_SymlinkEscapeIsRefused(t *testing.T) {
 		t.Skipf("symlink unavailable: %v", err)
 	}
 
-	s, err := filesystem.NewScopedReader(ctx, local.New(), []string{filepath.Join(dir, "a")})
+	s, err := filesystem.NewScopedReaderWithExactFiles(ctx, local.New(),
+		[]string{filepath.Join(dir, "a")}, []string{filepath.Join(dir, "a", "escape.txt")})
 	if err != nil {
-		t.Fatalf("NewScopedReader: %v", err)
+		t.Fatalf("NewScopedReaderWithExactFiles: %v", err)
 	}
 	_, err = s.Read(ctx, filepath.Join(dir, "a", "escape.txt"), 1<<20)
 	if !errors.Is(err, filesystem.ErrOutOfScope) {
@@ -101,9 +103,9 @@ func TestScopedReader_SymlinkEscapeIsRefused(t *testing.T) {
 // capability with no scope cannot express any call.
 func TestScopedReader_ZeroRootsRefuseEverything(t *testing.T) {
 	dir := scopeDir(t)
-	s, err := filesystem.NewScopedReader(context.Background(), local.New(), nil)
+	s, err := filesystem.NewScopedReaderWithExactFiles(context.Background(), local.New(), nil, nil)
 	if err != nil {
-		t.Fatalf("NewScopedReader: %v", err)
+		t.Fatalf("NewScopedReaderWithExactFiles: %v", err)
 	}
 	_, err = s.Read(context.Background(), filepath.Join(dir, "a", "in.txt"), 1<<20)
 	if !errors.Is(err, filesystem.ErrOutOfScope) {
@@ -115,8 +117,9 @@ func TestScopedReader_ZeroRootsRefuseEverything(t *testing.T) {
 // construction interval: a scope whose identity cannot be resolved must not
 // silently become a wider or narrower scope — the constructor refuses.
 func TestScopedReader_UnknowableRootFailsConstruction(t *testing.T) {
-	if _, err := filesystem.NewScopedReader(context.Background(), local.New(), []string{filepath.Join(t.TempDir(), "does-not-exist")}); err == nil {
-		t.Fatal("NewScopedReader accepted an unknowable root")
+	if _, err := filesystem.NewScopedReaderWithExactFiles(context.Background(), local.New(),
+		[]string{filepath.Join(t.TempDir(), "does-not-exist")}, nil); err == nil {
+		t.Fatal("NewScopedReaderWithExactFiles accepted an unknowable root")
 	}
 }
 

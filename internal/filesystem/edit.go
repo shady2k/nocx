@@ -21,12 +21,6 @@ type ScopedEditor struct {
 	parentExact  bool
 }
 
-// NewScopedEditor builds a mutating capability over exactly the given roots.
-// Roots are canonicalized at construction, just like ScopedReader.
-func NewScopedEditor(ctx context.Context, p Provider, roots []string) (*ScopedEditor, error) {
-	return newScopedEditor(ctx, p, roots, nil, nil, false, false)
-}
-
 // NewScopedEditorWithExactFiles retains canonical grant roots for provider
 // containment while authorizing only the canonical file identities in files.
 // A file cannot itself be a directory root, because a root would authorize

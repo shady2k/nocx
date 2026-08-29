@@ -43,14 +43,6 @@ type ScopedContent struct {
 	Total int64
 }
 
-// NewScopedReader builds the capability over p for exactly the given roots.
-// A root that cannot be canonicalized is an error at construction — a scope
-// whose identity is unknowable must not silently become a wider or narrower
-// scope. Zero roots build a capability that refuses every read.
-func NewScopedReader(ctx context.Context, p Provider, roots []string) (*ScopedReader, error) {
-	return newScopedReader(ctx, p, roots, nil, false)
-}
-
 // NewScopedReaderWithExactFiles retains the provider-canonical grant roots for
 // context while authorizing only the canonical file identities in files.
 // This is the files.read capability shape: a file cannot itself be a directory

@@ -10,7 +10,7 @@
  * That is asserted twice below — the rendered count, and a compile-time
  * @ts-expect-error proving the type refuses a JSX element in the slot.
  */
-import { cleanup, fireEvent, render } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render, within } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { RecordRow } from './record-row'
 import { Badge } from './badge'
@@ -86,7 +86,7 @@ describe("RecordRow — the kit's record grammar", () => {
     void (() => <RecordRow title="x" kind={<Badge tone="info">two</Badge>} actions={null} />)
   })
 
-  it('passes activation through: Enter on the row fires onActivate, not the actions', () => {
+  it('passes activation through: the name opens the record, the actions do their own thing', () => {
     const onActivate = vi.fn()
     const onEdit = vi.fn()
     const { container } = render(() => (
@@ -100,14 +100,62 @@ describe("RecordRow — the kit's record grammar", () => {
         }
       />
     ))
+    // The keyboard target USED TO BE the row itself (tabIndex 0 here), and
+    // that changed deliberately with nocx-5xwub: the row announced "list
+    // item" and nothing else while acting on Enter. The control is now the
+    // record's name — see the describe below, which reads it by role.
     const row = container.querySelector('.ui-collection-row') as HTMLElement
-    expect(row.tabIndex).toBe(0)
+    expect(row.tabIndex).toBe(-1)
 
     fireEvent.click(container.querySelector('.ui-record-row__title')!)
     expect(onActivate).toHaveBeenCalledTimes(1)
 
     fireEvent.click(container.querySelector('.ui-collection-row__actions button')!)
     expect(onEdit).toHaveBeenCalledTimes(1)
+    expect(onActivate).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('RecordRow — a record you can open says so (nocx-5xwub)', () => {
+  it("makes the record's own name the control, named by the title", () => {
+    const onActivate = vi.fn()
+    const { container } = render(() => (
+      <RecordRow title="Deploy failed" actions={<></>} onActivate={onActivate} />
+    ))
+
+    // Read by ROLE and NAME, never by class: what a person listening to the
+    // row is told is the entire point. A row is not a button — it is a
+    // record — so the control is the record's NAME, which is also where its
+    // accessible name comes from for free.
+    const control = within(container).getByRole('button', { name: 'Deploy failed' })
+    fireEvent.click(control)
+    expect(onActivate).toHaveBeenCalledTimes(1)
+
+    // The row stops being a keyboard target of its own. It was one, and it
+    // announced "list item" and nothing else — a stop that promises nothing
+    // and delivers an action is the defect, not the missing role.
+    const row = container.querySelector('.ui-collection-row') as HTMLElement
+    expect(row.tabIndex).toBe(-1)
+    expect(row.getAttribute('role')).toBe('listitem')
+    expect(row.getAttribute('data-activatable')).toBe('true')
+
+    // And the whole-row click survives as what it always was: a shortcut for
+    // the mouse, on top of the control, never instead of it.
+    fireEvent.click(container.querySelector('.ui-record-row__meta')!)
+    expect(onActivate).toHaveBeenCalledTimes(2)
+  })
+
+  it('gives a row that cannot be opened no control at all', () => {
+    const { container } = render(() => <RecordRow title="Deploy failed" actions={<></>} />)
+    expect(within(container).queryByRole('button', { name: 'Deploy failed' })).toBeNull()
+  })
+
+  it('opens once when the name is clicked, not twice', () => {
+    const onActivate = vi.fn()
+    const { container } = render(() => (
+      <RecordRow title="Deploy failed" actions={<></>} onActivate={onActivate} />
+    ))
+    fireEvent.click(within(container).getByRole('button', { name: 'Deploy failed' }))
     expect(onActivate).toHaveBeenCalledTimes(1)
   })
 })

@@ -75,6 +75,33 @@ describe('CollectionRow', () => {
     expect(onActivate).toHaveBeenCalledTimes(2)
   })
 
+  it('hands the keyboard to the content when the content owns activation, and keeps the click', () => {
+    const onActivate = vi.fn()
+    const { container } = render(() => (
+      <CollectionRow
+        info={<span>Item</span>}
+        actions={null}
+        onActivate={onActivate}
+        activationInInfo
+      />
+    ))
+    const row = container.querySelector('.ui-collection-row') as HTMLElement
+
+    // Still a listitem, still marked activatable for the cursor — but not a
+    // tab stop of its own, because the control the content rendered is the
+    // one a person is told about (nocx-5xwub).
+    expect(row.getAttribute('role')).toBe('listitem')
+    expect(row.getAttribute('data-activatable')).toBe('true')
+    expect(row.tabIndex).toBe(-1)
+    fireEvent.keyDown(row, { key: 'Enter' })
+    expect(onActivate).not.toHaveBeenCalled()
+
+    // The whole-row click survives: it is the mouse's shortcut, and it was
+    // never the thing a screen reader could reach anyway.
+    fireEvent.click(container.querySelector('.ui-collection-row__info')!)
+    expect(onActivate).toHaveBeenCalledTimes(1)
+  })
+
   it('a click on the row body activates it', () => {
     const onActivate = vi.fn()
     const { container } = render(() => (

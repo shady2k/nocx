@@ -806,6 +806,35 @@ describe('the activity bar reads as two zones without a rule between them', () =
     }
   })
 
+  it('has one placement rule for the badge, and it is the class the renderer draws (nocx-63j6r)', () => {
+    const { bar, panel } = mount()
+    mountSidebar(
+      bar,
+      panel,
+      [
+        TWO_VIEWS[0],
+        { ...TWO_VIEWS[1], status: () => ({ count: 3, progress: null }) },
+      ] as SidebarViewDescriptor[],
+      [SETTINGS_ACTION],
+    )
+    const drawn = bar.querySelector<HTMLElement>('[data-view-badge]')
+    expect(drawn).not.toBeNull()
+
+    // Every selector in the sheet that is about the badge must be about the
+    // element the renderer actually mounts. A second spelling is a second
+    // answer to one placement question, and the unreachable one is the one
+    // that stays wrong without anybody noticing.
+    const bare = CSS.replace(/\/\*[\s\S]*?\*\//g, '')
+    const badgeSelectors = [...bare.matchAll(/([^{}]+)\{[^{}]*\}/gs)]
+      .flatMap((rule) => rule[1].split(','))
+      .map((sel) => sel.trim())
+      .filter((sel) => /badge/i.test(sel))
+    expect(badgeSelectors.length).toBeGreaterThan(0)
+    for (const sel of badgeSelectors) {
+      expect(drawn!.matches(sel)).toBe(true)
+    }
+  })
+
   it('and they are still two groups a screen reader can tell apart', () => {
     const { bar, panel } = mount()
     mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION])

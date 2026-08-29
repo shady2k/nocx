@@ -695,6 +695,16 @@ func TestAttach_OverTheWireConformsToContract(t *testing.T) {
 	// And the reset half of the shape, off the same socket: an offset the ring
 	// has moved past. Both branches are sent by the handler, so both are held
 	// against the contract.
+	//
+	// THE ACK COMES AFTER THE DELIVERY, and the order is the test (nocx-5v9zf).
+	// It used to trim first and then wait for the emit to arrive on connB — so
+	// whether connB's pump had read its first snapshot before the base moved
+	// past it was a race, lost on a loaded machine, and the reported failure
+	// was this wait timing out under whichever test name drew the short straw.
+	// Acking what the subscriber has demonstrably RECEIVED is both the state
+	// this test wants and the only ack a real client can send.
+	term.emit(t, "past the trim\n")
+	tapDataFor(t, tapB, opened.SessionID, "past the trim", wantWithin)
 	rx := ws.getRx(session.ID(opened.SessionID))
 	if rx == nil {
 		t.Fatal("the session has no ring")
@@ -702,8 +712,6 @@ func TestAttach_OverTheWireConformsToContract(t *testing.T) {
 	if err := rx.ring.ack(rx.ring.writtenLocked()); err != nil {
 		t.Fatalf("ack: %v", err)
 	}
-	term.emit(t, "past the trim\n")
-	tapDataFor(t, tapB, opened.SessionID, "past the trim", wantWithin)
 	_ = connB.Close()
 	awaitDetached(t, ws, session.ID(opened.SessionID))
 

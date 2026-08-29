@@ -200,6 +200,13 @@ func (s *Server) Start() error {
 		"version", s.cfg.Build.Version,
 		"commit", s.cfg.Build.Commit,
 	)
+	// Counted here, under mu, rather than by accept itself: Close sets
+	// closed under this same lock and only then waits, so every Add is
+	// ordered before the Wait that must see it. A WaitGroup whose counter
+	// can go from zero to one while another goroutine is already in Wait is
+	// a data race, and it is the one CI reported on this line — accept's
+	// per-connection Add against Close's Wait (nocx-dy2mn).
+	s.conns.Add(1)
 	go s.accept(listener)
 	return nil
 }
@@ -313,7 +320,25 @@ func (s *Server) abandonBind(l *net.UnixListener, tmp string, cause error) error
 }
 
 // accept runs until the listener is closed.
+// trackConn joins the connection wait group unless the server is already
+// closing, and reports whether it joined.
+//
+// The lock is what makes the WaitGroup safe rather than what makes the
+// counter correct: Close sets closed and releases mu before it waits, so an
+// Add that gets past this check happened before that Wait, and one that
+// arrives after it is refused instead of racing it.
+func (s *Server) trackConn() bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.closed {
+		return false
+	}
+	s.conns.Add(1)
+	return true
+}
+
 func (s *Server) accept(l *net.UnixListener) {
+	defer s.conns.Done()
 	for {
 		conn, err := l.AcceptUnix()
 		if err != nil {
@@ -323,7 +348,13 @@ func (s *Server) accept(l *net.UnixListener) {
 			s.cfg.Logger.Warn("coordinator: accept failed", "error", err)
 			return
 		}
-		s.conns.Add(1)
+		if !s.trackConn() {
+			// Close has begun. The connection is dropped rather than
+			// served, because the daemon is going away and a peer that
+			// gets no answer retries against the next one.
+			_ = conn.Close()
+			return
+		}
 		go func() {
 			defer s.conns.Done()
 			s.serve(conn)

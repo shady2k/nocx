@@ -20,7 +20,7 @@
  * ## Which source this exercises, and why there is no choice
  *
  * The STREAM source — the renderer holds the bytes. That is forced, not
- * chosen: the suite runs the headless stand (cmd/devharness plus vite), where
+ * chosen: the suite runs the headless stand (cmd/nocx-server plus vite), where
  * there is no Wails runtime, therefore no EnableFileDrop and no backend-minted
  * source ticket. Playwright builds a `File` and a `DataTransfer` in the page,
  * which is exactly what a browser drop produces, so the source this watches is

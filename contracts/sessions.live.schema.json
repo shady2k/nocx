@@ -1,0 +1,53 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sessions.live.schema.json",
+  "title": "SessionsLiveResult",
+  "description": "Result of the sessions.live JSON-RPC method (nocx-oevq4, the nocx-server design D5 and §5): every session the backend is holding right now, each with the pane it is the pipe of and the offset a fresh client should attach at. It is the answer to the question a fresh window cannot answer for itself. frontend/src/ipc.ts keeps its sessions in a Map in RENDERER MEMORY, and the reconnect pass reattaches only what is in it, so a window that has just started reattaches nothing and the live PTYs are orphaned with no way to find them. This method replaces that memory with a server-owned list. WHAT IS DELIBERATELY NOT HERE is the point of the shape: no cwd, no kind, no endpoint, no tab. Those are PANE facts, and the pane is the renderer's durable identity — minted by the frontend, persisted by internal/uistate and the layout store, and read back with layout.read. The coordinator owns the live half (which session, which incarnation, where its bytes resume) and the renderer owns the durable half; a copy of the pane's own facts here would be the second owner AD-8 forbids, and the two would part company the first time a pane was renamed or moved. The association between the two halves is the paneId on each entry, and nothing else crosses.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessions"],
+  "properties": {
+    "sessions": {
+      "description": "The live sessions, in no defined order. An empty array is the ordinary answer on a backend that holds nothing — an array, never null, because the renderer maps over it.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/liveSession" }
+    }
+  },
+  "$defs": {
+    "liveSession": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["sessionId", "instanceId", "sessionEpoch", "paneId", "replayFrom", "attached"],
+      "properties": {
+        "sessionId": {
+          "description": "The session's id, server-minted and server-authoritative (AD-7).",
+          "type": "string",
+          "minLength": 1
+        },
+        "instanceId": {
+          "description": "The backend instance holding this session (nocx-3oupk), carried per entry rather than once for the whole list because the identity of a session is (instanceId, sessionId, sessionEpoch) and no part of this system names a session with less. It is the value a claim must carry back: a claim naming another instance is refused, which is how AD-7 keeps holding across a coordinator restart (D5).",
+          "type": "string",
+          "minLength": 1
+        },
+        "sessionEpoch": {
+          "description": "Which incarnation of this session id, within that instance. Minted from 1, so zero names no incarnation.",
+          "type": "integer",
+          "minimum": 1
+        },
+        "paneId": {
+          "description": "The pane this session is the pipe of — the durable identity the renderer minted and the backend recorded at open — or null when the session is the pipe of no recorded pane, which is a legitimate state and not a missing value. This is the whole association: it is what lets a fresh window put a live session back into the pane it belongs to.",
+          "type": ["string", "null"]
+        },
+        "replayFrom": {
+          "description": "The oldest byte offset the session's replay ring still holds. A fresh client attaches HERE and receives everything the ring retained, including output produced while nothing was attached; attaching below it answers reset instead, because those bytes are gone (AD-9, ring.go). A client that already knows a later offset of its own — a reconnect rather than a reclaim — attaches at that one instead.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "attached": {
+          "description": "Whether a client currently holds this session. One client owns a session at a time (D8), so true means a claim will TAKE it from whoever has it and that client will be told it lost it. It is a fact about now, not a lock: it can change between this answer and the claim.",
+          "type": "boolean"
+        }
+      }
+    }
+  }
+}

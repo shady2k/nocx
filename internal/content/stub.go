@@ -62,6 +62,42 @@ func (s *Stub) APIRuns() APIRunRepository {
 	return &apiRunStub{log: s.log}
 }
 
+// SessionOutput returns a stub recorder. It is what the terminal runs with
+// when the content key could not be read: history.status already says the
+// store is not running, and the stance below says the consequence a detached
+// session will meet.
+func (s *Stub) SessionOutput() SessionOutputRepository {
+	s.log.Info("content stub: SessionOutput called (no-op)")
+	return &sessionOutputStub{log: s.log}
+}
+
+type sessionOutputStub struct {
+	log log.Logger
+}
+
+// Append keeps nothing and says so. It is NOT an error: the caller reads
+// Kept and leaves its persistence cursor where it is, which is what puts the
+// ring back under client acks alone — the degrade the product states rather
+// than a failure it retries.
+func (s *sessionOutputStub) Append(_ context.Context, in SessionOutputAppend) (SessionOutputResult, error) {
+	s.log.Info("content stub: SessionOutputRepository.Append",
+		"session_id", in.SessionID, "offset", in.Offset, "bytes", len(in.Body))
+	return SessionOutputResult{}, nil
+}
+
+func (s *sessionOutputStub) Read(_ context.Context, sessionID string) (SessionOutputRecording, error) {
+	s.log.Info("content stub: SessionOutputRepository.Read", "session_id", sessionID)
+	return SessionOutputRecording{SessionID: sessionID}, nil
+}
+
+// Stance is historyOff rather than a fourth member: with no store there is no
+// history at all, which is the sentence the two switches already produce, and
+// a stub-only reason would be a vocabulary the product has to learn for a
+// state it already describes through history.status.available.
+func (s *sessionOutputStub) Stance() SessionOutputStance {
+	return SessionOutputHistoryOff
+}
+
 type apiRunStub struct {
 	log log.Logger
 }

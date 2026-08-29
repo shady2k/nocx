@@ -88,11 +88,16 @@ func (p *Policy) SetOutputCapBytes(v int) {
 	p.outputCap = v
 }
 
-// OutputCapBytes reports the per-command cap. It is the RENDERER that applies
-// it — it holds the rows and can cut on a character boundary — and this is
-// what the renderer is told, through settings; the store's own ceiling
-// (MaxArtifactBytes) is a different number for a different question and is
-// not this.
+// OutputCapBytes reports the per-command cap. TWO surfaces apply it, and they
+// cut the same way on purpose: the RENDERER caps a frozen block's body, which
+// it can do on a character boundary because it holds the rows (capBody in
+// capture-client.ts), and the STORE caps a session's live recording, which
+// cannot wait for the end of something that has no end
+// (session_output_sqlite.go). Both keep the head and the tail and drop the
+// middle; both take the number from here.
+//
+// The store's own ceiling (MaxArtifactBytes) is a different number for a
+// different question and is not this.
 func (p *Policy) OutputCapBytes() int {
 	p.mu.RLock()
 	defer p.mu.RUnlock()

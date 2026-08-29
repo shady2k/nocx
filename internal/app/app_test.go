@@ -64,8 +64,8 @@ func TestStartShutdown(t *testing.T) {
 	if err := a.Start(ctx); err != nil {
 		t.Fatalf("Start() returned error: %v", err)
 	}
-	if a.WSPort() == 0 {
-		t.Fatal("WSPort() == 0 after Start")
+	if a.Transport.Port() == 0 {
+		t.Fatal("Transport.Port() == 0 after Start")
 	}
 
 	a.Shutdown(ctx)
@@ -77,8 +77,8 @@ func TestWSPortBeforeStart(t *testing.T) {
 	if err != nil {
 		t.Fatalf("New() returned error: %v", err)
 	}
-	if a.WSPort() != 0 {
-		t.Fatalf("expected 0 before Start, got %d", a.WSPort())
+	if a.Transport.Port() != 0 {
+		t.Fatalf("expected 0 before Start, got %d", a.Transport.Port())
 	}
 }
 
@@ -201,8 +201,8 @@ func TestNew_LogFile(t *testing.T) {
 	}
 	defer a.Shutdown(context.Background())
 
-	if got := a.LogFilePath(); got != path {
-		t.Errorf("LogFilePath() = %q, want %q", got, path)
+	if got := a.logFilePath; got != path {
+		t.Errorf("logFilePath = %q, want %q", got, path)
 	}
 	b, err := os.ReadFile(path) // #nosec G304 — the test's own temp path.
 	if err != nil {
@@ -226,7 +226,7 @@ func TestNew_LogFileDisabled(t *testing.T) {
 	}
 	defer a.Shutdown(context.Background())
 
-	if got := a.LogFilePath(); got != "" {
+	if got := a.logFilePath; got != "" {
 		t.Errorf("LogFilePath() = %q, want \"\" when file logging is disabled", got)
 	}
 }
@@ -246,7 +246,7 @@ func TestNew_LogFileUnavailableStartsAnyway(t *testing.T) {
 		t.Fatalf("New must fail open when the log file cannot be opened: %v", err)
 	}
 	defer a.Shutdown(context.Background())
-	if got := a.LogFilePath(); got != "" {
+	if got := a.logFilePath; got != "" {
 		t.Errorf("LogFilePath() = %q, want \"\" when the file could not be opened", got)
 	}
 }
@@ -462,9 +462,9 @@ func TestLocalEnhancedSessionEstablishesThroughProductionWiring(t *testing.T) {
 	}
 	defer a.Shutdown(context.Background())
 
-	wsURL := "ws://127.0.0.1:" + strconv.Itoa(a.WSPort()) + "/session"
+	wsURL := "ws://127.0.0.1:" + strconv.Itoa(a.Transport.Port()) + "/session"
 	conn, _, err := (&websocket.Dialer{
-		Subprotocols: []string{"nocx.token." + a.WSToken()},
+		Subprotocols: []string{"nocx.token." + a.Transport.Token()},
 	}).Dial(wsURL, nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)

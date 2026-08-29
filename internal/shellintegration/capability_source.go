@@ -26,7 +26,7 @@ import "strings"
 // remote COMMAND, where both bearers reached the far host's process arguments
 // and every recorder of the exec request. That is the defect this epic exists
 // to remove, and it is gone — the command that carried it was deleted with
-// its last caller (ADR-0035). What is left is the two forms above, and each
+// its last caller (ADR-0049). What is left is the two forms above, and each
 // of them has a transport that never becomes a filesystem name or an argv
 // word.
 //

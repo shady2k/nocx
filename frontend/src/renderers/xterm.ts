@@ -782,7 +782,7 @@ export class XtermRenderer implements TerminalRenderer {
   }
 
   /** Subscribe to notification requests: a program asked nocx to present a
-   *  message (ADR-0029). OSC 9 and OSC 777 are two spellings of one request,
+   *  message (ADR-0047). OSC 9 and OSC 777 are two spellings of one request,
    *  so both register here and fan out to one subscriber list — the consumer
    *  never learns which sequence a program chose, because nothing downstream
    *  may depend on it.

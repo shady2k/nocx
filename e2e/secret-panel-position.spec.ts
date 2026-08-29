@@ -79,7 +79,7 @@ function currentEndpoint(): BackendEndpoint {
 
 test.beforeEach(async () => {
   const root = mkdtempSync(join(tmpdir(), 'nocx-secret-panel-position-'))
-  backend = new VaultBackend(readStand().devharness, { root }, true)
+  backend = new VaultBackend(readStand().server, { root })
   endpoint = await backend.start()
 })
 

@@ -6,9 +6,11 @@ import {
   integrationMessage,
   isDegraded,
   observationSentence,
+  recordingSentence,
   shellFamily,
   subscribeIntegrationChanged,
   type IntegrationReason,
+  type OutputRecording,
 } from './status'
 import type { Dispatcher } from '../dispatcher'
 import type { SessionIntegrationChanged } from '../generated/session.integrationChanged'
@@ -64,7 +66,7 @@ describe('what the product says about a degraded session', () => {
 
   it('has words for every reason the wire can carry', () => {
     for (const reason of REASONS) {
-      const m = integrationMessage(fact({ reason }))
+      const m = integrationMessage(fact({ reason }), 'unknown')
       expect(m, reason).not.toBeNull()
       expect(m!.title.length, reason).toBeGreaterThan(0)
       expect(m!.description.length, reason).toBeGreaterThan(0)
@@ -91,7 +93,7 @@ describe('what the product says about a degraded session', () => {
       'conda',
     ]
     for (const reason of REASONS) {
-      const m = integrationMessage(fact({ reason }))!
+      const m = integrationMessage(fact({ reason }), 'unknown')!
       const text = [
         m.title,
         m.description,
@@ -114,15 +116,19 @@ describe('what the product says about a degraded session', () => {
   // sentence; startup-did-not-return must say it, because that stage is
   // exactly what the backend observed (nocx-yww2).
   it('does not claim an interception it cannot observe', () => {
-    const m = integrationMessage(fact({ reason: 'handshake-timeout' }))!
+    const m = integrationMessage(fact({ reason: 'handshake-timeout' }), 'unknown')!
     expect(m.description.toLowerCase()).not.toContain('startup file')
-    const s = integrationMessage(fact({ reason: 'startup-did-not-return' }))!
+    const s = integrationMessage(fact({ reason: 'startup-did-not-return' }), 'unknown')!
     expect(s.description.toLowerCase()).toContain('startup file')
   })
 
   it('says nothing about a session that is starting or integrated', () => {
-    expect(integrationMessage(fact({ status: 'starting', reason: undefined }))).toBeNull()
-    expect(integrationMessage(fact({ status: 'integrated', reason: undefined }))).toBeNull()
+    expect(
+      integrationMessage(fact({ status: 'starting', reason: undefined }), 'unknown'),
+    ).toBeNull()
+    expect(
+      integrationMessage(fact({ status: 'integrated', reason: undefined }), 'unknown'),
+    ).toBeNull()
     expect(isDegraded(fact({ status: 'starting', reason: undefined }))).toBe(false)
     expect(isDegraded(null)).toBe(false)
   })
@@ -135,9 +141,92 @@ describe('what the product says about a degraded session', () => {
   // defect this whole surface exists to remove, so a reason from a newer
   // backend falls back to "unknown" rather than to nothing.
   it('falls back to unknown for a reason it does not recognise', () => {
-    const m = integrationMessage(fact({ reason: 'brand-new' as IntegrationReason }))
+    const m = integrationMessage(fact({ reason: 'brand-new' as IntegrationReason }), 'unknown')
     expect(m).not.toBeNull()
     expect(m!.title).toBe('Not integrated')
+  })
+})
+
+// ── what a plain tab says about its output (nocx-22k1c.3) ────────────────
+//
+// The defect these were written against: a session in a shell nocx has no
+// integration for records everything it prints — the backend became the
+// replay ring's own consumer (nocx-22k1c.1) and does not ask whether the
+// session is integrated first — while the card in front of the user went on
+// saying nothing was being kept. A user reading that closes the tab believing
+// the run is gone.
+
+describe('what a plain tab says about its output', () => {
+  // Acceptance 1 and 2 together, on the string a user can see without
+  // opening anything: the tab is recording, it is not producing blocks, and
+  // the sentence before it says which of the thirty reasons this is.
+  it('says output is recorded, that blocks are not, and why — in one visible string', () => {
+    const m = integrationMessage(fact({ reason: 'unsupported-shell' }), 'recorded')!
+    // the reason, named
+    expect(m.description).toContain('no integration for this shell')
+    // and both halves of what that now means
+    expect(m.description).toContain('still being recorded')
+    expect(m.description).toContain('command blocks')
+  })
+
+  // The paired negative. The same sentence must not be said when there is no
+  // sink, or the product would claim a recording that is not happening — the
+  // same lie in the other direction, and the one the settings can cause.
+  it('says the opposite, and does not claim a recording, when there is no sink', () => {
+    const m = integrationMessage(fact({ reason: 'unsupported-shell' }), 'not-recorded')!
+    expect(m.description).toContain('not being recorded')
+    expect(m.description).not.toContain('still being recorded')
+  })
+
+  // Before history.status has answered the renderer has no fact, and saying
+  // nothing is the only honest third value. It is NOT the same as
+  // 'not-recorded': one is silence, the other is a claim.
+  it('says nothing about recording until the backend has answered', () => {
+    const m = integrationMessage(fact({ reason: 'unsupported-shell' }), 'unknown')!
+    expect(m.description.toLowerCase()).not.toContain('recorded')
+    expect(recordingSentence('unknown')).toBeNull()
+  })
+
+  // Acceptance 3, stated as the negative it has to be: an integrated session
+  // has no message at all, so the sentence cannot appear on one. Without
+  // this the sentence would appear everywhere and mean nothing.
+  it('is absent for a session that is integrated or still starting', () => {
+    for (const recording of ['recorded', 'not-recorded', 'unknown'] as OutputRecording[]) {
+      expect(
+        integrationMessage(fact({ status: 'integrated', reason: undefined }), recording),
+      ).toBeNull()
+      expect(
+        integrationMessage(fact({ status: 'starting', reason: undefined }), recording),
+      ).toBeNull()
+    }
+  })
+
+  // Every reason gets it, not just the one the bead was filed about: a fish
+  // user and a user whose handshake expired are in the same situation as far
+  // as their output is concerned, and a sentence on one card only would read
+  // as a property of that reason.
+  it('is said for every reason the wire can carry', () => {
+    for (const reason of REASONS) {
+      const m = integrationMessage(fact({ reason }), 'recorded')!
+      expect(m.description, reason).toContain('still being recorded')
+    }
+  })
+
+  // The claim that went stale. `channel-lost` used to say the commands were
+  // "no longer recorded", which was true before the backend consumed its own
+  // ring and is false now — and it is the one message a user reads at the
+  // exact moment they are wondering whether they have lost anything.
+  it('no longer tells a lost session that nothing is being recorded', () => {
+    const m = integrationMessage(fact({ status: 'lost', reason: 'channel-lost' }), 'recorded')!
+    expect(m.happening).not.toContain('no longer recorded')
+    expect(m.description).toContain('still being recorded')
+  })
+
+  // The same stale claim, one level up: the explanation behind "Learn more"
+  // told the reader a plain terminal keeps nothing at all.
+  it('no longer explains a plain terminal as one that records nothing', () => {
+    const text = INTEGRATION_EXPLANATION.join(' ')
+    expect(text).not.toContain('nothing recorded')
   })
 })
 
@@ -149,7 +238,7 @@ describe('what the product says about a degraded session', () => {
 // game where nocx's own launcher gives it a measured answer.
 
 describe('the fix a degraded session is offered', () => {
-  const fixFor = (shell: string) => integrationMessage(fact({ shell }))!.fix
+  const fixFor = (shell: string) => integrationMessage(fact({ shell }), 'unknown')!.fix
 
   // THE bug, stated from the user's side: nothing put in front of a zsh
   // user may be a bash command or a bash file.
@@ -216,10 +305,12 @@ describe('the fix a degraded session is offered', () => {
   // says "try again" teaches the user the button never helps.
   it('is absent for a reason nocx cannot advise on', () => {
     expect(
-      integrationMessage(fact({ status: 'lost', reason: 'channel-lost' }))!.fix,
+      integrationMessage(fact({ status: 'lost', reason: 'channel-lost' }), 'unknown')!.fix,
     ).toBeUndefined()
-    expect(integrationMessage(fact({ reason: 'remote-command' }))!.fix).toBeUndefined()
-    expect(integrationMessage(fact({ reason: 'unsupported-shell' }))!.fix).toBeUndefined()
+    expect(integrationMessage(fact({ reason: 'remote-command' }), 'unknown')!.fix).toBeUndefined()
+    expect(
+      integrationMessage(fact({ reason: 'unsupported-shell' }), 'unknown')!.fix,
+    ).toBeUndefined()
   })
 })
 

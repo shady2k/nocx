@@ -332,7 +332,11 @@ func (l *runLease) escalate() foregroundOutcome {
 			"session_id", string(l.sid))
 		return foregroundUnsupported
 	}
-	return stopForeground(l.log, l.sid, l.sess, l.cfg.SignalGrace)
+	// No protected-group fallback (nocx-7l4ex.10): the lease supervises the
+	// agent's run and holds no authenticated lifecycle attempt, so over a
+	// protected group it has nothing that says a program is in there. It
+	// takes the honest refusal rather than writing a byte on a guess.
+	return stopForeground(l.log, l.sid, l.sess, l.cfg.SignalGrace, nil)
 }
 
 // cancelExecution withdraws this exact broker request and synchronously runs

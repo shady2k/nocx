@@ -760,6 +760,8 @@ export class TerminalContent extends BasePaneContent {
   private _projections: LifecycleProjections | null = null
   private _markers = new Map<number, MarkerAdapter>()
   private _globalKeydown: ((e: KeyboardEvent) => void) | null = null
+  /** The ONE recogniser of the target chord (nocx-a7mw7.6), in capture. */
+  private _targetChordKeydown: ((e: KeyboardEvent) => void) | null = null
   private _cwd = '~'
   /** True only when _cwd came from a verified OSC 7 report (AD-5): the one
    *  cwd a composition layer may hand to files.open as rootPath (D2). A
@@ -1973,7 +1975,6 @@ export class TerminalContent extends BasePaneContent {
           // ⌘/Ctrl+Enter: the explicit switch (ADR-0004 §3) — same flip as
           // clicking the caret indicator, and the only thing the chord
           // does. Asking is plain Enter with Ask active.
-          onToggleTarget: () => this.toggleInputTarget(),
         },
         // The language is chosen HERE, not inside the editor. CommandEditor
         // must stay language-agnostic (ADR-0010 §Decision 3): the agent target
@@ -2103,100 +2104,7 @@ export class TerminalContent extends BasePaneContent {
       //     are the dropdown's while it is open.
       //   - Esc closes exactly one surface per press, in the same order:
       //     recall, picker, completion.
-      this.editor.setKeyArbiter((e) => {
-        // Every decision here is traced (off by default — `window.nocxDebug
-        // = true` in devtools): which surface got the key and why is the
-        // diagnosis for "my key did the wrong thing", and the chain's
-        // evaluation order is the accident that reads as ownership unless
-        // the decision is stated. The gate is checked BEFORE any field is
-        // built: with tracing off, a keystroke costs nothing but the check.
-        // The snippet palette chord (⌥⌘P, snippets/chord.ts) opens the
-        // palette from anywhere in the editor, exactly like recall's
-        // shortcut: checked BEFORE the surfaces so it cannot be swallowed
-        // by one of them, and opening it closes them — the palette owns
-        // the keys now (the surfaces never stack). Both keyboard paths
-        // (this arbiter and the xterm boundary) land in handleSnippetChord,
-        // which delegates to the composition root's ONE opener.
-        if (isSnippetChord(e)) {
-          if (isDecisionTracing()) {
-            logDecision('arbiter', {
-              surface: 'snippet-palette',
-              key: keyLabel(e),
-              why: 'the snippet chord opens the palette',
-            })
-          }
-          this.handleSnippetChord()
-          return true
-        }
-        // Recall first: the shortcut opens it from anywhere, and an open
-        // recall owns its keys. Opening it closes the other surfaces.
-        const recallWasOpen = this.recall!.isOpen
-        const consumed = this.recall!.handleKey(e)
-        if (this.recall!.isOpen) {
-          this.completion?.dismiss()
-          this.promptVault?.closePicker()
-        }
-        if (consumed) {
-          if (isDecisionTracing()) {
-            logDecision('arbiter', {
-              surface: 'recall',
-              key: keyLabel(e),
-              why: recallWasOpen ? 'recall is open; it owns its keys' : 'recall shortcut',
-            })
-          }
-          return true
-        }
-        // The picker outranks completion: while it is open its keys
-        // (arrows, Enter, Tab, Esc) belong to it, and a Right/End ghost
-        // accept must never insert completion text into the line under the
-        // picker.
-        if (this.promptVault!.isPickerOpen) this.completion?.dismiss()
-        if (this.promptVault!.handleKey(e)) {
-          if (isDecisionTracing()) {
-            logDecision('arbiter', {
-              surface: 'picker',
-              key: keyLabel(e),
-              why: 'picker is open; it owns its keys',
-            })
-          }
-          return true
-        }
-        // The ownership decision above, applied: an open selectable
-        // dropdown owns bare ArrowUp/ArrowDown — its footer promises
-        // navigation — so they are routed to it explicitly and can never
-        // fall through to the editor's recall gesture. Everything else
-        // (Enter, Tab, Esc, Right/End, typing) still goes to the
-        // completion controller's ordinary handling.
-        if (this.completion!.ownsArrows(e)) {
-          if (isDecisionTracing()) {
-            logDecision('arbiter', {
-              surface: 'completion',
-              key: keyLabel(e),
-              why: 'dropdown is open; bare arrows belong to it',
-            })
-          }
-          return this.completion!.handleKey(e)
-        }
-        const handled = this.completion?.handleKey(e) ?? false
-        if (handled) {
-          if (isDecisionTracing()) {
-            logDecision('arbiter', {
-              surface: 'completion',
-              key: keyLabel(e),
-              why: 'completion consumed the key',
-            })
-          }
-          return true
-        }
-        if (isDecisionTracing()) {
-          logDecision('arbiter', {
-            surface: 'editor',
-            key: keyLabel(e),
-            why: 'no surface claimed the key',
-          })
-        }
-        return false
-      })
+      this.editor.setKeyArbiter((e) => this.arbitrateEditorKey(e))
 
       if (signal.aborted) {
         this.recall?.destroy()
@@ -2500,31 +2408,6 @@ export class TerminalContent extends BasePaneContent {
         ) {
           e.preventDefault()
           e.stopPropagation()
-          return
-        }
-        // The target chord keeps its one meaning when a scrollback selection
-        // has released editor focus: switch where the next document goes.
-        // Editor-root events are already consumed by CommandEditor; unrelated
-        // text controls and higher overlays keep their own key stream.
-        if (
-          e.key === 'Enter' &&
-          (e.ctrlKey || e.metaKey) &&
-          !e.altKey &&
-          !e.shiftKey &&
-          this.editor?.isVisible
-        ) {
-          const active = document.activeElement
-          if (active && this.editor.rootContains(active)) return
-          if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
-          if (
-            active instanceof HTMLElement &&
-            active.closest('button, a[href], [role="button"]') !== null
-          )
-            return
-          if (hasOpenOverlays() || document.querySelector('.cmd-overflow-menu')) return
-          e.preventDefault()
-          e.stopPropagation()
-          this.toggleInputTarget()
           return
         }
         if (this.scrollback && this.scrollback.selectedBlockId !== null) {
@@ -3255,45 +3138,74 @@ export class TerminalContent extends BasePaneContent {
         }
       })
 
-      // ── Summon the editor over a running command (nocx-92gfl) ──────────
+      // ── THE TARGET CHORD HAS ONE OWNER (nocx-a7mw7.6) ─────────────────
+      //
+      // ⌘/Ctrl+Enter means one thing — "I want the assistant" — and it is
+      // recognised here and nowhere else. It used to be claimed in three
+      // places, each keyed on where the browser happened to have parked the
+      // focus: a capture listener on the editor's root flipped the target, a
+      // capture listener on the xterm host summoned the editor, and a third
+      // listener was added on document so a scrollback selection — which
+      // releases focus onto <body>, neither of the other two — could reach
+      // the flip at all. Three guard sets for one key, and between them two
+      // states where the gesture did nothing: the summon was unreachable
+      // from anywhere but the grid, and an open block menu swallowed the
+      // chord in silence.
       //
       // IN THE CAPTURE PHASE, and that is not a style choice. xterm attaches
       // its own keydown to the hidden textarea, and by the time an event
-      // bubbles to this element xterm has already turned Ctrl+Enter into a
-      // CR and pushed it through onData — into the stdin of the very command
-      // this chord is about. Capture on an ancestor runs before the
-      // textarea's own listener, so the key is intercepted rather than
-      // undone.
+      // bubbles to an ancestor xterm has already turned Ctrl+Enter into a CR
+      // and pushed it through onData — into the stdin of the very command
+      // this chord is about. Capture at the document root also runs before
+      // CM6's keymap, which binds Mod-Enter to insertBlankLine, and before
+      // the editor's own root-capture listener. One position that precedes
+      // all three claimants is what lets there be one claimant.
       //
-      // ⌘/Ctrl+Enter and not a new chord, because it already means "I want
-      // the assistant": at a prompt it flips the target to Ask, and here it
-      // brings the box that has that target back. One gesture, one meaning,
-      // two situations.
-      target.addEventListener(
-        'keydown',
-        (e: KeyboardEvent) => {
-          if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return
-          const decision = this.canSummonEditor()
-          // Editor-visible and no-running states are silent and unconsumed;
-          // a capture in flight and a summon already open are silent but must
-          // still consume the chord so it cannot become a CR in the running
-          // program while the first one finishes.
-          if (
-            (decision.kind === 'silent' &&
-              decision.reason !== 'summon-pending' &&
-              decision.reason !== 'summon-active') ||
-            decision.kind === 'invariant'
-          )
-            return
-          // Every spoken refusal and successful summon consumes the chord
-          // before capture awaits the parse fence, so it cannot become a CR
-          // in the running program.
+      // AND IT READS THE STATE, NOT THE FOCUS. `editor.isVisible` chooses
+      // between flipping and summoning — the same fact canSummonEditor's
+      // first line already tests — so the gesture means the same thing from
+      // the composer, from the grid, from a released selection on <body>.
+      this._targetChordKeydown = (e: KeyboardEvent) => {
+        if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return
+        if (!this._active || !target.isConnected) return
+        // An overlay owns the keyboard while it is up (ui/overlay/stack), and
+        // a text control belonging to some other surface owns its own keys.
+        // Controls inside this pane are not "some other surface": the grid's
+        // helper textarea is exactly where this chord is pressed from.
+        if (hasOpenOverlays()) return
+        const active = document.activeElement
+        if (isTextEntry(active) && this._paneTarget?.contains(active) !== true) return
+        // The editor's surfaces get first refusal through the ONE arbiter
+        // chain, so an open recall, picker or dropdown keeps the keys it
+        // already owns and this does not become a second answer to "which
+        // surface has the keyboard".
+        if (this.editor?.isVisible === true && this.arbitrateEditorKey(e)) return
+        if (this.editor?.isVisible === true) {
           e.preventDefault()
           e.stopPropagation()
-          void this.summonEditor(decision)
-        },
-        true,
-      )
+          this.toggleInputTarget()
+          return
+        }
+        const decision = this.canSummonEditor()
+        // A capture in flight and a summon already open are silent but must
+        // still consume the chord so it cannot become a CR in the running
+        // program while the first one finishes. The other silent states —
+        // and every DOM invariant — leave the key alone.
+        if (
+          (decision.kind === 'silent' &&
+            decision.reason !== 'summon-pending' &&
+            decision.reason !== 'summon-active') ||
+          decision.kind === 'invariant'
+        )
+          return
+        // Every spoken refusal and successful summon consumes the chord
+        // before capture awaits the parse fence, so it cannot become a CR in
+        // the running program.
+        e.preventDefault()
+        e.stopPropagation()
+        void this.summonEditor(decision)
+      }
+      document.addEventListener('keydown', this._targetChordKeydown, true)
 
       this.grantController = new GrantController({
         chip: this.editor.root.querySelector<HTMLButtonElement>('.nocx-editor-grant') ?? undefined,
@@ -4251,6 +4163,111 @@ export class TerminalContent extends BasePaneContent {
   /** Whether the editor can begin a capture transaction. No presentation
    *  state changes here: the frame and marker are installed only after the
    *  renderer has produced a settled snapshot. */
+  /**
+   * ONE arbiter chain (design §8.9.4 — three surfaces, one keyboard).
+   *
+   * A METHOD RATHER THAN A CLOSURE because it now has two callers, and
+   * that is the whole point: the editor asks it for a key typed into the
+   * prompt, and the target chord's one owner asks it before acting on a
+   * chord pressed from anywhere else in the pane. Two callers, one
+   * decision — the alternative is the chord re-deriving "is a surface
+   * open" from the DOM, which is the second answer AD-8 forbids.
+   */
+  private arbitrateEditorKey(e: KeyboardEvent): boolean {
+    // Every decision here is traced (off by default — `window.nocxDebug
+    // = true` in devtools): which surface got the key and why is the
+    // diagnosis for "my key did the wrong thing", and the chain's
+    // evaluation order is the accident that reads as ownership unless
+    // the decision is stated. The gate is checked BEFORE any field is
+    // built: with tracing off, a keystroke costs nothing but the check.
+    // The snippet palette chord (⌥⌘P, snippets/chord.ts) opens the
+    // palette from anywhere in the editor, exactly like recall's
+    // shortcut: checked BEFORE the surfaces so it cannot be swallowed
+    // by one of them, and opening it closes them — the palette owns
+    // the keys now (the surfaces never stack). Both keyboard paths
+    // (this arbiter and the xterm boundary) land in handleSnippetChord,
+    // which delegates to the composition root's ONE opener.
+    if (isSnippetChord(e)) {
+      if (isDecisionTracing()) {
+        logDecision('arbiter', {
+          surface: 'snippet-palette',
+          key: keyLabel(e),
+          why: 'the snippet chord opens the palette',
+        })
+      }
+      this.handleSnippetChord()
+      return true
+    }
+    // Recall first: the shortcut opens it from anywhere, and an open
+    // recall owns its keys. Opening it closes the other surfaces.
+    const recallWasOpen = this.recall!.isOpen
+    const consumed = this.recall!.handleKey(e)
+    if (this.recall!.isOpen) {
+      this.completion?.dismiss()
+      this.promptVault?.closePicker()
+    }
+    if (consumed) {
+      if (isDecisionTracing()) {
+        logDecision('arbiter', {
+          surface: 'recall',
+          key: keyLabel(e),
+          why: recallWasOpen ? 'recall is open; it owns its keys' : 'recall shortcut',
+        })
+      }
+      return true
+    }
+    // The picker outranks completion: while it is open its keys
+    // (arrows, Enter, Tab, Esc) belong to it, and a Right/End ghost
+    // accept must never insert completion text into the line under the
+    // picker.
+    if (this.promptVault!.isPickerOpen) this.completion?.dismiss()
+    if (this.promptVault!.handleKey(e)) {
+      if (isDecisionTracing()) {
+        logDecision('arbiter', {
+          surface: 'picker',
+          key: keyLabel(e),
+          why: 'picker is open; it owns its keys',
+        })
+      }
+      return true
+    }
+    // The ownership decision above, applied: an open selectable
+    // dropdown owns bare ArrowUp/ArrowDown — its footer promises
+    // navigation — so they are routed to it explicitly and can never
+    // fall through to the editor's recall gesture. Everything else
+    // (Enter, Tab, Esc, Right/End, typing) still goes to the
+    // completion controller's ordinary handling.
+    if (this.completion!.ownsArrows(e)) {
+      if (isDecisionTracing()) {
+        logDecision('arbiter', {
+          surface: 'completion',
+          key: keyLabel(e),
+          why: 'dropdown is open; bare arrows belong to it',
+        })
+      }
+      return this.completion!.handleKey(e)
+    }
+    const handled = this.completion?.handleKey(e) ?? false
+    if (handled) {
+      if (isDecisionTracing()) {
+        logDecision('arbiter', {
+          surface: 'completion',
+          key: keyLabel(e),
+          why: 'completion consumed the key',
+        })
+      }
+      return true
+    }
+    if (isDecisionTracing()) {
+      logDecision('arbiter', {
+        surface: 'editor',
+        key: keyLabel(e),
+        why: 'no surface claimed the key',
+      })
+    }
+    return false
+  }
+
   private canSummonEditor(): SummonDecision {
     const editor = this.editor
     if (editor === null) {
@@ -5051,6 +5068,10 @@ export class TerminalContent extends BasePaneContent {
     if (this._globalKeydown) {
       document.removeEventListener('keydown', this._globalKeydown)
       this._globalKeydown = null
+    }
+    if (this._targetChordKeydown) {
+      document.removeEventListener('keydown', this._targetChordKeydown, true)
+      this._targetChordKeydown = null
     }
     this._summoned = false
     this._summonRestoreTargetId = null

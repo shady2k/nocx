@@ -396,6 +396,38 @@ describe('sidebar — a view’s icon carries its status', () => {
     expect(viewBtn(bar, 'beta').getAttribute('aria-label')).toBe('Beta — 2 running')
     expect(viewBtn(bar, 'alpha').getAttribute('aria-label')).toBe('Alpha')
   })
+  it('shows 99+ in the badge while the accessible name keeps the full count', () => {
+    const { bar, panel } = mount()
+    mountSidebar(
+      bar,
+      panel,
+      withStatus(() => ({ count: 137, progress: null })),
+      [SETTINGS_ACTION],
+    )
+
+    // This is the second view, not a Notifications-specific path: every view
+    // gets the activity-bar count treatment.
+    expect(badge(bar, 'beta')?.textContent).toBe('99+')
+    expect(badge(bar, 'beta')?.querySelector('.ui-badge')?.getAttribute('data-variant')).toBe(
+      'solid',
+    )
+    expect(viewBtn(bar, 'beta').getAttribute('aria-label')).toBe('Beta — 137 running')
+  })
+
+  it('keeps 99 visible and clamps 100 at the activity-bar boundary', () => {
+    const { bar, panel } = mount()
+    const [count, setCount] = createSignal(99)
+    mountSidebar(
+      bar,
+      panel,
+      withStatus(() => ({ count: count(), progress: null })),
+      [SETTINGS_ACTION],
+    )
+
+    expect(badge(bar, 'beta')?.textContent).toBe('99')
+    setCount(100)
+    expect(badge(bar, 'beta')?.textContent).toBe('99+')
+  })
 
   it('says what the count is ABOUT, so a bell does not report unread as running', () => {
     // The bar owns the wording — a view names a KIND and never a string, or
@@ -753,6 +785,20 @@ describe('the activity bar reads as two zones without a rule between them', () =
     expect(CSS).toMatch(/\.activity-bar-spacer\s*\{[^}]*flex:\s*1 1 auto/)
     expect(CSS).toMatch(/\.activity-bar\s*\{[^}]*flex-direction:\s*column/)
     expect(CSS).toMatch(/\.activity-bar\s*\{[^}]*height:\s*100%/)
+  })
+
+  it('declares the rail background for a solid badge ring without repainting the kit', () => {
+    expect(CSS).toMatch(
+      /\.activity-bar-badge\s*\{[^}]*--badge-ring-color:\s*var\(--color-chrome-rail\)/s,
+    )
+
+    for (const match of CSS.matchAll(/([^{}]+)\{([^{}]*)\}/gs)) {
+      if (/\bui-[\w-]+/.test(match[1])) {
+        expect(match[2]).not.toMatch(
+          /\b(?:background|border(?:-[\w-]+)?|color|box-shadow|font(?:-[\w-]+)?)\s*:/,
+        )
+      }
+    }
   })
 
   it('and they are still two groups a screen reader can tell apart', () => {

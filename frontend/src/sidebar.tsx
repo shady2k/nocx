@@ -509,7 +509,9 @@ function SidebarSolid(props: SidebarSolidProps) {
                     target. */}
                 <Show when={count() > 0}>
                   <span class="activity-bar-badge" data-view-badge={view.id}>
-                    <Badge tone="info">{String(count())}</Badge>
+                    <Badge tone="info" variant="solid">
+                      {count() > 99 ? '99+' : String(count())}
+                    </Badge>
                   </span>
                 </Show>
                 {/* The guard is on PRESENCE and not on truthiness: zero is a

@@ -138,7 +138,7 @@ what they already decided, before it says what to build.
 - **D8 — One active client per session, and the loser is told.** `ws.go:64` is the single `subscriber` slot and `:75` replaces it silently on attach. A1 makes that explicit rather than silent:
   a second attach takes the session and the displaced client is informed it lost it.
   Read-only observers and real multi-window ownership are later work.
-- **D9 — The vault seals when the last client detaches.** Today `main.go:639` -> `app.go:2478` ->
+- **D9 — The vault seals when the last client has been gone for a departure window** (amended 2026-08-29 by `nocx-58q7d`; the first draft said "when the last client detaches" and did not define the event, which is what broke eighteen e2e specs — a reload and a reconnect both pass through zero clients, so an instantaneous read of the count seals the vault on a page refresh. `DefaultDetachWindow` is ten seconds and lives in `internal/vault/presence.go` with the reasoning). Today `main.go:639` -> `app.go:2478` ->
   `internal/vault/vault.go:754` seals on app shutdown; with a daemon, quitting the window would otherwise
   leave the root key in a live heap for days — an exposure that did not exist before. The
   cost is named: an SSH session that needs a secret while you are away does not reconnect

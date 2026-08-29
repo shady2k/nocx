@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/vault.resolveLine.params.schema.json",
+  "title": "VaultResolveLineParams",
+  "description": "Params for vault.resolveLine.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["line"],
+  "properties": { "line": { "type": "string", "maxLength": 64000 } }
+}

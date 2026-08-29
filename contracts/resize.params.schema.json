@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/resize.params.schema.json",
+  "title": "ResizeParams",
+  "description": "Params for resizing a terminal session.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "cols", "rows"],
+  "properties": {
+    "sessionId": { "type": "string", "pattern": "^[0-9a-fA-F]{32}$" },
+    "cols": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "rows": { "type": "integer", "minimum": 1, "maximum": 65535 },
+    "xpixel": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "ypixel": { "type": "integer", "minimum": 0, "maximum": 65535 }
+  }
+}

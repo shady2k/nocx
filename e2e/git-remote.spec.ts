@@ -279,7 +279,7 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
     })
 
     // Seed the connection the way Settings would. The name is unique per
-    // run: the devharness store persists across runs in this home.
+    // run: the nocx-server store persists across runs in this home.
     const profileName = `e2e-git-remote-${Date.now()}`
     wsPort = wsInfo.port
     wsToken = wsInfo.token

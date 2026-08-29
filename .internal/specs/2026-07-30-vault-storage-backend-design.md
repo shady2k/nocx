@@ -2,7 +2,7 @@
 
 - **Date:** 2026-07-30
 - **Beads:** nocx-nfvd (this brainstorm), nocx-25k9 (epic), nocx-25k9.1 (the wiring bug this answers)
-- **Touches:** ADR-0011 (§1 amended — see §3; §2 upheld — see §3.1), ADR-0006, AD-8
+- **Touches:** ADR-0011 (§1 amended — see §3; §2 upheld — see §3.1), ADR-0046, AD-8
 - **Status:** approved section by section by the owner, then adversarially reviewed against a peer
   agent (codex) on 2026-07-30. The review overturned four of my positions; §4.1, §4.2, §5.4 and §7.2
   are the result, not the original draft.

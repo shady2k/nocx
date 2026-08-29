@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.request.move.params.schema.json",
+  "title": "APIRequestMoveParams",
+  "description": "Params for api.request.move.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["handle", "relPath", "toRelPath"],
+  "properties": {
+    "handle": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "relPath": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "toRelPath": { "type": "string", "minLength": 1, "maxLength": 4096 }
+  }
+}

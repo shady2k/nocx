@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.collections.close.params.schema.json",
+  "title": "APICollectionsCloseParams",
+  "description": "Params for api.collections.close.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["handle"],
+  "properties": { "handle": { "type": "string", "pattern": "^[0-9a-f]{32}$" } }
+}

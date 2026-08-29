@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/groups.update.params.schema.json",
+  "title": "GroupsUpdateParams",
+  "description": "Params for groups.update.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "maxLength": 128
+    },
+    "parentGroupId": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "icon": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "color": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "defaults": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "passwordSecret": {
+          "type": "string"
+        },
+        "keySecret": {
+          "type": "string"
+        },
+        "keyPassphraseSecret": {
+          "type": "string"
+        },
+        "user": {
+          "type": "string"
+        },
+        "auth": {
+          "type": "string"
+        },
+        "keepaliveInterval": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "keepaliveCountMax": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "readyTimeout": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "keyPath": {
+          "type": "string"
+        },
+        "jumpHost": {
+          "type": "string"
+        },
+        "agentForward": {
+          "type": "boolean"
+        },
+        "desiredMode": {
+          "type": "string"
+        },
+        "portDiscovery": {
+          "type": "string"
+        },
+        "behaviorOnSessionEnd": {
+          "type": "string"
+        }
+      },
+      "required": []
+    }
+  }
+}

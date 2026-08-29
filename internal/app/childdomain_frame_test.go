@@ -10,7 +10,7 @@ package app
 // publishing launcher embedded the whole bundle and measured ~77 KiB, which
 // is exactly how this was found, and why the bound was raised to 256 KiB.
 //
-// The line is now the bounded carrier plus the user's own words (ADR-0035),
+// The line is now the bounded carrier plus the user's own words (ADR-0049),
 // so the margin is four orders rather than three — but the assertion stays,
 // because what it guards is the composer, and a composer that started
 // embedding again would be caught here first.

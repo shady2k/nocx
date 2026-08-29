@@ -47,6 +47,7 @@ import { IconButton } from './ui/icon-button'
 import { BellIcon, CheckCircleIcon, PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
 import { mountReadScreenHandler } from './read-screen'
+import { mountClientHost } from './client-host'
 import { mountRunCommandHandler } from './run-command'
 import { bootstrapTheme, reconcileThemeFromGo } from './renderers/theme-bootstrap'
 import { bootstrapPlatform } from './platform'
@@ -199,7 +200,7 @@ async function main() {
   const footprintClient = new FootprintClient(dispatcher)
   const endpointsClient = new EndpointClient(dispatcher)
   const agentClient = new AgentClient(dispatcher)
-  // The UI-state document (ADR-0033): what the app remembers without being
+  // The UI-state document (ADR-0048): what the app remembers without being
   // asked — the sidebar's collapse, its view, its width. Not the settings
   // registry, which holds what a user deliberately chose, and not
   // localStorage, which may not carry facts.
@@ -391,7 +392,7 @@ async function main() {
 
   let placement: unknown = 'horizontal'
   // The sidebar's remembered state, from the UI-state document rather than
-  // the settings snapshot below — a drag is not a decision (ADR-0033). A
+  // the settings snapshot below — a drag is not a decision (ADR-0048). A
   // failure falls back to the declared defaults, which is also what the CSS
   // paints before this bootstrap runs (style.css #sidebar); load() never
   // throws for exactly that reason.
@@ -436,6 +437,18 @@ async function main() {
   // asking afterwards.
   const layout = new LayoutStore(new LayoutClient(dispatcher))
 
+  // Durable-history availability (nocx-rtg0.15). Started here rather than
+  // inside Settings so the status is already known when the tab opens, and
+  // so a degrade raised while the app runs (nocx-rtg0.10 raises through the
+  // same surface) reaches a screen that is already on the section.
+  //
+  // Before the pane manager rather than after it (nocx-22k1c.3): the panes
+  // read the same status to say what is happening to a plain tab's output,
+  // and the first status should be in hand before the first tab is built
+  // rather than one round trip later.
+  const historyStatusStore = new HistoryStatusStore(client)
+  historyStatusStore.start()
+
   const tm = new PaneManager(
     bar,
     verticalStripHost,
@@ -448,10 +461,14 @@ async function main() {
     tabStrip,
     layout,
     // Which tab was in front: the UI-state document holds it, and the mirror
-    // is already warm — `load()` above ran before this line (ADR-0033).
+    // is already warm — `load()` above ran before this line (ADR-0048).
     uiStateClient,
   )
   tm.onDisplayRevision(notifyDisplayChange)
+  // A plain tab records its output and produces no blocks; the card that
+  // says so reads the recording half from the store that owns it, rather
+  // than deriving it a second time (nocx-22k1c.3).
+  tm.outputRecording = historyStatusStore
   tm.onVaultSealed = () => vaultController.openUnlock('open this connection')
   tm.onHostKeyError = (evidence, signal) => openHostKeys.request(evidence, signal)
   tm.onSetupVault = () => vaultController.openSetup()
@@ -475,6 +492,15 @@ async function main() {
   // answered failed, honestly — never a hang.
   mountReadScreenHandler(dispatcher, (sessionId) => tm.terminalContentForSession(sessionId))
 
+  // -- The client host (nocx-uo1k6, design D3) -------------------------
+  // The coordinator runs as a daemon with no window of its own, so the
+  // native-host capabilities it cannot perform -- a file picker, a browser
+  // open, a desktop banner, a window raise -- are asked of this client and
+  // performed through the Wails bindings. Mounted unconditionally: a client
+  // with no Wails runtime still answers, saying so, because the coordinator
+  // must never be left waiting on a client that cannot act.
+  mountClientHost(dispatcher)
+
   // ── Backend-initiated run requests (nocx-tjppv) ─────────────────────
   // The broker's pull for the headline tool: the backend asks the renderer
   // to run a command through the same submit path a person uses, in the
@@ -492,12 +518,6 @@ async function main() {
   tm.onOpenOverview = () => overview.open()
 
   const observer = new SettingsObserver(dispatcher)
-  // Durable-history availability (nocx-rtg0.15). Started here rather than
-  // inside Settings so the status is already known when the tab opens, and
-  // so a degrade raised while the app runs (nocx-rtg0.10 will raise through
-  // the same surface) reaches a screen that is already on the section.
-  const historyStatusStore = new HistoryStatusStore(client)
-  historyStatusStore.start()
 
   // Surface registry — surfaces declared once, every entry point resolves
   // through the registry rather than rebuilding the descriptor. (AD-8)
@@ -987,7 +1007,7 @@ async function main() {
         // The sidebar width is deliberately absent from this loop now. It
         // is not a setting, so no settings revision can carry it, and one
         // window is the only thing that changes it — re-reading it here
-        // would be the app telling itself what it just did (ADR-0033 §7).
+        // would be the app telling itself what it just did (ADR-0048 §7).
       } catch {
         // Silently ignore — a settings fetch failure is not actionable here.
       }
@@ -1168,6 +1188,12 @@ async function main() {
           if (pane) void tm.activate(pane)
         }}
         canActivate={(backendId, sessionId) => tm.findBySession(backendId, sessionId) !== undefined}
+        // A row's inertness is a fact about the TAB, and this panel stays
+        // mounted while the sidebar is collapsed, so it outlives the tabs it
+        // is about. Without this the answer above was read once, as the row
+        // was built — which for a session.ended row is the moment its own tab
+        // is closing (nocx-bu8fl).
+        subscribe={(listener) => tm.onPanesChanged(listener)}
       />
     ),
     // Last in the bar, after Operations (3) — see OPERATIONS_VIEW_ORDER for

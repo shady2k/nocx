@@ -112,6 +112,11 @@ type Provider struct {
 	keyring     Keyring
 	timeout     time.Duration
 	reasonProbe ReasonProbe
+	// notInPlay is set by NotInPlay. It short-circuits Probe/Status so a
+	// host whose stance excluded the OS keystore makes NO keyring call at
+	// all — see NotInPlay for why that is the whole point rather than an
+	// optimisation.
+	notInPlay bool
 }
 
 // New creates a system provider with the given options. The default keyring
@@ -128,6 +133,30 @@ func New(opts ...Option) *Provider {
 	return p
 }
 
+// NotInPlay builds a provider for a host whose declared stance says the OS
+// keystore is out of play: a headless coordinator, a container, any host
+// where nobody could answer a keychain dialog.
+//
+// IT IS NOT "New over a keyring that fails". The difference is the one D10
+// is about. Probe opens with a WRITE of a fresh random entry, and on macOS a
+// write under a $HOME with no login keychain raises "Keychain not found" — a
+// modal nobody can dismiss on a headless host, and on a developer machine
+// one per backend start. So the failure is not the keyring's answer; the
+// failure is ASKING. A provider built here never asks: Probe and Status
+// return excluded without touching the keyring, which is what makes "zero
+// modal dialogs" a property of construction rather than a hope about error
+// handling.
+//
+// The reads and writes still go through AbsentKeyring, so a caller that
+// resolves a reference into this provider gets a plain refusal naming the
+// condition rather than a nil dereference. Options are accepted so a test
+// can substitute a counting keyring and assert that nothing reaches it.
+func NotInPlay(opts ...Option) *Provider {
+	p := New(append([]Option{WithKeyring(AbsentKeyring{})}, opts...)...)
+	p.notInPlay = true
+	return p
+}
+
 func (p *Provider) ID() vault.ProviderID { return vault.ProviderSystem }
 
 // Status reports the provider's readiness. It delegates to Probe.
@@ -139,6 +168,12 @@ func (p *Provider) Status(ctx context.Context) vault.Status {
 // random entry. A failed removal is tolerated; every other failure produces a
 // non-ready status with a reason.
 func (p *Provider) Probe(ctx context.Context) vault.Status {
+	// The stance said no, so nothing is asked — of the keyring or of the
+	// person. Placed first, before the random id is even minted, so there is
+	// no path from here to a keychain write (NotInPlay).
+	if p.notInPlay {
+		return vault.Status{Reason: vault.ReasonExcluded}
+	}
 	id := randomProbeID()
 	probeVal := "probe-" + id
 
@@ -341,6 +376,12 @@ func (p *Provider) classifyAndWrap(err error) error {
 func (p *Provider) classifyReason(err error) vault.Reason {
 	if err == nil {
 		return ""
+	}
+	// A host that declined to look does not get to guess why. Every failure
+	// from a not-in-play provider has exactly one cause — nobody asked — and
+	// naming it "no-service" would be the machine claim D10 forbids.
+	if p.notInPlay {
+		return vault.ReasonExcluded
 	}
 	s := strings.ToLower(err.Error())
 	switch {

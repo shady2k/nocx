@@ -63,6 +63,20 @@
             }
           }
         },
+        "truncated": {
+          "type": "boolean",
+          "description": "True when the byte-bound result omitted one or more listed items."
+        },
+        "dropped": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Bytes omitted from the complete list result because of the declared bound."
+        },
+        "remaining": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Bytes still omitted from the complete list result."
+        },
         "more": {
           "type": "boolean",
           "description": "True when the session has more items than this page. Absent means false."

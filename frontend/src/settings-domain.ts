@@ -446,7 +446,7 @@ export interface SettingsMatrix {
    * The declaration where a row meets a column, or `undefined` when the backend
    * offers no such pair. Absence is the answer on purpose: the catalogue does not
    * offer a pair its trust bound forbids, so there is nothing to render and nothing
-   * to refuse (ADR-0029 §3, plan D3).
+   * to refuse (ADR-0047 §3, plan D3).
    */
   cell(rowId: string, columnId: string): Declaration | undefined
 }

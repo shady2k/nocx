@@ -243,7 +243,7 @@ func TestHeuristic_ReachesLocalOnly(t *testing.T) {
 
 // TestSubscriptionRoute_AttestedOnly: the same table governs the ad-hoc
 // completion-subscription route; only an attested event may match it
-// (ADR-0029 §3). programRequest and heuristic never do, even where their
+// (ADR-0047 §3). programRequest and heuristic never do, even where their
 // raise route has a row.
 func TestSubscriptionRoute_AttestedOnly(t *testing.T) {
 	r, err := notify.NewRouter(notify.Table{

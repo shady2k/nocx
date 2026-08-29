@@ -30,6 +30,7 @@ type SessionService interface {
 // SessionOperation is the typed operation for the session domain. Its gate
 // is [session]. The operation is scoped by id through SessionOperations.
 type SessionOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, SessionService) error) error
 }
 
@@ -48,6 +49,7 @@ type SessionTarget struct {
 // ordinary execution lane. Slow remote I/O therefore stays bounded without
 // blocking resize, close, or another session lookup.
 type SessionTargetOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, SessionTarget) error) error
 }
 
@@ -56,6 +58,7 @@ type sessionTargetOperation struct {
 	lane        control.Admission
 	registry    session.Registry
 	id          session.ID
+	disposition Disposition
 }
 
 // SessionOperations builds per-session operations. The KIND of resource is
@@ -84,7 +87,7 @@ func (f *SessionOperations) ForSession(id session.ID) (SessionOperation, error) 
 		return nil, fmt.Errorf("capability: unknown session %q", id)
 	}
 	g := &guard{}
-	return newOperation[SessionService](control.NewComposite(f.sessionGate, f.lane), g, newSessionService(g, f.registry, f.usage)), nil
+	return newOperation[SessionService](Adapted("terminal.resize", "session operations enforce assistant-owned session identity"), control.NewComposite(f.sessionGate, f.lane), g, newSessionService(g, f.registry, f.usage)), nil
 }
 
 // ForSessionTarget returns a staged read operation for immutable connection
@@ -100,7 +103,12 @@ func (f *SessionOperations) ForSessionTarget(id session.ID) (SessionTargetOperat
 		lane:        f.lane,
 		registry:    f.registry,
 		id:          id,
+		disposition: Adapted("terminal.reattach", "session targets require an assistant-owned session scope"),
 	}, nil
+}
+
+func (op *sessionTargetOperation) Disposition() Disposition {
+	return op.disposition
 }
 
 func (op *sessionTargetOperation) Run(ctx context.Context, fn func(context.Context, SessionTarget) error) error {
@@ -137,7 +145,7 @@ func (op *sessionTargetOperation) Run(ctx context.Context, fn func(context.Conte
 // half of open) rather than keyed by a per-request id.
 func NewSessionOperation(sessionGate, lane control.Admission, registry session.Registry, usage session.ProfileUsageTracker) SessionOperation {
 	g := &guard{}
-	return newOperation[SessionService](control.NewComposite(sessionGate, lane), g, newSessionService(g, registry, usage))
+	return newOperation[SessionService](Adapted("terminal.resize", "session operations enforce assistant-owned session identity"), control.NewComposite(sessionGate, lane), g, newSessionService(g, registry, usage))
 }
 
 // newSessionService builds the concrete session service bound to guard g.

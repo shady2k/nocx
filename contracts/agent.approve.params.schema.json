@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.approve.params.schema.json",
+  "title": "AgentApproveParams",
+  "description": "Params for agent.approve.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["runId", "attempt", "tool", "callId", "argHash", "scope"],
+  "properties": {
+    "runId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "attempt": { "type": "integer", "exclusiveMinimum": 0 },
+    "tool": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "callId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "argHash": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "scope": { "type": "string", "enum": ["once", "session", "always"] }
+  }
+}

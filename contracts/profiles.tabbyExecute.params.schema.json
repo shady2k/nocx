@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/profiles.tabbyExecute.params.schema.json",
+  "title": "ProfilesTabbyexecuteParams",
+  "description": "Params for profiles.tabbyExecute.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["planToken"],
+  "properties": {
+    "planToken": {
+      "type": "string",
+      "minLength": 64,
+      "maxLength": 64,
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

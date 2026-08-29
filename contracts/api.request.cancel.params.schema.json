@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.request.cancel.params.schema.json",
+  "title": "APIRequestCancelParams",
+  "description": "Params for api.request.cancel.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["token"],
+  "properties": {
+    "token": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Capability token authorizing cancellation of an API request."
+    }
+  }
+}

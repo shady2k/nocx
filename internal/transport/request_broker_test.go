@@ -1089,6 +1089,93 @@ func TestBroker_AllDeliveriesFailTerminalizes(t *testing.T) {
 	}
 }
 
+// TestBroker_RegisteredIsNotYetResolvable states the window awaitArmedRequest
+// exists for, without needing a loaded machine to show it.
+//
+// Request() registers a pending id and arms its recipients as two steps.
+// Pending() reports the first; Resolve() requires the second. Between them the
+// request is live and unresolvable, and a test that treats "registered" as
+// "resolvable" is racing that gap — which is how a CI job reported "Unknown
+// request id" at 0.00s for a request that was perfectly healthy (nocx-op57l).
+func TestBroker_RegisteredIsNotYetResolvable(t *testing.T) {
+	conn := &harnessConn{}
+	broker := NewBroker(
+		func() []Conn { return []Conn{conn} },
+		func(Conn, string, json.RawMessage) error { return nil },
+	)
+	kind := testPasswordKind(0)
+
+	rid, ch, err := broker.register(kind)
+	if err != nil {
+		t.Fatalf("register: %v", err)
+	}
+	if n := broker.Pending(); n != 1 {
+		t.Fatalf("Pending() = %d after register, want 1 — the id is live", n)
+	}
+
+	resolution := mustMarshal(map[string]any{
+		"requestId": rid,
+		"outcome":   "submitted",
+		"password":  "hunter2",
+		"remember":  false,
+	})
+	// Registered, not armed: the connection that is ABOUT to be a recipient
+	// is not one yet, and Resolve answers exactly as it does for an id that
+	// never existed.
+	if reply := broker.Resolve("test.passwordResolved", resolution, conn); reply.Code == 0 {
+		t.Fatal("a registered-but-unarmed request accepted a resolution")
+	} else if reply.Message != "Unknown request id" {
+		t.Fatalf("refusal message = %q, want \"Unknown request id\"", reply.Message)
+	}
+	if n := broker.Pending(); n != 1 {
+		t.Fatalf("the refused resolution consumed the request: %d pending", n)
+	}
+
+	// Armed: the same connection, the same id, the same envelope — accepted.
+	broker.arm(rid, []Conn{conn})
+	if reply := broker.Resolve("test.passwordResolved", resolution, conn); reply.Code != 0 {
+		t.Fatalf("resolution by an armed recipient refused: %s", reply.Message)
+	}
+	select {
+	case res := <-ch:
+		if res.err != nil {
+			t.Fatalf("resolution carried an error: %v", res.err)
+		}
+	default:
+		t.Fatal("the armed resolution did not signal the waiting request")
+	}
+}
+
+// awaitArmedRequest waits until a pending request is ARMED with conn — not
+// merely registered — and returns its id.
+//
+// The two are different moments and the gap is real: Request() calls
+// register(), which inserts b.pending[rid] with a NIL recipients map, and only
+// several statements later calls arm(), which fills it. Pending() counts the
+// map, so it reaches 1 at register; Resolve() refuses any connection missing
+// from p.recipients with the deliberate "Unknown request id". A test that waits
+// on Pending() and resolves immediately can land inside that window — which is
+// what happened on CI, instantly rather than as a timeout (nocx-op57l).
+//
+// Tests that read the notification off a real socket do not need this: delivery
+// happens after arm, so the id cannot be known before the request is armed.
+func awaitArmedRequest(t *testing.T, broker *Broker, conn Conn) string {
+	t.Helper()
+	rid := ""
+	waittest.WaitForTimeout(t, "pending request armed with its recipient", wantWithin, func() bool {
+		broker.mu.Lock()
+		defer broker.mu.Unlock()
+		for k, p := range broker.pending {
+			if _, ok := p.recipients[conn]; ok {
+				rid = k
+				return true
+			}
+		}
+		return false
+	})
+	return rid
+}
+
 // TestBroker_FailedDeliveryIsNotARecipient is finding 3's second end: a
 // delivery failure removes that connection from the recipients — it cannot
 // answer what it never received — while a recipient whose delivery landed
@@ -1112,21 +1199,10 @@ func TestBroker_FailedDeliveryIsNotARecipient(t *testing.T) {
 			map[string]any{"reason": "c1 lost, c2 live"}, &ans)
 	}()
 
-	// Wait for the request to be registered (the deliver seams are no-ops,
-	// so the id never reaches the test through a socket), then resolve it
-	// as c2 — the recipient whose delivery landed.
-	waittest.WaitForTimeout(t, "pending request registered", wantWithin, func() bool {
-		return broker.Pending() == 1
-	})
-	broker.mu.Lock()
-	rid := ""
-	for k := range broker.pending {
-		rid = k
-	}
-	broker.mu.Unlock()
-	if rid == "" {
-		t.Fatal("no pending request to resolve")
-	}
+	// The deliver seams are no-ops, so the id never reaches the test through
+	// a socket: wait for the request to be armed with c2 — the recipient
+	// whose delivery landed — and read the id from the broker.
+	rid := awaitArmedRequest(t, broker, c2)
 
 	rpcErr := broker.Resolve("test.passwordResolved", mustMarshal(map[string]any{
 		"requestId": rid,
@@ -1172,19 +1248,9 @@ func TestBroker_WrongResolveMethodIsRefused(t *testing.T) {
 	}()
 
 	// The deliver seam is a no-op, so read the pending id the way the
-	// notification would have carried it — directly from the broker.
-	waittest.WaitForTimeout(t, "pending request registered", wantWithin, func() bool {
-		return broker.Pending() == 1
-	})
-	broker.mu.Lock()
-	rid := ""
-	for k := range broker.pending {
-		rid = k
-	}
-	broker.mu.Unlock()
-	if rid == "" {
-		t.Fatal("no pending request to resolve")
-	}
+	// notification would have carried it — directly from the broker, once the
+	// request is armed with the connection about to answer it.
+	rid := awaitArmedRequest(t, broker, conn)
 
 	// The LIVE request id submitted through a method no kind declared is
 	// refused — the method binding, not a stale id, is what refuses it —

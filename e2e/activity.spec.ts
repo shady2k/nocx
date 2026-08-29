@@ -4,7 +4,7 @@ import path from 'node:path'
 
 import { test, expect, promptReady } from './harness'
 
-// Drives the real app against the stand (cmd/devharness plus vite), so this
+// Drives the real app against the stand (cmd/nocx-server plus vite), so this
 // exercises the real transport, PTY and renderer. The activity indicator is
 // invisible to jsdom — no layout, no GPU, no focus.
 

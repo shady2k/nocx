@@ -46,7 +46,7 @@ import type { Page } from './harness'
  *    is marked read first (`quietBell`), which makes UNREAD mean "raised
  *    since this test began". Nothing here passes only when this file runs
  *    first.
- *  - Both browser projects run this file against ONE devharness and one $HOME
+ *  - Both browser projects run this file against ONE nocx-server and one $HOME
  *    (playwright.config.ts declares chromium and webkit; workers is 1, so they
  *    run in sequence), and marking read does not empty the feed. An unread
  *    scope survives that, but a `hasText` filter cannot be read, it has to

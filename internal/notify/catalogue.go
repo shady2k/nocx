@@ -16,7 +16,7 @@ import (
 // the settings the user ticks. Keeping the two apart is what lets the settings
 // declarations exist on a host that never builds a router at all.
 //
-// The trust bound is expressed here by ABSENCE (D3, ADR-0029 §3). A pair a
+// The trust bound is expressed here by ABSENCE (D3, ADR-0047 §3). A pair a
 // trust class may never reach — heuristic to anything that leaves the machine
 // — is not offered by the catalogue, so no toggle for it exists, so no table
 // built from the toggles can contain it. The router still re-checks every
@@ -345,7 +345,7 @@ func mustCatalogue() *Catalogue {
 			},
 			{
 				// Attested, because it is nocx's own registry that observed
-				// it, so it may reach every sink (ADR-0029 §3). It ships on
+				// it, so it may reach every sink (ADR-0047 §3). It ships on
 				// for the same reason a program's own request does: the user
 				// is not looking at the tab, which is the only moment either
 				// event matters.

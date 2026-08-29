@@ -93,6 +93,7 @@ function renderPanel(manager: PaneManager, o: Occurrence) {
       canActivate={(backendId, sessionId) =>
         manager.findBySession(backendId, sessionId) !== undefined
       }
+      subscribe={(listener) => manager.onPanesChanged(listener)}
     />
   ))
 }
@@ -165,6 +166,28 @@ describe('a notification row and the tab it came from', () => {
 
     fireEvent.click(container.querySelector(ROW_TITLE)!)
     expect(manager.findBySession('local', opened[0].sessionId)).toBeUndefined()
+  })
+
+  // THE PANEL IS MOUNTED WHILE THE SIDEBAR IS COLLAPSED — sidebar.tsx toggles
+  // a class, it does not unmount the view — so rows are built as occurrences
+  // arrive, which for a session.ended row is the moment its tab is closing.
+  // Without this, `canActivate` is a snapshot taken then and never revised:
+  // the row went on offering a tab that had since closed, and the panel's own
+  // meta line said the session was still there (nocx-bu8fl). The two tests
+  // above both render AFTER the state settled, which is exactly why neither
+  // could see it.
+  it('a row goes inert when its tab closes while the panel is on screen', async () => {
+    const { manager, opened } = await twoTabsFirstLost()
+    const { container } = renderPanel(manager, occurrence(opened[0].sessionId))
+    expect(container.querySelector(ROW_META)?.textContent).not.toContain('session closed')
+
+    const gone = manager.findBySession('local', opened[0].sessionId)
+    expect(gone).toBeDefined()
+    await manager.closePane(gone!)
+
+    await vi.waitFor(() => {
+      expect(container.querySelector(ROW_META)?.textContent).toContain('session closed')
+    })
   })
 
   it('a backend id that is not this machine never resolves', async () => {

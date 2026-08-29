@@ -36,7 +36,7 @@
  * So the panel states the narrowed count itself — "3 of 12 shown" — which is
  * the epic's criterion answered with its second half deliberately.
  */
-import { For, Show, createEffect, createSignal } from 'solid-js'
+import { For, Show, createEffect, createSignal, onCleanup, onMount } from 'solid-js'
 import { EmptyState } from '../ui/empty-state'
 import { Field } from '../ui/field'
 import { RecordRow } from '../ui/record-row'
@@ -159,6 +159,19 @@ export interface NotificationsPanelProps {
   catalogue?: () => NotifyCatalogue | null
   /** Renderer-owned session-to-tab display name lookup. */
   sessionNameOf?: (backendId: string, sessionId: string) => string | null
+  /** Say when the answer `canActivate` gives may have changed — a tab opened,
+   *  or one closed (PaneManager.onPanesChanged). Returns the unsubscribe.
+   *
+   *  Required because `canActivate` reads state this panel cannot see, so
+   *  nothing about it is reactive on its own, and this panel OUTLIVES the
+   *  tabs it is about: the sidebar toggles a class rather than unmounting the
+   *  view, so a `session.ended` row is built at the moment its own tab is
+   *  closing. Without this the row kept the answer it got then and went on
+   *  offering a tab that had closed (nocx-bu8fl).
+   *
+   *  Optional so a test that is not about the tab strip need not wire one;
+   *  omitting it is the old behaviour, an answer read once per render. */
+  subscribe?: (listener: () => void) => () => void
 }
 
 export function NotificationsPanel(props: NotificationsPanelProps) {
@@ -190,6 +203,16 @@ export function NotificationsPanel(props: NotificationsPanelProps) {
       optionLabel: (o) => kindLabel(o.kind, catalogue()),
     },
   ]
+
+  /** Bumped whenever the tab strip changed. Rows read it before asking
+   *  `canActivate`, which is what makes that question reactive at all — see
+   *  the prop. A counter rather than the answer itself because the question
+   *  is asked per row and the answer differs per row. */
+  const [tabsGeneration, setTabsGeneration] = createSignal(0)
+  onMount(() => {
+    const unsubscribe = props.subscribe?.(() => setTabsGeneration((n) => n + 1))
+    onCleanup(() => unsubscribe?.())
+  })
 
   /** Which rows are open, by occurrence id. Ephemeral (D4): a feed that does
    *  not survive a restart cannot have an expansion that does. Keyed by id
@@ -316,7 +339,12 @@ export function NotificationsPanel(props: NotificationsPanelProps) {
             <div class="notifications-panel__list" role="list" aria-label="Notifications">
               <For each={visible()}>
                 {(o) => {
-                  const live = () => props.canActivate(o.backendId, o.sessionId)
+                  const live = () => {
+                    // Read FIRST, so this stays a dependency however
+                    // canActivate answers.
+                    tabsGeneration()
+                    return props.canActivate(o.backendId, o.sessionId)
+                  }
                   return (
                     <RecordRow
                       density="dense"

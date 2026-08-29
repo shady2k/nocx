@@ -29,7 +29,7 @@ import { readStand } from './stand'
  * reason is structural rather than a gap somebody should close. The OS banner
  * is the AttentionHost port, `SetAttentionHost` is called from main.go and
  * nowhere else (internal/app/app.go), so a backend with no Wails host —
- * cmd/devharness, which is what this suite runs — holds `notify.HostHolder`'s
+ * cmd/nocx-server, which is what this suite runs — holds `notify.HostHolder`'s
  * unbound state and every banner delivery returns `ErrUnavailable`. The
  * composition root's result handler then deliberately files NO feed row for
  * that one error ("a row per notification would say 'this build has no
@@ -78,7 +78,7 @@ import { readStand } from './stand'
  *  3. THE STAND IS SHARED AND ITS SETTINGS PERSIST. Turning the banner off is
  *     a write to the settings document, and a write to the shard's own stand
  *     would be the next spec's starting state. So this file brings its OWN
- *     devharness on a disposable home (the arrangement agent-ask.spec.ts and
+ *     nocx-server on a disposable home (the arrangement agent-ask.spec.ts and
  *     connection-password.spec.ts use), which also gives it a log stream
  *     carrying nobody else's notifications.
  *
@@ -94,7 +94,7 @@ const test = base
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 const TAB = '.nocx-tab'
 const TITLE = '.nocx-tab-title'
@@ -218,7 +218,7 @@ test('turning the OS banner off leaves the toast on, and the banner is never rea
   // `true` = no Secret Service for this backend regardless of the session the
   // suite runs in, so the vault comes up the same way in the container and on
   // a developer's machine (the arrangement agent-ask.spec.ts relies on).
-  const backend = new VaultBackend(devharnessBin(), { root: gates }, true)
+  const backend = new VaultBackend(serverBin(), { root: gates })
 
   try {
     const endpoint = await backend.start()

@@ -44,6 +44,7 @@ type GitOpenService interface {
 // [session, git]: opening resolves the session and registers the
 // repository.
 type GitOpenOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, GitOpenService) error) error
 }
 
@@ -57,6 +58,7 @@ func NewGitOpenOperation(
 ) GitOpenOperation {
 	g := &guard{}
 	return newOperation[GitOpenService](
+		Adapted("git.open", "opening a repository resolves a session and selects its helper or local binding"),
 		control.NewComposite(sessionGate, gitGate, lane),
 		g,
 		newGitOpenService(g, registry, factory, reg),
@@ -146,6 +148,7 @@ type GitBindingService interface {
 // GitBindingOperation is the typed operation for the git-binding domain.
 // Its gate is [git].
 type GitBindingOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, GitBindingService) error) error
 }
 
@@ -153,7 +156,7 @@ type GitBindingOperation interface {
 // git gate before the execution lane.
 func NewGitBindingOperation(gitGate, lane control.Admission, reg *registry.Registry) GitBindingOperation {
 	g := &guard{}
-	return newOperation[GitBindingService](control.NewComposite(gitGate, lane), g, newGitBindingService(g, reg))
+	return newOperation[GitBindingService](Adapted("git.refresh", "git calls require an assistant-owned repository lease"), control.NewComposite(gitGate, lane), g, newGitBindingService(g, reg))
 }
 
 // newGitBindingService builds the concrete git-binding service bound to

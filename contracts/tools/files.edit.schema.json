@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/files.edit.schema.json",
+  "title": "FilesEditParams",
+  "description": "Apply one strict line-addressed patch to a file. The revision must come from files.read for this exact canonical file and every addressed line must have been displayed by that read. UTF-8 text is required; original line endings are preserved.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "revision", "patch"],
+  "properties": {
+    "path": { "type": "string", "description": "Canonical file path previously read." },
+    "revision": {
+      "type": "string",
+      "description": "Opaque byte-exact revision returned by files.read."
+    },
+    "patch": {
+      "type": "string",
+      "description": "One-file patch using PUT N.=M:, PUT <N:, PUT >N:, and CUT N.=M. Body rows begin with literal +; line numbers refer to the original read."
+    }
+  },
+  "$defs": {
+    "result": {
+      "title": "FilesEditResult",
+      "description": "The result is either an applied edit with a new revision or an actionable refusal; a refusal is a tool result, not a run failure.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "status", "revision"],
+          "properties": {
+            "path": { "type": "string" },
+            "status": { "const": "applied" },
+            "revision": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "status", "reason"],
+          "properties": {
+            "path": { "type": "string" },
+            "status": { "const": "refused" },
+            "reason": { "type": "string" }
+          }
+        }
+      ]
+    }
+  }
+}

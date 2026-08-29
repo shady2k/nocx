@@ -434,6 +434,12 @@ func (f *fakeSessionRegistry) Open(context.Context, session.Config) (session.Ses
 	return nil, errors.New("not in test")
 }
 
+// InstanceID answers with a fixed, well-shaped instance: this fake is one
+// backend instance for as long as it exists, like the real registry.
+func (f *fakeSessionRegistry) InstanceID() session.InstanceID {
+	return session.InstanceID("00000000000000000000000000000001")
+}
+
 func (f *fakeSessionRegistry) Get(id session.ID) (session.Session, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -485,17 +491,19 @@ func (f *fakeSession) Liveness() session.LivenessState {
 // WorkspaceID reports the default: this fake stands in for a session in
 // tests that are about capability, and membership carries no behaviour
 // (nocx-fraus), so there is nothing here for a workspace to change.
-func (f *fakeSession) WorkspaceID() workspace.ID { return workspace.Default }
-func (f *fakeSession) Kind() session.Kind        { return f.kind }
-func (f *fakeSession) PaneID() string            { return "" }
-func (f *fakeSession) OpenedAt() time.Time       { return f.openedAt }
-func (f *fakeSession) Host() string              { return f.host }
-func (f *fakeSession) Cwd() string               { return "/home/test" }
-func (f *fakeSession) ProfileID() string         { return "" }
-func (f *fakeSession) CredentialID() string      { return "" }
-func (f *fakeSession) Write([]byte) (int, error) { return 0, nil }
-func (f *fakeSession) EnqueueWrite([]byte) bool  { return true }
-func (f *fakeSession) Resize(context.Context, uint16, uint16, uint16, uint16) error {
+func (f *fakeSession) WorkspaceID() workspace.ID   { return workspace.Default }
+func (f *fakeSession) Kind() session.Kind          { return f.kind }
+func (f *fakeSession) PaneID() string              { return "" }
+func (f *fakeSession) OpenedAt() time.Time         { return f.openedAt }
+func (f *fakeSession) Host() string                { return f.host }
+func (f *fakeSession) Cwd() string                 { return "/home/test" }
+func (f *fakeSession) ProfileID() string           { return "" }
+func (f *fakeSession) CredentialID() string        { return "" }
+func (f *fakeSession) Write([]byte) (int, error)   { return 0, nil }
+func (f *fakeSession) EnqueueWrite([]byte) bool    { return true }
+func (f *fakeSession) EffectiveSize() session.Size { return session.DefaultSize() }
+
+func (f *fakeSession) Resize(context.Context, session.Size) error {
 	return nil
 }
 func (f *fakeSession) Close() error          { return nil }
@@ -559,8 +567,9 @@ func (f *fakeContentDB) Ledger() content.LedgerRepository              { return 
 
 // Layout is unused by these tests: the fake predates the layout chain and no
 // capability reaches it (nocx-isoph.1).
-func (f *fakeContentDB) Layout() content.LayoutRepository  { return nil }
-func (f *fakeContentDB) APIRuns() content.APIRunRepository { return nil }
+func (f *fakeContentDB) Layout() content.LayoutRepository               { return nil }
+func (f *fakeContentDB) APIRuns() content.APIRunRepository              { return nil }
+func (f *fakeContentDB) SessionOutput() content.SessionOutputRepository { return nil }
 
 // fakeReset is a capability.VaultReset recorder.
 type fakeReset struct {

@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/settings.set.params.schema.json",
+  "title": "SettingsSetParams",
+  "description": "Params for settings.set.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["key", "value"],
+  "properties": {
+    "key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "value": {
+      "not": {
+        "type": "null"
+      }
+    }
+  }
+}

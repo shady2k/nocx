@@ -164,7 +164,7 @@ export interface SidebarAction {
 /** The sidebar's remembered state, and the seam that records a change.
  *
  *  It used to be `localStorage` under `nocx.sidebar.collapsed`, which is
- *  precisely the ad-hoc pattern ADR-0033 ends: localStorage may not carry
+ *  precisely the ad-hoc pattern ADR-0048 ends: localStorage may not carry
  *  facts. The panel's collapse and its active view are UI state — what the
  *  app must remember without being asked — so they live in the UI-state
  *  document on the Go side and are reached over the control plane.
@@ -574,7 +574,7 @@ function SidebarSolid(props: SidebarSolidProps) {
  * @param views              view descriptors (top zone)
  * @param actions            action descriptors (bottom zone)
  * @param persistence        the sidebar's remembered state and the seam
- *                           that records it (ADR-0033), from the UI-state
+ *                           that records it (ADR-0048), from the UI-state
  *                           document. Null starts expanded on the first
  *                           view and remembers nothing.
  * @param getActiveProfileId reactive accessor for the active tab's
@@ -622,7 +622,7 @@ export function mountSidebar(
   // The remembered view, when this build still registers it. A renamed or
   // removed id falls back to the first view rather than leaving the panel
   // open on nothing — a value the app no longer understands is repaired,
-  // never treated as an error (ADR-0033 §4).
+  // never treated as an error (ADR-0048 §4).
   const rememberedViewId =
     persistence && views.some((v) => v.id === persistence.activeViewId)
       ? persistence.activeViewId

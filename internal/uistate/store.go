@@ -88,7 +88,7 @@ func newStore(doc storage.DocumentStore, log *slog.Logger, debounce time.Duratio
 
 // load reads the document, repairing what it can and falling back to defaults
 // for what it cannot. Every failure here is a warning and a default — see the
-// table in ADR-0033 §4. It is deliberately quiet about absence: a first launch
+// table in ADR-0048 §4. It is deliberately quiet about absence: a first launch
 // is not a problem worth a log line above Debug.
 func (s *Store) load() {
 	var stored Document

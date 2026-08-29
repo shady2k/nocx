@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/vault.setDefaultProvider.params.schema.json",
+  "title": "VaultSetDefaultProviderParams",
+  "description": "Params for vault.setDefaultProvider.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["provider"],
+  "properties": { "provider": { "type": "string", "pattern": "^[a-z0-9_-]{1,32}$" } }
+}

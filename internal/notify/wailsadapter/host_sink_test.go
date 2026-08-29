@@ -160,7 +160,7 @@ func TestHostSinkSendFailureRecordsFailedDelivery(t *testing.T) {
 }
 
 // TestHostSinkLeavesMachineFalse: a banner leaves the machine nowhere, so the
-// heuristic trust bound (ADR-0029 §3) never blocks it.
+// heuristic trust bound (ADR-0047 §3) never blocks it.
 func TestHostSinkLeavesMachineFalse(t *testing.T) {
 	if (notify.HostSink{}).LeavesMachine() {
 		t.Error("HostSink.LeavesMachine() = true, want false")

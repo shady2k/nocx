@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/sessions.live.params.schema.json",
+  "title": "SessionsLiveParams",
+  "description": "Params for listing the sessions the backend is still holding. There are none: a fresh client asks what is live, and the answer is not narrowed by anything the client already believes.",
+  "type": ["object", "null"],
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

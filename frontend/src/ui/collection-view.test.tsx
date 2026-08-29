@@ -51,21 +51,23 @@ describe('CollectionView', () => {
 })
 
 describe('CollectionRow', () => {
-  it('stays inert without activation: tabIndex -1, default density', () => {
+  it('stays inert without activation: no activatable marker, tabIndex -1, default density', () => {
     const { container } = render(() => (
       <CollectionRow info={<span>Item</span>} actions={<button type="button">Edit</button>} />
     ))
     const row = container.querySelector('.ui-collection-row') as HTMLElement
     expect(row.tabIndex).toBe(-1)
+    expect(row.getAttribute('data-activatable')).toBeNull()
     expect(row.getAttribute('data-density')).toBe('default')
   })
-  it('an activatable row is reachable and operable from the keyboard', () => {
+  it('an activatable row is reachable, marked, and operable from the keyboard', () => {
     const onActivate = vi.fn()
     const { container } = render(() => (
       <CollectionRow info={<span>Item</span>} actions={null} onActivate={onActivate} />
     ))
     const row = container.querySelector('.ui-collection-row') as HTMLElement
     expect(row.tabIndex).toBe(0)
+    expect(row.getAttribute('data-activatable')).toBe('true')
     row.focus()
     fireEvent.keyDown(row, { key: 'Enter' })
     expect(onActivate).toHaveBeenCalledTimes(1)
@@ -120,6 +122,16 @@ describe('CollectionRow', () => {
     const row = container.querySelector('.ui-collection-row')
     expect(row?.getAttribute('data-selected')).toBe('true')
     expect(row?.getAttribute('data-focused')).toBe('true')
+  })
+  it('keeps hover feedback on every row while the cursor marks only activatable rows', () => {
+    const css = readFileSync(
+      resolve(process.cwd(), 'src/styles/components/collection-view.css'),
+      'utf8',
+    )
+    expect(css).toMatch(
+      /\.ui-collection-row\[data-activatable='true'\]\s*\{[^}]*cursor:\s*pointer/s,
+    )
+    expect(css).toMatch(/\.ui-collection-row:hover\s*\{[^}]*background:/s)
   })
 })
 

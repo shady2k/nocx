@@ -63,6 +63,16 @@
   color: var(--color-danger);
 }
 
+/* Solid badges are for compact counts over changing surfaces: the accent is
+   opaque, the canvas token keeps its text readable in every theme, and the
+   ring separates the chip from its host. A host with a different background
+   sets --badge-ring-color; the rail token is the safe default. */
+.ui-badge[data-variant='solid'] {
+  background: var(--color-accent);
+  color: var(--color-canvas);
+  box-shadow: 0 0 0 2px var(--badge-ring-color, var(--color-chrome-rail));
+}
+
 /* The chip yields to its row (nocx-wzc4.9): never wraps, and ellipsizes at
    its own box edge. `min-width: 0` is what lets a flex row shrink the chip
    below its content width; `max-width: 100%` is the no-wrap companion. */

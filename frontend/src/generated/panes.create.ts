@@ -10,7 +10,7 @@
  */
 
 /**
- * Result of the panes.create JSON-RPC method (nocx-isoph.2, design §5 and §7): the stored pane, and whether this call was a retry of one already made. This file is also the single declaration of the pane shape; panes.move references it cross-file. The pane is the durable identity and its id is minted by the FRONTEND for exactly that reason — it must survive a restart, so it cannot come from a backend instance. The session id is the opposite case and is minted by the backend (AD-7): it is embedded in the remote launcher before the connection exists, and it dies with the backend while the pane does not.
+ * Result of the panes.create JSON-RPC method (nocx-isoph.2, design §5 and §7): the stored pane, and whether this call was a retry of one already made. This file is also the single declaration of the pane shape; panes.move references it cross-file. The pane is the durable identity and its id is minted by the FRONTEND for exactly that reason — it must survive a restart, so it cannot come from a backend instance. The session id is the opposite case and is minted by the backend (AD-7): it is embedded in the remote launcher before the connection exists, and it dies with the backend INSTANCE while the pane does not — never with the window, which is what a coordinator outliving its window changes (nocx-oevq4). So the pane is not merely the durable half, it is the half the renderer owns: the live binding paneId -> (instanceId, sessionId) is the backend's, and a fresh window asks for it with sessions.live rather than remembering it.
  */
 export interface PanesCreateResult {
   pane: Pane

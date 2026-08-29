@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/shell.footprint.consent.params.schema.json",
+  "title": "ShellFootprintConsentParams",
+  "description": "Params for shell.footprint.consent.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}"
+    }
+  }
+}

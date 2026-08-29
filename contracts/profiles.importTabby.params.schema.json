@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/profiles.importTabby.params.schema.json",
+  "title": "ProfilesImporttabbyParams",
+  "description": "Params for profiles.importTabby.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["config"],
+  "properties": {
+    "config": { "type": "string", "minLength": 1 },
+    "passphrase": {
+      "type": "string",
+      "maxLength": 65536,
+      "description": "Passphrase used to decrypt the imported profile configuration."
+    }
+  }
+}

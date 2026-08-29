@@ -48,7 +48,7 @@ somewhere to put it. The remaining six stay with the `nocx-bt3w` sweep.
 
 ### D2 — Default-deny survives, and it is what the DEFAULT of each toggle encodes
 
-A `(kind, trust)` pair reaches a sink only where a row says so (ADR-0029 §3). With
+A `(kind, trust)` pair reaches a sink only where a row says so (ADR-0047 §3). With
 user-authored rows the same rule holds mechanically: the table is built from the toggles
 that are ON, so a kind whose toggles are all off reaches nothing, and a kind nobody
 declared has no toggle to turn on.
@@ -59,7 +59,7 @@ the banner — so an existing user's behaviour does not change the day this land
 ### D3 — The trust-capability bound is re-checked on every swap, and a refused table never becomes live
 
 `NewRouter` refuses a table whose `TrustHeuristic` row reaches a sink with
-`LeavesMachine() == true` (`ErrTrustCapability`, ADR-0029 §3). That check exists because
+`LeavesMachine() == true` (`ErrTrustCapability`, ADR-0047 §3). That check exists because
 trust classes are a hard capability bound and it is a **security control**.
 
 With a user-authored table it must run on **every** rebuild, not once at construction. A
@@ -72,7 +72,7 @@ heuristic-to-network row. The catalogue simply does not offer the pair.
 
 ### D4 — The router's table becomes swappable, and the interval is named
 
-ADR-0029 §2.3 says routing is resolved once, in the router, before any sink is invoked. That
+ADR-0047 §2.3 says routing is resolved once, in the router, before any sink is invoked. That
 is about **when** resolution happens relative to delivery, and a swappable table does not
 touch it — but only if the swap is atomic with respect to a raise.
 
@@ -194,4 +194,4 @@ Task 3 is independent of 2 after the section exists.
 - It does not move the `Policy` or change `Disposition`'s meaning (D5).
 - It does not add a JSON-RPC method the settings methods already provide (D1).
 - No push targets and no secrets — that is epic B (`nocx-hz94`).
-- No per-program grants (ADR-0029 §4.5).
+- No per-program grants (ADR-0047 §4.5).

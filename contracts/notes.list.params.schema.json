@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/notes.list.params.schema.json",
+  "title": "NotesListParams",
+  "description": "Params for notes.list; the method takes no parameters.",
+  "type": ["object", "null"],
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

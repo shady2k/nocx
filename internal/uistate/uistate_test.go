@@ -189,7 +189,7 @@ func TestRestoreCarriesMaximisedAndFullScreenAsStates(t *testing.T) {
 func TestObserveKeepsNormalGeometryWhileMaximised(t *testing.T) {
 	// The platform reports the MAXIMISED size as the window size. Recording it
 	// would give a window that looks maximised and unmaximises to the wrong
-	// place, which is the "states, not pixels" rule in ADR-0033 §6.4.
+	// place, which is the "states, not pixels" rule in ADR-0048 §6.4.
 	prev := Window{Width: 1200, Height: 800, X: 40, Y: 40, Displays: "1:2560x1440p"}
 	live := Window{Width: 2560, Height: 1400, X: 0, Y: 0, Maximised: true, Displays: "1:2560x1440p"}
 

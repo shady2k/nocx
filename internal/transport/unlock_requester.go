@@ -11,6 +11,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/shady2k/nocx/internal/transport/control"
+	"github.com/shady2k/nocx/internal/vault"
 )
 
 // ── resolver ingress validators (the per-field sweep) ─────────────────────
@@ -204,7 +205,15 @@ type UnlockRequester interface {
 
 // ErrNoClientConnected is returned by RequestUnlock when no renderer is
 // attached to receive the notification.
-var ErrNoClientConnected = errors.New("no client connected to show unlock prompt")
+//
+// It IS vault.ErrNoUnlockClient, not a look-alike. The vault has to tell
+// "nobody is there to ask" — suspend, and raise the prompt when somebody
+// returns (D9) — from "the person said no", which is the answer. Comparing
+// message text would be a second answer to that question, wrong the first
+// time either side reworded itself, and the vault cannot import this package
+// (it is imported BY it). One sentinel, declared where the meaning lives,
+// named here for the callers that already use this name.
+var ErrNoClientConnected = vault.ErrNoUnlockClient
 
 // ErrUnlockCancelled is returned by RequestUnlock when the user dismissed
 // the unlock dialog without unlocking.

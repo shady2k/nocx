@@ -52,7 +52,7 @@ export interface CommandMarkerEvent extends CommandMarker {
 export type CommandMarkerCallback = (event: CommandMarkerEvent) => void
 
 // NotificationRequestCallback fires when a program asks nocx to present a
-// message (ADR-0029) — OSC 9 or OSC 777. Like every other OSC on this
+// message (ADR-0047) — OSC 9 or OSC 777. Like every other OSC on this
 // contract the renderer parses and reports; it carries only what the program
 // supplied, and never where the message should go.
 export type NotificationRequestCallback = (request: OscNotification) => void
@@ -181,7 +181,7 @@ export interface TerminalRenderer {
   onRenderFence?(cb: RenderFenceCallback): void
 
   // onNotification registers a callback that fires when a program asks nocx
-  // to present a message (ADR-0029) — OSC 9 or OSC 777, two spellings of one
+  // to present a message (ADR-0047) — OSC 9 or OSC 777, two spellings of one
   // request, fanned out identically so nothing downstream depends on which
   // one a program chose. Parse-and-report only: the renderer says a program
   // asked and never says where the message goes; the backend's router is the

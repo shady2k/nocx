@@ -1,4 +1,4 @@
-.PHONY: all init build dev dev-web lint format test clean hooks ci ci-full \
+.PHONY: all init build build-server dev dev-web lint format test clean hooks ci ci-full \
         ci-backend ci-linux ci-mac ci-os-split ci-frontend ci-e2e helpers \
         print-os-pkgs print-portable-pkgs \
         lint-ci test-ci build-ci root-ci frontend-ci
@@ -90,9 +90,23 @@ all: lint test build
 # cannot read or clobber the documents an installed nocx owns
 # (internal/storage/appdir.go). Use build-release to produce the shipped
 # artefact; CI does that from a tag.
-build:
+build: build-server
 	$(FRONTEND_BUILD)
 	$(GO) build $(if $(WAILS_PLATFORM_TAGS),-tags "$(WAILS_PLATFORM_TAGS)") -ldflags "$(LDFLAGS)" -o build/bin/nocx .
+
+# The coordinator, built BESIDE the application binary and never instead of
+# it. Both bundles put the two in one directory — nocx.app/Contents/MacOS on
+# macOS, AppDir/usr/bin inside the AppImage — and internal/update/serverbin's
+# SiblingPath is that fact stated once, so a local `make build` has to
+# reproduce the layout or the launcher cannot be exercised outside a release.
+#
+# CGO_ENABLED=0 and no wails tags: the coordinator has no window, no GTK and
+# no WebKit (cmd/nocx-server), and building it against them would drag the
+# desktop shell's dependency surface into a headless daemon for nothing.
+# Same -ldflags as the app, because a pair that cannot report one version is
+# the defect the update health check exists to catch.
+build-server:
+	CGO_ENABLED=0 $(GO) build -ldflags "$(LDFLAGS)" -o build/bin/nocx-server ./cmd/nocx-server
 
 # The shipped artefact. `-tags release` is what selects the real profile
 # directory, and it is deliberately the side that needs the flag: a build made
@@ -101,9 +115,17 @@ build:
 # `helpers` is a prerequisite because the shipped binary embeds the
 # cross-compiled helper artefacts; without them Artifact answers
 # ErrArtifactsNotBuilt and the remote panel has nothing to install.
+#
+# The coordinator is built here too, and with `release` and nothing else:
+# that tag is what selects the shipped profile directory (appdir.go), and a
+# coordinator resolving nocx-dev while the app resolved nocx would hold a
+# different vault and a different settings document from the window attached
+# to it. It is NOT built through build-server, which is the development
+# build of the same binary.
 build-release: helpers
 	$(FRONTEND_BUILD)
 	$(GO) build -tags "$(strip release production $(WAILS_PLATFORM_TAGS))" -ldflags "$(LDFLAGS)" -o build/bin/nocx .
+	CGO_ENABLED=0 $(GO) build -tags release -ldflags "$(LDFLAGS)" -o build/bin/nocx-server ./cmd/nocx-server
 
 # A local dev loop: build the embedded frontend and run the app with the dev
 # profile. `wails dev` used to provide a hot-reloading asset server; v3 has
@@ -116,11 +138,12 @@ dev:
 
 
 # The same app in an ordinary browser instead of the Wails webview: backend
-# (cmd/devharness, real PTY) plus vite with the Wails bindings shimmed. Needs no
-# display, no GTK — forward both ports over SSH and open http://localhost:5180.
-# Ports: NOCX_WS_PORT=9880, NOCX_WEB_PORT=5180. Neither is shared with anything
-# else: 5173 belongs to `npm run dev` and the e2e suite, 9876 to the e2e suite's
-# devharness, 34115 to `wails dev`.
+# (cmd/nocx-server, real PTY) plus vite with the Wails bindings shimmed. Needs
+# no display, no GTK — forward both ports over SSH and open
+# http://localhost:5180. NOCX_WEB_PORT=5180 pins vite, off `npm run dev` and
+# the e2e suite (5173) and off `wails dev` (34115). The backend's port is the
+# OS's to choose and changes every restart; the script prints the forward
+# command with the real number in it.
 dev-web:
 	./scripts/dev-web.sh
 
@@ -170,16 +193,18 @@ init: hooks
 	@echo ""
 	@echo "Ready. Run 'make dev' to start the app, 'bd ready' for the backlog."
 
-# Per-clone git configuration. Both lines are the same kind of thing: git
-# behaviour this repo needs that a clone cannot carry by itself.
+# Per-clone git configuration: git behaviour this repo needs that a clone cannot
+# carry by itself.
 #
-# The merge driver resolves `.beads/issues.jsonl` by regenerating it from the
-# issue database instead of asking which side to keep — see .gitattributes for
-# why neither side is ever the answer.
+# The --unset lines clean up after the beads merge driver, which used to resolve
+# `.beads/issues.jsonl` by regenerating it. The file is untracked now, so there
+# is nothing left to merge — and the driver never helped where it hurt most
+# anyway: GitHub computes a pull request's mergeability server-side and does not
+# run custom merge drivers at all.
 hooks:
 	git config core.hooksPath .githooks
-	git config merge.beads-export.name "regenerate the beads export from the issue database"
-	git config merge.beads-export.driver "bd export -o %A"
+	-@git config --unset merge.beads-export.driver 2>/dev/null || true
+	-@git config --unset merge.beads-export.name 2>/dev/null || true
 	@echo "git hooks installed from .githooks/"
 
 # `ci` is the HOST-SIDE half of CI: the `backend` job (macos-latest) plus the
@@ -278,11 +303,11 @@ ci-full: ci-os-split ci ci-mac ci-backend ci-linux ci-frontend ci-e2e
 # and a package with a platform split that stays in the portable set has its
 # `!unix` half compiled by nothing at all.
 OS_PKG_DIRS := cmd/e2e-sshd internal/apicoll internal/app internal/contentkey \
-               internal/lifecyclechannel \
+               internal/coordinator internal/lifecyclechannel \
                internal/loginshell internal/nativeports internal/procwatch \
                internal/pty internal/reveal internal/ssh/mux \
                internal/storage internal/update internal/vault/system
-OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/ssh/mux|internal/storage|internal/update|internal/vault/system)
+OS_PKG_RE := (cmd/e2e-sshd|internal/apicoll|internal/app|internal/contentkey|internal/coordinator|internal/lifecyclechannel|internal/loginshell|internal/nativeports|internal/procwatch|internal/pty|internal/reveal|internal/ssh/mux|internal/storage|internal/update|internal/vault/system)
 OS_PKGS := $(addprefix ./,$(addsuffix /...,$(OS_PKG_DIRS)))
 
 # BOTH keyring variants here too, and the comment above already said so —

@@ -91,7 +91,7 @@ type HostConfig struct {
 
 	// The multiplex directives, as the oracle resolves them for this exact
 	// argv — the user's config and their command-line -M/-S/-o together.
-	// ADR-0035's typed wrapper reads all three before it proposes a socket
+	// ADR-0049's typed wrapper reads all three before it proposes a socket
 	// of its own, for two different reasons.
 	//
 	// The first is a REFUSAL: a user who expressed their own multiplex
@@ -161,7 +161,7 @@ type sshConfigResolver struct {
 	//
 	// AND NEVER BY THE RESOLVED IDENTITY EITHER, which is what it was until
 	// 2026-08-21. Keying by identity assumes every argv naming one
-	// destination has one answer, and since ADR-0035 that is false by
+	// destination has one answer, and since ADR-0049 that is false by
 	// design: the typed wrapper asks this oracle twice about the same
 	// destination, once about the user's own line and once about the same
 	// line plus our ControlMaster/ControlPath/ControlPersist, and the whole
@@ -231,7 +231,7 @@ func (r *sshConfigResolver) ResolveConfig(ctx context.Context, host string) (*Ho
 //
 // Caching: results are cached under the EXACT ARGV, not the typed hostname
 // and not the resolved identity — the ADR-0015 narrowing of the 2026-08-05
-// delivery-modes design (§8) says the alias is not a key, and ADR-0035 makes
+// delivery-modes design (§8) says the alias is not a key, and ADR-0049 makes
 // the destination not a key either: the typed wrapper asks about one
 // destination twice, with and without our own mux options, and needs two
 // different answers. A repeat of the same argv still skips the ssh -G spawn.

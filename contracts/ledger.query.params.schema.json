@@ -1,0 +1,46 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/ledger.query.params.schema.json",
+  "title": "LedgerQueryParams",
+  "description": "Params for ledger.query.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scope"],
+  "properties": {
+    "scope": {
+      "type": "string",
+      "enum": ["directory", "host", "everywhere"]
+    },
+    "environmentId": {
+      "type": "string"
+    },
+    "cwd": {
+      "type": "string"
+    },
+    "paneId": {
+      "type": "string"
+    },
+    "kind": {
+      "type": "string",
+      "enum": ["shell", "ask", "action", "frame", "text"]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pending", "running", "success", "failure", "interrupted", "unknown"]
+    },
+    "text": {
+      "type": "string"
+    },
+    "since": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "before": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "limit": {
+      "type": "integer"
+    }
+  }
+}

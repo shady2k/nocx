@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/host.attentionActivated.params.schema.json",
+  "title": "HostAttentionActivatedParams",
+  "description": "The client telling the coordinator that a person activated a banner it had presented. An addressing session id and nothing else.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId"],
+  "properties": {
+    "sessionId": { "type": "string", "minLength": 1, "maxLength": 128 }
+  }
+}

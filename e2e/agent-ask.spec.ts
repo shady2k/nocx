@@ -60,7 +60,7 @@
  * explicit release — every "wait" here is a poll on a state change, never a
  * sleep (AGENTS.md: "a test may not depend on timing").
  *
- * The backend is THIS FILE'S OWN devharness on a disposable home
+ * The backend is THIS FILE'S OWN nocx-server on a disposable home
  * (VaultBackend), so the endpoint it configures never leaks into the shard's
  * shared stand, and the "no endpoint configured" state is real for this
  * file's first test (AGENTS.md: "Your dev profile is not the installed
@@ -106,7 +106,7 @@ async function waitForProbeRequest(
 }
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
@@ -172,7 +172,7 @@ test.beforeAll(async () => {
   // the suite runs in: the container has no keychain to ask, and the derived
   // content key makes the vault available without user setup — the same
   // arrangement history-persistence.spec.ts relies on.
-  backend = new VaultBackend(devharnessBin(), { root }, true)
+  backend = new VaultBackend(serverBin(), { root })
   endpoint = await backend.start()
 })
 
@@ -264,35 +264,63 @@ async function runCommand(
   return { block }
 }
 
-/** THE GESTURE (nocx-4wtlh, nocx-wcswn, nocx-a7mw7.4, nocx-a7mw7.5):
- * select a finished block's output and confirm the offer. A Run selection
- * remains ordinary selectable/copyable text: neither the affordance nor the
- * block menu offers a grant. The real target chord then changes the active
- * capability, and the existing selection is re-evaluated without another
- * selection event; only Ask presents Mark.
+/** The real target chord, as a person presses it — the same gesture
+ *  askFromPrompt uses, on its own, for specs that need Ask active as setup
+ *  rather than as the thing under test. */
+async function switchToAsk(page: Page): Promise<void> {
+  const indicator = page.locator('.pane.active .ui-mode-indicator:visible')
+  if ((await indicator.getAttribute('data-target')) === 'agent') return
+  await page.locator(INPUT).click()
+  await page.keyboard.press('ControlOrMeta+Enter')
+  await expect(indicator).toHaveAttribute('data-target', 'agent', { timeout: 10_000 })
+}
+
+/** RUN OFFERS NOTHING, AND THE CHORD IS WHAT CHANGES THAT (nocx-a7mw7.5,
+ * nocx-a7mw7.6). Asserts the pane really is in Run, that neither the block
+ * menu nor a real scrollback selection produces a grant there, and that the
+ * REAL cross-platform target chord — pressed with the focus wherever the
+ * selection left it — reveals the offer over the same Range, with no second
+ * selection event.
  *
- * The selection is a real DOM Range over the block rows, the same object a
- * mouse drag leaves behind. The confirmation marks the block for the next
- * question; selection alone never changes grant state. */
-async function pointAt(block: Locator): Promise<void> {
+ * NOT A BRANCH INSIDE pointAt. It used to be one, read off the live
+ * indicator, so at the call sites where Ask was already active every Run
+ * assertion silently did nothing — and had the pane ever started in Ask, the
+ * whole half would have gone on passing while testing nothing. */
+async function pointAtFromRun(block: Locator): Promise<void> {
   const page = block.page()
   await expect(block.locator('.cmd-output .term-line').first()).toBeVisible({ timeout: 15_000 })
-  const input = page.locator(INPUT)
   const indicator = page.locator('.pane.active .ui-mode-indicator:visible')
-  const startedInRun = (await indicator.getAttribute('data-target')) !== 'agent'
+  await expect(indicator).toHaveAttribute('data-target', 'shell')
 
-  if (startedInRun) {
-    await block.locator('.cmd-overflow-btn').click()
-    await expect(page.locator('.cmd-overflow-menu-item[data-action="grant"]')).toHaveCount(0)
-    const copyCommand = page.locator('.cmd-overflow-menu-item').filter({ hasText: 'Copy command' })
-    await expect(copyCommand).toBeVisible()
-    await copyCommand.click()
-    await expect(page.locator('.cmd-overflow-menu')).toHaveCount(0)
-  }
+  await block.locator('.cmd-overflow-btn').click()
+  await expect(page.locator('.cmd-overflow-menu-item[data-action="grant"]')).toHaveCount(0)
+  const copyCommand = page.locator('.cmd-overflow-menu-item').filter({ hasText: 'Copy command' })
+  await expect(copyCommand).toBeVisible()
+  await copyCommand.click()
+  await expect(page.locator('.cmd-overflow-menu')).toHaveCount(0)
 
-  // Put the composer in the exact state from which the target chord is
-  // handled, then leave a real scrollback Range while retaining its focus.
-  await input.click()
+  await page.locator(INPUT).click()
+  await selectWholeOutput(block)
+
+  const offer = page.locator('.mark-affordance .ui-button')
+  await expect(offer).toBeHidden()
+  await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() ?? '')).not.toBe('')
+
+  // No reselection and no second selectionchange: the registry callback
+  // reuses the Range already on the document when the real chord flips, and
+  // the draft swap underneath it must not eat that Range either.
+  await page.keyboard.press('ControlOrMeta+Enter')
+  await expect(indicator).toHaveAttribute('data-target', 'agent', { timeout: 10_000 })
+  await expect.poll(() => page.evaluate(() => window.getSelection()?.toString() ?? '')).not.toBe('')
+
+  await confirmOffer(page)
+}
+
+/** The selection a mouse drag leaves behind, made as a real DOM Range over
+ *  the block's output rows and announced with the event the product listens
+ *  for. A synthetic drag across rows would be a geometry test in disguise;
+ *  what these specs are about is what a selection MEANS. */
+async function selectWholeOutput(block: Locator): Promise<void> {
   await block.evaluate((el) => {
     const lines = Array.from(el.querySelectorAll<HTMLElement>('.cmd-output .term-line'))
     if (lines.length === 0) throw new Error('block has no output rows to point at')
@@ -306,23 +334,21 @@ async function pointAt(block: Locator): Promise<void> {
     sel?.addRange(range)
     document.dispatchEvent(new Event('selectionchange'))
   })
+}
 
+/** THE OFFER MUST OUTLIVE THE COMPOSER, NOT OUTRUN IT (nocx-45vkz).
+ *
+ *  CodeMirror restores the DOM selection into its own document while its
+ *  contentDOM is the active element, and a selection made without taking
+ *  focus off it was collapsed a frame or two later — the offer vanished, and
+ *  this helper passed only because it clicked within a few milliseconds. The
+ *  scrollback takes the focus when it claims the selection, so the observable
+ *  to wait on is that transfer: with the composer unfocused there is nothing
+ *  left to restore. Then a pair of frames, which is when the restore would
+ *  have run, and the offer is still there to press. Frames and a DOM state,
+ *  never a duration. */
+async function confirmOffer(page: Page): Promise<void> {
   const offer = page.locator('.mark-affordance .ui-button')
-  if (startedInRun) {
-    await expect(offer).toBeHidden()
-    await expect
-      .poll(() => page.evaluate(() => window.getSelection()?.toString() ?? ''))
-      .not.toBe('')
-
-    // No reselection and no second selectionchange: the registry callback
-    // reuses the Range already on the document when the real chord flips.
-    await page.keyboard.press('ControlOrMeta+Enter')
-    await expect(indicator).toHaveAttribute('data-target', 'agent', { timeout: 10_000 })
-    await expect
-      .poll(() => page.evaluate(() => window.getSelection()?.toString() ?? ''))
-      .not.toBe('')
-  }
-
   await expect(offer).toBeVisible({ timeout: 10_000 })
   await expect
     .poll(() => page.evaluate(() => String(document.activeElement?.className ?? '')), {
@@ -335,6 +361,32 @@ async function pointAt(block: Locator): Promise<void> {
   )
   await expect(offer).toBeVisible()
   await offer.click()
+}
+
+/** THE GESTURE (nocx-4wtlh, nocx-wcswn, nocx-a7mw7.4): with Ask active,
+ * select a region of a finished block's output and the product OFFERS to
+ * mark it; pressing the offer marks the WHOLE BLOCK for the next question —
+ * "if you ask, this comes with you". A selection is a quote and a grant,
+ * never a row range: the payload is the block, so the mark is on the block.
+ *
+ * THE SELECTION ALONE MARKS NOTHING, and the confirmation is the second half
+ * of this helper (nocx-a7mw7.4). Selecting output to read it, or to copy it,
+ * used to mark it with nothing confirmed; a spec that skipped the button
+ * would go on passing after the offer stopped being offered. */
+async function pointAt(block: Locator): Promise<void> {
+  const page = block.page()
+  await expect(block.locator('.cmd-output .term-line').first()).toBeVisible({ timeout: 15_000 })
+  await expect(page.locator('.pane.active .ui-mode-indicator:visible')).toHaveAttribute(
+    'data-target',
+    'agent',
+  )
+  // The state a person points FROM: mid-draft, so the composer holds the
+  // focus. Put there deliberately rather than left to whatever the previous
+  // step happened to focus, because it is the whole difficulty — see
+  // confirmOffer.
+  await page.locator(INPUT).click()
+  await selectWholeOutput(block)
+  await confirmOffer(page)
 }
 
 /** Send the drafted line to the ASSISTANT: ⌘/Ctrl+Enter flips where Enter
@@ -377,7 +429,7 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
 
     // The gesture still works with nothing configured: the selection marks
     // the block it was made in, and the input line says one block is marked.
-    await pointAt(block)
+    await pointAtFromRun(block)
     await expectGranted(page, [`echo ${marker}`])
 
     // The ask is refused, and the refusal carries its repair: the toast
@@ -491,6 +543,10 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // across the file's tests, and every index below is relative to it.
     const base = fake.requests().length
     fake.setScript({ chunks: ['The first block printed ', markerA, '.'], holdAfter: 1 })
+    // Ask has to be active before the offer exists (nocx-a7mw7.5). The Run
+    // half of that rule has its own coverage in pointAtFromRun; here the
+    // flip is setup, made through the same real chord.
+    await switchToAsk(page)
     await pointAt(blockA)
 
     // The mark is on the block and the count is in the INPUT LINE BEFORE the
@@ -594,6 +650,10 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     const { block } = await runCommand(page, `echo ${marker}`, marker)
     const base = fake.requests().length
     fake.setScript({ chunks: ['ok ', marker] })
+    // Ask has to be active before the offer exists (nocx-a7mw7.5). The Run
+    // half of that rule has its own coverage in pointAtFromRun; here the
+    // flip is setup, made through the same real chord.
+    await switchToAsk(page)
     await pointAt(block)
     // The block is marked before the question is sent; then the question
     // goes out and the completion lands — the ask must actually be SENT for
@@ -632,6 +692,10 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     fake.setScript({ chunks: ['Answer two: ', markerB] })
 
     // Ask about A; the stream opens and is held.
+    // Ask has to be active before the offer exists (nocx-a7mw7.5). The Run
+    // half of that rule has its own coverage in pointAtFromRun; here the
+    // flip is setup, made through the same real chord.
+    await switchToAsk(page)
     await pointAt(blockA)
     await expectGranted(page, [cmdA])
     const q1 = 'Question one about the first block?'

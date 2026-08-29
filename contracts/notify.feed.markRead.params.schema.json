@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/notify.feed.markRead.params.schema.json",
+  "title": "NotifyFeedMarkreadParams",
+  "description": "Params for notify.feed.markRead.",
+  "type": ["object", "null"],
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

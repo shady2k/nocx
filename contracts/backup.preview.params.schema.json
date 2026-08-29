@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/backup.preview.params.schema.json",
+  "title": "BackupPreviewParams",
+  "description": "Params for backup.preview.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contents", "strategy"],
+  "properties": {
+    "contents": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8388608
+    },
+    "strategy": {
+      "type": "string",
+      "enum": ["merge", "replace"]
+    }
+  }
+}

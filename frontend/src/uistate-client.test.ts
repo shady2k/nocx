@@ -1,4 +1,4 @@
-// uistate-client — the renderer's end of the UI-state document (ADR-0033).
+// uistate-client — the renderer's end of the UI-state document (ADR-0048).
 //
 // Two things are worth testing here and nothing else is: that a caller who
 // knows only one field does not wipe the others, and that the mirror learns

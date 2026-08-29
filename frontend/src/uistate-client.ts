@@ -1,5 +1,5 @@
 /**
- * uistate-client — the renderer's end of the UI-state document (ADR-0033).
+ * uistate-client — the renderer's end of the UI-state document (ADR-0048).
  *
  * UI state is what the app must remember WITHOUT being asked: the sidebar's
  * collapse, its active view, its width, and which tab was in front. It is not

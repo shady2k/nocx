@@ -1690,7 +1690,7 @@ describe('bracketed paste, read from the real parser', () => {
   })
 })
 
-describe('onNotification fan-out (ADR-0029)', () => {
+describe('onNotification fan-out (ADR-0047)', () => {
   // jsdom lacks matchMedia and ResizeObserver, which xterm.js / our mount
   // code uses during init. Stub them so the terminal can initialise.
   async function mountRenderer(): Promise<XtermRenderer> {

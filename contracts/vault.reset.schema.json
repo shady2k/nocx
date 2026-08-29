@@ -46,7 +46,8 @@
             "denied",
             "timeout",
             "unsupported-platform",
-            "unknown-provider"
+            "unknown-provider",
+            "excluded"
           ]
         }
       }

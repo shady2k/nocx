@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/backup.restore.params.schema.json",
+  "title": "BackupRestoreParams",
+  "description": "Params for backup.restore.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["contents", "strategy", "previewToken"],
+  "properties": {
+    "contents": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8388608
+    },
+    "strategy": {
+      "type": "string",
+      "enum": ["merge", "replace"]
+    },
+    "previewToken": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    }
+  }
+}

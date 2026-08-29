@@ -14,3 +14,7 @@ import "syscall"
 func (lp *LocalPty) ForegroundProcessGroup() (int, error) { return 0, ErrNoForeground }
 
 func (lp *LocalPty) SignalForeground(_ syscall.Signal) error { return ErrNoForeground }
+
+func (lp *LocalPty) ForegroundJob() (int, error) { return 0, ErrNoForeground }
+
+func (lp *LocalPty) SignalProcessGroup(_ int, _ syscall.Signal) error { return ErrNoForeground }

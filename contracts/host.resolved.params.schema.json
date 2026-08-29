@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/host.resolved.params.schema.json",
+  "title": "HostResolvedParams",
+  "description": "The client's answer to one client-host request. The outcome decides which other fields may appear: only ok carries a path, only failed requires an error, and unavailable may carry one. Those cross-field rules live in the registered validator; this states the shape and the bounds.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["outcome"],
+  "properties": {
+    "outcome": { "enum": ["ok", "cancelled", "failed", "unavailable"] },
+    "path": { "type": "string", "maxLength": 8192 },
+    "error": { "type": "string", "maxLength": 512 }
+  }
+}

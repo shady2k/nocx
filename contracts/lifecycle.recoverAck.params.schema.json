@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/lifecycle.recoverAck.params.schema.json",
+  "title": "LifecycleRecoverackParams",
+  "description": "Params for lifecycle.recoverAck.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "generation"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}"
+    },
+    "generation": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}"
+    }
+  }
+}

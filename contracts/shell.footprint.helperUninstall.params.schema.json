@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/shell.footprint.helperUninstall.params.schema.json",
+  "title": "ShellFootprintHelperuninstallParams",
+  "description": "Params for shell.footprint.helperUninstall.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profileId", "fingerprint", "path"],
+  "properties": {
+    "profileId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "fingerprint": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "path": {
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

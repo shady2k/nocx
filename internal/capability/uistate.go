@@ -15,7 +15,7 @@ import (
 // Only the renderer's half is here. Window geometry is deliberately absent:
 // the renderer can neither know it nor act on it, and putting it behind a
 // method the transport could call would create a second potential owner of a
-// fact the Wails side already owns (ADR-0033 §7).
+// fact the Wails side already owns (ADR-0048 §7).
 type UIStateService interface {
 	Layout(context.Context) uistate.Layout
 	SetLayout(context.Context, uistate.Layout)
@@ -28,6 +28,7 @@ type UIStateService interface {
 // serialises. UI state never touches the vault, so the vault gate is
 // deliberately not held.
 type UIStateOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, UIStateService) error) error
 }
 
@@ -35,7 +36,7 @@ type UIStateOperation interface {
 // the execution lane, and hands the callback a guard-bound UI-state service.
 func NewUIStateOperation(configGate, lane control.Admission, store *uistate.Store) UIStateOperation {
 	g := &guard{}
-	return newOperation[UIStateService](control.NewComposite(configGate, lane), g, &uiStateService{guard: g, store: store})
+	return newOperation[UIStateService](Excluded("it persists renderer presentation state rather than performing a domain action"), control.NewComposite(configGate, lane), g, &uiStateService{guard: g, store: store})
 }
 
 type uiStateService struct {
@@ -56,7 +57,7 @@ func (s *uiStateService) Layout(context.Context) uistate.Layout {
 // SetLayout returns nothing because the store's write is deferred: the value
 // is recorded now and reaches the disk when changes stop. There is no error a
 // caller could act on — a failed write leaves the panel where the user put it
-// and is retried by the next change (ADR-0033 §5).
+// and is retried by the next change (ADR-0048 §5).
 func (s *uiStateService) SetLayout(_ context.Context, l uistate.Layout) {
 	if err := s.guard.check(); err != nil {
 		return

@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/vault.inventory.params.schema.json",
+  "title": "VaultInventoryParams",
+  "description": "Params for vault.inventory.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

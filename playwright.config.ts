@@ -3,12 +3,12 @@ import { defineConfig, type Project } from '@playwright/test'
 import { BASE_URL } from './e2e/base-url'
 
 // e2e drives the whole app, not the frontend alone: the stand this config
-// starts is cmd/devharness — the real Go backend on a real PTY, the real
+// starts is cmd/nocx-server — the real Go backend on a real PTY, the real
 // transport — with vite serving the real renderer. That is the only place
 // layout, focus and GPU behaviour are observable; jsdom has none of them.
 //
 // ONE arrangement. There used to be two — `wails dev` here and a shell script
-// that started devharness and set NOCX_WS_PORT — and seven specs could only
+// that started nocx-server and set NOCX_WS_PORT — and seven specs could only
 // run on the second, kept off the first by a hand-written list. That is how
 // seven files failed on their first line while the shards stayed green
 // (nocx-azxe.2), and how "where is the home" became a question with two right
@@ -64,7 +64,7 @@ export default defineConfig({
   // WebSocket, and the backend spawns a PTY."
   //
   // THAT ARRANGEMENT NO LONGER EXISTS. This file's own header says so — there
-  // is ONE stand now, cmd/devharness plus vite, and `wails is not started
+  // is ONE stand now, cmd/nocx-server plus vite, and `wails is not started
   // here`. The number outlived the machine it was measured against, which is
   // how a workaround becomes a constant.
   //
@@ -75,7 +75,7 @@ export default defineConfig({
   // and paid again on every debugging round.
   //
   // So it goes back to the library default. If the first-tab assertion turns
-  // out to need more than five seconds on the devharness stand, THAT is the
+  // out to need more than five seconds on the nocx-server stand, THAT is the
   // defect: AGENTS.md's rule is that a test waits on an observable state change
   // and never on a duration, and an assertion that needs a long budget is one
   // that is not waiting on the right thing. Raise the waiting, not the number.
@@ -89,7 +89,7 @@ export default defineConfig({
   // can throttle. That is handled outside the repo by capping dump size. What
   // this guard buys is refusing to begin a run on a filesystem that is already
   // too full to survive one.
-  // The stand — cmd/devharness plus vite — is brought up here and taken down
+  // The stand — cmd/nocx-server plus vite — is brought up here and taken down
   // in globalTeardown, so `npx playwright test` is the whole command on a
   // developer's machine and in CI. preflight's disk floor runs first.
   globalSetup: './e2e/global-setup.ts',

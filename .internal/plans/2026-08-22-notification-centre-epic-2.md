@@ -73,7 +73,7 @@ the second half deliberately.
 
 ### D4 — Which rows are expanded, and the active filter, are ephemeral view state
 
-Both live in renderer signals. Not `localStorage`: ADR-0033 settled that it may not carry
+Both live in renderer signals. Not `localStorage`: ADR-0048 settled that it may not carry
 facts. Not a UI-state document either — nothing has asked for an expansion to survive a
 restart, and the feed itself does not survive one, so a document remembering which row of a
 feed that no longer exists was open would be remembering nothing.

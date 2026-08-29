@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/tools/files.read.schema.json",
   "title": "FilesReadParams",
-  "description": "Params of the files.read agent tool (design §4.2): read a file within the grant's paths. The model is untrusted input and gets the same check the renderer's parameters get — additionalProperties: false plus an explicit required list, and a bound on the path it may name (the grant's paths, enforced by the narrowed capability nocx-lndv constructs). Windowing of the return is the tool's return contract (design §4.4), not a parameter of this slice.",
+  "description": "Read a UTF-8 text file inside the grant's canonical paths. The window is bounded to the first 64 KiB of complete source lines; output lines are numbered from one, and the opaque revision binds a later files.edit to the exact bytes and identity observed here. Binary or invalid UTF-8 files are reported without text. Original trailing whitespace, BOM and line endings are not normalized for revision purposes; edits preserve the source line-ending style.",
   "type": "object",
   "additionalProperties": false,
   "required": ["path"],
@@ -15,18 +15,16 @@
   "$defs": {
     "result": {
       "title": "FilesReadResult",
-      "description": "What files.read hands back. Binary content is REPORTED, never pasted: binary is true and text is absent, so a model asking for an image gets a fact rather than a screenful of bytes.",
+      "description": "What files.read hands back. Binary content is reported, never pasted: binary is true and text is absent. The revision is a strict compare-and-swap token for files.edit.",
       "type": "object",
       "additionalProperties": false,
-      "required": ["path", "total", "window", "returned"],
+      "required": ["path", "total", "revision", "window", "seen", "returned"],
       "properties": {
-        "path": {
+        "path": { "type": "string", "description": "The file that was read." },
+        "total": { "type": "integer", "description": "The file's complete size in bytes." },
+        "revision": {
           "type": "string",
-          "description": "The file that was read."
-        },
-        "total": {
-          "type": "integer",
-          "description": "The file's size in bytes."
+          "description": "Opaque revision tied to the exact bytes and canonical identity observed by this read."
         },
         "window": {
           "type": "object",
@@ -35,26 +33,56 @@
           "properties": {
             "start": {
               "type": "integer",
-              "description": "First line of the window returned, in bytes, counting from 0."
+              "description": "First byte of the source window returned, counting from 0."
             },
             "end": {
               "type": "integer",
-              "description": "One past the last line of the window returned, in bytes."
+              "description": "One past the last byte of the source window returned."
             }
           },
-          "description": "The byte span returned: [0, size of the window)."
+          "description": "The source-byte span returned: [start, end)."
+        },
+        "seen": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["start", "end"],
+          "properties": {
+            "start": {
+              "type": "integer",
+              "description": "First displayed source line number, inclusive."
+            },
+            "end": {
+              "type": "integer",
+              "description": "Last displayed source line number, inclusive; zero when no complete line fit."
+            }
+          },
+          "description": "The only source lines a later files.edit may address under this revision."
         },
         "returned": {
           "type": "integer",
-          "description": "Bytes actually returned. Less than total means the file is longer than the window."
+          "description": "Source bytes represented by the returned complete-line window; less than total means the window is partial."
+        },
+        "truncated": {
+          "type": "boolean",
+          "description": "True when the result retained only part of the source window."
+        },
+        "dropped": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Source bytes omitted from this result because of the declared bound."
+        },
+        "remaining": {
+          "type": "integer",
+          "minimum": 0,
+          "description": "Source bytes still omitted after this result."
         },
         "binary": {
           "type": "boolean",
-          "description": "True when the content is binary. Absent means false."
+          "description": "True when the content is binary or invalid UTF-8. Absent means false."
         },
         "text": {
           "type": "string",
-          "description": "The text of the returned window. Absent for binary content and for an empty file."
+          "description": "Numbered text of the returned complete lines. Absent for binary content and for an empty window."
         }
       }
     }

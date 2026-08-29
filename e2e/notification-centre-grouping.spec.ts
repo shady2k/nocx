@@ -34,7 +34,7 @@ import { readStand } from './stand'
  *  - A tab the user closes raises NOTHING, deliberately (`takeCloseRequested`,
  *    internal/transport/ws.go). So no session here ends by having its tab
  *    closed; every occurrence in this test is a program asking nocx to present
- *    a message (ADR-0029), which is the source that needs no ending at all.
+ *    a message (ADR-0047), which is the source that needs no ending at all.
  *  - The feed is IN-MEMORY in a shared stand and `resetStand` does not clear
  *    it — it resets panes, ui state, notes and snippets. Rows from earlier
  *    spec files are legitimately still there, so this test ESTABLISHES its
@@ -99,7 +99,7 @@ const rowsOfKind = (page: Page, kind: string) =>
  * The titles carry the PROJECT NAME, and that is load-bearing rather than
  * decorative.
  *
- * Both browser projects run this file against ONE devharness and one $HOME
+ * Both browser projects run this file against ONE nocx-server and one $HOME
  * (playwright.config.ts declares chromium and webkit; workers is 1, so they
  * run in sequence), and marking the feed read does not empty it. So the
  * second project starts with the first project's rows already in the feed.
@@ -317,7 +317,7 @@ async function run(page: Page, line: string): Promise<void> {
   await promptReady(page)
 }
 
-/** A program in this pane asks nocx to present a message (ADR-0029) — the one
+/** A program in this pane asks nocx to present a message (ADR-0047) — the one
  *  source that needs no session to end, which is what keeps trap 1 out of this
  *  test entirely. */
 function osc777(title: string, body: string): string {

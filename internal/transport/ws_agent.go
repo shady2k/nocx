@@ -14,8 +14,6 @@ package transport
 // call.
 //
 // The result shapes are declared once in contracts/agent.*.schema.json.
-// There is deliberately no params schema (contracts/README.md): the handler
-// is the check, and rejects what it cannot parse.
 
 import (
 	"bytes"
@@ -719,6 +717,19 @@ func decodeAgentAskParams(raw json.RawMessage) (agentAskParams, string) {
 		return agentAskParams{}, "params must be an object"
 	}
 	return p, ""
+}
+
+// validateAgentAskRaw validates the complete ask envelope before the handler
+// can create a run. The semantic validator remains the single owner of the
+// field and attached-content rules; this wrapper makes that check part of
+// registration rather than a handler-only habit.
+func validateAgentAskRaw(raw json.RawMessage) string {
+	p, msg := decodeAgentAskParams(raw)
+	if msg != "" {
+		return msg
+	}
+	_, _, msg = validateAgentAsk(p)
+	return msg
 }
 
 func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
@@ -2346,7 +2357,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		}
 	}
 	return []methodSpec{
-		reg(contentSub, "agent.ask", genericObject("per-field validation pending nocx-VALID"), func(w *wsConn, state *connState, r Responder) handlerFunc {
+		reg(contentSub, "agent.ask", params(validateAgentAskRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := build(w, state, r)
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAsk(ctx, req) }
 		}),

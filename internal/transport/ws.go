@@ -72,11 +72,31 @@ type sessionRx struct {
 	inputStalled atomic.Bool
 }
 
-func (rx *sessionRx) setSubscriber(wconn *wsConn, state *connState) {
+// setSubscriber installs wconn as the session's one subscriber and RETURNS
+// WHOEVER IT REPLACED, which is the whole of D8 at this seam: one client owns
+// a session, and the displacement is a fact the caller has to act on rather
+// than something that quietly happened.
+//
+// The slot was always single — it replaced its occupant silently, so the
+// displaced client went on rendering a stream it no longer owned and offering
+// a keyboard whose bytes the backend would refuse. Returning the previous pair
+// is what lets the caller tell it (session.displaced), drop the session from
+// its connection state and stop its pump. A nil first return means the slot
+// was empty; the same connection re-installing itself returns itself, and the
+// caller compares before announcing anything.
+func (rx *sessionRx) setSubscriber(wconn *wsConn, state *connState) (*wsConn, *connState) {
 	rx.mu.Lock()
 	defer rx.mu.Unlock()
+	prevConn, prevState := rx.subscriber, rx.subState
 	rx.subscriber = wconn
 	rx.subState = state
+	// The ring is told, because it has two consumers now and only one of
+	// them is allowed to free it on nobody's behalf (nocx-22k1c.1). This
+	// mutator and clearSubscriber are the flag's only writers, which is what
+	// keeps it a mirror of the slot rather than a second answer to "is
+	// anybody attached".
+	rx.ring.setAttached(true)
+	return prevConn, prevState
 }
 
 func (rx *sessionRx) getSubscriber() (*wsConn, *connState) {
@@ -91,13 +111,29 @@ func (rx *sessionRx) getSubscriber() (*wsConn, *connState) {
 // acknowledgement validates against (decision 9): a detached connection's
 // late ack must never release an accept, and with the slot cleared on
 // teardown it cannot.
-func (rx *sessionRx) clearSubscriber(wconn *wsConn) {
+//
+// It RETURNS WHETHER THE SLOT EMPTIED, which is the closing event of the
+// foreground interval (nocx-eidfb.2): the session's size belongs to the
+// client that attached last, from the moment its report reaches the channel
+// until another client replaces it or this returns true. Reported rather
+// than inferred, because "this connection went away" and "nobody is holding
+// the session any more" are different facts — a displaced connection's
+// teardown is the first without being the second — and only the slot can
+// tell them apart.
+func (rx *sessionRx) clearSubscriber(wconn *wsConn) bool {
 	rx.mu.Lock()
 	defer rx.mu.Unlock()
 	if rx.subscriber == wconn {
 		rx.subscriber = nil
 		rx.subState = nil
+		// THE MOMENT THE INTERVAL OPENS. From here until a subscriber is
+		// installed again, the ring's consumer is the recorder, and a writer
+		// already parked against a client that will never ack is released by
+		// the signal this sends.
+		rx.ring.setAttached(false)
+		return true
 	}
+	return false
 }
 
 type WSServer struct {
@@ -111,10 +147,12 @@ type WSServer struct {
 	tokenSource io.Reader // entropy source; crypto/rand default
 	origins     OriginPolicy
 
-	// Override the listen address. Default 127.0.0.1:0.
-	listenAddr string
-	listener   net.Listener
-	upgrader   websocket.Upgrader
+	// listenAddress is the address the listener actually bound, resolved
+	// once in Start. Port alone cannot answer "where is the WS server",
+	// because the host half is a configuration choice — see Addr.
+	listenAddress string
+	listener      net.Listener
+	upgrader      websocket.Upgrader
 	// Optional profile/group stores for the connection-manager control
 	// plane (profiles.*, groups.*). When nil, those methods return a
 	// JSON-RPC error.
@@ -150,6 +188,15 @@ type WSServer struct {
 	// guarded like the dialog service.
 	urlMu     sync.RWMutex
 	urlOpener UrlOpener
+
+	// The client-host activation seam (nocx-uo1k6, design D3): what happens
+	// when a person clicks a desktop banner an attached client presented for
+	// this coordinator. Bound post-construction at the composition root,
+	// guarded like the two seams above because a click can arrive while the
+	// root is still wiring. When nil the click is logged and dropped — the
+	// honest degrade for a host with no notification surface.
+	attentionActivationMu sync.RWMutex
+	attentionActivation   AttentionActivation
 
 	// Profile resolver maps profile IDs to SSH connect configs. The holder
 	// is set post-construction (SetProfileResolver): the resolver depends on
@@ -480,6 +527,12 @@ type WSServer struct {
 	// last-used timestamps are unavailable (nocx-uxs5.4).
 	profileUsage session.ProfileUsageTracker
 
+	// sessionRecorder is the durable sink for what a session printed
+	// (ws_session_record.go). Nil means nothing records, the ring is freed
+	// by client acks alone, and a detached session throttles once the ring
+	// fills — which the History settings section states rather than only a
+	// log line.
+	sessionRecorder SessionOutputRecorder
 	// contentDB is the durable content store backing history.query. When
 	// nil, the method answers source=unavailable — the overlay then says
 	// durable history is not running instead of presenting the in-memory
@@ -587,6 +640,14 @@ type WSServer struct {
 	// connsMu protects conns. One entry per active WebSocket connection.
 	connsMu sync.Mutex
 	conns   map[*wsConn]struct{}
+
+	// presence is told how many clients are attached whenever that changes
+	// (client_presence.go). nil when nobody asked; the vault is what asks,
+	// because the count is what D9's seal-on-last-detach rule reads.
+	presence ClientPresence
+	// presenceNotify serializes those deliveries so the observer's last
+	// value is the truth and not whichever goroutine happened to win.
+	presenceNotify presenceNotifier
 
 	// outboundBudget is the process-wide cap on queued outbound bytes,
 	// shared by every connection's outbound queue (the per-connection
@@ -1367,6 +1428,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.askResolverSpecs(immediate)...)
 	specs = append(specs, s.laneInteractivitySpec(immediate))
 	specs = append(specs, s.brokerSpecs(immediate)...)
+	specs = append(specs, s.clientHostSpecs(immediate, s.lane)...)
 	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired)...)
 	specs = append(specs, s.backupSpecs(lane, gates.config)...)
 	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)
@@ -1491,11 +1553,14 @@ func (s *WSServer) Start(ctx context.Context) error {
 	// because a page reading this with fetch needs them.
 	mux.HandleFunc("GET "+downloadRoutePrefix+"{ticket}", s.handleDownloadFetch)
 
-	addr := s.listenAddr
-	if addr == "" {
-		addr = "127.0.0.1:0"
-	}
-	listener, err := net.Listen("tcp", addr)
+	// LOOPBACK, AND A PORT THE OS PICKS, with nothing that can change
+	// either. Both halves are the design's (§6): loopback keeps the PTY off
+	// the network entirely, and the option that used to override this went
+	// with cmd/devharness — a coordinator that lives for days and could be
+	// told where to bind is a coordinator that can be told to bind off
+	// loopback. Where it actually landed is Addr's to answer, and the
+	// discovery socket is how a client learns it.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return fmt.Errorf("ws listen: %w", err)
 	}
@@ -1506,6 +1571,7 @@ func (s *WSServer) Start(ctx context.Context) error {
 		return fmt.Errorf("ws listen: not a TCP address")
 	}
 	s.port = tcpAddr.Port
+	s.listenAddress = listener.Addr().String()
 
 	s.server = &http.Server{
 		Handler: mux,
@@ -1543,6 +1609,13 @@ func (s *WSServer) Start(ctx context.Context) error {
 	}()
 
 	s.log.Info("ws server started", "port", s.port)
+	// The first presence report, and the one that makes every later one
+	// mean something: the server is listening and nobody is attached. A
+	// vault that has never been told anything cannot tell "nobody is here"
+	// from "nobody has said", so it does not suspend — which would leave a
+	// coordinator that restored sessions before the first window opened
+	// answering "no client connected" instead of waiting for one (D9).
+	s.notePresence()
 	return nil
 }
 
@@ -1630,6 +1703,16 @@ func (s *WSServer) Stop(ctx context.Context) error {
 
 func (s *WSServer) Port() int {
 	return s.port
+}
+
+// Addr returns the address the WS server actually bound, host and port, or
+// "" before Start. There is no option to bind anywhere else: the address is
+// always loopback with an OS-chosen port, so the port alone is not the
+// answer to "where is it" —
+// and a discovery handshake that told a client a port and let it guess the
+// host would be guessing on the client's behalf.
+func (s *WSServer) Addr() string {
+	return s.listenAddress
 }
 
 // --- ring helpers (connection-independent, keyed by session.ID) ----------
@@ -2069,10 +2152,74 @@ type closeParams struct {
 	SessionID string `json:"sessionId"`
 }
 
-// attachParams is the payload of the "attach" RPC method (AD-9 reconnect).
+// attachParams is the payload of the "attach" RPC method: the AD-9 reconnect
+// and the CLAIM of a session by a client that never opened it (nocx-oevq4,
+// the nocx-server design D5).
+//
+// InstanceID and SessionEpoch are the identity the claim is written against,
+// as sessions.live handed it over — the same three words the open ack and the
+// parent edge use, because a session is named completely by (instance,
+// sessionId, epoch) and nothing here mints a fourth way to say it.
+//
+// They are OPTIONAL, and that is a decision rather than a leniency. A session
+// id is 128 random bits minted by this backend, so the only way an attach can
+// name a live session at all is that this backend told the caller the id — in
+// the open ack or in sessions.live — and both carry the identity beside it.
+// Requiring it would therefore refuse nothing that could otherwise succeed;
+// it would only turn a caller that named less than it had into a failure.
+// What the check DOES buy is the refusal: a claim carrying an identity is
+// judged against it, so a binding remembered across a coordinator restart is
+// answered "that is a different backend" instead of "no such session", which
+// is the distinction D5 exists for.
 type attachParams struct {
-	SessionID string `json:"sessionId"`
-	Offset    uint64 `json:"offset"`
+	SessionID  string `json:"sessionId"`
+	InstanceID string `json:"instanceId,omitempty"`
+	// A POINTER, so "absent" and "zero" stay different facts. The epoch is
+	// minted from 1, so an explicit 0 names no incarnation and is refused as
+	// the nonsense it is — the same rule the open params apply to a claimed
+	// parent edge. A plain uint64 would silently read that nonsense as "the
+	// caller did not claim an incarnation".
+	SessionEpoch *uint64 `json:"sessionEpoch,omitempty"`
+	Offset       uint64  `json:"offset"`
+	// Cols/Rows/XPixel/YPixel are the geometry the CLAIMING client measured,
+	// in the same four words open and resize use — one shape for one concept
+	// (AD-1). They ride the claim because the claim is the only moment a
+	// client that has never held this session can report anything about it:
+	// resize is refused until the session is in the connection's own state,
+	// so there is no earlier seam to report at.
+	//
+	// A measurement, never an instruction. The backend decides what the
+	// session runs at (nocx-eidfb.1) and what it decided is read off the
+	// session; what this task adds is WHOSE measurement is taken — the
+	// client that attached last, which is the one the shared channel follows
+	// (nocx-eidfb.2).
+	//
+	// Absent is a client that has not measured itself yet, which is NOT the
+	// no-client state: the session keeps the size it is running at rather
+	// than dropping to the default. See session.NoClient for the two facts
+	// spelled apart.
+	Cols   uint16 `json:"cols"`
+	Rows   uint16 `json:"rows"`
+	XPixel uint16 `json:"xpixel"`
+	YPixel uint16 `json:"ypixel"`
+}
+
+// reportedSize is the claiming client's measurement as one value. One reader
+// of the four loose fields, so nowhere else has to know they are four — the
+// rule session.Config.clientSize already applies on the open side. Valid is
+// false when the client reported nothing.
+func (p attachParams) reportedSize() session.Size {
+	return session.Size{Cols: p.Cols, Rows: p.Rows, XPixel: p.XPixel, YPixel: p.YPixel}
+}
+
+// claimedEpoch is the epoch the caller claimed, or 0 for "claimed none" — the
+// form judgeClaim takes. One reader of the pointer, so nowhere else has to
+// know it is one.
+func (p attachParams) claimedEpoch() uint64 {
+	if p.SessionEpoch == nil {
+		return 0
+	}
+	return *p.SessionEpoch
 }
 
 // ackParams is the payload of the "ack" notification (AD-9 trimming).
@@ -2380,14 +2527,32 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	// it still holds (a newer subscriber is preserved), then wake any ring
 	// waiters blocked on this connection's sessions. The cancel above also
 	// fires (via defer) which is the primary exit signal for ringToConn.
+	//
+	// A slot that EMPTIED closes the foreground interval (nocx-eidfb.2): that
+	// session has no client left, so it must not go on running at a departed
+	// window's geometry. Which of these sessions those are is collected here
+	// and acted on below, outside the lock: admitting a resize can complete a
+	// superseded one, whose completion writes a JSON-RPC response to a socket,
+	// and that must never happen while this connection's state is held.
+	var orphaned []session.Session
 	state.mu.Lock()
-	for sid := range state.sessions {
+	for sid, sess := range state.sessions {
 		if rx := s.getRx(sid); rx != nil {
-			rx.clearSubscriber(wconn)
+			if rx.clearSubscriber(wconn) {
+				orphaned = append(orphaned, sess)
+			}
 			rx.ring.wake()
 		}
 	}
 	state.mu.Unlock()
+
+	// Back to the named default, one session at a time. NoClient is the report
+	// rather than a size, because that is what is true: nobody is measuring
+	// this session any more (session.NoClient). The session stays alive and
+	// keeps producing into its ring — this is AD-9, not a close.
+	for _, sess := range orphaned {
+		s.takeSize(sess.ID(), sess, session.NoClient())
+	}
 }
 
 func (s *WSServer) readLoop(ctx context.Context, wconn *wsConn, state *connState, readErr chan<- error) {
@@ -2671,8 +2836,10 @@ func (s *WSServer) handleDataFrame(state *connState, data []byte) {
 		// feeding EVERY session on this connection — so one dead tab
 		// froze all of them (nocx-o2le). EnqueueWrite puts the frame on
 		// a bounded per-session queue and returns immediately; the
-		// readLoop is its sole sender, which is what keeps the queue in
-		// the order the user typed.
+		// readLoop is the sole sender OF USER INPUT, which is what keeps
+		// the queue in the order the user typed. (session.signal's
+		// protected-group mechanism enqueues one byte here too and is
+		// deliberately unordered against this — see EnqueueWrite.)
 		//
 		// A full queue means the channel has stopped accepting bytes.
 		// The frame is dropped — and the tab is TOLD, because input
@@ -2721,6 +2888,15 @@ func (s *WSServer) pumpToRing(ctx context.Context, sess session.Session, ring *o
 	// lives connection-independently, so "closing the frontend does not stop
 	// it being fed" is a property of the placement rather than a promise
 	// (nocx-szb40.2). An unenrolled session drops the bytes at a map lookup.
+	// The recorder is started HERE, beside the pump and for the same reason
+	// the grid is fed here: this call is per session and connection-
+	// independent, so "the recording does not stop when the window closes"
+	// is a property of the placement rather than a promise (nocx-22k1c.1).
+	// It is the consumer that keeps ring.write from blocking with nobody
+	// attached, so it has to exist before the first byte, not after the
+	// first attach. It ends itself when the ring closes.
+	go s.recordSessionOutput(ctx, sess.ID(), ring)
+
 	err := sess.StartOutput(ctx, func(data []byte) error {
 		s.feedPaneGrid(sess.ID(), data)
 		return ring.write(data)
@@ -2743,23 +2919,40 @@ func (s *WSServer) pumpToRing(ctx context.Context, sess session.Session, ring *o
 	}
 }
 
-// ringToConn streams the output ring to a WebSocket connection starting at
-// the given byte offset. Exits when the connection drops or the ring closes.
+// ringToConn streams a session's output ring to a WebSocket connection
+// starting at the given byte offset. Exits when the connection drops, when the
+// ring closes, or when this connection STOPS BEING the session's subscriber.
+//
+// That last exit is D8 made real rather than announced (nocx-oevq4). It takes
+// the whole rx rather than the bare ring for exactly this: the ring says what
+// the session produced, and only the subscriber slot says who it is for. A
+// displaced client used to go on receiving the stream — its pump lived until
+// its socket died — so "one client owns the session" was true of the slot and
+// false of the bytes. The check is on the loop rather than a cancellation
+// because the slot is already the single owner of the answer, and a second
+// mechanism carrying it (a per-pump context the attach handler would have to
+// find and cancel) would be a second owner of one fact.
 //
 // Enforces AD-10 credit-based flow control: a subscriber stops sending once
 // unacked bytes reach CreditLimit and resumes when an ack frees room. Each
 // send is capped at FairChunk bytes so a flooding session releases the
 // shared wsConn write mutex between chunks, giving other sessions a chance
 // to send (cross-tab fairness).
-func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, ring *outputRing, startOffset uint64) {
+func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, rx *sessionRx, startOffset uint64) {
+	ring := rx.ring
 	var pending []byte
 	pos := startOffset
 
 	for {
+		// The displacement check comes FIRST, before any wait: a pump that
+		// has lost the session must not send the byte it is already holding.
+		if cur, _ := rx.getSubscriber(); cur != wconn {
+			return
+		}
 		// Wait until the in-flight window has room (AD-10). The ring owns
 		// the predicate; acked may legitimately exceed pos after a large
 		// ack on reattach, which counts as no bytes unacked.
-		if ring.waitForCredit(ctx, pos, CreditLimit) {
+		if ring.waitForCredit(ctx, startOffset, pos, CreditLimit) {
 			return
 		}
 
@@ -3306,6 +3499,9 @@ func (s *WSServer) registerConn(wc *wsConn) {
 	s.connsMu.Lock()
 	s.conns[wc] = struct{}{}
 	s.connsMu.Unlock()
+	// A client is here again. Whatever is suspended waiting for somebody to
+	// show a dialog to can now be shown one (D9).
+	s.notePresence()
 }
 
 // unregisterConn removes a connection from the broadcast set and destroys
@@ -3334,6 +3530,11 @@ func (s *WSServer) unregisterConn(wc *wsConn) {
 		s.broker.ConnectionLost(wc)
 	}
 	s.stopOwnerTunnels(wc)
+	// And the presence signal (D9): when this was the last one, the vault
+	// seals rather than leaving the root key in a coordinator that outlives
+	// every window. Last, so a connection that is still tearing down is
+	// already out of the set when the count is read.
+	s.notePresence()
 }
 
 // broadcastSettingsChanged sends a settings.changed notification to every

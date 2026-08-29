@@ -4947,7 +4947,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
   it('plain Enter goes to the shell; ⌘Enter flips to Ask and the next Enter goes to the assistant — one walk, and the indicator matches the registry after each (nocx-4wtlh)', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
     try {
       content.setVisible(true)
       _resetThemeState()
@@ -5042,7 +5046,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
   it("a command submitted by the shell target while another registered target's submission is in flight is attributed to the shell target (nocx-iadtt)", async () => {
     const { client } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
     let releaseAsk: () => void = () => {}
     try {
       content.setVisible(true)
@@ -5110,7 +5118,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
   it('an agent-authored command carries the badge through the real submit path — the closest seam a person will reach (nocx-iadtt)', async () => {
     const { client } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
     try {
       content.setVisible(true)
       _resetThemeState()
@@ -5289,6 +5301,65 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       expect(grantState.grantedBlocks[1]).toBe(before[1])
       expect(whole.dataset.granted).toBe('true')
       expect(rows.querySelectorAll('.term-line[data-granted]')).toHaveLength(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a Run selection stays ordinary text and never takes the focus off the composer', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      ed.focus()
+      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      expect(activeLabel(content)).toBe('Shell')
+
+      selectRows(block, 0, 1)
+
+      // The focus transfer exists to protect an offer (nocx-45vkz). In Run
+      // there is no offer, so taking the focus is a silent loss with nothing
+      // bought by it: the composer keeps the caret and the selection stays
+      // selectable, copyable text.
+      expect(ed.rootContains(document.activeElement)).toBe(true)
+      expect(document.querySelector<HTMLElement>('.mark-affordance')?.style.display).toBe('none')
+      expect(window.getSelection()?.isCollapsed).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a target change closes a block menu that is offering the wrong actions', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const registry = (content as unknown as { inputTargets: { setActive(id: string): void } })
+        .inputTargets
+      registry.setActive('agent')
+      const block = frozenBlockOf(content, 'git status', ['clean'])
+
+      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      expect(document.querySelector('.cmd-overflow-menu-item[data-action="grant"]')).not.toBeNull()
+
+      // Programmatic, because that is the case the pane-hide sweep cannot
+      // reach: ask entry and restore both call setActive without anybody
+      // clicking. A menu left open goes on offering Mark in Run.
+      registry.setActive('shell')
+
+      expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
     } finally {
       teardown()
     }
@@ -5611,7 +5682,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
   it('⌘Enter flips the target and sends nothing — the indicator names what the person does, Run ⇄ Ask (nocx-4wtlh)', async () => {
     const { client } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
     try {
       content.setVisible(true)
       _resetThemeState()
@@ -5636,7 +5711,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
   })
   it('each mode keeps its own draft — the same text, caret and scroll survive a switch away and back, and the indicator tone follows (nocx-4ff.7)', async () => {
     const { client } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
     try {
       content.setVisible(true)
       _resetThemeState()
@@ -7330,18 +7409,15 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
     el.click()
   }
 
-  /** The person's own explicit switch — ⌘Enter, the same gesture the
-   *  indicator's click performs. */
+  /** The person's own explicit switch, pressed on the indicator — the
+   *  twin of ⌘Enter and the one these tests reach for, because what they
+   *  are about is the CHIP. The chord's own owner is a pane-level capture
+   *  listener that an off-screen, detached fixture cannot reach, and it has
+   *  its own specs (nocx-a7mw7.6). */
   const switchToAsk = (content: TerminalContent): void => {
-    const ed = editorOf(content)
-    viewOf(ed).contentDOM.dispatchEvent(
-      new KeyboardEvent('keydown', {
-        key: 'Enter',
-        bubbles: true,
-        cancelable: true,
-        metaKey: true,
-      }),
-    )
+    const el = viewOf(editorOf(content)).dom.querySelector<HTMLElement>('.ui-mode-indicator')
+    if (!el) throw new Error('no mode indicator to switch with')
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
   }
 
   it('shows no model chip while Enter goes to the shell', async () => {
@@ -8098,6 +8174,235 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     }
   })
 
+  // ── ONE OWNER FOR THE TARGET CHORD (nocx-a7mw7.6) ────────────────────
+  //
+  // ⌘/Ctrl+Enter used to be claimed in three places, each keyed on where
+  // the browser had parked the focus: a capture listener on the editor's
+  // root (flip the target), a capture listener on the xterm host (summon),
+  // and a document bubble listener added so a scrollback selection — which
+  // blurs onto <body>, neither of the other two — could still reach the
+  // flip. Three guard sets for one key, and the third had none of its own
+  // tested.
+  //
+  // Now one capture listener on document decides, per pane, and it reads
+  // the STATE rather than the focus: `editor.isVisible` chooses flip or
+  // summon, exactly the fact canSummonEditor's first line already tested.
+  // These tests press the chord from every place a person's focus can be.
+  describe('the target chord has one owner (nocx-a7mw7.6)', () => {
+    /** A settled block with output, the way the ask-entry specs build one. */
+    function frozenBlock(content: TerminalContent, command: string, output: string[]): HTMLElement {
+      const manager = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .blockManager
+      manager.startBlock(command, '~', 0)
+      manager.bindAttempt(`att-chord-${manager.blocks.length}`)
+      const lines = output.map((t) => new BufferLine(t))
+      const frozen = manager.freezeBlock((y) => lines[y], lines.length - 1, 0)
+      expect(frozen).not.toBeNull()
+      return frozen!.el
+    }
+
+    /** The chord as a person presses it, from wherever focus happens to be. */
+    function chordOn(el: EventTarget): void {
+      el.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+    }
+
+    it('flips the target from the composer without letting CM6 insert a blank line', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        ed.insertText('ls -la')
+        expect(targetNamed(ed)).toBe('shell')
+
+        chordOn(viewOf(ed).contentDOM)
+
+        expect(targetNamed(ed)).toBe('agent')
+        // Back to the shell draft: `defaultKeymap` binds Mod-Enter to
+        // insertBlankLine, so the one owner must SWALLOW the chord in
+        // capture. A draft that came back with a newline in it would be
+        // CM6 having had the key after us.
+        chordOn(viewOf(ed).contentDOM)
+        expect(targetNamed(ed)).toBe('shell')
+        expect(ed.getDoc()).toBe('ls -la')
+      } finally {
+        teardown()
+      }
+    })
+
+    it('flips the target when a scrollback selection has parked focus on the body', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        viewOf(ed).contentDOM.blur()
+        expect(document.activeElement).toBe(document.body)
+
+        chordOn(document.body)
+
+        expect(targetNamed(ed)).toBe('agent')
+      } finally {
+        teardown()
+      }
+    })
+
+    it('summons the editor from the grid instead of flipping, and never both', async () => {
+      const client = makeClient()
+      const { ed, content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const restore = stubScrolling()
+      try {
+        content.setVisible(true)
+        startCommand(client)
+        expect(ed.isVisible).toBe(false)
+        const session = sessionOf(content)
+        session.send.mockClear()
+
+        await summonChord(content)
+
+        expect(ed.isVisible).toBe(true)
+        // The summoned editor's only target is the assistant, and the chord
+        // that brought it did not ALSO flip anything: one press, one meaning.
+        expect(targetNamed(ed)).toBe('agent')
+        // And it never became a CR in the running command's stdin, which is
+        // why this owner is in the capture phase.
+        expect(session.send).not.toHaveBeenCalled()
+      } finally {
+        restore()
+        teardown()
+      }
+    })
+
+    it('leaves the chord alone while an overlay owns the keyboard', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      const entry = pushOverlay(() => true)
+      try {
+        content.setVisible(true)
+        ed.show()
+        expect(targetNamed(ed)).toBe('shell')
+
+        chordOn(document.body)
+
+        expect(targetNamed(ed)).toBe('shell')
+      } finally {
+        popOverlay(entry)
+        teardown()
+      }
+    })
+
+    it("leaves the chord alone in another surface's text field", async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      const field = document.createElement('input')
+      document.body.append(field)
+      try {
+        content.setVisible(true)
+        ed.show()
+        field.focus()
+        expect(document.activeElement).toBe(field)
+
+        chordOn(field)
+
+        expect(targetNamed(ed)).toBe('shell')
+      } finally {
+        field.remove()
+        teardown()
+      }
+    })
+
+    it('summons from anywhere in the pane, not only from the grid', async () => {
+      const client = makeClient()
+      const { ed, content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const restore = stubScrolling()
+      try {
+        content.setVisible(true)
+        startCommand(client)
+        expect(ed.isVisible).toBe(false)
+        // The state a person is in after reading the scrollback while the
+        // command runs: the selection released the focus onto <body>, which
+        // is neither the composer nor the grid. The gesture is the same
+        // gesture and must still summon — when the chord was claimed by
+        // whichever element happened to hold the focus, this pressed nothing.
+        const renderer = rendererOf(content)
+        if (typeof renderer.captureLiveFrame !== 'function') {
+          renderer.captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+        }
+        gridOf(content).blur()
+        expect(document.activeElement).toBe(document.body)
+
+        chordOn(document.body)
+        await Promise.resolve()
+
+        expect(ed.isVisible).toBe(true)
+        expect(targetNamed(ed)).toBe('agent')
+      } finally {
+        restore()
+        teardown()
+      }
+    })
+
+    it('is not swallowed by an open block menu, which owns no keys', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        const block = frozenBlock(content, 'git status', ['clean'])
+        block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+        expect(document.querySelector('.cmd-overflow-menu')).not.toBeNull()
+
+        chordOn(document.body)
+
+        // A deliberate gesture that does nothing in silence reads as a broken
+        // control (toggleInputTarget says so about its own refusal). The menu
+        // has no Enter semantics; it is not a claimant on this key.
+        expect(targetNamed(ed)).toBe('agent')
+      } finally {
+        teardown()
+      }
+    })
+
+    it('is not claimed by a pane that is not on screen', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        content.setVisible(false)
+
+        chordOn(document.body)
+
+        expect(targetNamed(ed)).toBe('shell')
+      } finally {
+        teardown()
+      }
+    })
+  })
+
   it('nothing changes for a command nobody summons the editor during', async () => {
     const client = makeClient()
     const { ed, content, teardown } = await mountTerminal(
@@ -8744,7 +9049,7 @@ describe('a program printing BEL (nocx-n3nfg)', () => {
       // The notification: its own method, carrying addressing and nothing
       // else. The kind is not here because it cannot be — it is stamped from
       // the method invoked, which is the whole reason notify.bell exists
-      // rather than an argument on notify.raise (ADR-0029 §2.2, design §3).
+      // rather than an argument on notify.raise (ADR-0047 §2.2, design §3).
       expect(bellCalls(client)).toEqual([
         ['notify.bell', { sessionId: sessionOf(content).sessionId }],
       ])

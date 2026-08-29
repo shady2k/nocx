@@ -39,5 +39,11 @@ export interface ResidueEntry {
    * Why it could not be cleared. A code, never a sentence — the renderer owns the wording. Absent when the failure carried no reason code.
    */
   reason?:
-    'no-service' | 'locked' | 'denied' | 'timeout' | 'unsupported-platform' | 'unknown-provider'
+    | 'no-service'
+    | 'locked'
+    | 'denied'
+    | 'timeout'
+    | 'unsupported-platform'
+    | 'unknown-provider'
+    | 'excluded'
 }

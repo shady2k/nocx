@@ -33,7 +33,7 @@ import { readStand } from './stand'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 const FIXTURE_PASSWORD = 'e2e-password-42'
 const PROFILE_NAME = 'Password Proof'
 const PROFILE_ID = 'ssh:password-proof'
@@ -184,7 +184,7 @@ test.describe('connection password ask: first open prompts, remembered second op
   test.beforeAll(async () => {
     root = createDisposableRoot()
     fixture = await startSshd(FIXTURE_PASSWORD)
-    backend = new VaultBackend(devharnessBin(), { root }, true)
+    backend = new VaultBackend(serverBin(), { root })
   })
 
   test.afterAll(() => {
@@ -288,7 +288,7 @@ test.describe('open-time host key consent', () => {
   test.beforeAll(async () => {
     root = createDisposableRoot()
     fixture = await startSshd()
-    backend = new VaultBackend(devharnessBin(), { root }, true)
+    backend = new VaultBackend(serverBin(), { root })
   })
 
   test.afterAll(() => {

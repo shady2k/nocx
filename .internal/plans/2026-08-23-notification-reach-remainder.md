@@ -28,7 +28,7 @@ product, and makes the banner click land through the same path the feed row alre
 
 ### D2 — A toast is a sink like any other, reached through a port
 
-The router is the only holder of "where" (ADR-0029 §2.3), and a sink may never select its
+The router is the only holder of "where" (ADR-0047 §2.3), and a sink may never select its
 target. A toast is therefore not a special case in the renderer: it is a `Sink` whose
 `Deliver` hands the event to a **port** the transport implements, exactly as `HostSink`
 hands its event to `AttentionHost`. `LeavesMachine()` is false.

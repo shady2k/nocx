@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -24,6 +25,7 @@ import (
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apisend"
+	"github.com/shady2k/nocx/internal/app/clienthost"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/backup"
 	"github.com/shady2k/nocx/internal/bootstrapprogress"
@@ -68,7 +70,6 @@ import (
 	"github.com/shady2k/nocx/internal/update"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vault/file"
-	"github.com/shady2k/nocx/internal/vault/system"
 	"github.com/shady2k/nocx/internal/vaultreset"
 	"github.com/shady2k/nocx/internal/version"
 )
@@ -129,13 +130,13 @@ type App struct {
 	logFile *os.File
 
 	// attentionHost is the late-bound implementation behind the notify
-	// router's banner route (ADR-0029). The route itself was decided when
+	// router's banner route (ADR-0047). The route itself was decided when
 	// the table was built; this is only the surface it reaches, and it stays
 	// UnavailableHost on every host that never calls SetAttentionHost.
 	attentionHost *notify.HostHolder
 
 	// notifyToast is the late-bound implementation behind the notify
-	// router's toast route (ADR-0029, plan D2). Same shape as attentionHost
+	// router's toast route (ADR-0047, plan D2). Same shape as attentionHost
 	// and for the same reason: the route was decided when the table was
 	// built, and only the surface it reaches arrives later — here, the
 	// WebSocket server, which New constructs after the router.
@@ -168,20 +169,20 @@ type App struct {
 	UploadSources *transport.SourceTicketStore
 
 	// UIState owns what the app must remember without being asked
-	// (ADR-0033) — window geometry and the shell's layout. Exported because
+	// (ADR-0048) — window geometry and the shell's layout. Exported because
 	// main.go is the only place a Wails context exists, and the window half
 	// of this document can only be sampled and applied there.
 	UIState *uistate.Store
 
 	// slogger is the same logger Logger wraps, kept so an adapter built
-	// outside this package (main.go's attention host) writes to the log file
-	// rather than to slog.Default(), which nothing here installs.
+	// outside this package (the client-host attention surface) writes to the
+	// log file rather than to slog.Default(), which nothing here installs.
 	slogger *slog.Logger
 }
 
-// Slog returns the backend's structured logger, for adapters constructed in
-// main.go that take a *slog.Logger directly. Prefer the Logger interface
-// everywhere else.
+// Slog returns the backend's structured logger, for adapters built outside
+// this package that take a *slog.Logger directly — the client-host attention
+// surface is the one that does. Prefer the Logger interface everywhere else.
 func (a *App) Slog() *slog.Logger { return a.slogger }
 
 // contentCompactionFloor is the hysteresis fraction of the disk ceiling at
@@ -280,27 +281,34 @@ func clearWindowOnCleanStart(ctx context.Context, reg *settings.Registry, db con
 
 // SetDialogService attaches the native dialog capability (dialog.openFile and
 // dialog.openDirectory — one service, because one native dialog is open at a
-// time). It is wired from main.go's WailsApp.startup — the Wails context it
-// needs only exists there, after the transport was built — and must be called
-// before Start, so no renderer request can observe the unset state.
+// time). It is wired by New, after the transport was built and before Start,
+// so no renderer request can observe the unset state.
+//
+// THE CALLER MOVED AND THE CONTRACT DID NOT. It used to be main.go's
+// WailsApp.startup, because the Wails context the picker needed existed only
+// there and main.go was this process. main.go is another process now (design
+// D3), so the implementation New wires is the client-backed one — it asks an
+// attached client for the picker — and the seam is still what a host without
+// one leaves unset: dialog.* then answers -32601, which is the dev-web
+// harness and the headless suites.
 func (a *App) SetDialogService(ds transport.DialogService) {
 	a.Transport.SetDialogService(ds)
 }
 
 // SetUrlOpener attaches the native URL-open capability (shell.openUrl RPCs).
-// Like SetDialogService it is wired from main.go's WailsApp.startup — the
-// Wails context it needs only exists there, after the transport was built —
-// and must be called before Start, so no renderer request can observe the
-// unset state.
+// Like SetDialogService it is wired by New, after the transport was built and
+// before Start, so no renderer request can observe the unset state, and for
+// the same reason it is now a client-backed implementation rather than a
+// Wails-backed one.
 func (a *App) SetUrlOpener(opener transport.UrlOpener) {
 	a.Transport.SetUrlOpener(opener)
 }
 
 // SetAttentionHost binds the desktop attention surface behind the notify
-// router's banner route (ADR-0029). Like SetDialogService it is wired from
-// main.go's WailsApp.startup — the Wails context the adapter needs exists
-// only there, after the router was built — and must be called before Start,
-// so no raise can observe the unset state.
+// router's banner route (ADR-0047). Like SetDialogService it is wired by New,
+// after the router was built and before Start, so no raise can observe the
+// unset state, and it binds the client-backed surface: the coordinator has no
+// desktop of its own to raise a banner on.
 //
 // It binds an implementation, never a destination. The route was decided when
 // the routing table was built and is not reachable from here; a host that
@@ -325,15 +333,9 @@ func (a *App) FocusSession(sessionID string) {
 	a.Transport.FocusSession(sessionID)
 }
 
-// Log logs a message from the frontend.
-func (a *App) Log(message string) {
-	a.Logger.Info("frontend: " + message)
-}
-
 type Option func(*optionSet)
 
 type optionSet struct {
-	wsAddr string
 	// logFilePath overrides where the backend log file lives. Test-only:
 	// without it New() resolves the profile's data directory, and a test
 	// must not write into the developer's real profile (nocx-ti8w).
@@ -347,100 +349,22 @@ type optionSet struct {
 	keystoreReason string
 }
 
-// keystoreStance is what a caller has decided about the OS keystore — the
-// per-user OS service the vault's system provider talks to, and the one piece
-// of a machine's state that $HOME isolation cannot move.
-//
-// The zero value is "undeclared", and undeclared means the production stance:
-// the shipped app builds the real provider and probes it once at startup, so
-// a machine with no secret store says so in the log rather than failing
-// mysteriously later. Under `go test` undeclared is refused instead — see
-// resolveKeystoreStance.
-type keystoreStance int
-
-const (
-	// keystoreUndeclared is production's stance and no test's.
-	keystoreUndeclared keystoreStance = iota
-	// keystoreAbsent builds the provider over a keyring that fails every
-	// operation and skips the startup probe: there is nothing to call.
-	keystoreAbsent
-	// keystoreReal reaches the real per-user store, with a stated reason.
-	keystoreReal
-)
-
-// resolveKeystoreStance decides whether this backend may reach the real OS
-// keystore, and refuses a test that has not said.
-//
-// The refusal lives here — inside the composition root, at run time, keyed on
-// testing.Testing() — rather than in a linter or a ratchet, for the reason
-// storage.NewAppPaths puts the same kind of refusal in the same place: it
-// cannot be routed around. It fires for every construction from every test
-// binary, in packages that have never heard of internal/app's test helper,
-// under a renamed constructor, and in code a grep-based ratchet would not
-// recognise. It costs one comparison on the production path.
-func resolveKeystoreStance(inTest bool, o *optionSet) (reachReal bool, err error) {
-	switch o.keystore {
-	case keystoreAbsent:
-		return false, nil
-	case keystoreReal:
-		if strings.TrimSpace(o.keystoreReason) == "" {
-			return false, fmt.Errorf(
-				"app: WithRealSystemKeystore needs a reason — it writes to the " +
-					"login keychain of whoever runs the suite, and the reason is " +
-					"what tells the next reader why this test may")
-		}
-		return true, nil
-	default:
-		if inTest {
-			return false, fmt.Errorf(
-				"app: this test has not said whether it may reach the OS keystore, " +
-					"and building the app reaches it: the startup probe is a real " +
-					"keyring write, which on macOS is a keychain dialog per backend " +
-					"start (nocx-o4hg). Build it with newTestApp(t), which keeps the " +
-					"keystore out of reach, or state the exception with " +
-					"app.WithRealSystemKeystore(reason). $HOME isolation cannot cover " +
-					"this: go-keyring talks to a per-user OS service, not to a directory")
-		}
-		return true, nil
-	}
-}
-
-// WithWSAddr pins the WebSocket listen address instead of the default
-// 127.0.0.1:0. Dev-only; shipped code should never set this.
-func WithWSAddr(addr string) Option {
-	return func(o *optionSet) { o.wsAddr = addr }
-}
-
-// WithoutSystemKeystore builds the vault's system provider over a keyring that
-// fails every operation, so the backend behaves exactly like one on a host with
-// no OS secret store.
-//
-// Dev-only, wired from cmd/devharness. It exists because the e2e cases that are
-// ABOUT the passphrase path had no portable way to state their premise: the
-// suite pointed DBUS_SESSION_BUS_ADDRESS at nothing, which is a Linux
-// mechanism, and on macOS go-keyring talks to the Security framework and
-// ignores it. Those cases were therefore not arranging "no keystore" on macOS
-// at all — and a backend given a disposable $HOME there put a "Keychain not
-// found" dialog in front of whoever was running the suite, once per start
-// (nocx-o4hg).
-//
-// It also skips the startup probe, because a probe is a real keystore call and
-// there is nothing here to call. It is what newTestApp applies, so it is the
-// stance almost every test has.
-func WithoutSystemKeystore() Option {
-	return func(o *optionSet) { o.keystore = keystoreAbsent }
-}
-
 // WithRealSystemKeystore reaches the real OS keystore, and says why.
 //
-// Test-only, and the exception rather than the rule: the store is a per-user
-// OS service, so this writes into the login keychain of whoever is running the
-// suite — on macOS a modal dialog per backend start (nocx-o4hg). Production
-// needs nothing here; reaching the real store is what an undeclared stance
-// already means off `go test`.
+// The exception rather than the rule, in both the places that may use it. In
+// a TEST it writes into the login keychain of whoever is running the suite —
+// on macOS a modal dialog per backend start (nocx-o4hg). In a LAUNCHER it is
+// the desktop declaration D10 describes: a composition root that knows it is
+// starting a backend inside a login session says so here, and the build
+// property (keystore.go) is what answers for everything that does not.
+//
+// It no longer describes what saying nothing means: an undeclared stance off
+// `go test` takes buildKeystoreStance, which by default is "out of play",
+// because a coordinator that lives for days on a headless host must not
+// discover its keystore by writing to one.
 //
 // The reason is required and is logged at startup, so a keychain prompt seen
-// during a run leads back to the test that asked for it.
+// during a run leads back to whatever asked for it.
 func WithRealSystemKeystore(reason string) Option {
 	return func(o *optionSet) {
 		o.keystore = keystoreReal
@@ -586,10 +510,14 @@ func New(opts ...Option) (*App, error) {
 	for _, opt := range opts {
 		opt(&o)
 	}
-	// Before anything is built: may this backend reach the OS keystore? A
-	// test that has not said is refused here rather than silently writing
-	// to the login keychain of whoever is running the suite (nocx-o4hg).
-	reachRealKeystore, stanceErr := resolveKeystoreStance(testing.Testing(), &o)
+	// Before anything is built: what is this backend's stance on the OS
+	// keystore, and what follows from it? Declared, never discovered
+	// (keystore.go, design D10) — the probe that would discover it is a
+	// keychain write, and on a host with no keychain that write is a modal
+	// nobody can dismiss. A test that has not said is refused here rather
+	// than silently writing to the login keychain of whoever is running the
+	// suite (nocx-o4hg).
+	keystore, stanceErr := decideKeystore(testing.Testing(), &o)
 	if stanceErr != nil {
 		return nil, stanceErr
 	}
@@ -715,7 +643,7 @@ func New(opts ...Option) (*App, error) {
 	sshConfigPath := filepath.Join(home, ".ssh", "config")
 	sshCfgResolver := ssh.NewSSHConfigResolver(logger, sshConfigPath, "")
 
-	// The typed-`ssh` delivery (ADR-0035, design §4.3): the one owner of
+	// The typed-`ssh` delivery (ADR-0049, design §4.3): the one owner of
 	// "does nocx interpose on a line the user typed, and on which socket".
 	// Assembled here because every part of it is a product decision — which
 	// oracle answers for the user's configuration, where our control sockets
@@ -798,7 +726,7 @@ func New(opts ...Option) (*App, error) {
 	)
 	apiFetcher := apifetch.New(apiRouteTable, logger)
 
-	// The UI-state document (ADR-0033): the same document family again, and
+	// The UI-state document (ADR-0048): the same document family again, and
 	// deliberately NOT the settings registry — a drag is not a decision. It
 	// never fails to open, because an absent document is an ordinary state
 	// and an unreadable one costs the user their window size, not their
@@ -837,10 +765,10 @@ func New(opts ...Option) (*App, error) {
 	// honestly).
 	var contentDB content.ContentDB = content.NewStub(logger)
 
-	sysProv := system.New()
-	if !reachRealKeystore {
-		sysProv = system.New(system.WithKeyring(system.AbsentKeyring{}))
-	}
+	// The provider comes from the stance and from nowhere else: building one
+	// here would be the second opinion keystore.go exists to make
+	// impossible.
+	sysProv := keystore.provider
 	fileProv := file.New(docStore, "vault-file.json")
 	reg, err := vault.NewRegistry(sysProv, fileProv)
 	if err != nil {
@@ -856,17 +784,21 @@ func New(opts ...Option) (*App, error) {
 	// at all from a test that has not asked for it (nocx-o4hg).
 	probeStatus := vault.Status{}
 	systemReady := false
-	if reachRealKeystore {
-		if o.keystore == keystoreReal {
-			slogger.Info("reaching the real OS keystore by request",
-				"reason", o.keystoreReason)
-		}
+	if keystore.probe {
+		slogger.Info("the OS keystore is in play",
+			"stance", keystore.stance.String(),
+			"declaredBy", keystore.source,
+			"reason", keystore.reason)
 		probeStatus = sysProv.Probe(ctx)
 		systemReady = probeStatus.Ready
 	} else {
-		// Nothing to probe: the provider is absent by construction, and a
-		// probe is a real keystore call.
-		probeStatus = vault.Status{Reason: "no system keystore (dev override)"}
+		// Nothing is asked. The provider answers "excluded" without touching
+		// the keyring, which is what makes "no modal on a headless host" a
+		// property of construction rather than of error handling.
+		slogger.Info("the OS keystore is out of play; the file provider is the vault's store",
+			"stance", keystore.stance.String(),
+			"declaredBy", keystore.source)
+		probeStatus = sysProv.Status(ctx)
 	}
 	slogger.Info("vault system-provider availability probe",
 		"ready", systemReady, "reason", probeStatus.Reason)
@@ -1034,6 +966,15 @@ func New(opts ...Option) (*App, error) {
 				if v, getErr := settingsRegistry.GetNumber(settings.HistoryOutputCapKB); getErr == nil {
 					historyPolicy.SetOutputCapBytes(int(v) << 10)
 				}
+				// AFTER the policy, and in this order deliberately: what
+				// history.status says about a detached session's output is
+				// read live off the policy, so announcing first would carry
+				// the value the person just replaced. Two of these switches
+				// decide whether a session with no window keeps running at
+				// all, and a person flipping one is owed the consequence on
+				// the screen in front of them rather than in a log
+				// (ws_history_status.go, Restate).
+				historyStatus.Restate()
 			}
 		}
 	})
@@ -1112,6 +1053,12 @@ func New(opts ...Option) (*App, error) {
 		// share the vault's unlock semantics.
 		transport.WithVaultUnsealer(v),
 		transport.WithVaultLifecycle(v),
+		// D9, and the whole of its plumbing: the transport counts attached
+		// clients, the vault decides what a count of zero means. Without
+		// this line quitting the window leaves the root key in a
+		// coordinator that outlives it by days — an exposure that did not
+		// exist while quitting the window WAS stopping the backend.
+		transport.WithClientPresence(v),
 		transport.WithAgentKnownMaterial(transport.NewVaultKnownMaterial(v, credResolver, v)),
 		transport.WithVaultReset(vaultreset.New(v, profileStore, slogger)),
 		transport.WithAgentPolicy(policyStore),
@@ -1125,6 +1072,13 @@ func New(opts ...Option) (*App, error) {
 		transport.WithLiveEffects(agenttools.LiveEffects()),
 		transport.WithSettingsRegistry(settingsRegistry),
 		transport.WithContentDB(contentDB),
+		// The durable sink for what a session prints while nothing is
+		// attached (nocx-22k1c.1). It is the replay ring's consumer in that
+		// interval, so a session whose window is closed keeps running past
+		// the ring's 256 KiB instead of throttling on acks that will never
+		// come. With the store stubbed — no content key — the stub records
+		// nothing and says so, and history.status carries the consequence.
+		transport.WithSessionOutputRecorder(contentDB.SessionOutput()),
 		transport.WithHistoryStatus(historyStatus),
 		transport.WithProber(&proberAdapter{client: sshClient}),
 		transport.WithProfileService(profileSvc),
@@ -1344,14 +1298,6 @@ func New(opts ...Option) (*App, error) {
 	tpOpts = append(tpOpts, transport.WithRemoteLifecycle(remoteLifecycle))
 	tpOpts = append(tpOpts, transport.WithLifecyclePublisher(lifecyclePub))
 
-	// WithWSAddr set the field and nothing read it, so NOCX_WS_ADDR was accepted
-	// and ignored and the listener always took an ephemeral port. The dev stand
-	// pins 9880 precisely so the SSH forward survives a restart; instead every
-	// restart moved the backend and left the open tab talking to a port that no
-	// longer existed — which reads as "the backend stopped responding".
-	if o.wsAddr != "" {
-		tpOpts = append(tpOpts, transport.WithListenAddr(o.wsAddr))
-	}
 	// The ordinary control lane's permit count, named here the way the D14
 	// bounds are named here: the number of control tasks that may run
 	// concurrently before new work is refused with the saturation error.
@@ -1368,7 +1314,7 @@ func New(opts ...Option) (*App, error) {
 	// this line names it, so the seam stays reachable from production and
 	// a future settings surface flips one option here, not a default.
 	tpOpts = append(tpOpts, transport.WithRunLease(transport.DefaultRunLeaseConfig()))
-	// The notification router (ADR-0029): the only holder of "where" a raised
+	// The notification router (ADR-0047): the only holder of "where" a raised
 	// notification goes. Before this line the whole notify package was
 	// reachable from its own tests and nowhere else (AGENTS.md check 5).
 	//
@@ -1389,7 +1335,7 @@ func New(opts ...Option) (*App, error) {
 	// special case in the renderer (plan D2): the router resolves it here,
 	// once, and the sink hands the event to a port the transport satisfies.
 	// A toast that the renderer chose for itself would put "where" somewhere
-	// other than the router, which is the one thing ADR-0029 §2.3 forbids.
+	// other than the router, which is the one thing ADR-0047 §2.3 forbids.
 	//
 	// Its holder binds late for the same ordering reason the host's does, and
 	// the late half is nearer than it looks: the implementation is the
@@ -1805,6 +1751,30 @@ func New(opts ...Option) (*App, error) {
 		slogger:          slogger,
 	}
 
+	// ── the client host (nocx-uo1k6, design D3) ────────────────────────
+	//
+	// The native-host capabilities — a file picker, a browser open, a
+	// desktop banner, a window raise — used to be injected here from
+	// main.go, because main.go WAS this process and held the Wails
+	// runtime. It is not this process any more: the coordinator has no
+	// window, only zero or more attached clients. So the same three seams
+	// are wired with implementations that ASK a client (internal/app/
+	// clienthost) and answer honestly when none is attached.
+	//
+	// Wired before Start, exactly as the setters have always required, so
+	// no renderer request and no raise can observe the unset state. The
+	// setters kept their names and their contract; only the caller moved,
+	// from a shell that could inject to the composition root that can.
+	app.SetDialogService(clienthost.NewDialogs(tp))
+	app.SetUrlOpener(clienthost.NewURLs(tp))
+	attention := clienthost.NewAttention(tp, app.Slog(), app.FocusSession)
+	app.SetAttentionHost(attention)
+	// The other half of a banner. The click lands in the client, which is
+	// where the OS delivers it; what it MEANS — raise a window, focus the
+	// pane holding that session — is decided here, on the far side of the
+	// wire from the shell that reported it (AD-3).
+	tp.SetAttentionActivation(attention)
+
 	logger.Info("application initialized")
 	return app, nil
 }
@@ -2187,6 +2157,72 @@ func (p *lifecyclePTY) WaitErr() (error, bool) {
 	return provider.WaitErr()
 }
 
+// SignalForeground forwards the signal to the pty this wraps, for exactly the
+// reason WaitErr above does and with a costlier consequence (nocx-7l4ex.13).
+//
+// Without it the optional-method assertion in realSession.SignalForeground
+// found nothing on an ENHANCED local session, answered pty.ErrNoForeground for
+// every signal, and session.signal told the person "nothing is running in this
+// pane" while their command plainly was — the incident nocx-92gfl.4 was filed
+// as. The shell's protected process group had nothing to do with it: nothing
+// ever asked the pty at all.
+//
+// ForegroundProcessGroup travels with it because it is the same seam asked a
+// question instead of told to act, and a wrapper that can signal a group it
+// cannot name is half-wired in the way that hides.
+func (p *lifecyclePTY) SignalForeground(sig syscall.Signal) error {
+	sg, ok := p.Pty.(interface {
+		SignalForeground(sig syscall.Signal) error
+	})
+	if !ok {
+		return pty.ErrNoForeground
+	}
+	return sg.SignalForeground(sig)
+}
+
+func (p *lifecyclePTY) ForegroundProcessGroup() (int, error) {
+	fg, ok := p.Pty.(interface{ ForegroundProcessGroup() (int, error) })
+	if !ok {
+		return 0, pty.ErrNoForeground
+	}
+	return fg.ForegroundProcessGroup()
+}
+
+// ForegroundJob and SignalProcessGroup travel with the two above for the
+// reason the comment on SignalForeground already gives, and they are here
+// because that reason was proved a second time (nocx-i5a1k's sibling).
+//
+// nocx-uvac6.11 split a stop into "name the addressee once" and "signal that
+// exact group", and a stop now ASKS ForegroundJob before it signals anything.
+// This wrapper forwarded SignalForeground and ForegroundProcessGroup and not
+// these two, so on an ENHANCED local session the optional-method assertion in
+// realSession.ForegroundJob found nothing, answered pty.ErrNoForeground, and
+// session.signal told the person "nothing is running in this pane" about a
+// full-screen program that plainly was — nocx-92gfl.4 word for word, through
+// a door that did not exist when it was closed.
+//
+// The rule this seam keeps: every method of the pty signal seam is forwarded
+// here, or none is. A wrapper that answers some of them is not degraded, it
+// is wrong, and it is wrong silently — nothing fails to compile and the
+// answer it gives is a plausible one.
+func (p *lifecyclePTY) ForegroundJob() (int, error) {
+	fg, ok := p.Pty.(interface{ ForegroundJob() (int, error) })
+	if !ok {
+		return 0, pty.ErrNoForeground
+	}
+	return fg.ForegroundJob()
+}
+
+func (p *lifecyclePTY) SignalProcessGroup(pgid int, sig syscall.Signal) error {
+	sg, ok := p.Pty.(interface {
+		SignalProcessGroup(pgid int, sig syscall.Signal) error
+	})
+	if !ok {
+		return pty.ErrNoForeground
+	}
+	return sg.SignalProcessGroup(pgid, sig)
+}
+
 func (p *lifecyclePTY) Close() error {
 	err := p.Pty.Close()
 	_ = p.ch.Close()
@@ -2509,22 +2545,6 @@ func (a *App) Shutdown(ctx context.Context) {
 	if a.logFile != nil {
 		_ = a.logFile.Close()
 	}
-}
-
-// LogFilePath returns where this backend's log file lives, or "" when file
-// logging is unavailable (stderr only). A running session can say where the
-// log is instead of the P0's mtime archaeology — the desktop binding
-// (WailsApp) and the dev stand both reach it through this accessor.
-func (a *App) LogFilePath() string {
-	return a.logFilePath
-}
-
-func (a *App) WSPort() int {
-	return a.Transport.Port()
-}
-
-func (a *App) WSToken() string {
-	return a.Transport.Token()
 }
 
 // sshFactoryAdapter adapts ssh.SSH to session.SSHFactory.

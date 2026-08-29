@@ -257,7 +257,7 @@ func TestCarrier_SecretsAppearNowhereInTheCommand(t *testing.T) {
 //
 // It used to take that contrast from the launcher this carrier replaced,
 // which really did put both secrets in the command — 92,204 bytes of it, both
-// bearers verbatim. That launcher is gone from the repository (ADR-0035, P4),
+// bearers verbatim. That launcher is gone from the repository (ADR-0049, P4),
 // so the contrast is stated directly instead: the same detector, run over a
 // command shaped like the old one, still fires. What is lost with the old
 // code is only that the sample is now a fixture rather than a live artefact;
@@ -317,7 +317,7 @@ func TestCarrier_FitsARecorderThatTodaysCommandDoesNot(t *testing.T) {
 	// And the contrast, without which the assertion above is satisfied by
 	// any recorder with a generous limit: the SAME recorder refuses a
 	// command of the size this design retired. 92,204 bytes is the measured
-	// ShellAuto form of the self-installing launcher, taken from ADR-0035
+	// ShellAuto form of the self-installing launcher, taken from ADR-0049
 	// before it was deleted; the number is kept here because it is what
 	// makes the recorder's limit mean something.
 	const retiredCommandBytes = 92_204

@@ -39,7 +39,13 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { bindEndpoint, settingsReady, VaultBackend, type DisposableRoot } from './harness'
+import {
+  bindEndpoint,
+  openImportDestination,
+  settingsReady,
+  VaultBackend,
+  type DisposableRoot,
+} from './harness'
 import { readStand } from './stand'
 import {
   SENT_MESSAGE_BODY,
@@ -56,7 +62,7 @@ import {
 const test = base
 
 /** Lazily: the stand is started by globalSetup, after this file is collected. */
-const devharnessBin = (): string => readStand().devharness
+const serverBin = (): string => readStand().server
 
 /** The vault passphrase this run sets up. It is a passphrase, not a token. */
 const VAULT_PASSPHRASE = 'api-secret-path-e2e-master-pass'
@@ -88,7 +94,7 @@ test.describe('a secret in the path: the value crosses to the server and never t
     // It must NOT exist beforehand: an import refuses an occupied
     // destination rather than replacing it (§12.2).
     collectionRoot = join(disposable.root, TELEGRAM_COLLECTION_NAME)
-    backend = new VaultBackend(devharnessBin(), disposable, true)
+    backend = new VaultBackend(serverBin(), disposable)
   })
 
   test.afterAll(async () => {
@@ -160,8 +166,7 @@ test.describe('a secret in the path: the value crosses to the server and never t
     // it is still the truth and is still what a person types into once they
     // disagree with the offer. This spec disagrees: the collection must land
     // where the walk below can read it, not under the collections root.
-    await ask.getByRole('button', { name: 'Change where this goes' }).click()
-    await page.locator('#api-import-postman-dest').fill(collectionRoot)
+    await (await openImportDestination(ask, page)).fill(collectionRoot)
     await ask.getByRole('button', { name: 'Import', exact: true }).click()
 
     // The folder arriving is the import's closing event (§12.2), so waiting

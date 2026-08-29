@@ -1,0 +1,19 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/panes.move.params.schema.json",
+  "title": "PanesMoveParams",
+  "description": "Params for moving a pane to a tab.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "tabId"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "tabId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    }
+  }
+}

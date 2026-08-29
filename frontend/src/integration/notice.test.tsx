@@ -3,6 +3,7 @@ import { describe, it, expect, vi, afterEach } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { mountIntegrationNotice } from './notice'
+import type { OutputRecording, OutputRecordingSource } from './status'
 import type { SessionIntegrationChanged } from '../generated/session.integrationChanged'
 
 // A test asserts what a user can do (AGENTS.md rule 1): the card exists, the
@@ -22,6 +23,28 @@ const TIMED_OUT: SessionIntegrationChanged = {
 }
 
 const ZSH_TIMED_OUT: SessionIntegrationChanged = { ...TIMED_OUT, shell: '/bin/zsh' }
+
+/** A recording source a test can move, because the fact it carries is a
+ *  SETTING and settings are changed while a card is up. It is the same shape
+ *  HistoryStatusStore satisfies in the product: what is true now, plus a way
+ *  to be told when that stops being true. */
+function recordingSource(initial: OutputRecording = 'unknown'): OutputRecordingSource & {
+  set(next: OutputRecording): void
+} {
+  let current = initial
+  const listeners = new Set<() => void>()
+  return {
+    outputRecording: () => current,
+    subscribe(listener) {
+      listeners.add(listener)
+      return () => listeners.delete(listener)
+    },
+    set(next) {
+      current = next
+      for (const listener of [...listeners]) listener()
+    },
+  }
+}
 
 let dispose: (() => void) | null = null
 let pane: HTMLElement | null = null
@@ -45,6 +68,10 @@ function mount(over: Partial<Parameters<typeof mountIntegrationNotice>[1]> = {})
   document.body.appendChild(pane)
   const props = {
     fact: TIMED_OUT,
+    // Nothing known about recording unless a test says otherwise: that is
+    // the state before history.status answers, and it is what keeps every
+    // test written before this seam asserting exactly what it asserted.
+    recording: recordingSource(),
     copy: vi.fn(() => Promise.resolve()),
     onSuppressShell: vi.fn(),
     onDismiss: vi.fn(),
@@ -113,6 +140,70 @@ describe('the degraded-session card', () => {
   it('offers three actions and Details is not one of them', () => {
     mount()
     expect(buttonLabels()).toEqual(['How to fix', "Don't show again for this shell", '×'])
+  })
+})
+
+// ── the pane says it is recording and not blocking (nocx-22k1c.3) ─────────
+//
+// Asserted on the card in the pane, which is what a user can see without
+// opening anything. The backend records every session's output whether it is
+// integrated or not (nocx-22k1c.1), so a plain tab that says nothing about it
+// leaves the person to conclude the run is being thrown away.
+
+/** The card's own sentence, as the person reads it — the one string that is
+ *  in front of them without their opening anything. */
+const cardDescription = (): string =>
+  pane?.querySelector('.ui-status-card__desc')?.textContent ?? ''
+
+describe("what the card says about this session's output", () => {
+  it('says output is recorded and blocks are not, beside the reason', () => {
+    mount({ recording: recordingSource('recorded') })
+    expect(cardDescription()).toContain('did not answer nocx in time')
+    expect(cardDescription()).toContain('still being recorded')
+    expect(cardDescription()).toContain('command blocks')
+  })
+
+  it('says the opposite when there is nowhere to record to', () => {
+    mount({ recording: recordingSource('not-recorded') })
+    expect(cardDescription()).toContain('not being recorded')
+    expect(cardDescription()).not.toContain('still being recorded')
+  })
+
+  // The interval this seam covers has both ends: it opens when the card is
+  // raised and closes when the card is taken down, and the setting that
+  // governs recording can be changed anywhere inside it. A snapshot taken at
+  // the first instant would leave the card contradicting the settings screen
+  // the person just used — the silent-degrade shape, drawn by us.
+  it('follows the setting while the card is up', () => {
+    const source = recordingSource('recorded')
+    mount({ recording: source })
+    expect(cardDescription()).toContain('still being recorded')
+    source.set('not-recorded')
+    expect(cardDescription()).toContain('not being recorded')
+  })
+
+  // The negative acceptance. A card is raised only for a degraded session,
+  // so an integrated one has nothing to say — and the sentence about
+  // recording must not become a thing every tab wears.
+  it('draws no card at all for a session that integrated', () => {
+    const { pane } = mount({
+      fact: { ...TIMED_OUT, status: 'integrated', reason: undefined },
+      recording: recordingSource('recorded'),
+    })
+    expect(pane.querySelector('.ui-status-card')).toBeNull()
+    expect(pane.textContent ?? '').not.toContain('recorded')
+  })
+
+  // A source that goes away must not take the card with it: the unsubscribe
+  // runs on dispose, and a listener still holding the dead component would
+  // be the leak this test exists to catch.
+  it('stops listening to the setting when the card goes', () => {
+    const source = recordingSource('recorded')
+    mount({ recording: source })
+    dispose!()
+    dispose = null
+    // No throw, and nothing repainted into a disposed root.
+    expect(() => source.set('not-recorded')).not.toThrow()
   })
 })
 

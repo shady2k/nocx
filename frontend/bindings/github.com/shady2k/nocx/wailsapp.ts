@@ -52,6 +52,68 @@ export function GetWSToken(): $CancellablePromise<string> {
 }
 
 /**
+ * HostBadge sets the dock badge count; 0 clears it. The Wails host does not
+ * implement it (nocx-3a40), and it says so loudly rather than pretending to
+ * have delivered.
+ */
+export function HostBadge(count: number): $CancellablePromise<void> {
+    return $Call.ByName("main.WailsApp.HostBadge", count);
+}
+
+/**
+ * HostBanner presents one desktop notification banner. Title and body reach
+ * the OS verbatim; sessionId rides in the notification's payload and comes
+ * back on a click.
+ */
+export function HostBanner(title: string, body: string, sessionID: string): $CancellablePromise<void> {
+    return $Call.ByName("main.WailsApp.HostBanner", title, body, sessionID);
+}
+
+/**
+ * HostBounce requests the attention bounce. Same absence as HostBadge, same
+ * loud error.
+ */
+export function HostBounce(): $CancellablePromise<void> {
+    return $Call.ByName("main.WailsApp.HostBounce");
+}
+
+/**
+ * HostFocusWindow brings this window to the front. The coordinator asks for
+ * it when it has decided a click should land here; the shell only raises.
+ */
+export function HostFocusWindow(): $CancellablePromise<void> {
+    return $Call.ByName("main.WailsApp.HostFocusWindow");
+}
+
+/**
+ * HostOpenDirectory is the same v3 open dialog restricted to directories:
+ * CanChooseFiles(false) is what makes a file unselectable, so a caller
+ * expecting a folder cannot be handed one. Same cancellation contract as
+ * HostOpenFile.
+ */
+export function HostOpenDirectory(): $CancellablePromise<string> {
+    return $Call.ByName("main.WailsApp.HostOpenDirectory");
+}
+
+/**
+ * HostOpenFile opens the platform file picker and returns the chosen ABSOLUTE
+ * path, or "" when the person cancelled.
+ */
+export function HostOpenFile(): $CancellablePromise<string> {
+    return $Call.ByName("main.WailsApp.HostOpenFile");
+}
+
+/**
+ * HostOpenUrl opens a URL in the system browser. The coordinator has already
+ * refused anything that is not an http(s) URL with a host (ws_openurl.go);
+ * this side adds no second gate, because a second answer to one question is
+ * how the two drift apart.
+ */
+export function HostOpenUrl(url: string): $CancellablePromise<void> {
+    return $Call.ByName("main.WailsApp.HostOpenUrl", url);
+}
+
+/**
  * Log logs a message from the frontend.
  */
 export function Log(message: string): $CancellablePromise<void> {

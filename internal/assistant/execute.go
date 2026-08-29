@@ -20,13 +20,25 @@ import (
 	"fmt"
 
 	"github.com/shady2k/nocx/internal/agenttools"
+	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/filesystem"
+	"github.com/shady2k/nocx/internal/note"
+	"github.com/shady2k/nocx/internal/snippet"
 )
 
-// filesReadWindowBytes is the window the files.read tool returns: the first
-// this-many bytes of the file. It is a context budget, not a file limit —
-// the window statement tells the model how much more the file holds.
-const filesReadWindowBytes = 64 << 10
+type toolBoundContextKey struct{}
+
+func withToolBound(ctx context.Context, bound agenttools.ResultBound) context.Context {
+	return context.WithValue(ctx, toolBoundContextKey{}, bound)
+}
+
+func toolBound(ctx context.Context) (agenttools.ResultBound, error) {
+	bound, ok := ctx.Value(toolBoundContextKey{}).(agenttools.ResultBound)
+	if !ok || !bound.Valid() {
+		return agenttools.ResultBound{}, errors.New("agent tool: missing result bound")
+	}
+	return bound, nil
+}
 
 // executors maps tool name to the function that runs it against its narrowed
 // capability. One entry per executable tool. The middleware consults it only
@@ -35,8 +47,19 @@ const filesReadWindowBytes = 64 << 10
 // (a new row with a Narrow but no executor is a registration that cannot
 // run).
 var executors = map[string]func(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error){
-	"files.read":   executeFilesRead,
-	"session.list": executeSessionListTool,
+	"files.read":       executeFilesRead,
+	"files.edit":       executeFilesEdit,
+	"files.create":     executeFilesCreate,
+	"session.list":     executeSessionListTool,
+	"notes.search":     executeNotesSearch,
+	"notes.create":     executeNotesCreate,
+	"notes.update":     executeNotesUpdate,
+	"notes.delete":     executeNotesDelete,
+	"snippets.list":    executeSnippetsList,
+	"snippets.create":  executeSnippetsCreate,
+	"snippets.update":  executeSnippetsUpdate,
+	"snippets.delete":  executeSnippetsDelete,
+	"snippets.reorder": executeSnippetsReorder,
 }
 
 // toolSeams is the per-RUN infrastructure an executor may need and the
@@ -44,7 +67,394 @@ var executors = map[string]func(ctx context.Context, cap agenttools.Capability, 
 // 4 — the dispatcher narrows, it does not check), while the session ledger is
 // wiring, exactly as the renderer requester is for InRenderer tools.
 type toolSeams struct {
-	sessions SessionSource
+	sessions         SessionSource
+	noteOperation    capability.NoteOperation
+	snippetOperation capability.SnippetOperation
+}
+
+type noteSearchRow struct {
+	ID        string `json:"id"`
+	Title     string `json:"title"`
+	Excerpt   string `json:"excerpt"`
+	UpdatedAt int64  `json:"updatedAt"`
+	Body      string `json:"body,omitempty"`
+}
+
+type notesSearchResult struct {
+	Notes     []noteSearchRow `json:"notes"`
+	Truncated bool            `json:"truncated"`
+	Dropped   int             `json:"dropped"`
+}
+
+type noteMutationResult struct {
+	Status string    `json:"status"`
+	Note   note.Note `json:"note"`
+}
+
+type contentDeleteResult struct {
+	ID     string `json:"id"`
+	Status string `json:"status"`
+}
+
+type snippetsListResult struct {
+	Snippets  []snippet.Snippet `json:"snippets"`
+	Truncated bool              `json:"truncated"`
+	Dropped   int               `json:"dropped"`
+}
+
+type snippetMutationResult struct {
+	Status  string          `json:"status"`
+	Snippet snippet.Snippet `json:"snippet"`
+}
+
+type snippetsReorderResult struct {
+	Snippets []snippet.Snippet `json:"snippets"`
+}
+
+func contentScope(cap agenttools.Capability, tool string) (*agenttools.ContentScope, error) {
+	scope, ok := cap.(*agenttools.ContentScope)
+	if !ok {
+		return nil, fmt.Errorf("%s: capability is %T, not *agenttools.ContentScope", tool, cap)
+	}
+	return scope, nil
+}
+
+func requireContentRoot(scope *agenttools.ContentScope, tool string) error {
+	if !scope.Allows("content") {
+		return fmt.Errorf("%s: content library is outside the run's grant", tool)
+	}
+	return nil
+}
+
+func requireContentItem(scope *agenttools.ContentScope, tool, kind, id string) error {
+	if !scope.Allows(kind + "/" + id) {
+		return fmt.Errorf("%s: %s/%s is outside the run's grant", tool, kind, id)
+	}
+	return nil
+}
+
+func executeNotesSearch(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	scope, err := contentScope(cap, "notes.search")
+	if err != nil {
+		return "", err
+	}
+	var p struct {
+		Query string `json:"query"`
+		ID    string `json:"id"`
+	}
+	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
+		return "", fmt.Errorf("notes.search: args: %w", unmarshalErr)
+	}
+	if seams.noteOperation == nil {
+		return "", errors.New("notes.search: notes operation is unavailable")
+	}
+	var result notesSearchResult
+	err = seams.noteOperation.Run(ctx, func(callCtx context.Context, svc capability.NoteService) error {
+		if p.ID != "" {
+			if itemErr := requireContentItem(scope, "notes.search", "note", p.ID); itemErr != nil {
+				return itemErr
+			}
+			n, getErr := svc.Get(callCtx, p.ID)
+			if getErr != nil {
+				return getErr
+			}
+			result.Notes = []noteSearchRow{{ID: n.ID, Title: n.Title, Body: n.Body, UpdatedAt: n.UpdatedAt}}
+			return nil
+		}
+		if rootErr := requireContentRoot(scope, "notes.search"); rootErr != nil {
+			return rootErr
+		}
+		rows, searchErr := svc.Search(callCtx, p.Query)
+		if searchErr != nil {
+			return searchErr
+		}
+		for _, row := range rows {
+			if scope.Allows("note/" + row.ID) {
+				result.Notes = append(result.Notes, noteSearchRow{
+					ID: row.ID, Title: row.Title, Excerpt: row.Excerpt, UpdatedAt: row.UpdatedAt,
+				})
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return "", err
+	}
+	bound, err := toolBound(ctx)
+	if err != nil {
+		return "", err
+	}
+	return marshalBoundedNotes(result.Notes, bound.MaxBytes)
+}
+
+func executeNotesCreate(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	scope, err := contentScope(cap, "notes.create")
+	if err != nil {
+		return "", err
+	}
+	var p struct {
+		Body string `json:"body"`
+	}
+	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
+		return "", fmt.Errorf("notes.create: args: %w", unmarshalErr)
+	}
+	if rootErr := requireContentRoot(scope, "notes.create"); rootErr != nil {
+		return "", rootErr
+	}
+	if seams.noteOperation == nil {
+		return "", errors.New("notes.create: notes operation is unavailable")
+	}
+	var out noteMutationResult
+	err = seams.noteOperation.Run(ctx, func(callCtx context.Context, svc capability.NoteService) error {
+		n, createErr := svc.Create(callCtx, p.Body)
+		out = noteMutationResult{Status: "created", Note: n}
+		return createErr
+	})
+	if err != nil {
+		return "", err
+	}
+	return marshalResult(out)
+}
+
+func executeNotesUpdate(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	scope, err := contentScope(cap, "notes.update")
+	if err != nil {
+		return "", err
+	}
+	var p struct {
+		ID   string `json:"id"`
+		Body string `json:"body"`
+	}
+	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
+		return "", fmt.Errorf("notes.update: args: %w", unmarshalErr)
+	}
+	if itemErr := requireContentItem(scope, "notes.update", "note", p.ID); itemErr != nil {
+		return "", itemErr
+	}
+	if seams.noteOperation == nil {
+		return "", errors.New("notes.update: notes operation is unavailable")
+	}
+	var out noteMutationResult
+	err = seams.noteOperation.Run(ctx, func(callCtx context.Context, svc capability.NoteService) error {
+		n, updateErr := svc.Update(callCtx, p.ID, p.Body)
+		out = noteMutationResult{Status: "updated", Note: n}
+		return updateErr
+	})
+	if err != nil {
+		return "", err
+	}
+	return marshalResult(out)
+}
+
+func executeNotesDelete(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	scope, err := contentScope(cap, "notes.delete")
+	if err != nil {
+		return "", err
+	}
+	var p struct {
+		ID string `json:"id"`
+	}
+	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
+		return "", fmt.Errorf("notes.delete: args: %w", unmarshalErr)
+	}
+	if itemErr := requireContentItem(scope, "notes.delete", "note", p.ID); itemErr != nil {
+		return "", itemErr
+	}
+	if seams.noteOperation == nil {
+		return "", errors.New("notes.delete: notes operation is unavailable")
+	}
+	err = seams.noteOperation.Run(ctx, func(callCtx context.Context, svc capability.NoteService) error {
+		return svc.Delete(callCtx, p.ID)
+	})
+	if err != nil {
+		return "", err
+	}
+	return marshalResult(contentDeleteResult{ID: p.ID, Status: "deleted"})
+}
+
+func executeSnippetsList(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	scope, err := contentScope(cap, "snippets.list")
+	if err != nil {
+		return "", err
+	}
+	if rootErr := requireContentRoot(scope, "snippets.list"); rootErr != nil {
+		return "", rootErr
+	}
+	if seams.snippetOperation == nil {
+		return "", errors.New("snippets.list: snippets operation is unavailable")
+	}
+	var snippets []snippet.Snippet
+	err = seams.snippetOperation.Run(ctx, func(_ context.Context, svc capability.SnippetService) error {
+		var listErr error
+		snippets, listErr = svc.List()
+		return listErr
+	})
+	if err != nil {
+		return "", err
+	}
+	filtered := snippets[:0]
+	for _, item := range snippets {
+		if scope.Allows("snippet/" + item.ID) {
+			filtered = append(filtered, item)
+		}
+	}
+	bound, err := toolBound(ctx)
+	if err != nil {
+		return "", err
+	}
+	return marshalBoundedSnippets(filtered, bound.MaxBytes)
+}
+
+func executeSnippetsCreate(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	scope, err := contentScope(cap, "snippets.create")
+	if err != nil {
+		return "", err
+	}
+	var p struct {
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
+		return "", fmt.Errorf("snippets.create: args: %w", unmarshalErr)
+	}
+	if rootErr := requireContentRoot(scope, "snippets.create"); rootErr != nil {
+		return "", rootErr
+	}
+	if seams.snippetOperation == nil {
+		return "", errors.New("snippets.create: snippets operation is unavailable")
+	}
+	var out snippetMutationResult
+	err = seams.snippetOperation.Run(ctx, func(_ context.Context, svc capability.SnippetService) error {
+		item, createErr := svc.Create(p.Title, p.Body)
+		out = snippetMutationResult{Status: "created", Snippet: item}
+		return createErr
+	})
+	if err != nil {
+		return "", err
+	}
+	return marshalResult(out)
+}
+
+func executeSnippetsUpdate(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	scope, err := contentScope(cap, "snippets.update")
+	if err != nil {
+		return "", err
+	}
+	var p struct {
+		ID    string `json:"id"`
+		Title string `json:"title"`
+		Body  string `json:"body"`
+	}
+	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
+		return "", fmt.Errorf("snippets.update: args: %w", unmarshalErr)
+	}
+	if itemErr := requireContentItem(scope, "snippets.update", "snippet", p.ID); itemErr != nil {
+		return "", itemErr
+	}
+	if seams.snippetOperation == nil {
+		return "", errors.New("snippets.update: snippets operation is unavailable")
+	}
+	var out snippetMutationResult
+	err = seams.snippetOperation.Run(ctx, func(_ context.Context, svc capability.SnippetService) error {
+		item, updateErr := svc.Update(p.ID, p.Title, p.Body)
+		out = snippetMutationResult{Status: "updated", Snippet: item}
+		return updateErr
+	})
+	if err != nil {
+		return "", err
+	}
+	return marshalResult(out)
+}
+
+func executeSnippetsDelete(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	scope, err := contentScope(cap, "snippets.delete")
+	if err != nil {
+		return "", err
+	}
+	var p struct {
+		ID string `json:"id"`
+	}
+	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
+		return "", fmt.Errorf("snippets.delete: args: %w", unmarshalErr)
+	}
+	if itemErr := requireContentItem(scope, "snippets.delete", "snippet", p.ID); itemErr != nil {
+		return "", itemErr
+	}
+	if seams.snippetOperation == nil {
+		return "", errors.New("snippets.delete: snippets operation is unavailable")
+	}
+	err = seams.snippetOperation.Run(ctx, func(_ context.Context, svc capability.SnippetService) error {
+		return svc.Delete(p.ID)
+	})
+	if err != nil {
+		return "", err
+	}
+	return marshalResult(contentDeleteResult{ID: p.ID, Status: "deleted"})
+}
+
+func executeSnippetsReorder(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	scope, err := contentScope(cap, "snippets.reorder")
+	if err != nil {
+		return "", err
+	}
+	if rootErr := requireContentRoot(scope, "snippets.reorder"); rootErr != nil {
+		return "", rootErr
+	}
+	var p struct {
+		IDs []string `json:"ids"`
+	}
+	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
+		return "", fmt.Errorf("snippets.reorder: args: %w", unmarshalErr)
+	}
+	if seams.snippetOperation == nil {
+		return "", errors.New("snippets.reorder: snippets operation is unavailable")
+	}
+	var out []snippet.Snippet
+	err = seams.snippetOperation.Run(ctx, func(_ context.Context, svc capability.SnippetService) error {
+		var reorderErr error
+		out, reorderErr = svc.Reorder(p.IDs)
+		return reorderErr
+	})
+	if err != nil {
+		return "", err
+	}
+	return marshalResult(snippetsReorderResult{Snippets: out})
+}
+
+func marshalResult(v any) (string, error) {
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", fmt.Errorf("agent tool: marshal result: %w", err)
+	}
+	return string(b), nil
+}
+
+func marshalBoundedNotes(rows []noteSearchRow, max int64) (string, error) {
+	for count := len(rows); count >= 0; count-- {
+		out := notesSearchResult{Notes: rows[:count], Truncated: count != len(rows), Dropped: len(rows) - count}
+		b, err := json.Marshal(out)
+		if err != nil {
+			return "", fmt.Errorf("notes.search: marshal result: %w", err)
+		}
+		if int64(len(b)) <= max {
+			return string(b), nil
+		}
+	}
+	return "", errors.New("notes.search: result bound is too small for its contract")
+}
+
+func marshalBoundedSnippets(rows []snippet.Snippet, max int64) (string, error) {
+	for count := len(rows); count >= 0; count-- {
+		out := snippetsListResult{Snippets: rows[:count], Truncated: count != len(rows), Dropped: len(rows) - count}
+		b, err := json.Marshal(out)
+		if err != nil {
+			return "", fmt.Errorf("snippets.list: marshal result: %w", err)
+		}
+		if int64(len(b)) <= max {
+			return string(b), nil
+		}
+	}
+	return "", errors.New("snippets.list: result bound is too small for its contract")
 }
 
 func executeSessionListTool(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
@@ -60,17 +470,27 @@ func executeSessionListTool(ctx context.Context, cap agenttools.Capability, args
 // end is answered honestly, never as an error), and the text. Binary content
 // is reported as data, not pasted: Binary=true and no text.
 type filesReadResult struct {
-	Path     string          `json:"path"`
-	Total    int64           `json:"total"`
-	Window   filesReadWindow `json:"window"`
-	Returned int64           `json:"returned"`
-	Binary   bool            `json:"binary,omitempty"`
-	Text     string          `json:"text,omitempty"`
+	Path      string          `json:"path"`
+	Total     int64           `json:"total"`
+	Revision  string          `json:"revision"`
+	Window    filesReadWindow `json:"window"`
+	Seen      filesReadSeen   `json:"seen"`
+	Returned  int64           `json:"returned"`
+	Truncated bool            `json:"truncated,omitempty"`
+	Dropped   int64           `json:"dropped,omitempty"`
+	Remaining int64           `json:"remaining,omitempty"`
+	Binary    bool            `json:"binary,omitempty"`
+	Text      string          `json:"text,omitempty"`
 }
 
 type filesReadWindow struct {
 	Start int64 `json:"start"`
 	End   int64 `json:"end"`
+}
+
+type filesReadSeen struct {
+	Start int `json:"start"`
+	End   int `json:"end"`
 }
 
 // executeFilesRead runs the files.read tool: read the named path through the
@@ -87,28 +507,95 @@ func executeFilesRead(ctx context.Context, cap agenttools.Capability, args json.
 		Path string `json:"path"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
-		// Unreachable through the middleware (validation precedes policy,
-		// let alone execution); the direct-call seam still answers honestly.
 		return "", fmt.Errorf("files.read: args: %w", err)
 	}
-	c, err := scoped.Read(ctx, p.Path, filesReadWindowBytes)
+	bound, err := toolBound(ctx)
 	if err != nil {
 		return "", err
 	}
+	snapshot, err := scoped.ReadSnapshot(ctx, p.Path, bound.MaxBytes)
+	if err != nil {
+		return "", err
+	}
+	truncated := snapshot.WindowEnd < snapshot.Total
 	out := filesReadResult{
-		Path:  c.Path,
-		Total: c.Total,
-		Window: filesReadWindow{
-			Start: 0,
-			End:   c.Size,
-		},
-		Returned: c.Size,
-		Binary:   c.Binary,
-		Text:     c.Text,
+		Path:      p.Path,
+		Total:     snapshot.Total,
+		Revision:  snapshot.Revision,
+		Window:    filesReadWindow{Start: 0, End: snapshot.WindowEnd},
+		Seen:      filesReadSeen{Start: snapshot.SeenStart, End: snapshot.SeenEnd},
+		Returned:  snapshot.WindowEnd,
+		Truncated: truncated,
+		Binary:    snapshot.Binary,
+		Text:      snapshot.Text,
+	}
+	if truncated {
+		out.Dropped = snapshot.Total - snapshot.WindowEnd
+		out.Remaining = out.Dropped
 	}
 	b, err := json.Marshal(out)
 	if err != nil {
 		return "", fmt.Errorf("files.read: marshal result: %w", err)
+	}
+	return string(b), nil
+}
+
+type filesMutationResult struct {
+	Path     string `json:"path"`
+	Status   string `json:"status"`
+	Revision string `json:"revision,omitempty"`
+	Reason   string `json:"reason,omitempty"`
+}
+
+func executeFilesEdit(ctx context.Context, cap agenttools.Capability, args json.RawMessage, _ toolSeams) (string, error) {
+	if _, err := toolBound(ctx); err != nil {
+		return "", err
+	}
+	editor, ok := cap.(*filesystem.ScopedEditor)
+	if !ok {
+		return "", fmt.Errorf("files.edit: capability is %T, not *filesystem.ScopedEditor", cap)
+	}
+	var p struct {
+		Path     string `json:"path"`
+		Revision string `json:"revision"`
+		Patch    string `json:"patch"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return "", fmt.Errorf("files.edit: args: %w", err)
+	}
+	result, err := editor.Edit(ctx, p.Path, p.Revision, p.Patch)
+	if err != nil {
+		return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "refused", Reason: err.Error()})
+	}
+	return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "applied", Revision: result.Revision})
+}
+
+func executeFilesCreate(ctx context.Context, cap agenttools.Capability, args json.RawMessage, _ toolSeams) (string, error) {
+	if _, err := toolBound(ctx); err != nil {
+		return "", err
+	}
+	editor, ok := cap.(*filesystem.ScopedEditor)
+	if !ok {
+		return "", fmt.Errorf("files.create: capability is %T, not *filesystem.ScopedEditor", cap)
+	}
+	var p struct {
+		Path    string `json:"path"`
+		Content string `json:"content"`
+	}
+	if err := json.Unmarshal(args, &p); err != nil {
+		return "", fmt.Errorf("files.create: args: %w", err)
+	}
+	result, err := editor.Create(ctx, p.Path, p.Content)
+	if err != nil {
+		return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "refused", Reason: err.Error()})
+	}
+	return marshalFilesMutation(filesMutationResult{Path: p.Path, Status: "created", Revision: result.Revision})
+}
+
+func marshalFilesMutation(result filesMutationResult) (string, error) {
+	b, err := json.Marshal(result)
+	if err != nil {
+		return "", fmt.Errorf("files mutation: marshal result: %w", err)
 	}
 	return string(b), nil
 }
@@ -176,17 +663,9 @@ type frameBodyWire struct {
 }
 
 // ── run (design §4.1: the agent runs a command through the same submit
-//    path a person uses, executed by the renderer — the backend never
-//    writes to the PTY, design §2.1) ──────────────────────────────────────
-
-// runResult is the run tool's return contract (design §4.4 — every tool
-// that returns text returns a window): the entry id the command was
-// accepted under, the exit status of the completed block (null when it
-// froze without one — an entered environment), total (the block's output
-// line count), the window that was asked for (run asks for the whole
-// output — [0, total)), the window that was actually returned (the
-// renderer clamps to what it can carry; a longer output is answered
-// honestly, never as an error), and the text of the returned window.
+//
+//	path a person uses, executed by the renderer — the backend never
+//	writes to the PTY, design §2.1) ──────────────────────────────────────
 type runResult struct {
 	SessionID string           `json:"sessionId"`
 	EntryID   string           `json:"entryId"`
@@ -196,6 +675,9 @@ type runResult struct {
 	Window    readScreenWindow `json:"window"`
 	Returned  readScreenWindow `json:"returned"`
 	Text      string           `json:"text"`
+	Truncated bool             `json:"truncated,omitempty"`
+	Dropped   int64            `json:"dropped,omitempty"`
+	Remaining int64            `json:"remaining,omitempty"`
 }
 
 // runBodyWire is this tool's consumer view of the resolved run body the
@@ -231,14 +713,18 @@ type runBodyWire struct {
 // is decoded exactly once, here, where the wire shape is owned. Nil for a
 // caller that is not recording causes.
 func executeRun(ctx context.Context, runner *agenttools.Runner, requester RendererRequester, args json.RawMessage, caused func(entryID string)) (string, error) {
+	bound, err := toolBound(ctx)
+	if err != nil {
+		return "", err
+	}
 	var p struct {
 		SessionID string `json:"sessionId"`
 		Command   string `json:"command"`
 	}
-	if err := json.Unmarshal(args, &p); err != nil {
+	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
 		// Unreachable through the middleware (validation precedes policy,
 		// let alone execution); the direct-call seam still answers honestly.
-		return "", fmt.Errorf("run: args: %w", err)
+		return "", fmt.Errorf("run: args: %w", unmarshalErr)
 	}
 	if p.Command == "" {
 		return "", errors.New("run: an empty command is a bare newline, not an execution")
@@ -274,20 +760,15 @@ func executeRun(ctx context.Context, runner *agenttools.Runner, requester Render
 		caused(b.EntryID)
 	}
 
-	// The window: run asks for the whole output — [0, total) — and the
-	// renderer states the span it actually returned (it clamps a long
-	// output rather than erroring, and the window says how much more the
-	// block holds). The wire span is authoritative: a zero-length window
-	// (an empty block) is a legitimate answer, not an absent one, so
-	// returned is never invented when the span is empty — only a span that
-	// contradicts the block (outside [0, total]) is refused as a corrupt
-	// resolution.
 	total := b.Total
 	asked := readScreenWindow{Start: 0, End: total}
 	if total < 0 || b.Start < 0 || b.End < b.Start || b.End > total {
 		return "", fmt.Errorf("run: the renderer's window [%d,%d) is outside the block's [0,%d)", b.Start, b.End, total)
 	}
 	returned := readScreenWindow{Start: b.Start, End: b.End}
+	text, returnedEnd := boundBlockText(b.Text, b.Start, b.End, bound.MaxBytes)
+	returned.End = returnedEnd
+	truncated := len(text) < len(b.Text)
 
 	out := runResult{
 		SessionID: p.SessionID,
@@ -297,7 +778,12 @@ func executeRun(ctx context.Context, runner *agenttools.Runner, requester Render
 		Total:     total,
 		Window:    asked,
 		Returned:  returned,
-		Text:      b.Text,
+		Text:      text,
+		Truncated: truncated,
+	}
+	if truncated {
+		out.Dropped = int64(len(b.Text) - len(text))
+		out.Remaining = out.Dropped
 	}
 	res, err := json.Marshal(out)
 	if err != nil {

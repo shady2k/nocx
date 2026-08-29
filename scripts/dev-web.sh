@@ -5,35 +5,36 @@
 #
 # Two processes, because the app is two halves:
 #
-#   devharness  — internal/app with the WS transport and a real PTY, no GUI
+#   nocx-server — the coordinator: internal/app with the WS transport and a
+#                 real PTY, no GUI. The binary the desktop app spawns, so this
+#                 stand and production are one thing rather than two similar
+#                 ones (design D11; cmd/devharness is gone).
 #   vite        — the frontend, with the two Wails bindings shimmed
 #
 # The bindings are the whole reason a plain `npm run dev` is not enough. The
 # frontend asks Go for the WS port and the capability token; in a browser the
 # call throws, the token falls back to "" and the socket is refused by the auth
-# gate. This script reads both values off the backend's stdout and hands them
-# to vite, so the pair is never copied by hand.
+# gate. This script learns both from the coordinator's discovery socket and
+# hands them to vite, so the pair is never copied by hand.
 #
-# Ports (override by env): NOCX_WS_PORT=9880, NOCX_WEB_PORT=5180.
+# THE BACKEND PORT IS NO LONGER YOURS TO CHOOSE. nocx-server binds loopback on
+# a port the OS picks and takes no flags at all — a token must never reach
+# argv, and a daemon that took its address from the environment could be told
+# to bind off loopback (design §6). So the port changes on every restart and
+# the SSH forward has to be re-made; the command to copy is printed below with
+# the real number in it. NOCX_WEB_PORT=5180 still pins vite.
 #
-# Both halves are deliberately off every other consumer's port, because a dev
-# stand that quietly shares a socket with the test suite is worse than one that
+# Vite's port is deliberately off every other consumer's, because a dev stand
+# that quietly shares a socket with the test suite is worse than one that
 # refuses to start:
 #
-#   5173       `npm run dev` AND the headless e2e vite (playwright BASE_URL)
-#   9876       the WS port the headless e2e runbook pins for devharness
+#   5173       `npm run dev` AND the e2e vite (playwright BASE_URL)
 #   34115      the wails dev asset server
-#   32768+     the ephemeral range wails dev's own backend (127.0.0.1:0) lands in
 #
-# 5180 and 9880 are in none of those, the last one by arithmetic rather than by
-# luck: both sit below the ephemeral floor, so a `wails dev` running alongside
-# cannot draw one of them at random.
+# ONE COORDINATOR PER PROFILE. This stand starts its own nocx-server in the
+# development profile's runtime directory, and so does `wails dev` — a second
+# one there exits 3 rather than serving beside the first. Run one at a time.
 set -euo pipefail
-
-# Deliberately NOT 9876: that is the port the headless e2e path pins for its own
-# devharness, so sharing it means a test run and a look-and-see session evict
-# each other on the backend socket.
-WS_PORT="${NOCX_WS_PORT:-9880}"
 # Deliberately NOT 5173: the headless e2e path serves the frontend there
 # (playwright.config.ts BASE_URL), so sharing the port means a test run and a
 # look-and-see session evict each other, or worse, one silently attaches to the
@@ -80,11 +81,10 @@ check_port_free() {
 		echo "port $port ($what) is already in use:" >&2
 		echo "$holders" >&2
 		echo "" >&2
-		echo "stop it, or pick another: NOCX_WS_PORT=... NOCX_WEB_PORT=... make dev-web" >&2
+		echo "stop it, or pick another: NOCX_WEB_PORT=... make dev-web" >&2
 		exit 1
 	fi
 }
-check_port_free "$WS_PORT" "backend WS"
 check_port_free "$WEB_PORT" "frontend"
 
 work="$(mktemp -d)"
@@ -101,10 +101,15 @@ trap cleanup EXIT INT TERM
 # Built rather than `go run`: go run wraps the binary in a child process that
 # survives a kill of the parent, and an orphaned backend holds the WS port
 # against the next run.
-echo "=== building devharness ==="
-go build -o "$work/devharness" ./cmd/devharness
+# `-tags nocx_login_session` because this stand IS in one: somebody is at the
+# machine, there is a login keychain, and there is a person who can answer a
+# dialog about it. That is exactly the declaration design D10 asks for, and
+# without it the dev stand's vault would take the file provider and ask for a
+# passphrase where the developer's OS key would have carried it.
+echo "=== building nocx-server ==="
+go build -tags nocx_login_session -o "$work/nocx-server" ./cmd/nocx-server
 
-echo "=== backend on 127.0.0.1:$WS_PORT ==="
+echo "=== backend on loopback, port chosen by the OS ==="
 backend_dbus_address="${DBUS_SESSION_BUS_ADDRESS:-}"
 session_bus="/run/user/$(id -u)/bus"
 if [[ ( -z "$backend_dbus_address" || "$backend_dbus_address" == "disabled:" ) && -S "$session_bus" ]]; then
@@ -119,17 +124,18 @@ fi
 # is never written to it (internal/assistant/wiretap.go). Point NOCX_WIRE_LOG
 # somewhere else to keep one, or set it empty to turn the tap off.
 DBUS_SESSION_BUS_ADDRESS="$backend_dbus_address" \
-	NOCX_WS_ADDR="127.0.0.1:$WS_PORT" \
 	NOCX_WIRE_LOG="${NOCX_WIRE_LOG-$work/wire.log}" \
-	"$work/devharness" >"$work/backend.log" 2>&1 &
+	"$work/nocx-server" >"$work/backend.log" 2>&1 &
 backend_pid=$!
 
-# The backend prints WSPORT then WSTOKEN once the listener is up; WSTOKEN last,
-# so waiting on it means both are readable.
-for _ in $(seq 1 100); do
-	if grep -q '^WSTOKEN=' "$work/backend.log" 2>/dev/null; then
-		break
-	fi
+# The server names its discovery socket on its readiness line; the port and the
+# token come from the socket and from nowhere else, because a token on stdout
+# is what design §6 forbids. e2e/coordinator.ts is the one implementation of
+# that exchange — Node 24 runs it straight, with no build step.
+socket=""
+for _ in $(seq 1 200); do
+	socket="$(sed -n 's/.*[[:space:]]socket=\([^[:space:]]*\).*/\1/p' "$work/backend.log" | tail -1 | tr -d '"')"
+	[ -n "$socket" ] && break
 	if ! kill -0 "$backend_pid" 2>/dev/null; then
 		echo "backend exited before it was ready:" >&2
 		cat "$work/backend.log" >&2
@@ -137,12 +143,22 @@ for _ in $(seq 1 100); do
 	fi
 	sleep 0.1
 done
-
-token="$(sed -n 's/^WSTOKEN=//p' "$work/backend.log" | head -1)"
-port="$(sed -n 's/^WSPORT=//p' "$work/backend.log" | head -1)"
-if [ -z "$token" ] || [ -z "$port" ]; then
-	echo "backend never reported WSPORT/WSTOKEN:" >&2
+if [ -z "$socket" ]; then
+	echo "backend never named its discovery socket:" >&2
 	cat "$work/backend.log" >&2
+	exit 1
+fi
+
+if ! hello="$(node "$repo_root/e2e/coordinator.ts" "$socket")"; then
+	echo "the coordinator on $socket refused the handshake:" >&2
+	cat "$work/backend.log" >&2
+	exit 1
+fi
+token="$(printf '%s\n' "$hello" | sed -n 's/^WSTOKEN=//p' | head -1)"
+port="$(printf '%s\n' "$hello" | sed -n 's/^WSPORT=//p' | head -1)"
+if [ -z "$token" ] || [ -z "$port" ]; then
+	echo "the coordinator's hello carried no port or no token:" >&2
+	printf '%s\n' "$hello" >&2
 	exit 1
 fi
 
@@ -158,7 +174,9 @@ What was sent to the model and what it said back, verbatim:
 
   ${NOCX_WIRE_LOG-$work/wire.log}
 
-The remote side of both forwards is spelled 127.0.0.1, not localhost: both
+The backend port changes every restart — the OS picks it — so re-copy the
+line above each time. The remote side of both forwards is spelled 127.0.0.1,
+not localhost: both
 servers bind IPv4 loopback, and localhost resolves to ::1 first here — a
 forward aimed at localhost would land on nothing (or on someone else's
 server). Set NOCX_WEB_HOST to change what vite binds.

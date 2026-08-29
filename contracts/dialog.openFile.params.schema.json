@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/dialog.openFile.params.schema.json",
+  "title": "DialogOpenfileParams",
+  "description": "Params for dialog.openFile.",
+  "type": ["object", "null"],
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

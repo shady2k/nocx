@@ -5,7 +5,7 @@ package shellintegration
 // This file used to also hold the sh publish writer's tests: the prelude that
 // travelled inside the ~90 KiB remote command published the bundle from the
 // far side, so there were TWO writers of one contract and a bidirectional
-// conformance criterion between them. ADR-0035 removed the command, and the
+// conformance criterion between them. ADR-0049 removed the command, and the
 // prelude with it; there is one writer now — the Go publisher, over SFTP or
 // over an auxiliary channel of a multiplex master — so the conformance the
 // deleted tests proved is no longer a property this repository has to hold.

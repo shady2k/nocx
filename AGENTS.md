@@ -20,16 +20,35 @@ this file.
 
 **Fresh clone:** install the tooling, then `make init`. Git carries neither the issue
 database nor its ref, so until `make init` runs there is no backlog — `bd ready` answers
-"no beads database found", and `.beads/issues.jsonl` is a passive export that may lag it.
-Afterwards `git commit` stages the export and `git push` runs `bd dolt push`. If a push
-fails on beads, fix the sync; `--no-verify` leaves everyone on a backlog that looks
-current and is not.
+"no beads database found". `git push` runs `bd dolt push`; if a push fails on beads, fix
+the sync, because `--no-verify` leaves everyone on a backlog that looks current and is
+not.
 
-**Never resolve a conflict in `.beads/issues.jsonl` by hand** — neither side is the
-answer. The backlog is merged in Dolt by `bd dolt pull`; the file only restates what the
-database says, so the resolution is to regenerate it. `make hooks` installs a merge
-driver that does exactly that, and `.gitattributes` says when it lags by a commit. If you
-ever see this file in a conflict, your clone is missing the driver — run `make hooks`.
+**`.beads/issues.jsonl` is not in git, deliberately.** `.githooks/pre-commit` used to
+regenerate and stage it on every commit, so every branch touched all 2707 lines of it and
+almost every pull request came back conflicted. A merge driver fixed only half of that: it
+is per-clone git config, and GitHub computes mergeability server-side without running
+custom drivers at all — which is why PR #129 was clean locally and CONFLICTING on the
+site. The file is ignored now. The backlog lives in Dolt and syncs through
+`refs/dolt/data`; the spare copy is published by `.githooks/pre-push` to
+`refs/beads/snapshot` on the same remote, from your local database. Recovering it is
+three lines in [README](README.md#agent-tooling).
+
+**A branch cut before this will conflict once, and the resolution is one command.**
+Every branch in flight has commits that modified the file, because the old hook staged
+it on every commit; against a `main` where it is deleted, that is a modify/delete
+conflict, which no merge driver can help with — drivers run only when both sides
+changed content, and this one is resolved in the tree. Counted on 2026-08-29: thirteen
+unmerged branches carried the file, of which four had been touched that day; the other
+nine were between one and five weeks stale and pay this only if somebody revives them.
+Take the deletion and move on:
+
+```bash
+git rm .beads/issues.jsonl
+```
+
+Once a branch carries that merge it never happens again, because nothing writes the
+file any more.
 
 **Your dev profile is not the installed app's.** Anything you build or run from
 this repo — `wails dev`, `make dev-web`, `make build`, and the Playwright suite,
@@ -41,31 +60,56 @@ developer's real settings and reset their theme on every pass (nocx-ti8w). If
 you want your real SSH profiles in the dev stand, copy them across by hand —
 nothing migrates them for you, and nothing should.
 
-**And the e2e suite gets a disposable `$HOME`.** On the default path
-`playwright.config.ts` applies it to the `wails dev` backend and you need do
-nothing. On the **headless** path you start the backend yourself, so the suite
-cannot isolate it and refuses to run until you say you have: export
-`NOCX_E2E_HOME_DIR` and launch devharness with that `HOME` — `e2e/preflight.ts`
-prints the exact command when it stops you. Do not work around it by unsetting
-`NOCX_WS_PORT`; the boundary is what keeps a run off your settings, your vault
+**And the e2e suite gets a disposable `$HOME`.** There is one stand and
+Playwright owns it (`e2e/stand.ts`), so the boundary is applied to every
+backend the suite starts — the shared one and the ones individual specs raise
+— by `e2e/home-isolation.ts`, which RAISES rather than warns if a caller tries
+to opt out. `NOCX_E2E_HOME_DIR` travels with each of them as the record of
+which home it got. There is no second path to remember: `e2e/preflight.ts`
+refuses a run with `NOCX_WS_PORT` set, because nothing reads it any more and a
+run that thinks it is driving a backend of its own is measuring the wrong
+process. The boundary is what keeps a run off your settings, your vault
 documents, your `~/.nocx` and your shell rc files.
 
-**That boundary does not cover the login keychain — so run e2e in the container.**
+**Run e2e in the container anyway — it is CI's environment and it is faster.**
 
 ```bash
 e2e/run-in-container.sh                        # whole suite, both browsers
 PW_PROJECTS=chromium e2e/run-in-container.sh e2e/sidebar.spec.ts
 ```
 
-`$HOME` moves three things and the keystore is a fourth: `go-keyring` talks to
-the Keychain service, not to a directory, and `app.New` probes the system vault
-provider on **every** backend start — "a probe is a real keychain write", says
-the comment doing it. `wails dev` re-signs the binary each run, so macOS re-asks
-every time, and a suite that restarts the backend per spec asks continuously.
-The owner watched a dialog appear every two seconds during a local run
-(`nocx-o4hg`). A Linux container has no keychain to ask, and it runs the headless
-path — `cmd/devharness` plus vite — so it is also about fifteen times faster
-than a cold `wails dev` per spec.
+It runs the headless path — `cmd/nocx-server` plus vite — so it is about
+fifteen times faster than a cold `wails dev` per spec, and it is byte-for-byte
+CI's image.
+
+**`$HOME` moves three things and a per-user OS SERVICE is a fourth class it
+cannot move**, and the keystore is the one that bit us. `go-keyring` talks to
+the Keychain service, not to a directory, and `app.New` used to PROBE the
+system vault provider on every backend start — "a probe is a real keychain
+write", said the comment doing it.
+
+What was written here before, and what `nocx-o4hg` recorded as the cause, was
+that `wails dev` re-signs the binary each run so macOS re-asks every time.
+**That is wrong, and it is worth knowing why.** zalando/go-keyring shells out
+to `/usr/bin/security` (`keyring_darwin.go`), so the process asking is Apple's
+signed binary and OUR signature never enters a keychain ACL at all —
+re-signing cannot produce a prompt. Measured on macOS instead: `$HOME` **does**
+move the login keychain — `security` resolves it under `$HOME/Library/Keychains`
+— and a READ under a `$HOME` with no keychain fails **silently** while a
+**WRITE** raises "Keychain not found". The probe is a write. So the dialog the
+owner watched every two seconds was the disposable `$HOME` having no keychain
+in it, once per backend start — not a signature, and not something re-signing
+or notarising would have changed.
+
+The fix is therefore not isolation but DECLARATION (design D10): the keystore
+stance is stated before anything is built, never discovered by writing to one.
+A Go test that has not said whether it may reach the OS keystore is refused by
+`app.New` (`nocx-o4hg`); a backend binary takes the stance from its BUILD, so
+`cmd/nocx-server` compiled without `-tags nocx_login_session` has no OS
+keystore to reach and the e2e suite has nothing to remember to switch off
+(`nocx-nhhr`). The general rule survives its wrong explanation: `$HOME`
+isolation covers DIRECTORIES and cannot cover a per-user OS service — the
+keychain, the Secret Service, a launchd agent, D-Bus.
 
 **Its failure set is not CI's, and CI is the source of truth.** The container
 runs Linux WebKit at a container-default viewport; the shipped app is macOS
@@ -131,8 +175,9 @@ it can only confirm that what was written does what it was written to do.
 user can do that they could not before, and close the epic only when one automated check
 has watched them do it end to end. Write that check when the epic is created — by the end
 you know what the code does, and that is the knowledge that makes you write the test the
-implementation passes. `cmd/devharness` runs the real backend headless (no wails, no GTK,
-no display), so there is no excuse about the harness.
+implementation passes. `cmd/nocx-server` runs the real backend headless (no wails, no
+GTK, no display) — the SHIPPED coordinator, not a harness beside it — so there is no
+excuse about the harness.
 
 **`deadcode` and coverage are floors, never criteria. Neither can report a feature that is
 missing — only that written code is used.**
@@ -318,8 +363,8 @@ rule.
 seconds and is pull-based — nothing surfaces them for you.
 
 > A session spent installing Xvfb and rebuilding NixOS twice to run Playwright ended when
-> `bd memories e2e` turned up `cmd/devharness` plus the `NOCX_WS_PORT` shim — a headless
-> path needing no display, in the repo the whole time.
+> `bd memories e2e` turned up the headless backend plus its port shim — a path needing
+> no display, in the repo the whole time.
 
 **When a branch behaves differently from `main`, diff it against `main` first** — before
 measuring, instrumenting or theorising:
@@ -512,14 +557,22 @@ list before believing it — and never the other way round: CI is still the sour
 or not — a worker that forgets strands everyone behind it:
 
 ```bash
-bd merge-slot acquire   # blocks/queues if another agent holds it
+scripts/merge-slot.sh acquire   # add --wait to queue behind the holder
 # merge, resolve, gate, push
-bd merge-slot release   # in the failure path too; `check` says who holds it
+scripts/merge-slot.sh release   # in the failure path too; `check` says who holds it
 ```
 
 Without it, two agents resolve conflicts against a `main` moving underneath both and each
 resolution invalidates the other's. This is orthogonal to approval: the slot decides _who
 merges next_, never _whether_.
+
+**Go through the script, not `bd merge-slot` directly** — bare `acquire` takes the holder
+from `git user.name`, which is one string for every agent on the machine, so `check`
+answers "held by shady2k" and you cannot tell your own stale hold from a colleague's live
+one. The script passes `--holder worktree:branch` instead, which is what you actually
+decide on. Twice in one session (2026-08-29) a coordinator burned the investigation on
+worktree mtimes and beads timestamps to guess whose slot it was, and both times had to ask
+the owner (`nocx-e3if5`).
 
 ### Every commit names its bead
 

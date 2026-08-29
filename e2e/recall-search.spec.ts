@@ -31,7 +31,7 @@
  * of history, and the panel says how far back instead of presenting a
  * partial answer as the whole one.
  *
- * Drives the real frontend against cmd/devharness with NO Secret Service
+ * Drives the real frontend against cmd/nocx-server with NO Secret Service
  * for the backend and fresh XDG directories.
  */
 import { test as base, expect } from '@playwright/test'
@@ -43,7 +43,7 @@ import { readStand } from './stand'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 // Outside the ranges used by `wails dev` (34115), the e2e suite default
 // (9876), `dev-web.sh` (9880/5180), `npm run dev` (5173), and the other
@@ -101,7 +101,7 @@ test.describe('recall: typing narrows, and the panel states its coverage', () =>
         secretRefs: {},
       }),
     )
-    backend = new VaultBackend(devharnessBin(), asXdgDirs(xdg), true)
+    backend = new VaultBackend(serverBin(), asXdgDirs(xdg))
   })
 
   test.afterAll(() => {

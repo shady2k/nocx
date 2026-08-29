@@ -63,7 +63,7 @@ import { FakeOpenAI } from './fake-openai'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
@@ -104,7 +104,7 @@ test.beforeAll(async () => {
   // `true` = no Secret Service for this backend: the container has no
   // keychain to ask, and the derived content key makes the vault available
   // without user setup — the arrangement agent-ask.spec.ts uses.
-  backend = new VaultBackend(devharnessBin(), { root }, true)
+  backend = new VaultBackend(serverBin(), { root })
   endpoint = await backend.start()
 })
 

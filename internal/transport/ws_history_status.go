@@ -44,6 +44,7 @@ import (
 	"context"
 	"sync"
 
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
 
@@ -91,6 +92,26 @@ type historyStatusResponse struct {
 	// the honest symptom — an empty history — is indistinguishable from a
 	// fresh install.
 	Discarded *int `json:"discarded"`
+	// DetachedOutput is what happens to a session's output while no client
+	// is attached (nocx-22k1c.1). It rides here, beside `available`, for the
+	// reason `discarded` does: it is not a degrade OF durable history, it is
+	// a CONSEQUENCE of the History switches that the settings below do not
+	// otherwise state.
+	//
+	// And it has to be stated. With no recorder there is no consumer for the
+	// replay ring, so a session whose window is closed throttles once the
+	// ring fills — its output stops until somebody attaches. That is an
+	// accepted degrade and a surprising one, and a degrade that reaches only
+	// a slog.Warn is how a feature that does not exist survives a release
+	// (AGENTS.md). It is said where the switches that cause it live.
+	DetachedOutput detachedOutputStatus `json:"detachedOutput"`
+}
+
+// detachedOutputStatus is the shape of that consequence: whether it is being
+// kept, and which switch says otherwise.
+type detachedOutputStatus struct {
+	Recorded bool    `json:"recorded"`
+	Reason   *string `json:"reason"`
 }
 
 // HistoryStatus is the raise/clear state of durable command history: the one
@@ -184,6 +205,26 @@ func (h *HistoryStatus) Raise(reason HistoryDegradeReason, detail string) {
 	notifyHistoryStatusListeners(listeners)
 }
 
+// Restate announces the CURRENT status again, without changing it.
+//
+// It exists because history.status carries a fact this type does not own:
+// whether a detached session's output is being recorded, which follows the
+// History switches live. Those switches move without any episode opening or
+// closing, so nothing here would fire — and the renderer would go on
+// displaying a sentence that stopped being true when the person flipped the
+// toggle in front of it.
+//
+// The caller is the composition root, which updates the policy and then says
+// so, in that order. Deliberately not a second notifier registered against
+// the settings registry: notifier order would then decide whether the
+// announcement carried the new policy or the old one.
+func (h *HistoryStatus) Restate() {
+	h.mu.RLock()
+	listeners := append([]func(){}, h.listeners...)
+	h.mu.RUnlock()
+	notifyHistoryStatusListeners(listeners)
+}
+
 // Clear closes the open degrade episode: durable history is running again.
 // Idempotent — clearing an already-clear status announces nothing.
 func (h *HistoryStatus) Clear() {
@@ -261,10 +302,28 @@ func WithHistoryStatus(st *HistoryStatus) WSServerOption {
 // "running" when no status was wired. One reader for both the method and the
 // broadcast, so the two can never disagree.
 func (s *WSServer) historyStatusSnapshot() historyStatusResponse {
-	if s.historyStatus == nil {
-		return historyStatusResponse{Available: true}
+	out := historyStatusResponse{Available: true}
+	if s.historyStatus != nil {
+		out = s.historyStatus.snapshot()
 	}
-	return s.historyStatus.snapshot()
+	// Merged HERE and not inside HistoryStatus, because the two facts have
+	// different owners: the degrade episode is that type's, and whether a
+	// detached session is being recorded is the recorder's, read live off
+	// the History policy. One reader for the method and the broadcast, so
+	// the two can never disagree.
+	out.DetachedOutput = detachedOutputOf(s.sessionRecordingStance())
+	return out
+}
+
+// detachedOutputOf turns the recorder's stance into the wire shape. The
+// stance codes travel unchanged — the renderer picks its own sentence from a
+// closed code, so a backend rewording never changes what a person reads.
+func detachedOutputOf(stance content.SessionOutputStance) detachedOutputStatus {
+	if stance == content.SessionOutputKept {
+		return detachedOutputStatus{Recorded: true}
+	}
+	reason := string(stance)
+	return detachedOutputStatus{Reason: &reason}
 }
 
 // historyDurableAvailable reports whether durable history is running, for

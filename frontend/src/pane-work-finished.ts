@@ -101,7 +101,7 @@ export class WorkFinishedWatch {
     this.cancel()
     if (prev !== 'working' || next !== 'idle') return
     const sessionId = this.deps.session()
-    // Nothing to address. sessionId is ADDRESSING (ADR-0029 §2.2), so a
+    // Nothing to address. sessionId is ADDRESSING (ADR-0047 §2.2), so a
     // pane between sessions has no record to make — and arming anyway would
     // let a session that arrives during the window inherit a settle it was
     // never part of.

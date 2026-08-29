@@ -24,3 +24,24 @@ var (
 	Commit  = "none"
 	Date    = "unknown"
 )
+
+// Requested reports whether args — os.Args[1:] — asks only for the build
+// metadata.
+//
+// It is a scan for two exact strings and not a flag parser, which is the
+// point rather than an economy. nocx-server deliberately parses no flags at
+// all, so that a capability cannot arrive by argv where `ps` shows it to
+// every process on the machine (the nocx-server design, §6); a valueless
+// spelling honours that, and anything taking a value would not.
+//
+// It lives here, and not in either main package, because both binaries
+// answer this question and a release smoke check compares their answers.
+// Two copies of the accepted spellings is exactly the pair that drifts.
+func Requested(args []string) bool {
+	for _, arg := range args {
+		if arg == "--version" || arg == "-version" {
+			return true
+		}
+	}
+	return false
+}

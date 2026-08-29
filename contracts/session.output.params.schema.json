@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/session.output.params.schema.json",
+  "title": "SessionOutputParams",
+  "description": "Params for reading recorded session output older than the replay ring. instanceId and sessionEpoch are the claim a reclaiming client makes about WHICH incarnation it means; both are optional, because a client that has never been told either may still read.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId"],
+  "properties": {
+    "sessionId": { "type": "string", "pattern": "^[0-9a-fA-F]{32}$" },
+    "instanceId": { "type": "string", "pattern": "^[0-9a-fA-F]{32}$" },
+    "sessionEpoch": { "type": "integer", "minimum": 1 },
+    "from": { "type": "integer", "minimum": 0 }
+  }
+}

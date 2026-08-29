@@ -356,6 +356,12 @@ func (u *updater) rollback(jp string, rec *journalRecord) error {
 // ---------------------------------------------------------------------------
 
 // ReportHealthy implements [Updater.ReportHealthy].
+//
+// Finalisation deletes the rollback journal, so everything that decides
+// whether this build is trustworthy has to happen BEFORE the first
+// destructive step below. The order is: is a transaction in flight, did
+// the exchange happen, and — the pair check, D4 — is the software now
+// running actually the software that was installed.
 func (u *updater) ReportHealthy(ctx context.Context) error {
 	lk, err := acquireLock(u.lockPath)
 	if err != nil {
@@ -383,6 +389,13 @@ func (u *updater) ReportHealthy(ctx context.Context) error {
 		return nil // exchange not yet applied, nothing to report
 	}
 
+	// The pair check. From here on the journal is about to be deleted and
+	// automatic rollback disarmed, so this is the last moment at which
+	// being wrong is still recoverable.
+	if err := u.certifyPair(ctx, rec); err != nil {
+		return err
+	}
+
 	// Finalisation (idempotent):
 	// 1. Delete old backup (if exists and not the current newID).
 	backup := backupPath(u.installPath)
@@ -406,6 +419,74 @@ func (u *updater) ReportHealthy(ctx context.Context) error {
 	}
 
 	u.log.Info("report healthy: update finalised", "version", rec.ToVersion)
+	return nil
+}
+
+// certifyPair refuses to certify anything but the exact pair this update
+// installed: the UI reporting health and the coordinator answering it must
+// both be rec.ToVersion. It never deletes, renames or writes anything —
+// its whole job is to say no before the caller does.
+//
+// TWO halves, and each was its own hole.
+//
+// The UI half: installPath holding newBundleID says the bundle on disk was
+// exchanged, and says nothing whatever about which binary is executing.
+// The process that CALLED Apply is still the old one, still running from
+// the swapped-out inode, and it satisfies that identity check the instant
+// Apply returns — so the pre-restart app could finalise its own update and
+// delete the journal without any new code having run at all.
+//
+// The server half is D4's: with a detached coordinator, the old daemon
+// survives the swap and answers the new window (design §4, ADR-0007's
+// health gate). Version N+1's renderer mounts against version N's backend,
+// reports healthy, and rollback is disarmed for a release whose server has
+// never started.
+//
+// A refusal here is not a failed update. The bundle is installed and the
+// journal survives, so the next launch counts again and reconciliation
+// rolls back on the third — which is exactly what should happen to a
+// version that cannot get its own two halves onto the same build.
+func (u *updater) certifyPair(ctx context.Context, rec *journalRecord) error {
+	if u.currentVersion != rec.ToVersion {
+		u.log.Warn("report healthy: refused — the reporting build is not the installed version",
+			"reporting", u.currentVersion, "installed", rec.ToVersion)
+		return fmt.Errorf(
+			"report healthy: %w: this build reports %s but the update installed %s — "+
+				"health is reported by the NEW build after a restart, not by the one that applied the update; "+
+				"the rollback journal is left intact",
+			ErrPairMismatch, u.currentVersion, rec.ToVersion)
+	}
+
+	if u.coordinator == nil {
+		u.log.Warn("report healthy: refused — no coordinator probe is wired",
+			"installed", rec.ToVersion)
+		return fmt.Errorf(
+			"report healthy: %w: no coordinator probe was wired into the updater, so the backend "+
+				"answering this window cannot be identified; the rollback journal is left intact",
+			ErrPairUnverifiable)
+	}
+
+	build, err := u.coordinator.AnsweringCoordinator(ctx)
+	if err != nil {
+		u.log.Warn("report healthy: refused — the coordinator could not be identified",
+			"installed", rec.ToVersion, "error", err)
+		return fmt.Errorf("report healthy: %w: %w; the rollback journal is left intact",
+			ErrPairUnverifiable, err)
+	}
+
+	if build.Version != rec.ToVersion {
+		u.log.Warn("report healthy: refused — a mixed pair answered",
+			"coordinator", build.Version, "coordinatorCommit", build.Commit,
+			"installed", rec.ToVersion)
+		return fmt.Errorf(
+			"report healthy: %w: the coordinator answering reports %s and this update installed %s — "+
+				"the old backend survived the swap and must be replaced before this version can be "+
+				"certified; the rollback journal is left intact",
+			ErrPairMismatch, build.Version, rec.ToVersion)
+	}
+
+	u.log.Info("report healthy: pair certified",
+		"version", rec.ToVersion, "coordinatorCommit", build.Commit)
 	return nil
 }
 

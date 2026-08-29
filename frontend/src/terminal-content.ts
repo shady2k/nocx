@@ -59,8 +59,19 @@ import {
   isDegraded,
   safeSilenceStorage,
   subscribeIntegrationChanged,
+  type OutputRecordingSource,
 } from './integration/status'
 import { mountIntegrationNotice } from './integration/notice'
+
+/** What a pane reads when nothing supplied the recording seam: the fact is
+ *  unknown and stays unknown, so the card says nothing about this session's
+ *  output. Deliberately not 'not-recorded' — a missing wire is not evidence
+ *  that the store is off, and claiming a loss the person is not suffering is
+ *  the same defect as hiding one. */
+const RECORDING_UNKNOWN: OutputRecordingSource = {
+  outputRecording: () => 'unknown',
+  subscribe: () => () => {},
+}
 import { BlockReceipt } from './ui/block-receipt'
 import type { HistoryRecord } from './generated/history.record'
 import { blockOutputText, renderRecordedCommand } from './scrollback/blocks'
@@ -298,6 +309,13 @@ export interface TerminalContentHooks {
    *  exec). Tab chrome renders at most this small warning mark
    *  (nocx-4t37.2); the capability statement itself lives in the rail. */
   onWarningChange?: (warning: boolean, label?: string) => void
+  /** Where this pane reads "is what my session prints being written down"
+   *  (nocx-22k1c.3). A plain tab records its output and produces no blocks,
+   *  and the card has to be able to say both halves; the fact belongs to
+   *  HistoryStatusStore and reaches the pane through here rather than being
+   *  derived a second time. Absent in a pane assembled without it, which
+   *  reads as "nothing known" and never as "nothing kept". */
+  outputRecording?: OutputRecordingSource
   /** The pane entered or left an environment, so the ports panel's target
    *  changed without the active tab changing (nocx-695k.3). */
   onPortsTargetChange?: () => void
@@ -369,6 +387,26 @@ export interface TerminalContentHooks {
    *  it is the same idea — a state names one page that repairs it — and
    *  wired by main.tsx to the Settings tab's Roles page. */
   onOpenRoles?: () => void
+  /** TAKE A LIVE SESSION BACK instead of opening a new one (design D5, §5).
+   *
+   *  The coordinator outlives this window, so a pane the layout chain brings
+   *  back may still have its process running on the other side. When the
+   *  backend named a live session for this pane, the pane manager supplies
+   *  this; calling it claims that session and answers with a handle to it,
+   *  and `openRequestedSession` never runs.
+   *
+   *  A THUNK, not a handle, because the claim must not happen before the pane
+   *  mounts. One client owns a session at a time (D8), so claiming takes it
+   *  from whoever holds it — a pane built during a restore and then disposed
+   *  before it was ever shown must not have stolen anything on the way past.
+   *  It is therefore called exactly where an open would have been called, and
+   *  only then.
+   *
+   *  A REJECTION IS NOT FATAL: the session died, or another client took it,
+   *  between the list and the claim. The pane then opens a fresh session, the
+   *  way a pane with nothing to reclaim always has. Whoever supplies the
+   *  thunk owns saying so to the person — this side only falls back. */
+  adoptSession?: () => Promise<SessionHandle>
 }
 
 type SummonDecision =
@@ -902,6 +940,9 @@ export class TerminalContent extends BasePaneContent {
   private readonly _readyPromise: Promise<boolean>
   /** The drop gesture's detach, held for dispose. */
   private _dropDetach: (() => void) | null = null
+  /** Whether the reclaim of a live session has already been tried — see
+   *  adoptLiveSession. */
+  private _adoptAttempted = false
   /** This pane's files binding, opened on the FIRST upload and reused. A
    *  terminal does not need one to run, so it is not opened at mount: a
    *  binding is a provider, a pooled SSH reference and a watch set, and a
@@ -1400,6 +1441,8 @@ export class TerminalContent extends BasePaneContent {
    * the open goes out exactly as it did before this bead, unanchored.
    */
   private async openRequestedSession(): Promise<SessionHandle> {
+    const adopted = await this.adoptLiveSession()
+    if (adopted !== null) return adopted
     const anchor: OpenAnchor = (await this.pane.registered) ? { paneId: this.pane.paneId } : {}
     if (!this.sshOpts) {
       return this.client.openSession(this.cols, this.rows, anchor)
@@ -1414,6 +1457,37 @@ export class TerminalContent extends BasePaneContent {
       this.sshOpts.user,
       anchor,
     )
+  }
+
+  /**
+   * Take back the session the coordinator is already running for this pane,
+   * or answer null so a new one is opened (design D5, §5).
+   *
+   * THE ATTEMPT IS MADE AT MOST ONCE per pane, whatever happens to it. The
+   * caller retries on a host-key refusal, and a second claim would be a
+   * second attempt to take a session this pane has already established it
+   * cannot have — the ssh fallback is what the retry is about.
+   *
+   * A failure is answered with null rather than raised: the session ended, or
+   * another client claimed it, between the list and the claim, and the pane
+   * then starts a fresh one exactly as a pane with nothing to reclaim does.
+   * Whoever supplied the thunk says so to the person — the fallback is here
+   * and the account of it is there, because this side cannot tell a claim
+   * that lost a race from a backend that never held anything.
+   */
+  private async adoptLiveSession(): Promise<SessionHandle | null> {
+    const adopt = this.hooks.adoptSession
+    if (adopt === undefined || this._adoptAttempted) return null
+    this._adoptAttempted = true
+    try {
+      return await adopt()
+    } catch (err) {
+      log.warn('nocx: the live session for this pane could not be taken back', {
+        pane: this.pane.paneId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return null
+    }
   }
 
   private async openSessionWithHostKeyRecovery(signal: AbortSignal): Promise<SessionHandle> {
@@ -2165,7 +2239,7 @@ export class TerminalContent extends BasePaneContent {
       // not parse these degrades to raising nothing rather than failing to
       // mount, which is what the fakes in the test suite rely on.
       renderer.onNotification?.((request) => {
-        // A program asked nocx to present a message (ADR-0029). The renderer
+        // A program asked nocx to present a message (ADR-0047). The renderer
         // reports the request and never grants it: what crosses is the text
         // the program supplied plus this session's id, and the backend stamps
         // kind, trust, level and attribution from the method invoked and its
@@ -3037,7 +3111,7 @@ export class TerminalContent extends BasePaneContent {
         // which is a routable event with a trust class, an attribution and a
         // feed row. A bell is both, so it does both.
         host.requestAttention()
-        // A program printed BEL (ADR-0029). Reported through its OWN method:
+        // A program printed BEL (ADR-0047). Reported through its OWN method:
         // kind is stamped from the method invoked, so notify.bell is what
         // makes this a bell, and there is no argument here — or anywhere on
         // this client — by which it could become a different kind or reach a
@@ -3929,7 +4003,8 @@ export class TerminalContent extends BasePaneContent {
     // mark: it is the backend's own fact about this session, not a
     // stream-derived claim.
     const degraded = isDegraded(this._integration)
-    const label = integrationMessage(this._integration)?.title ?? ''
+    const label =
+      integrationMessage(this._integration, this._recording().outputRecording())?.title ?? ''
     if (
       shellState === this._shellState &&
       presentation === this._presentation &&
@@ -3982,6 +4057,14 @@ export class TerminalContent extends BasePaneContent {
       return
     }
     this._maybeShowIntegrationNotice(fact)
+  }
+
+  /** Where this pane reads the recording fact, with the honest fallback for
+   *  a pane assembled without the seam: nothing known, so the card says
+   *  nothing about recording rather than guessing. It is never a claim that
+   *  nothing is kept — that is a different sentence and it would be wrong. */
+  private _recording(): OutputRecordingSource {
+    return this.hooks.outputRecording ?? RECORDING_UNKNOWN
   }
 
   /** Take the card down and give the pane back to the terminal. */
@@ -4060,6 +4143,7 @@ export class TerminalContent extends BasePaneContent {
     if (this._silencedShells.isSilenced(fact.shell)) return
     this._noticeDispose = mountIntegrationNotice(target, {
       fact,
+      recording: this._recording(),
       copy: (text) => this.clipboard.writeText(text),
       onSuppressShell: () => {
         this._silencedShells.silenceShell(fact.shell)

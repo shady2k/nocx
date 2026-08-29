@@ -67,7 +67,7 @@ refused launcher, a read-only remote `$HOME`, an environment depth greater than 
 ### 3.2 script — first contact
 
 > **Amended 2026-08-20 by `nocx-a1615` (the integration-delivery-carrier design)
-> and [ADR-0035](../../docs/decisions/0035-the-channel-we-own-is-the-carrier.md),
+> and [ADR-0049](../../docs/decisions/0049-the-channel-we-own-is-the-carrier.md),
 > which supersedes ADR-0022.** First contact stops being an argv event. The
 > launcher no longer travels in the command, nothing is staged in a local file,
 > and there is no separate first-contact line: **publication happens on a channel

@@ -77,7 +77,7 @@ func TestBashLauncher_RefusesNothingWhenTempIsUnusable(t *testing.T) {
 //     used a flat 128KB and died as `fork/exec /bin/sh: argument list too
 //     long` on the Linux runner. The bound used to be the product's own
 //     maxFullLauncherLen, because the rcfile really did travel in a remote
-//     command; ADR-0035 retired that command, so the rcfile now travels
+//     command; ADR-0049 retired that command, so the rcfile now travels
 //     inside the installed launch carrier and the only argv word left is this
 //     test's own. The number is therefore stated here, where it still binds.
 //
@@ -229,7 +229,7 @@ func TestBashLauncher_UserRcAlreadySourcedAnInstall(t *testing.T) {
 // bashTierArg builds the bash tier's payload the way the installed launch
 // carrier builds it: the rcfile sources the installed generation file and
 // carries no per-session bearer at all. The method that used to build it went
-// with the remote command it was for (ADR-0035) — that form substituted both
+// with the remote command it was for (ADR-0049) — that form substituted both
 // bearers into the rcfile TEXT, which then travelled in argv.
 func bashTierArg(opts LaunchOptions) string {
 	return tierArg(ShellBash, launcherEnvBlock(opts))

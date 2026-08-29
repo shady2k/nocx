@@ -7,7 +7,7 @@
   ownership), and the lifecycle half of `AD-5`.
 - **Amends:** `AD-1` (what may cross the control plane), `AD-6` (who owns what).
 - **Amended:** 2026-08-20 by
-  [ADR-0035](0035-the-channel-we-own-is-the-carrier.md) and the
+  [ADR-0049](0049-the-channel-we-own-is-the-carrier.md) and the
   integration-delivery-carrier design (D8, §5.4) — one open question closes and
   decision 10's threat model gains the actor it was always about. See
   **Amendment (2026-08-20)** below; decision 2's sentence about substituting the
@@ -310,7 +310,7 @@ substitutes `@SID@` — never passed as an environment variable. Verified: a chi
 cannot read a non-exported shell variable, and a value that was never in the
 environment is absent from `/proc/<pid>/environ`, which survives `unset`.
 
-> **Amended 2026-08-20 (ADR-0035).** "Never passed as an environment variable"
+> **Amended 2026-08-20 (ADR-0049).** "Never passed as an environment variable"
 > stands, and so does everything above about the environment. "Substituted into
 > the integration script text" is retired: that text travelled in the SSH command,
 > so the capability reached the far host's process arguments and every recorder of
@@ -609,7 +609,7 @@ never prove a compromised speaker told the truth.
 
 ## Amendment (2026-08-20) — how the capability travels, and whom it is for
 
-Made by [ADR-0035](0035-the-channel-we-own-is-the-carrier.md) and the
+Made by [ADR-0049](0049-the-channel-we-own-is-the-carrier.md) and the
 integration-delivery-carrier design (D8 and §5.4). Two things change: an open
 question closes, and decision 10 gains an actor it named only in passing.
 
@@ -686,7 +686,7 @@ which is the compromised-shell case this ADR excluded from the start.
 ## What this deliberately leaves open
 
 - ~~**Whether the capability ever touches a named file.**~~ **Closed
-  2026-08-20 (ADR-0035), in the direction this ADR preferred:** the per-epoch
+  2026-08-20 (ADR-0049), in the direction this ADR preferred:** the per-epoch
   capability never enters a filesystem object under a name, and installed scripts
   stay capability-free. The condition attached to the preference is also
   discharged, and in the harder direction — decision 10 does now name same-user

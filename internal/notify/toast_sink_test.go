@@ -32,7 +32,7 @@ func (p *recordingToast) seen() []notify.Event {
 
 // TestToastSink_HandsTheEventToItsPort: the whole of the sink. It validates
 // nothing, decides nothing and selects nothing — the destination arrived
-// resolved (ADR-0029 §2.3) and the port is bound at construction.
+// resolved (ADR-0047 §2.3) and the port is bound at construction.
 func TestToastSink_HandsTheEventToItsPort(t *testing.T) {
 	p := &recordingToast{}
 	sink := notify.ToastSink{Presenter: p}

@@ -4,7 +4,7 @@
   pool-rotation finding of §2.9, which was wrong)
 - **Brainstorming bead:** `nocx-52cd`
 - **Status:** design approved, pending implementation plan
-- **Supersedes in part:** [ADR-0006 — Reusable Credentials](../../docs/decisions/0006-reusable-credentials.md)
+- **Supersedes in part:** [ADR-0046 — Reusable Credentials](../../docs/decisions/0046-reusable-credentials.md)
 - **Adopts the diagnosis, rejects the mechanism of:** PR #59 / draft ADR-0013
   "Credential-Scoped Trusted Endpoints" (see §3.2; its §4, one owner of endpoint
   identity, is adopted and then refined in §3.4)

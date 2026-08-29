@@ -258,11 +258,9 @@ test.describe('a Postman ZIP imports as one complete archive', () => {
   let backend: VaultBackend
 
   test.beforeEach(() => {
-    backend = new VaultBackend(
-      readStand().devharness,
-      { root: mkdtempSync(join(tmpdir(), 'nocx-e2e-api-import-zip-')) },
-      true,
-    )
+    backend = new VaultBackend(readStand().server, {
+      root: mkdtempSync(join(tmpdir(), 'nocx-e2e-api-import-zip-')),
+    })
   })
 
   test.afterEach(() => {

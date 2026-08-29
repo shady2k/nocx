@@ -9,7 +9,7 @@ import (
 // routing table is built. It exists for exactly the reason HostHolder does,
 // and the reason is worth repeating rather than cross-referencing: the table
 // is fixed at NewRouter because the router is the only holder of "where"
-// (ADR-0029 §2.3), and a table that could grow rows later would put that
+// (ADR-0047 §2.3), and a table that could grow rows later would put that
 // authority somewhere else.
 //
 // The toast's implementation is a push to the renderer, so it needs the

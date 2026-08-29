@@ -657,7 +657,7 @@ func handleSession(ch gossh.Channel, reqs <-chan *gossh.Request) {
 				// `internal-sftp` and is configured with it by default, so a far
 				// side that refuses this request is not a smaller sshd — it is a
 				// different one. Two consumers depend on it: nocx publishes its
-				// integration bundle over SFTP and nothing else (ADR-0035), and
+				// integration bundle over SFTP and nothing else (ADR-0049), and
 				// the helper install lease (internal/ssh.HelperInstallConn)
 				// writes the versioned binary through the same subsystem. While
 				// this fell through to `default`, every connection to the fixture
@@ -850,7 +850,7 @@ func startCommand(ch gossh.Channel, st *sessionState, command string) {
 		// with status 255" with no output at all. Nothing noticed while the
 		// integration bundle travelled in the ssh command line: the one
 		// caller is GetRemoteHome, whose failure was fail-open and cost the
-		// old path nothing. ADR-0035 moved the bundle onto SFTP, which needs
+		// old path nothing. ADR-0049 moved the bundle onto SFTP, which needs
 		// that home, so a fixture that cannot run `echo $HOME` now reports
 		// itself to the user as "nocx could not copy its shell integration to
 		// this host".

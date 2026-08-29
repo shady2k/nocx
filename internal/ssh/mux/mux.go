@@ -9,7 +9,7 @@
 // prompt: a credential use the user did not ask for, arriving as a side effect
 // of a feature they did not request.
 //
-// The decision is ADR-0035's: THE ADAPTER IS MUX-ONLY, WITH NO FALLBACK. A
+// The decision is ADR-0049's: THE ADAPTER IS MUX-ONLY, WITH NO FALLBACK. A
 // refused session request refuses the delivery; it never opens a connection.
 // OpenSSH's own clients cannot promise that — there is no option that says
 // "use the master or fail" — so the client is here instead, and the property
@@ -30,7 +30,7 @@
 //     subsystem session, with no new authentication. The control socket IS the
 //     trust boundary, so this package is only ever pointed at a socket nocx
 //     created for one destination (a %C-derived path under a directory we
-//     own). Reusing a master the user runs is rejected in ADR-0035, not
+//     own). Reusing a master the user runs is rejected in ADR-0049, not
 //     deferred, and there is deliberately no API here for it.
 //
 // The wire is OpenSSH's PROTOCOL.mux. Every message is a big-endian uint32

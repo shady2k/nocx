@@ -131,7 +131,7 @@ function startSshd(): Fixture & { _wait: Promise<void> } {
 }
 
 /** Seed the isolated home's known_hosts so the backend's ssh client accepts
- *  the fixture's host key (the devharness runs with that HOME). */
+ *  the fixture's host key (the nocx-server runs with that HOME). */
 function trustHostKey(fixture: Fixture): void {
   const sshDir = path.join(readStand().home, '.ssh')
   mkdirSync(sshDir, { recursive: true, mode: 0o700 })

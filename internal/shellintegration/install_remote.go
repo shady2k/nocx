@@ -104,7 +104,7 @@ func (s *Impl) UninstallRemote(ctx context.Context, sshClient *gossh.Client, rem
 
 // EnsureInstalledOverPipe publishes the bundle over an SFTP subsystem that is
 // already speaking on rw, through the same Publisher every other carrier
-// uses. It is the typed path's publish (ADR-0035): there the connection is
+// uses. It is the typed path's publish (ADR-0049): there the connection is
 // the user's own `ssh` process and nocx holds no SSH transport for it — what
 // it holds is an AUXILIARY CHANNEL on that connection, opened over the
 // multiplex master after ownership was proven, which is a pair of pipes and

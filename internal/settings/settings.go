@@ -859,7 +859,7 @@ var AssistantPersonalInstructions = MustRegisterString(StringSpec{
 // for them to say so: every answer arrived closed and every note had to be
 // opened by hand, one at a time, forever.
 //
-// It is a setting and not UI state (ADR-0033): a person chooses it
+// It is a setting and not UI state (ADR-0048): a person chooses it
 // deliberately, at a control, it means the same on any machine, and
 // differing from the default is worth a badge. Opening one note by clicking
 // its summary is the other class — a side effect of reading — and is
@@ -885,7 +885,7 @@ var AssistantExpandReasoning = MustRegisterBool(BoolSpec{
 // Settings → Interface reading 206.3828125 px and badged the section
 // "Modified" the moment anybody dragged the edge — two symptoms of the one
 // wrong owner (nocx-mqie.3). It now lives in internal/uistate, beside the
-// window geometry, as a whole number of CSS pixels. See ADR-0033 for the line
+// window geometry, as a whole number of CSS pixels. See ADR-0048 for the line
 // between the two stores, and check a new key against it before adding one
 // here.
 

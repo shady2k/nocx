@@ -10,7 +10,7 @@
 #
 # A Linux container has no macOS keychain to ask, so the boundary is the
 # container itself rather than a variable a caller could forget. It also runs
-# the path AGENTS.md already documents — cmd/devharness plus the NOCX_WS_PORT
+# the path AGENTS.md already documents — cmd/nocx-server plus the discovery-socket
 # shim: the real Go backend and a real PTY, with no wails, no GTK and no
 # display.
 #
@@ -41,7 +41,7 @@
 # Revisit if a failure ever turns out to be arch-specific. Nothing has been.
 FROM mcr.microsoft.com/playwright:v1.61.1-noble
 
-# Go, pinned to go.mod. The suite compiles cmd/devharness and cmd/e2e-sshd.
+# Go, pinned to go.mod. The suite compiles cmd/nocx-server and cmd/e2e-sshd.
 ARG GO_VERSION=1.26.5
 RUN set -eux; \
     arch="$(dpkg --print-architecture)"; \

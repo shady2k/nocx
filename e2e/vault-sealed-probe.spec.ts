@@ -17,7 +17,7 @@
  * operation's gates and lane permit, released when the failed attempt
  * returned, are free for it.
  *
- * The backend is THIS FILE'S OWN devharness on a disposable home with no
+ * The backend is THIS FILE'S OWN nocx-server on a disposable home with no
  * Secret Service (VaultBackend, `true`), so the passphrase journey is the
  * real one and the endpoint never leaks into the shared stand.
  */
@@ -30,7 +30,7 @@ import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
 import { fieldChip } from './secret-field'
 
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 // The rail is selected by PAGE ID, not by display title (nocx-dgsp): the
@@ -54,7 +54,7 @@ test.beforeAll(async () => {
   fake = new FakeOpenAI()
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-y7fg-e2e-'))
-  backend = new VaultBackend(devharnessBin(), { root }, true)
+  backend = new VaultBackend(serverBin(), { root })
   endpoint = await backend.start()
 })
 

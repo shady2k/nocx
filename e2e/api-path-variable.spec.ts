@@ -32,7 +32,7 @@ import {
 const test = base
 
 /** Lazily: the stand is started by globalSetup, after this file is collected. */
-const devharnessBin = (): string => readStand().devharness
+const serverBin = (): string => readStand().server
 
 test.describe('a request-owned path variable sends its resolved value', () => {
   // Three columns — tree, request, runs — must all be on screen for a person
@@ -46,7 +46,7 @@ test.describe('a request-owned path variable sends its resolved value', () => {
   test.beforeAll(async () => {
     disposable = { root: mkdtempSync(join(tmpdir(), 'nocx-e2e-path-variable-')) }
     server = await startPathVariableServer({ expectedID: PATH_VARIABLE_ID })
-    backend = new VaultBackend(devharnessBin(), disposable, true)
+    backend = new VaultBackend(serverBin(), disposable)
   })
 
   test.afterAll(async () => {

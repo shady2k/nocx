@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/notify.feed.read.schema.json",
   "title": "NotifyFeedRead",
-  "description": "Result of notify.feed.read: the authoritative snapshot of the notification centre's in-memory feed. The renderer reconciles against revision — it applies a notify.feed.changed hint only when the hint is exactly its own revision plus one, and refetches on any gap, so a change notification dropped by the refreshable outbound queue costs one refetch rather than a lost row (nocx-sb3f). Occurrences are newest first. trust is deliberately absent: it is a routing capability bound (ADR-0029 §3) and not something a surface renders, and carrying it would invite a renderer to act on a decision the router already made.",
+  "description": "Result of notify.feed.read: the authoritative snapshot of the notification centre's in-memory feed. The renderer reconciles against revision — it applies a notify.feed.changed hint only when the hint is exactly its own revision plus one, and refetches on any gap, so a change notification dropped by the refreshable outbound queue costs one refetch rather than a lost row (nocx-sb3f). Occurrences are newest first. trust is deliberately absent: it is a routing capability bound (ADR-0047 §3) and not something a surface renders, and carrying it would invite a renderer to act on a decision the router already made.",
   "type": "object",
   "additionalProperties": false,
   "required": ["revision", "unreadCount", "occurrences", "dropped"],
@@ -53,7 +53,7 @@
         },
         "at": { "description": "RFC 3339 instant, stamped once by ingress.", "type": "string" },
         "title": {
-          "description": "Untrusted presentation data (ADR-0029 §2.3). Rendered as text, never as markup.",
+          "description": "Untrusted presentation data (ADR-0047 §2.3). Rendered as text, never as markup.",
           "type": "string"
         },
         "body": {
@@ -125,7 +125,7 @@
           "type": "string"
         },
         "title": {
-          "description": "The title this constituent arrived with. Untrusted presentation data (ADR-0029 §2.3), same guarantees as the row's: rendered as text, never as markup.",
+          "description": "The title this constituent arrived with. Untrusted presentation data (ADR-0047 §2.3), same guarantees as the row's: rendered as text, never as markup.",
           "type": "string"
         },
         "read": {

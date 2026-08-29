@@ -146,7 +146,7 @@ func TestResolveArgv_CacheSkipsRepeatSpawn(t *testing.T) {
 //
 // THIS CASE USED TO ASSERT THE OPPOSITE — one entry, keyed by the resolved
 // identity, with the argv only an index into it — and it is reversed
-// deliberately rather than relaxed. ADR-0035 gave one destination two
+// deliberately rather than relaxed. ADR-0049 gave one destination two
 // questions with two different right answers: the typed wrapper asks about
 // the user's own line, and then about the same line plus our own
 // ControlMaster/ControlPath/ControlPersist, because only ssh can expand the

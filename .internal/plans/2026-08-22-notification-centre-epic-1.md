@@ -15,8 +15,8 @@
 - **AD-1:** the feed is control plane only. No PTY byte enters it, ever.
 - **AD-6:** the backend never parses the byte stream. OSC parsing stays in `frontend/src/renderers/xterm.ts`.
 - **AD-8:** the `Router` remains the only holder of "where"; the `Feed` is the only holder of "what was raised". Neither answers the other's question.
-- **ADR-0029 §3, non-negotiable:** trust classes are hard capability bounds. `TrustHeuristic` may never reach a sink whose `LeavesMachine()` is true, and `NewRouter` refuses such a table at construction (`ErrTrustCapability`). No task in this plan touches that check, and no task makes it configurable.
-- **ADR-0029 §2.2:** protected fields are stamped by nocx and are absent from the wire, never validated on it.
+- **ADR-0047 §3, non-negotiable:** trust classes are hard capability bounds. `TrustHeuristic` may never reach a sink whose `LeavesMachine()` is true, and `NewRouter` refuses such a table at construction (`ErrTrustCapability`). No task in this plan touches that check, and no task makes it configurable.
+- **ADR-0047 §2.2:** protected fields are stamped by nocx and are absent from the wire, never validated on it.
 - **AGENTS.md rule 5:** every JSON-RPC result shape gets a schema in `contracts/` with `additionalProperties: false` and an explicit `required`, a generated renderer type, a `_DTOConformsToContract` case and a `_OverTheWireConformsToContract` case.
 - **UI kit:** surfaces import from `frontend/src/ui/`. A surface may **place** a kit component and may never **repaint** it. New kit components get a module, a CSS file in `styles/components/`, a stable identity class, a test and a row in `frontend/src/ui/README.md`.
 - **Commit format:** `<type>(<scope>): <imperative subject> (<bead-id>)`, body as prose explaining what was wrong and why this way.
@@ -107,7 +107,7 @@ Expected: FAIL — `undefined: NewFeed`.
 // Package-local: the feed is the only holder of "what was raised". It never
 // decides delivery, and the router never decides membership (AD-8).
 //
-// In memory, deliberately: ADR-0033 forbids the renderer holding facts, and
+// In memory, deliberately: ADR-0048 forbids the renderer holding facts, and
 // this design holds none on disk either — the feed dies with the process and
 // the spec says so with both ends named (§7).
 package notify
@@ -953,7 +953,7 @@ git commit -m "feat(transport,notify): a session that ends while you are away is
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/notify.feed.read.schema.json",
   "title": "NotifyFeedRead",
-  "description": "Result of notify.feed.read: the authoritative snapshot of the notification centre's in-memory feed. The renderer reconciles against revision — it applies a notify.feed.changed hint only when the hint is exactly its own revision plus one, and refetches on any gap, so a change notification dropped by the refreshable outbound queue costs one refetch rather than a lost row (nocx-sb3f). Occurrences are newest first. trust is deliberately absent: it is a routing capability bound (ADR-0029 §3) and not something a surface renders, and carrying it would invite a renderer to act on a decision the router already made.",
+  "description": "Result of notify.feed.read: the authoritative snapshot of the notification centre's in-memory feed. The renderer reconciles against revision — it applies a notify.feed.changed hint only when the hint is exactly its own revision plus one, and refetches on any gap, so a change notification dropped by the refreshable outbound queue costs one refetch rather than a lost row (nocx-sb3f). Occurrences are newest first. trust is deliberately absent: it is a routing capability bound (ADR-0047 §3) and not something a surface renders, and carrying it would invite a renderer to act on a decision the router already made.",
   "type": "object",
   "additionalProperties": false,
   "required": ["revision", "unreadCount", "occurrences", "dropped"],
@@ -1002,7 +1002,7 @@ git commit -m "feat(transport,notify): a session that ends while you are away is
         },
         "at": { "description": "RFC 3339 instant, stamped once by ingress.", "type": "string" },
         "title": {
-          "description": "Untrusted presentation data (ADR-0029 §2.3). Rendered as text, never as markup.",
+          "description": "Untrusted presentation data (ADR-0047 §2.3). Rendered as text, never as markup.",
           "type": "string"
         },
         "body": {
@@ -1151,7 +1151,7 @@ package transport
 // notify.feed.read / notify.feed.markRead -- the renderer's window onto the
 // notification centre. The DTOs mirror contracts/notify.feed.read.schema.json
 // field for field, and `trust` is absent from BOTH: it is a routing capability
-// bound (ADR-0029 3), not something a surface renders, and carrying it would
+// bound (ADR-0047 3), not something a surface renders, and carrying it would
 // invite a renderer to act on a decision the router already made.
 
 import (

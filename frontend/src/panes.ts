@@ -646,6 +646,7 @@ export class PaneManager {
   private readonly profileClient: ProfileClient
   private _initialPaneReady: Promise<void> | undefined
   private tabStrip: TabStrip
+  private readonly displayRevisionListeners = new Set<() => void>()
   /** The chain, as the backend last answered. A cache, never an authority. */
   /** The panes this window is NOT showing: what the chain held at boot when
    *  the person asked for a clean start (nocx-yejir).
@@ -829,6 +830,11 @@ export class PaneManager {
 
   get paneCount(): number {
     return this.panes.length
+  }
+  /** Subscribe to changes in pane display state, such as title or decoration. */
+  onDisplayRevision(listener: () => void): () => void {
+    this.displayRevisionListeners.add(listener)
+    return () => this.displayRevisionListeners.delete(listener)
   }
 
   get initialPaneReady(): Promise<void> {
@@ -1325,6 +1331,13 @@ export class PaneManager {
    * and its shell runs — an agent in a workspace nobody is looking at has to
    * keep working.
    */
+  private attachDisplayChange(pane: Pane): void {
+    pane.onDisplayChange = () => {
+      this.tabStrip.refreshPane(pane)
+      for (const listener of this.displayRevisionListeners) listener()
+    }
+  }
+
   private addPane(
     content: PaneContent,
     descriptor: ContentDescriptor,
@@ -1361,6 +1374,7 @@ export class PaneManager {
           })
         })
     }
+    this.attachDisplayChange(pane)
     this.tabStrip.addPane(pane)
     if (activateNow) {
       void this.activate(pane)

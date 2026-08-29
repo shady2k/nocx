@@ -125,6 +125,25 @@ interface PaneDisplayRecord {
   depth: number
 }
 
+function paneDisplayRecord(tab: PaneView): PaneDisplayRecord {
+  return {
+    title: tab.displayTitle ?? tab.title,
+    tooltip: tab.tooltip,
+    subtitle: tab.subtitle,
+    preview: tab.preview,
+    adoptable: tab.adoptable === true,
+    warning: tab.warning === true,
+    warningLabel: tab.warningLabel ?? '',
+    hasActivity: tab.hasActivity,
+    agentStatus: tab.agentStatus,
+    agentSource: tab.agentSource,
+    colour: tab.colour ?? null,
+    pinned: tab.pinned === true,
+    groupKey: tab.groupKey ?? '',
+    depth: tab.depth ?? 0,
+  }
+}
+
 /** What stands above one group of rows, or null for a group that draws no
  *  heading — the default workspace's, which is top-level rows and nothing
  *  else (§4.2). The strip is TOLD these; deciding one is the axis's job
@@ -168,6 +187,7 @@ export interface TabStrip {
   readonly orientation: Orientation
   mount(container: HTMLElement): void
   addPane(tab: PaneView): void
+  refreshPane(tab: PaneView): void
   removePane(paneId: number): void
   setActive(paneId: number): void
   reorder(tabs: readonly PaneView[]): void
@@ -1004,49 +1024,17 @@ abstract class TabStripBase implements TabStrip {
   addPane(tab: PaneView): void {
     if (!this.mounted) return
 
-    // Wire display-change notification to write changed fields into the store.
-    tab.onDisplayChange = () => {
-      this._setDisplay('records', tab.id, {
-        title: tab.displayTitle ?? tab.title,
-        tooltip: tab.tooltip,
-        subtitle: tab.subtitle,
-        preview: tab.preview,
-        adoptable: tab.adoptable,
-        warning: tab.warning,
-        warningLabel: tab.warningLabel ?? '',
-        hasActivity: tab.hasActivity,
-        agentStatus: tab.agentStatus,
-        agentSource: tab.agentSource,
-        colour: tab.colour ?? null,
-        pinned: tab.pinned === true,
-        groupKey: tab.groupKey ?? '',
-        depth: tab.depth ?? 0,
-      })
-    }
-
     this._setPaneViews((prev) => [...prev, tab])
-
-    // Initialize store entry with current display state.
-    this._setDisplay('records', tab.id, {
-      title: tab.displayTitle ?? tab.title,
-      tooltip: tab.tooltip,
-      subtitle: tab.subtitle,
-      preview: tab.preview,
-      adoptable: tab.adoptable,
-      warning: tab.warning,
-      warningLabel: tab.warningLabel ?? '',
-      hasActivity: tab.hasActivity,
-      agentStatus: tab.agentStatus,
-      agentSource: tab.agentSource,
-      colour: tab.colour ?? null,
-      pinned: tab.pinned === true,
-      groupKey: tab.groupKey ?? '',
-      depth: tab.depth ?? 0,
-    })
+    this.refreshPane(tab)
 
     // Link pane to button (aria-labelledby)
     const pane = document.getElementById(tab.paneId)
     if (pane) pane.setAttribute('aria-labelledby', `tab-btn-${tab.id}`)
+  }
+
+  refreshPane(tab: PaneView): void {
+    if (!this.mounted) return
+    this._setDisplay('records', tab.id, paneDisplayRecord(tab))
   }
 
   removePane(paneId: number): void {

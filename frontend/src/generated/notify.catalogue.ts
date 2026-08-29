@@ -20,6 +20,10 @@ export interface NotifyCatalogue {
 }
 export interface Kind {
   /**
+   * The stable id the notifications.centre.<id> setting key is built from.
+   */
+  id: string
+  /**
    * The wire value stamped on a notification occurrence.
    */
   kind:

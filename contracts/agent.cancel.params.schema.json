@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.cancel.params.schema.json",
+  "title": "AgentCancelParams",
+  "description": "Params for agent.cancel.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["runId"],
+  "properties": { "runId": { "type": "integer", "exclusiveMinimum": 0 } }
+}

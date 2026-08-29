@@ -1,0 +1,24 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/snippets.update.params.schema.json",
+  "title": "SnippetsUpdateParams",
+  "description": "Params for snippets.update.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 200
+    },
+    "body": {
+      "type": "string",
+      "maxLength": 16000
+    }
+  }
+}

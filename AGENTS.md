@@ -538,14 +538,22 @@ list before believing it — and never the other way round: CI is still the sour
 or not — a worker that forgets strands everyone behind it:
 
 ```bash
-bd merge-slot acquire   # blocks/queues if another agent holds it
+scripts/merge-slot.sh acquire   # add --wait to queue behind the holder
 # merge, resolve, gate, push
-bd merge-slot release   # in the failure path too; `check` says who holds it
+scripts/merge-slot.sh release   # in the failure path too; `check` says who holds it
 ```
 
 Without it, two agents resolve conflicts against a `main` moving underneath both and each
 resolution invalidates the other's. This is orthogonal to approval: the slot decides _who
 merges next_, never _whether_.
+
+**Go through the script, not `bd merge-slot` directly** — bare `acquire` takes the holder
+from `git user.name`, which is one string for every agent on the machine, so `check`
+answers "held by shady2k" and you cannot tell your own stale hold from a colleague's live
+one. The script passes `--holder worktree:branch` instead, which is what you actually
+decide on. Twice in one session (2026-08-29) a coordinator burned the investigation on
+worktree mtimes and beads timestamps to guess whose slot it was, and both times had to ask
+the owner (`nocx-e3if5`).
 
 ### Every commit names its bead
 

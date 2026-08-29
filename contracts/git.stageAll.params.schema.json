@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/git.stageAll.params.schema.json",
+  "title": "GitStageAllParams",
+  "description": "Params for git.stageAll.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bindingId"],
+  "properties": { "bindingId": { "type": "string", "pattern": "^[0-9a-f]{32}$" } }
+}

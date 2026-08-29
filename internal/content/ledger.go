@@ -248,6 +248,14 @@ const (
 	ResourceCredential  ResourceKind = "credential"
 	ResourceDestination ResourceKind = "destination"
 	ResourceTool        ResourceKind = "tool"
+	// ResourceContent covers durable app content. Its canonical ids are
+	// "content", "note/<id>", and "snippet/<id>"; the latter two are
+	// hierarchical sub-scopes, not separate kinds.
+	ResourceContent ResourceKind = "content"
+	// ResourceWorkspace covers the workspace → tab → pane hierarchy. Its
+	// canonical ids are workspace/<id>, workspace/<id>/tab/<id>, and
+	// workspace/<id>/tab/<id>/pane/<id>.
+	ResourceWorkspace ResourceKind = "workspace"
 )
 
 // Effect is the ADR-0020 effect lattice — what an execution may do to the
@@ -573,10 +581,12 @@ type FinishAgentRun struct {
 	EndedAt           int64
 }
 
-// GrantScope is one resource the grant touches — what "this run held a grant
-// for these environments and touched these three sessions" is a query over.
+// GrantScope is one resource named by a grant. It records what this run may
+// touch, including canonical content and workspace sub-scopes.
 // The json tags are the wire form of a policy row's scope (the settings RPC);
-// the durable record persists kind and id as columns, not JSON.
+// the durable record persists kind and id as columns, not JSON. ValidateGrantScope
+// and GrantScope.Contains define the canonical ids and containment relation
+// consumed by policy and capability narrowing.
 type GrantScope struct {
 	Kind ResourceKind `json:"kind"`
 	ID   string       `json:"id"`

@@ -937,7 +937,7 @@ CREATE TABLE IF NOT EXISTS authority_grants (
 CREATE TABLE IF NOT EXISTS grant_scopes (
   grant_id      INTEGER NOT NULL REFERENCES authority_grants(id) ON DELETE CASCADE,
   resource_kind TEXT NOT NULL CHECK (resource_kind IN
-                ('environment','session','path','credential','destination','tool')),
+                ('environment','session','path','credential','destination','tool','content','workspace')),
   resource_id   TEXT NOT NULL,
   PRIMARY KEY (grant_id, resource_kind, resource_id)
 ) STRICT;

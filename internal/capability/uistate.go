@@ -28,6 +28,7 @@ type UIStateService interface {
 // serialises. UI state never touches the vault, so the vault gate is
 // deliberately not held.
 type UIStateOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, UIStateService) error) error
 }
 
@@ -35,7 +36,7 @@ type UIStateOperation interface {
 // the execution lane, and hands the callback a guard-bound UI-state service.
 func NewUIStateOperation(configGate, lane control.Admission, store *uistate.Store) UIStateOperation {
 	g := &guard{}
-	return newOperation[UIStateService](control.NewComposite(configGate, lane), g, &uiStateService{guard: g, store: store})
+	return newOperation[UIStateService](Excluded("it persists renderer presentation state rather than performing a domain action"), control.NewComposite(configGate, lane), g, &uiStateService{guard: g, store: store})
 }
 
 type uiStateService struct {

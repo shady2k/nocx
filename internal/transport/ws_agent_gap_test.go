@@ -154,6 +154,14 @@ func (o *directAgentOp) Run(_ context.Context, fn func(context.Context, capabili
 	return fn(context.Background(), o.svc)
 }
 
+// Disposition satisfies capability.AgentOperation. A test double stands in for
+// the real operation and inherits its classification rather than inventing one:
+// a double that claimed a different disposition would be testing a shape the
+// product does not have.
+func (o *directAgentOp) Disposition() capability.Disposition {
+	return capability.Direct("agent transcript and turn state")
+}
+
 // gapResponder is a Responder that records every notification and refuses
 // agent.runDelta on demand with outbound.ErrStalled — the exact error a full
 // queue or exhausted budget returns. failDeltaTimes counts DOWN: the first N

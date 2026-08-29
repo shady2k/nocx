@@ -1143,11 +1143,8 @@ const maxShellPinRunes = 32
 // host/user reach the ssh subprocess, so control characters are refused.
 func validateOpenRaw(raw json.RawMessage) string {
 	var p openParams
-	if len(raw) == 0 {
-		return "params are required"
-	}
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return "params must be a JSON object"
+	if msg := decodeObject(raw, &p, "cols", "rows"); msg != "" {
+		return msg
 	}
 	if p.Cols == 0 {
 		return "cols is required"
@@ -1222,11 +1219,8 @@ func validateOpenRaw(raw json.RawMessage) string {
 // must be a real server-minted id, and cols/rows nonzero.
 func validateResizeRaw(raw json.RawMessage) string {
 	var p resizeParams
-	if len(raw) == 0 {
-		return "params are required"
-	}
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return "params must be a JSON object"
+	if msg := decodeObject(raw, &p, "sessionId", "cols", "rows"); msg != "" {
+		return msg
 	}
 	if p.SessionID == "" {
 		return "sessionId is required"
@@ -1247,11 +1241,8 @@ func validateResizeRaw(raw json.RawMessage) string {
 // must be a real server-minted id.
 func validateCloseRaw(raw json.RawMessage) string {
 	var p closeParams
-	if len(raw) == 0 {
-		return "params are required"
-	}
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return "params must be a JSON object"
+	if msg := decodeObject(raw, &p, "sessionId"); msg != "" {
+		return msg
 	}
 	if p.SessionID == "" {
 		return "sessionId is required"
@@ -1275,11 +1266,8 @@ func validateCloseRaw(raw json.RawMessage) string {
 // straight to the store, which could only report "no such pane".
 func validateAttachRaw(raw json.RawMessage) string {
 	var p attachParams
-	if len(raw) == 0 {
-		return "params are required"
-	}
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return "params must be a JSON object"
+	if msg := decodeObject(raw, &p, "sessionId"); msg != "" {
+		return msg
 	}
 	if p.SessionID == "" {
 		return "sessionId is required"
@@ -1304,11 +1292,8 @@ func validateAttachRaw(raw json.RawMessage) string {
 // trivial: decode and two string checks, no allocation beyond the struct.
 func validateAckRaw(raw json.RawMessage) string {
 	var p ackParams
-	if len(raw) == 0 {
-		return "params are required"
-	}
-	if err := json.Unmarshal(raw, &p); err != nil {
-		return "params must be a JSON object"
+	if msg := decodeObject(raw, &p, "sessionId"); msg != "" {
+		return msg
 	}
 	if p.SessionID == "" {
 		return "sessionId is required"

@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/connections.test.params.schema.json",
+  "title": "ConnectionsTestParams",
+  "description": "Params for connections.test.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["profileId"],
+  "properties": {
+    "profileId": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    }
+  }
+}

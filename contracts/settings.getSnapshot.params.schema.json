@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/settings.getSnapshot.params.schema.json",
+  "title": "SettingsGetsnapshotParams",
+  "description": "Params for settings.getSnapshot.",
+  "type": ["object", "null"],
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

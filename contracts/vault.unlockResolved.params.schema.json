@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/vault.unlockResolved.params.schema.json",
+  "title": "VaultUnlockResolvedParams",
+  "description": "Params for vault.unlockResolved.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["requestId", "outcome"],
+  "properties": {
+    "requestId": { "type": "string", "minLength": 1, "maxLength": 256 },
+    "outcome": { "type": "string", "enum": ["unsealed", "cancelled"] }
+  }
+}

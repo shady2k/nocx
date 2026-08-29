@@ -150,47 +150,6 @@ const maxGenericStringRunes = 64_000
 // becomes expensive to walk.
 const maxGenericDepth = 16
 
-// genericObject is the FLOOR every method gets until it declares a validator
-// that knows its own fields: params must be absent or a JSON object, no
-// string in it may exceed maxGenericStringRunes, and nesting is bounded.
-//
-// This is real validation, not a placeholder — a method wearing it cannot be
-// reached with a bare scalar, an unbounded string or a pathological nesting.
-// It is nonetheless WEAKER than a validator that knows the method's fields
-// exist, are required, and mean something, and the `why` string names the
-// bead that will replace it. Count them with:
-//
-//	grep -c 'genericObject(' internal/transport/*.go
-//
-// That count is a ratchet: it may only shrink.
-func genericObject(why string) paramsValidator {
-	_ = why
-	return func(raw json.RawMessage) string {
-		if len(raw) == 0 {
-			return ""
-		}
-		trimmed := strings.TrimSpace(string(raw))
-		if trimmed == "" || trimmed == "null" {
-			return ""
-		}
-		var v any
-		if err := json.Unmarshal(raw, &v); err != nil {
-			return "params must be a JSON object or array"
-		}
-		// JSON-RPC 2.0 §4.2: params, when present, is a structured value —
-		// an object (named) or an array (positional). Both are legitimate
-		// here and both are walked; a bare scalar is not params at all.
-		// (groups.apply sends an array, which is how this floor learned it
-		// had been written from one method's habits rather than the spec.)
-		switch v.(type) {
-		case map[string]any, []any:
-		default:
-			return "params must be a JSON object or array"
-		}
-		return walkGeneric(v, 0)
-	}
-}
-
 func walkGeneric(v any, depth int) string {
 	if depth > maxGenericDepth {
 		return fmt.Sprintf("params nest deeper than %d levels", maxGenericDepth)

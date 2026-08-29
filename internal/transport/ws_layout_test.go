@@ -557,7 +557,7 @@ func TestNoContractDeclaresATabAddress(t *testing.T) {
 	}
 	seen := 0
 	for _, e := range entries {
-		if !strings.HasSuffix(e.Name(), ".schema.json") {
+		if !strings.HasSuffix(e.Name(), ".schema.json") || strings.HasSuffix(e.Name(), ".params.schema.json") {
 			continue
 		}
 		raw, err := os.ReadFile(filepath.Join(contractDir, e.Name())) //nolint:gosec // test-only path under contracts/

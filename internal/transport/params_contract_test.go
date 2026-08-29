@@ -219,6 +219,9 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"notify.bell": {
 			[]byte(`{"sessionId":"session-1"}`),
 		},
+		"notify.catalogue": {
+			[]byte(`{}`),
+		},
 		"notify.feed.markRead": {
 			[]byte(`{}`),
 		},

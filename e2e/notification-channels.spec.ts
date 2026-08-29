@@ -113,7 +113,7 @@ const cellAt = (row: string, column: string) =>
 /** The catalogue's ids and labels (internal/notify/catalogue.go). Written out
  *  because they are what a person reads and what the key persists — the two
  *  halves this surface is supposed to keep in step. */
-const KIND = { id: 'programNotify', label: 'A program asked for a notification' }
+const KIND = { id: 'programNotify', label: 'Program notification request' }
 const BANNER = { id: 'banner', label: 'OS banner' }
 const TOAST = { id: 'toast', label: 'In-app toast' }
 const cellLabel = (channel: { label: string }) => `${KIND.label} → ${channel.label}`

@@ -221,7 +221,7 @@ test('a session that ends while you are elsewhere waits for you in the bell', as
     // the bell gained is the message the program asked us to present.
     await expect(badge).toHaveText(String(waitingBefore + 1), { timeout: 30_000 })
     await showSidebarView(page, 'notifications')
-    const deployRow = unreadRowsOfKind(page, 'program.notify')
+    const deployRow = unreadRowsOfKind(page, 'Program notification request')
     await expect(deployRow).toHaveCount(1)
     const deployTitle = deployRow.locator('.ui-record-row__title')
     await expect(deployTitle).toHaveText('deploy done')

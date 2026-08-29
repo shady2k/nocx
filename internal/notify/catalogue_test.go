@@ -254,14 +254,59 @@ func TestCatalogueAccessorsHandOutCopies(t *testing.T) {
 
 	pairs := c.Pairs()
 	pairs[0].Kind.ID = "clobbered"
+	pairs[0].Kind.Trusts[0] = notify.TrustHeuristic
+	pairs[0].Kind.DefaultChannels = append(pairs[0].Kind.DefaultChannels, "clobbered")
 	pairs[0].DefaultOn = !pairs[0].DefaultOn
-	if c.Pairs()[0].Kind.ID == "clobbered" || len(c.Pairs()) != before {
-		t.Error("Pairs() hands out the catalogue's own slice; a caller can rewrite the catalogue through it")
+	if got := c.Pairs()[0]; got.Kind.ID == "clobbered" ||
+		got.Kind.Trusts[0] == notify.TrustHeuristic ||
+		len(got.Kind.DefaultChannels) != len(pairs[0].Kind.DefaultChannels)-1 ||
+		len(c.Pairs()) != before {
+		t.Error("Pairs() hands out the catalogue's own data; a caller can rewrite the catalogue through it")
 	}
+
+	presented := c.PresentedKinds()
+	presented[0].Trusts[0] = notify.TrustHeuristic
+	presented[0].DefaultChannels = append(presented[0].DefaultChannels, "clobbered")
+	if got := c.PresentedKinds()[0]; got.Trusts[0] == notify.TrustHeuristic ||
+		len(got.DefaultChannels) != len(presented[0].DefaultChannels)-1 {
+		t.Error("PresentedKinds() hands out the catalogue's nested data")
+	}
+
 	channels := c.Channels()
 	channels[0].ID = "clobbered"
 	if c.Channels()[0].ID == "clobbered" {
 		t.Error("Channels() hands out the catalogue's own slice")
+	}
+}
+
+func TestCataloguePresentedKindsIncludesUnroutableKind(t *testing.T) {
+	c, err := notify.NewCatalogue(
+		[]notify.RoutableKind{catKind("guessed", notify.TrustHeuristic)},
+		[]notify.RoutableChannel{networkChannel("remote")},
+	)
+	if err != nil {
+		t.Fatalf("NewCatalogue: %v", err)
+	}
+	if got := c.Pairs(); len(got) != 0 {
+		t.Fatalf("Pairs() returned %d offered cells, want none", len(got))
+	}
+	kinds := c.PresentedKinds()
+	if len(kinds) != 1 || kinds[0].ID != "guessed" {
+		t.Fatalf("PresentedKinds() = %+v, want the unroutable guessed kind", kinds)
+	}
+}
+
+func TestCatalogueCopiesNestedKindSlicesOnConstruction(t *testing.T) {
+	kinds := []notify.RoutableKind{catKind("original", notify.TrustAttested, "local")}
+	c, err := notify.NewCatalogue(kinds, []notify.RoutableChannel{localChannel("local")})
+	if err != nil {
+		t.Fatalf("NewCatalogue: %v", err)
+	}
+	kinds[0].Trusts[0] = notify.TrustHeuristic
+	kinds[0].DefaultChannels[0] = "changed"
+	got := c.PresentedKinds()[0]
+	if got.Trusts[0] != notify.TrustAttested || got.DefaultChannels[0] != "local" {
+		t.Errorf("catalogue retained caller-owned nested slices: %+v", got)
 	}
 }
 

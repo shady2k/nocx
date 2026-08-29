@@ -18,11 +18,11 @@ import { Badge } from './badge'
 afterEach(cleanup)
 
 describe("RecordRow — the kit's record grammar", () => {
-  it('renders title, one kind badge, meta text and the status dot + text', () => {
+  it('renders title, one kind badge with its description, meta text and the status dot + text', () => {
     const { container } = render(() => (
       <RecordRow
         title="provider"
-        kind={{ label: 'OpenAI-compatible' }}
+        kind={{ label: 'OpenAI-compatible', description: 'The provider protocol' }}
         meta="3 models"
         status={{ tone: 'ok', text: 'Key saved' }}
         actions={<button type="button">Edit</button>}
@@ -38,6 +38,7 @@ describe("RecordRow — the kit's record grammar", () => {
     const badges = container.querySelectorAll('.ui-badge')
     expect(badges.length).toBe(1)
     expect(badges[0].textContent).toBe('OpenAI-compatible')
+    expect(badges[0].getAttribute('title')).toBe('The provider protocol')
 
     expect(container.querySelector('.ui-record-row__meta-text')?.textContent).toBe('3 models')
 

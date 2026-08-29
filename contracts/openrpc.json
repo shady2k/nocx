@@ -4710,6 +4710,55 @@
       }
     },
     {
+      "name": "notify.catalogue",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/notify.catalogue.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32004,
+          "message": "Control plane busy",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "result": {
+        "name": "notify.catalogueResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/notify.catalogue.schema.json"
+        }
+      }
+    },
+    {
       "name": "notify.feed.markRead",
       "params": [
         {
@@ -9593,6 +9642,9 @@
     },
     {
       "$ref": "https://nocx.local/contracts/notify.bell.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/notify.catalogue.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/notify.feed.changed.schema.json"

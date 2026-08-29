@@ -67,7 +67,7 @@ html {
 
   /* ── Shell layout (§2.5) ────────────────────────────────────────────
      There is deliberately no --sidebar-width here: the sidebar's width is
-     UI state in the uistate document (ADR-0033), applied inline as
+     UI state in the uistate document (ADR-0048), applied inline as
      --sidebar-width by frontend/src/sidebar-width.ts. A second declaration
      of the same number would be the dead twin this token used to be. */
   --activity-bar-width: 48px;

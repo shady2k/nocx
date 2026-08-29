@@ -123,4 +123,54 @@ describe('ResizeHandle', () => {
     expect(onCommit).toHaveBeenCalledWith(270)
     expect(onDragStateChange).toHaveBeenLastCalledWith(false)
   })
+
+  // ── The pane on the other side (nocx-ls38w) ──────────────────────────────
+  //
+  // The sidebar moved to the window's trailing edge, so its handle is on the
+  // panel's LEADING edge and the pane it measures is AFTER the separator.
+  // What inverts is the mapping from a gesture to a width, and only for the
+  // gestures that actually move the separator.
+
+  it('pane="after": dragging the separator left widens the pane after it', () => {
+    const onChange = vi.fn()
+    const onCommit = vi.fn()
+    subject({ value: 240, pane: 'after', onChange, onCommit })
+    const sep = screen.getByRole('separator')
+
+    fireEvent.pointerDown(sep, { clientX: 500, pointerId: 1 })
+    fireEvent.pointerMove(sep, { clientX: 400, pointerId: 1 })
+    expect(onChange).toHaveBeenLastCalledWith(340)
+    expect(sep.getAttribute('aria-valuenow')).toBe('340')
+
+    fireEvent.pointerUp(sep, { clientX: 400, pointerId: 1 })
+    expect(onCommit).toHaveBeenLastCalledWith(340)
+  })
+
+  it('pane="after": the on-axis keys invert, the off-axis and absolute ones do not', () => {
+    const onChange = vi.fn()
+    subject({ value: 240, pane: 'after', onChange })
+    const sep = screen.getByRole('separator')
+
+    // Physical: the separator follows the arrow, so LEFT grows the pane that
+    // is to the right of it.
+    fireEvent.keyDown(sep, { key: 'ArrowLeft' })
+    expect(onChange).toHaveBeenLastCalledWith(248)
+    fireEvent.keyDown(sep, { key: 'ArrowRight' })
+    expect(onChange).toHaveBeenLastCalledWith(240)
+    expect(sep.getAttribute('aria-valuenow')).toBe('240')
+
+    // Off-axis: Up and Down move nothing on a vertical separator. They are
+    // APG's plain "increase / decrease", not a direction on screen, so they
+    // mean the same thing on both sides.
+    fireEvent.keyDown(sep, { key: 'ArrowUp' })
+    expect(onChange).toHaveBeenLastCalledWith(248)
+    fireEvent.keyDown(sep, { key: 'ArrowDown' })
+    expect(onChange).toHaveBeenLastCalledWith(240)
+
+    // Absolute on both sides.
+    fireEvent.keyDown(sep, { key: 'Home' })
+    expect(onChange).toHaveBeenLastCalledWith(200)
+    fireEvent.keyDown(sep, { key: 'End' })
+    expect(onChange).toHaveBeenLastCalledWith(640)
+  })
 })

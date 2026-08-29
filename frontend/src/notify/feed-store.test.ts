@@ -122,7 +122,10 @@ describe('feed store', () => {
 
   it('coalesces a burst of change hints into one refetch', async () => {
     const { client, read } = fakeClient({
-      read: vi.fn().mockResolvedValue(snapshot({ revision: 1, unreadCount: 7 })),
+      read: vi
+        .fn()
+        .mockResolvedValueOnce(snapshot({ revision: 1, unreadCount: 7 }))
+        .mockResolvedValue(snapshot({ revision: 11, unreadCount: 7 })),
     })
     const d = fakeDispatcher()
     const store = createFeedStore(client, d)
@@ -130,7 +133,7 @@ describe('feed store', () => {
     // is still true while the first refetch is in flight, and the burst would
     // then be swallowed by it rather than costing the one extra round trip
     // this test is about.
-    await vi.waitFor(() => expect(store.unreadCount()).toBe(7))
+    await vi.waitFor(() => expect(store.readKnown()).toBe(true))
     expect(read).toHaveBeenCalledTimes(1)
 
     // Ten hints arriving while one refetch is in flight must not become ten
@@ -168,7 +171,7 @@ describe('feed store', () => {
     const { client } = fakeClient({ read })
     const d = fakeDispatcher()
     const store = createFeedStore(client, d)
-    await vi.waitFor(() => expect(store.unreadCount()).toBe(2))
+    await vi.waitFor(() => expect(store.unreadCount()).toBe(1))
 
     d.emit(6)
     await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2))
@@ -177,7 +180,7 @@ describe('feed store', () => {
     late.resolve(snapshot({ revision: 4, unreadCount: 0, occurrences: [] }))
     await tick()
 
-    expect(store.unreadCount()).toBe(2)
+    expect(store.unreadCount()).toBe(1)
     expect(store.occurrences()).toEqual([OCC])
     store.destroy()
   })
@@ -190,7 +193,7 @@ describe('feed store', () => {
     })
     const d = fakeDispatcher()
     const store = createFeedStore(client, d)
-    await vi.waitFor(() => expect(store.unreadCount()).toBe(3))
+    await vi.waitFor(() => expect(store.unreadCount()).toBe(1))
 
     store.markRead()
     await vi.waitFor(() => expect(store.unreadCount()).toBe(0))
@@ -213,7 +216,7 @@ describe('feed store', () => {
     const { client } = fakeClient({ read })
     const d = fakeDispatcher()
     const store = createFeedStore(client, d)
-    await vi.waitFor(() => expect(store.unreadCount()).toBe(4))
+    await vi.waitFor(() => expect(store.unreadCount()).toBe(1))
 
     d.emit(4)
     await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2))
@@ -221,13 +224,13 @@ describe('feed store', () => {
 
     // A bell that blanks itself on a transient error is worse than one that
     // is briefly stale: it says "nothing happened" when it cannot look.
-    expect(store.unreadCount()).toBe(4)
+    expect(store.unreadCount()).toBe(1)
     expect(store.occurrences()).toEqual([OCC])
 
     // And the next hint still retries — the failure is not sticky.
     read.mockResolvedValueOnce(snapshot({ revision: 5, unreadCount: 6, occurrences: [OCC] }))
     d.emit(5)
-    await vi.waitFor(() => expect(store.unreadCount()).toBe(6))
+    await vi.waitFor(() => expect(store.unreadCount()).toBe(1))
     store.destroy()
   })
 
@@ -258,11 +261,55 @@ describe('feed store', () => {
     const { client } = fakeClient({ read })
     const d = fakeDispatcher()
     const store = createFeedStore(client, d)
-    await vi.waitFor(() => expect(store.unreadCount()).toBe(4))
+    await vi.waitFor(() => expect(store.readKnown()).toBe(true))
 
     d.reconnect()
-    await vi.waitFor(() => expect(store.unreadCount()).toBe(1))
+    await vi.waitFor(() => expect(read).toHaveBeenCalledTimes(2))
     expect(read).toHaveBeenCalledTimes(2)
+    store.destroy()
+  })
+
+  it('derives unread count from visible occurrences, not the wire count', async () => {
+    const hidden = new Set<string>(['finishedBlock', 'bell'])
+    const { client } = fakeClient({
+      read: vi.fn().mockResolvedValue(
+        snapshot({
+          unreadCount: 3,
+          occurrences: [
+            OCC,
+            { ...OCC, id: 'bell-1', kind: 'bell', read: false },
+            { ...OCC, id: 'seen-1', kind: 'session.ended', read: true },
+          ],
+        }),
+      ),
+    })
+    const d = fakeDispatcher()
+    const store = createFeedStore(
+      client,
+      d,
+      () => hidden,
+      (kind) => (kind === 'block.finished' ? 'finishedBlock' : kind),
+    )
+
+    await vi.waitFor(() => expect(store.occurrences()).toHaveLength(3))
+    expect(store.visibleOccurrences()).toEqual([
+      { ...OCC, id: 'seen-1', kind: 'session.ended', read: true },
+    ])
+    expect(store.unreadCount()).toBe(0)
+    expect(store.readKnown()).toBe(true)
+    store.destroy()
+  })
+
+  it('keeps the first-read state unknown when the initial read fails', async () => {
+    const { client } = fakeClient({
+      read: vi.fn().mockRejectedValue(new Error('not connected')),
+    })
+    const d = fakeDispatcher()
+    const store = createFeedStore(client, d)
+
+    await tick()
+    expect(store.readKnown()).toBe(false)
+    expect(store.unreadCount()).toBe(0)
     store.destroy()
   })
 })

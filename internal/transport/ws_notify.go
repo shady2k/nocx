@@ -219,5 +219,6 @@ func (s *WSServer) notifySpecs() []methodSpec {
 		}),
 		s.notifyBellSpec(),
 		s.notifyPaneWorkFinishedSpec(),
+		s.notifyCatalogueSpec(),
 	}
 }

@@ -87,6 +87,7 @@ export function CollectionRow(props: CollectionRowProps) {
       role="listitem"
       tabIndex={activatable() ? 0 : -1}
       data-density={props.density ?? 'default'}
+      data-activatable={activatable() ? 'true' : undefined}
       data-selected={props.selected === true ? 'true' : undefined}
       data-focused={props.focused === true ? 'true' : undefined}
       onClick={handleClick}

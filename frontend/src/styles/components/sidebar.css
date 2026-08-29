@@ -49,6 +49,7 @@
    `pointer-events: none` on both, because the button is ONE target: a mark
    drawn on it must not be able to swallow the click meant for it. */
 .activity-bar-badge {
+  --badge-ring-color: var(--color-chrome-rail);
   position: absolute;
   top: 4px;
   right: 6px;

@@ -50,6 +50,13 @@
   border-radius: var(--border-radius-sm, 4px);
 }
 
+/* An activatable row advertises that clicking its body does something. Hover
+   stays on the base row because it describes pointer position for every row,
+   including rows whose actions are separate controls. */
+.ui-collection-row[data-activatable='true'] {
+  cursor: pointer;
+}
+
 /* Dense variant — the sidebar's row rhythm (the Git panel's lists). The
    manager-page spacing is the row's baseline; density is a typed data-*
    decision the row makes, never a surface repaint from outside. */

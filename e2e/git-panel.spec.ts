@@ -3,7 +3,7 @@
 //
 // A store test mounts a component and asserts what it renders; none of these
 // tests do that. Each one drives the REAL panel over the REAL transport
-// against a REAL temporary git repository (cmd/devharness, no wails), and
+// against a REAL temporary git repository (cmd/nocx-server, no wails), and
 // asserts a control EXISTS, is ENABLED from the state a user starts in, and
 // DOES the thing — the shape of the connection-manager defect (1041 green
 // frontend tests, no way to create a group) this suite exists to catch.
@@ -729,7 +729,7 @@ test('on an SSH tab with no consent the consent offer is present and the mutatio
     })
 
     // Seed the connection the way Settings would. The name is unique per
-    // run: the devharness store persists across runs in this home.
+    // run: the nocx-server store persists across runs in this home.
     const profileName = `e2e-git-remote-${Date.now()}`
     wsPort = wsInfo.port
     wsToken = wsInfo.token
@@ -825,7 +825,7 @@ test('on an SSH tab with no consent the consent offer is present and the mutatio
 //
 // Opening a link is the same class of thing behind its own seam
 // (frontend/src/open-url.ts): on web — the only environment e2e runs in,
-// devharness has no Wails runtime — the click calls window.open
+// nocx-server has no Wails runtime — the click calls window.open
 // synchronously with noopener,noreferrer; in the packaged app it goes
 // through shell.openUrl. The specs below assert AT THE SEAM on purpose: a
 // spec must not actually navigate away or spawn tabs it cannot clean up,

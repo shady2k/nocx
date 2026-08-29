@@ -1,4 +1,4 @@
-# ADR-0033 — UI state is a document, not a setting
+# ADR-0048 — UI state is a document, not a setting
 
 - **Status:** Accepted.
 - **Date:** 2026-08-18
@@ -13,6 +13,7 @@
   controller), `nocx-l21ib` (session restore — explicitly not this).
 - **Extends:** ADR-0011 §1, by naming the module that owns `DocumentStore`'s
   "tab restore" tenant and by drawing the settings/UI-state line in writing.
+- **Formerly ADR-0033:** renumbered 0048 on 2026-08-28 (`nocx-yjvg5`) — the number was shared with [ADR-0033 — `auto` is the name for "not yet answered"](0033-auto-is-the-name-for-not-yet-answered.md), which is older and keeps it.
 
 ## Context
 

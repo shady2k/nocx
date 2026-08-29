@@ -647,6 +647,32 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"panes.close": {
 			[]byte(`{"id":"0198f2b0-0000-7000-8000-00000000c006"}`),
 		},
+		// A fresh client asks what is live and narrows it by nothing, so the
+		// empty object and the absent params are the whole valid set
+		// (nocx-oevq4).
+		"sessions.live": {
+			[]byte(`{}`),
+			[]byte(`null`),
+		},
+		// The id alone is enough to read; instanceId and sessionEpoch are the
+		// claim a RECLAIMING client makes about which incarnation it means,
+		// and a client that was never told either still reads (nocx-22k1c.2).
+		"session.output": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","from":4096}`),
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef","instanceId":"fedcba9876543210fedcba9876543210","sessionEpoch":1,"from":0}`),
+		},
+		// One probe per outcome, because the outcome is what decides which
+		// other field may appear at all (nocx-uo1k6).
+		"host.resolved": {
+			[]byte(`{"outcome":"ok","path":"/tmp/chosen"}`),
+			[]byte(`{"outcome":"cancelled"}`),
+			[]byte(`{"outcome":"failed","error":"the dialog could not be presented"}`),
+			[]byte(`{"outcome":"unavailable"}`),
+		},
+		"host.attentionActivated": {
+			[]byte(`{"sessionId":"0123456789abcdef0123456789abcdef"}`),
+		},
 	}
 	for method := range registered {
 		if _, ok := valid[method]; !ok {

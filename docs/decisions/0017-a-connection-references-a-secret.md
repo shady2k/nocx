@@ -2,10 +2,10 @@
 
 - **Status:** Accepted
 - **Date:** 2026-07-31
-- **Related:** ADR-0006 (reusable credentials), ADR-0011 §2 (secrets as opaque
+- **Related:** ADR-0046 (reusable credentials), ADR-0011 §2 (secrets as opaque
   references), ADR-0016 (a secret owns its name), beads `nocx-b5bu` (a secret saved on
   the Secrets page cannot be attached to a connection), `nocx-gqzg`, `nocx-cx03`
-- **Supersedes:** ADR-0006 in full. The credential aggregate is deleted, not renamed; the
+- **Supersedes:** ADR-0046 in full. The credential aggregate is deleted, not renamed; the
   Decision says what happens to each of its three jobs.
 
 ## Context
@@ -22,7 +22,7 @@ and each version holds the opaque `SecretID`s. The connection editor therefore e
 **credentials**. A secret created on the Secrets page belongs to no credential, so it is
 absent from that list by construction, and no amount of UI work will put it there.
 
-**Why it drifted.** ADR-0006 was written when a secret had no independent existence: it was
+**Why it drifted.** ADR-0046 was written when a secret had no independent existence: it was
 an opaque reference inside a credential, and the credential was the only object a user could
 name or reuse. ADR-0016 changed that six days later — the vault now persists a display name
 per secret, precisely so a secret can exist _before_ the connection that will use it. The
@@ -43,7 +43,7 @@ manages", and they are not nested cleanly:
 The last row is the finding. The user saved a password; the product stored a secret inside a
 credential and then offered them the credential. Two objects, one intent.
 
-**What the credential still uniquely holds.** Being fair to ADR-0006, three things:
+**What the credential still uniquely holds.** Being fair to ADR-0046, three things:
 
 1. **Identity** — username, auth mode, key path. But the profile already carries all three
    inline (`options.user`, `options.auth`, `options.keyPath`), and the editor shows the
@@ -54,7 +54,7 @@ credential and then offered them the credential. Two objects, one intent.
    it:** `RolloutPanel` is imported by its own test and by nothing else, because the
    Credentials page that hosted it was removed. So this is real, tested, unique — and
    currently a feature no user can invoke (`nocx-si5z`).
-3. **The authorization anchor** — ADR-0006 wave 2 removed host binding and replaced it with
+3. **The authorization anchor** — ADR-0046 wave 2 removed host binding and replaced it with
    a computed proof: the saved profile resolves to an effective (credential version,
    endpoint) pair, and that pair is authorised at connect time. The argument there is subtle
    and worth keeping: authorisation is proven from the profile the user selected, never from
@@ -104,7 +104,7 @@ Two reasons, and the second is the one that settles it:
   application-level aggregate only works for a store we fully control, and we deliberately
   do not require one (ADR-0011 §1: the SecretStore is a boundary, not a file we write).
 
-So ADR-0006's aggregate does not need a replacement. The guarantee it carried — that a
+So ADR-0046's aggregate does not need a replacement. The guarantee it carried — that a
 rejected candidate is never silently retried with the working secret — is not weakened by
 this, because with no staging there is no candidate and no retry; a probe authenticates with
 the one secret the connection names, and a rejection is reported.
@@ -127,7 +127,7 @@ selected saved profile
 
 Per hop, justified by the effective profile that supplies **that hop's** secret — never by
 the fact that some other profile happens to use the same secret at the same endpoint. That
-is the whole of ADR-0006 wave 2's argument, and nothing in it changes except the noun and
+is the whole of ADR-0046 wave 2's argument, and nothing in it changes except the noun and
 the disappearance of the version.
 
 ### 4. Nothing named "credential" is left
@@ -177,7 +177,7 @@ considering as a staging step while §2 looked expensive; once versions are dele
 than moved, the expensive part is gone and there is nothing left to stage.
 
 **Do nothing; teach the Secrets page not to create ownerless secrets.** This is the
-consistent version of ADR-0006, and it means reverting ADR-0016's central promise: a secret
+consistent version of ADR-0046, and it means reverting ADR-0016's central promise: a secret
 could not exist before its connection. The user asked for the opposite six days ago and was
 right — storing a key before wiring it up is an ordinary thing to want.
 

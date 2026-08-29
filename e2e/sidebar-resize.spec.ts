@@ -6,9 +6,9 @@
  * names stop clipping because there is room for them; the width they chose
  * is still there after a restart.
  *
- * This spec starts its own devharness backend (VaultBackend) so it can
+ * This spec starts its own nocx-server backend (VaultBackend) so it can
  * RESTART it mid-test — the width's persistence is the subject, and the
- * seam that persists it is the UI-state document (ADR-0033): drag →
+ * seam that persists it is the UI-state document (ADR-0048): drag →
  * uistate.set → uistate.json → restart → uistate.get → applied to #sidebar.
  * The assertion after the restart is the panel's computed width, not a
  * variable read back.
@@ -36,14 +36,9 @@ import { createRepo, cleanupRepo, type GitRepo } from './git-fixture'
  *  runs after Playwright has collected this file. The path was hard-coded to
  *  /tmp/nocx-devharness, which was true of the runner that built three copies
  *  by hand and stopped being true when one stand took ownership of the
- *  lifecycle — the spec then failed on its first line with 'devharness binary
+ *  lifecycle — the spec then failed on its first line with 'nocx-server binary
  *  not found'. The manifest is the one place that knows. */
-const devharnessBin = () => readStand().devharness
-
-// Distinct ports, outside the ranges used by `wails dev` (34115), the e2e
-// suite default (9876), and the other restart specs (19876-19879).
-const FIRST_PORT = 19882
-const SECOND_PORT = 19883
+const serverBin = () => readStand().server
 
 const SIDEBAR = '#sidebar'
 const HANDLE = '[role="separator"][aria-label="Resize sidebar"]'
@@ -104,7 +99,7 @@ async function openGitPanel(page: import('@playwright/test').Page, repo: GitRepo
 /** The persisted width in the backend's uistate.json — the durable seam.
  *  It moved out of settings.json in nocx-mqie.3: a width produced by
  *  dragging a panel edge is not a decision, so it is not a setting
- *  (ADR-0033). The backend's HOME is the isolated home under the disposable
+ *  (ADR-0048). The backend's HOME is the isolated home under the disposable
  *  root (root/home, per home-isolation.ts), so the doc lives under THAT
  *  home, never under the root itself. */
 function persistedWidth(backend: VaultBackend): unknown {
@@ -131,7 +126,7 @@ test.describe('sidebar resize (nocx-qmcu)', () => {
   test.beforeEach(() => {
     home = { root: mkdtempSync(join(tmpdir(), 'nocx-sidebar-resize-')) }
     // `true` = no Secret Service for this backend.
-    backend = new VaultBackend(devharnessBin(), home, true)
+    backend = new VaultBackend(serverBin(), home)
   })
 
   test.afterEach(() => {
@@ -146,7 +141,7 @@ test.describe('sidebar resize (nocx-qmcu)', () => {
   }) => {
     const repo = createRepo({ file: LONG_NAME })
     try {
-      const ep = await backend.start(FIRST_PORT)
+      const ep = await backend.start()
       await bindEndpoint(page, ep)
       await page.goto('/')
       await openGitPanel(page, repo)
@@ -173,7 +168,7 @@ test.describe('sidebar resize (nocx-qmcu)', () => {
   })
 
   test('the bounds hold: dragging past either end stops at the limit', async ({ page }) => {
-    const ep = await backend.start(FIRST_PORT)
+    const ep = await backend.start()
     await bindEndpoint(page, ep)
     await page.goto('/')
     await promptReady(page)
@@ -186,7 +181,7 @@ test.describe('sidebar resize (nocx-qmcu)', () => {
   })
 
   test('the separator is keyboard-operable and every step persists', async ({ page }) => {
-    const ep = await backend.start(FIRST_PORT)
+    const ep = await backend.start()
     await bindEndpoint(page, ep)
     await page.goto('/')
     await promptReady(page)
@@ -209,7 +204,7 @@ test.describe('sidebar resize (nocx-qmcu)', () => {
   test('the chosen width survives a backend restart', async ({ page }) => {
     const repo = createRepo({ file: LONG_NAME })
     try {
-      const ep1 = await backend.start(FIRST_PORT)
+      const ep1 = await backend.start()
       await bindEndpoint(page, ep1)
       await page.goto('/')
       await openGitPanel(page, repo)
@@ -226,7 +221,7 @@ test.describe('sidebar resize (nocx-qmcu)', () => {
 
       // Restart the backend and reload the page: the width must come back
       // through the settings seam (snapshot → applied to #sidebar).
-      const ep2 = await backend.restart(SECOND_PORT)
+      const ep2 = await backend.restart()
       await bindEndpoint(page, ep2)
       await page.reload()
       await expect(page.locator('.nocx-tab')).toHaveCount(1, { timeout: 90_000 })

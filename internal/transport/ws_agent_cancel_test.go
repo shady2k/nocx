@@ -14,12 +14,11 @@ import (
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/session"
-	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // A real assistant run owns the renderer request until the renderer resolves
-// it. These tests use the real local session behind that request so stopping
-// the parent can be distinguished from merely cancelling the model stream.
+// it. These tests use the real local session behind that request so cancelling
+// the model turn can be proved independent from stopping its foreground child.
 
 type cancelBlockingClient struct {
 	started chan struct{}
@@ -63,6 +62,8 @@ func TestAgentCancel_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "agent.cancel.schema.json")
 	validateJSON(t, schema, mustMarshal(agentCancelResponse{
 		RunID: 7, State: string(content.RunCancelled), Cancelled: true,
+		Error:         "no local process group to signal — the execution keeps running",
+		DroppedDeltas: 2,
 	}), "agent.cancel DTO")
 }
 
@@ -154,6 +155,68 @@ func TestAgentCancel_StopsStreamingRunAndKeepsReceivedProse(t *testing.T) {
 	}
 	if secondEnv.Error == nil || !strings.Contains(secondEnv.Error.Message, "not active") {
 		t.Fatalf("repeated cancel = %s, want an honest not-active error", second)
+	}
+}
+
+func TestAgentCancel_UnsupportedOwnedRunStillClosesWithPresentation(t *testing.T) {
+	client := newCancelBlockingClient()
+	h := newAskHarness(t, client)
+	h.createEndpoint()
+	sid := openLocalSession(t, h.conn)
+	res, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId": "cancel-unsupported-1", "sessionId": sid, "question": "stop remote work", "cwd": "/repo", "attachedContent": []any{},
+	}, 1)
+	if errObj != nil {
+		t.Fatalf("agent.ask: %+v", errObj)
+	}
+	select {
+	case <-client.emitted:
+	case <-time.After(time.Second):
+		t.Fatal("assistant did not emit before cancellation")
+	}
+
+	h.ws.pendingRunsMu.Lock()
+	rc := h.ws.pendingRuns[res.RunID]
+	lease := h.ws.newRunLease(session.ID(sid), RunLeaseConfig{})
+	lease.sess = nil
+	lease.cancel = func() {} // armed RequestRun: the renderer execution exists
+	if !rc.control.attachRunLease(lease) {
+		h.ws.pendingRunsMu.Unlock()
+		t.Fatal("active run refused its exact lease")
+	}
+	rc.control.recordDroppedDelta()
+	rc.control.recordDroppedDelta()
+	h.ws.pendingRunsMu.Unlock()
+
+	resp, notifications := cancelCallPreservingNotifications(t, h.conn, res.RunID, 2)
+	var env struct {
+		Result agentCancelResponse `json:"result"`
+		Error  *jsonrpcErrorObj    `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("decode agent.cancel: %v\nraw: %s", err, resp)
+	}
+	warning := "no local process group to signal — the execution keeps running"
+	if env.Error != nil || env.Result.Error != warning || env.Result.DroppedDeltas != 2 {
+		t.Fatalf("agent.cancel = %+v, want warning and two dropped deltas", env)
+	}
+	if len(notifications) == 0 {
+		notifications = append(notifications, readNotification(t, h.conn, "agent.runState", time.Second))
+	}
+	var state agentRunState
+	for _, raw := range notifications {
+		var candidate agentRunState
+		if json.Unmarshal(raw, &candidate) == nil && candidate.RunID == res.RunID {
+			state = candidate
+		}
+	}
+	if state.State != string(content.RunCancelled) || state.Error != warning || state.DroppedDeltas != 2 {
+		t.Fatalf("runState = %+v, want cancelled with matching presentation", state)
+	}
+	select {
+	case <-client.stopped:
+	case <-time.After(time.Second):
+		t.Fatal("provider stream did not close when signalling was unsupported")
 	}
 }
 
@@ -260,9 +323,11 @@ func tapCancelCall(t *testing.T, conn *websocket.Conn, tap *socketTap, id int, r
 	return nil, state
 }
 
-// TestAgentCancel_StopsRendererRunCommand proves parent cancellation reaches
-// the renderer-executed command before the turn is terminalized.
-func TestAgentCancel_StopsRendererRunCommand(t *testing.T) {
+// TestAgentCancel_StopsAssistantRunChildBeforeResponse proves the backend's
+// exact ownership contract: agent.cancel stops the child started by this
+// turn's RequestRun lease before the reserved response, while the paired
+// streaming test proves arrived prose survives the same terminal close.
+func TestAgentCancel_StopsAssistantRunChildBeforeResponse(t *testing.T) {
 	h := newRunLeaseHarness(t, RunLeaseConfig{
 		WallClock:   time.Minute,
 		Inactivity:  time.Minute,
@@ -295,6 +360,10 @@ func TestAgentCancel_StopsRendererRunCommand(t *testing.T) {
 	if env.Error != nil || !env.Result.Cancelled || env.Result.State != string(content.RunCancelled) {
 		t.Fatalf("agent.cancel = %s, want cancelled result", raw)
 	}
+	// The reserved response is written only after the synchronous stop ladder.
+	// There is no cleanup signal after this assertion: the PID must already be
+	// gone as part of agent.cancel itself.
+	waitChildDead(t, pid)
 	if state.State == "" {
 		stateRaw := tapNotify(t, tap, "agent.runState", time.Second)
 		if err := json.Unmarshal(stateRaw, &state); err != nil {
@@ -306,81 +375,6 @@ func TestAgentCancel_StopsRendererRunCommand(t *testing.T) {
 	}
 	if state.Error != "" {
 		t.Fatalf("ordinary cancelled runState error = %q, want empty", state.Error)
-	}
-	waitChildDead(t, pid)
-}
-
-// TestAgentCancel_RemoteHostWarningArrivesOnTheRealWire proves the renderer
-// can learn that cancellation did not stop the command from a real
-// agent.cancel flow. The remote session kind makes the composition-root
-// stopForeground closure return foregroundUnsupported; the test never builds
-// an agent.runState payload.
-func TestAgentCancel_RemoteHostWarningArrivesOnTheRealWire(t *testing.T) {
-	client := newCancelBlockingClient()
-	h := newAskHarnessWithOpts(t, client,
-		WithProfileResolver(&fakeResolver{
-			resolveFn: func(string) (string, *ssh.ConnectConfig, error) {
-				return "remote.example", &ssh.ConnectConfig{User: "test", Port: 22}, nil
-			},
-		}),
-	)
-	reg, ok := h.ws.registry.(*session.Reg)
-	if !ok {
-		t.Fatal("ask harness registry is not a session registry")
-	}
-	reg.WithSSHFactory(&stubSSHFactory{
-		connectFn: func(context.Context, string, ...ssh.ConnectOption) (ssh.Channel, error) {
-			return ssh.NewStubChannel(h.ws.log), nil
-		},
-	})
-	h.createEndpoint()
-	sid := openRemoteSessionOnConn(t, h.ws, h.conn, 1)
-	res, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId": "remote-cancel-1", "sessionId": sid, "question": "stop this", "cwd": "/repo", "attachedContent": []any{},
-	}, 1)
-	if errObj != nil {
-		t.Fatalf("agent.ask: %+v", errObj)
-	}
-	select {
-	case <-client.started:
-	case <-time.After(time.Second):
-		t.Fatal("assistant did not start streaming")
-	}
-	select {
-	case <-client.emitted:
-	case <-time.After(time.Second):
-		t.Fatal("assistant did not emit the prose before cancellation")
-	}
-	raw, notifications := cancelCallPreservingNotifications(t, h.conn, res.RunID, 2)
-	var env struct {
-		Error *jsonrpcErrorObj `json:"error"`
-	}
-	if err := json.Unmarshal(raw, &env); err != nil {
-		t.Fatalf("decode agent.cancel: %v\nraw: %s", err, raw)
-	}
-	if env.Error != nil {
-		t.Fatalf("agent.cancel: %+v", env.Error)
-	}
-	var state agentRunState
-	var stateRaw json.RawMessage
-	for _, notification := range notifications {
-		var candidate agentRunState
-		if json.Unmarshal(notification, &candidate) == nil && candidate.RunID == res.RunID {
-			state = candidate
-			stateRaw = append(json.RawMessage(nil), notification...)
-			break
-		}
-	}
-	if state.State == "" {
-		stateRaw = readNotification(t, h.conn, "agent.runState", time.Second)
-		if err := json.Unmarshal(stateRaw, &state); err != nil {
-			t.Fatalf("decode cancelled runState: %v\nraw: %s", err, stateRaw)
-		}
-	}
-	validateJSON(t, loadSchema(t, "agent.runState.schema.json"), stateRaw, "agent.runState remote cancellation (real socket)")
-	const want = "the person stopped this answer, but its command could not be stopped on the host"
-	if state.State != string(content.RunCancelled) || state.Error != want {
-		t.Fatalf("remote cancelled runState = %+v, want sentence %q", state, want)
 	}
 }
 

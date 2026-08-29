@@ -1,6 +1,6 @@
 /**
  * e2e: a person asks about a full-screen program without leaving it
- * (nocx-7l4ex.5/.6).
+ * (nocx-7l4ex.5/.6, nocx-92gfl.4).
  *
  * This is deliberately a real alternate-buffer journey, not the running normal
  * buffer case in ask-about-a-running-command.spec.ts. The fixture owns a pty,
@@ -10,6 +10,9 @@
  * visible in the live grid after Escape thaws it. The first terminal answer
  * returns the same composer; a held follow-up proves both answers remain in a
  * non-overlapping ordered stack before Escape and seat once after normal exit.
+ * A second real-PTY act covers the incident boundary: Escape explicitly
+ * focuses the live grid so q cannot disappear with the hidden composer, and
+ * Stop captures lifecycle, block, presentation and signal outcome together.
  *
  * The first answer is derived from the model request. A fixed response could repeat a
  * marker typed into this fixture and would prove only the fixture. The answer
@@ -36,7 +39,7 @@ import {
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
 
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
@@ -56,6 +59,8 @@ const READY = `fullscreen-ready-${nonce}`
 const ARMED = `fullscreen-armed-${nonce}`
 const DURING_READY = `during-freeze-ready-${nonce}`
 const ENDPOINT_NAME = `E2E Full Screen Ask ${nonce}`
+const KEY_READY = `fullscreen-key-ready-${nonce}`
+const KEY_QUESTION = 'Can I still control this full-screen program?'
 
 let backend: VaultBackend
 let fake: FakeOpenAI
@@ -73,6 +78,8 @@ let resizePath = ''
 let baselineSizePath = ''
 let summonedSizePath = ''
 let finalSizePath = ''
+let keyScriptPath = ''
+let keyResultPath = ''
 
 function fileText(path: string): string {
   try {
@@ -86,7 +93,7 @@ test.beforeAll(async () => {
   fake = new FakeOpenAI()
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-7l4ex-e2e-'))
-  backend = new VaultBackend(devharnessBin(), { root }, true)
+  backend = new VaultBackend(serverBin(), { root })
   fixtureDir = mkdtempSync(join(tmpdir(), 'nocx-7l4ex-fullscreen-'))
   endpoint = await backend.start()
 
@@ -102,6 +109,8 @@ test.beforeAll(async () => {
   baselineSizePath = join(fixtureDir, 'baseline-size')
   summonedSizePath = join(fixtureDir, 'summoned-size')
   finalSizePath = join(fixtureDir, 'final-size')
+  keyScriptPath = join(fixtureDir, 'fullscreen-key-job.sh')
+  keyResultPath = join(fixtureDir, 'fullscreen-key-result')
   writeFileSync(resizePath, '')
 
   // This is a small full-screen program, not a normal-buffer command. It
@@ -134,6 +143,25 @@ test.beforeAll(async () => {
       '',
     ].join('\n'),
   )
+  // A key-owning full-viewport normal-buffer program for the recovery/Stop
+  // trace. It mirrors `top`'s screen ownership rather than using a sleep: raw
+  // mode gives it the next byte, q exits, and INT/TERM restore the terminal.
+  writeFileSync(
+    keyScriptPath,
+    [
+      'old=$(stty -g)',
+      `cleanup() { stty "$old"; exit 0; }`,
+      'trap cleanup INT TERM HUP',
+      `printf '\\033[2J\\033[H'`,
+      `i=1; while [ "$i" -le 24 ]; do printf 'TUI ROW %02d ${INITIAL}-KEY\\r\\n' "$i"; i=$((i+1)); done`,
+      `printf '\\033]9;%s\\007' '${KEY_READY}'`,
+      'stty -echo -icanon min 1 time 0',
+      'key=$(dd bs=1 count=1 2>/dev/null)',
+      `printf '%s' "$key" > '${keyResultPath}'`,
+      'cleanup',
+      '',
+    ].join('\n'),
+  )
 })
 test.beforeEach(() => {
   for (const path of [
@@ -147,6 +175,7 @@ test.beforeEach(() => {
     baselineSizePath,
     summonedSizePath,
     finalSizePath,
+    keyResultPath,
   ]) {
     rmSync(path, { force: true })
   }
@@ -172,10 +201,26 @@ interface ResolvedFrame {
   error?: string
   rows?: ResolvedRow[]
 }
+interface LifecycleTrace {
+  sessionId?: string
+  lifecycle?: string
+  domain?: string
+  epoch?: number
+  attempt?: { id?: string; state?: string; origin?: string }
+}
+interface SignalTrace {
+  id: string
+  sessionId?: string
+  signal?: string
+  outcome?: string
+}
 interface SpecRecord {
   asks: string[]
   raised: string[]
   resolved: ResolvedFrame[]
+  lifecycles: LifecycleTrace[]
+  signalRequests: SignalTrace[]
+  signalResults: SignalTrace[]
 }
 
 declare global {
@@ -187,12 +232,66 @@ declare global {
 /** Record the renderer's own ask/read traffic off the app's WebSocket. */
 async function recordFrames(page: Page): Promise<void> {
   await page.addInitScript(() => {
-    window.__nocxFullScreenAskSpec = { asks: [], raised: [], resolved: [] }
+    window.__nocxFullScreenAskSpec = {
+      asks: [],
+      raised: [],
+      resolved: [],
+      lifecycles: [],
+      signalRequests: [],
+      signalResults: [],
+    }
     const send = WebSocket.prototype.send
+    const add = WebSocket.prototype.addEventListener
+    const recordedSockets = new WeakSet<WebSocket>()
+    WebSocket.prototype.addEventListener = function (
+      this: WebSocket,
+      type: string,
+      listener: EventListenerOrEventListenerObject,
+      options?: boolean | AddEventListenerOptions,
+    ): void {
+      if (type === 'message' && !recordedSockets.has(this)) {
+        recordedSockets.add(this)
+        add.call(
+          this,
+          'message',
+          (rawEvent: Event) => {
+            const event = rawEvent as MessageEvent
+            if (typeof event.data !== 'string') return
+            try {
+              const msg = JSON.parse(event.data) as {
+                id?: string | number
+                method?: string
+                params?: LifecycleTrace
+                result?: { outcome?: string }
+              }
+              const rec = window.__nocxFullScreenAskSpec!
+              if (msg.method === 'lifecycle.changed' && msg.params) {
+                rec.lifecycles.push(msg.params)
+              }
+              if (msg.id !== undefined) {
+                const id = String(msg.id)
+                const request = rec.signalRequests.find((candidate) => candidate.id === id)
+                if (request && typeof msg.result?.outcome === 'string') {
+                  rec.signalResults.push({ ...request, outcome: msg.result.outcome })
+                }
+              }
+            } catch {
+              // Binary PTY frames and unrelated text frames are not this trace.
+            }
+          },
+          options,
+        )
+      }
+      add.call(this, type, listener, options)
+    }
     WebSocket.prototype.send = function (this: WebSocket, data: Parameters<typeof send>[0]) {
       if (typeof data === 'string') {
         try {
-          const msg = JSON.parse(data) as { method?: string; params?: Record<string, unknown> }
+          const msg = JSON.parse(data) as {
+            id?: string | number
+            method?: string
+            params?: Record<string, unknown>
+          }
           const rec = window.__nocxFullScreenAskSpec!
           if (msg.method === 'agent.ask' && typeof msg.params?.sessionId === 'string') {
             rec.asks.push(msg.params.sessionId)
@@ -202,6 +301,17 @@ async function recordFrames(page: Page): Promise<void> {
           }
           if (msg.method === 'agent.readScreenResolved' && msg.params) {
             rec.resolved.push(msg.params as ResolvedFrame)
+          }
+          if (
+            msg.method === 'session.signal' &&
+            (typeof msg.id === 'string' || typeof msg.id === 'number')
+          ) {
+            rec.signalRequests.push({
+              id: String(msg.id),
+              sessionId:
+                typeof msg.params?.sessionId === 'string' ? msg.params.sessionId : undefined,
+              signal: typeof msg.params?.signal === 'string' ? msg.params.signal : undefined,
+            })
           }
         } catch {
           // Binary PTY frames and unrelated text frames are not this record.
@@ -214,7 +324,15 @@ async function recordFrames(page: Page): Promise<void> {
 
 async function recorded(page: Page): Promise<SpecRecord> {
   return page.evaluate(
-    () => window.__nocxFullScreenAskSpec ?? { asks: [], raised: [], resolved: [] },
+    () =>
+      window.__nocxFullScreenAskSpec ?? {
+        asks: [],
+        raised: [],
+        resolved: [],
+        lifecycles: [],
+        signalRequests: [],
+        signalResults: [],
+      },
   )
 }
 
@@ -296,18 +414,18 @@ async function summonStackGeometry(page: Page): Promise<{
   })
 }
 
-async function configureAssistant(page: Page): Promise<void> {
+async function configureAssistant(page: Page, endpointName: string): Promise<void> {
   await openSettings(page, SETTINGS_AI_NAV)
   await expect(page.locator('.ep-root')).toBeVisible({ timeout: 10_000 })
   await createAiEndpoint(page, {
-    name: ENDPOINT_NAME,
+    name: endpointName,
     baseUrl: fake.baseUrl(),
     models: ['e2e-model'],
     key: `e2e-key-${nonce}`,
     vaultPassphrase: `vault-pass-${nonce}`,
   })
   await page.locator(SETTINGS_ROLES_NAV).click()
-  await setDefaultModel(page, ENDPOINT_NAME, 'e2e-model')
+  await setDefaultModel(page, endpointName, 'e2e-model')
   await page.locator(SETTINGS_POLICY_NAV).click()
   const observeRow = page.locator(OBSERVE_ROW)
   await expect(observeRow).toBeVisible({ timeout: 15_000 })
@@ -344,7 +462,7 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
     test.setTimeout(120_000)
     await recordFrames(page)
     await openApp(page)
-    await configureAssistant(page)
+    await configureAssistant(page, `${ENDPOINT_NAME} — stack`)
     await backToTerminal(page)
     await promptReady(page)
     // Obtain the real session id from the product's own ask payload. The
@@ -594,5 +712,110 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
         }),
       )
       .toMatchObject({ seated: true, atBottom: true, tailVisible: true })
+  })
+
+  test('returns q and Stop to a full-screen foreground after Ask, with all owners agreeing', async ({
+    page,
+  }) => {
+    test.setTimeout(120_000)
+    await recordFrames(page)
+    await openApp(page)
+    await configureAssistant(page, `${ENDPOINT_NAME} — recovery`)
+    await backToTerminal(page)
+    await promptReady(page)
+
+    const startProgram = async (): Promise<void> => {
+      const readyBefore = (await recorded(page)).raised.filter((body) => body === KEY_READY).length
+      rmSync(keyResultPath, { force: true })
+      await useTarget(page, 'shell')
+      // JOB CONTROL OFF, which is the whole point of this act (nocx-7l4ex.11).
+      // `set +m` makes bash run the command in its OWN process group instead
+      // of creating one for it — the topology ADR-0024 names, and the one the
+      // owner's `top` was in when Stop answered "nothing is running". Without
+      // it the job gets an independent group, the ordinary TIOCGPGRP ladder
+      // handles it, and this act would pass with the protected-group
+      // mechanism deleted.
+      await page.keyboard.type(`set +m; sh '${keyScriptPath}'`)
+      await page.keyboard.press('Enter')
+      await expect(page.locator(RUNNING_BLOCK)).toHaveCount(1, { timeout: 20_000 })
+      await expect
+        .poll(async () => (await recorded(page)).raised.filter((body) => body === KEY_READY).length)
+        .toBeGreaterThan(readyBefore)
+      await expect(page.locator(GRID)).toBeVisible({ timeout: 20_000 })
+    }
+
+    const askAndReturn = async (question: string): Promise<void> => {
+      await page.locator(GRID).click()
+      await page.keyboard.press('ControlOrMeta+Enter')
+      await expect(page.locator(INPUT)).toBeVisible({ timeout: 15_000 })
+      fake.setScript({ chunks: ['The full-screen program is waiting for one key.'] })
+      await page.locator(INPUT).fill(question)
+      await page.keyboard.press('Enter')
+      await answerFinished(page, question)
+      await expect(page.locator(INPUT)).toBeVisible({ timeout: 15_000 })
+      await page.keyboard.press('Escape')
+      await expect(page.locator(FREEZE)).toHaveCount(0, { timeout: 10_000 })
+      await expect(page.locator(INPUT)).toBeHidden({ timeout: 10_000 })
+      await expect(page.locator(GRID)).toBeVisible()
+    }
+
+    // Keyboard recovery: the first program owns one byte and q is that byte.
+    await startProgram()
+    await askAndReturn(`${KEY_QUESTION} — q`)
+    await page.keyboard.press('q')
+    await expect.poll(() => fileText(keyResultPath)).toBe('q')
+    await expect(page.locator(RUNNING_BLOCK)).toHaveCount(0, { timeout: 30_000 })
+    await expect(page.locator(INPUT)).toBeVisible({ timeout: 20_000 })
+
+    // Stop recovery: repeat the same real full-screen journey, then capture
+    // every authority immediately before the established Stop path answers.
+    await startProgram()
+    await askAndReturn(`${KEY_QUESTION} — Stop`)
+    const running = page.locator(RUNNING_BLOCK)
+    const beforeStop = await page.evaluate(
+      ({ blockSelector, inputSelector, freezeSelector, gridSelector }) => {
+        const block = document.querySelector<HTMLElement>(blockSelector)
+        const input = document.querySelector<HTMLElement>(inputSelector)
+        const grid = document.querySelector<HTMLElement>(gridSelector)
+        return {
+          blockCount: document.querySelectorAll(blockSelector).length,
+          blockEntryId: block?.dataset.entryId ?? '',
+          blockKind: block?.dataset.blockKind ?? '',
+          inputVisible: input !== null && input.getClientRects().length > 0,
+          freezePresent: document.querySelector(freezeSelector) !== null,
+          gridFullscreen: grid?.classList.contains('live-fullscreen') ?? false,
+        }
+      },
+      {
+        blockSelector: RUNNING_BLOCK,
+        inputSelector: INPUT,
+        freezeSelector: FREEZE,
+        gridSelector: GRID,
+      },
+    )
+    const traceBefore = await recorded(page)
+    const lifecycle = [...traceBefore.lifecycles]
+      .reverse()
+      .find((candidate) => candidate.lifecycle === 'running')
+    expect(
+      lifecycle,
+      JSON.stringify({ beforeStop, lifecycles: traceBefore.lifecycles }),
+    ).toBeDefined()
+    expect(beforeStop).toMatchObject({
+      blockCount: 1,
+      blockEntryId: lifecycle?.attempt?.id,
+      inputVisible: false,
+      freezePresent: false,
+      gridFullscreen: false,
+    })
+
+    await running.locator('.cmd-overflow-btn').click()
+    await page.locator('.cmd-overflow-menu-item[data-action="stop"]').click()
+    await expect.poll(async () => (await recorded(page)).signalResults.length).toBeGreaterThan(0)
+    const signal = (await recorded(page)).signalResults.at(-1)
+    const fourFacts = { lifecycle, beforeStop, signal }
+    expect(signal?.outcome, JSON.stringify(fourFacts)).toBe('delivered')
+    await expect(page.locator(RUNNING_BLOCK)).toHaveCount(0, { timeout: 30_000 })
+    await expect(page.locator(INPUT)).toBeVisible({ timeout: 20_000 })
   })
 })

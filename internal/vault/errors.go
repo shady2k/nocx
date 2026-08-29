@@ -23,6 +23,24 @@ var (
 	ErrSecretNotFound         = errors.New("secret not found")
 	ErrUnsealFailed           = errors.New("unseal failed")
 	ErrSecretNameLooksLikeRow = errors.New("secret name must not begin with secrow:")
+
+	// ErrNoUnlockClient is what raising the unlock prompt gets when no client
+	// is attached to show it. It is declared HERE, in the package that owns
+	// the prompt, and internal/transport names the same value
+	// ErrNoClientConnected: the vault has to tell "nobody is there to ask"
+	// (suspend and wait for a client) from "the person said no" (fail now),
+	// and one sentinel with two names is the only shape that does not put a
+	// cycle between the two packages. Matching on the message instead would
+	// be a second answer to the same question, drifting the first time either
+	// side reworded itself.
+	ErrNoUnlockClient = errors.New("no client connected to show unlock prompt")
+
+	// ErrUnlockSuspended is the answer to an operation that waited out the
+	// whole suspension window without a client ever attaching. It is the
+	// "no hang" half of D9: a session that needs a secret while you are away
+	// suspends rather than failing, but a suspension has an end, and this is
+	// what the caller is told when it is reached.
+	ErrUnlockSuspended = errors.New("no client attached to unlock the vault within the suspension window")
 )
 
 // ProviderError carries the reason discriminator alongside the sentinel.

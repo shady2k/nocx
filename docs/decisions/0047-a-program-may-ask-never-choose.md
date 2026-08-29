@@ -1,4 +1,4 @@
-# ADR-0029 — A program may ask; it never chooses
+# ADR-0047 — A program may ask; it never chooses
 
 - **Status:** Accepted
 - **Date:** 2026-08-13 (rescoped and accepted 2026-08-14 — see §1.1)
@@ -10,6 +10,7 @@
 - **Design that consumes this:** `.internal/specs/2026-08-13-notification-system-design.md`
 - **Consulted:** an adversarial review (codex, four rounds, 2026-08-13/14) and the owner.
   §5 records what was taken and what was left.
+- **Formerly ADR-0029:** renumbered 0047 on 2026-08-28 (`nocx-yjvg5`) — the number was shared with [ADR-0029 — A proposed keystroke is bound to what makes it meaningful](0029-a-keystroke-is-bound-to-what-makes-it-meaningful.md), which is older and keeps it.
 
 ## 1. Context
 
@@ -58,7 +59,7 @@ constraints**, which existed nowhere before it.
 ### 2.1 AD-1 — extend the ledger-facts enumeration
 
 > The enumeration of typed facts that may cross the control plane (amended 2026-08-02) is
-> extended to **presentation requests** (2026-08-14, ADR-0029): a parsed, expressly
+> extended to **presentation requests** (2026-08-14, ADR-0047): a parsed, expressly
 > registered terminal sequence by which a program asks nocx to present a message. The
 > amendment's test is unchanged and still governs — no raw bytes wrapped in JSON, no raw
 > OSC sequence crossing, no fact carrying the output it was derived from — and the rules in

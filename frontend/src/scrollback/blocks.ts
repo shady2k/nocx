@@ -871,9 +871,13 @@ export interface RunningBlockActions {
   isActive(blockEl: HTMLElement): boolean
   /** Whether this block is currently granted to the next question. */
   isGranted?(blockEl: HTMLElement): boolean
+  /** Whether grants can be offered for the active input target right now. */
+  grantsAvailable?(): boolean
   /** Toggle this whole block's grant, independent of liveness. */
   toggleGrant?(blockEl: HTMLElement): void
 }
+
+const overflowMenuClosers = new WeakMap<HTMLElement, () => void>()
 
 function buildOverflowMenu(
   blockEl: HTMLElement,
@@ -905,6 +909,7 @@ function buildOverflowMenu(
       closeOnClick = null
     }
   }
+  overflowMenuClosers.set(blockEl, closeMenu)
   const onBlockSettled = (): void => {
     closeMenu()
     blockEl.removeEventListener('nocx:block-settled', onBlockSettled)
@@ -1078,7 +1083,7 @@ function buildOverflowMenu(
     }
 
     const isActive = running?.isActive(blockEl) ?? false
-    if (running?.toggleGrant) {
+    if (running?.toggleGrant && (running.grantsAvailable?.() ?? true)) {
       const grant = document.createElement('button')
       grant.className = 'cmd-overflow-menu-item'
       grant.dataset.action = 'grant'
@@ -2657,7 +2662,13 @@ export class BlockManager {
     }
   }
 
+  /** Close every body-level menu this manager owns before its pane hides. */
+  closeOverflowMenus(): void {
+    for (const block of this._owned) overflowMenuClosers.get(block)?.()
+  }
+
   clearAll(): void {
+    this.closeOverflowMenus()
     this._stopTicker()
     this._cancelPendingFence()
     this._clearCommandIndicator()

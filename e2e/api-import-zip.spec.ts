@@ -22,7 +22,7 @@ import { tmpdir } from 'node:os'
 
 import { join, sep } from 'node:path'
 import { openWorkbench } from './api-workbench'
-import { VaultBackend } from './harness'
+import { openImportDestination, VaultBackend } from './harness'
 import { readStand } from './stand'
 
 const test = base
@@ -258,11 +258,9 @@ test.describe('a Postman ZIP imports as one complete archive', () => {
   let backend: VaultBackend
 
   test.beforeEach(() => {
-    backend = new VaultBackend(
-      readStand().devharness,
-      { root: mkdtempSync(join(tmpdir(), 'nocx-e2e-api-import-zip-')) },
-      true,
-    )
+    backend = new VaultBackend(readStand().server, {
+      root: mkdtempSync(join(tmpdir(), 'nocx-e2e-api-import-zip-')),
+    })
   })
 
   test.afterEach(() => {
@@ -295,8 +293,7 @@ test.describe('a Postman ZIP imports as one complete archive', () => {
 
     // Read the destination from the field the ask owns, rather than
     // re-deriving the backend's platform-specific collection path here.
-    await ask.getByRole('button', { name: 'Change where this goes' }).click()
-    const destinationField = page.locator('#api-import-postman-dest')
+    const destinationField = await openImportDestination(ask, page)
     await expect(destinationField).toBeVisible()
     const destination = await destinationField.inputValue()
     expect(destination).not.toBe('')

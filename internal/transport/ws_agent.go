@@ -147,9 +147,11 @@ type agentCancelParams struct {
 // only when this request closed a live run; an already-terminal or unknown
 // run is answered as an error rather than being reported as stopped.
 type agentCancelResponse struct {
-	RunID     int64  `json:"runId"`
-	State     string `json:"state"`
-	Cancelled bool   `json:"cancelled"`
+	RunID         int64  `json:"runId"`
+	State         string `json:"state"`
+	Cancelled     bool   `json:"cancelled"`
+	Error         string `json:"error,omitempty"`
+	DroppedDeltas int    `json:"droppedDeltas,omitempty"`
 }
 
 // agentAskResponse is the result of agent.ask: the backend-minted run id
@@ -179,14 +181,95 @@ type agentAskResponse struct {
 type agentRunControl struct {
 	mu               sync.Mutex
 	eventsMu         sync.Mutex
-	cancelFn         context.CancelFunc
+	drive            *agentRunDrive
+	runLeases        map[*runLease]struct{}
 	cancelled        bool
 	terminalized     bool
+	droppedDeltas    int
 	cancelState      content.RunState
 	cancelReason     content.TerminationReason
 	cancelSentence   string
 	cancelHasDetails bool
 	cancelDone       chan struct{}
+}
+
+type agentRunDrive struct {
+	cancel context.CancelFunc
+}
+
+type agentRunControlContextKey struct{}
+
+func (c *agentRunControl) beginDrive(parent context.Context) (context.Context, func()) {
+	ctx, cancel := context.WithCancel(parent)
+	drive := &agentRunDrive{cancel: cancel}
+	c.mu.Lock()
+	if c.cancelled || c.terminalized {
+		cancel()
+	} else {
+		c.drive = drive
+	}
+	c.mu.Unlock()
+	ctx = context.WithValue(ctx, agentRunControlContextKey{}, c)
+	return ctx, func() {
+		cancel()
+		c.mu.Lock()
+		if c.drive == drive {
+			c.drive = nil
+		}
+		c.mu.Unlock()
+	}
+}
+
+func agentRunControlFromContext(ctx context.Context) *agentRunControl {
+	control, _ := ctx.Value(agentRunControlContextKey{}).(*agentRunControl)
+	return control
+}
+
+func (c *agentRunControl) attachRunLease(lease *runLease) bool {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.cancelled || c.terminalized {
+		return false
+	}
+	if c.runLeases == nil {
+		c.runLeases = make(map[*runLease]struct{})
+	}
+	c.runLeases[lease] = struct{}{}
+	return true
+}
+
+func (c *agentRunControl) detachRunLease(lease *runLease) {
+	c.mu.Lock()
+	delete(c.runLeases, lease)
+	c.mu.Unlock()
+}
+
+func (c *agentRunControl) cancelRunLeases() bool {
+	c.mu.Lock()
+	leases := make([]*runLease, 0, len(c.runLeases))
+	for lease := range c.runLeases {
+		leases = append(leases, lease)
+	}
+	c.mu.Unlock()
+	unsupported := false
+	for _, lease := range leases {
+		if lease.cancelExecution() == foregroundUnsupported {
+			unsupported = true
+		}
+	}
+	return unsupported
+}
+
+func (c *agentRunControl) recordDroppedDelta() {
+	c.mu.Lock()
+	c.droppedDeltas++
+	c.mu.Unlock()
+}
+
+func (c *agentRunControl) droppedDeltaCount() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.droppedDeltas
 }
 
 func (c *agentRunControl) beginCancel() bool {
@@ -201,10 +284,10 @@ func (c *agentRunControl) beginCancel() bool {
 
 func (c *agentRunControl) cancelContext() {
 	c.mu.Lock()
-	cancel := c.cancelFn
+	drive := c.drive
 	c.mu.Unlock()
-	if cancel != nil {
-		cancel()
+	if drive != nil {
+		drive.cancel()
 	}
 }
 
@@ -335,8 +418,9 @@ type agentRunReasoning struct {
 
 // agentRunState is the agent.runState notification: the run's terminal
 // state. error is present for failed runs and for cancelled runs only when
-// cancellation could not stop the host command; it is a sentence a person
-// reads, never a Go error string (design §7). droppedDeltas is present only
+// cancellation could not stop an assistant-run child registered to this exact
+// turn; a user-started host command is outside agent.cancel. It is a sentence
+// a person reads, never a Go error string (design §7). droppedDeltas is present only
 // when the live view is incomplete: the wire refused one or more
 // agent.runDelta frames (a full outbound queue — outbound's deliberate
 // non-blocking policy), so the renderer must not read the block it received
@@ -460,9 +544,6 @@ type agentApproveResponse struct {
 type agentHandlers struct {
 	op     capability.AgentOperation // nil → content store not wired
 	dumpOp capability.LedgerOperation
-	// session and runs the shared stop ladder without holding the content
-	// queue or pending-runs mutex.
-	stopForeground func(session.ID) foregroundOutcome
 	// configOp resolves the endpoint the run uses (the ONE config operation,
 	// shared with the config handlers — AD-8). nil → no endpoint store.
 	configOp capability.ConfigOperation
@@ -773,8 +854,8 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	// approval that suspends it, the resume that finishes it and every
 	// effect any of them run all log under one trace, across the several
 	// wire frames it takes (internal/log).
-	runCtx, runCancel := context.WithCancel(log.WithTraceID(ctx, runTrace(askRes.RunID)))
-	runControl := &agentRunControl{cancelFn: runCancel, cancelDone: make(chan struct{})}
+	runCtx := log.WithTraceID(ctx, runTrace(askRes.RunID))
+	runControl := &agentRunControl{cancelDone: make(chan struct{})}
 	rc := askRunContext{
 		runID:    askRes.RunID,
 		control:  runControl,
@@ -820,7 +901,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		h.pendingRunsMu.Lock()
 		delete(h.pendingRuns, rc.runID)
 		h.pendingRunsMu.Unlock()
-		h.terminalize(ctx, rc, 0, content.RunFailed, content.TermFailed,
+		h.terminalize(ctx, rc, content.RunFailed, content.TermFailed,
 			"too many answers in flight — try again in a moment", h.r)
 	}
 }
@@ -916,13 +997,6 @@ type askRunContext struct {
 	// workspace policy the composition root named (runGrantFor). Nil: the
 	// run executes no tools — the model is offered none.
 	grant *content.Grant
-	// droppedBefore is the live-view drop count recorded before a
-	// suspension: deltas the wire refused while THIS stream ran. The
-	// resume re-drives the same run (agent.approve), so the count must
-	// survive the boundary — the visible gap describes the whole answer,
-	// not just the last Ask invocation. Written by suspendForApproval into
-	// the pendingRuns copy; never wire-facing.
-	droppedBefore int
 	// attempt is the run's attempt — the ledger inserted the run row at
 	// attempt 1 (SubmitAgentAsk), and it is the value the approval binding
 	// names. The resume passes the SAME attempt so the middleware's
@@ -959,15 +1033,14 @@ type askRunContext struct {
 	// collision: new text written over the persisted chunks of the text
 	// before the question, and a renderer routing new deltas onto old
 	// numbers. The count must ascend across the whole run, so it crosses
-	// the suspension exactly as droppedBefore does.
+	// the suspension with the prose checkpoint.
 	nextSeq int
 	// pendingReason is which gate the run is currently suspended on —
 	// "policy" or "egress", empty when it is not suspended. Written by
 	// suspendForApproval into the pendingRuns copy, and read by
 	// agent.approve, which refuses a standing answer to an egress question.
-	// It is a fact about the OPEN QUESTION, not about the proposal, which
-	// is why it lives beside droppedBefore rather than in the approval
-	// store: only the transport knows which of the two gates asked.
+	// It is a fact about the OPEN QUESTION, not about the proposal; only the
+	// transport knows which of the two gates asked.
 	pendingReason string
 }
 
@@ -975,26 +1048,24 @@ type askRunContext struct {
 // first, outside a capability admission and before any external request. A
 // sealed vault therefore waits and continues this same durable run.
 func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Responder) {
+	if rc.control != nil {
+		var finishDrive func()
+		ctx, finishDrive = rc.control.beginDrive(ctx)
+		defer finishDrive()
+	}
 	// Secret material resolves first, outside a capability admission and
 	// before any external request. A sealed vault therefore waits and
 	// continues this same durable run, and a dismissed unlock cancels it.
 	secret, headers, materialErr := h.resolveEndpointMaterial(ctx, rc.endpoint)
 	if materialErr != nil {
 		if errors.Is(materialErr, ErrUnlockCancelled) {
-			h.terminalize(ctx, rc, rc.droppedBefore, content.RunCancelled, content.TermUserKilled, "", r)
+			h.terminalize(ctx, rc, content.RunCancelled, content.TermUserKilled, "", r)
 			return
 		}
-		h.terminalize(ctx, rc, rc.droppedBefore, content.RunFailed, content.TermFailed, materialErr.Error(), r)
+		h.terminalize(ctx, rc, content.RunFailed, content.TermFailed, materialErr.Error(), r)
 		return
 	}
 
-	// dropped counts the deltas the wire refused while THIS stream ran. It
-	// is declared before the context assembly because the reference-failure
-	// path terminalizes below it. The stream is re-driven by a resume with
-	// the SAME run (agent.approve), so the count starts from what a prior
-	// attempt recorded — the visible gap describes the whole answer, never
-	// just the last Ask invocation.
-	dropped := rc.droppedBefore
 	// WHAT THE RUN SPENT ITSELF ON (nocx-d6gn4.8.1). A run that thinks for
 	// four minutes and emits nothing logs NOTHING today — the lines below
 	// are written when a program runs or when the run dies, so the owner
@@ -1193,7 +1264,9 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 				// reading, and the answer they see is not the whole of what
 				// the run did. The durable side is whole either way — the
 				// ledger has the attempt — so this never aborts the stream.
-				dropped++
+				if rc.control != nil {
+					rc.control.recordDroppedDelta()
+				}
 			}
 			return nil
 		case assistant.AskReasoning:
@@ -1210,7 +1283,9 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 				EntryID: rc.entryID,
 				Text:    ev.Text,
 			})); err != nil {
-				dropped++
+				if rc.control != nil {
+					rc.control.recordDroppedDelta()
+				}
 			}
 			return nil
 		}
@@ -1276,7 +1351,9 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			Seq:     seq,
 			Text:    text,
 		})); err != nil {
-			dropped++
+			if rc.control != nil {
+				rc.control.recordDroppedDelta()
+			}
 		}
 		seq++
 		return nil
@@ -1294,11 +1371,11 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		var apErr *assistant.ApprovalRequestedError
 		var egErr *assistant.EgressRequestedError
 		if errors.As(err, &apErr) && apErr.Request != nil {
-			h.suspendForApproval(ctx, rc, r, dropped, seq, prose, apErr.Request, nil)
+			h.suspendForApproval(ctx, rc, r, seq, prose, apErr.Request, nil)
 			return
 		}
 		if errors.As(err, &egErr) && egErr.Request != nil {
-			h.suspendForApproval(ctx, rc, r, dropped, seq, prose, nil, egErr.Request)
+			h.suspendForApproval(ctx, rc, r, seq, prose, nil, egErr.Request)
 			return
 		}
 		reason, sentence := classifyAskFailure(err, rc.model)
@@ -1311,10 +1388,10 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		h.log.Warn("agent ask: the run failed",
 			"run", rc.runID, "reason", string(reason), "sentence", sentence,
 			"error", err, "callPath", log.CallPath(0))
-		h.terminalize(ctx, rc, dropped, content.RunFailed, reason, sentence, r)
+		h.terminalize(ctx, rc, content.RunFailed, reason, sentence, r)
 		return
 	}
-	h.terminalize(ctx, rc, dropped, content.RunCompleted, content.TermCompleted, "", r)
+	h.terminalize(ctx, rc, content.RunCompleted, content.TermCompleted, "", r)
 }
 
 // suspendForApproval moves the run to awaiting_approval and sends the
@@ -1324,13 +1401,9 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 // whose refusal is the call's result (nocx-uvac6.1); only an egress no
 // terminalizes it (agent-declined).
 //
-// dropped is the live-view drop count the suspending stream accumulated;
-// it is recorded into the stored stream context so the resume's or the
-// decline's terminal close carries the WHOLE run's count — a gap observed
-// before the question reached the person is still a gap in the live view
-// after the resume's terminal close. nextSeq crosses the same boundary for
-// the same reason and is the stronger case: since nocx-igu4y the resume
-// CONTINUES the answer instead of re-rolling it, so its deltas must be
+// The run control owns the live-view drop count across every suspension and
+// resume. nextSeq crosses the same boundary because since nocx-igu4y the
+// resume CONTINUES the answer instead of re-rolling it, so its deltas must be
 // numbered after these, not over them.
 //
 // prose crosses with it, and for the identical reason one step further in
@@ -1340,7 +1413,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 // opened beside it. A run suspended before it said anything carries the zero
 // block, which is "nothing is open" — the resume's first delta then opens the
 // first one, exactly as a fresh run would.
-func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext, r Responder, dropped, nextSeq int, prose content.ProseBlock, ap *assistant.ApprovalRequest, eg *assistant.EgressRequest) {
+func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext, r Responder, nextSeq int, prose content.ProseBlock, ap *assistant.ApprovalRequest, eg *assistant.EgressRequest) {
 	if rc.control != nil {
 		// Declared HERE and nowhere else, for the reason terminalize's
 		// release is: outside this branch there is no event to release, and
@@ -1348,7 +1421,7 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 		// nothing the day the branch is restructured.
 		releaseEvent := rc.control.beginEvent()
 		if releaseEvent == nil {
-			h.terminalize(ctx, rc, dropped, content.RunCancelled, content.TermUserKilled,
+			h.terminalize(ctx, rc, content.RunCancelled, content.TermUserKilled,
 				"the person stopped this answer", r)
 			return
 		}
@@ -1374,16 +1447,12 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 		n.Effect, n.Resource = string(eg.Effect), eg.Resource
 		n.Standing = agentApprovalStanding{Reason: "standing answers are not offered for result disclosure"}
 	}
-	// Carry the drops across the suspension: the resume re-drives this
-	// same context (runAskStream starts from rc.droppedBefore), and the
-	// egress decline's terminal close carries it the same way. The gate
-	// that asked is carried the same way and for the same reason —
-	// agent.approve refuses a standing answer to an egress question, and
-	// by then only this record remembers which of the two gates produced
-	// it.
+	// Carry the gate that asked across the suspension. agent.approve refuses
+	// a standing answer to an egress question, and by then only this record
+	// remembers which of the two gates produced it. Delta drops stay on the
+	// run control, whose lifetime already spans every resume.
 	h.pendingRunsMu.Lock()
 	if stored, ok := h.pendingRuns[rc.runID]; ok {
-		stored.droppedBefore = dropped
 		stored.nextSeq = nextSeq
 		stored.prose = prose
 		stored.pendingReason = n.Reason
@@ -1426,10 +1495,11 @@ func (h agentHandlers) suspendForApproval(ctx context.Context, rc askRunContext,
 	_ = r.TryNotify("agent.approvalRequested", mustMarshal(n))
 }
 
-// handleCancel stops one prepared, streaming or awaiting-approval run. The
-// foreground escalation completes before the run context is cancelled and the
-// terminal ledger write is completed before the result is answered, so no
-// stream event can overtake the person's stop decision.
+// handleCancel stops one prepared, streaming or awaiting-approval assistant
+// turn. It never signals the session's foreground command: command interruption
+// belongs exclusively to session.signal and its existing focus owners. The
+// terminal ledger write completes before the result is answered, so no stream
+// event can overtake the person's stop decision.
 func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 	if h.op == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "method not found: content store not wired"})
@@ -1454,29 +1524,28 @@ func (h agentHandlers) handleCancel(ctx context.Context, req jsonrpcRequest) {
 	state := content.RunCancelled
 	reason := content.TermUserKilled
 	sentence := "the person stopped this answer"
-	outcome := foregroundNothingRunning
-	if h.stopForeground != nil {
-		// Foreground escalation completes before cancellation lets the stream
-		// terminalize. The callback runs without pendingRunsMu or the content
-		// operation queue held.
-		outcome = h.stopForeground(rc.sessionID)
+	hasDetails := false
+	// Stop only RequestRun executions registered by this assistant turn. The
+	// synchronous ladder completes before provider cancellation, durable
+	// terminalization and the reserved response; user/summoned commands have
+	// no registration and are never signalled here.
+	if rc.control.cancelRunLeases() {
+		sentence = "no local process group to signal — the execution keeps running"
+		hasDetails = true
 	}
-	if outcome == foregroundUnsupported {
-		// The assistant turn is cancelled, but the command on a remote host
-		// may still be alive. Keep that distinction visible in the terminal
-		// state instead of claiming the command was stopped.
-		sentence = "the person stopped this answer, but its command could not be stopped on the host"
-		h.log.Warn("agent cancel: foreground command could not be stopped",
-			"run", rc.runID, "session", rc.sessionID)
-	}
-	rc.control.finishCancel(state, reason, sentence, outcome == foregroundUnsupported)
 	rc.control.cancelContext()
-	h.terminalize(ctx, rc, rc.droppedBefore, state, reason, sentence, h.r)
-	_ = h.r.TryResult(req.ID, mustMarshal(agentCancelResponse{
-		RunID:     p.RunID,
-		State:     string(content.RunCancelled),
-		Cancelled: true,
-	}))
+	rc.control.finishCancel(state, reason, sentence, hasDetails)
+	h.terminalize(ctx, rc, state, reason, sentence, h.r)
+	result := agentCancelResponse{
+		RunID:         p.RunID,
+		State:         string(content.RunCancelled),
+		Cancelled:     true,
+		DroppedDeltas: rc.control.droppedDeltaCount(),
+	}
+	if hasDetails {
+		result.Error = sentence
+	}
+	_ = h.r.TryResult(req.ID, mustMarshal(result))
 }
 
 // handleApprove answers agent.approve — the person's decision on one exact
@@ -1561,7 +1630,7 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		// about a result that DID run but will not be sent.
 		if rc.pendingReason == "egress" {
 			h.approvals.ClearRetained(ap)
-			h.terminalize(ctx, rc, rc.droppedBefore, content.RunFailed, content.TermAgentDeclined,
+			h.terminalize(ctx, rc, content.RunFailed, content.TermAgentDeclined,
 				"the person declined to send the result to the model", h.r)
 			_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed)}))
 			return
@@ -1588,7 +1657,7 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 		if rej := h.askSub.TrySubmit(ctx, control.Task{Run: func(taskCtx context.Context) {
 			h.resumeRunDeclined(taskCtx, rc, h.r)
 		}}); rej != nil {
-			h.terminalize(ctx, rc, rc.droppedBefore, content.RunFailed, content.TermFailed,
+			h.terminalize(ctx, rc, content.RunFailed, content.TermFailed,
 				"too many answers in flight — try again in a moment", h.r)
 			_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed), Warning: warning}))
 			return
@@ -1616,7 +1685,7 @@ func (h agentHandlers) handleApprove(ctx context.Context, req jsonrpcRequest) {
 	if rej := h.askSub.TrySubmit(ctx, control.Task{Run: func(taskCtx context.Context) {
 		h.resumeRun(taskCtx, rc, h.r)
 	}}); rej != nil {
-		h.terminalize(ctx, rc, rc.droppedBefore, content.RunFailed, content.TermFailed,
+		h.terminalize(ctx, rc, content.RunFailed, content.TermFailed,
 			"too many answers in flight — try again in a moment", h.r)
 		_ = h.r.TryResult(req.ID, mustMarshal(agentApproveResponse{State: string(content.RunFailed), Warning: warning}))
 		return
@@ -1803,13 +1872,13 @@ func declineKindForScope(scope string) assistant.DeclineKind {
 // ctx would fail the very write that closes the run. WithoutCancel keeps
 // the terminal close independent of the connection's fate.
 //
-// dropped is the run's live-view drop count (deltas the wire refused): the
-// notification carries it so the renderer can mark the gap. It is a
-// live-view bound, never a terminal-state change — the durable answer is
-// whole, so the run still closes with the state it earned.
-func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, dropped int, state content.RunState, reason content.TerminationReason, sentence string, r Responder) {
+// The run control's drop count is read only after beginTerminal excludes
+// racing callbacks. The notification carries that authoritative whole-run
+// count so the renderer marks the gap without changing the earned state.
+func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, state content.RunState, reason content.TerminationReason, sentence string, r Responder) {
 	wireError := state != content.RunCancelled
 	cancelled := false
+	dropped := 0
 	if rc.control != nil {
 		// Declared HERE and nowhere else: outside this branch there is no
 		// terminal to release, and a no-op standing in for one is a release
@@ -1820,6 +1889,7 @@ func (h agentHandlers) terminalize(ctx context.Context, rc askRunContext, droppe
 		}
 		cancelled = c
 		defer releaseTerminal()
+		dropped = rc.control.droppedDeltaCount()
 	}
 	if cancelled {
 		if rc.control.cancelDone != nil {
@@ -2275,17 +2345,6 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		// idempotency to the connection (a reconnect mints a new one), never
 		// to a renderer-minted tab.
 		return agentHandlers{
-			stopForeground: func(sid session.ID) foregroundOutcome {
-				sess, owned := state.get(sid)
-				if !owned || sess == nil || sess.Kind() == session.KindRemote {
-					return foregroundUnsupported
-				}
-				leaseSess, ok := sess.(runLeaseSession)
-				if !ok {
-					return foregroundUnsupported
-				}
-				return stopForeground(s.log, sid, leaseSess, s.effectiveRunLease().SignalGrace)
-			},
 			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
 			credentials: credentials, client: client, askSub: askSub,
 			attemptLedger: attemptLedger, grantFor: s.runGrantFor,

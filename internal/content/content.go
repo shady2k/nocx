@@ -76,6 +76,11 @@ type ContentDB interface {
 	// the collection path plus request relative path; the renderer's
 	// session-only collection handle is never persisted.
 	APIRuns() APIRunRepository
+	// SessionOutput returns the backend's own recording of what a session
+	// printed (session_output.go, nocx-22k1c.1). Its identity is a session
+	// id and a stream offset — neither an entry nor a request — which is why
+	// it owns its own two tables rather than widening the ledger's.
+	SessionOutput() SessionOutputRepository
 }
 
 // Redaction is one structured redaction segment on a history row. Offsets

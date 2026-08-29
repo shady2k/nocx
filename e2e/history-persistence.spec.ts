@@ -16,7 +16,7 @@
  * swept in the same writer turn as the INSERT). Do not "simplify" this back
  * to the default: the setting is the point.
  *
- * Drives the real frontend against cmd/devharness with NO Secret Service for
+ * Drives the real frontend against cmd/nocx-server with NO Secret Service for
  * the backend (the `true` argument) and fresh XDG directories, so the
  * content key is DERIVED at startup from the machine salt — the vault and
  * its seal are irrelevant to it, which is the point of nocx-rtg0.14.
@@ -39,7 +39,7 @@ import { readStand } from './stand'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 // Two distinct ports so restart never conflicts with the first instance's
 // TIME_WAIT. Outside the ranges used by `wails dev` (34115), the e2e suite
@@ -76,7 +76,7 @@ function createXdgDirs(): XdgDirsResult {
 // one disposable home, because XDG_CONFIG_HOME outranks $HOME and redirecting
 // only the former let a backend walk straight back out (nocx-ti8w). The spec
 // was never updated, `this.disposable.root` was undefined, and the run died in
-// path.resolve — invisible until CI built the devharness these specs need
+// path.resolve — invisible until CI built the devharness these specs then needed
 // (nocx-azxe.2), and invisible to the type checker because nothing type-checks
 // e2e/.
 function asDisposableRoot(r: XdgDirsResult): DisposableRoot {
@@ -109,7 +109,7 @@ test.describe('history: a command survives a restart and recall answers from the
     )
     // `true` = no Secret Service for this backend, regardless of the
     // session the suite runs in — the derived-key branch is the point.
-    backend = new VaultBackend(devharnessBin(), asDisposableRoot(xdg), true)
+    backend = new VaultBackend(serverBin(), asDisposableRoot(xdg))
   })
 
   test.afterAll(() => {

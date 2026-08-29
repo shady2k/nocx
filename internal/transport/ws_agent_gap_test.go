@@ -221,6 +221,7 @@ func gapRunContext() askRunContext {
 		runID:    7,
 		entryID:  "turn-1",
 		question: "q",
+		control:  &agentRunControl{cancelDone: make(chan struct{})},
 		// The stream resolves endpoint material up front; a keyless endpoint
 		// resolves to nothing, keeping these unit tests on the delta path.
 		endpoint: profile.Endpoint{NoKey: true},
@@ -319,8 +320,8 @@ func TestAgentAsk_DropCountSurvivesASuspension(t *testing.T) {
 	if !ok {
 		t.Fatal("pending run context lost at suspension")
 	}
-	if stored.droppedBefore != 1 {
-		t.Fatalf("stored droppedBefore = %d, want 1 — the suspension must carry the pre-approval drops", stored.droppedBefore)
+	if got := stored.control.droppedDeltaCount(); got != 1 {
+		t.Fatalf("control dropped deltas = %d, want 1 — the run control must carry the pre-approval drops", got)
 	}
 
 	// The person approves; the resume re-streams with the SAME run. Its

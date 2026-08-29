@@ -1248,7 +1248,7 @@ describe('notification routing matrix (nocx-3mniv)', () => {
     expect(invented.querySelector('input[type="checkbox"]')).toBeTruthy()
 
     // And a pair the backend does NOT declare is an empty cell — absent
-    // rather than offered and declined (ADR-0029 §3).
+    // rather than offered and declined (ADR-0047 §3).
     const notOffered = matrix.querySelector<HTMLElement>(
       '.ui-toggle-matrix__cell[data-row="bell"][data-column="carrierPigeon"]',
     )!

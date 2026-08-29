@@ -22,7 +22,7 @@ import { readStand } from './stand'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 
@@ -208,7 +208,7 @@ test.describe('Vault settings — change passphrase', () => {
 
   test.beforeAll(() => {
     xdg = createXdgDirs()
-    backend = new VaultBackend(devharnessBin(), asDisposableRoot(xdg), true)
+    backend = new VaultBackend(serverBin(), asDisposableRoot(xdg))
   })
 
   test.afterAll(() => {
@@ -311,7 +311,7 @@ test.describe('Vault settings — reissue recovery code', () => {
 
   test.beforeAll(() => {
     xdg = createXdgDirs()
-    backend = new VaultBackend(devharnessBin(), asDisposableRoot(xdg), true)
+    backend = new VaultBackend(serverBin(), asDisposableRoot(xdg))
   })
 
   test.afterAll(() => {

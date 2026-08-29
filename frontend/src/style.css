@@ -137,7 +137,7 @@
 /* ── Sidebar panel ─────────────────────────────────────────────────────
    The width is the `--sidebar-width` custom property, set inline by the
    sidebar's width controller (frontend/src/sidebar-width.ts) from the
-   UI-state document (ADR-0033); 240px here is only the first-paint
+   UI-state document (ADR-0048); 240px here is only the first-paint
    fallback before that document arrives. The panel is a flex ROW: the kit
    ResizeHandle owns the FIRST 6px and the active view fills the rest, so the
    drag surface is a real flex slot that never overlaps the view's

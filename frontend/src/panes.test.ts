@@ -2575,6 +2575,18 @@ describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', ()
     await connecting
 
     const openRequests = () => realSocket.requests().filter((request) => request.method === 'open')
+    // BOOT ASKS THE COORDINATOR WHAT IT IS STILL RUNNING before it draws the
+    // chain (design D5), and this is a REAL client on a fake socket, so the
+    // question has to be answered or nothing past it happens. Empty is a cold
+    // backend, which is what this test's subject assumes.
+    const answerLiveSessions = async (): Promise<void> => {
+      await vi.waitFor(() => {
+        expect(realSocket.requests().filter((r) => r.method === 'sessions.live')).toHaveLength(1)
+      })
+      const request = realSocket.requests().find((r) => r.method === 'sessions.live')
+      if (request?.id === undefined) throw new Error('missing sessions.live request')
+      realSocket.deliverText({ jsonrpc: '2.0', id: request.id, result: { sessions: [] } })
+    }
     const answerOpen = (index: number): void => {
       const request = openRequests()[index]
       if (request?.id === undefined) throw new Error(`missing open request ${index}`)
@@ -2615,6 +2627,7 @@ describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', ()
 
     try {
       const mounted = mountPaneManager(realClient as unknown as ClientFake)
+      await answerLiveSessions()
       await vi.waitFor(() => expect(openRequests()).toHaveLength(1))
       answerOpen(0)
       const { manager, bar, panes } = await mounted
@@ -2713,5 +2726,135 @@ describe('anyLocalSession — a live answer, never a latch', () => {
     })
 
     expect(manager.anyLocalSession()).toBeNull()
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A restored pane takes back the session the coordinator is still running
+// (nocx-gpyxp, design D5 and §5)
+//
+// THIS IS THE STEP THAT WAS MISSING, and it is the reason the epic's own
+// acceptance test could not pass by construction. The backend could list its
+// live sessions and hand one back, and `WSClient.reclaimSession` could ask for
+// one — but no pane ever adopted the result, so a fresh window opened a new
+// shell over a process that was still running with nobody attached.
+//
+// The seam is the one a user reaches: the window comes up, the chain says
+// which panes there are, and what the pane does about the session it is the
+// pipe of is what these assert.
+// ═══════════════════════════════════════════════════════════════════════════
+describe('a restored pane and the session the backend still holds', () => {
+  /** A live-session entry naming one pane, shaped like the wire's
+   *  (contracts/sessions.live.schema.json). */
+  const liveEntry = (paneId: string) => ({
+    sessionId: '77123456789abcdef0011223344556677',
+    instanceId: 'fedcba9876543210fedcba9876543210',
+    sessionEpoch: 1,
+    paneId,
+    replayFrom: 0,
+    attached: false,
+  })
+
+  it('adopts the live session named for its pane instead of opening a new one', async () => {
+    const chain = makeLayoutStore()
+    await mountPaneManager(makeClient(), undefined, undefined, undefined, chain)
+    const paneId = chain.backend.rows().panes[0].id
+
+    const returning = makeClient()
+    returning.listLiveSessions.mockResolvedValue([liveEntry(paneId)])
+    await mountPaneManager(
+      returning,
+      undefined,
+      undefined,
+      undefined,
+      makeLayoutStore(chain.backend),
+    )
+
+    expect(returning.reclaimSession).toHaveBeenCalledTimes(1)
+    expect(returning.reclaimSession.mock.calls[0][0]).toMatchObject({ paneId })
+    // The whole point: no second shell over a process that is still running.
+    expect(returning.openSession).not.toHaveBeenCalled()
+  })
+
+  it('opens a fresh session when the backend holds nothing for the pane', async () => {
+    const chain = makeLayoutStore()
+    await mountPaneManager(makeClient(), undefined, undefined, undefined, chain)
+
+    const returning = makeClient()
+    returning.listLiveSessions.mockResolvedValue([])
+    await mountPaneManager(
+      returning,
+      undefined,
+      undefined,
+      undefined,
+      makeLayoutStore(chain.backend),
+    )
+
+    expect(returning.reclaimSession).not.toHaveBeenCalled()
+    expect(returning.openSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('falls back to a fresh session when the claim is refused', async () => {
+    const chain = makeLayoutStore()
+    await mountPaneManager(makeClient(), undefined, undefined, undefined, chain)
+    const paneId = chain.backend.rows().panes[0].id
+
+    const returning = makeClient()
+    returning.listLiveSessions.mockResolvedValue([liveEntry(paneId)])
+    // The session ended, or another client took it, between the list and the
+    // claim. A pane that stayed dead over that would be a worse answer than
+    // the one that predates the coordinator.
+    returning.reclaimSession.mockRejectedValue(new Error('session is gone'))
+    await mountPaneManager(
+      returning,
+      undefined,
+      undefined,
+      undefined,
+      makeLayoutStore(chain.backend),
+    )
+
+    expect(returning.reclaimSession).toHaveBeenCalledTimes(1)
+    expect(returning.openSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('does not ask the backend twice for one pane', async () => {
+    const chain = makeLayoutStore()
+    await mountPaneManager(makeClient(), undefined, undefined, undefined, chain)
+    const paneId = chain.backend.rows().panes[0].id
+
+    // TWO entries naming ONE pane cannot both be claimed: one session is one
+    // pane's pipe, and a second claim would take the session off the pane
+    // that had just adopted it (D8 — a claim TAKES).
+    const returning = makeClient()
+    returning.listLiveSessions.mockResolvedValue([liveEntry(paneId), liveEntry(paneId)])
+    await mountPaneManager(
+      returning,
+      undefined,
+      undefined,
+      undefined,
+      makeLayoutStore(chain.backend),
+    )
+
+    expect(returning.reclaimSession).toHaveBeenCalledTimes(1)
+  })
+
+  it('carries on when the backend cannot say what it is running', async () => {
+    const chain = makeLayoutStore()
+    await mountPaneManager(makeClient(), undefined, undefined, undefined, chain)
+
+    // The degrade is the behaviour that predates the coordinator: every
+    // restored pane opens a fresh session. A window that refused to boot over
+    // it would be a worse failure than the one it reports.
+    const returning = makeClient()
+    returning.listLiveSessions.mockRejectedValue(new Error('no such method'))
+    await mountPaneManager(
+      returning,
+      undefined,
+      undefined,
+      undefined,
+      makeLayoutStore(chain.backend),
+    )
+
+    expect(returning.openSession).toHaveBeenCalledTimes(1)
   })
 })

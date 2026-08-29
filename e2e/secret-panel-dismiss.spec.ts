@@ -12,7 +12,7 @@ import { test, expect, VaultBackend, type DisposableRoot, type Page } from './ha
 import { openWorkbench, treeRow, ZEN } from './api-workbench'
 import { readStand } from './stand'
 
-const devharnessBin = (): string => readStand().devharness
+const serverBin = (): string => readStand().server
 const OPEN_PANEL = '.ui-floating-panel[data-variant="secret"][data-open="true"]'
 
 /** Open the seeded request, then add the empty header used by the picker path. */
@@ -50,7 +50,7 @@ test.describe('secret picker document dismissal', () => {
 
   test.beforeEach(() => {
     disposable = { root: mkdtempSync(join(tmpdir(), 'nocx-e2e-secret-dismiss-')) }
-    backend = new VaultBackend(devharnessBin(), disposable, true)
+    backend = new VaultBackend(serverBin(), disposable)
   })
 
   test.afterEach(() => {

@@ -130,11 +130,11 @@ func WithWindowSource(fn WindowSource) PolicyOption {
 // suppression and the per-{session,kind} debounce with coalescing (design
 // §6.1, §6.2). Both stages are payload-independent — suppression keys on
 // focus and session, the debounce key on {session, kind}, the coalescing
-// count on the number of events — which is what keeps ADR-0029's
+// count on the number of events — which is what keeps ADR-0047's
 // noninterference invariant true: resolution never depends on the
 // presentation fields.
 //
-// The ad-hoc subscription route (ADR-0029 §3, design §6.1) bypasses this
+// The ad-hoc subscription route (ADR-0047 §3, design §6.1) bypasses this
 // policy entirely: an explicit gesture delivers immediately through the
 // subscription route and is never suppressed, debounced or coalesced. That
 // path lands with the subscription work and must not call Submit. This
@@ -398,7 +398,7 @@ func (p *Policy) suppressed(session string) bool {
 //
 // Where a failure becomes visible therefore moves: an admission refusal or a
 // sink error arrives at the result handler (WithResultHandler) rather than at
-// the caller. ADR-0029 §2.2 requires a refused delivery to be visible, and the
+// the caller. ADR-0047 §2.2 requires a refused delivery to be visible, and the
 // handler is the seam that carries it — today into the log, and into whatever
 // surface reports notification health when one exists (nocx-jiwq.2).
 func (p *Policy) Raise(ctx context.Context, ev Event) Outcome {

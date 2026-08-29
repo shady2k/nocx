@@ -751,7 +751,7 @@ func TestPolicy_ResultHandler_SeesDeadlineExpiredSink(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// The ADR-0029 differential property test
+// The ADR-0047 differential property test
 
 // payloadValues is a hand-rolled set of schema-valid presentation values
 // covering what resolution must not care about: normal text, the empty
@@ -759,7 +759,7 @@ func TestPolicy_ResultHandler_SeesDeadlineExpiredSink(t *testing.T) {
 // (CR, LF, NUL, quotes, URL metacharacters), sizes far beyond any sink's
 // limit, and byte sequences that are not valid UTF-8 — valid in a Go
 // string, rejected by a validating sink, and exactly the "invalid-encoding"
-// case the ADR's generator must not exclude (ADR-0029 §4.3).
+// case the ADR's generator must not exclude (ADR-0047 §4.3).
 func payloadValues() []string {
 	return []string{
 		"",
@@ -825,7 +825,7 @@ type payload struct {
 	title, body string
 }
 
-// sameResolution compares two resolved route sets by the ADR-0029 contract:
+// sameResolution compares two resolved route sets by the ADR-0047 contract:
 // the same sinks (by identity), the same target identifiers, the same
 // credentials, the same destination and the same method. The destination
 // value carries target, credentials and method; DeepEqual covers all of
@@ -845,7 +845,7 @@ func sameResolution(a, b []notify.Route) bool {
 	return true
 }
 
-// sameOutcome compares two raises by the ADR-0029 contract: the same
+// sameOutcome compares two raises by the ADR-0047 contract: the same
 // resolved route set in the same order and, for every delivery, the same
 // sink identity, the same destination and a clean result. It compares what
 // actually came out of the pipeline — a divergence in routing, ordering or
@@ -908,7 +908,7 @@ func propertyRouter(t *testing.T) *notify.Router {
 }
 
 // TestNoninterference_ResolutionIndependentOfPresentation is the executable
-// form of ADR-0029's differential rule (§2.2, §4.3): for any two
+// form of ADR-0047's differential rule (§2.2, §4.3): for any two
 // schema-valid payloads differing only in title or body, the pipeline
 // produces the same sinks, the same target identifiers, the same
 // credentials, the same destination and the same order. It is exercised
@@ -985,7 +985,7 @@ func TestNoninterference_ResolutionIndependentOfPresentation(t *testing.T) {
 // title of a window's closing summary to name the count and puts the newest
 // held-back message in its body — that rewrite must not change route
 // resolution, which is the invariant the policy itself could otherwise break
-// (ADR-0029 §2.2). The delivered event must also keep the keyed session's
+// (ADR-0047 §2.2). The delivered event must also keep the keyed session's
 // attribution.
 func TestPolicy_CoalescedDelivery_ResolvesSameAsSource(t *testing.T) {
 	// Capture the outcome of the policy's own delivery — the real path,
@@ -1027,7 +1027,7 @@ func TestPolicy_CoalescedDelivery_ResolvesSameAsSource(t *testing.T) {
 }
 
 // ---------------------------------------------------------------------------
-// Resolution precedes sink validation (ADR-0029 §2.2)
+// Resolution precedes sink validation (ADR-0047 §2.2)
 
 // TestSinkRejection_ResolvedSetUnchanged: route resolution completes before
 // sink-level validation. A sink that rejects a payload — oversized, invalid
@@ -1084,14 +1084,14 @@ func TestSinkRejection_ResolvedSetUnchanged(t *testing.T) {
 var errPolicySink = errors.New("notify_test: sink failed")
 
 // errSink fails every delivery with a fixed error, like a real sink
-// rejecting a payload (ADR-0029 §2.3).
+// rejecting a payload (ADR-0047 §2.3).
 type errSink struct{ err error }
 
 func (s *errSink) Deliver(ctx context.Context, d notify.Delivery) error { return s.err }
 
 func (s *errSink) LeavesMachine() bool { return false }
 
-// sizeRejectingSink validates like a real sink (ADR-0029 §2.3): oversized
+// sizeRejectingSink validates like a real sink (ADR-0047 §2.3): oversized
 // payloads fail visibly; everything else delivers.
 type sizeRejectingSink struct {
 	mu       sync.Mutex
@@ -1132,7 +1132,7 @@ func (s *sizeRejectingSink) acceptedCount() int {
 
 // deadlineSink blocks past its delivery deadline, like a real sink that
 // cannot honor cancellation promptly; it observes the context but only
-// returns when the deadline fires (ADR-0029 §2.2's "a deadline is not proof
+// returns when the deadline fires (ADR-0047 §2.2's "a deadline is not proof
 // a goroutine stopped writing").
 type deadlineSink struct{}
 

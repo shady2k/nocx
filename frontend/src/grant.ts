@@ -22,6 +22,8 @@ export class GrantController {
   private mounted = false
   private readonly paintedRows = new Set<HTMLElement>()
   private readonly ownsChip: boolean
+  /** Presentation only: hidden grants remain the exact stored objects. */
+  private visible = true
   constructor(options: GrantControllerOptions = {}) {
     this.onChange = options.onChange
     this.ownsChip = options.chip === undefined
@@ -44,6 +46,7 @@ export class GrantController {
     this.updateChip()
   }
   toggle(): void {
+    if (!this.visible) return
     if (this.panel.isOpen) this.panel.hide()
     else if (this.blocks.length > 0) this.renderPanel()
   }
@@ -63,6 +66,18 @@ export class GrantController {
       if (this.blocks.length > 0) this.renderPanel()
       else this.panel.hide()
     }
+  }
+
+  /**
+   * Project the stored grants onto the assistant surface without changing
+   * their state. Hiding closes the panel and removes every paint marker;
+   * showing reapplies those manifestations from the same grant objects.
+   */
+  setVisible(visible: boolean): void {
+    this.visible = visible
+    this.chip.style.display = visible ? '' : 'none'
+    if (!visible) this.panel.hide()
+    this.repaintBlocks()
   }
 
   get current(): ReadonlyArray<GrantBlock> {
@@ -158,6 +173,15 @@ export class GrantController {
     for (const row of this.paintedRows) delete row.dataset.granted
     this.paintedBlocks.clear()
     this.paintedRows.clear()
+    if (!this.visible) {
+      for (const grant of this.blocks) {
+        grant.blockEl.classList.remove('cmd-block-grant-flash')
+        for (const row of grant.blockEl.querySelectorAll<HTMLElement>('.term-line')) {
+          row.classList.remove('cmd-block-grant-flash')
+        }
+      }
+      return
+    }
     for (const grant of this.blocks) {
       if (grant.start !== undefined && grant.count !== undefined) {
         const rows = Array.from(grant.blockEl.querySelectorAll<HTMLElement>('.term-line')).slice(

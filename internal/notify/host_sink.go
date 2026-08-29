@@ -7,7 +7,7 @@ import (
 // HostSink bridges the router to the AttentionHost port: Deliver presents
 // the event through the host's banner, and every host failure — including
 // ErrUnavailable from an unavailable host — is a failed delivery the router
-// records in the outcome. It never selects where an event goes (ADR-0029
+// records in the outcome. It never selects where an event goes (ADR-0047
 // §2.3): the host is bound at construction.
 //
 // It lives here, in the Wails-free package, deliberately: the composition

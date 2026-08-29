@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
 )
 
@@ -430,43 +431,39 @@ func TestResizeAfterCloseAdmissionNeverReachesSession(t *testing.T) {
 	}
 }
 
-// --- acceptance 5: a close from one connection must not let another
-// connection's resize use the session the close already removed ------------
+// --- acceptance 5: a resize must not reach a session the registry no longer
+// holds, whatever the connection still believes -----------------------------
 
+// The connection's own state and the registry can disagree, and this is what
+// happens when they do. A session that ends on its own — the shell exits, the
+// channel dies — leaves the registry while the connection that opened it is
+// told nothing until the exit notification arrives; a resize sent in that
+// window names a session this connection genuinely has, and the registry
+// genuinely does not.
+//
+// It used to be written with two connections, the second attaching so that the
+// session stayed in its state after the first closed it. That setup is gone
+// because it can no longer happen: attaching TAKES the session (D8,
+// ws_reclaim.go), so the displaced connection loses it from its own state in
+// the same act and its resize is refused one gate earlier — which
+// ws_reclaim_test.go asserts. Ending the session under the connection is the
+// remaining way to reach this gate, and it is the realistic one.
 func TestResizeFromAttachedConnectionAfterCloseIsRefused(t *testing.T) {
 	gated := newGatedResizeChannel()
 	ws := stallServer(t, gated)
-	connA := connectWS(t, ws)
-	connB := connectWS(t, ws)
-	t.Cleanup(func() { _ = connA.Close() })
-	t.Cleanup(func() { _ = connB.Close() })
+	conn := connectWS(t, ws)
+	t.Cleanup(func() { _ = conn.Close() })
 
-	sid := openSSHOverSocket(t, ws, connA, 1)
+	sid := openSSHOverSocket(t, ws, conn, 1)
 
-	// Connection B attaches, so the session is in B's connState too — the
-	// state gate alone can no longer refuse B's resize.
-	at := jsonrpcCallWithID(t, connB, "attach", map[string]any{
-		"sessionId": sid,
-		"offset":    0,
-	}, 2)
-	var ar struct {
-		Error *struct {
-			Code int `json:"code"`
-		} `json:"error"`
-	}
-	_ = json.Unmarshal(at, &ar)
-	if ar.Error != nil {
-		t.Fatalf("attach failed: code %d", ar.Error.Code)
+	// The session ends without the connection being told.
+	if err := ws.registry.Close(session.ID(sid)); err != nil {
+		t.Fatalf("registry close: %v", err)
 	}
 
-	// A closes the session. B's connState still names it.
-	closeResp := closeSessionAwait(t, connA, sid, 3, 5*time.Second)
-	assertResponseOK(t, closeResp, 3)
-
-	// B resizes the closed session: refused (the registry gate), and
-	// nothing reaches the PTY.
-	sendResizeRaw(t, connB, sid, 200, 60, 4)
-	resps := collectResponses(t, connB, []int{4}, 5*time.Second)
+	// The resize is refused (the registry gate), and nothing reaches the PTY.
+	sendResizeRaw(t, conn, sid, 200, 60, 4)
+	resps := collectResponses(t, conn, []int{4}, 5*time.Second)
 	assertResponseError(t, resps[4], 4, -32602)
 
 	deadline := time.After(200 * time.Millisecond)

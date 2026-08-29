@@ -103,7 +103,17 @@ const defaultRunSignalGrace = time.Second
 // process cannot signal (the remote kill is the remote-footprint bead's
 // job, not this one's).
 type runLeaseSession interface {
+	// SignalForeground is the ONE-SHOT form: signal whatever job is in front
+	// right now. It is what an interrupt means and it is all an interrupt
+	// needs.
 	SignalForeground(sig syscall.Signal) error
+	// ForegroundJob names that job's process group, and SignalProcessGroup
+	// signals it. An ESCALATION is built out of these two rather than out of
+	// repeated SignalForeground calls: the ladder must keep the addressee it
+	// started against, or a job that exits between two rungs hands the next
+	// rung to whatever the person started in its place (nocx-uvac6.11).
+	ForegroundJob() (int, error)
+	SignalProcessGroup(pgid int, sig syscall.Signal) error
 }
 
 // runLease supervises one run request. It is created per RequestRun and is
@@ -120,21 +130,17 @@ type runLease struct {
 	lane *laneState      // nil → no awaiting-takeover observation
 	cfg  RunLeaseConfig
 
-	// mu guards the observer state below: written by the ring hook (under
-	// the ring's lock), the timers' goroutines and the lane callback; read
-	// by supervise after disarm. The lock order is fixed: the ring's lock
-	// is taken alone first (setWriteObserver, onOutput incoming), then mu —
-	// disarm and the arming path take ring.mu before mu, so no cycle.
-	mu          sync.Mutex
-	output      int64
-	lastOutput  time.Time // monotonic stamp of the last output byte
-	firedReason content.TerminationReason
-	suspended   bool
-	done        bool // disarm has run; observers must not act
-	cancel      context.CancelFunc
-	wallTimer   *time.Timer // the wall-clock AfterFunc timer, stopped on disarm
-	inactTimer  *time.Timer // the inactivity AfterFunc timer, re-armed by its own callback
-	unwatch     func()
+	mu            sync.Mutex
+	cancel        context.CancelFunc
+	wallTimer     *time.Timer
+	inactTimer    *time.Timer
+	unwatch       func()
+	lastOutput    time.Time
+	output        int64
+	firedReason   content.TerminationReason
+	done          bool
+	suspended     bool
+	cancelStarted bool
 }
 
 // supervise runs fn (the broker request) under the lease, INLINE on the
@@ -148,38 +154,43 @@ func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) e
 	if cfg.SignalGrace <= 0 {
 		cfg.SignalGrace = defaultRunSignalGrace
 	}
-	if cfg.WallClock <= 0 && cfg.Inactivity <= 0 && cfg.OutputBudget <= 0 {
-		// The lease is fully disabled: the pre-lease path, unchanged.
-		return fn(ctx)
-	}
+	enabled := cfg.WallClock > 0 || cfg.Inactivity > 0 || cfg.OutputBudget > 0
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	defer l.disarm()
 
-	// Arm the observers BEFORE the request runs. The ring hook first,
-	// taking the ring's lock alone — the same order the hook itself takes
-	// (incoming from the ring's write, which holds ring.mu).
-	if l.ring != nil {
-		l.ring.setWriteObserver(func(n int) { l.onOutput(n) })
-	}
+	// The cancellation handle is armed before broker delivery even when the
+	// ordinary lease bounds are disabled. agent.cancel owns this exact request,
+	// so it must be able to withdraw it without restoring the old broad
+	// foreground-session signal path.
 	l.mu.Lock()
 	l.cancel = cancel
-	l.lastOutput = time.Now()
-	if cfg.WallClock > 0 {
-		l.wallTimer = time.AfterFunc(cfg.WallClock, func() { l.fire(content.TermTimeout) })
+	if l.cancelStarted {
+		l.mu.Unlock()
+		cancel()
+		return context.Canceled
 	}
-	if cfg.Inactivity > 0 {
-		l.inactTimer = time.AfterFunc(cfg.Inactivity, l.checkInactivity)
-	}
-	if l.lane != nil {
-		l.unwatch = l.lane.watch(l.sid, l.onLane)
+	if enabled {
+		l.lastOutput = time.Now()
+		if cfg.WallClock > 0 {
+			l.wallTimer = time.AfterFunc(cfg.WallClock, func() { l.fire(content.TermTimeout) })
+		}
+		if cfg.Inactivity > 0 {
+			l.inactTimer = time.AfterFunc(cfg.Inactivity, l.checkInactivity)
+		}
+		if l.lane != nil {
+			l.unwatch = l.lane.watch(l.sid, l.onLane)
+		}
 	}
 	l.mu.Unlock()
+	if enabled && l.ring != nil {
+		l.ring.setWriteObserver(func(n int) { l.onOutput(n) })
+	}
 
 	// A lane already awaiting takeover (the report raced the run start)
-	// suspends the lease from the first byte: the human owns the execution
-	// and the product's bounds do not apply to it.
-	if l.lane != nil && l.lane.awaitingTakeover(l.sid) {
+	// suspends the bounds from the first byte. Exact cancellation remains
+	// armed: it belongs to this assistant request, not to lane ownership.
+	if enabled && l.lane != nil && l.lane.awaitingTakeover(l.sid) {
 		l.mu.Lock()
 		l.suspended = true
 		l.mu.Unlock()
@@ -325,13 +336,64 @@ func (l *runLease) disarm() {
 // (nocx-23rph, AGENTS.md "look for the existing answer"). What stays here
 // is the lease's own part: which session, and what to say when there is no
 // local process group at all.
-func (l *runLease) escalate() {
+func (l *runLease) escalate() foregroundOutcome {
 	if l.sess == nil {
 		l.log.Warn("run lease: no local process group to signal — the execution keeps running",
 			"session_id", string(l.sid))
-		return
+		return foregroundUnsupported
 	}
-	stopForeground(l.log, l.sid, l.sess, l.cfg.SignalGrace)
+	// No protected-group fallback (nocx-7l4ex.10): the lease supervises the
+	// agent's run and holds no authenticated lifecycle attempt, so over a
+	// protected group it has nothing that says a program is in there. It
+	// takes the honest refusal rather than writing a byte on a guess.
+	return stopForeground(l.log, l.sid, l.sess, l.cfg.SignalGrace, nil)
+}
+
+// cancelExecution withdraws this exact broker request and synchronously runs
+// the established INT → TERM → KILL ladder while the request still owns the
+// foreground execution. A completed/disarmed lease is inert — checked when the
+// claim is taken AND again after the withdrawal, because those are two
+// different instants and the request can finish between them — so a late turn
+// cancellation can never signal a command the person started afterwards.
+func (l *runLease) cancelExecution() foregroundOutcome {
+	l.mu.Lock()
+	if l.done || l.cancelStarted {
+		l.mu.Unlock()
+		return foregroundNothingRunning
+	}
+	l.cancelStarted = true
+	cancel := l.cancel
+	l.mu.Unlock()
+	if cancel == nil {
+		// The control attached this lease before supervise armed the broker
+		// request. Nothing owned by the assistant exists yet: mark the
+		// cancellation for supervise to consume, but never signal whatever
+		// unrelated foreground group happens to be in the session.
+		return foregroundNothingRunning
+	}
+	// THE ADDRESSEE IS NAMED BEFORE THE WITHDRAWAL (nocx-uvac6.11), and that
+	// ordering is the whole guarantee. While the broker request is still in
+	// flight the foreground job IS this request's, by construction. Cancelling
+	// first and asking afterwards inverts that: the request resolves, its
+	// command exits, and the question "what is in front" is then answered by
+	// whatever the person started next.
+	//
+	// Naming it does not commit to signalling it. If the command exits on its
+	// own between here and the first rung, the ladder's own signal to that
+	// exact group answers ESRCH and reports nothing-running — a dead addressee
+	// is still the right addressee.
+	if l.sess == nil {
+		l.log.Warn("run lease: no local process group to signal — the execution keeps running",
+			"session_id", string(l.sid))
+		cancel()
+		return foregroundUnsupported
+	}
+	pgid, outcome, named := foregroundJob(l.log, l.sid, l.sess)
+	cancel()
+	if !named {
+		return outcome
+	}
+	return stopProcessGroup(l.log, l.sid, l.sess, pgid, l.cfg.SignalGrace)
 }
 
 // effectiveRunLease returns the server's lease config: the config named by

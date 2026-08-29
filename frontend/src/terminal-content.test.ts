@@ -492,6 +492,18 @@ describe('SSH open host-key recovery', () => {
   })
 })
 
+/** Flip the active input target through the real composer chord. */
+const switchInputTarget = (ed: CommandEditor): void => {
+  viewOf(ed).contentDOM.dispatchEvent(
+    new KeyboardEvent('keydown', {
+      key: 'Enter',
+      metaKey: true,
+      bubbles: true,
+      cancelable: true,
+    }),
+  )
+}
+
 /** Complete a mouse selection gesture over the editor surface. */
 const mouseupOn = (view: EditorView): void => {
   view.contentDOM.dispatchEvent(new MouseEvent('mouseup', { bubbles: true }))
@@ -2775,6 +2787,11 @@ describe('the projections consume the kernel through the composition root (ADR-0
       const rec = withScrollback.scrollback.blockManager.blocks[0]
       expect(rec.status).toBe('success')
       expect(rec.el.classList.contains('cmd-block-running')).toBe(true)
+      // This receipt test marks the block to prove identity survives the
+      // visual freeze; make that setup an Ask target explicitly.
+      ;(
+        content as unknown as { inputTargets: { setActive(id: string): void } }
+      ).inputTargets.setActive('agent')
       const menuButton = rec.el.querySelector<HTMLElement>('.cmd-overflow-btn')
       expect(menuButton).not.toBeNull()
       menuButton!.click()
@@ -4840,7 +4857,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
     const manager = scrollback.blockManager
     manager.startBlock(command, '~', 0)
-    manager.bindAttempt('att-fixture')
+    manager.bindAttempt(`att-fixture-${manager.blocks.length}`)
     const lines = output.map((t) => new BufferLine(t))
     const frozen = manager.freezeBlock((y) => lines[y], lines.length - 1, 0)
     expect(frozen).not.toBeNull()
@@ -4930,7 +4947,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
   it('plain Enter goes to the shell; ⌘Enter flips to Ask and the next Enter goes to the assistant — one walk, and the indicator matches the registry after each (nocx-4wtlh)', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
     try {
       content.setVisible(true)
       _resetThemeState()
@@ -5025,7 +5046,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
   it("a command submitted by the shell target while another registered target's submission is in flight is attributed to the shell target (nocx-iadtt)", async () => {
     const { client } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
     let releaseAsk: () => void = () => {}
     try {
       content.setVisible(true)
@@ -5093,7 +5118,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
   it('an agent-authored command carries the badge through the real submit path — the closest seam a person will reach (nocx-iadtt)', async () => {
     const { client } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
     try {
       content.setVisible(true)
       _resetThemeState()
@@ -5143,7 +5172,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
-  it('lets a person mark a whole block from its menu, keeps the shell target, and dismisses it from the grant chip', async () => {
+  it('keeps selection and ordinary block actions in Run without offering a grant', async () => {
     const { client, dispatcherCalls } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -5155,33 +5184,38 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       _resetThemeState()
       ed.show()
       const block = frozenBlockOf(content, 'git status', ['clean'])
-      const beforeTarget = activeLabel(content)
+      selectRows(block, 0, 1)
+
+      const selection = window.getSelection()
+      expect(selection?.isCollapsed).toBe(false)
+      expect(document.querySelector<HTMLElement>('.mark-affordance')?.style.display).toBe('none')
+      const markShortcut = new KeyboardEvent('keydown', {
+        key: 'a',
+        ctrlKey: true,
+        shiftKey: true,
+        bubbles: true,
+        cancelable: true,
+      })
+      document.body.dispatchEvent(markShortcut)
+      expect(markShortcut.defaultPrevented).toBe(false)
+      expect((content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks).toEqual([])
 
       block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
-      const mark = document.querySelector<HTMLButtonElement>(
-        '.cmd-overflow-menu-item[data-action="grant"]',
+      const items = Array.from(
+        document.querySelectorAll<HTMLButtonElement>('.cmd-overflow-menu-item'),
       )
-      expect(mark?.textContent).toBe('Ask about this block')
-      mark?.click()
-
-      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')
-      expect(chip?.dataset.state).toBe('chosen')
-      expect(chip?.textContent).toContain('1')
-      expect(block.dataset.granted).toBe('true')
-      expect(activeLabel(content)).toBe(beforeTarget)
+      expect(items.find((item) => item.dataset.action === 'grant')).toBeUndefined()
+      expect(items.map((item) => item.textContent)).toContain('Copy command')
+      expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.style.display).toBe(
+        'none',
+      )
+      expect((content as unknown as { grantedBlocks: GrantBlock[] }).grantedBlocks).toEqual([])
       expect(dispatcherCalls.some((call) => call.method === 'agent.ask')).toBe(false)
-
-      chip?.click()
-      const panel = ed.root.querySelector<HTMLElement>('.ui-floating-panel[data-variant="grant"]')
-      expect(panel?.textContent).toContain('git status')
-      panel?.querySelector<HTMLButtonElement>('[data-action="dismiss-grant"]')?.click()
-      expect(chip?.dataset.state).toBe('default')
-      expect(block.dataset.granted).toBeUndefined()
     } finally {
       teardown()
     }
   })
-  it('keeps an Ask mark and its count through a Run round trip', async () => {
+  it('keeps exact whole-block and row grants invisible through Ask → Run → Ask', async () => {
     const { client } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -5192,29 +5226,172 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       content.setVisible(true)
       _resetThemeState()
       ed.show()
-      const block = frozenBlockOf(content, 'git status', ['clean'])
+      const whole = frozenBlockOf(content, 'git status', ['clean'])
+      const rows = frozenBlockOf(content, 'npm test', ['first', 'second'])
 
       submitKey(ed, { metaKey: true })
       expect(activeLabel(content)).toBe('Agent')
-      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
-      document
-        .querySelector<HTMLButtonElement>('.cmd-overflow-menu-item[data-action="grant"]')!
-        .click()
+      selectRows(rows, 1, 2)
+      const offer = document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')
+      expect(offer).not.toBeNull()
+      expect(offer?.closest<HTMLElement>('.mark-affordance')?.style.display).toBe('block')
+      offer!.click()
+      const grantState = content as unknown as { grantedBlocks: GrantBlock[] }
+      expect(grantState.grantedBlocks).toHaveLength(1)
 
+      whole.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      const menuGrant = document.querySelector<HTMLButtonElement>(
+        '.cmd-overflow-menu-item[data-action="grant"]',
+      )
+      expect(menuGrant).not.toBeNull()
+      menuGrant!.click()
+
+      const before = [...grantState.grantedBlocks]
+      expect(before).toHaveLength(2)
+      expect(before[0]).toMatchObject({ blockEl: rows, start: 1, count: 1 })
+      expect(before[1]).toMatchObject({ blockEl: whole })
       const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
-      expect(chip.textContent).toContain('1')
-      expect(block.dataset.granted).toBe('true')
+      chip.click()
+      expect(document.querySelector('.ui-floating-panel[data-open="true"]')).not.toBeNull()
+      expect(whole.dataset.granted).toBe('true')
+      expect(rows.querySelectorAll('.term-line[data-granted]')).toHaveLength(1)
+
+      // Hiding the pane removes every body-level and inline grant surface,
+      // including a menu that otherwise lives outside the pane subtree.
+      whole.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      expect(document.querySelector('.cmd-overflow-menu')).not.toBeNull()
+      content.setVisible(false)
+      expect(chip.style.display).toBe('none')
+      expect(document.querySelector('.ui-floating-panel[data-open="true"]')).toBeNull()
+      expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+      expect(whole.dataset.granted).toBeUndefined()
+      expect(rows.querySelector('.term-line[data-granted]')).toBeNull()
+      // A target change while the tab is in the background cannot repaint
+      // its body-level grant surfaces.
+      submitKey(ed, { metaKey: true })
+      submitKey(ed, { metaKey: true })
+      expect(activeLabel(content)).toBe('Agent')
+      expect(chip.style.display).toBe('none')
+      expect(document.querySelector<HTMLElement>('.mark-affordance')?.style.display).toBe('none')
+
+      content.setVisible(true)
+      expect(chip.style.display).toBe('')
+      expect(whole.dataset.granted).toBe('true')
+      expect(rows.querySelectorAll('.term-line[data-granted]')).toHaveLength(1)
 
       submitKey(ed, { metaKey: true })
+
       expect(activeLabel(content)).toBe('Shell')
       expect(chip.style.display).toBe('none')
-      expect(block.dataset.granted).toBe('true')
+      expect(document.querySelector('.ui-floating-panel[data-open="true"]')).toBeNull()
+      expect(whole.dataset.granted).toBeUndefined()
+      expect(rows.querySelector('.term-line[data-granted]')).toBeNull()
+      expect(grantState.grantedBlocks[0]).toBe(before[0])
+      expect(grantState.grantedBlocks[1]).toBe(before[1])
+
+      whole.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      expect(document.querySelector('.cmd-overflow-menu-item[data-action="grant"]')).toBeNull()
 
       submitKey(ed, { metaKey: true })
+
       expect(activeLabel(content)).toBe('Agent')
       expect(chip.style.display).toBe('')
-      expect(chip.textContent).toContain('1')
-      expect(block.dataset.granted).toBe('true')
+      expect(chip.textContent).toContain('2')
+      expect(grantState.grantedBlocks[0]).toBe(before[0])
+      expect(grantState.grantedBlocks[1]).toBe(before[1])
+      expect(whole.dataset.granted).toBe('true')
+      expect(rows.querySelectorAll('.term-line[data-granted]')).toHaveLength(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a Run selection stays ordinary text and never takes the focus off the composer', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      ed.focus()
+      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      expect(activeLabel(content)).toBe('Shell')
+
+      selectRows(block, 0, 1)
+
+      // The focus transfer exists to protect an offer (nocx-45vkz). In Run
+      // there is no offer, so taking the focus is a silent loss with nothing
+      // bought by it: the composer keeps the caret and the selection stays
+      // selectable, copyable text.
+      expect(ed.rootContains(document.activeElement)).toBe(true)
+      expect(document.querySelector<HTMLElement>('.mark-affordance')?.style.display).toBe('none')
+      expect(window.getSelection()?.isCollapsed).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a target change closes a block menu that is offering the wrong actions', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const registry = (content as unknown as { inputTargets: { setActive(id: string): void } })
+        .inputTargets
+      registry.setActive('agent')
+      const block = frozenBlockOf(content, 'git status', ['clean'])
+
+      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      expect(document.querySelector('.cmd-overflow-menu-item[data-action="grant"]')).not.toBeNull()
+
+      // Programmatic, because that is the case the pane-hide sweep cannot
+      // reach: ask entry and restore both call setActive without anybody
+      // clicking. A menu left open goes on offering Mark in Run.
+      registry.setActive('shell')
+
+      expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('re-evaluates an existing Run selection when the real chord switches to Ask', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      selectRows(block, 0, 1)
+      const selection = window.getSelection()
+      const selectedText = selection?.toString()
+
+      expect(activeLabel(content)).toBe('Shell')
+      expect(selection?.isCollapsed).toBe(false)
+      expect(document.querySelector<HTMLElement>('.mark-affordance')?.style.display).toBe('none')
+
+      submitKey(ed, { metaKey: true })
+
+      expect(activeLabel(content)).toBe('Agent')
+      expect(window.getSelection()?.toString()).toBe(selectedText)
+      expect(
+        document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')?.textContent,
+      ).toBe('Mark 1 line')
     } finally {
       teardown()
     }
@@ -5232,6 +5409,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       _resetThemeState()
       ed.show()
       const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      submitKey(ed, { metaKey: true })
       selectRows(block, 0, 1)
       const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
       expect(chip.dataset.state).toBe('default')
@@ -5273,6 +5451,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       _resetThemeState()
       ed.show()
       const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      submitKey(ed, { metaKey: true })
       block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
       document
         .querySelector<HTMLButtonElement>('.cmd-overflow-menu-item[data-action="grant"]')!
@@ -5410,6 +5589,7 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
       ed.show()
 
       const marked = frozenBlockOf(content, 'git status', ['clean'])
+      submitKey(ed, { metaKey: true })
       marked.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
       document
         .querySelector<HTMLButtonElement>('.cmd-overflow-menu-item[data-action="grant"]')!
@@ -5502,7 +5682,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
 
   it('⌘Enter flips the target and sends nothing — the indicator names what the person does, Run ⇄ Ask (nocx-4wtlh)', async () => {
     const { client } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
     try {
       content.setVisible(true)
       _resetThemeState()
@@ -5527,7 +5711,11 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
   })
   it('each mode keeps its own draft — the same text, caret and scroll survive a switch away and back, and the indicator tone follows (nocx-4ff.7)', async () => {
     const { client } = agentDispatcher()
-    const { ed, content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
     try {
       content.setVisible(true)
       _resetThemeState()
@@ -6421,6 +6609,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     try {
       content.setVisible(true)
       ed.show()
+      switchInputTarget(ed)
       const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
         .scrollbackInner
       await vi.waitFor(() => {
@@ -6480,6 +6669,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     try {
       content.setVisible(true)
       ed.show()
+      switchInputTarget(ed)
       const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
         .scrollbackInner
       await vi.waitFor(() => {
@@ -6547,6 +6737,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     try {
       content.setVisible(true)
       ed.show()
+      switchInputTarget(ed)
       // The state a person is actually in: drafting a question, caret in the
       // composer, when they go to select the output they want to point at.
       ed.focus()
@@ -6619,6 +6810,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     try {
       content.setVisible(true)
       ed.show()
+      switchInputTarget(ed)
       ed.focus()
       const focused = document.activeElement as HTMLElement
       expect(ed.rootContains(focused)).toBe(true)
@@ -6683,6 +6875,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     try {
       content.setVisible(true)
       ed.show()
+      switchInputTarget(ed)
       const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
         .scrollbackInner
       await vi.waitFor(() => {
@@ -6731,6 +6924,7 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     try {
       content.setVisible(true)
       ed.show()
+      switchInputTarget(ed)
       const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
         .scrollbackInner
       await vi.waitFor(() => {
@@ -7215,18 +7409,15 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
     el.click()
   }
 
-  /** The person's own explicit switch — ⌘Enter, the same gesture the
-   *  indicator's click performs. */
+  /** The person's own explicit switch, pressed on the indicator — the
+   *  twin of ⌘Enter and the one these tests reach for, because what they
+   *  are about is the CHIP. The chord's own owner is a pane-level capture
+   *  listener that an off-screen, detached fixture cannot reach, and it has
+   *  its own specs (nocx-a7mw7.6). */
   const switchToAsk = (content: TerminalContent): void => {
-    const ed = editorOf(content)
-    viewOf(ed).contentDOM.dispatchEvent(
-      new KeyboardEvent('keydown', {
-        key: 'Enter',
-        bubbles: true,
-        cancelable: true,
-        metaKey: true,
-      }),
-    )
+    const el = viewOf(editorOf(content)).dom.querySelector<HTMLElement>('.ui-mode-indicator')
+    if (!el) throw new Error('no mode indicator to switch with')
+    el.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }))
   }
 
   it('shows no model chip while Enter goes to the shell', async () => {
@@ -7266,6 +7457,7 @@ describe('the model chip in the composer (nocx-rikz5)', () => {
     const { client } = statusClient(READY_ANSWERING)
     const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
     try {
+      content.setVisible(true)
       const grant = editorOf(content).root.querySelector<HTMLElement>('.nocx-editor-grant')!
       expect(grant.style.display).toBe('none')
 
@@ -7758,6 +7950,8 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       await summonChord(content)
       expect(ed.isVisible).toBe(true)
       const renderer = rendererOf(content)
+      const focus = vi.spyOn(renderer, 'focus')
+      focus.mockClear()
       const write = Object.getOwnPropertyDescriptor(renderer, 'write')?.value as Mock<
         (data: string) => void
       >
@@ -7775,6 +7969,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       expect(ed.isVisible).toBe(false)
       expect(ed.root.dataset.placement).toBe('inline')
       expect(readOnlyOf(content)).toHaveBeenLastCalledWith(false)
+      expect(focus).toHaveBeenCalledTimes(1)
       // The assertion that matters is not the flag: it is a key the PROGRAM
       expect(content.pinnedFrame()).toBeNull()
       expect(gridOf(content).textContent).toContain('during freeze\n')
@@ -7977,6 +8172,235 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       restore()
       teardown()
     }
+  })
+
+  // ── ONE OWNER FOR THE TARGET CHORD (nocx-a7mw7.6) ────────────────────
+  //
+  // ⌘/Ctrl+Enter used to be claimed in three places, each keyed on where
+  // the browser had parked the focus: a capture listener on the editor's
+  // root (flip the target), a capture listener on the xterm host (summon),
+  // and a document bubble listener added so a scrollback selection — which
+  // blurs onto <body>, neither of the other two — could still reach the
+  // flip. Three guard sets for one key, and the third had none of its own
+  // tested.
+  //
+  // Now one capture listener on document decides, per pane, and it reads
+  // the STATE rather than the focus: `editor.isVisible` chooses flip or
+  // summon, exactly the fact canSummonEditor's first line already tested.
+  // These tests press the chord from every place a person's focus can be.
+  describe('the target chord has one owner (nocx-a7mw7.6)', () => {
+    /** A settled block with output, the way the ask-entry specs build one. */
+    function frozenBlock(content: TerminalContent, command: string, output: string[]): HTMLElement {
+      const manager = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .blockManager
+      manager.startBlock(command, '~', 0)
+      manager.bindAttempt(`att-chord-${manager.blocks.length}`)
+      const lines = output.map((t) => new BufferLine(t))
+      const frozen = manager.freezeBlock((y) => lines[y], lines.length - 1, 0)
+      expect(frozen).not.toBeNull()
+      return frozen!.el
+    }
+
+    /** The chord as a person presses it, from wherever focus happens to be. */
+    function chordOn(el: EventTarget): void {
+      el.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+    }
+
+    it('flips the target from the composer without letting CM6 insert a blank line', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        ed.insertText('ls -la')
+        expect(targetNamed(ed)).toBe('shell')
+
+        chordOn(viewOf(ed).contentDOM)
+
+        expect(targetNamed(ed)).toBe('agent')
+        // Back to the shell draft: `defaultKeymap` binds Mod-Enter to
+        // insertBlankLine, so the one owner must SWALLOW the chord in
+        // capture. A draft that came back with a newline in it would be
+        // CM6 having had the key after us.
+        chordOn(viewOf(ed).contentDOM)
+        expect(targetNamed(ed)).toBe('shell')
+        expect(ed.getDoc()).toBe('ls -la')
+      } finally {
+        teardown()
+      }
+    })
+
+    it('flips the target when a scrollback selection has parked focus on the body', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        viewOf(ed).contentDOM.blur()
+        expect(document.activeElement).toBe(document.body)
+
+        chordOn(document.body)
+
+        expect(targetNamed(ed)).toBe('agent')
+      } finally {
+        teardown()
+      }
+    })
+
+    it('summons the editor from the grid instead of flipping, and never both', async () => {
+      const client = makeClient()
+      const { ed, content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const restore = stubScrolling()
+      try {
+        content.setVisible(true)
+        startCommand(client)
+        expect(ed.isVisible).toBe(false)
+        const session = sessionOf(content)
+        session.send.mockClear()
+
+        await summonChord(content)
+
+        expect(ed.isVisible).toBe(true)
+        // The summoned editor's only target is the assistant, and the chord
+        // that brought it did not ALSO flip anything: one press, one meaning.
+        expect(targetNamed(ed)).toBe('agent')
+        // And it never became a CR in the running command's stdin, which is
+        // why this owner is in the capture phase.
+        expect(session.send).not.toHaveBeenCalled()
+      } finally {
+        restore()
+        teardown()
+      }
+    })
+
+    it('leaves the chord alone while an overlay owns the keyboard', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      const entry = pushOverlay(() => true)
+      try {
+        content.setVisible(true)
+        ed.show()
+        expect(targetNamed(ed)).toBe('shell')
+
+        chordOn(document.body)
+
+        expect(targetNamed(ed)).toBe('shell')
+      } finally {
+        popOverlay(entry)
+        teardown()
+      }
+    })
+
+    it("leaves the chord alone in another surface's text field", async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      const field = document.createElement('input')
+      document.body.append(field)
+      try {
+        content.setVisible(true)
+        ed.show()
+        field.focus()
+        expect(document.activeElement).toBe(field)
+
+        chordOn(field)
+
+        expect(targetNamed(ed)).toBe('shell')
+      } finally {
+        field.remove()
+        teardown()
+      }
+    })
+
+    it('summons from anywhere in the pane, not only from the grid', async () => {
+      const client = makeClient()
+      const { ed, content, teardown } = await mountTerminal(
+        makeClipboard(),
+        { attachToDocument: true },
+        client,
+      )
+      const restore = stubScrolling()
+      try {
+        content.setVisible(true)
+        startCommand(client)
+        expect(ed.isVisible).toBe(false)
+        // The state a person is in after reading the scrollback while the
+        // command runs: the selection released the focus onto <body>, which
+        // is neither the composer nor the grid. The gesture is the same
+        // gesture and must still summon — when the chord was claimed by
+        // whichever element happened to hold the focus, this pressed nothing.
+        const renderer = rendererOf(content)
+        if (typeof renderer.captureLiveFrame !== 'function') {
+          renderer.captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+        }
+        gridOf(content).blur()
+        expect(document.activeElement).toBe(document.body)
+
+        chordOn(document.body)
+        await Promise.resolve()
+
+        expect(ed.isVisible).toBe(true)
+        expect(targetNamed(ed)).toBe('agent')
+      } finally {
+        restore()
+        teardown()
+      }
+    })
+
+    it('is not swallowed by an open block menu, which owns no keys', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        const block = frozenBlock(content, 'git status', ['clean'])
+        block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+        expect(document.querySelector('.cmd-overflow-menu')).not.toBeNull()
+
+        chordOn(document.body)
+
+        // A deliberate gesture that does nothing in silence reads as a broken
+        // control (toggleInputTarget says so about its own refusal). The menu
+        // has no Enter semantics; it is not a claimant on this key.
+        expect(targetNamed(ed)).toBe('agent')
+      } finally {
+        teardown()
+      }
+    })
+
+    it('is not claimed by a pane that is not on screen', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        content.setVisible(false)
+
+        chordOn(document.body)
+
+        expect(targetNamed(ed)).toBe('shell')
+      } finally {
+        teardown()
+      }
+    })
   })
 
   it('nothing changes for a command nobody summons the editor during', async () => {
@@ -8298,7 +8722,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     }
   })
 
-  it('the editor’s own Ctrl+C sends no ^C to the pty while the question is the submission (nocx-oova)', async () => {
+  it('the summoned Agent editor delegates Ctrl+C once to the running command and never to the turn', async () => {
     const client = makeClient()
     const { ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -8323,13 +8747,14 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         }),
       )
 
-      // The draft is cancelled, which is what the key means in a prompt.
-      expect(ed.getDoc()).toBe('')
-      // And nothing reached the pty: a submission that is not a shell
-      // command must not carry shell behaviour to the process. Under the
-      // summon this is not academic — the ^C would have killed the very
-      // command the person was composing a question about.
+      // The command — not the turn — receives exactly one ordinary interrupt
+      // through its signal ladder, and the half-typed question survives.
+      expect(ed.getDoc()).toBe('what is it waiting on')
+      expect(signalsSent(content)).toEqual(['interrupt'])
       expect(session.send).not.toHaveBeenCalledWith('\x03')
+      expect(
+        client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.cancel'),
+      ).toHaveLength(0)
     } finally {
       restore()
       teardown()
@@ -8418,7 +8843,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
     return items.find((el) => el.dataset.action === action)
   }
 
-  it('the running block’s ⋮ menu grants it and summons the editor, like a finished block', async () => {
+  it('the running block grant action exists only after the target switches to Ask', async () => {
     const client = makeClient()
     const { view, ed, content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -8444,30 +8869,36 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       expect(ed.isVisible).toBe(false)
       rendererOf(content).captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
 
+      const runItems = runningBlockMenu(content)
+      expect(itemNamed(runItems, 'grant')).toBeUndefined()
+      expect(itemNamed(runItems, 'stop')?.textContent).toBe('Stop')
+      paneOf(content).querySelector<HTMLElement>('.cmd-block-running .cmd-overflow-btn')!.click()
+
+      await summonChord(content)
+      await vi.waitFor(() => expect(ed.isVisible).toBe(true))
+      expect(targetNamed(ed)).toBe('agent')
       const grant = itemNamed(runningBlockMenu(content), 'grant')
       expect(grant?.textContent).toBe('Ask about this block')
       grant?.click()
-      await vi.waitFor(() => expect(ed.isVisible).toBe(true))
 
       const block = paneOf(content).querySelector<HTMLElement>('.cmd-block-running')
       expect(block?.dataset.granted).toBe('true')
       expect(ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')?.dataset.state).toBe(
         'chosen',
       )
-      expect(ed.isVisible).toBe(true)
-      expect(targetNamed(ed)).toBe('agent')
-      expect(document.activeElement).toBe(view.contentDOM)
 
       escapeOn(view.contentDOM)
       expect(ed.isVisible).toBe(false)
       expect(targetNamed(ed)).toBe('shell')
+      expect(block?.dataset.granted).toBeUndefined()
+      expect(itemNamed(runningBlockMenu(content), 'grant')).toBeUndefined()
+      paneOf(content).querySelector<HTMLElement>('.cmd-block-running .cmd-overflow-btn')!.click()
 
+      await summonChord(content)
       const unmark = itemNamed(runningBlockMenu(content), 'grant')
       expect(unmark?.textContent).toBe('Unmark')
       unmark?.click()
       expect(block?.dataset.granted).toBeUndefined()
-      expect(ed.isVisible).toBe(false)
-      expect(targetNamed(ed)).toBe('shell')
     } finally {
       restore()
       teardown()
@@ -8535,6 +8966,46 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       document.querySelectorAll('.cmd-overflow-menu').forEach((m) => m.remove())
     }
   })
+
+  it('names a lifecycle/foreground contradiction instead of claiming nothing is running', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      const handler = lifecycleHandler(client)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-shared', state: 'open', origin: 'app', command: 'top' },
+      })
+      sessionOf(content).signal.mockResolvedValue({
+        signal: 'stop',
+        outcome: 'unreconciled',
+      })
+      vi.mocked(showToast).mockClear()
+
+      itemNamed(runningBlockMenu(content), 'stop')!.click()
+
+      await vi.waitFor(() => expect(showToast).toHaveBeenCalled())
+      const calls = vi.mocked(showToast).mock.calls
+      const warning = calls[calls.length - 1]?.[0]
+      expect(warning).toMatchObject({ level: 'warning' })
+      expect(warning?.message).toContain('still recorded as running')
+      expect(warning?.message).not.toContain('Nothing is running')
+    } finally {
+      restore()
+      teardown()
+      document.querySelectorAll('.cmd-overflow-menu').forEach((el) => el.remove())
+    }
+  })
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -8578,7 +9049,7 @@ describe('a program printing BEL (nocx-n3nfg)', () => {
       // The notification: its own method, carrying addressing and nothing
       // else. The kind is not here because it cannot be — it is stamped from
       // the method invoked, which is the whole reason notify.bell exists
-      // rather than an argument on notify.raise (ADR-0029 §2.2, design §3).
+      // rather than an argument on notify.raise (ADR-0047 §2.2, design §3).
       expect(bellCalls(client)).toEqual([
         ['notify.bell', { sessionId: sessionOf(content).sessionId }],
       ])
@@ -8901,7 +9372,7 @@ describe('session.read serves the frame the question is about (nocx-7l4ex.3)', (
       teardown()
     }
   })
-  it('keeps the read pin through Escape until the same ask turn ends', async () => {
+  it('keeps the read pin through Escape until the stopped ask turn terminalizes', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(
       makeClipboard(),
@@ -8965,7 +9436,7 @@ describe('session.read serves the frame the question is about (nocx-7l4ex.3)', (
         ([method]) => method === 'agent.runState',
       )
       expect(runState).toBeDefined()
-      ;(runState![1] as (params: unknown) => void)({ runId: 42, state: 'completed' })
+      ;(runState![1] as (params: unknown) => void)({ runId: 42, state: 'cancelled' })
 
       capture.mockResolvedValue(live)
       readCurrent(dispatcher, content, 'read-after-turn')
@@ -9518,6 +9989,61 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
+  it('does not cancel an older turn when the newest answer is still pre-ack', async () => {
+    const client = makeClient()
+    let resolveFirst!: (value: { runId: number; entryId: string; model: string }) => void
+    let rejectSecond!: (error: Error) => void
+    const firstAsk = new Promise<{ runId: number; entryId: string; model: string }>((resolve) => {
+      resolveFirst = resolve
+    })
+    const secondAsk = new Promise<never>((_resolve, reject) => {
+      rejectSecond = reject
+    })
+    let asks = 0
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        asks += 1
+        return asks === 1 ? firstAsk : secondAsk
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const first = await submitQuestion(content, client, 'older accepted turn')
+      await submitQuestion(content, client, 'newer pre-ack turn')
+      resolveFirst({ runId: 1, entryId: 'entry-1', model: 'test-model' })
+      await vi.waitFor(() => expect(first.dataset.entryId).toBe('entry-1'))
+
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      await Promise.resolve()
+      expect(
+        client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.cancel'),
+      ).toHaveLength(0)
+      expect(content.pinnedFrame()).toBeNull()
+
+      rejectSecond(new Error('newer ask refused during cleanup'))
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      state?.({ runId: 1, entryId: 'entry-1', state: 'completed', droppedDeltas: 0 })
+    } finally {
+      teardown()
+    }
+  })
+
   it('does not resurrect answers after their running command is cleared', async () => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
@@ -9637,12 +10163,13 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
-  it('Escape after acceptance thaws the live screen and keeps the answer streaming', async () => {
+  it('Escape stops the exact current answer once, thaws the summon, and leaves the command running', async () => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
-      if (method === 'agent.ask') {
+      if (method === 'agent.ask')
         return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
-      }
+      if (method === 'agent.cancel')
+        return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
       return Promise.resolve({
         endpointConfigured: true,
         credential: 'resolvable',
@@ -9658,36 +10185,242 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       content.setVisible(true)
       startCommand(client)
       await summon(content)
-      const answer = await submitQuestion(content, client, 'can I leave this view?')
+      const answer = await submitQuestion(content, client, 'stop only this answer')
+      await vi.waitFor(() => expect(answer.dataset.entryId).toBe('entry-42'))
       const delta = client.dispatcher.subscribe.mock.calls.find(
         ([method]) => method === 'agent.runDelta',
       )?.[1] as ((params: unknown) => void) | undefined
-      expect(delta).toBeDefined()
-      delta!({ runId: 42, entryId: 'entry-42', text: 'still running' })
+      delta!({ runId: 42, entryId: 'entry-42', text: 'partial prose survives' })
 
+      const escape = (): KeyboardEvent => {
+        const event = new KeyboardEvent('keydown', {
+          key: 'Escape',
+          bubbles: true,
+          cancelable: true,
+        })
+        document.body.dispatchEvent(event)
+        return event
+      }
+      expect(escape().defaultPrevented).toBe(true)
+      escape()
+
+      await vi.waitFor(() =>
+        expect(
+          client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.cancel'),
+        ).toEqual([['agent.cancel', { runId: 42 }]]),
+      )
+      expect(sessionOf(content).signal).not.toHaveBeenCalled()
+      expect(
+        (content as unknown as { scrollback: ScrollbackController }).scrollback.blockManager
+          .runningBlock,
+      ).not.toBeNull()
+      expect(content.pinnedFrame()).toBeNull()
+      expect(editorOf(content).isVisible).toBe(false)
+
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      state!({ runId: 42, entryId: 'entry-42', state: 'cancelled', droppedDeltas: 0 })
+      expect(answer.querySelector('[data-answer-body]')?.textContent).toContain(
+        'partial prose survives',
+      )
+      expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).toBe(
+        'stopped',
+      )
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a streaming answer leaves Escape with text controls, overlays, and the block menu', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask')
+        return Promise.resolve({ runId: 43, entryId: 'entry-43', model: 'test-model' })
+      if (method === 'agent.cancel')
+        return Promise.resolve({ runId: 43, state: 'cancelled', cancelled: true })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const input = document.createElement('input')
+    const menu = document.createElement('div')
+    menu.className = 'cmd-overflow-menu'
+    let overlayClosed = false
+    let overlay: ReturnType<typeof pushOverlay> | null = null
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'owners keep Escape')
+      await vi.waitFor(() => expect(answer.dataset.entryId).toBe('entry-43'))
       const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
-      expect(pane.querySelector('.nocx-freeze-frame')).not.toBeNull()
+      pane.append(input)
+
+      input.focus()
+      input.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      input.blur()
+
+      overlay = pushOverlay(() => {
+        overlayClosed = true
+        return true
+      })
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      expect(overlayClosed).toBe(true)
+      popOverlay(overlay)
+      overlay = null
+
+      document.body.append(menu)
       document.body.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
       )
 
-      expect(content.pinnedFrame()).toBeNull()
-      expect(pane.querySelector('.nocx-freeze-frame')).toBeNull()
-      expect(editorOf(content).isVisible).toBe(false)
-      const session = sessionOf(content)
-      session.send.mockClear()
-      rendererOf(content)._fireData('q')
-      expect(session.send).toHaveBeenCalledWith('q')
-      // After Escape the turn remains a view over the live screen: it stays
-      // in the pane-owned stack until the command ends, then takes its seat.
-      expect(answer.parentElement?.classList.contains('nocx-summon-answers')).toBe(true)
-      expect(answer.parentElement?.parentElement?.parentElement).toBe(pane)
-      expect(answer.classList.contains('nocx-answer-overlay')).toBe(true)
+      expect(
+        client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.cancel'),
+      ).toHaveLength(0)
+      expect(content.pinnedFrame()).not.toBeNull()
+    } finally {
+      if (overlay !== null) popOverlay(overlay)
+      input.remove()
+      menu.remove()
+      teardown()
+    }
+  })
 
-      delta!({ runId: 42, entryId: 'entry-42', text: ' after Escape' })
-      expect(answer.querySelector('[data-answer-body]')?.textContent).toContain(
-        'still running after Escape',
+  it('Ctrl+C keeps one command owner across chrome, grid, selection, and text-control focus while the turn streams', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask')
+        return Promise.resolve({ runId: 44, entryId: 'entry-44', model: 'test-model' })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const key = (target: HTMLElement): void => {
+      target.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'c',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
       )
+    }
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'do not stop this turn')
+      await vi.waitFor(() => expect(answer.dataset.entryId).toBe('entry-44'))
+      const session = sessionOf(content)
+      session.signal.mockClear()
+      const pane = (content as unknown as { _paneTarget: HTMLElement })._paneTarget
+
+      const chrome = document.createElement('button')
+      pane.append(chrome)
+      chrome.focus()
+      key(chrome)
+      expect(session.signal.mock.calls.map((call: unknown[]) => call[0])).toEqual(['interrupt'])
+
+      session.signal.mockClear()
+      const gridInput = document.createElement('textarea')
+      ;(
+        content as unknown as { scrollback: ScrollbackController }
+      ).scrollback.xtermLiveContainer.append(gridInput)
+      gridInput.focus()
+      key(gridInput)
+      expect(session.signal).not.toHaveBeenCalled()
+
+      const otherInput = document.createElement('input')
+      pane.append(otherInput)
+      otherInput.focus()
+      key(otherInput)
+      expect(session.signal).not.toHaveBeenCalled()
+
+      const selected = document.createElement('span')
+      const selectedText = document.createTextNode('copy this output')
+      selected.append(selectedText)
+      ;(
+        content as unknown as { scrollback: ScrollbackController }
+      ).scrollback.scrollbackArea.append(selected)
+      const selectionSpy = vi.spyOn(window, 'getSelection').mockReturnValue({
+        anchorNode: selectedText,
+        focusNode: selectedText,
+        isCollapsed: false,
+        toString: () => 'copy this output',
+      } as unknown as Selection)
+      otherInput.blur()
+      try {
+        key(document.body)
+        expect(session.signal).not.toHaveBeenCalled()
+      } finally {
+        selectionSpy.mockRestore()
+      }
+      expect(
+        client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.cancel'),
+      ).toHaveLength(0)
+      expect(content.pinnedFrame()).not.toBeNull()
+    } finally {
+      window.getSelection()?.removeAllRanges()
+      teardown()
+    }
+  })
+
+  it('Escape on a settled summoned answer keeps dismiss-only behaviour', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask')
+        return Promise.resolve({ runId: 45, entryId: 'entry-45', model: 'test-model' })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'already settled')
+      await vi.waitFor(() => expect(answer.dataset.entryId).toBe('entry-45'))
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      state!({ runId: 45, entryId: 'entry-45', state: 'completed', droppedDeltas: 0 })
+      await vi.waitFor(() => expect(editorOf(content).isVisible).toBe(true))
+
+      viewOf(editorOf(content)).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+
+      expect(
+        client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.cancel'),
+      ).toHaveLength(0)
+      expect(editorOf(content).isVisible).toBe(false)
+      expect(content.pinnedFrame()).toBeNull()
     } finally {
       teardown()
     }

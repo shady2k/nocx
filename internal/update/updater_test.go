@@ -522,12 +522,17 @@ func TestReportHealthy_FinalisesUpdate(t *testing.T) {
 	swap := swapPath(installPath)
 	makeMinimalAppImage(t, swap)
 
+	// This updater is the RESTARTED app: its own version is the installed
+	// one and the backend answering it is the same build. Both halves of
+	// the pair have to be stated for finalisation to be reachable at all
+	// — see pair_test.go for what each half refuses.
 	u := NewUpdater(UpdaterConfig{
 		Platform:       newFakePlatform(),
 		Fetcher:        &mockFetcher{},
 		Keyring:        nil,
 		CurrentVersion: "0.2.0",
 		InstallPath:    installPath,
+		Coordinator:    &stubProbe{build: CoordinatorBuild{Version: "0.2.0", Commit: "testsha"}},
 	})
 
 	if err := u.ReportHealthy(context.Background()); err != nil {
@@ -779,8 +784,21 @@ func TestUpdater_Apply_HappyPath(t *testing.T) {
 		t.Errorf("launch attempts not incremented: got %d", reread.LaunchAttempts)
 	}
 
-	// 5. ReportHealthy must finalise (journal deleted, backup created).
-	if err := u.ReportHealthy(ctx); err != nil {
+	// 5. ReportHealthy must finalise (journal deleted, backup created) —
+	// but only for the RESTARTED application. Health certifies a pair,
+	// and `u` above is still the 0.1.0 build that applied the update, so
+	// it cannot certify its own work however healthy it feels. The
+	// restart is what the second updater stands for: the new binary, and
+	// a backend that is also the new binary.
+	restarted := NewUpdater(UpdaterConfig{
+		Platform:       newFakePlatform(),
+		Fetcher:        &mockFetcher{body: manifestBody, sig: manifestSig},
+		Keyring:        pubs,
+		CurrentVersion: "0.2.0",
+		InstallPath:    installPath,
+		Coordinator:    &stubProbe{build: CoordinatorBuild{Version: "0.2.0", Commit: "testsha"}},
+	})
+	if err := restarted.ReportHealthy(ctx); err != nil {
 		t.Fatalf("ReportHealthy failed: %v", err)
 	}
 	if _, err := os.Stat(jp); !os.IsNotExist(err) {

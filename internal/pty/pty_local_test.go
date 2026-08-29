@@ -3,8 +3,10 @@ package pty
 import (
 	"bytes"
 	"context"
+	"errors"
 	"io"
 	"log/slog"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +68,30 @@ func TestLocalPty_Resize(t *testing.T) {
 	err := lp.Resize(context.Background(), 132, 43, 0, 0)
 	if err != nil {
 		t.Fatalf("Resize: %v", err)
+	}
+}
+
+// A resize that arrives after the close is REFUSED, and the refusal names the
+// closed descriptor.
+//
+// This is the deterministic half of nocx-vqziz. The race itself needs a resize
+// and the read pump to interleave on a loaded machine, which is why CI found it
+// and the dev host did not; what can be asserted every run is the ordering rule
+// that removes it — Resize takes the same lock Close does and never reaches
+// pty.Setsize once the file is gone. Returning nil here would be worse than the
+// race: a caller told its resize succeeded, on a grid nobody is running at.
+func TestLocalPty_ResizeAfterCloseIsRefused(t *testing.T) {
+	lp := mustSpawn(t, 80, 24)
+	if err := lp.Close(); err != nil {
+		t.Fatalf("Close: %v", err)
+	}
+
+	err := lp.Resize(context.Background(), 132, 43, 0, 0)
+	if err == nil {
+		t.Fatal("Resize after Close returned nil; a resize nobody applied must not report success")
+	}
+	if !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("Resize after Close = %v, want an error wrapping os.ErrClosed", err)
 	}
 }
 

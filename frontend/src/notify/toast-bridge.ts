@@ -1,7 +1,7 @@
 // notify.toast — the toast sink's renderer half (nocx-c6ef, plan D2).
 //
 // A toast is a SINK on the backend, not a decision made here: the router
-// resolved the route before any sink ran (ADR-0029 §2.3), and what arrives is
+// resolved the route before any sink ran (ADR-0047 §2.3), and what arrives is
 // an instruction to present, never an invitation to decide whether to. So
 // this module has exactly one job — hand the event to the kit's toast — and
 // no policy of its own.
@@ -12,7 +12,7 @@
 // concept — the defect two epics spent themselves unwinding.
 //
 // Title and body are untrusted presentation data written by whatever the user
-// ran (ADR-0029 §2.3). They are rendered as TEXT by the kit and are never
+// ran (ADR-0047 §2.3). They are rendered as TEXT by the kit and are never
 // spliced into markup or any other syntax here.
 
 import type { Dispatcher } from '../dispatcher'

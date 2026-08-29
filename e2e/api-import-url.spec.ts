@@ -62,7 +62,13 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { bindEndpoint, settingsReady, VaultBackend, type DisposableRoot } from './harness'
+import {
+  bindEndpoint,
+  openImportDestination,
+  settingsReady,
+  VaultBackend,
+  type DisposableRoot,
+} from './harness'
 import { readStand } from './stand'
 import { rpc, startSshd, type SshdFixture } from './sshd-fixture'
 import {
@@ -74,7 +80,7 @@ import {
 const test = base
 
 /** Lazily: the stand is started by globalSetup, after this file is collected. */
-const devharnessBin = (): string => readStand().devharness
+const serverBin = (): string => readStand().server
 
 /** The vault passphrase this run sets up. It is a passphrase, not a token —
  *  nothing here asserts its absence and it never reaches a collection. */
@@ -210,7 +216,7 @@ test.describe('an export arrives by URL', () => {
   test.beforeAll(async () => {
     disposable = { root: mkdtempSync(join(tmpdir(), 'nocx-e2e-import-url-')) }
     exportServer = await startExportServer(postmanExport(UNREACHED_BASE_URL))
-    backend = new VaultBackend(devharnessBin(), disposable, true)
+    backend = new VaultBackend(serverBin(), disposable)
   })
 
   test.afterAll(async () => {
@@ -260,8 +266,7 @@ test.describe('an export arrives by URL', () => {
     // takes the proposal, and reads it back out because the field is the
     // truth (api-paths.ts — an offer, not a derivation) and rebuilding the
     // path here would make this spec a second owner of it.
-    await ask.getByRole('button', { name: 'Change where this goes' }).click()
-    const dest = page.locator('#api-import-postman-dest')
+    const dest = await openImportDestination(ask, page)
     await expect(dest).toHaveValue(
       new RegExp(`[\\\\/]collections[\\\\/]${POSTMAN_COLLECTION_NAME}$`),
     )
@@ -302,7 +307,7 @@ test.describe('an export arrives by URL', () => {
     // ── THE FETCH WAS REAL, AND THE BACKEND IS WHAT MADE IT ───────────────
     //
     // One GET, for that path. This server is in the Playwright worker and the
-    // fetch is in the devharness the worker spawned, so a hit here can only
+    // fetch is in the nocx-server the worker spawned, so a hit here can only
     // have come across a socket — an import that had somehow read the
     // document any other way would leave this list empty.
     expect(exportServer.hits()).toEqual([`GET ${EXPORT_PATH}`])
@@ -338,7 +343,7 @@ test.describe('an export arrives by URL through a connection', () => {
   test.beforeAll(async () => {
     disposable = { root: mkdtempSync(join(tmpdir(), 'nocx-e2e-import-conn-')) }
     exportServer = await startExportServer(postmanExport(UNREACHED_BASE_URL))
-    backend = new VaultBackend(devharnessBin(), disposable, true)
+    backend = new VaultBackend(serverBin(), disposable)
   })
 
   test.afterAll(async () => {
@@ -423,8 +428,7 @@ test.describe('an export arrives by URL through a connection', () => {
     await expect(route).toHaveValue(created.id)
 
     // ── …and where it goes, through the pencil ────────────────────────────
-    await ask.getByRole('button', { name: 'Change where this goes' }).click()
-    const dest = page.locator('#api-import-postman-dest')
+    const dest = await openImportDestination(ask, page)
     await expect(dest).toHaveValue(
       new RegExp(`[\\\\/]collections[\\\\/]${POSTMAN_COLLECTION_NAME}$`),
     )

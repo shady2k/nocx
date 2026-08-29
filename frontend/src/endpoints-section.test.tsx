@@ -244,8 +244,6 @@ interface VaultHarness {
 function vaultHarness(statusOverride: Record<string, unknown> = {}): VaultHarness {
   const status = vi.fn().mockResolvedValue({
     state: 'uninitialized' as const,
-    osKeyAvailable: false,
-    osKeyCapable: false,
     hasPassphrase: false,
     autoSealMinutes: 0,
     providers: [],
@@ -265,7 +263,6 @@ function vaultHarness(statusOverride: Record<string, unknown> = {}): VaultHarnes
 function resolvableVault(row: InventoryEntry): VaultHarness {
   const vault = vaultHarness({
     state: 'unsealed' as const,
-    osKeyCapable: true,
     hasPassphrase: true,
   })
   vault.inventory.mockResolvedValue({ entries: [row] })
@@ -1023,8 +1020,6 @@ describe('the vault seam — a key is minted through the vault layer (nocx-8rwj)
     const { container, createEndpoint, status, ctrl } = mountWithVault()
     status.mockResolvedValue({
       state: 'sealed' as const,
-      osKeyAvailable: false,
-      osKeyCapable: false,
       hasPassphrase: true,
       autoSealMinutes: 0,
       providers: [],

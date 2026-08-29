@@ -357,6 +357,18 @@ export function NotificationsPanel(props: NotificationsPanelProps) {
                       meta={metaLine(o.host, live() ? formatWhen(o.at) : 'session closed')}
                       detail={o.body === '' ? undefined : o.body}
                       selected={!o.read}
+                      // A ROW WITH NO LIVE SESSION OFFERS NOTHING, and that is
+                      // decided rather than unfinished (nocx-4ii6g). The two
+                      // alternatives were opening the session's saved
+                      // scrollback and expanding a detail view in place, and
+                      // both are features this product does not have: there is
+                      // no surface for a dead session's output, and a row of
+                      // one occurrence has nothing further to disclose. What is
+                      // left is to say so, which the meta line above does —
+                      // "session closed" where a live row prints the time. An
+                      // offer that cannot be honoured is a lie (design §8), and
+                      // the same rule that removes a filter with one value
+                      // removes an activation with no destination.
                       onActivate={
                         live() ? () => props.onActivate(o.backendId, o.sessionId) : undefined
                       }

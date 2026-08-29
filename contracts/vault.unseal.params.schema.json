@@ -7,7 +7,11 @@
   "additionalProperties": false,
   "required": ["means"],
   "properties": {
-    "means": { "type": "string", "enum": ["os", "passphrase", "recovery"] },
+    "means": {
+      "type": "string",
+      "enum": ["passphrase", "recovery"],
+      "description": "How the caller wants to open the vault. There were three and there are two: no vault holds an OS-held root key any more (ADR-0050 step 1), so a means that read one could only ever fail."
+    },
     "secret": {
       "type": "string",
       "maxLength": 64000,

@@ -64,7 +64,7 @@ type VaultLifecycle interface {
 
 // vaultSetupParams is the wire format for vault.setup.
 type vaultSetupParams struct {
-	Passphrase string `json:"passphrase,omitempty"`
+	Passphrase string `json:"passphrase"`
 }
 
 // vaultUnsealParams is the wire format for vault.unseal.
@@ -184,8 +184,6 @@ func vaultSecretError(fallback int, msgPrefix string, err error) RPCError {
 
 type vaultStatusResponse struct {
 	State           string `json:"state"`
-	OSKeyAvailable  bool   `json:"osKeyAvailable"`
-	OSKeyCapable    bool   `json:"osKeyCapable"`
 	HasPassphrase   bool   `json:"hasPassphrase"`
 	AutoSealMinutes int    `json:"autoSealMinutes"`
 	// Pointer, so an uninitialized vault sends null rather than "". The
@@ -205,8 +203,6 @@ type vaultStatusProviderEntry struct {
 func vaultSnapToStatus(snap vault.Snapshot) vaultStatusResponse {
 	resp := vaultStatusResponse{
 		State:           snap.State.String(),
-		OSKeyAvailable:  snap.HasOSKey,
-		OSKeyCapable:    snap.OSKeyCapable,
 		HasPassphrase:   snap.HasPassphrase,
 		AutoSealMinutes: snap.AutoSealMinutes,
 	}
@@ -322,14 +318,12 @@ func (h vaultLifecycleHandlers) handleUnseal(ctx context.Context, req jsonrpcReq
 
 	vreq := vault.UnsealRequest{}
 	switch params.Means {
-	case "os":
-		vreq.UseOSKey = true
 	case "passphrase":
 		vreq.Passphrase = params.Secret
 	case "recovery":
 		vreq.RecoveryCode = params.Secret
 	default:
-		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "invalid means: must be os, passphrase, or recovery"})
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "invalid means: must be passphrase or recovery"})
 		return
 	}
 
@@ -1009,15 +1003,23 @@ func validProviderTag(p string) bool {
 
 // ── per-method validators ──────────────────────────────────────────────
 
-// validateVaultSetupRaw / validateVaultSetup: the passphrase is optional —
-// an empty one selects silent setup with an OS-held root key — and bounded
-// when present.
+// validateVaultSetupRaw / validateVaultSetup: the passphrase is REQUIRED and
+// bounded. An empty one used to select silent setup with an OS-held root key;
+// ADR-0050 step 1 removed that mode, so an empty passphrase is now a request
+// for something that does not exist and is refused here rather than reaching
+// the vault. EMPTINESS, not blankness — the same rule the unseal validator
+// states below: a passphrase of spaces is a passphrase somebody may already
+// have.
 func validateVaultSetupRaw(raw json.RawMessage) string {
 	var p vaultSetupParams
-	if len(raw) > 0 {
-		if err := json.Unmarshal(raw, &p); err != nil {
-			return "params must be a JSON object"
-		}
+	if len(raw) == 0 {
+		return "params are required"
+	}
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return "params must be a JSON object"
+	}
+	if p.Passphrase == "" {
+		return "passphrase is required"
 	}
 	if n := utf8.RuneCountInString(p.Passphrase); n > maxSecretMaterialRunes {
 		return fmt.Sprintf("passphrase exceeds %d characters", maxSecretMaterialRunes)
@@ -1041,7 +1043,6 @@ func validateVaultUnsealRaw(raw json.RawMessage) string {
 		return "means is required"
 	}
 	switch p.Means {
-	case "os":
 	case "passphrase", "recovery":
 		// EMPTINESS, not blankness. The handler has always tested `!= ""`,
 		// and a passphrase of spaces is a passphrase somebody may already
@@ -1052,7 +1053,7 @@ func validateVaultUnsealRaw(raw json.RawMessage) string {
 			return "secret is required when means is " + p.Means
 		}
 	default:
-		return "means must be one of os, passphrase, recovery"
+		return "means must be one of passphrase, recovery"
 	}
 	if p.SecretID != "" {
 		return "secretId is backend-owned and must not be sent"

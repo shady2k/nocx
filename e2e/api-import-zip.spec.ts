@@ -32,11 +32,18 @@ const COLLECTION_NAMES = ['Alpha collection', 'Beta collection'] as const
 const ENVIRONMENT_NAME = 'Staging environment'
 const REQUEST_WITH_UNSUPPORTED_FEATURE = 'Alpha request'
 const MANIFEST_NAME = 'nocx-collection.json'
+/** THE SHAPE POSTMAN ACTUALLY EXPORTS. A workspace export wraps everything in
+ * one directory named for the export, and carries the directory entries too;
+ * nothing sits beside it. The archive below is nested for that reason and not
+ * for decoration — a flat one was the only shape anything exercised, and the
+ * real one could not be imported at all (nocx-bvxf2.4). */
+const EXPORT_DIR = '9e0a1c7c-4f2b-4c26-9c37-postman-export'
 const ARCHIVE_MEMBER_NAMES = [
-  'archive.json',
-  'collection/alpha-document.json',
-  'collection/beta-document.json',
-  'environment/staging-document.json',
+  `${EXPORT_DIR}/`,
+  `${EXPORT_DIR}/archive.json`,
+  `${EXPORT_DIR}/collection/alpha-document.json`,
+  `${EXPORT_DIR}/collection/beta-document.json`,
+  `${EXPORT_DIR}/environment/staging-document.json`,
 ] as const
 
 /** A ZIP entry with method 0 (stored). No package or checked-in export bytes
@@ -128,8 +135,12 @@ function buildStoredZip(entries: readonly ZipEntry[]): Buffer {
 
 function postmanArchive(): Buffer {
   const entries: ZipEntry[] = [
+    // The export directory itself, as a ZIP directory entry: it is skipped
+    // rather than read, and an archive that refuses one refuses every real
+    // export along with it.
+    { name: `${EXPORT_DIR}/`, body: Buffer.alloc(0) },
     {
-      name: 'archive.json',
+      name: `${EXPORT_DIR}/archive.json`,
       body: jsonBody({
         collection: {
           'alpha-document': true,
@@ -139,7 +150,7 @@ function postmanArchive(): Buffer {
       }),
     },
     {
-      name: 'collection/alpha-document.json',
+      name: `${EXPORT_DIR}/collection/alpha-document.json`,
       body: jsonBody({
         info: { name: COLLECTION_NAMES[0] },
         item: [
@@ -155,7 +166,7 @@ function postmanArchive(): Buffer {
       }),
     },
     {
-      name: 'collection/beta-document.json',
+      name: `${EXPORT_DIR}/collection/beta-document.json`,
       body: jsonBody({
         info: { name: COLLECTION_NAMES[1] },
         item: [
@@ -170,7 +181,7 @@ function postmanArchive(): Buffer {
       }),
     },
     {
-      name: 'environment/staging-document.json',
+      name: `${EXPORT_DIR}/environment/staging-document.json`,
       body: jsonBody({
         name: ENVIRONMENT_NAME,
         values: [

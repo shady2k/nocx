@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/notify.catalogue.schema.json",
+  "title": "NotifyCatalogue",
+  "description": "Result of notify.catalogue: the backend-owned vocabulary for notification kinds. The renderer uses these words for every kind badge, filter option and tooltip rather than duplicating the catalogue in TypeScript.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kinds"],
+  "properties": {
+    "kinds": {
+      "description": "Every declared notification kind, including one whose trust bound leaves it with no offered delivery pair, in catalogue order.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/kind" }
+    }
+  },
+  "$defs": {
+    "kind": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "label", "description"],
+      "properties": {
+        "kind": {
+          "description": "The wire value stamped on a notification occurrence.",
+          "type": "string",
+          "enum": [
+            "block.finished",
+            "session.ended",
+            "transfer.finished",
+            "program.notify",
+            "bell",
+            "pane.workFinished"
+          ]
+        },
+        "label": {
+          "description": "The noun phrase shown wherever the notification kind is named.",
+          "type": "string",
+          "minLength": 1
+        },
+        "description": {
+          "description": "The sentence explaining what produces this notification kind.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

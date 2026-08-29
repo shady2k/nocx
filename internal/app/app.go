@@ -581,6 +581,23 @@ func registerNotifyRouteToggles() map[string]*settings.Bool {
 	return toggles
 }
 
+// The centre visibility settings are intentionally unread by Go: the renderer
+// reads them for presentation, while the backend records every event regardless.
+// A Go reader would violate that invariant by making recording depend on display.
+func init() {
+	for _, kind := range notify.DefaultCatalogue().PresentedKinds() {
+		key := notify.CentreSettingKey(kind.ID)
+		settings.MustRegisterBool(settings.BoolSpec{
+			Key:         key,
+			Section:     notify.RouteSettingSection,
+			Label:       kind.Label + " → Notification centre",
+			Description: "The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.",
+			DataClass:   settings.PublicConfig,
+			Default:     true,
+		})
+	}
+}
+
 func New(opts ...Option) (*App, error) {
 	var o optionSet
 	for _, opt := range opts {

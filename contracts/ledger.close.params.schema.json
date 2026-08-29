@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/ledger.close.params.schema.json",
+  "title": "LedgerCloseParams",
+  "description": "Params for ledger.close.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["envelope", "status", "facts"],
+  "properties": {
+    "envelope": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "sessionId": {
+          "type": "string",
+          "minLength": 1
+        },
+        "cwd": {
+          "type": "string",
+          "minLength": 1
+        },
+        "kind": {
+          "type": "string",
+          "enum": ["shell", "ask", "action", "text", "frame"]
+        },
+        "intent": {
+          "type": "string",
+          "maxLength": 4096
+        },
+        "sensitivity": {
+          "type": "string",
+          "enum": ["normal", "sensitive"]
+        },
+        "clientSeq": {
+          "type": "integer",
+          "minimum": 0
+        }
+      },
+      "required": ["id", "sessionId", "cwd", "kind", "sensitivity"]
+    },
+    "status": {
+      "type": "string",
+      "enum": ["pending", "running", "success", "failure", "interrupted", "unknown"]
+    },
+    "facts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "terminationReason": {
+          "type": "string",
+          "enum": [
+            "completed",
+            "failed",
+            "timeout",
+            "transport-gone",
+            "user-killed",
+            "agent-declined",
+            "interrupted"
+          ]
+        },
+        "exitCode": {
+          "type": ["integer", "null"]
+        }
+      },
+      "required": ["terminationReason"]
+    },
+    "durationMs": {
+      "type": ["integer", "null"],
+      "minimum": 0
+    },
+    "startedAt": {
+      "type": ["integer", "null"],
+      "minimum": 1577836800000
+    }
+  }
+}

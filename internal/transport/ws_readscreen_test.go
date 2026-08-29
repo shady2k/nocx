@@ -59,6 +59,8 @@ func autonomousMatrixForTests() content.EffectPolicy {
 	}
 }
 
+// Mutate-reversible stopped being an effect class with no tool behind it, so
+// the product-minted grant now includes the two corresponding file tools.
 func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
 	policy := assistant.NewGlobalPolicyStore(storage.NewDocumentStore(t.TempDir()), "agent-policy.json")
@@ -87,7 +89,7 @@ func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
 	for _, tool := range reg.ForGrant(*grant) {
 		names = append(names, tool.Name)
 	}
-	want := []string{"files.read", "session.list", "session.read", "run"}
+	want := []string{"files.read", "session.list", "session.read", "run", "files.edit", "files.create"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("tools offered by the product-minted grant = %v, want %v", names, want)
 	}

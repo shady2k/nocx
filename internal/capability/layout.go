@@ -66,6 +66,7 @@ type LayoutService interface {
 // LayoutOperation is the typed operation for the layout domain. Its gate is
 // [content].
 type LayoutOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, LayoutService) error) error
 }
 
@@ -73,7 +74,7 @@ type LayoutOperation interface {
 // before the execution lane.
 func NewLayoutOperation(contentGate, lane control.Admission, db content.ContentDB) LayoutOperation {
 	g := &guard{}
-	return newOperation[LayoutService](control.NewComposite(contentGate, lane), g, newLayoutService(g, db))
+	return newOperation[LayoutService](Direct("LayoutOperation"), control.NewComposite(contentGate, lane), g, newLayoutService(g, db))
 }
 
 func newLayoutService(g *guard, db content.ContentDB) *layoutService {

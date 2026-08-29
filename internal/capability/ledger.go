@@ -74,6 +74,7 @@ type LedgerService interface {
 // LedgerOperation is the typed operation for the ledger domain. Its gate is
 // [content].
 type LedgerOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, LedgerService) error) error
 }
 
@@ -81,7 +82,7 @@ type LedgerOperation interface {
 // before the execution lane.
 func NewLedgerOperation(contentGate, lane control.Admission, db content.ContentDB) LedgerOperation {
 	g := &guard{}
-	return newOperation[LedgerService](control.NewComposite(contentGate, lane), g, newLedgerService(g, db))
+	return newOperation[LedgerService](Excluded("the ledger records assistant transactions; it is not a user action"), control.NewComposite(contentGate, lane), g, newLedgerService(g, db))
 }
 
 func newLedgerService(g *guard, db content.ContentDB) *ledgerService {

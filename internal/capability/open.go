@@ -50,6 +50,7 @@ type OpenService interface {
 // operation ever holds the lane while waiting for a domain gate, which is
 // the inversion the order exists to forbid.
 type OpenOperation interface {
+	AssistantOperation
 	// Prepare runs fn under the [config, session] conflict gates and no
 	// lane permit — the resolve is store work, not execution.
 	Prepare(context.Context, func(context.Context, OpenService) error) error
@@ -70,9 +71,9 @@ func NewOpenOperation(
 	g := &guard{}
 	svc := newOpenService(g, resolver, registry)
 	return &openOperation{
-		prepare: newOperation[OpenService](control.NewComposite(configGate, sessionGate), g, svc),
-		dial:    newOperation[OpenService](control.NewComposite(lane), g, svc),
-		full:    newOperation[OpenService](control.NewComposite(configGate, sessionGate, lane), g, svc),
+		prepare: newOperation[OpenService](Adapted("terminal.connect", "opening a terminal uses connection/session ownership and registration"), control.NewComposite(configGate, sessionGate), g, svc),
+		dial:    newOperation[OpenService](Adapted("terminal.connect", "opening a terminal uses connection/session ownership and registration"), control.NewComposite(lane), g, svc),
+		full:    newOperation[OpenService](Adapted("terminal.connect", "opening a terminal uses connection/session ownership and registration"), control.NewComposite(configGate, sessionGate, lane), g, svc),
 	}
 }
 
@@ -82,6 +83,10 @@ func NewOpenOperation(
 // single-admission operations are.
 type openOperation struct {
 	prepare, dial, full *operation[OpenService]
+}
+
+func (o *openOperation) Disposition() Disposition {
+	return o.full.Disposition()
 }
 
 func (o *openOperation) Prepare(ctx context.Context, fn func(context.Context, OpenService) error) error {

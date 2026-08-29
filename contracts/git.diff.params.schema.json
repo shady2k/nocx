@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/git.diff.params.schema.json",
+  "title": "GitDiffParams",
+  "description": "Params for git.diff.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bindingId", "path", "side", "maxBytes"],
+  "properties": {
+    "bindingId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "path": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "side": { "type": "string", "enum": ["staged", "unstaged", "untracked"] },
+    "maxBytes": { "type": "integer", "minimum": 1, "maximum": 4194304 }
+  }
+}

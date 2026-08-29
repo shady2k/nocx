@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/attach.params.schema.json",
+  "title": "AttachParams",
+  "description": "Params for attaching to a terminal session ring.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId"],
+  "properties": {
+    "sessionId": { "type": "string", "pattern": "^[0-9a-fA-F]{32}$" },
+    "offset": { "type": "integer", "minimum": 0 }
+  }
+}

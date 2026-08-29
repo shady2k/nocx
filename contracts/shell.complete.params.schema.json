@@ -1,0 +1,32 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/shell.complete.params.schema.json",
+  "title": "ShellCompleteParams",
+  "description": "Params for shell.complete.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "cwd", "line"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}"
+    },
+    "cwd": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "line": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 65536
+    },
+    "pos": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "limit": {
+      "type": "integer"
+    }
+  }
+}

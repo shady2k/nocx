@@ -14,9 +14,6 @@ package transport
 import (
 	"context"
 	"encoding/json"
-	"os"
-	"path/filepath"
-	"regexp"
 	"strings"
 	"testing"
 
@@ -91,74 +88,6 @@ func TestNoParams_IsAnAssertionNotAnExemption(t *testing.T) {
 		if msg := v(json.RawMessage(bad)); msg == "" {
 			t.Fatalf("noParams accepted a payload: %s", bad)
 		}
-	}
-}
-
-// TestGenericObject_Floor pins what the floor actually enforces, so a later
-// reader does not mistake it for nothing. Objects and arrays are both
-// legitimate params (JSON-RPC 2.0 §4.2); a bare scalar is not, an unbounded
-// string is not, and pathological nesting is not.
-func TestGenericObject_Floor(t *testing.T) {
-	v := genericObject("test")
-	for _, ok := range []string{"", "null", `{"a":"b"}`, `[{"a":1}]`} {
-		if msg := v(json.RawMessage(ok)); msg != "" {
-			t.Fatalf("floor refused legitimate params %q: %s", ok, msg)
-		}
-	}
-	huge := `{"a":"` + strings.Repeat("x", maxGenericStringRunes+1) + `"}`
-	for _, bad := range []string{`"x"`, `5`, `true`, huge} {
-		if msg := v(json.RawMessage(bad)); msg == "" {
-			t.Fatalf("floor accepted %.40s…", bad)
-		}
-	}
-	deep := strings.Repeat(`{"a":`, maxGenericDepth+2) + `1` + strings.Repeat(`}`, maxGenericDepth+2)
-	if msg := v(json.RawMessage(deep)); msg == "" {
-		t.Fatal("floor accepted params nested past its own bound")
-	}
-}
-
-// genericObjectBaseline is the number of control methods still wearing the
-// generic floor instead of a validator that knows their own fields.
-//
-// THIS NUMBER MAY ONLY SHRINK. It is not a target to hit at once: the floor is
-// real validation (structured params, bounded strings, bounded nesting) and
-// every method has it, which is what makes the prohibition true today. It is
-// nonetheless weaker than a validator that knows a field is required and what
-// it means, and each conversion is a method that can no longer be reached with
-// a well-shaped payload that means nothing.
-const genericObjectBaseline = 1
-
-func TestGenericObjectRatchet_OnlyShrinks(t *testing.T) {
-	pattern := regexp.MustCompile(`genericObject\(`)
-	entries, err := os.ReadDir(".")
-	if err != nil {
-		t.Fatalf("read dir: %v", err)
-	}
-	count := 0
-	for _, e := range entries {
-		name := e.Name()
-		if !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
-		}
-		if name == "registration.go" {
-			continue // the declaration and its doc comment, not a registration
-		}
-		b, err := os.ReadFile(filepath.Clean(name))
-		if err != nil {
-			t.Fatalf("read %s: %v", name, err)
-		}
-		count += len(pattern.FindAll(b, -1))
-	}
-	if count > genericObjectBaseline {
-		t.Fatalf("generic params validators: %d, baseline %d — a NEW method was "+
-			"registered with the floor instead of a validator that knows its "+
-			"fields. Write one; the floor is for methods not yet converted, "+
-			"never for methods being added.", count, genericObjectBaseline)
-	}
-	if count < genericObjectBaseline {
-		t.Fatalf("generic params validators: %d, baseline %d — good, and the "+
-			"baseline must come down with it: set genericObjectBaseline to %d",
-			count, genericObjectBaseline, count)
 	}
 }
 

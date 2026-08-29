@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/lifecycle.submitAttempt.params.schema.json",
+  "title": "LifecycleSubmitattemptParams",
+  "description": "Params for lifecycle.submitAttempt.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["domain", "command", "source"],
+  "properties": {
+    "domain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "command": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1048576
+    },
+    "cwd": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "host": {
+      "type": "string",
+      "maxLength": 512
+    },
+    "source": {
+      "type": "string",
+      "enum": ["user", "assistant"]
+    }
+  }
+}

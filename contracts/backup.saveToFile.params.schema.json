@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/backup.saveToFile.params.schema.json",
+  "title": "BackupSavetofileParams",
+  "description": "Params for backup.saveToFile.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["fileName", "contents"],
+  "properties": {
+    "fileName": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 255
+    },
+    "contents": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8388608
+    }
+  }
+}

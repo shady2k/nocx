@@ -28,7 +28,17 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/hashline"
 )
+
+func toolResultJSON(content string) []byte {
+	start := strings.Index(content, "{")
+	end := strings.LastIndex(content, "}")
+	if start < 0 || end < start {
+		return nil
+	}
+	return []byte(content[start : end+1])
+}
 
 // ── helpers ───────────────────────────────────────────────────────────────
 
@@ -109,6 +119,12 @@ func (f *fakeLedger) FinishExecution(_ context.Context, _ int64, end content.Fin
 	defer f.mu.Unlock()
 	f.log = append(f.log, "finish:"+string(end.Status))
 	return nil
+}
+
+func (f *fakeLedger) recordedSubmissions() []fakeSubmission {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]fakeSubmission(nil), f.submissions...)
 }
 
 func (f *fakeLedger) AddCause(_ context.Context, turnID, causedID string) (int, error) {
@@ -929,6 +945,190 @@ func TestAsk_PermittedReadReturnsFileContents(t *testing.T) {
 	}
 }
 
+// TestAsk_PermittedEditChangesFile drives files.edit through the real Ask
+// pipeline: the declaration, policy narrowing, executor and ledger all take
+// part, and the model receives the applied result as its tool message.
+func TestAsk_PermittedEditChangesFile(t *testing.T) {
+	grant, dir := testDirGrant(t, autonomousMatrix())
+	path := filepath.Join(dir, "a.txt")
+	writeFile(t, path, "before\n")
+	snapshot, err := hashline.Read(path, testResultMaxBytes())
+	if err != nil {
+		t.Fatalf("hashline.Read: %v", err)
+	}
+	args := fmt.Sprintf(`{"path":%q,"revision":%q,"patch":"PUT 1.=1:\n+after"}`, path, snapshot.Revision)
+	ledger := &fakeLedger{}
+	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.edit", args: args}))
+	defer srv.Close()
+
+	cl, err := newClient(nil, os.DirFS(realToolsFS), nil)
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	if askErr := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(AskEvent) error { return nil }); askErr != nil {
+		t.Fatalf("Ask: %v", askErr)
+	}
+	// #nosec G304 -- path is created under t.TempDir.
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "after\n" {
+		t.Fatalf("file = %q, want after", got)
+	}
+	if ledger.started() != 1 {
+		t.Fatalf("ledger started %d executions, want 1", ledger.started())
+	}
+	var req struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(f.body()), &req); err != nil {
+		t.Fatalf("request body: %v", err)
+	}
+	found := false
+	for _, message := range req.Messages {
+		if message["role"] != "tool" {
+			continue
+		}
+		content, _ := message["content"].(string)
+		var result filesMutationResult
+		if err := json.Unmarshal(toolResultJSON(content), &result); err != nil {
+			t.Fatalf("tool result: %v", err)
+		}
+		if result.Status == "applied" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("model request did not carry applied edit result: %s", f.body())
+	}
+	submissions := ledger.recordedSubmissions()
+	if len(submissions) != 1 {
+		t.Fatalf("ledger recorded %d submissions, want exactly 1", len(submissions))
+	}
+	if submissions[0].intent != "files.edit" {
+		t.Fatalf("ledger intent = %q, want files.edit", submissions[0].intent)
+	}
+	if submissions[0].source != content.SourceAssistant {
+		t.Fatalf("ledger source = %q, want assistant", submissions[0].source)
+	}
+	if strings.Contains(submissions[0].payload, `"command"`) {
+		t.Fatalf("ledger payload describes a shell command: %s", submissions[0].payload)
+	}
+}
+
+// TestAsk_StaleEditIsRefusedAsToolResult drives the read-then-edit flow
+// through Ask. The model's second request mutates the file after receiving
+// the read result and submits that stale revision; the refusal is a tool
+// result, so Ask completes and the file remains at the intervening bytes.
+func TestAsk_StaleEditIsRefusedAsToolResult(t *testing.T) {
+	grant, dir := testDirGrant(t, autonomousMatrix())
+	path := filepath.Join(dir, "a.txt")
+	const before = "before\n"
+	const intervening = "changed behind the assistant\n"
+	writeFile(t, path, before)
+
+	ledger := &fakeLedger{}
+	var revision string
+	var requests int
+	f, srv := newFakeOpenAI(func(w http.ResponseWriter, r *http.Request) {
+		requests++
+		if requests == 1 {
+			streamToolCalls(w, toolCallSpec{
+				id:   "read_call",
+				name: "files.read",
+				args: fmt.Sprintf(`{"path":%q}`, path),
+			})
+			return
+		}
+		if requests > 2 {
+			streamOK(w)
+			return
+		}
+
+		var req struct {
+			Messages []map[string]any `json:"messages"`
+		}
+		if err := json.Unmarshal([]byte(requestBody(r)), &req); err == nil {
+			for _, message := range req.Messages {
+				if message["role"] != "tool" {
+					continue
+				}
+				content, _ := message["content"].(string)
+				start := strings.Index(content, "{")
+				end := strings.LastIndex(content, "}")
+				var result filesReadResult
+				if start >= 0 && end >= start && json.Unmarshal([]byte(content[start:end+1]), &result) == nil && result.Revision != "" {
+					revision = result.Revision
+				}
+			}
+		}
+		if revision == "" {
+			streamAnswer(w, "missing read revision")
+			return
+		}
+		if err := os.WriteFile(path, []byte(intervening), 0o600); err != nil {
+			streamAnswer(w, "mutation failed")
+			return
+		}
+		streamToolCalls(w, toolCallSpec{
+			id:   "edit_call",
+			name: "files.edit",
+			args: fmt.Sprintf(`{"path":%q,"revision":%q,"patch":"PUT 1.=1:\n+after"}`, path, revision),
+		})
+	})
+	defer srv.Close()
+
+	cl, err := newClient(nil, os.DirFS(realToolsFS), nil)
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	if askErr := cl.Ask(context.Background(), askParams(srv.URL, &grant, ledger, nil), func(AskEvent) error {
+		return nil
+	}); askErr != nil {
+		t.Fatalf("Ask: %v — stale refusal must be a tool result", askErr)
+	}
+
+	// #nosec G304 -- path is created under t.TempDir.
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != intervening {
+		t.Fatalf("file after stale edit = %q, want intervening bytes %q", got, intervening)
+	}
+	if f.requests.Load() != 3 {
+		t.Fatalf("the engine made %d model requests, want read, stale edit, and answer", f.requests.Load())
+	}
+
+	var final struct {
+		Messages []map[string]any `json:"messages"`
+	}
+	if err := json.Unmarshal([]byte(f.body()), &final); err != nil {
+		t.Fatalf("final request body: %v", err)
+	}
+	foundRefusal := false
+	for _, message := range final.Messages {
+		if message["role"] != "tool" {
+			continue
+		}
+		content, _ := message["content"].(string)
+		var result filesMutationResult
+		if err := json.Unmarshal(toolResultJSON(content), &result); err != nil {
+			continue
+		}
+		if result.Status == "refused" {
+			foundRefusal = true
+			if result.Reason == "" || !strings.Contains(strings.ToLower(result.Reason), "changed") {
+				t.Fatalf("stale refusal reason = %q, want an actionable changed-file explanation", result.Reason)
+			}
+		}
+	}
+	if !foundRefusal {
+		t.Fatalf("final model request carried no stale-edit refusal tool result: %s", f.body())
+	}
+}
+
 // TestExecuteFilesRead_WindowIsHonest is criterion 6: files.read returns a
 // window — total, the window, and which window was actually returned — and a
 // file shorter than the window (a window past the end) is answered honestly,
@@ -947,11 +1147,15 @@ func TestExecuteFilesRead_WindowIsHonest(t *testing.T) {
 	if !ok {
 		t.Fatal("files.read not in the registry")
 	}
-	narrowed, err := decl.Narrow(grant)
+	refs, err := decl.ResolveResources(map[string]any{"path": short}, agenttools.RunContext{})
+	if err != nil {
+		t.Fatalf("ResolveResources: %v", err)
+	}
+	narrowed, err := decl.Narrow(grant, refs, agenttools.RunContext{})
 	if err != nil {
 		t.Fatalf("Narrow: %v", err)
 	}
-	out, err := executeFilesRead(context.Background(), narrowed, json.RawMessage(fmt.Sprintf(`{"path":%q}`, short)), toolSeams{})
+	out, err := executeFilesRead(toolTestContext(), narrowed, json.RawMessage(fmt.Sprintf(`{"path":%q}`, short)), toolSeams{})
 	if err != nil {
 		t.Fatalf("executeFilesRead: %v", err)
 	}
@@ -973,7 +1177,15 @@ func TestExecuteFilesRead_WindowIsHonest(t *testing.T) {
 	// a zero-length window, no error.
 	empty := filepath.Join(dir, "empty.txt")
 	writeFile(t, empty, "")
-	out, err = executeFilesRead(context.Background(), narrowed, json.RawMessage(fmt.Sprintf(`{"path":%q}`, empty)), toolSeams{})
+	emptyRefs, err := decl.ResolveResources(map[string]any{"path": empty}, agenttools.RunContext{})
+	if err != nil {
+		t.Fatalf("ResolveResources(empty): %v", err)
+	}
+	emptyNarrowed, err := decl.Narrow(grant, emptyRefs, agenttools.RunContext{})
+	if err != nil {
+		t.Fatalf("Narrow(empty): %v", err)
+	}
+	out, err = executeFilesRead(toolTestContext(), emptyNarrowed, json.RawMessage(fmt.Sprintf(`{"path":%q}`, empty)), toolSeams{})
 	if err != nil {
 		t.Fatalf("executeFilesRead on an empty file: %v — a window past the end is answered honestly, not as an error", err)
 	}
@@ -1066,7 +1278,7 @@ func TestNewClient_AssemblesFromTheEmbedOutsideTheRepo(t *testing.T) {
 	for _, tl := range internal.tools.All() {
 		names = append(names, tl.Name)
 	}
-	want := []string{"files.read", "session.list", "session.read", "run", "git.status"}
+	want := []string{"files.read", "session.list", "session.read", "run", "files.edit", "files.create", "git.status", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("assembled tools = %v, want %v", names, want)
 	}
@@ -1252,21 +1464,21 @@ func TestMiddleware_RunCommandClassifiesTheCallEffect(t *testing.T) {
 	}
 }
 
-// TestAsk_EscalationWithoutAResourceArgCarriesNoResource is the null half:
-// an executable declaration whose parameters name no resource escalates with
-// an effect and NO resource. Null is a fact, not a gap — and the wire says so.
-func TestAsk_EscalationWithoutAResourceArgCarriesNoResource(t *testing.T) {
+// TestAsk_EscalationWithoutAResourceResolverCarriesNoResource is the null
+// half: an executable declaration whose resolver is nil names no resource,
+// while a non-nil resolver is a declaration of resource-bearing calls.
+func TestAsk_EscalationWithoutAResourceResolverCarriesNoResource(t *testing.T) {
 	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
 	// Use the real session.list executor and schema, but remove only its
-	// ResourceArg in this synthetic registry. This keeps the test on a tool
-	// that can actually run while exercising the no-resource policy branch.
+	// resolver in this synthetic registry. This keeps the test on a tool that
+	// can actually run while exercising the no-resource policy branch.
 	var found bool
 	for i, tool := range reg.All() {
 		if tool.Name == "session.list" {
-			reg.All()[i].ResourceArg = ""
+			reg.All()[i].ResolveResources = nil
 			found = true
 			break
 		}
@@ -1398,5 +1610,47 @@ func TestAsk_ObserveToolResultIsFramedAsDataBeforeModelActs(t *testing.T) {
 	}
 	if calls := runner.runCalls(); len(calls) != 0 {
 		t.Fatalf("the instruction-shaped block caused a command: %+v", calls)
+	}
+}
+
+func TestMiddleware_RefusesWhenAnyResolvedResourceIsOutsideScope(t *testing.T) {
+	grant, dir := testDirGrant(t, autonomousMatrix())
+	inside := filepath.Join(dir, "inside.txt")
+	outside := filepath.Join(t.TempDir(), "outside.txt")
+	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	var found bool
+	for i, tool := range reg.All() {
+		if tool.Name != "files.read" {
+			continue
+		}
+		reg.All()[i].ResolveResources = func(args map[string]any, _ agenttools.RunContext) ([]agenttools.ResourceRef, error) {
+			path, ok := args["path"].(string)
+			if !ok {
+				return nil, errors.New("path is not a string")
+			}
+			return []agenttools.ResourceRef{
+				{Kind: content.ResourcePath, ID: path},
+				{Kind: content.ResourcePath, ID: outside},
+			}, nil
+		}
+		found = true
+		break
+	}
+	if !found {
+		t.Fatal("files.read declaration not found")
+	}
+	mw, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-1", 1, "", nil, nil, nil)
+	if err != nil {
+		t.Fatalf("newPolicyMiddleware: %v", err)
+	}
+	out, err := wrappedEndpoint(mw, "files.read", "call-1", `{"path":"`+inside+`"}`)
+	if err != nil {
+		t.Fatalf("outside resource returned an error: %v", err)
+	}
+	if !strings.Contains(out, "REFUSED") {
+		t.Fatalf("result = %q, want a refusal when the second resource is outside scope", out)
 	}
 }

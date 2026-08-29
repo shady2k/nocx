@@ -180,7 +180,7 @@ const maxNoteQueryRunes = 1_000
 
 func validateNoteIDRaw(raw json.RawMessage) string {
 	var p noteIDParams
-	if msg := decodeObject(raw, &p); msg != "" {
+	if msg := decodeObject(raw, &p, "id"); msg != "" {
 		return msg
 	}
 	if p.ID == "" {
@@ -191,7 +191,7 @@ func validateNoteIDRaw(raw json.RawMessage) string {
 
 func validateNoteCreateRaw(raw json.RawMessage) string {
 	var p noteCreateParams
-	if msg := decodeObject(raw, &p); msg != "" {
+	if msg := decodeObject(raw, &p, "body"); msg != "" {
 		return msg
 	}
 	// An EMPTY body is legal and ordinary: the chord opens a note and the
@@ -201,7 +201,7 @@ func validateNoteCreateRaw(raw json.RawMessage) string {
 
 func validateNoteUpdateRaw(raw json.RawMessage) string {
 	var p noteUpdateParams
-	if msg := decodeObject(raw, &p); msg != "" {
+	if msg := decodeObject(raw, &p, "id", "body"); msg != "" {
 		return msg
 	}
 	if p.ID == "" {
@@ -215,7 +215,7 @@ func validateNoteUpdateRaw(raw json.RawMessage) string {
 
 func validateNoteSearchRaw(raw json.RawMessage) string {
 	var p noteSearchParams
-	if msg := decodeObject(raw, &p); msg != "" {
+	if msg := decodeObject(raw, &p, "query"); msg != "" {
 		return msg
 	}
 	return boundedRunes("query", p.Query, maxNoteQueryRunes)

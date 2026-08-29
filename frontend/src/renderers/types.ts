@@ -275,6 +275,19 @@ export interface TerminalRenderer {
    */
   liveContentHeight(): number | null
 
+  // What the renderer can say about ITSELF, for a diagnostic and for nothing
+  // else (wake-report.ts). It is one method rather than several accessors so
+  // that it cannot quietly become product state: nothing in the product may
+  // branch on it, and a reader who wants to is looking at the wrong seam.
+  //
+  // `bufferRows` is how many rows the buffer holds — zero on a renderer that
+  // has been cleared or never wrote, which is the fact the blank-pane
+  // investigation could not otherwise obtain. `accelerated` says whether the
+  // GPU renderer is still attached; a WebGL context lost to a sleeping GPU
+  // detaches it, and a detached context is a candidate explanation for a pane
+  // that draws nothing while holding everything.
+  diagnostics(): { bufferRows: number; accelerated: boolean }
+
   // dispose releases renderer-held resources (timers, listeners). Called when
   // the tab owning this renderer is closed so a periodic forced-refresh pump
   // does not outlive the terminal it paints.

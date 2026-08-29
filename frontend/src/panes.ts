@@ -30,6 +30,8 @@ import {
   type PaneActivitySource,
   type DriverState,
 } from './pane-observation'
+import type { ConnectionCondition } from './connection-condition'
+import { startWakeReporter, type WakeObservation } from './wake-report'
 import { WorkFinishedWatch } from './pane-work-finished'
 import { type ClipboardAccess, type ClipboardGate } from './clipboard'
 import type { ClipboardBanner } from './banner'
@@ -114,6 +116,7 @@ export class Pane implements PaneHost {
    *  every pane. Never derived here: it is classified in the backend, where
    *  the grid lives, and arrives as session.observationChanged. */
   private _observation: DriverState | null = null
+  private _connection: ConnectionCondition = 'reachable'
   /** Whether the content has declared its opening over (PaneHost.
    *  contentSettled). Output before that is the pane starting up, not
    *  something the user missed. */
@@ -261,13 +264,20 @@ export class Pane implements PaneHost {
    *  work-finished watcher's edge is a claim about the title and must stay
    *  one (its trust class is `heuristic` for that reason). */
   get agentStatus(): PaneActivity | null {
-    return paneIndicator(this._observation, this._agentStatus)?.activity ?? null
+    return paneIndicator(this._observation, this._agentStatus, this.hostObserved)?.activity ?? null
+  }
+
+  /** Whether observations about this pane are still ARRIVING. A slow host is
+   *  observed — its bytes are late, not absent — so only the two conditions
+   *  that stop the stream count. */
+  private get hostObserved(): boolean {
+    return this._connection !== 'unreachable' && this._connection !== 'lost'
   }
 
   /** How strong the evidence behind agentStatus is. `title` is the weaker row
    *  of the provenance table: it may light an indicator and decides nothing. */
   get agentSource(): PaneActivitySource | null {
-    return paneIndicator(this._observation, this._agentStatus)?.source ?? null
+    return paneIndicator(this._observation, this._agentStatus, this.hostObserved)?.source ?? null
   }
 
   get tooltip(): string {
@@ -445,6 +455,17 @@ export class Pane implements PaneHost {
     if (this._disposed) return
     if (state === this._observation) return
     this._observation = state
+    this.onDisplayChange?.()
+  }
+
+  /** What the pane says about reaching its host. Kept because the agent
+   *  indicator has to STOP asserting what it last observed once the bytes
+   *  behind that observation are no longer arriving (pane-observation.ts owns
+   *  the rule; this only carries the fact). */
+  updateConnectionCondition(condition: ConnectionCondition): void {
+    if (this._disposed) return
+    if (condition === this._connection) return
+    this._connection = condition
     this.onDisplayChange?.()
   }
 
@@ -638,6 +659,7 @@ export const LOCAL_BACKEND_ID = 'local'
 
 export class PaneManager {
   private readonly panes: Pane[] = []
+  private readonly stopWakeReporter: () => void
   private nextPaneId = 1
   private activePane: Pane | null = null
   private readonly panesContainer: HTMLElement
@@ -846,6 +868,17 @@ export class PaneManager {
     this.verticalHost = verticalHost
     this.layout = layout
     this.uiState = uiState
+
+    // The wake diagnostic (wake-report.ts). It reads and never repairs, and
+    // it exists because one half of the panes-lifecycle report — ssh panes
+    // coming back EMPTY after a suspend, in the same process — was never
+    // explained by the backend defect that explained the silence. The wake is
+    // the one moment nobody could observe; this observes it.
+    this.stopWakeReporter = startWakeReporter(() =>
+      this.panes
+        .map((pane) => pane.content.wakeObservation?.())
+        .filter((o): o is WakeObservation => o !== undefined),
+    )
 
     // Wire TabStrip intents.
     this.wireStrip(tabStrip)
@@ -1272,6 +1305,8 @@ export class PaneManager {
         onOpenRoles: this.onOpenRoles,
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
         onPaneObservationChange: (state) => paneRef.current?.updatePaneObservation(state),
+        onConnectionConditionChange: (condition) =>
+          paneRef.current?.updateConnectionCondition(condition),
         // Where the pane IS, recorded so a restart reopens it there
         // (nocx-zkiv4). Fire-and-forget and fail-quiet: a directory the
         // chain did not take costs the NEXT restore its cwd — it falls back
@@ -1362,6 +1397,8 @@ export class PaneManager {
         outputRecording: this.recordingSource(),
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
         onPaneObservationChange: (state) => paneRef.current?.updatePaneObservation(state),
+        onConnectionConditionChange: (condition) =>
+          paneRef.current?.updateConnectionCondition(condition),
         onActiveOriginChange: () => this.onActivePaneChange?.(),
         onPortsTargetChange: () => this.onActivePaneChange?.(),
         onVaultSealed: this.onVaultSealed,

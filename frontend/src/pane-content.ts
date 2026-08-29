@@ -127,6 +127,12 @@ export interface PaneHost {
 // ── Content (B.4, B.6) ────────────────────────────────────────────────────
 
 export interface PaneContent {
+  /** What this pane looked like at a wake, for the diagnostic in
+   *  wake-report.ts. Optional because only the terminal content can answer —
+   *  a settings page has no grid to be blank — and a content type that cannot
+   *  is not a hole in the record, it is a pane the question is not about. */
+  wakeObservation?(): import('./wake-report').WakeObservation
+
   /**
    * Called at most once per content instance. `signal` is aborted when the
    * tab is disposed during mount — the implementation MUST stop and tear

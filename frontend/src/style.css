@@ -51,6 +51,7 @@
 @import './styles/components/block-receipt.css';
 @import './styles/components/empty-state.css';
 @import './styles/components/status-card.css';
+@import './styles/components/connection-indicator.css';
 @import './styles/components/status-dot.css';
 @import './styles/components/action-group.css';
 @import './styles/components/toolbar.css';

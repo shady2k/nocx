@@ -62,6 +62,14 @@ import {
   type OutputRecordingSource,
 } from './integration/status'
 import { mountIntegrationNotice } from './integration/notice'
+import { mountConnectionMark } from './connection-mark'
+import type { WakeObservation } from './wake-report'
+import {
+  connectionCondition,
+  type ConnectionCondition,
+  type ConnectionFacts,
+} from './connection-condition'
+import type { SessionLiveness as SessionLivenessFact } from './generated/session.liveness'
 
 /** What a pane reads when nothing supplied the recording seam: the fact is
  *  unknown and stays unknown, so the card says nothing about this session's
@@ -309,6 +317,11 @@ export interface TerminalContentHooks {
    *  exec). Tab chrome renders at most this small warning mark
    *  (nocx-4t37.2); the capability statement itself lives in the rail. */
   onWarningChange?: (warning: boolean, label?: string) => void
+  /** The pane's connection condition, whenever it changes (nocx: the
+   *  reachability axis). The pane is the only place that holds every fact
+   *  behind it — the liveness notifications and whether the session has ended
+   *  — so it is the owner, and every surface reads the same answer. */
+  onConnectionConditionChange?: (condition: ConnectionCondition) => void
   /** Where this pane reads "is what my session prints being written down"
    *  (nocx-22k1c.3). A plain tab records its output and produces no blocks,
    *  and the card has to be able to say both halves; the fact belongs to
@@ -885,6 +898,74 @@ export class TerminalContent extends BasePaneContent {
   private _noticeDispose: (() => void) | null = null
   /** The pane the card mounts over. */
   private _paneTarget: HTMLElement | null = null
+  // The last thing the backend said about REACHING this pane's host, and the
+  // corner mark drawn from it. Null liveness is the ordinary state of a local
+  // pane: this machine is never probed, so there is nothing to say about
+  // reaching it (connection-condition.ts).
+  private _liveness: SessionLivenessFact | null = null
+  private _connectionMark: { set(f: ConnectionFacts): void; dispose(): void } | null = null
+  private _connection: ConnectionCondition = 'reachable'
+
+  /** What this pane looks like right now, for the wake diagnostic
+   *  (wake-report.ts). Measurements only — nothing here decides or repairs,
+   *  and nothing in the product may branch on it. */
+  wakeObservation(): WakeObservation {
+    const diag = this.renderer?.diagnostics() ?? null
+    const box = this._paneTarget?.getBoundingClientRect()
+    return {
+      paneId: this.pane.paneId,
+      sessionId: this.session?.sessionId ?? null,
+      bufferRows: diag?.bufferRows ?? null,
+      rendererLive: diag ? diag.accelerated : null,
+      width: Math.round(box?.width ?? 0),
+      height: Math.round(box?.height ?? 0),
+      editorPresent: this.editor !== null,
+      editorVisible: this.editor?.isVisible === true,
+      connection: this._connection,
+    }
+  }
+
+  /** Restate the pane's connection condition to every surface that draws it.
+   *
+   *  ONE derivation, in connection-condition.ts, read from here and from
+   *  nowhere else. The corner mark and the tab must not be able to disagree
+   *  about whether a host is answering. */
+  private _publishConnectionCondition(): void {
+    const facts: ConnectionFacts = { sessionLost: this._sessionLost, liveness: this._liveness }
+    this._connectionMark?.set(facts)
+    this._connection = connectionCondition(facts)
+    this.hooks.onConnectionConditionChange?.(this._connection)
+    this._publishTabMark()
+  }
+
+  /** The tab's warning mark, from ONE place.
+   *
+   *  Three facts want that mark — the session is lost, the host has stopped
+   *  answering, the shell integration degraded — and it is a single boolean
+   *  with a label. Before this it had two write sites and no arbiter, and the
+   *  lost state won only by declaring itself terminal and making every other
+   *  writer check a flag. Two writers of one value is the defect AGENTS.md
+   *  names most often; this is the arbiter, and the order below is the whole
+   *  of it.
+   *
+   *  The order is not preference. A lost session is TERMINAL and outranks
+   *  everything. An unreachable host outranks a degraded integration because
+   *  it makes it moot: a shell whose host is not answering is not degraded,
+   *  it is unreachable, and offering the integration remedy would send a
+   *  person to fix a shell they cannot currently talk to. A SLOW host says
+   *  nothing here at all — the corner mark says it, and a tab strip that
+   *  warned about latency would cry wolf. */
+  private _publishTabMark(): void {
+    if (this._sessionLost) {
+      this.hooks.onWarningChange?.(true, 'Connection lost')
+      return
+    }
+    if (this._connection === 'unreachable') {
+      this.hooks.onWarningChange?.(true, 'Host not answering')
+      return
+    }
+    this.hooks.onWarningChange?.(this._degraded, this._degradedLabel)
+  }
   /** Which shells this machine has been told to stop raising cards for.
    *  Renderer presentation state — "has this person answered for this
    *  shell" — so it lives in localStorage rather than behind an RPC, and it
@@ -1517,6 +1598,10 @@ export class TerminalContent extends BasePaneContent {
     // the status can arrive at any point in the session's life, long after
     // mount returned.
     this._paneTarget = target
+    // The corner mark, mounted with the pane and driven imperatively after.
+    // Absent in the healthy state, so mounting it here costs an empty host
+    // element and nothing else.
+    this._connectionMark = mountConnectionMark(target)
 
     // Wire the signal: if the tab is disposed during mount, abort.
     if (signal.aborted) {
@@ -3030,7 +3115,8 @@ export class TerminalContent extends BasePaneContent {
           // rest of the tab's life, so a late integration fact cannot clear
           // it (the lost state is terminal for this tab).
           this._sessionLost = true
-          this.hooks.onWarningChange?.(true, 'Connection lost')
+          this._publishConnectionCondition()
+          this._publishTabMark()
           return
         }
         // A clean exit closes the tab exactly as it always did.
@@ -3047,31 +3133,24 @@ export class TerminalContent extends BasePaneContent {
         })
       })
       session.onLiveness((liveness) => {
-        // The backend cannot currently reach this session's host, and
-        // NOTHING HAS ENDED — so the tab is neither dead nor trustworthy,
-        // and saying nothing would leave it looking perfectly alive
-        // (nocx-iarf9). Reported the way an input stall is: a toast, from
-        // the kit, once per change rather than once per probe.
+        // The backend has revised what it believes about REACHING this
+        // session's host: it has stopped answering, it is answering late, or
+        // it is answering again. Nothing has ENDED — that is the exit
+        // notification's news and it has its own path above.
         //
-        // Deliberately NOT the tab's warning mark: that mark has an owner
-        // already — the integration axis, and the lost state above it — and
-        // a second writer would be the two-surfaces-one-input defect
-        // AGENTS.md names. A tab whose session is already lost says nothing
-        // here either; the loss is terminal and has had its say.
+        // This used to be a toast, twice, and that was the wrong shape: the
+        // product's own words are "a persistent condition ... is not a toast
+        // (a toast fades whether or not the condition has come back)"
+        // (connection-notice.tsx). A condition needs a mark that lasts exactly
+        // as long as the condition, so it is the pane's corner indicator now,
+        // and it clears itself when the host answers again.
+        //
+        // A tab whose session is already lost says nothing here: the loss is
+        // terminal and outranks every reachability statement, including a
+        // stale one that arrived before it died.
         if (this._sessionLost) return
-        if (liveness.liveness === 'unknown') {
-          log.warn('nocx: session unreachable', {
-            sid: session.sessionId,
-            observedAt: liveness.observedAt,
-          })
-          showToast({
-            level: 'warning',
-            message:
-              'This connection has stopped responding — the session may still be running on the host.',
-          })
-          return
-        }
-        showToast({ level: 'info', message: 'This connection is responding again.' })
+        this._liveness = liveness
+        this._publishConnectionCondition()
       })
       session.onReset(() => {
         renderer.reset()
@@ -4021,7 +4100,7 @@ export class TerminalContent extends BasePaneContent {
     // this mark, the card, the details dialog — reads it. The label is part
     // of the dedupe above, because conventional → lost changes what the
     // mark means without changing whether it is showing.
-    this.hooks.onWarningChange?.(degraded, label)
+    this._publishTabMark()
     this._renderRecovery()
   }
 
@@ -5279,6 +5358,8 @@ export class TerminalContent extends BasePaneContent {
     this._summonStack = null
     this._summonAnswerList = null
     this.session?.close()
+    this._connectionMark?.dispose()
+    this._connectionMark = null
     this.renderer?.dispose()
     this.editor?.dispose()
     this.recall?.destroy()

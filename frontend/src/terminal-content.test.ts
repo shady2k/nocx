@@ -58,6 +58,7 @@ import {
   type InputTarget,
   type InputTargetRegistry,
 } from './input-target'
+import type { ConnectionCondition } from './connection-condition'
 import { TerminalContent, type SnippetFire, type TerminalContentHooks } from './terminal-content'
 import { LOCAL_TARGET_ID } from './ports-client'
 import { Pane } from './panes'
@@ -6121,26 +6122,78 @@ describe('the running command names the tab (nocx-n8n82)', () => {
 // terminal that has silently stopped being connected to anything looks
 // identical to one that is simply quiet.
 describe('the reachability axis', () => {
-  it('says so when the connection stops responding, and again when it returns', async () => {
+  // It used to be two toasts, and that was the wrong shape for it. A dropped
+  // connection is a PERSISTENT CONDITION, and the product already said so in
+  // its own words — "a toast fades whether or not the condition has come
+  // back" (connection-notice.tsx). So the statement is a mark that lasts
+  // exactly as long as the condition, and the pane is its one owner.
+  it('states an unreachable host, and takes it back when the host answers', async () => {
     const client = makeClient()
-    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    const conditions: ConnectionCondition[] = []
+    const latest = () => conditions[conditions.length - 1]
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { onConnectionConditionChange: (c) => conditions.push(c) } },
+      client,
+    )
     try {
       content.setVisible(true)
-      const session = client._sessions[0]
+      const session: SessionFake = client._sessions[0]
       expect(session.onLiveness).toHaveBeenCalled()
 
       session.fireLiveness('unknown')
-      expect(showToast).toHaveBeenCalledWith({
-        level: 'warning',
-        message:
-          'This connection has stopped responding — the session may still be running on the host.',
-      })
+      expect(latest()).toBe('unreachable')
 
       session.fireLiveness('alive', 3)
-      expect(showToast).toHaveBeenCalledWith({
-        level: 'info',
-        message: 'This connection is responding again.',
-      })
+      expect(latest()).toBe('reachable')
+    } finally {
+      teardown()
+    }
+  })
+
+  // A host answering LATE is not a host that is gone, and the two must not
+  // draw the same thing: one is a warning about the link, the other says the
+  // work on the far side may be unreachable.
+  it('distinguishes a slow host from an unreachable one', async () => {
+    const client = makeClient()
+    const conditions: ConnectionCondition[] = []
+    const latest = () => conditions[conditions.length - 1]
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { onConnectionConditionChange: (c) => conditions.push(c) } },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      const session: SessionFake = client._sessions[0]
+
+      session.fireSlowLiveness(3)
+      expect(latest()).toBe('slow')
+
+      session.fireLiveness('unknown', 4)
+      expect(latest()).toBe('unreachable')
+    } finally {
+      teardown()
+    }
+  })
+
+  // The grade is the BACKEND's (it has hysteresis, which the milliseconds
+  // alone cannot reproduce). A renderer that thresholded the number for
+  // itself would be a second derivation of one concept.
+  it('does not invent a slow grade from the milliseconds', async () => {
+    const client = makeClient()
+    const conditions: ConnectionCondition[] = []
+    const latest = () => conditions[conditions.length - 1]
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { hooks: { onConnectionConditionChange: (c) => conditions.push(c) } },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      const session: SessionFake = client._sessions[0]
+      session.fireLiveness('alive', 3)
+      expect(latest()).toBe('reachable')
     } finally {
       teardown()
     }

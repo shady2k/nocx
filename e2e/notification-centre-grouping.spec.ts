@@ -497,7 +497,7 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     // assertion of this test is about.
     await expect(badge).toHaveText(String(waitingBeforeRemote + 1), { timeout: 30_000 })
 
-    const remoteRow = rowsOfKind(page, 'program.notify').filter({ hasText: REMOTE })
+    const remoteRow = rowsOfKind(page, 'Program notification request').filter({ hasText: REMOTE })
     await expect(remoteRow).toHaveCount(1)
     // It says where it came from, which is the axis the filter narrows on.
     await expect(remoteRow.locator('.ui-record-row__meta-text')).toContainText(remoteHost)

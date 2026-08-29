@@ -670,11 +670,17 @@ describe('the panel narrows the feed, and the bell goes on counting (D3)', () =>
     const catalogue: NotifyCatalogue = {
       kinds: [
         {
+          id: 'paneWorkFinished',
           kind: 'pane.workFinished',
           label: 'Work seems finished',
           description: 'A pane became idle.',
         },
-        { kind: 'bell', label: 'Terminal bell', description: 'A program printed BEL.' },
+        {
+          id: 'bell',
+          kind: 'bell',
+          label: 'Terminal bell',
+          description: 'A program printed BEL.',
+        },
       ],
     }
     const { container } = render(() => (
@@ -722,11 +728,17 @@ describe('the panel narrows the feed, and the bell goes on counting (D3)', () =>
     setCatalogue({
       kinds: [
         {
+          id: 'paneWorkFinished',
           kind: 'pane.workFinished',
           label: 'Work seems finished',
           description: 'A pane became idle.',
         },
-        { kind: 'bell', label: 'Terminal bell', description: 'A program printed BEL.' },
+        {
+          id: 'bell',
+          kind: 'bell',
+          label: 'Terminal bell',
+          description: 'A program printed BEL.',
+        },
       ],
     })
     expect(container.querySelector('.ui-badge')?.textContent).toBe('Work seems finished')
@@ -791,7 +803,7 @@ describe('the panel narrows the feed, and the bell goes on counting (D3)', () =>
     setHidden(new Set(['bell']))
     expect(filterSelect(container, 'Kind')).toBeNull()
     expect(titles(container)).toEqual(['session.ended'])
-    setHidden(new Set())
+    setHidden(new Set<string>())
     expect(titles(container)).toEqual(['build finished', 'session.ended'])
     store.destroy()
   })

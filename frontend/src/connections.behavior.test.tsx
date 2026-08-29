@@ -2351,8 +2351,6 @@ describe('profile move preview', () => {
 function sealedVaultClient() {
   const status = vi.fn().mockResolvedValue({
     state: 'sealed',
-    osKeyAvailable: false,
-    osKeyCapable: false,
     hasPassphrase: false,
     autoSealMinutes: 0,
     providers: [],

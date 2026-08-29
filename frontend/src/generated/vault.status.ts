@@ -18,15 +18,7 @@ export interface VaultStatus {
    */
   state: 'uninitialized' | 'sealed' | 'unsealed'
   /**
-   * STATE: this vault holds an OS-held key, so it can be unsealed by one. False until setup has stored one. Ask this before offering 'unlock with the OS key'.
-   */
-  osKeyAvailable: boolean
-  /**
-   * CAPABILITY: this machine has a system keyring that is ready and writable, so setup can mint an OS-held key with no passphrase. One word apart from osKeyAvailable and a different question — ask this before deciding whether setup must prompt.
-   */
-  osKeyCapable: boolean
-  /**
-   * STATE: the vault holds a passphrase envelope. False on OS-key-only vaults, where changing the passphrase or reissuing the recovery code is refused.
+   * STATE: the vault holds a passphrase envelope. True of every initialized vault since ADR-0050 step 1 removed the mode that had none, so what this now distinguishes is an initialized vault from one that has never been set up.
    */
   hasPassphrase: boolean
   /**

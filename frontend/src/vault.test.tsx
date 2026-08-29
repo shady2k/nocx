@@ -73,8 +73,6 @@ function mockClient() {
 
 const BASE_STATUS = {
   state: 'sealed' as const,
-  osKeyAvailable: false,
-  osKeyCapable: false,
   hasPassphrase: false,
   autoSealMinutes: 0,
   providers: [],
@@ -84,66 +82,14 @@ const BASE_STATUS = {
 // ── createVaultState — controller behavior (no Dialog rendering) ───────
 
 describe('createVaultState', () => {
-  it('calls silent setup + doSave when osKeyCapable and uninitialized', async () => {
-    const { client, setup } = mockClient()
-    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
-      state: 'uninitialized',
-      osKeyAvailable: false,
-      osKeyCapable: true,
-      hasPassphrase: false,
-      autoSealMinutes: 0,
-      providers: [],
-      defaultProvider: null,
-    })
-    setup.mockResolvedValue({})
-
-    const ctrl = createVaultState(client)
-    await ctrl.refresh()
-
-    const doSave = vi.fn().mockResolvedValue(undefined)
-    ctrl.ensureBeforeSave(doSave)
-
-    // Silent setup: no dialog shown, setup called, save called
-    expect(ctrl.showSetup()).toBe(false)
-    await vi.waitFor(() => {
-      expect(setup).toHaveBeenCalledWith({})
-    })
-    await vi.waitFor(() => {
-      expect(doSave).toHaveBeenCalled()
-    })
-  })
-
-  it('does not save when silent setup fails', async () => {
-    const { client, setup } = mockClient()
-    ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
-      state: 'uninitialized',
-      osKeyAvailable: false,
-      osKeyCapable: true,
-      hasPassphrase: false,
-      autoSealMinutes: 0,
-      providers: [],
-      defaultProvider: null,
-    })
-    setup.mockRejectedValue(new Error('no-service'))
-
-    const ctrl = createVaultState(client)
-    await ctrl.refresh()
-
-    const doSave = vi.fn().mockResolvedValue(undefined)
-    ctrl.ensureBeforeSave(doSave)
-
-    await vi.waitFor(() => {
-      expect(setup).toHaveBeenCalledWith({})
-    })
-    // doSave must NOT be called when setup fails
-    expect(doSave).not.toHaveBeenCalled()
-  })
-
-  it('shows setup dialog when uninitialized and no OS key', async () => {
+  // Every machine, not just the ones without a keystore. A writable keystore
+  // used to make this silent: setup({}) put the root key in it and the save
+  // went through without anybody being asked. ADR-0050 step 1 removed that,
+  // so the sheet is the only answer here now.
+  it('shows the setup dialog when uninitialized', async () => {
     const { client } = mockClient()
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
       state: 'uninitialized',
-      osKeyAvailable: false,
       hasPassphrase: false,
       autoSealMinutes: 0,
       providers: [],
@@ -165,7 +111,6 @@ describe('createVaultState', () => {
     const { client } = mockClient()
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
       state: 'sealed',
-      osKeyAvailable: true,
       hasPassphrase: false,
       autoSealMinutes: 0,
       providers: [],
@@ -187,7 +132,6 @@ describe('createVaultState', () => {
     const { client } = mockClient()
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
       state: 'unsealed',
-      osKeyAvailable: true,
       hasPassphrase: false,
       autoSealMinutes: 0,
       providers: [],
@@ -212,7 +156,6 @@ describe('createVaultState', () => {
     // Status is null initially — refresh not called
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
       state: 'unsealed',
-      osKeyAvailable: false,
       hasPassphrase: false,
       autoSealMinutes: 0,
       providers: [],
@@ -252,7 +195,6 @@ describe('createVaultState', () => {
     const { client } = mockClient()
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
       state: 'uninitialized',
-      osKeyAvailable: false,
       hasPassphrase: false,
       autoSealMinutes: 0,
       providers: [],
@@ -278,7 +220,6 @@ describe('createVaultState', () => {
     const { client } = mockClient()
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
       state: 'sealed',
-      osKeyAvailable: false,
       hasPassphrase: false,
       autoSealMinutes: 0,
       providers: [],
@@ -317,8 +258,6 @@ describe('createVaultState', () => {
     const { client } = mockClient()
     ;(client.status as ReturnType<typeof vi.fn>).mockResolvedValue({
       state: 'sealed',
-      osKeyAvailable: true,
-      osKeyCapable: true,
       autoSealMinutes: 0,
       providers: [],
       defaultProvider: null,
@@ -367,50 +306,29 @@ describe('createVaultSecretSource: the explicit door onto an uninitialized vault
     return { ...h, picker, openSetup, refresh, onError }
   }
 
-  it('sets up SILENTLY on a machine whose OS key can carry the vault', async () => {
+  it('raises the setup sheet, and never sets a vault up behind the person', async () => {
     const h = source()
-    h.status.mockResolvedValue({ ...BASE_STATUS, state: 'uninitialized', osKeyCapable: true })
-    h.setup.mockResolvedValue({})
+    h.status.mockResolvedValue({ ...BASE_STATUS, state: 'uninitialized' })
 
-    // `false` is the whole answer: nothing took the surface, so the panel
-    // stays where the person is standing and reloads its list.
-    await expect(h.picker.requestSetup()).resolves.toBe(false)
-    expect(h.setup).toHaveBeenCalledWith({})
-    expect(h.openSetup).not.toHaveBeenCalled()
-    // And the controller learns the vault is open, or every later read of its
-    // state answers about the vault as it was a moment ago.
-    expect(h.refresh).toHaveBeenCalled()
-  })
-
-  it('raises the setup sheet on a machine that cannot', async () => {
-    const h = source()
-    h.status.mockResolvedValue({ ...BASE_STATUS, state: 'uninitialized', osKeyCapable: false })
-
+    // `true` is the whole answer: the sheet took the surface, so the panel
+    // does not reload its list underneath it.
     await expect(h.picker.requestSetup()).resolves.toBe(true)
     expect(h.openSetup).toHaveBeenCalled()
     expect(h.setup).not.toHaveBeenCalled()
   })
 
-  it('falls through to the sheet when the silent setup itself fails, and says so', async () => {
-    const h = source()
-    h.status.mockResolvedValue({ ...BASE_STATUS, state: 'uninitialized', osKeyCapable: true })
-    h.setup.mockRejectedValue(new Error('keyring refused'))
-
-    await expect(h.picker.requestSetup()).resolves.toBe(true)
-    expect(h.openSetup).toHaveBeenCalled()
-    // A silent failure that stayed silent would be a lock that appeared to do
-    // nothing (AGENTS.md: a soft degrade must be visible).
-    expect(h.onError).toHaveBeenCalled()
-  })
-
-  it('asks when it cannot even read the status: no remedy is known, so none is assumed', async () => {
+  // The status read used to decide WHICH remedy this offered, so failing it
+  // was its own case. There is one remedy now, so a status the picker cannot
+  // read changes nothing about what it does — and this asserts exactly that,
+  // because the alternative (raising nothing) is a lock that appears to do
+  // nothing.
+  it('raises the sheet even when it cannot read the status', async () => {
     const h = source()
     h.status.mockRejectedValue(new Error('no backend'))
 
     await expect(h.picker.requestSetup()).resolves.toBe(true)
     expect(h.openSetup).toHaveBeenCalled()
     expect(h.setup).not.toHaveBeenCalled()
-    expect(h.onError).toHaveBeenCalled()
   })
 })
 
@@ -419,7 +337,6 @@ describe('saveSecretWithVault', () => {
     const { client, status, setup } = mockClient()
     status.mockResolvedValue({
       state: 'uninitialized',
-      osKeyAvailable: false,
       hasPassphrase: false,
       autoSealMinutes: 0,
       providers: [],
@@ -449,44 +366,10 @@ describe('saveSecretWithVault', () => {
     expect(savePassword.mock.calls[1]).toEqual(['my-pw'])
   })
 
-  it('vault-uninitialized + osKeyCapable: silent setup, no dialog, retries save', async () => {
-    const { client, status, setup } = mockClient()
-    status.mockResolvedValue({
-      state: 'uninitialized',
-      osKeyAvailable: false,
-      osKeyCapable: true,
-      hasPassphrase: false,
-      autoSealMinutes: 0,
-      providers: [],
-      defaultProvider: null,
-    })
-    setup.mockResolvedValue({})
-
-    const ctrl = createVaultState(client)
-    await ctrl.refresh()
-
-    const savePassword = vi
-      .fn<(...args: string[]) => Promise<void>>()
-      .mockRejectedValueOnce(makeRpcError('vault-uninitialized'))
-      .mockResolvedValueOnce(undefined)
-    const saveFn = () => savePassword('my-pw')
-
-    const promise = ctrl.saveSecretWithVault(saveFn)
-
-    await expect(promise).resolves.toBeUndefined()
-    expect(ctrl.showSetup()).toBe(false)
-    expect(ctrl.showUnlock()).toBe(false)
-    expect(setup).toHaveBeenCalledWith({})
-    expect(savePassword).toHaveBeenCalledTimes(2)
-    expect(savePassword.mock.calls[0]).toEqual(['my-pw'])
-    expect(savePassword.mock.calls[1]).toEqual(['my-pw'])
-  })
-
   it('vault-sealed: shows UnlockDialog, retries after unseal', async () => {
     const { client, status } = mockClient()
     status.mockResolvedValue({
       state: 'sealed',
-      osKeyAvailable: true,
       hasPassphrase: false,
       autoSealMinutes: 0,
       providers: [],
@@ -517,7 +400,6 @@ describe('saveSecretWithVault', () => {
     const { client, status } = mockClient()
     status.mockResolvedValue({
       state: 'sealed',
-      osKeyAvailable: true,
       hasPassphrase: false,
       autoSealMinutes: 0,
       providers: [],
@@ -545,7 +427,6 @@ describe('saveSecretWithVault', () => {
     const { client, status } = mockClient()
     status.mockResolvedValue({
       state: 'unsealed',
-      osKeyAvailable: false,
       hasPassphrase: false,
       autoSealMinutes: 0,
       providers: [],
@@ -560,34 +441,10 @@ describe('saveSecretWithVault', () => {
 
     await expect(promise).rejects.toThrow('network error')
   })
-  it('silent setup failure: rejects so caller shows error', async () => {
-    const { client, status, setup } = mockClient()
-    status.mockResolvedValue({
-      state: 'uninitialized',
-      osKeyAvailable: false,
-      osKeyCapable: true,
-      hasPassphrase: false,
-      autoSealMinutes: 0,
-      providers: [],
-      defaultProvider: null,
-    })
-    setup.mockRejectedValue(new Error('secret-service-unavailable'))
-
-    const ctrl = createVaultState(client)
-    await ctrl.refresh()
-
-    const saveFn = vi.fn().mockRejectedValueOnce(makeRpcError('vault-uninitialized'))
-    const promise = ctrl.saveSecretWithVault(saveFn)
-
-    await expect(promise).rejects.toThrow('secret-service-unavailable')
-    expect(saveFn).toHaveBeenCalledTimes(1)
-  })
-
   it('retry failure after unlock: rejects', async () => {
     const { client, status } = mockClient()
     status.mockResolvedValue({
       state: 'sealed',
-      osKeyAvailable: false,
       hasPassphrase: false,
       autoSealMinutes: 0,
       providers: [],
@@ -616,7 +473,6 @@ describe('saveSecretWithVault', () => {
     const { client, status } = mockClient()
     status.mockResolvedValue({
       state: 'uninitialized',
-      osKeyAvailable: false,
       hasPassphrase: false,
       autoSealMinutes: 0,
       providers: [],
@@ -645,7 +501,6 @@ describe('saveSecretWithVault', () => {
     const { client, status } = mockClient()
     status.mockResolvedValue({
       state: 'sealed',
-      osKeyAvailable: false,
       hasPassphrase: false,
       autoSealMinutes: 0,
       providers: [],
@@ -857,25 +712,6 @@ describe('SetupDialog', () => {
 // ── UnlockDialog ───────────────────────────────────────────────────────
 
 describe('UnlockDialog', () => {
-  it('calls vaultClient.unseal with os means when OS key is available', async () => {
-    const { client, unseal } = mockClient()
-    unseal.mockResolvedValue({})
-    render(() => (
-      <UnlockDialog
-        open={true}
-        onClose={vi.fn()}
-        vaultClient={client}
-        vaultStatus={{ ...BASE_STATUS, osKeyAvailable: true }}
-      />
-    ))
-
-    fireEvent.click(screen.getByText('Unlock'))
-
-    await vi.waitFor(() => {
-      expect(unseal).toHaveBeenCalledWith({ means: 'os' })
-    })
-  })
-
   it('calls vaultClient.unseal with passphrase when passphrase is entered', async () => {
     const { client, unseal } = mockClient()
     unseal.mockResolvedValue({})
@@ -1217,7 +1053,6 @@ describe('RecoveryCodeDialog', () => {
 describe('VaultSection', () => {
   const UNSEALED_STATUS = {
     state: 'unsealed' as const,
-    osKeyAvailable: true,
     hasPassphrase: true,
     autoSealMinutes: 0,
     providers: [{ id: 'keychain', writable: true, ready: true }],
@@ -1225,7 +1060,6 @@ describe('VaultSection', () => {
   }
   const SEALED_STATUS = {
     state: 'sealed' as const,
-    osKeyAvailable: false,
     hasPassphrase: false,
     autoSealMinutes: 0,
     providers: [{ id: 'secret-service', writable: true, ready: true }],
@@ -1233,7 +1067,6 @@ describe('VaultSection', () => {
   }
   const UNINIT_STATUS = {
     state: 'uninitialized' as const,
-    osKeyAvailable: false,
     hasPassphrase: false,
     autoSealMinutes: 0,
     providers: [],
@@ -1348,7 +1181,6 @@ describe('VaultSection', () => {
   it('names every store and states every store, all at once', async () => {
     const status = {
       state: 'unsealed' as const,
-      osKeyAvailable: true,
       hasPassphrase: true,
       autoSealMinutes: 0,
       providers: [
@@ -1373,7 +1205,6 @@ describe('VaultSection', () => {
   it('leaves no store name to be truncated by a fixed-width container', async () => {
     const status = {
       state: 'unsealed' as const,
-      osKeyAvailable: true,
       hasPassphrase: true,
       autoSealMinutes: 0,
       providers: [
@@ -1395,7 +1226,6 @@ describe('VaultSection', () => {
   it('each store carries a status dot toned to its health', async () => {
     const status = {
       state: 'unsealed' as const,
-      osKeyAvailable: true,
       hasPassphrase: true,
       autoSealMinutes: 0,
       providers: [
@@ -1414,7 +1244,6 @@ describe('VaultSection', () => {
   it('unready store identifiable without selecting it', async () => {
     const status = {
       state: 'unsealed' as const,
-      osKeyAvailable: true,
       hasPassphrase: true,
       autoSealMinutes: 0,
       providers: [
@@ -1437,7 +1266,6 @@ describe('VaultSection', () => {
   it('store panel shows state as sentence with remedy, not a reason code', async () => {
     const status = {
       state: 'unsealed' as const,
-      osKeyAvailable: true,
       hasPassphrase: true,
       autoSealMinutes: 0,
       providers: [{ id: 'file', writable: false, ready: false, reason: 'locked' }],
@@ -1459,7 +1287,6 @@ describe('VaultSection', () => {
     const status = {
       state: 'unsealed' as const,
       hasPassphrase: false,
-      osKeyAvailable: true,
       autoSealMinutes: 0,
       providers: [{ id: 'keychain', writable: true, ready: true }],
       defaultProvider: 'keychain',
@@ -1607,7 +1434,6 @@ describe('VaultSection', () => {
   it('refuses to offer an unreachable store as the place for new secrets', async () => {
     const status = {
       state: 'unsealed' as const,
-      osKeyAvailable: false,
       hasPassphrase: true,
       autoSealMinutes: 0,
       providers: [
@@ -1631,7 +1457,6 @@ describe('VaultSection', () => {
   it('offers a reachable read-only store nothing either', async () => {
     const status = {
       state: 'unsealed' as const,
-      osKeyAvailable: false,
       hasPassphrase: true,
       autoSealMinutes: 0,
       providers: [
@@ -1650,7 +1475,6 @@ describe('VaultSection', () => {
   it('non-default store shows Store new secrets here button', async () => {
     const status = {
       state: 'unsealed' as const,
-      osKeyAvailable: true,
       hasPassphrase: true,
       autoSealMinutes: 0,
       providers: [
@@ -1810,7 +1634,6 @@ describe('VaultSection', () => {
   it('Test says what the store answered, not merely when it was asked', async () => {
     const status = {
       state: 'unsealed' as const,
-      osKeyAvailable: false,
       hasPassphrase: true,
       autoSealMinutes: 0,
       providers: [{ id: 'system', writable: true, ready: false, reason: 'no-service' }],
@@ -1849,7 +1672,6 @@ describe('VaultSection', () => {
   it('says a keystore the build excluded was never asked, not that it failed', async () => {
     const status = {
       state: 'unsealed' as const,
-      osKeyAvailable: false,
       hasPassphrase: true,
       autoSealMinutes: 0,
       providers: [
@@ -1873,7 +1695,6 @@ describe('VaultSection', () => {
   it('states every diagnostics value as a badge, toned to what it means', async () => {
     const status = {
       state: 'unsealed' as const,
-      osKeyAvailable: false,
       hasPassphrase: true,
       autoSealMinutes: 0,
       providers: [
@@ -1890,12 +1711,15 @@ describe('VaultSection', () => {
       b.getAttribute('data-tone'),
     ])
     expect(badges).toContainEqual(['unsealed', 'success'])
-    expect(badges).toContainEqual(['Not available', 'neutral'])
     expect(badges).toContainEqual(['Not ready', 'danger'])
     expect(badges).toContainEqual(['Ready', 'success'])
     // The raw reason code, verbatim — this is the line that goes in a bug
     // report, so it must not be reworded into a sentence here.
     expect(badges).toContainEqual(['no-service', 'danger'])
+    // There is no "OS-held key" row any more: no vault holds one (ADR-0050
+    // step 1), so a diagnostics line about it could only ever read "Not
+    // available" and would read as a fault rather than as a fact.
+    expect(details.textContent).not.toContain('OS-held key')
   })
 
   // The rows were a bare <div>, so nothing spaced them and they sat flush

@@ -38,8 +38,8 @@ func TestBannerClickReachesTheRendererAsSessionFocus(t *testing.T) {
 	defer a.Shutdown(context.Background())
 
 	conn, _, derr := (&websocket.Dialer{
-		Subprotocols: []string{"nocx.token." + a.WSToken()},
-	}).Dial("ws://127.0.0.1:"+strconv.Itoa(a.WSPort())+"/session", nil)
+		Subprotocols: []string{"nocx.token." + a.Transport.Token()},
+	}).Dial("ws://127.0.0.1:"+strconv.Itoa(a.Transport.Port())+"/session", nil)
 	if derr != nil {
 		t.Fatalf("dial: %v", derr)
 	}

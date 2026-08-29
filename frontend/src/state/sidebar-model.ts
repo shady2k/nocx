@@ -9,7 +9,7 @@
  *   Collapsed    → sidebar component (keyboard shortcut Ctrl/Cmd+B, icon click)
  *   Active view  → sidebar component (icon click)
  *   Persistence  → SidebarPersistence, over the UI-state document
- *                  (ADR-0033) — not modeled here
+ *                  (ADR-0048) — not modeled here
  *
  * Terminal render state is NOT modeled (AD-6).  The sidebar never touches it.
  */

@@ -61,7 +61,7 @@ import {
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
 
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
@@ -97,7 +97,7 @@ test.beforeAll(async () => {
   // `true` = no Secret Service for this backend: the container has no
   // keychain to ask, and the derived content key makes the vault available
   // without user setup — the arrangement the other agent specs use.
-  backend = new VaultBackend(devharnessBin(), { root }, true)
+  backend = new VaultBackend(serverBin(), { root })
   endpoint = await backend.start()
 })
 

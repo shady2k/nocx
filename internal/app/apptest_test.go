@@ -35,8 +35,25 @@ import (
 func newTestApp(t *testing.T, opts ...Option) (*App, error) {
 	t.Helper()
 	defaults := []Option{
-		WithoutSystemKeystore(),
+		withoutSystemKeystore(),
 		WithLogFilePath(filepath.Join(t.TempDir(), "nocx.log")),
 	}
 	return New(append(defaults, opts...)...)
+}
+
+// withoutSystemKeystore builds the vault's system provider over a keyring
+// that fails every operation, so the app behaves exactly like one on a host
+// with no OS secret store — which is the stance nearly every test wants.
+//
+// IN THE TEST BINARY, not beside WithRealSystemKeystore in app.go, because
+// nothing in production says it any more. It used to be exported for
+// cmd/devharness, which said it by environment variable; devharness is gone
+// with the cutover (design D11) and the stance it stated is now the BUILD's
+// (keystore_build_headless.go), so a build with no login session declares the
+// same thing without anybody passing anything. What is left is the test's own
+// need to declare a stance at all — decideKeystore refuses an undeclared one
+// under `go test` — and a declaration only tests make belongs where only
+// tests can reach it.
+func withoutSystemKeystore() Option {
+	return func(o *optionSet) { o.keystore = keystoreAbsent }
 }

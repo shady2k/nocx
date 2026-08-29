@@ -183,13 +183,6 @@ func WithOriginPolicy(p OriginPolicy) WSServerOption {
 	return func(s *WSServer) { s.origins = p }
 }
 
-// WithListenAddr overrides the listen address. The default, 127.0.0.1:0, is
-// deliberate on both halves: loopback keeps the PTY off the network entirely,
-// and port 0 lets the OS pick a free port instead of a predictable one.
-func WithListenAddr(addr string) WSServerOption {
-	return func(s *WSServer) { s.listenAddr = addr }
-}
-
 // Token returns the capability minted for this launch. Valid only after Start.
 func (s *WSServer) Token() string { return s.token }
 

@@ -12,7 +12,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 )
 
-// The master's ownership interval, and losing it (design §6.2, ADR-0035's
+// The master's ownership interval, and losing it (design §6.2, ADR-0049's
 // first consequence).
 //
 // A typed `ssh` leaves a control socket and a master process behind it, and

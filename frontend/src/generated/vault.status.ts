@@ -56,8 +56,14 @@ export interface ProviderStatus {
    */
   ready: boolean
   /**
-   * Why the store is not ready. Absent when it is. A code, never a sentence — the renderer owns the wording.
+   * Why the store is not ready. Absent when it is. A code, never a sentence — the renderer owns the wording. "excluded" is the one that is not a claim about the machine: this build declared the OS keystore out of play and never asked it anything, because asking is a keychain write and on a host with no keychain that write is a modal nobody can dismiss (design D10).
    */
   reason?:
-    'no-service' | 'locked' | 'denied' | 'timeout' | 'unsupported-platform' | 'unknown-provider'
+    | 'no-service'
+    | 'locked'
+    | 'denied'
+    | 'timeout'
+    | 'unsupported-platform'
+    | 'unknown-provider'
+    | 'excluded'
 }

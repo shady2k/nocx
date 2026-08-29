@@ -1843,6 +1843,31 @@ describe('VaultSection', () => {
     })
   })
 
+  // A store this build deliberately never asked is not a store that failed.
+  // "Not answering" would describe a question nobody put, and an error dot
+  // beside a decision reads as a fault to go and fix (design D10).
+  it('says a keystore the build excluded was never asked, not that it failed', async () => {
+    const status = {
+      state: 'unsealed' as const,
+      osKeyAvailable: false,
+      hasPassphrase: true,
+      autoSealMinutes: 0,
+      providers: [
+        { id: 'system', writable: true, ready: false, reason: 'excluded' },
+        { id: 'file', writable: true, ready: true },
+      ],
+      defaultProvider: 'file',
+    }
+    await renderVaultSection(status)
+
+    const row = Array.from(document.querySelectorAll('.ui-vault-store')).find((el) =>
+      el.textContent?.includes('System keychain'),
+    )!
+    expect(row).toBeTruthy()
+    expect(row.textContent).not.toContain('Not answering')
+    expect(row.textContent).toContain('does not use the system keychain')
+  })
+
   // ── Diagnostics values are badges ─────────────────────────────────
 
   it('states every diagnostics value as a badge, toned to what it means', async () => {

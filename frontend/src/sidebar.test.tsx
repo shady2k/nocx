@@ -156,7 +156,7 @@ describe('sidebar', () => {
   })
 
   it('persists the collapsed state and restores it on the next mount', () => {
-    // The persistence seam is the UI-state document (ADR-0033), not
+    // The persistence seam is the UI-state document (ADR-0048), not
     // localStorage. The fake stands in for the round trip: whatever the
     // first mount saved is what the second one boots from.
     const saved = { collapsed: false, activeViewId: '' }

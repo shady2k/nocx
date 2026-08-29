@@ -28,7 +28,7 @@ import { assertResolvedIsolatedHome, createHomeIsolation } from './home-isolatio
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 /** mtime of the real ~/.nocx, or null when it does not exist. */
 function realShellIntegrationStamp(): number | null {
@@ -43,7 +43,7 @@ test.describe('the e2e home boundary is obeyed, not just handed over', () => {
   // No "is the binary there" guard any more. It was asked at collection time,
   // which is before the stand exists, and it was guarding against a binary
   // nobody built — the failure mode of the old arrangement, where the runner
-  // and CI each had to remember. The stand builds devharness on its way up, so
+  // and CI each had to remember. The stand builds nocx-server on its way up, so
   // a missing binary now means the stand failed, and that fails the run rather
   // than quietly skipping this file (nocx-z9s9.7).
 
@@ -51,7 +51,7 @@ test.describe('the e2e home boundary is obeyed, not just handed over', () => {
     const root = mkdtempSync(join(tmpdir(), 'nocx-e2e-live-home-'))
     const before = realShellIntegrationStamp()
 
-    const backend = new VaultBackend(devharnessBin(), { root }, true)
+    const backend = new VaultBackend(serverBin(), { root })
     try {
       await backend.start()
 

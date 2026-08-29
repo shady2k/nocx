@@ -1,6 +1,6 @@
 // Package notify is the notification pipeline core: the Event record, the
 // trust classes, the default-deny router, and the Sink contract. It is the
-// pipeline of ADR-0029 and the notification design (§2): sources stamp an
+// pipeline of ADR-0047 and the notification design (§2): sources stamp an
 // Event, the router resolves where it goes, sinks deliver.
 //
 // The two rules that are the point of the package:
@@ -8,13 +8,13 @@
 //   - Routing resolves ONCE, in the router, before any sink is invoked. A
 //     sink receives an immutable resolved destination (a Delivery) and may
 //     never select a target, credential, method, retry or redirect
-//     (ADR-0029 §2.3).
+//     (ADR-0047 §2.3).
 //   - Every sink invocation is synchronous, takes a finite-deadline context,
 //     must stop retaining request data and return when cancelled, and may
 //     not publish a callback after returning. Expiry cancels the
 //     invocation; the closing event is the invocation's RETURN, so the
 //     in-flight slot is released on return, never at deadline expiry.
-//     Finalization is one-shot: a late result is ignored (ADR-0029 §2.2).
+//     Finalization is one-shot: a late result is ignored (ADR-0047 §2.2).
 //
 // It is wired at the composition root (internal/app). Ingress is the one
 // entry point: it stamps what nocx owns, records the occurrence in the feed,
@@ -34,7 +34,7 @@ import (
 )
 
 // Kind is the event kind, stamped by the source adapter from the method
-// invoked — never carried on the wire (ADR-0029 §2.2). The values below are
+// invoked — never carried on the wire (ADR-0047 §2.2). The values below are
 // the sources of the design (§3); the enum is open, and default-deny means
 // a kind added later reaches no sink until a table row exists.
 type Kind string
@@ -50,7 +50,7 @@ const (
 
 // Trust is the trust class of an event, stamped by its source adapter —
 // never carried on the wire. The class decides what the event may reach
-// (ADR-0029 §3); the routing table is default-deny, and a class bound is a
+// (ADR-0047 §3); the routing table is default-deny, and a class bound is a
 // hard capability, not a suggestion.
 type Trust string
 
@@ -80,7 +80,7 @@ const (
 
 // Attribution is the backend-stamped origin of an event, naming the tab,
 // host and session it came from. Stamped by nocx from its session registry
-// — never carried on the wire (ADR-0029 §2.2, §4.6).
+// — never carried on the wire (ADR-0047 §2.2, §4.6).
 type Attribution struct {
 	// Backend names which backend raised this — "local" for this machine,
 	// the same vocabulary internal/commandnames.LocalRoute already uses for
@@ -104,7 +104,7 @@ type Attribution struct {
 // the protected fields (Kind, Trust, Level, Attribution, At) are not on the
 // wire and are stamped by whoever the field comment names; only SessionID,
 // Title and Body are carried on the wire, and SessionID is addressing, not
-// attribution (ADR-0029 §2.2).
+// attribution (ADR-0047 §2.2).
 type Event struct {
 	// SessionID is addressing: which terminal parsed the sequence. Set by
 	// the source adapter; the backend rejects an id not live on the
@@ -113,7 +113,7 @@ type Event struct {
 
 	// Title and Body are the presentation fields. Set by the source; may
 	// be stream-derived. They are untrusted presentation data — never
-	// control data, never an opaque blob to concatenate (ADR-0029 §2.3).
+	// control data, never an opaque blob to concatenate (ADR-0047 §2.3).
 	Title string
 	Body  string
 
@@ -137,7 +137,7 @@ type Event struct {
 // Destination is the immutable, fully-resolved "where" of one delivery. The
 // router resolves it during Resolve, before any sink is invoked; a sink
 // receives it read-only and may never select an alternate target,
-// credential, method, retry or redirect (ADR-0029 §2.3). Program-supplied
+// credential, method, retry or redirect (ADR-0047 §2.3). Program-supplied
 // fields never participate in its construction in any position.
 type Destination struct {
 	// Target is the resolved target identifier. For a local sink it is the
@@ -173,7 +173,7 @@ type Sink interface {
 	// LeavesMachine reports whether delivering through this sink leaves the
 	// machine (a network destination). The router enforces the heuristic
 	// trust bound with it: an inference never leaves the machine
-	// (ADR-0029 §3). Every sink must declare this — an undeclared network
+	// (ADR-0047 §3). Every sink must declare this — an undeclared network
 	// sink is a fail-open.
 	LeavesMachine() bool
 }
@@ -186,7 +186,7 @@ type Key struct {
 
 // Table is the default-deny routing table. A (kind, trust) pair reaches a
 // sink only where a row says so; one table governs both the ordinary route
-// and the ad-hoc completion-subscription route (ADR-0029 §3).
+// and the ad-hoc completion-subscription route (ADR-0047 §3).
 //
 // One table value is immutable: nothing mutates a Table after it has been
 // handed to a router. A CHANGE replaces the whole value (SetTable), which is
@@ -201,13 +201,13 @@ const (
 	// RouteRaise is the ordinary delivery route.
 	RouteRaise RouteKind = iota
 	// RouteSubscription is the ad-hoc "notify me when done" route. Only an
-	// attested event may match it (ADR-0029 §3).
+	// attested event may match it (ADR-0047 §3).
 	RouteSubscription
 )
 
 // Limits are the router's global admission bounds. Every sink invocation
 // runs under a finite deadline; admission beyond a bound is a visible
-// failed delivery, never an unbounded queue (ADR-0029 §2.2).
+// failed delivery, never an unbounded queue (ADR-0047 §2.2).
 type Limits struct {
 	// MaxInFlight bounds events whose sinks are currently being invoked.
 	// When all slots are busy, an event waits in the queue instead.
@@ -245,7 +245,7 @@ const (
 // ErrTrustCapability is returned by NewRouter when a table row grants a
 // sink to a trust class that may never reach it — a heuristic row granting
 // a network sink can never fire, and building it silently would leave a
-// configured route that always resolves to nothing (ADR-0029 §3).
+// configured route that always resolves to nothing (ADR-0047 §3).
 var ErrTrustCapability = errors.New("notify: table row exceeds its trust class capability")
 
 // Outcome is the result of raising one event.
@@ -264,7 +264,7 @@ type Outcome struct {
 	//
 	// It never goes on the wire. Outcome is a Go value the transport reads
 	// Err from and never marshals, and the fields this carries are exactly
-	// the ones ADR-0029 §2.2 keeps off the wire.
+	// the ones ADR-0047 §2.2 keeps off the wire.
 	Event Event
 
 	// Resolved is the route set resolution produced, in table order, before
@@ -338,7 +338,7 @@ func NewRouter(table Table, limits Limits) (*Router, error) {
 }
 
 // validateTable enforces the trust-class capability bound over a whole table:
-// a heuristic row may never reach a sink that leaves the machine (ADR-0029
+// a heuristic row may never reach a sink that leaves the machine (ADR-0047
 // §3). It returns on the FIRST offending row and reports nothing partial,
 // because its callers apply a table whole or not at all.
 //

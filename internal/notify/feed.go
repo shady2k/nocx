@@ -1,7 +1,7 @@
 // Package-local: the feed is the only holder of "what was raised". It never
 // decides delivery, and the router never decides membership (AD-8).
 //
-// In memory, deliberately: ADR-0033 forbids the renderer holding facts, and
+// In memory, deliberately: ADR-0048 forbids the renderer holding facts, and
 // this design holds none on disk either — the feed dies with the process and
 // the spec says so with both ends named (§7).
 
@@ -454,7 +454,7 @@ func (f *Feed) enforceLocked() {
 // title, and the spinner behind it matches `npm install` as readily as an
 // agent. Making someone confirm a guess teaches them to mark everything read
 // without looking, which destroys the acknowledgement for the events that
-// earned it. ADR-0029 §3 already confines heuristic to local attention and
+// earned it. ADR-0047 §3 already confines heuristic to local attention and
 // never a network destination; this is that rule continued into retention.
 func MustAcknowledge(ev Event) bool {
 	if ev.Trust == TrustHeuristic {

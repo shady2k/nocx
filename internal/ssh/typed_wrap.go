@@ -11,7 +11,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 )
 
-// The typed-`ssh` wrapper (ADR-0035, design §4.3 and §4.4).
+// The typed-`ssh` wrapper (ADR-0049, design §4.3 and §4.4).
 //
 // What the binding texts already decided, before this says what it builds.
 // AD-5 keeps this inside Tier A: what changes is how a bundle travels, never
@@ -91,7 +91,7 @@ const (
 	// ControlPath or ControlPersist — as -M, -S, or -o, or in their config,
 	// which is the same expression seen through the oracle. We never
 	// override it. Reusing a master the user already runs is rejected in
-	// ADR-0035 rather than deferred: liveness is checkable (`ssh -O check`
+	// ADR-0049 rather than deferred: liveness is checkable (`ssh -O check`
 	// answers) but liveness is not identity — our own spike measured a mux
 	// master accepting a session request that named a DIFFERENT destination
 	// and executing it on its own connection.

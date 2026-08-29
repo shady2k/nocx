@@ -180,7 +180,7 @@ Backend-owned, and it holds exactly six things.
 "What may reach you, and by which channel" already has an owner: `internal/notify`'s `Trust`, one
 of three classes stamped by the source adapter, never carried on the wire, enforced default-deny
 against a routing table that refuses at construction to give a heuristic row a sink which leaves
-the machine (`notify.go:355`, and ADR-0029 §3 — the one titled "A program may ask; it never
+the machine (`notify.go:355`, and ADR-0047 §3 — the one titled "A program may ask; it never
 chooses", which has to be named by title because a second accepted decision also numbered 0029
 exists in `docs/decisions/`; that is `nocx-jp0h3`). The previous revision invented a parallel "may wake
 your phone" axis with its own vocabulary and its own answers — including "per-agent opt-in only",

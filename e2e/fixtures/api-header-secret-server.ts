@@ -4,7 +4,7 @@
  * the literal reference cannot satisfy the happy-path assertion.
  *
  * The server belongs to the Playwright worker because the caller is the
- * separate devharness process. Port 0 keeps parallel workers isolated.
+ * separate nocx-server process. Port 0 keeps parallel workers isolated.
  */
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http'
 import type { AddressInfo } from 'node:net'

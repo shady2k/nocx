@@ -6,19 +6,25 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net"
 	"os"
 	"path/filepath"
+	"runtime"
+	"strconv"
+	"sync"
+	"time"
 
 	"github.com/wailsapp/wails/v3/pkg/application"
-	"github.com/wailsapp/wails/v3/pkg/events"
 	"github.com/wailsapp/wails/v3/pkg/services/notifications"
 
-	"github.com/shady2k/nocx/internal/app"
+	"github.com/shady2k/nocx/internal/coordinator"
+	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/notify"
 	"github.com/shady2k/nocx/internal/notify/wailsadapter"
-	"github.com/shady2k/nocx/internal/transport"
+	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/uistate"
 	"github.com/shady2k/nocx/internal/update"
+	"github.com/shady2k/nocx/internal/update/serverbin"
 	"github.com/shady2k/nocx/internal/version"
 )
 
@@ -27,31 +33,39 @@ var assets embed.FS
 
 // mainWindowName is the shell's name for the one window nocx opens. It is
 // how anything outside main() reaches that window back through the v3 window
-// manager — the notification click path below is the first such caller.
+// manager.
 const mainWindowName = "main"
 
+// launchTimeout bounds the whole find-or-raise-the-coordinator sequence,
+// including a spawn and its readiness wait. It is the outer bound on how
+// long a window can sit blank before it either has a backend or says why it
+// has not: never a hang, always an answer (design §4).
+const launchTimeout = 45 * time.Second
+
 func main() {
-	// Checked before any backend or window exists so CI's release smoke check
+	// Checked before any window exists so CI's release smoke check
 	// (distribution design §5) and a user's `nocx --version` print the linked
 	// build metadata and exit, never opening a terminal.
-	if versionRequested() {
+	if version.Requested(os.Args[1:]) {
 		fmt.Printf("nocx %s (commit %s, built %s)\n", version.Version, version.Commit, version.Date)
 		return
 	}
 
-	backend, err := app.New()
-	if err != nil {
-		slog.Error("failed to initialize application", "error", err)
-		os.Exit(1)
-	}
+	// The window's own logger, on stderr. THE BACKEND'S LOG IS NOT THIS
+	// PROCESS'S ANY MORE: nocx-server owns the sessions, so it owns the log
+	// file that records what they did. What is left here is the handful of
+	// lines about finding a coordinator, which is exactly what a person
+	// needs when the window comes up blank.
+	logger := slog.New(slog.NewTextHandler(os.Stderr, nil))
 
-	wailsApp := &WailsApp{backend: backend}
+	wailsApp := &WailsApp{logger: logger}
 
 	// The Wails v3 shell. The window is created before Run; on Linux the
 	// platform defers actually loading the webview until activation inside
 	// Run, which happens after ServiceStartup — so the frontend's first
-	// binding calls (GetWSPort/GetWSToken) resolve against a started backend,
-	// preserving the v2 OnStartup ordering this composition root relied on.
+	// binding calls (GetWSPort/GetWSToken) resolve after the launcher has
+	// found the coordinator, preserving the ordering this composition root
+	// has always relied on.
 	shell := application.New(application.Options{
 		Name:        "nocx",
 		Description: "A local-first, Warp-style terminal",
@@ -69,24 +83,15 @@ func main() {
 		OnShutdown: wailsApp.shutdown,
 	})
 
-	// The tab strip IS the title bar, Tabby-style: no title text and no
-	// second row stealing ~28px of terminal. TitleBarHiddenInset keeps the
-	// traffic lights and insets them, so the strip needs left padding to
-	// clear them and a drag region on its empty part — see .tabbar in
-	// frontend/src/style.css, which is the other half of this decision.
-	// TitleBarHidden, not TitleBarHiddenInset: the two differ only by
-	// UseToolbar, and that NSToolbar left the window unrestorable after
-	// minimising (nocx-dqg; cf. wailsapp/wails#1319). We keep the hidden
-	// title and full-size content, and lose only the extra inset of the
-	// traffic lights.
-	// THE SIZE THE WINDOW OPENS AT, from the UI-state document (ADR-0033).
-	// Wails wants it before there is a window, and therefore before the screen
-	// manager can say what is attached — so this pass takes the saved size and
-	// the minimum, and `restoreWindow` does the display-aware half once the
-	// window exists: the position, maximised and full-screen. Two passes
-	// rather than one is what makes the FIRST frame the right size instead of
-	// 1024x768 followed by a jump.
-	opening := uistate.Restore(backend.UIState.Window(), nil)
+	// THE SIZE THE WINDOW OPENS AT. Wails wants it before there is a window.
+	// The saved geometry lives in the UI-state document, which the
+	// COORDINATOR owns now — this process has no store to read and must not
+	// open a second one over the daemon's (ADR-0043 is the same argument one
+	// level up). So the opening pass asks the rule for its default with
+	// nothing saved, which is what it has always answered for a first launch,
+	// and restoring the real geometry moves to the client host with the rest
+	// of the native-window surface (design D3, A1.2).
+	opening := uistate.Restore(uistate.Window{}, nil)
 
 	window := shell.Window.NewWithOptions(application.WebviewWindowOptions{
 		Name:                       mainWindowName,
@@ -96,21 +101,6 @@ func main() {
 		MinWidth:                   uistate.MinWindowWidth,
 		MinHeight:                  uistate.MinWindowHeight,
 		DefaultContextMenuDisabled: true,
-		// FILES DROPPED ON THE WINDOW REACH GO, NOT THE RENDERER. In the
-		// desktop shell a drop delivers absolute paths on this machine, and
-		// R2 says the renderer may never learn one — so Go takes the drop,
-		// mints a source ticket per file and tells the renderer only a name
-		// and a size (handleFilesDropped, below).
-		//
-		// The tab strip is unaffected, and that is checked rather than
-		// hoped: v3's runtime installs document-level listeners that return
-		// immediately unless the drag's `types` contain `Files`
-		// (window.ts:712 in v3.0.0-beta.9), while a tab row's drag carries
-		// application/x-nocx-tab (frontend/src/layout/strip-drag.ts). The
-		// regression test is frontend/src/tab.test.tsx — "a tab drag is not
-		// a files drag", written so a future runtime bump that widened that
-		// check cannot break reordering silently.
-		EnableFileDrop: true,
 		// DevTools/Inspector, opened on startup when NOCX_DEVTOOLS=1.
 		//
 		// There is no other way into a console here, and that is deliberate on
@@ -125,226 +115,239 @@ func main() {
 		// inspector in the shipped app whatever the environment says.
 		OpenInspectorOnStartup: os.Getenv("NOCX_DEVTOOLS") == "1",
 		Mac: application.MacWindow{
+			// The tab strip IS the title bar, Tabby-style: no title text and
+			// no second row stealing ~28px of terminal. TitleBarHidden, not
+			// TitleBarHiddenInset: the two differ only by UseToolbar, and that
+			// NSToolbar left the window unrestorable after minimising
+			// (nocx-dqg; cf. wailsapp/wails#1319).
 			TitleBar: application.MacTitleBarHidden,
 		},
 	})
 	window.Show()
 	wailsApp.window = window
 
-	// The window drop is the second of the upload feature's two gestures
-	// (the first is the native picker, behind dialog.openFileForUpload).
-	// Registered here because this is where the window exists; the handler
-	// itself resolves no destination — see handleFilesDropped.
-	window.OnWindowEvent(events.Common.WindowFilesDropped, wailsApp.handleFilesDropped)
-	wailsApp.screens = shell.Screen.GetAll
-
 	if err := shell.Run(); err != nil {
-		slog.Error("application error", "error", err)
+		logger.Error("application error", "error", err)
 		os.Exit(1)
 	}
 }
 
-// WailsApp is the bound service (v3) that was the bound struct (v2): the
-// frontend reaches the backend through these methods over the Wails runtime.
+// WailsApp is the bound service (v3) the frontend reaches over the Wails
+// runtime.
+//
+// IT IS A WINDOW AND A LAUNCHER, and no longer a backend (design D3). The
+// sessions, the vault, the stores and the WebSocket live in nocx-server, a
+// process of their own that outlives this window; what this struct holds is
+// how to reach that process and what to tell the person when reaching it
+// went badly.
 type WailsApp struct {
-	backend *app.App
-	ctx     context.Context
+	logger *slog.Logger
+	window *application.WebviewWindow
 
-	// notifications is the v3 notifications service, started by hand in
-	// ServiceStartup (it is not registered as a Wails service, because a
-	// service whose startup fails aborts app.Run) and shut down in
-	// ServiceShutdown.
-	notifications *notifications.NotificationService
+	// ws is what the launcher learned from the coordinator: the loopback
+	// address and the token the renderer needs. Written once, in
+	// ServiceStartup, before the webview loads.
+	ws coordinator.Hello
+
+	// notices holds what the launcher said a person must be told — today
+	// only that an incompatible coordinator was replaced and its sessions
+	// died (D4). Shown as a dialog once the shell can raise one.
+	notices noticeRecorder
+
+	// updater applies signed releases to the installed bundle. It belongs to
+	// the WINDOW rather than to the daemon in A1: it is about the files on
+	// disk, not about the sessions, and the health report that certifies an
+	// update is a renderer call that arrives here. It is wired with the
+	// probe below, so the health report certifies a PAIR (D4).
+	updater update.Updater
+
+	// probe tells the updater which coordinator answered this window. It
+	// is constructed empty, before the launcher has run, and filled by the
+	// launch — see [coordinator.LaunchProbe] for why that order is forced.
+	probe *coordinator.LaunchProbe
 
 	// updateInfo holds the most recent Check result. Apply takes no
 	// arguments — it applies the update that Check already verified.
 	updateInfo *update.UpdateInfo
 
-	// stopGeometry cancels the window-geometry sampler at shutdown, so no
-	// poll outlives the process.
-	stopGeometry context.CancelFunc
+	// notifications is the v3 notifications service, started by hand rather
+	// than registered (see ServiceStartup), and torn down in
+	// ServiceShutdown. nil when it never started.
+	notifications *notifications.NotificationService
 
-	// window is the shell's one window, handed over after it is created so
-	// the geometry restore has something to place. v3 gives a window object
-	// where v2 gave a context, which is why this is a field rather than a
-	// runtime call.
-	window *application.WebviewWindow
-
-	// screens reads the attached displays. A function rather than the manager
-	// itself, so the probe stays testable and this file keeps the only
-	// dependency on the shell.
-	screens func() []*application.Screen
+	// attention is the desktop attention surface this window IMPLEMENTS for
+	// the coordinator (design D3, A1.2). The coordinator has no desktop, so
+	// it asks a client to raise a banner; this is what raises it. nil until
+	// ServiceStartup has built it, and on a host whose notification service
+	// would not start it is still built — every raise then fails loudly per
+	// call, which is the contract that predates the split.
+	attention *wailsadapter.Host
 }
 
 // Log logs a message from the frontend.
+//
+// It reaches this process's stderr rather than the backend's log file: the
+// renderer is this window's, and the file belongs to the daemon now.
 func (w *WailsApp) Log(message string) {
-	w.backend.Log(message)
+	w.logger.Info("frontend", "message", message)
 }
 
-// LogFilePath reports where the backend log file lives, so a running
-// desktop session can say where its log is instead of it being guessed
-// from a file's mtime. "" means file logging is unavailable (stderr only).
+// LogFilePath reports where the backend log file lives. "" means
+// unavailable, which is the honest answer while the log belongs to a process
+// this one only talks to over a socket: the discovery handshake carries four
+// facts and this is not one of them. Restoring it is the client host's
+// (design D3, A1.2) — it needs a control-plane call, not a guess at a path.
 func (w *WailsApp) LogFilePath() string {
-	return w.backend.LogFilePath()
+	return ""
 }
 
 // ServiceStartup is the v3 lifecycle hook that replaced the v2 OnStartup
 // callback: it runs once, during app.Run, before the webview loads the
-// frontend (see main). All composition-root wiring lives here for the same
-// reason it lived in v2's OnStartup: this is the only place the Wails
-// context and shell exist to back the OS conveniences.
+// frontend (see main). It is where the coordinator is found or raised,
+// because that is the last moment before a binding call can arrive and the
+// first moment at which a failure can be shown to a person.
 //
 //wails:ignore
 func (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOptions) error {
-	w.ctx = ctx
-	w.backend.Logger.Info("Wails app starting up")
-
-	// Derive the install path from the running executable.
-	// On macOS this points into the .app bundle; on Linux it's the
-	// AppImage path. The Platform seam handles the OS differences.
-	execPath, err := os.Executable()
-	if err != nil {
-		w.backend.Logger.Warn("cannot determine executable path", "error", err)
-	}
-	installPath := upgradeInstallPath(execPath)
+	w.logger.Info("nocx window starting up", "version", version.Version, "commit", version.Commit)
 
 	// The trust root for every update this build will ever accept. It is
-	// compiled in (internal/update/keyring.go); the field used to be a literal
-	// nil with a comment claiming the release pipeline filled it via ldflags,
-	// which nothing did and nothing could, so every production update check
-	// failed on an empty keyring before it compared versions (nocx-nfu5.1).
-	//
-	// A keyring that will not decode costs the user their update check and
-	// nothing else: the app starts, and VerifyManifest then refuses every
-	// manifest, which is the direction to fail in.
+	// compiled in (internal/update/keyring.go). A keyring that will not
+	// decode costs the user their update check and nothing else: the app
+	// starts, and VerifyManifest then refuses every manifest, which is the
+	// direction to fail in.
 	keyring, err := update.ReleaseKeyring()
 	if err != nil {
-		w.backend.Logger.Error("release keyring unusable; updates cannot be verified on this build", "error", err)
+		w.logger.Error("release keyring unusable; updates cannot be verified on this build", "error", err)
 	}
-
-	// Wire the updater with the real install path and platform.
-	w.backend.Updater = update.NewUpdater(update.UpdaterConfig{
+	execPath, err := os.Executable()
+	if err != nil {
+		w.logger.Warn("cannot determine executable path", "error", err)
+	}
+	// The pair probe (D4). This window's backend is another process, so
+	// the only honest answer to "which coordinator is serving me" is the
+	// one the discovery handshake gives — and that answer does not exist
+	// yet, because the updater has to Reconcile before the launcher runs
+	// (see coordinator.LaunchProbe). So it is wired empty here and
+	// attached below. Until it is attached it refuses to certify, which is
+	// the direction to fail in.
+	w.probe = coordinator.NewLaunchProbe()
+	w.updater = update.NewUpdater(update.UpdaterConfig{
 		Platform:       update.NewPlatform(),
 		Fetcher:        update.NewGitHubManifestFetcher(nil),
 		Keyring:        keyring,
 		CurrentVersion: version.Version,
-		InstallPath:    installPath,
-		Logger:         w.backend.Logger,
+		InstallPath:    upgradeInstallPath(execPath),
+		Coordinator:    w.probe,
+		Logger:         log.NewSlogAdapter(w.logger),
 	})
+	// Settle any transaction in flight from a previous launch.
+	if reconcileErr := w.updater.Reconcile(ctx); reconcileErr != nil {
+		w.logger.Warn("update reconcile at startup failed", "error", reconcileErr)
+	}
 
-	// The native file and directory dialogs are one control-plane
-	// capability (AD-1): the renderer reaches the Wails runtime through
-	// dialog.openFile and dialog.openDirectory on the WebSocket, and this
-	// is the only place the shell exists to back them.
-	// Wired before Start so no renderer request can observe the unset
-	// state. The dev-web harness never runs this — the method then reports
-	// itself unavailable and the surfaces fall back to typing paths.
-	w.backend.SetDialogService(&wailsDialogService{
-		app: application.Get(),
-		// The upload half of the picker mints into the backend's own store,
-		// which is the SAME store the window drop mints into and the same
-		// one a later files.upload claims from. One mint, one owner.
-		sources: w.backend.UploadSources,
-	})
+	launchCtx, cancel := context.WithTimeout(ctx, launchTimeout)
+	defer cancel()
+	launch, err := w.launchCoordinator(launchCtx, execPath)
+	if err != nil {
+		// A window with no backend is not a window: say why, in a dialog a
+		// person can read, and then quit. Asynchronously, because the dialog
+		// is dispatched onto the main thread and this hook is running before
+		// the event loop that would service it.
+		w.logger.Error("nocx cannot reach its backend", "error", err)
+		go w.fatal("nocx cannot start", err.Error())
+		return nil
+	}
+	w.ws = launch.Hello
+	// From here a health report can certify: the updater can name the
+	// backend that answered this window, and refuse anything else.
+	w.probe.Attach(launch)
+	w.logger.Info("nocx window has a backend",
+		"version", launch.Hello.Build.Version,
+		"commit", launch.Hello.Build.Commit,
+		"protocol", launch.Hello.Protocol,
+		"wsAddress", launch.Hello.WSAddress,
+		"spawned", launch.Spawned,
+		"replaced", launch.Replaced,
+	)
+	// The desktop attention surface this window implements for the
+	// coordinator (design D3). Built AFTER the launcher, because a window
+	// with no backend quits and never presents anything.
+	w.startAttention(ctx)
 
-	// The native browser-open is the same control-plane shape as the file
-	// dialog: the renderer reaches the Wails runtime through shell.openUrl
-	// on the WebSocket, and this is the only place the shell exists to back
-	// it. Wired before Start; the dev-web harness never runs this, and the
-	// method then reports itself unavailable and the panel toasts.
-	w.backend.SetUrlOpener(&wailsUrlOpener{app: application.Get()})
+	// Whatever the launcher said a person must be told, said. After the
+	// startup path rather than inside it, for the same main-thread reason as
+	// the fatal dialog above.
+	go w.showNotices()
+	return nil
+}
 
-	// The desktop attention surface, behind the notify router's banner route
-	// (ADR-0029). Same shape as the two above and for the same reason: the
-	// v3 notifications service locates its D-Bus connection here. Wired
-	// before Start, so no raise can observe the unset state; the dev-web
-	// harness and cmd/devharness never run this, and their raises stay
-	// visible failed deliveries.
-	//
-	// The notifications service is started by hand rather than registered as
-	// a Wails service: a registered service whose ServiceStartup fails aborts
-	// app.Run (v3 services.go), and on Linux the service's startup connects
-	// the session D-Bus, which a bus-less host lacks. v2 failed per call;
-	// this keeps that contract — the app starts, and banners on a bus-less
-	// host fail loudly per raise. ServiceShutdown is called by the framework
-	// because WailsApp is itself a registered service.
+// startAttention brings up the notification surface this window offers the
+// coordinator.
+//
+// The notifications service is started BY HAND rather than registered as a
+// Wails service: a registered service whose ServiceStartup fails aborts
+// app.Run (v3 services.go), and on Linux the service's startup connects the
+// session D-Bus, which a bus-less host lacks. Failing per call is the older
+// contract and the right one — the app starts, and banners on a bus-less host
+// fail loudly per raise. ServiceShutdown is called by the framework because
+// WailsApp is itself a registered service.
+func (w *WailsApp) startAttention(ctx context.Context) {
 	ns := notifications.New()
 	w.notifications = ns
 	notificationsUp := true
 	if err := ns.ServiceStartup(ctx, application.ServiceOptions{}); err != nil {
 		notificationsUp = false
-		w.backend.Logger.Warn("notification service unavailable; banners will fail per raise", "error", err)
+		w.logger.Warn("notification service unavailable; banners will fail per raise", "error", err)
 	}
-	//
-	// Focus is the composition root's half of a banner click, and it is two
-	// halves under one seam. Raising the window is the SHELL's: only main()
-	// has a window manager. Activating the tab that holds the session is the
-	// RENDERER's, because the renderer owns session -> tab and the backend
-	// cannot do it at all — Attribution.Tab is a WebSocket connection id
-	// rather than a tab (nocx-wyp3p). So the backend asks for a session and
-	// nothing more, over the existing control plane (AD-1, AD-7), and the
-	// renderer resolves it with the one lookup it already owns
-	// (nocx-jiwq.1). A click on a session no pane holds moves the window and
-	// nothing else, which is the honest outcome rather than an error.
-	host := wailsadapter.New(wailsadapter.Deps{
+	w.attention = wailsadapter.New(wailsadapter.Deps{
 		Service: ns,
-		Log:     w.backend.Slog(),
+		Log:     w.logger,
 		// THE ROOT IS THE CALLER WITH REAL KNOWLEDGE, and the adapter's
 		// default says so: v3.0.0-beta.9 exposes no availability probe, so
-		// the default assumes a surface exists and lets every failure land at
-		// send time — "PermissionUnavailable stays reachable through this
-		// seam where a caller has real knowledge" (host.go). This is that
-		// caller. It has just watched ServiceStartup fail and has already
-		// written the reason into the log; passing that verdict on is what
-		// was missing.
-		//
-		// Without it the host was born NotDetermined over a service that had
-		// not started, and the startup resolve then called into it. On macOS
-		// that reaches +[UNUserNotificationCenter currentNotificationCenter],
-		// which throws NSInternalInconsistencyException when the process has
-		// no bundle — an Objective-C exception, so not an error Go can
-		// recover: the whole application aborted. Any unbundled run took it,
-		// which is every `make dev` on a Mac, one line after the log had
-		// stated the service was unavailable. The same call underlies a
-		// raise, so "banners fail loudly per raise" was in fact "the process
-		// dies per raise" on that build.
+		// the default assumes a surface exists and lets every failure land
+		// at send time. This is the caller that has just watched
+		// ServiceStartup fail and written the reason into the log; passing
+		// that verdict on is what stops the host being born NotDetermined
+		// over a service that never started — on macOS that reached
+		// +[UNUserNotificationCenter currentNotificationCenter] in a process
+		// with no bundle, an Objective-C exception Go cannot recover, and
+		// the whole application aborted.
 		IsAvailable: func() bool { return notificationsUp },
-		Focus: func(sessionID string) error {
-			win, ok := application.Get().Window.GetByName(mainWindowName)
-			if !ok {
-				return fmt.Errorf("notification click: window %q is gone", mainWindowName)
-			}
-			win.Focus()
-			w.backend.FocusSession(sessionID)
-			return nil
-		},
+		Focus:       w.reportAttentionActivated,
 	})
-	w.backend.SetAttentionHost(host)
 
 	// Resolve the OS's authorization state, and ask for it once when it has
 	// never been asked. Without this the host stays PermissionNotDetermined
 	// for the life of the process and every banner is refused with
 	// ErrNotRequested — including on a machine that has already authorized
-	// nocx. Nothing else calls these: spec §6.4 gives the job to a settings
-	// control, no surface has ever grown one, and so the composition root is
-	// where it has to happen or the whole banner route is unreachable.
+	// nocx.
 	//
 	// Off the startup path deliberately. On macOS the check waits on the OS
-	// for up to 15s and the request for as long as the user takes to answer
-	// (the runtime caps it at 180s), and ServiceStartup runs before the
-	// webview loads — inline, either one would hold the window shut.
-	go w.resolveNotificationPermission(host)
+	// for up to 15s and the request for as long as the user takes to answer,
+	// and ServiceStartup runs before the webview loads — inline, either one
+	// would hold the window shut.
+	go w.resolveNotificationPermission(w.attention)
+}
 
-	// Settle any transaction in flight from a previous launch.
-	if err := w.backend.Updater.Reconcile(ctx); err != nil {
-		w.backend.Logger.Warn("update reconcile at startup failed", "error", err)
+// reportAttentionActivated is what a banner click does in this process, and
+// it is deliberately almost nothing: it tells the renderer, which tells the
+// coordinator (host.attentionActivated).
+//
+// THE SHELL DOES NOT DECIDE WHAT A CLICK MEANS. Which window is raised and
+// which pane is focused depend on which connection holds that session, and
+// only the coordinator knows that — this window may not even be the one
+// showing the pane. Raising the window here would be the shell owning a
+// decision AD-3 keeps on the other side; the coordinator asks for the raise
+// back through window.focus when it has decided.
+//
+// The Wails event is the only channel available: the WebSocket belongs to the
+// renderer, and this callback runs in the shell.
+func (w *WailsApp) reportAttentionActivated(sessionID string) error {
+	if w.window == nil {
+		return fmt.Errorf("notification click: window %q is gone", mainWindowName)
 	}
-
-	if err := w.backend.Start(ctx); err != nil {
-		w.backend.Logger.Error("failed to start backend", "error", err)
-	}
-
-	w.restoreWindow()
+	w.window.EmitEvent(attentionActivatedEvent, sessionID)
 	return nil
 }
 
@@ -371,166 +374,244 @@ func (w *WailsApp) resolveNotificationPermission(host *wailsadapter.Host) {
 		// repeating it as "could not read" would describe a call that was
 		// deliberately never made.
 		if errors.Is(err, notify.ErrUnavailable) {
-			w.backend.Logger.Info("notifications unavailable; no authorization to resolve")
+			w.logger.Info("notifications unavailable; no authorization to resolve")
 			return
 		}
-		w.backend.Logger.Warn("could not read notification authorization", "error", err)
+		w.logger.Warn("could not read notification authorization", "error", err)
 		return
 	}
 	if perm == wailsadapter.PermissionNotDetermined {
 		perm, err = host.RequestAuthorization(ctx)
 		if err != nil && !errors.Is(err, wailsadapter.ErrDenied) {
-			w.backend.Logger.Warn("notification authorization request failed", "error", err)
+			w.logger.Warn("notification authorization request failed", "error", err)
 			return
 		}
 	}
-	w.backend.Logger.Info("notification authorization resolved", "permission", perm.String())
+	w.logger.Info("notification authorization resolved", "permission", perm.String())
 }
 
-// restoreWindow hands the window to internal/uistate and gets out of the way,
-// which is the whole of nocx-mqie.1 on this side of the seam.
+// ServiceShutdown tears down the manually-started notifications service. The
+// framework calls it because WailsApp is itself a registered service.
 //
-// No decision is made here. Where the window goes is uistate.Restore's, from
-// the saved geometry and the displays attached now; WHEN it goes there is
-// uistate.RestoreAndWatch's, because it depends on a window that does not exist
-// yet at the moment this runs. Both are rules, and a rule that can only run
-// with a window on a screen is a rule nobody can test — so this function owns
-// two adapters over the Wails API and nothing else.
+//wails:ignore
+func (w *WailsApp) ServiceShutdown() error {
+	if w.notifications != nil {
+		return w.notifications.ServiceShutdown()
+	}
+	return nil
+}
+
+// launchCoordinator finds the running nocx-server or raises one.
 //
-// THE WINDOW IS NOT THERE YET WHEN THIS IS CALLED. ServiceStartup runs inside
-// application.Run, before the platform window is realised (v3 runs the pending
-// window runnables after the services are up), so a probe here answers (0,0)
-// and `ok=false`. This used to be read as a failure and it ended the feature
-// for the session: the one-shot probe below the warning returned before the
-// sampler was started, so nothing was ever recorded, the document kept its
-// zeros, and every launch opened at the default (nocx-39vhn). The waiting is
-// inside RestoreAndWatch now, where a fake probe can be made to answer late.
+// This is the composition root for the launcher: every seam it depends on —
+// the dial, the spawn, the stop, the surface a notice appears on — is a real
+// implementation constructed here and nowhere else (AD-8), so the launcher
+// itself can be tested without putting a process on the machine.
+func (w *WailsApp) launchCoordinator(ctx context.Context, execPath string) (coordinator.Launch, error) {
+	paths, err := storage.NewAppPaths()
+	if err != nil {
+		return coordinator.Launch{}, fmt.Errorf("resolving the profile directories: %w", err)
+	}
+	// Where this build's nocx-server must be spawned from. On darwin that
+	// is the binary beside this executable inside the bundle; on Linux it
+	// is a versioned copy outside the AppImage, whose FUSE mount does not
+	// survive this process (design §4). serverbin owns that split and the
+	// reasoning for it; this is the composition root handing it the three
+	// facts it must not guess.
+	serverPath, err := serverbin.New(serverbin.NewOSFS(), log.NewSlogAdapter(w.logger)).
+		Resolve(ctx, serverbin.Target{
+			GOOS:    runtime.GOOS,
+			ExePath: execPath,
+			DataDir: paths.DataDir(),
+			Version: version.Version,
+		})
+	if err != nil {
+		return coordinator.Launch{}, fmt.Errorf("installing the coordinator binary: %w", err)
+	}
+
+	dir := coordinator.RuntimeDir(paths)
+	self := coordinator.ClientIdentity{
+		Version:  version.Version,
+		Commit:   version.Commit,
+		Protocol: coordinator.ProtocolVersion,
+	}
+	client, err := coordinator.NewClient(coordinator.ClientConfig{
+		Socket: coordinator.SocketPathIn(dir),
+		Self:   self,
+		Dialer: coordinator.SystemDialer{},
+		Logger: w.logger,
+	})
+	if err != nil {
+		return coordinator.Launch{}, err
+	}
+	launcher, err := coordinator.NewLauncher(coordinator.LauncherConfig{
+		Dir:    dir,
+		Self:   self,
+		Client: client,
+		Spawner: coordinator.NewExecSpawner(coordinator.ExecSpawnerConfig{
+			Path:   serverPath,
+			Logger: w.logger,
+		}),
+		Stopper:   coordinator.NewSignalStopper(coordinator.SignalStopperConfig{Logger: w.logger}),
+		Announcer: &w.notices,
+		Logger:    w.logger,
+	})
+	if err != nil {
+		return coordinator.Launch{}, err
+	}
+	return launcher.Launch(ctx)
+}
+
+// noticeRecorder is the launcher's [coordinator.Announcer]: it collects what
+// a person must be told while there is not yet a surface to tell them on.
 //
-// PORTED FROM WAILS v2 AT THE MERGE. The worker built this against the v2
-// runtime package (`runtime.WindowSetSize`, `runtime.ScreenGetAll`) because
-// its branch was cut from main, where the v3 migration had not landed; the
-// seam it built — a Probe the rules are tested against without a display —
-// is exactly what made the port a change of two call sites rather than of the
-// policy. Nothing in internal/uistate moved.
-func (w *WailsApp) restoreWindow() {
-	if w.window == nil {
-		return
-	}
-	watchCtx, cancel := context.WithCancel(context.Background())
-	w.stopGeometry = cancel
-	// Save-on-change, by sampling. v3 does raise move and resize events, and
-	// they would be a smaller seam — but the store already coalesces what the
-	// poll sees, so a drag of any length costs one write half a second after
-	// it stops either way, and swapping the mechanism at a merge would be a
-	// change nobody had tested. Filed rather than done here.
-	go w.backend.UIState.RestoreAndWatch(
-		watchCtx,
-		wailsWindowProbe{window: w.window, screens: w.screens},
-		wailsWindowPlacer{window: w.window},
-		uistate.DefaultSampleInterval,
-	)
+// The launcher runs before the renderer has connected to anything, so a
+// notice cannot travel over the control plane; and by design the launcher
+// must not know how this shell shows things. So it states the fact here, and
+// the shell shows it as soon as it can.
+type noticeRecorder struct {
+	mu      sync.Mutex
+	notices []coordinator.Notice
 }
 
-// wailsWindowPlacer applies a placement through the Wails v3 API. Its own type
-// rather than more methods on the probe: reading where the window is and
-// putting it somewhere are two jobs, and the store asks for them through two
-// interfaces. The adapters exist because v3's builders return the window for
-// chaining and uistate.Placer, which is about doing a thing rather than
-// building one, returns nothing.
-type wailsWindowPlacer struct {
-	window *application.WebviewWindow
+func (r *noticeRecorder) Announce(n coordinator.Notice) {
+	r.mu.Lock()
+	r.notices = append(r.notices, n)
+	r.mu.Unlock()
 }
 
-func (p wailsWindowPlacer) SetSize(width, height int) { p.window.SetSize(width, height) }
-func (p wailsWindowPlacer) SetPosition(x, y int)      { p.window.SetPosition(x, y) }
-func (p wailsWindowPlacer) Center()                   { p.window.Center() }
-func (p wailsWindowPlacer) Maximise()                 { p.window.Maximise() }
-func (p wailsWindowPlacer) Fullscreen()               { p.window.Fullscreen() }
-
-// wailsWindowProbe reads the live window and the attached displays through the
-// Wails v3 API. It is the only implementation of uistate.Probe and it lives
-// here because this is the only place a window exists — keeping the interface
-// on the other side is what lets every rule above it be tested without a
-// display.
-type wailsWindowProbe struct {
-	window  *application.WebviewWindow
-	screens func() []*application.Screen
+func (r *noticeRecorder) drain() []coordinator.Notice {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	drained := r.notices
+	r.notices = nil
+	return drained
 }
 
-func (p wailsWindowProbe) Geometry() (uistate.Window, []uistate.Display, bool) {
-	if p.window == nil {
-		return uistate.Window{}, nil, false
-	}
-	width, height := p.window.Size()
-	if width <= 0 || height <= 0 {
-		// The window is not laid out yet (or is minimised). A zero is not a
-		// geometry, and recording it would restore a window with no size.
-		return uistate.Window{}, nil, false
-	}
-	x, y := p.window.Position()
-
-	var displays []uistate.Display
-	if p.screens != nil {
-		// An empty list is reported as no displays, which uistate reads as
-		// "unknown" and treats as a mismatch: when we cannot tell, we open
-		// somewhere visible.
-		for _, s := range p.screens() {
-			if s == nil {
-				continue
-			}
-			displays = append(displays, uistate.Display{
-				Primary: s.IsPrimary,
-				Width:   s.Size.Width,
-				Height:  s.Size.Height,
-			})
+// showNotices raises one dialog per notice.
+//
+// A DIALOG, not a log line and not a toast. D4 permits A1 to kill an
+// incompatible coordinator and lose its sessions, and requires that the loss
+// be said out loud; a person who has just watched their SSH connections die
+// has to be told that is what happened, and a message that can be missed is
+// not telling them.
+func (w *WailsApp) showNotices() {
+	for _, n := range w.notices.drain() {
+		w.logger.Warn("nocx: telling the user what the launcher did",
+			"kind", string(n.Kind), "message", n.Message)
+		app := application.Get()
+		if app == nil {
+			return
 		}
+		app.Dialog.Warning().
+			SetTitle("The nocx backend was replaced").
+			SetMessage(n.Message).
+			Show()
 	}
-
-	return uistate.Window{
-		Width:      width,
-		Height:     height,
-		X:          x,
-		Y:          y,
-		Maximised:  p.window.IsMaximised(),
-		FullScreen: p.window.IsFullscreen(),
-	}, displays, true
 }
 
-// wailsDialogService opens the platform file and directory pickers through
-// the Wails runtime. The renderer never calls it directly; it is the backend
-// of the dialog.openFile and dialog.openDirectory control-plane methods.
+// fatal shows a message and ends the process. Used only for a startup that
+// cannot produce a working window.
+func (w *WailsApp) fatal(title, message string) {
+	app := application.Get()
+	if app == nil {
+		os.Exit(1)
+	}
+	app.Dialog.Error().SetTitle(title).SetMessage(message).Show()
+	app.Quit()
+}
+
+func (w *WailsApp) shutdown() {
+	// The daemon is NOT stopped here. It outliving this window is the whole
+	// point of moving it out (design §1); when the last client detaches it
+	// ends itself after a grace period, which is nocx-server's decision and
+	// not a window's.
+	w.logger.Info("nocx window shutting down")
+}
+
+// GetWSPort reports the port the coordinator's WebSocket is listening on.
 //
-// The platform-adapter contract (transport.DialogService) permits observing
-// ctx and dismissing the dialog where the native API allows it. This adapter
-// is the case where it does NOT: the v3 open-file dialog has no cancel
-// handle once the picker is shown, so the transport's context is
-// deliberately ignored and the call returns only when the user acts. The
-// transport keeps the capability busy until then (see ws_dialog.go), so a
-// reconnect never stacks a second picker over this one.
-type wailsDialogService struct {
-	app *application.App
-	// sources is the mint for upload source tickets. OpenFileForUpload is
-	// the only method that touches it, and it is what makes this adapter a
-	// transport.UploadPicker as well as a transport.DialogService.
-	sources *transport.SourceTicketStore
+// The renderer has always been given a port and connects to loopback, so the
+// binding keeps its name and its signature and only its SOURCE has changed:
+// the address now comes from the discovery socket rather than from a server
+// this process started. 0 means the launcher never got one, and the fatal
+// dialog above is already on screen saying why.
+func (w *WailsApp) GetWSPort() int {
+	if w.ws.WSAddress == "" {
+		return 0
+	}
+	_, port, err := net.SplitHostPort(w.ws.WSAddress)
+	if err != nil {
+		w.logger.Error("the coordinator reported an address with no port", "wsAddress", w.ws.WSAddress, "error", err)
+		return 0
+	}
+	n, err := strconv.Atoi(port)
+	if err != nil {
+		w.logger.Error("the coordinator reported a non-numeric port", "wsAddress", w.ws.WSAddress, "error", err)
+		return 0
+	}
+	return n
 }
 
-func (d *wailsDialogService) OpenFile(_ context.Context) (string, error) {
-	return d.app.Dialog.OpenFile().
+// GetWSToken reports the capability that opens that WebSocket.
+//
+// It reaches this process over the discovery socket and leaves it only
+// through this binding — never a log line, never argv, never the spawned
+// daemon's environment (design §6).
+func (w *WailsApp) GetWSToken() string {
+	return w.ws.WSToken
+}
+
+// ── the client host: what this window IMPLEMENTS for the coordinator ──────
+//
+// The coordinator has no window (design §1). A native file picker, a browser
+// open, a desktop banner, a dock badge and a window raise are things only a
+// shell can do, so the coordinator ASKS an attached client for them
+// (host.request) and the client answers (host.resolved). The renderer is the
+// half that speaks the WebSocket; these bindings are the half that speaks the
+// platform, and between them is one hop through the Wails runtime.
+//
+// NOTHING HERE DECIDES ANYTHING (AD-3). Whether a URL may be opened, whether
+// a second picker may stack, which pane a click focuses — every one of those
+// is settled on the coordinator's side before the ask is sent. These methods
+// perform the effect and report what happened, and their errors are the
+// platform's own words.
+
+// attentionActivatedEvent is the Wails event this window emits when a person
+// clicks a banner. The renderer forwards it to the coordinator; see
+// reportAttentionActivated for why the shell does not act on it itself.
+const attentionActivatedEvent = "nocx:attentionActivated"
+
+// HostOpenFile opens the platform file picker and returns the chosen ABSOLUTE
+// path, or "" when the person cancelled.
+//
+// It cannot be dismissed from here — the v3 open dialog has no cancel handle
+// once shown — so the call returns only when the person acts. That is the
+// contract transport.DialogService has always documented for a
+// non-cooperative adapter, and the coordinator's capacity-one waiting gate is
+// what keeps a second picker from stacking meanwhile.
+func (w *WailsApp) HostOpenFile() (string, error) {
+	app := application.Get()
+	if app == nil {
+		return "", errors.New("no Wails application in this process")
+	}
+	return app.Dialog.OpenFile().
 		CanChooseFiles(true).
-		SetTitle("Choose a private key").
+		SetTitle("Choose a file").
 		AddFilter("All files", "*").
 		PromptForSingleSelection()
 }
 
-// OpenDirectory is the same v3 open dialog restricted to directories:
+// HostOpenDirectory is the same v3 open dialog restricted to directories:
 // CanChooseFiles(false) is what makes a file unselectable, so a caller
-// expecting a folder cannot be handed a file. It is bound by the same
-// contract as OpenFile above — the picker cannot be dismissed from here, so
-// the transport's context is deliberately ignored and the capability stays
-// busy until the user acts.
-func (d *wailsDialogService) OpenDirectory(_ context.Context) (string, error) {
-	return d.app.Dialog.OpenFile().
+// expecting a folder cannot be handed one. Same cancellation contract as
+// HostOpenFile.
+func (w *WailsApp) HostOpenDirectory() (string, error) {
+	app := application.Get()
+	if app == nil {
+		return "", errors.New("no Wails application in this process")
+	}
+	return app.Dialog.OpenFile().
 		CanChooseFiles(false).
 		CanChooseDirectories(true).
 		CanCreateDirectories(true).
@@ -538,69 +619,116 @@ func (d *wailsDialogService) OpenDirectory(_ context.Context) (string, error) {
 		PromptForSingleSelection()
 }
 
-// OpenFileForUpload is the same native picker asked a different question,
-// and it answers with a TICKET rather than a path (transport.UploadPicker,
-// design R2). The path the runtime returns is handed straight to the mint
-// and never leaves this function: what goes back over the wire is an opaque
-// id, a base name and a size.
-//
-// The runtime's own error is returned as-is — the picker has not chosen a
-// file yet, so there is no path in it to leak. The mint's refusals are
-// worded without the path by contract (internal/transport/ws_upload_source.go).
-func (d *wailsDialogService) OpenFileForUpload(_ context.Context) (transport.SourcePick, error) {
-	path, err := d.app.Dialog.OpenFile().
-		CanChooseFiles(true).
-		SetTitle("Choose a file to upload").
-		AddFilter("All files", "*").
-		PromptForSingleSelection()
+// HostOpenUrl opens a URL in the system browser. The coordinator has already
+// refused anything that is not an http(s) URL with a host (ws_openurl.go);
+// this side adds no second gate, because a second answer to one question is
+// how the two drift apart.
+func (w *WailsApp) HostOpenUrl(url string) error {
+	app := application.Get()
+	if app == nil {
+		return errors.New("no Wails application in this process")
+	}
+	return app.Browser.OpenURL(url)
+}
+
+// HostBanner presents one desktop notification banner. Title and body reach
+// the OS verbatim; sessionId rides in the notification's payload and comes
+// back on a click.
+func (w *WailsApp) HostBanner(title, body, sessionID string) error {
+	if w.attention == nil {
+		return errors.New("this window has no notification surface")
+	}
+	return w.attention.Banner(context.Background(), notify.Event{
+		Title:     title,
+		Body:      body,
+		SessionID: sessionID,
+	})
+}
+
+// HostBadge sets the dock badge count; 0 clears it. The Wails host does not
+// implement it (nocx-3a40), and it says so loudly rather than pretending to
+// have delivered.
+func (w *WailsApp) HostBadge(count int) error {
+	if w.attention == nil {
+		return errors.New("this window has no notification surface")
+	}
+	return w.attention.Badge(context.Background(), count)
+}
+
+// HostBounce requests the attention bounce. Same absence as HostBadge, same
+// loud error.
+func (w *WailsApp) HostBounce() error {
+	if w.attention == nil {
+		return errors.New("this window has no notification surface")
+	}
+	return w.attention.Bounce(context.Background())
+}
+
+// HostFocusWindow brings this window to the front. The coordinator asks for
+// it when it has decided a click should land here; the shell only raises.
+func (w *WailsApp) HostFocusWindow() error {
+	if w.window == nil {
+		return fmt.Errorf("window %q is gone", mainWindowName)
+	}
+	w.window.Focus()
+	return nil
+}
+
+// CheckForUpdate fetches and verifies the signed release manifest.
+// Returns an update description if a newer version is available,
+// or null when already current or on a dev build.
+func (w *WailsApp) CheckForUpdate() *update.UpdateInfo {
+	if w.updater == nil {
+		return nil
+	}
+	info, err := w.updater.Check(context.Background())
 	if err != nil {
-		return transport.SourcePick{}, err
+		w.logger.Warn("update check failed", "error", err)
+		return nil
 	}
-	if path == "" {
-		// Cancelled. An empty ticket, not an error — the renderer reads it
-		// as "no change", the way dialog.openFile's empty path already works.
-		return transport.SourcePick{}, nil
-	}
-	return d.sources.Mint(path)
+	w.updateInfo = info
+	return info
 }
 
-// handleFilesDropped is the window-drop mint site: Wails hands over the
-// dropped absolute paths and every attribute of the element that carried
-// data-file-drop-target, and the backend turns them into source tickets the
-// renderer can use but could not have authored.
+// ApplyUpdate applies a previously checked update. No arguments —
+// the update info is already verified and held in window state.
+func (w *WailsApp) ApplyUpdate() error {
+	if w.updater == nil {
+		return errors.New("the updater is not available in this window")
+	}
+	if w.updateInfo == nil {
+		return errors.New("no update available — call CheckForUpdate first")
+	}
+	return w.updater.Apply(context.Background(), w.updateInfo)
+}
+
+// ReportHealthy signals that the frontend is running correctly.
+// Called once the initial tab's renderer mounted and its PTY session
+// opened (§7.5). Only then does the updater finalise a pending update.
 //
-// IT RESOLVES NO DESTINATION. The renderer reads data-session-id off the
-// notification, finds its own binding and calls files.upload like any other
-// caller, so the native gesture goes through the same authorised route
-// rather than becoming a second addressing scheme that skips the
-// connection's session set (design §5.5).
-func (w *WailsApp) handleFilesDropped(event *application.WindowEvent) {
-	ctx := event.Context()
-	files := ctx.DroppedFiles()
-	attrs := map[string]string{}
-	if details := ctx.DropTargetDetails(); details != nil && details.Attributes != nil {
-		attrs = details.Attributes
+// It certifies a PAIR: the updater asks the launch probe which coordinator
+// answered this window, and finalises only when that backend is the version
+// this update installed (D4). A mixed pair — the old daemon surviving the
+// bundle swap — is refused here and the rollback journal is left intact.
+func (w *WailsApp) ReportHealthy() error {
+	if w.updater == nil {
+		return errors.New("the updater is not available in this window")
 	}
-	// The COUNT, never the names: a filename is a path here, and the log is
-	// a file on disk. The store's own errors are worded the same way.
-	if err := w.backend.UploadSources.Dropped(files, attrs); err != nil {
-		w.backend.Logger.Warn("dropped files were not offered for upload",
-			"error", err, "count", len(files))
-	}
+	return w.updater.ReportHealthy(context.Background())
 }
 
-// wailsUrlOpener opens a URL in the system browser through the Wails
-// runtime. The renderer never calls it directly; it is the backend of the
-// shell.openUrl control-plane method. v3's Browser.OpenURL reports failure,
-// unlike v2's fire-and-forget BrowserOpenURL — an unwired opener is the
-// other failure this seam can surface, and that is the dev-web
-// configuration.
-type wailsUrlOpener struct {
-	app *application.App
-}
-
-func (o *wailsUrlOpener) OpenURL(_ context.Context, url string) error {
-	return o.app.Browser.OpenURL(url)
+// GetUpdateState returns the updater state for the UI notice.
+// "pending" means an update was applied and is waiting for a restart;
+// empty string means nothing in flight.
+func (w *WailsApp) GetUpdateState() string {
+	if w.updater == nil {
+		return ""
+	}
+	// Reconcile at startup to settle any in-flight transaction.
+	_ = w.updater.Reconcile(context.Background())
+	// For now, return empty — the actual state detection will be
+	// refined once Reconcile returns a richer status.
+	return ""
 }
 
 // upgradeInstallPath derives the path to the installed bundle from the
@@ -625,89 +753,4 @@ func upgradeInstallPath(execPath string) string {
 	}
 	// Not inside a .app — return the executable itself (Linux AppImage).
 	return execPath
-}
-
-func (w *WailsApp) shutdown() {
-	w.backend.Logger.Info("Wails app shutting down")
-	// The sampler stops BEFORE the backend and before the window goes: it
-	// reads the live window on every tick, and one more tick after the window
-	// is gone would be a read of something that no longer exists. The final
-	// write is the backend's job — App.Shutdown flushes the store.
-	if w.stopGeometry != nil {
-		w.stopGeometry()
-	}
-	w.backend.Shutdown(w.ctx)
-}
-
-// ServiceShutdown tears down the manually-started notifications service.
-// The framework calls it because WailsApp is itself a registered service;
-// it runs after the OnShutdown hook (backend teardown).
-//
-//wails:ignore
-func (w *WailsApp) ServiceShutdown() error {
-	if w.notifications != nil {
-		return w.notifications.ServiceShutdown()
-	}
-	return nil
-}
-
-func (w *WailsApp) GetWSPort() int {
-	return w.backend.WSPort()
-}
-
-func (w *WailsApp) GetWSToken() string {
-	return w.backend.WSToken()
-}
-
-// CheckForUpdate fetches and verifies the signed release manifest.
-// Returns an update description if a newer version is available,
-// or null when already current or on a dev build.
-func (w *WailsApp) CheckForUpdate() *update.UpdateInfo {
-	info, err := w.backend.Updater.Check(w.ctx)
-	if err != nil {
-		w.backend.Logger.Warn("update check failed", "error", err)
-		return nil
-	}
-	w.updateInfo = info
-	return info
-}
-
-// ApplyUpdate applies a previously checked update. No arguments —
-// the update info is already verified and held in backend state.
-func (w *WailsApp) ApplyUpdate() error {
-	if w.updateInfo == nil {
-		return fmt.Errorf("no update available — call CheckForUpdate first")
-	}
-	return w.backend.Updater.Apply(w.ctx, w.updateInfo)
-}
-
-// ReportHealthy signals that the frontend is running correctly.
-// Called once the initial tab's renderer mounted and its PTY session
-// opened (§7.5). Only then does the updater finalise a pending update.
-func (w *WailsApp) ReportHealthy() error {
-	return w.backend.Updater.ReportHealthy(w.ctx)
-}
-
-// GetUpdateState returns the updater state for the UI notice.
-// "pending" means an update was applied and is waiting for a restart;
-// empty string means nothing in flight.
-func (w *WailsApp) GetUpdateState() string {
-	// Reconcile at startup to settle any in-flight transaction.
-	// On first call, this detects a pending restart state.
-	_ = w.backend.Updater.Reconcile(w.ctx)
-	// For now, return empty — the actual state detection will be
-	// refined once Reconcile returns a richer status.
-	return ""
-}
-
-// versionRequested reports whether the process was invoked only to print its
-// version. Both spellings that Go's flag package accepts are honoured; the app
-// takes no other flags today, so a plain launch always returns false.
-func versionRequested() bool {
-	for _, arg := range os.Args[1:] {
-		if arg == "--version" || arg == "-version" {
-			return true
-		}
-	}
-	return false
 }

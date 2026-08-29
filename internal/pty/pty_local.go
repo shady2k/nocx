@@ -2,6 +2,7 @@ package pty
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -254,7 +255,27 @@ func (lp *LocalPty) Close() error {
 	return lp.file.Close()
 }
 
+// Resize takes the same lock Close does, because both reach the master's file
+// descriptor and one of them destroys it.
+//
+// pty.Setsize calls File.Fd(), which READS the descriptor os.File is closing
+// under it; the race detector reported exactly that pair on CI — Setsize's Fd
+// against the deferred destroy inside the read pump's File.Read, once Close
+// had dropped the last reference (nocx-vqziz). A resize arriving while a
+// session closes is ordinary: the lane that carries it runs off the read loop,
+// so a client's last resize and the tab's close are two goroutines by design.
+//
+// A closed pty REFUSES rather than silently succeeding. The size a caller
+// asked for was not taken, and a resize that returns nil having done nothing
+// is how a terminal ends up at a grid nobody chose — the lane already says so
+// out loud for the session it cannot find, and this is the same fact one layer
+// down.
 func (lp *LocalPty) Resize(_ context.Context, cols, rows, xpixel, ypixel uint16) error {
+	lp.mu.Lock()
+	defer lp.mu.Unlock()
+	if lp.closed {
+		return fmt.Errorf("pty: resize after close: %w", os.ErrClosed)
+	}
 	return pty.Setsize(lp.file, &pty.Winsize{
 		Cols: cols,
 		Rows: rows,

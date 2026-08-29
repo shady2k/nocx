@@ -179,7 +179,7 @@ func TestSessionEnv_NamesTheShellTheFixtureActuallyRuns(t *testing.T) {
 }
 
 // The far side must serve the SFTP subsystem, because that is the only way
-// nocx delivers its integration bundle (ADR-0035).
+// nocx delivers its integration bundle (ADR-0049).
 //
 // The fixture answered `subsystem` from handleSession's `default` arm — a
 // flat refusal — so `sftp.NewClientPipe` got a closed channel instead of a
@@ -327,7 +327,7 @@ func dialFixture(t *testing.T) *gossh.Client {
 //
 // The one caller is shellintegration.GetRemoteHome, and while the integration
 // bundle travelled in the ssh command line its failure was fail-open and cost
-// nothing. Since ADR-0035 the bundle travels over SFTP into that home, so the
+// nothing. Since ADR-0049 the bundle travels over SFTP into that home, so the
 // same silent 255 turns into "nocx could not copy its shell integration to
 // this host" on the user's screen, and three e2e specs with it.
 func TestExec_RunsToCompletionWhenTheClientHalfClosesItsStdin(t *testing.T) {

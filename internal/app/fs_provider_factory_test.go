@@ -51,7 +51,9 @@ func (s factorySession) EnqueueWrite([]byte) bool        { return true }
 func (s factorySession) Close() error                    { return nil }
 func (s factorySession) Done() <-chan struct{}           { return make(chan struct{}) }
 func (s factorySession) SSHOptions() []ssh.ConnectOption { return nil }
-func (s factorySession) Resize(context.Context, uint16, uint16, uint16, uint16) error {
+func (s factorySession) EffectiveSize() session.Size     { return session.DefaultSize() }
+
+func (s factorySession) Resize(context.Context, session.Size) error {
 	return nil
 }
 

@@ -60,9 +60,9 @@ func TestFilesRevealerWiredThroughProductionWiring(t *testing.T) {
 	}
 	defer a.Shutdown(context.Background())
 
-	wsURL := "ws://127.0.0.1:" + strconv.Itoa(a.WSPort()) + "/session"
+	wsURL := "ws://127.0.0.1:" + strconv.Itoa(a.Transport.Port()) + "/session"
 	conn, _, dialErr := (&websocket.Dialer{
-		Subprotocols: []string{"nocx.token." + a.WSToken()},
+		Subprotocols: []string{"nocx.token." + a.Transport.Token()},
 	}).Dial(wsURL, nil)
 	if dialErr != nil {
 		t.Fatalf("dial: %v", dialErr)

@@ -62,7 +62,13 @@ import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { bindEndpoint, settingsReady, VaultBackend, type DisposableRoot } from './harness'
+import {
+  bindEndpoint,
+  openImportDestination,
+  settingsReady,
+  VaultBackend,
+  type DisposableRoot,
+} from './harness'
 import { readStand } from './stand'
 import { rpc, startSshd, type SshdFixture } from './sshd-fixture'
 import {
@@ -260,8 +266,7 @@ test.describe('an export arrives by URL', () => {
     // takes the proposal, and reads it back out because the field is the
     // truth (api-paths.ts — an offer, not a derivation) and rebuilding the
     // path here would make this spec a second owner of it.
-    await ask.getByRole('button', { name: 'Change where this goes' }).click()
-    const dest = page.locator('#api-import-postman-dest')
+    const dest = await openImportDestination(ask, page)
     await expect(dest).toHaveValue(
       new RegExp(`[\\\\/]collections[\\\\/]${POSTMAN_COLLECTION_NAME}$`),
     )
@@ -423,8 +428,7 @@ test.describe('an export arrives by URL through a connection', () => {
     await expect(route).toHaveValue(created.id)
 
     // ── …and where it goes, through the pencil ────────────────────────────
-    await ask.getByRole('button', { name: 'Change where this goes' }).click()
-    const dest = page.locator('#api-import-postman-dest')
+    const dest = await openImportDestination(ask, page)
     await expect(dest).toHaveValue(
       new RegExp(`[\\\\/]collections[\\\\/]${POSTMAN_COLLECTION_NAME}$`),
     )

@@ -219,9 +219,28 @@ func TestSessionSignal_StopEscalatesUntilTheExecutionIsGone(t *testing.T) {
 type fakeForegroundSession struct {
 	err   error
 	calls []syscall.Signal
+	// named counts how often the policy asked for the ADDRESSEE rather than
+	// signalling blind. After nocx-uvac6.11 a stop names the group once and
+	// keeps it, so over a protected group the topology is learned here and
+	// NOTHING is ever signalled — which is why `calls` is empty in that case
+	// rather than holding the one refused SIGINT it used to hold.
+	named int
 }
 
 func (f *fakeForegroundSession) SignalForeground(sig syscall.Signal) error {
+	f.calls = append(f.calls, sig)
+	return f.err
+}
+
+func (f *fakeForegroundSession) ForegroundJob() (int, error) {
+	f.named++
+	if f.err != nil {
+		return 0, f.err
+	}
+	return 4242, nil
+}
+
+func (f *fakeForegroundSession) SignalProcessGroup(_ int, sig syscall.Signal) error {
 	f.calls = append(f.calls, sig)
 	return f.err
 }
@@ -348,10 +367,20 @@ func TestForegroundSignal_StopOverAProtectedGroupWaitsForTheExactAttempt(t *test
 			if got != tc.want {
 				t.Fatalf("outcome = %q, want %q", got, tc.want)
 			}
-			// Exactly one rung, and it never became TERM or KILL: the shell
-			// is in that group.
-			if len(sess.calls) != 1 || sess.calls[0] != syscall.SIGINT {
-				t.Fatalf("signals sent = %v, want one SIGINT and no escalation", sess.calls)
+			// NOT ONE SIGNAL, of any kind, to any group: the shell is in
+			// that group. This used to read "exactly one SIGINT", because
+			// the policy learned the topology BY attempting that SIGINT and
+			// having the pty seam refuse it. Since nocx-uvac6.11 the group
+			// is named first (ForegroundJob), so the refusal arrives before
+			// any kill(2) is attempted at all — strictly stronger, and the
+			// assertion says so rather than counting a call that no longer
+			// happens. What must never change is the second half: nothing
+			// escalates into the launcher shell's group.
+			if len(sess.calls) != 0 {
+				t.Fatalf("signals sent = %v, want none — a protected group is never signalled", sess.calls)
+			}
+			if sess.named != 1 {
+				t.Fatalf("addressee named %d times, want exactly once", sess.named)
 			}
 			if fb.waitedFor != attempt {
 				t.Fatalf("waited for attempt %q, want the exact one that was named (%q)", fb.waitedFor, attempt)

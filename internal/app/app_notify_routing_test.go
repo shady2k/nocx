@@ -53,6 +53,139 @@ func programEvent(session string) notify.Event {
 // Every cell of the matrix is declared, in one section, and the section is
 // grouped like every other generated section. Nothing here enumerates kinds or
 // channels: the expectation is the catalogue's own list.
+func describeNotificationSettings(t *testing.T, a *App) []settings.Declaration {
+	t.Helper()
+	conn := dialAppWS(t, a)
+	defer func() { _ = conn.Close() }()
+
+	resp := callAppWS(t, conn, "settings.describe", map[string]any{}, 1)
+	if resp.Error != nil {
+		t.Fatalf("settings.describe: code=%d msg=%s", resp.Error.Code, resp.Error.Message)
+	}
+	var result struct {
+		Declarations []settings.Declaration `json:"declarations"`
+	}
+	if err := json.Unmarshal(resp.Result, &result); err != nil {
+		t.Fatalf("decode settings.describe: %v", err)
+	}
+	return result.Declarations
+}
+
+func notificationCentreDeclarations(t *testing.T, a *App) []settings.Declaration {
+	t.Helper()
+	const prefix = "notifications.centre."
+	var centre []settings.Declaration
+	for _, declaration := range describeNotificationSettings(t, a) {
+		if len(declaration.Key) >= len(prefix) && declaration.Key[:len(prefix)] == prefix {
+			centre = append(centre, declaration)
+		}
+	}
+	return centre
+}
+
+func TestNotificationCentreSettingKeysMatchPresentedKindsExactly(t *testing.T) {
+	a, _ := routingApp(t)
+	centre := notificationCentreDeclarations(t, a)
+
+	got := make(map[string]struct{}, len(centre))
+	for _, declaration := range centre {
+		got[declaration.Key] = struct{}{}
+	}
+	want := make(map[string]struct{})
+	for _, kind := range notify.DefaultCatalogue().PresentedKinds() {
+		want[notify.CentreSettingKey(kind.ID)] = struct{}{}
+	}
+	if len(got) != len(want) {
+		t.Errorf("centre setting count = %d, want exactly %d", len(got), len(want))
+	}
+	for key := range want {
+		if _, ok := got[key]; !ok {
+			t.Errorf("presented kind key %q has no registered centre toggle", key)
+		}
+	}
+	for key := range got {
+		if _, ok := want[key]; !ok {
+			t.Errorf("registered centre toggle %q has no presented kind", key)
+		}
+	}
+}
+
+func TestNotificationCentreSettingsUseRoutingSection(t *testing.T) {
+	a, _ := routingApp(t)
+	centre := notificationCentreDeclarations(t, a)
+	if len(centre) == 0 {
+		t.Fatal("settings.describe returned no notification centre toggles")
+	}
+	for _, declaration := range centre {
+		if declaration.Section != notify.RouteSettingSection {
+			t.Errorf("centre toggle %q is in section %q, want %q", declaration.Key, declaration.Section, notify.RouteSettingSection)
+		}
+	}
+}
+
+func TestNotificationCentreSettingsUseKindLabels(t *testing.T) {
+	a, _ := routingApp(t)
+	byKey := make(map[string]settings.Declaration)
+	for _, declaration := range notificationCentreDeclarations(t, a) {
+		byKey[declaration.Key] = declaration
+	}
+	for _, kind := range notify.DefaultCatalogue().PresentedKinds() {
+		key := notify.CentreSettingKey(kind.ID)
+		declaration, ok := byKey[key]
+		if !ok {
+			t.Errorf("presented kind key %q has no registered centre toggle", key)
+			continue
+		}
+		if want := kind.Label + " → Notification centre"; declaration.Label != want {
+			t.Errorf("centre toggle %q label = %q, want %q", key, declaration.Label, want)
+		}
+	}
+}
+
+func TestNotificationCentreSettingsFollowRoutingDeclarations(t *testing.T) {
+	a, _ := routingApp(t)
+	declarations := describeNotificationSettings(t, a)
+	positions := make(map[string]int, len(declarations))
+	for i, declaration := range declarations {
+		positions[declaration.Key] = i
+	}
+
+	routePairs := notify.DefaultCatalogue().Pairs()
+	if len(routePairs) == 0 {
+		t.Fatal("the catalogue offers no routing pairs")
+	}
+	presentedKinds := notify.DefaultCatalogue().PresentedKinds()
+	if len(presentedKinds) == 0 {
+		t.Fatal("the catalogue presents no notification kinds")
+	}
+	maxRoute := -1
+	for _, pair := range routePairs {
+		position, ok := positions[pair.SettingKey()]
+		if !ok {
+			t.Errorf("routing key %q is absent from settings.describe", pair.SettingKey())
+			continue
+		}
+		if position > maxRoute {
+			maxRoute = position
+		}
+	}
+	minCentre := len(declarations)
+	for _, kind := range presentedKinds {
+		key := notify.CentreSettingKey(kind.ID)
+		position, ok := positions[key]
+		if !ok {
+			t.Errorf("centre key %q is absent from settings.describe", key)
+			continue
+		}
+		if position < minCentre {
+			minCentre = position
+		}
+	}
+	if maxRoute >= minCentre {
+		t.Errorf("centre declarations begin at %d, but a routing declaration appears at %d; centre must follow every routing key", minCentre, maxRoute)
+	}
+}
+
 func TestAppDeclaresTheNotificationRoutingMatrix(t *testing.T) {
 	a, _ := routingApp(t)
 	conn := dialAppWS(t, a)

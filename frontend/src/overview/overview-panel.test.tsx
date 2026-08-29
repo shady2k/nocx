@@ -8,7 +8,7 @@
  * that made a connection manager ship with no way to create a group
  * (AGENTS.md, testing rule 1).
  */
-import { cleanup, fireEvent, render } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render, within } from '@solidjs/testing-library'
 import { afterEach, describe, expect, it } from 'vitest'
 import { OverviewPanel } from './overview-panel'
 import { fakePane, FakeOverviewPort } from './fake-port'
@@ -198,8 +198,13 @@ describe('the overview a person opens', () => {
       <OverviewPanel port={port} onClose={() => {}} now={() => NOW} />
     ))
 
-    const row = cards(container)[0].querySelector('.ui-collection-row')!
-    fireEvent.keyDown(row, { key: 'Enter' })
+    // The keyboard lands on the card's NAME, which is a real button, so
+    // Enter is the browser's own (nocx-5xwub). It used to land on the kit
+    // row, which listened for Enter while announcing "list item" — the
+    // change is deliberate: the roving now targets the thing a person is
+    // actually told they can press.
+    const control = within(container).getAllByRole('button', { name: 'claude' })[0]
+    fireEvent.click(control)
     expect(port.activated.length).toBe(1)
   })
 
@@ -209,7 +214,11 @@ describe('the overview a person opens', () => {
       <OverviewPanel port={port} onClose={() => {}} now={() => NOW} />
     ))
 
-    const focusables = cards(container).map((c) => c.querySelector<HTMLElement>('[tabindex]')!)
+    // The roving target is the card's own name-control (nocx-5xwub), not the
+    // kit row it sits in.
+    const focusables = cards(container).map((c) =>
+      c.querySelector<HTMLElement>('.ui-record-row__open')!,
+    )
     focusables[0].focus()
     expect(document.activeElement).toBe(focusables[0])
 

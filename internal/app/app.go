@@ -505,6 +505,23 @@ func registerNotifyRouteToggles() map[string]*settings.Bool {
 	return toggles
 }
 
+// The centre visibility settings are intentionally unread by Go: the renderer
+// reads them for presentation, while the backend records every event regardless.
+// A Go reader would violate that invariant by making recording depend on display.
+func init() {
+	for _, kind := range notify.DefaultCatalogue().PresentedKinds() {
+		key := notify.CentreSettingKey(kind.ID)
+		settings.MustRegisterBool(settings.BoolSpec{
+			Key:         key,
+			Section:     notify.RouteSettingSection,
+			Label:       kind.Label + " → Notification centre",
+			Description: "The event is recorded either way; this governs whether the panel shows it and whether the bell counts it; turning it back on brings back what the feed still holds.",
+			DataClass:   settings.PublicConfig,
+			Default:     true,
+		})
+	}
+}
+
 func New(opts ...Option) (*App, error) {
 	var o optionSet
 	for _, opt := range opts {
@@ -2186,6 +2203,41 @@ func (p *lifecyclePTY) ForegroundProcessGroup() (int, error) {
 		return 0, pty.ErrNoForeground
 	}
 	return fg.ForegroundProcessGroup()
+}
+
+// ForegroundJob and SignalProcessGroup travel with the two above for the
+// reason the comment on SignalForeground already gives, and they are here
+// because that reason was proved a second time (nocx-i5a1k's sibling).
+//
+// nocx-uvac6.11 split a stop into "name the addressee once" and "signal that
+// exact group", and a stop now ASKS ForegroundJob before it signals anything.
+// This wrapper forwarded SignalForeground and ForegroundProcessGroup and not
+// these two, so on an ENHANCED local session the optional-method assertion in
+// realSession.ForegroundJob found nothing, answered pty.ErrNoForeground, and
+// session.signal told the person "nothing is running in this pane" about a
+// full-screen program that plainly was — nocx-92gfl.4 word for word, through
+// a door that did not exist when it was closed.
+//
+// The rule this seam keeps: every method of the pty signal seam is forwarded
+// here, or none is. A wrapper that answers some of them is not degraded, it
+// is wrong, and it is wrong silently — nothing fails to compile and the
+// answer it gives is a plausible one.
+func (p *lifecyclePTY) ForegroundJob() (int, error) {
+	fg, ok := p.Pty.(interface{ ForegroundJob() (int, error) })
+	if !ok {
+		return 0, pty.ErrNoForeground
+	}
+	return fg.ForegroundJob()
+}
+
+func (p *lifecyclePTY) SignalProcessGroup(pgid int, sig syscall.Signal) error {
+	sg, ok := p.Pty.(interface {
+		SignalProcessGroup(pgid int, sig syscall.Signal) error
+	})
+	if !ok {
+		return pty.ErrNoForeground
+	}
+	return sg.SignalProcessGroup(pgid, sig)
 }
 
 func (p *lifecyclePTY) Close() error {

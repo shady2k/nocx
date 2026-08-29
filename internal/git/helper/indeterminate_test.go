@@ -53,12 +53,100 @@ func waitForFile(t *testing.T, path string) {
 // slowCommitHook writes a pre-commit hook that writes started, then blocks
 // until release appears — the only way to hold a commit in flight
 // deterministically, so the transport can be killed mid-mutation.
+//
+// The wait is bounded twice, and both bounds are load-bearing (nocx-hgtt0).
+// The release file lives in a directory the test owns and Go deletes on
+// cleanup, so there is a window one poll wide in which the release is not
+// late but impossible — the file and the directory that would hold it are
+// already gone. A hook that only asks "is it there yet" spins on that
+// forever: 62 of them accumulated here over five days, forking 2364
+// processes a second and holding the load average near 50 on six cores while
+// using a third of one. So the hook exits the moment the directory goes,
+// and caps the wait outright in case it is ever pointed at a path whose
+// parent outlives the test.
+//
+// Losing the race now fails the commit instead of leaking a process, which is
+// the right trade: a failed commit is visible in the test that caused it.
 func slowCommitHook(t *testing.T, dir, started, release string) {
 	t.Helper()
-	script := "#!/bin/sh\ntouch '" + started + "'\nwhile [ ! -f '" + release + "' ]; do sleep 0.02; done\n"
+	releaseDir := filepath.Dir(release)
+	script := "#!/bin/sh\n" +
+		"touch '" + started + "'\n" +
+		"i=0\n" +
+		"while [ ! -f '" + release + "' ]; do\n" +
+		"  [ -d '" + releaseDir + "' ] || exit 1\n" +
+		"  i=$((i + 1))\n" +
+		"  [ \"$i\" -gt 3000 ] && exit 1\n" +
+		"  sleep 0.02\n" +
+		"done\n"
 	// #nosec G306 — a hook in a test repository, deliberately executable
 	if err := os.WriteFile(filepath.Join(dir, ".git", "hooks", "pre-commit"), []byte(script), 0o755); err != nil {
 		t.Fatal(err)
+	}
+}
+
+// TestSlowCommitHookCannotOutliveItsTest is the guard for nocx-hgtt0.
+//
+// The hook slowCommitHook installs waits for a release file that lives in a
+// t.TempDir(). Go deletes that directory when the test ends, so there is a
+// window — one poll interval wide — in which the release never arrives and
+// never can: the file the hook is waiting for has been deleted along with the
+// directory that would hold it. A hook that only asks "does the file exist
+// yet" then spins until the machine is rebooted.
+//
+// That is not hypothetical. On 2026-08-29 this machine carried 62 of them, the
+// oldest 5.3 days, together forking 2364 processes a second and holding the
+// load average between 35 and 74 on six cores while using barely a third of one.
+// The cost is the forking, not the arithmetic, which is why it hid behind an
+// unremarkable %CPU column.
+//
+// So the contract is not "the hook usually gets released". It is that the hook
+// cannot wait for something that can no longer happen. This test takes the
+// release directory away — exactly what t.TempDir() cleanup does — and requires
+// the hook to notice and exit on its own.
+func TestSlowCommitHookCannotOutliveItsTest(t *testing.T) {
+	repo := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(repo, ".git", "hooks"), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	// Deliberately NOT t.TempDir(): this test removes the directory itself, at
+	// the moment of its choosing, to make the race deterministic rather than
+	// waiting to lose it by chance.
+	sig, err := os.MkdirTemp("", "hook-signals")
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := filepath.Join(sig, "hook-started")
+	release := filepath.Join(sig, "hook-release")
+	slowCommitHook(t, repo, started, release)
+
+	cmd := exec.Command(filepath.Join(repo, ".git", "hooks", "pre-commit")) // #nosec G204 — a path this test just wrote
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan error, 1)
+	go func() { done <- cmd.Wait() }()
+	// Kill only; do NOT read done here. The success path below already took
+	// the one value the goroutine sends, and a second receive would block
+	// this cleanup forever — which is how the first draft of this test hung
+	// to the package timeout instead of reporting anything.
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = os.RemoveAll(sig)
+	})
+
+	waitForFile(t, started)
+
+	// The release can now never arrive: this is t.TempDir() cleanup, early.
+	if err := os.RemoveAll(sig); err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case <-done:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the hook is still waiting for a release that can no longer arrive — " +
+			"this is the leak in nocx-hgtt0: one such process per test run, forever")
 	}
 }
 
@@ -101,7 +189,40 @@ func dialKillable(t *testing.T, conn *killableConn) *client.Client {
 	if err != nil {
 		t.Fatalf("helper dial: %v", err)
 	}
-	t.Cleanup(func() { _ = c.Close() })
+	// Closing the client is not enough: it ends the CLIENT's half, and these
+	// tests exist because the helper's half is still working when it does.
+	// `Commit` returns the moment the transport dies, while the git the peer
+	// spawned is mid-write inside the fixture repo's .git — so the test
+	// returned, t.TempDir's RemoveAll walked that directory, and files
+	// appeared under it between the readdir and the rmdir:
+	//
+	//     TempDir RemoveAll cleanup: unlinkat .../002/.git: directory not empty
+	//
+	// which is a FAILING test whose every assertion passed. It only shows up
+	// where cleanup outruns the peer, so it was green here and red on CI.
+	//
+	// `exited` is the observable that closes the gap — never a sleep, the
+	// repo's rule. The host serves frames synchronously inside Serve's read
+	// loop (internal/helper/host/host.go), so the commit runs ON that
+	// goroutine and Serve cannot reach its next Read until git is done.
+	// Closing the client closes the peer's stdin, that Read then sees EOF,
+	// Serve returns and `exited` closes — by which point nothing is writing
+	// into the repository any more.
+	//
+	// It is registered here rather than in the test bodies so no future test
+	// on a killable conn can forget it, and it runs BEFORE every t.TempDir
+	// cleanup in these tests: those directories are made in fixtureRepo and
+	// the test body, both earlier, and cleanups run last-registered-first.
+	t.Cleanup(func() {
+		_ = c.Close()
+		select {
+		case <-conn.exited:
+		case <-time.After(30 * time.Second):
+			// The deadline bounds the failure case only; the wait itself is
+			// on the observable.
+			t.Error("the helper peer never exited — a commit may still be writing into the fixture repo")
+		}
+	})
 	return c
 }
 

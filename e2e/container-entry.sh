@@ -49,10 +49,37 @@ handback() {
 }
 trap handback EXIT
 
+# A Secret Service for the one spec that needs one.
+#
+# e2e/vault.spec.ts case 3 is about a machine WITH a working OS keystore: that
+# setting a vault up there asks for a passphrase anyway (ADR-0050 step 1).
+# Without a keyring the case skips itself, and a permanently-skipped case is
+# how an epic's happy path stops being watched without anybody noticing — the
+# case's own comment says exactly that about itself.
+#
+# BEST EFFORT, deliberately: a keyring that will not start leaves the spec's
+# own reachability guard to skip the case, precisely as before, and must never
+# take the other specs down with it. Hence `|| true` inside, and no `set -e`
+# reaching it.
+
 # `npx playwright test` is the whole command — the same one a developer runs
 # and the same one CI runs. The stand (backend + vite) is Playwright's, so
 # nothing here starts or knows about it.
 #
 # Not `exec`: that would replace this shell and the trap above with it, and the
 # handback would never run.
-npx playwright test "$@"
+#
+# Under dbus-run-session when one is available: the Secret Service is a SESSION
+# BUS NAME, and this container has no session bus of its own. The keyring
+# daemon therefore has to be started inside that session and the tests run in
+# the same one, which is why the two are wrapped together rather than layered.
+if command -v dbus-run-session >/dev/null 2>&1; then
+  dbus-run-session -- bash -euo pipefail -c '
+    if command -v gnome-keyring-daemon >/dev/null 2>&1; then
+      printf "%s" nocx-ci | gnome-keyring-daemon --unlock --daemonize --components=secrets >/dev/null 2>&1 || true
+    fi
+    npx playwright test "$@"
+  ' bash "$@"
+else
+  npx playwright test "$@"
+fi

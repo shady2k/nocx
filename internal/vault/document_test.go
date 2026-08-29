@@ -60,9 +60,7 @@ func TestDocument_RoundTrip(t *testing.T) {
 		DefaultProvider: ProviderFile,
 		Passphrase:      pass,
 		Recovery:        recovery,
-		HasOSKey:        false,
 		AutoSealMinutes: 15,
-		PreferredUnseal: "passphrase",
 		Journal: []JournalEntry{
 			{Op: "create", OldID: "", NewID: "sec:v1:file:aaaabbbbaaaabbbbccccddddaaaabbbb", Target: "profile:myserver", Phase: "prepared"},
 		},
@@ -136,9 +134,7 @@ func TestDocument_JSONMarshal(t *testing.T) {
 			Time:       3,
 			Threads:    4,
 		},
-		HasOSKey:        true,
 		AutoSealMinutes: 0,
-		PreferredUnseal: "os-key",
 		Journal: []JournalEntry{
 			{Op: "rotate", OldID: "sec:v1:system:oldoldoldoldoldoldoldoldold1", NewID: "sec:v1:system:newnewnewnewnewnewnewnewnew1", Target: "profile:remote", Phase: "metadata-repointed"},
 		},
@@ -157,38 +153,6 @@ func TestDocument_JSONMarshal(t *testing.T) {
 	}
 	if decoded.DefaultProvider != doc.DefaultProvider {
 		t.Errorf("DefaultProvider = %q, want %q", decoded.DefaultProvider, doc.DefaultProvider)
-	}
-}
-
-// TestDocument_NilEnvelopesIsRepresentable asserts that a Document with nil
-// envelope pointers round-trips correctly — on a machine where the OS holds
-// the root key there is no passphrase envelope and no recovery envelope, and
-// nil must mean "was never created" rather than "empty".
-func TestDocument_NilEnvelopesIsRepresentable(t *testing.T) {
-	store := &fakeDocStore{}
-	orig := Document{
-		Version:         2,
-		Instance:        "os-only",
-		DefaultProvider: ProviderSystem,
-		HasOSKey:        true,
-	}
-
-	if err := saveDocument(store, orig); err != nil {
-		t.Fatalf("saveDocument: %v", err)
-	}
-
-	got, found, err := loadDocument(store)
-	if err != nil {
-		t.Fatalf("loadDocument: %v", err)
-	}
-	if !found {
-		t.Fatal("loadDocument returned found=false")
-	}
-	if got.Passphrase != nil {
-		t.Error("Passphrase should be nil for OS-only vault")
-	}
-	if got.Recovery != nil {
-		t.Error("Recovery should be nil for OS-only vault")
 	}
 }
 

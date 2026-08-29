@@ -47,6 +47,15 @@ package transport
 // the promise is "the terminal's own interrupt was written", never "a SIGINT
 // arrived" — see contracts/session.signal.schema.json.
 //
+// THE TWO INTENTS DIFFER IN THEIR ADDRESSEE, AND THAT IS THE DISTINCTION
+// (nocx-uvac6.11). An interrupt is about the present moment, so it asks the
+// kernel what is in front and signals that. A stop is a conversation with one
+// job across several seconds, so it names that job's process group ONCE and
+// keeps it for every rung and for the existence poll. Built out of repeated
+// "what is in front" questions instead, the ladder walked onto whatever the
+// person started after the job it was stopping had already exited.
+//
+//
 // Nothing here reads the byte stream to decide anything (AD-6): the
 // foreground process group comes from the kernel through TIOCGPGRP, and
 // whether a program is inside the protected group is answered by the
@@ -182,60 +191,43 @@ func interruptForeground(lg log.Logger, sid session.ID, sess runLeaseSession, fb
 	}
 }
 
-// stopForeground keeps Stop's promise. Over an independent group it runs the
-// ladder INT → TERM → KILL, waiting `grace` after each signal for the
-// execution to cooperate, and returns only when the execution is gone, the
-// KILL is sent, or there was nothing to signal. Over a protected group it
-// writes the terminal's interrupt and waits for that exact attempt to leave
-// `open` — the promise it can keep there — and says `unreconciled` when it
-// cannot. Runs on the caller's goroutine and spawns nothing (ADR-0026).
+// stopForeground keeps Stop's promise, and WHICH promise it can keep is
+// decided by the kernel's answer about foreground topology — never by a
+// caller's preference. This is where nocx-uvac6.11 and nocx-7l4ex.10 meet.
+//
+// Over an INDEPENDENT group it runs the ladder INT → TERM → KILL against ONE
+// process group, NAMED ONCE before the first signal, and returns only when
+// that group is gone, the KILL is sent, or there was nothing to signal.
+// Over a PROTECTED group there is no ladder at all — every rung would reach
+// the launcher shell — so it writes the terminal's interrupt once and waits
+// for that exact authenticated attempt to leave `open`, saying
+// `unreconciled` when it cannot. Runs on the caller's goroutine and spawns
+// nothing (ADR-0026).
+//
+// IT CLASSIFIES THE ERROR ITSELF RATHER THAN GOING THROUGH foregroundJob,
+// and that is load-bearing rather than a refactor. ErrProtectedForeground
+// WRAPS ErrNoForeground, so a plain errors.Is(err, ErrNoForeground) is true
+// for BOTH and would fold the protected case into "nothing is running" —
+// the exact lie the incident was reported as (nocx-7l4ex.12), leaving the
+// protected branch unreachable with the compiler silent about it. Specific
+// before general, and the order is the correctness.
 func stopForeground(lg log.Logger, sid session.ID, sess runLeaseSession, grace time.Duration, fb protectedForeground) foregroundOutcome {
-	if grace <= 0 {
-		grace = defaultRunSignalGrace
+	pgid, err := sess.ForegroundJob()
+	switch classifyForeground(err) {
+	case reachDelivered:
+		return stopProcessGroup(lg, sid, sess, pgid, grace)
+	case reachProtected:
+		return stopProtected(lg, sid, fb, grace)
+	case reachGone:
+		return foregroundNothingRunning
+	default:
+		// The call itself failed. Something may well be there and nocx
+		// cannot prove it stopped — never nothing-running, which is a
+		// refusal a person acts on.
+		lg.Warn("foreground signal: could not name the foreground job",
+			"session_id", string(sid), "error", err)
+		return foregroundUnreconciled
 	}
-	escalation := []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL}
-	delivered := false
-	for i, sig := range escalation {
-		err := sess.SignalForeground(sig)
-		switch classifyForeground(err) {
-		case reachDelivered:
-			delivered = true
-			if i == len(escalation)-1 {
-				return foregroundDelivered // KILL — the execution is gone
-			}
-			if cooperatedForeground(sess, grace) {
-				return foregroundDelivered
-			}
-			lg.Info("foreground signal: execution did not cooperate, escalating",
-				"session_id", string(sid), "from", int(sig))
-		case reachProtected:
-			// Only reachable on the first rung: a later rung means an
-			// earlier one signalled an independent group, and the shell
-			// cannot become the foreground group while its job still holds
-			// the terminal.
-			if delivered {
-				return foregroundDelivered
-			}
-			return stopProtected(lg, sid, fb, grace)
-		case reachGone:
-			// Nothing running — either from the start or because an earlier
-			// rung already ended it.
-			if delivered {
-				return foregroundDelivered
-			}
-			return foregroundNothingRunning
-		default:
-			lg.Warn("foreground signal: escalation step failed",
-				"session_id", string(sid), "signal", int(sig), "error", err)
-			continue
-		}
-	}
-	if delivered {
-		return foregroundDelivered
-	}
-	// Every rung failed and none of them was the guard: something is there
-	// and nocx cannot prove it stopped.
-	return foregroundUnreconciled
 }
 
 // stopProtected is Stop over a group that may never be killed. The byte goes
@@ -281,14 +273,91 @@ func protectedAttempt(lg log.Logger, sid session.ID, fb protectedForeground) (li
 	return attempt, true
 }
 
-// cooperatedForeground polls the foreground group until it is gone —
-// ErrNoForeground means the shell took the foreground back (or the group
-// vanished) — or `grace` elapses. A zombie waits for its parent's reap, so
-// the poll has to outlive it; the shell reaps promptly.
-func cooperatedForeground(sess runLeaseSession, grace time.Duration) bool {
+// foregroundJob names the group a stop is about to address, or reports why
+// there is none. Separate from the ladder because a caller can need the NAME
+// earlier than the signals: withdrawing an assistant request can let its
+// command exit, and after that "what is in front" is somebody else's
+// (nocx-uvac6.11).
+func foregroundJob(lg log.Logger, sid session.ID, sess runLeaseSession) (int, foregroundOutcome, bool) {
+	pgid, err := sess.ForegroundJob()
+	switch classifyForeground(err) {
+	case reachDelivered:
+		return pgid, foregroundDelivered, true
+	case reachProtected, reachGone:
+		// A protected group is "not named" here, and that is honest rather
+		// than a fold: this seam hands back a pgid to signal, and a
+		// protected group has none that may be signalled. It is NOT a claim
+		// that nothing runs — a caller holding a lifecycle projection can
+		// still reach in, which is why stopForeground classifies the error
+		// itself instead of coming through here. The one caller that does
+		// (run_lease's cancelExecution) holds no projection, and the
+		// prompt's answer is what a nil fallback already gave it.
+		return 0, foregroundNothingRunning, false
+	default:
+		lg.Warn("foreground signal: could not name the foreground job",
+			"session_id", string(sid), "error", err)
+		return 0, foregroundNothingRunning, false
+	}
+}
+
+// stopProcessGroup runs the ladder against ONE group, named by an earlier
+// foregroundJob. Everything the package comment says about a stop's addressee
+// is enforced here: this function never asks what is in front.
+func stopProcessGroup(lg log.Logger, sid session.ID, sess runLeaseSession, pgid int, grace time.Duration) foregroundOutcome {
+	if grace <= 0 {
+		grace = defaultRunSignalGrace
+	}
+	escalation := []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL}
+	delivered := false
+	for i, sig := range escalation {
+		err := sess.SignalProcessGroup(pgid, sig)
+		if err != nil {
+			if errors.Is(err, pty.ErrNoForeground) {
+				// The group is gone — either from the start or because an
+				// earlier rung already ended it.
+				if delivered {
+					return foregroundDelivered
+				}
+				return foregroundNothingRunning
+			}
+			lg.Warn("foreground signal: escalation step failed",
+				"session_id", string(sid), "signal", int(sig), "error", err)
+			continue
+		}
+		delivered = true
+		if i == len(escalation)-1 {
+			return foregroundDelivered // KILL — the execution is gone
+		}
+		if groupGone(sess, pgid, grace) {
+			return foregroundDelivered
+		}
+		lg.Info("foreground signal: execution did not cooperate, escalating",
+			"session_id", string(sid), "signal", int(sig), "pgid", pgid)
+	}
+	if delivered {
+		return foregroundDelivered
+	}
+	// Every rung failed and none of them was the guard: something is there
+	// and nocx cannot prove it stopped. NOT nothing-running — that sentence
+	// is shown to a person beside a block that is still running, and it is
+	// the lie nocx-7l4ex.12 was filed as. Reachable: SignalProcessGroup
+	// folds only ESRCH and pgid <= 0 into ErrNoForeground, so an EPERM from
+	// kill(-pgid) — a group the backend may not signal, which is what
+	// `sudo` inside the execution produces — lands here three times over.
+	return foregroundUnreconciled
+}
+
+// groupGone polls ONE process group until it is gone — ErrNoForeground means
+// that group has exited — or `grace` elapses. A zombie waits for its parent's
+// reap, so the poll has to outlive it; the shell reaps promptly.
+//
+// It asks about the group the ladder addressed, never about "is anything in
+// the foreground": the second question answers yes for a command the person
+// started afterwards, which is how the escalation used to walk onto it.
+func groupGone(sess runLeaseSession, pgid int, grace time.Duration) bool {
 	deadline := time.Now().Add(grace)
 	for time.Now().Before(deadline) {
-		if err := sess.SignalForeground(0); err != nil {
+		if err := sess.SignalProcessGroup(pgid, 0); err != nil {
 			return true
 		}
 		time.Sleep(50 * time.Millisecond)

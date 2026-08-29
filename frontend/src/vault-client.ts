@@ -35,11 +35,15 @@ export type VaultState = VaultStatus['state']
 export type VaultSecretKind = InventoryEntry['kind']
 
 export interface VaultSetupParams {
-  passphrase?: string
+  /** Required and non-empty. An empty one used to select a setup that put the
+   *  root key in the OS keystore and minted no recovery code; ADR-0050 step 1
+   *  removed that mode and the backend refuses it. */
+  passphrase: string
 }
 
 export interface VaultSetupResult {
-  recoveryCode?: string
+  /** Shown to the person once. Every successful setup returns one. */
+  recoveryCode: string
 }
 
 export interface VaultChangePassphraseParams {
@@ -61,7 +65,7 @@ export interface VaultSetDefaultProviderParams {
 }
 
 export interface VaultUnsealParams {
-  means: 'os' | 'passphrase' | 'recovery'
+  means: 'passphrase' | 'recovery'
   secret?: string
 }
 

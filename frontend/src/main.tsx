@@ -116,8 +116,21 @@ import { createFeedStore } from './notify/feed-store'
 import { subscribeSessionFocus } from './notify/focus-request'
 import { subscribeNotifyToast } from './notify/toast-bridge'
 import { NotificationsPanel } from './notify/notifications-panel'
+import type { NotifyCatalogue } from './generated/notify.catalogue'
 import { createOverviewController } from './overview/overview-controller'
 import { askFields } from './snippets/resolve'
+
+const NOTIFICATIONS_CENTRE_PREFIX = 'notifications.centre.'
+
+function hiddenNotificationKinds(values: Record<string, unknown>): ReadonlySet<string> {
+  const hidden = new Set<string>()
+  for (const [key, value] of Object.entries(values)) {
+    if (key.startsWith(NOTIFICATIONS_CENTRE_PREFIX) && value === false) {
+      hidden.add(key.slice(NOTIFICATIONS_CENTRE_PREFIX.length))
+    }
+  }
+  return hidden
+}
 
 async function main() {
   // The browser transport must be installed before any binding call: in the
@@ -375,6 +388,9 @@ async function main() {
   // frame must not show the opposite of what the backend is about to say.
   applyOutputWrap(OUTPUT_WRAP_DEFAULT)
 
+  let initialSettingsRevision = 0
+  const [hiddenKindIds, setHiddenKindIds] = createSignal<ReadonlySet<string>>(new Set())
+
   let placement: unknown = 'horizontal'
   // The sidebar's remembered state, from the UI-state document rather than
   // the settings snapshot below — a drag is not a decision (ADR-0048). A
@@ -385,6 +401,8 @@ async function main() {
   const sidebarWidth = clampSidebarWidth(uiState.sidebar.width)
   try {
     const snap = await profileClient.getSnapshot()
+    initialSettingsRevision = snap.revision
+    setHiddenKindIds(hiddenNotificationKinds(snap.values))
     placement = snap.values[PLACEMENT_KEY] ?? 'horizontal'
     // Reconcile the Go theme setting against the bootstrap cache. Go is
     // authoritative (ADR-0013 §8.1): the bootstrap cache covers the first
@@ -411,6 +429,8 @@ async function main() {
     // Backend may not be ready yet — safe fallback.
   }
   const tabStrip = placement === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
+  const [displayRevision, setDisplayRevision] = createSignal(0)
+  const notifyDisplayChange = () => setDisplayRevision((revision) => revision + 1)
 
   // The layout chain, which the backend owns and the renderer renders
   // (nocx-isoph.4). Constructed here, beside every other wire client, and
@@ -446,6 +466,7 @@ async function main() {
     // is already warm — `load()` above ran before this line (ADR-0048).
     uiStateClient,
   )
+  tm.onDisplayRevision(notifyDisplayChange)
   // A plain tab records its output and produces no blocks; the card that
   // says so reads the recording half from the store that owns it, rather
   // than deriving it a second time (nocx-22k1c.3).
@@ -956,12 +977,15 @@ async function main() {
 
   // Live application through SettingsObserver: when any setting
   // changes, refetch the snapshot and act on relevant keys.
-  observer.setRevision(0)
+  observer.setRevision(initialSettingsRevision)
   observer.start(() => {
     void (async () => {
       try {
         const snap = await profileClient.getSnapshot()
         observer.setRevision(snap.revision)
+        // Replace the complete projection atomically. FeedStore reads this
+        // same signal, so a settings batch cannot expose a partial hidden set.
+        setHiddenKindIds(hiddenNotificationKinds(snap.values))
         const next = snap.values[PLACEMENT_KEY] ?? 'horizontal'
         if (next !== placement) {
           placement = next
@@ -1066,7 +1090,44 @@ async function main() {
   // consume it: the panel body and the activity-bar badge. Creating it inside
   // the view would leave the badge with nothing to read until the panel was
   // first opened — a bell that only starts counting once you look at it.
-  const feedStore = createFeedStore(new NotifyFeedClient(dispatcher), dispatcher)
+  const [catalogue, setCatalogue] = createSignal<NotifyCatalogue | null>(null)
+  let catalogueRequest: Promise<void> | null = null
+  const readCatalogue = (): Promise<void> => {
+    if (catalogueRequest) return catalogueRequest
+    const request: Promise<void> = dispatcher
+      .call<NotifyCatalogue>('notify.catalogue', {})
+      .then((next) => {
+        setCatalogue(next)
+      })
+      .catch(() => {
+        // Keep the last successful vocabulary. Before the first success the
+        // panel's readable fallback names unknown wire kinds.
+      })
+      .finally(() => {
+        catalogueRequest = null
+      })
+    catalogueRequest = request
+    return request
+  }
+  dispatcher.onConnect(() => {
+    void readCatalogue()
+  })
+  void readCatalogue()
+
+  const sessionNameOf = (backendId: string, sessionId: string): string | null => {
+    // PaneManager owns these mutable display fields. The signal makes Solid
+    // re-run this lookup when a pane reports a title/decoration change.
+    displayRevision()
+    const pane = tm.findBySession(backendId, sessionId)
+    return pane?.displayTitle || null
+  }
+
+  const feedStore = createFeedStore(
+    new NotifyFeedClient(dispatcher),
+    dispatcher,
+    () => hiddenKindIds(),
+    (kind) => catalogue()?.kinds.find((entry) => entry.kind === kind)?.id ?? kind,
+  )
   // The two backend-initiated halves of the same pipeline, wired HERE for the
   // same reason the store is: both need something only the composition root
   // holds — the pane manager for one, and for the other nothing at all beyond
@@ -1117,6 +1178,8 @@ async function main() {
     view: () => (
       <NotificationsPanel
         store={feedStore}
+        catalogue={catalogue}
+        sessionNameOf={sessionNameOf}
         // Resolution is the RENDERER's: it already owns session -> tab, and
         // the backend cannot do it at all (Attribution.Tab is a WebSocket
         // connection id). Focusing a tab does NOT mark anything read — that

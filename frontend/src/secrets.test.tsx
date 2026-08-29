@@ -25,8 +25,6 @@ afterEach(() => {
 
 const SEALED_STATUS = {
   state: 'sealed' as const,
-  osKeyAvailable: false,
-  osKeyCapable: false,
   hasPassphrase: false,
   autoSealMinutes: 0,
   providers: [],
@@ -69,8 +67,6 @@ function mockClient() {
 
 const UNSEALED_STATUS = {
   state: 'unsealed' as const,
-  osKeyAvailable: true,
-  osKeyCapable: true,
   hasPassphrase: true,
   autoSealMinutes: 0,
   providers: [],

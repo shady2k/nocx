@@ -110,7 +110,7 @@
 @import './styles/surfaces/agent-policy.css';
 @import './styles/surfaces/git.css';
 
-/* ── App body row: activity bar | sidebar | panes ────────────────────── */
+/* ── App body row: strip | panes | sidebar | activity bar ─────────────── */
 
 #body {
   display: flex;
@@ -123,9 +123,14 @@
 #activitybar {
   --wails-draggable: no-drag;
   flex: 0 0 auto;
-  width: 48px;
+  /* The token, not the literal. It has existed in tokens.css since the shell
+     did and had no users at all, while this rule kept its own copy of the
+     number — the dead twin its own comment warns about. It has a second
+     consumer now: the notification area, which is fixed to the viewport
+     corner the rail occupies and has to step around it (nocx-u5zoc). */
+  width: var(--activity-bar-width);
   background: var(--color-canvas);
-  border-right: 1px solid var(--color-divider);
+  border-left: 1px solid var(--color-divider);
   -webkit-user-select: none;
   user-select: none;
 }
@@ -133,11 +138,13 @@
 /* ── Sidebar panel ─────────────────────────────────────────────────────
    The width is the `--sidebar-width` custom property, set inline by the
    sidebar's width controller (frontend/src/sidebar-width.ts) from the
-   UI-state document (ADR-0033); 240px here is only the first-paint
-   fallback before that document arrives. The panel is a flex ROW: the
-   active view fills it and the kit ResizeHandle owns the last 6px, so the
+   UI-state document (ADR-0048); 240px here is only the first-paint
+   fallback before that document arrives. The panel is a flex ROW: the kit
+   ResizeHandle owns the FIRST 6px and the active view fills the rest, so the
    drag surface is a real flex slot that never overlaps the view's
-   scrollbar (nocx-qmcu). */
+   scrollbar (nocx-qmcu). The handle is on the leading edge because the panel
+   is on the window's trailing one — the edge a user reaches for is the one
+   facing the panes (nocx-crjft). */
 
 #sidebar {
   --wails-draggable: no-drag;
@@ -146,7 +153,7 @@
   display: flex;
   flex-direction: row;
   background: var(--color-surface);
-  border-right: 1px solid var(--color-divider);
+  border-left: 1px solid var(--color-divider);
   overflow: hidden;
 }
 

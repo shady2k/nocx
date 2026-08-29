@@ -381,6 +381,10 @@ func testVault(t *testing.T, providers ...Provider) (*Vault, storage.DocumentSto
 	return v, store, capH
 }
 
+// mustSetup sets a vault up and fails the test if it cannot. Every caller
+// passes a passphrase, because there is no other way to set a vault up
+// (ADR-0050 step 1) — the empty string used to select the silent path and now
+// selects a refusal.
 func mustSetup(t *testing.T, v *Vault, passphrase string) SetupResult {
 	t.Helper()
 	result, err := v.Setup(context.Background(), SetupRequest{Passphrase: passphrase})
@@ -391,30 +395,12 @@ func mustSetup(t *testing.T, v *Vault, passphrase string) SetupResult {
 }
 
 // ---------------------------------------------------------------------------
-// Behaviour 1: Silent setup where the probe succeeds
+// Behaviour 1: Setup needs a passphrase, and mints both envelopes
+//
+// The refusal itself, and what the vault looks like afterwards, live in
+// vault_passphrase_required_test.go — this section keeps the cases that are
+// about the remaining path rather than about the removed one.
 // ---------------------------------------------------------------------------
-
-func TestSetup_Silent(t *testing.T) {
-	loweredCost(t)
-	sys := newTestProvider(ProviderSystem)
-	fp := newTestFileProvider(ProviderFile)
-	v, _, _ := testVault(t, sys, fp)
-	result := mustSetup(t, v, "")
-	if result.RecoveryCode != "" {
-		t.Fatalf("silent setup returned recovery code %q, want empty", result.RecoveryCode)
-	}
-	if v.State() != StateUnsealed {
-		t.Fatalf("state = %v, want %s", v.State(), StateUnsealed)
-	}
-	oskID := osKeyID(v.doc.Instance)
-	sec, err := sys.Get(context.Background(), oskID)
-	if err != nil {
-		t.Fatalf("OS key not found: %v", err)
-	}
-	if sec.IsEmpty() {
-		t.Fatal("OS key is empty")
-	}
-}
 
 func TestSetup_WithPassphrase(t *testing.T) {
 	loweredCost(t)
@@ -435,38 +421,13 @@ func TestSetup_EmptyPassphraseNoSystemProvider(t *testing.T) {
 	v, _, _ := testVault(t, fp)
 	_, err := v.Setup(context.Background(), SetupRequest{})
 	if err == nil {
-		t.Fatal("silent setup without system provider should fail")
+		t.Fatal("setup without a passphrase should fail")
 	}
 }
 
 // ---------------------------------------------------------------------------
 // Behaviour 2: Document fields after setup
 // ---------------------------------------------------------------------------
-
-func TestSetup_SilentDocumentFields(t *testing.T) {
-	loweredCost(t)
-	sys := newTestProvider(ProviderSystem)
-	fp := newTestFileProvider(ProviderFile)
-	v, store, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
-	var doc Document
-	found, err := store.Read("vault.json", &doc)
-	if err != nil {
-		t.Fatalf("Read: %v", err)
-	}
-	if !found {
-		t.Fatal("document not found")
-	}
-	if doc.Passphrase != nil {
-		t.Fatal("Passphrase should be nil after silent setup")
-	}
-	if doc.Recovery != nil {
-		t.Fatal("Recovery should be nil after silent setup")
-	}
-	if !doc.HasOSKey {
-		t.Fatal("HasOSKey should be true after silent setup")
-	}
-}
 
 func TestSetup_PassphraseDocumentFields(t *testing.T) {
 	loweredCost(t)
@@ -487,9 +448,6 @@ func TestSetup_PassphraseDocumentFields(t *testing.T) {
 	if doc.Recovery == nil {
 		t.Fatal("Recovery should not be nil after passphrase setup")
 	}
-	if doc.HasOSKey {
-		t.Fatal("HasOSKey should be false after passphrase setup")
-	}
 }
 
 // ---------------------------------------------------------------------------
@@ -501,7 +459,7 @@ func TestCreate_Concurrent(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	ctx := context.Background()
 	const n = 50
@@ -563,7 +521,7 @@ func TestSeal_RejectsSlowPut(t *testing.T) {
 		<-putGate
 	}
 	v, _, _ := testVault(t, sys, slowProv)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	ctx := context.Background()
 	v.mu.Lock()
@@ -608,7 +566,7 @@ func TestGet_HonestLimit(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	ctx := context.Background()
 	id, err := v.Create(ctx, credential.NewSecret("honest-limit-value"))
@@ -650,13 +608,13 @@ func TestState_Transitions(t *testing.T) {
 	}
 
 	check(StateUninitialized)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "hunter2")
 	check(StateUnsealed)
 	v.Seal()
 	check(StateSealed)
 
 	ctx := context.Background()
-	if err := v.Unseal(ctx, UnsealRequest{UseOSKey: true}); err != nil {
+	if err := v.Unseal(ctx, UnsealRequest{Passphrase: "hunter2"}); err != nil {
 		t.Fatalf("Unseal: %v", err)
 	}
 	check(StateUnsealed)
@@ -688,7 +646,7 @@ func TestStateGating_SecretStore(t *testing.T) {
 		}
 	})
 
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	t.Run("sealed", func(t *testing.T) {
 		v.Seal()
@@ -719,7 +677,7 @@ func TestCreate_JournalBeforePut(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	panicking := &panickingProvider{testProvider: newTestProvider(ProviderFile)}
 	v, _, _ := testVault(t, sys, panicking)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	v.mu.Lock()
 	v.doc.DefaultProvider = ProviderFile
@@ -747,7 +705,7 @@ func TestGet_NoSilentFallback(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	// Install a Get tracker AFTER setup (setup calls Put on sys, not Get).
 	sys.getHook = func() { sysGotCalled.Store(true) }
@@ -782,7 +740,7 @@ func TestGet_MalformedReference(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	sys.getHook = func() { providerCalled.Store(true) }
 	fp.getHook = func() { providerCalled.Store(true) }
@@ -821,7 +779,7 @@ func TestCreate_NoPlaintextInLogs(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, capH := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	plaintext := "my-supersecret-password-42"
 	_, err := v.Create(context.Background(), credential.NewSecret(plaintext))
@@ -842,7 +800,7 @@ func TestDelete_Basic(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	ctx := context.Background()
 	id, err := v.Create(ctx, credential.NewSecret("delete-me"))
@@ -920,7 +878,7 @@ func TestCreate_AdvanceToPhaseSecretWritten(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	ctx := context.Background()
 	id, err := v.Create(ctx, credential.NewSecret("test-value"))
@@ -958,18 +916,23 @@ func TestCreate_AdvanceToPhaseSecretWritten(t *testing.T) {
 }
 
 // Defect 2: Setup returns while holding the mutex on several error paths.
-// Regression test verifies that after a failing provider Put during silent
-// setup, State() does not hang.
+// Regression test verifies that after a failing provider init, State() does
+// not hang.
+//
+// The injected failure used to be the system provider refusing the OS-held
+// root key. Setup no longer writes one (ADR-0050 step 1), so the failure that
+// exercises the same return path is the file provider refusing its data key —
+// which is the LAST failing step before the commit point and therefore the
+// one that has unwound the most state by the time it returns.
 func TestSetup_MutexNotHeldOnError(t *testing.T) {
 	loweredCost(t)
-	sys := newTestProvider(ProviderSystem)
-	sys.fail = errors.New("injected put failure")
 	fp := newTestFileProvider(ProviderFile)
-	v, _, _ := testVault(t, sys, fp)
+	fp.dataKeyFail = errors.New("injected data key failure")
+	v, _, _ := testVault(t, fp)
 
 	done := make(chan struct{}, 1)
 	go func() {
-		_, _ = v.Setup(context.Background(), SetupRequest{})
+		_, _ = v.Setup(context.Background(), SetupRequest{Passphrase: "hunter2"})
 		done <- struct{}{}
 	}()
 	select {
@@ -994,7 +957,7 @@ func TestUnseal_DetectsConcurrentSeal(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "hunter2")
 
 	ctx := context.Background()
 	v.Seal()
@@ -1013,7 +976,7 @@ func TestUnseal_DetectsConcurrentSeal(t *testing.T) {
 		close(release) // let Unseal's Unlock complete
 	}()
 
-	err := v.Unseal(ctx, UnsealRequest{UseOSKey: true})
+	err := v.Unseal(ctx, UnsealRequest{Passphrase: "hunter2"})
 	// After fix: Unseal captures gen, re-checks after provider calls,
 	// detects the gen change from concurrent Seal, returns error.
 	// Before fix: Unseal ignores gen change and returns nil.
@@ -1034,7 +997,7 @@ func TestGet_RejectsResultAfterSeal(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	ctx := context.Background()
 	// Create routes to ProviderSystem (default when sys is registered).
@@ -1115,18 +1078,23 @@ func TestSetup_OrphanCleanupOnSaveFail(t *testing.T) {
 		t.Fatalf("New: %v", err)
 	}
 
-	// Silent setup: OS key is stored, then document save fails.
+	// Setup runs to its commit point, then the document save fails.
 	store.failOnWrite = true
-	_, err = v.Setup(context.Background(), SetupRequest{})
+	_, err = v.Setup(context.Background(), SetupRequest{Passphrase: "hunter2"})
 	if err == nil {
 		t.Fatal("expected Setup to fail due to document save failure")
 	}
 
-	// The OS key should have been best-effort deleted.
-	oskID := osKeyID(v.doc.Instance)
-	sec, err := sys.Get(context.Background(), oskID)
-	if err == nil && !sec.IsEmpty() {
-		t.Fatal("OS key should have been cleaned up after save failure")
+	// Nothing reached the keystore, so there is nothing to clean up after the
+	// failure — which is the point of ADR-0050 step 1 and not merely a
+	// simplification. Setup used to have written the root key by now, and its
+	// rollback had to delete an item it could never enumerate to find again.
+	sysItems := 0
+	sys.mu.Lock()
+	sysItems = len(sys.data)
+	sys.mu.Unlock()
+	if sysItems != 0 {
+		t.Fatalf("failed Setup left %d item(s) in the system provider, want 0", sysItems)
 	}
 
 	// The vault should still be uninitialized.
@@ -1151,7 +1119,7 @@ func TestSetup_SerialisesConcurrentCalls(t *testing.T) {
 		go func() {
 			readyCh <- struct{}{}
 			<-startCh
-			_, err := v.Setup(context.Background(), SetupRequest{})
+			_, err := v.Setup(context.Background(), SetupRequest{Passphrase: "hunter2"})
 			results <- err
 		}()
 	}
@@ -1176,22 +1144,29 @@ func TestSetup_SerialisesConcurrentCalls(t *testing.T) {
 	}
 
 	// The winner completed and the loser left nothing behind: the vault is
-	// unsealed, and the system provider holds EXACTLY ONE OS key — the
-	// loser failed before minting, so an orphan key is not expressible.
+	// unsealed, and the system provider holds NOTHING. It used to hold
+	// exactly one OS key here, and "exactly one" was the interesting number
+	// because an orphan was expressible; since Setup writes no key material
+	// to the keystore at all (ADR-0050 step 1), zero is.
 	if v.State() != StateUnsealed {
 		t.Fatalf("state = %v, want unsealed after one winning setup", v.State())
 	}
 	sys.mu.Lock()
 	keys := len(sys.data)
 	sys.mu.Unlock()
-	if keys != 1 {
-		t.Errorf("system provider holds %d keys after concurrent setup, want exactly 1 (no orphan)", keys)
+	if keys != 0 {
+		t.Errorf("system provider holds %d keys after concurrent setup, want 0", keys)
 	}
 }
 
-// Cancellation before the commit point changes nothing on disk: the system
-// provider's Put observes the cancelled context and fails, and the vault is
-// left exactly where it started — uninitialized, no document, no key.
+// Cancellation before the commit point changes nothing on disk: Setup checks
+// the context before it mints anything, and the vault is left exactly where it
+// started — uninitialized, no document, nothing in any provider.
+//
+// The check it exercises is deliberate rather than incidental. Setup used to
+// discover cancellation through the system provider's Put; that call went with
+// the OS-held root key, and without an explicit check this property would have
+// gone with it.
 func TestSetup_CancelledContextChangesNothing(t *testing.T) {
 	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
@@ -1199,7 +1174,7 @@ func TestSetup_CancelledContextChangesNothing(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	_, err := v.Setup(ctx, SetupRequest{})
+	_, err := v.Setup(ctx, SetupRequest{Passphrase: "test-pass"})
 	if err == nil {
 		t.Fatal("Setup with a cancelled context succeeded, want error")
 	}
@@ -1269,7 +1244,7 @@ func TestDelete_SealBeforeDelete(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	ctx := context.Background()
 	id, err := v.Create(ctx, credential.NewSecret("delete-seal"))
@@ -1289,7 +1264,7 @@ func TestExists_PropagatesProviderErrors(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	ctx := context.Background()
 	id, err := v.Create(ctx, credential.NewSecret("exists-test"))
@@ -1397,7 +1372,7 @@ func TestCreate_NoPlaintextInRenderedLogs(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestProvider(ProviderFile)
 	v, _, capH := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	plaintext := "my-supersecret-password-42"
 	_, err := v.Create(context.Background(), credential.NewSecret(plaintext))
@@ -1417,7 +1392,7 @@ func TestExists_RejectsResultAfterSeal(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	ctx := context.Background()
 	id, err := v.Create(ctx, credential.NewSecret("exists-race"))
@@ -1583,7 +1558,7 @@ func TestChangePassphrase_NoAuthFactor(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	ctx := context.Background()
 	err := v.ChangePassphrase(ctx, ChangePassphraseRequest{
@@ -1648,23 +1623,6 @@ func TestChangePassphrase_Sealed(t *testing.T) {
 	}
 }
 
-func TestChangePassphrase_NoPassphraseEnvelope(t *testing.T) {
-	loweredCost(t)
-	sys := newTestProvider(ProviderSystem)
-	fp := newTestFileProvider(ProviderFile)
-	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "") // silent setup — no passphrase envelope
-
-	ctx := context.Background()
-	err := v.ChangePassphrase(ctx, ChangePassphraseRequest{
-		OldPassphrase: "sekret",
-		NewPassphrase: "newsekret",
-	})
-	if err == nil {
-		t.Fatal("expected error when no passphrase envelope exists")
-	}
-}
-
 // ---------------------------------------------------------------------------
 // RegenerateRecovery
 // ---------------------------------------------------------------------------
@@ -1725,20 +1683,6 @@ func TestRegenerateRecovery_EmptyPassphrase(t *testing.T) {
 	}
 }
 
-func TestRegenerateRecovery_NoPassphraseEnvelope(t *testing.T) {
-	loweredCost(t)
-	sys := newTestProvider(ProviderSystem)
-	fp := newTestFileProvider(ProviderFile)
-	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "") // silent setup — no passphrase envelope
-
-	ctx := context.Background()
-	_, err := v.RegenerateRecovery(ctx, RegenerateRequest{Passphrase: "sekret"})
-	if err == nil {
-		t.Fatal("expected error when no passphrase envelope exists")
-	}
-}
-
 func TestRegenerateRecovery_Uninitialized(t *testing.T) {
 	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
@@ -1778,7 +1722,7 @@ func TestSetDefaultProvider_Valid(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	ctx := context.Background()
 	if err := v.SetDefaultProvider(ctx, ProviderFile); err != nil {
@@ -1794,7 +1738,7 @@ func TestSetDefaultProvider_Unregistered(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	ctx := context.Background()
 	err := v.SetDefaultProvider(ctx, ProviderID("nonexistent"))
@@ -1815,7 +1759,7 @@ func TestSetDefaultProvider_NonWritable(t *testing.T) {
 	loweredCost(t)
 	ro := &readOnlyProvider{id: ProviderSystem, inner: newTestProvider(ProviderSystem)}
 	v, _, _ := testVault(t, ro)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	ctx := context.Background()
 	err := v.SetDefaultProvider(ctx, ProviderSystem)
@@ -1850,7 +1794,7 @@ func TestSetDefaultProvider_Sealed(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	v.Seal()
 
 	ctx := context.Background()
@@ -1934,7 +1878,7 @@ func TestSetDefaultProvider_SaveFails(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, docStore, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	// Replace the store with a failing one.
 	v.mu.Lock()
@@ -1957,80 +1901,6 @@ func TestSetDefaultProvider_SaveFails(t *testing.T) {
 	// Assert: DefaultProvider was rolled back to original value.
 	if v.doc.DefaultProvider != ProviderSystem {
 		t.Errorf("DefaultProvider = %q, want %q (original)", v.doc.DefaultProvider, ProviderSystem)
-	}
-}
-
-// ---------------------------------------------------------------------------
-// Snapshot: OSKeyCapable — derived from provider list, not from vault state
-// ---------------------------------------------------------------------------
-
-func TestSnapshot_OSKeyCapable_ReadyWritableSystem(t *testing.T) {
-	loweredCost(t)
-	sys := newTestProvider(ProviderSystem)
-	fp := newTestFileProvider(ProviderFile)
-	v, _, _ := testVault(t, sys, fp)
-	snap := v.Snapshot(context.Background())
-	if !snap.OSKeyCapable {
-		t.Error("OSKeyCapable = false, want true (system provider is ready and writable)")
-	}
-}
-
-func TestSnapshot_OSKeyCapable_SystemNotWritable(t *testing.T) {
-	loweredCost(t)
-	ro := &readOnlyProvider{id: ProviderSystem, inner: newTestProvider(ProviderSystem)}
-	fp := newTestFileProvider(ProviderFile)
-	v, _, _ := testVault(t, ro, fp)
-	snap := v.Snapshot(context.Background())
-	if snap.OSKeyCapable {
-		t.Error("OSKeyCapable = true, want false (system provider is not writable)")
-	}
-}
-
-func TestSnapshot_OSKeyCapable_SystemNotReady(t *testing.T) {
-	loweredCost(t)
-	sys := &unreadyProvider{testProvider: newTestProvider(ProviderSystem)}
-	fp := newTestFileProvider(ProviderFile)
-	v, _, _ := testVault(t, sys, fp)
-	snap := v.Snapshot(context.Background())
-	if snap.OSKeyCapable {
-		t.Error("OSKeyCapable = true, want false (system provider is not ready)")
-	}
-}
-
-func TestSnapshot_OSKeyCapable_NoSystemProvider(t *testing.T) {
-	loweredCost(t)
-	fp := newTestFileProvider(ProviderFile)
-	v, _, _ := testVault(t, fp)
-	snap := v.Snapshot(context.Background())
-	if snap.OSKeyCapable {
-		t.Error("OSKeyCapable = true, want false (no system provider)")
-	}
-}
-
-func TestSnapshot_OSKeyCapable_NonSystemWritableReady(t *testing.T) {
-	loweredCost(t)
-	// Only a file provider — ready+writable but not a system provider.
-	fp := newTestFileProvider(ProviderFile)
-	v, _, _ := testVault(t, fp)
-	snap := v.Snapshot(context.Background())
-	if snap.OSKeyCapable {
-		t.Error("OSKeyCapable = true, want false (only file provider, not system)")
-	}
-}
-
-func TestSnapshot_HasOSKeyPreserved(t *testing.T) {
-	loweredCost(t)
-	sys := newTestProvider(ProviderSystem)
-	fp := newTestFileProvider(ProviderFile)
-	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
-	snap := v.Snapshot(context.Background())
-	if !snap.HasOSKey {
-		t.Error("HasOSKey = false, want true after silent setup")
-	}
-	// OSKeyCapable should remain true even after setup.
-	if !snap.OSKeyCapable {
-		t.Error("OSKeyCapable = false, want true (system provider is still present)")
 	}
 }
 
@@ -2449,7 +2319,7 @@ func TestCreateNamed_PersistsRecordAndJournal(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
@@ -2501,7 +2371,7 @@ func TestCreateNamed_PersistsRecordAndJournal(t *testing.T) {
 func TestCreate_RecordsNamelessPasswordKind(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	id, err := v.Create(context.Background(), credential.NewSecret("pw"))
@@ -2526,7 +2396,7 @@ func TestCreate_RecordsNamelessPasswordKind(t *testing.T) {
 func TestDelete_RemovesRecord(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
@@ -2551,7 +2421,7 @@ func TestDelete_RemovesRecord(t *testing.T) {
 func TestRenameSecret_RecordRow(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
@@ -2582,7 +2452,7 @@ func TestRenameSecret_RecordRow(t *testing.T) {
 func TestRenameSecret_UnrecordedRefRow(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	ref := credential.SecretID(refSys)
@@ -2609,7 +2479,7 @@ func TestRenameSecret_UnrecordedRefRow(t *testing.T) {
 func TestRenameSecret_RejectsEmptyName(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
@@ -2630,7 +2500,7 @@ func TestRenameSecret_RejectsEmptyName(t *testing.T) {
 func TestRenameSecret_UnknownRow(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	if err := v.RenameSecret(context.Background(), "secrow:00000000000000000000000000000000", "x", nil); err == nil {
@@ -2641,7 +2511,7 @@ func TestRenameSecret_UnknownRow(t *testing.T) {
 func TestRenameSecret_RejectsSecretID(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
@@ -2671,7 +2541,7 @@ func TestRenameSecret_RejectsSecretID(t *testing.T) {
 func TestReplaceSecret_OverwritesValueKeepsReference(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	id, err := v.CreateNamed(context.Background(), credential.NewSecret("old value"),
@@ -2721,7 +2591,7 @@ func TestReplaceSecret_OverwritesValueKeepsReference(t *testing.T) {
 func TestReplaceSecret_UnrecordedRefRow(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	ref := credential.SecretID(refSys)
@@ -2761,7 +2631,7 @@ func TestReplaceSecret_UnrecordedRefRow(t *testing.T) {
 func TestReplaceSecret_RejectsSecretID(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
@@ -2777,7 +2647,7 @@ func TestReplaceSecret_RejectsSecretID(t *testing.T) {
 func TestReplaceSecret_UnknownRow(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	if err := v.ReplaceSecret(context.Background(), "secrow:00000000000000000000000000000000", credential.NewSecret("x"), nil); err == nil {
@@ -2788,7 +2658,7 @@ func TestReplaceSecret_UnknownRow(t *testing.T) {
 func TestReplaceSecret_RejectsSealedVault(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	id, err := v.CreateNamed(context.Background(), credential.NewSecret("pw"),
 		SecretMeta{Name: "named", Kind: "password"})
@@ -2809,7 +2679,7 @@ func TestReplaceSecret_JournalBeforePut(t *testing.T) {
 	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	v, _, _ := testVault(t, sys)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	id, err := v.CreateNamed(context.Background(), credential.NewSecret("old"),
 		SecretMeta{Name: "named", Kind: "password"})
@@ -2850,7 +2720,7 @@ func TestReplaceSecret_ProviderFailureLeavesJournalEntry(t *testing.T) {
 	loweredCost(t)
 	sys := newTestProvider(ProviderSystem)
 	v, _, _ := testVault(t, sys)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 
 	id, err := v.CreateNamed(context.Background(), credential.NewSecret("old"),
 		SecretMeta{Name: "named", Kind: "password"})
@@ -2886,7 +2756,7 @@ func TestCreateNamedResolved_ResolvesCollisionsAtomically(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	ctx := context.Background()
@@ -2949,7 +2819,7 @@ func TestCreateNamedResolved_EmptyNameStaysEmpty(t *testing.T) {
 	sys := newTestProvider(ProviderSystem)
 	fp := newTestFileProvider(ProviderFile)
 	v, _, _ := testVault(t, sys, fp)
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	_, name, err := v.CreateNamedResolved(context.Background(), credential.NewSecret("pw"),

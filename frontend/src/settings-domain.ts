@@ -370,49 +370,64 @@ export function applyAcceptedSnapshot(snapshot: AcceptedSnapshot): SettingsMirro
   }
 }
 
-// ── The routing matrix ─────────────────────────────────────────────────────
+// ── The notification matrix ────────────────────────────────────────────────
 
 /**
- * The key convention for one cell of the notification routing matrix.
+ * The key conventions for one cell of the notification matrix.
  *
- * **The convention is owned by `internal/notify/catalogue.go`** — `RouteSettingKey`
- * builds `notifications.route.<kindId>.<channelId>` from the catalogue's own ids, and
- * `Pair.SettingLabel` builds the cell's label as `<kind label> → <channel label>`.
- * This module is the citing half, and it restates the two literals below because
- * `settings.describe` carries no axis structure: the wire has a flat `Declaration`
- * list and nothing on it says which cell of which grid a key is. Putting the axes on
- * the wire would make every future grid a schema change, so the KEY carries them, as
- * it already did for the section and the group.
+ * **The convention is owned by `internal/notify/catalogue.go`** — routing
+ * settings use `notifications.route.<kindId>.<channelId>`, while centre
+ * settings use `notifications.centre.<kindId>`. Routing keys are offered
+ * delivery pairs; centre keys control visibility without delivering anything.
+ * This module is the citing half, and it restates the literals because
+ * `settings.describe` carries no axis structure: the wire has a flat
+ * `Declaration` list and nothing on it says which cell of which grid a key is.
+ * Putting the axes on the wire would make every future grid a schema change,
+ * so the KEY carries them, as it already did for the section and the group.
  *
- * What this half must never do is name a kind or a channel. It reads whatever ids the
- * keys carry, so a kind the backend adds next year gets its row here with no edit —
- * which is what `sectionBlocks` is tested on.
+ * What this half must never do is name a kind or a channel. It reads whatever
+ * ids the keys carry, so a kind the backend adds next year gets its row here
+ * with no edit — which is what `sectionBlocks` is tested on.
  */
 const ROUTE_SETTING_PREFIX = 'notifications.route.'
+const CENTRE_SETTING_PREFIX = 'notifications.centre.'
 
-/** The separator `Pair.SettingLabel` puts between the two halves of a cell's label. */
-const ROUTE_LABEL_SEPARATOR = ' → '
+/** The separator declaration labels put between the two halves of a cell label. */
+const MATRIX_LABEL_SEPARATOR = ' → '
 
-/** The two ids a cell key carries: its row (the kind) and its column (the channel). */
-export interface RouteCell {
+/** The two ids a matrix cell key carries: its row (the kind) and its column. */
+export interface NotificationMatrixCell {
   rowId: string
   columnId: string
 }
 
 /**
- * The ids in a routing-matrix cell key, or `null` when the key is not one.
+ * The ids in a notification-matrix cell key, or `null` when the key is not one.
  *
- * `null` is not a discard: a key under the namespace that does not parse is a
- * malformed cell, and `sectionBlocks` renders it as an ordinary setting row so the
- * control stays operable and visible. A malformed key that vanished into a grid nobody
- * could see it in is the failure this refusal exists to prevent.
+ * `null` is not a discard: a key under either namespace that does not parse is a
+ * malformed cell, and `sectionBlocks` renders it as an ordinary setting row so
+ * the control stays operable and visible. A malformed key that vanished into a
+ * grid nobody could see is the failure this refusal exists to prevent.
  */
-export function parseRouteSettingKey(key: string): RouteCell | null {
-  if (!key.startsWith(ROUTE_SETTING_PREFIX)) return null
-  const parts = key.slice(ROUTE_SETTING_PREFIX.length).split('.')
-  if (parts.length !== 2) return null
-  if (parts[0] === '' || parts[1] === '') return null
-  return { rowId: parts[0], columnId: parts[1] }
+export function parseNotificationMatrixSettingKey(key: string): NotificationMatrixCell | null {
+  let rowId: string
+  let columnId: string
+
+  if (key.startsWith(ROUTE_SETTING_PREFIX)) {
+    const parts = key.slice(ROUTE_SETTING_PREFIX.length).split('.')
+    if (parts.length !== 2) return null
+    ;[rowId, columnId] = parts
+  } else if (key.startsWith(CENTRE_SETTING_PREFIX)) {
+    const parts = key.slice(CENTRE_SETTING_PREFIX.length).split('.')
+    if (parts.length !== 1) return null
+    rowId = parts[0]
+    columnId = 'centre'
+  } else {
+    return null
+  }
+
+  if (rowId === '' || columnId === '') return null
+  return { rowId, columnId }
 }
 
 /** One axis entry of a matrix: the id from the key, the label from the declaration. */
@@ -460,10 +475,10 @@ export function sectionBlocks(decls: readonly Declaration[]): SectionBlock[] {
   let matrixAt = -1
 
   for (const decl of decls) {
-    const at = parseRouteSettingKey(decl.key)
+    const at = parseNotificationMatrixSettingKey(decl.key)
     // A cell key on anything but a toggle is not a cell of a toggle matrix. It
     // renders as an ordinary row rather than being dropped — the same refusal
-    // parseRouteSettingKey makes, for the same reason.
+    // parseNotificationMatrixSettingKey makes, for the same reason.
     if (at === null || decl.control !== 'toggle') {
       blocks.push({ kind: 'setting', decl })
       continue
@@ -477,6 +492,7 @@ export function sectionBlocks(decls: readonly Declaration[]): SectionBlock[] {
     if (!columns.some((c) => c.id === at.columnId)) {
       columns.push({ id: at.columnId, label: columnLabel ?? at.columnId })
     }
+
     const row = byRow.get(at.rowId)!
     if (!row.has(at.columnId)) row.set(at.columnId, decl)
 
@@ -505,9 +521,9 @@ export function sectionBlocks(decls: readonly Declaration[]): SectionBlock[] {
  * standing in for the missing half. Only the KEY decides placement.
  */
 function splitCellLabel(label: string): [string | undefined, string | undefined] {
-  const at = label.indexOf(ROUTE_LABEL_SEPARATOR)
+  const at = label.indexOf(MATRIX_LABEL_SEPARATOR)
   if (at === -1) return [label === '' ? undefined : label, undefined]
   const before = label.slice(0, at)
-  const after = label.slice(at + ROUTE_LABEL_SEPARATOR.length)
+  const after = label.slice(at + MATRIX_LABEL_SEPARATOR.length)
   return [before === '' ? undefined : before, after === '' ? undefined : after]
 }

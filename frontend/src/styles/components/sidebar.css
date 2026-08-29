@@ -49,6 +49,7 @@
    `pointer-events: none` on both, because the button is ONE target: a mark
    drawn on it must not be able to swallow the click meant for it. */
 .activity-bar-badge {
+  --badge-ring-color: var(--color-chrome-rail);
   position: absolute;
   top: 4px;
   right: 6px;
@@ -87,19 +88,12 @@
 }
 
 /* ── A view's unread badge on its rail button (nocx-708q.1) ────────────────
-   Placement only. The button becomes the positioning context and the badge is
-   pinned to its trailing-top corner, so a count neither widens the rail nor
-   pushes the glyph off centre; the Badge paints itself, and this surface does
-   not repaint it. The wrapper is the sidebar's OWN element — the badge is
-   decoration over a button that already has an accessible name, so it never
-   takes the pointer. */
+   The button becomes the positioning context, so a count neither widens the
+   rail nor pushes the glyph off centre. The badge itself is placed by
+   `.activity-bar-badge` above — the class the renderer draws. A second
+   `.activity-bar__badge` sat here saying nearly the same thing and matching
+   nothing, which is one placement question with two answers and the wrong one
+   free to rot unseen (nocx-63j6r). */
 .activity-bar .ui-icon-button {
   position: relative;
-}
-
-.activity-bar__badge {
-  position: absolute;
-  top: 5px;
-  right: 5px;
-  pointer-events: none;
 }

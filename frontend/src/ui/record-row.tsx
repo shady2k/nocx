@@ -19,7 +19,7 @@
  * The slots are named and typed:
  *
  *   title   the record's name, its own line.
- *   kind    the record's category badge — a typed {label, tone}, NOT a JSX
+ *   kind    the record's category badge — a typed {label, tone, description?}, NOT a JSX
  *           element, so a second badge is structurally impossible. One kind,
  *           one badge; a second badge is not one of the slots.
  *   meta    the record's descriptive line (address, model count, path).
@@ -85,7 +85,7 @@ export interface RecordRowProps {
   title: string
   /** The record's category badge. At most one: the composite renders the
    *  badge from this typed slot, so a surface cannot pass a second one. */
-  kind?: { label: string; tone?: BadgeTone }
+  kind?: { label: string; tone?: BadgeTone; description?: string }
   /** The record's descriptive line, beside the kind badge. */
   meta?: string
   /** The record's current state: the kit's dot + text, never a badge. */
@@ -144,6 +144,9 @@ export function RecordRow(props: RecordRowProps) {
     <CollectionRow
       actions={props.actions}
       onActivate={props.onActivate}
+      // The name below is the control (nocx-5xwub), so the row keeps the
+      // click and hands the keyboard to it.
+      activationInInfo={props.onActivate !== undefined}
       selected={props.selected}
       focused={props.focused}
       density={props.density}
@@ -174,10 +177,39 @@ export function RecordRow(props: RecordRowProps) {
             </span>
           </Show>
           <div class="ui-record-row__body">
-            <div class="ui-record-row__title">{props.title}</div>
+            {/* THE NAME IS THE CONTROL when the record can be opened
+                (nocx-5xwub). A row cannot announce the action itself: it is
+                a `listitem` its list requires, and it holds real buttons of
+                its own, so it can be neither a button nor the parent of one.
+                The record's name can — and it needs no invented label,
+                because `title` IS its accessible name.
+
+                The click is stopped here so the whole-row shortcut on the
+                row above does not fire the same activation a second time —
+                the disclosure's reasoning, applied to the other control in
+                the same row. */}
+            <Show
+              when={props.onActivate !== undefined}
+              fallback={<div class="ui-record-row__title">{props.title}</div>}
+            >
+              <button
+                type="button"
+                class="ui-record-row__title ui-record-row__open"
+                onClick={(e: MouseEvent) => {
+                  e.stopPropagation()
+                  props.onActivate?.(e)
+                }}
+              >
+                {props.title}
+              </button>
+            </Show>
             <div class="ui-record-row__meta">
               <Show when={props.kind} keyed>
-                {(kind) => <Badge tone={kind.tone ?? 'neutral'}>{kind.label}</Badge>}
+                {(kind) => (
+                  <Badge tone={kind.tone ?? 'neutral'} title={kind.description}>
+                    {kind.label}
+                  </Badge>
+                )}
               </Show>
               <Show when={props.meta}>
                 <span class="ui-record-row__meta-text">{props.meta}</span>

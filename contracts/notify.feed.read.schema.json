@@ -13,7 +13,7 @@
       "minimum": 0
     },
     "unreadCount": {
-      "description": "Occurrences whose read flag is false. This is the ONE number the bell badge and the dock badge both read (design §6); the tab activity dot answers a different question and keeps reading hasActivity.",
+      "description": "Every retained occurrence with readAt == null. This is the feed-wide wire count; the renderer's bell badge and dock badge derive a separate count restricted to kinds the centre shows (design §6).",
       "type": "integer",
       "minimum": 0
     },

@@ -6235,20 +6235,14 @@ export class TerminalContent extends BasePaneContent {
       showToast({ level: 'warning', message: 'Unlock the vault to save this key.' })
       return false
     }
-    if (status.osKeyCapable) {
-      try {
-        await this.vault.setup({})
-        return true
-      } catch {
-        showToast({
-          level: 'danger',
-          message: 'Could not set the vault up — the key was not saved.',
-        })
-        return false
-      }
-    }
-    // No OS key: setting up needs a passphrase, and a passphrase needs a
-    // dialog the vault layer owns. The receipt survives it.
+    // Setting up needs a passphrase, and a passphrase needs a dialog the
+    // vault layer owns. The receipt survives it.
+    //
+    // There used to be a branch above this one: where the OS keystore was
+    // writable, `vault.setup({})` set the vault up silently and the save went
+    // straight through. That mode is gone (ADR-0050 step 1) — it put the root
+    // key in the keychain, minted no recovery code, and left the person with
+    // no second way in — so every machine reaches the dialog now.
     this.hooks.onSetupVault?.()
     return false
   }

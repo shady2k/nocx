@@ -42,9 +42,7 @@ type Document struct {
 	DefaultProvider ProviderID            `json:"defaultProvider"`
 	Passphrase      *Envelope             `json:"passphrase,omitempty"`
 	Recovery        *Envelope             `json:"recovery,omitempty"`
-	HasOSKey        bool                  `json:"hasOSKey"`
 	AutoSealMinutes int                   `json:"autoSealMinutes"`
-	PreferredUnseal string                `json:"preferredUnseal"`
 	Secrets         []SecretRecord        `json:"secrets,omitempty"`
 	Journal         []JournalEntry        `json:"journal,omitempty"`
 }

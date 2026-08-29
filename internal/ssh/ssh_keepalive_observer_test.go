@@ -111,8 +111,8 @@ func TestKeepalive_ReportsAnUnresponsiveHostBeforeClosing(t *testing.T) {
 	fake := newKeepaliveFake(true)
 	reports := make(chan bool, 8)
 
-	stop, done := startKeepalive(fake, time.Millisecond, 3, func(responsive bool) {
-		reports <- responsive
+	stop, done := startKeepalive(fake, time.Millisecond, 3, func(r Reachability) {
+		reports <- r.Responsive
 	})
 	if stop == nil {
 		t.Fatal("startKeepalive returned nil stop for a non-zero interval")

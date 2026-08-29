@@ -153,6 +153,13 @@ export class FloatingPanel {
    *  moves under an anchored panel (scroll, resize). */
   private lastAnchorLeft: number | null | undefined
   private viewportListenersAttached = false
+  /** Watches the panel's OWN box while it is open. An anchored panel is
+   *  placed from its height, and its height is not final when the placement
+   *  is computed: applyGeometry sets the width first, the rows reflow against
+   *  it, and anything that changes the list afterwards changes the height
+   *  again. Placing once left the panel standing where it USED to fit — about
+   *  ten pixels off the six the anchor gap promises (nocx-sa1pk). */
+  private sizeObserver: ResizeObserver | null = null
   private readonly onViewportChange = (): void => {
     if (!this._open) return
     this.applyGeometry(this.lastAnchorLeft)
@@ -475,6 +482,13 @@ export class FloatingPanel {
     if (this.viewportListenersAttached) return
     window.addEventListener('resize', this.onViewportChange)
     document.addEventListener('scroll', this.onViewportChange, true)
+    // The panel's own height is the other thing the placement depends on,
+    // and unlike the viewport it changes from INSIDE. Re-place on it for the
+    // same reason and through the same path.
+    if (this.sizeObserver === null && typeof ResizeObserver !== 'undefined') {
+      this.sizeObserver = new ResizeObserver(() => this.onViewportChange())
+    }
+    this.sizeObserver?.observe(this.root)
     this.viewportListenersAttached = true
   }
 
@@ -482,6 +496,7 @@ export class FloatingPanel {
     if (!this.viewportListenersAttached) return
     window.removeEventListener('resize', this.onViewportChange)
     document.removeEventListener('scroll', this.onViewportChange, true)
+    this.sizeObserver?.disconnect()
     this.viewportListenersAttached = false
   }
 

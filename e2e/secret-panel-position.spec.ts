@@ -200,13 +200,21 @@ function expectInsideViewport(m: Measured): void {
   expect(m.panel.right).toBeLessThanOrEqual(m.viewport.width)
 }
 
-/** Anchored to its own field: the panel touches it, above or below. */
+/** Anchored to its own field: the panel touches it, above or below.
+ *
+ *  A FAILURE HERE HAS TO BE READABLE, because the number alone has been
+ *  reported four times without ever saying which of the panel's two legitimate
+ *  placements produced it (nocx-sa1pk). The whole measurement goes into the
+ *  message: the placement is recoverable from panel.bottom against
+ *  viewport.height — equal means the panel was CLAMPED to stay on screen,
+ *  which floating-panel.ts does deliberately when the panel fits neither above
+ *  nor below, and in that mode the six-pixel anchor gap is given up on purpose. */
 function expectAnchoredToField(m: Measured): void {
   const gap = Math.min(
     Math.abs(m.field.top - m.panel.bottom),
     Math.abs(m.panel.top - m.field.bottom),
   )
-  expect(gap).toBeLessThanOrEqual(16)
+  expect(gap, JSON.stringify(m)).toBeLessThanOrEqual(16)
 }
 
 test.describe('the secret panel opens where a person can reach it', () => {

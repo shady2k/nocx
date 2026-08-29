@@ -163,11 +163,11 @@ test.describe('the import ask on a stand with no Wails', () => {
     // ── The ask opens already holding OUR folder ──────────────────────────
     //
     // THROUGH THE PENCIL, because the destination is a SENTENCE until
-    // somebody disagrees with it (nocx-ysyy2). The field is still the truth
-    // and still where every refusal is said, but it is only on screen once
-    // it has been asked for — so this is the control a person clicks, and
-    // reading the value any other way would be reading a field nobody can
-    // see.
+    // somebody disagrees with it (nocx-ysyy2). The field is still the truth,
+    // but it is only on screen once it has been asked for — so this is the
+    // control a person clicks, and reading the value any other way would be
+    // reading a field nobody can see. A refusal no longer opens it: an
+    // outcome is a toast (nocx-bvxf2.6).
     await ask.getByRole('button', { name: 'Change where this goes' }).click()
     // Matched by shape rather than against a second derivation of the path:
     // `<DataDir>/collections` is resolved by internal/storage from the

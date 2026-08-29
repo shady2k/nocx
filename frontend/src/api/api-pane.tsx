@@ -798,7 +798,37 @@ export function ApiPane(props: ApiPaneProps) {
    */
   const [importRoute, setImportRoute] = createSignal<ApiRoute>(DIRECT_ROUTE)
   const [postmanDest, setPostmanDest] = createSignal('')
-  const [importRefused, setImportRefused] = createSignal('')
+  /**
+   * HOW THIS ASK REFUSES — a toast, and never a line in its own layout.
+   *
+   * Every refusal here is the OUTCOME OF A CALL: the archive could not be
+   * read, the import was refused, the picker failed, two files were dropped
+   * where one was asked for. The kit owns that distinction and states it
+   * (ui/README.md, §Toast): what belongs on a field is validation of what is
+   * IN the field, answered by editing it; the outcome of the call the box
+   * triggered is a toast.
+   *
+   * It used to be neither. The reason was rendered into the DESTINATION
+   * field's validation slot, and a refusal FORCED that field open so there
+   * would be somewhere to put it — so "this ZIP is not a Postman export"
+   * arrived as a complaint about a path nobody had disputed, and the ask
+   * changed shape to deliver it (nocx-bvxf2.6). That is the status line in
+   * the document flow the kit's Toast was built to replace.
+   *
+   * STICKY, because `danger` is: a failure the person was not looking at is
+   * a failure they never saw. ONE AT A TIME, for the reason
+   * `tellWhatWasNotImported` holds its own id — two sticky refusals leave
+   * one attempt's reason standing beside another's.
+   */
+  let standingRefusal = 0
+  const clearImportRefusal = (): void => {
+    dismissToast(standingRefusal)
+    standingRefusal = 0
+  }
+  const refuseImport = (message: string): void => {
+    dismissToast(standingRefusal)
+    standingRefusal = showToast({ level: 'danger', message })
+  }
   /**
    * Whether the person has TYPED into the destination.
    *
@@ -1627,7 +1657,7 @@ export function ApiPane(props: ApiPaneProps) {
    *  destination and not the export, because `dialog.openDirectory` chooses
    *  a directory — the export has a picker of its own over `dialog.openFile`
    *  (`browseForExport`), and the two capabilities retire independently. */
-  const browseForImportDest = (): void => browseInto(setPostmanDest, setImportRefused)
+  const browseForImportDest = (): void => browseInto(setPostmanDest, refuseImport)
 
   /**
    * PROPOSE WHERE THE COLLECTION LANDS, from the export's PLACE — the
@@ -1724,7 +1754,7 @@ export function ApiPane(props: ApiPaneProps) {
     // The last attempt's refusal belonged to the source it was refused
     // about. A new one is a new attempt, and leaving the old sentence up
     // would have it read as a verdict on this one.
-    setImportRefused('')
+    clearImportRefusal()
     const root = untrack(() => store.defaultRoot())
     if (source.kind === 'url') {
       setPostmanSource({ kind: 'url', url: source.url })
@@ -1743,7 +1773,7 @@ export function ApiPane(props: ApiPaneProps) {
     setPostmanSource({ kind: 'none' })
     setArchivePreview(null)
     clearPaste()
-    setImportRefused('')
+    clearImportRefusal()
     // The route belonged to the source that travelled. Letting it stand
     // would leave a connection chosen for a URL nobody is importing any
     // more, ready to ride out with the next one unasked.
@@ -1770,13 +1800,13 @@ export function ApiPane(props: ApiPaneProps) {
    */
   const chooseDocument = (files: File[]): void => {
     if (files.length > 1) {
-      setImportRefused(MULTIPLE_EXPORTS_REFUSAL)
+      refuseImport(MULTIPLE_EXPORTS_REFUSAL)
       return
     }
     const file = files[0]
     if (file === undefined) return
     const requestId = ++archivePreviewRequest
-    setImportRefused('')
+    clearImportRefusal()
     setArchivePreview(null)
     clearPaste()
     if (!isArchiveFile(file)) {
@@ -1811,7 +1841,7 @@ export function ApiPane(props: ApiPaneProps) {
           const held = postmanSource()
           if (held.kind !== 'archive' || held.bytes !== archiveBytes) return
           setArchivePreview(result.documents ?? [])
-          setImportRefused('')
+          clearImportRefusal()
         }),
       )
       .catch((err: unknown) =>
@@ -1819,7 +1849,7 @@ export function ApiPane(props: ApiPaneProps) {
           if (requestId !== archivePreviewRequest) return
           setPostmanSource({ kind: 'none' })
           setArchivePreview(null)
-          setImportRefused(err instanceof Error ? err.message : String(err))
+          refuseImport(err instanceof Error ? err.message : String(err))
         }),
       )
       .finally(() =>
@@ -1831,7 +1861,7 @@ export function ApiPane(props: ApiPaneProps) {
 
   const browseForExport = (): void => {
     if (!filePicker) return
-    setImportRefused('')
+    clearImportRefusal()
     void filePicker().then(
       (chosen) => {
         // An EMPTY path is a cancellation, not an answer — writing it into
@@ -1841,7 +1871,7 @@ export function ApiPane(props: ApiPaneProps) {
       },
       (err: unknown) => {
         setFilePickerLive(false)
-        setImportRefused(err instanceof Error ? err.message : String(err))
+        refuseImport(err instanceof Error ? err.message : String(err))
       },
     )
   }
@@ -1864,14 +1894,14 @@ export function ApiPane(props: ApiPaneProps) {
           // One import makes one collection, and N collections is N
           // destinations — a different question, and not one this ask can
           // answer by guessing which of them was meant.
-          setImportRefused(MULTIPLE_EXPORTS_REFUSAL)
+          refuseImport(MULTIPLE_EXPORTS_REFUSAL)
           return
         }
         const path = p.sources[0]?.localPath
         // No path means the drop was minted rather than described — a remote
         // tab. Nothing here can read a ticket.
         if (path === undefined || path === '') return
-        setImportRefused('')
+        clearImportRefusal()
         chooseExport(path)
       }),
     )
@@ -1917,7 +1947,7 @@ export function ApiPane(props: ApiPaneProps) {
     const root = store.defaultRoot()
     setPostmanDest(root === '' ? '' : `${root.replace(/[\\/]+$/, '')}/`)
     setDestTyped(false)
-    setImportRefused('')
+    clearImportRefusal()
     setImporting(true)
   }
 
@@ -2333,8 +2363,11 @@ export function ApiPane(props: ApiPaneProps) {
       .then((chosen) => store.importPostman(chosen, dest))
       .then(async (): Promise<void> => {
         const refused = store.error()
-        setImportRefused(refused)
-        if (refused !== '') return
+        if (refused !== '') {
+          refuseImport(refused)
+          return
+        }
+        clearImportRefusal()
         tellWhatWasNotImported(dest)
         const notOpened = await putInTree(dest)
         setImporting(false)
@@ -2348,7 +2381,7 @@ export function ApiPane(props: ApiPaneProps) {
         showToast({ level: 'success', message: `Imported into ${dest}` })
       })
       .catch((err: unknown) => {
-        setImportRefused(err instanceof Error ? err.message : String(err))
+        refuseImport(err instanceof Error ? err.message : String(err))
       })
       .finally(() => {
         setImportingBusy(false)
@@ -2923,13 +2956,13 @@ export function ApiPane(props: ApiPaneProps) {
                     return
                   }
                   setArchivePreview(result.documents ?? [])
-                  setImportRefused('')
+                  clearImportRefusal()
                 }),
               )
               .catch((err: unknown) =>
                 untrack(() => {
                   if (requestId !== archivePreviewRequest) return
-                  setImportRefused(err instanceof Error ? err.message : String(err))
+                  refuseImport(err instanceof Error ? err.message : String(err))
                 }),
               )
               .finally(() =>
@@ -2947,7 +2980,6 @@ export function ApiPane(props: ApiPaneProps) {
           // asks that runtime a second time.
           nativeWindow={nativeDrop !== undefined}
           onFiles={chooseDocument}
-          error={importRefused()}
           busy={importingBusy()}
           onBrowseFile={filePickerLive() ? browseForExport : undefined}
           onBrowse={pickerLive() ? browseForImportDest : undefined}

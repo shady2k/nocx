@@ -147,8 +147,6 @@ export interface PostmanImportDialogProps {
    *  handed over; refusing several is this ask's own rule and is stated in
    *  ONE place, beside the native half's refusal. */
   onFiles?: (files: File[]) => void
-  /** The backend's reason the last attempt was refused, or ''. */
-  error: string
   /** Inventory returned by the archive preview, or '' for non-archives. */
   archiveSummary?: string
   /** Whether a held archive has been previewed for the current destination. */
@@ -192,24 +190,26 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
   // there" about a folder the person never chose.
   const ready = () =>
     props.sourceLabel !== '' && nameable() && !props.busy && (props.archiveReady ?? true)
-  const refusal = (): string | undefined => (props.error !== '' ? props.error : undefined)
   const pasteRefusal = (): string | undefined =>
     props.pasteRefusal !== '' ? props.pasteRefusal : undefined
 
   /**
    * WHEN THE DESTINATION IS A FIELD RATHER THAN A SENTENCE.
    *
-   * The pencil is one of three reasons and the other two are not the
-   * person's. A REFUSAL has to be readable: the backend's sentence is
-   * rendered in this field's validation slot — that is where every refusal
-   * in this ask has always been said — and a soft degrade nobody can see is
-   * the failure AGENTS.md names, so a collapsed line may not swallow it. And
-   * a source that proposes NOTHING (spec §3 — a share link with no usable
-   * segment) leaves a summary with nothing to summarise, so the line opens
-   * as the empty required field it would otherwise be hiding.
+   * The pencil, or a source that proposes NOTHING (spec §3 — a share link
+   * with no usable segment), which leaves a summary with nothing to
+   * summarise and so opens as the empty required field it would otherwise be
+   * hiding.
+   *
+   * A REFUSAL IS NO LONGER ONE OF THE REASONS. It used to be: the backend's
+   * sentence was rendered in this field's validation slot, so any refusal
+   * forced the field open to carry it, and "this ZIP is not a Postman
+   * export" arrived as a complaint about a path nobody had disputed. A
+   * refusal still may not be swallowed — that is the soft-degrade rule — but
+   * the surface that keeps it visible is the kit's Toast, which is sticky at
+   * `danger` and does not live in this ask's layout (nocx-bvxf2.6).
    */
-  const editing = (): boolean =>
-    props.editingDest || refusal() !== undefined || (props.sourceLabel !== '' && !nameable())
+  const editing = (): boolean => props.editingDest || (props.sourceLabel !== '' && !nameable())
 
   const submit = (): void => {
     if (!ready()) return
@@ -398,7 +398,6 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
           label="New collection folder"
           description="Must not exist yet — the import arrives whole or not at all."
           value={props.dest}
-          error={refusal()}
           onInput={props.onDest}
           required
           trailing={

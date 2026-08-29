@@ -2119,9 +2119,10 @@ describe('a Postman export is imported through an ask', () => {
       expect(importAskBody().querySelector('.ui-file-input__native')).not.toBeNull(),
     )
     // The refusal costs the person nothing they typed, and is said where
-    // every other refusal in this ask is said.
+    // every other refusal in this ask is said — the toast, which is not part
+    // of this ask's layout and therefore not part of the workbench's text.
     expect(field('api-import-postman-file').value).toBe('/w/half-typed.json')
-    expect(workbench().textContent).toContain('method not found')
+    await vi.waitFor(() => expect(toastMessages()).toContain('method not found'))
   })
 
   it('cancelling the file picker leaves what was typed untouched', async () => {
@@ -2423,7 +2424,12 @@ describe('the import ask asks one question', () => {
     Object.defineProperty(input!, 'files', { value: [file] })
     fireEvent.change(input!)
 
-    await vi.waitFor(() => expect(destError()).toContain('archive preview refused'))
+    // THE OUTCOME OF THE CALL IS A TOAST, and the destination field is not
+    // its witness: the path nobody complained about does not carry the
+    // reason the archive could not be read (ui/README.md, §Toast).
+    await vi.waitFor(() => expect(toastMessages()).toContain('archive preview refused'))
+    expect(toasts().every((t) => t.level === 'danger')).toBe(true)
+    expect(destError()).toBe('')
     expect(archiveSummary()).toBe('')
     expect(button('Import').disabled).toBe(true)
     expect(importPostman).not.toHaveBeenCalled()
@@ -2812,7 +2818,8 @@ describe('the import ask accepts a drop', () => {
 
     expect(field('api-import-postman-file').value).toBe('')
     expect(field('api-import-postman-dest').value).toBe('/data/collections/')
-    expect(destError()).toMatch(/one export/i)
+    await vi.waitFor(() => expect(toastMessages().join(' ')).toMatch(/one export/i))
+    expect(destError()).toBe('')
   })
 
   it('ignores a drop that names no path — a remote tab mints a ticket instead', async () => {
@@ -3002,7 +3009,8 @@ describe('the import ask accepts a browser drop', () => {
 
     dropOnAsk([exportFile('a.json'), exportFile('b.json')])
 
-    await vi.waitFor(() => expect(destError()).toMatch(/one export/i))
+    await vi.waitFor(() => expect(toastMessages().join(' ')).toMatch(/one export/i))
+    expect(destError()).toBe('')
     expect(field('api-import-postman-file').value).toBe('')
     expect(field('api-import-postman-dest').value).toBe('/data/collections/')
   })
@@ -3147,17 +3155,26 @@ describe('an import opens its destination', () => {
     expect(toastMessages()).toHaveLength(1)
   })
 
-  it('a REFUSED import opens nothing and keeps the ask, with the reason under the field', async () => {
+  it('a REFUSED import opens nothing, keeps the ask, and says why in a sticky toast', async () => {
     const openCollection = vi.fn()
     await importInto('/data/collections/acme', {
       importPostman: vi.fn().mockRejectedValue(new Error('a folder is already there')),
       openCollection,
     })
 
-    await vi.waitFor(() => expect(destError()).toContain('a folder is already there'))
+    // The refusal is the outcome of the call the button triggered, so it is
+    // a toast — sticky, because a failure nobody happened to be looking at
+    // is a failure they never saw. It is NOT validation of the destination
+    // field, which is why that field's slot stays empty and the ask does not
+    // reshape itself to hold a sentence.
+    await vi.waitFor(() => expect(toastMessages()).toContain('a folder is already there'))
+    expect(toasts()[0]?.level).toBe('danger')
+    expect(destError()).toBe('')
+    // The ask keeps the shape it had: the destination is still the sentence
+    // it was, not a field forced open to carry a message.
+    expect(reachable(field('api-import-postman-dest'))).toBe(false)
     expect(dialogFor('api-import-postman-file').open).toBe(true)
     expect(openCollection).not.toHaveBeenCalled()
-    expect(toastMessages()).toHaveLength(0)
     // What was typed survives — the destination is what has to change.
     expect(field('api-import-postman-dest').value).toBe('/data/collections/acme')
   })

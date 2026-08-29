@@ -69,6 +69,59 @@ import { createHomeIsolation } from './home-isolation'
 
 const repoRoot = path.resolve(__dirname, '..')
 
+/**
+ * SOMEBODY IS AT THIS MACHINE FOR THE WHOLE RUN, and this socket is what
+ * says so.
+ *
+ * The vault seals when the last client detaches (design D9,
+ * internal/vault/presence.go): a count of zero that stays zero for ten
+ * seconds is read as the person having left, and the root key goes. That is
+ * right for the product — the coordinator outlives the window on purpose, so
+ * the alternative is a key sitting in a live process heap for days.
+ *
+ * It is wrong for a suite that keeps ONE backend for the whole run. Playwright
+ * runs its projects in sequence, so every page of the chromium project closes
+ * before the first page of the webkit project opens, and measured in this
+ * stand that gap is six and a half minutes. The vault sealed 10 s into it, and
+ * the second project then ran every one of its specs against a vault the first
+ * project had set up and nobody had unlocked. Two failed that way and neither
+ * says anything about the vault: connections-settings could not click the
+ * Authentication tab, because an unlock sheet is broadcast to every attached
+ * client and covered the form; snippets waited for "could not be resolved"
+ * from a secret lookup that raised a dialog instead of answering.
+ *
+ * A person who leaves the app open does not get sealed on, and the suite is
+ * that person. So the stand holds one control-plane connection from before the
+ * first spec until after the last, and the count never reaches zero at a
+ * project boundary. It sends nothing and reads nothing; being registered in
+ * the connection set is its entire job (internal/transport/client_presence.go
+ * counts len(conns)).
+ *
+ * WHAT THIS DOES NOT HIDE. Every spec about sealing raises a backend of its
+ * own through VaultBackend — vault.spec.ts, vault-settings.spec.ts,
+ * prompt-vault.spec.ts, vault-sealed-probe.spec.ts, history-persistence.spec.ts
+ * — so D9 is still exercised end to end, against a backend where the departure
+ * is the one the spec staged rather than one Playwright's scheduler happened
+ * to create.
+ */
+let keepalive: WebSocket | null = null
+
+/** Hold a client open against the stand's backend for the lifetime of the run.
+ *  Throws rather than warns: a run whose keepalive silently failed to connect
+ *  is the run this exists to prevent, and it would fail later, elsewhere, in
+ *  two specs that mention neither the vault nor the socket. */
+async function openKeepalive(port: number, token: string): Promise<WebSocket> {
+  const ws = new WebSocket(`ws://127.0.0.1:${port}/session`, `nocx.token.${token}`)
+  await new Promise<void>((resolve, reject) => {
+    const failed = (): void =>
+      reject(new Error(`e2e: the stand's keepalive client was refused on port ${port}`))
+    ws.addEventListener('open', () => resolve(), { once: true })
+    ws.addEventListener('error', failed, { once: true })
+    ws.addEventListener('close', failed, { once: true })
+  })
+  return ws
+}
+
 /** Where the run publishes what it built. Under the repo, git-ignored, and
  *  deliberately not a mkdtemp: a finished run leaves it behind to be read. */
 export const MANIFEST = path.join(repoRoot, '.e2e', 'stand.json')
@@ -294,6 +347,11 @@ export async function startStand(): Promise<StandManifest> {
   writeFileSync(tmp, JSON.stringify(manifest, null, 2))
   renameSync(tmp, MANIFEST)
 
+  // After the manifest, so a keepalive that is refused fails a stand that has
+  // already published what it built — the log and the port are readable while
+  // the failure is being read.
+  keepalive = await openKeepalive(port, token)
+
   const flush = () => {
     writeFileSync(path.join(logDir, 'backend.log'), backendLog)
     writeFileSync(path.join(logDir, 'vite.log'), viteLog)
@@ -309,6 +367,10 @@ let standFlush: (() => void) | null = null
 /** Take the stand down and keep its account. */
 export async function stopStand(): Promise<void> {
   standFlush?.()
+  // Before the backend is signalled: closing it after would be a detach
+  // reported by a transport that is already going away.
+  keepalive?.close()
+  keepalive = null
   for (const proc of [vite, backend]) {
     if (proc === null || proc.exitCode !== null) continue
     proc.kill('SIGTERM')

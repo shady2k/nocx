@@ -120,7 +120,16 @@ tty_flag=()
 # NOCX_E2E_CPUS=<n> caps it again for bisecting a suspected concurrency
 # defect. That is a debugging tool, not the gate — the same knob, with the
 # same meaning, as `scripts/ci-linux.sh`.
-cpus="${NOCX_E2E_CPUS:-0}"
+# Capped by default, for the same reason as scripts/ci-linux.sh: the argument
+# against caps is about what the run measures, not about what it costs a laptop
+# that is also running agents. NOCX_E2E_CPUS=0 restores the uncapped run.
+cpus="${NOCX_E2E_CPUS:-4}"
+
+# One heavy containerized run at a time on this machine.
+. "$(dirname "$0")/../scripts/gate-lock.sh"
+trap gate_lock_release EXIT INT TERM
+gate_lock_acquire
+
 cpu_flag=()
 # An `if`, not `[ … ] && …`: under `set -e` a false test as the last command
 # of a && list exits the script, so with 0 as the default the one-liner this

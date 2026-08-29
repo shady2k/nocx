@@ -123,12 +123,18 @@ nothing sits in front of a file read.
 1. Take the next task with the queue command in [What to work on next](#what-to-work-on-next).
 2. Read the relevant `AD`(s) before touching a boundary.
 3. **TDD**: red → green → refactor. The failing test comes first.
-4. Keep it green. **The gate is split by what it costs.** `pre-commit` is static and
-   takes seconds — formatting, linting, the ratchets, the wire contracts, the type
-   checkers — so committing in small steps stays cheap. `pre-push` runs the two
-   containerized suites (the Go module under `-race`, the whole vitest suite), once
-   per push instead of once per commit, scoped to what the push actually changes.
-   CI is still the source of truth, and `make ci-full` on the merged tree is still
+4. Keep it green, and **let the gate cost what it is worth.** `pre-commit` is static
+   and takes seconds — formatting, linting, the ratchets, the wire contracts, the type
+   checkers — so committing in small steps stays cheap. `pre-push` runs no test at
+   all: it publishes the issue tracker and gets out of the way. It used to run the two
+   containerized suites "scoped to what the push actually changes", and that scoping
+   never fired — git gives a pre-push hook the REMOTE's sha, which for a branch the
+   remote has not seen is forty zeros, so there was no range to diff and the hook ran
+   everything. Every task here gets its own worktree branch, so that was every push: a
+   frontend-only diff spawning `go test -race`, four minutes of two containers, three
+   at once the moment a second worktree pushed too (nocx-fwsw2). The suites are still
+   one command away by hand — `.githooks/containerized-tests.sh`. What catches a break
+   is CI, which is the source of truth, and `make ci-full` on the merged tree, which is
    whoever integrates.
 5. Update the bead; record any non-obvious decision as an ADR in `docs/decisions/`.
 

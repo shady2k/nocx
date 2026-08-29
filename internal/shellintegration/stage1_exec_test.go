@@ -12,6 +12,8 @@ import (
 	"syscall"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/bootstrapstream"
 )
 
 // Stage-1 exercised AS SHELL, on a real terminal, driven exactly as the Go
@@ -938,7 +940,7 @@ func (l *loaderStream) ReadLine(ctx context.Context, timeout time.Duration) (str
 				return "", io.EOF
 			}
 		case <-deadline:
-			return "", ErrBootstrapDeadline
+			return "", bootstrapstream.ErrDeadline
 		case <-ctx.Done():
 			return "", ctx.Err()
 		}

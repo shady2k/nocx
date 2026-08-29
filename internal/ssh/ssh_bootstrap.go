@@ -3,10 +3,12 @@ package ssh
 import (
 	"bytes"
 	"context"
-	"errors"
+	"fmt"
 	"io"
 	"sync"
 	"time"
+
+	"github.com/shady2k/nocx/internal/bootstrapstream"
 )
 
 // The session side of the bootstrap: the byte streams it runs on, and the
@@ -18,11 +20,10 @@ import (
 // outcome name live in internal/shellintegration, and the composition root
 // adapts the two declarations exactly as it does for the launcher.
 
-// ErrBootstrapDeadline is what ReadLine returns when the deadline passed
-// before a line completed. It is declared here as well as in
-// internal/shellintegration because neither package may import the other; the
-// values are compared by the CALLER's Is, so each side matches its own.
-var ErrBootstrapDeadline = errors.New("ssh: bootstrap deadline")
+// The two errors this reader can raise are internal/bootstrapstream's, not
+// this package's. They cross the seam to a consumer that tests them with
+// errors.Is, so there is exactly one value per fact; see that package for the
+// three-sentinel defect this replaced.
 
 // ErrInputQuarantined is returned by Write while the session is
 // bootstrapping. A keystroke in that window is REFUSED, not buffered: a
@@ -248,7 +249,8 @@ func (f *sessionFeed) ReadLine(ctx context.Context, timeout time.Duration) (stri
 			// dropping them: this session is about to become an
 			// ordinary terminal and they are its output.
 			f.pending = line
-			return "", errors.New("ssh: bootstrap line exceeds the bound")
+			return "", fmt.Errorf("%w: %d bytes with no line ending (bound %d)",
+				bootstrapstream.ErrLineTooLong, len(line), maxBootstrapLine)
 		}
 		select {
 		case chunk, ok := <-f.chunks:
@@ -262,7 +264,7 @@ func (f *sessionFeed) ReadLine(ctx context.Context, timeout time.Duration) (stri
 			f.pending = chunk
 		case <-deadline:
 			f.pending = line
-			return "", ErrBootstrapDeadline
+			return "", bootstrapstream.ErrDeadline
 		case <-ctx.Done():
 			f.pending = line
 			return "", ctx.Err()

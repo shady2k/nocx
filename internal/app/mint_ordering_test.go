@@ -9,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/bootstrapstream"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/ssh"
 )
@@ -42,7 +43,7 @@ func (s *scriptedStream) ReadLine(_ context.Context, _ time.Duration) (string, e
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if len(s.lines) == 0 {
-		return "", ssh.ErrBootstrapDeadline
+		return "", bootstrapstream.ErrDeadline
 	}
 	line := s.lines[0]
 	s.lines = s.lines[1:]
@@ -188,7 +189,7 @@ func (f *refusedFar) ReadLine(ctx context.Context, _ time.Duration) (string, err
 		return shellintegration.OutcomePrefix +
 			shellintegration.OutcomeToken(shellintegration.OutcomeBootstrapAccepted), nil
 	}
-	return "", ssh.ErrBootstrapDeadline
+	return "", bootstrapstream.ErrDeadline
 }
 
 func (f *refusedFar) Write(p []byte) (int, error) {

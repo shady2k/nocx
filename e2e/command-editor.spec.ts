@@ -358,19 +358,28 @@ test.describe('command editor (nocx-4ff)', () => {
     await expect.poll(draft).toBe('e')
     const typed = await cardHeight()
 
-    // The slack is the measured cost of a mechanism that belongs to CM6 and
-    // not to this card. When the completion has a candidate it draws the ghost
-    // as a CM6 WIDGET, and CM6 puts an `<img class="cm-widgetBuffer">` beside
-    // every widget — `height: 1em`, `vertical-align: text-top` — which lifts
-    // the line box. The lift is per-ENGINE, and the number here was first
-    // measured on one of them:
+    // NO SLACK. This case used to allow two pixels, and the slack was one
+    // real defect wearing a tolerance: when the completion has a candidate it
+    // draws the ghost as a CM6 WIDGET, and CM6 puts an
+    // `<img class="cm-widgetBuffer">` beside every widget — `height: 1em`,
+    // `vertical-align: text-top` — which lifts the line box by an amount that
+    // depends on the font's metrics, so it differed per engine:
     //
     //   webkit    16.796875 → 16.890625   0.09375px
     //   chromium  16.796875 → 17.796875   1px exactly
+    //   WKWebView 16       → 17           1px, the shipped app (nocx-dvdfx
+    //                                     round: the owner's screenshots)
     //
     // (chromium measured 2026-08-21 in e2e/run-in-container.sh: font-size
-    // 14px, line-height 16.8px, the buffer img 14px tall.) A `< 1` bound was
-    // the webkit figure rounded up, and chromium lands exactly on it.
+    // 14px, line-height 16.8px, the buffer img 14px tall.) The card and
+    // everything above it moved on the first keystroke, in the product.
+    //
+    // style.css now aligns that image to the top of the LINE BOX instead, so
+    // the lift is zero on every engine and every font by construction, and
+    // this case says so: the bound that was "less than the defect" is now
+    // "the card does not move". `cmd-output-wrap.test.ts` states the other
+    // half of the same rule — the buffer may be aligned, and may never carry
+    // the width/indent arithmetic the old target-token widget needed.
     //
     // Whether the ghost is there at all used to depend on what the stand's
     // shell history held. It no longer does: since the carrier design's §8
@@ -380,19 +389,17 @@ test.describe('command editor (nocx-4ff)', () => {
     // nothing before, which is why this case turned red without the card
     // changing.
     //
-    // The defect this case guards is 10px — a whole scrollbar gutter reserved
-    // for an empty document — so two pixels of slack still fails on it by a
-    // factor of five. THE 1px IS NOT NOTHING: it is a real wobble of the card
-    // and everything above it on the first keystroke, and it is written up as
-    // such in REPORT-e2e-triage.md. It is not fixed here because the fix is
-    // in the editor and CM6's buffer is deliberately left unstyled by this
-    // repo (`cmd-output-wrap.test.ts` asserts no rule targets it).
-    expect(Math.abs(typed - empty)).toBeLessThan(2)
+    // Polled rather than sampled, for the reason the second half below gives:
+    // the scroller settles a beat after the line box does, and a height read
+    // before it had settled was the whole of an earlier failure.
+    await expect
+      .poll(async () => Math.abs((await cardHeight()) - empty) < 0.01, { timeout: 5_000 })
+      .toBe(true)
+    expect(typed).toBeGreaterThan(0)
 
     // And back again when the draft is emptied — the height belongs to the
-    // box, not to whether anything is in it. STILL A SUB-PIXEL BOUND here,
-    // and it is the CM6 buffer's absence that earns it: an empty draft has
-    // no candidates, so there is no ghost and no widget beside it.
+    // box, not to whether anything is in it. A sub-pixel bound both ways now:
+    // whether a ghost is on screen is no longer a question about height.
     //
     // WAITED FOR, not sampled once. An empty document is not yet a settled
     // one: the ghost's line box shrinks back immediately and `.cm-scroller`

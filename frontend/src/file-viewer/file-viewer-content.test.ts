@@ -369,3 +369,53 @@ describe('FileViewerContent — read-only', () => {
     content.dispose()
   })
 })
+
+// ── Opening at a line (terminal links) ────────────────────────────────────
+//
+// A path printed as `docs/architecture.md:101` opens the file AT 101, and
+// the line stays marked once the scroll has happened — otherwise the user
+// arrives somewhere in a file and has to find the line again by eye, which
+// is the work the link was supposed to save.
+
+describe('FileViewerContent — opening at a line', () => {
+  async function mountAt(line: number | undefined, text: string): Promise<Mounted> {
+    const binding = new FakeBinding()
+    const content = new FileViewerContent(
+      line === undefined ? TARGET : { ...TARGET, line },
+      binding.deps,
+    )
+    const host = document.createElement('div')
+    document.body.append(host)
+    await content.mount(host, {} as PaneHost, new AbortController().signal)
+    binding.resolveNext({ text })
+    await Promise.resolve()
+    await Promise.resolve()
+    return { content, binding, host }
+  }
+
+  it('marks the requested line', async () => {
+    const { host, content } = await mountAt(3, 'one\ntwo\nthree\nfour\nfive\n')
+    expect(host.querySelector('.cm-activeLine')?.textContent).toBe('three')
+    content.dispose()
+  })
+
+  it('marks nothing when no line was requested', async () => {
+    const { host, content } = await mountAt(undefined, 'one\ntwo\nthree\n')
+    expect(host.querySelector('.cm-activeLine')).toBeNull()
+    content.dispose()
+  })
+
+  it('clamps a line past the end of a file that has since shrunk', async () => {
+    const { host, content } = await mountAt(999, 'one\ntwo\n')
+    // Trailing newline gives a final empty line; the clamp lands on it
+    // rather than refusing to open the file at all.
+    expect(host.querySelector('.cm-activeLine')).not.toBeNull()
+    content.dispose()
+  })
+
+  it('clamps a line of zero rather than throwing', async () => {
+    const { host, content } = await mountAt(0, 'one\ntwo\n')
+    expect(host.querySelector('.cm-activeLine')?.textContent).toBe('one')
+    content.dispose()
+  })
+})

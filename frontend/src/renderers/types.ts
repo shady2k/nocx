@@ -77,6 +77,39 @@ export interface RenderFenceEvent {
 
 export type RenderFenceCallback = (event: RenderFenceEvent) => void
 
+// ── Links (nocx-8yg.8) ────────────────────────────────────────────────────
+
+/** A half-open [from, to) range of UTF-16 offsets into one row's text. */
+export interface RendererLinkRange {
+  from: number
+  to: number
+}
+
+/**
+ * The link POLICY, supplied from above the renderer.
+ *
+ * AD-6 in miniature: the renderer owns the grid, so it is the only party
+ * that can say what text is on a row and where a pointer landed on it — and
+ * it owns nothing else here. What counts as a link, whether the modifier is
+ * held, and what happens on activation are all decisions made above it, in
+ * terminal-links/, by the same module that answers them for the frozen DOM
+ * scrollback. Two grammars for one question is the failure this shape exists
+ * to prevent.
+ */
+export interface LinkPolicy {
+  /** The ranges of `lineText` to offer as links. An empty array is a normal
+   *  answer and the one returned while the modifier is not held: a link the
+   *  engine draws but a click cannot follow is worse than no link. */
+  ranges(lineText: string): RendererLinkRange[]
+  /** The user activated the link at [from, to) of that row. */
+  activate(lineText: string, from: number, to: number): void
+  /** The user activated an OSC 8 hyperlink a PROGRAM declared. Separate
+   *  from `activate` because the url did not come from the grammar and must
+   *  not be re-derived from the visible text — the whole point of OSC 8 is
+   *  that the two differ (ADR-0029: a program may ask, never choose). */
+  activateHyperlink(url: string): void
+}
+
 export interface TerminalRenderer {
   mount(container: HTMLElement): Promise<void>
   /**
@@ -217,6 +250,14 @@ export interface TerminalRenderer {
   /** When readOnly, the terminal ignores keyboard input but text selection
    *  still works. Used when the DOM editor owns input at a prompt. */
   setReadOnly(readOnly: boolean): void
+
+  /** Install (or, with null, remove) the link policy for the LIVE region —
+   *  the running command's rows. The frozen scrollback is DOM and is reached
+   *  directly; this covers the half of the terminal that is still a grid.
+   *  Optional so a renderer without link support degrades to a scrollback
+   *  that links and a live region that does not, rather than failing to
+   *  mount. */
+  setLinkPolicy?(policy: LinkPolicy | null): void
 
   focus(): void
   readonly cols: number

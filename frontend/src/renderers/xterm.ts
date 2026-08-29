@@ -6,6 +6,7 @@ import '@xterm/xterm/css/xterm.css'
 import { FONT_FAMILY, FONT_SIZE, LINE_HEIGHT } from './font'
 import type {
   CommandMarker,
+  LinkPolicy,
   CommandMarkerCallback,
   CommandMarkerEvent,
   CwdCallback,
@@ -304,6 +305,11 @@ export class XtermRenderer implements TerminalRenderer {
    *  established. */
   private _captureTracker: CaptureIdentityTracker | null = null
   private _disposed = false
+  /** The link policy and the engine registration it produced. Kept apart so
+   *  a policy installed BEFORE mount is honoured at mount, which is the
+   *  order the composition root actually wires things in. */
+  private _linkPolicy: LinkPolicy | null = null
+  private _linkProvider: { dispose(): void } | null = null
 
   async mount(container: HTMLElement): Promise<void> {
     this.container = container
@@ -351,6 +357,7 @@ export class XtermRenderer implements TerminalRenderer {
       theme: getCurrentTheme(),
     })
     this.term = term
+    this._applyLinkPolicy()
 
     // The capture tracker (nocx-3j9b) lives for the renderer's whole life:
     // its generation counts every write, buffer switch, resize, clear and
@@ -901,6 +908,66 @@ export class XtermRenderer implements TerminalRenderer {
     if (this.term) this.term.options.disableStdin = readOnly
   }
 
+  setLinkPolicy(policy: LinkPolicy | null): void {
+    this._linkPolicy = policy
+    this._applyLinkPolicy()
+  }
+
+  /**
+   * Wire (or unwire) the policy into the engine. Two mechanisms, because
+   * xterm has two: a link PROVIDER, asked per row for ranges we found in the
+   * text, and a link HANDLER, which is how OSC 8 — a hyperlink the program
+   * itself declared — is delivered. The provider never sees an OSC 8 link
+   * and the handler never sees a detected one, so both are needed and
+   * neither is a fallback for the other.
+   *
+   * The provider is asked on hover, so returning nothing while the modifier
+   * is up is what keeps the engine's own underline from advertising a click
+   * that would be ignored.
+   */
+  private _applyLinkPolicy(): void {
+    const term = this.term
+    if (!term) return
+    this._linkProvider?.dispose()
+    this._linkProvider = null
+    const policy = this._linkPolicy
+    if (!policy) {
+      term.options.linkHandler = null
+      return
+    }
+    term.options.linkHandler = {
+      activate: (_event, text) => policy.activateHyperlink(text),
+    }
+    this._linkProvider = term.registerLinkProvider({
+      provideLinks: (y, callback) => {
+        const buf = term.buffer.active
+        // `y` is 1-based and VIEWPORT-relative; the buffer is 0-based and
+        // absolute. Conflating them offers links from whatever row happens
+        // to sit that far down the scrollback.
+        const row = buf.getLine(buf.viewportY + y - 1)
+        if (!row) {
+          callback(undefined)
+          return
+        }
+        const text = row.translateToString(true)
+        const ranges = policy.ranges(text)
+        if (ranges.length === 0) {
+          callback(undefined)
+          return
+        }
+        callback(
+          ranges.map((r) => ({
+            // xterm columns are 1-based and the end is INCLUSIVE; ours are
+            // 0-based and half-open.
+            range: { start: { x: r.from + 1, y }, end: { x: r.to, y } },
+            text: text.slice(r.from, r.to),
+            activate: () => policy.activate(text, r.from, r.to),
+          })),
+        )
+      },
+    })
+  }
+
   focus(): void {
     this.term?.focus()
   }
@@ -921,6 +988,12 @@ export class XtermRenderer implements TerminalRenderer {
   }
   dispose(): void {
     if (this._disposed) return
+    // The provider holds a closure over the policy, which holds the tab's
+    // opener; leaving it registered on a disposed terminal keeps the whole
+    // chain alive behind a tab the user closed.
+    this._linkProvider?.dispose()
+    this._linkProvider = null
+    this._linkPolicy = null
     this._disposed = true
     // Tell the frame tracker BEFORE the subscriptions go away: a capture
     // parked on the parse fence must settle (reject) now, while its waiter

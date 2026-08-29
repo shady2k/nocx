@@ -1,8 +1,10 @@
 package shellintegration
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
@@ -872,5 +874,92 @@ func TestManifestEntrySymlinkInvalidates(t *testing.T) {
 	var se *SymlinkError
 	if !errors.As(err, &se) {
 		t.Fatalf("want SymlinkError from Verify, got %T: %v", err, err)
+	}
+}
+
+// TestPublishReplacesAStaleLaunchCarrier is the convergence rule the carrier
+// did not have: a host that received ~/.nocx/launch from an older nocx must
+// get the current one on the next publish, WITHOUT anybody deleting a file by
+// hand. The interesting path is the one that skips: the version check
+// short-circuits the whole generation when the manifest already names this
+// version or a newer one, and the carrier is not part of a generation — so a
+// host that is "already-installed" is exactly the host whose carrier used to
+// be unreachable forever.
+func TestPublishReplacesAStaleLaunchCarrier(t *testing.T) {
+	pub, home, _ := newTestPublisher(t)
+	root := filepath.Join(home, dirName)
+	current := []byte("#!/bin/sh\nexec \"${SHELL:-/bin/sh}\" -l\n")
+
+	b := testBundle("10")
+	b.Files = append(b.Files, BundleFile{Name: launchName, Mode: 0o700, Data: current})
+	if _, err := pub.Publish(b); err != nil {
+		t.Fatalf("first Publish: %v", err)
+	}
+
+	// The state this bead is about: a carrier from a protocol nobody speaks
+	// any more, beside a manifest that is perfectly current.
+	stale := []byte("#!/bin/sh\n# a carrier from a protocol nobody speaks any more\nexit 1\n")
+	// 0600 on purpose: the mode is what a chmod'd or otherwise foreign carrier
+	// looks like, and the replacement must restore 0700 as well as the bytes.
+	if err := os.WriteFile(filepath.Join(root, launchName), stale, 0o600); err != nil {
+		t.Fatalf("plant stale carrier: %v", err)
+	}
+
+	res, err := pub.Publish(b)
+	if err != nil {
+		t.Fatalf("second Publish: %v", err)
+	}
+	if res.Published {
+		t.Errorf("the generation must still be skipped, got %+v", res)
+	}
+	if got := readFileT(t, filepath.Join(root, launchName)); !bytes.Equal(got, current) {
+		t.Errorf("stale carrier survived a publish: got %q", got)
+	}
+	if got := statModeT(t, filepath.Join(root, launchName)).Perm(); got != 0o700 {
+		t.Errorf("replaced carrier mode = %04o, want 0700", got)
+	}
+	if entries, derr := os.ReadDir(filepath.Join(root, tmpName)); derr == nil && len(entries) != 0 {
+		t.Errorf("staging residue left behind: %v", names(entries))
+	}
+}
+
+// TestReplacedLaunchCarrierKeepsTheRunningShellsBytes is why the replacement
+// is a rename rather than a truncate-in-place: another session on the same
+// host may be executing the carrier at this moment, and a shell reads its
+// script incrementally. An open handle must go on seeing the bytes it started
+// with.
+func TestReplacedLaunchCarrierKeepsTheRunningShellsBytes(t *testing.T) {
+	pub, home, _ := newTestPublisher(t)
+	root := filepath.Join(home, dirName)
+
+	b := testBundle("10")
+	old := []byte("#!/bin/sh\n# the carrier a session is running right now\nexit 0\n")
+	b.Files = append(b.Files, BundleFile{Name: launchName, Mode: 0o700, Data: old})
+	if _, err := pub.Publish(b); err != nil {
+		t.Fatalf("first Publish: %v", err)
+	}
+
+	running, err := os.Open(filepath.Join(root, launchName)) // #nosec G304 — test-only path.
+	if err != nil {
+		t.Fatalf("open the carrier: %v", err)
+	}
+	defer func() { _ = running.Close() }()
+
+	next := testBundle("11")
+	current := []byte("#!/bin/sh\n# the carrier this nocx ships\nexit 0\n")
+	next.Files = append(next.Files, BundleFile{Name: launchName, Mode: 0o700, Data: current})
+	if _, perr := pub.Publish(next); perr != nil {
+		t.Fatalf("second Publish: %v", perr)
+	}
+
+	if got := readFileT(t, filepath.Join(root, launchName)); !bytes.Equal(got, current) {
+		t.Errorf("carrier not replaced on the publishing path: got %q", got)
+	}
+	held, err := io.ReadAll(running)
+	if err != nil {
+		t.Fatalf("read the held handle: %v", err)
+	}
+	if !bytes.Equal(held, old) {
+		t.Errorf("the running shell's handle changed under it: got %q, want %q", held, old)
 	}
 }

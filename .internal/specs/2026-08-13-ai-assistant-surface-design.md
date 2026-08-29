@@ -191,6 +191,21 @@ Two rules fall out and both are load-bearing:
 - **Key ownership binds to a live session generation.** After a reconnect, the same-looking
   target is a different process.
 
+A summon over a running program reuses that machine and the **same `CommandEditor`** for
+follow-ups. The existing editor and every summoned answer are reparented into one absolute
+presentation stack: the current streaming answer hides the composer; any wire-terminal state
+returns the composer below all readable answers; and a new follow-up repeats that transition.
+Escape thaws the program without discarding those answer nodes, and command completion moves
+each node once into consecutive scrollback seats in ask order. Because the stack is absolute and
+only reparents existing DOM, this adds neither terminal geometry nor a new ownership authority.
+
+**The answers are bounded, and the bound is the feature.** This is asking ABOUT a program
+without leaving it, so the answer list keeps the `min(50vh, 36em)` cap the single pinned answer
+carried before the stack existed, and scrolls inside it. The stack's own `max-height: 100%` is
+only the outer bound — the pane is `position: absolute; inset: 0`, so that is the whole pane, and
+after Escape, which keeps the answers and takes the composer away, nothing else would stop them
+covering the program the question is about.
+
 ### 3.4 The gesture extends xterm's existing escape hatch
 
 xterm already owns "the user wants to select, not to click at the program": **Option on
@@ -792,6 +807,11 @@ Assertions, in the bead, authored before the implementation.
   **two sources, both recorded**, and neither silently substituted for the other.
 - The program exits while the panel is open: **assert** the UI stops offering to hand keys to
   it, and no byte is delivered to the dead session.
+- A summoned answer reaches any terminal state while the program still runs: **assert** the
+  same composer returns beneath it without overlap, the renderer remains read-only, a follow-up
+  can finish with both answers readable in ask order, and neither submit sends PTY input or
+  changes PTY geometry. Escape preserves those answer nodes; program exit seats each exactly
+  once after the command, in the same order.
 - Two asks in flight: cancelling one leaves the other streaming, and deltas land on the right
   entry. Cancel is by run id.
 - **The backend restarts mid-answer.** On start, the run is `interrupted`, the block says so,

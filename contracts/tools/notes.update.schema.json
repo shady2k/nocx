@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "body"],
+  "properties": { "id": { "type": "string" }, "body": { "type": "string" } },
+  "$defs": {
+    "result": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "note"],
+      "properties": {
+        "status": { "const": "updated" },
+        "note": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["id", "title", "body", "createdAt", "updatedAt"],
+          "properties": {
+            "id": { "type": "string" },
+            "title": { "type": "string" },
+            "body": { "type": "string" },
+            "createdAt": { "type": "integer" },
+            "updatedAt": { "type": "integer" }
+          }
+        }
+      }
+    }
+  }
+}

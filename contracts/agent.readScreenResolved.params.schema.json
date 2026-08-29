@@ -1,0 +1,102 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.readScreenResolved.params.schema.json",
+  "title": "AgentReadScreenResolvedParams",
+  "description": "Params for agent.readScreenResolved.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["requestId", "outcome"],
+  "properties": {
+    "requestId": { "type": "string", "minLength": 1 },
+    "outcome": { "type": "string", "enum": ["frame", "failed"] },
+    "error": { "type": ["string", "null"], "maxLength": 512 },
+    "rows": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["kind", "cells"],
+        "properties": {
+          "kind": { "type": "string", "const": "cells" },
+          "cells": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "additionalProperties": false,
+              "required": ["char", "attrs"],
+              "properties": {
+                "char": { "type": "string" },
+                "attrs": {
+                  "type": "object",
+                  "additionalProperties": false,
+                  "properties": {
+                    "fg": { "type": ["string", "null"] },
+                    "bg": { "type": ["string", "null"] },
+                    "bold": { "type": "boolean" },
+                    "italic": { "type": "boolean" },
+                    "dim": { "type": "boolean" },
+                    "underline": { "type": "boolean" },
+                    "inverse": { "type": "boolean" },
+                    "blink": { "type": "boolean" },
+                    "strikethrough": { "type": "boolean" },
+                    "overline": { "type": "boolean" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "cursor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["line", "col"],
+      "properties": {
+        "line": { "type": "integer", "minimum": 0 },
+        "col": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "identity": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["buffer", "cols", "rows", "generation"],
+      "properties": {
+        "buffer": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["kind"],
+          "properties": {
+            "kind": { "type": "string", "enum": ["normal", "alternate"] },
+            "altSession": { "type": ["integer", "null"] }
+          }
+        },
+        "cols": { "type": "integer", "minimum": 1 },
+        "rows": { "type": "integer", "minimum": 1 },
+        "generation": { "type": "integer", "minimum": 0 }
+      }
+    },
+    "range": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end"],
+      "properties": {
+        "start": { "type": "integer", "minimum": 0 },
+        "end": { "type": "integer", "minimum": 0 }
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": { "properties": { "outcome": { "const": "frame" } }, "required": ["outcome"] },
+      "then": {
+        "required": ["rows", "cursor", "identity", "range"],
+        "properties": { "error": { "type": "null" } }
+      }
+    },
+    {
+      "if": { "properties": { "outcome": { "const": "failed" } }, "required": ["outcome"] },
+      "then": { "required": ["error"] }
+    }
+  ]
+}

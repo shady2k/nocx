@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/git.close.params.schema.json",
+  "title": "GitCloseParams",
+  "description": "Params for git.close.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bindingId"],
+  "properties": { "bindingId": { "type": "string", "pattern": "^[0-9a-f]{32}$" } }
+}

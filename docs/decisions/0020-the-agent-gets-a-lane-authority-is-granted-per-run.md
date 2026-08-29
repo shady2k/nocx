@@ -247,3 +247,69 @@ execution. The concrete approval UI.
 
 An agent needs to act across two workspaces at once — at which point the grant is already
 the right object to widen, and the workspace is already not the thing being widened.
+
+## Amendment (2026-08-28) — app-surface resource vocabulary
+
+The closed `ResourceKind` set is extended only where the four-part test requires
+an independently grantable, canonically identifiable and enforceable resource.
+This amendment is additive; the original decision and its earlier amendment
+remain above exactly as written.
+
+**Note — content sub-scope, not a new kind.** A note passes the test as a
+grantable unit: a person may permit one note while refusing its sibling notes,
+the note id is stable, `note/<id>` has exact equality and containment, and a
+note-scoped capability can refuse every other note. It is therefore represented
+by `ResourceContent` with the canonical sub-scope `note/<id>`, rather than by a
+`ResourceNote` kind.
+
+**Snippet — content sub-scope, not a new kind.** A snippet has the same
+independent grant decision, stable identity, exact equality and containment,
+and capability boundary as a note. It is represented by
+`ResourceContent` with `snippet/<id>`. Notes and snippets remain sibling
+sub-scopes: neither contains the other.
+
+**Workspace — new kind.** A workspace passes all four parts. It is a
+person-visible unit that may be granted while another workspace is denied, its
+id is stable across restart, its hierarchy has meaningful parent-child
+containment, and a narrowed capability can enforce the workspace boundary.
+`ResourceWorkspace` uses `workspace/<workspace-id>` as its root canonical id.
+Tabs and panes are represented beneath that root as
+`workspace/<workspace-id>/tab/<tab-id>` and
+`workspace/<workspace-id>/tab/<tab-id>/pane/<pane-id>`.
+
+**Tab — workspace sub-scope, not a new kind.** A tab can be identified and can
+be compared with siblings, but authority over its workspace necessarily includes
+the tabs in that workspace. Making `ResourceTab` would turn the presentation
+hierarchy into a second policy matrix and create a parent grant that does not
+mean what the user reads. A tab is consequently a `ResourceWorkspace`
+sub-scope.
+
+**Pane — workspace sub-scope, not a new kind.** A pane has a stable id and
+meaningful membership under a tab, but the workspace grant necessarily includes
+its panes. A separate `ResourcePane` would duplicate the workspace hierarchy
+without adding an independent capability boundary. A pane is consequently a
+`ResourceWorkspace` sub-scope.
+
+**Tunnel — rejected for now.** A tunnel is currently a compound use of a
+session and a remote destination, so those existing kinds already express its
+authority. It has no separate grant or stop capability whose boundary the
+ledger must name. It therefore fails the independent-grant and enforceability
+parts of the test; a future independently grantable tunnel lifecycle would
+justify revisiting this decision.
+
+**Saved endpoint — rejected.** A saved endpoint is configuration for reaching a
+remote target, not an authority boundary distinct from its
+`ResourceDestination` identity and the `ResourceCredential` it uses. Although
+it can have a stable record id, granting it independently would either confer
+destination authority indirectly or require a second capability with duplicate
+containment rules. It fails the independent capability part of the test and
+remains represented by destination plus credential scopes.
+
+The canonical containment rules are executable in `internal/content`: a
+`ResourceContent` root contains note and snippet sub-scopes; a
+`ResourceWorkspace` root contains tabs and panes, and a tab contains its panes;
+a child scope never contains its parent or a sibling. Existing path scopes
+retain segment-aware lexical containment, while the other existing resource
+kinds retain exact identity. Policy parsing uses the same canonical validator,
+so malformed hierarchy, empty segments and traversal-like ids are refused
+before a grant reaches a capability.

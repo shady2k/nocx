@@ -45,7 +45,6 @@ const (
 	maxBlockListLimit     = 50
 	defaultBlockLines     = 200
 	maxBlockLines         = 2000
-	maxBlockWindowBytes   = 64 << 10
 )
 
 var ErrSessionItemNotFound = errors.New("no such item in this session")
@@ -55,8 +54,8 @@ var ErrSessionItemNotFound = errors.New("no such item in this session")
 // very long lines. It cuts on a line boundary and returns the end the
 // returned window must state, so the reply never claims lines it did not
 // carry.
-func boundBlockText(text string, start, end int) (string, int) {
-	if len(text) <= maxBlockWindowBytes {
+func boundBlockText(text string, start, end int, maxBytes int64) (string, int) {
+	if maxBytes <= 0 || int64(len(text)) <= maxBytes {
 		return text, end
 	}
 	kept := 0
@@ -67,7 +66,7 @@ func boundBlockText(text string, start, end int) (string, int) {
 		if nl < 0 {
 			width = len(text) - kept
 		}
-		if kept+width > maxBlockWindowBytes {
+		if int64(kept+width) > maxBytes {
 			break
 		}
 		kept += width
@@ -78,7 +77,7 @@ func boundBlockText(text string, start, end int) (string, int) {
 	// answer with the head of it rather than with an empty window that reads
 	// as "the block printed nothing".
 	if lines == 0 {
-		return text[:maxBlockWindowBytes], start + 1
+		return text[:int(maxBytes)], start + 1
 	}
 	if len(out) > 0 && out[len(out)-1] == '\n' {
 		out = out[:len(out)-1]
@@ -133,6 +132,9 @@ type sessionListResult struct {
 	SessionID string            `json:"sessionId"`
 	Items     []sessionListItem `json:"items"`
 	More      bool              `json:"more,omitempty"`
+	Truncated bool              `json:"truncated,omitempty"`
+	Dropped   int64             `json:"dropped,omitempty"`
+	Remaining int64             `json:"remaining,omitempty"`
 }
 type sessionListItem struct {
 	ID       string `json:"id"`
@@ -152,6 +154,9 @@ type sessionReadResult struct {
 	Window    blockSpan         `json:"window,omitempty"`
 	Returned  blockSpan         `json:"returned,omitempty"`
 	Text      string            `json:"text"`
+	Truncated bool              `json:"truncated,omitempty"`
+	Dropped   int64             `json:"dropped,omitempty"`
+	Remaining int64             `json:"remaining,omitempty"`
 	Cursor    *readScreenCursor `json:"cursor,omitempty"`
 	Identity  *readScreenIdent  `json:"identity,omitempty"`
 	Note      string            `json:"note,omitempty"`
@@ -163,12 +168,16 @@ type blockSpan struct {
 }
 
 func executeSessionList(ctx context.Context, reader *agenttools.SessionReader, source SessionSource, args json.RawMessage) (string, error) {
+	bound, err := toolBound(ctx)
+	if err != nil {
+		return "", err
+	}
 	var p struct {
 		SessionID string `json:"sessionId"`
 		Limit     int    `json:"limit"`
 	}
-	if err := json.Unmarshal(args, &p); err != nil {
-		return "", fmt.Errorf("session.list: args: %w", err)
+	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
+		return "", fmt.Errorf("session.list: args: %w", unmarshalErr)
 	}
 	if !reader.Allows(p.SessionID) {
 		return "", fmt.Errorf("session.list: session %q is outside the run's grant", p.SessionID)
@@ -198,18 +207,46 @@ func executeSessionList(ctx context.Context, reader *agenttools.SessionReader, s
 	if err != nil {
 		return "", fmt.Errorf("session.list: marshal result: %w", err)
 	}
+	originalBytes := len(b)
+	for int64(len(b)) > bound.MaxBytes && len(out.Items) > 0 {
+		out.Items = out.Items[:len(out.Items)-1]
+		out.More = true
+		b, err = json.Marshal(out)
+		if err != nil {
+			return "", fmt.Errorf("session.list: marshal truncated result: %w", err)
+		}
+	}
+	if int64(len(b)) > bound.MaxBytes {
+		return "", fmt.Errorf("session.list: result metadata exceeds declared result bound of %d bytes", bound.MaxBytes)
+	}
+	if len(b) < originalBytes {
+		out.Truncated = true
+		out.Dropped = int64(originalBytes - len(b))
+		out.Remaining = out.Dropped
+		b, err = json.Marshal(out)
+		if err != nil {
+			return "", fmt.Errorf("session.list: marshal bounded result: %w", err)
+		}
+		if int64(len(b)) > bound.MaxBytes {
+			return "", fmt.Errorf("session.list: bounded result metadata exceeds declared result bound of %d bytes", bound.MaxBytes)
+		}
+	}
 	return string(b), nil
 }
 
 func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, source SessionSource, requester RendererRequester, args json.RawMessage) (string, error) {
+	bound, err := toolBound(ctx)
+	if err != nil {
+		return "", err
+	}
 	var p struct {
 		SessionID string `json:"sessionId"`
 		ID        string `json:"id"`
 		Start     int    `json:"start"`
 		Count     int    `json:"count"`
 	}
-	if err := json.Unmarshal(args, &p); err != nil {
-		return "", fmt.Errorf("session.read: args: %w", err)
+	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
+		return "", fmt.Errorf("session.read: args: %w", unmarshalErr)
 	}
 	if p.Start < 0 || p.Count < 0 {
 		return "", errors.New("session.read: start and count must be non-negative")
@@ -218,7 +255,7 @@ func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, s
 		return "", fmt.Errorf("session.read: session %q is outside the run's grant", p.SessionID)
 	}
 	if p.ID == "" {
-		return executeSessionScreen(ctx, p.SessionID, requester, p.Start, p.Count)
+		return executeSessionScreen(ctx, p.SessionID, requester, p.Start, p.Count, bound.MaxBytes)
 	}
 	if source == nil {
 		return "", errors.New("session.read: no session source is wired for this run")
@@ -234,9 +271,9 @@ func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, s
 		return "", fmt.Errorf("session.read: %w", err)
 	}
 	if item.State == "running" {
-		return executeSessionItemScreen(ctx, p.SessionID, p.ID, requester, p.Start, p.Count)
+		return executeSessionItemScreen(ctx, p.SessionID, p.ID, requester, p.Start, p.Count, bound.MaxBytes)
 	}
-	outText, returnedEnd := boundBlockText(item.Text, item.Start, item.End)
+	outText, returnedEnd := boundBlockText(item.Text, item.Start, item.End, bound.MaxBytes)
 	out := sessionReadResult{
 		SessionID: p.SessionID,
 		ID:        item.ID,
@@ -249,6 +286,11 @@ func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, s
 		Text:      outText,
 		Note:      item.Note,
 	}
+	if len(outText) < len(item.Text) {
+		out.Truncated = true
+		out.Dropped = int64(len(item.Text) - len(outText))
+		out.Remaining = int64(len(item.Text) - len(outText))
+	}
 	b, err := json.Marshal(out)
 	if err != nil {
 		return "", fmt.Errorf("session.read: marshal result: %w", err)
@@ -256,8 +298,8 @@ func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, s
 	return string(b), nil
 }
 
-func executeSessionItemScreen(ctx context.Context, sessionID, itemID string, requester RendererRequester, start, count int) (string, error) {
-	body, err := executeSessionScreen(ctx, sessionID, requester, start, count)
+func executeSessionItemScreen(ctx context.Context, sessionID, itemID string, requester RendererRequester, start, count int, maxBytes int64) (string, error) {
+	body, err := executeSessionScreen(ctx, sessionID, requester, start, count, maxBytes)
 	if err != nil {
 		return "", err
 	}
@@ -274,7 +316,7 @@ func executeSessionItemScreen(ctx context.Context, sessionID, itemID string, req
 	return string(b), nil
 }
 
-func executeSessionScreen(ctx context.Context, sessionID string, requester RendererRequester, start, count int) (string, error) {
+func executeSessionScreen(ctx context.Context, sessionID string, requester RendererRequester, start, count int, maxBytes int64) (string, error) {
 	if requester == nil {
 		return "", errors.New("session.read: no renderer requester is wired for this run")
 	}
@@ -313,7 +355,8 @@ func executeSessionScreen(ctx context.Context, sessionID string, requester Rende
 		}
 		lines = append(lines, line.String())
 	}
-	text, returnedEnd := boundBlockText(strings.Join(lines, "\n"), returned.Start, returned.End)
+	fullText := strings.Join(lines, "\n")
+	text, returnedEnd := boundBlockText(fullText, returned.Start, returned.End, maxBytes)
 	returned.End = returnedEnd
 	out := sessionReadResult{
 		SessionID: sessionID,
@@ -323,6 +366,11 @@ func executeSessionScreen(ctx context.Context, sessionID string, requester Rende
 		Window:    asked,
 		Returned:  returned,
 		Text:      text,
+	}
+	if len(text) < len(fullText) {
+		out.Truncated = true
+		out.Dropped = int64(len(fullText) - len(text))
+		out.Remaining = int64(len(fullText) - len(text))
 	}
 	if frame.Cursor != nil {
 		out.Cursor = &readScreenCursor{Line: frame.Cursor.Line, Col: frame.Cursor.Col}

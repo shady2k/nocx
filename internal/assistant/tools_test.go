@@ -105,14 +105,16 @@ func TestAsk_DeclaresExactlyThePermittedTools(t *testing.T) {
 		}
 	}
 
-	// A grant whose effect is not permitted declares nothing — the observe
-	// tools are absent, never declared-and-filtered.
+	// A grant whose effect permits reversible mutation declares exactly the
+	// filesystem mutation tools, and no renderer command.
 	f = askWithGrant(t, &content.Grant{
 		Effects: []content.Effect{content.EffectMutateReversible},
 		Scopes:  []content.GrantScope{{Kind: content.ResourcePath, ID: "/workspace"}},
 	})
-	if got := requestTools(t, f.body()); len(got) != 0 {
-		t.Fatalf("mutate grant declared tools %v, want none", toolNames(t, got))
+	got = toolNames(t, requestTools(t, f.body()))
+	wantMutation := []string{"files.edit", "files.create"}
+	if !reflect.DeepEqual(got, wantMutation) {
+		t.Fatalf("mutate grant declared tools %v, want exactly %v", got, wantMutation)
 	}
 
 	// A grant whose resource kinds are not covered declares nothing: the

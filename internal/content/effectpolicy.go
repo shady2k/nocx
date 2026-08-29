@@ -55,12 +55,11 @@ func (d Decision) valid() bool {
 }
 
 // EffectRow is one row of the matrix: the decision for one effect class plus
-// the resource scopes (paths, sessions — the closed ResourceKind set) the
-// decision applies within. A row with NO stated scope applies within the
+// the resource scopes (including canonical content and workspace sub-scopes)
+// the decision applies within. A row with NO stated scope applies within the
 // grant's own bound — the run's session scope the mint supplies — and a call
 // naming a resource outside the row's scopes is refused, never silently
-// re-scoped (ADR-0020 decision 6: scope expansion invalidates prior
-// approval).
+// re-scoped (ADR-0020 decision 6: scope expansion invalidates prior approval).
 type EffectRow struct {
 	Decision Decision
 	Scopes   []GrantScope
@@ -86,13 +85,13 @@ func (r EffectRow) MarshalJSON() ([]byte, error) {
 
 // UnmarshalJSON is strict: an unknown key on a row is an unparseable policy
 // (the tool-name rejection by construction), a decision outside the enum is
-// an unparseable policy, and a scope must name a known kind with a non-empty
-// id — or an absolute path, the both-ends-absolute contract the policy's
-// lexical containment check assumes. A tool-kind scope is refused outright:
-// a scope over a TOOL id is a rule over a tool name — the --no-tools mistake
-// at the settings layer (ADR-0028 decision 4). The ledger's kind set keeps
-// ResourceTool for the grant record's own vocabulary; a POLICY may not bind
-// an effect to a named tool.
+// an unparseable policy, and a scope must name a known kind with a valid
+// canonical id. ResourcePath retains its absolute-path rule, while content
+// and workspace scopes are checked by ValidateGrantScope. A tool-kind scope
+// is refused outright: a scope over a TOOL id is a rule over a tool name —
+// the --no-tools mistake at the settings layer (ADR-0028 decision 4). The
+// ledger's kind set keeps ResourceTool for the grant record's own vocabulary;
+// a POLICY may not bind an effect to a named tool.
 func (r *EffectRow) UnmarshalJSON(b []byte) error {
 	var raw struct {
 		Decision Decision     `json:"decision"`
@@ -110,14 +109,8 @@ func (r *EffectRow) UnmarshalJSON(b []byte) error {
 		if s.Kind == ResourceTool {
 			return fmt.Errorf("effect row: scope %d: a tool-kind scope names a tool, and the policy is over resources and effects, never tool names", i)
 		}
-		if !validResourceKind(s.Kind) {
-			return fmt.Errorf("effect row: scope %d: kind %q is not a resource kind", i, s.Kind)
-		}
-		if s.ID == "" {
-			return fmt.Errorf("effect row: scope %d: empty resource id", i)
-		}
-		if s.Kind == ResourcePath && !isAbsolutePath(s.ID) {
-			return fmt.Errorf("effect row: scope %d: path %q is not absolute", i, s.ID)
+		if err := ValidateGrantScope(s); err != nil {
+			return fmt.Errorf("effect row: scope %d: %w", i, err)
 		}
 	}
 	*r = EffectRow{Decision: raw.Decision, Scopes: raw.Scopes}
@@ -137,7 +130,7 @@ func isAbsolutePath(p string) bool {
 func validResourceKind(k ResourceKind) bool {
 	switch k {
 	case ResourceEnvironment, ResourceSession, ResourcePath, ResourceCredential,
-		ResourceDestination, ResourceTool:
+		ResourceDestination, ResourceTool, ResourceContent, ResourceWorkspace:
 		return true
 	default:
 		return false

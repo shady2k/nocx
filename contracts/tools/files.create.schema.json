@@ -1,0 +1,44 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tools/files.create.schema.json",
+  "title": "FilesCreateParams",
+  "description": "Create one UTF-8 text file if absent. The path is authorized beneath the grant's canonical filesystem scope; no shell command is involved.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["path", "content"],
+  "properties": {
+    "path": { "type": "string", "description": "Path of the new file inside the grant's paths." },
+    "content": {
+      "type": "string",
+      "description": "Exact UTF-8 bytes to write; line endings are not normalized."
+    }
+  },
+  "$defs": {
+    "result": {
+      "title": "FilesCreateResult",
+      "description": "The result is either a created file with a revision or an actionable refusal; a refusal is a tool result, not a run failure.",
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "status", "revision"],
+          "properties": {
+            "path": { "type": "string" },
+            "status": { "const": "created" },
+            "revision": { "type": "string" }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["path", "status", "reason"],
+          "properties": {
+            "path": { "type": "string" },
+            "status": { "const": "refused" },
+            "reason": { "type": "string" }
+          }
+        }
+      ]
+    }
+  }
+}

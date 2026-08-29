@@ -38,8 +38,9 @@ const (
 	maxCaptureChunkBytes = 64 << 10
 )
 
-// ledgerCaptureParams is the request. There is deliberately no params schema
-// (contracts/README.md): the handler is the check.
+// ledgerCaptureParams is the request. The earlier decision to leave params
+// unpinned was wrong: ledger.capture.params.schema.json is now the wire contract,
+// and its registered validator remains runtime enforcement for the bounded chunk.
 //
 //	entryId        — required; the row the body belongs to, as history.record
 //	                 answered. Backend-minted, so its shape is not a UUIDv7

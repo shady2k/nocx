@@ -1,0 +1,23 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/notify.raise.params.schema.json",
+  "title": "NotifyRaiseParams",
+  "description": "Params for notify.raise.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "title", "body"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "minLength": 1
+    },
+    "title": {
+      "type": "string",
+      "maxLength": 4096
+    },
+    "body": {
+      "type": "string",
+      "maxLength": 4096
+    }
+  }
+}

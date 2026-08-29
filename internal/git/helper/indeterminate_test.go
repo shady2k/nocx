@@ -271,6 +271,23 @@ func TestRemoteURLNoRemoteCrossesAsItself(t *testing.T) {
 	}
 }
 
+// sameStatus compares two panels' status as the contract actually defines it:
+// every field except Head.
+//
+// Head is the repository's OWN commit hash, and a helper/local comparison runs
+// against two DIFFERENT repositories. Their fixtures are byte-identical, so
+// the hashes agree only while both initial commits land inside the same second
+// — git's timestamp granularity — and diverge otherwise: about one run in
+// fifteen here (nocx-n0n6b). Asserting it asserts a coincidence, not that the
+// panel says the same thing on both machines.
+//
+// Both call sites assert separately that a head is PRESENT. What it is belongs
+// to the repository; that there is one belongs to the contract.
+func sameStatus(a, b git.Status) bool {
+	a.Head, b.Head = "", ""
+	return reflect.DeepEqual(a, b)
+}
+
 // TestHelperMutationsMatchLocal is the mutation half of the one contract:
 // the panel must say the same thing on both machines, so a mutation
 // through the helper is only correct if it agrees with the local
@@ -301,8 +318,11 @@ func TestHelperMutationsMatchLocal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helper stage: %v", err)
 	}
-	if !reflect.DeepEqual(want, got) {
+	if !sameStatus(want, got) {
 		t.Fatalf("helper stage disagrees with local:\nwant: %+v\ngot:  %+v", want, got)
+	}
+	if want.Head == "" || got.Head == "" {
+		t.Fatalf("a staged status must carry a head: helper %q, local %q", got.Head, want.Head)
 	}
 
 	wantOut, err := repoLocal.Commit(context.Background(), "same subject\n\nsame body", false)
@@ -313,10 +333,12 @@ func TestHelperMutationsMatchLocal(t *testing.T) {
 	if err != nil {
 		t.Fatalf("helper commit: %v", err)
 	}
-	// The two commits are made moments apart, so the head hashes may
-	// differ; the state, the staleness flag and the fresh status are the
-	// panel's truth and must agree.
-	if wantOut.State != gotOut.State || wantOut.StatusStale != gotOut.StatusStale || !reflect.DeepEqual(wantOut.Status, gotOut.Status) {
+	// The state, the staleness flag and the fresh status are the panel's
+	// truth and must agree. The head is excluded on both levels — the outer
+	// one AND the one inside Status, which this check used to compare
+	// through reflect.DeepEqual while excluding only its neighbour.
+	if wantOut.State != gotOut.State || wantOut.StatusStale != gotOut.StatusStale ||
+		!sameStatus(wantOut.Status, gotOut.Status) {
 		t.Fatalf("helper commit disagrees with local:\nwant: %+v\ngot:  %+v", wantOut, gotOut)
 	}
 	if wantOut.Head == "" || gotOut.Head == "" {

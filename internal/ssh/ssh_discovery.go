@@ -217,6 +217,36 @@ func (c *discoveryConn) Close() error {
 	return nil
 }
 
+// leaseErr answers which lease-level fact ended an exec, and it is the ONLY
+// place that answer is derived.
+//
+// EXPLICIT CLOSE OUTRANKS CONNECTION LOSS, and the order is not a preference.
+// Close drops this lease's pooled reference, so the transport shutdown that
+// fires done is a CONSEQUENCE of the close, arriving milliseconds later —
+// reporting the loss would describe our own action as a fact about the host,
+// and discovery would record a dead host where a tab merely died.
+//
+// So the two channels may never be raced against each other. A select with
+// both as cases picks a ready case AT RANDOM, and that is exactly how an exec
+// closed by its own caller reported ErrExecLost (nocx-4c5d7): the wake path
+// decided the answer, when the answer is a fact about the lease. Wake on
+// either channel if you must; derive the error here.
+//
+// Returns nil only while the lease is still live.
+func (c *discoveryConn) leaseErr() error {
+	select {
+	case <-c.closed:
+		return ErrExecClosed
+	default:
+	}
+	select {
+	case <-c.done:
+		return ErrExecLost
+	default:
+	}
+	return nil
+}
+
 // Exec implements DiscoveryConn.Exec. See the interface doc for the
 // cancellation contract.
 func (c *discoveryConn) Exec(ctx context.Context, cmd string) (*ExecResult, error) {
@@ -229,18 +259,8 @@ func (c *discoveryConn) Exec(ctx context.Context, cmd string) (*ExecResult, erro
 	if len(cmd) >= MaxRemoteCommandLen {
 		return nil, fmt.Errorf("%w: %d bytes, bound %d", ErrCommandTooLong, len(cmd), MaxRemoteCommandLen)
 	}
-	// closed is checked before done — sequentially, not in one select: when
-	// the lease was explicitly closed AND the connection died, a select
-	// would pick between two ready cases at random.
-	select {
-	case <-c.closed:
-		return nil, ErrExecClosed
-	default:
-	}
-	select {
-	case <-c.done:
-		return nil, ErrExecLost
-	default:
+	if err := c.leaseErr(); err != nil {
+		return nil, err
 	}
 
 	sess, err := c.client.NewSession()
@@ -298,7 +318,10 @@ func (c *discoveryConn) Exec(ctx context.Context, cmd string) (*ExecResult, erro
 	case <-c.done:
 		_ = sess.Close()
 		<-errCh
-		return nil, ErrExecLost
+		// Which of the two channels woke us is a scheduling accident, so it
+		// may not pick the error: Close fires closed and then, through the
+		// released reference, done. leaseErr is non-nil here — done is shut.
+		return nil, c.leaseErr()
 	case <-c.closed:
 		_ = sess.Close()
 		<-errCh
@@ -351,17 +374,11 @@ func classifySessionOpenError(err error) error {
 // classifyExecError maps a Run error that is not an exit status to a typed
 // exec error, keeping the raw error for everything else. The lease's own
 // state is checked first because a select race may deliver the run error
-// after done or closed fired — the deterministic answer wins.
+// after done or closed fired — the deterministic answer wins, and which of
+// the two it is belongs to leaseErr, not to this function's ordering.
 func classifyExecError(c *discoveryConn, err error, cmd string) error {
-	select {
-	case <-c.done:
-		return ErrExecLost
-	default:
-	}
-	select {
-	case <-c.closed:
-		return ErrExecClosed
-	default:
+	if leaseErr := c.leaseErr(); leaseErr != nil {
+		return leaseErr
 	}
 	// x/crypto/ssh returns exactly "ssh: command <cmd> failed" when the
 	// server replies false to the exec request (session.go Start). There is

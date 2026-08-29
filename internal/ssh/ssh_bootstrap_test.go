@@ -1,13 +1,17 @@
 package ssh
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/shady2k/nocx/internal/bootstrapstream"
 )
 
 // The input quarantine and the stream handover (design §5.3), against the
@@ -255,7 +259,7 @@ func TestSessionFeed_ADeadlineNeverConsumesTheUsersBytes(t *testing.T) {
 	// is on an observable state — bytes present — not on a duration.
 	waitUntil(t, func() bool { return f.peekPending() > 0 })
 	deadline <- time.Time{}
-	if _, err := f.ReadLine(context.Background(), time.Hour); !errors.Is(err, ErrBootstrapDeadline) {
+	if _, err := f.ReadLine(context.Background(), time.Hour); !errors.Is(err, bootstrapstream.ErrDeadline) {
 		t.Fatalf("ReadLine err = %v, want the deadline", err)
 	}
 
@@ -389,5 +393,38 @@ func TestSessionFeed_TheStreamsEndIsVisibleToWhoeverItWoke(t *testing.T) {
 	}
 	if !f.Ended() {
 		t.Fatal("the reader the stream's end woke was told the stream had not ended")
+	}
+}
+
+// TestSessionFeed_AnOverBoundLineSaysWhatItIs pins the other half of the
+// vocabulary this reader raises. A far side that writes past the bound with no
+// line ending has NOT ended the connection, and the error must not be
+// mistakable for one: the driver reads it with errors.Is, and it reports
+// bootstrap-protocol on the strength of it.
+//
+// The counts travel in the message so the log can say how much arrived. The
+// BYTES never do: the backend does not read the user's stream (AD-6), and a
+// "bounded prefix" in a log file is reading it.
+func TestSessionFeed_AnOverBoundLineSaysWhatItIs(t *testing.T) {
+	pr, pw := io.Pipe()
+	f := newSessionFeed(pr)
+
+	go func() {
+		_, _ = pw.Write(bytes.Repeat([]byte("x"), maxBootstrapLine+1))
+	}()
+
+	_, err := f.ReadLine(context.Background(), time.Hour)
+	if !errors.Is(err, bootstrapstream.ErrLineTooLong) {
+		t.Fatalf("ReadLine err = %v, want it to be bootstrapstream.ErrLineTooLong", err)
+	}
+	if got := err.Error(); !strings.Contains(got, strconv.Itoa(maxBootstrapLine)) {
+		t.Errorf("error %q does not name the bound; the log cannot say how much arrived", got)
+	}
+
+	// And the bytes are still the terminal's: this reader is about to hand
+	// the session over as an ordinary terminal, and they are its output.
+	if f.peekPending() <= maxBootstrapLine {
+		t.Errorf("%d bytes left pending, want the whole over-bound run kept for the terminal",
+			f.peekPending())
 	}
 }

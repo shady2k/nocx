@@ -321,3 +321,75 @@ describe('the snippets action (nocx-d346)', () => {
     expect(() => row.click()).not.toThrow()
   })
 })
+
+describe('the new-note row', () => {
+  // A note is one keystroke away (⌥⌘N) for somebody who knows the chord, and
+  // unreachable for everybody else until they have found the Notes panel. The
+  // caret menu is where the strip keeps the actions that have a name instead
+  // of a glyph, so it is where "New note" belongs — in BOTH placements, since
+  // a row wired onto the first strip and lost on the next one is the failure
+  // the snippets row above already records.
+  const menuRows = (): HTMLElement[] => {
+    document.querySelector<HTMLButtonElement>('[aria-label="More"]')!.click()
+    return [...document.querySelectorAll<HTMLElement>('.ui-context-menu__item')]
+  }
+
+  const noteRow = (): HTMLElement | undefined =>
+    menuRows().find((el) => el.textContent?.includes('New note'))
+
+  it('the vertical strip offers it and reports the press', () => {
+    const { strip } = setupVerticalStrip()
+    let presses = 0
+    strip.onNewNote = () => (presses += 1)
+
+    const row = noteRow()
+    expect(row, 'the vertical strip does not offer a new note').toBeDefined()
+    row!.click()
+
+    expect(presses).toBe(1)
+  })
+
+  it('the horizontal strip offers it too — a strip replacement must not lose it', () => {
+    const strip = new HorizontalTabStrip()
+    const container = document.createElement('div')
+    document.body.appendChild(container)
+    strip.mount(container)
+    let presses = 0
+    strip.onNewNote = () => (presses += 1)
+
+    const row = noteRow()
+    expect(row, 'the horizontal strip does not offer a new note').toBeDefined()
+    row!.click()
+
+    expect(presses).toBe(1)
+  })
+
+  it('carries no ellipsis, because nothing further is asked', () => {
+    setupVerticalStrip()
+    // The three rows above it end in one and mean it: each opens a palette or
+    // a dialog. This row opens the note itself, and an ellipsis that promises
+    // a question nobody is asked is a menu telling a small lie every time.
+    expect(noteRow()!.textContent).toContain('New note')
+    expect(noteRow()!.textContent).not.toContain('…')
+  })
+
+  it('wears a mark of its own rather than the snippets one', () => {
+    // One glyph on two rows of one menu is a person pointing at the wrong
+    // row: TextQuoteIcon means a saved phrase, and it used to mean a note too.
+    setupVerticalStrip()
+    const rows = menuRows()
+    const note = rows.find((el) => el.textContent?.includes('New note'))!
+    const snippets = rows.find((el) => el.textContent?.includes('Snippets'))!
+    const pathsOf = (row: HTMLElement) =>
+      [...row.querySelectorAll('path')].map((p) => p.getAttribute('d'))
+
+    expect(pathsOf(note).length).toBeGreaterThan(0)
+    for (const d of pathsOf(note)) expect(pathsOf(snippets)).not.toContain(d)
+  })
+
+  it('with no callback wired the row is inert rather than broken', () => {
+    setupVerticalStrip()
+    const row = noteRow()!
+    expect(() => row.click()).not.toThrow()
+  })
+})

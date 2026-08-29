@@ -356,6 +356,14 @@ func TestStartupFidelity_SystemProfileObservableOrDeclared(t *testing.T) {
 // which had stopped being true when the .zshrc phase began restoring
 // ZDOTDIR. Order is asserted, not just presence: a file read in the wrong
 // phase sets a variable a later phase was supposed to see first.
+//
+// This drives the CARRIER, so it reports the remote tier. The table is per
+// SHELL, not per tier, so the local tier owes the same behaviour and has its
+// own end-to-end counterpart:
+// TestLocalZshSession_RunsTheUsersLoginPhases in launcher_local_zsh_test.go.
+// For months it did not owe it in practice — the local launcher wrote only
+// the .zshrc into the transient directory, so this table declared a fidelity
+// only one of the two tiers had (nocx-2ka0).
 func TestStartupFidelity_ZshRunsEveryUserLoginPhase(t *testing.T) {
 	shellPath := startupShellFor(t, ShellZsh)
 	withEtcFixture(t)

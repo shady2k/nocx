@@ -196,6 +196,30 @@ class CMHost {
     this.view?.focus()
   }
 
+  /**
+   * Scroll `line` (1-BASED, as a terminal, a compiler and a person all count
+   * lines) into the middle of the view and put the cursor at its start.
+   *
+   * Clamped rather than refused: a file that shrank since the line number was
+   * printed still opens, at its last line, which is the honest approximation.
+   * A refusal here would be a click that opened nothing, and the whole point
+   * of the caller is that a click never ends in silence.
+   *
+   * Selection is not editing — the read-only mode gates INPUT, so moving the
+   * cursor is as legal here as dragging one, and it is what makes CM's own
+   * active-line decoration land on the line we came for.
+   */
+  revealLine(line: number): void {
+    const view = this.view
+    if (!view) return
+    const clamped = Math.max(1, Math.min(Math.floor(line), view.state.doc.lines))
+    const pos = view.state.doc.line(clamped).from
+    view.dispatch({
+      selection: { anchor: pos },
+      effects: EditorView.scrollIntoView(pos, { y: 'center' }),
+    })
+  }
+
   /** Destroy the view and detach from the abort signal. Idempotent; safe to
    *  call after the signal already fired, and vice versa. */
   dispose(): void {

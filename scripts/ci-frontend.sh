@@ -56,6 +56,12 @@ fi
 # 4 vCPU, and a vitest suite with timers in it is a different suite on a
 # developer's core count. NOCX_CI_CPUS=0 opts out.
 CPUS="${NOCX_CI_CPUS:-4}"
+
+# One heavy containerized run at a time on this machine.
+. "$(dirname "$0")/gate-lock.sh"
+trap gate_lock_release EXIT INT TERM
+gate_lock_acquire
+
 cpu_flag=()
 [ "$CPUS" != "0" ] && cpu_flag=(--cpus "$CPUS")
 

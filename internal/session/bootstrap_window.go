@@ -3,11 +3,12 @@ package session
 import (
 	"bytes"
 	"context"
-	"errors"
 	"fmt"
 	"io"
 	"sync"
 	"time"
+
+	"github.com/shady2k/nocx/internal/bootstrapstream"
 )
 
 // The bootstrap window on a local session: the one interval in which the
@@ -54,10 +55,12 @@ import (
 // re-enabled there — never on a readiness token, which says only that the far
 // side is listening.
 
-// ErrBootstrapDeadline is what ReadLine returns when the deadline passed
-// before a line completed. Everything read so far stays where the next read
-// will find it: a deadline may never consume the far side's bytes.
-var ErrBootstrapDeadline = errors.New("session: bootstrap deadline")
+// The deadline and over-bound errors this reader raises are
+// internal/bootstrapstream's, not this package's: they cross the seam to a
+// consumer that tests them with errors.Is, and a private copy of a sentinel is
+// a comparison that is always false. Everything read so far stays where the
+// next read will find it either way — a deadline may never consume the far
+// side's bytes.
 
 // maxWindowBuffer bounds what the tap holds. The window is short and its
 // vocabulary is a handful of short lines; a tap with no bound would
@@ -141,8 +144,10 @@ func (t *outputTap) takeLine() (string, bool, error) {
 	if len(t.buf) > maxWindowLine {
 		// Not our protocol. The bytes are the renderer's and it already
 		// has them; what this drops is only the tap's copy.
+		n := len(t.buf)
 		t.buf = t.buf[:0]
-		return "", false, errors.New("session: bootstrap line exceeds the bound")
+		return "", false, fmt.Errorf("%w: %d bytes with no line ending (bound %d)",
+			bootstrapstream.ErrLineTooLong, n, maxWindowLine)
 	}
 	if t.over {
 		return "", false, io.EOF
@@ -183,7 +188,7 @@ func (w *bootstrapWindow) ReadLine(ctx context.Context, timeout time.Duration) (
 		select {
 		case <-w.tap.sig:
 		case <-deadline:
-			return "", ErrBootstrapDeadline
+			return "", bootstrapstream.ErrDeadline
 		case <-ctx.Done():
 			return "", ctx.Err()
 		case <-w.sess.ch.Done():

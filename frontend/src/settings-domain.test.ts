@@ -4,7 +4,7 @@ import {
   createMirror,
   numberRangeCaption,
   numberRangeError,
-  parseRouteSettingKey,
+  parseNotificationMatrixSettingKey,
   textLengthCaption,
   textLengthError,
   fieldSaveError,
@@ -350,29 +350,34 @@ describe('number range caption and error (nocx-w7h.7)', () => {
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
-//  The routing matrix — axes derived from the declarations, never listed here
+//  The notification matrix — axes derived from the declarations, never listed here
 // ═══════════════════════════════════════════════════════════════════════════
 
-describe('parseRouteSettingKey (nocx-3mniv)', () => {
-  it('splits a well-formed cell key into its two ids', () => {
-    expect(parseRouteSettingKey('notifications.route.programNotify.banner')).toEqual({
+describe('parseNotificationMatrixSettingKey (nocx-enetk)', () => {
+  it('splits routing and centre keys into matrix coordinates', () => {
+    expect(parseNotificationMatrixSettingKey('notifications.route.programNotify.banner')).toEqual({
       rowId: 'programNotify',
       columnId: 'banner',
+    })
+    expect(parseNotificationMatrixSettingKey('notifications.centre.programNotify')).toEqual({
+      rowId: 'programNotify',
+      columnId: 'centre',
     })
   })
 
   it('is not fooled by a key that merely resembles one', () => {
-    // Not under the namespace at all.
-    expect(parseRouteSettingKey('notifications.debounceMs')).toBeNull()
-    expect(parseRouteSettingKey('terminal.fontSize')).toBeNull()
-    // Under the namespace and malformed: one segment, three segments, or an
-    // empty one. Each of these renders as an ordinary row rather than
-    // disappearing into the grid — see sectionBlocks below.
-    expect(parseRouteSettingKey('notifications.route.programNotify')).toBeNull()
-    expect(parseRouteSettingKey('notifications.route.a.b.c')).toBeNull()
-    expect(parseRouteSettingKey('notifications.route..banner')).toBeNull()
-    expect(parseRouteSettingKey('notifications.route.programNotify.')).toBeNull()
-    expect(parseRouteSettingKey('notifications.route.')).toBeNull()
+    // Not under either namespace at all.
+    expect(parseNotificationMatrixSettingKey('notifications.debounceMs')).toBeNull()
+    expect(parseNotificationMatrixSettingKey('terminal.fontSize')).toBeNull()
+    // Under either namespace and malformed: wrong arity or an empty segment.
+    expect(parseNotificationMatrixSettingKey('notifications.route.programNotify')).toBeNull()
+    expect(parseNotificationMatrixSettingKey('notifications.route.a.b.c')).toBeNull()
+    expect(parseNotificationMatrixSettingKey('notifications.route..banner')).toBeNull()
+    expect(parseNotificationMatrixSettingKey('notifications.route.programNotify.')).toBeNull()
+    expect(parseNotificationMatrixSettingKey('notifications.route.')).toBeNull()
+    expect(parseNotificationMatrixSettingKey('notifications.centre')).toBeNull()
+    expect(parseNotificationMatrixSettingKey('notifications.centre.')).toBeNull()
+    expect(parseNotificationMatrixSettingKey('notifications.centre.a.b')).toBeNull()
   })
 })
 
@@ -389,10 +394,25 @@ describe('sectionBlocks (nocx-3mniv)', () => {
     }
   }
 
-  const bellBanner = cell('bell', 'banner', 'A terminal bell → OS banner')
-  const bellToast = cell('bell', 'toast', 'A terminal bell → In-app toast')
-  const progBanner = cell('programNotify', 'banner', 'A program asked → OS banner')
-  const progToast = cell('programNotify', 'toast', 'A program asked → In-app toast')
+  function centreCell(kind: string, kindLabel: string): Declaration {
+    return {
+      key: `notifications.centre.${kind}`,
+      section: 'Notifications',
+      label: `${kindLabel} → Notification centre`,
+      description: `${kindLabel} visibility description`,
+      control: 'toggle',
+      dataClass: 'publicConfig',
+      default: false,
+    }
+  }
+
+  const bellCentre = centreCell('bell', 'Terminal bell')
+  const sessionCentre = centreCell('sessionEnded', 'Session ended')
+
+  const bellBanner = cell('bell', 'banner', 'Terminal bell → OS banner')
+  const bellToast = cell('bell', 'toast', 'Terminal bell → In-app toast')
+  const progBanner = cell('programNotify', 'banner', 'Program notification request → OS banner')
+  const progToast = cell('programNotify', 'toast', 'Program notification request → In-app toast')
 
   const debounce: Declaration = {
     key: 'notifications.debounceMs',
@@ -417,6 +437,44 @@ describe('sectionBlocks (nocx-3mniv)', () => {
     expect(blocks[1]).toEqual({ kind: 'setting', decl: debounce })
   })
 
+  it('folds routing and centre namespaces into one matrix with centre last', () => {
+    const blocks = sectionBlocks([
+      bellBanner,
+      bellToast,
+      progBanner,
+      progToast,
+      bellCentre,
+      sessionCentre,
+    ])
+    expect(blocks.map((b) => b.kind)).toEqual(['matrix'])
+    const b = blocks[0]
+    if (b.kind !== 'matrix') throw new Error('expected a matrix block')
+    expect(b.matrix.columns.map((c) => c.id)).toEqual(['banner', 'toast', 'centre'])
+    expect(b.matrix.rows.map((r) => r.id)).toEqual(['bell', 'programNotify', 'sessionEnded'])
+    expect(b.matrix.cell('bell', 'centre')).toBe(bellCentre)
+  })
+
+  it('keeps asymmetric kinds and reports unavailable cells as undefined', () => {
+    const blocks = sectionBlocks([bellBanner, sessionCentre])
+    const b = blocks[0]
+    if (b.kind !== 'matrix') throw new Error('expected a matrix block')
+    expect(b.matrix.cell('bell', 'centre')).toBeUndefined()
+    expect(b.matrix.cell('sessionEnded', 'banner')).toBeUndefined()
+    expect(b.matrix.cell('sessionEnded', 'centre')).toBe(sessionCentre)
+  })
+
+  it('uses declaration labels for rows, with the first declaration winning', () => {
+    const conflictingCentre = centreCell('bell', 'Wrong label')
+    const blocks = sectionBlocks([bellBanner, conflictingCentre])
+    const b = blocks[0]
+    if (b.kind !== 'matrix') throw new Error('expected a matrix block')
+    expect(b.matrix.rows).toEqual([{ id: 'bell', label: 'Terminal bell' }])
+    expect(b.matrix.columns).toEqual([
+      { id: 'banner', label: 'OS banner' },
+      { id: 'centre', label: 'Notification centre' },
+    ])
+  })
+
   it('the axes come from the keys in first-seen order, and nothing else names them', () => {
     const blocks = sectionBlocks([progBanner, progToast, bellBanner, bellToast])
     const b = blocks[0]
@@ -434,7 +492,10 @@ describe('sectionBlocks (nocx-3mniv)', () => {
     const b = blocks[0]
     if (b.kind !== 'matrix') throw new Error('expected a matrix block')
     expect(b.matrix.rows.map((r) => r.id)).toEqual(['programNotify', 'diskFull'])
-    expect(b.matrix.rows.map((r) => r.label)).toEqual(['A program asked', 'The disk filled up'])
+    expect(b.matrix.rows.map((r) => r.label)).toEqual([
+      'Program notification request',
+      'The disk filled up',
+    ])
     expect(b.matrix.cell('diskFull', 'toast')).toBe(invented)
     // And a pair the backend does not offer is absent, not invented.
     expect(b.matrix.cell('diskFull', 'banner')).toBeUndefined()
@@ -443,29 +504,34 @@ describe('sectionBlocks (nocx-3mniv)', () => {
   it('the axis labels are the halves of the cell label, and fall back to the id', () => {
     const b = sectionBlocks([bellBanner, bellToast])[0]
     if (b.kind !== 'matrix') throw new Error('expected a matrix block')
-    expect(b.matrix.rows.map((r) => r.label)).toEqual(['A terminal bell'])
+    expect(b.matrix.rows.map((r) => r.label)).toEqual(['Terminal bell'])
     expect(b.matrix.columns.map((c) => c.label)).toEqual(['OS banner', 'In-app toast'])
 
     // A label that does not carry the separator cannot remove a control from
     // the grid: the id stands in for the half that is missing.
-    const odd = { ...cell('bell', 'banner', 'A terminal bell') }
+    const odd = { ...cell('bell', 'banner', 'Terminal bell') }
     const c = sectionBlocks([odd])[0]
     if (c.kind !== 'matrix') throw new Error('expected a matrix block')
-    expect(c.matrix.rows[0].label).toBe('A terminal bell')
+    expect(c.matrix.rows[0].label).toBe('Terminal bell')
     expect(c.matrix.columns[0].label).toBe('banner')
   })
 
-  // "Visible rather than silently absent from the grid": a key under the
+  // "Visible rather than silently absent from the grid": a key under either
   // namespace that does not parse is still a control the user can operate.
-  it('a malformed cell key renders as an ordinary setting, not as nothing', () => {
-    const malformed: Declaration = {
+  it('a malformed key in either namespace renders as an ordinary setting', () => {
+    const malformedRoute: Declaration = {
       ...bellBanner,
       key: 'notifications.route.bell',
-      label: 'A terminal bell',
+      label: 'Terminal bell',
     }
-    const blocks = sectionBlocks([progBanner, malformed])
-    expect(blocks.map((b) => b.kind)).toEqual(['matrix', 'setting'])
-    expect(blocks[1]).toEqual({ kind: 'setting', decl: malformed })
+    const malformedCentre: Declaration = {
+      ...bellCentre,
+      key: 'notifications.centre',
+    }
+    const blocks = sectionBlocks([progBanner, malformedRoute, malformedCentre])
+    expect(blocks.map((b) => b.kind)).toEqual(['matrix', 'setting', 'setting'])
+    expect(blocks[1]).toEqual({ kind: 'setting', decl: malformedRoute })
+    expect(blocks[2]).toEqual({ kind: 'setting', decl: malformedCentre })
   })
 
   it('a cell key carrying something other than a toggle is an ordinary setting too', () => {

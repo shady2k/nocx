@@ -22,7 +22,7 @@
  * Only the HORIZONTAL overlap is asserted. Both surfaces live at the bottom of
  * the window, so a vertical overlap is expected and says nothing.
  */
-import { test, expect } from './harness'
+import { test, expect, promptReady } from './harness'
 import { createRepo, cleanupRepo } from './git-fixture'
 
 const TAB_TITLE = '.nocx-tab-title'
@@ -36,7 +36,16 @@ test('a toast does not cover the activity bar (nocx-nbxm6)', async ({ page }) =>
   const repo = createRepo({ file: 'a.txt' })
   try {
     await page.goto('/')
-    await expect(page.locator(TAB_TITLE).first()).not.toHaveText('', { timeout: 10_000 })
+    // A NON-EMPTY TAB TITLE IS NOT READINESS TO TYPE. It says the pane exists;
+    // it says nothing about which element has the keyboard, so keystrokes sent
+    // on the strength of it can land before the editor is focused and lose
+    // their leading characters. That is what failed here: `cd <repo>` arrived
+    // as `t-e2e-dNwLvP`, the shell ran the remains as a command, the cwd never
+    // changed, and the wait below timed out against a title that was still the
+    // home directory (nocx-b0k9a's sibling — a spec asserting a state the app
+    // never promised). promptReady is the question actually being asked, and
+    // it is what every other spec that types a `cd` already uses.
+    await promptReady(page)
 
     // Park the shell in the repo — OSC 7 makes the cwd verified, and the tab
     // title is the frontend's own word that it processed it.

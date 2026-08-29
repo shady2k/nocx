@@ -388,53 +388,6 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
           not exist yet, asked before the person had said what they were
           importing. The field is still the truth and still carries every
           refusal; the pencil is what puts it back on screen. */}
-      {/* THE ONE WAIT THIS ASK DRAWS. A disabled Import button says only that
-          it is disabled; the read behind it — the file, the encode, the round
-          trip — is what the person is actually waiting for, so it says so
-          with the kit's Spinner rather than with silence (nocx-bvxf2.5). The
-          destination re-check draws nothing: it was not asked for and it is
-          not what anybody is waiting on. */}
-      <Show when={props.reading === true}>
-        <p class="api-import-summary">
-          <Spinner size="sm" label="Reading the export" /> Reading the export…
-        </p>
-      </Show>
-      <Show
-        when={
-          props.reading !== true &&
-          props.archiveSummary !== undefined &&
-          props.archiveSummary !== ''
-        }
-      >
-        <p class="api-import-summary">{props.archiveSummary}</p>
-      </Show>
-      {/* THE OFFER, and only where there is one to make. Postman marks few
-          variables `secret` — nought of six in the export that bought
-          nocx-zn386 — so this region is absent from almost every import, and
-          absence is the capability here as everywhere else in this ask.
-
-          IT IS AN OFFER AND NOT A DECISION (ADR-0047). Unticked, the value
-          the export carried is written into the environment file, which is
-          what happens to every other value and is the state the person's
-          data was already in. Ticked, the value goes to the vault and the
-          file holds `{{secret:secrow:…}}` — the same reference every other
-          field in this product uses, reached here in one act instead of one
-          per variable afterwards.
-
-          The values are not on this side: what the preview sent is the
-          NAMES, so this control can say what it is about without the
-          renderer ever holding a credential. */}
-      <Show when={(props.offeredSecrets ?? []).length > 0}>
-        <Checkbox
-          checked={props.storeSecrets === true}
-          onChange={(checked) => props.onStoreSecrets?.(checked)}
-          label={
-            (props.offeredSecrets ?? []).length === 1
-              ? `Store ${(props.offeredSecrets ?? [])[0]} in the vault — the file keeps the name, never the value`
-              : `Store ${(props.offeredSecrets ?? []).length} secret variables in the vault — the files keep their names, never the values`
-          }
-        />
-      </Show>
       <Show when={!editing()}>
         <p class="api-import-dest">
           {props.sourceLabel !== '' && nameable()
@@ -480,6 +433,65 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
           }
         />
       </div>
+      {/* THE ONE WAIT THIS ASK DRAWS, and what the read found. The wait says
+          so with the kit's Spinner rather than with silence (nocx-bvxf2.5);
+          the destination re-check draws nothing, because it was not asked
+          for and nobody is sitting through it.
+
+          BOTH LIVE BELOW THE DESTINATION, with the offer, because both
+          arrive when a READ lands rather than when a person acts — and a
+          read starts on the blur that a click on the pencil causes. Drawn
+          above, the line appearing shifted the pencil out from under that
+          very click, and the ask silently lost the gesture: 30 seconds of
+          Playwright waiting for a field that never opened. Everything a
+          person aims at is above this point and stays where they saw it. */}
+      <Show when={props.reading === true}>
+        <p class="api-import-summary">
+          <Spinner size="sm" label="Reading the export" /> Reading the export…
+        </p>
+      </Show>
+      <Show
+        when={
+          props.reading !== true &&
+          props.archiveSummary !== undefined &&
+          props.archiveSummary !== ''
+        }
+      >
+        <p class="api-import-summary">{props.archiveSummary}</p>
+      </Show>
+      {/* THE OFFER, and only where there is one to make. Postman marks few
+          variables `secret` — nought of six in the export that bought
+          nocx-zn386 — so this region is absent from almost every import, and
+          absence is the capability here as everywhere else in this ask.
+
+          BELOW THE DESTINATION, because it arrives when the READ lands and
+          everything above it must not move when it does. Placed above, its
+          appearance shifted the pencil out from under a click that was
+          already on its way — the read starts on the blur that click causes
+          — and the e2e suite caught the ask losing the gesture.
+
+          IT IS AN OFFER AND NOT A DECISION (ADR-0047). Unticked, the value
+          the export carried is written into the environment file, which is
+          what happens to every other value and is the state the person's
+          data was already in. Ticked, the value goes to the vault and the
+          file holds `{{secret:secrow:…}}` — the same reference every other
+          field in this product uses, reached here in one act instead of one
+          per variable afterwards.
+
+          The values are not on this side: what the preview sent is the
+          NAMES, so this control can say what it is about without the
+          renderer ever holding a credential. */}
+      <Show when={(props.offeredSecrets ?? []).length > 0}>
+        <Checkbox
+          checked={props.storeSecrets === true}
+          onChange={(checked) => props.onStoreSecrets?.(checked)}
+          label={
+            (props.offeredSecrets ?? []).length === 1
+              ? `Store ${(props.offeredSecrets ?? [])[0]} in the vault — the file keeps the name, never the value`
+              : `Store ${(props.offeredSecrets ?? []).length} secret variables in the vault — the files keep their names, never the values`
+          }
+        />
+      </Show>
     </Dialog>
   )
 }

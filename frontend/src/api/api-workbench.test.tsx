@@ -2462,6 +2462,27 @@ describe('the import ask asks one question', () => {
     expect('path' in call[0] && call[0].path).toBe('/downloads/acme.json')
   })
 
+  it('a read that is superseded does not leave the ask busy for ever', async () => {
+    // The request id decides whose RESULT is applied. It may not also decide
+    // who ends the wait: a bump can happen with no new read behind it — a
+    // keystroke in the paste box, a source taken back — and the read already
+    // in flight then found the id changed and cleared nothing. Import is
+    // disabled while the ask is busy, so the ask went quietly dead. Caught by
+    // the e2e suite; held here (nocx-zn386).
+    const previewPostman = vi.fn<ApiWorkbenchServices['previewPostman']>().mockResolvedValue({
+      unsupported: [],
+      documents: [{ kind: 'collection', name: 'Acme', unsupported: [] }],
+    })
+    await openBrowserAsk({ previewPostman })
+
+    paste('{"info":{"name":"Acme"}}')
+    fireEvent.blur(field('api-import-paste'))
+    // …and a keystroke lands while that read is still in flight.
+    paste('{"info":{"name":"Acme"}} ')
+
+    await vi.waitFor(() => expect(button('Import').disabled).toBe(false))
+  })
+
   it('does not re-send the archive on every keystroke: the destination is re-checked when it is left', async () => {
     const previewPostman = vi
       .fn<ApiWorkbenchServices['previewPostman']>()

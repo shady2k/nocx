@@ -162,6 +162,17 @@ test.describe('a secret in the path: the value crosses to the server and never t
     // where the walk below can read it, not under the collections root.
     await ask.getByRole('button', { name: 'Change where this goes' }).click()
     await page.locator('#api-import-postman-dest').fill(collectionRoot)
+
+    // ── AND THE OFFER, TAKEN ──────────────────────────────────────────────
+    //
+    // The export marks `token` as `type: secret`, so the ask offers to put
+    // its value in the vault and write a reference in its place — the one
+    // case an import asks about, and the reason this spec set a vault up
+    // before it started (ADR-0051). It starts unticked: a program may ask
+    // and may not choose, so this is the person taking it.
+    const offer = ask.getByRole('checkbox', { name: /Store token in the vault/ })
+    await expect(offer).toBeVisible({ timeout: 15_000 })
+    await offer.check()
     await ask.getByRole('button', { name: 'Import', exact: true }).click()
 
     // The folder arriving is the import's closing event (§12.2), so waiting
@@ -181,8 +192,10 @@ test.describe('a secret in the path: the value crosses to the server and never t
         TELEGRAM_BOT_TOKEN,
       )
     }
-    // The importer leaves credential-shaped variables empty; the person
-    // supplies the value through the shared secret picker below.
+    // The variable is DECLARED and BOUND — to the record the import just
+    // minted, not to the value. The import no longer destroys what it finds
+    // (ADR-0051): what makes the folder safe to commit is the reference, and
+    // the walk above is what says so.
     const env = readFileSync(join(collectionRoot, 'environments', 'default.json')).toString('utf8')
     const parsed: unknown = JSON.parse(env)
     if (typeof parsed !== 'object' || parsed === null || !('values' in parsed)) {
@@ -192,7 +205,12 @@ test.describe('a secret in the path: the value crosses to the server and never t
     if (typeof values !== 'object' || values === null || Array.isArray(values)) {
       throw new Error('imported environment values is not an object')
     }
-    expect('token' in values).toBe(false)
+    if (!('token' in values)) {
+      throw new Error('the imported environment does not declare token')
+    }
+    expect(String((values as Record<string, unknown>).token)).toMatch(
+      /^\{\{secret:secrow:[^}]+\}\}$/,
+    )
 
     // ── Send, and NOTHING IS PRESSED TO GET HERE ──────────────────────────
     //
@@ -225,14 +243,20 @@ test.describe('a secret in the path: the value crosses to the server and never t
 
     // Type the requested name after a word-start `@`; the picker offers its
     // create row in place and carries the typed name into the dialog.
-    await urlField.fill('{{baseUrl}}/bot @token')
+    //
+    // A NAME THE VAULT DOES NOT ALREADY HOLD. The import minted `token` a
+    // moment ago (the offer above), so typing that name now offers the
+    // EXISTING record and this journey would never reach the create dialog
+    // — which is the picker behaving correctly and the wrong thing for this
+    // assertion to watch. `botToken` is the same act on a free name.
+    await urlField.fill('{{baseUrl}}/bot @botToken')
     await expect(picker).toBeVisible()
-    await expect(picker.getByRole('option', { name: /Add "token"/ })).toBeVisible()
+    await expect(picker.getByRole('option', { name: /Add "botToken"/ })).toBeVisible()
     await urlField.press('Enter')
 
     const createSecret = page.getByRole('dialog').filter({ hasText: 'Create secret' })
     await expect(createSecret).toBeVisible()
-    await expect(createSecret.locator('#secret-create-name')).toHaveValue('token')
+    await expect(createSecret.locator('#secret-create-name')).toHaveValue('botToken')
     await expect(createSecret.locator('#secret-create-kind')).toHaveValue('api-token')
     await createSecret.locator('#secret-create-value').fill(TELEGRAM_BOT_TOKEN)
     await createSecret.getByRole('button', { name: 'Save to vault', exact: true }).click()
@@ -261,7 +285,6 @@ test.describe('a secret in the path: the value crosses to the server and never t
     for (const file of savedFiles) {
       const text = readFileSync(file, 'utf8')
       expect(text, `${file} carries the token`).not.toContain(TELEGRAM_BOT_TOKEN)
-      expect(text, `${file} carries the secret name`).not.toContain('"token"')
     }
     const requestFile = savedFiles.find((file) =>
       readFileSync(file, 'utf8').includes(`"name": "${TELEGRAM_REQUEST_NAME}"`),
@@ -300,7 +323,7 @@ test.describe('a secret in the path: the value crosses to the server and never t
     // passing because the pane is empty.
     await expect(raw.locator('[aria-label="Raw request"]')).toContainText('/sendMessage')
     // The badge NAMES the secret where its bytes were (§11.1).
-    await expect(raw.locator('.ui-secret-chip__name').first()).toHaveText('token')
+    await expect(raw.locator('.ui-secret-chip__name').first()).toHaveText('botToken')
 
     // The whole serialised document, attributes included: a chip beside a
     // leak is still a leak, and a value can ride a title or a data-* that no

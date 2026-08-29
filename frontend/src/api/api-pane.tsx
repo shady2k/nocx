@@ -855,12 +855,17 @@ export function ApiPane(props: ApiPaneProps) {
    * value this surface wrote is not a value the person chose.
    */
   const [destTyped, setDestTyped] = createSignal(false)
+  /** Whether an IMPORT is in flight — the one thing that refuses a second
+   *  press of Import. Reading is not: see previewSource. */
   const [importingBusy, setImportingBusy] = createSignal(false)
-  /** Whether the ask is READING an archive it has just been handed — the
-   *  one wait a person sits through, and the only one that says so. A
-   *  destination re-check reuses `importingBusy` alone: it is fast, it was
-   *  not asked for, and a spinner for it would be motion nobody caused. */
+  /** Whether the ask is READING an export it has just been handed — the one
+   *  wait a person sits through, and the only one that says so. A
+   *  destination re-check draws nothing: it is fast, it was not asked for,
+   *  and a spinner for it would be motion nobody caused. */
   const [readingArchive, setReadingArchive] = createSignal(false)
+  /** How many reads are in flight. See previewSource for why this is a count
+   *  and the request id is not. */
+  let reads = 0
   const [archivePreview, setArchivePreview] = createSignal<ArchiveDocument[] | null>(null)
   let archivePreviewRequest = 0
   /**
@@ -1745,8 +1750,6 @@ export function ApiPane(props: ApiPaneProps) {
       const proposed = proposedDestination(store.defaultRoot(), path)
       return postmanDest().trim() || proposed
     })
-    setImportingBusy(true)
-    setReadingArchive(true)
     void previewSource({ path }, dest, requestId, true)
   }
 
@@ -1872,8 +1875,25 @@ export function ApiPane(props: ApiPaneProps) {
     dest: string,
     requestId: number,
     firstRead: boolean,
-  ): Promise<void> =>
-    store
+  ): Promise<void> => {
+    // BUSY IS A COUNT, NOT A FLAG. The request id decides whose RESULT is
+    // applied — a superseded read must not overwrite a newer one — and it
+    // may not also decide who clears the wait, because a bump can happen
+    // with no new read behind it (a keystroke in the paste box, a source
+    // taken back). Clearing on the id alone left `busy` true for ever after
+    // one of those, and Import is disabled while busy: the ask went quietly
+    // dead, which is what the e2e suite caught.
+    // A READ DOES NOT DISABLE IMPORT. It used to: `busy` was one flag for
+    // both, so clicking Import right after typing in the paste box lost the
+    // click — the click's own blur committed the field, which started a
+    // read, which disabled the button under the pointer. The two are
+    // different facts, and only the second is a reason to refuse a press:
+    // `reading` says a preview is in flight, `importingBusy` says an import
+    // is. An archive is still held back until it has been read, by
+    // `archiveReady`, which is about the ARCHIVE rather than about waiting.
+    reads++
+    if (firstRead) setReadingArchive(true)
+    return store
       .previewPostman(source, dest)
       .then((result) =>
         untrack(() => {
@@ -1892,11 +1912,12 @@ export function ApiPane(props: ApiPaneProps) {
       )
       .finally(() =>
         untrack(() => {
-          if (requestId !== archivePreviewRequest) return
-          setImportingBusy(false)
+          reads--
+          if (reads > 0) return
           setReadingArchive(false)
         }),
       )
+  }
 
   /**
    * THE EXPORT AS DOCUMENT OR ARCHIVE — a browser drop, or the kit's file input
@@ -1937,8 +1958,6 @@ export function ApiPane(props: ApiPaneProps) {
       // (nocx-zn386). The held source stays the FILE — the bytes travel
       // again at import, as they always did — because a document read into
       // the ask is a second copy of the same export.
-      setImportingBusy(true)
-      setReadingArchive(true)
       void file
         .text()
         .then((text) =>
@@ -1951,14 +1970,14 @@ export function ApiPane(props: ApiPaneProps) {
         .catch((err: unknown) =>
           untrack(() => {
             if (requestId !== archivePreviewRequest) return
-            setImportingBusy(false)
-            setReadingArchive(false)
             refuseImport(err instanceof Error ? err.message : String(err))
           }),
         )
       return
     }
-    setImportingBusy(true)
+    // The BYTES are read here rather than in previewSource, so the wait
+    // starts at the gesture and not one turn of the event loop later.
+    reads++
     setReadingArchive(true)
     void file
       .arrayBuffer()
@@ -1978,11 +1997,17 @@ export function ApiPane(props: ApiPaneProps) {
       )
       .catch((err: unknown) =>
         untrack(() => {
-          if (requestId !== archivePreviewRequest) return
-          setPostmanSource({ kind: 'none' })
-          setImportingBusy(false)
+          if (requestId === archivePreviewRequest) {
+            setPostmanSource({ kind: 'none' })
+            refuseImport(err instanceof Error ? err.message : String(err))
+          }
+        }),
+      )
+      .finally(() =>
+        untrack(() => {
+          reads--
+          if (reads > 0) return
           setReadingArchive(false)
-          refuseImport(err instanceof Error ? err.message : String(err))
         }),
       )
   }
@@ -3084,7 +3109,6 @@ export function ApiPane(props: ApiPaneProps) {
             const readable = readableSource(postmanSource())
             if (readable === null) return
             const requestId = ++archivePreviewRequest
-            setImportingBusy(true)
             void previewSource(readable, value.trim(), requestId, false)
           }}
           defaultRoot={store.defaultRoot()}
@@ -3110,8 +3134,6 @@ export function ApiPane(props: ApiPaneProps) {
             const readable = readableSource(postmanSource())
             if (readable === null || !('document' in readable)) return
             const requestId = ++archivePreviewRequest
-            setImportingBusy(true)
-            setReadingArchive(true)
             void previewSource(readable, postmanDest().trim(), requestId, true)
           }}
           onBrowseFile={filePickerLive() ? browseForExport : undefined}

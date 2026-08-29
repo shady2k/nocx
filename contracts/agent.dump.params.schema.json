@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/agent.dump.params.schema.json",
+  "title": "AgentDumpParams",
+  "description": "Params for agent.dump.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entryId"],
+  "properties": { "entryId": { "type": "string", "minLength": 1, "maxLength": 256 } }
+}

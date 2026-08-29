@@ -107,7 +107,13 @@ func TestAgentMethods_UnwiredAnswerMethodNotFound(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer conn.Close() //nolint:errcheck
 
-	resp := jsonrpcCallWithID(t, conn, "agent.ask", map[string]any{}, 1)
+	resp := jsonrpcCallWithID(t, conn, "agent.ask", map[string]any{
+		"askId":           "unwired",
+		"sessionId":       "session",
+		"question":        "test",
+		"attachedContent": []any{},
+		"cwd":             "/tmp",
+	}, 1)
 	var env struct {
 		Error *jsonrpcErrorObj `json:"error"`
 	}

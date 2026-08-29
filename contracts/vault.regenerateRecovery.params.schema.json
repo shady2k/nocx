@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/vault.regenerateRecovery.params.schema.json",
+  "title": "VaultRegenerateRecoveryParams",
+  "description": "Params for vault.regenerateRecovery.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["passphrase"],
+  "properties": {
+    "passphrase": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 64000,
+      "description": "Vault passphrase used to authorize recovery-code regeneration."
+    }
+  }
+}

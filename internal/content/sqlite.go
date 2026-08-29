@@ -434,7 +434,7 @@ func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // half-broken store is worse than no store, so the file is rebuilt instead —
 // and it says so, because "your history was discarded" is a fact the user is
 // entitled to rather than something to infer from an empty panel.
-const schemaVersion = 14
+const schemaVersion = 15
 
 // rebuildDropOrder is the complete set of user tables this build owns,
 // children first so a parent DROP never meets a surviving child under
@@ -922,7 +922,7 @@ CREATE TABLE IF NOT EXISTS authority_grants (
 CREATE TABLE IF NOT EXISTS grant_scopes (
   grant_id      INTEGER NOT NULL REFERENCES authority_grants(id) ON DELETE CASCADE,
   resource_kind TEXT NOT NULL CHECK (resource_kind IN
-                ('environment','session','path','credential','destination','tool')),
+                ('environment','session','path','credential','destination','tool','content','workspace')),
   resource_id   TEXT NOT NULL,
   PRIMARY KEY (grant_id, resource_kind, resource_id)
 ) STRICT;

@@ -463,27 +463,31 @@ func TestRunLeaseError_NamesTheBoundAndCarriesTheReason(t *testing.T) {
 	}
 }
 
-// THE CLAIM IS AN INTERVAL, NOT A MOMENT (nocx-uvac6.11).
+// THE ADDRESSEE IS NAMED BEFORE THE WITHDRAWAL (nocx-uvac6.11).
 //
-// cancelExecution checked `done`, released the lock and then escalated. Between
-// those two the request it was cancelling could complete on its own — and the
-// escalation then addressed whatever the session had in front of it, which is
-// the next thing the person started. The check is re-made after the withdrawal,
-// so a request that finished while the cancellation was being delivered signals
-// nothing at all.
+// cancelExecution used to withdraw the broker request and only then ask what
+// was in front. Withdrawing is exactly what lets the request's command exit,
+// so the answer could be the command the person started in its place — and the
+// ladder went to that one.
 //
-// The interleaving is forced through the withdrawal itself: `cancel` is what
-// ends the broker request, so a cancel that completes the lease IS the race,
-// deterministically.
-func TestRunLease_CancelExecutionThatRacesCompletionSignalsNothing(t *testing.T) {
-	sess := &fakeLeaseSession{}
+// The naming now happens first, while the request still owns the foreground by
+// construction. The withdrawal itself is the injection point here, because it
+// is what ends the request: a cancel that hands the foreground to another group
+// IS the race, deterministically.
+func TestRunLease_CancelExecutionNamesItsOwnGroupBeforeWithdrawing(t *testing.T) {
+	const owned, personStarted = 5100, 5200
+	sess := newHandoffSession(owned)
+	sess.diesOn = syscall.SIGINT
 	lease, _ := newUnitLease(t, sess, RunLeaseConfig{})
-	lease.cancel = func() { lease.disarm() }
+	lease.cancel = func() { sess.takeOver(personStarted) }
 
-	if got := lease.cancelExecution(); got != foregroundNothingRunning {
-		t.Fatalf("racing cancel outcome = %q, want %q", got, foregroundNothingRunning)
+	if got := lease.cancelExecution(); got != foregroundDelivered {
+		t.Fatalf("cancel outcome = %q, want %q", got, foregroundDelivered)
 	}
-	if got := sess.got(); len(got) != 0 {
-		t.Fatalf("a request that completed under the cancellation was still signalled: %v", got)
+	if got := sess.signalsTo(owned); len(got) != 1 || got[0] != syscall.SIGINT {
+		t.Fatalf("the request's own group got %v, want exactly [SIGINT]", got)
+	}
+	if got := sess.signalsTo(personStarted); len(got) != 0 {
+		t.Fatalf("a command the person started under the withdrawal was signalled: %v", got)
 	}
 }

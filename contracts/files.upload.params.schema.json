@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files.upload.params.schema.json",
+  "title": "FilesUploadParams",
+  "description": "Params for files.upload.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bindingId", "destDir", "name", "size"],
+  "properties": {
+    "bindingId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "destDir": { "type": "string", "pattern": "^/", "maxLength": 4096 },
+    "name": { "type": "string", "minLength": 1, "maxLength": 255 },
+    "size": { "type": "integer", "minimum": 0 },
+    "sourceTicket": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "onExists": { "type": "string", "enum": ["overwrite", "keepBoth", "skip"] }
+  }
+}

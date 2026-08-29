@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/git.stage.params.schema.json",
+  "title": "GitStageParams",
+  "description": "Params for git.stage.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bindingId", "paths"],
+  "properties": {
+    "bindingId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "paths": {
+      "type": "array",
+      "maxItems": 512,
+      "items": { "type": "string", "minLength": 1, "maxLength": 4096 }
+    }
+  }
+}

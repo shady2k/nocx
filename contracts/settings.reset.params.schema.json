@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/settings.reset.params.schema.json",
+  "title": "SettingsResetParams",
+  "description": "Params for settings.reset.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["key"],
+  "properties": {
+    "key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    }
+  }
+}

@@ -17,10 +17,16 @@ import (
 // moment later — inside the escalation's own grace window.
 type handoffSession struct {
 	mu sync.Mutex
-	// fg is the foreground job's group, 0 at a prompt.
+	// fg is the foreground job's group, 0 at a prompt. It answers
+	// "what is in front", which is a different question from "does this group
+	// still exist" — and telling the two apart is what this fake is for.
 	fg int
-	// diesOn ends the group named by `fg` and hands the foreground to
-	// `successor` (0 = back to a prompt).
+	// live is every group that still exists. A group can be alive and NOT in
+	// front: that is precisely the state the assistant's command is in once
+	// the person has started something else.
+	live map[int]bool
+	// diesOn ends the group it is delivered to, and hands the foreground to
+	// `successor` if that group was the one in front (0 = back to a prompt).
 	diesOn    syscall.Signal
 	successor int
 	got       []signalledGroup
@@ -29,6 +35,18 @@ type handoffSession struct {
 type signalledGroup struct {
 	pgid int
 	sig  syscall.Signal
+}
+
+// newHandoffSession starts with `fg` in front, and every named group alive.
+func newHandoffSession(fg int, alive ...int) *handoffSession {
+	h := &handoffSession{fg: fg, live: map[int]bool{}}
+	if fg != 0 {
+		h.live[fg] = true
+	}
+	for _, pgid := range alive {
+		h.live[pgid] = true
+	}
+	return h
 }
 
 func (h *handoffSession) SignalForeground(sig syscall.Signal) error {
@@ -52,22 +70,36 @@ func (h *handoffSession) ForegroundJob() (int, error) {
 func (h *handoffSession) SignalProcessGroup(pgid int, sig syscall.Signal) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	if pgid != h.fg {
-		// The group is gone: it is not the one the pty is waiting on.
+	if !h.live[pgid] {
 		return pty.ErrNoForeground
 	}
 	return h.signalLocked(pgid, sig)
 }
 
 func (h *handoffSession) signalLocked(pgid int, sig syscall.Signal) error {
+	if !h.live[pgid] {
+		return pty.ErrNoForeground
+	}
 	if sig == 0 {
 		return nil // the existence check: this group is still there
 	}
 	h.got = append(h.got, signalledGroup{pgid: pgid, sig: sig})
 	if h.diesOn != 0 && sig == h.diesOn {
-		h.fg = h.successor
+		delete(h.live, pgid)
+		if h.fg == pgid {
+			h.fg = h.successor
+		}
 	}
 	return nil
+}
+
+// takeOver models the person starting a command: a different group is alive
+// and in front from now on.
+func (h *handoffSession) takeOver(pgid int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.fg = pgid
+	h.live[pgid] = true
 }
 
 func (h *handoffSession) signalsTo(pgid int) []syscall.Signal {
@@ -94,7 +126,9 @@ func (h *handoffSession) signalsTo(pgid int) []syscall.Signal {
 // (nocx-uvac6.10), which is what turned a latent hazard into a defect.
 func TestStopForeground_SignalsOnlyTheGroupItStartedAgainst(t *testing.T) {
 	const assistantGroup, personGroup = 4100, 4200
-	sess := &handoffSession{fg: assistantGroup, diesOn: syscall.SIGINT, successor: personGroup}
+	sess := newHandoffSession(assistantGroup)
+	sess.diesOn, sess.successor = syscall.SIGINT, personGroup
+	sess.live[personGroup] = true
 
 	outcome := stopForeground(log.NewSlogAdapter(nil), session.ID("sid"), sess, 200*time.Millisecond)
 
@@ -113,7 +147,7 @@ func TestStopForeground_SignalsOnlyTheGroupItStartedAgainst(t *testing.T) {
 // the whole point of the rungs — and the escalation stays on the one group.
 func TestStopForeground_EscalatesOnTheSameGroupWhenNothingCooperates(t *testing.T) {
 	const stubborn = 4300
-	sess := &handoffSession{fg: stubborn}
+	sess := newHandoffSession(stubborn)
 
 	outcome := stopForeground(log.NewSlogAdapter(nil), session.ID("sid"), sess, 20*time.Millisecond)
 
@@ -135,7 +169,7 @@ func TestStopForeground_EscalatesOnTheSameGroupWhenNothingCooperates(t *testing.
 // A prompt has no job to stop, and saying "nothing running" is what keeps a
 // caller from claiming a command was stopped.
 func TestStopForeground_AtAPromptSignalsNothing(t *testing.T) {
-	sess := &handoffSession{fg: 0}
+	sess := newHandoffSession(0)
 
 	outcome := stopForeground(log.NewSlogAdapter(nil), session.ID("sid"), sess, 20*time.Millisecond)
 
@@ -152,7 +186,8 @@ func TestStopForeground_AtAPromptSignalsNothing(t *testing.T) {
 // the present moment and the person may press it again.
 func TestInterruptForeground_AddressesWhateverIsInFrontNow(t *testing.T) {
 	const first, second = 4400, 4500
-	sess := &handoffSession{fg: first, diesOn: syscall.SIGINT, successor: second}
+	sess := newHandoffSession(first, second)
+	sess.diesOn, sess.successor = syscall.SIGINT, second
 
 	if got := interruptForeground(log.NewSlogAdapter(nil), session.ID("sid"), sess); got != foregroundDelivered {
 		t.Fatalf("first interrupt = %q, want %q", got, foregroundDelivered)

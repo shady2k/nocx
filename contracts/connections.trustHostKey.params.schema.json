@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/connections.trustHostKey.params.schema.json",
+  "title": "ConnectionsTrusthostkeyParams",
+  "description": "Params for connections.trustHostKey.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["host", "key"],
+  "properties": {
+    "host": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8000
+    },
+    "key": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 8000
+    }
+  }
+}

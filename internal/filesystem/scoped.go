@@ -23,8 +23,10 @@ import (
 // to the provider); the containment check compares provider-canonical
 // strings at a separator boundary.
 type ScopedReader struct {
-	provider Provider
-	roots    []string // canonical absolute roots; empty = nothing is in scope
+	provider   Provider
+	roots      []string // canonical absolute roots; empty = nothing is in scope
+	exactFiles []string // canonical file identities for an exact-resource scope
+	exactOnly  bool     // exact files further narrow the canonical grant roots
 }
 
 // ErrOutOfScope is the refusal a read outside the scope returns. It is a
@@ -41,18 +43,30 @@ type ScopedContent struct {
 	Total int64
 }
 
-// NewScopedReader builds the capability over p for exactly the given roots.
-// A root that cannot be canonicalized is an error at construction — a scope
-// whose identity is unknowable must not silently become a wider or narrower
-// scope. Zero roots build a capability that refuses every read.
-func NewScopedReader(ctx context.Context, p Provider, roots []string) (*ScopedReader, error) {
-	s := &ScopedReader{provider: p}
+// NewScopedReaderWithExactFiles retains the provider-canonical grant roots for
+// context while authorizing only the canonical file identities in files.
+// This is the files.read capability shape: a file cannot itself be a directory
+// root, because a root would authorize descendants, so exact files are a
+// separate scope kind. Empty files therefore authorize no reads.
+func NewScopedReaderWithExactFiles(ctx context.Context, p Provider, roots, files []string) (*ScopedReader, error) {
+	return newScopedReader(ctx, p, roots, files, true)
+}
+
+func newScopedReader(ctx context.Context, p Provider, roots, files []string, exactOnly bool) (*ScopedReader, error) {
+	s := &ScopedReader{provider: p, exactOnly: exactOnly}
 	for _, r := range roots {
 		c, err := p.Canonical(ctx, r)
 		if err != nil {
 			return nil, fmt.Errorf("filesystem: scope root %q: %w", r, err)
 		}
 		s.roots = append(s.roots, c)
+	}
+	for _, file := range files {
+		c, err := p.Canonical(ctx, file)
+		if err != nil {
+			return nil, fmt.Errorf("filesystem: exact file %q: %w", file, err)
+		}
+		s.exactFiles = append(s.exactFiles, c)
 	}
 	return s, nil
 }
@@ -66,7 +80,7 @@ func (s *ScopedReader) Read(ctx context.Context, path string, maxBytes int64) (S
 	if err != nil {
 		return ScopedContent{}, err
 	}
-	if !contained(canonical, s.roots) {
+	if !s.allows(canonical) {
 		return ScopedContent{}, fmt.Errorf("%w: %s", ErrOutOfScope, path)
 	}
 	c, err := s.provider.Read(ctx, path, maxBytes)
@@ -85,6 +99,22 @@ func (s *ScopedReader) Read(ctx context.Context, path string, maxBytes int64) (S
 		}
 	}
 	return ScopedContent{Content: c, Total: total}, nil
+}
+
+func (s *ScopedReader) allows(canonical string) bool {
+	if s.exactOnly {
+		return exact(canonical, s.exactFiles) && contained(canonical, s.roots)
+	}
+	return contained(canonical, s.roots)
+}
+
+func exact(canonical string, files []string) bool {
+	for _, file := range files {
+		if canonical == file {
+			return true
+		}
+	}
+	return false
 }
 
 // contained reports whether canonical is one of the roots or a descendant at

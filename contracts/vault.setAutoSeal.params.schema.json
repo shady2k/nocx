@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/vault.setAutoSeal.params.schema.json",
+  "title": "VaultSetAutoSealParams",
+  "description": "Params for vault.setAutoSeal.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["minutes"],
+  "properties": { "minutes": { "type": "integer", "enum": [0, 5, 15, 30, 60] } }
+}

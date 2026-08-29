@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/roles.assign.params.schema.json",
+  "title": "RolesAssignParams",
+  "description": "Params for roles.assign.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["role"],
+  "properties": {
+    "role": {
+      "type": "string",
+      "enum": ["answering", "classifier"]
+    },
+    "endpointId": {
+      "type": ["string", "null"]
+    },
+    "model": {
+      "type": ["string", "null"]
+    }
+  }
+}

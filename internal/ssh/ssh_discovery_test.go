@@ -237,6 +237,53 @@ func TestDiscoveryConn_Exec_Cancel_NoGoroutineNoLeak(t *testing.T) {
 	})
 }
 
+// TestLeaseErr_ClosePrecedesLoss pins the precedence every exec path derives
+// its lease error from. Closing a lease releases its pooled reference, which
+// is what shuts the transport, so "closed" and "lost" are BOTH true a
+// moment later on the ordinary path — and the answer must be the caller's own
+// close, not the loss it caused.
+//
+// Before nocx-4c5d7 the answer depended on which channel a select happened to
+// wake on: an exec the caller had just closed reported ErrExecLost about 1
+// run in 150 under -race, and the end-to-end test that caught it needed
+// hundreds of runs to do so. This one is deterministic.
+func TestLeaseErr_ClosePrecedesLoss(t *testing.T) {
+	newLease := func() *discoveryConn {
+		return &discoveryConn{done: make(chan struct{}), closed: make(chan struct{})}
+	}
+
+	live := newLease()
+	if err := live.leaseErr(); err != nil {
+		t.Fatalf("a live lease has no lease error, got %v", err)
+	}
+
+	lost := newLease()
+	close(lost.done)
+	if err := lost.leaseErr(); !errors.Is(err, ErrExecLost) {
+		t.Fatalf("a lost lease = %v, want ErrExecLost", err)
+	}
+
+	closed := newLease()
+	close(closed.closed)
+	if err := closed.leaseErr(); !errors.Is(err, ErrExecClosed) {
+		t.Fatalf("a closed lease = %v, want ErrExecClosed", err)
+	}
+
+	// The ordinary sequence, and the one that was answered at random.
+	both := newLease()
+	close(both.closed)
+	close(both.done)
+	if err := both.leaseErr(); !errors.Is(err, ErrExecClosed) {
+		t.Fatalf("a lease closed AND then lost = %v, want ErrExecClosed — the close caused the loss", err)
+	}
+	// classifyExecError is the second reader of that fact, and it used to
+	// carry its own ordering, which was the opposite one.
+	raw := errors.New("ssh: exec connection reset by peer")
+	if err := classifyExecError(both, raw, "probe"); !errors.Is(err, ErrExecClosed) {
+		t.Fatalf("classifyExecError on a closed-then-lost lease = %v, want ErrExecClosed", err)
+	}
+}
+
 // TestDiscoveryConn_Close_MidExec_StopsRemoteExec proves tab-death
 // semantics: closing the lease while an exec is in flight closes the
 // auxiliary session — the only thing that stops the remote exec — and Exec

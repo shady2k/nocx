@@ -108,19 +108,36 @@ generation, so a screen can be reported as moved when it did not. **We prefer a 
 moved" to a false "unchanged"** — the first costs a re-ask, the second delivers advice about
 a screen that is gone.
 
-**There is also a capture fence, and global queue emptiness cannot be it.** `write()` queues
-parsing, so a request that arrives with pending work waits for a completed
-`onWriteParsed` pass. JavaScript cannot read the buffer during that pass: its end is a
-coherent state that existed, even when one large write has another chunk left or a
-continuously repainting TUI already queued its next write.
+**There is also a capture fence, and it is a write barrier.** `write()` queues parsing, so a
+snapshot taken with bytes still queued shows a screen the terminal has already been told to
+leave. The fence waits for **everything queued before the request, and for nothing queued
+after it**: xterm's `WriteBuffer` is FIFO and fires each chunk's callback when that chunk has
+been parsed, so an empty `write('', cb)` is exactly that barrier — later repaints queue
+behind it and cannot postpone it.
 
-The renderer's per-write callbacks still keep the unsettled count exact, but the count has
-one job: zero means capture immediately; non-zero means wait for the next parse boundary.
-Waiting for it to return to zero starves `top`: each callback can settle one repaint while
-the next keeps the count at one forever. If a source claims pending work but produces
-neither a parse boundary nor disposal within the renderer's local bound, capture rejects
-and `agent.readScreenResolved` reports `failed` — it never waits for the broker's 30-second
-timeout.
+The two obvious fences are each wrong in one direction, and the barrier is what has neither
+failure:
+
+- **Global queue emptiness starves.** `top` repaints forever: each per-write callback settles
+  one repaint while the next replaces it, so the count is exact, the callbacks are live, and
+  zero never happens. Measured on the real bug (`nocx-2ryxf.3`): pending `1 → 1`, generation
+  `+1`, the fence unresolved — starvation, not a leaked counter.
+- **The next parse boundary is incomplete.** xterm breaks its parse loop on a 12 ms budget
+  _between_ chunks, so a completed pass can end with bytes that were already queued when the
+  request arrived still unparsed. A bulk write — `cat` of a large file, a reattach replay —
+  would then be answered with a screen from several passes ago.
+
+The renderer's per-write callbacks still keep the unsettled count exact, and it has one job
+left: **zero means capture immediately, without a barrier at all.** That is not only an
+optimisation — a barrier costs a parse pass and a parse pass advances the generation, so
+issuing one on a motionless screen would report it as "moved". §2.3 tolerates a false
+positive; it never manufactures one.
+
+A barrier that never settles is a wedged parse queue, not a busy one — however much arrives
+behind it, a barrier opens as soon as the backlog ahead of it is parsed. That is bounded in
+the renderer (above the browser's ~1 s background-tab timer clamp, far below the broker's
+30 s) and `agent.readScreenResolved` reports `failed`; the request never hangs to the
+broker's timeout.
 
 A frozen block is the degenerate case: its identity is closed and its generation never
 advances again.
@@ -830,8 +847,12 @@ Assertions, in the bead, authored before the implementation.
   "moved" — the deliberate false positive of §2.3, asserted so it cannot be silently
   optimized away.
 - A frame is requested while a continuous repaint always leaves another write queued:
-  **assert** it is taken at the next completed parse pass, never waits for global
-  emptiness, and a source with no future pass answers `failed` within the local bound.
+  **assert** the fence opens with writes still queued (never global emptiness), that it does
+  NOT open before every write queued _before_ the request has parsed (never the next parse
+  boundary), that a write arriving _after_ the request cannot postpone it, and that a barrier
+  which never settles answers `failed` within the local bound.
+- A capture on a screen nothing wrote to leaves the generation **unchanged**: the fence must
+  not manufacture the "moved" it is allowed to over-report.
 - The same gesture on a frozen block mints a frame whose provenance records source `frozen`
   and the serializer version, and on a live surface records `live` and the buffer identity —
   **two sources, both recorded**, and neither silently substituted for the other.

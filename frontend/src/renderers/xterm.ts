@@ -681,11 +681,11 @@ export class XtermRenderer implements TerminalRenderer {
     this.unsettledWrites++
     try {
       t.write(data, () => {
-        // The per-write callback keeps the pending count exact: zero means a
-        // capture can read immediately, non-zero means it needs the next
-        // completed onWriteParsed boundary. The boundary, not global queue
-        // emptiness, is the fence — a continuously repainting TUI may always
-        // have a later write queued.
+        // The per-write callback keeps the pending count exact. The count no
+        // longer gates the fence — it only says whether a capture needs one:
+        // zero means the buffer already holds every byte we were given.
+        // Waiting for it to REACH zero is what starved a repainting TUI
+        // (nocx-2ryxf.3); the fence is awaitWriteBarrier().
         this.unsettledWrites = Math.max(0, this.unsettledWrites - 1)
       })
     } catch (err) {
@@ -1208,10 +1208,43 @@ export class XtermRenderer implements TerminalRenderer {
     this.resetSubs.push(cb)
   }
 
-  /** True while bytes queued via write() have not finished parsing — the
-   *  capture fence. */
+  /** True while bytes queued via write() have not finished parsing. Decides
+   *  whether a capture needs the fence; it is not the fence itself. */
   hasUnsettledWrite(): boolean {
     return this.unsettledWrites > 0
+  }
+
+  /** The capture fence: a write barrier over xterm's FIFO write queue.
+   *
+   *  xterm's WriteBuffer parses queued chunks in order and fires each
+   *  chunk's callback when THAT chunk has been parsed, so an EMPTY write is
+   *  a barrier: its callback runs once everything queued ahead of it is in
+   *  the buffer, and writes that arrive afterwards go behind it and cannot
+   *  postpone it. That is both halves of the problem at once — a
+   *  continuously repainting TUI cannot starve it (unlike waiting for the
+   *  queue to empty), and a bulk write cannot be answered half-parsed
+   *  (unlike waiting for the next parse boundary, which xterm breaks on a
+   *  12 ms budget between chunks).
+   *
+   *  The barrier is written straight to the terminal, NOT through write():
+   *  it carries no bytes, so it must not move the unsettled count, and it
+   *  must not be surfaced to the caller as a refused PTY write.
+   *
+   *  It rides the parse pass the backlog already scheduled, so it costs no
+   *  extra pass — but only because awaitSettled() never issues one on an
+   *  idle terminal, where a pass would advance the generation of a screen
+   *  that did not move. */
+  awaitWriteBarrier(): Promise<void> {
+    const t = this.term
+    // No terminal: the fence can never open. Rejecting rather than resolving
+    // is the same choice awaitSettled() makes for disposal — "settled" would
+    // let a caller mint a frame from a dead renderer.
+    if (!t) return Promise.reject(new CaptureAbortedError())
+    return new Promise<void>((resolve) => {
+      // May throw xterm's discard-watermark refusal, which rejects the
+      // promise: an honest failed capture, not a silent hang.
+      t.write('', resolve)
+    })
   }
 
   getBufferLine(line: number): import('@xterm/xterm').IBufferLine | undefined {

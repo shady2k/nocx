@@ -45,8 +45,12 @@
  *   then OSC 9 on the same byte stream; notify.raise cannot precede the cells.
  *
  * The loop keeps repainting until the answer lands. This is the `top` case:
- * xterm may always have a later write queued, so session.read must capture at
- * a completed parse-pass boundary rather than wait for global queue emptiness.
+ * xterm always has a later write queued, so the renderer's capture fence must
+ * be a WRITE BARRIER — everything queued before the request, nothing queued
+ * after it. Waiting for the queue to empty never opens here; the barrier is
+ * behind the repaint that was in flight when the ask arrived and opens on the
+ * pass that parses it, however much has piled up behind it. That is why this
+ * spec can spin the loop flat out without racing any bound.
  *
  * Nothing here sleeps and nothing waits out a clock (AGENTS.md: "a test may
  * not depend on timing").
@@ -108,10 +112,11 @@ test.beforeAll(async () => {
   scriptPath = join(fixtureDir, 'put-marker-on-screen.sh')
   flagPath = join(fixtureDir, 'release')
   stopPath = join(fixtureDir, 'stop')
-  // POSIX sh continuously repaints one row like a normal-buffer TUI. The
-  // release is a condition opened only after freeze/clear; the stop is opened
-  // only after session.read has answered. No sleep creates a false quiet gap
-  // in which a global-empty fence could accidentally pass.
+  // POSIX sh continuously repaints one row like a normal-buffer TUI, flat out
+  // and with no sleep: a quiet gap would let a queue-emptiness fence pass by
+  // accident, and the point of this spec is that the fence never needs one.
+  // The release is a condition opened only after freeze/clear; the stop is
+  // opened only after session.read has answered.
   writeFileSync(
     scriptPath,
     [

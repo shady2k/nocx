@@ -153,11 +153,11 @@ describe('mountReadScreenHandler — the renderer half of the pull', () => {
     expect(String(params.error)).toContain('frame capture aborted')
   })
 
-  it('answers a capture with no parse boundary as failed before the broker can hang', async () => {
+  it('answers a capture whose barrier never settled as failed before the broker can hang', async () => {
     const d = scriptedDispatcher()
     const content = {
       sessionId: () => 'session-a',
-      captureLiveFrame: vi.fn(() => Promise.reject(new CaptureUnsettledError(1000))),
+      captureLiveFrame: vi.fn(() => Promise.reject(new CaptureUnsettledError(5000))),
     }
     mountReadScreenHandler(d as unknown as Dispatcher, () => content)
 
@@ -171,7 +171,7 @@ describe('mountReadScreenHandler — the renderer half of the pull', () => {
     expect(params).toMatchObject({
       requestId: 'req-unsettled',
       outcome: 'failed',
-      error: 'frame capture did not reach a parse boundary within 1000ms',
+      error: 'frame capture did not settle within 5000ms',
     })
   })
 

@@ -6200,6 +6200,95 @@ describe('the reachability axis', () => {
   })
 })
 
+describe('reconnecting a lost pane (nocx-rtzo4)', () => {
+  type LostCb = (exit: { sessionId: string; cause: 'exited' | 'interrupted' }) => void
+  const loseSession = (session: SessionFake) => {
+    const cb = session.onExit.mock.calls[0]?.[0] as LostCb
+    cb({ sessionId: session.sessionId, cause: 'interrupted' })
+  }
+
+  // THE POINT OF THE WHOLE THING: the tab is not closed and the work stays
+  // readable. Everything else in this block is about not lying to the person
+  // whose work it is.
+  it('gets a new session without losing what the old one printed', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      const first: SessionFake = client._sessions[0]
+      first.fireData('what the old shell printed\r\n')
+
+      loseSession(first)
+      expect(content.connectionCondition()).toBe('lost')
+
+      expect(await content.reconnect()).toBe(true)
+      // A SECOND session, not the first one revived.
+      expect(client._sessions.length).toBe(2)
+      expect(content.connectionCondition()).toBe('reachable')
+      // And the pane is usable again: the loss is no longer terminal.
+      expect(content.sessionLost()).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
+  // A pane whose host has merely stopped answering may still have a live
+  // shell on the far side. Replacing it would kill work that was never in
+  // danger, so the offer is refused rather than merely not shown.
+  it('refuses to reconnect a session that has not ended', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      const session: SessionFake = client._sessions[0]
+      session.fireLiveness('unknown')
+      expect(content.connectionCondition()).toBe('unreachable')
+
+      expect(await content.reconnect()).toBe(false)
+      expect(client._sessions.length).toBe(1)
+    } finally {
+      teardown()
+    }
+  })
+
+  // The scrollback carries a mark saying the shell changed. Without it a
+  // person reads one continuous session and is wrong about what is still
+  // running on the host.
+  it('marks where the old shell ended', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      loseSession(client._sessions[0])
+      await content.reconnect()
+      expect(document.querySelector('[data-reconnect-boundary]')).not.toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  // A second reconnect must not stack on the first: two binds racing would
+  // leave one session unowned and its subscriptions delivering into a pane
+  // that has moved on.
+  it('does not start a second attempt while one is in flight', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      loseSession(client._sessions[0])
+      const [a, b] = await Promise.all([content.reconnect(), content.reconnect()])
+      expect([a, b].filter(Boolean).length).toBe(1)
+      expect(client._sessions.length).toBe(2)
+    } finally {
+      teardown()
+    }
+  })
+})
+
 // ── liveWork: what is RUNNING in this pane (nocx-isoph.6, design D6) ───────
 //
 // The close prompts name what dies before it dies, and this is where the

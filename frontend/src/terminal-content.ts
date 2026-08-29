@@ -4,7 +4,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { XtermRenderer } from './renderers/xterm'
-import type { TerminalRenderer, MarkerAdapter } from './renderers/types'
+import type { MarkerAdapter } from './renderers/types'
 import { LifecycleClient } from './lifecycle/client'
 import {
   LifecycleKernel,
@@ -63,6 +63,12 @@ import {
 } from './integration/status'
 import { mountIntegrationNotice } from './integration/notice'
 import { mountConnectionMark } from './connection-mark'
+import { mountReconnectOffer, type ReconnectOfferHandle } from './reconnect-offer'
+import {
+  autoReconnectDelayMs,
+  AUTO_RECONNECT_ATTEMPTS,
+  sshReconnectPolicy,
+} from './reconnect-setting'
 import type { WakeObservation } from './wake-report'
 import {
   connectionCondition,
@@ -511,7 +517,15 @@ export interface PaneBlock {
 }
 
 export class TerminalContent extends BasePaneContent {
-  private renderer: TerminalRenderer | null = null
+  // The CONCRETE renderer, not the interface. mount() constructs it here and
+  // nothing injects one, so `TerminalRenderer | null` was a seam with no
+  // second implementation behind it — and it cost a real one: _bindSession
+  // needs `activeBufferKind` and `snapshotStore`, which are the renderer's
+  // and not the interface's, so a rebind could not be handed the renderer the
+  // pane already holds. Narrowing the field states what is true rather than
+  // widening the interface with two members no other implementation would
+  // have. Everything else here still uses it through the interface's methods.
+  private renderer: XtermRenderer | null = null
   private session: SessionHandle | null = null
   private editor: CommandEditor | null = null
   private shellTarget: ShellInputTarget | null = null
@@ -905,6 +919,68 @@ export class TerminalContent extends BasePaneContent {
   private _liveness: SessionLivenessFact | null = null
   private _connectionMark: { set(f: ConnectionFacts): void; dispose(): void } | null = null
   private _connection: ConnectionCondition = 'reachable'
+  private _reconnecting = false
+  private _reconnectAbort: AbortController | null = null
+  private _offer: ReconnectOfferHandle | null = null
+  private _autoAttempts = 0
+  private _autoTimer: number | undefined
+
+  /** Spend an automatic attempt, if the person asked for automatic ones.
+   *
+   *  `ask` and `never` both do nothing here, and they are the same code path
+   *  for a reason: what `never` means is "the tab keeps the offer and nothing
+   *  happens by itself", which is exactly what `ask` looks like before the
+   *  button is pressed. The difference between them is only whether the
+   *  attempts would ever have been spent, so it is expressed once, here.
+   *
+   *  The attempts are bounded and backed off (reconnect-setting.ts). When they
+   *  are spent the pane is left in the state every policy ends in: lost, with
+   *  the offer on it, which is the honest end and not a failure to report. */
+  private _maybeAutoReconnect(): void {
+    if (sshReconnectPolicy() !== 'auto') return
+    if (this._autoAttempts >= AUTO_RECONNECT_ATTEMPTS) return
+    this._autoAttempts++
+    const attempt = this._autoAttempts
+    clearTimeout(this._autoTimer)
+    this._autoTimer = window.setTimeout(() => {
+      if (this._disposed || !this._sessionLost) return
+      void this.reconnect().then((ok) => {
+        // A failed automatic attempt schedules the next one; the guard above
+        // is what stops it. A SUCCESSFUL one resets the budget, so a
+        // connection that drops again tomorrow gets its own three tries
+        // rather than inheriting yesterday's spent ones.
+        if (ok) this._autoAttempts = 0
+        else this._maybeAutoReconnect()
+      })
+    }, autoReconnectDelayMs(attempt))
+  }
+
+  /** Raise, update or drop the offer, from the same place that publishes the
+   *  condition — so the card and the corner mark can never disagree about
+   *  whether this pane has a session. */
+  private _syncReconnectOffer(): void {
+    const target = this._paneTarget
+    if (!target) return
+    const wanted = this._sessionLost || this._reconnecting
+    if (!wanted) {
+      this._offer?.dispose()
+      this._offer = null
+      return
+    }
+    const auto = sshReconnectPolicy() === 'auto' && this._autoAttempts > 0
+    const props = {
+      host: this.sshOpts?.host ?? '',
+      attempting: this._reconnecting,
+      attempt: auto ? { spent: this._autoAttempts, of: AUTO_RECONNECT_ATTEMPTS } : undefined,
+      onReconnect: () => void this.reconnect(),
+    }
+    if (this._offer) this._offer.set(props)
+    else this._offer = mountReconnectOffer(target, props)
+    // The card takes height at the tail of the pane, so the grid fitted to
+    // the old box is now taller than the space it has — the same re-measure
+    // the integration card and the editor already go through.
+    this.scheduleLiveResize()
+  }
 
   /** What this pane looks like right now, for the wake diagnostic
    *  (wake-report.ts). Measurements only — nothing here decides or repairs,
@@ -925,6 +1001,19 @@ export class TerminalContent extends BasePaneContent {
     }
   }
 
+  /** What this pane currently says about reaching its host. Read-only, and
+   *  the same value every surface draws — connection-condition.ts owns the
+   *  derivation and this is the pane's answer from it. */
+  connectionCondition(): ConnectionCondition {
+    return this._connection
+  }
+
+  /** Whether this pane's session has ended. Read-only: the offer and the
+   *  reconnect path are the only things that may change it. */
+  sessionLost(): boolean {
+    return this._sessionLost
+  }
+
   /** Restate the pane's connection condition to every surface that draws it.
    *
    *  ONE derivation, in connection-condition.ts, read from here and from
@@ -934,6 +1023,7 @@ export class TerminalContent extends BasePaneContent {
     const facts: ConnectionFacts = { sessionLost: this._sessionLost, liveness: this._liveness }
     this._connectionMark?.set(facts)
     this._connection = connectionCondition(facts)
+    this._syncReconnectOffer()
     this.hooks.onConnectionConditionChange?.(this._connection)
     this._publishTabMark()
   }
@@ -2827,336 +2917,9 @@ export class TerminalContent extends BasePaneContent {
       // the import that would create a path. The backend routes facts to
       // this session's lane; the kernel adopts the first lane and rejects
       // the rest.
-      const lifecycleSubscription = new LifecycleClient(
-        this.client.dispatcher,
-      ).subscribeLifecycleChanged((fact) => {
-        // ADR-0024 decision 8: a lost fact carrying a recovery contract
-        // opens a restoration episode — the channel died while the shell
-        // was reachable, and the shell will restore its visible native
-        // prompt at the next prompt boundary, writing the one-shot fence.
-        // From this instant until the acknowledgement lands, the session
-        // is neither an authenticated terminal nor advertised as a usable
-        // conventional one (the capability rail is suppressed below; the
-        // editor holds no authority and offers none). A native fact ends
-        // the episode.
-        if (fact.lifecycle === 'lost' && fact.recovery) {
-          this._recovery = { fence: fact.recovery.fence, generation: fact.recovery.generation }
-        } else if (fact.lifecycle === 'native') {
-          this._recovery = null
-        }
-        // The kernel applies the fact and notifies onChange on a real
-        // change; the ownership sync runs there, once.
-        this.lifecycle.applyFact(fact)
-        // ADR-0024 decision 9: the establishment is acknowledged only
-        // AFTER the presentation is committed — applyFact above is what
-        // makes the editor available (ownership syncs on its onChange).
-        // The backend flushes the pending accept, and the shell may
-        // suppress its native prompt, ONLY on this acknowledgement for
-        // this exact generation. Without it the handshake times out and
-        // the session stays conventional with a visible prompt, which is
-        // the fail-open direction: no window in which the prompt is
-        // suppressed and no editor exists.
-        if (
-          fact.lifecycle === 'prompt_ready' &&
-          fact.generation &&
-          fact.generation !== this._establishmentAckInFlight &&
-          fact.generation !== this._establishmentAcked &&
-          this.session
-        ) {
-          const generation = fact.generation
-          this._establishmentAckInFlight = generation
-          new LifecycleClient(this.client.dispatcher)
-            .establishAck(
-              this.session.sessionId,
-              fact.lane,
-              fact.domain ?? '',
-              fact.epoch ?? 0,
-              generation,
-            )
-            .then(() => {
-              // Only a landed acknowledgement retires the generation. The
-              // backend has flushed the accept, so a later replay of the
-              // same projection needs no second ack.
-              this._establishmentAcked = generation
-              if (this._establishmentAckInFlight === generation) {
-                this._establishmentAckInFlight = null
-              }
-            })
-            .catch((e: unknown) => {
-              // Release the claim: this generation was NOT acknowledged, and
-              // a replay carrying it again — the reattach case, where only a
-              // fresh shell hello would have minted a new one — is the retry
-              // that can still complete the handshake.
-              //
-              // A refusal is usually the backend's own bookkeeping (stale
-              // generation, superseded establishment, replaced subscriber),
-              // and then the replay simply does not come. Retrying costs one
-              // refused call in that case and recovers the session in the
-              // case that matters, so releasing is the safe direction.
-              //
-              // The MESSAGE, not just the error object: five distinct
-              // backend rules all refuse with -32603, and logging the
-              // error alone rendered as `{"code":-32603,"name":"RpcError"}`
-              // — identical for every one of them. A reader could see that
-              // the handshake had been refused and never which rule did it,
-              // which is how the cause of six failing specs stayed
-              // "unknown" across three triage rounds (nocx-cbtc). The
-              // backend names the rule in its own log; this is the half a
-              // trace carries.
-              if (this._establishmentAckInFlight === generation) {
-                this._establishmentAckInFlight = null
-              }
-              log.warn('nocx: establishment acknowledgement refused', {
-                reason: e instanceof Error ? e.message : String(e),
-                generation,
-                lane: fact.lane,
-                domain: fact.domain ?? '',
-                epoch: fact.epoch ?? 0,
-              })
-            })
-        }
-      })
-      this._lifecycleUnsub = lifecycleSubscription.unsubscribe
-      const session = await this.openSessionWithHostKeyRecovery(signal)
-
-      if (signal.aborted) {
-        session.close()
-        this.editor.dispose()
-        renderer.dispose()
-        this.scrollback.dispose()
-        this._readyResolve(false)
-        return
-      }
-
-      this.session = session
-      lifecycleSubscription.bindSession(session.sessionId)
-      // THE PANE IS THE DROP TARGET, and this is where it can say so: the
-      // session is what the drop has to be routed to, and it does not exist
-      // until now. Wails' runtime looks for the nearest ancestor carrying
-      // data-file-drop-target and hands Go every attribute of that element,
-      // so data-session-id is how a native drop knows which tab it landed
-      // on. Nothing here reads a file and nothing here names a destination
-      // — Go mints source tickets (design R2) and the renderer then calls
-      // files.upload with its own bindingId.
-      //
-      // In a browser (dev-web) these attributes cost nothing and mean
-      // nothing: there is no Wails runtime to read them, and a drop yields
-      // File objects the renderer streams itself.
-      this.markAsFileDropTarget(session.sessionId)
-      // …and this is where it starts LISTENING. Both halves of the gesture
-      // are attached here: the DOM drop (a browser, where the renderer gets
-      // File objects) and the files.dropped notification (the Wails window,
-      // where the drop went to Go and came back as source tickets). The
-      // module decides which half is live; this decides only that the pane
-      // has one, and that it stops when the pane does.
-      this.attachDrop(target)
-      // The workspace is READ here, not assumed: the renderer named a pane
-      // and the backend walked pane -> tab -> workspace itself, so this is
-      // where a session's placement is learnt at all. It is recorded as
-      // provenance and drives nothing — §5.5 forbids any surface before the
-      // fence epic from acting on membership.
-      log.info('nocx: session opened', {
-        sid: session.sessionId,
-        cwd: session.cwd || '',
-        workspace: session.workspaceId,
-      })
-
-      // Re-report the CURRENT buffer kind now that the session has a
-      // backend id: a buffer change before open had no session to name,
-      // and the backend's lane starts at normal — the report brings a lane
-      // already inside a TUI (an alt screen restored by replay) up to
-      // date (ADR-0020 decision 3).
-      this.reportLaneBufferKind(renderer.activeBufferKind())
-
-      // The open ack carries the resolved launch policy and the refusal
-      // reason (nocx-4t37.2): the capability control starts from the
-      // backend's own resolution, never from a second fetch that could
-      // disagree with it.
-      this._policy = session.desiredMode ?? 'auto'
-      // The integration axis is a SUBSCRIPTION, not a field of the ack: the
-      // backend revises it as it learns (starting → integrated, or →
-      // conventional with a reason, or → lost). Subscribed before anything
-      // else touches the session so the first status — which the server
-      // sends immediately after the ack — cannot arrive unheard.
-      this._integrationUnsub = subscribeIntegrationChanged(this.client.dispatcher, (fact) => {
-        if (fact.sessionId !== session.sessionId) return
-        this._applyIntegration(fact)
-      })
-      // The statement is OBSERVED: until the first marker arrives, an auto
-      // session honestly reads "Native input" — the launcher may be
-      // mid-start, and the first prompt flips it to command blocks.
-      this._updateCapability()
-      // The domain-scoped environment projection (bead nocx-u7uh.11):
-      // cwd, host, the tab title and the completion scope follow the ACTIVE
-      // domain. The lane tier is seeded from the session-open facts — the
-      // provider's cwd guess (unverified, AD-5) and the ssh binding — and
-      // the root domain inherits them at establishment, so integration
-      // takes over seamlessly. A fresh CHILD domain starts blank and is
-      // populated by its own reports, exactly as the parent was.
-      this.env = new DomainEnvironmentProjection(this.lifecycle, () => this._applyEnvironmentView())
-      this.env.seedLane({
-        cwd: session.cwd || '',
-        cwdVerified: false,
-        host: this.sshOpts?.host || '',
-        user: this.sshOpts?.user ?? '',
-        isLocal: !this.sshOpts,
-        programTitle: this.sshOpts?.host || '',
-      })
-      this.env.attach()
-
-      // The SHARED half of command discovery (carrier design §8). The
-      // session's own shell answers the session-local half over OSC 636 —
-      // aliases, builtins, keywords and functions, which belong to this
-      // shell and to no other. The target's PATH set is the opposite: the
-      // same for every tab open on this target, and thousands of directory
-      // reads to enumerate. So it is asked ONCE here, and the backend serves
-      // ten tabs to one host from a single scan invalidated on the mtime of
-      // each PATH directory.
-      //
-      // Fired and not awaited: a session must come up whether or not a
-      // remote host answers, and the store starts in `running`, which is
-      // exactly what the dropdown says while this is outstanding.
-      void this.fetchCommandNames(session.sessionId, renderer.snapshotStore)
-      // The origin answer changed from null to a live session: an
-      // already-active tab whose session (re)opens must push the change
-      // without a tab switch, the same as a cwd or an environment change.
-      // _applyEnvironmentView fires it after every field activeOrigin()
-      // reads is initialised (the projection's first reconcile applies the
-      // lane seed above).
-      this._applyEnvironmentView()
-
-      // Signal adoptability for alias tabs (no saved profile yet).
-      // Must come after the session opens so adoption is only offered
-      // to sessions that actually connected — a failed connect never
-      // reaches this point (it throws to the outer catch).
-      if (this.sshOpts && !this.sshOpts.profileId) {
-        this.hooks.onAdoptabilityChange?.(true)
-      }
-      this.pushTitle()
-
-      // Nothing else will say the opening ended on a session that draws no
-      // prompt marker — see SETTLE_BACKSTOP_MS.
-      this._settleTimer = window.setTimeout(() => this._settle(), SETTLE_BACKSTOP_MS)
-
-      session.onData((data: string) => {
-        log.debug('nocx: session data received', { length: data.length })
-        renderer.write(data)
-        if (this._bufferType === 'normal' && Date.now() >= this.echoUntil) {
-          host.requestAttention()
-        }
-      })
-
-      // MEASURE THE GRID WHEN THE GRID HAS CHANGED, which is not when the
-      // bytes were handed over. `write()` parses asynchronously, so the
-      // measure used to be scheduled from `onData` above and ran on the
-      // animation frame BEFORE xterm had applied the chunk — it read the old
-      // grid and sized the live region to it. A command that prints
-      // everything in one chunk therefore ran at the size it had before its
-      // output existed, and the whole output appeared at once when the block
-      // froze: `seq 1 10` measured three rows while running and 11 lines
-      // frozen, and the block leapt 153px up the pane at the end of a command
-      // that had already finished (2026-08-19 frame capture). Nothing else
-      // could correct it, because for a fast command there is no next chunk.
-      renderer.onWriteParsed(() => {
-        this.scheduleLiveResize()
-        // AND THE STAND-IN STANDS DOWN (nocx-vnirv.1). A running command
-        // carries the same "working, nothing written yet" indicator a turn
-        // does, in the live region where its output will appear, and the
-        // first parsed write is the moment that claim stops being true.
-        // Here rather than in `onData` below for the same reason the measure
-        // is here: `write()` parses asynchronously, so the bytes having been
-        // handed over is not the output having arrived. Idempotent — every
-        // later chunk calls it again and nothing changes.
-        this.scrollback?.blockManager.noteCommandOutput()
-      })
-
-      // Keyboard → PTY: xterm.js fires onData for every keystroke when stdin
-      // is enabled (setReadOnly(false)). The editor captures keys while it is
-      // visible and the terminal is read-only, so these only arrive in RAW mode.
-      //
-      // Held, never dropped, while a submitted command is still on its way to
-      // the pty: the keyboard changed hands at the commit and the command
-      // goes out an RPC later, so these bytes belong AFTER it (_heldRaw).
-      renderer.onData((data: string) => {
-        if (this._heldRaw !== null) {
-          this._heldRaw.push(data)
-          return
-        }
-        this.session?.send(data)
-      })
-      // The pane's classification, for an enrolled agent pane. Registered
-      // beside the exit handler and before anything else touches the
-      // session: the backend replays the current observation immediately
-      // after an attach, so a subscription made later would miss the state
-      // of a pane that then sits still — which for a settled agent is
-      // forever.
-      session.onObservation((observation) => {
-        this.hooks.onPaneObservationChange?.(observation.state)
-      })
-      session.onExit((exit) => {
-        log.info('nocx: session exited', {
-          sid: exit.sessionId,
-          cause: exit.cause,
-          ...(exit.cause === 'exited' ? { status: exit.status } : {}),
-        })
-        // The session is gone: an origin naming it would name a machine
-        // that no longer exists (B.9). True for a clean exit AND a loss.
-        this._sessionExited = true
-        this.hooks.onActiveOriginChange?.()
-        this.lifecycle.reset()
-        this._disposeAllMarkers()
-        if (exit.cause === 'interrupted') {
-          // A loss is not a close (nocx-ictcq): the channel is gone, the
-          // host unreachable, a handshake expired, or a reattach failed —
-          // the work in the tab and the evidence of what happened must
-          // survive. The tab stays in both strips with the scrollback
-          // readable and a warning mark that says what the state is; the
-          // user closes it themselves. `_sessionLost` owns the mark for the
-          // rest of the tab's life, so a late integration fact cannot clear
-          // it (the lost state is terminal for this tab).
-          this._sessionLost = true
-          this._publishConnectionCondition()
-          this._publishTabMark()
-          return
-        }
-        // A clean exit closes the tab exactly as it always did.
-        host.requestClose()
-      })
-      session.onInputStalled(() => {
-        // The backend is dropping what this tab sends. Say so: a terminal
-        // that swallows keystrokes in silence is indistinguishable from one
-        // that is simply ignoring the person at it (nocx-o2le).
-        log.warn('nocx: session input stalled', { sid: session.sessionId })
-        showToast({
-          level: 'danger',
-          message: 'This connection has stopped accepting input — keystrokes are being dropped.',
-        })
-      })
-      session.onLiveness((liveness) => {
-        // The backend has revised what it believes about REACHING this
-        // session's host: it has stopped answering, it is answering late, or
-        // it is answering again. Nothing has ENDED — that is the exit
-        // notification's news and it has its own path above.
-        //
-        // This used to be a toast, twice, and that was the wrong shape: the
-        // product's own words are "a persistent condition ... is not a toast
-        // (a toast fades whether or not the condition has come back)"
-        // (connection-notice.tsx). A condition needs a mark that lasts exactly
-        // as long as the condition, so it is the pane's corner indicator now,
-        // and it clears itself when the host answers again.
-        //
-        // A tab whose session is already lost says nothing here: the loss is
-        // terminal and outranks every reachability statement, including a
-        // stale one that arrived before it died.
-        if (this._sessionLost) return
-        this._liveness = liveness
-        this._publishConnectionCondition()
-      })
-      session.onReset(() => {
-        renderer.reset()
-        this.lifecycle.reset()
-        this._disposeAllMarkers()
-      })
+      // The session and everything hanging off it. Extracted so it can run
+      // again: a reconnect rebuilds exactly this and nothing above it.
+      if (!(await this._bindSession(signal, renderer, false))) return
 
       renderer.onTitle((title: string) => {
         // An OSC 0/2 title is attributed to the ACTIVE domain (the stream
@@ -3288,7 +3051,11 @@ export class TerminalContent extends BasePaneContent {
           // its activity indicator for something the user did to the WINDOW
           // rather than to any tab (nocx-6w4z).
           this.echoUntil = Date.now() + RESIZE_ECHO_MS
-          session.sendResize(cols, rows)
+          // this.session, never the one captured when the pane mounted: a
+          // reconnect replaces the handle underneath this callback, and a
+          // resize sent to the session that died would size nothing while
+          // the live shell kept the geometry of a window that has moved on.
+          this.session?.sendResize(cols, rows)
         }, RESIZE_SETTLE_MS)
       })
 
@@ -3404,7 +3171,7 @@ export class TerminalContent extends BasePaneContent {
       this._readyResolve(true)
       log.info('nocx: terminal content ready', {
         renderer: 'xterm',
-        sid: session.sessionId,
+        sid: this.session?.sessionId ?? '',
       })
 
       // THE OTHER HALF OF THE SHOW/MOUNT PAIR (nocx-8won8). Drawing the past
@@ -3451,6 +3218,475 @@ export class TerminalContent extends BasePaneContent {
       this._readyResolve(false)
       log.error('nocx: terminal content failed', { error: String(err) })
     }
+  }
+
+  /**
+   * Get this pane a shell again, after the one it had was lost.
+   *
+   * WHAT THIS IS NOT, and the surface must never imply otherwise: a
+   * resurrection. The old shell is gone and the process it was running may
+   * still be alive on the far host, holding its own file descriptors and its
+   * own cwd. What comes back is a NEW shell at the same endpoint, and the
+   * divider drawn above it says so, because a person who reads their
+   * scrollback as one continuous session will be wrong about which machine
+   * state their earlier commands left behind.
+   *
+   * WHAT SURVIVES: the scrollback, in full, above the divider. It is the work,
+   * and not losing it is the entire reason the tab was never closed. The
+   * terminal grid, the editor and the pane's chrome survive with it — they
+   * belong to the pane, and only what belonged to the session is rebuilt
+   * (_bindSession draws that line).
+   *
+   * ONLY FROM `lost`. A pane whose host is merely unreachable is NOT offered
+   * this and must not take it: the session may still be alive on the far side,
+   * and replacing it would kill work that was never in danger. The guard is
+   * here as well as in the surface, because a surface is a promise and this is
+   * the enforcement.
+   */
+  async reconnect(): Promise<boolean> {
+    if (this._disposed || this._reconnecting) return false
+    if (!this._sessionLost) return false
+    const renderer = this.renderer
+    if (renderer === null) return false
+
+    this._reconnecting = true
+    this._publishConnectionCondition()
+    try {
+      // The old session's SUBSCRIPTIONS, which are the only things that leak.
+      // The handle's own callbacks (onData, onExit, …) live on the handle and
+      // die with it; these two are on the shared dispatcher and would go on
+      // delivering facts about a dead session into a live pane.
+      this._lifecycleUnsub?.()
+      this._lifecycleUnsub = null
+      this._integrationUnsub?.()
+      this._integrationUnsub = null
+      this.session?.close()
+      this.session = null
+
+      // The state that DESCRIBES the shell that is gone. The kernel's domains,
+      // the markers that point into a stream nobody is writing any more, the
+      // handshake generation that was acknowledged to a backend lane that no
+      // longer exists. Left standing, each of them would answer a question
+      // about the new shell with a fact about the old one.
+      this.lifecycle.reset()
+      this._disposeAllMarkers()
+      this._recovery = null
+      this._establishmentAcked = null
+      this._establishmentAckInFlight = null
+      this._sessionExited = false
+      this._sessionLost = false
+      this._liveness = null
+
+      // The divider, drawn BEFORE the attempt rather than after it. A person
+      // watching a reconnect should see where the old session ended even if
+      // the new one never arrives — and if it fails, the mark is the honest
+      // record that something was tried here.
+      this.scrollback?.blockManager.markReconnected()
+
+      const controller = new AbortController()
+      this._reconnectAbort = controller
+      const bound = await this._bindSession(controller.signal, renderer, true)
+      if (!bound) {
+        // The attempt failed and the pane goes back to being lost — which is
+        // a state it can be offered a way out of again. Restoring it here
+        // rather than leaving the pane in limbo is what makes a second press
+        // meaningful.
+        this._sessionLost = true
+      }
+      return bound
+    } catch (err) {
+      log.warn('nocx: reconnect failed', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+      this._sessionLost = true
+      return false
+    } finally {
+      this._reconnecting = false
+      this._reconnectAbort = null
+      clearTimeout(this._autoTimer)
+      this._publishConnectionCondition()
+      this._publishTabMark()
+    }
+  }
+
+  /**
+   * Give this pane a live backend session, and wire everything that hangs off
+   * one.
+   *
+   * IT RUNS MORE THAN ONCE. It used to be the middle of mount(), which runs
+   * exactly once per pane by construction (panes.ts: Pane.start is
+   * mount-once), and that is why a lost session was terminal: the only owner
+   * of "this pane must have a session" could never be asked again. Everything
+   * ABOVE the extraction point — the renderer, the editor, the scrollback, the
+   * DOM listeners, the pane's own chrome — belongs to the PANE and is built
+   * once; everything here belongs to the SESSION and is rebuilt with it.
+   *
+   * The line between the two is the whole correctness of a reconnect, and it
+   * is drawn by what a thing OUTLIVES: the scrollback outlives the session (it
+   * is the work), the lifecycle kernel does not (it describes a shell that no
+   * longer exists).
+   *
+   * `rebind` says which call this is. It changes exactly one thing — what an
+   * ABORT does — and the difference matters: a first bind that is abandoned
+   * takes the pane down, a rebind that is abandoned must leave the pane as it
+   * was, holding the scrollback the person did not want to lose.
+   *
+   * Returns whether a session was bound.
+   */
+  private async _bindSession(
+    signal: AbortSignal,
+    renderer: XtermRenderer,
+    rebind: boolean,
+  ): Promise<boolean> {
+    // The pane's own parts, which this method uses and never creates. A caller
+    // that has not built them is a programming error rather than a state to
+    // handle: mount() builds them before the first bind, and a rebind only
+    // ever runs on a pane that mounted.
+    const target = this._paneTarget
+    const host = this.host
+    if (target === null || host === null || this.editor === null || this.scrollback === null) {
+      return false
+    }
+    const editor = this.editor
+    const scrollback = this.scrollback
+    const lifecycleSubscription = new LifecycleClient(
+      this.client.dispatcher,
+    ).subscribeLifecycleChanged((fact) => {
+      // ADR-0024 decision 8: a lost fact carrying a recovery contract
+      // opens a restoration episode — the channel died while the shell
+      // was reachable, and the shell will restore its visible native
+      // prompt at the next prompt boundary, writing the one-shot fence.
+      // From this instant until the acknowledgement lands, the session
+      // is neither an authenticated terminal nor advertised as a usable
+      // conventional one (the capability rail is suppressed below; the
+      // editor holds no authority and offers none). A native fact ends
+      // the episode.
+      if (fact.lifecycle === 'lost' && fact.recovery) {
+        this._recovery = { fence: fact.recovery.fence, generation: fact.recovery.generation }
+      } else if (fact.lifecycle === 'native') {
+        this._recovery = null
+      }
+      // The kernel applies the fact and notifies onChange on a real
+      // change; the ownership sync runs there, once.
+      this.lifecycle.applyFact(fact)
+      // ADR-0024 decision 9: the establishment is acknowledged only
+      // AFTER the presentation is committed — applyFact above is what
+      // makes the editor available (ownership syncs on its onChange).
+      // The backend flushes the pending accept, and the shell may
+      // suppress its native prompt, ONLY on this acknowledgement for
+      // this exact generation. Without it the handshake times out and
+      // the session stays conventional with a visible prompt, which is
+      // the fail-open direction: no window in which the prompt is
+      // suppressed and no editor exists.
+      if (
+        fact.lifecycle === 'prompt_ready' &&
+        fact.generation &&
+        fact.generation !== this._establishmentAckInFlight &&
+        fact.generation !== this._establishmentAcked &&
+        this.session
+      ) {
+        const generation = fact.generation
+        this._establishmentAckInFlight = generation
+        new LifecycleClient(this.client.dispatcher)
+          .establishAck(
+            this.session.sessionId,
+            fact.lane,
+            fact.domain ?? '',
+            fact.epoch ?? 0,
+            generation,
+          )
+          .then(() => {
+            // Only a landed acknowledgement retires the generation. The
+            // backend has flushed the accept, so a later replay of the
+            // same projection needs no second ack.
+            this._establishmentAcked = generation
+            if (this._establishmentAckInFlight === generation) {
+              this._establishmentAckInFlight = null
+            }
+          })
+          .catch((e: unknown) => {
+            // Release the claim: this generation was NOT acknowledged, and
+            // a replay carrying it again — the reattach case, where only a
+            // fresh shell hello would have minted a new one — is the retry
+            // that can still complete the handshake.
+            //
+            // A refusal is usually the backend's own bookkeeping (stale
+            // generation, superseded establishment, replaced subscriber),
+            // and then the replay simply does not come. Retrying costs one
+            // refused call in that case and recovers the session in the
+            // case that matters, so releasing is the safe direction.
+            //
+            // The MESSAGE, not just the error object: five distinct
+            // backend rules all refuse with -32603, and logging the
+            // error alone rendered as `{"code":-32603,"name":"RpcError"}`
+            // — identical for every one of them. A reader could see that
+            // the handshake had been refused and never which rule did it,
+            // which is how the cause of six failing specs stayed
+            // "unknown" across three triage rounds (nocx-cbtc). The
+            // backend names the rule in its own log; this is the half a
+            // trace carries.
+            if (this._establishmentAckInFlight === generation) {
+              this._establishmentAckInFlight = null
+            }
+            log.warn('nocx: establishment acknowledgement refused', {
+              reason: e instanceof Error ? e.message : String(e),
+              generation,
+              lane: fact.lane,
+              domain: fact.domain ?? '',
+              epoch: fact.epoch ?? 0,
+            })
+          })
+      }
+    })
+    this._lifecycleUnsub = lifecycleSubscription.unsubscribe
+    const session = await this.openSessionWithHostKeyRecovery(signal)
+
+    if (signal.aborted) {
+      session.close()
+      // A FIRST bind that is aborted takes the pane down with it: nothing
+      // has been shown and there is nothing to leave behind. A REBIND that
+      // is aborted must leave the pane exactly as it was — its scrollback
+      // is the work the person did not want to lose, which is the whole
+      // reason the tab was never closed.
+      if (!rebind) {
+        editor.dispose()
+        renderer.dispose()
+        scrollback.dispose()
+        this._readyResolve(false)
+      }
+      return false
+    }
+
+    this.session = session
+    lifecycleSubscription.bindSession(session.sessionId)
+    // THE PANE IS THE DROP TARGET, and this is where it can say so: the
+    // session is what the drop has to be routed to, and it does not exist
+    // until now. Wails' runtime looks for the nearest ancestor carrying
+    // data-file-drop-target and hands Go every attribute of that element,
+    // so data-session-id is how a native drop knows which tab it landed
+    // on. Nothing here reads a file and nothing here names a destination
+    // — Go mints source tickets (design R2) and the renderer then calls
+    // files.upload with its own bindingId.
+    //
+    // In a browser (dev-web) these attributes cost nothing and mean
+    // nothing: there is no Wails runtime to read them, and a drop yields
+    // File objects the renderer streams itself.
+    this.markAsFileDropTarget(session.sessionId)
+    // …and this is where it starts LISTENING. Both halves of the gesture
+    // are attached here: the DOM drop (a browser, where the renderer gets
+    // File objects) and the files.dropped notification (the Wails window,
+    // where the drop went to Go and came back as source tickets). The
+    // module decides which half is live; this decides only that the pane
+    // has one, and that it stops when the pane does.
+    this.attachDrop(target)
+    // The workspace is READ here, not assumed: the renderer named a pane
+    // and the backend walked pane -> tab -> workspace itself, so this is
+    // where a session's placement is learnt at all. It is recorded as
+    // provenance and drives nothing — §5.5 forbids any surface before the
+    // fence epic from acting on membership.
+    log.info('nocx: session opened', {
+      sid: session.sessionId,
+      cwd: session.cwd || '',
+      workspace: session.workspaceId,
+    })
+
+    // Re-report the CURRENT buffer kind now that the session has a
+    // backend id: a buffer change before open had no session to name,
+    // and the backend's lane starts at normal — the report brings a lane
+    // already inside a TUI (an alt screen restored by replay) up to
+    // date (ADR-0020 decision 3).
+    this.reportLaneBufferKind(renderer.activeBufferKind())
+
+    // The open ack carries the resolved launch policy and the refusal
+    // reason (nocx-4t37.2): the capability control starts from the
+    // backend's own resolution, never from a second fetch that could
+    // disagree with it.
+    this._policy = session.desiredMode ?? 'auto'
+    // The integration axis is a SUBSCRIPTION, not a field of the ack: the
+    // backend revises it as it learns (starting → integrated, or →
+    // conventional with a reason, or → lost). Subscribed before anything
+    // else touches the session so the first status — which the server
+    // sends immediately after the ack — cannot arrive unheard.
+    this._integrationUnsub = subscribeIntegrationChanged(this.client.dispatcher, (fact) => {
+      if (fact.sessionId !== session.sessionId) return
+      this._applyIntegration(fact)
+    })
+    // The statement is OBSERVED: until the first marker arrives, an auto
+    // session honestly reads "Native input" — the launcher may be
+    // mid-start, and the first prompt flips it to command blocks.
+    this._updateCapability()
+    // The domain-scoped environment projection (bead nocx-u7uh.11):
+    // cwd, host, the tab title and the completion scope follow the ACTIVE
+    // domain. The lane tier is seeded from the session-open facts — the
+    // provider's cwd guess (unverified, AD-5) and the ssh binding — and
+    // the root domain inherits them at establishment, so integration
+    // takes over seamlessly. A fresh CHILD domain starts blank and is
+    // populated by its own reports, exactly as the parent was.
+    this.env = new DomainEnvironmentProjection(this.lifecycle, () => this._applyEnvironmentView())
+    this.env.seedLane({
+      cwd: session.cwd || '',
+      cwdVerified: false,
+      host: this.sshOpts?.host || '',
+      user: this.sshOpts?.user ?? '',
+      isLocal: !this.sshOpts,
+      programTitle: this.sshOpts?.host || '',
+    })
+    this.env.attach()
+
+    // The SHARED half of command discovery (carrier design §8). The
+    // session's own shell answers the session-local half over OSC 636 —
+    // aliases, builtins, keywords and functions, which belong to this
+    // shell and to no other. The target's PATH set is the opposite: the
+    // same for every tab open on this target, and thousands of directory
+    // reads to enumerate. So it is asked ONCE here, and the backend serves
+    // ten tabs to one host from a single scan invalidated on the mtime of
+    // each PATH directory.
+    //
+    // Fired and not awaited: a session must come up whether or not a
+    // remote host answers, and the store starts in `running`, which is
+    // exactly what the dropdown says while this is outstanding.
+    void this.fetchCommandNames(session.sessionId, renderer.snapshotStore)
+    // The origin answer changed from null to a live session: an
+    // already-active tab whose session (re)opens must push the change
+    // without a tab switch, the same as a cwd or an environment change.
+    // _applyEnvironmentView fires it after every field activeOrigin()
+    // reads is initialised (the projection's first reconcile applies the
+    // lane seed above).
+    this._applyEnvironmentView()
+
+    // Signal adoptability for alias tabs (no saved profile yet).
+    // Must come after the session opens so adoption is only offered
+    // to sessions that actually connected — a failed connect never
+    // reaches this point (it throws to the outer catch).
+    if (this.sshOpts && !this.sshOpts.profileId) {
+      this.hooks.onAdoptabilityChange?.(true)
+    }
+    this.pushTitle()
+
+    // Nothing else will say the opening ended on a session that draws no
+    // prompt marker — see SETTLE_BACKSTOP_MS.
+    this._settleTimer = window.setTimeout(() => this._settle(), SETTLE_BACKSTOP_MS)
+
+    session.onData((data: string) => {
+      log.debug('nocx: session data received', { length: data.length })
+      renderer.write(data)
+      if (this._bufferType === 'normal' && Date.now() >= this.echoUntil) {
+        host.requestAttention()
+      }
+    })
+
+    // MEASURE THE GRID WHEN THE GRID HAS CHANGED, which is not when the
+    // bytes were handed over. `write()` parses asynchronously, so the
+    // measure used to be scheduled from `onData` above and ran on the
+    // animation frame BEFORE xterm had applied the chunk — it read the old
+    // grid and sized the live region to it. A command that prints
+    // everything in one chunk therefore ran at the size it had before its
+    // output existed, and the whole output appeared at once when the block
+    // froze: `seq 1 10` measured three rows while running and 11 lines
+    // frozen, and the block leapt 153px up the pane at the end of a command
+    // that had already finished (2026-08-19 frame capture). Nothing else
+    // could correct it, because for a fast command there is no next chunk.
+    renderer.onWriteParsed(() => {
+      this.scheduleLiveResize()
+      // AND THE STAND-IN STANDS DOWN (nocx-vnirv.1). A running command
+      // carries the same "working, nothing written yet" indicator a turn
+      // does, in the live region where its output will appear, and the
+      // first parsed write is the moment that claim stops being true.
+      // Here rather than in `onData` below for the same reason the measure
+      // is here: `write()` parses asynchronously, so the bytes having been
+      // handed over is not the output having arrived. Idempotent — every
+      // later chunk calls it again and nothing changes.
+      this.scrollback?.blockManager.noteCommandOutput()
+    })
+
+    // Keyboard → PTY: xterm.js fires onData for every keystroke when stdin
+    // is enabled (setReadOnly(false)). The editor captures keys while it is
+    // visible and the terminal is read-only, so these only arrive in RAW mode.
+    //
+    // Held, never dropped, while a submitted command is still on its way to
+    // the pty: the keyboard changed hands at the commit and the command
+    // goes out an RPC later, so these bytes belong AFTER it (_heldRaw).
+    renderer.onData((data: string) => {
+      if (this._heldRaw !== null) {
+        this._heldRaw.push(data)
+        return
+      }
+      this.session?.send(data)
+    })
+    // The pane's classification, for an enrolled agent pane. Registered
+    // beside the exit handler and before anything else touches the
+    // session: the backend replays the current observation immediately
+    // after an attach, so a subscription made later would miss the state
+    // of a pane that then sits still — which for a settled agent is
+    // forever.
+    session.onObservation((observation) => {
+      this.hooks.onPaneObservationChange?.(observation.state)
+    })
+    session.onExit((exit) => {
+      log.info('nocx: session exited', {
+        sid: exit.sessionId,
+        cause: exit.cause,
+        ...(exit.cause === 'exited' ? { status: exit.status } : {}),
+      })
+      // The session is gone: an origin naming it would name a machine
+      // that no longer exists (B.9). True for a clean exit AND a loss.
+      this._sessionExited = true
+      this.hooks.onActiveOriginChange?.()
+      this.lifecycle.reset()
+      this._disposeAllMarkers()
+      if (exit.cause === 'interrupted') {
+        // A loss is not a close (nocx-ictcq): the channel is gone, the
+        // host unreachable, a handshake expired, or a reattach failed —
+        // the work in the tab and the evidence of what happened must
+        // survive. The tab stays in both strips with the scrollback
+        // readable and a warning mark that says what the state is; the
+        // user closes it themselves. `_sessionLost` owns the mark for the
+        // rest of the tab's life, so a late integration fact cannot clear
+        // it (the lost state is terminal for this tab).
+        this._sessionLost = true
+        this._publishConnectionCondition()
+        this._publishTabMark()
+        return
+      }
+      // A clean exit closes the tab exactly as it always did.
+      host.requestClose()
+    })
+    session.onInputStalled(() => {
+      // The backend is dropping what this tab sends. Say so: a terminal
+      // that swallows keystrokes in silence is indistinguishable from one
+      // that is simply ignoring the person at it (nocx-o2le).
+      log.warn('nocx: session input stalled', { sid: session.sessionId })
+      showToast({
+        level: 'danger',
+        message: 'This connection has stopped accepting input — keystrokes are being dropped.',
+      })
+    })
+    session.onLiveness((liveness) => {
+      // The backend has revised what it believes about REACHING this
+      // session's host: it has stopped answering, it is answering late, or
+      // it is answering again. Nothing has ENDED — that is the exit
+      // notification's news and it has its own path above.
+      //
+      // This used to be a toast, twice, and that was the wrong shape: the
+      // product's own words are "a persistent condition ... is not a toast
+      // (a toast fades whether or not the condition has come back)"
+      // (connection-notice.tsx). A condition needs a mark that lasts exactly
+      // as long as the condition, so it is the pane's corner indicator now,
+      // and it clears itself when the host answers again.
+      //
+      // A tab whose session is already lost says nothing here: the loss is
+      // terminal and outranks every reachability statement, including a
+      // stale one that arrived before it died.
+      if (this._sessionLost) return
+      this._liveness = liveness
+      this._publishConnectionCondition()
+    })
+    session.onReset(() => {
+      renderer.reset()
+      this.lifecycle.reset()
+      this._disposeAllMarkers()
+    })
+    return true
   }
 
   // ── Live-region sizing ────────────────────────────────────────────────
@@ -5360,6 +5596,9 @@ export class TerminalContent extends BasePaneContent {
     this.session?.close()
     this._connectionMark?.dispose()
     this._connectionMark = null
+    this._reconnectAbort?.abort()
+    this._offer?.dispose()
+    this._offer = null
     this.renderer?.dispose()
     this.editor?.dispose()
     this.recall?.destroy()

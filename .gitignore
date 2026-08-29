@@ -3,6 +3,7 @@ _bmad-output/
 _bmad/bmm/config.yaml
 _bmad/core/config.yaml
 .beads-credential-key
+.beads/issues.jsonl
 .beads/proxieddb/
 .claude/settings.local.json
 .dolt/

@@ -337,7 +337,14 @@ func stopProcessGroup(lg log.Logger, sid session.ID, sess runLeaseSession, pgid 
 	if delivered {
 		return foregroundDelivered
 	}
-	return foregroundNothingRunning
+	// Every rung failed and none of them was the guard: something is there
+	// and nocx cannot prove it stopped. NOT nothing-running — that sentence
+	// is shown to a person beside a block that is still running, and it is
+	// the lie nocx-7l4ex.12 was filed as. Reachable: SignalProcessGroup
+	// folds only ESRCH and pgid <= 0 into ErrNoForeground, so an EPERM from
+	// kill(-pgid) — a group the backend may not signal, which is what
+	// `sudo` inside the execution produces — lands here three times over.
+	return foregroundUnreconciled
 }
 
 // groupGone polls ONE process group until it is gone — ErrNoForeground means

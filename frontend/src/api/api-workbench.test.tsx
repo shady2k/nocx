@@ -2365,6 +2365,140 @@ describe('the import ask asks one question', () => {
     await vi.waitFor(() => expect(sourceLine()).not.toBe(''))
     expect(field('api-import-postman-dest').value).toBe('/elsewhere/mine')
   })
+  /** The inventory a previewed archive answers with, as three documents. */
+  function archiveDocuments() {
+    return {
+      unsupported: [],
+      documents: [
+        { kind: 'collection' as const, name: 'Accounts', unsupported: [] },
+        { kind: 'collection' as const, name: 'Billing', unsupported: [] },
+        { kind: 'environment' as const, name: 'Development', unsupported: [] },
+      ],
+    }
+  }
+
+  // ── The archive routes, and there are two of them ────────────────────────
+  //
+  // A browser drop and the kit's file input carry BYTES. The system picker
+  // and a native drop carry a PATH, and that is the only pair the shipped
+  // app has: inside the Wails window the runtime hands Go the path and the
+  // DOM event is never ours. The preview used to be wired to the bytes route
+  // alone, so the summary — and everything gated on it — existed in
+  // `make dev-web` and in this suite, and nowhere a person actually works
+  // (nocx-bvxf2.5).
+
+  it('previews a .zip chosen with the SYSTEM PICKER — the route the shipped app has', async () => {
+    const previewPostman = vi
+      .fn<ApiWorkbenchServices['previewPostman']>()
+      .mockResolvedValue(archiveDocuments())
+    const { bar } = await mountApp({
+      listCollections: vi
+        .fn()
+        .mockResolvedValue({ collections: [], defaultRoot: '/data/collections' }),
+      openFile: vi.fn().mockResolvedValue({ path: '/downloads/workspace.zip' }),
+      previewPostman,
+    })
+    await openImportAsk(bar)
+
+    fireEvent.click(button('Or select a file'))
+
+    await vi.waitFor(() => expect(archiveSummary()).toContain('2 collections'))
+    expect(archiveSummary()).toContain('1 environment')
+    const call = previewPostman.mock.calls[0]
+    if (call === undefined) throw new Error('preview call missing')
+    const [source, dest] = call
+    // A PATH travels as a path. The picker's answer names a file on the
+    // machine running Go, and re-reading it here to send bytes would be the
+    // renderer answering a question the backend already holds.
+    expect('path' in source && source.path).toBe('/downloads/workspace.zip')
+    expect(dest).toBe('/data/collections/workspace')
+  })
+
+  it('previews a .zip that arrives as a NATIVE drop, by the same route', async () => {
+    const previewPostman = vi
+      .fn<ApiWorkbenchServices['previewPostman']>()
+      .mockResolvedValue(archiveDocuments())
+    const drop = nativeDropFixture()
+    const { bar } = await mountApp({ nativeDrop: drop, previewPostman })
+    await openImportAsk(bar)
+
+    drop.emit({
+      sessionId: DROP_SESSION,
+      target: 'api-import',
+      sources: [droppedSource('workspace.zip', '/downloads/workspace.zip')],
+    })
+
+    await vi.waitFor(() => expect(archiveSummary()).toContain('2 collections'))
+    const call = previewPostman.mock.calls[0]
+    if (call === undefined) throw new Error('preview call missing')
+    expect('path' in call[0] && call[0].path).toBe('/downloads/workspace.zip')
+  })
+
+  it('a .json chosen with the system picker is not previewed — there is no archive to read', async () => {
+    const previewPostman = vi.fn<ApiWorkbenchServices['previewPostman']>()
+    const { bar } = await mountApp({
+      listCollections: vi
+        .fn()
+        .mockResolvedValue({ collections: [], defaultRoot: '/data/collections' }),
+      openFile: vi.fn().mockResolvedValue({ path: '/downloads/acme.json' }),
+      previewPostman,
+    })
+    await openImportAsk(bar)
+
+    fireEvent.click(button('Or select a file'))
+
+    await vi.waitFor(() => expect(sourceLine()).toContain('acme.json'))
+    expect(previewPostman).not.toHaveBeenCalled()
+    expect(archiveSummary()).toBe('')
+  })
+
+  it('does not re-send the archive on every keystroke: the destination is re-checked when it is left', async () => {
+    const previewPostman = vi
+      .fn<ApiWorkbenchServices['previewPostman']>()
+      .mockResolvedValue(archiveDocuments())
+    await openBrowserAsk({ previewPostman })
+
+    const input = importAskBody().querySelector<HTMLInputElement>('.ui-file-input__native')
+    const file = exportFile('workspace.zip')
+    Object.defineProperty(input!, 'files', { value: [file] })
+    fireEvent.change(input!)
+    await vi.waitFor(() => expect(previewPostman).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(button('Change where this goes'))
+    await vi.waitFor(() => expect(reachable(field('api-import-postman-dest'))).toBe(true))
+    const dest = field('api-import-postman-dest')
+    for (const value of ['/elsewhere/a', '/elsewhere/ab', '/elsewhere/abc']) {
+      fireEvent.input(dest, { target: { value } })
+    }
+    // Three characters, and the archive has not travelled again: what
+    // changed is the destination, and the bytes are the same bytes.
+    expect(previewPostman).toHaveBeenCalledTimes(1)
+
+    fireEvent.blur(dest)
+    await vi.waitFor(() => expect(previewPostman).toHaveBeenCalledTimes(2))
+    expect(previewPostman.mock.calls[1]?.[1]).toBe('/elsewhere/abc')
+  })
+
+  it('says it is reading while the first read is in flight, and stops saying it', async () => {
+    let release: (value: ReturnType<typeof archiveDocuments>) => void = () => {}
+    const previewPostman = vi
+      .fn<ApiWorkbenchServices['previewPostman']>()
+      .mockReturnValue(new Promise((resolve) => (release = resolve)))
+    await openBrowserAsk({ previewPostman })
+
+    const input = importAskBody().querySelector<HTMLInputElement>('.ui-file-input__native')
+    const file = exportFile('workspace.zip')
+    Object.defineProperty(input!, 'files', { value: [file] })
+    fireEvent.change(input!)
+
+    // The one wait a person sits through — read, encode, round trip — says
+    // so. A disabled button says only that it is disabled.
+    await vi.waitFor(() => expect(importAskBody().querySelector('.ui-spinner')).not.toBeNull())
+    release(archiveDocuments())
+    await vi.waitFor(() => expect(importAskBody().querySelector('.ui-spinner')).toBeNull())
+    expect(archiveSummary()).toContain('2 collections')
+  })
+
   it('accepts a zip, previews its inventory before writing, and uses one destination', async () => {
     const previewPostman = vi.fn<ApiWorkbenchServices['previewPostman']>().mockResolvedValue({
       unsupported: [],

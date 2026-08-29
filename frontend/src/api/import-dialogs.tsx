@@ -36,6 +36,7 @@ import { Show } from 'solid-js'
 import { Button } from '../ui/button'
 import { Dialog } from '../ui/dialog'
 import { DropZone } from '../ui/drop-zone'
+import { Spinner } from '../ui/spinner'
 import { Field } from '../ui/field'
 import { IconButton } from '../ui/icon-button'
 import { CloseIcon, FolderOpenIcon, PencilIcon } from '../ui/icons'
@@ -149,6 +150,14 @@ export interface PostmanImportDialogProps {
   onFiles?: (files: File[]) => void
   /** Inventory returned by the archive preview, or '' for non-archives. */
   archiveSummary?: string
+  /** Whether an archive just handed over is being READ — the wait a person
+   *  is sitting through, and the only one this ask draws. */
+  reading?: boolean
+  /** The destination, once the person is finished with it (TextField's
+   *  onCommit). Separate from `onDest` because what a keystroke changes and
+   *  what a settled value changes are two different questions: one is the
+   *  text in the field, the other is a call. */
+  onCommitDest?: (value: string) => void
   /** Whether a held archive has been previewed for the current destination. */
   archiveReady?: boolean
   busy: boolean
@@ -367,7 +376,24 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
           not exist yet, asked before the person had said what they were
           importing. The field is still the truth and still carries every
           refusal; the pencil is what puts it back on screen. */}
-      <Show when={props.archiveSummary !== undefined && props.archiveSummary !== ''}>
+      {/* THE ONE WAIT THIS ASK DRAWS. A disabled Import button says only that
+          it is disabled; the read behind it — the file, the encode, the round
+          trip — is what the person is actually waiting for, so it says so
+          with the kit's Spinner rather than with silence (nocx-bvxf2.5). The
+          destination re-check draws nothing: it was not asked for and it is
+          not what anybody is waiting on. */}
+      <Show when={props.reading === true}>
+        <p class="api-import-summary">
+          <Spinner size="sm" label="Reading the export" /> Reading the export…
+        </p>
+      </Show>
+      <Show
+        when={
+          props.reading !== true &&
+          props.archiveSummary !== undefined &&
+          props.archiveSummary !== ''
+        }
+      >
         <p class="api-import-summary">{props.archiveSummary}</p>
       </Show>
       <Show when={!editing()}>
@@ -399,6 +425,7 @@ export function PostmanImportDialog(props: PostmanImportDialogProps) {
           description="Must not exist yet — the import arrives whole or not at all."
           value={props.dest}
           onInput={props.onDest}
+          onCommit={props.onCommitDest}
           required
           trailing={
             props.onBrowse ? (

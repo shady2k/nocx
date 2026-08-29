@@ -34,6 +34,7 @@ type ContentService interface {
 // ContentOperation is the typed operation for the content domain. Its gate
 // is [content].
 type ContentOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, ContentService) error) error
 }
 
@@ -41,7 +42,7 @@ type ContentOperation interface {
 // gate before the execution lane.
 func NewContentOperation(contentGate, lane control.Admission, db content.ContentDB) ContentOperation {
 	g := &guard{}
-	return newOperation[ContentService](control.NewComposite(contentGate, lane), g, newContentService(g, db))
+	return newOperation[ContentService](Direct("ContentOperation"), control.NewComposite(contentGate, lane), g, newContentService(g, db))
 }
 
 // newContentService builds the concrete content service bound to guard g.

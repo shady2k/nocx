@@ -1,0 +1,26 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.folder.write.params.schema.json",
+  "title": "APIFolderWriteParams",
+  "description": "Params for api.folder.write.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["handle", "relPath", "variables"],
+  "properties": {
+    "handle": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "relPath": { "type": "string", "maxLength": 4096 },
+    "variables": { "type": "array", "maxItems": 512, "items": { "$ref": "#/$defs/param" } }
+  },
+  "$defs": {
+    "param": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "value", "enabled"],
+      "properties": {
+        "name": { "type": "string", "maxLength": 256 },
+        "value": { "type": "string", "maxLength": 4096 },
+        "enabled": { "type": "boolean" }
+      }
+    }
+  }
+}

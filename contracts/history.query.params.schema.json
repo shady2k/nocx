@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/history.query.params.schema.json",
+  "title": "HistoryQueryParams",
+  "description": "Params for history.query.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["scope"],
+  "properties": {
+    "scope": {
+      "type": "string",
+      "enum": ["directory", "host", "everywhere"]
+    },
+    "cwd": {
+      "type": "string"
+    },
+    "host": {
+      "type": "string"
+    },
+    "limit": {
+      "type": "integer"
+    },
+    "before": {
+      "type": "string",
+      "minLength": 1
+    },
+    "text": {
+      "type": "string"
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "scope": {
+            "const": "directory"
+          }
+        }
+      },
+      "then": {
+        "required": ["cwd"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "scope": {
+            "const": "host"
+          }
+        }
+      },
+      "then": {
+        "required": ["host"]
+      }
+    }
+  ]
+}

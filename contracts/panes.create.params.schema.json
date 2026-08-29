@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/panes.create.params.schema.json",
+  "title": "PanesCreateParams",
+  "description": "Params for creating a pane.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "tabId", "kind", "sizeShare"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "tabId": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "cwd": { "type": "string", "maxLength": 4096 },
+    "kind": { "type": "string", "enum": ["local", "ssh"] },
+    "endpoint": { "type": ["string", "null"], "maxLength": 512 },
+    "sizeShare": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
+  },
+  "oneOf": [
+    {
+      "properties": { "kind": { "const": "local" } },
+      "anyOf": [
+        { "not": { "required": ["endpoint"] } },
+        { "required": ["endpoint"], "properties": { "endpoint": { "type": "null" } } }
+      ]
+    },
+    {
+      "required": ["endpoint"],
+      "properties": {
+        "kind": { "const": "ssh" },
+        "endpoint": { "type": "string", "pattern": ".*\\S.*" }
+      }
+    }
+  ]
+}

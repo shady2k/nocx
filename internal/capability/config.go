@@ -160,6 +160,7 @@ type ConfigService interface {
 // with a vault operation even though the config handler itself never sees
 // the vault. See the package doc for the conservative-grain rationale.
 type ConfigOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, ConfigService) error) error
 }
 
@@ -179,7 +180,7 @@ func NewConfigOperation(
 	secrets EndpointSecrets,
 ) ConfigOperation {
 	g := &guard{}
-	return newOperation[ConfigService](control.NewComposite(configGate, vaultGate, lane), g, newConfigService(g, profiles, groups, endpoints, roles, svc, reg, rows, secrets))
+	return newOperation[ConfigService](Direct("ConfigOperation"), control.NewComposite(configGate, vaultGate, lane), g, newConfigService(g, profiles, groups, endpoints, roles, svc, reg, rows, secrets))
 }
 
 // newConfigService builds the concrete config service bound to guard g.
@@ -970,8 +971,11 @@ func (s *settingsService) SecretExists(sec *settings.Secret) (bool, error) {
 	return s.reg.SecretExists(sec)
 }
 
-// newOperation wires the generic core: admission, guard and service. Every
-// concrete operation constructor delegates here.
-func newOperation[S any](admission control.Admission, g *guard, svc S) *operation[S] {
-	return &operation[S]{admission: admission, guard: g, service: svc}
+// newOperation wires the generic core: disposition, admission, guard and
+// service. Every concrete operation constructor delegates here.
+func newOperation[S any](disposition Disposition, admission control.Admission, g *guard, svc S) *operation[S] {
+	if err := disposition.Validate(); err != nil {
+		panic("capability: invalid operation disposition: " + err.Error())
+	}
+	return &operation[S]{admission: admission, guard: g, service: svc, disposition: disposition}
 }

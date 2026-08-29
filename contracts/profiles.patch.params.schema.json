@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/profiles.patch.params.schema.json",
+  "title": "ProfilesPatchParams",
+  "description": "Params for profiles.patch.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128
+    },
+    "set": {
+      "type": "object"
+    },
+    "unset": {
+      "type": "array",
+      "items": {
+        "type": "string"
+      }
+    }
+  }
+}

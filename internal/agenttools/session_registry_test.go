@@ -14,7 +14,7 @@ func TestSessionToolsReplaceTheFinishedVersusLiveChoice(t *testing.T) {
 		t.Fatalf("Assemble: %v", err)
 	}
 	got := toolNames(reg.All())
-	want := []string{"files.read", "session.list", "session.read", "run", "git.status"}
+	want := []string{"files.read", "session.list", "session.read", "run", "files.edit", "files.create", "git.status", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder"}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("assembled tools = %v, want %v", got, want)
 	}
@@ -34,7 +34,7 @@ func TestSessionToolsReplaceTheFinishedVersusLiveChoice(t *testing.T) {
 	if read.Executes != Dynamic {
 		t.Fatalf("session.read executes as %q, want dynamic dispatch", read.Executes)
 	}
-	if read.Effect != content.EffectObserve || !reflect.DeepEqual(read.Resources, []content.ResourceKind{content.ResourceSession}) {
-		t.Fatalf("session.read classification = effect %q resources %v", read.Effect, read.Resources)
+	if read.Effect != content.EffectObserve || !reflect.DeepEqual(read.ResourceKinds, []content.ResourceKind{content.ResourceSession}) {
+		t.Fatalf("session.read classification = effect %q resources %v", read.Effect, read.ResourceKinds)
 	}
 }

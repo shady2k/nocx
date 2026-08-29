@@ -35,6 +35,7 @@ import (
 	"github.com/eino-contrib/jsonschema"
 
 	"github.com/shady2k/nocx/internal/agenttools"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/log"
 )
@@ -405,9 +406,20 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		}
 		mw, err := newPolicyMiddleware(askLog, *p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.Attempt, p.TurnEntryID, p.Requester, classifier, func(call ToolCall) error {
 			return sink(AskEvent{Kind: AskToolCall, Call: &call})
+		}, toolSeams{
+			noteOperation:    p.NoteOperation,
+			snippetOperation: p.SnippetOperation,
 		})
 		if err != nil {
 			return err
+		}
+		if p.Presentation != nil {
+			mw.presentation = *p.Presentation
+			mw.presentationState = newPresentationState(p.Presentation.Loaded)
+			mw.grantProvider = func() content.Grant {
+				return *p.Grant
+			}
+			mw.searchSchema = append([]byte(nil), c.searchSchema...)
 		}
 		declared, err = mw.Declare(permitted)
 		if err != nil {
@@ -417,6 +429,13 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		// refused. The policy middleware removes this internal anchor from
 		// ToolInfos before every model call, so it is never declared.
 		runTools = append(append([]tool.BaseTool(nil), declared...), &unknownToolAnchor{})
+		if p.Presentation != nil && p.Presentation.Lazy && len(c.searchSchema) > 0 {
+			search, err := mw.searchTool()
+			if err != nil {
+				return err
+			}
+			runTools = append(runTools, search)
+		}
 		unknownTool = func(_ context.Context, name, rawArgs string) (string, error) {
 			return mw.UnknownTool(name, rawArgs)
 		}

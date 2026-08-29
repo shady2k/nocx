@@ -218,9 +218,9 @@ func ledgerCausedWireOf(c content.CausedEntry) ledgerCausedWire {
 
 // ── params ────────────────────────────────────────────────────────────────
 
-// ledgerQueryParams is the request. There is deliberately no params schema
-// (contracts/README.md): the handler is the check and rejects what it cannot
-// parse.
+// ledgerQueryParams is the request. The earlier decision to leave params
+// unpinned was wrong: ledger.query.params.schema.json is now the wire contract,
+// and its registered validator remains runtime enforcement for these filters.
 //
 //	scope         — required; directory | host | everywhere
 //	environmentId — required for scope=directory and scope=host

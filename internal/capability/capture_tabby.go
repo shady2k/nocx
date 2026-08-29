@@ -40,6 +40,7 @@ type CaptureSaveService interface {
 // CaptureSaveOperation is the typed operation for secrets.captureSave. Its
 // gates are [vault, content].
 type CaptureSaveOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, CaptureSaveService) error) error
 }
 
@@ -53,6 +54,7 @@ func NewCaptureSaveOperation(
 ) CaptureSaveOperation {
 	g := &guard{}
 	return newOperation[CaptureSaveService](
+		Direct("CaptureSaveOperation"),
 		control.NewComposite(vaultGate, contentGate, lane),
 		g,
 		newCaptureSaveService(g, vaultLifecycle, contentDB),
@@ -122,6 +124,7 @@ type TabbyImportService interface {
 // profiles.tabbyPreview and profiles.tabbyExecute. Its gates are
 // [config, vault].
 type TabbyImportOperation interface {
+	AssistantOperation
 	Run(context.Context, func(context.Context, TabbyImportService) error) error
 }
 
@@ -138,6 +141,7 @@ func NewTabbyImportOperation(
 ) TabbyImportOperation {
 	g := &guard{}
 	return newOperation[TabbyImportService](
+		Direct("TabbyImportOperation"),
 		control.NewComposite(configGate, vaultGate, lane),
 		g,
 		newTabbyImportService(g, profiles, groups, svc, vaultLifecycle, store),

@@ -14,10 +14,12 @@ package transport
 // sparseFromWire, secretRowInputs, rowToSecretRef are gone).
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"strings"
 	"unicode/utf8"
 
@@ -124,14 +126,37 @@ const (
 
 // decodeObject decodes params into dst, treating absent, null or an empty
 // payload as an empty object — a field-aware validator then answers "x is
-// required" rather than a parse error. Returns "" on success.
-func decodeObject(raw json.RawMessage, dst any) string {
-	trimmed := strings.TrimSpace(string(raw))
-	if trimmed == "" || trimmed == "null" {
+// required" rather than a parse error. Unknown fields and trailing values are
+// rejected so the validator cannot accept a shape its params contract forbids.
+// Named fields listed in nonNullable are additionally rejected when null.
+func decodeObject(raw json.RawMessage, dst any, nonNullable ...string) string {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || string(trimmed) == "null" {
 		return ""
 	}
-	if err := json.Unmarshal(raw, dst); err != nil {
+	decoder := json.NewDecoder(bytes.NewReader(trimmed))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(dst); err != nil {
+		const unknownField = "json: unknown field "
+		if name, ok := strings.CutPrefix(err.Error(), unknownField); ok {
+			return "unknown field " + name
+		}
 		return "params must be a JSON object"
+	}
+	if err := decoder.Decode(&struct{}{}); err != io.EOF {
+		return "trailing content after the params object"
+	}
+	if len(nonNullable) == 0 {
+		return ""
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(trimmed, &fields); err != nil {
+		return "params must be a JSON object"
+	}
+	for _, field := range nonNullable {
+		if value, ok := fields[field]; ok && string(bytes.TrimSpace(value)) == "null" {
+			return field + " must not be null"
+		}
 	}
 	return ""
 }

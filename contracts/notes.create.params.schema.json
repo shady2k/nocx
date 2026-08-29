@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/notes.create.params.schema.json",
+  "title": "NotesCreateParams",
+  "description": "Params for notes.create. The body is optional because an empty note opens for editing.",
+  "type": ["object", "null"],
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "body": {
+      "type": "string",
+      "maxLength": 200000
+    }
+  }
+}

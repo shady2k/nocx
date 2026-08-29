@@ -1,0 +1,142 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/profiles.create.params.schema.json",
+  "title": "ProfilesCreateParams",
+  "description": "Params for profiles.create.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["options"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "type": {
+      "type": "string",
+      "maxLength": 64
+    },
+    "name": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "group": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "icon": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "color": {
+      "type": "string",
+      "maxLength": 256
+    },
+    "disableDynamicTitle": {
+      "type": "boolean"
+    },
+    "behaviorOnSessionEnd": {
+      "type": "string"
+    },
+    "weight": {
+      "type": "integer"
+    },
+    "isBuiltin": {
+      "type": "boolean"
+    },
+    "needsReview": {
+      "type": "boolean"
+    },
+    "options": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "host": {
+          "type": "string",
+          "minLength": 1
+        },
+        "port": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "passwordSecret": {
+          "type": "string"
+        },
+        "keySecret": {
+          "type": "string"
+        },
+        "keyPassphraseSecret": {
+          "type": "string"
+        },
+        "user": {
+          "type": "string"
+        },
+        "auth": {
+          "type": "string"
+        },
+        "keepaliveInterval": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "keepaliveCountMax": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "readyTimeout": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "keyPath": {
+          "type": "string"
+        },
+        "jumpHost": {
+          "type": "string"
+        },
+        "agentForward": {
+          "type": "boolean"
+        },
+        "desiredMode": {
+          "type": "string"
+        },
+        "relayConsent": {
+          "type": "string"
+        },
+        "portDiscovery": {
+          "type": "string"
+        },
+        "forwards": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "additionalProperties": false,
+            "properties": {
+              "direction": {
+                "type": "string",
+                "enum": ["local", "remote", "dynamic"]
+              },
+              "bindHost": {
+                "type": "string"
+              },
+              "bindPort": {
+                "type": "integer",
+                "minimum": 0,
+                "maximum": 65535
+              },
+              "destination": {
+                "type": "string"
+              }
+            },
+            "required": []
+          }
+        },
+        "canBeJumpServer": {
+          "type": "boolean"
+        },
+        "behaviorOnSessionEnd": {
+          "type": "string"
+        }
+      },
+      "required": ["host"]
+    }
+  }
+}

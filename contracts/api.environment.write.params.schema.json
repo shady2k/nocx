@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/api.environment.write.params.schema.json",
+  "title": "APIEnvironmentWriteParams",
+  "description": "Params for api.environment.write.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["handle", "relPath", "environment"],
+  "properties": {
+    "handle": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "relPath": { "type": "string", "minLength": 1, "maxLength": 4096 },
+    "environment": { "$ref": "#/$defs/environment" }
+  },
+  "$defs": {
+    "environment": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "values", "route"],
+      "properties": {
+        "name": { "type": "string", "maxLength": 256 },
+        "values": {
+          "type": "object",
+          "additionalProperties": { "type": "string", "maxLength": 4096 }
+        },
+        "route": { "$ref": "#/$defs/route" }
+      }
+    },
+    "route": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "profileId", "insecureTls"],
+      "properties": {
+        "kind": { "type": "string", "enum": ["direct", "connection"] },
+        "profileId": { "type": "string", "maxLength": 256 },
+        "insecureTls": { "type": "boolean" }
+      }
+    }
+  }
+}

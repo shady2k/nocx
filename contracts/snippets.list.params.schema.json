@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/snippets.list.params.schema.json",
+  "title": "SnippetsListParams",
+  "description": "Params for snippets.list; the method takes no parameters.",
+  "type": ["object", "null"],
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

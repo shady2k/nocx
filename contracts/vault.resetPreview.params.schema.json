@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/vault.resetPreview.params.schema.json",
+  "title": "VaultResetPreviewParams",
+  "description": "Params for vault.resetPreview.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

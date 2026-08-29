@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/vault.setup.params.schema.json",
+  "title": "VaultSetupParams",
+  "description": "Params for vault.setup.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {
+    "passphrase": {
+      "type": "string",
+      "maxLength": 64000,
+      "description": "Optional vault passphrase; empty selects the OS-held key path."
+    }
+  }
+}

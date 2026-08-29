@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/lifecycle.establishAck.params.schema.json",
+  "title": "LifecycleEstablishackParams",
+  "description": "Params for lifecycle.establishAck.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "lane", "domain", "epoch", "generation"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}"
+    },
+    "lane": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "domain": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "epoch": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "generation": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    }
+  }
+}

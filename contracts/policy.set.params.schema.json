@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/policy.set.params.schema.json",
+  "title": "PolicySetParams",
+  "description": "Params for policy.set.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["policy"],
+  "properties": {
+    "policy": {
+      "type": "object"
+    }
+  }
+}

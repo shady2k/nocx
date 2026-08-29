@@ -11,6 +11,18 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 )
 
+func testToolBound() agenttools.ResultBound {
+	return agenttools.ResultBound{MaxBytes: 64 << 10, Truncation: agenttools.TruncationDropTail}
+}
+
+func toolTestContext() context.Context {
+	return withToolBound(context.Background(), testToolBound())
+}
+
+func testResultMaxBytes() int64 {
+	return testToolBound().MaxBytes
+}
+
 type sessionSourceFake struct {
 	items SessionItems
 	item  SessionItemRead
@@ -51,7 +63,7 @@ func TestExecuteSessionList_EmptyPaneIsAnHonestEmptyResult(t *testing.T) {
 	source := &sessionSourceFake{items: SessionItems{Items: []SessionItem{}}}
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
 
-	out, err := executeSessionList(context.Background(), reader, source, json.RawMessage(`{"sessionId":"pane-a"}`))
+	out, err := executeSessionList(toolTestContext(), reader, source, json.RawMessage(`{"sessionId":"pane-a"}`))
 	if err != nil {
 		t.Fatalf("executeSessionList: %v", err)
 	}
@@ -65,7 +77,7 @@ func TestExecuteSessionList_EmptyPaneIsAnHonestEmptyResult(t *testing.T) {
 
 func TestExecuteSessionList_PropagatesSourceFailure(t *testing.T) {
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
-	_, err := executeSessionList(context.Background(), reader, &sessionSourceFake{err: errors.New("ledger unavailable")}, json.RawMessage(`{"sessionId":"pane-a"}`))
+	_, err := executeSessionList(toolTestContext(), reader, &sessionSourceFake{err: errors.New("ledger unavailable")}, json.RawMessage(`{"sessionId":"pane-a"}`))
 	if err == nil || !strings.Contains(err.Error(), "ledger unavailable") {
 		t.Fatalf("list error = %v, want source failure", err)
 	}
@@ -75,7 +87,7 @@ func TestExecuteSessionRead_ExitedCarriesStateAndCode(t *testing.T) {
 	source := &sessionSourceFake{item: SessionItemRead{ID: "item-1", State: "exited", ExitCode: intPtr(7), Text: "done"}}
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
 
-	out, err := executeSessionRead(context.Background(), reader, source, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`))
+	out, err := executeSessionRead(toolTestContext(), reader, source, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`))
 	if err != nil {
 		t.Fatalf("executeSessionRead: %v", err)
 	}
@@ -88,7 +100,7 @@ func TestExecuteSessionRead_ExitedNoBodyCarriesRetentionNote(t *testing.T) {
 	source := &sessionSourceFake{item: SessionItemRead{ID: "item-1", State: "exited", Note: "output was not kept"}}
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
 
-	out, err := executeSessionRead(context.Background(), reader, source, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`))
+	out, err := executeSessionRead(toolTestContext(), reader, source, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`))
 	if err != nil {
 		t.Fatalf("executeSessionRead: %v", err)
 	}
@@ -102,7 +114,7 @@ func TestExecuteSessionRead_RunningUsesRendererAndCarriesState(t *testing.T) {
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
 	req := sessionScreenRequester{body: liveFrameBody("current")}
 
-	out, err := executeSessionRead(context.Background(), reader, source, req, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`))
+	out, err := executeSessionRead(toolTestContext(), reader, source, req, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`))
 	if err != nil {
 		t.Fatalf("executeSessionRead: %v", err)
 	}
@@ -133,7 +145,7 @@ func TestExecuteSessionRead_NoIDReturnsCurrentScreenAndAlternateCaveat(t *testin
 	}
 	body = encoded
 
-	out, err := executeSessionRead(context.Background(), reader, nil, sessionScreenRequester{body: body}, json.RawMessage(`{"sessionId":"pane-a"}`))
+	out, err := executeSessionRead(toolTestContext(), reader, nil, sessionScreenRequester{body: body}, json.RawMessage(`{"sessionId":"pane-a"}`))
 	if err != nil {
 		t.Fatalf("executeSessionRead: %v", err)
 	}
@@ -145,12 +157,12 @@ func TestExecuteSessionRead_NoIDReturnsCurrentScreenAndAlternateCaveat(t *testin
 func TestExecuteSessionRead_PropagatesLedgerAndRendererFailures(t *testing.T) {
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
 	ledgerErr := errors.New("ledger unavailable")
-	if _, err := executeSessionRead(context.Background(), reader, &sessionSourceFake{err: ledgerErr}, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`)); !strings.Contains(err.Error(), "ledger unavailable") {
+	if _, err := executeSessionRead(toolTestContext(), reader, &sessionSourceFake{err: ledgerErr}, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`)); !strings.Contains(err.Error(), "ledger unavailable") {
 		t.Fatalf("ledger error = %v, want source failure", err)
 	}
 	rendererErr := errors.New("renderer disappeared")
 	source := &sessionSourceFake{item: SessionItemRead{ID: "item-1", State: "running"}}
-	if _, err := executeSessionRead(context.Background(), reader, source, sessionScreenRequester{err: rendererErr}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`)); !strings.Contains(err.Error(), "renderer disappeared") {
+	if _, err := executeSessionRead(toolTestContext(), reader, source, sessionScreenRequester{err: rendererErr}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`)); !strings.Contains(err.Error(), "renderer disappeared") {
 		t.Fatalf("renderer error = %v, want renderer failure", err)
 	}
 }
@@ -162,20 +174,23 @@ func TestExecuteSessionRead_ExitedBoundsTextAndReturnedEnd(t *testing.T) {
 		lines[i] = line
 	}
 	text := strings.Join(lines, "\n")
-	expectedLines := maxBlockWindowBytes / (len(line) + 1)
+	expectedLines := int(testResultMaxBytes()) / (len(line) + 1)
 	expectedText := strings.Join(lines[:expectedLines], "\n")
 	source := &sessionSourceFake{item: SessionItemRead{
 		ID: "item-1", State: "exited", Total: len(lines), Start: 0, End: len(lines), Text: text,
 	}}
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
 
-	out, err := executeSessionRead(context.Background(), reader, source, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1","count":2000}`))
+	out, err := executeSessionRead(toolTestContext(), reader, source, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1","count":2000}`))
 	if err != nil {
 		t.Fatalf("executeSessionRead: %v", err)
 	}
 	var result sessionReadResult
 	if err := json.Unmarshal([]byte(out), &result); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
+	}
+	if !result.Truncated || result.Dropped <= 0 || result.Remaining != result.Dropped {
+		t.Fatalf("truncation metadata = truncated:%v dropped:%d remaining:%d, want omitted bytes reported consistently", result.Truncated, result.Dropped, result.Remaining)
 	}
 	if result.Text != expectedText {
 		t.Fatalf("text has %d bytes, want %d bytes ending on line %d", len(result.Text), len(expectedText), expectedLines)
@@ -191,17 +206,20 @@ func TestExecuteSessionRead_LiveScreenBoundsTextAndReturnedEnd(t *testing.T) {
 	for i := range lines {
 		lines[i] = line
 	}
-	expectedLines := maxBlockWindowBytes / (len(line) + 1)
+	expectedLines := int(testResultMaxBytes()) / (len(line) + 1)
 	expectedText := strings.Join(lines[:expectedLines], "\n")
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
 
-	out, err := executeSessionRead(context.Background(), reader, nil, sessionScreenRequester{body: liveFrameBody(lines...)}, json.RawMessage(`{"sessionId":"pane-a"}`))
+	out, err := executeSessionRead(toolTestContext(), reader, nil, sessionScreenRequester{body: liveFrameBody(lines...)}, json.RawMessage(`{"sessionId":"pane-a"}`))
 	if err != nil {
 		t.Fatalf("executeSessionRead: %v", err)
 	}
 	var result sessionReadResult
 	if err := json.Unmarshal([]byte(out), &result); err != nil {
 		t.Fatalf("unmarshal result: %v", err)
+	}
+	if !result.Truncated || result.Dropped <= 0 || result.Remaining != result.Dropped {
+		t.Fatalf("truncation metadata = truncated:%v dropped:%d remaining:%d, want omitted bytes reported consistently", result.Truncated, result.Dropped, result.Remaining)
 	}
 	if result.Text != expectedText {
 		t.Fatalf("text has %d bytes, want %d bytes ending on line %d", len(result.Text), len(expectedText), expectedLines)

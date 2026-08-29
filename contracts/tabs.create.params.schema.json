@@ -1,0 +1,62 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/tabs.create.params.schema.json",
+  "title": "TabsCreateParams",
+  "description": "Params for creating a tab with its first pane.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["id", "workspaceId", "layout", "firstPane"],
+  "properties": {
+    "id": {
+      "type": "string",
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "workspaceId": {
+      "type": "string",
+      "pattern": "^(workspace:default|[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12})$"
+    },
+    "parentId": {
+      "type": ["string", "null"],
+      "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+    },
+    "name": { "type": ["string", "null"], "maxLength": 200 },
+    "colour": { "type": ["string", "null"], "maxLength": 64 },
+    "position": { "type": "integer", "minimum": 0, "maximum": 1048576 },
+    "pinned": { "type": "boolean" },
+    "layout": { "type": "string", "enum": ["row", "column"] },
+    "firstPane": { "$ref": "#/$defs/firstPane" }
+  },
+  "$defs": {
+    "firstPane": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["id", "kind", "sizeShare"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-7[0-9a-fA-F]{3}-[89aAbB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$"
+        },
+        "cwd": { "type": "string", "maxLength": 4096 },
+        "kind": { "type": "string", "enum": ["local", "ssh"] },
+        "endpoint": { "type": ["string", "null"], "maxLength": 512 },
+        "sizeShare": { "type": "number", "exclusiveMinimum": 0, "maximum": 1 }
+      },
+      "oneOf": [
+        {
+          "properties": { "kind": { "const": "local" } },
+          "anyOf": [
+            { "not": { "required": ["endpoint"] } },
+            { "required": ["endpoint"], "properties": { "endpoint": { "type": "null" } } }
+          ]
+        },
+        {
+          "required": ["endpoint"],
+          "properties": {
+            "kind": { "const": "ssh" },
+            "endpoint": { "type": "string", "pattern": ".*\\S.*" }
+          }
+        }
+      ]
+    }
+  }
+}

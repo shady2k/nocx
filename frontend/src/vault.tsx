@@ -219,7 +219,7 @@ export function createVaultSecretSource(deps: VaultSecretSourceDeps): SecretPick
       deps.vaultController.openUnlock('use its secrets')
       await deps.vaultClient.inventory()
     },
-    requestSetup: () => {
+    requestSetup: async () => {
       // Setting a vault up asks for a passphrase, so it takes the surface:
       // `true` says so, and the panel hands the person the sheet rather than
       // reloading its list underneath them.
@@ -231,8 +231,31 @@ export function createVaultSecretSource(deps: VaultSecretSourceDeps): SecretPick
       // removed that mode, which also removes the hazard the old comment was
       // about: two doors onto one act can no longer disagree about whether it
       // needs a dialog, because both need one.
+      // AFTER THE ACTIVATING CLICK'S TASK HAS ENDED, and this is load-bearing
+      // rather than decoration.
+      //
+      // The connection editor's dialog is a native <dialog> and the picker
+      // panel is re-homed inside it so it can paint in the top layer. Opening
+      // a second top-layer surface while that click is still being handled
+      // takes the dialog down with it, and the sheet goes too because it was
+      // rendered inside it — the person is returned to Settings having
+      // activated a row and been given nothing. A MICROTASK IS NOT ENOUGH
+      // and this was measured, not assumed: `await Promise.resolve()` still
+      // lost the dialog in both engines. The browser's own light-dismiss
+      // handling for <dialog> belongs to the click's task, so the boundary
+      // has to be the end of that task.
+      //
+      // It used to happen by accident. The function awaited vault.status() to
+      // decide between the silent path and the sheet, and that round trip was
+      // what put the open on a later turn; ADR-0050 step 1 removed the
+      // decision and with it the accident, which
+      // e2e/secret-panel-position.spec.ts caught in one run — "a row still
+      // activates from the panel portion hanging past the dialog", written
+      // for exactly this path. Stated deliberately now, because a boundary
+      // nobody named is one the next faster call removes again.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0))
       deps.vaultController.openSetup()
-      return Promise.resolve(true)
+      return true
     },
     requestCreate: (name, value) => {
       // `value ?? ''`, not a branch: the destination's own default for "no

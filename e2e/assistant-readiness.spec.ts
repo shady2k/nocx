@@ -29,8 +29,8 @@
  * THE FIXTURES ARE THE SUITE'S, not new ones. `FakeOpenAI`
  * (e2e/fake-openai.ts) is a real local server answering
  * `/chat/completions`: without it there is no model to answer and "an
- * answer arrives" cannot be made true by `cmd/devharness` alone.
- * `VaultBackend` is this file's OWN devharness on a disposable home, so the
+ * answer arrives" cannot be made true by `cmd/nocx-server` alone.
+ * `VaultBackend` is this file's OWN nocx-server on a disposable home, so the
  * first state a person is ever in — no endpoints at all — is real here and
  * nothing this file configures leaks into the shard's shared stand.
  *
@@ -64,7 +64,7 @@ import { FakeOpenAI } from './fake-openai'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
@@ -103,7 +103,7 @@ test.beforeAll(async () => {
   // the suite is running: the container has no keychain to ask, and stating
   // the premise explicitly is what keeps this arrangement identical on both
   // platforms (the same reason agent-ask.spec.ts passes it).
-  backend = new VaultBackend(devharnessBin(), { root }, true)
+  backend = new VaultBackend(serverBin(), { root })
   endpoint = await backend.start()
 })
 

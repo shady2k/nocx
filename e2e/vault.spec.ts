@@ -1,7 +1,7 @@
 /**
  * e2e: Vault full-path coverage.
  *
- * Drives the real frontend against cmd/devharness, walking the exact path a
+ * Drives the real frontend against cmd/nocx-server, walking the exact path a
  * user walks — no mocked components, no unit-test stubs. Each case owns a
  * clean XDG directory so every run begins uninitialised.
  *
@@ -23,7 +23,7 @@ import { addSecretFromLock, pressLock } from './secret-field'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 // Two distinct ports so restart never conflicts with the first instance's
 // TIME_WAIT. Both are outside the ranges used by `wails dev` (34115), the
@@ -84,7 +84,7 @@ test.describe('Vault — no keyring, full round trip', () => {
     xdg = createXdgDirs()
     // `true` = no Secret Service for this backend, regardless of the session
     // the suite runs in. These two cases are ABOUT the passphrase path.
-    backend = new VaultBackend(devharnessBin(), asDisposableRoot(xdg), true)
+    backend = new VaultBackend(serverBin(), asDisposableRoot(xdg))
   })
 
   test.afterAll(() => {
@@ -297,7 +297,7 @@ test.describe('Vault — recovery code unseal', () => {
     xdg = createXdgDirs()
     // `true` = no Secret Service for this backend, regardless of the session
     // the suite runs in. These two cases are ABOUT the passphrase path.
-    backend = new VaultBackend(devharnessBin(), asDisposableRoot(xdg), true)
+    backend = new VaultBackend(serverBin(), asDisposableRoot(xdg))
   })
 
   test.afterAll(() => {
@@ -475,8 +475,16 @@ test.describe('Vault — with keyring, silent setup', () => {
     }
 
     // ── Start the backend under the existing keyring session ────────────
+    //
+    // THE BUILD THAT DECLARES A LOGIN SESSION, and the only spec that asks
+    // for it. The keystore stance is a build property (design D10): the
+    // default server makes no claim to a login session, so it takes the file
+    // provider and never calls the OS store — which is why every other spec
+    // gets the passphrase path without setting anything. This case is ABOUT
+    // the OS key carrying the vault, so it needs the other build, and the
+    // skip above is what keeps it honest on a host with no Secret Service.
     const xdg = createXdgDirs()
-    const backend = new VaultBackend(devharnessBin(), asDisposableRoot(xdg))
+    const backend = new VaultBackend(readStand().serverLoginSession, asDisposableRoot(xdg))
 
     try {
       const ep = await backend.start()

@@ -104,7 +104,7 @@ function folderVariableExport(baseUrl: string): string {
 }
 
 /** Lazily: the stand is started by globalSetup, after this file is collected. */
-const devharnessBin = (): string => readStand().devharness
+const serverBin = (): string => readStand().server
 
 test.describe('a request inherits and sends a folder variable', () => {
   test.use({ viewport: { width: 1400, height: 900 } })
@@ -116,7 +116,7 @@ test.describe('a request inherits and sends a folder variable', () => {
   test.beforeAll(async () => {
     disposable = { root: mkdtempSync(join(tmpdir(), 'nocx-e2e-folder-variable-')) }
     server = await startFolderVariableServer()
-    backend = new VaultBackend(devharnessBin(), disposable, true)
+    backend = new VaultBackend(serverBin(), disposable)
   })
 
   test.afterAll(async () => {

@@ -48,16 +48,18 @@
 # Disabled by default; enable only when an integration needs fresh .beads/issues.jsonl.
 # Use relative paths under .beads/ for JSONL import/export filenames.
 #
-# Enabled here because .beads/issues.jsonl is tracked in git: it is what a
-# reader sees on GitHub, and the last-resort source bd bootstrap falls back to.
-# Leaving it to be exported by hand is how it drifts from the database.
-# git-add stages it so it lands in the same commit as the work it describes.
-# The export is throttled to one a minute and there is no daemon to flush the
-# tail, so .githooks/pre-commit forces a final export before each commit.
+# Off here. It was on because .beads/issues.jsonl used to be tracked in git and
+# had to stay in step with the database; the file is untracked now, so there is
+# nothing for the export to keep in step with. `git-add: true` in particular
+# would stage an ignored path on every write to the database.
+#
+# The spare copy of the backlog is published by .githooks/pre-push to
+# refs/beads/snapshot on the remote. Run `bd export` by hand for a local file.
+# import.path below is left as it is — the recovery procedure in README uses it.
 export:
-    auto: true
+    auto: false
     path: issues.jsonl
-    git-add: true
+    git-add: false
 # import:
 #   path: issues.jsonl
 

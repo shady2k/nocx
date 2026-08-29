@@ -8,7 +8,7 @@
  * read out of the encrypted store rather than out of a process that still
  * remembers writing it.
  *
- * Its own devharness backend, like sidebar-resize and active-tab-restore,
+ * Its own nocx-server backend, like sidebar-resize and active-tab-restore,
  * precisely so it can be restarted mid-test. Everything asserted is on
  * screen: a person's answer to "did my work come back" is what the pane
  * shows, not what a query returns.
@@ -30,12 +30,7 @@ import {
 } from './harness'
 import { readStand } from './stand'
 
-const devharnessBin = () => readStand().devharness
-
-// Distinct ports, outside `wails dev` (34115), the suite default (9876) and
-// the other restart specs (19876-19885).
-const FIRST_PORT = 19886
-const SECOND_PORT = 19887
+const serverBin = () => readStand().server
 
 const TAB = '.nocx-tab'
 const NEW_TAB = '[aria-label="New tab"]'
@@ -138,7 +133,7 @@ test.describe('the application opens on what you left (nocx-l21ib)', () => {
   test.beforeEach(() => {
     home = { root: mkdtempSync(join(tmpdir(), 'nocx-restore-')) }
     // `true` = no Secret Service for this backend.
-    backend = new VaultBackend(devharnessBin(), home, true)
+    backend = new VaultBackend(serverBin(), home)
   })
 
   test.afterEach(() => {
@@ -155,7 +150,7 @@ test.describe('the application opens on what you left (nocx-l21ib)', () => {
   // had no "later", because the tab stays active and a page load is not a
   // reconnect. mount() is the later.
   test('the tabs, and the output of what ran in them, come back', async ({ page }) => {
-    const ep1 = await backend.start(FIRST_PORT)
+    const ep1 = await backend.start()
     await bindEndpoint(page, ep1)
     await page.goto('/')
 
@@ -174,7 +169,7 @@ test.describe('the application opens on what you left (nocx-l21ib)', () => {
 
     // The application restarts. Nothing in the first process survives it —
     // including the shells, which is the point: what comes back is the tab.
-    const ep2 = await backend.restart(SECOND_PORT)
+    const ep2 = await backend.restart()
     await bindEndpoint(page, ep2)
     await page.reload()
 
@@ -210,14 +205,14 @@ test.describe('the application opens on what you left (nocx-l21ib)', () => {
   // so a test that reads the DOM cannot see it, and a test that reads the class
   // would have been green throughout.
   test('a program taking the pane hides the previous-session boundary', async ({ page }) => {
-    const ep1 = await backend.start(FIRST_PORT)
+    const ep1 = await backend.start()
     await bindEndpoint(page, ep1)
     await page.goto('/')
 
     await run(page, 'echo BOUNDARY-ALT-SCREEN')
     await stored(page, ep1, 'echo BOUNDARY-ALT-SCREEN')
 
-    const ep2 = await backend.restart(SECOND_PORT)
+    const ep2 = await backend.restart()
     await bindEndpoint(page, ep2)
     await page.reload()
 
@@ -247,7 +242,7 @@ test.describe('the application opens on what you left (nocx-l21ib)', () => {
   })
 
   test('with the setting off, the same restart gives one fresh tab', async ({ page }) => {
-    const ep1 = await backend.start(FIRST_PORT)
+    const ep1 = await backend.start()
     await bindEndpoint(page, ep1)
     await page.goto('/')
 
@@ -267,7 +262,7 @@ test.describe('the application opens on what you left (nocx-l21ib)', () => {
     await expect(toggle).not.toBeChecked()
     await page.keyboard.press('Meta+w')
 
-    const ep2 = await backend.restart(SECOND_PORT)
+    const ep2 = await backend.restart()
     await bindEndpoint(page, ep2)
     await page.reload()
 

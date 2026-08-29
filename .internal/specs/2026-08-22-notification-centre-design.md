@@ -21,7 +21,7 @@ follow immediately and are settled here rather than left to be discovered:
   lifecycle". A centre with unread rows **is** a second lifecycle. §6 names the one source
   of truth for the bell count, the dock badge, tab activity and mark-read, so the two
   cannot disagree.
-- **"A notification is transient" survives in ADR-0029's sense** — nothing is persisted to
+- **"A notification is transient" survives in ADR-0047's sense** — nothing is persisted to
   disk, nothing outlives the process — and stops being true in the product sense. §7 states
   the retention interval with both ends.
 
@@ -42,8 +42,8 @@ returns to zero and the row remains in the feed.
 | **AD-1**                                                     | One WebSocket: binary data plane + JSON-RPC control plane                                                                    | The feed is control plane. No PTY byte ever enters it                                                                                         |
 | **AD-6**                                                     | The backend never sniffs the byte stream                                                                                     | Untouched. OSC parsing stays in the renderer (`renderers/xterm.ts`), which then calls `notify.raise` as it does today                         |
 | **AD-8**                                                     | One owner per behaviour, interface-first, wired at one composition root                                                      | The **router** stays the only holder of "where". The **centre** is the only holder of "what was raised". Neither answers the other's question |
-| **ADR-0029**                                                 | Routing resolves once before any sink; a sink never selects a target; default-deny; trust classes are hard capability bounds | Unchanged and load-bearing. §5 states what "unfiltered ingest" does **not** mean                                                              |
-| **ADR-0033**                                                 | UI state is a document on the Go side; localStorage may not carry facts                                                      | The feed is in memory and dies with the process, so it is not a document. `mark all read` is therefore also in memory — see §7                |
+| **ADR-0047**                                                 | Routing resolves once before any sink; a sink never selects a target; default-deny; trust classes are hard capability bounds | Unchanged and load-bearing. §5 states what "unfiltered ingest" does **not** mean                                                              |
+| **ADR-0048**                                                 | UI state is a document on the Go side; localStorage may not carry facts                                                      | The feed is in memory and dies with the process, so it is not a document. `mark all read` is therefore also in memory — see §7                |
 | **helper design D17** (`2026-08-13-remote-helper-design.md`) | A helper service may only be the remote half of an interface that already exists locally                                     | §4's `Ingress` is that local interface. Defining it now is the precondition for a relay ever raising events, not a speculative hook           |
 | **`nocx-if6` phase A**                                       | Session identity becomes `(backendId, sessionId)`                                                                            | The occurrence record carries backend identity from the first commit. §4                                                                      |
 
@@ -72,7 +72,7 @@ block done   ─┘        │
 `Policy.Submit`. That is wrong — `Router.Raise` stamps `ev.At = time.Now()`
 (`internal/notify/notify.go:318`, "the router is the first nocx-owned stage of the
 pipeline"), so a hook before it would file every occurrence with a zero timestamp, against
-the `Event` contract and ADR-0029. Stamping moves **into ingress**, once, and `Router.Raise`
+the `Event` contract and ADR-0047. Stamping moves **into ingress**, once, and `Router.Raise`
 stops doing it. Nothing restamps afterwards.
 
 ```go
@@ -105,7 +105,7 @@ Every raised event enters the feed. Policy decides which **channels** fire; it n
 decides membership. A suppressed event, a coalesced one and a delivered one are all in the
 feed, and the row says which channels fired.
 
-**It does not mean the trust bound is negotiable.** ADR-0029 §3 makes trust classes hard
+**It does not mean the trust bound is negotiable.** ADR-0047 §3 makes trust classes hard
 capability bounds: `TrustHeuristic` may never reach a sink whose `LeavesMachine()` is true,
 and `NewRouter` refuses to construct such a table at all (`ErrTrustCapability`,
 `internal/notify/notify.go:289`). That check stays exactly where it is and never becomes

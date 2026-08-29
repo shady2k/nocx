@@ -10,7 +10,7 @@
  * and the recorded path is the proof stated a second way.
  *
  * It lives in the Playwright worker for the reason its sibling states: the
- * process that dials it is the devharness the spec starts, a separate
+ * process that dials it is the nocx-server the spec starts, a separate
  * binary, so the server has to belong to the worker that shares a network
  * namespace with it. Port 0, read back off the listener.
  */

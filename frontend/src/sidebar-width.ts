@@ -3,7 +3,7 @@
  *
  * One clamped WHOLE number of CSS pixels, applied to #sidebar as the
  * `--sidebar-width` variable and persisted in the UI-state document on the Go
- * side (ADR-0033). This module owns the frontend half: the bounds, the
+ * side (ADR-0048). This module owns the frontend half: the bounds, the
  * rounding, the application, and the controller that is the single owner of
  * the value between the drag and the persistence seam.
  *

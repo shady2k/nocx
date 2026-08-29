@@ -5,11 +5,11 @@
  * WHY A SECOND FAKE, WHEN internal/assistant/probe_test.go HAS ONE (AD-8).
  * The Go fake is an in-package httptest server living and dying inside one
  * `go test` process; nothing outside that process can reach it. The e2e
- * needs a server the DEVHARNESS process dials — devharness is spawned by
+ * needs a server the BACKEND process dials — nocx-server is spawned by
  * Playwright and must reach the model endpoint over 127.0.0.1, so the server
  * has to be owned by the spec process itself. A Node http server in the
  * Playwright worker is that owner: same host network namespace as the
- * devharness child it spawns, scripted by the very test driving the browser.
+ * nocx-server child it spawns, scripted by the very test driving the browser.
  *
  * The wire shape is kept IDENTICAL to the Go fake's (probe_test.go:
  * streamOK/chunkJSON): each content delta is one

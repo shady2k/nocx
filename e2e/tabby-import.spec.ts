@@ -19,7 +19,7 @@ const test = base
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 // ── Encrypted vault fixture ──────────────────────────────────────────────
 //
@@ -66,7 +66,7 @@ interface XdgDirsResult {
    *  off a shape that had no such field, so the backend got `{ root:
    *  undefined }` and the run died in path.join before a single assertion.
    *  Nothing caught it because the spec could not run at all until CI built
-   *  the devharness it needs (nocx-azxe.2), and nothing type-checks e2e/. */
+   *  the nocx-server it needs (nocx-azxe.2), and nothing type-checks e2e/. */
   root: string
   data: string
   config: string
@@ -101,7 +101,7 @@ test.describe('Tabby import preview + execute', () => {
 
   test.beforeAll(() => {
     xdg = createXdgDirs()
-    backend = new VaultBackend(devharnessBin(), asDisposableRoot(xdg), true)
+    backend = new VaultBackend(serverBin(), asDisposableRoot(xdg))
     configPath = join(xdg.root, 'tabby-e2e-test.yml')
     writeFileSync(configPath, CONFIG_YAML, 'utf-8')
   })

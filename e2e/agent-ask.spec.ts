@@ -60,7 +60,7 @@
  * explicit release — every "wait" here is a poll on a state change, never a
  * sleep (AGENTS.md: "a test may not depend on timing").
  *
- * The backend is THIS FILE'S OWN devharness on a disposable home
+ * The backend is THIS FILE'S OWN nocx-server on a disposable home
  * (VaultBackend), so the endpoint it configures never leaks into the shard's
  * shared stand, and the "no endpoint configured" state is real for this
  * file's first test (AGENTS.md: "Your dev profile is not the installed
@@ -106,7 +106,7 @@ async function waitForProbeRequest(
 }
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
@@ -172,7 +172,7 @@ test.beforeAll(async () => {
   // the suite runs in: the container has no keychain to ask, and the derived
   // content key makes the vault available without user setup — the same
   // arrangement history-persistence.spec.ts relies on.
-  backend = new VaultBackend(devharnessBin(), { root }, true)
+  backend = new VaultBackend(serverBin(), { root })
   endpoint = await backend.start()
 })
 

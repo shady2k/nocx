@@ -28,7 +28,7 @@
  * half that broke, and it is the half asserted below.
  *
  * THE PATH-INSERT HALF CANNOT BE WATCHED HERE. It needs the Wails runtime
- * handing Go a real OS path, and the headless stand is cmd/devharness plus
+ * handing Go a real OS path, and the headless stand is cmd/nocx-server plus
  * vite — there is no Wails in it, so nothing in this repository sees that
  * happen. It is covered by unit tests on both sides of the wire and it
  * remains a MANUAL step on the desktop app. Said here, where the next reader

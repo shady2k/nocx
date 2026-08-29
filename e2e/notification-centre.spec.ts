@@ -179,7 +179,7 @@ test('a session that ends while you are elsewhere waits for you in the bell', as
     await expect(page.locator(ROW_TITLE)).toHaveCount(rowsBefore)
 
     // ── and the row you can go back to ────────────────────────────────────
-    // A program in a LIVE tab asks nocx to present a message (ADR-0029, the
+    // A program in a LIVE tab asks nocx to present a message (ADR-0047, the
     // centre's other source). Its tab is still open, so this is the row the
     // epic's "clicking the row focuses the tab" is about.
     await backToTheTerminal(page)

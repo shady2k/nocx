@@ -38,7 +38,7 @@ import { readStand } from './stand'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 // Two distinct ports so restart never conflicts with the first instance's
 // TIME_WAIT. Both are outside the ranges used by the rest of the suite
@@ -84,7 +84,7 @@ test.describe('vault secrets in the prompt — the owner’s acceptance', () => 
     // `true` = no Secret Service for this backend: the passphrase path is the
     // deterministic one (setup always prompts, unseal always needs the
     // passphrase), exactly like vault.spec.ts's cases 1-2.
-    backend = new VaultBackend(devharnessBin(), asDisposableRoot(xdg), true)
+    backend = new VaultBackend(serverBin(), asDisposableRoot(xdg))
   })
 
   test.afterAll(() => {

@@ -400,7 +400,7 @@ func runLineArgv(t *testing.T, binDir, line string) []string {
 }
 
 // ---------------------------------------------------------------------------
-// The canary, on the typed path. ADR-0035's subject in one assertion: the
+// The canary, on the typed path. ADR-0049's subject in one assertion: the
 // line the parent shell runs carries neither bearer and no bundle. Both
 // values are unmistakable strings, so a test that finds them is finding
 // exactly the defect, and one that does not is not passing by accident — the

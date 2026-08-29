@@ -19,6 +19,15 @@ set -euo pipefail
 : "${VERSION:?set VERSION, e.g. VERSION=0.2.1}"
 BIN="${BIN:-build/bin/nocx}"
 test -x "$BIN" || { echo "no binary at $BIN — build it first"; exit 1; }
+# The coordinator ships inside the image too. On Linux the daemon cannot be
+# spawned from in here and left to run: an AppImage unmounts its FUSE
+# directory when the process that started it exits, so the daemon would lose
+# its own executable at the moment it must survive. It is copied out to a
+# versioned path on first run instead (internal/update/serverbin) — and an
+# image that does not carry it has nothing to copy. Checked HERE, before the
+# three tool downloads below, so a missing build fails in a second.
+SERVER_BIN="${SERVER_BIN:-build/bin/nocx-server}"
+test -x "$SERVER_BIN" || { echo "no coordinator at $SERVER_BIN — run: make build-server"; exit 1; }
 base="nocx-${VERSION}-linux-amd64"
 mkdir -p dist
 
@@ -174,6 +183,19 @@ python3 scripts/appimage/patch-webkit-path.py \
   --libexec "$webkit_libexec" \
   --occurrences 2
 
+# ── The coordinator ──────────────────────────────────────────
+# Copied AFTER linuxdeploy and after the patch step, deliberately.
+# linuxdeploy walks usr/bin and rewrites what it finds there — rpaths, and
+# with NO_STRIP unset, the sections themselves — and nocx-server is a
+# statically linked Go binary with no interpreter and no dependency closure
+# to deploy. There is nothing for that pass to do to it and something for it
+# to get wrong, so it is placed once everything that rewrites ELF files has
+# finished. It sits beside nocx because that is where the launcher looks:
+# internal/update/serverbin.SiblingPath is this layout stated once, and the
+# macOS bundle puts the same two files in one directory.
+cp "$SERVER_BIN" AppDir/usr/bin/nocx-server
+chmod +x AppDir/usr/bin/nocx-server
+
 # ── Package ──────────────────────────────────────────────────
 ARCH=x86_64 ./appimagetool.AppImage --appimage-extract-and-run \
   --runtime-file runtime-x86_64 \
@@ -188,5 +210,21 @@ test -x "dist/${base}.AppImage"
 # on Arch, Fedora or NixOS passed every check this job had (nocx-azxe.7).
 echo "=== version check ==="
 "./dist/${base}.AppImage" --appimage-extract-and-run --version 2>&1 | tee /dev/stderr | grep -qw "$VERSION"
+
+# The coordinator must be INSIDE the packaged file, not merely in the AppDir
+# the packaging step was handed. Asserted by extracting it back out of the
+# artefact: an AppDir check would pass on an image that dropped it.
+echo "=== coordinator is in the image ==="
+artefact="$(pwd)/dist/${base}.AppImage"
+extracted="$(mktemp -d)"
+# A whole extract, not `--appimage-extract usr/bin/nocx-server`: the
+# pattern form exists but this is a release gate that cannot be rehearsed
+# on a developer machine, and a check that silently extracts nothing would
+# report the artefact healthy. Ten seconds and a gigabyte of runner disk.
+( cd "$extracted" && "$artefact" --appimage-extract >/dev/null )
+test -x "$extracted/squashfs-root/usr/bin/nocx-server" \
+  || { echo "nocx-server is not in the AppImage"; exit 1; }
+file "$extracted/squashfs-root/usr/bin/nocx-server" | grep -q 'ELF 64-bit'
+rm -rf "$extracted"
 
 sha256sum dist/*

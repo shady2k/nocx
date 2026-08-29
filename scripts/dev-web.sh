@@ -130,7 +130,7 @@ backend_pid=$!
 
 # The server names its discovery socket on its readiness line; the port and the
 # token come from the socket and from nowhere else, because a token on stdout
-# is what design §6 forbids. e2e/coordinator.ts is the one implementation of
+# is what design §6 forbids. e2e/coordinator.mts is the one implementation of
 # that exchange — Node 24 runs it straight, with no build step.
 socket=""
 for _ in $(seq 1 200); do
@@ -149,7 +149,7 @@ if [ -z "$socket" ]; then
 	exit 1
 fi
 
-if ! hello="$(node "$repo_root/e2e/coordinator.ts" "$socket")"; then
+if ! hello="$(node "$repo_root/e2e/coordinator.mts" "$socket")"; then
 	echo "the coordinator on $socket refused the handshake:" >&2
 	cat "$work/backend.log" >&2
 	exit 1

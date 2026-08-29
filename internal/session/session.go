@@ -819,11 +819,26 @@ func (s *realSession) Write(p []byte) (int, error) {
 // transport readLoop calls this for every data frame: it must never
 // stall on one session (a dead SSH channel would freeze every other
 // tab). If the bounded queue is full the frame is dropped — a slow
-// channel should not be able to exhaust memory. Because the readLoop
-// is the sole EnqueueWrite caller, the queue preserves FIFO order:
-// frame N is enqueued before frame N+1. The result channel is nil —
-// the transport does not need the write result, and writeLoop skips
-// the send when res is nil.
+// channel should not be able to exhaust memory. The result channel is
+// nil — the transport does not need the write result, and writeLoop
+// skips the send when res is nil.
+//
+// TWO SENDERS, AND WHAT ORDER MEANS BETWEEN THEM (nocx-7l4ex.12). The
+// readLoop is one, and because it is a single goroutine the bytes a
+// person typed keep the order they typed them in: frame N is enqueued
+// before frame N+1, always. The second is session.signal's protected-group
+// mechanism, which writes one 0x03 here rather than through Write
+// precisely so that it is subject to everything a keystroke is subject to
+// — the quarantine below, the queue's bound, this session and no other.
+// It is deliberately NOT ordered against input in flight, and could not
+// be: it is a gesture aimed at the pane by someone who may not have the
+// keyboard at all, so there is no "before" or "after" to preserve. What
+// IS guaranteed is that it arrives whole and between two frames, never
+// inside one, because writeLoop drains this queue one job at a time.
+//
+// ACCEPTED IS NOT DELIVERED, and no caller may report otherwise. True
+// here means the queue took it; the channel write happens later on
+// writeLoop and can still fail.
 func (s *realSession) EnqueueWrite(p []byte) bool {
 	select {
 	case <-s.writeDone:

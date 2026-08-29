@@ -198,11 +198,26 @@ Two rules fall out and both are load-bearing:
 - **Key ownership binds to a live session generation.** After a reconnect, the same-looking
   target is a different process.
 - **A protected shell process group is not proof of an idle pane.** Some foreground
-  programs share the launcher shell's group, so TIOCGPGRP correctly refuses to signal
-  that group while the authenticated lifecycle still names an exact open attempt.
-  `session.signal` keeps the process-group ladder first; only on that contradiction it
-  sends the terminal's ordinary `0x03` byte. Stop waits for the exact attempt to end and
-  otherwise reports `unreconciled` — never `nothing-running` beside a running block.
+  programs share the launcher shell's group — job control off (`set +m`, ADR-0024) or
+  `exec` — so TIOCGPGRP gives the same answer it gives at an idle prompt while a program
+  is very much running. `internal/pty` therefore names that answer separately
+  (`ErrProtectedForeground`, wrapping `ErrNoForeground`), and
+  `internal/transport/foreground_signal.go` stays the one owner of "how do you stop a
+  process": ONE policy, whose MECHANISM is chosen from that kernel answer and from
+  nothing else. An independent group is signalled with `kill(2)` and escalated through;
+  a protected group receives the terminal's own `0x03` byte and is never escalated into.
+- **What may say a program is inside a protected group.** Only an authenticated
+  lifecycle attempt that is both open and `Started` — the shell's own start, never the
+  app's submit, which opens the attempt _before_ the bytes that could cause it are
+  written (lifecycle-protocol §7). Exactly one such attempt across the session's lanes,
+  or the answer is the prompt's. Nothing here reads the byte stream (AD-6).
+- **And what the fallback does not claim.** `0x03` is a byte: the line discipline turns
+  it into SIGINT for the whole foreground group while ISIG is set — which in the
+  protected case includes the launcher shell, which ignores it — and a program that has
+  cleared ISIG receives it as input. So Stop's promise is stated on the outcome:
+  `delivered` means that exact attempt is no longer open when the response is sent,
+  `unreconciled` means nocx could not establish that. Never `nothing-running` beside a
+  running block.
 
 A summon over a running program reuses that machine and the **same `CommandEditor`** for
 follow-ups. The existing editor and every summoned answer are reparented into one absolute

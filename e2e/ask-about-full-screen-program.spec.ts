@@ -728,7 +728,14 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
       const readyBefore = (await recorded(page)).raised.filter((body) => body === KEY_READY).length
       rmSync(keyResultPath, { force: true })
       await useTarget(page, 'shell')
-      await page.keyboard.type(`sh '${keyScriptPath}'`)
+      // JOB CONTROL OFF, which is the whole point of this act (nocx-7l4ex.11).
+      // `set +m` makes bash run the command in its OWN process group instead
+      // of creating one for it — the topology ADR-0024 names, and the one the
+      // owner's `top` was in when Stop answered "nothing is running". Without
+      // it the job gets an independent group, the ordinary TIOCGPGRP ladder
+      // handles it, and this act would pass with the protected-group
+      // mechanism deleted.
+      await page.keyboard.type(`set +m; sh '${keyScriptPath}'`)
       await page.keyboard.press('Enter')
       await expect(page.locator(RUNNING_BLOCK)).toHaveCount(1, { timeout: 20_000 })
       await expect

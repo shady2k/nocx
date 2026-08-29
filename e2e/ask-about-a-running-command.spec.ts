@@ -101,6 +101,14 @@ test.beforeAll(async () => {
   // command deliberately keeps running, so command and turn remain independently
   // usable. It prints the marker with no trailing newline, then waits on a
   // condition this spec releases only after every assertion.
+  //
+  // The trap is what makes this spec about the TURN rather than about the
+  // command, and it is the reason this spec is not evidence about signal
+  // delivery: a real command dies here. That contract is proven where it
+  // belongs, against real process groups — internal/transport's
+  // TestSessionSignal_InterruptReachesTheRunningCommand for an independent
+  // group and TestSessionSignal_StopsAProgramInsideTheLauncherShellsGroup for
+  // the shell's own.
   writeFileSync(
     scriptPath,
     [

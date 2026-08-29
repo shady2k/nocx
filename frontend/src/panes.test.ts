@@ -22,7 +22,7 @@ import {
 import { isUuidv7 } from './layout/uuid7'
 import { Dispatcher } from './dispatcher'
 import { WSClient } from './ipc'
-import { Pane, PaneManager } from './panes'
+import { LOCAL_BACKEND_ID, Pane, PaneManager } from './panes'
 import { PANE_WORK_FINISHED_SETTLE_MS } from './pane-work-finished'
 import { ClipboardGate } from './clipboard'
 import type { TerminalContent } from './terminal-content'
@@ -321,6 +321,55 @@ describe('PaneManager', () => {
       cwdVerified: false,
     })
     expect(manager.sessionWhere('mock-sid-does-not-exist')).toBeNull()
+  })
+
+  // ── one lookup, one answer (nocx-cf920) ──────────────────────────────
+
+  it('refuses the empty session id, which is what a pane whose session has not opened answers', async () => {
+    const { manager } = await mountPaneManager()
+    const { TerminalContent } = await import('./terminal-content')
+    // The open never answers, which is what holds the pane in the state this
+    // test is about: chrome up, no session yet.
+    const client = makeClient()
+    client.openSession = vi.fn(() => new Promise(() => {}))
+    const content = new TerminalContent(
+      client as unknown as import('./ipc').WSClient,
+      anchoredPane(),
+      makeClipboard(),
+      new ClipboardGate(),
+      makeBanner(),
+      null,
+      () => {},
+    )
+    // Never started, which is the state a pane is in for one round trip
+    // after the chrome goes up. The two capabilities disagree about how to
+    // say so, and that disagreement is the defect: '' is a STRING a lookup
+    // can be handed, null is not.
+    expect(content.sessionId()).toBe('')
+    expect(content.lineage()).toBeNull()
+
+    const before = (await getRendererMocks()).length
+    manager.openPane(content, {
+      surfaceType: SURFACE_TERMINAL,
+      singletonKey: null,
+      restoreDescriptor: { type: 'local' },
+      supportsAttention: true,
+      defaultTitle: 'Terminal',
+    })
+    // Let the pane finish mounting inside this test rather than leaking a
+    // renderer into the next one.
+    await vi.waitFor(async () => {
+      expect((await getRendererMocks()).length).toBeGreaterThan(before)
+    })
+    expect(content.sessionId()).toBe('')
+
+    // findBySession refuses the empty id outright. Every other lookup has to
+    // give the same answer, or the one that does not names a tab, a machine
+    // and a directory for a session no pane holds.
+    expect(manager.findBySession(LOCAL_BACKEND_ID, '')).toBeUndefined()
+    expect(manager.sessionDisplayName('')).toBeNull()
+    expect(manager.sessionWhere('')).toBeNull()
+    expect(manager.terminalContentForSession('')).toBeNull()
   })
 
   // ── the directory, and whether we KNOW it (nocx-n7xha) ────────────────

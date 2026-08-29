@@ -500,6 +500,19 @@ func (h apiCollectionHandlers) handleSend(ctx context.Context, req jsonrpcReques
 			return
 		}
 	}
+	// THE TOKEN'S INTERVAL ENDS WHEN THE OUTCOME IS PUBLISHED, not when this
+	// function happens to return. The deferred drop runs AFTER the response
+	// is enqueued, so between the two a client that acts on the answer it
+	// already has — a Stop, or the renderer's verbatim replay — still finds
+	// the name registered: api.request.cancel was ACCEPTED on a settled
+	// exchange and reported success having stopped nothing.
+	//
+	// The sealed-vault branch above already drops here for exactly this
+	// reason and says so. It closed the window for one path; this closes it
+	// for the one every ordinary send takes. The defer stays as the cleanup
+	// for the paths that never reach this line, and dropping twice is a
+	// delete of a key that is already gone.
+	h.cancels.drop(h.conn, p.Token)
 	_ = h.r.TryResult(req.ID, mustMarshal(wireExchange(ex, inputs.Environment, inputs.Route)))
 }
 

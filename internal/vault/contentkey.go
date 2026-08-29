@@ -26,7 +26,7 @@ import (
 const contentKeyNamespace = "nocx-contentdb-key"
 
 // ContentKeyID derives the deterministic SecretID for the ContentDB key at
-// the given provider. Same shape as osKeyID: sec:v1:<provider>:<32hex>.
+// the given provider: sec:v1:<provider>:<32hex>.
 // The provider is baked into the reference (references are immutable), so a
 // default-provider change later cannot silently move the key.
 //

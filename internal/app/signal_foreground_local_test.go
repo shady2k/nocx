@@ -118,3 +118,81 @@ func TestLocalEnhancedSession_SignalReachesTheForegroundExecution(t *testing.T) 
 	waittest.WaitForTimeoutDetail(t, "the shell to answer after the interrupt", 30*time.Second,
 		output, func() bool { return strings.Contains(output(), "INTERRUPTED-OK") })
 }
+
+// TestLocalEnhancedSession_TheWholeSignalSeamIsForwarded is the THIRD instance
+// of one defect, and it is written to be the last (nocx-92gfl.4, nocx-o3amz,
+// nocx-7l4ex.13, and now the reconciliation of nocx-uvac6.11 with it).
+//
+// Every time, lifecyclePTY forwarded SOME of the pty's optional signal methods
+// and not others, and every time the missing one made realSession's
+// optional-method assertion answer pty.ErrNoForeground on an ENHANCED local
+// session — which session.signal reports to a person as "nothing is running in
+// this pane" over a command that plainly is. Nothing fails to compile, and the
+// wrong answer is a plausible one, so only an end-to-end run has ever caught
+// it.
+//
+// nocx-uvac6.11 then split a stop into "name the addressee once"
+// (ForegroundJob) and "signal that exact group" (SignalProcessGroup). Those
+// two grew on a branch where this wrapper did not exist, so they did not
+// travel with it, and the merge reopened the incident through a door that was
+// not there when it was closed.
+//
+// So this test asks for the SEAM, not for a method: every question the stop
+// policy puts to a session must be answerable by an enhanced local session.
+// A method added to that seam later and not forwarded here fails this test
+// rather than a person's Stop.
+func TestLocalEnhancedSession_TheWholeSignalSeamIsForwarded(t *testing.T) {
+	sess, output := openLocalEnhancedWatched(t)
+	seam, ok := sess.(interface {
+		SignalForeground(sig syscall.Signal) error
+		ForegroundJob() (int, error)
+		SignalProcessGroup(pgid int, sig syscall.Signal) error
+	})
+	if !ok {
+		t.Fatal("an enhanced local session does not offer the whole signal seam — " +
+			"a stop asks ForegroundJob before it signals anything, so a session " +
+			"missing any of these answers ErrNoForeground over a running command")
+	}
+
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "seam-foreground-ready")
+	if err := os.WriteFile(marker, []byte("SEAM-FOREGROUND-READY\n"), 0o600); err != nil {
+		t.Fatalf("write the readiness marker: %v", err)
+	}
+	if _, err := sess.Write([]byte("tail -f '" + marker + "'\n")); err != nil {
+		t.Fatalf("write the command: %v", err)
+	}
+	waittest.WaitForTimeoutDetail(t, "the foreground program to announce itself", 30*time.Second,
+		output, func() bool { return strings.Contains(output(), "SEAM-FOREGROUND-READY") })
+
+	// NAMING the addressee is the question the merge broke: it answered
+	// ErrNoForeground, the policy read that as "the group is gone", and Stop
+	// said nothing-running about this very program.
+	pgid, err := seam.ForegroundJob()
+	if err != nil {
+		t.Fatalf("ForegroundJob over a running foreground job = %v, want a pgid — "+
+			"the naming half of the seam is not reaching the pty (errors.Is ErrNoForeground: %v)",
+			err, errors.Is(err, pty.ErrNoForeground))
+	}
+	if pgid <= 0 {
+		t.Fatalf("ForegroundJob named pgid %d, want a real process group", pgid)
+	}
+
+	// And the named group is reachable: the existence check must succeed
+	// against the pgid just named, or the ladder's every rung would miss.
+	if err := seam.SignalProcessGroup(pgid, 0); err != nil {
+		t.Fatalf("SignalProcessGroup(%d, 0) right after naming it = %v, want nil — "+
+			"the signalling half of the seam is not reaching the pty", pgid, err)
+	}
+
+	// The whole point, end to end: the group that was NAMED is the group that
+	// gets the signal, and the shell reads a line again afterwards.
+	if err := seam.SignalProcessGroup(pgid, syscall.SIGINT); err != nil {
+		t.Fatalf("SignalProcessGroup(%d, SIGINT): %v", pgid, err)
+	}
+	if _, err := sess.Write([]byte("printf %s%s SEAM -OK\n")); err != nil {
+		t.Fatalf("write the follow-up command: %v", err)
+	}
+	waittest.WaitForTimeoutDetail(t, "the shell to answer after the interrupt", 30*time.Second,
+		output, func() bool { return strings.Contains(output(), "SEAM-OK") })
+}

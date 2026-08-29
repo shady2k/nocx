@@ -220,39 +220,40 @@ export function createVaultSecretSource(deps: VaultSecretSourceDeps): SecretPick
       await deps.vaultClient.inventory()
     },
     requestSetup: async () => {
-      // THE CONTRACT, HONOURED (secret-picker.ts, SecretPickerSource):
-      // silent when the OS key can carry the vault, the dialog otherwise —
-      // and `false` says nothing took the surface, so the panel reloads its
-      // list where the person is standing instead of handing them a sheet.
+      // Setting a vault up asks for a passphrase, so it takes the surface:
+      // `true` says so, and the panel hands the person the sheet rather than
+      // reloading its list underneath them.
       //
-      // This used to open the dialog unconditionally, which nothing noticed
-      // while the only door onto an uninitialized vault was the API
-      // workbench's. The connections editor's password field is the other
-      // one now (nocx-3o0ed.4), and there the silent path is a shipped
-      // behaviour with a spec on it: on a machine with a keyring, setting a
-      // connection password has never raised a sheet (e2e/vault.spec.ts case
-      // 3), because saveSecretWithVault does exactly this test before it
-      // asks. Two doors onto one act must not disagree about whether it needs
-      // a dialog.
-      let capable = false
-      try {
-        capable = (await deps.vaultClient.status()).osKeyCapable
-      } catch (err) {
-        // The status read is what decides the remedy, so failing it means
-        // there is no silent remedy to choose — ask.
-        deps.onError?.('secret picker could not read the vault status', err)
-      }
-      if (capable) {
-        try {
-          await deps.vaultClient.setup({})
-          await deps.vaultController.refresh()
-          return false
-        } catch (err) {
-          // A silent setup that failed is not a reason to say nothing: fall
-          // through to the sheet, which is the surface that can report it.
-          deps.onError?.('secret picker silent vault setup failed', err)
-        }
-      }
+      // There were two answers here and there is one. Where the OS keystore
+      // was writable this called `vault.setup({})` and returned `false`, and
+      // the person got a working vault they were never told about — with the
+      // root key in the keychain and no recovery code. ADR-0050 step 1
+      // removed that mode, which also removes the hazard the old comment was
+      // about: two doors onto one act can no longer disagree about whether it
+      // needs a dialog, because both need one.
+      // AFTER THE ACTIVATING CLICK'S TASK HAS ENDED, and this is load-bearing
+      // rather than decoration.
+      //
+      // The connection editor's dialog is a native <dialog> and the picker
+      // panel is re-homed inside it so it can paint in the top layer. Opening
+      // a second top-layer surface while that click is still being handled
+      // takes the dialog down with it, and the sheet goes too because it was
+      // rendered inside it — the person is returned to Settings having
+      // activated a row and been given nothing. A MICROTASK IS NOT ENOUGH
+      // and this was measured, not assumed: `await Promise.resolve()` still
+      // lost the dialog in both engines. The browser's own light-dismiss
+      // handling for <dialog> belongs to the click's task, so the boundary
+      // has to be the end of that task.
+      //
+      // It used to happen by accident. The function awaited vault.status() to
+      // decide between the silent path and the sheet, and that round trip was
+      // what put the open on a later turn; ADR-0050 step 1 removed the
+      // decision and with it the accident, which
+      // e2e/secret-panel-position.spec.ts caught in one run — "a row still
+      // activates from the panel portion hanging past the dialog", written
+      // for exactly this path. Stated deliberately now, because a boundary
+      // nobody named is one the next faster call removes again.
+      await new Promise<void>((resolve) => setTimeout(resolve, 0))
       deps.vaultController.openSetup()
       return true
     },
@@ -343,18 +344,8 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
     }
 
     if (s.state === 'uninitialized') {
-      if (s.osKeyCapable) {
-        void vaultClient
-          .setup({})
-          .then(() => doSave())
-          .catch((e: unknown) => {
-            showToast({
-              level: 'danger',
-              message: vaultErrorMessage(e),
-            })
-          })
-        return
-      }
+      // Always the sheet: setup needs a passphrase (ADR-0050 step 1), so
+      // there is no longer a machine on which this completes by itself.
       pendingSave = () => doSave()
       setShowSetup(true)
       return
@@ -475,9 +466,9 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
    * saveSecretWithVault — operation-first vault error handling with retry.
    *
    * 1. Tries saveFn first. On success, resolves.
-   * 2. On vault-uninitialized: checks osKeyCapable (fetches fresh status).
-   *    osKeyCapable → silent setup, then retry. Silent setup failure → rejects.
-   *    !osKeyCapable → SetupDialog, retry on completion.
+   * 2. On vault-uninitialized: SetupDialog, retry on completion. There is no
+   *    second branch here any more — setting a vault up needs a passphrase on
+   *    every machine (ADR-0050 step 1).
    * 3. On vault-sealed: UnlockDialog, retry on completion.
    * 4. On any other error: rejects (propagates to caller's catch).
    * 5. User cancels a dialog: rejects with VaultOperationCancelledError, so
@@ -537,30 +528,15 @@ export function createVaultState(vaultClient: VaultClient): VaultController {
     })
   }
 
-  /** Handle a vault-uninitialized error: silent setup or dialog, then retry once. */
+  /** Handle a vault-uninitialized error: raise the setup dialog, then retry
+   *  the save once it completes. There is no second remedy — setting a vault
+   *  up needs a passphrase on every machine (ADR-0050 step 1). */
   async function handleUninitialized(saveFn: () => Promise<void>): Promise<void> {
     // Fetch fresh status — the error came from the backend, cached status may be stale.
     try {
       const s = await vaultClient.status()
       setStatus(s)
-      if (s.osKeyCapable) {
-        try {
-          await vaultClient.setup({})
-          // Retry the save once
-          await saveFn()
-          pendingResolve?.(undefined)
-          pendingResolve = null
-          pendingReject = null
-          return
-        } catch (e2) {
-          // Silent setup failed — reject so caller never shows "Saved"
-          pendingReject?.(e2)
-          pendingResolve = null
-          pendingReject = null
-          return
-        }
-      }
-      // No OS key — show SetupDialog, retry on completion
+      // Show SetupDialog, retry on completion.
       pendingSave = (): Promise<void> => {
         return saveFn().then(
           () => {
@@ -1019,7 +995,10 @@ function residueSentence(residue: ResidueEntry[]): string {
 
 // ── Unlock dialog ────────────────────────────────────────────────────────
 
-export type UnlockMeans = 'os' | 'passphrase' | 'recovery'
+// Two, not three. The OS-held key went with the silent setup that minted it
+// (ADR-0050 step 1): no vault holds one, so offering it as a means could only
+// ever produce a refusal.
+export type UnlockMeans = 'passphrase' | 'recovery'
 
 export interface UnlockDialogProps {
   open: boolean
@@ -1039,7 +1018,7 @@ export interface UnlockDialogProps {
 
 export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
   const [means, setMeans] = createSignal<UnlockMeans | undefined>(undefined)
-  const currentMeans = () => means() ?? (props.vaultStatus?.osKeyAvailable ? 'os' : 'passphrase')
+  const currentMeans = () => means() ?? 'passphrase'
   const [secret, setSecret] = createSignal('')
   const [error, setError] = createSignal('')
   const [unlocking, setUnlocking] = createSignal(false)
@@ -1057,8 +1036,7 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
     const generic = vaultErrorMessage(e)
     if (generic !== REASON_MESSAGES['unseal-failed']) return generic
     if (m === 'passphrase') return 'That passphrase does not unlock this vault.'
-    if (m === 'recovery') return 'That recovery code does not unlock this vault.'
-    return 'The system key did not unlock this vault.'
+    return 'That recovery code does not unlock this vault.'
   }
 
   const handleUnseal = async (overrideMeans?: UnlockMeans) => {
@@ -1067,7 +1045,7 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
     // clears as you type, and it is answered without asking the backend
     // anything. The OUTCOME of the call is a different kind of message and
     // goes where every other outcome on these surfaces goes — a toast.
-    if (m !== 'os' && !secret()) {
+    if (!secret()) {
       const lbl = m === 'passphrase' ? 'vault passphrase' : 'vault recovery code'
       setError(`Enter your ${lbl}`)
       return
@@ -1075,7 +1053,7 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
     setError('')
     setUnlocking(true)
     try {
-      await props.vaultClient.unseal(m === 'os' ? { means: m } : { means: m, secret: secret() })
+      await props.vaultClient.unseal({ means: m, secret: secret() })
       reset()
       showToast({ level: 'success', message: 'Vault unlocked.' })
       props.onUnsealed?.()
@@ -1091,14 +1069,6 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
 
   const meansRow = (
     <div class="ui-vault-means-row">
-      <Show when={props.vaultStatus?.osKeyAvailable}>
-        <Button
-          variant={currentMeans() === 'os' ? 'primary' : 'default'}
-          onClick={() => setMeans('os')}
-        >
-          System key
-        </Button>
-      </Show>
       <Button
         variant={currentMeans() === 'passphrase' ? 'primary' : 'default'}
         onClick={() => setMeans('passphrase')}
@@ -1116,11 +1086,6 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
 
   const meansForm = () => {
     const m = currentMeans()
-    if (m === 'os') {
-      return (
-        <p class="ui-vault-desc-text">Unlock with your system keychain — no passphrase needed.</p>
-      )
-    }
     const label = m === 'passphrase' ? 'Vault passphrase' : 'Vault recovery code'
     const placeholder = m === 'passphrase' ? 'Your vault passphrase' : 'Your vault recovery code'
     const inputId = m === 'passphrase' ? 'vault-unlock-passphrase' : 'vault-unlock-recovery'
@@ -1172,7 +1137,7 @@ export const UnlockDialog: Component<UnlockDialogProps> = (props) => {
               void handleUnseal()
             }}
           >
-            {currentMeans() === 'os' ? 'Unlock' : unlocking() ? 'Unlocking…' : 'Unlock'}
+            {unlocking() ? 'Unlocking…' : 'Unlock'}
           </Button>
           <Button variant="default" disabled={unlocking()} onClick={props.onClose}>
             Cancel
@@ -1853,11 +1818,6 @@ export function VaultSection(props: VaultSectionProps) {
           <Stack>
             <Field for="vault-state-raw" label="State" orientation="horizontal">
               <Badge tone={diagStateTone()}>{status()!.state}</Badge>
-            </Field>
-            <Field for="vault-oskey-raw" label="OS-held key" orientation="horizontal">
-              <Badge tone={status()!.osKeyAvailable ? 'success' : 'neutral'}>
-                {status()!.osKeyAvailable ? 'Available' : 'Not available'}
-              </Badge>
             </Field>
             <Show when={status()!.providers.length > 0}>
               <For each={status()!.providers}>

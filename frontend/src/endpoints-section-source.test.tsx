@@ -96,8 +96,6 @@ function createClient(initial: Endpoint[] = []) {
 function unsealedVault(rows: InventoryEntry[]) {
   const status = vi.fn().mockResolvedValue({
     state: 'unsealed' as const,
-    osKeyAvailable: false,
-    osKeyCapable: true,
     hasPassphrase: true,
     autoSealMinutes: 0,
     providers: [],
@@ -406,8 +404,6 @@ describe('custom header rows (nocx-lyyk)', () => {
 function sealedVault(rows: InventoryEntry[], state: 'sealed' | 'uninitialized' = 'sealed') {
   const status = vi.fn().mockResolvedValue({
     state,
-    osKeyAvailable: false,
-    osKeyCapable: false,
     hasPassphrase: state === 'sealed',
     autoSealMinutes: 0,
     providers: [],
@@ -421,8 +417,6 @@ function sealedVault(rows: InventoryEntry[], state: 'sealed' | 'uninitialized' =
 
 const UNSEALED_STATUS = {
   state: 'unsealed' as const,
-  osKeyAvailable: false,
-  osKeyCapable: true,
   hasPassphrase: true,
   autoSealMinutes: 0,
   providers: [],

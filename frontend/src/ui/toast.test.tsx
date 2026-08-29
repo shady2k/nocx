@@ -1,6 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi, afterEach, beforeEach } from 'vitest'
 import { render, cleanup } from '@solidjs/testing-library'
+import { readFileSync } from 'node:fs'
 import { ToastHost, showToast, dismissToast, clearToasts, toasts } from './toast'
 
 beforeEach(() => {
@@ -89,5 +90,33 @@ describe('ToastHost', () => {
     const { container } = render(() => <ToastHost />)
     const host = container.querySelector('.ui-toast-host')
     expect(host?.getAttribute('aria-live')).toBe('polite')
+  })
+})
+
+// ── The notification area clears the activity bar (nocx-u5zoc) ────────────
+//
+// The host is fixed to the viewport's bottom-right corner. Once the activity
+// bar is on the trailing edge, that corner is the rail's bottom zone — the
+// API workbench and Settings buttons — and a `danger` toast is sticky, so it
+// would sit on two global actions until dismissed.
+//
+// Read off the stylesheet SOURCE because jsdom loads no CSS: a
+// getComputedStyle assertion here would pass against a stylesheet that says
+// anything at all. Same reason sidebar.test.tsx reads its file. What a user
+// can see is asserted in a real browser by
+// e2e/toast-clears-activity-bar.spec.ts — this pair is the ratchet against
+// somebody re-hardcoding the number, not the proof that the layout is right.
+describe('the notification area clears the activity bar', () => {
+  const TOAST_CSS = readFileSync('src/styles/components/toast.css', 'utf8')
+  const TOKENS_CSS = readFileSync('src/styles/tokens.css', 'utf8')
+
+  it('offsets its right edge by the rail width rather than hugging the corner', () => {
+    expect(TOAST_CSS).toMatch(
+      /\.ui-toast-host\s*\{[^}]*right:\s*calc\(var\(--space-4\)\s*\+\s*var\(--activity-bar-width\)\)/,
+    )
+  })
+
+  it('the rail width is a token, so the two rules cannot drift apart', () => {
+    expect(TOKENS_CSS).toMatch(/--activity-bar-width:\s*48px/)
   })
 })

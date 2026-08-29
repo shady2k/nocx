@@ -1136,10 +1136,10 @@ function routeCell(
 }
 
 const NOTIFY_DECLARATIONS: Declaration[] = [
-  routeCell('bell', 'banner', 'A terminal bell', 'OS banner'),
-  routeCell('bell', 'toast', 'A terminal bell', 'In-app toast'),
-  routeCell('programNotify', 'banner', 'A program asked', 'OS banner', true),
-  routeCell('programNotify', 'toast', 'A program asked', 'In-app toast', true),
+  routeCell('bell', 'banner', 'Terminal bell', 'OS banner'),
+  routeCell('bell', 'toast', 'Terminal bell', 'In-app toast'),
+  routeCell('programNotify', 'banner', 'Program notification request', 'OS banner', true),
+  routeCell('programNotify', 'toast', 'Program notification request', 'In-app toast', true),
   {
     key: 'notifications.debounceMs',
     section: 'Notifications',
@@ -1215,7 +1215,7 @@ describe('notification routing matrix (nocx-3mniv)', () => {
   it('reads as kind × channel, not as one sentence per pair', async () => {
     const matrix = await openNotifications()
 
-    expect(visibleRowLabels(matrix)).toEqual(['A terminal bell', 'A program asked'])
+    expect(visibleRowLabels(matrix)).toEqual(['Terminal bell', 'Program notification request'])
     expect(visibleColumnLabels(matrix)).toEqual(['OS banner', 'In-app toast'])
     // Four pairs, four switches — and none of them is a settings row of its
     // own any more.
@@ -1237,8 +1237,8 @@ describe('notification routing matrix (nocx-3mniv)', () => {
     ])
 
     expect(visibleRowLabels(matrix)).toEqual([
-      'A terminal bell',
-      'A program asked',
+      'Terminal bell',
+      'Program notification request',
       'A quota was exceeded',
     ])
     expect(visibleColumnLabels(matrix)).toEqual(['OS banner', 'In-app toast', 'Carrier pigeon'])
@@ -1262,10 +1262,10 @@ describe('notification routing matrix (nocx-3mniv)', () => {
       matrix.querySelectorAll<HTMLInputElement>('.ui-toggle-matrix__cell input[type="checkbox"]'),
     ).map((i) => i.getAttribute('aria-label'))
     expect(names).toEqual([
-      'A terminal bell → OS banner',
-      'A terminal bell → In-app toast',
-      'A program asked → OS banner',
-      'A program asked → In-app toast',
+      'Terminal bell → OS banner',
+      'Terminal bell → In-app toast',
+      'Program notification request → OS banner',
+      'Program notification request → In-app toast',
     ])
     // The headers are what locate the switch; without scope a screen reader
     // gets a grid of switches and no idea where any of them sits.
@@ -1314,16 +1314,16 @@ describe('notification routing matrix (nocx-3mniv)', () => {
       expect(visibleColumnLabels(matrix)).toEqual(['In-app toast'])
     })
     // Both kinds carry a toast cell, so both rows stay.
-    expect(visibleRowLabels(matrix)).toEqual(['A terminal bell', 'A program asked'])
+    expect(visibleRowLabels(matrix)).toEqual(['Terminal bell', 'Program notification request'])
     // The number in the same section does not match and is hidden.
     const number = document.getElementById('st-setting-notifications.debounceMs')!
     expect(number.classList.contains('st-vis-hidden')).toBe(true)
 
     // Narrowing to one kind leaves one row and both of its columns.
-    searchInput.value = 'A terminal bell'
+    searchInput.value = 'Terminal bell'
     searchInput.dispatchEvent(new Event('input', { bubbles: true }))
     await vi.waitFor(() => {
-      expect(visibleRowLabels(matrix)).toEqual(['A terminal bell'])
+      expect(visibleRowLabels(matrix)).toEqual(['Terminal bell'])
     })
     expect(visibleColumnLabels(matrix)).toEqual(['OS banner', 'In-app toast'])
 
@@ -1380,7 +1380,7 @@ describe('notification routing matrix (nocx-3mniv)', () => {
     const malformed: Declaration = {
       key: 'notifications.route.bell',
       section: 'Notifications',
-      label: 'A terminal bell',
+      label: 'Terminal bell',
       description: 'A key the cell convention cannot place.',
       control: 'toggle',
       dataClass: 'publicConfig',
@@ -1430,8 +1430,6 @@ describe('horizontal Field gate — every settings row must use primary label', 
   it('every vault-section horizontal Field defaults to data-label=primary', () => {
     const vaultStatus = {
       state: 'unsealed' as const,
-      osKeyAvailable: true,
-      osKeyCapable: true,
       hasPassphrase: true,
       autoSealMinutes: 15,
       providers: [{ id: 'test-provider', writable: true, ready: true, reason: undefined }],
@@ -1669,8 +1667,6 @@ describe('the Secrets fallback carries the value, not only the name', () => {
 
   const UNSEALED = {
     state: 'unsealed' as const,
-    osKeyAvailable: true,
-    osKeyCapable: true,
     hasPassphrase: true,
     autoSealMinutes: 15,
     providers: [{ id: 'system', writable: true, ready: true, reason: undefined }],

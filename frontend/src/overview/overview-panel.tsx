@@ -158,7 +158,7 @@ export function OverviewPanel(props: OverviewPanelProps) {
     // at. With nothing active, the first card; with no cards at all, the
     // panel itself, so the focus trap has something to hold.
     if (!root) return
-    const cards = Array.from(root.querySelectorAll<HTMLElement>('.overview__card [tabindex]'))
+    const cards = Array.from(root.querySelectorAll<HTMLElement>(CARD_CONTROL))
     const active = cards.find(
       (c) => c.closest<HTMLElement>('.overview__card')?.dataset.active === 'true',
     )
@@ -176,7 +176,7 @@ export function OverviewPanel(props: OverviewPanelProps) {
 
   const move = (from: HTMLElement | null, delta: number): void => {
     if (!root) return
-    const cards = Array.from(root.querySelectorAll<HTMLElement>('.overview__card [tabindex]'))
+    const cards = Array.from(root.querySelectorAll<HTMLElement>(CARD_CONTROL))
     if (cards.length === 0) return
     const current = from === null ? -1 : cards.indexOf(from)
     // Clamped, not wrapped. A wrap sends the eye across the whole window for
@@ -188,9 +188,10 @@ export function OverviewPanel(props: OverviewPanelProps) {
 
   const trapTab = (e: KeyboardEvent): void => {
     if (!root) return
-    const controls = Array.from(
-      root.querySelectorAll<HTMLElement>('.overview__card [tabindex], button:not(:disabled)'),
-    )
+    // The card's control IS a button now, so one clause covers both it and
+    // the panel's own buttons — and in document order, which is what a comma
+    // selector always gave anyway.
+    const controls = Array.from(root.querySelectorAll<HTMLElement>('button:not(:disabled)'))
     e.preventDefault()
     if (controls.length === 0) {
       root.focus()
@@ -409,6 +410,14 @@ export function OverviewPanel(props: OverviewPanelProps) {
     </div>
   )
 }
+
+/** What the arrow keys move between, and what opening the panel focuses: the
+ *  card's RECORD NAME, which is the control that opens it (nocx-5xwub). It
+ *  used to be `.overview__card [tabindex]` — the kit row itself, which was
+ *  the tab stop then. The row is a `listitem` and never announced that it
+ *  did anything; the name is a button and says so, so the roving lands on
+ *  the thing a person is actually told about. */
+const CARD_CONTROL = '.overview__card .ui-record-row__open'
 
 function OverviewCards(props: { group: OverviewGroup; onPick: (paneId: string) => void }) {
   return (

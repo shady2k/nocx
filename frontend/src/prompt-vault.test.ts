@@ -68,7 +68,7 @@ class FakeEditor implements PromptVaultEditor {
   }
 }
 
-const UNSEALED = { state: 'unsealed', osKeyCapable: true, defaultProvider: 'file' } as const
+const UNSEALED = { state: 'unsealed', defaultProvider: 'file' } as const
 
 /** The VaultClient seams the controller touches, stubbed directly (the
  *  controller calls the client's METHODS, never the raw dispatcher). */

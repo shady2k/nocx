@@ -54,7 +54,13 @@ import { existsSync, mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { bindEndpoint, settingsReady, VaultBackend, type DisposableRoot } from './harness'
+import {
+  bindEndpoint,
+  openImportDestination,
+  settingsReady,
+  VaultBackend,
+  type DisposableRoot,
+} from './harness'
 import { readStand } from './stand'
 import {
   POSTMAN_COLLECTION_NAME,
@@ -168,7 +174,7 @@ test.describe('the import ask on a stand with no Wails', () => {
     // control a person clicks, and reading the value any other way would be
     // reading a field nobody can see. A refusal no longer opens it: an
     // outcome is a toast (nocx-bvxf2.6).
-    await ask.getByRole('button', { name: 'Change where this goes' }).click()
+    await openImportDestination(ask, page)
     // Matched by shape rather than against a second derivation of the path:
     // `<DataDir>/collections` is resolved by internal/storage from the
     // isolated home, and a spec that recomputed it would be a second owner of

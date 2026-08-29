@@ -648,6 +648,7 @@ export class PaneManager {
   private readonly profileClient: ProfileClient
   private _initialPaneReady: Promise<void> | undefined
   private tabStrip: TabStrip
+  private readonly displayRevisionListeners = new Set<() => void>()
   /** The chain, as the backend last answered. A cache, never an authority. */
   /** The panes this window is NOT showing: what the chain held at boot when
    *  the person asked for a clean start (nocx-yejir).
@@ -881,6 +882,11 @@ export class PaneManager {
 
   get paneCount(): number {
     return this.panes.length
+  }
+  /** Subscribe to changes in pane display state, such as title or decoration. */
+  onDisplayRevision(listener: () => void): () => void {
+    this.displayRevisionListeners.add(listener)
+    return () => this.displayRevisionListeners.delete(listener)
   }
 
   get initialPaneReady(): Promise<void> {
@@ -1484,6 +1490,13 @@ export class PaneManager {
    * and its shell runs — an agent in a workspace nobody is looking at has to
    * keep working.
    */
+  private attachDisplayChange(pane: Pane): void {
+    pane.onDisplayChange = () => {
+      this.tabStrip.refreshPane(pane)
+      for (const listener of this.displayRevisionListeners) listener()
+    }
+  }
+
   private addPane(
     content: PaneContent,
     descriptor: ContentDescriptor,
@@ -1521,6 +1534,7 @@ export class PaneManager {
           })
         })
     }
+    this.attachDisplayChange(pane)
     this.tabStrip.addPane(pane)
     if (activateNow) {
       void this.activate(pane)
@@ -2300,16 +2314,23 @@ export class PaneManager {
   }
 
   /** The pane whose session matches, when any pane in this window holds it.
-   *  ONE walk, because "which pane is this session" is one question and the
-   *  two callers below want different halves of the answer. */
+   *
+   *  `findBySession` above IS that answer, and this is it asked without a
+   *  backend id by the three callers below that are window-local by
+   *  construction. It used to be a SECOND walk with a second predicate —
+   *  `instanceof TerminalContent` plus `sessionId()`, against the other's
+   *  `lineage()?.sessionId` — and the two already disagreed (nocx-cf920):
+   *  `sessionId()` answers '' for a pane whose session has not opened yet,
+   *  `lineage()` answers null, and only the other walk refused the empty id.
+   *  So `sessionWhere('')` named a tab, a machine and a directory for a
+   *  session no pane held, while `findBySession('')` correctly held its
+   *  tongue. One question, one owner (AD-8).
+   *
+   *  The backend id is this build's own: every tab it opens is on this
+   *  machine, which is the same fact `findBySession` states where it compares
+   *  the argument it is given. */
   private paneForSession(sessionId: string): Pane | null {
-    for (const pane of this.panes) {
-      const content = pane.content
-      if (content instanceof TerminalContent && content.sessionId() === sessionId) {
-        return pane
-      }
-    }
-    return null
+    return this.findBySession(LOCAL_BACKEND_ID, sessionId) ?? null
   }
 
   /** The terminal content whose session matches, when any pane holds it —

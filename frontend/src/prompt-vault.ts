@@ -441,17 +441,18 @@ export class PromptVaultController {
     return true
   }
 
-  /** The picker's setup offer: silent setup when the OS key is capable;
-   *  otherwise the host's seam raises the setup dialog (the vault layer
-   *  owns it). The vault's setup with a passphrase cannot be asked from the
-   *  prompt — that would be a modal the passive contract forbids. */
+  /** The picker's setup offer: the host's seam raises the setup dialog, and
+   *  the vault layer owns it. Setting a vault up needs a passphrase and a
+   *  passphrase needs a modal the passive contract forbids the prompt to
+   *  raise, so this hands the flow over rather than completing it.
+   *
+   *  It used to complete it, on any machine whose OS keystore was writable:
+   *  `vault.setup({})` minted a root key straight into the keychain and no
+   *  recovery code at all, without asking anybody. ADR-0050 step 1 removed
+   *  that mode, so there is one path here now instead of two. */
   private async setupVault(): Promise<boolean> {
     const status = await this.deps.vault.status()
     if (status.state !== 'uninitialized') return false
-    if (status.osKeyCapable) {
-      await this.deps.vault.setup({})
-      return false
-    }
     if (this.deps.requestSetupDialog) {
       this.deps.requestSetupDialog()
       return true

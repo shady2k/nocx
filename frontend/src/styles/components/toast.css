@@ -8,7 +8,16 @@
 
 .ui-toast-host {
   position: fixed;
-  right: var(--space-4);
+  /* Past the activity bar, not merely inside the viewport: the rail is at the
+     window's trailing edge and its bottom zone holds global actions — the API
+     workbench and Settings — and a `danger` toast is sticky, so an overlap is
+     not a flicker but two buttons unreachable until somebody dismisses it.
+
+     The panel is deliberately NOT cleared as well: it collapses and it
+     resizes, and a toast over it is no worse than a toast over a pane. The
+     rail is the surface that is always present and always holds global
+     actions (nocx-u5zoc). */
+  right: calc(var(--space-4) + var(--activity-bar-width));
   bottom: var(--space-4);
   z-index: 300;
   display: flex;

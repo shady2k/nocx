@@ -44,10 +44,27 @@ export interface CollectionRowProps {
    *  so a surface cannot invent a second one (nocx-pp3y.3). */
   info: JSX.Element
   actions: JSX.Element
-  /** Makes the row activatable: reachable (tabIndex 0), operable with
-   *  Enter/Space, and a click anywhere except the actions slot fires it.
-   *  A control inside `actions` owns its click — the row never swallows it. */
+  /** Makes the row activatable: a click anywhere except the actions slot
+   *  fires it. A control inside `actions` owns its click — the row never
+   *  swallows it. Unless `activationInInfo` says otherwise the row is also
+   *  the keyboard target, reachable at tabIndex 0 and operable with
+   *  Enter/Space. */
   onActivate?: (e: MouseEvent | KeyboardEvent) => void
+  /** The `info` slot renders the control that OWNS activation — the record's
+   *  own name as a button (RecordRow). The row then keeps the whole-row click
+   *  as a mouse shortcut and stops being a keyboard target of its own.
+   *
+   *  A row is not a button (nocx-5xwub). It is a record, it contains real
+   *  controls of its own, and it lives inside a `role="list"` that requires
+   *  `listitem` children — so it cannot honestly announce an action, and a
+   *  tab stop that announces "list item" while doing something on Enter is
+   *  the defect rather than the missing role. Where the content can name
+   *  itself, the NAME is the control and this hands it the keyboard.
+   *
+   *  Default false: a row whose `info` is free-form (the Git panel's file and
+   *  commit rows) has no name to make a control of, so the row itself stays
+   *  the keyboard target rather than losing keyboard operability. */
+  activationInInfo?: boolean
   /** The caller's selection vocabulary — the row only renders it. */
   selected?: boolean
   /** The current keyboard target; reads stronger than selection. */
@@ -66,6 +83,9 @@ export interface CollectionRowProps {
 export function CollectionRow(props: CollectionRowProps) {
   let actionsEl: HTMLDivElement | undefined
   const activatable = () => props.onActivate !== undefined
+  /** Whether the ROW answers the keyboard, as opposed to a control the
+   *  content rendered — see `activationInInfo`. */
+  const rowOwnsKeyboard = () => activatable() && props.activationInInfo !== true
 
   const handleClick = (e: MouseEvent) => {
     if (!activatable()) return
@@ -74,7 +94,7 @@ export function CollectionRow(props: CollectionRowProps) {
   }
 
   const handleKeyDown = (e: KeyboardEvent) => {
-    if (!activatable()) return
+    if (!rowOwnsKeyboard()) return
     if (e.key === 'Enter' || e.key === ' ') {
       e.preventDefault() // Space must not scroll the list
       props.onActivate?.(e)
@@ -85,8 +105,9 @@ export function CollectionRow(props: CollectionRowProps) {
     <div
       class="ui-collection-row"
       role="listitem"
-      tabIndex={activatable() ? 0 : -1}
+      tabIndex={rowOwnsKeyboard() ? 0 : -1}
       data-density={props.density ?? 'default'}
+      data-activatable={activatable() ? 'true' : undefined}
       data-selected={props.selected === true ? 'true' : undefined}
       data-focused={props.focused === true ? 'true' : undefined}
       onClick={handleClick}

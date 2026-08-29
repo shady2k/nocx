@@ -39,7 +39,13 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { bindEndpoint, settingsReady, VaultBackend, type DisposableRoot } from './harness'
+import {
+  bindEndpoint,
+  openImportDestination,
+  settingsReady,
+  VaultBackend,
+  type DisposableRoot,
+} from './harness'
 import { readStand } from './stand'
 import {
   SENT_MESSAGE_BODY,
@@ -160,8 +166,7 @@ test.describe('a secret in the path: the value crosses to the server and never t
     // it is still the truth and is still what a person types into once they
     // disagree with the offer. This spec disagrees: the collection must land
     // where the walk below can read it, not under the collections root.
-    await ask.getByRole('button', { name: 'Change where this goes' }).click()
-    await page.locator('#api-import-postman-dest').fill(collectionRoot)
+    await (await openImportDestination(ask, page)).fill(collectionRoot)
 
     // ── AND THE OFFER, TAKEN ──────────────────────────────────────────────
     //

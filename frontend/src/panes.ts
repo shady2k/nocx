@@ -801,6 +801,9 @@ export class PaneManager {
    *  active pane through this (nocx-wzc4.7); wired by main.tsx to a Solid
    *  signal. */
   onActivePaneChange?: () => void
+  /** Listeners for `onPanesChanged` — see the method for why this is a
+   *  subscription and not a single slot like the callbacks above. */
+  private readonly paneSetListeners = new Set<() => void>()
   /** The snippet palette chord (⌥⌘P) was pressed in the active pane —
    *  forwarded from the pane's TerminalContent, whose xterm boundary and
    *  editor arbiter both land here. The composition root opens the
@@ -1490,6 +1493,7 @@ export class PaneManager {
     const pane = new Pane(content, descriptor, this.nextPaneId++, wireId)
 
     this.panes.push(pane)
+    this.panesChanged()
     this.panesContainer.append(pane.pane)
     // B.5: start observing pane geometry once it's in the DOM.
     pane.setupViewportObserver()
@@ -2130,6 +2134,7 @@ export class PaneManager {
     pane.pane.remove()
     this.tabStrip.removePane(pane.id)
     this.panes.splice(index, 1)
+    this.panesChanged()
 
     if (this.layoutAvailable && this.layout.tabOf(pane.wireId)) {
       void this.ask(
@@ -2256,6 +2261,39 @@ export class PaneManager {
    * nothing and is not consulted: this answers "which tab is this occurrence
    * from", never "what may one tab do to another" (ADR-0020 §5, lineage.ts).
    */
+  /**
+   * Say when the answer `findBySession` gives may have changed: a tab opened,
+   * or one closed.
+   *
+   * A SUBSCRIPTION rather than one of the single-slot callbacks above
+   * (`onActivePaneChange` and its siblings), and shaped like
+   * LayoutStore.onChange, because more than one surface asks this question.
+   *
+   * NOT the layout chain, though the chain changes at the same moments and
+   * the workspace overview subscribes to it: the chain is the BACKEND's
+   * projection of the tabs and it is absent on a host whose layout store
+   * could not be read, while `panes` is the thing `findBySession` actually
+   * reads. One owner for one question (AD-8).
+   *
+   * It exists because that answer is read by surfaces that OUTLIVE the tab
+   * they are about. The notification centre stays mounted while the sidebar
+   * is collapsed (sidebar.tsx toggles a class), so a `session.ended` row is
+   * built at the moment its own tab is closing; with no way to hear that the
+   * tab went, the row kept the answer it got then and went on offering a tab
+   * that had closed (nocx-bu8fl).
+   */
+  onPanesChanged(listener: () => void): () => void {
+    this.paneSetListeners.add(listener)
+    return () => this.paneSetListeners.delete(listener)
+  }
+
+  /** Fired wherever `panes` gains or loses a member, and nowhere else: a
+   *  reorder is not a change to the SET, and no surface asking this question
+   *  is about order. */
+  private panesChanged(): void {
+    for (const listener of this.paneSetListeners) listener()
+  }
+
   findBySession(backendId: string, sessionId: string): Pane | undefined {
     if (backendId !== LOCAL_BACKEND_ID || sessionId === '') return undefined
     return this.panes.find((p) => p.content.lineage?.()?.sessionId === sessionId)
@@ -2670,6 +2708,7 @@ export class PaneManager {
     pane.pane.remove()
     this.tabStrip.removePane(pane.id)
     this.panes.splice(index, 1)
+    this.panesChanged()
     this.registered.delete(pane.wireId)
     if (wasActive) {
       const next = this.popRecent() ?? this.panes[0]

@@ -142,9 +142,21 @@ async function answer(
     // shell here to open a picker or raise a banner. Said once, honestly, so
     // the coordinator answers its caller rather than waiting on a client that
     // will never act.
+    //
+    // UNAVAILABLE, NOT FAILED, and the two are different facts rather than
+    // two words for one (nocx-bu8fl). `failed` is an effect that was
+    // ATTEMPTED and did not happen — a denied permission, a thrown binding —
+    // and the coordinator is right to remember it: a notification that was
+    // accepted and never arrived earns a "Not delivered" row in the
+    // notification centre. This client was never able to, and never will be,
+    // which is the same fact as no client attached at all; the coordinator
+    // maps it to its own no-UI-host answer, which notify exempts from that
+    // feed because a channel that does not exist is not a channel that lost
+    // a message. Answering `failed` here put a "Not delivered" row behind
+    // every banner-routed notification in every browser-hosted client.
     resolve(dispatcher, {
       requestId: p.requestId,
-      outcome: 'failed',
+      outcome: 'unavailable',
       error: 'this client has no native host',
     })
     return

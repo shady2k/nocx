@@ -121,8 +121,19 @@ type hostRequestParams struct {
 
 // hostResolvedParams is the client's answer: a closed outcome — "ok" (the
 // effect happened, with a picker's chosen path), "cancelled" (a person
-// dismissed a picker, which is an outcome and not a failure), or "failed"
-// with why.
+// dismissed a picker, which is an outcome and not a failure), "failed" with
+// why, or "unavailable" — this client has no such native surface at all.
+//
+// The last two are not one outcome with two spellings. "failed" is an effect
+// that was ATTEMPTED and did not happen: a denied permission, a thrown
+// binding, a dead D-Bus. "unavailable" is a client that was never able to —
+// a plain browser has no OS banner and never will — and it resolves to the
+// same per-capability ErrNoUIHost as no client at all, because from the
+// coordinator's side both mean there is nobody who can perform this. That
+// distinction is load-bearing: notify's one exemption from the failure feed
+// is written against absence, so folding absence into failure puts a "Not
+// delivered" row in the notification centre for every notification a
+// browser-hosted client is ever asked to present.
 type hostResolvedParams struct {
 	Outcome string `json:"outcome"`
 	Path    string `json:"path,omitempty"`
@@ -221,8 +232,17 @@ func resolveHostAnswerFor(cap HostCapability) func(json.RawMessage) (json.RawMes
 		if err := json.Unmarshal(raw, &p); err != nil {
 			return nil, fmt.Errorf("resolution: %w", err)
 		}
-		if p.Outcome == "failed" {
+		switch p.Outcome {
+		case "failed":
 			return nil, fmt.Errorf("the UI host could not perform %s: %s", cap, p.Error)
+		case "unavailable":
+			// Absence, in the same words a missing client gets. The
+			// client's sentence rides along when it sent one, so a log
+			// still says which surface was missing and why.
+			if p.Error == "" {
+				return nil, noHostErrFor(cap)
+			}
+			return nil, fmt.Errorf("%w: %s", noHostErrFor(cap), p.Error)
 		}
 		body, err := json.Marshal(hostAnswerBody{
 			Path:      p.Path,
@@ -275,8 +295,19 @@ func validateHostResolvedRaw(raw json.RawMessage) string {
 			return "a failed outcome carries no path"
 		}
 		return ""
+	case "unavailable":
+		// The sentence is optional here and required for "failed": a
+		// failure has a reason only the client knows, while absence is
+		// fully named by the capability the ask already carried.
+		if utf8.RuneCountInString(p.Error) > maxHostErrorRunes {
+			return "error exceeds the length bound"
+		}
+		if p.Path != "" {
+			return "an unavailable outcome carries no path"
+		}
+		return ""
 	default:
-		return "outcome must be one of ok, cancelled, failed"
+		return "outcome must be one of ok, cancelled, failed, unavailable"
 	}
 }
 

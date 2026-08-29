@@ -17,8 +17,10 @@ package clienthost
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
+	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/notify"
@@ -200,6 +202,29 @@ func TestAttention_NoUIHostIsAlsoUnavailable(t *testing.T) {
 		}
 		if !errors.Is(err, notify.ErrUnavailable) {
 			t.Errorf("%s: error = %v, want it to be notify.ErrUnavailable too", name, err)
+		}
+	}
+}
+
+// And a client that ANSWERS "I have no such surface" is the same absence,
+// which is the case the notification centre was actually breaking on
+// (nocx-bu8fl): every browser-hosted client is attached and has no OS banner.
+// The transport resolves that answer to the capability's own ErrNoUIHost with
+// the client's sentence appended, so the wrapping has to survive one more
+// layer than the missing-client case above.
+func TestAttention_AClientWithNoSurfaceIsAlsoUnavailable(t *testing.T) {
+	req := &fakeRequester{err: fmt.Errorf("%w: this client has no native host", transport.ErrNoAttentionHost)}
+	a := NewAttention(req, quietLogger(), nil)
+	for name, err := range map[string]error{
+		"banner": a.Banner(context.Background(), notify.Event{}),
+		"badge":  a.Badge(context.Background(), 1),
+		"bounce": a.Bounce(context.Background()),
+	} {
+		if !errors.Is(err, notify.ErrUnavailable) {
+			t.Errorf("%s: error = %v, want it to be notify.ErrUnavailable", name, err)
+		}
+		if !strings.Contains(err.Error(), "this client has no native host") {
+			t.Errorf("%s: error = %v, want it to keep the client's sentence", name, err)
 		}
 	}
 }

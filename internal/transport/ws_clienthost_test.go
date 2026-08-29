@@ -402,6 +402,99 @@ func TestClientHost_FailedOutcomeIsATypedError(t *testing.T) {
 	}
 }
 
+// TestClientHost_UnavailableOutcomeIsAbsenceNotFailure — the other half of
+// the failure path above, and the distinction the notification centre turns
+// on. A client that ANSWERS "I have no such surface" is not a client that
+// tried and failed: a plain browser has no OS banner and never will, so the
+// coordinator has nobody who can present one — exactly what ErrNoUIHost
+// means. It therefore resolves to the SAME per-capability error as no client
+// at all, which is what keeps notify's one exemption from the failure feed
+// (a channel that does not exist is not a channel that lost a message)
+// working without a second spelling of absence (AD-8).
+func TestClientHost_UnavailableOutcomeIsAbsenceNotFailure(t *testing.T) {
+	for _, tc := range hostCapabilityCases {
+		t.Run(tc.name, func(t *testing.T) {
+			ws := newHostServer(t)
+			conn := attachClient(t, ws)
+			defer conn.Close() //nolint:errcheck
+
+			out := askAsync(ws, t.Context(), tc.ask)
+			req := awaitHostRequest(t, conn)
+			resolveHost(t, conn, map[string]any{
+				"requestId": req.RequestID, "outcome": "unavailable",
+				"error": "this client has no native host",
+			})
+
+			o := settled(t, out)
+			if !errors.Is(o.err, tc.noHost) {
+				t.Fatalf("error = %v, want %v", o.err, tc.noHost)
+			}
+			if !errors.Is(o.err, ErrNoUIHost) {
+				t.Errorf("error = %v, want it to wrap ErrNoUIHost", o.err)
+			}
+			if !strings.Contains(o.err.Error(), "this client has no native host") {
+				t.Errorf("error %q does not carry the client's sentence", o.err)
+			}
+			if o.answer != (HostAnswer{}) {
+				t.Errorf("answer = %+v on an unavailable surface, want the zero value", o.answer)
+			}
+			if n := ws.broker.Pending(); n != 0 {
+				t.Errorf("pending after the answer = %d, want 0", n)
+			}
+		})
+	}
+}
+
+// TestClientHost_UnavailableWithoutASentenceIsStillAbsence — the sentence is
+// the client's courtesy, not the meaning. An unavailable outcome that carries
+// none still answers, and still answers absence.
+func TestClientHost_UnavailableWithoutASentenceIsStillAbsence(t *testing.T) {
+	ws := newHostServer(t)
+	conn := attachClient(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	out := askAsync(ws, t.Context(), HostAsk{Capability: HostCapBanner, Title: "done"})
+	req := awaitHostRequest(t, conn)
+	resolveHost(t, conn, map[string]any{"requestId": req.RequestID, "outcome": "unavailable"})
+
+	o := settled(t, out)
+	if !errors.Is(o.err, ErrNoAttentionHost) {
+		t.Fatalf("error = %v, want ErrNoAttentionHost", o.err)
+	}
+}
+
+// TestClientHost_UnavailableCarriesNoPath — the shape check, stated the way
+// the other outcomes state theirs: a surface that does not exist produced
+// nothing, so a path on it is a broken client and the resolution is refused
+// with the ask left pending for a corrected retry.
+func TestClientHost_UnavailableCarriesNoPath(t *testing.T) {
+	ws := newHostServer(t)
+	conn := attachClient(t, ws)
+	defer conn.Close() //nolint:errcheck
+
+	out := askAsync(ws, t.Context(), HostAsk{Capability: HostCapOpenFile})
+	req := awaitHostRequest(t, conn)
+	resp := jsonrpcCall(t, conn, "host.resolved", map[string]any{
+		"requestId": req.RequestID, "outcome": "unavailable", "path": "/home/dev/key",
+	})
+	var env struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &env); err != nil {
+		t.Fatalf("host.resolved decode: %v", err)
+	}
+	if env.Error == nil {
+		t.Fatal("an unavailable outcome carrying a path was accepted")
+	}
+	if ws.broker.Pending() != 1 {
+		t.Fatalf("pending after the refusal = %d, want the ask left for a retry", ws.broker.Pending())
+	}
+	resolveHost(t, conn, map[string]any{"requestId": req.RequestID, "outcome": "unavailable"})
+	if o := settled(t, out); !errors.Is(o.err, ErrNoDialogHost) {
+		t.Fatalf("error after the corrected retry = %v, want ErrNoDialogHost", o.err)
+	}
+}
+
 // TestClientHost_MalformedResolutionLeavesTheAskPending — a refused
 // resolution must not consume the ask: a broken client cannot turn a garbage
 // outcome into a silent ask failure, and a corrected retry still answers.

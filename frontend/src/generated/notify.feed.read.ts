@@ -18,7 +18,7 @@ export interface NotifyFeedRead {
    */
   revision: number
   /**
-   * Occurrences whose read flag is false. This is the ONE number the bell badge and the dock badge both read (design §6); the tab activity dot answers a different question and keeps reading hasActivity.
+   * Every retained occurrence with readAt == null. This is the feed-wide wire count; the renderer's bell badge and dock badge derive a separate count restricted to kinds the centre shows (design §6).
    */
   unreadCount: number
   /**

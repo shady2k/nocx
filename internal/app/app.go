@@ -335,7 +335,6 @@ func (a *App) FocusSession(sessionID string) {
 type Option func(*optionSet)
 
 type optionSet struct {
-	wsAddr string
 	// logFilePath overrides where the backend log file lives. Test-only:
 	// without it New() resolves the profile's data directory, and a test
 	// must not write into the developer's real profile (nocx-ti8w).
@@ -347,37 +346,6 @@ type optionSet struct {
 	// with keystoreReal, and logged, so a keychain prompt during a run can
 	// be traced to the test that asked for it.
 	keystoreReason string
-}
-
-// WithWSAddr pins the WebSocket listen address instead of the default
-// 127.0.0.1:0. Dev-only; shipped code should never set this.
-func WithWSAddr(addr string) Option {
-	return func(o *optionSet) { o.wsAddr = addr }
-}
-
-// WithoutSystemKeystore builds the vault's system provider over a keyring that
-// fails every operation, so the backend behaves exactly like one on a host with
-// no OS secret store.
-//
-// Dev-only, wired from cmd/devharness. It exists because the e2e cases that are
-// ABOUT the passphrase path had no portable way to state their premise: the
-// suite pointed DBUS_SESSION_BUS_ADDRESS at nothing, which is a Linux
-// mechanism, and on macOS go-keyring talks to the Security framework and
-// ignores it. Those cases were therefore not arranging "no keystore" on macOS
-// at all — and a backend given a disposable $HOME there put a "Keychain not
-// found" dialog in front of whoever was running the suite, once per start
-// (nocx-o4hg).
-//
-// It also skips the startup probe, because a probe is a real keystore call and
-// there is nothing here to call. It is what newTestApp applies, so it is the
-// stance almost every test has.
-//
-// Since D10 it is no longer the only way to get there: it now states
-// explicitly what buildKeystoreStance already says by default (keystore.go).
-// It survives because a dev binary and a test must be able to say it without
-// depending on which tags the build happened to carry.
-func WithoutSystemKeystore() Option {
-	return func(o *optionSet) { o.keystore = keystoreAbsent }
 }
 
 // WithRealSystemKeystore reaches the real OS keystore, and says why.
@@ -1329,14 +1297,6 @@ func New(opts ...Option) (*App, error) {
 	tpOpts = append(tpOpts, transport.WithRemoteLifecycle(remoteLifecycle))
 	tpOpts = append(tpOpts, transport.WithLifecyclePublisher(lifecyclePub))
 
-	// WithWSAddr set the field and nothing read it, so NOCX_WS_ADDR was accepted
-	// and ignored and the listener always took an ephemeral port. The dev stand
-	// pins 9880 precisely so the SSH forward survives a restart; instead every
-	// restart moved the backend and left the open tab talking to a port that no
-	// longer existed — which reads as "the backend stopped responding".
-	if o.wsAddr != "" {
-		tpOpts = append(tpOpts, transport.WithListenAddr(o.wsAddr))
-	}
 	// The ordinary control lane's permit count, named here the way the D14
 	// bounds are named here: the number of control tasks that may run
 	// concurrently before new work is refused with the saturation error.
@@ -2518,22 +2478,6 @@ func (a *App) Shutdown(ctx context.Context) {
 	if a.logFile != nil {
 		_ = a.logFile.Close()
 	}
-}
-
-// LogFilePath returns where this backend's log file lives, or "" when file
-// logging is unavailable (stderr only). A running session can say where the
-// log is instead of the P0's mtime archaeology — the desktop binding
-// (WailsApp) and the dev stand both reach it through this accessor.
-func (a *App) LogFilePath() string {
-	return a.logFilePath
-}
-
-func (a *App) WSPort() int {
-	return a.Transport.Port()
-}
-
-func (a *App) WSToken() string {
-	return a.Transport.Token()
 }
 
 // sshFactoryAdapter adapts ssh.SSH to session.SSHFactory.

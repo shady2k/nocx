@@ -46,7 +46,7 @@ frontend/dist/*
 # ignored, so it never churns. Negation must follow the ignore — last match wins.
 !frontend/dist/.gitkeep
 frontend/node_modules/
-# Root-anchored, like /e2e-sshd and /devharness below and for the same reason:
+# Root-anchored, like /e2e-sshd and /nocx-server below and for the same reason:
 # a bare `go build .` drops the binary in the working directory. Unanchored it
 # also matched every PATH COMPONENT named nocx, which silently swallowed
 # frontend/bindings/github.com/shady2k/nocx/ — the generated bindings for our
@@ -58,7 +58,6 @@ node_modules/
 # 6 MB Mach-O in the repo root is one `git add -A` away from being committed.
 # The e2e specs build these into a temp dir; these are what a hand-run leaves.
 /e2e-sshd
-/devharness
 /nocx-server
 Thumbs.db
 vendor/

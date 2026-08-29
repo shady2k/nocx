@@ -101,7 +101,7 @@ function startSshd(): Fixture {
 }
 
 /** Seed the isolated home's known_hosts so the backend's ssh client accepts
- *  the fixture's host key (the devharness runs with that HOME). The file is
+ *  the fixture's host key (the nocx-server runs with that HOME). The file is
  *  REPLACED, not appended: every fixture spawn mints fresh keys, and a stale
  *  line for a dead key makes the backend refuse the connection. */
 function trustHostKey(fixture: Fixture): void {
@@ -168,7 +168,7 @@ test('an SSH connection comes up integrated and its commands become blocks', asy
 
     // Seed the connection the way Settings would: a profile pointing at the
     // fixture, on the default destination mode (script). The name is unique per
-    // run: the devharness store persists across runs in this home, and a
+    // run: the nocx-server store persists across runs in this home, and a
     // stale profile from an earlier run would dial a dead fixture.
     const profileName = `e2e-fixture-${Date.now()}`
     const created = await rpc<{ id: string }>(page, wsInfo.port, wsInfo.token, 'profiles.create', {

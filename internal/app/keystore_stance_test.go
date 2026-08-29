@@ -122,12 +122,12 @@ func TestKeystoreStance(t *testing.T) {
 		{
 			name:   "a caller that declares the keystore absent does not reach it",
 			inTest: true,
-			opts:   []Option{WithoutSystemKeystore()},
+			opts:   []Option{withoutSystemKeystore()},
 		},
 		{
-			name:   "the dev override still means absent outside a test",
+			name:   "an explicit absent stance still means absent outside a test",
 			inTest: false,
-			opts:   []Option{WithoutSystemKeystore()},
+			opts:   []Option{withoutSystemKeystore()},
 		},
 		{
 			name:    "a test that says nothing is refused",

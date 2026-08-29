@@ -34,7 +34,7 @@ import {
 import { readStand } from './stand'
 import { FakeOpenAI } from './fake-openai'
 
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
@@ -84,7 +84,7 @@ test.beforeAll(async () => {
   fake = new FakeOpenAI()
   await fake.start()
   const root = mkdtempSync(join(tmpdir(), 'nocx-7l4ex-e2e-'))
-  backend = new VaultBackend(devharnessBin(), { root }, true)
+  backend = new VaultBackend(serverBin(), { root })
   fixtureDir = mkdtempSync(join(tmpdir(), 'nocx-7l4ex-fullscreen-'))
   endpoint = await backend.start()
 

@@ -99,7 +99,7 @@ const rowsOfKind = (page: Page, kind: string) =>
  * The titles carry the PROJECT NAME, and that is load-bearing rather than
  * decorative.
  *
- * Both browser projects run this file against ONE devharness and one $HOME
+ * Both browser projects run this file against ONE nocx-server and one $HOME
  * (playwright.config.ts declares chromium and webkit; workers is 1, so they
  * run in sequence), and marking the feed read does not empty it. So the
  * second project starts with the first project's rows already in the feed.

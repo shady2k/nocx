@@ -8,7 +8,7 @@
  * nothing about the trip through the backend: uistate.set, uistate.json on
  * disk, uistate.get on the next start.
  *
- * So this spec starts its OWN devharness backend, the way
+ * So this spec starts its OWN nocx-server backend, the way
  * e2e/sidebar-resize.spec.ts does, precisely so it can restart it mid-test.
  * The assertion afterwards is on the STRIP — which row carries
  * aria-selected — rather than on a value read back, because "the tab you
@@ -32,12 +32,7 @@ import { readStand } from './stand'
 
 /** Lazily: the stand is started by globalSetup, which runs after Playwright
  *  has collected this file. */
-const devharnessBin = () => readStand().devharness
-
-// Distinct ports, outside `wails dev` (34115), the suite default (9876) and
-// the other restart specs (19876-19883).
-const FIRST_PORT = 19884
-const SECOND_PORT = 19885
+const serverBin = () => readStand().server
 
 const TAB = '.nocx-tab'
 const NEW_TAB = '[aria-label="New tab"]'
@@ -65,7 +60,7 @@ test.describe('the window reopens on the tab you left (nocx-mqie.5)', () => {
   test.beforeEach(() => {
     home = { root: mkdtempSync(join(tmpdir(), 'nocx-active-tab-')) }
     // `true` = no Secret Service for this backend.
-    backend = new VaultBackend(devharnessBin(), home, true)
+    backend = new VaultBackend(serverBin(), home)
   })
 
   test.afterEach(() => {
@@ -75,7 +70,7 @@ test.describe('the window reopens on the tab you left (nocx-mqie.5)', () => {
   test('the tab that was in front is the tab that is selected after a restart', async ({
     page,
   }) => {
-    const ep1 = await backend.start(FIRST_PORT)
+    const ep1 = await backend.start()
     await bindEndpoint(page, ep1)
     await page.goto('/')
     await promptReady(page)
@@ -117,7 +112,7 @@ test.describe('the window reopens on the tab you left (nocx-mqie.5)', () => {
     const remembered = persistedActiveTab(backend)
 
     // The application restarts. Nothing in the first process survives it.
-    const ep2 = await backend.restart(SECOND_PORT)
+    const ep2 = await backend.restart()
     await bindEndpoint(page, ep2)
     await page.reload()
 

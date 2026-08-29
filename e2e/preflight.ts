@@ -17,48 +17,56 @@ const DEFAULT_MIN_FREE_GB = 3
 const BYTES_PER_GB = 1024 ** 3
 
 /**
- * Refuse to start the headless path unless the runner declared a home boundary.
+ * Refuse to start when the caller believes they are driving a backend of
+ * their own.
  *
- * On the default path playwright.config.ts owns the backend and applies the
- * boundary itself. On the headless path the runner starts devharness and vite
- * outside Playwright, so the suite cannot apply anything — it can only decline
- * to run against a backend nobody isolated.
+ * There is one stand and Playwright owns it (e2e/stand.ts). `NOCX_WS_PORT`
+ * used to be how a runner said "I started the backend, here is where it is",
+ * and it does not say that any more — nocx-server binds a port the OS picks
+ * and hands the address out over its discovery socket, so nothing in this
+ * suite reads that variable. A run with it set is therefore a run where
+ * somebody's belief about which backend is under test is already wrong, and
+ * the specs would report results for a process they never touched.
  *
- * Refusing is the point. This suite used to run happily against the developer's
- * real home, resetting their theme and rewriting their profile on every pass
- * (nocx-ti8w), and it stayed green throughout. A red run with an instruction in
- * it is strictly better than a green run that quietly rewrites somebody's
- * settings, so the missing boundary is an error rather than a warning.
+ * Refusing is the point, and this is the second thing it has refused for the
+ * same reason. It used to guard the home boundary: the suite ran happily
+ * against the developer's real home, resetting their theme and rewriting
+ * their profile on every pass (nocx-ti8w), and stayed green throughout. That
+ * boundary is now structural — e2e/stand.ts and e2e/harness.ts both build the
+ * environment through createHomeIsolation, which RAISES rather than warns, so
+ * there is no launcher left that could forget it — and `NOCX_E2E_HOME_DIR`
+ * still travels with every backend the suite starts as the record of which
+ * home it got.
+ *
+ * A red run with an instruction in it is strictly better than a green run
+ * about the wrong process, so this is an error rather than a warning.
  */
-function assertHeadlessRunnerDeclaredABoundary(): void {
+function refuseAHandStartedBackend(): void {
   if (!process.env.NOCX_WS_PORT) return
-  if (process.env.NOCX_E2E_HOME_DIR) return
 
   throw new Error(
     [
-      'nocx e2e preflight: refusing to start the headless path with no home boundary.',
+      'nocx e2e preflight: refusing to start with NOCX_WS_PORT set.',
       '',
-      'NOCX_WS_PORT is set, so the backend was started by you rather than by',
-      'Playwright, and nothing here can isolate it. Without a boundary a run',
-      'writes the real home: settings, SSH profiles, vault documents, ~/.nocx',
-      'and the shell rc files.',
+      'Nothing in this suite reads it. The backend is cmd/nocx-server, started',
+      'by e2e/stand.ts from globalSetup; it binds loopback on a port the OS',
+      'picks and reports it over its discovery socket, so a port cannot be',
+      'chosen from outside. If this variable is set, whatever you meant it to',
+      'point at is not the process the specs are about to measure.',
       '',
-      'Start devharness with a disposable home and export it, e.g.',
+      'It is most likely left over from `make dev-web`, which exports it for',
+      'vite. Unset it and run:',
       '',
-      '  export NOCX_E2E_HOME_DIR="$(mktemp -d)/home" && mkdir -p "$NOCX_E2E_HOME_DIR"',
-      '  HOME="$NOCX_E2E_HOME_DIR" \\',
-      '    XDG_CONFIG_HOME= XDG_DATA_HOME= XDG_CACHE_HOME= ZDOTDIR= BASH_ENV= ENV= \\',
-      '    NOCX_WS_ADDR=127.0.0.1:9876 ./devharness',
+      '  npx playwright test',
       '',
-      'The same variables e2e/home-isolation.ts strips, for the same reasons:',
-      'XDG_CONFIG_HOME outranks $HOME, and the shell entry points let the login',
-      'shell a PTY spawns read back out of the boundary.',
+      'The home boundary the suite used to check here is applied by the stand',
+      'itself (e2e/home-isolation.ts), which refuses rather than warns.',
     ].join('\n'),
   )
 }
 
 export default function preflight(): void {
-  assertHeadlessRunnerDeclaredABoundary()
+  refuseAHandStartedBackend()
 
   const raw = process.env.PW_MIN_FREE_GB
   const minFreeGb = raw ? Number(raw) : DEFAULT_MIN_FREE_GB

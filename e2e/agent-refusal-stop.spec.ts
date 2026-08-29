@@ -4,7 +4,7 @@
  *
  * WHAT THIS FILE WATCHES. The feature's children are unit- and
  * transport-green, but those layers do not watch a person use the two
- * surfaces together. These journeys do, against this file's real devharness
+ * surfaces together. These journeys do, against this file's real nocx-server
  * and a model fake reachable over 127.0.0.1:
  *
  *   - A person asks about a refused `session.read`, presses Deny once, and
@@ -50,7 +50,7 @@ import {
 import { readStand } from './stand'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
 
-const devharnessBin = () => readStand().devharness
+const serverBin = () => readStand().server
 
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
@@ -76,7 +76,7 @@ test.beforeAll(async () => {
   const root = mkdtempSync(join(tmpdir(), 'nocx-uvac6-7-e2e-'))
   // No Secret Service in the container: the derived content key makes the
   // vault available without an interactive setup prompt.
-  backend = new VaultBackend(devharnessBin(), { root }, true)
+  backend = new VaultBackend(serverBin(), { root })
   endpoint = await backend.start()
 })
 

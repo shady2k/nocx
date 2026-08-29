@@ -142,22 +142,27 @@ func (s *ExecSpawner) environ() []string {
 // the daemon resolve something OTHER than what the launcher expects, and
 // nothing is on it merely for tidiness.
 //
-//   - NOCX_WS_ADDR pins the WebSocket listen address (cmd/devharness reads
-//     it, and app.WithWSAddr applies it). The launcher learns the address
-//     from the socket the daemon reports on; a daemon that took its
-//     address from an inherited variable would be listening somewhere the
-//     launcher never chose — and, since the variable can name any
-//     interface, potentially off loopback, which design §6 forbids
-//     outright.
-//   - NOCX_NO_SYSTEM_KEYSTORE. The stance itself is no longer here: D10
-//     moved it to a build property (internal/app/keystore_build_*.go), so a
-//     daemon that inherited this variable would not change what it does.
-//     The strip stays anyway, and deliberately. It is the dev/test seam
-//     cmd/devharness reads, and a variable that means "keystore policy" in
-//     one binary of this repo must not silently mean something else in the
-//     one that lives for days — design §6's rule is that the stance is
-//     never something any process of the user can supply, and the cheapest
-//     way to keep that true is for the daemon never to see it.
+// NEITHER IS READ BY ANY BINARY THIS REPO BUILDS ANY MORE, and the strip
+// stays regardless. That is a deliberate exception to "no dead code", and the
+// reason is that this is a security control rather than a feature: §6 forbids
+// a class — "a daemon that inherited NOCX_WS_ADDR or a profile override
+// resolves something other than what the launcher expects" — and the class
+// outlives its current members. A reader is the thing that comes and goes; a
+// variable a developer's shell exported before the cutover does not.
+//
+//   - NOCX_WS_ADDR pinned the WebSocket listen address. Its readers are gone
+//     with cmd/devharness (design D11) and the listener is now loopback with
+//     an OS-chosen port and no override at all (transport/ws.go). While it
+//     was read, a daemon that took its address from an inherited variable
+//     would have been listening somewhere the launcher never chose — and,
+//     since the variable can name any interface, potentially off loopback,
+//     which design §6 forbids outright.
+//   - NOCX_NO_SYSTEM_KEYSTORE stated the keystore stance. D10 moved that to
+//     a build property (internal/app/keystore_build_*.go) and the last
+//     environment reader went with devharness, so today an inherited copy
+//     would change nothing. The rule it serves is the one that matters: the
+//     stance is never something any process of the user can supply, and the
+//     cheapest way to keep that true is for the daemon never to see it.
 //
 // Deliberately NOT on the list, because the reasoning runs the other way:
 //

@@ -105,7 +105,7 @@ host_gate() {
 # worse than a gate that does less.
 #
 # So the per-commit gate is STATIC: formatting, linting, type-checking, the
-# ratchets, the wire contracts, and the beads export. Say the cost out loud —
+# ratchets, the wire contracts, and the type checkers. Say the cost out loud —
 # a commit can now be made whose tests do not pass. The suites keep their teeth
 # at four addresses:
 #
@@ -271,13 +271,6 @@ if printf '%s
 else
     ok "check-site — skipped (no site/ changes staged)"
 fi
-
-# --- 7. beads: materialise the issue snapshot into this commit ---------------
-# Last, deliberately: a gate that fails above must not leave .beads/issues.jsonl
-# rewritten and staged for a commit that never happens.
-. "$(dirname "$0")/beads-hook.sh"
-export_beads_snapshot
-ok "beads export"
 
 printf "\nAll static checks passed.\n"
 

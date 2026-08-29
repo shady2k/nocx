@@ -34,26 +34,55 @@ func (lp *LocalPty) ForegroundProcessGroup() (int, error) {
 	return pgid, nil
 }
 
-// SignalForeground sends sig to the pty's current foreground process group —
-// the execution's own group, so the signal reaches the command and its
-// children, never only the shell. At a prompt the foreground group is the
-// shell's own and there is nothing to signal: ErrNoForeground (the shell
-// must never be signaled here — it is not part of the execution it is
-// waiting on). sig of 0 is the POSIX existence check: ErrNoForeground when
-// the group is gone.
-func (lp *LocalPty) SignalForeground(sig syscall.Signal) error {
+// ForegroundJob names the process group of the foreground JOB — the execution
+// the interactive shell is waiting on. It differs from ForegroundProcessGroup
+// in exactly one case, and that case is the whole reason it exists: at a
+// prompt the foreground group is the SHELL'S OWN, and the shell must never be
+// signalled — it is not part of the execution it is waiting on. That is
+// ErrNoForeground here, the same answer as no process at all.
+//
+// A caller that is going to signal more than once needs this, because a
+// process group is a stable addressee and "whatever is in front" is not: the
+// job it names can exit between two rungs of an escalation and the next
+// command a person starts takes its place (nocx-uvac6.11).
+func (lp *LocalPty) ForegroundJob() (int, error) {
 	pgid, err := lp.ForegroundProcessGroup()
 	if err != nil {
-		return err
+		return 0, err
 	}
 	if lp.cmd.Process != nil && pgid == lp.cmd.Process.Pid {
+		return 0, ErrNoForeground
+	}
+	return pgid, nil
+}
+
+// SignalProcessGroup sends sig to one exact process group, named by an earlier
+// ForegroundJob. sig of 0 is the POSIX existence check: ErrNoForeground once
+// the group is gone. A group that has exited is not an error the caller can do
+// anything about — it is the answer it was asking for.
+func (lp *LocalPty) SignalProcessGroup(pgid int, sig syscall.Signal) error {
+	if pgid <= 0 {
 		return ErrNoForeground
 	}
 	if err := unix.Kill(-pgid, sig); err != nil {
 		if errors.Is(err, unix.ESRCH) {
 			return ErrNoForeground
 		}
-		return fmt.Errorf("pty: signal foreground group %d: %w", pgid, err)
+		return fmt.Errorf("pty: signal process group %d: %w", pgid, err)
 	}
 	return nil
+}
+
+// SignalForeground sends sig to the pty's current foreground job — the
+// execution's own group, so the signal reaches the command and its children,
+// never only the shell. It is the ONE-SHOT form, for an intent that is about
+// the present moment (a person's Ctrl+C: interrupt this, and I may press it
+// again). An escalation must not be built out of repeated calls to it; use
+// ForegroundJob once and SignalProcessGroup for each rung.
+func (lp *LocalPty) SignalForeground(sig syscall.Signal) error {
+	pgid, err := lp.ForegroundJob()
+	if err != nil {
+		return err
+	}
+	return lp.SignalProcessGroup(pgid, sig)
 }

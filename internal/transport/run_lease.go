@@ -103,7 +103,17 @@ const defaultRunSignalGrace = time.Second
 // process cannot signal (the remote kill is the remote-footprint bead's
 // job, not this one's).
 type runLeaseSession interface {
+	// SignalForeground is the ONE-SHOT form: signal whatever job is in front
+	// right now. It is what an interrupt means and it is all an interrupt
+	// needs.
 	SignalForeground(sig syscall.Signal) error
+	// ForegroundJob names that job's process group, and SignalProcessGroup
+	// signals it. An ESCALATION is built out of these two rather than out of
+	// repeated SignalForeground calls: the ladder must keep the addressee it
+	// started against, or a job that exits between two rungs hands the next
+	// rung to whatever the person started in its place (nocx-uvac6.11).
+	ForegroundJob() (int, error)
+	SignalProcessGroup(pgid int, sig syscall.Signal) error
 }
 
 // runLease supervises one run request. It is created per RequestRun and is
@@ -337,7 +347,9 @@ func (l *runLease) escalate() foregroundOutcome {
 
 // cancelExecution withdraws this exact broker request and synchronously runs
 // the established INT → TERM → KILL ladder while the request still owns the
-// foreground execution. A completed/disarmed lease is inert, so a late turn
+// foreground execution. A completed/disarmed lease is inert — checked when the
+// claim is taken AND again after the withdrawal, because those are two
+// different instants and the request can finish between them — so a late turn
 // cancellation can never signal a command the person started afterwards.
 func (l *runLease) cancelExecution() foregroundOutcome {
 	l.mu.Lock()
@@ -356,6 +368,19 @@ func (l *runLease) cancelExecution() foregroundOutcome {
 		return foregroundNothingRunning
 	}
 	cancel()
+	// AND THE CLAIM IS RE-MADE AFTER THE WITHDRAWAL (nocx-uvac6.11). Between
+	// taking the claim above and arriving here the request can have completed
+	// on its own — supervise returns and disarm marks the lease done. An
+	// escalation started then would address whatever the session has in front
+	// of it NOW, which is the next thing the person ran. The lease's promise
+	// is an interval — inert from the moment it is done until it is collected
+	// — so the state is read again at the last instant before any signal.
+	l.mu.Lock()
+	done := l.done
+	l.mu.Unlock()
+	if done {
+		return foregroundNothingRunning
+	}
 	return l.escalate()
 }
 

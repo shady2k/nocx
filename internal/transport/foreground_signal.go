@@ -21,6 +21,14 @@ package transport
 //   - stop is the ladder. It is what a menu item called Stop promises: when
 //     it answers, the execution is gone rather than merely asked to leave.
 //
+// THE TWO INTENTS DIFFER IN THEIR ADDRESSEE, AND THAT IS THE DISTINCTION
+// (nocx-uvac6.11). An interrupt is about the present moment, so it asks the
+// kernel what is in front and signals that. A stop is a conversation with one
+// job across several seconds, so it names that job's process group ONCE and
+// keeps it for every rung and for the existence poll. Built out of repeated
+// "what is in front" questions instead, the ladder walked onto whatever the
+// person started after the job it was stopping had already exited.
+//
 // Nothing here reads the byte stream to decide anything (AD-6): the
 // foreground process group comes from the kernel through TIOCGPGRP, and the
 // shell's own group is never signalled — it is not part of the job it is
@@ -75,26 +83,44 @@ func interruptForeground(lg log.Logger, sid session.ID, sess runLeaseSession) fo
 	return foregroundNothingRunning
 }
 
-// stopForeground runs the ladder INT → TERM → KILL against the session's
-// foreground process group, waiting `grace` after each signal for the
-// execution to cooperate. It returns only when the execution is gone
-// (cooperated), the KILL is sent (nothing can ignore it), or there was
-// nothing in the foreground to signal — never before, so a caller may
-// assert on its return that the execution is actually dead rather than
-// merely scheduled to die. Runs on the caller's goroutine and spawns
-// nothing (ADR-0026).
+// stopForeground runs the ladder INT → TERM → KILL against ONE process group —
+// the foreground job's, named once before the first signal — waiting `grace`
+// after each signal for it to cooperate. It returns only when that group is
+// gone (cooperated), the KILL is sent (nothing can ignore it), or there was
+// nothing in the foreground to signal — never before, so a caller may assert
+// on its return that the execution is actually dead rather than merely
+// scheduled to die. Runs on the caller's goroutine and spawns nothing
+// (ADR-0026).
+//
+// THE GROUP IS NAMED ONCE, AND THAT IS THE WHOLE CORRECTNESS OF IT
+// (nocx-uvac6.11). This used to ask the kernel "what is in front right now" at
+// every rung, and the existence poll reported cooperation only when NOTHING
+// was in front. So a command that took its SIGINT and exited was
+// indistinguishable from one that had ignored it, the moment the person
+// started their own next command inside the grace window — and TERM, then
+// KILL, went to that command. The addressee of a stop is decided when the stop
+// begins; everything after that is the same conversation with the same job.
 func stopForeground(lg log.Logger, sid session.ID, sess runLeaseSession, grace time.Duration) foregroundOutcome {
 	if grace <= 0 {
 		grace = defaultRunSignalGrace
 	}
+	pgid, err := sess.ForegroundJob()
+	if err != nil {
+		if errors.Is(err, pty.ErrNoForeground) {
+			return foregroundNothingRunning
+		}
+		lg.Warn("foreground signal: could not name the foreground job",
+			"session_id", string(sid), "error", err)
+		return foregroundNothingRunning
+	}
 	escalation := []syscall.Signal{syscall.SIGINT, syscall.SIGTERM, syscall.SIGKILL}
 	delivered := false
 	for i, sig := range escalation {
-		err := sess.SignalForeground(sig)
+		err := sess.SignalProcessGroup(pgid, sig)
 		if err != nil {
 			if errors.Is(err, pty.ErrNoForeground) {
-				// Nothing running — either from the start (a session at a
-				// prompt) or because an earlier rung already ended it.
+				// The group is gone — either from the start or because an
+				// earlier rung already ended it.
 				if delivered {
 					return foregroundDelivered
 				}
@@ -108,11 +134,11 @@ func stopForeground(lg log.Logger, sid session.ID, sess runLeaseSession, grace t
 		if i == len(escalation)-1 {
 			return foregroundDelivered // KILL — the execution is gone
 		}
-		if cooperatedForeground(sess, grace) {
+		if groupGone(sess, pgid, grace) {
 			return foregroundDelivered
 		}
 		lg.Info("foreground signal: execution did not cooperate, escalating",
-			"session_id", string(sid), "from", int(sig))
+			"session_id", string(sid), "signal", int(sig), "pgid", pgid)
 	}
 	if delivered {
 		return foregroundDelivered
@@ -120,14 +146,17 @@ func stopForeground(lg log.Logger, sid session.ID, sess runLeaseSession, grace t
 	return foregroundNothingRunning
 }
 
-// cooperatedForeground polls the foreground group until it is gone —
-// ErrNoForeground means the shell took the foreground back (or the group
-// vanished) — or `grace` elapses. A zombie waits for its parent's reap, so
-// the poll has to outlive it; the shell reaps promptly.
-func cooperatedForeground(sess runLeaseSession, grace time.Duration) bool {
+// groupGone polls ONE process group until it is gone — ErrNoForeground means
+// that group has exited — or `grace` elapses. A zombie waits for its parent's
+// reap, so the poll has to outlive it; the shell reaps promptly.
+//
+// It asks about the group the ladder addressed, never about "is anything in
+// the foreground": the second question answers yes for a command the person
+// started afterwards, which is how the escalation used to walk onto it.
+func groupGone(sess runLeaseSession, pgid int, grace time.Duration) bool {
 	deadline := time.Now().Add(grace)
 	for time.Now().Before(deadline) {
-		if err := sess.SignalForeground(0); err != nil {
+		if err := sess.SignalProcessGroup(pgid, 0); err != nil {
 			return true
 		}
 		time.Sleep(50 * time.Millisecond)

@@ -280,7 +280,7 @@ describe('AgentInputTarget', () => {
     expect(handle.append).not.toHaveBeenCalled()
   })
 
-  it('passes the live turn Stop action through to agent.cancel with the minted run id', async () => {
+  it('passes Stop to agent.cancel and closes from its reserved response without runState', async () => {
     const dispatcher = new FakeDispatcher()
     const handle: AnswerBlockHandle = {
       id: 1,
@@ -292,8 +292,15 @@ describe('AgentInputTarget', () => {
     }
     let actions: RunningBlockActions | undefined
     const cancel = vi.fn(() =>
-      Promise.resolve({ runId: 7, state: 'cancelled' as const, cancelled: true as const }),
+      Promise.resolve({
+        runId: 7,
+        state: 'cancelled' as const,
+        cancelled: true as const,
+        error: 'no local process group to signal — the execution keeps running',
+        droppedDeltas: 2,
+      }),
     )
+    const onTurnEnd = vi.fn()
     const target = new AgentInputTarget({
       dispatcher: dispatcher as never,
       sessionId: () => 'session-a',
@@ -307,6 +314,7 @@ describe('AgentInputTarget', () => {
       ),
       cancel,
       onRefusal: vi.fn(),
+      onTurnEnd,
     })
 
     await target.submit('stop this turn')
@@ -316,19 +324,71 @@ describe('AgentInputTarget', () => {
     expect(cancel).toHaveBeenCalledTimes(1)
     expect(cancel).toHaveBeenCalledWith(7)
     expect(dispatcher.calls.some((call) => call.method === 'agent.cancel')).toBe(false)
+    await vi.waitFor(() => expect(handle.close).toHaveBeenCalledTimes(1))
+    expect(handle.append).toHaveBeenCalledWith(
+      '— 2 chunks of the answer were dropped while streaming; the full answer was saved —',
+    )
+    expect(handle.close).toHaveBeenCalledWith(
+      'cancelled',
+      'no local process group to signal — the execution keeps running',
+    )
+    expect(onTurnEnd).toHaveBeenCalledTimes(1)
     dispatcher.emit('agent.runState', { runId: 7, state: 'cancelled' })
-    expect(handle.close).toHaveBeenCalledWith('cancelled', undefined)
+    expect(handle.close).toHaveBeenCalledTimes(1)
+    expect(onTurnEnd).toHaveBeenCalledTimes(1)
   })
 
-  it('renders the cancellation sentence when the host could not stop the command', async () => {
-    const { dispatcher, handle, target } = makeTarget()
-    await target.submit('stop the remote command')
+  it('terminalizes once when runState wins the cancel-response race', async () => {
+    const dispatcher = new FakeDispatcher()
+    const handle: AnswerBlockHandle = {
+      id: 1,
+      el: document.createElement('div'),
+      append: vi.fn(),
+      toolCall: vi.fn(),
+      reasoning: vi.fn(),
+      close: vi.fn(),
+    }
+    let actions: RunningBlockActions | undefined
+    let resolveCancel!: (value: {
+      runId: number
+      state: 'cancelled'
+      cancelled: true
+      droppedDeltas?: number
+    }) => void
+    const cancel = vi.fn(
+      () =>
+        new Promise<{ runId: number; state: 'cancelled'; cancelled: true; droppedDeltas?: number }>(
+          (resolve) => {
+            resolveCancel = resolve
+          },
+        ),
+    )
+    const onTurnEnd = vi.fn()
+    const target = new AgentInputTarget({
+      dispatcher: dispatcher as never,
+      sessionId: () => 'session-a',
+      cwd: () => '/repo',
+      grants: () => [],
+      openAnswer: vi.fn(
+        (_q: string, _cwd: string, provided?: RunningBlockActions): AnswerBlockHandle => {
+          actions = provided
+          return handle
+        },
+      ),
+      cancel,
+      onRefusal: vi.fn(),
+      onTurnEnd,
+    })
 
-    const warning =
-      'the person stopped this answer, but its command could not be stopped on the host'
-    dispatcher.emit('agent.runState', { runId: 7, state: 'cancelled', error: warning })
+    await target.submit('race the stop')
+    actions?.stop()
+    dispatcher.emit('agent.runState', { runId: 7, state: 'cancelled', droppedDeltas: 1 })
+    resolveCancel({ runId: 7, state: 'cancelled', cancelled: true, droppedDeltas: 1 })
+    await Promise.resolve()
 
-    expect(handle.close).toHaveBeenCalledWith('cancelled', warning)
+    expect(handle.append).toHaveBeenCalledTimes(1)
+    expect(handle.close).toHaveBeenCalledTimes(1)
+    expect(onTurnEnd).toHaveBeenCalledTimes(1)
   })
 
   it('closes the block completed on the terminal state; failed carries the renderable reason', async () => {

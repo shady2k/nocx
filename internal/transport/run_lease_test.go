@@ -309,6 +309,120 @@ func TestRunLease_NoLocalProcessGroupStillTerminalizes(t *testing.T) {
 	}
 }
 
+func TestRunLease_CancelExecutionStopsBeforeReturning(t *testing.T) {
+	sess := &fakeLeaseSession{dieOn: syscall.SIGINT}
+	lease, _ := newUnitLease(t, sess, RunLeaseConfig{})
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- lease.supervise(context.Background(), func(ctx context.Context) error {
+			close(started)
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	}()
+	<-started
+
+	if got := lease.cancelExecution(); got != foregroundDelivered {
+		t.Fatalf("cancel outcome = %q, want %q", got, foregroundDelivered)
+	}
+	if got := sess.got(); len(got) != 1 || got[0] != syscall.SIGINT {
+		t.Fatalf("signals before cancel returned = %v, want [SIGINT]", got)
+	}
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("supervise error = %v, want context canceled", err)
+	}
+}
+
+func TestRunLease_CancelBeforeSuperviseEmitsNothingAndSignalsNothing(t *testing.T) {
+	sess := &fakeLeaseSession{}
+	lease, _ := newUnitLease(t, sess, RunLeaseConfig{})
+
+	if got := lease.cancelExecution(); got != foregroundNothingRunning {
+		t.Fatalf("pre-arm cancel outcome = %q, want %q", got, foregroundNothingRunning)
+	}
+	called := false
+	err := lease.supervise(context.Background(), func(context.Context) error {
+		called = true
+		return nil
+	})
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("supervise error = %v, want context canceled", err)
+	}
+	if called {
+		t.Fatal("pre-cancelled lease delivered the broker request")
+	}
+	if got := sess.got(); len(got) != 0 {
+		t.Fatalf("pre-cancelled lease signalled an unrelated foreground: %v", got)
+	}
+}
+
+func TestRunLease_CancelExecutionAfterDisarmSignalsNothing(t *testing.T) {
+	sess := &fakeLeaseSession{}
+	lease, _ := newUnitLease(t, sess, RunLeaseConfig{})
+	if err := lease.supervise(context.Background(), func(context.Context) error { return nil }); err != nil {
+		t.Fatalf("supervise: %v", err)
+	}
+
+	if got := lease.cancelExecution(); got != foregroundNothingRunning {
+		t.Fatalf("late cancel outcome = %q, want %q", got, foregroundNothingRunning)
+	}
+	if got := sess.got(); len(got) != 0 {
+		t.Fatalf("late cancel signalled a later foreground: %v", got)
+	}
+}
+
+func TestAgentRunControl_RejectsLeaseAttachedAfterCancellation(t *testing.T) {
+	control := &agentRunControl{cancelDone: make(chan struct{})}
+	if !control.beginCancel() {
+		t.Fatal("fresh control refused cancellation")
+	}
+	lease, _ := newUnitLease(t, &fakeLeaseSession{}, RunLeaseConfig{})
+	if control.attachRunLease(lease) {
+		t.Fatal("lease attached after cancellation; RequestRun would emit a broker request")
+	}
+}
+
+func TestAgentRunControl_CancelSignalsOnlyRegisteredAssistantLease(t *testing.T) {
+	owned := &fakeLeaseSession{dieOn: syscall.SIGINT}
+	userStarted := &fakeLeaseSession{}
+	lease, _ := newUnitLease(t, owned, RunLeaseConfig{})
+	lease.cancel = func() {}
+	control := &agentRunControl{runLeases: map[*runLease]struct{}{lease: {}}}
+
+	if control.cancelRunLeases() {
+		t.Fatal("local assistant lease reported unsupported")
+	}
+	if got := owned.got(); len(got) != 1 || got[0] != syscall.SIGINT {
+		t.Fatalf("owned signals = %v, want [SIGINT]", got)
+	}
+	if got := userStarted.got(); len(got) != 0 {
+		t.Fatalf("unregistered user command was signalled: %v", got)
+	}
+}
+
+func TestRunLease_CancelExecutionWithoutLocalProcessStillCancelsRequest(t *testing.T) {
+	lease, _ := newUnitLease(t, &fakeLeaseSession{}, RunLeaseConfig{})
+	lease.sess = nil
+	started := make(chan struct{})
+	done := make(chan error, 1)
+	go func() {
+		done <- lease.supervise(context.Background(), func(ctx context.Context) error {
+			close(started)
+			<-ctx.Done()
+			return ctx.Err()
+		})
+	}()
+	<-started
+
+	if got := lease.cancelExecution(); got != foregroundUnsupported {
+		t.Fatalf("cancel outcome = %q, want %q", got, foregroundUnsupported)
+	}
+	if err := <-done; !errors.Is(err, context.Canceled) {
+		t.Fatalf("supervise error = %v, want context canceled", err)
+	}
+}
+
 type errSession struct{ err error }
 
 func (e *errSession) SignalForeground(syscall.Signal) error { return e.err }

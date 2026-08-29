@@ -272,6 +272,15 @@ export interface PaneIdentity {
   readonly registered: Promise<boolean>
 }
 
+/** A scrollback selection held across a transaction that would overwrite it. */
+interface HeldRange {
+  readonly range: Range
+  readonly startNode: Node
+  readonly startOffset: number
+  readonly endNode: Node
+  readonly endOffset: number
+}
+
 /** The host callbacks a tab may hand a TerminalContent. Named rather than
  *  positional: they are all optional functions, so any misalignment between
  *  them type-checks cleanly and fails only in front of a user. */
@@ -537,8 +546,9 @@ export class TerminalContent extends BasePaneContent {
    *  renderer keeps parsing underneath it; this is presentation state only. */
   private _pinnedFrame: CapturedFrame | null = null
   /** A captured frame waiting for the ask submit seam to mint its askId.
-   *  This is distinct from the display pin: Escape ends the display, but
-   *  cannot end a turn that is already answering. */
+   *  This is distinct from the display pin: Escape ends the display
+   *  immediately, while the read pin ends at the stopped turn's existing
+   *  terminal seam. */
   private _pendingReadFrame: CapturedFrame | null = null
   private _readPinnedFrame: { askId: string; frame: CapturedFrame } | null = null
   private _freezeFrameView: HTMLElement | null = null
@@ -562,7 +572,11 @@ export class TerminalContent extends BasePaneContent {
   /** Every answer opened by this command's summon, in ask order. A terminal
    *  answer stays in the absolute stack so the same composer can return below
    *  it; command completion reparents these exact nodes into scrollback. */
-  private _summonedAnswers: { el: HTMLElement; terminal: boolean }[] = []
+  private _summonedAnswers: {
+    el: HTMLElement
+    terminal: boolean
+    running: RunningBlockActions | undefined
+  }[] = []
   private _summonedCommand: BlockRecord | null = null
   /** The one presentation-owned stack. Answers scroll in its first child and
    *  the existing editor occupies its final flex seat while the summon is
@@ -640,6 +654,7 @@ export class TerminalContent extends BasePaneContent {
     isActive: (blockEl) =>
       this.hasRunningCommand() && this.scrollback?.blockManager.runningBlock?.el === blockEl,
     isGranted: (blockEl) => this.grantedBlocks.some((grant) => grant.blockEl === blockEl),
+    grantsAvailable: () => this.grantsAvailable(),
     toggleGrant: (blockEl) => this.toggleGrant(blockEl),
     stop: () => this.signalActiveCommand('stop'),
   }
@@ -658,6 +673,18 @@ export class TerminalContent extends BasePaneContent {
     const rects = Array.from(range.getClientRects())
     const rect = rects[rects.length - 1]
     if (!rect) {
+      this.markAffordance?.hide()
+      return
+    }
+    // AND IT IS ONLY THIS SURFACE'S SELECTION WHEN THERE IS AN OFFER TO MAKE
+    // (nocx-a7mw7.7). Everything below claims the selection in order to keep
+    // an offer alive under it. A target that routes to the shell makes no
+    // offer, so the claim buys nothing and costs the caret: a person reading
+    // output mid-command lost the composer's focus to protect a button that
+    // was never going to appear. In Run the selection stays what it looks
+    // like — ordinary, selectable, copyable text — and the composer keeps
+    // the keyboard.
+    if (!this.grantsAvailable()) {
       this.markAffordance?.hide()
       return
     }
@@ -785,6 +812,8 @@ export class TerminalContent extends BasePaneContent {
   private _projections: LifecycleProjections | null = null
   private _markers = new Map<number, MarkerAdapter>()
   private _globalKeydown: ((e: KeyboardEvent) => void) | null = null
+  /** The ONE recogniser of the target chord (nocx-a7mw7.6), in capture. */
+  private _targetChordKeydown: ((e: KeyboardEvent) => void) | null = null
   private _cwd = '~'
   /** True only when _cwd came from a verified OSC 7 report (AD-5): the one
    *  cwd a composition layer may hand to files.open as rootPath (D2). A
@@ -1662,6 +1691,15 @@ export class TerminalContent extends BasePaneContent {
         const prevId = this.activeTargetId
         if (this.editor && prevId !== null && prevId !== target.id) {
           const sel = this.editor.getSelection()
+          // THE DRAFT SWAP MUST NOT EAT A SELECTION IT DOES NOT OWN
+          // (nocx-a7mw7.7). replaceDoc and clear dispatch CodeMirror
+          // transactions, and a transaction sets the DOCUMENT selection to
+          // the editor's own — which silently discards a highlight the
+          // person made in the scrollback. That is the highlight the flip
+          // is FOR: Run → Ask over selected output is how the offer is
+          // reached without dragging twice. Held across the swap and put
+          // back, and only when it was never the editor's to begin with.
+          const held = this.heldScrollbackRange()
           this.targetState.saveDraft(prevId, {
             text: this.editor.getDoc(),
             from: sel.from,
@@ -1678,6 +1716,7 @@ export class TerminalContent extends BasePaneContent {
             // surfaces hold no stale findings from the other mode.
             this.editor.clear()
           }
+          this.restoreScrollbackRange(held)
         }
         this.activeTargetId = target.id
         // The line-start indicator renders the registry's active target
@@ -1685,6 +1724,10 @@ export class TerminalContent extends BasePaneContent {
         // signal (ask-entry.ts). The indicator derives its own WORD from
         // the target id — the registry's label stays the registry's.
         this.indicator?.set(target.id, target.label)
+        // Completion candidates belong to the target that produced them.
+        // A selection can move focus away before the chord, so dismiss here
+        // at the registry transition rather than relying on editor key order.
+        if (prevId !== null && prevId !== target.id) this.completion?.dismiss()
         // And the editor wears the target's own layer: the shell's
         // highlighting and completion surface belong to the shell, so a
         // question typed at Ask is plain prose — never `Привет!` painted
@@ -1697,6 +1740,7 @@ export class TerminalContent extends BasePaneContent {
         // repaints — a Run pane pays no readiness call.
         if (target.id === this.agentTarget?.id) this.refreshReadiness()
         this.renderTargetChips()
+        this.reconcileGrantPresentation()
       })
       this.inputTargets.register(this.shellTarget)
       this.agentTarget = new AgentInputTarget({
@@ -1731,7 +1775,7 @@ export class TerminalContent extends BasePaneContent {
             if (surface !== null) {
               handle.el.classList.add('nocx-answer-overlay')
               surface.answers.appendChild(handle.el)
-              this._summonedAnswers.push({ el: handle.el, terminal: false })
+              this._summonedAnswers.push({ el: handle.el, terminal: false, running })
               // A deliberate follow-up moves the answer scroller to its new
               // current turn; subsequent content grows in that visible seat.
               surface.answers.scrollTop = surface.answers.scrollHeight
@@ -1933,18 +1977,29 @@ export class TerminalContent extends BasePaneContent {
           // per-mode boolean inside the editor and no second derivation of
           // "which mode am I in".
           //
-          // It was already the right rule and it is now load-bearing: a
-          // summoned editor is up while a command RUNS (nocx-92gfl), so the
-          // bare CR would go into that program's stdin and the ^C would
-          // kill the very command the person is composing a question about.
+          // A summoned editor is up while a command RUNS (nocx-92gfl), so a
+          // bare CR must never enter that program. Ctrl-C is different: the
+          // final two-key contract deliberately delegates it to the running
+          // command's interrupt owner while leaving the assistant turn alone.
           // Before the summon the editor could only be up at a prompt, where
-          // both were merely wrong rather than destructive.
+          // the shell target owned both behaviours directly.
           submitEmpty: () => {
             if (this.inputTargets?.active().routesToShell === false) return
             this.session?.send('\r')
           },
           cancel: () => {
-            if (this.inputTargets?.active().routesToShell === false) return
+            const target = this.inputTargets?.active()
+            if (target?.routesToShell === false) {
+              // Ctrl-C never stops an assistant turn. In the one state where
+              // an Agent composer sits over a running command, it delegates
+              // to that command's existing interrupt owner and preserves the
+              // half-typed question. Ordinary Ask still clears normally.
+              if (this._summoned && this.hasRunningCommand()) {
+                this.signalActiveCommand('interrupt')
+                return false
+              }
+              return true
+            }
             // Ctrl-C at a prompt is a keystroke to the SHELL — its line
             // editor discards the line and prints a fresh prompt — and the
             // byte is what delivers that. Over a RUNNING command the same
@@ -1952,12 +2007,13 @@ export class TerminalContent extends BasePaneContent {
             // active block's business and goes through the one owner of it.
             if (this.hasRunningCommand()) this.signalActiveCommand('interrupt')
             else this.session?.send('\x03')
+            return true
           },
-          // A summoned editor's Escape puts it away and gives the keys back
-          // to the running process, leaving the half-typed question where it
-          // is (nocx-92gfl). Everywhere else this declines and Escape stays
-          // the draft clear it has always been.
-          onEscape: () => this.dismissSummonedEditor(),
+          // The editor's own overlay/IME arbiters run first. An unclaimed
+          // Escape then stops the current summoned turn through its answer's
+          // exact Stop action and unwinds the summon; with no active turn it
+          // keeps the prior dismiss-only behaviour.
+          onEscape: () => this.stopCurrentSummonedAnswerAndDismiss(),
           // A taller editor is a shorter scrollback. Keep the bottom of the
           // transcript where it belongs — just above the editor — instead of
           // letting it slide underneath.
@@ -2017,7 +2073,6 @@ export class TerminalContent extends BasePaneContent {
           // ⌘/Ctrl+Enter: the explicit switch (ADR-0004 §3) — same flip as
           // clicking the caret indicator, and the only thing the chord
           // does. Asking is plain Enter with Ask active.
-          onToggleTarget: () => this.toggleInputTarget(),
         },
         // The language is chosen HERE, not inside the editor. CommandEditor
         // must stay language-agnostic (ADR-0010 §Decision 3): the agent target
@@ -2147,100 +2202,7 @@ export class TerminalContent extends BasePaneContent {
       //     are the dropdown's while it is open.
       //   - Esc closes exactly one surface per press, in the same order:
       //     recall, picker, completion.
-      this.editor.setKeyArbiter((e) => {
-        // Every decision here is traced (off by default — `window.nocxDebug
-        // = true` in devtools): which surface got the key and why is the
-        // diagnosis for "my key did the wrong thing", and the chain's
-        // evaluation order is the accident that reads as ownership unless
-        // the decision is stated. The gate is checked BEFORE any field is
-        // built: with tracing off, a keystroke costs nothing but the check.
-        // The snippet palette chord (⌥⌘P, snippets/chord.ts) opens the
-        // palette from anywhere in the editor, exactly like recall's
-        // shortcut: checked BEFORE the surfaces so it cannot be swallowed
-        // by one of them, and opening it closes them — the palette owns
-        // the keys now (the surfaces never stack). Both keyboard paths
-        // (this arbiter and the xterm boundary) land in handleSnippetChord,
-        // which delegates to the composition root's ONE opener.
-        if (isSnippetChord(e)) {
-          if (isDecisionTracing()) {
-            logDecision('arbiter', {
-              surface: 'snippet-palette',
-              key: keyLabel(e),
-              why: 'the snippet chord opens the palette',
-            })
-          }
-          this.handleSnippetChord()
-          return true
-        }
-        // Recall first: the shortcut opens it from anywhere, and an open
-        // recall owns its keys. Opening it closes the other surfaces.
-        const recallWasOpen = this.recall!.isOpen
-        const consumed = this.recall!.handleKey(e)
-        if (this.recall!.isOpen) {
-          this.completion?.dismiss()
-          this.promptVault?.closePicker()
-        }
-        if (consumed) {
-          if (isDecisionTracing()) {
-            logDecision('arbiter', {
-              surface: 'recall',
-              key: keyLabel(e),
-              why: recallWasOpen ? 'recall is open; it owns its keys' : 'recall shortcut',
-            })
-          }
-          return true
-        }
-        // The picker outranks completion: while it is open its keys
-        // (arrows, Enter, Tab, Esc) belong to it, and a Right/End ghost
-        // accept must never insert completion text into the line under the
-        // picker.
-        if (this.promptVault!.isPickerOpen) this.completion?.dismiss()
-        if (this.promptVault!.handleKey(e)) {
-          if (isDecisionTracing()) {
-            logDecision('arbiter', {
-              surface: 'picker',
-              key: keyLabel(e),
-              why: 'picker is open; it owns its keys',
-            })
-          }
-          return true
-        }
-        // The ownership decision above, applied: an open selectable
-        // dropdown owns bare ArrowUp/ArrowDown — its footer promises
-        // navigation — so they are routed to it explicitly and can never
-        // fall through to the editor's recall gesture. Everything else
-        // (Enter, Tab, Esc, Right/End, typing) still goes to the
-        // completion controller's ordinary handling.
-        if (this.completion!.ownsArrows(e)) {
-          if (isDecisionTracing()) {
-            logDecision('arbiter', {
-              surface: 'completion',
-              key: keyLabel(e),
-              why: 'dropdown is open; bare arrows belong to it',
-            })
-          }
-          return this.completion!.handleKey(e)
-        }
-        const handled = this.completion?.handleKey(e) ?? false
-        if (handled) {
-          if (isDecisionTracing()) {
-            logDecision('arbiter', {
-              surface: 'completion',
-              key: keyLabel(e),
-              why: 'completion consumed the key',
-            })
-          }
-          return true
-        }
-        if (isDecisionTracing()) {
-          logDecision('arbiter', {
-            surface: 'editor',
-            key: keyLabel(e),
-            why: 'no surface claimed the key',
-          })
-        }
-        return false
-      })
+      this.editor.setKeyArbiter((e) => this.arbitrateEditorKey(e))
 
       if (signal.aborted) {
         this.recall?.destroy()
@@ -2539,6 +2501,7 @@ export class TerminalContent extends BasePaneContent {
           e.shiftKey &&
           !e.altKey &&
           e.key.toLowerCase() === 'a' &&
+          this.grantsAvailable() &&
           this.grantCurrentSelection()
         ) {
           e.preventDefault()
@@ -2645,16 +2608,16 @@ export class TerminalContent extends BasePaneContent {
           return
         }
         // Once an accepted summoned answer owns the overlay, the editor is
-        // intentionally hidden so the answer is readable. Escape still
-        // dismisses the summon through the document path: every answer remains
-        // a view over the live screen and the current one keeps receiving
-        // deltas until the running command ends, when all take ordered seats.
+        // intentionally hidden so the answer is readable. Selection above,
+        // then text controls, overlays and the block menu below retain their
+        // established Escape priority. Only an otherwise-unclaimed Escape
+        // reaches the answer's exact Stop action before the summon thaws.
         if (e.key === 'Escape' && this._summoned && this._currentSummonedAnswer() !== null) {
           const active = document.activeElement
           if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
           if (hasOpenOverlays()) return
           if (document.querySelector('.cmd-overflow-menu')) return
-          if (this.dismissSummonedEditor()) e.preventDefault()
+          if (this.stopCurrentSummonedAnswerAndDismiss()) e.preventDefault()
           return
         }
         // Escape with the editor on screen but out of focus: the editor's
@@ -3273,45 +3236,74 @@ export class TerminalContent extends BasePaneContent {
         }
       })
 
-      // ── Summon the editor over a running command (nocx-92gfl) ──────────
+      // ── THE TARGET CHORD HAS ONE OWNER (nocx-a7mw7.6) ─────────────────
+      //
+      // ⌘/Ctrl+Enter means one thing — "I want the assistant" — and it is
+      // recognised here and nowhere else. It used to be claimed in three
+      // places, each keyed on where the browser happened to have parked the
+      // focus: a capture listener on the editor's root flipped the target, a
+      // capture listener on the xterm host summoned the editor, and a third
+      // listener was added on document so a scrollback selection — which
+      // releases focus onto <body>, neither of the other two — could reach
+      // the flip at all. Three guard sets for one key, and between them two
+      // states where the gesture did nothing: the summon was unreachable
+      // from anywhere but the grid, and an open block menu swallowed the
+      // chord in silence.
       //
       // IN THE CAPTURE PHASE, and that is not a style choice. xterm attaches
       // its own keydown to the hidden textarea, and by the time an event
-      // bubbles to this element xterm has already turned Ctrl+Enter into a
-      // CR and pushed it through onData — into the stdin of the very command
-      // this chord is about. Capture on an ancestor runs before the
-      // textarea's own listener, so the key is intercepted rather than
-      // undone.
+      // bubbles to an ancestor xterm has already turned Ctrl+Enter into a CR
+      // and pushed it through onData — into the stdin of the very command
+      // this chord is about. Capture at the document root also runs before
+      // CM6's keymap, which binds Mod-Enter to insertBlankLine, and before
+      // the editor's own root-capture listener. One position that precedes
+      // all three claimants is what lets there be one claimant.
       //
-      // ⌘/Ctrl+Enter and not a new chord, because it already means "I want
-      // the assistant": at a prompt it flips the target to Ask, and here it
-      // brings the box that has that target back. One gesture, one meaning,
-      // two situations.
-      target.addEventListener(
-        'keydown',
-        (e: KeyboardEvent) => {
-          if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return
-          const decision = this.canSummonEditor()
-          // Editor-visible and no-running states are silent and unconsumed;
-          // a capture in flight and a summon already open are silent but must
-          // still consume the chord so it cannot become a CR in the running
-          // program while the first one finishes.
-          if (
-            (decision.kind === 'silent' &&
-              decision.reason !== 'summon-pending' &&
-              decision.reason !== 'summon-active') ||
-            decision.kind === 'invariant'
-          )
-            return
-          // Every spoken refusal and successful summon consumes the chord
-          // before capture awaits the parse fence, so it cannot become a CR
-          // in the running program.
+      // AND IT READS THE STATE, NOT THE FOCUS. `editor.isVisible` chooses
+      // between flipping and summoning — the same fact canSummonEditor's
+      // first line already tests — so the gesture means the same thing from
+      // the composer, from the grid, from a released selection on <body>.
+      this._targetChordKeydown = (e: KeyboardEvent) => {
+        if (e.key !== 'Enter' || !(e.metaKey || e.ctrlKey) || e.altKey || e.shiftKey) return
+        if (!this._active || !target.isConnected) return
+        // An overlay owns the keyboard while it is up (ui/overlay/stack), and
+        // a text control belonging to some other surface owns its own keys.
+        // Controls inside this pane are not "some other surface": the grid's
+        // helper textarea is exactly where this chord is pressed from.
+        if (hasOpenOverlays()) return
+        const active = document.activeElement
+        if (isTextEntry(active) && this._paneTarget?.contains(active) !== true) return
+        // The editor's surfaces get first refusal through the ONE arbiter
+        // chain, so an open recall, picker or dropdown keeps the keys it
+        // already owns and this does not become a second answer to "which
+        // surface has the keyboard".
+        if (this.editor?.isVisible === true && this.arbitrateEditorKey(e)) return
+        if (this.editor?.isVisible === true) {
           e.preventDefault()
           e.stopPropagation()
-          void this.summonEditor(decision)
-        },
-        true,
-      )
+          this.toggleInputTarget()
+          return
+        }
+        const decision = this.canSummonEditor()
+        // A capture in flight and a summon already open are silent but must
+        // still consume the chord so it cannot become a CR in the running
+        // program while the first one finishes. The other silent states —
+        // and every DOM invariant — leave the key alone.
+        if (
+          (decision.kind === 'silent' &&
+            decision.reason !== 'summon-pending' &&
+            decision.reason !== 'summon-active') ||
+          decision.kind === 'invariant'
+        )
+          return
+        // Every spoken refusal and successful summon consumes the chord
+        // before capture awaits the parse fence, so it cannot become a CR in
+        // the running program.
+        e.preventDefault()
+        e.stopPropagation()
+        void this.summonEditor(decision)
+      }
+      document.addEventListener('keydown', this._targetChordKeydown, true)
 
       this.grantController = new GrantController({
         chip: this.editor.root.querySelector<HTMLButtonElement>('.nocx-editor-grant') ?? undefined,
@@ -3327,6 +3319,7 @@ export class TerminalContent extends BasePaneContent {
         this.ensureGrant(grant)
         this.markAffordance?.hide()
       })
+      this.reconcileGrantPresentation()
       document.addEventListener('selectionchange', this.onSelectionChange)
       this._mounted = true
       this._readyResolve(true)
@@ -3613,6 +3606,15 @@ export class TerminalContent extends BasePaneContent {
     if (visible && this.inputTargets?.active().id === this.agentTarget?.id) {
       this.refreshReadiness()
     }
+    // The mark affordance is portaled to body, so pane CSS cannot hide it.
+    // Reconcile on return from the current selection; hide immediately when
+    // this pane leaves the front.
+    if (visible) this.reconcileGrantPresentation()
+    else {
+      this.markAffordance?.hide()
+      this.grantController?.setVisible(false)
+      this.scrollback?.blockManager.closeOverflowMenus()
+    }
     // The pane's past, drawn the first time somebody looks at it
     // (nocx-m3fqk). On first SHOW rather than at boot: eight panes at fifty
     // blocks is four hundred blocks of DOM before the first frame, and a pane
@@ -3640,23 +3642,89 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /**
-   * The ONE writer in this pane for every chip that depends on which target
-   * Enter reaches. Both the model chip and the grant chip are meaningful only
-   * when a submit reaches the assistant — a Run pane names no model, because
-   * none answers anything, and marks no blocks, because there is no question
-   * for them to be about — so both read `isAsk` here rather than each site
-   * remembering to combine the target with the readiness store.
+   * The document selection when it belongs to this pane's scrollback rather
+   * than to the editor — the only case worth holding across a transaction
+   * that will overwrite it. Null whenever there is nothing to protect.
    *
-   * Presentation only. The grant's LIST stays owned by GrantController and is
-   * untouched by this: marks made in Ask survive a flip to Run and are on
-   * screen again on return, which is the criterion a careless fix breaks.
+   * THE RANGE OBJECT, not a copy of it, plus its boundary points. Re-asserting
+   * is `setStart`/`setEnd` on that same object, the way the ownership claim in
+   * onSelectionChange already does it: a clone is a different Range, and the
+   * surfaces downstream measure the one the selection actually holds.
+   */
+  private heldScrollbackRange(): HeldRange | null {
+    const selection = window.getSelection()
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null
+    const range = selection.getRangeAt(0)
+    const inner = this.scrollback?.scrollbackInner
+    if (!inner || !inner.contains(range.commonAncestorContainer)) return null
+    return {
+      range,
+      startNode: range.startContainer,
+      startOffset: range.startOffset,
+      endNode: range.endContainer,
+      endOffset: range.endOffset,
+    }
+  }
+
+  /** Put back what heldScrollbackRange held, if the swap moved it. */
+  private restoreScrollbackRange(held: HeldRange | null): void {
+    if (!held) return
+    const selection = window.getSelection()
+    if (!selection) return
+    const current = selection.rangeCount > 0 ? selection.getRangeAt(0) : null
+    if (
+      current !== null &&
+      current.startContainer === held.startNode &&
+      current.startOffset === held.startOffset &&
+      current.endContainer === held.endNode &&
+      current.endOffset === held.endOffset
+    )
+      return
+    held.range.setStart(held.startNode, held.startOffset)
+    held.range.setEnd(held.endNode, held.endOffset)
+    selection.removeAllRanges()
+    selection.addRange(held.range)
+  }
+
+  /** Whether the active input target can consume marks on its next submit. */
+  private grantsAvailable(): boolean {
+    return this.inputTargets?.active().routesToShell === false
+  }
+
+  /**
+   * Reconcile every grant manifestation from the one active-target
+   * capability. GrantController owns stored-mark projection; the affordance
+   * is re-evaluated on entry so a selection made in Run needs no new event.
+   */
+  private reconcileGrantPresentation(): void {
+    const available = this._active && this.grantsAvailable()
+    this.grantController?.setVisible(available)
+    // A block menu builds its items from this same capability when it opens,
+    // so one left open across a target change goes on offering the actions of
+    // the target it was opened under. Closed here rather than only on pane
+    // hide, because setActive is also called with nobody clicking — ask entry
+    // mints its own switch, and a restore replays one.
+    this.scrollback?.blockManager.closeOverflowMenus()
+    if (!available) {
+      this.markAffordance?.hide()
+      return
+    }
+    // The full claim, not a projection of it: after the flip the scrollback
+    // genuinely owns this selection, exactly as it would have if the person
+    // had dragged it in Ask, and the offer has to survive CodeMirror's
+    // restore the same way (nocx-45vkz).
+    this.onSelectionChange()
+  }
+
+  /**
+   * The ONE writer in this pane for model chips that depend on which target
+   * Enter reaches. A target that routes to the shell has no answering model.
    */
   private renderTargetChips(): void {
     if (!this.editor) return
-    const active = this.inputTargets?.active()
-    const isAsk = active !== undefined && active.id === this.agentTarget?.id
-    this.editor.setGrantChipVisible(isAsk)
-    this.editor.setModelChip(isAsk ? modelChipState(this.readiness?.status ?? null) : null)
+    this.editor.setModelChip(
+      this.grantsAvailable() ? modelChipState(this.readiness?.status ?? null) : null,
+    )
   }
 
   /** One shot. A pane is shown many times — every tab switch — and its past
@@ -4034,7 +4102,7 @@ export class TerminalContent extends BasePaneContent {
 
   /** The frame displayed by the active summoned editor, or null otherwise.
    *  This display seam ends with the overlay; the read-turn pin is separate so
-   *  session.read can keep describing the same turn after Escape. */
+   *  an in-flight read keeps its turn identity until Stop terminalizes it. */
   pinnedFrame(): CapturedFrame | null {
     return this._pinnedFrame
   }
@@ -4257,6 +4325,111 @@ export class TerminalContent extends BasePaneContent {
   /** Whether the editor can begin a capture transaction. No presentation
    *  state changes here: the frame and marker are installed only after the
    *  renderer has produced a settled snapshot. */
+  /**
+   * ONE arbiter chain (design §8.9.4 — three surfaces, one keyboard).
+   *
+   * A METHOD RATHER THAN A CLOSURE because it now has two callers, and
+   * that is the whole point: the editor asks it for a key typed into the
+   * prompt, and the target chord's one owner asks it before acting on a
+   * chord pressed from anywhere else in the pane. Two callers, one
+   * decision — the alternative is the chord re-deriving "is a surface
+   * open" from the DOM, which is the second answer AD-8 forbids.
+   */
+  private arbitrateEditorKey(e: KeyboardEvent): boolean {
+    // Every decision here is traced (off by default — `window.nocxDebug
+    // = true` in devtools): which surface got the key and why is the
+    // diagnosis for "my key did the wrong thing", and the chain's
+    // evaluation order is the accident that reads as ownership unless
+    // the decision is stated. The gate is checked BEFORE any field is
+    // built: with tracing off, a keystroke costs nothing but the check.
+    // The snippet palette chord (⌥⌘P, snippets/chord.ts) opens the
+    // palette from anywhere in the editor, exactly like recall's
+    // shortcut: checked BEFORE the surfaces so it cannot be swallowed
+    // by one of them, and opening it closes them — the palette owns
+    // the keys now (the surfaces never stack). Both keyboard paths
+    // (this arbiter and the xterm boundary) land in handleSnippetChord,
+    // which delegates to the composition root's ONE opener.
+    if (isSnippetChord(e)) {
+      if (isDecisionTracing()) {
+        logDecision('arbiter', {
+          surface: 'snippet-palette',
+          key: keyLabel(e),
+          why: 'the snippet chord opens the palette',
+        })
+      }
+      this.handleSnippetChord()
+      return true
+    }
+    // Recall first: the shortcut opens it from anywhere, and an open
+    // recall owns its keys. Opening it closes the other surfaces.
+    const recallWasOpen = this.recall!.isOpen
+    const consumed = this.recall!.handleKey(e)
+    if (this.recall!.isOpen) {
+      this.completion?.dismiss()
+      this.promptVault?.closePicker()
+    }
+    if (consumed) {
+      if (isDecisionTracing()) {
+        logDecision('arbiter', {
+          surface: 'recall',
+          key: keyLabel(e),
+          why: recallWasOpen ? 'recall is open; it owns its keys' : 'recall shortcut',
+        })
+      }
+      return true
+    }
+    // The picker outranks completion: while it is open its keys
+    // (arrows, Enter, Tab, Esc) belong to it, and a Right/End ghost
+    // accept must never insert completion text into the line under the
+    // picker.
+    if (this.promptVault!.isPickerOpen) this.completion?.dismiss()
+    if (this.promptVault!.handleKey(e)) {
+      if (isDecisionTracing()) {
+        logDecision('arbiter', {
+          surface: 'picker',
+          key: keyLabel(e),
+          why: 'picker is open; it owns its keys',
+        })
+      }
+      return true
+    }
+    // The ownership decision above, applied: an open selectable
+    // dropdown owns bare ArrowUp/ArrowDown — its footer promises
+    // navigation — so they are routed to it explicitly and can never
+    // fall through to the editor's recall gesture. Everything else
+    // (Enter, Tab, Esc, Right/End, typing) still goes to the
+    // completion controller's ordinary handling.
+    if (this.completion!.ownsArrows(e)) {
+      if (isDecisionTracing()) {
+        logDecision('arbiter', {
+          surface: 'completion',
+          key: keyLabel(e),
+          why: 'dropdown is open; bare arrows belong to it',
+        })
+      }
+      return this.completion!.handleKey(e)
+    }
+    const handled = this.completion?.handleKey(e) ?? false
+    if (handled) {
+      if (isDecisionTracing()) {
+        logDecision('arbiter', {
+          surface: 'completion',
+          key: keyLabel(e),
+          why: 'completion consumed the key',
+        })
+      }
+      return true
+    }
+    if (isDecisionTracing()) {
+      logDecision('arbiter', {
+        surface: 'editor',
+        key: keyLabel(e),
+        why: 'no surface claimed the key',
+      })
+    }
+    return false
+  }
+
   private canSummonEditor(): SummonDecision {
     const editor = this.editor
     if (editor === null) {
@@ -4447,14 +4620,32 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /** Return the newest non-terminal turn. Two submits can overlap only in the
-   * pre-ack window, before the first acceptance hides the composer; terminal
-   * ordering must therefore keep it hidden until every accepted turn settles. */
-  private _currentSummonedAnswer(): HTMLElement | null {
+   * pre-ack window, before the first acceptance hides the composer; every key
+   * path uses this one ordering decision rather than re-deriving a target. */
+  private _newestActiveSummonedAnswer(): (typeof this._summonedAnswers)[number] | null {
     for (let i = this._summonedAnswers.length - 1; i >= 0; i -= 1) {
       const answer = this._summonedAnswers[i]
-      if (!answer.terminal) return answer.el
+      if (!answer.terminal) return answer
     }
     return null
+  }
+
+  private _currentSummonedAnswer(): HTMLElement | null {
+    return this._newestActiveSummonedAnswer()?.el ?? null
+  }
+
+  /** Stop the newest active summoned turn, then thaw its presentation.
+   *
+   * The action is the exact object the answer menu received. Its isActive
+   * guard owns run acceptance, terminal state and repeat-stop idempotence;
+   * dismissing through the existing unwind makes repeated Escape a no-op. */
+  private stopCurrentSummonedAnswerAndDismiss(): boolean {
+    if (!this._summoned) return false
+    const answer = this._newestActiveSummonedAnswer()
+    if (answer?.running?.isActive(answer.el) === true) answer.running.stop()
+    // A newer pre-ack or already-stopping turn still owns Escape. Never fall
+    // through and cancel an older conversation the person did not aim at.
+    return this.dismissSummonedEditor()
   }
 
   /** Keep the current answer tail visible only while the person was already
@@ -4491,14 +4682,12 @@ export class TerminalContent extends BasePaneContent {
 
   /** Dismiss a summoned editor: the keys go back to the process (nocx-92gfl).
    *
-   *  The DRAFT IS LEFT ALONE, which is the one thing that distinguishes this
-   *  from the Escape the editor has always had. Escape here means "put this
-   *  away" — the person dismissed a surface, they did not cancel their
-   *  question — and a re-summon resumes it. Clearing is still Ctrl-C's, and
-   *  it still means exactly that.
+   *  The DRAFT IS LEFT ALONE. The caller decides whether Escape first stops
+   *  an active answer; this method owns only the existing presentation unwind
+   *  and therefore remains the dismiss-only path for a settled or absent turn.
    *
    *  Returns whether anything was dismissed, so Escape falls through to the
-   *  clear when it was not. */
+   *  ordinary editor clear when it was not. */
   private dismissSummonedEditor(): boolean {
     if (!this._summoned) return false
     // Through _endSummon, which is the ONE place a summon is unwound —
@@ -4510,6 +4699,10 @@ export class TerminalContent extends BasePaneContent {
     // the e2e, because no unit followed a dismissal past the command's end.
     this._endSummon()
     this._syncLifecycleOwnership()
+    // Escape is the discoverable hand-back gesture. Read-only state alone
+    // does not route the next physical key: focus can remain on the hidden
+    // CodeMirror content or an answer control, where q reaches nothing.
+    if (this.hasRunningCommand()) this.takeKeyboardToGrid()
     return true
   }
 
@@ -4604,7 +4797,9 @@ export class TerminalContent extends BasePaneContent {
 
   /** The person's ONE explicit target switch: the caret indicator's click
    *  and the ⌘/Ctrl+Enter chord are the same gesture, and were two copies
-   *  of it until this existed (AD-8 — one owner per behaviour).
+   *  of it until this existed (AD-8 — one owner per behaviour). The chord
+   *  itself has one recogniser too, a capture listener at the document root
+   *  (nocx-a7mw7.6); both gestures end here.
    *
    *  It refuses the shell while the editor is summoned, and that refusal is
    *  the whole of "a second command cannot be started over a running one":
@@ -4645,14 +4840,41 @@ export class TerminalContent extends BasePaneContent {
     if (session === null || !this.hasRunningCommand()) return
     void session.signal(signal).then(
       (result) => {
-        if (result.outcome === 'delivered') return
-        showToast({
-          level: 'warning',
-          message:
-            result.outcome === 'unsupported'
-              ? 'This command is running on the remote host, which nocx cannot signal from here.'
-              : 'Nothing is running in this pane any more, so there was nothing to stop.',
-        })
+        // A SWITCH, AND EXHAUSTIVE ON PURPOSE. The outcome set is closed by
+        // the contract and this is the branch the person reads, so a word
+        // the server learns to send and this does not must be a type error
+        // here rather than a wrong sentence there. The if/else this replaces
+        // had `nothing-running` as its fallback, which is the one message
+        // that must never be shown by accident: it is exactly the lie the
+        // incident was reported as (nocx-7l4ex.12).
+        let message: string
+        switch (result.outcome) {
+          case 'delivered':
+            return
+          case 'unsupported':
+            message =
+              'This command is running on the remote host, which nocx cannot signal from here.'
+            break
+          case 'unreconciled':
+            // Deliberately does NOT suggest Ctrl+C: over a group nocx may
+            // not kill, Ctrl+C is precisely what the backend just sent, and
+            // recommending the gesture that has already failed reads as the
+            // app not knowing what it did.
+            message =
+              'The command is still recorded as running and nocx could not stop it — the program shares the shell it was started from, so stopping it by force would take the shell too. Use the program’s own way out.'
+            break
+          case 'nothing-running':
+            message = 'Nothing is running in this pane any more, so there was nothing to stop.'
+            break
+          default: {
+            const unreachable: never = result.outcome
+            log.warn('nocx: session.signal returned an outcome this build does not know', {
+              outcome: String(unreachable),
+            })
+            message = 'nocx could not tell whether the command stopped.'
+          }
+        }
+        showToast({ level: 'warning', message })
       },
       (err: unknown) => {
         log.warn('nocx: session.signal failed', {
@@ -5041,6 +5263,10 @@ export class TerminalContent extends BasePaneContent {
     if (this._globalKeydown) {
       document.removeEventListener('keydown', this._globalKeydown)
       this._globalKeydown = null
+    }
+    if (this._targetChordKeydown) {
+      document.removeEventListener('keydown', this._targetChordKeydown, true)
+      this._targetChordKeydown = null
     }
     this._summoned = false
     this._summonRestoreTargetId = null

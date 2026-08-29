@@ -136,6 +136,55 @@ describe('GrantController', () => {
     expect(one.blockEl.dataset.granted).toBe('true')
     controller.destroy()
   })
+
+  it('hides every manifestation while preserving the exact grants for a visible round trip', () => {
+    const controller = new GrantController()
+    const whole = block('whole-hidden', 'git status')
+    const rows = block('rows-hidden', 'npm test', false, { start: 1, count: 1 })
+    controller.mount(document.body)
+    controller.setBlocks([whole, rows])
+    controller.chip.click()
+    expect(document.querySelector('.ui-floating-panel[data-open="true"]')).not.toBeNull()
+    whole.blockEl.classList.add('cmd-block-grant-flash')
+    rows.blockEl.querySelectorAll('.term-line')[1]?.classList.add('cmd-block-grant-flash')
+
+    controller.setVisible(false)
+
+    expect(controller.current[0]).toBe(whole)
+    expect(controller.current[1]).toBe(rows)
+    expect(controller.chip.style.display).toBe('none')
+    expect(document.querySelector('.ui-floating-panel[data-open="true"]')).toBeNull()
+    expect(whole.blockEl.dataset.granted).toBeUndefined()
+    expect(rows.blockEl.querySelector('.term-line[data-granted]')).toBeNull()
+    expect(whole.blockEl.classList.contains('cmd-block-grant-flash')).toBe(false)
+    expect(
+      rows.blockEl.querySelector('.term-line')?.classList.contains('cmd-block-grant-flash'),
+    ).toBe(false)
+
+    // Updating and reconciling again while hidden stores the same objects
+    // without leaking paint back onto either grant shape.
+    controller.setBlocks([whole, rows])
+    controller.setVisible(false)
+    expect(controller.current[0]).toBe(whole)
+    expect(controller.current[1]).toBe(rows)
+    expect(whole.blockEl.dataset.granted).toBeUndefined()
+    expect(rows.blockEl.querySelector('.term-line[data-granted]')).toBeNull()
+
+    controller.setVisible(true)
+
+    expect(controller.current[0]).toBe(whole)
+    expect(controller.current[1]).toBe(rows)
+    expect(controller.chip.style.display).toBe('')
+    expect(controller.chip.textContent).toContain('2')
+    expect(whole.blockEl.dataset.granted).toBe('true')
+    expect(rows.blockEl.querySelectorAll('.term-line[data-granted]')).toHaveLength(1)
+    expect(whole.blockEl.classList.contains('cmd-block-grant-flash')).toBe(false)
+    expect(
+      rows.blockEl.querySelector('.term-line')?.classList.contains('cmd-block-grant-flash'),
+    ).toBe(false)
+    expect(document.querySelector('.ui-floating-panel[data-open="true"]')).toBeNull()
+    controller.destroy()
+  })
   it('does not open the panel when no blocks are marked', () => {
     const controller = new GrantController()
     controller.mount(document.body)

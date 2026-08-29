@@ -250,6 +250,12 @@ func (s *WSServer) RequestRun(ctx context.Context, sessionID string, command str
 	}
 
 	lease := s.newRunLease(sid, cfg)
+	if control := agentRunControlFromContext(ctx); control != nil {
+		if !control.attachRunLease(lease) {
+			return nil, fmt.Errorf("run: %w", context.Canceled)
+		}
+		defer control.detachRunLease(lease)
+	}
 	var body json.RawMessage
 	err := lease.supervise(ctx, func(ctx context.Context) error {
 		return s.broker.Request(ctx, kind, runRequestParams{SessionID: sessionID, Command: command}, &body)

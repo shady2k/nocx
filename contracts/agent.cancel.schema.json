@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/agent.cancel.schema.json",
   "title": "AgentCancel",
-  "description": "Result of the agent.cancel JSON-RPC method (nocx-uvac6.2): the backend closes a live agent run after a person's stop request. The cancelled flag is true only when this request closed a non-terminal run; an already-terminal or unknown run is answered with an error. The terminal state is persisted before this result is answered, and the run's already-recorded prose remains in the ledger.",
+  "description": "Result of the agent.cancel JSON-RPC method (nocx-uvac6.2): the backend closes a live agent run after a person's stop request. Before terminalization it synchronously stops only assistant-run child executions registered to that exact run; a user-started or summoned host command has no registration and is never changed. The cancelled flag is true only when this request closed a non-terminal run; an already-terminal or unknown run is answered with an error. The terminal state is persisted before this result is answered, and the run's already-recorded prose remains in the ledger. The optional presentation fields mirror agent.runState so this reserved response can close the renderer even when that notification is dropped.",
   "type": "object",
   "additionalProperties": false,
   "required": ["runId", "state", "cancelled"],
@@ -21,6 +21,15 @@
       "description": "True because this request stopped the live run.",
       "type": "boolean",
       "const": true
+    },
+    "error": {
+      "description": "Additional terminal presentation detail, present only when cancellation could not stop an owned assistant-run child (for example, the host has no local process group to signal). A user-started host command is outside agent.cancel and never produces this field.",
+      "type": "string"
+    },
+    "droppedDeltas": {
+      "description": "The authoritative whole-run count of streamed chunks refused by the wire. Present only when non-zero so the reserved response preserves the same visible gap marker as agent.runState.",
+      "type": "integer",
+      "minimum": 1
     }
   }
 }

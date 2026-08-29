@@ -100,8 +100,18 @@ export class AgentInputTarget implements InputTarget {
     const running: RunningBlockActions = {
       stop: (): void => {
         if (runId === null || settled || cancellationRequested) return
+        const cancellingRunID = runId
         cancellationRequested = true
-        void this.seams.cancel(runId).catch(() => undefined)
+        // The response is reserved and arrives after durable terminalization;
+        // runState is a notification and may be dropped under outbound pressure.
+        // Whichever arrives first closes the same handle exactly once.
+        void this.seams
+          .cancel(cancellingRunID)
+          .then((result) => this.settleRun(cancellingRunID, result))
+          .catch(() => {
+            // The backend refused the stop; keep the menu/key action retryable.
+            cancellationRequested = false
+          })
       },
       isActive: (): boolean => runId !== null && !settled && !cancellationRequested,
     }
@@ -122,6 +132,43 @@ export class AgentInputTarget implements InputTarget {
     handle.el.dataset.entryId = ask.entryId
     handle.el.dataset.answeredBy = ask.model
     this.runs.set(ask.runId, { handle, askId, settle: () => (settled = true) })
+  }
+
+  private settleRun(
+    runId: number,
+    presentation: { state: AgentRunState['state']; error?: string; droppedDeltas?: number },
+  ): void {
+    const run = this.runs.get(runId)
+    if (!run) return
+    if (
+      presentation.state !== 'completed' &&
+      presentation.state !== 'cancelled' &&
+      presentation.state !== 'failed' &&
+      presentation.state !== 'interrupted'
+    )
+      return
+
+    // Delete first: runState and the reserved cancel response may race, and
+    // either may synchronously trigger presentation callbacks. The first
+    // terminal fact owns every effect below; the second is a no-op.
+    this.runs.delete(runId)
+    run.settle()
+    const dropped = presentation.droppedDeltas ?? 0
+    if (dropped > 0) {
+      run.handle.append(
+        dropped === 1
+          ? '— part of the answer was dropped while streaming; the full answer was saved —'
+          : `— ${dropped} chunks of the answer were dropped while streaming; the full answer was saved —`,
+      )
+    }
+    if (presentation.state === 'completed') {
+      run.handle.close('success', undefined, run.handle.el.dataset.answeredBy)
+    } else if (presentation.state === 'cancelled') {
+      run.handle.close('cancelled', presentation.error)
+    } else {
+      run.handle.close('failure', presentation.error ?? presentation.state)
+    }
+    this.seams.onTurnEnd?.(run.askId)
   }
 
   /** Subscribe once: deltas append to the run's block; the terminal state
@@ -194,61 +241,8 @@ export class AgentInputTarget implements InputTarget {
       handle.reasoning(r.text)
     })
     this.seams.dispatcher.subscribe('agent.runState', (params: unknown) => {
-      const s = params as AgentRunState
-      const run = this.runs.get(s.runId)
-      if (!run) return
-      if (
-        s.state === 'completed' ||
-        s.state === 'cancelled' ||
-        s.state === 'failed' ||
-        s.state === 'interrupted'
-      ) {
-        this.seams.onTurnEnd?.(run.askId)
-      }
-      const handle = run.handle
-      if (handle.el.dataset.entryId === undefined) {
-        // A run that failed before its first delta never carried the entry
-        // id on a delta — but the block was opened from the ask result, and
-        // the entry id was recorded there. If it is still missing, the
-        // block was never associated: nothing to close.
-        return
-      }
-      // A dropped live delta is a visible bound (the bead's criterion 1):
-      // the wire refused one or more agent.runDelta frames, so the block
-      // must not read as a complete answer. The durable answer is whole —
-      // every chunk was persisted before the notify — so the run still
-      // closes with the state it earned; the gap is marked, never turned
-      // into a failure (nocx-dw3.1).
-      if ((s.droppedDeltas ?? 0) > 0) {
-        handle.append(
-          s.droppedDeltas === 1
-            ? '— part of the answer was dropped while streaming; the full answer was saved —'
-            : `— ${s.droppedDeltas} chunks of the answer were dropped while streaming; the full answer was saved —`,
-        )
-      }
-      if (s.state === 'completed') {
-        run.settle()
-        handle.close('success', undefined, handle.el.dataset.answeredBy)
-      } else if (s.state === 'cancelled') {
-        run.settle()
-        handle.close('cancelled', s.error)
-      } else if (s.state === 'failed' || s.state === 'interrupted') {
-        run.settle()
-        handle.close('failure', s.error ?? s.state)
-      } else if (s.state === 'awaiting_approval') {
-        // A question is outstanding: the block stays OPEN (nothing is
-        // closed — the person decides in the approval prompt), and the run
-        // stays routable so the RESUME's deltas land on this same block
-        // (nocx-z9hj4). The terminal close arrives when the question is
-        // answered.
-        return
-      } else {
-        // Unknown state: keep the block open and routable rather than
-        // closing or forgetting it — a state this renderer does not know
-        // may still produce deltas.
-        return
-      }
-      this.runs.delete(s.runId)
+      const state = params as AgentRunState
+      this.settleRun(state.runId, state)
     })
   }
 }

@@ -183,6 +183,27 @@ So the assistant is expressed as **states of the existing machine** — the pane
 active input target is the assistant — and everything else (editor visibility, `disableStdin`,
 focus, the focus ring, what a click on the live region does) derives from that one state.
 
+Context marks follow that same active target. The sole availability fact is
+`!InputTargetRegistry.active().routesToShell`: while the target routes to the shell, selection
+remains available for reading and copy but there is no Mark affordance or block-menu action, and
+the grant chip, panel, block fill and row fill are absent. `GrantController` retains the exact
+grant objects and remains the only owner of those manifestations. When a non-shell target becomes
+active, it reprojects the saved grants and re-evaluates the current selection immediately, so the
+offer appears after the target chord without requiring another drag or selection event.
+
+Three consequences, and each was a defect before it was a rule. **A Run selection is not
+claimed.** The scrollback takes the focus off the composer only to keep an offer alive under
+a highlight (`nocx-45vkz`); with no offer to keep there is nothing bought by it, so in Run
+the selection stays ordinary selectable, copyable text and the composer keeps the caret.
+**The draft swap may not eat that selection.** Switching target replaces the editor's
+document, and a CodeMirror transaction sets the document selection to the editor's own — the
+scrollback Range is held across the swap and re-asserted, because it is the Range the flip
+exists to make an offer over. **A block menu closes on a target change.** Its items are built
+from the same availability fact when it opens, so one left open across a switch goes on
+offering the actions of the target it was opened under; `setActive` is called with nobody
+clicking (ask entry mints its own switch, a restore replays one), so the pane-hide sweep does
+not cover it.
+
 Two rules fall out and both are load-bearing:
 
 - **Program exit invalidates "hand the keys back to the program".** There may be no
@@ -190,14 +211,68 @@ Two rules fall out and both are load-bearing:
   the target as the TUI. Exit forces a visible transition.
 - **Key ownership binds to a live session generation.** After a reconnect, the same-looking
   target is a different process.
+- **A protected shell process group is not proof of an idle pane.** Some foreground
+  programs share the launcher shell's group — job control off (`set +m`, ADR-0024) or
+  `exec` — so TIOCGPGRP gives the same answer it gives at an idle prompt while a program
+  is very much running. `internal/pty` therefore names that answer separately
+  (`ErrProtectedForeground`, wrapping `ErrNoForeground`), and
+  `internal/transport/foreground_signal.go` stays the one owner of "how do you stop a
+  process": ONE policy, whose MECHANISM is chosen from that kernel answer and from
+  nothing else. An independent group is signalled with `kill(2)` and escalated through;
+  a protected group receives the terminal's own `0x03` byte and is never escalated into.
+- **What may say a program is inside a protected group.** Only an authenticated
+  lifecycle attempt that is both open and `Started` — the shell's own start, never the
+  app's submit, which opens the attempt _before_ the bytes that could cause it are
+  written (lifecycle-protocol §7). Exactly one such attempt across the session's lanes,
+  or the answer is the prompt's. Nothing here reads the byte stream (AD-6).
+- **And what the fallback does not claim.** `0x03` is a byte: the line discipline turns
+  it into SIGINT for the whole foreground group while ISIG is set — which in the
+  protected case includes the launcher shell, which ignores it — and a program that has
+  cleared ISIG receives it as input. So Stop's promise is stated on the outcome:
+  `delivered` means that exact attempt is no longer open when the response is sent,
+  `unreconciled` means nocx could not establish that. Never `nothing-running` beside a
+  running block.
+
+**The target chord has one owner, and it reads the state rather than the focus.**
+⌘/Ctrl+Enter means one thing — "I want the assistant" — and one capture-phase listener at
+the document root, per pane, recognises it: `editor.isVisible` chooses between flipping the
+active target and summoning the editor over a running command, which is the same fact
+`canSummonEditor` tests first. Capture at the root is what makes a single owner possible at
+all: it precedes xterm's helper textarea, which would otherwise turn the chord into a CR in
+the running command's stdin, and CodeMirror's `Mod-Enter` binding, which would otherwise
+insert a blank line into the draft. The editor's own surfaces keep first refusal through the
+one arbiter chain (`§8.9.4` of the command-blocks design), so an open recall, picker or
+completion dropdown still owns the keys it already owned; an overlay owns the keyboard while
+it is up; and a text control outside this pane keeps its own key stream. Nothing else in the
+renderer tests `Enter` with a Command/Ctrl modifier.
+
+Splitting that recognition across surfaces is what the rule exists against. It was split
+three ways once — a listener on the editor root, one on the xterm host, one on `document` —
+each keyed on wherever the browser had parked the focus, and between them the gesture had two
+dead states: the summon was unreachable from anywhere but the grid, so pressing the chord
+after reading the scrollback did nothing, and an open block menu swallowed the chord in
+silence.
 
 A summon over a running program reuses that machine and the **same `CommandEditor`** for
 follow-ups. The existing editor and every summoned answer are reparented into one absolute
 presentation stack: the current streaming answer hides the composer; any wire-terminal state
 returns the composer below all readable answers; and a new follow-up repeats that transition.
-Escape thaws the program without discarding those answer nodes, and command completion moves
-each node once into consecutive scrollback seats in ask order. Because the stack is absolute and
-only reparents existing DOM, this adds neither terminal geometry nor a new ownership authority.
+
+The owner's final key scope is deliberately two gestures because the user-started command and the
+assistant turn are independent executions. **Escape stops only the newest active summoned answer**,
+through the exact `RunningBlockActions.stop` object that powers that answer's menu, then dismisses
+and thaws the summon. A settled or absent turn keeps the prior dismiss-only Escape. `agent.cancel`
+also synchronously stops any command the addressed turn itself started through `run`, using that
+request's execution-specific lease; a user-started or summoned host command has no such registration
+and survives. **Ctrl+C stops no assistant turn**: while summoned, the editor delegates to the
+user-started command's interrupt owner and preserves the half-typed question; terminal chrome uses
+the existing global signal owner, and a focused live grid keeps xterm's one `0x03`. Selection/copy,
+text controls, overlays, menus and IME retain their higher-priority ownership. Stopping both the
+summoned host command and its independent answer requires both keys.
+
+Escape preserves arrived answer nodes, and command completion moves each node once into
+consecutive scrollback seats in ask order. Because the stack is absolute and only reparents
+existing DOM, this adds neither terminal geometry nor a new ownership authority.
 
 **The answers are bounded, and the bound is the feature.** This is asking ABOUT a program
 without leaving it, so the answer list keeps the `min(50vh, 36em)` cap the single pinned answer
@@ -213,7 +288,9 @@ macOS, Shift elsewhere**, forcing selection inside mouse-tracking programs. The 
 picker extends that path — it does not add a parallel pointer listener, which would be a
 second claimant on one mouse event.
 
-- **In the flow:** drag across part of a block's output → a chip in the editor.
+- **In the flow:** while Ask is active, drag across part of a block's output → a chip in the
+  editor. The same selection in Run remains ordinary selectable text and creates no assistant
+  surface.
 - **On the alternate screen:** mouse-down mints the frame at that instant (you cannot circle
   something that is moving), drag on the frozen frame, release → the same chip.
 
@@ -812,6 +889,21 @@ Assertions, in the bead, authored before the implementation.
   can finish with both answers readable in ask order, and neither submit sends PTY input or
   changes PTY geometry. Escape preserves those answer nodes; program exit seats each exactly
   once after the command, in the same order.
+- A summoned answer is held after partial prose. Press real Ctrl+C from editor, chrome/body and
+  live-grid focus: **assert** exactly one existing command owner acts, xterm emits no duplicate,
+  no `agent.cancel` frame exists, the turn still streams, and a half-typed summoned question stays
+  intact. An ordinary prompt draft still clears. Selection/copy, another text control and
+  no-command states remain untouched.
+- With that command and turn still active, press real Escape after selection, text-control,
+  overlay and menu guards: **assert** the exact answer Stop fires once, the partial answer says
+  `stopped` rather than `failed`, the summon thaws, and the command remains alive. Re-summon,
+  complete another ask, then release the command normally. A settled/no-turn Escape remains
+  dismiss-only.
+- On the real backend socket, `agent.cancel` synchronously stops the addressed turn's registered
+  renderer-run child through the existing INT → TERM → KILL ladder, then terminalizes the turn,
+  preserves arrived prose, and only then answers. A user-started/summoned command has no lease in
+  that turn and remains alive. Unsupported remote signalling leaves its warning visible while the
+  turn still closes.
 - Two asks in flight: cancelling one leaves the other streaming, and deltas land on the right
   entry. Cancel is by run id.
 - **The backend restarts mid-answer.** On start, the run is `interrupted`, the block says so,

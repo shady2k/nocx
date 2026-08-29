@@ -10,7 +10,7 @@
  */
 
 /**
- * Params of the agent.runState server-to-client notification (nocx-x8s2.2, design §7): the run's terminal state. A renderer that reconnects mid-answer reads the run's state and its appended chunks from the ledger; it never infers liveness from notifications having stopped. error is present for failed runs and for cancelled runs only when cancellation could not stop the host command; it is a sentence a person reads — never a Go error string. A cancelled run whose command was stopped omits error because the cancelled state already says what happened. droppedDeltas is present ONLY when the live view is incomplete: the wire refused one or more agent.runDelta frames (outbound's deliberate non-blocking overflow), so the block must not be read as a complete answer. The durable answer is whole either way — every chunk was persisted before the notify — so the marker is a live-view bound, never a terminal-state change (nocx-dw3.1).
+ * Params of the agent.runState server-to-client notification (nocx-x8s2.2, design §7): the run's state. A renderer that reconnects mid-answer reads the run's state and its appended chunks from the ledger; it never infers liveness from notifications having stopped. error is present for failed runs and for cancelled runs only when cancellation has additional turn-specific detail; it is a sentence a person reads — never a Go error string. Cancelling a turn stops only assistant-run child executions registered to that exact run. A user-started or summoned host command is not registered, is never reported here, and is never changed. droppedDeltas is the authoritative whole-run count and is present only when the live view is incomplete.
  */
 export interface AgentRunState {
   /**
@@ -18,7 +18,7 @@ export interface AgentRunState {
    */
   runId: number
   /**
-   * The run's state, exactly as the renderer draws it (design §7). This notification carries a terminal state: completed | cancelled | failed | interrupted.
+   * The run's state, exactly as the renderer draws it (design §7). Terminal settlement uses completed | cancelled | failed | interrupted; prepared, streaming and awaiting_approval are non-terminal lifecycle states.
    */
   state:
     | 'prepared'
@@ -29,11 +29,11 @@ export interface AgentRunState {
     | 'failed'
     | 'interrupted'
   /**
-   * The reason, present for failed runs and for cancelled runs only when the cancellation could not stop the host command: a sentence a person reads ('the endpoint's credential is unavailable' or 'the command could not be stopped on the host'), never a Go error string.
+   * The reason, present for failed runs and only when a cancelled turn has additional turn-specific detail, such as inability to signal an owned assistant-run child. A user-started host command is outside agent.cancel and never appears here.
    */
   error?: string
   /**
-   * How many streamed chunks the wire refused for this run (a full outbound queue took outbound's overflow path). Present only when non-zero: the renderer marks the block's gap instead of reading it as a complete answer. The ledger holds the whole answer regardless.
+   * The authoritative whole-run count of streamed chunks the wire refused. Present only when non-zero: the renderer marks the block's gap instead of reading it as a complete answer. The ledger holds the whole answer regardless.
    */
   droppedDeltas?: number
 }

@@ -155,12 +155,6 @@ export interface EditorActions {
    *  Absent in tests and in any host without a scrollback: the transition
    *  then simply happens, which is the same result without the animation. */
   settleAround?: (mutate: () => void) => void
-  /** ⌘Enter / Ctrl+Enter: the explicit target switch ADR-0004 §3 requires
-   *  — the indicator's keyboard twin, flipping Run ⇄ Ask. The host flips
-   *  the registry's active target; the editor stays passive, the draft is
-   *  untouched, and the next plain Enter goes wherever the person just
-   *  put it. */
-  onToggleTarget?: () => void
 }
 
 export class CommandEditor {
@@ -559,9 +553,12 @@ export class CommandEditor {
   }
 
   /**
-   * The model chip's ONE writer (nocx-rikz5). Null hides both chips — the
-   * state a Run target is in, where no model answers anything and a chip
-   * claiming one would be decoration.
+   * The model chip's ONE writer (nocx-rikz5). Null hides both of ITS chips —
+   * the endpoint and the model — which is the state a Run target is in, where
+   * no model answers anything and a chip claiming one would be decoration.
+   * The grant chip beside them is not this writer's: GrantController owns its
+   * visibility (nocx-a7mw7.5), and naming it here again would be the second
+   * owner that rule removed.
    */
   setModelChip(state: ModelChipState | null): void {
     this._modelChipTargets = { endpoint: null, model: null }
@@ -882,23 +879,12 @@ export class CommandEditor {
       return
     }
 
-    // The ask entry gesture (nocx-4wtlh): ⌘/Ctrl+Enter is the explicit
-    // switch ADR-0004 §3 requires — it flips the ACTIVE target, exactly as
-    // clicking the caret indicator does, and sends nothing. The chord that
-    // asked ONCE without moving the target is gone (owner's correction):
-    // one chord that submits and one that submits somewhere else is two
-    // send keys on one line, and the person could not see, before pressing
-    // it, where the text was about to go. Now the chord only ever changes
-    // the indicator, plain Enter is the only send, and the indicator says
-    // where it goes. The draft is untouched by the flip. Unwired (no
-    // onToggleTarget), the chord falls through to CM6.
-    if (e.key === 'Enter' && (e.metaKey || e.ctrlKey) && !e.altKey) {
-      if (!this.actions.onToggleTarget) return
-      e.preventDefault()
-      e.stopPropagation()
-      this.actions.onToggleTarget()
-      return
-    }
+    // ⌘/Ctrl+Enter is NOT handled here (nocx-a7mw7.6). The target chord
+    // has one owner, a capture listener at the document root, because the
+    // gesture must mean the same thing from the composer, from the grid and
+    // from a scrollback selection that has released the focus — and a
+    // listener on this root can only ever see the first of those. It runs
+    // before this one, so the chord never reaches CM6's Mod-Enter binding.
 
     // Standard editor keys.
     if (e.key === 'Enter' && !e.shiftKey) {

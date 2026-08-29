@@ -190,6 +190,20 @@ the grant chip, panel, block fill and row fill are absent. `GrantController` ret
 grant objects and remains the only owner of those manifestations. When a non-shell target becomes
 active, it reprojects the saved grants and re-evaluates the current selection immediately, so the
 offer appears after the target chord without requiring another drag or selection event.
+
+Three consequences, and each was a defect before it was a rule. **A Run selection is not
+claimed.** The scrollback takes the focus off the composer only to keep an offer alive under
+a highlight (`nocx-45vkz`); with no offer to keep there is nothing bought by it, so in Run
+the selection stays ordinary selectable, copyable text and the composer keeps the caret.
+**The draft swap may not eat that selection.** Switching target replaces the editor's
+document, and a CodeMirror transaction sets the document selection to the editor's own — the
+scrollback Range is held across the swap and re-asserted, because it is the Range the flip
+exists to make an offer over. **A block menu closes on a target change.** Its items are built
+from the same availability fact when it opens, so one left open across a switch goes on
+offering the actions of the target it was opened under; `setActive` is called with nobody
+clicking (ask entry mints its own switch, a restore replays one), so the pane-hide sweep does
+not cover it.
+
 Two rules fall out and both are load-bearing:
 
 - **Program exit invalidates "hand the keys back to the program".** There may be no

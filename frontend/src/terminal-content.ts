@@ -261,6 +261,15 @@ export interface PaneIdentity {
   readonly registered: Promise<boolean>
 }
 
+/** A scrollback selection held across a transaction that would overwrite it. */
+interface HeldRange {
+  readonly range: Range
+  readonly startNode: Node
+  readonly startOffset: number
+  readonly endNode: Node
+  readonly endOffset: number
+}
+
 /** The host callbacks a tab may hand a TerminalContent. Named rather than
  *  positional: they are all optional functions, so any misalignment between
  *  them type-checks cleanly and fails only in front of a user. */
@@ -629,6 +638,18 @@ export class TerminalContent extends BasePaneContent {
       this.markAffordance?.hide()
       return
     }
+    // AND IT IS ONLY THIS SURFACE'S SELECTION WHEN THERE IS AN OFFER TO MAKE
+    // (nocx-a7mw7.7). Everything below claims the selection in order to keep
+    // an offer alive under it. A target that routes to the shell makes no
+    // offer, so the claim buys nothing and costs the caret: a person reading
+    // output mid-command lost the composer's focus to protect a button that
+    // was never going to appear. In Run the selection stays what it looks
+    // like — ordinary, selectable, copyable text — and the composer keeps
+    // the keyboard.
+    if (!this.grantsAvailable()) {
+      this.markAffordance?.hide()
+      return
+    }
     // ── THE SELECTION HAS ONE OWNER, AND IT IS THIS SURFACE (nocx-45vkz) ─
     //
     // The scrollback is about to offer a grant over this selection, so it
@@ -688,13 +709,6 @@ export class TerminalContent extends BasePaneContent {
         held.removeAllRanges()
         held.addRange(range)
       }
-    }
-    // Run cannot consume a mark, but it still owns the scrollback selection:
-    // preserving the exact range is what lets the target chord reveal the
-    // offer without asking the person to select again.
-    if (!this.grantsAvailable()) {
-      this.markAffordance?.hide()
-      return
     }
     this.markAffordance?.show(
       {
@@ -1603,6 +1617,15 @@ export class TerminalContent extends BasePaneContent {
         const prevId = this.activeTargetId
         if (this.editor && prevId !== null && prevId !== target.id) {
           const sel = this.editor.getSelection()
+          // THE DRAFT SWAP MUST NOT EAT A SELECTION IT DOES NOT OWN
+          // (nocx-a7mw7.7). replaceDoc and clear dispatch CodeMirror
+          // transactions, and a transaction sets the DOCUMENT selection to
+          // the editor's own — which silently discards a highlight the
+          // person made in the scrollback. That is the highlight the flip
+          // is FOR: Run → Ask over selected output is how the offer is
+          // reached without dragging twice. Held across the swap and put
+          // back, and only when it was never the editor's to begin with.
+          const held = this.heldScrollbackRange()
           this.targetState.saveDraft(prevId, {
             text: this.editor.getDoc(),
             from: sel.from,
@@ -1619,6 +1642,7 @@ export class TerminalContent extends BasePaneContent {
             // surfaces hold no stale findings from the other mode.
             this.editor.clear()
           }
+          this.restoreScrollbackRange(held)
         }
         this.activeTargetId = target.id
         // The line-start indicator renders the registry's active target
@@ -3213,7 +3237,6 @@ export class TerminalContent extends BasePaneContent {
           this.grantedBlocks = [...blocks]
         },
       })
-      this.grantController.setVisible(this._active && this.grantsAvailable())
       const chipRow = this.editor.root.querySelector<HTMLElement>('.nocx-editor-chrome-left')
       if (chipRow) this.grantController.mount(chipRow)
       this.editor.onGrantChipClick(() => this.grantController?.toggle())
@@ -3544,6 +3567,51 @@ export class TerminalContent extends BasePaneContent {
     })
   }
 
+  /**
+   * The document selection when it belongs to this pane's scrollback rather
+   * than to the editor — the only case worth holding across a transaction
+   * that will overwrite it. Null whenever there is nothing to protect.
+   *
+   * THE RANGE OBJECT, not a copy of it, plus its boundary points. Re-asserting
+   * is `setStart`/`setEnd` on that same object, the way the ownership claim in
+   * onSelectionChange already does it: a clone is a different Range, and the
+   * surfaces downstream measure the one the selection actually holds.
+   */
+  private heldScrollbackRange(): HeldRange | null {
+    const selection = window.getSelection()
+    if (!selection || selection.isCollapsed || selection.rangeCount === 0) return null
+    const range = selection.getRangeAt(0)
+    const inner = this.scrollback?.scrollbackInner
+    if (!inner || !inner.contains(range.commonAncestorContainer)) return null
+    return {
+      range,
+      startNode: range.startContainer,
+      startOffset: range.startOffset,
+      endNode: range.endContainer,
+      endOffset: range.endOffset,
+    }
+  }
+
+  /** Put back what heldScrollbackRange held, if the swap moved it. */
+  private restoreScrollbackRange(held: HeldRange | null): void {
+    if (!held) return
+    const selection = window.getSelection()
+    if (!selection) return
+    const current = selection.rangeCount > 0 ? selection.getRangeAt(0) : null
+    if (
+      current !== null &&
+      current.startContainer === held.startNode &&
+      current.startOffset === held.startOffset &&
+      current.endContainer === held.endNode &&
+      current.endOffset === held.endOffset
+    )
+      return
+    held.range.setStart(held.startNode, held.startOffset)
+    held.range.setEnd(held.endNode, held.endOffset)
+    selection.removeAllRanges()
+    selection.addRange(held.range)
+  }
+
   /** Whether the active input target can consume marks on its next submit. */
   private grantsAvailable(): boolean {
     return this.inputTargets?.active().routesToShell === false
@@ -3557,10 +3625,20 @@ export class TerminalContent extends BasePaneContent {
   private reconcileGrantPresentation(): void {
     const available = this._active && this.grantsAvailable()
     this.grantController?.setVisible(available)
+    // A block menu builds its items from this same capability when it opens,
+    // so one left open across a target change goes on offering the actions of
+    // the target it was opened under. Closed here rather than only on pane
+    // hide, because setActive is also called with nobody clicking — ask entry
+    // mints its own switch, and a restore replays one.
+    this.scrollback?.blockManager.closeOverflowMenus()
     if (!available) {
       this.markAffordance?.hide()
       return
     }
+    // The full claim, not a projection of it: after the flip the scrollback
+    // genuinely owns this selection, exactly as it would have if the person
+    // had dragged it in Ask, and the offer has to survive CodeMirror's
+    // restore the same way (nocx-45vkz).
     this.onSelectionChange()
   }
 
@@ -4631,7 +4709,9 @@ export class TerminalContent extends BasePaneContent {
 
   /** The person's ONE explicit target switch: the caret indicator's click
    *  and the ⌘/Ctrl+Enter chord are the same gesture, and were two copies
-   *  of it until this existed (AD-8 — one owner per behaviour).
+   *  of it until this existed (AD-8 — one owner per behaviour). The chord
+   *  itself has one recogniser too, a capture listener at the document root
+   *  (nocx-a7mw7.6); both gestures end here.
    *
    *  It refuses the shell while the editor is summoned, and that refusal is
    *  the whole of "a second command cannot be started over a running one":

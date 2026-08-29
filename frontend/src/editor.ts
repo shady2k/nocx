@@ -553,9 +553,12 @@ export class CommandEditor {
   }
 
   /**
-   * The model chip's ONE writer (nocx-rikz5). Null hides both chips — the
-   * state a Run target is in, where no model answers anything and a chip
-   * claiming one would be decoration.
+   * The model chip's ONE writer (nocx-rikz5). Null hides both of ITS chips —
+   * the endpoint and the model — which is the state a Run target is in, where
+   * no model answers anything and a chip claiming one would be decoration.
+   * The grant chip beside them is not this writer's: GrantController owns its
+   * visibility (nocx-a7mw7.5), and naming it here again would be the second
+   * owner that rule removed.
    */
   setModelChip(state: ModelChipState | null): void {
     this._modelChipTargets = { endpoint: null, model: null }

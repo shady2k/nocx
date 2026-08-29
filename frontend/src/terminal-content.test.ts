@@ -5306,6 +5306,65 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
+  it('a Run selection stays ordinary text and never takes the focus off the composer', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      ed.focus()
+      const block = frozenBlockOf(content, 'ls', ['total 12', 'docs'])
+      expect(activeLabel(content)).toBe('Shell')
+
+      selectRows(block, 0, 1)
+
+      // The focus transfer exists to protect an offer (nocx-45vkz). In Run
+      // there is no offer, so taking the focus is a silent loss with nothing
+      // bought by it: the composer keeps the caret and the selection stays
+      // selectable, copyable text.
+      expect(ed.rootContains(document.activeElement)).toBe(true)
+      expect(document.querySelector<HTMLElement>('.mark-affordance')?.style.display).toBe('none')
+      expect(window.getSelection()?.isCollapsed).toBe(false)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('a target change closes a block menu that is offering the wrong actions', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const registry = (content as unknown as { inputTargets: { setActive(id: string): void } })
+        .inputTargets
+      registry.setActive('agent')
+      const block = frozenBlockOf(content, 'git status', ['clean'])
+
+      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      expect(document.querySelector('.cmd-overflow-menu-item[data-action="grant"]')).not.toBeNull()
+
+      // Programmatic, because that is the case the pane-hide sweep cannot
+      // reach: ask entry and restore both call setActive without anybody
+      // clicking. A menu left open goes on offering Mark in Run.
+      registry.setActive('shell')
+
+      expect(document.querySelector('.cmd-overflow-menu')).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
   it('re-evaluates an existing Run selection when the real chord switches to Ask', async () => {
     const { client } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(

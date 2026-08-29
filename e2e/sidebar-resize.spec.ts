@@ -74,7 +74,11 @@ async function nameBox(
   return el.evaluate((n) => ({ client: n.clientWidth, scroll: n.scrollWidth }))
 }
 
-/** Drag the resize handle by `dx` pixels from its centre. */
+/** Drag the resize handle so the sidebar GROWS by `dx` pixels (a negative
+ *  `dx` shrinks it). The handle is on the panel's LEADING edge — the panel is
+ *  at the window's trailing edge — so growing it means moving the pointer
+ *  LEFT (nocx-crjft). Every call site says what it wants of the sidebar; only
+ *  the direction that means is in here. */
 async function dragHandle(page: import('@playwright/test').Page, dx: number): Promise<void> {
   const handle = page.locator(HANDLE)
   const box = await handle.boundingBox()
@@ -83,7 +87,7 @@ async function dragHandle(page: import('@playwright/test').Page, dx: number): Pr
   const y = box.y + box.height / 2
   await page.mouse.move(startX, y)
   await page.mouse.down()
-  await page.mouse.move(startX + dx, y, { steps: 10 })
+  await page.mouse.move(startX - dx, y, { steps: 10 })
   await page.mouse.up()
 }
 
@@ -188,12 +192,15 @@ test.describe('sidebar resize (nocx-qmcu)', () => {
     await promptReady(page)
 
     await page.locator(HANDLE).focus()
+    // ArrowRight moves the separator right; the panel is to its right, so the
+    // panel narrows. The key's physical direction is unchanged — what changed
+    // is which side of the separator the panel is on (nocx-crjft).
     await page.keyboard.press('ArrowRight')
-    await expect.poll(() => sidebarWidth(page)).toBe(248)
-    await expect.poll(() => persistedWidth(backend)).toBe(248)
+    await expect.poll(() => sidebarWidth(page)).toBe(232)
+    await expect.poll(() => persistedWidth(backend)).toBe(232)
 
     await page.keyboard.press('ArrowRight')
-    await expect.poll(() => sidebarWidth(page)).toBe(256)
+    await expect.poll(() => sidebarWidth(page)).toBe(224)
 
     await page.keyboard.press('Home')
     await expect.poll(() => sidebarWidth(page)).toBe(200)

@@ -299,14 +299,16 @@ describe('sidebar', () => {
     const ctrl = createSidebarWidthController(panel, 240, persist)
     mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION], undefined, undefined, undefined, ctrl)
 
+    // The panel sits at the window's trailing edge, so its handle is on the
+    // LEFT and dragging LEFT is what widens it (nocx-crjft).
     const sep = panel.querySelector('[role="separator"]') as HTMLElement
-    fireEvent.pointerDown(sep, { clientX: 100, pointerId: 1 })
+    fireEvent.pointerDown(sep, { clientX: 200, pointerId: 1 })
     expect(ctrl.isDragging()).toBe(true)
-    fireEvent.pointerMove(sep, { clientX: 200, pointerId: 1 })
+    fireEvent.pointerMove(sep, { clientX: 100, pointerId: 1 })
     expect(panel.style.getPropertyValue('--sidebar-width')).toBe('340px')
     expect(persist).not.toHaveBeenCalled() // still dragging
 
-    fireEvent.pointerUp(sep, { clientX: 200, pointerId: 1 })
+    fireEvent.pointerUp(sep, { clientX: 100, pointerId: 1 })
     expect(ctrl.isDragging()).toBe(false)
     expect(persist).toHaveBeenCalledWith(340)
   })
@@ -317,11 +319,14 @@ describe('sidebar', () => {
     const ctrl = createSidebarWidthController(panel, 636, persist)
     mountSidebar(bar, panel, TWO_VIEWS, [SETTINGS_ACTION], undefined, undefined, undefined, ctrl)
 
+    // ArrowLeft moves the separator left, which on this side is the growing
+    // direction — the ceiling is what it runs into. The key's physical
+    // direction did not change; which side the panel is on did (nocx-crjft).
     const sep = panel.querySelector('[role="separator"]') as HTMLElement
-    fireEvent.keyDown(sep, { key: 'ArrowRight' })
+    fireEvent.keyDown(sep, { key: 'ArrowLeft' })
     expect(panel.style.getPropertyValue('--sidebar-width')).toBe('640px')
     expect(persist).toHaveBeenLastCalledWith(640)
-    fireEvent.keyDown(sep, { key: 'ArrowRight' }) // already at the ceiling
+    fireEvent.keyDown(sep, { key: 'ArrowLeft' }) // already at the ceiling
     expect(persist).toHaveBeenCalledTimes(1)
     fireEvent.keyDown(sep, { key: 'Home' })
     expect(panel.style.getPropertyValue('--sidebar-width')).toBe('200px')

@@ -147,8 +147,6 @@ type WSServer struct {
 	tokenSource io.Reader // entropy source; crypto/rand default
 	origins     OriginPolicy
 
-	// Override the listen address. Default 127.0.0.1:0.
-	listenAddr string
 	// listenAddress is the address the listener actually bound, resolved
 	// once in Start. Port alone cannot answer "where is the WS server",
 	// because the host half is a configuration choice — see Addr.
@@ -1555,11 +1553,14 @@ func (s *WSServer) Start(ctx context.Context) error {
 	// because a page reading this with fetch needs them.
 	mux.HandleFunc("GET "+downloadRoutePrefix+"{ticket}", s.handleDownloadFetch)
 
-	addr := s.listenAddr
-	if addr == "" {
-		addr = "127.0.0.1:0"
-	}
-	listener, err := net.Listen("tcp", addr)
+	// LOOPBACK, AND A PORT THE OS PICKS, with nothing that can change
+	// either. Both halves are the design's (§6): loopback keeps the PTY off
+	// the network entirely, and the option that used to override this went
+	// with cmd/devharness — a coordinator that lives for days and could be
+	// told where to bind is a coordinator that can be told to bind off
+	// loopback. Where it actually landed is Addr's to answer, and the
+	// discovery socket is how a client learns it.
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return fmt.Errorf("ws listen: %w", err)
 	}
@@ -1705,8 +1706,9 @@ func (s *WSServer) Port() int {
 }
 
 // Addr returns the address the WS server actually bound, host and port, or
-// "" before Start. The default is loopback with an OS-chosen port
-// (WithListenAddr), so the port alone is not the answer to "where is it" —
+// "" before Start. There is no option to bind anywhere else: the address is
+// always loopback with an OS-chosen port, so the port alone is not the
+// answer to "where is it" —
 // and a discovery handshake that told a client a port and let it guess the
 // host would be guessing on the client's behalf.
 func (s *WSServer) Addr() string {

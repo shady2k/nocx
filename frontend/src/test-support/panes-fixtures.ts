@@ -545,6 +545,14 @@ export interface ClientFake {
    *  way a second window does. */
   _fireDisplaced: (d?: { sessionId: string; instanceId: string; sessionEpoch: number }) => void
   readonly connected: boolean
+  /** What the coordinator is still running, asked once before the chain is
+   *  drawn (design D5). Answers an empty list by default, which is a cold
+   *  backend and the ordinary case; a restore test that means to RECLAIM a
+   *  pane overrides it with an entry naming that pane. */
+  listLiveSessions: ReturnType<typeof vi.fn>
+  /** Take one of those back. Answers a fresh session by default, so a pane
+   *  that adopts one still has a handle to drive. */
+  reclaimSession: ReturnType<typeof vi.fn>
   /** Sessions created by openSession calls, in order. */
   _sessions: SessionFake[]
   /** The narrow dispatcher seam TerminalContent's lifecycle wiring touches:
@@ -619,6 +627,8 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     openSession: vi.fn(() => Promise.resolve(newSession())),
     openSSHSession: vi.fn(() => Promise.resolve(newSession())),
     openSSHSessionByHost: vi.fn(() => Promise.resolve(newSession())),
+    listLiveSessions: vi.fn(() => Promise.resolve([])),
+    reclaimSession: vi.fn(() => Promise.resolve(newSession())),
     close: vi.fn(),
     sendToSession: vi.fn(),
     sendResize: vi.fn(),

@@ -142,8 +142,8 @@ type wsRPCResult struct {
 
 func dialAppWS(t *testing.T, a *App) *websocket.Conn {
 	t.Helper()
-	u := url.URL{Scheme: "ws", Host: fmt.Sprintf("127.0.0.1:%d", a.WSPort()), Path: "/session"}
-	d := websocket.Dialer{Subprotocols: []string{"nocx.token." + a.WSToken()}}
+	u := url.URL{Scheme: "ws", Host: fmt.Sprintf("127.0.0.1:%d", a.Transport.Port()), Path: "/session"}
+	d := websocket.Dialer{Subprotocols: []string{"nocx.token." + a.Transport.Token()}}
 	conn, _, err := d.Dial(u.String(), nil)
 	if err != nil {
 		t.Fatalf("dial: %v", err)

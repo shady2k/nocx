@@ -21,17 +21,19 @@ package app
 // declarers, and the probe runs only once the stance says the store is in
 // play:
 //
-//   - AN EXPLICIT OPTION. WithRealSystemKeystore(reason) or
-//     WithoutSystemKeystore(), from a composition root that knows — a
-//     launcher starting a backend inside a login session, or a test.
+//   - AN EXPLICIT OPTION. WithRealSystemKeystore(reason), from a composition
+//     root that knows — a launcher starting a backend inside a login
+//     session, or a test that means to write to the developer's own
+//     keychain. Its counterpart, "absent", is stated only by tests and so
+//     lives in the test binary (apptest_test.go's withoutSystemKeystore).
 //   - THE BUILD. Everything else takes buildKeystoreStance, which is a
 //     compile-time constant selected by build tag (keystore_build*.go).
 //     It is a build property and not an environment variable on purpose:
 //     for a process that lives for days, a keystore switch any process of
-//     the user can set is the wrong shape (design §6). The dev/test
-//     override that IS an environment variable lives in cmd/devharness,
-//     where it cannot reach a shipped build, and the coordinator launcher
-//     strips it from a spawned daemon's environment (coordinator/spawn.go).
+//     the user can set is the wrong shape (design §6). There is no longer an
+//     environment override anywhere: cmd/devharness carried the last one and
+//     is gone with the cutover (design D11), so every backend this repo
+//     builds now takes its stance from the tag it was compiled with.
 //
 // ONE POLICY IN ONE PLACE. decideKeystore below returns the stance, the
 // provider built from it and whether to probe, together, as one value. They

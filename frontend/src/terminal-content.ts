@@ -377,6 +377,26 @@ export interface TerminalContentHooks {
    *  it is the same idea — a state names one page that repairs it — and
    *  wired by main.tsx to the Settings tab's Roles page. */
   onOpenRoles?: () => void
+  /** TAKE A LIVE SESSION BACK instead of opening a new one (design D5, §5).
+   *
+   *  The coordinator outlives this window, so a pane the layout chain brings
+   *  back may still have its process running on the other side. When the
+   *  backend named a live session for this pane, the pane manager supplies
+   *  this; calling it claims that session and answers with a handle to it,
+   *  and `openRequestedSession` never runs.
+   *
+   *  A THUNK, not a handle, because the claim must not happen before the pane
+   *  mounts. One client owns a session at a time (D8), so claiming takes it
+   *  from whoever holds it — a pane built during a restore and then disposed
+   *  before it was ever shown must not have stolen anything on the way past.
+   *  It is therefore called exactly where an open would have been called, and
+   *  only then.
+   *
+   *  A REJECTION IS NOT FATAL: the session died, or another client took it,
+   *  between the list and the claim. The pane then opens a fresh session, the
+   *  way a pane with nothing to reclaim always has. Whoever supplies the
+   *  thunk owns saying so to the person — this side only falls back. */
+  adoptSession?: () => Promise<SessionHandle>
 }
 
 type SummonDecision =
@@ -882,6 +902,9 @@ export class TerminalContent extends BasePaneContent {
   private readonly _readyPromise: Promise<boolean>
   /** The drop gesture's detach, held for dispose. */
   private _dropDetach: (() => void) | null = null
+  /** Whether the reclaim of a live session has already been tried — see
+   *  adoptLiveSession. */
+  private _adoptAttempted = false
   /** This pane's files binding, opened on the FIRST upload and reused. A
    *  terminal does not need one to run, so it is not opened at mount: a
    *  binding is a provider, a pooled SSH reference and a watch set, and a
@@ -1380,6 +1403,8 @@ export class TerminalContent extends BasePaneContent {
    * the open goes out exactly as it did before this bead, unanchored.
    */
   private async openRequestedSession(): Promise<SessionHandle> {
+    const adopted = await this.adoptLiveSession()
+    if (adopted !== null) return adopted
     const anchor: OpenAnchor = (await this.pane.registered) ? { paneId: this.pane.paneId } : {}
     if (!this.sshOpts) {
       return this.client.openSession(this.cols, this.rows, anchor)
@@ -1394,6 +1419,37 @@ export class TerminalContent extends BasePaneContent {
       this.sshOpts.user,
       anchor,
     )
+  }
+
+  /**
+   * Take back the session the coordinator is already running for this pane,
+   * or answer null so a new one is opened (design D5, §5).
+   *
+   * THE ATTEMPT IS MADE AT MOST ONCE per pane, whatever happens to it. The
+   * caller retries on a host-key refusal, and a second claim would be a
+   * second attempt to take a session this pane has already established it
+   * cannot have — the ssh fallback is what the retry is about.
+   *
+   * A failure is answered with null rather than raised: the session ended, or
+   * another client claimed it, between the list and the claim, and the pane
+   * then starts a fresh one exactly as a pane with nothing to reclaim does.
+   * Whoever supplied the thunk says so to the person — the fallback is here
+   * and the account of it is there, because this side cannot tell a claim
+   * that lost a race from a backend that never held anything.
+   */
+  private async adoptLiveSession(): Promise<SessionHandle | null> {
+    const adopt = this.hooks.adoptSession
+    if (adopt === undefined || this._adoptAttempted) return null
+    this._adoptAttempted = true
+    try {
+      return await adopt()
+    } catch (err) {
+      log.warn('nocx: the live session for this pane could not be taken back', {
+        pane: this.pane.paneId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return null
+    }
   }
 
   private async openSessionWithHostKeyRecovery(signal: AbortSignal): Promise<SessionHandle> {

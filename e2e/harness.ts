@@ -322,7 +322,7 @@ async function resetStand(): Promise<void> {
 
 /** One JSON-RPC call at a time over a socket opened for this purpose. The
  *  data plane is not touched: every frame here is text. */
-async function openControlPlane(
+export async function openControlPlane(
   port: number,
   token: string,
 ): Promise<{ call: (method: string, params: unknown) => Promise<unknown>; close: () => void }> {
@@ -381,18 +381,23 @@ function uuidv7(): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
-// ── Vault e2e helper: managed devharness lifecycle ───────────────────
+// ── Vault e2e helper: managed nocx-server lifecycle ──────────────────
 //
-// VaultBackend wraps a devharness child process so a spec can stop and
+// VaultBackend wraps a nocx-server child process so a spec can stop and
 // restart the backend with a fresh token (which changes per launch). The
-// caller provides the binary path; start() returns the WS port and token.
+// caller provides the binary path — readStand().server, or
+// readStand().serverLoginSession for the one spec whose subject is the OS
+// keystore — and start() returns the WS port and token.
 //
-// The XDG dirs passed to the constructor are used for every instance, so
-// vault state (DB, sealed vault files) survives restart.
+// The disposable root passed to the constructor is used for every instance,
+// so vault state (DB, sealed vault files) survives a restart. It is also what
+// keeps two of these apart: the coordinator's discovery socket and its
+// single-daemon lock live under the profile the home resolves, so one root is
+// one backend and a second server on the same root refuses to start rather
+// than quietly serving beside the first.
 //
 // Usage:
-//   const backend = new VaultBackend('/tmp/nocx-devharness',
-//     { data: '/tmp/vt/data', config: '/tmp/vt/config', cache: '/tmp/vt/cache' })
+//   const backend = new VaultBackend(readStand().server, { root })
 //   const { port, token } = await backend.start()
 //   // … test …
 //   const { port: p2, token: t2 } = await backend.restart()
@@ -401,6 +406,7 @@ import { spawn, execSync, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, openSync, mkdirSync, copyFileSync } from 'node:fs'
 import { resolve, basename, join } from 'node:path'
 
+import { awaitCoordinator } from './coordinator'
 import { createHomeIsolation, type HomeIsolation } from './home-isolation'
 
 /**
@@ -756,94 +762,76 @@ export class VaultBackend {
   /** The canonical home this backend was given, once it has been started. */
   private isolation: HomeIsolation | null = null
 
+  /**
+   * THE BINARY IS THE STANCE, and there is no flag beside it.
+   *
+   * This used to take a `withoutSecretService` boolean that pointed
+   * DBUS_SESSION_BUS_ADDRESS at nothing and set NOCX_NO_SYSTEM_KEYSTORE — set
+   * by the specs that are ABOUT the passphrase path and missing everywhere
+   * else, which is nocx-nhhr exactly: two launchers disagreeing about one
+   * premise, and a keychain dialog per backend start on a macOS host for
+   * every spec that forgot (nocx-o4hg).
+   *
+   * The premise is a build property now (design D10). `readStand().server`
+   * declares no login session, so it has no OS keystore to reach at all;
+   * `readStand().serverLoginSession` declares one, and is what the single
+   * spec about the silent OS-key path passes. Nothing to set, nothing to
+   * forget, and this launcher and stand.ts take the premise from the same
+   * place — which is what that bead asked for.
+   */
   constructor(
     private readonly binary: string,
     private readonly disposable: DisposableRoot,
-    /**
-     * Cut the backend off from the session bus, so its system provider probes
-     * as unavailable no matter what is running around the test.
-     *
-     * A case that needs "no OS keychain" cannot get it by assuming: run the
-     * suite inside the dbus-run-session the keyring case requires and the
-     * passphrase cases fail, because setup silently succeeds and the dialog
-     * they wait for never appears. That is a true result reported as the wrong
-     * defect. Pointing DBUS_SESSION_BUS_ADDRESS at nothing makes the condition
-     * explicit and identical in both environments.
-     */
-    private readonly withoutSecretService = false,
   ) {
     if (!existsSync(binary)) {
-      throw new Error(`devharness binary not found: ${binary}`)
+      throw new Error(`nocx-server binary not found: ${binary}`)
     }
   }
 
-  /** Start devharness on the given port, wait for WSPORT/WSTOKEN. */
-  /** Start the backend. The port defaults to 0, which asks the OS for a free
-   *  one and reads back what it got — devharness prints WSPORT either way.
+  /**
+   * Start the backend and learn where it answers.
    *
-   *  It used to be required, and every spec picked a constant by hand. Three
-   *  pairs collided: vault-settings and recall-search both claimed 19880,
-   *  history-persistence and home-boundary-live both 19878, prompt-vault and
-   *  connection-password both 19901. In isolation each passed; in a full run
-   *  whichever went second could find the port still held and come up with no
-   *  backend at all, which surfaces as "no tab ever appeared" somewhere else
-   *  entirely. A port is a shared resource and hand-assignment does not scale
-   *  past the first person who forgets to check (nocx-z9s9.11). */
-  async start(port = 0): Promise<BackendEndpoint> {
+   * NO PORT, and nothing to collide over. nocx-server binds loopback on a
+   * port the OS picks and takes no flags at all — the token must never reach
+   * argv (design §6) — so the address is learnt the way the desktop launcher
+   * learns it: off the discovery socket, through e2e/coordinator.ts. That
+   * closes by construction what nocx-z9s9.11 closed by convention. Three
+   * pairs of specs once claimed the same hand-picked port (19880, 19878,
+   * 19901); in a full run whichever went second found it held and came up
+   * with no backend at all, surfacing as "no tab ever appeared" somewhere
+   * else entirely.
+   */
+  async start(): Promise<BackendEndpoint> {
     if (this.proc) throw new Error('backend already running; call stop() first')
-    this.logPath = resolve(this.disposable.root, `devharness-${port || 'auto'}.log`)
+    this.logPath = resolve(this.disposable.root, 'nocx-server.log')
     const logFd = openSync(this.logPath, 'w')
 
-    const overrideEnv: Record<string, string> = { NOCX_WS_ADDR: `127.0.0.1:${port}` }
-    if (this.withoutSecretService) {
-      overrideEnv.DBUS_SESSION_BUS_ADDRESS = 'unix:path=/nonexistent/nocx-e2e-no-secret-service'
-      // The portable half. The line above is a LINUX mechanism: on macOS
-      // go-keyring goes to the Security framework and ignores it entirely, so
-      // these cases were not arranging "no keystore" there at all — and with a
-      // disposable $HOME the framework found no login keychain under it and put
-      // a "Keychain not found" dialog on the developer's screen, once per
-      // backend start (nocx-o4hg). Both are set: the env var states the premise
-      // on every platform, and the dbus one keeps stating it for anything that
-      // reads the bus directly.
-      overrideEnv.NOCX_NO_SYSTEM_KEYSTORE = '1'
-    }
-
-    // The same boundary the default path gets from playwright.config.ts. Built
-    // per start() rather than per instance so a restart re-derives it: if the
+    // The same boundary the shared stand gets from e2e/stand.ts. Built per
+    // start() rather than per instance so a restart re-derives it: if the
     // root were ever swapped underneath, the refusals fire again rather than a
     // stale environment being replayed.
     this.isolation = createHomeIsolation({
       inheritedEnv: process.env,
-      overrideEnv,
       root: this.disposable.root,
     })
     const env = this.isolation.env as Record<string, string>
 
     this.proc = spawn(this.binary, [], { env, stdio: ['ignore', logFd, logFd], detached: false })
 
-    // Wait for WSTOKEN line (printed after WSPORT).
-    const timeoutMs = 15_000
-    const pollIntervalMs = 200
-    const deadline = Date.now() + timeoutMs
-
-    while (Date.now() < deadline) {
-      if (!this.proc || (!this.proc.killed && this.proc.exitCode !== null)) {
-        const code = this.proc?.exitCode
-        const log = readFileSync(this.logPath, 'utf8')
-        throw new Error(`devharness exited early (code=${code}):\n${log}`)
+    const readLog = (): string => {
+      try {
+        return readFileSync(this.logPath, 'utf8')
+      } catch {
+        return ''
       }
-      const log = readFileSync(this.logPath, 'utf8')
-      const m = log.match(/^WSTOKEN=(.+)$/m)
-      if (m) {
-        const p = log.match(/^WSPORT=(\d+)$/m)
-        return { port: p ? Number(p[1]) : port, token: m[1] }
-      }
-      const { promise, resolve: later } = Promise.withResolvers<void>()
-      setTimeout(later, pollIntervalMs)
-      await promise
     }
-
-    throw new Error(`devharness did not print WSTOKEN within ${timeoutMs}ms`)
+    const { port, token } = await awaitCoordinator({
+      readLog,
+      alive: () => this.proc !== null && this.proc.exitCode === null,
+      what: this.binary,
+      timeoutMs: 30_000,
+    })
+    return { port, token }
   }
 
   /**
@@ -861,7 +849,7 @@ export class VaultBackend {
   private preserveLog(): void {
     if (!this.logPath) return
     try {
-      const dir = resolve(process.cwd(), 'test-results', 'devharness')
+      const dir = resolve(process.cwd(), 'test-results', 'nocx-server')
       mkdirSync(dir, { recursive: true })
       copyFileSync(this.logPath, resolve(dir, basename(this.logPath)))
     } catch {
@@ -880,7 +868,7 @@ export class VaultBackend {
     }
   }
 
-  /** Stop the running devharness. */
+  /** Stop the running server. */
   stop(): void {
     this.preserveLog()
     if (!this.proc) return
@@ -903,14 +891,18 @@ export class VaultBackend {
       /* fine */
     }
   }
-  /** Restart with a fresh token. Same port policy as start(): 0 asks the OS. */
-  async restart(port = 0): Promise<BackendEndpoint> {
+  /** Restart with a fresh token, on whatever port the OS gives the new one. */
+  async restart(): Promise<BackendEndpoint> {
     this.stop()
-    // Brief quiescent period so the OS releases the old listen socket.
+    // Brief quiescent period so the OS releases the old listen socket AND the
+    // old daemon releases its single-daemon lock: a second nocx-server on one
+    // profile refuses to start (exit 3) rather than serving beside the first,
+    // so a restart overlapping its predecessor would fail outright instead of
+    // racing.
     const { promise, resolve: wait } = Promise.withResolvers<void>()
     setTimeout(wait, 500)
     await promise
-    return this.start(port)
+    return this.start()
   }
 
   get running(): boolean {

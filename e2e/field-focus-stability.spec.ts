@@ -14,7 +14,7 @@ import { readStand } from './stand'
 const test = base
 
 /** Lazily: the stand is started by globalSetup, after this file is collected. */
-const devharnessBin = (): string => readStand().devharness
+const serverBin = (): string => readStand().server
 
 test.describe('field focus stability', () => {
   test.use({ viewport: { width: 1400, height: 900 } })
@@ -24,7 +24,7 @@ test.describe('field focus stability', () => {
 
   test.beforeEach(() => {
     disposable = { root: mkdtempSync(join(tmpdir(), 'nocx-e2e-field-focus-')) }
-    backend = new VaultBackend(devharnessBin(), disposable, true)
+    backend = new VaultBackend(serverBin(), disposable)
   })
 
   test.afterEach(() => {

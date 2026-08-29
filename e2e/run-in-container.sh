@@ -55,12 +55,12 @@ docker volume create "$NODE_VOL" >/dev/null
 docker volume create "$FENODE_VOL" >/dev/null
 docker volume create nocx-e2e-gocache >/dev/null
 # AND THE MODULE CACHE, which was missing and made every run need the network.
-# globalSetup builds cmd/devharness before a single spec runs, so with no
+# globalSetup builds cmd/nocx-server before a single spec runs, so with no
 # /root/go/pkg/mod the build re-downloads the whole module graph each time and
 # the suite dies in globalSetup when DNS blinks — three times on 2026-08-18,
 # each one indistinguishable at a glance from a real failure:
 #   proxy.golang.org ... server misbehaving
-#   Error: Command failed: go build -o /work/.e2e/devharness ./cmd/devharness
+#   Error: Command failed: go build -o /work/.e2e/nocx-server ./cmd/nocx-server
 # Content-addressed like the build cache, so it is shared across worktrees on
 # purpose (nocx-x6z3 keyed the install trees, not the caches).
 docker volume create nocx-e2e-gomod >/dev/null
@@ -133,7 +133,7 @@ fi
 # A git worktree keeps no .git DIRECTORY — it keeps a .git FILE pointing at
 # `<main-repo>/.git/worktrees/<name>`, which is outside the bind mount. The
 # container then answers "fatal: not a git repository", and because
-# container-entry.sh builds devharness with `go build` — which stamps VCS
+# container-entry.sh builds nocx-server with `go build` — which stamps VCS
 # info, deliberately spelled the same way here as on CI — the run dies before
 # a single spec starts.
 #

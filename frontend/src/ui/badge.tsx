@@ -7,7 +7,7 @@
  * - settings.ts: .st-provenance / .st-customized / .st-default (Customized/Default badge)
  * - settings.ts: .st-section-nav-badge (modified-only count)
  *
- * Per §3.1: class="ui-badge" always, variance on data-tone.
+ * Per §3.1: class="ui-badge" always, variance on data-tone and data-variant.
  */
 
 export type BadgeTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger'
@@ -15,6 +15,8 @@ export type BadgeTone = 'neutral' | 'info' | 'success' | 'warning' | 'danger'
 export interface BadgeProps {
   children: string
   tone?: BadgeTone
+  /** An opaque, high-contrast badge for counts over changing surfaces. */
+  variant?: 'solid'
   /** The chip yields to its row (nocx-wzc4.9): it ellipsizes instead of
    *  wrapping or pushing the row. The row places it (a bounded flex share);
    *  this variance is the ellipsis itself. */
@@ -29,6 +31,7 @@ export function Badge(props: BadgeProps) {
     <span
       class="ui-badge"
       data-tone={props.tone ?? 'neutral'}
+      data-variant={props.variant}
       data-truncate={props.truncate === true ? 'true' : undefined}
       title={props.title}
       data-testid={props['data-testid']}

@@ -62,6 +62,14 @@ func RouteSettingKey(kindID, channelID string) string {
 	return routeSettingPrefix + kindID + "." + channelID
 }
 
+const centreSettingPrefix = "notifications.centre."
+
+// CentreSettingKey is the persisted key of a kind's notification-centre
+// visibility toggle.
+func CentreSettingKey(kindID string) string {
+	return centreSettingPrefix + kindID
+}
+
 // ErrCatalogue is returned by NewCatalogue when a declaration is malformed or
 // a default names a pair the catalogue does not offer.
 var ErrCatalogue = errors.New("notify: catalogue")
@@ -132,12 +140,13 @@ func (p Pair) SettingLabel() string { return p.Kind.Label + " → " + p.Channel.
 // turning it on makes it reach.
 func (p Pair) SettingDescription() string {
 	return p.Kind.Description + " When on, it reaches " + p.Channel.Description +
-		". With every channel off, this kind reaches nothing."
+		". With every delivery channel off, this kind reaches no channel — it is still recorded in the notification centre."
 }
 
 // Catalogue is the immutable set of routable kinds and channels, and the
 // pairs they offer.
 type Catalogue struct {
+	kinds    []RoutableKind
 	channels []RoutableChannel
 	pairs    []Pair
 }
@@ -184,6 +193,9 @@ func NewCatalogue(kinds []RoutableKind, channels []RoutableChannel) (*Catalogue,
 		seenKindID[k.ID] = true
 		seenKind[k.Kind] = true
 	}
+	// Keep an owned copy of the declarations. PresentedKinds is the vocabulary
+	// of every raised event, including kinds whose trust bound offers no pair.
+	kinds = cloneRoutableKinds(kinds)
 
 	byChannel := make(map[string]RoutableChannel, len(channels))
 	for _, ch := range channels {
@@ -216,11 +228,12 @@ func NewCatalogue(kinds []RoutableKind, channels []RoutableChannel) (*Catalogue,
 			if !offers(k, ch) {
 				continue
 			}
-			pairs = append(pairs, Pair{Kind: k, Channel: ch, DefaultOn: defaults[ch.ID]})
+			pairs = append(pairs, Pair{Kind: cloneRoutableKind(k), Channel: ch, DefaultOn: defaults[ch.ID]})
 		}
 	}
 
 	return &Catalogue{
+		kinds:    kinds,
 		channels: append([]RoutableChannel(nil), channels...),
 		pairs:    pairs,
 	}, nil
@@ -243,21 +256,46 @@ func offers(k RoutableKind, ch RoutableChannel) bool {
 // Channels returns the declared channels, in declaration order. The slice is a
 // copy: the catalogue is immutable and a caller may not rewrite it through an
 // accessor.
-//
-// There is deliberately no matching Kinds(): every reader wants the OFFERED
-// cells, and a kind list beside Pairs() would be a second answer to "what can
-// be routed" that omits the trust bound. A kind present in the catalogue and
-// absent from every pair is exactly as unroutable as one nobody catalogued,
-// which is what the coverage test asserts over Pairs().
 func (c *Catalogue) Channels() []RoutableChannel {
 	return append([]RoutableChannel(nil), c.channels...)
 }
 
+// PresentedKinds returns every declared kind, in declaration order. This is
+// the vocabulary of events that may be raised, including a kind whose trust
+// bound leaves it with no offered pair. Pairs answers what can be routed;
+// PresentedKinds answers what may be named in the notification centre.
+func (c *Catalogue) PresentedKinds() []RoutableKind {
+	return cloneRoutableKinds(c.kinds)
+}
+
 // Pairs returns every OFFERED (kind, channel) cell, in kind-then-channel
-// order, as a copy. A cell the trust bound forbids is absent — the impossible
-// choice is not offered rather than offered and declined.
+// order, as a deep copy. A cell the trust bound forbids is absent — the
+// impossible choice is not offered rather than offered and declined.
 func (c *Catalogue) Pairs() []Pair {
-	return append([]Pair(nil), c.pairs...)
+	out := make([]Pair, len(c.pairs))
+	for i, pair := range c.pairs {
+		out[i] = clonePair(pair)
+	}
+	return out
+}
+
+func cloneRoutableKind(k RoutableKind) RoutableKind {
+	k.Trusts = append([]Trust(nil), k.Trusts...)
+	k.DefaultChannels = append([]string(nil), k.DefaultChannels...)
+	return k
+}
+
+func cloneRoutableKinds(kinds []RoutableKind) []RoutableKind {
+	out := make([]RoutableKind, len(kinds))
+	for i, kind := range kinds {
+		out[i] = cloneRoutableKind(kind)
+	}
+	return out
+}
+
+func clonePair(pair Pair) Pair {
+	pair.Kind = cloneRoutableKind(pair.Kind)
+	return pair
 }
 
 // defaultCatalogue is the shipped catalogue, built once at package init. It
@@ -301,7 +339,7 @@ func mustCatalogue() *Catalogue {
 				// toggles beside this row now govern a real event; they
 				// simply start off.
 				Kind: KindBlockFinished, ID: "blockFinished",
-				Label:       "A command finished",
+				Label:       "Command finished",
 				Description: "nocx's own block ledger recorded that a command finished.",
 				Trusts:      []Trust{TrustAttested},
 			},
@@ -312,7 +350,7 @@ func mustCatalogue() *Catalogue {
 				// is not looking at the tab, which is the only moment either
 				// event matters.
 				Kind: KindSessionEnded, ID: "sessionEnded",
-				Label:           "A session ended",
+				Label:           "Session ended",
 				Description:     "nocx's own session registry recorded that a session ended.",
 				Trusts:          []Trust{TrustAttested},
 				DefaultChannels: []string{ChannelBanner, ChannelToast},
@@ -342,7 +380,7 @@ func mustCatalogue() *Catalogue {
 				// known to the backend, and nothing here reads a renderer's
 				// claim about it.
 				Kind: KindTransferFinished, ID: "transferFinished",
-				Label: "A file transfer finished",
+				Label: "File transfer finished",
 				Description: "nocx's own transfer registry recorded that an upload or " +
 					"a download reached its end.",
 				Trusts:          []Trust{TrustAttested},
@@ -350,14 +388,14 @@ func mustCatalogue() *Catalogue {
 			},
 			{
 				Kind: KindProgramNotify, ID: "programNotify",
-				Label:           "A program asked for a notification",
+				Label:           "Program notification request",
 				Description:     "A program printed OSC 9 or OSC 777 to ask for one.",
 				Trusts:          []Trust{TrustProgramRequest},
 				DefaultChannels: []string{ChannelBanner, ChannelToast},
 			},
 			{
 				Kind: KindBell, ID: "bell",
-				Label:       "A terminal bell",
+				Label:       "Terminal bell",
 				Description: "A program printed BEL.",
 				Trusts:      []Trust{TrustProgramRequest},
 			},

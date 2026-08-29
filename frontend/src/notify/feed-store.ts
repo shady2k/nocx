@@ -7,7 +7,7 @@
 // refetch rather than a row nobody ever learns about (nocx-sb3f). The store
 // cannot derive the new state from a hint (there is no occurrence in it), so
 // every applied hint is a refetch.
-import { createSignal } from 'solid-js'
+import { createMemo, createSignal } from 'solid-js'
 import type { Dispatcher } from '../dispatcher'
 import type { Dropped, NotifyFeedRead } from '../generated/notify.feed.read'
 import type { NotifyFeedMarkRead } from '../generated/notify.feed.markRead'
@@ -27,17 +27,30 @@ export type FeedDispatcherLike = Pick<Dispatcher, 'subscribe' | 'onConnect'>
 
 export interface FeedStore {
   occurrences: () => NotifyFeedRead['occurrences']
+  visibleOccurrences: () => NotifyFeedRead['occurrences']
   unreadCount: () => number
+  readKnown: () => boolean
   dropped: () => Dropped
   markRead: () => void
   destroy: () => void
 }
 
 const EMPTY_DROPPED: Dropped = { count: 0, oldest: '', newest: '' }
+const EMPTY_HIDDEN = new Set<string>()
 
-export function createFeedStore(client: FeedClientLike, dispatcher: FeedDispatcherLike): FeedStore {
+export function createFeedStore(
+  client: FeedClientLike,
+  dispatcher: FeedDispatcherLike,
+  hiddenKindIds: () => ReadonlySet<string> = () => EMPTY_HIDDEN,
+  kindIdOf: (kind: string) => string = (kind) => kind,
+): FeedStore {
   const [occurrences, setOccurrences] = createSignal<NotifyFeedRead['occurrences']>([])
-  const [unreadCount, setUnreadCount] = createSignal(0)
+  const visibleOccurrences = createMemo(() => {
+    const hidden = hiddenKindIds()
+    return occurrences().filter((o) => !hidden.has(kindIdOf(o.kind)))
+  })
+  const unreadCount = createMemo(() => visibleOccurrences().filter((o) => !o.read).length)
+  const [readKnown, setReadKnown] = createSignal(false)
   const [dropped, setDropped] = createSignal<Dropped>(EMPTY_DROPPED)
 
   let revision = -1
@@ -54,7 +67,7 @@ export function createFeedStore(client: FeedClientLike, dispatcher: FeedDispatch
     if (snap.revision < revision) return
     revision = snap.revision
     setOccurrences(snap.occurrences)
-    setUnreadCount(snap.unreadCount)
+    setReadKnown(true)
     setDropped(snap.dropped)
   }
 
@@ -78,7 +91,7 @@ export function createFeedStore(client: FeedClientLike, dispatcher: FeedDispatch
   const unsubscribe = dispatcher.subscribe('notify.feed.changed', (params: unknown) => {
     const hint = params as NotifyFeedChanged | null
     // At or below our own revision is a late duplicate. Refetching on it would
-    // turn one resent hint into an endless loop.
+    // turn one dropped-and-resent hint into an endless refetch loop.
     if (typeof hint?.revision !== 'number' || hint.revision <= revision) return
     void refetch()
   })
@@ -97,7 +110,9 @@ export function createFeedStore(client: FeedClientLike, dispatcher: FeedDispatch
 
   return {
     occurrences,
+    visibleOccurrences,
     unreadCount,
+    readKnown,
     dropped,
     markRead: () => {
       // The METHOD RESULT is authoritative; the change notification that
@@ -107,7 +122,6 @@ export function createFeedStore(client: FeedClientLike, dispatcher: FeedDispatch
         .then((r) => {
           if (r.revision <= revision) return
           revision = r.revision
-          setUnreadCount(0)
           setOccurrences((prev) => prev.map((o) => ({ ...o, read: true })))
         })
         .catch(() => refetch())

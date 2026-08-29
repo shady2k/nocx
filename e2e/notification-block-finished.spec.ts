@@ -204,7 +204,7 @@ test('a command that finished is waiting in the notification centre, and a failu
   expect(await titleOf(okRow).textContent()).toBe(`${OK} succeeded`)
   // The badge is the kind, and its TONE is the level: an ordinary completion
   // is a success, not an advisory (notify/notifications-panel.tsx, toneOf).
-  await expect(badgeOf(okRow)).toHaveText('block.finished')
+  await expect(badgeOf(okRow)).toHaveText('Command finished')
   await expect(badgeOf(okRow)).toHaveAttribute('data-tone', 'success')
   // And it carries no exit line: a zero says nothing the title has not said
   // already, and a row that spends its detail on emptiness reads as broken

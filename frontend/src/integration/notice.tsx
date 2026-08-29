@@ -43,7 +43,7 @@
  * repaints nothing, which is the boundary frontend/src/ui/README.md draws.
  */
 
-import { createSignal, For, Show, type JSX } from 'solid-js'
+import { createRenderEffect, createSignal, For, onCleanup, Show, type JSX } from 'solid-js'
 import { render } from 'solid-js/web'
 import { Button } from '../ui/button'
 import { CodeBlock } from '../ui/code-block'
@@ -60,11 +60,18 @@ import {
   integrationMessage,
   observationSentence,
   type IntegrationMessage,
+  type OutputRecording,
+  type OutputRecordingSource,
 } from './status'
 
 export interface IntegrationNoticeProps {
   /** The degraded fact. */
   fact: SessionIntegrationChanged
+  /** Whether what this session prints is being written down, read live
+   *  (nocx-22k1c.3). A source rather than a value because the switch behind
+   *  it is one a person changes while this card is up, and a card that then
+   *  contradicts the screen they just used is the defect. */
+  recording: OutputRecordingSource
   /** Copy the snippet to the clipboard. Rejects like every clipboard call. */
   copy: (text: string) => Promise<void>
   /** The user asked not to be shown this shell's cards again. */
@@ -103,7 +110,24 @@ function openLabel(msg: IntegrationMessage): string {
 function IntegrationNotice(props: IntegrationNoticeProps): JSX.Element {
   const [open, setOpen] = createSignal(false)
   const [aboutOpen, setAboutOpen] = createSignal(false)
-  const msg = () => integrationMessage(props.fact)
+  // The recording answer as a signal, so the card re-words itself when the
+  // setting moves under it. The subscription's interval has both ends: it
+  // opens with the card and closes on the root's disposal, so a source that
+  // outlives twenty panes is not left holding twenty dead ones.
+  //
+  // A RENDER effect and not an ordinary one: an ordinary effect runs after
+  // the first paint, so the card would show the no-answer wording and then
+  // replace it — a flicker on the one sentence this bead exists to add. The
+  // seam is read inside the effect rather than lifted into a const because
+  // that is the tracked scope; reading it in the component body would leave
+  // a pane whose source is swapped afterwards on the old one for good.
+  const [recording, setRecording] = createSignal<OutputRecording>('unknown')
+  createRenderEffect(() => {
+    const source = props.recording
+    setRecording(source.outputRecording())
+    onCleanup(source.subscribe(() => setRecording(source.outputRecording())))
+  })
+  const msg = () => integrationMessage(props.fact, recording())
 
   const copySnippet = (snippet: string) => {
     props.copy(snippet).then(

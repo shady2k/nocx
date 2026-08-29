@@ -50,6 +50,13 @@ var ingressCriticalMethods = map[string]struct{}{
 	// two existing resolvers, for the same reason.
 	"agent.readScreenResolved": {},
 	"agent.runResolved":        {},
+	// The client host's resolution (nocx-uo1k6, design D3): the asking task
+	// — a dialog, a URL open, a banner, a window raise — blocks on the
+	// answer while holding a lane permit, so an answer queued behind a full
+	// lane would deadlock the ask against the very work the client is
+	// unblocking. Same disposition as every other resolver, for the reason
+	// every other resolver has it.
+	"host.resolved": {},
 	// The lane interactivity report (ADR-0020 decision 3): the run lease
 	// waits on the awaiting-takeover transition it feeds, so it must never
 	// queue behind the lane either. Handler: a mutex update, microseconds.

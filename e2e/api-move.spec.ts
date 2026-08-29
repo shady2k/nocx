@@ -49,7 +49,7 @@ import { readStand } from './stand'
 const test = base
 
 /** Lazily, not at module scope: the stand is started by globalSetup. */
-const devharnessBin = (): string => readStand().devharness
+const serverBin = (): string => readStand().server
 
 /**
  * The built-in collection and its seed (internal/apicoll/starter.go). A fresh
@@ -89,7 +89,7 @@ test.describe('a request can be moved into a folder, and stays open', () => {
 
   test.beforeEach(() => {
     disposable = { root: mkdtempSync(join(tmpdir(), 'nocx-e2e-api-move-')) }
-    backend = new VaultBackend(devharnessBin(), disposable, true)
+    backend = new VaultBackend(serverBin(), disposable)
   })
 
   test.afterEach(() => {

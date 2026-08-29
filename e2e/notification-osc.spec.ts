@@ -111,7 +111,7 @@ test('a program asking for a notification reaches the backend once, with its ses
   // title to invent.
   expect(raised.body).toBe('build finished')
   expect(raised.title).toBe('')
-  // Addressing, not attribution (ADR-0029 §2.2): the record says WHICH
+  // Addressing, not attribution (ADR-0047 §2.2): the record says WHICH
   // terminal parsed the sequence, and the backend derives everything it
   // attributes from its own registry entry for that id. An empty one would be
   // refused, so a non-empty id is the assertion that the join wired it at all.

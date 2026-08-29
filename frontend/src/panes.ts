@@ -21,7 +21,8 @@
 // position, pinned, layout, workspace_id, seen-mark, and no "active".
 // ═══════════════════════════════════════════════════════════════════════════
 
-import type { WSClient } from './ipc'
+import type { SessionHandle, WSClient } from './ipc'
+import type { LiveSession } from './generated/sessions.live'
 import { detectAgentStatus, type AgentStatus } from './agent-status'
 import {
   paneIndicator,
@@ -71,6 +72,7 @@ import type {
 import { SURFACE_TERMINAL } from './pane-content'
 import type { SnippetProviderDeps } from './snippets/snippet-provider'
 import { TerminalContent, type HostKeyErrorEvidence, type PaneIdentity } from './terminal-content'
+import type { OutputRecordingSource } from './integration/status'
 
 // ═══════════════════════════════════════════════════════════════════════════
 // Pane — chrome and lifecycle, delegates content to PaneContent
@@ -668,7 +670,7 @@ export class PaneManager {
    * while "the one I was looking at" is a fact about a VIEWPORT, exactly like
    * `viewedWorkspaceId` above it. It is not in localStorage either — the
    * renderer holding a fact of its own is the arrangement the UI-state
-   * document exists to end (ADR-0033).
+   * document exists to end (ADR-0048).
    */
   private readonly uiState: UIStateClient
   /**
@@ -708,6 +710,31 @@ export class PaneManager {
    * ~/.ssh/config exactly as it was opened.
    */
   private savedProfiles: SSHProfile[] = []
+
+  /**
+   * WHAT THE COORDINATOR IS STILL RUNNING, indexed by the pane it is the pipe
+   * of — read once, before the chain is drawn (design D5, §5).
+   *
+   * The backend outlives this window now, so a row the chain brings back may
+   * still have its process on the other side. `sessions.live` is the only
+   * answer to that question: the renderer's own session map is process memory
+   * and a window that has just started holds none.
+   *
+   * READ BEFORE THE LAYOUT, for the same reason the saved connections are:
+   * adoption happens inside the read's own change notification, so anything a
+   * restored pane needs has to be in hand before the read begins.
+   *
+   * AN ENTRY IS CONSUMED WHEN IT IS CLAIMED (see adoptionFor). One client owns
+   * a session at a time (D8) and one session is one pane's pipe, so a second
+   * pane must never be handed the same entry — it would take the session off
+   * the pane that had just adopted it.
+   *
+   * Empty is the ordinary answer: a cold coordinator holds nothing, and so
+   * does one whose sessions all ended. Empty is also what a backend that
+   * cannot answer leaves behind, and that degrade is the pre-coordinator
+   * behaviour exactly — every restored pane opens a fresh session.
+   */
+  private readonly liveByPane = new Map<string, LiveSession>()
   /** The endpoints this turn has yet to report as not reconnected, and
    *  whether the report is already scheduled. One statement per turn, not
    *  one per pane: four stored connections behind a host that is not
@@ -774,6 +801,9 @@ export class PaneManager {
    *  active pane through this (nocx-wzc4.7); wired by main.tsx to a Solid
    *  signal. */
   onActivePaneChange?: () => void
+  /** Listeners for `onPanesChanged` — see the method for why this is a
+   *  subscription and not a single slot like the callbacks above. */
+  private readonly paneSetListeners = new Set<() => void>()
   /** The snippet palette chord (⌥⌘P) was pressed in the active pane —
    *  forwarded from the pane's TerminalContent, whose xterm boundary and
    *  editor arbiter both land here. The composition root opens the
@@ -784,6 +814,13 @@ export class PaneManager {
    *  composition root; handed to each TerminalContent as it is built. */
   snippets?: SnippetProviderDeps
   onSnippetAccepted?: (snippetId: string) => void
+  /** Where every pane reads "is what my session prints being written down"
+   *  (nocx-22k1c.3). Set once by the composition root to the
+   *  HistoryStatusStore, which owns the fact; a plain tab's card needs it to
+   *  say what IS happening to its output beside what is not. Read through
+   *  recordingSource() rather than handed to a pane directly, so a pane
+   *  built before the root has wired it still sees the answer afterwards. */
+  outputRecording?: OutputRecordingSource
 
   constructor(
     bar: HTMLElement,
@@ -818,6 +855,21 @@ export class PaneManager {
     // remembering to re-render — which is how two of them end up disagreeing
     // about what "after a close" looks like.
     this.layout.onChange(() => this.renderFromLayout())
+
+    // A session this window was holding has been taken by another client
+    // (nocx-oevq4, the nocx-server design D8). The pane is still on the strip
+    // with its scrollback readable, and it is no longer connected to anything
+    // — so the one thing that must not happen is silence, which leaves a
+    // terminal that looks live and swallows every keystroke.
+    this.client.onSessionDisplaced((displaced) => {
+      const name = this.sessionDisplayName(displaced.sessionId)
+      showToast({
+        level: 'warning',
+        message: name
+          ? `"${name}" is now open in another window — this one is no longer connected to it`
+          : 'A pane is now open in another window — this one is no longer connected to it',
+      })
+    })
 
     window.addEventListener('keydown', this.onKeydown, true)
   }
@@ -869,10 +921,15 @@ export class PaneManager {
    * brings back the tabs with their colours, names, order and pinning,
    * because none of it was ever here.
    *
-   * What does NOT come back is the shell: a session dies with the backend
-   * (D5) and a restored local pane starts a fresh one in its place. An ssh
-   * pane makes a NEW CONNECTION to the endpoint it applies at, which is not
-   * a resurrection either — nothing of the old session survives it.
+   * WHETHER THE SHELL COMES BACK IS NOT THE RENDERER'S TO DECIDE any more.
+   * The backend is a process of its own that outlives this window (design
+   * §1), so `sessions.live` is asked first (primeLiveSessions): a pane the
+   * coordinator is still running is TAKEN BACK, with the output produced
+   * while nothing was attached, and a pane it holds nothing for starts a
+   * fresh session in its place exactly as it always did. The same split
+   * applies to an ssh pane — a connection still held is reclaimed, and one
+   * that is gone is made again, which is not a resurrection and never looks
+   * like one.
    */
   private async boot(): Promise<void> {
     this.tabStrip.mount(this.hostFor(this.tabStrip))
@@ -903,9 +960,12 @@ export class PaneManager {
       if (!(await content.ready)) throw new Error('initial pane failed to start')
       return
     }
-    // THE SAVED CONNECTIONS BEFORE THE CHAIN, because adoption reads them
-    // and adoption happens inside the read (see savedProfiles).
-    await this.primeProfiles()
+    // THE SAVED CONNECTIONS AND THE LIVE SESSIONS BEFORE THE CHAIN, because
+    // adoption reads both and adoption happens inside the read (see
+    // savedProfiles, liveByPane). Together, not in sequence: neither answer
+    // depends on the other, and a restore should not wait for two round trips
+    // where one will do.
+    await Promise.all([this.primeProfiles(), this.primeLiveSessions()])
     await this.readLayout()
     // readLayout's change notification has already adopted whatever the
     // backend holds; an empty chain means a first pane to open.
@@ -1002,6 +1062,75 @@ export class PaneManager {
     }
   }
 
+  /**
+   * Ask the coordinator what it is still running, once, before the chain is
+   * drawn (design D5, §5).
+   *
+   * This is the half of a reclaim the renderer cannot supply. `sessions.live`
+   * names, per live session, the pane it is the pipe of and the offset a
+   * fresh client attaches at; `adoptionFor` turns one of those into the claim
+   * a pane makes instead of an open.
+   *
+   * FAIL-QUIET, and the degrade is the behaviour that predates the
+   * coordinator: with no list in hand every restored pane opens a fresh
+   * session, which is what a pane whose backend had died always did. It is
+   * not silent — the warning names the reason — and it is not contradicted
+   * anywhere in the UI, because nothing promises a reclaimed pane before one
+   * has been reclaimed.
+   *
+   * Sessions with no pane are skipped rather than guessed at: a session that
+   * is the pipe of no recorded pane is a legitimate state (the schema says
+   * so), and attaching one to whichever row came back first would put a
+   * stranger's output into somebody's tab.
+   */
+  private async primeLiveSessions(): Promise<void> {
+    this.liveByPane.clear()
+    try {
+      for (const entry of await this.client.listLiveSessions()) {
+        if (entry.paneId === null) continue
+        this.liveByPane.set(entry.paneId, entry)
+      }
+    } catch (err) {
+      log.warn('nocx: the coordinator could not say what it is still running', {
+        error: err instanceof Error ? err.message : String(err),
+      })
+    }
+    log.info('nocx: live sessions the coordinator is holding', { panes: this.liveByPane.size })
+  }
+
+  /**
+   * The claim a restored pane makes instead of an open, or undefined when the
+   * coordinator holds nothing for it.
+   *
+   * THE ENTRY IS TAKEN OUT OF THE MAP HERE, at build time, not inside the
+   * thunk: two panes must not be handed the same session even if only one of
+   * them is ever shown. The thunk itself runs at mount (TerminalContent's
+   * adoptSession), which is where the claim actually takes the session off
+   * whoever holds it — a pane built during a restore and closed before it was
+   * ever displayed claims nothing.
+   *
+   * A FAILED CLAIM IS SAID OUT LOUD HERE and rethrown. The pane falls back to
+   * a fresh session, which is the right recovery, and a person who left a
+   * command running has to be told that what came back is not it — a shell
+   * that silently replaced a running one is exactly the "soft degrade the UI
+   * contradicts" AGENTS.md names.
+   */
+  private adoptionFor(paneId: string): (() => Promise<SessionHandle>) | undefined {
+    const entry = this.liveByPane.get(paneId)
+    if (entry === undefined) return undefined
+    this.liveByPane.delete(paneId)
+    return () =>
+      this.client.reclaimSession(entry).catch((err: unknown) => {
+        const message = err instanceof Error ? err.message : String(err)
+        log.warn('nocx: a live session could not be reclaimed', { pane: paneId, error: message })
+        showToast({
+          level: 'warning',
+          message: `The session this tab was running could not be taken back (${message}) — a new one was started`,
+        })
+        throw err
+      })
+  }
+
   /** Read the chain, and say so in the product when it cannot be read. */
   private async readLayout(): Promise<void> {
     // Set BEFORE the read, because the read's own change notification is
@@ -1077,6 +1206,21 @@ export class PaneManager {
     return { paneId: opened.paneId, registered }
   }
 
+  /** The panes' view of the recording fact, resolved at READ time rather
+   *  than captured at pane construction (nocx-22k1c.3).
+   *
+   *  Late binding on purpose: a restore builds panes from the layout chain
+   *  well after the composition root has run, but nothing guarantees the two
+   *  orders, and a pane handed `undefined` once would go on saying nothing
+   *  about its output for the life of the tab. Resolving per call costs one
+   *  indirection and cannot go stale. */
+  private recordingSource(): OutputRecordingSource {
+    return {
+      outputRecording: () => this.outputRecording?.outputRecording() ?? 'unknown',
+      subscribe: (listener) => this.outputRecording?.subscribe(listener) ?? (() => {}),
+    }
+  }
+
   /** Create a new local terminal pane and activate it: mint the identity,
    *  ask the backend for the tab, and put the chrome up in the same turn. */
   newPane(): Pane {
@@ -1086,7 +1230,14 @@ export class PaneManager {
   /** The chrome and content of a LOCAL terminal pane with a given identity —
    *  one implementation for a pane the user just asked for and a pane the
    *  chain already holds, because "a local pane" must not mean two things. */
-  private buildLocalPane(identity: PaneIdentity, activateNow = true): Pane {
+  private buildLocalPane(
+    identity: PaneIdentity,
+    activateNow = true,
+    /** The live session the coordinator holds for this pane, as the claim
+     *  that takes it back (adoptionFor). Undefined for a pane the user just
+     *  asked for — there is nothing running to take. */
+    adoptSession?: () => Promise<SessionHandle>,
+  ): Pane {
     const paneRef = { current: undefined as Pane | undefined }
     const content = new TerminalContent(
       this.client,
@@ -1107,7 +1258,9 @@ export class PaneManager {
         // pane's own name (nocx-vnzek). Only this manager can answer it —
         // the session may be another pane's.
         sessionName: (id) => this.sessionDisplayName(id),
+        adoptSession,
         onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
+        outputRecording: this.recordingSource(),
         onPortsTargetChange: () => this.onActivePaneChange?.(),
         onActiveOriginChange: () => this.onActivePaneChange?.(),
         onSetupVault: this.onSetupVault,
@@ -1173,6 +1326,10 @@ export class PaneManager {
     sshOpts: { profileId: string; host: string; user?: string; port?: number },
     title: string,
     activateNow = true,
+    /** As buildLocalPane's: the claim that takes back a connection the
+     *  coordinator is still holding, rather than making a second one to the
+     *  same host beside it. */
+    adoptSession?: () => Promise<SessionHandle>,
   ): Pane {
     const { host, user, port } = sshOpts
     const paneRef = { current: undefined as Pane | undefined }
@@ -1191,6 +1348,7 @@ export class PaneManager {
         // pane's own name (nocx-vnzek). Only this manager can answer it —
         // the session may be another pane's.
         sessionName: (id) => this.sessionDisplayName(id),
+        adoptSession,
         onAdoptabilityChange: (adoptable: boolean) => {
           const pane = paneRef.current
           if (!pane) return
@@ -1201,6 +1359,7 @@ export class PaneManager {
           }
         },
         onWarningChange: (warning, label) => paneRef.current?.setWarningState(warning, label),
+        outputRecording: this.recordingSource(),
         onProgramTitleChange: (programTitle) => paneRef.current?.updateProgramTitle(programTitle),
         onPaneObservationChange: (state) => paneRef.current?.updatePaneObservation(state),
         onActiveOriginChange: () => this.onActivePaneChange?.(),
@@ -1334,12 +1493,13 @@ export class PaneManager {
     const pane = new Pane(content, descriptor, this.nextPaneId++, wireId)
 
     this.panes.push(pane)
+    this.panesChanged()
     this.panesContainer.append(pane.pane)
     // B.5: start observing pane geometry once it's in the DOM.
     pane.setupViewportObserver()
 
     pane.onCloseRequested = () => void this.closePane(pane)
-    // A settled pane, reported to the pipeline (ADR-0029). Wired HERE and
+    // A settled pane, reported to the pipeline (ADR-0047). Wired HERE and
     // not in Pane for the same reason the close intent is: a Pane holds no
     // client. Its OWN method, because kind is stamped from the method
     // invoked — notify.paneWorkFinished is what makes this heuristic, and
@@ -1974,6 +2134,7 @@ export class PaneManager {
     pane.pane.remove()
     this.tabStrip.removePane(pane.id)
     this.panes.splice(index, 1)
+    this.panesChanged()
 
     if (this.layoutAvailable && this.layout.tabOf(pane.wireId)) {
       void this.ask(
@@ -2100,6 +2261,39 @@ export class PaneManager {
    * nothing and is not consulted: this answers "which tab is this occurrence
    * from", never "what may one tab do to another" (ADR-0020 §5, lineage.ts).
    */
+  /**
+   * Say when the answer `findBySession` gives may have changed: a tab opened,
+   * or one closed.
+   *
+   * A SUBSCRIPTION rather than one of the single-slot callbacks above
+   * (`onActivePaneChange` and its siblings), and shaped like
+   * LayoutStore.onChange, because more than one surface asks this question.
+   *
+   * NOT the layout chain, though the chain changes at the same moments and
+   * the workspace overview subscribes to it: the chain is the BACKEND's
+   * projection of the tabs and it is absent on a host whose layout store
+   * could not be read, while `panes` is the thing `findBySession` actually
+   * reads. One owner for one question (AD-8).
+   *
+   * It exists because that answer is read by surfaces that OUTLIVE the tab
+   * they are about. The notification centre stays mounted while the sidebar
+   * is collapsed (sidebar.tsx toggles a class), so a `session.ended` row is
+   * built at the moment its own tab is closing; with no way to hear that the
+   * tab went, the row kept the answer it got then and went on offering a tab
+   * that had closed (nocx-bu8fl).
+   */
+  onPanesChanged(listener: () => void): () => void {
+    this.paneSetListeners.add(listener)
+    return () => this.paneSetListeners.delete(listener)
+  }
+
+  /** Fired wherever `panes` gains or loses a member, and nowhere else: a
+   *  reorder is not a change to the SET, and no surface asking this question
+   *  is about order. */
+  private panesChanged(): void {
+    for (const listener of this.paneSetListeners) listener()
+  }
+
   findBySession(backendId: string, sessionId: string): Pane | undefined {
     if (backendId !== LOCAL_BACKEND_ID || sessionId === '') return undefined
     return this.panes.find((p) => p.content.lineage?.()?.sessionId === sessionId)
@@ -2353,17 +2547,21 @@ export class PaneManager {
   /**
    * Put a pane the backend holds on screen.
    *
-   * A LOCAL pane starts a fresh shell, which is §8's rule: the process died
-   * with the backend and is never resurrected, so what comes back is the
-   * pane, not its shell. That is also the whole of what an INLINE ssh gets —
-   * a pane somebody typed `ssh host` inside is a local pane and its row says
-   * so, so it comes back as its local shell, and the commands that ran on
-   * the far host go on saying where they ran because the entry, not the
-   * pane, is what recorded it (design §7).
+   * A LOCAL pane TAKES BACK the session the coordinator is still running for
+   * it, when there is one (adoptionFor), and starts a fresh shell when there
+   * is not. Which of the two happens is a fact about the backend, not a rule
+   * about restores: before the coordinator the process always died with the
+   * window, so the second branch was the only one there was.
    *
-   * AN SSH PANE MAKES A NEW CONNECTION to the endpoint it applies at
-   * (reopenSSH). Not a resurrection and never allowed to look like one: the
-   * old session died with the backend, and what this opens is another one.
+   * A pane somebody typed `ssh host` inside is a LOCAL pane and its row says
+   * so, so it comes back as its local session either way, and the commands
+   * that ran on the far host go on saying where they ran because the entry,
+   * not the pane, is what recorded it (design §7).
+   *
+   * AN SSH PANE takes its connection back on the same terms and otherwise
+   * makes a new one to the endpoint it applies at (reopenSSH). A new one is
+   * never allowed to look like a resurrection: nothing of a session that
+   * ended survives it.
    */
   private adopt(row: PaneRow): void {
     if (row.kind === 'ssh') {
@@ -2378,12 +2576,16 @@ export class PaneManager {
     // window's answer to "which tab is in front" is not the last row the
     // chain happened to hand over — `boot` decides that once, from the pane
     // the person was actually in.
-    this.buildLocalPane({ paneId: row.id, registered: Promise.resolve(true) }, false)
+    this.buildLocalPane(
+      { paneId: row.id, registered: Promise.resolve(true) },
+      false,
+      this.adoptionFor(row.id),
+    )
   }
 
   /**
-   * Reopen a stored connection: a NEW session to the endpoint the row says
-   * the pane applies at.
+   * Reopen a stored connection: the session the coordinator still holds for
+   * this pane, or a NEW one to the endpoint the row says the pane applies at.
    *
    * THE PROFILE IS RESOLVED FROM THE ENDPOINT, because the chain has no
    * column for one — §5 stores where a pane applies, not which saved
@@ -2420,6 +2622,13 @@ export class PaneManager {
       // exactly as a connection opened by hand is named after its host.
       dest.host || endpoint,
       false,
+      // A CONNECTION THE COORDINATOR STILL HOLDS IS TAKEN BACK, not made a
+      // second time. Without this the reconnect below would open another
+      // session to the same host while the first one went on running with
+      // nobody attached — which is worse than the pre-coordinator behaviour
+      // rather than the same as it, because there the old session was already
+      // gone.
+      this.adoptionFor(row.id),
     )
     void this.watchReconnect(pane, endpoint)
   }
@@ -2499,6 +2708,7 @@ export class PaneManager {
     pane.pane.remove()
     this.tabStrip.removePane(pane.id)
     this.panes.splice(index, 1)
+    this.panesChanged()
     this.registered.delete(pane.wireId)
     if (wasActive) {
       const next = this.popRecent() ?? this.panes[0]

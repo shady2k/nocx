@@ -93,7 +93,7 @@ type RemoteLauncher interface {
 	// bundle bytes and neither secret. The full self-installing launcher it
 	// replaced is gone from the repository: its last caller, the nested
 	// typed `ssh` in internal/app/childdomain.go, emits this instead
-	// (ADR-0035), and with the caller went the launcher, the publish
+	// (ADR-0049), and with the caller went the launcher, the publish
 	// prelude and the argument-length cap that guarded them.
 	StartCommand(shell ShellKind, opts LaunchOptions) (cmd string, reason RefusalReason, ok bool)
 }

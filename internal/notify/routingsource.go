@@ -13,7 +13,7 @@ import (
 // where, and the settings registry owns the choices, their validation, their
 // persistence and their change notification. This type holds neither. It reads
 // the catalogue, asks a lookup whether a cell is on, and hands the result to
-// the router — which is still the only holder of "where" (ADR-0029 §2.3).
+// the router — which is still the only holder of "where" (ADR-0047 §2.3).
 //
 // It owns the router's CONSTRUCTION because the two cannot be built
 // independently: a router needs a table and a source needs a router to swap

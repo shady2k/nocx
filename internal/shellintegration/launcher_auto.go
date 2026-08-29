@@ -3,7 +3,7 @@ package shellintegration
 import "strings"
 
 // The ShellAuto DISPATCHER that used to live here went with the remote
-// command that carried it (ADR-0035). It ran under /bin/sh, read the login
+// command that carried it (ADR-0049). It ran under /bin/sh, read the login
 // shell's own argv[0] out of "$0", and picked one of three tier payloads that
 // travelled beside it as quoted argv words — which is only a shape a ~90 KiB
 // command can have. The dispatch itself did not go: the installed launch

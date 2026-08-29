@@ -1903,17 +1903,54 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 		"relay":  "relay",
 	} {
 		raw, err := json.Marshal(openResult{
-			SessionID:    "0123456789abcdef0123456789abcdef",
-			InstanceID:   "fedcba9876543210fedcba9876543210",
-			SessionEpoch: 1,
-			WorkspaceID:  string(workspace.Default),
-			Cwd:          "~/work",
-			DesiredMode:  mode,
+			SessionID:     "0123456789abcdef0123456789abcdef",
+			InstanceID:    "fedcba9876543210fedcba9876543210",
+			SessionEpoch:  1,
+			WorkspaceID:   string(workspace.Default),
+			Cwd:           "~/work",
+			DesiredMode:   mode,
+			EffectiveSize: sizeResultOf(session.Size{Cols: 132, Rows: 43}),
 		})
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}
 		validateJSON(t, schema, raw, "open DTO ("+name+" mode)")
+	}
+
+	// The shape the ownership move exists for (nocx-eidfb.1): a session with
+	// no client attached still has a size to marshal — the named default —
+	// and the schema's minimum:1 is what makes "never zero" a check rather
+	// than a sentence in a description.
+	noClient, err := json.Marshal(openResult{
+		SessionID:     "0123456789abcdef0123456789abcdef",
+		InstanceID:    "fedcba9876543210fedcba9876543210",
+		SessionEpoch:  1,
+		WorkspaceID:   string(workspace.Default),
+		Cwd:           "~/work",
+		DesiredMode:   "script",
+		EffectiveSize: sizeResultOf(session.DefaultSize()),
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	validateJSON(t, schema, noClient, "open DTO (no client attached)")
+
+	// And the state the field replaces must not marshal at all: a session
+	// with no size is what the client owning it degraded to, and the
+	// contract has to refuse it rather than carry 0x0 to a renderer.
+	sizeless, err := json.Marshal(openResult{
+		SessionID:    "0123456789abcdef0123456789abcdef",
+		InstanceID:   "fedcba9876543210fedcba9876543210",
+		SessionEpoch: 1,
+		WorkspaceID:  string(workspace.Default),
+		Cwd:          "~/work",
+		DesiredMode:  "script",
+	})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if verr := schema.Validate(mustUnmarshalAny(t, sizeless)); verr == nil {
+		t.Error("open schema accepts a 0x0 effectiveSize: a session always has a size, and minimum:1 is what has to enforce it")
 	}
 
 	// The removed field is removed, not merely unset: an ack that still
@@ -1925,6 +1962,7 @@ func TestOpen_DTOConformsToContract(t *testing.T) {
 		"sessionEpoch":           1,
 		"cwd":                    "~/work",
 		"desiredMode":            "script",
+		"effectiveSize":          map[string]any{"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0},
 		"shellIntegrationReason": "no-secure-temp",
 	})
 	if err != nil {
@@ -2013,8 +2051,11 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 	conn := connectWS(t, ws)
 	defer func() { _ = conn.Close() }()
 
+	// A size no default could be mistaken for: the assertions below are
+	// about WHO chose it, so a number that happens to equal the fallback
+	// would prove nothing (nocx-eidfb.1).
 	resp := jsonrpcCall(t, conn, "open", map[string]any{
-		"cols": 80, "rows": 24, "xpixel": 0, "ypixel": 0,
+		"cols": 132, "rows": 43, "xpixel": 1320, "ypixel": 860,
 		"kind": "ssh", "profileId": "ssh:test:1",
 	})
 	var envelope struct {
@@ -2029,11 +2070,28 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 	}
 	validateJSON(t, schema, envelope.Result, "open result (real socket)")
 	var got struct {
-		SessionID   string `json:"sessionId"`
-		DesiredMode string `json:"desiredMode"`
+		SessionID     string     `json:"sessionId"`
+		DesiredMode   string     `json:"desiredMode"`
+		EffectiveSize sizeResult `json:"effectiveSize"`
 	}
 	if err := json.Unmarshal(envelope.Result, &got); err != nil {
 		t.Fatalf("decode: %v", err)
+	}
+
+	// The ack's size is READ OFF THE SESSION, not echoed from the params
+	// (nocx-eidfb.1). Asserting it against the registry's own answer is
+	// what makes that checkable: a handler that copied the request would
+	// agree with the request and disagree with the session the moment the
+	// backend decided anything else.
+	sess, serr := reg.Get(session.ID(got.SessionID))
+	if serr != nil {
+		t.Fatalf("registry does not hold the session it acked: %v", serr)
+	}
+	if want := sizeResultOf(sess.EffectiveSize()); got.EffectiveSize != want {
+		t.Errorf("effectiveSize off the socket = %+v, want the session's own %+v", got.EffectiveSize, want)
+	}
+	if want := (sizeResult{Cols: 132, Rows: 43, XPixel: 1320, YPixel: 860}); got.EffectiveSize != want {
+		t.Errorf("effectiveSize = %+v, want the reported %+v the backend adopted", got.EffectiveSize, want)
 	}
 
 	// The launcher refusal reaches the product, and it reaches it on the
@@ -2078,6 +2136,15 @@ func TestOpen_OverTheWireConformsToContract(t *testing.T) {
 	}
 	if cfg.RemoteLauncher == nil {
 		t.Error("WithRemoteLauncher did not reach the ConnectConfig: RemoteLauncher is nil in the options the SSH factory received")
+	}
+	// And the size the SSH CHANNEL was opened at is the session's, not the
+	// renderer's copy: the transport no longer writes the params onto the
+	// ConnectConfig, so the only way this size can be here is the registry
+	// putting it there (AD-1 — the channel is created at its final size,
+	// never spawned-then-resized).
+	opened := sizeResult{Cols: cfg.Cols, Rows: cfg.Rows, XPixel: cfg.XPixel, YPixel: cfg.YPixel}
+	if want := sizeResultOf(sess.EffectiveSize()); opened != want {
+		t.Errorf("ssh channel opened at %+v, want the session's effective size %+v", opened, want)
 	}
 }
 

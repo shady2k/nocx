@@ -424,7 +424,7 @@ jobs:
       # compile errors that ran anyway, because the runner strips types rather
       # than checking them. They surfaced as "argument must be of type string.
       # Received undefined" from inside node:path, and only once CI began
-      # building the devharness those specs need (nocx-azxe.2).
+      # building the backend binary those specs need (nocx-azxe.2).
       - name: Typecheck the e2e suite
         working-directory: .
         run: |
@@ -458,7 +458,7 @@ jobs:
   # e2e — the suite, in the same container a developer runs it in.
   #
   # ONE command: `e2e/run-in-container.sh`. Inside it, `npx playwright test`; the
-  # stand it drives — cmd/devharness on a real PTY plus vite serving the renderer
+  # stand it drives — cmd/nocx-server on a real PTY plus vite serving the renderer
   # — is Playwright's own (e2e/stand.ts). e2e/check-coverage.mjs is the receipt
   # that no spec file is uncollected, and it runs in the frontend job.
   #
@@ -502,7 +502,7 @@ jobs:
     # second browser repeating the first browser's walk.
     #
     # Splitting by PROJECT rather than raising the worker count is the safe
-    # half of the same idea. The stand is one devharness plus one vite per
+    # half of the same idea. The stand is one nocx-server plus one vite per
     # run, and specs share it: two workers would put two browsers on one
     # backend, one profile store and one settings document, which is a
     # different bug hunt. Two runners each bring up their own stand and

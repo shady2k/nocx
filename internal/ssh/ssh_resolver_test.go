@@ -697,7 +697,7 @@ port 22
 //
 // The oracle cache was keyed by the resolved identity (user@host:port) with
 // the argv only an index into it, on the assumption that every argv for one
-// destination resolves the same. ADR-0035 made that false on purpose: the
+// destination resolves the same. ADR-0049 made that false on purpose: the
 // typed wrapper asks about the user's own line, and then about the same line
 // plus our own ControlMaster/ControlPath/ControlPersist, and the second
 // question exists BECAUSE it answers differently — only ssh can expand the

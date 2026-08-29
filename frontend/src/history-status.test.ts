@@ -13,6 +13,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   HistoryStatusStore,
+  detachedOutputSentence,
   historyDiscardSentence,
   historyUnavailableSentence,
   HISTORY_UNAVAILABLE_RECALL_TITLE,
@@ -80,7 +81,14 @@ function fakeClient(initial: HistoryStatus | Error): FakeClient {
  *  goes on passing over a status the backend no longer sends. A caller names
  *  only what its assertion is about. */
 function aStatus(over: Partial<HistoryStatus> = {}): HistoryStatus {
-  return { available: true, reason: null, detail: null, discarded: null, ...over }
+  return {
+    available: true,
+    reason: null,
+    detail: null,
+    discarded: null,
+    detachedOutput: { recorded: true, reason: null },
+    ...over,
+  }
 }
 
 const AVAILABLE = aStatus()
@@ -508,5 +516,104 @@ describe('historyUnavailableSentence for a refusing store', () => {
     expect(s).not.toBeNull()
     expect(s!.description).toContain('running')
     expect(s!.description).toContain('not being kept')
+  })
+})
+
+// ── A session with no window (nocx-22k1c.1) ──────────────────────────────
+//
+// The degrade these are written against is the one this bead ACCEPTS: with
+// nothing recording, a detached session pauses once its output buffer fills.
+// That is deliberate — nothing is dropped — and it is invisible, which is
+// precisely why it may not live in a log line. The DOM test at the foot is
+// the one that matters; the unit tests above it pin what it reads.
+
+describe('detachedOutputSentence', () => {
+  it('says nothing while a detached session is being recorded', () => {
+    expect(detachedOutputSentence(aStatus())).toBeNull()
+  })
+
+  it('says nothing before the status has been read', () => {
+    expect(detachedOutputSentence(null)).toBeNull()
+  })
+
+  it('names the consequence, not the setting, when history is off', () => {
+    const s = detachedOutputSentence(
+      aStatus({ detachedOutput: { recorded: false, reason: 'historyOff' } }),
+    )
+    expect(s).not.toBeNull()
+    // The person is told what happens to their SESSION. A sentence about
+    // storage would be true and useless: they already know history is off,
+    // they turned it off.
+    expect(s!.title).toContain('window')
+    expect(s!.description).toContain('History is turned off')
+    expect(s!.description).toContain('pauses')
+    // And that nothing is lost, because the obvious fear is that it is.
+    expect(s!.description).toContain('Nothing it printed is lost')
+  })
+
+  it('names the other switch when it is the other switch', () => {
+    const s = detachedOutputSentence(
+      aStatus({ detachedOutput: { recorded: false, reason: 'outputOff' } }),
+    )
+    expect(s!.description).toContain('Command output is not being kept')
+    expect(s!.description).not.toContain('History is turned off')
+  })
+
+  it('is a DIFFERENT fact from the two notices beside it, and all three can be true', () => {
+    const down = aStatus({
+      available: false,
+      reason: 'noKey',
+      discarded: 3,
+      detachedOutput: { recorded: false, reason: 'historyOff' },
+    })
+    expect(historyUnavailableSentence(down)).not.toBeNull()
+    expect(historyDiscardSentence(down)).not.toBeNull()
+    expect(detachedOutputSentence(down)).not.toBeNull()
+
+    // And a perfectly healthy store still says nothing about any of them.
+    const fine = aStatus()
+    expect(historyUnavailableSentence(fine)).toBeNull()
+    expect(historyDiscardSentence(fine)).toBeNull()
+    expect(detachedOutputSentence(fine)).toBeNull()
+  })
+})
+
+describe('Settings → History says when a detached session will pause', () => {
+  let target: HTMLDivElement
+
+  beforeEach(() => {
+    document.body.replaceChildren()
+    target = document.createElement('div')
+    document.body.append(target)
+  })
+
+  it('renders the statement in the History section, beside the switches that cause it', async () => {
+    const f = fakeClient(aStatus({ detachedOutput: { recorded: false, reason: 'outputOff' } }))
+    const store = new HistoryStatusStore(f.client)
+    store.start()
+    await settle()
+
+    await mountSettings(target, store)
+
+    const section = historySection(target)
+    const cards = [...section.querySelectorAll<HTMLElement>('.ui-status-card')]
+    const card = cards.find((c) => c.textContent?.includes('window'))
+    expect(card).toBeDefined()
+    expect(card!.dataset.tone).toBe('neutral')
+    expect(card!.textContent).toContain('Command output is not being kept')
+    // The switch it is about is on the same screen.
+    expect(section.textContent).toContain('Keep command history')
+  })
+
+  it('says nothing when a detached session is being recorded', async () => {
+    const f = fakeClient(aStatus())
+    const store = new HistoryStatusStore(f.client)
+    store.start()
+    await settle()
+
+    await mountSettings(target, store)
+
+    const section = historySection(target)
+    expect(section.textContent).not.toContain('Sessions keep running only while a window is open')
   })
 })

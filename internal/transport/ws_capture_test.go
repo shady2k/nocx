@@ -41,12 +41,13 @@ type captureFakeDB struct {
 
 func newCaptureFakeDB() *captureFakeDB { return &captureFakeDB{} }
 
-func (f *captureFakeDB) Conversations() content.ConversationRepository { return nil }
-func (f *captureFakeDB) Backup(_ context.Context, _ string) error      { return content.ErrNotImplemented }
-func (f *captureFakeDB) Close() error                                  { return nil }
-func (f *captureFakeDB) Ledger() content.LedgerRepository              { return f }
-func (f *captureFakeDB) Layout() content.LayoutRepository              { return nil }
-func (f *captureFakeDB) APIRuns() content.APIRunRepository             { return nil }
+func (f *captureFakeDB) Conversations() content.ConversationRepository  { return nil }
+func (f *captureFakeDB) Backup(_ context.Context, _ string) error       { return content.ErrNotImplemented }
+func (f *captureFakeDB) Close() error                                   { return nil }
+func (f *captureFakeDB) Ledger() content.LedgerRepository               { return f }
+func (f *captureFakeDB) Layout() content.LayoutRepository               { return nil }
+func (f *captureFakeDB) APIRuns() content.APIRunRepository              { return nil }
+func (f *captureFakeDB) SessionOutput() content.SessionOutputRepository { return nil }
 
 func (f *captureFakeDB) RecordCompleted(_ context.Context, in content.CompletedCommand) (string, error) {
 	f.mu.Lock()

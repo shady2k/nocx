@@ -8,7 +8,7 @@
   // rather than checking them. They then failed at run time inside node:path
   // with "argument must be of type string. Received undefined" — a message that
   // names nothing about the specs — and they failed there only once CI started
-  // building the devharness they need, having been dead on their first line for
+  // building the backend binary they need, having been dead on their first line for
   // as long as anyone can measure (nocx-azxe.2).
   //
   // noEmit: this exists to be checked, never to build. `npm run typecheck`.

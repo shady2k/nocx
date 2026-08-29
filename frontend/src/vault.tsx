@@ -50,6 +50,11 @@ const REASON_MESSAGES: Record<string, string> = {
   denied: 'Access to the system keyring was denied.',
   timeout: 'The operation timed out. Please try again.',
   'unsupported-platform': 'System keyring is not supported on this platform.',
+  // Not "no keyring here" — nobody looked. This build declared the OS keystore
+  // out of play, because the only way to ask is a keychain write and on a host
+  // with no keychain that write is a modal nobody can dismiss (design D10).
+  excluded:
+    'This build does not use the system keychain. Secrets are kept in the encrypted file store.',
   'unknown-provider': 'This secret reference names a provider not available in this build.',
   // Without this entry the reason fell through to the backend's own words and
   // the user was shown "unseal failed" — an internal phrase, in lower case,
@@ -93,6 +98,10 @@ const UNKNOWN_REASON_SENTENCE = 'Not answering: check the store and try again.'
 
 function storeStateSentence(p: ProviderStatus): string {
   if (p.ready) return `${storeLabelName(p.id)} is available and answering.`
+  // "excluded" is the one not-ready reason that is not a failure: nothing was
+  // asked, so "Not answering" would describe a question nobody put. It gets
+  // its own sentence rather than the failure prefix (design D10).
+  if (p.reason === 'excluded') return REASON_MESSAGES.excluded
   const msg = p.reason
     ? (REASON_MESSAGES[p.reason] ?? UNKNOWN_REASON_SENTENCE)
     : UNKNOWN_REASON_SENTENCE
@@ -108,6 +117,11 @@ interface StoreRowStatus {
 
 function storeRowStatus(p: ProviderStatus): StoreRowStatus {
   if (!p.ready) {
+    // A store this build deliberately never asked is not broken, and an error
+    // dot next to a decision somebody made reads as a fault to fix.
+    if (p.reason === 'excluded') {
+      return { tone: 'warning', accessibleName: 'Not used by this build' }
+    }
     const label = p.reason ? (REASON_MESSAGES[p.reason] ?? 'Not available') : 'Not available'
     return { tone: 'error', accessibleName: label }
   }

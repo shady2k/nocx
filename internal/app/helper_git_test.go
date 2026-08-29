@@ -453,9 +453,11 @@ func (s *fakeRemoteSession) ProfileID() string  { return "" }
 func (s *fakeRemoteSession) CredentialID() string {
 	return ""
 }
-func (s *fakeRemoteSession) Write([]byte) (int, error) { return 0, nil }
-func (s *fakeRemoteSession) EnqueueWrite([]byte) bool  { return false }
-func (s *fakeRemoteSession) Resize(context.Context, uint16, uint16, uint16, uint16) error {
+func (s *fakeRemoteSession) Write([]byte) (int, error)   { return 0, nil }
+func (s *fakeRemoteSession) EnqueueWrite([]byte) bool    { return false }
+func (s *fakeRemoteSession) EffectiveSize() session.Size { return session.DefaultSize() }
+
+func (s *fakeRemoteSession) Resize(context.Context, session.Size) error {
 	return nil
 }
 

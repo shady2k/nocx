@@ -31,6 +31,7 @@ package vault
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -134,10 +135,7 @@ func (v *Vault) EnsureUnsealed(ctx context.Context, reason string) error {
 	// fresh prompt — telling those two apart is what the pointer is for, and
 	// leaving it set past the resolution is what stopped it doing that.
 	go func() {
-		v.mu.Lock()
-		reason := p.reason()
-		v.mu.Unlock()
-		err := req.RequestUnlock(pctx, reason)
+		err := v.raiseUnlock(pctx, req, p)
 		v.mu.Lock()
 		if v.unlockPending == p {
 			v.unlockPending = nil
@@ -216,5 +214,82 @@ func (p *unlockPrompt) wait(ctx context.Context) error {
 		return p.err
 	case <-ctx.Done():
 		return ctx.Err()
+	}
+}
+
+// raiseUnlock puts ONE prompt in front of a person, waiting for a person to
+// be there.
+//
+// A detached coordinator cannot ask anybody. ADR-0032 is explicit that the
+// dialog is renderer-owned — there is no daemon-native prompt to fall back
+// on — so the only honest options are to fail or to suspend, and D9 chooses
+// to suspend: the operation is held, the reason is recorded, and the prompt
+// goes out the moment a client attaches.
+//
+// The loop exists for exactly two states, and no others:
+//
+//   - nobody is attached: awaitClient suspends until somebody is, the
+//     caller's context ends, or the suspension ceiling is reached.
+//   - somebody was attached when we looked and had gone by the time the
+//     broadcast happened: the transport answers ErrNoUnlockClient, which is
+//     the same sentinel this package declares, and we suspend again.
+//
+// And it does not loop at all on a vault nobody reports presence to. Such a
+// vault has no attach to wait for, so a suspension would be a hang; it
+// raises once and returns whatever came back, which is what every caller saw
+// before D9.
+//
+// Every other outcome — unsealed, cancelled by the person, the caller's
+// context — is the answer and is returned verbatim to every joined waiter.
+// In particular a dismissal is NOT retried: a person who said no has
+// answered, and asking again would be the dialog loop nocx-25k9.20 bought.
+//
+// WHAT HAPPENS WHEN A CLIENT ATTACHES WHILE AN ASK IS PENDING. Nothing, if
+// the ask is still on the wire to a client that can answer it — the prompt
+// is one dialog and it already exists. If the last client left while the ask
+// was outstanding, ClientsAttached(0) abandoned the ATTEMPT (presence.go),
+// so this loop is back in awaitClient and the attach raises a fresh
+// broadcast for the SAME prompt: still one dialog, now addressed to somebody
+// who can see it, and still naming every operation joined to it.
+func (v *Vault) raiseUnlock(ctx context.Context, req UnlockRequester, p *unlockPrompt) error {
+	for {
+		v.mu.Lock()
+		reason := p.reason()
+		v.mu.Unlock()
+
+		tracked, err := v.awaitClient(ctx, reason)
+		if err != nil {
+			return err
+		}
+
+		actx, cancel := context.WithCancel(ctx)
+		v.mu.Lock()
+		v.unlockAttempt = cancel
+		v.unlockAttemptAbandoned = false
+		v.mu.Unlock()
+
+		err = req.RequestUnlock(actx, reason)
+
+		v.mu.Lock()
+		abandoned := v.unlockAttemptAbandoned
+		v.unlockAttempt = nil
+		v.unlockAttemptAbandoned = false
+		v.mu.Unlock()
+		cancel()
+
+		if !tracked {
+			// Nobody reports presence to this vault, so there is no attach
+			// to wait for and no second chance to take. One raise, one
+			// answer — what every caller saw before D9.
+			return err
+		}
+		switch {
+		case abandoned:
+			// The last client detached under this ask. Suspend and re-raise.
+		case errors.Is(err, ErrNoUnlockClient):
+			// The client left between the check and the broadcast.
+		default:
+			return err
+		}
 	}
 }

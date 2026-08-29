@@ -29,7 +29,7 @@ func (UnavailableToast) Toast(context.Context, Event) error { return ErrUnavaila
 
 // ToastSink bridges the router to the ToastPresenter port: Deliver presents
 // the event, and every failure is a failed delivery the router records in the
-// outcome. It never selects where an event goes (ADR-0029 §2.3) — the
+// outcome. It never selects where an event goes (ADR-0047 §2.3) — the
 // presenter is bound at construction, exactly as HostSink's host is.
 //
 // It is HostSink's sibling on purpose. A toast is not a special case in the

@@ -1,9 +1,9 @@
 # Notification system — design
 
 - **Date:** 2026-08-13 (revised 2026-08-14 after three adversarial review rounds)
-- **Status:** Accepted — ADR-0029 accepted 2026-08-14; AD-1 amended
+- **Status:** Accepted — ADR-0047 accepted 2026-08-14; AD-1 amended
 - **Brainstorming session:** `nocx-uz7f`
-- **Depends on:** **ADR-0029**, which decides the category this feature belongs to — a
+- **Depends on:** **ADR-0047**, which decides the category this feature belongs to — a
   program-initiated effect: what it may cause and what it may never choose — and adds
   presentation requests to AD-1's enumeration. **Accepted 2026-08-14.**
 - **Epics to create:** A1, A2, A3, B (§9)
@@ -22,16 +22,16 @@ Per AGENTS.md, a brief that crosses a boundary names it before it says what to b
 
 | Binding document           | What it already decided                                                                                                 | What this design does with it                                                                                                                                                                                                                    |
 | -------------------------- | ----------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| **AD-1**                   | OSC markers stay frontend-side; ledger facts may cross as typed records.                                                | **Enumeration extended by ADR-0029.** The 2026-08-02 ledger-facts amendment already permits this shape; presentation requests join its closed list, under the rules of ADR-0029 §2.2.                                                            |
-| **AD-6**                   | The backend never interprets the **bytes** a session produces; render state lives in the frontend.                      | **Untouched.** Parsing stays in xterm.js; AD-6 governs the byte stream, and never spoke to what the backend does with a typed value (ADR-0029 §4.2).                                                                                             |
+| **AD-1**                   | OSC markers stay frontend-side; ledger facts may cross as typed records.                                                | **Enumeration extended by ADR-0047.** The 2026-08-02 ledger-facts amendment already permits this shape; presentation requests join its closed list, under the rules of ADR-0047 §2.2.                                                            |
+| **AD-6**                   | The backend never interprets the **bytes** a session produces; render state lives in the frontend.                      | **Untouched.** Parsing stays in xterm.js; AD-6 governs the byte stream, and never spoke to what the backend does with a typed value (ADR-0047 §4.2).                                                                                             |
 | **AD-2**                   | Go backend service as the one core.                                                                                     | Outbound HTTP and the OS calls live in the backend, behind a host port with a Wails adapter (§2.2).                                                                                                                                              |
 | **AD-3**                   | Wails v2 as the MVP desktop shell — thin and swappable.                                                                 | The Wails runtime is reached only through that port; devharness binds an unavailable adapter.                                                                                                                                                    |
-| **AD-8**                   | Interface-first + DI, one owner per behaviour.                                                                          | Source, router and sink are three interfaces at one composition root. The router owns "where" — stated in ADR-0029 §2.3.                                                                                                                         |
-| **ADR-0024** (`nocx-u7uh`) | PTY output is render-only; a program's output cannot drive your terminal.                                               | **Untouched.** Its prohibitions are about authority — an execution attempt, an exit status, input ownership, history — and a presentation request asserts none (ADR-0029 §4.1). OSC 52 is the standing precedent for an effect caused by output. |
+| **AD-8**                   | Interface-first + DI, one owner per behaviour.                                                                          | Source, router and sink are three interfaces at one composition root. The router owns "where" — stated in ADR-0047 §2.3.                                                                                                                         |
+| **ADR-0024** (`nocx-u7uh`) | PTY output is render-only; a program's output cannot drive your terminal.                                               | **Untouched.** Its prohibitions are about authority — an execution attempt, an exit status, input ownership, history — and a presentation request asserts none (ADR-0047 §4.1). OSC 52 is the standing precedent for an effect caused by output. |
 | **ADR-0017**               | A connection references a secret; nothing is called a credential.                                                       | A target references a secret the same way, including when the provider wants it in the URL (§4.1).                                                                                                                                               |
 | **ADR-0011** §4            | The delete cascade prefers a brief unreachable orphan over metadata pointing at a missing secret.                       | Target creation and deletion follow the same ordering (§6.3).                                                                                                                                                                                    |
 | **ADR-0003**               | No Developer ID, ever; ad-hoc signature only.                                                                           | A bundle identifier is **necessary**; that it is **sufficient** is a hypothesis with an experiment attached (§8, §9).                                                                                                                            |
-| **`nocx-ywhp`**            | Program-scoped grants; OSC 52 is the first program-initiated action needing consent, and the next one reuses the model. | Deliberately not reused — ADR-0029 §4.5 records why, as the reuse rule requires.                                                                                                                                                                 |
+| **`nocx-ywhp`**            | Program-scoped grants; OSC 52 is the first program-initiated action needing consent, and the next one reuses the model. | Deliberately not reused — ADR-0047 §4.5 records why, as the reuse rule requires.                                                                                                                                                                 |
 | **`nocx-sb3f`**            | The transport has three delivery classes and models two.                                                                | Epic B depends on it (§6.4).                                                                                                                                                                                                                     |
 | **`nocx-2x8x`**            | Redaction covers scrollback, ledger and clipboard — for secrets **injected from the vault**.                            | Insufficient here, and §7 says so rather than cross-referencing past the problem.                                                                                                                                                                |
 
@@ -42,7 +42,7 @@ Per AGENTS.md, a brief that crosses a boundary names it before it says what to b
 | 1   | Direction of "webhook"                  | **Outbound only.** Event → HTTP POST to a URL the user configured. No listening socket.                                      |
 | 2   | Bark / ntfy / Telegram                  | **One sink, typed presets.** Not three integrations, and not one free-form template either (§4.1).                           |
 | 3   | History / notification centre           | **None.** A notification is transient. The dock badge is what replaces it (§4.3).                                            |
-| 4   | May a program-sourced event reach push? | **Yes** — the user chooses the route. Safety is the destination being user-configured, enforced by ADR-0029, not by a grant. |
+| 4   | May a program-sourced event reach push? | **Yes** — the user chooses the route. Safety is the destination being user-configured, enforced by ADR-0047, not by a grant. |
 | 5   | Scope of the deliverable                | **The pipeline**, not a list of events. A new source is one registration.                                                    |
 | 6   | Sinks                                   | **Five**: in-app toast, OS banner, sound, dock badge + bounce, push. Push is epic B; the rest are A1–A3.                     |
 | 7   | Trust                                   | Every event carries a `trust` class stamped by its source adapter (§3.1). A guess cannot do what an attested fact can.       |
@@ -69,7 +69,7 @@ sources ──▶ Event ──▶ router ──▶ [sink, sink, …]
 
 Provenance is **structural**: the protected fields are not on the wire to be forged. A schema
 proves a record's shape, never who assigned a field, so validating authorship was never the
-answer (ADR-0029 §2.2).
+answer (ADR-0047 §2.2).
 
 `sessionId` is the exception and it is deliberate. An earlier revision removed it along with the
 protected fields, which was a regression: AD-1 multiplexes many server-assigned sessions over one
@@ -78,7 +78,7 @@ session is what keys the debounce, decides suppression, stamps attribution and r
 click. It is **addressing**: the backend rejects an id not live on that connection and derives
 every attributed field from its own registry, never from the record.
 
-**Ingress authority is closed** (ADR-0029 §2.2): no renderer-callable method can produce an
+**Ingress authority is closed** (ADR-0047 §2.2): no renderer-callable method can produce an
 `attested` event. `notify.raise` and BEL are always `programRequest`; `block.finished` originates
 only at the lifecycle publication boundary and `session.ended` only at the session registry.
 Without that rule, "stamped from the method invoked" would only move the forging one level up.
@@ -125,7 +125,7 @@ desktop build.
 | `heuristic`      | local attention only — toast, dock badge, tab dot. **Never push.** |
 
 **Only an `attested` event may match, activate, deliver through, or disarm a completion
-subscription** (ADR-0029 §3). Saying only that a guess cannot _close_ one leaves it able to
+subscription** (ADR-0047 §3). Saying only that a guess cannot _close_ one leaves it able to
 match, borrow the subscription's sinks and its suppression override, deliver, and leave the
 subscription armed so the real completion delivers again. The matching attested event **consumes**
 the subscription once every selected sink has returned, whatever the outcome — consuming only on
@@ -249,7 +249,7 @@ NUL are rejected everywhere.** A path field percent-encodes exactly one segment;
 goes through a JSON encoder; a header goes through HTTP field-value validation; a raw body sets
 a fixed content type; OS fields are bounded before the platform call. **An invalid payload
 fails visibly and never falls back to string concatenation**, and a sink-level rejection is a
-failed delivery — it never removes the sink from the resolved set (ADR-0029 §2.2).
+failed delivery — it never removes the sink from the resolved set (ADR-0047 §2.2).
 
 **Every sink invocation is synchronous and carries a finite-deadline context.** Expiry
 _cancels_ the invocation; the closing event is the invocation's **return**, not expiry itself — a
@@ -318,7 +318,7 @@ armed makes it fire on some unrelated later event. The override is reachable onl
 - **Coalescing** within the window produces one notification naming the count, carrying the
   attribution of the session it was keyed on. Memory is bounded.
 
-Both are payload-independent, which is what keeps ADR-0029's noninterference invariant true:
+Both are payload-independent, which is what keeps ADR-0047's noninterference invariant true:
 neither the key nor the count depends on `title` or `body`.
 
 Without these, `while true; do printf '\e]9;spam\a'; done` is ten thousand pushes and a banned
@@ -362,7 +362,7 @@ Settings, because nocx cannot re-prompt after a denial).
 
 ## 7. Security
 
-The invariants live in **ADR-0029** and are binding rather than aspirational: structural
+The invariants live in **ADR-0047** and are binding rather than aspirational: structural
 provenance, differential noninterference, the absolute destination rule, secret-bearing URLs,
 and retention with a closing event. §4.1 and §4.2 are their design-level consequences.
 
@@ -372,7 +372,7 @@ secret that was never nocx's to know. Program-chosen text can carry anything. So
 either extend the redaction contract to the push sink explicitly, or state in the target UI that
 unredacted terminal content leaves the machine. A cross-reference does neither.
 
-**Residual risk, accepted deliberately:** ADR-0029 §4.6.
+**Residual risk, accepted deliberately:** ADR-0047 §4.6.
 
 ## 8. macOS specifics — researched, not assumed
 
@@ -430,7 +430,7 @@ sinks, attribution, suppression, debounce and coalescing. Plus the bundle identi
 `notify.raise` crosses the real socket conforming to its contract and carrying `title` and
 `body` and nothing else; the router resolves the expected sinks; and the `AttentionHost` fake is
 invoked with the exact title, body and backend-stamped attribution. Plus the differential
-noninterference property test (ADR-0029 §2.2), and — through the port's fake — the click-callback
+noninterference property test (ADR-0047 §2.2), and — through the port's fake — the click-callback
 decode, the originating-tab lookup, the focus call, and the unavailable and denied authorization
 states.
 
@@ -494,7 +494,7 @@ into a log or an error surface, asserted.
 
 History and a notification centre; agent events (a child of `nocx-dw3`); deeper per-agent title
 classification; OSC 1337 RequestAttention (§3.3); an inbound webhook endpoint; per-program grants
-(ADR-0029 §4.5); a durable retry queue (ADR-0029 §2.2 — adding one is a deliberate amendment, not
+(ADR-0047 §4.5); a durable retry queue (ADR-0047 §2.2 — adding one is a deliberate amendment, not
 an HTTP implementation detail).
 
 ## 10. Testing
@@ -503,7 +503,7 @@ an HTTP implementation detail).
   method, `additionalProperties: false` plus explicit `required`, carrying `title` and `body` and
   nothing else — that absence is what makes provenance structural — with the
   `…_OverTheWireConformsToContract` test off the real socket.
-- **The differential property test** (ADR-0029 §4.3), ranging over every **schema-valid** input
+- **The differential property test** (ADR-0047 §4.3), ranging over every **schema-valid** input
   and comparing **route resolution**, which is ordered before sink validation. Restricting the
   generator to payloads a sink would accept would exclude exactly the oversized and
   invalid-encoding cases that could diverge.

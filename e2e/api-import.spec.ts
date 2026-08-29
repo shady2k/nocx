@@ -7,7 +7,7 @@
  * The gesture the feature was built for is the NATIVE WINDOW DROP: a person
  * drags a Postman export from Finder onto the ask, and Wails hands Go the
  * file's absolute path. No Playwright gesture can produce it. The headless
- * stand is `cmd/devharness` plus vite and has no Wails in it at all, the
+ * stand is `cmd/nocx-server` plus vite and has no Wails in it at all, the
  * native drop never becomes a DOM event, and `SourceTicketStore.Dropped` is
  * deliberately unreachable over JSON-RPC — the wire may never mint a source.
  * `e2e/drop-gesture.ts`, which the terminal's specs use, builds a
@@ -65,7 +65,7 @@ import {
 const test = base
 
 /** Lazily: the stand is started by globalSetup, after this file is collected. */
-const devharnessBin = (): string => readStand().devharness
+const serverBin = (): string => readStand().server
 
 /** The vault passphrase this run sets up. It is a passphrase, not a token —
  *  nothing here asserts its absence and it never reaches a collection. */
@@ -98,7 +98,7 @@ test.describe('the import ask on a stand with no Wails', () => {
   // "the destination does not exist yet" a fact rather than a hope.
   test.beforeEach(() => {
     disposable = { root: mkdtempSync(join(tmpdir(), 'nocx-e2e-api-import-')) }
-    backend = new VaultBackend(devharnessBin(), disposable, true)
+    backend = new VaultBackend(serverBin(), disposable)
   })
 
   test.afterEach(() => {

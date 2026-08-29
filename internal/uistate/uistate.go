@@ -1,7 +1,7 @@
 // Package uistate owns the state the app must remember WITHOUT being asked:
 // window geometry, the sidebar's collapse/view/width, and which tab is in
 // front. It is deliberately not the settings registry — see
-// docs/decisions/0033-ui-state-is-a-document-not-a-setting.md, which draws the
+// docs/decisions/0048-ui-state-is-a-document-not-a-setting.md, which draws the
 // line: a setting is something a user deliberately chooses; UI state is a side
 // effect of using the app.
 //
@@ -36,7 +36,7 @@ var module = storage.Module{
 // Window is the recorded window geometry.
 //
 // Every field has a meaningful zero, which is what makes an absent document an
-// ordinary state rather than an error path (ADR-0033 §4):
+// ordinary state rather than an error path (ADR-0048 §4):
 //
 //   - Width or Height of 0 means "no size was ever recorded" — use the default.
 //   - Displays of "" means "no position that can be trusted" — the window is
@@ -46,7 +46,7 @@ var module = storage.Module{
 // Width/Height/X/Y always describe the NORMAL window, never the maximised or
 // full-screen one: those are states, restored by asking the platform to enter
 // them, so that leaving the state lands where the user last left the window
-// (ADR-0033 §6.4).
+// (ADR-0048 §6.4).
 type Window struct {
 	Width      int  `json:"width"`
 	Height     int  `json:"height"`
@@ -72,7 +72,7 @@ type Sidebar struct {
 
 // Layout is the renderer's half of the document: everything the webview knows
 // and the Go side cannot. It is the whole of what crosses the wire
-// (ADR-0033 §7) — window geometry deliberately does not, in either direction,
+// (ADR-0048 §7) — window geometry deliberately does not, in either direction,
 // because the renderer can neither know it nor act on it.
 type Layout struct {
 	Sidebar   Sidebar `json:"sidebar"`
@@ -272,7 +272,7 @@ func ClampSidebarWidth(width int) int {
 
 // sanitise repairs a document field by field. It never rejects the whole
 // document, because one unknown sidebar view id must not also throw away
-// window geometry that was perfectly good (ADR-0033 §4).
+// window geometry that was perfectly good (ADR-0048 §4).
 func sanitise(d Document) Document {
 	d.SchemaVersion = int(schemaVersion)
 	d.Sidebar.Width = ClampSidebarWidth(d.Sidebar.Width)

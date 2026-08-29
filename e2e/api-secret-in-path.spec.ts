@@ -56,7 +56,7 @@ import {
 const test = base
 
 /** Lazily: the stand is started by globalSetup, after this file is collected. */
-const devharnessBin = (): string => readStand().devharness
+const serverBin = (): string => readStand().server
 
 /** The vault passphrase this run sets up. It is a passphrase, not a token. */
 const VAULT_PASSPHRASE = 'api-secret-path-e2e-master-pass'
@@ -88,7 +88,7 @@ test.describe('a secret in the path: the value crosses to the server and never t
     // It must NOT exist beforehand: an import refuses an occupied
     // destination rather than replacing it (§12.2).
     collectionRoot = join(disposable.root, TELEGRAM_COLLECTION_NAME)
-    backend = new VaultBackend(devharnessBin(), disposable, true)
+    backend = new VaultBackend(serverBin(), disposable)
   })
 
   test.afterAll(async () => {

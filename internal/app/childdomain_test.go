@@ -16,7 +16,7 @@ import (
 // needs, the user's own words, and the remote command last. It stands in for
 // the call site so each test below states only what it is about.
 //
-// The composer used to be a function of its own with this signature. ADR-0035
+// The composer used to be a function of its own with this signature. ADR-0049
 // merged it with the typed wrapper's: there is one composer for "the line a
 // parent shell runs" now, and the ssh child is one of its callers.
 func composeSSHChildLine(startCmd string, remotePort, localPort int, req lifecyclepub.GrantRequest) string {
@@ -65,7 +65,7 @@ func TestComposeSSHChildLine_LineIsExecutableAndCarriesTheForward(t *testing.T) 
 		t.Errorf("line does not request a remote pty with a single -t: %s", line)
 	}
 	// Our own two options, and only ours: the user's process is the
-	// multiplex master and the interactive session both (ADR-0035).
+	// multiplex master and the interactive session both (ADR-0049).
 	for _, want := range []string{"ControlMaster=auto", "ControlPath=", "ControlPersist=no"} {
 		if !strings.Contains(line, want) {
 			t.Errorf("line does not make the user's own process the master (%s missing): %s", want, line)

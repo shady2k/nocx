@@ -1,4 +1,4 @@
-# ADR-0035 — the channel we own is the carrier, not the command line
+# ADR-0049 — the channel we own is the carrier, not the command line
 
 - **Status:** accepted (2026-08-20)
 - **Supersedes:** [ADR-0022](0022-the-ssh-command-line-is-the-carrier.md) in
@@ -16,6 +16,7 @@
   the multiplex spike
   ([`.internal/reports/nocx-mlm7-spike-multiplex.md`](../../.internal/reports/nocx-mlm7-spike-multiplex.md)),
   `nocx-a1615`, `nocx-m8jwn`, `nocx-mlm7`.
+- **Formerly ADR-0035:** renumbered 0049 on 2026-08-28 (`nocx-yjvg5`) — the number was shared with [ADR-0035 — the AppImage carries WebKitGTK's helper processes](0035-appimage-carries-webkits-helper-processes.md), which is older and keeps it.
 
 ## What the binding texts already decided
 

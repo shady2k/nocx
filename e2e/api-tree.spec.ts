@@ -79,7 +79,7 @@ const test = base
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
  *  runs after Playwright has collected this file. */
-const devharnessBin = (): string => readStand().devharness
+const serverBin = (): string => readStand().server
 
 /** What a copy is called: `freeCopyName` in api-store.ts, whose rule is
  *  "<name> copy", then "<name> copy 2". Spelled here because the whole point
@@ -123,7 +123,7 @@ test.describe('the collections tree: folders, a row’s acts, and the mark that 
 
   test.beforeEach(() => {
     disposable = { root: mkdtempSync(join(tmpdir(), 'nocx-e2e-api-tree-')) }
-    backend = new VaultBackend(devharnessBin(), disposable, true)
+    backend = new VaultBackend(serverBin(), disposable)
   })
 
   test.afterEach(() => {

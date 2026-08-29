@@ -1,8 +1,17 @@
 import { decodeFrame, encodeFrame, isSessionID } from './frame'
 import { Dispatcher } from './dispatcher'
 import { historyOutbox } from './history-client'
+import type { AttachResult } from './generated/attach'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
+import type { LiveSession, SessionsLiveResult } from './generated/sessions.live'
+import type {
+  EffectiveSize as SessionSize,
+  Gap as SessionOutputGap,
+  Run as WireRun,
+  SessionOutput,
+} from './generated/session.output'
+import type { SessionDisplaced } from './generated/session.displaced'
 import type { SessionLiveness } from './generated/session.liveness'
 import type { SessionObservationChanged } from './generated/session.observationChanged'
 import { isDriverState } from './pane-observation'
@@ -93,6 +102,90 @@ const ACK_INTERVAL_MS = 100
 // invisible until more output arrives. This decoder eliminates that class
 // of bug by construction: if the bytes form a complete character, it is
 // returned now, not later.
+/** One contiguous stretch of a session's recorded output, and where it sits
+ *  in the stream. The offset is carried rather than implied: it is the only
+ *  thing that says whether two runs are adjacent or have a hole between
+ *  them, and that is the difference between joining bytes and inventing
+ *  them.
+ *
+ *  Not exported: it is reached as the element type of SessionRecording.runs,
+ *  which is, and a second exported name for one shape is a second thing to
+ *  keep in step. */
+interface RecordedRun {
+  offset: number
+  body: Uint8Array
+}
+
+/** What a read of a session's recording came back with (nocx-22k1c.2). The
+ *  runs are what survives, the gaps are what does not, and `produced` is the
+ *  recording's end — the offset a client attaches at once it has read this
+ *  far, so the recording and the ring meet with nothing between them. */
+export interface SessionRecording {
+  from: number
+  produced: number
+  runs: RecordedRun[]
+  gaps: SessionOutputGap[]
+  /** The size the BACKEND decided this session runs at (nocx-eidfb.1).
+   *  Bytes alone are not a screen — the same stream wraps differently at two
+   *  widths — so a surface that renders a recovered recording at its own
+   *  guess would disagree with the client that watched it live. */
+  size: SessionSize
+}
+
+/** One recorded run off the wire, turned into bytes. Its own function so the
+ *  wire shape is named exactly once on this side of the socket: base64 in,
+ *  bytes out, and the offset carried through untouched. */
+function decodeRun(run: WireRun): RecordedRun {
+  return { offset: run.offset, body: decodeBase64(run.body) }
+}
+
+/** What a reclaim recovered before it attached, for the surface that draws
+ *  the pane to say. `gaps` is the whole of "what is missing" over the
+ *  recovered span: the ranges the retention bound dropped, plus — when the
+ *  recording ends before the ring's window begins — the stretch nothing
+ *  kept at all. */
+export interface SessionRecovery {
+  /** Bytes handed to the terminal ahead of the live stream. */
+  bytes: number
+  gaps: SessionOutputGap[]
+  /** The size the recovered bytes were produced at. A surface rendering them
+   *  at anything else is drawing a different screen from the one the session
+   *  printed. */
+  size: SessionSize
+}
+
+/** What a read that could not happen came back with. A named constant, not
+ *  an inline literal, because the degrade has to be the SAME shape as a
+ *  successful read of a session that printed nothing — a reclaim must not be
+ *  able to tell them apart, or the failure path would grow a branch. */
+const EMPTY_RECORDING: SessionRecording = {
+  from: 0,
+  produced: 0,
+  runs: [],
+  gaps: [],
+  // The same named default a session with no client attached holds
+  // (nocx-eidfb.1). Not zero: a size of zero is not a size, and a surface
+  // that had to branch on one would be branching on a degrade rather than
+  // rendering an empty recording.
+  size: { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
+}
+
+/** The gap reason for a stretch that neither the recording nor the ring
+ *  holds. It is the renderer's word because the fact is the renderer's to
+ *  derive: `produced` belongs to session.output and `replayFrom` to
+ *  sessions.live, and neither owner can see the other's number. */
+const UNRECORDED = 'unrecorded'
+
+/** base64 → bytes. atob is the platform's, and its output is one byte per
+ *  code unit by definition, so the copy below is exact rather than a
+ *  re-encoding. */
+function decodeBase64(b64: string): Uint8Array {
+  const raw = atob(b64)
+  const out = new Uint8Array(raw.length)
+  for (let i = 0; i < raw.length; i++) out[i] = raw.charCodeAt(i)
+  return out
+}
+
 class UTF8StreamDecoder {
   private tail: number[] = [] // incomplete multi-byte leftovers (0–3 bytes)
 
@@ -190,12 +283,6 @@ class UTF8StreamDecoder {
   }
 }
 
-interface AttachResult {
-  resumed?: boolean
-  reset?: boolean
-  from: number
-}
-
 interface SessionState {
   decoder: UTF8StreamDecoder
 
@@ -212,6 +299,20 @@ interface SessionState {
   // this session. Counted as frame.payload.byteLength, NOT decoded string
   // length, because a multi-byte rune is several bytes and one character.
   offset: number
+
+  // The geometry THIS client last reported for this session — what it told
+  // the backend at open, and every resize since. It is kept because the
+  // report has to survive the socket: the backend returns a session to its
+  // named default the moment its last client detaches (nocx-eidfb.2), so a
+  // reconnecting client that said nothing would leave a live window's
+  // terminal running at 80x24. It rides the attach, which re-takes the
+  // session and its size together.
+  //
+  // Null for a session this client has never reported a size for — a pane
+  // reclaimed by a window that has not laid it out yet. That is not a report
+  // of nothing: the attach then carries no geometry at all and the backend
+  // leaves the session at the size it is running at.
+  reported: { cols: number; rows: number } | null
 
   // dataCallback receives decoded PTY output for the caller (Tab → renderer).
   // May be null briefly between session creation (open response) and the
@@ -296,6 +397,18 @@ export class SessionHandle {
      *  is decoded here rather than dropped: this ack is the only message
      *  that carries it. */
     readonly workspaceId: string = '',
+    /** What a reclaim recovered from the backend's recording before it
+     *  attached (nocx-22k1c.2), or null for a handle that was never
+     *  reclaimed — an open starts an empty session and has nothing to
+     *  recover.
+     *
+     *  It is READ BY THE SURFACE THAT DRAWS THE PANE, which is the only
+     *  thing that can say what is missing where a person will see it. The
+     *  bytes are already queued for the terminal by the time this handle
+     *  exists; what this carries is the part the terminal cannot show —
+     *  the ranges nothing kept. A recovered scrollback with a silent hole
+     *  in it is the one outcome worse than a short one. */
+    readonly recovered: SessionRecovery | null = null,
   ) {}
 
   send(data: string): void {
@@ -358,6 +471,13 @@ export class WSClient {
   // Reattach-outcome subscribers (nocx-gbhwh): the notice consumes the
   // aggregate of one reconnect's session reattach pass.
   private reconnectResultHandlers = new Set<(r: { resumed: number; lost: number }) => void>()
+  // Displacement subscribers (nocx-oevq4, D8): another client took a session
+  // this one was holding. A client-level set rather than a per-session
+  // callback because the surface that has to react — the pane holding the
+  // session — is found BY the session id, and a pane that never registered a
+  // callback is exactly the one that would otherwise go on advertising a
+  // terminal it no longer has.
+  private displacedHandlers = new Set<(displaced: SessionDisplaced) => void>()
 
   constructor(private readonly dispatcherImpl: Dispatcher) {
     // Wire binary frame handling and session reattach on every connect/reconnect.
@@ -401,7 +521,7 @@ export class WSClient {
       // listener can state what became of the sessions on this reconnect
       // (nocx-gbhwh): resumed, or gone — the backend no longer has them.
       const reattached = [...this.sessions.entries()].map(([sid, state]) =>
-        this._sendAttach(sid, state.offset)
+        this._sendAttach(sid, state.offset, state, state.reported)
           .then((result) => {
             if (result.reset) {
               state.offset = result.from ?? 0
@@ -561,6 +681,37 @@ export class WSClient {
       })
     })
 
+    // Another client took a session this one was holding (D8). The take has
+    // already happened on the backend — no output is coming and no input will
+    // be accepted — so this is not a request to give it up, it is the news
+    // that it is gone.
+    //
+    // The session is dropped from the map BEFORE the handlers run, and that
+    // order is the point: a handler that reacted while the entry was still
+    // there could send one more keystroke into a stream this client no longer
+    // owns, and sendToSession's only guard is the map.
+    this.dispatcher.subscribe('session.displaced', (params: unknown) => {
+      if (!params || typeof params !== 'object') return
+      const raw = params as Record<string, unknown>
+      const sid = raw.sessionId
+      if (typeof sid !== 'string') return
+      const state = this.sessions.get(sid)
+      // Unknown, or a previous incarnation of this id: not this client's
+      // session, so nothing is dropped and nobody is told. The identity is
+      // checked exactly as every other session-scoped notification checks it
+      // (nocx-3oupk) — the renderer never mints one and never assumes one.
+      if (!state) return
+      if (raw.instanceId !== state.instanceId || raw.sessionEpoch !== state.sessionEpoch) return
+      this._flushAck(sid)
+      this.sessions.delete(sid)
+      const displaced: SessionDisplaced = {
+        sessionId: sid,
+        instanceId: state.instanceId,
+        sessionEpoch: state.sessionEpoch,
+      }
+      for (const h of this.displacedHandlers) h(displaced)
+    })
+
     // The backend dropped input for a session: its write queue is full,
     // so the channel underneath has stopped accepting bytes.
     this.dispatcher.subscribe('inputStalled', (params: unknown) => {
@@ -673,7 +824,7 @@ export class WSClient {
         ypixel: 0,
         ...paneParam(anchor),
       })
-      .then((result) => this._registerHandle(result))
+      .then((result) => this._registerHandle(result, { cols, rows }))
   }
 
   // openSSHSession opens an SSH session via a profile ID. The backend
@@ -695,7 +846,7 @@ export class WSClient {
         profileId,
         ...paneParam(anchor),
       })
-      .then((result) => this._registerHandle(result))
+      .then((result) => this._registerHandle(result, { cols, rows }))
   }
 
   // openSSHSessionByHost opens a direct SSH session by hostname/alias,
@@ -718,13 +869,16 @@ export class WSClient {
         user,
         ...paneParam(anchor),
       })
-      .then((result) => this._registerHandle(result))
+      .then((result) => this._registerHandle(result, { cols, rows }))
   }
 
   /** The open ack's wire shape (contracts/open.schema.json). Every open —
    *  local, profile SSH, direct-host SSH — carries the resolved launch
    *  policy and the refusal reason alongside the id and cwd. */
-  private _registerHandle(result: OpenResult): SessionHandle {
+  private _registerHandle(
+    result: OpenResult,
+    reported: { cols: number; rows: number },
+  ): SessionHandle {
     const sid = result?.sessionId
     if (!sid || !isSessionID(sid)) {
       throw new Error(`nocx: invalid session-id from server: ${sid}`)
@@ -736,20 +890,7 @@ export class WSClient {
     if (typeof instanceId !== 'string' || typeof sessionEpoch !== 'number') {
       throw new Error(`nocx: invalid session identity from server: ${sid}`)
     }
-    this.sessions.set(sid, {
-      decoder: new UTF8StreamDecoder(),
-      offset: 0,
-      dataCallback: null,
-      pendingData: '',
-      exitCallback: null,
-      resetCallback: null,
-      inputStalledCallback: null,
-      livenessCallback: null,
-      observationCallback: null,
-      livenessEpoch: 0,
-      instanceId,
-      sessionEpoch,
-    })
+    this._registerSession(sid, { instanceId, sessionEpoch }, 0, reported)
     return new SessionHandle(
       this,
       sid,
@@ -760,10 +901,251 @@ export class WSClient {
     )
   }
 
+  /** Mint the per-session state this client keeps. ONE PLACE, because an open
+   *  and a reclaim are two ways of coming to hold the same thing, and a second
+   *  literal would be the field the next callback is added to and forgotten
+   *  in. The offset differs: an open starts at zero, a reclaim starts where
+   *  the backend says the replay does. */
+  private _registerSession(
+    sessionId: string,
+    identity: { instanceId: string; sessionEpoch: number },
+    offset: number,
+    reported: { cols: number; rows: number } | null = null,
+  ): void {
+    this.sessions.set(sessionId, {
+      decoder: new UTF8StreamDecoder(),
+      offset,
+      reported,
+      dataCallback: null,
+      pendingData: '',
+      exitCallback: null,
+      resetCallback: null,
+      inputStalledCallback: null,
+      livenessCallback: null,
+      observationCallback: null,
+      livenessEpoch: 0,
+      instanceId: identity.instanceId,
+      sessionEpoch: identity.sessionEpoch,
+    })
+  }
+
   // --- reattach -----------------------------------------------------------
 
-  private _sendAttach(sessionId: string, offset: number): Promise<AttachResult> {
-    return this.dispatcher.call<AttachResult>('attach', { sessionId, offset })
+  /** The claim, in the one shape both callers use (contracts/attach.schema
+   *  .json). The identity travels with it because a claim names a session
+   *  COMPLETELY — instanceId and sessionEpoch, never a bare id — so a binding
+   *  written against a backend that has since restarted is refused as what it
+   *  is rather than answered "no such session". */
+  private _sendAttach(
+    sessionId: string,
+    offset: number,
+    identity: { instanceId: string; sessionEpoch: number },
+    reported: { cols: number; rows: number } | null = null,
+  ): Promise<AttachResult> {
+    return this.dispatcher.call<AttachResult>('attach', {
+      sessionId,
+      offset,
+      instanceId: identity.instanceId,
+      sessionEpoch: identity.sessionEpoch,
+      // The claiming client's own geometry, when it has one. A claim takes
+      // the session AND its size — the client that attached last is the one
+      // the shared channel follows (nocx-eidfb.2) — so a reconnect that
+      // omitted it would leave the terminal at the default the backend put
+      // it on when this client went away. Omitted entirely, not sent as
+      // zeroes, when this client has never laid the session out: the backend
+      // then leaves the size alone rather than reading it as "no client".
+      ...(reported ? { cols: reported.cols, rows: reported.rows, xpixel: 0, ypixel: 0 } : {}),
+    })
+  }
+
+  // --- reclaim -------------------------------------------------------------
+
+  /** What the BACKEND is holding right now: every live session with the pane
+   *  it is the pipe of and the offset its replay starts at
+   *  (contracts/sessions.live.schema.json).
+   *
+   *  This is the answer `this.sessions` cannot give. That Map is renderer
+   *  process memory, so a window that has just started knows nothing, and the
+   *  reconnect pass below reattaches only what is in it — which is why live
+   *  PTYs were orphaned by closing the window. The list replaces the memory;
+   *  it does not replace the reattach. */
+  listLiveSessions(): Promise<LiveSession[]> {
+    return this.dispatcher
+      .call<SessionsLiveResult>('sessions.live', {})
+      .then((result) => result.sessions)
+  }
+
+  // --- the recording -------------------------------------------------------
+
+  /** Everything the backend recorded for one session, read back by OFFSET
+   *  (contracts/session.output.schema.json).
+   *
+   *  This is what the replay ring cannot give. The ring is 256 KiB of
+   *  transport-side buffering (AD-9) and deliberately not scrollback, so a
+   *  window opened an hour into a run used to see about ten screens of the
+   *  hour. The recording holds the rest.
+   *
+   *  It PAGES, because one answer is bounded: the target is the `produced`
+   *  the FIRST answer reported, never the latest — the session is live and
+   *  its own end keeps moving, so chasing it would never terminate. Whatever
+   *  arrives after that offset is the ring's to replay, which is the point of
+   *  attaching at it.
+   *
+   *  The bytes stay bytes. They are decoded by the SESSION's decoder, at the
+   *  call site that owns it, because a UTF-8 rune can straddle any boundary
+   *  the recorder happened to write at — including the boundary between the
+   *  recording and the ring's first frame. */
+  readSessionOutput(
+    sessionId: string,
+    identity?: { instanceId: string; sessionEpoch: number },
+    from = 0,
+  ): Promise<SessionRecording> {
+    const claim = identity
+      ? { instanceId: identity.instanceId, sessionEpoch: identity.sessionEpoch }
+      : {}
+    const runs: RecordedRun[] = []
+    const gaps: SessionOutputGap[] = []
+    let produced = 0
+    let size: SessionSize = EMPTY_RECORDING.size
+
+    const page = (at: number, target: number | null): Promise<SessionRecording> =>
+      this.dispatcher
+        .call<SessionOutput>('session.output', { sessionId, ...claim, from: at })
+        .then((answer) => {
+          produced = answer.produced
+          size = answer.effectiveSize
+          const end = target ?? answer.produced
+          for (const gap of answer.gaps) gaps.push(gap)
+          let cursor = at
+          for (const run of answer.runs) {
+            const decoded = decodeRun(run)
+            runs.push(decoded)
+            cursor = decoded.offset + decoded.body.length
+          }
+          // No progress means the recording holds nothing more at this
+          // offset, whatever `produced` says — stop rather than ask the same
+          // question again for ever.
+          if (cursor <= at || cursor >= end) return { from, produced, runs, gaps, size }
+          return page(cursor, end)
+        })
+
+    return page(from, null)
+  }
+
+  /** Feed a recording to the session's own decoder, in stream order.
+   *
+   *  The decoder is RESET wherever a run does not continue the one before
+   *  it. Bytes are missing there, so a partial rune held from before the
+   *  hole can never be completed by what comes after — the same reason the
+   *  reset path resets it, and without it the first character past a hole
+   *  would be a replacement glyph. A run boundary that IS adjacent — the
+   *  seam between two pages of one unbroken recording — is not a hole and
+   *  must not reset anything, or a rune split across the page boundary would
+   *  be lost. */
+  private _decodeRecording(state: SessionState, rec: SessionRecording): string {
+    let text = ''
+    let next: number | null = null
+    for (const run of rec.runs) {
+      if (next !== null && run.offset !== next) state.decoder.reset()
+      text += state.decoder.decode(run.body)
+      next = run.offset + run.body.length
+    }
+    return text
+  }
+
+  /** Take a live session back: register it as if this client had opened it,
+   *  then attach at the offset the backend named.
+   *
+   *  The handle it returns knows the session and NOT the pane's own facts —
+   *  no cwd, no mode, no workspace — because those belong to the pane, which
+   *  is the renderer's durable identity and is read from the layout store.
+   *  The backend owns the live binding and the renderer owns the pane; a
+   *  reclaim is where the two are joined, not where either learns the other's
+   *  half.
+   *
+   *  A reset here is not a loss to report: this client has drawn nothing yet,
+   *  so it simply starts at the offset the backend resumed from. */
+  reclaimSession(entry: LiveSession): Promise<SessionHandle> {
+    const identity = { instanceId: entry.instanceId, sessionEpoch: entry.sessionEpoch }
+    // The recording is read BEFORE the claim, and a failure to read it never
+    // fails the claim. Recovering the scrollback is what makes the reclaimed
+    // pane worth looking at; taking the session back is the job, and a
+    // backend with no content store wired answers this method "not found"
+    // (registration.go) on an otherwise perfectly reclaimable session.
+    return this.readSessionOutput(entry.sessionId, identity)
+      .catch(() => EMPTY_RECORDING)
+      .then((recording) => {
+        // Attach at the LATER of the two, which is what makes the two halves
+        // meet. While recording is on the ring may not free a byte the
+        // recorder has not passed, so `produced` is at or past the ring's
+        // window and attaching there resumes exactly where the recording
+        // stopped. With recording off the recording stands still while acks
+        // go on freeing the ring, `replayFrom` overtakes it, and attaching
+        // below the window would be answered with a reset — losing the
+        // recording as well as the gap.
+        const attachAt = Math.max(recording.produced, entry.replayFrom)
+        this._registerSession(entry.sessionId, identity, attachAt)
+        const state = this.sessions.get(entry.sessionId)
+        const gaps = [...recording.gaps]
+        let recovered = ''
+        if (state) {
+          recovered = this._decodeRecording(state, recording)
+          // Queued, not delivered: the surface has not registered its data
+          // callback yet, and pendingData is the buffer that already exists
+          // for exactly this window. The ring's own replay lands behind it,
+          // in stream order, and both flush together on onData.
+          state.pendingData = recovered + state.pendingData
+          if (attachAt !== recording.produced) {
+            // The live stream does not continue the recording — the attach
+            // starts past its end. A partial rune the decoder is holding from
+            // the recording's last bytes can never be completed by what comes
+            // next, so it is dropped here rather than fused onto the first
+            // byte of the ring's replay and drawn as a character neither half
+            // contained.
+            state.decoder.reset()
+          }
+        }
+        if (recording.produced < entry.replayFrom) {
+          // Neither owner holds this stretch. Said, not swallowed: a shorter
+          // scrollback nobody mentioned is indistinguishable from a shorter
+          // session.
+          gaps.push({ start: recording.produced, end: entry.replayFrom, reason: UNRECORDED })
+        }
+        return this._sendAttach(entry.sessionId, attachAt, identity)
+          .then((result) => {
+            const attached = this.sessions.get(entry.sessionId)
+            if (attached) attached.offset = result.from
+            // No cwd, no mode, no parent, no workspace: every one of those is
+            // a fact of the PANE or of the open that made the session, and
+            // the reclaiming window reads them from the layout store it
+            // already has. Inventing them here would be the second owner
+            // (AD-8) — and the one that is wrong, because it would be
+            // guessing.
+            return new SessionHandle(this, entry.sessionId, '', 'script', null, '', {
+              bytes: recovered.length,
+              gaps,
+              size: recording.size,
+            })
+          })
+          .catch((err) => {
+            // A refused claim leaves NOTHING behind: the map must not hold a
+            // session this client does not have, or its next reconnect would
+            // reattach to it and its input would be sent into a stream it
+            // never owned.
+            this.sessions.delete(entry.sessionId)
+            throw err
+          })
+      })
+  }
+
+  /** Fires when another client takes a session this one was holding (D8,
+   *  contracts/session.displaced.schema.json). The session is already gone
+   *  from this client's map when a handler runs: the backend has stopped
+   *  sending its output and refuses its input, so the only honest state here
+   *  is not holding it. Returns an unsubscribe. */
+  onSessionDisplaced(cb: (displaced: SessionDisplaced) => void): () => void {
+    this.displacedHandlers.add(cb)
+    return () => this.displacedHandlers.delete(cb)
   }
 
   // --- data plane ---------------------------------------------------------
@@ -784,6 +1166,11 @@ export class WSClient {
     const ws = this.dispatcher.socket
     if (!ws || ws.readyState !== WebSocket.OPEN) return
     if (!this.sessions.has(sessionId)) return
+    // Recorded before it is sent, and recorded whatever the backend answers:
+    // this is what THIS client measured, and it is what the next attach has
+    // to report to take the session's size back (nocx-eidfb.2).
+    const state = this.sessions.get(sessionId)
+    if (state) state.reported = { cols, rows }
     // Fire-and-forget — response is silently dropped.
     void this.dispatcher
       .call('resize', { sessionId, cols, rows, xpixel: 0, ypixel: 0 })

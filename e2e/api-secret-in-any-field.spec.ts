@@ -50,7 +50,7 @@ const AUTH_SECRET_VALUE = 'e2e-auth-bearer-value-6b1d8e3f'
 const VAULT_PASSPHRASE = 'api-secret-any-field-e2e-master-pass'
 
 /** Lazily: the stand is started by globalSetup, after this file is collected. */
-const devharnessBin = (): string => readStand().devharness
+const serverBin = (): string => readStand().server
 
 /** Every file under `root`, recursively. */
 function walk(root: string): string[] {
@@ -187,7 +187,7 @@ test.describe('vault secrets in Auth and header fields with no environment', () 
       expectedValue: `Bearer ${SECRET_VALUE}`,
     })
     collectionRoot = join(disposable.root, COLLECTION_NAME)
-    backend = new VaultBackend(devharnessBin(), disposable, true)
+    backend = new VaultBackend(serverBin(), disposable)
   })
 
   test.afterAll(async () => {

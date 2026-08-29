@@ -118,6 +118,54 @@ type Vault struct {
 	// its waiters) alive past the vault's own end.
 	promptCtx    context.Context
 	promptCancel context.CancelFunc
+
+	// clients is how many clients are attached, as last reported by the
+	// transport (presence.go). It is the ONE fact the seal-on-last-detach
+	// policy and the suspend-until-somebody-returns wait both read, so the
+	// two can never disagree about whether there is anybody to ask.
+	clients int
+	// clientsKnown records that presence is being REPORTED at all. Its zero
+	// value is what a vault built without a transport holds, and there
+	// "clients == 0" means "nobody has said", not "nobody is attached" — a
+	// vault that suspended on it would hang every caller in every package
+	// that constructs a vault of its own.
+	clientsKnown bool
+	// clientWait is closed when the count goes from zero to non-zero, and
+	// replaced by nil so the next suspension makes a fresh one. nil means
+	// nothing is suspended.
+	clientWait chan struct{}
+	// unlockSuspension is the ceiling on how long one operation waits for a
+	// client to come back. Zero means DefaultUnlockSuspension; only tests
+	// set it (SetUnlockSuspension).
+	unlockSuspension time.Duration
+	// unlockAttempt cancels the ask currently on the wire — one ATTEMPT at
+	// the outstanding prompt, not the prompt itself. Set while
+	// UnlockRequester.RequestUnlock is in flight; called when the last
+	// client detaches, because a notification broadcast to connections that
+	// no longer exist can never be answered.
+	unlockAttempt context.CancelFunc
+	// unlockAttemptAbandoned records that the cancellation above was ours
+	// rather than the caller's, so the raise loop suspends and re-raises
+	// instead of reporting a cancelled context to every waiter.
+	unlockAttemptAbandoned bool
+	// detachWindow is how long the client count must STAY zero before the
+	// detach is read as a departure (presence.go). New sets it to
+	// DefaultDetachWindow; SetDetachWindow replaces it, and zero means
+	// "confirm immediately", which is what the tests that are about the seal
+	// rather than about the observation use.
+	detachWindow time.Duration
+	// presenceEpoch is bumped on every presence report. An armed departure
+	// captures it and confirms only if it is unchanged, which is how "the
+	// count is still zero because nobody came back" is told from "the count
+	// is zero again after somebody came and went" — the second departure
+	// arms its own.
+	presenceEpoch uint64
+	// departureSettled runs when an armed departure's window elapses, with
+	// whether it was confirmed. It is the only observable an assertion of
+	// "this was NOT a departure" can wait on — the alternative is sleeping
+	// longer than the window and calling a green run proof. Nothing outside
+	// this package's tests sets it; it is nil in every shipped build.
+	departureSettled func(confirmed bool)
 }
 
 // New loads the vault document, decides the initial state, and runs
@@ -138,6 +186,7 @@ func New(docs storage.DocumentStore, reg *Registry, logger *slog.Logger) (*Vault
 		autoSealQuit:         make(chan struct{}),
 		autoSealDurationFn:   defaultAutoSealDuration,
 		autoSealTimerFactory: newAutoSealTimer,
+		detachWindow:         DefaultDetachWindow,
 	}
 	v.promptCtx, v.promptCancel = context.WithCancel(context.Background())
 	if found {

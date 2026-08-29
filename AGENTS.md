@@ -60,31 +60,56 @@ developer's real settings and reset their theme on every pass (nocx-ti8w). If
 you want your real SSH profiles in the dev stand, copy them across by hand —
 nothing migrates them for you, and nothing should.
 
-**And the e2e suite gets a disposable `$HOME`.** On the default path
-`playwright.config.ts` applies it to the `wails dev` backend and you need do
-nothing. On the **headless** path you start the backend yourself, so the suite
-cannot isolate it and refuses to run until you say you have: export
-`NOCX_E2E_HOME_DIR` and launch devharness with that `HOME` — `e2e/preflight.ts`
-prints the exact command when it stops you. Do not work around it by unsetting
-`NOCX_WS_PORT`; the boundary is what keeps a run off your settings, your vault
+**And the e2e suite gets a disposable `$HOME`.** There is one stand and
+Playwright owns it (`e2e/stand.ts`), so the boundary is applied to every
+backend the suite starts — the shared one and the ones individual specs raise
+— by `e2e/home-isolation.ts`, which RAISES rather than warns if a caller tries
+to opt out. `NOCX_E2E_HOME_DIR` travels with each of them as the record of
+which home it got. There is no second path to remember: `e2e/preflight.ts`
+refuses a run with `NOCX_WS_PORT` set, because nothing reads it any more and a
+run that thinks it is driving a backend of its own is measuring the wrong
+process. The boundary is what keeps a run off your settings, your vault
 documents, your `~/.nocx` and your shell rc files.
 
-**That boundary does not cover the login keychain — so run e2e in the container.**
+**Run e2e in the container anyway — it is CI's environment and it is faster.**
 
 ```bash
 e2e/run-in-container.sh                        # whole suite, both browsers
 PW_PROJECTS=chromium e2e/run-in-container.sh e2e/sidebar.spec.ts
 ```
 
-`$HOME` moves three things and the keystore is a fourth: `go-keyring` talks to
-the Keychain service, not to a directory, and `app.New` probes the system vault
-provider on **every** backend start — "a probe is a real keychain write", says
-the comment doing it. `wails dev` re-signs the binary each run, so macOS re-asks
-every time, and a suite that restarts the backend per spec asks continuously.
-The owner watched a dialog appear every two seconds during a local run
-(`nocx-o4hg`). A Linux container has no keychain to ask, and it runs the headless
-path — `cmd/devharness` plus vite — so it is also about fifteen times faster
-than a cold `wails dev` per spec.
+It runs the headless path — `cmd/nocx-server` plus vite — so it is about
+fifteen times faster than a cold `wails dev` per spec, and it is byte-for-byte
+CI's image.
+
+**`$HOME` moves three things and a per-user OS SERVICE is a fourth class it
+cannot move**, and the keystore is the one that bit us. `go-keyring` talks to
+the Keychain service, not to a directory, and `app.New` used to PROBE the
+system vault provider on every backend start — "a probe is a real keychain
+write", said the comment doing it.
+
+What was written here before, and what `nocx-o4hg` recorded as the cause, was
+that `wails dev` re-signs the binary each run so macOS re-asks every time.
+**That is wrong, and it is worth knowing why.** zalando/go-keyring shells out
+to `/usr/bin/security` (`keyring_darwin.go`), so the process asking is Apple's
+signed binary and OUR signature never enters a keychain ACL at all —
+re-signing cannot produce a prompt. Measured on macOS instead: `$HOME` **does**
+move the login keychain — `security` resolves it under `$HOME/Library/Keychains`
+— and a READ under a `$HOME` with no keychain fails **silently** while a
+**WRITE** raises "Keychain not found". The probe is a write. So the dialog the
+owner watched every two seconds was the disposable `$HOME` having no keychain
+in it, once per backend start — not a signature, and not something re-signing
+or notarising would have changed.
+
+The fix is therefore not isolation but DECLARATION (design D10): the keystore
+stance is stated before anything is built, never discovered by writing to one.
+A Go test that has not said whether it may reach the OS keystore is refused by
+`app.New` (`nocx-o4hg`); a backend binary takes the stance from its BUILD, so
+`cmd/nocx-server` compiled without `-tags nocx_login_session` has no OS
+keystore to reach and the e2e suite has nothing to remember to switch off
+(`nocx-nhhr`). The general rule survives its wrong explanation: `$HOME`
+isolation covers DIRECTORIES and cannot cover a per-user OS service — the
+keychain, the Secret Service, a launchd agent, D-Bus.
 
 **Its failure set is not CI's, and CI is the source of truth.** The container
 runs Linux WebKit at a container-default viewport; the shipped app is macOS
@@ -150,8 +175,9 @@ it can only confirm that what was written does what it was written to do.
 user can do that they could not before, and close the epic only when one automated check
 has watched them do it end to end. Write that check when the epic is created — by the end
 you know what the code does, and that is the knowledge that makes you write the test the
-implementation passes. `cmd/devharness` runs the real backend headless (no wails, no GTK,
-no display), so there is no excuse about the harness.
+implementation passes. `cmd/nocx-server` runs the real backend headless (no wails, no
+GTK, no display) — the SHIPPED coordinator, not a harness beside it — so there is no
+excuse about the harness.
 
 **`deadcode` and coverage are floors, never criteria. Neither can report a feature that is
 missing — only that written code is used.**
@@ -337,8 +363,8 @@ rule.
 seconds and is pull-based — nothing surfaces them for you.
 
 > A session spent installing Xvfb and rebuilding NixOS twice to run Playwright ended when
-> `bd memories e2e` turned up `cmd/devharness` plus the `NOCX_WS_PORT` shim — a headless
-> path needing no display, in the repo the whole time.
+> `bd memories e2e` turned up the headless backend plus its port shim — a path needing
+> no display, in the repo the whole time.
 
 **When a branch behaves differently from `main`, diff it against `main` first** — before
 measuring, instrumenting or theorising:

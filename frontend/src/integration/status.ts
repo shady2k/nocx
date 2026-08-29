@@ -21,6 +21,44 @@ import type { SessionIntegrationChanged } from '../generated/session.integration
 
 export type IntegrationReason = NonNullable<SessionIntegrationChanged['reason']>
 
+// ── whether what this session prints is being written down ────────────────
+
+/** The second half of the answer a plain tab owes its reader (nocx-22k1c.3).
+ *
+ *  "No blocks" and "nothing kept" used to be the same sentence and stopped
+ *  being one: since the backend became the replay ring's own consumer
+ *  (nocx-22k1c.1) a session with no integration at all still has everything
+ *  it prints written to the store, because the recorder is fed by the output
+ *  pump and never asks whether a lifecycle channel exists. A card that goes
+ *  on saying nothing is kept tells a person their run is being thrown away
+ *  while it is not, which is the same class of lie as a silent degrade —
+ *  drawn by us, in the surface that exists to end them.
+ *
+ *  `unknown` is an honest third value rather than a hedge: history.status is
+ *  read over the socket, and until it answers the renderer has no fact. The
+ *  product then says nothing about recording rather than guessing either way,
+ *  which is the rule agent-status-line.ts states for the assistant's
+ *  credential and history-status.ts states for a status not yet read. */
+export type OutputRecording = 'recorded' | 'not-recorded' | 'unknown'
+
+/** Where a surface reads that answer from, live.
+ *
+ *  A getter alone would be a snapshot, and the interval this seam has to
+ *  cover has both ends: it opens when the card is raised and closes when the
+ *  card is taken down, and the switches that govern recording can be changed
+ *  anywhere inside it. A card left contradicting the settings screen the
+ *  person has just used is the defect, whichever direction it points.
+ *
+ *  HistoryStatusStore satisfies this and is the one owner of the fact (AD-8);
+ *  this is the narrow half of it a pane needs, declared here so the pane's
+ *  side of the seam does not depend on the whole History status. */
+export interface OutputRecordingSource {
+  /** What is true now. */
+  outputRecording(): OutputRecording
+  /** Observe changes to it. Returns an unsubscribe. */
+  subscribe(listener: () => void): () => void
+}
+
 /** One integration fact, delivered with its session id intact. */
 export type IntegrationFactHandler = (fact: SessionIntegrationChanged) => void
 
@@ -124,11 +162,22 @@ interface IntegrationFix {
 export interface IntegrationMessage {
   /** The card's title and the tab mark's label. */
   readonly title: string
-  /** One sentence. No program names, no host names, no paths, no error
-   *  text — a remote publish failure is an SFTP status code and a path,
-   *  meaningful in a log and meaningless in a pane (nocx-viil). */
+  /** What happened, and what is now true of this session's output. No
+   *  program names, no host names, no paths, no error text — a remote
+   *  publish failure is an SFTP status code and a path, meaningful in a log
+   *  and meaningless in a pane (nocx-viil).
+   *
+   *  Two sentences rather than one since nocx-22k1c.3, and deliberately so:
+   *  the reason is half the answer, and "so what is happening to my output"
+   *  is the other half. It is HERE rather than in `happening` because this
+   *  is the string the card puts in front of the person without their
+   *  opening anything, and a fact behind a click is a fact most readers
+   *  never get. */
   readonly description: string
-  /** What is true right now, for the details chain. */
+  /** What is true right now, for the details chain. About the STRUCTURE
+   *  around the session — blocks, the editor — and never about whether the
+   *  output is being kept: that is one sentence with one owner
+   *  (recordingSentence) and it is said in `description`. */
   readonly happening: string
   /** The last step that did work, for the details chain. */
   readonly lastGoodStep: string
@@ -241,7 +290,13 @@ const MESSAGES: Record<IntegrationReason, MessageTemplate> = {
   'channel-lost': {
     title: 'Integration lost',
     description: 'nocx lost its channel to this shell, so this tab is now a plain terminal.',
-    happening: 'This tab is a plain terminal. Commands still run; they are no longer recorded.',
+    // It used to end "they are no longer recorded", which was true until the
+    // backend became its own consumer of the replay ring (nocx-22k1c.1) and
+    // is false now — and it is the one message a person reads at the exact
+    // moment they are wondering whether they have lost anything. What ended
+    // is the marking, not the keeping.
+    happening:
+      'This tab is a plain terminal. Commands still run; nocx no longer marks where each one starts and ends.',
     lastGoodStep: 'The shell was integrated and answering. Its channel then ended.',
   },
   'unsupported-shell': notIntegrated(
@@ -410,16 +465,56 @@ const MESSAGES: Record<IntegrationReason, MessageTemplate> = {
  *  own types by the time the test runs. */
 export const INTEGRATION_REASONS = Object.keys(MESSAGES) as IntegrationReason[]
 
+/** What is happening to this session's output while it produces no blocks,
+ *  as one sentence, in one place (nocx-22k1c.3).
+ *
+ *  One function rather than a clause written into thirty-one templates: the
+ *  fact is the same for every reason — a plain tab is a plain tab whether its
+ *  shell has no tier or its handshake expired — and thirty-one copies is
+ *  thirty-one chances to leave one saying what the last build said.
+ *
+ *  Null for `unknown`, which is silence and not a hedge. A sentence that
+ *  said "output may or may not be kept" would teach the reader to skip the
+ *  line on the occasions nocx does know.
+ *
+ *  It names the switches without naming a file or a path, and points at the
+ *  one screen that can change them — the History section, which is where
+ *  detachedOutputSentence says the same thing to a person who is already
+ *  looking at those controls. Same fact, two audiences, and each surface
+ *  words it for the reader in front of it. */
+export function recordingSentence(recording: OutputRecording): string | null {
+  switch (recording) {
+    case 'recorded':
+      return 'What this session prints is still being recorded; what it is not producing is command blocks.'
+    case 'not-recorded':
+      // The paired negative, and the direction the person's own settings
+      // cause. Saying the first sentence here would claim a recording that
+      // is not happening, which is the same lie the other way round.
+      return 'What this session prints is not being recorded either — Settings → History says why.'
+    default:
+      return null
+  }
+}
+
 /** The message for a fact, or null when there is nothing to say — which is
  *  every non-degraded status. A reason the renderer does not recognise falls
  *  back to `unknown` rather than to silence: an unrenderable reason is still
- *  a degraded session, and silence is the defect. */
+ *  a degraded session, and silence is the defect.
+ *
+ *  `recording` is required rather than defaulted because it is a question
+ *  every caller can answer and a default would answer it silently, in the
+ *  direction that says nothing — a card that stopped mentioning recording
+ *  because somebody added a call site is exactly the regression this
+ *  parameter exists to make impossible. */
 export function integrationMessage(
   fact: SessionIntegrationChanged | null,
+  recording: OutputRecording,
 ): IntegrationMessage | null {
   if (!isDegraded(fact) || !fact) return null
   const { fix, ...words } = MESSAGES[fact.reason as IntegrationReason] ?? MESSAGES.unknown
-  return fix ? { ...words, fix: fix(shellFacts(fact.shell)) } : words
+  const output = recordingSentence(recording)
+  const said = output ? { ...words, description: `${words.description} ${output}` } : words
+  return fix ? { ...said, fix: fix(shellFacts(fact.shell)) } : said
 }
 
 /** How much of an executable name the process table keeps, in bytes.
@@ -491,7 +586,13 @@ export function observationSentence(fact: SessionIntegrationChanged): string | n
  *  zsh users for a month. */
 export const INTEGRATION_EXPLANATION: readonly string[] = [
   'An integrated tab knows where each command starts and ends, so nocx can draw command blocks, record what you ran, and offer the command editor.',
-  'A plain terminal runs your shell and its own prompt. Everything still works; what is missing is the structure around it — no command blocks, no command editor, and nothing recorded.',
+  // "and nothing recorded" until nocx-22k1c.3, which was true until the
+  // backend became the replay ring's own consumer and is not any more. What
+  // a plain tab loses is the STRUCTURE; whether its output is written down
+  // is a different switch, on a different screen, and the card says which
+  // way that one is set.
+  'A plain terminal runs your shell and its own prompt. Everything still works; what is missing is the structure around it — no command blocks, no command editor, and nothing kept as a command you can find again.',
+  'Whether what a session prints is written down is a separate switch, in Settings → History. It applies to every tab, integrated or not, and the card above says which way it is set for this one.',
   'nocx says this only when it tried to integrate a session and did not manage it. A tab that was never meant to be integrated says nothing at all, so this is always about something on the machine that can be changed.',
   'The mark on the tab stays for as long as the session is degraded. "Don\'t show again for this shell" stops the card for this shell on this machine; it leaves the mark alone, because the mark is the honest state of the session.',
 ]

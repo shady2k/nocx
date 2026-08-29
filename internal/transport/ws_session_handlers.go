@@ -1097,6 +1097,19 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 			h := sessionsLiveHandlers{op: liveOp, rings: s, r: r, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSessionsLive(ctx, req) }
 		}),
+		// session.output is the session plane's OTHER read, and it rides the
+		// same per-operation queue as attach and sessions.live for the same
+		// reason: a fresh client asks what is alive, reads what one printed,
+		// and takes it — three steps of one act, and a read admitted under a
+		// different admission than the claim it feeds would answer while the
+		// claim it is preparing was refused. Available only while a store is
+		// wired: with no recording there is nothing to hand back, and the
+		// caller's next move is to stop asking rather than to fix its
+		// arguments (registration.go).
+		whenAvailable(regResponder(sessionSub, "session.output", params(validateSessionOutputRaw), func(r Responder) handlerFunc {
+			h := sessionOutputHandlers{ops: sessionOps, store: s.sessionRecorder, instance: instance, r: r, log: s.log}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleSessionOutput(ctx, req) }
+		}), func() bool { return s.sessionRecorder != nil }, "method not found: session output store not wired"),
 		reg(immediate, "ack", params(validateAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := ackHandler{machine: s, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAck(req) }

@@ -43,7 +43,7 @@ package content
 // RTA marks every method reached through an interface as reflection-reachable,
 // so the ratchet cannot separate a wired write path from an unwired one in
 // this package (ledger.go's header says the same, for the same reason). The
-// honest statement, as of nocx-22k1c.1, checked with `-whylive`:
+// honest statement, as of nocx-22k1c.2, checked with `-whylive`:
 //
 //	Append  — WIRED. main → App.Run → … → handleOpen → pumpToRing →
 //	          recordSessionOutput → Append. It is the seam the whole bead is
@@ -51,14 +51,16 @@ package content
 //	          outlive the ring is its end-to-end proof.
 //	Stance  — WIRED. history.status reads it on every render of the History
 //	          settings section, which is where the degrade is stated.
-//	Read    — TEST-REACHABLE ONLY. Nothing on the wire asks for a recording
-//	          back yet; `-whylive` answers "reachable only through
-//	          reflection". It is here because a recording nothing can read is
-//	          not durable in any sense worth the word — the acceptance
-//	          "replays to the same bytes the client received" is checked
-//	          through it — and because the read surface is the next bead, not
-//	          a thing to invent inside this one. Keep this line current: it is
-//	          the only warning the next reader gets.
+//	Read    — WIRED as of nocx-22k1c.2. main → App.Run → … → sessionSpecs →
+//	          sessionOutputHandlers.handleSessionOutput → Read: the
+//	          session.output JSON-RPC method is the read surface, and the
+//	          transport test that watches a fresh client recover an hour of
+//	          output the replay ring had long since discarded is its
+//	          end-to-end proof. It was TEST-REACHABLE ONLY for one bead —
+//	          `-whylive` answered "reachable only through reflection" — and
+//	          that was REPORTED rather than baselined, which is what made it
+//	          the next bead instead of a permanent warning. Keep this line
+//	          current: it is the only warning the next reader gets.
 
 import (
 	"context"

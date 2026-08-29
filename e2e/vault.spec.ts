@@ -441,9 +441,9 @@ test.describe('Vault — recovery code unseal', () => {
   })
 })
 
-// ── Case 3: with keyring, setup is silent ─────────────────────────────────
+// ── Case 3: a reachable keyring changes nothing ───────────────────────────
 
-test.describe('Vault — with keyring, silent setup', () => {
+test.describe('Vault — a reachable keyring still asks for a passphrase', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
   // This test exercises the OS-keychain path, which requires a running
   // gnome-keyring daemon. It is the most likely to rot silently (nocx-25k9)
@@ -455,7 +455,16 @@ test.describe('Vault — with keyring, silent setup', () => {
   //
   // gnome-keyring is available via `nix-shell -p gnome-keyring dbus`.
 
-  test('silent vault setup with gnome-keyring', async ({ page }) => {
+  // This case INVERTED on 2026-08-29 and its build is the reason to keep it.
+  // It used to assert that a machine with a working Secret Service was set up
+  // with no sheet at all: `vault.setup({})` put the root key in the keystore
+  // and minted no recovery code. ADR-0050 step 1 removed that mode, so what
+  // this case now proves is the epic's happy path — that the machine which
+  // used to be set up behind the person's back is asked, like every other,
+  // and leaves with a recovery code.
+  test('vault setup asks for a passphrase even where gnome-keyring is reachable', async ({
+    page,
+  }) => {
     // ── Check that gnome-keyring is reachable ───────────────────────────
     let hasKeyring = false
     try {
@@ -517,25 +526,42 @@ test.describe('Vault — with keyring, silent setup', () => {
         .getByRole('radio', { name: 'Password' })
         .click()
 
-      // THE SILENT PATH, and it is the whole point of this case. The lock is
-      // an explicit request onto an uninitialized vault, so it sets the vault
-      // up — but a machine whose OS key can carry it is set up WITHOUT a
-      // sheet, and the panel stays where the person is standing and lists
-      // what the vault now holds (createVaultSecretSource.requestSetup).
-      // Cases 1 and 2 get the sheet because they run with no Secret Service;
-      // this one must not, and that difference is what is asserted below.
-      //
-      // So there is exactly one dialog in this flow, and it is the password
-      // generator behind the panel's create row — the same one "Set Password"
-      // used to raise directly (nocx-3o0ed.4).
+      // THE SHEET, on the one machine that used to be exempt from it. The
+      // lock is an explicit request onto an uninitialized vault, and there is
+      // now exactly one answer to that on every machine: ask for a
+      // passphrase (createVaultSecretSource.requestSetup). Cases 1 and 2
+      // reach this same sheet with no Secret Service at all; this case has a
+      // working one, and that is precisely why it is worth running.
       const pwField = page.locator('#profile-auth-password')
       await expect(pwField).toBeVisible({ timeout: 3000 })
+      await pressLock(pwField)
+
+      const setupDialog = page
+        .locator('.ui-prompt-overlay')
+        .filter({ has: page.locator('#vault-setup-passphrase') })
+      await expect(setupDialog).toBeVisible({ timeout: 10_000 })
+
+      await page.locator('#vault-setup-passphrase').fill('keyring-master-passphrase-7')
+      await page.locator('#vault-setup-confirm').fill('keyring-master-passphrase-7')
+      await page
+        .getByRole('dialog')
+        .getByRole('button', { name: /Set Up/i })
+        .click()
+
+      // AND A RECOVERY CODE COMES BACK. This is the assertion the epic is
+      // closed by: the silent path minted none, so the person who lost that
+      // keychain item had lost the vault with no second way in. Its presence
+      // here is the difference, not the sheet.
+      const codeBlock = page.locator('.ui-vault-code-block-wrap .ui-code-block')
+      await expect(codeBlock).toBeVisible({ timeout: 10_000 })
+      const recoveryCode = await codeBlock.textContent()
+      expect((recoveryCode ?? '').length).toBeGreaterThan(10)
+
+      await page.getByRole('dialog').getByRole('button', { name: 'Done', exact: true }).click()
+
+      // The sheet took the surface, so the panel closed with it: the person
+      // presses the lock again, this time onto an OPEN vault.
       await addSecretFromLock(page, pwField)
-      // The create row was reached, so the vault is already open — and the
-      // sheet cases 1 and 2 meet at exactly this moment did not appear.
-      await expect(
-        page.locator('.ui-prompt-overlay').filter({ has: page.locator('#vault-setup-passphrase') }),
-      ).not.toBeVisible()
       const pwInput = page.locator('#password-value')
       await expect(pwInput).toBeVisible({ timeout: 3000 })
       await pwInput.fill('keyring-password-789')
@@ -543,18 +569,17 @@ test.describe('Vault — with keyring, silent setup', () => {
       await expect(pwInput).not.toBeVisible({ timeout: 3000 })
       await expect(pwField).toHaveValue(/^\{\{secret:.+\}\}$/, { timeout: 10_000 })
 
-      // Click "Create Connection". With a keyring, the vault setup should be
-      // silent — no dialog should appear.
+      // The vault is open and holds the secret, so the save completes with no
+      // further asking: the connection list shows the profile.
       await page.getByRole('button', { name: 'Create Connection', exact: true }).click()
 
-      // Verify NO vault dialog appeared: the connection list shows the profile.
       await expect(
         page.locator('.ui-collection-row').filter({ hasText: 'Keyring Test' }),
       ).toBeVisible({
         timeout: 10_000,
       })
 
-      // Verify no setup/unlock dialog is visible.
+      // Answered once, not once per save. The sheet is gone and stays gone.
       await expect(page.getByRole('dialog').filter({ hasText: 'Set Up Vault' })).not.toBeVisible({
         timeout: 3000,
       })

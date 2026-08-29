@@ -29,10 +29,25 @@ func rootKeyPresent(v *Vault) bool {
 
 // unsealedVaultWithClient returns a vault that is set up, unsealed and has
 // one client attached — the state a person is in while looking at a window.
+//
+// Its departure window is ZERO, which makes a detach seal synchronously.
+// That is deliberate and it is what keeps the tests below about the SEAL
+// rather than about the observation: "is the count zero because the person
+// left" is a separate question with its own tests further down, and mixing
+// the two would make every assertion here wait on a timer it is not about.
 func unsealedVaultWithClient(t *testing.T) *Vault {
+	t.Helper()
+	v := unsealedVaultWithClientAndWindow(t, 0)
+	return v
+}
+
+// unsealedVaultWithClientAndWindow is the same vault with a departure window
+// of the caller's choosing — the tests that are about the window itself.
+func unsealedVaultWithClientAndWindow(t *testing.T, window time.Duration) *Vault {
 	t.Helper()
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestFileProvider(ProviderFile))
+	v.SetDetachWindow(window)
 	mustSetup(t, v, "hunter2")
 	v.ClientsAttached(1)
 	if !rootKeyPresent(v) {
@@ -441,5 +456,260 @@ func TestEnsureUnsealed_ReportingPresenceIsWhatTurnsSuspensionOn(t *testing.T) {
 	v.ClientsAttached(1)
 	if err := <-done; err != nil {
 		t.Fatalf("EnsureUnsealed after the client attached: %v", err)
+	}
+}
+
+// ── what "the last client detached" actually means ────────────────────────
+//
+// The transport reports a COUNT, and a count of zero is not by itself a
+// person leaving: the renderer reconnects on a dropped socket (AD-9), and a
+// window that reloads tears one socket down before it opens the next. Both
+// pass through zero, and the vault must not read either as a departure.
+// Measured in the e2e stand: a `goto('/')` reload sealed a vault 199 ms
+// after it had been set up, and the person's next click landed on an unlock
+// sheet nobody had asked for (nocx-58q7d).
+//
+// So a detach ARMS a departure, and the departure is CONFIRMED only if the
+// count is still zero when the window elapses. These tests own that window;
+// the ones above own the seal it leads to.
+//
+// None of them waits on a duration. Every armed departure calls
+// departureSettled when its window elapses — confirmed or not — so a test
+// that must prove the vault did NOT seal waits for that event and then reads
+// the state, rather than sleeping longer than the window and hoping.
+
+// departures reports every armed departure whose window has elapsed: true
+// when it was confirmed (the vault sealed), false when somebody had come
+// back. Buffered deeply enough that no arming can block on a test that is
+// not reading yet.
+func departures(t *testing.T, v *Vault) <-chan bool {
+	t.Helper()
+	ch := make(chan bool, 16)
+	v.mu.Lock()
+	v.departureSettled = func(confirmed bool) { ch <- confirmed }
+	v.mu.Unlock()
+	return ch
+}
+
+// nextDeparture waits for one settled departure. The timeout is a test
+// failure mode, not the thing under test — the window itself is milliseconds.
+func nextDeparture(t *testing.T, ch <-chan bool) bool {
+	t.Helper()
+	select {
+	case confirmed := <-ch:
+		return confirmed
+	case <-time.After(10 * time.Second):
+		t.Fatal("no departure settled: the arming never elapsed")
+		return false
+	}
+}
+
+// A window reload is not a departure. This is the case the e2e stand
+// reproduced: the socket is gone for a fraction of the window and the same
+// person is back.
+func TestClientsAttached_AReloadIsNotADeparture(t *testing.T) {
+	v := unsealedVaultWithClientAndWindow(t, 50*time.Millisecond)
+	settled := departures(t, v)
+
+	v.ClientsAttached(0) // the old document's socket closes
+	v.ClientsAttached(1) // the new document's socket opens
+
+	if confirmed := nextDeparture(t, settled); confirmed {
+		t.Error("the reload was read as a departure")
+	}
+	if !rootKeyPresent(v) {
+		t.Error("a reload sealed the vault; the person never left")
+	}
+	if got := v.State(); got != StateUnsealed {
+		t.Errorf("state = %v, want unsealed", got)
+	}
+}
+
+// A dropped socket the renderer reconnects after is not a departure either.
+// The reconnect is slower than a reload — the dispatcher backs off before it
+// retries — so the absence here covers most of the window rather than a
+// fraction of it, and still must not seal.
+func TestClientsAttached_AReconnectIsNotADeparture(t *testing.T) {
+	v := unsealedVaultWithClientAndWindow(t, 400*time.Millisecond)
+	settled := departures(t, v)
+
+	v.ClientsAttached(0)
+	time.Sleep(200 * time.Millisecond) // the reconnect backoff, half the window
+	v.ClientsAttached(1)
+
+	if confirmed := nextDeparture(t, settled); confirmed {
+		t.Error("the reconnect was read as a departure")
+	}
+	if !rootKeyPresent(v) {
+		t.Error("a reconnect sealed the vault; the person never left")
+	}
+}
+
+// And a second window closing arms nothing at all: the count never reached
+// zero, so there is no departure to settle and the vault cannot seal.
+func TestClientsAttached_ASecondWindowClosingArmsNothing(t *testing.T) {
+	v := unsealedVaultWithClientAndWindow(t, 50*time.Millisecond)
+	settled := departures(t, v)
+	v.ClientsAttached(2)
+
+	v.ClientsAttached(1)
+
+	select {
+	case <-settled:
+		t.Error("one window of two closing armed a departure")
+	case <-time.After(300 * time.Millisecond):
+	}
+	if !rootKeyPresent(v) {
+		t.Error("the vault sealed while a client was still attached")
+	}
+}
+
+// The departure itself: nobody came back, so the vault seals. Without this
+// the window would be a way of never sealing at all, which is the exposure
+// D9 was written to close.
+func TestClientsAttached_ADepartureSealsWhenTheWindowElapses(t *testing.T) {
+	v := unsealedVaultWithClientAndWindow(t, 50*time.Millisecond)
+	settled := departures(t, v)
+
+	v.ClientsAttached(0)
+
+	if confirmed := nextDeparture(t, settled); !confirmed {
+		t.Fatal("nobody came back and the departure was still not confirmed")
+	}
+	if rootKeyPresent(v) {
+		t.Error("the root key is still in memory after the departure was confirmed")
+	}
+	if got := v.State(); got != StateSealed {
+		t.Errorf("state = %v, want sealed", got)
+	}
+}
+
+// A person who comes back and then really does leave must still get a seal:
+// the second detach arms its own departure, and the first one being made
+// stale must not have taken the second with it.
+func TestClientsAttached_AReturnFollowedByARealDepartureStillSeals(t *testing.T) {
+	v := unsealedVaultWithClientAndWindow(t, 50*time.Millisecond)
+	settled := departures(t, v)
+
+	v.ClientsAttached(0)
+	v.ClientsAttached(1) // back inside the window — not a departure
+	v.ClientsAttached(0) // and now they really go
+
+	// Two armings, and they settle in whichever order their timers fire —
+	// the claim is about the outcomes, not the sequence. Exactly one is a
+	// confirmed departure: the return ended the first, the leaving is the
+	// second.
+	confirmations := 0
+	for range 2 {
+		if nextDeparture(t, settled) {
+			confirmations++
+		}
+	}
+	if confirmations != 1 {
+		t.Errorf("confirmed departures = %d, want exactly 1 (the return ended the first arming)", confirmations)
+	}
+	if rootKeyPresent(v) {
+		t.Error("the real departure left the root key in memory")
+	}
+}
+
+// THE INTERVAL, BOTH ENDS, ON THE WINDOWED VAULT. The root key is absent
+// from the moment a departure is CONFIRMED — the count has been zero for the
+// whole window — until a client is attached AND a person unlocks. The middle
+// is sampled: nothing between those two points may put key material back,
+// and in particular a client attaching after the seal must not.
+func TestRootKeyIsAbsentFromTheConfirmedDepartureUntilAClientUnlocks(t *testing.T) {
+	v := unsealedVaultWithClientAndWindow(t, 50*time.Millisecond)
+	settled := departures(t, v)
+	id, err := v.Create(context.Background(), credential.NewSecret("s3cret"))
+	if err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	// The opening event is the CONFIRMATION, not the detach: the key is
+	// still there when the socket goes, which is the whole difference this
+	// change makes and is asserted rather than assumed.
+	v.ClientsAttached(0)
+	if !rootKeyPresent(v) {
+		t.Fatal("the vault sealed before the departure window elapsed")
+	}
+	if confirmed := nextDeparture(t, settled); !confirmed {
+		t.Fatal("the departure was never confirmed; the interval never opened")
+	}
+	if rootKeyPresent(v) {
+		t.Fatal("the confirmed departure left the root key in memory")
+	}
+
+	// Nothing in the middle may reopen it.
+	v.ClientsAttached(1)
+	if rootKeyPresent(v) {
+		t.Error("a client attaching unsealed the vault; only a person unlocking may")
+	}
+	v.Activity()
+	if rootKeyPresent(v) {
+		t.Error("an activity signal unsealed the vault")
+	}
+	if _, getErr := v.Get(context.Background(), id); !errors.Is(getErr, ErrVaultSealed) {
+		t.Errorf("Get on the sealed vault = %v, want ErrVaultSealed", getErr)
+	}
+	if rootKeyPresent(v) {
+		t.Error("a read attempt unsealed the vault")
+	}
+
+	// The closing event, and nothing else.
+	if unsealErr := v.Unseal(context.Background(), UnsealRequest{Passphrase: "hunter2"}); unsealErr != nil {
+		t.Fatalf("Unseal after reattach: %v", unsealErr)
+	}
+	if !rootKeyPresent(v) {
+		t.Fatal("the interval never closed: unsealing after reattach left no root key")
+	}
+	got, err := v.Get(context.Background(), id)
+	if err != nil {
+		t.Fatalf("Get after the reattach unlock: %v", err)
+	}
+	if err := got.Use(func(b []byte) error {
+		if string(b) != "s3cret" {
+			t.Errorf("secret = %q, want %q", b, "s3cret")
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Use: %v", err)
+	}
+}
+
+// Closing a vault with a departure armed must not leave the arming running
+// for the rest of the window, and must seal regardless — Close is the
+// shutdown path and the root key may not outlive it while a timer runs down.
+func TestClientsAttached_CloseEndsAnArmedDeparture(t *testing.T) {
+	v := unsealedVaultWithClientAndWindow(t, time.Hour)
+	settled := departures(t, v)
+
+	v.ClientsAttached(0)
+	v.Close()
+
+	if rootKeyPresent(v) {
+		t.Error("Close left the root key in memory")
+	}
+	select {
+	case <-settled:
+		t.Error("the arming outlived Close and settled a departure afterwards")
+	case <-time.After(200 * time.Millisecond):
+	}
+}
+
+// The shipped window is a real duration, not zero: a vault built by New must
+// not seal on the first blink of a socket. Without this the constant could
+// be dropped to zero and every test above would still pass on its own setter.
+func TestNewVaultTakesTheShippedDetachWindow(t *testing.T) {
+	loweredCost(t)
+	v, _, _ := testVault(t, newTestFileProvider(ProviderFile))
+	v.mu.Lock()
+	got := v.detachWindow
+	v.mu.Unlock()
+	if got != DefaultDetachWindow {
+		t.Errorf("a freshly built vault's detach window = %v, want %v", got, DefaultDetachWindow)
+	}
+	if DefaultDetachWindow <= 0 {
+		t.Fatal("the shipped detach window is not positive; a reload would seal the vault")
 	}
 }

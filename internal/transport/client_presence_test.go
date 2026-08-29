@@ -172,3 +172,37 @@ func TestClientPresence_NoObserverIsHarmless(t *testing.T) {
 	}
 	_ = conn.Close()
 }
+
+// A RECONNECT LOOKS EXACTLY LIKE A DEPARTURE FROM HERE, and it must: the
+// transport reports what it can see, and it cannot see intent. A socket that
+// drops and comes back produces 1, 0, 1 — the same three numbers as a person
+// leaving and a different person arriving.
+//
+// This is the fact that forced the vault's departure window (nocx-58q7d).
+// While the seal fired on the bare zero, every reconnect and every window
+// reload shut the vault under the person still using it, and a modal covered
+// the whole application on their next click. The answer is not to teach this
+// file to guess — that would be the transport owning the vault's policy,
+// against AD-8 — but to leave the count exact and let the vault decide what a
+// zero means.
+func TestClientPresence_AReconnectIsReportedAsADetachAndAnAttach(t *testing.T) {
+	ws, rec := presenceServer(t)
+
+	conn := connectWS(t, ws)
+	waitForCount(t, rec, 1)
+
+	// The socket drops the way a real one does — no close frame.
+	_ = conn.UnderlyingConn().Close()
+	waitForCount(t, rec, 0)
+
+	// And the renderer comes back (AD-9).
+	again := connectWS(t, ws)
+	t.Cleanup(func() { _ = again.Close() })
+	waitForCount(t, rec, 1)
+
+	// Nothing here interpreted any of it: the counts are the raw sequence
+	// and no seal, grace or departure appears in this package.
+	if got := rec.seen(); len(got) < 3 {
+		t.Fatalf("the observer saw %v, want at least the attach, the drop and the return", got)
+	}
+}

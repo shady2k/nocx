@@ -16,6 +16,7 @@ import (
 	"context"
 	"encoding/json"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -27,6 +28,16 @@ import (
 const detachTestPassphrase = "correct horse battery staple"
 
 // startedApp boots the real composition root with a socket to dial.
+//
+// It shortens the vault's DEPARTURE WINDOW to a millisecond. A detach does
+// not seal on its own — a count of zero is a reload or a reconnect as often
+// as it is somebody leaving, so the vault waits to see whether anybody comes
+// back (internal/vault/presence.go). The shipped window is ten seconds, and
+// the poll below re-dials, so on the production value this test would spend
+// its whole budget re-arming a window it never outlives. Shortening it keeps
+// the test waiting on the STATE and not on a duration: what is being proved
+// is that the count reaches the policy at all, and the length of the window
+// is asserted where the window lives.
 func startedApp(t *testing.T) *App {
 	t.Helper()
 	storagetest.IsolateWithHome(t)
@@ -38,7 +49,22 @@ func startedApp(t *testing.T) *App {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { a.Shutdown(context.Background()) })
+	shortenDetachWindow(t, a)
 	return a
+}
+
+// shortenDetachWindow reaches the composition root's own vault. It is held
+// as a minimal interface, so the seam is asked for by name rather than
+// assumed — a vault that stopped offering it would fail here loudly instead
+// of leaving the test waiting on the shipped ten seconds.
+func shortenDetachWindow(t *testing.T, a *App) {
+	t.Helper()
+	windowed, ok := a.vaultCloser.(interface{ SetDetachWindow(time.Duration) })
+	if !ok {
+		t.Fatal("the composition root's vault does not offer SetDetachWindow; " +
+			"this test cannot observe a departure inside its budget")
+	}
+	windowed.SetDetachWindow(time.Millisecond)
 }
 
 // vaultStateOver reads the vault's lifecycle state off the wire.
@@ -106,7 +132,9 @@ func TestTheVaultSealsWhenTheLastClientDetaches(t *testing.T) {
 			"test never starts", got)
 	}
 
-	// The window closes. Nothing else happens — no shutdown, no timer.
+	// The window closes. Nothing else happens — no shutdown, and no timer
+	// beyond the departure window itself, which is what tells a person
+	// leaving from a socket that blinked.
 	_ = first.Close()
 
 	waitForSealedOverTheWire(t, a)

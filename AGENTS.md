@@ -38,8 +38,10 @@ three lines in [README](README.md#agent-tooling).
 Every branch in flight has commits that modified the file, because the old hook staged
 it on every commit; against a `main` where it is deleted, that is a modify/delete
 conflict, which no merge driver can help with — drivers run only when both sides
-changed content, and this one is resolved in the tree. Measured on 2026-08-29: 14 of
-the then-open branches. Take the deletion and move on:
+changed content, and this one is resolved in the tree. Counted on 2026-08-29: thirteen
+unmerged branches carried the file, of which four had been touched that day; the other
+nine were between one and five weeks stale and pay this only if somebody revives them.
+Take the deletion and move on:
 
 ```bash
 git rm .beads/issues.jsonl

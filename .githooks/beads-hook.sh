@@ -139,6 +139,113 @@ pull_beads_state() {
     return 0
 }
 
+# Publish the issue export to the git remote as a standalone ref.
+#
+# This is the spare copy of the backlog, and it exists for exactly one failure:
+# nocx-wj4 records that concurrent pushes to a git-protocol Dolt remote can
+# strand history in refs/dolt/data. When that happens the healthy backlog is the
+# local Dolt database, and this ref is what carries it off the machine.
+#
+# Which is why this runs in a hook and not in CI. A GitHub Action can only read
+# the remote — so in the one moment this insurance exists for, it would faithfully
+# back up the broken state. The developer's database is the good copy and a hook
+# on their machine is the only thing that can reach it.
+#
+# A ref, not a branch: refs/beads/snapshot does not appear in the branch list, is
+# not part of any pull request and is not cloned by default — exactly like the
+# refs/dolt/data that already lives on the same remote. Recovery is three lines,
+# and they are in README.md.
+#
+# Nothing here touches the working tree or the index. The blob goes straight into
+# the object database and the commit is built with plumbing, so a push never
+# rewrites a file under somebody's editor.
+#
+# Failure policy is the pull side's, not the push side's: every branch returns 0
+# and at most warns. A push that fails because the SPARE copy could not be made
+# is a push somebody learns to make with --no-verify, and then neither the spare
+# nor the real sync happens.
+#
+# Three details are load-bearing, all three found in review before this shipped:
+#
+#   --no-verify on the inner push. Without it, `git push` inside pre-push runs
+#   pre-push again — recursion with no floor, each level also firing bd dolt push
+#   at the .dolt/noms/LOCK every worktree on this machine shares. Measured in a
+#   throwaway repo: 5 levels deep and still going, versus 1 with the flag.
+#
+#   origin, not the remote git is pushing to (which git passes as $1). A
+#   `git push fork feature` would put the snapshot in fork and leave the
+#   canonical origin/refs/beads/snapshot silently stale, which is worse than
+#   having none: README recovers from origin.
+#
+#   A timeout around the push as well as around the export. An SSH remote waiting
+#   on interactive auth would otherwise hold a push open forever — the one thing
+#   this function promises never to do.
+publish_beads_snapshot() {
+    command -v bd >/dev/null 2>&1 || return 0
+    git remote get-url origin >/dev/null 2>&1 || return 0
+
+    BD_GIT_HOOK=1
+    export BD_GIT_HOOK
+
+    # A variable rather than the if/elif/else the other two functions inline,
+    # because this one needs the same timeout twice. -k for the reason recorded
+    # above them: bd ignores SIGTERM and a plain timeout leaves it holding the
+    # shared lock (nocx-v48vl).
+    timeout_secs=${BEADS_SNAPSHOT_TIMEOUT:-60}
+    if command -v timeout >/dev/null 2>&1; then
+        _t="timeout -k 5 $timeout_secs"
+    elif command -v gtimeout >/dev/null 2>&1; then
+        _t="gtimeout -k 5 $timeout_secs"
+    else
+        _t=""
+    fi
+
+    _snap=$(mktemp) || return 0
+
+    $_t bd export >"$_snap" 2>/dev/null && bd_exit=0 || bd_exit=$?
+
+    if [ "$bd_exit" -eq 3 ]; then
+        rm -f "$_snap" || :
+        return 0 # no database in this clone
+    fi
+    if [ "$bd_exit" -ne 0 ]; then
+        rm -f "$_snap" || :
+        printf "\nWARN: bd export exited %s — no backlog snapshot published this push.\n" \
+            "$bd_exit" >&2
+        return 0
+    fi
+
+    _blob=$(git hash-object -w --stdin <"$_snap") || _blob=""
+    rm -f "$_snap" || :
+    if [ -z "$_blob" ]; then
+        printf "\nWARN: could not write the backlog snapshot blob — none published.\n" >&2
+        return 0
+    fi
+
+    _tree=$(printf '100644 blob %s\tissues.jsonl\n' "$_blob" | git mktree) || _tree=""
+    if [ -z "$_tree" ]; then
+        printf "\nWARN: could not build the backlog snapshot tree — none published.\n" >&2
+        return 0
+    fi
+
+    _commit=$(git commit-tree "$_tree" -m "beads snapshot") || _commit=""
+    if [ -z "$_commit" ]; then
+        printf "\nWARN: could not build the backlog snapshot commit — none published.\n" >&2
+        printf "      A clone with no committer identity cannot mint one; git config user.email.\n" >&2
+        return 0
+    fi
+
+    # --force because each snapshot is a fresh root commit: consecutive ones share
+    # no history, so every push after the first is a non-fast-forward.
+    if ! $_t git push --no-verify --force --quiet origin "$_commit:refs/beads/snapshot" 2>/dev/null; then
+        printf "\nWARN: could not publish the backlog snapshot to origin.\n" >&2
+        printf "      The backlog itself is unaffected — this is only the spare copy.\n" >&2
+        return 0
+    fi
+
+    return 0
+}
+
 # Write .beads/issues.jsonl and stage it, so the commit carries the issue state
 # it describes.
 #

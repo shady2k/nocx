@@ -67,4 +67,13 @@ command -v go >/dev/null 2>&1 && PATH="$(go env GOPATH)/bin:$PATH"
 
 . "$(dirname "$0")/beads-hook.sh"
 
+# The spare copy first, from the local database, to a ref of its own.
+#
+# Before push_beads_state and not after, because this script runs under `set -e`
+# and push_beads_state deliberately returns nonzero when bd dolt push genuinely
+# fails. That failure IS the scenario the snapshot exists for — a stranded
+# refs/dolt/data with the healthy backlog only on this machine. Publishing
+# afterwards would mean never publishing in the one case that matters.
+publish_beads_snapshot
+
 push_beads_state

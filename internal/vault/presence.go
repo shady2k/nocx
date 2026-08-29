@@ -1,6 +1,6 @@
 package vault
 
-// THE VAULT SEALS WHEN THE LAST CLIENT DETACHES (design D9).
+// THE VAULT SEALS WHEN THE LAST CLIENT LEAVES (design D9).
 //
 // Until the coordinator existed, quitting the window WAS stopping the
 // backend, so App.Shutdown -> Vault.Close -> Seal was a complete answer: the
@@ -11,15 +11,40 @@ package vault
 //
 // The rule is stated on CLIENT PRESENCE, not on a timer and not on process
 // exit. The transport counts attached clients and tells this file whenever
-// the count changes; zero means nobody can see the vault, and a vault nobody
-// can see holds nothing.
+// the count changes; nobody attached means nobody can see the vault, and a
+// vault nobody can see holds nothing.
 //
-// THE INVARIANT, WITH BOTH ENDS NAMED. The root key is absent from memory
-// from the moment the last client detaches until a client is attached AND a
-// person unlocks. Attaching does not open it; only Unseal does. The closing
-// event is the successful unseal, and nothing between those two points can
-// put key material back — Seal wipes the bytes, bumps the generation so any
-// write still in flight is rejected, and every later read finds StateSealed.
+// A COUNT OF ZERO IS NOT BY ITSELF SOMEBODY LEAVING, and reading it as one
+// is the defect this file was rewritten for (nocx-58q7d). The renderer
+// reconnects on a dropped socket (AD-9), and a window that reloads tears one
+// socket down before it opens the next: both pass through zero with the same
+// person sitting in front of the same window. Measured in the e2e stand, a
+// `goto('/')` reload sealed a vault 199 ms after it had been set up, and the
+// person's next click landed on an unlock sheet nobody had asked for —
+// eighteen specs reported it as "ui-prompt-overlay intercepts pointer
+// events", which is what an unbidden modal over the whole application looks
+// like from outside.
+//
+// So a detach ARMS a departure and the departure is CONFIRMED only if the
+// count is still zero a short window later. Any attach inside the window
+// makes the arming stale and nothing is sealed.
+//
+// WHY THAT IS NOT THE TIMER D9 REFUSES. D9 refuses a timer as the POLICY —
+// "seal after N minutes idle" — because idleness is not the fact it cares
+// about, and because this vault already has that policy and it belongs to
+// somebody else: autoSealLoop, driven by the person's own 0/5/15/30/60
+// setting. This window decides nothing. It makes ONE observation reliable,
+// because a socket close is not the fact "the person left" and cannot be
+// read as one at the instant it happens. The vault still seals if and only
+// if the last client left; only the moment it is known moves, and it moves
+// by the length of a reload.
+//
+// THE INVARIANT, WITH BOTH ENDS NAMED. The root key is absent from the
+// moment a departure is confirmed until a client is attached AND a person
+// unlocks. Attaching does not open it; only Unseal does. The closing event
+// is the successful unseal, and nothing between those two points can put key
+// material back — Seal wipes the bytes, bumps the generation so any write
+// still in flight is rejected, and every later read finds StateSealed.
 //
 // THE COST IS REAL AND IS PAID IN THE OPEN. An SSH session that needs a
 // secret while you are away cannot reconnect by itself, so it SUSPENDS: the
@@ -52,6 +77,23 @@ import (
 // can read, not a hang.
 const DefaultUnlockSuspension = 8 * time.Hour
 
+// DefaultDetachWindow is how long the client count must stay at zero before
+// the vault reads it as the person having left.
+//
+// TEN SECONDS, and the number comes from the thing it has to outlast rather
+// than from taste. The renderer reconnects with an exponential backoff that
+// tops out at 5 s plus up to 50% jitter (frontend/src/dispatcher.ts), so
+// 7.5 s is the longest a live renderer can be away between one attempt and
+// the next; a reload is two orders of magnitude quicker than that. Ten
+// seconds clears the worst reconnect with room and is four orders of
+// magnitude short of the exposure D9 was written to close, which is a
+// coordinator holding the key for days.
+//
+// It is a ceiling on how WRONG the observation may be, not a grace a person
+// is granted: somebody who really has gone waits ten seconds for their seal,
+// and nothing else in the lifecycle moves.
+const DefaultDetachWindow = 10 * time.Second
+
 // SetUnlockSuspension replaces the suspension ceiling. Tests use it to make
 // the expiry observable in milliseconds; nothing in a shipped build calls it,
 // which is why it is a setter rather than a construction parameter — the
@@ -63,22 +105,39 @@ func (v *Vault) SetUnlockSuspension(d time.Duration) {
 	v.unlockSuspension = d
 }
 
+// SetDetachWindow replaces the departure window. Same shape and same reason
+// as SetUnlockSuspension: the production value is the constant above and
+// nothing in a shipped build calls this. Zero confirms a departure
+// immediately and synchronously, which is what a test about the SEAL rather
+// than about the observation wants.
+func (v *Vault) SetDetachWindow(d time.Duration) {
+	v.mu.Lock()
+	defer v.mu.Unlock()
+	if d < 0 {
+		d = 0
+	}
+	v.detachWindow = d
+}
+
 // ClientsAttached reports how many clients are attached to the backend. It
 // is called by the transport on every attach and every detach, with the
-// count taken after the change, and it is the ONE place the seal-on-detach
+// count taken after the change, and it is the ONE place the seal-on-departure
 // policy lives.
 //
-// Zero seals. Non-zero releases whatever is suspended waiting for a client,
-// and nothing else — in particular it does not unseal, because a client
-// being present is not a person having unlocked.
-//
-// A window reload, a dropped socket and a quit all reach here identically,
-// and that is deliberate: the transport cannot tell them apart either, and a
-// grace period that guessed would be exactly the timer D9 refuses.
+// Zero ARMS a departure — see confirmDeparture. Non-zero releases whatever is
+// suspended waiting for a client, and nothing else — in particular it does
+// not unseal, because a client being present is not a person having
+// unlocked.
 func (v *Vault) ClientsAttached(n int) {
 	v.mu.Lock()
 	v.clients = n
 	v.clientsKnown = true
+	// Every report, attach or detach, makes any arming that is still waiting
+	// out its window stale. An attach is a return; a second detach owns its
+	// own departure.
+	v.presenceEpoch++
+	epoch := v.presenceEpoch
+	window := v.detachWindow
 	waiters := v.clientWait
 	if n > 0 {
 		// Wake everything suspended on "nobody to ask". The channel is the
@@ -97,6 +156,11 @@ func (v *Vault) ClientsAttached(n int) {
 	// survives — every joined caller keeps waiting on the same one, so a
 	// returning client still sees a single dialog naming every operation
 	// that is waiting.
+	//
+	// This half is NOT windowed, and the asymmetry is the point: whether an
+	// ask can still be answered is a fact about the connections it was
+	// broadcast to, and those are gone the moment the socket is. Whether the
+	// PERSON has left is the question the window exists for.
 	var abandon context.CancelFunc
 	if n == 0 && v.unlockAttempt != nil {
 		v.unlockAttemptAbandoned = true
@@ -111,12 +175,54 @@ func (v *Vault) ClientsAttached(n int) {
 		return
 	}
 
-	// Seal outside the lock: Seal takes it itself, and calls provider Lock
-	// after releasing it (ADR-0011 §4).
-	sealed := v.State() == StateUnsealed
-	v.Seal()
-	if sealed {
-		v.logger.Info("vault sealed: the last client detached")
+	if window <= 0 {
+		v.confirmDeparture(epoch)
+		return
+	}
+	go v.awaitDeparture(epoch, window)
+}
+
+// awaitDeparture waits out the window and then asks confirmDeparture whether
+// the person actually left.
+//
+// It runs on the vault's own lifetime (promptCtx), so Close ends it rather
+// than leaving a timer running against a vault that is already shut — Close
+// seals on its own way out, so an arming that survived it could only seal
+// something already sealed and would still hold the Vault alive for the rest
+// of the window.
+func (v *Vault) awaitDeparture(epoch uint64, window time.Duration) {
+	timer := time.NewTimer(window)
+	defer timer.Stop()
+	select {
+	case <-v.promptCtx.Done():
+		return
+	case <-timer.C:
+	}
+	v.confirmDeparture(epoch)
+}
+
+// confirmDeparture seals the vault if the arming identified by epoch is
+// still the current one and nobody is attached.
+//
+// Sealing happens outside the lock: Seal takes it itself, and calls provider
+// Lock after releasing it (ADR-0011 §4).
+func (v *Vault) confirmDeparture(epoch uint64) {
+	v.mu.Lock()
+	confirmed := v.presenceEpoch == epoch && v.clients == 0
+	wasUnsealed := v.rootKey != nil
+	settled := v.departureSettled
+	window := v.detachWindow
+	v.mu.Unlock()
+
+	if confirmed {
+		v.Seal()
+		if wasUnsealed {
+			v.logger.Info("vault sealed: the last client left and did not come back",
+				"window", window)
+		}
+	}
+	if settled != nil {
+		settled(confirmed)
 	}
 }
 
@@ -129,6 +235,11 @@ func (v *Vault) ClientsAttached(n int) {
 // reason the prompt would have carried, because that log line is the only
 // record of a waiting operation while there is nobody to show a dialog to;
 // the person learns of it when they return and the dialog names it.
+//
+// It reads the raw count, not the departure window: whether there is
+// somebody to show a dialog TO is answered by the connections that exist
+// now, and a client that has gone cannot be shown one merely because the
+// vault has not yet concluded it left.
 //
 // tracked reports whether presence is being reported to this vault at all. A
 // vault nobody tells — every one built without a transport, which is most of

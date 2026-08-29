@@ -1430,8 +1430,6 @@ describe('horizontal Field gate — every settings row must use primary label', 
   it('every vault-section horizontal Field defaults to data-label=primary', () => {
     const vaultStatus = {
       state: 'unsealed' as const,
-      osKeyAvailable: true,
-      osKeyCapable: true,
       hasPassphrase: true,
       autoSealMinutes: 15,
       providers: [{ id: 'test-provider', writable: true, ready: true, reason: undefined }],
@@ -1669,8 +1667,6 @@ describe('the Secrets fallback carries the value, not only the name', () => {
 
   const UNSEALED = {
     state: 'unsealed' as const,
-    osKeyAvailable: true,
-    osKeyCapable: true,
     hasPassphrase: true,
     autoSealMinutes: 15,
     providers: [{ id: 'system', writable: true, ready: true, reason: undefined }],

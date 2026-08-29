@@ -567,7 +567,7 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"provider":"file"}`),
 		},
 		"vault.setup": {
-			[]byte(`{}`),
+			[]byte(`{"passphrase":"hunter2"}`),
 		},
 		"vault.status": {
 			[]byte(`{}`),
@@ -576,7 +576,7 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"requestId":"request-1","outcome":"cancelled"}`),
 		},
 		"vault.unseal": {
-			[]byte(`{"means":"os"}`),
+			[]byte(`{"means":"passphrase","secret":"hunter2"}`),
 		},
 		"open": {
 			[]byte(`{"cols":80,"rows":24}`),
@@ -697,7 +697,7 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		schema := loadSchema(t, name)
 		probes := invalid
 		switch method {
-		case "secrets.detect", "vault.resolveLine", "vault.setup":
+		case "secrets.detect", "vault.resolveLine":
 			// These methods intentionally accept an empty object and use a
 			// tolerant decoder for optional input; malformed JSON values
 			// remain the shared shape rejection for them.

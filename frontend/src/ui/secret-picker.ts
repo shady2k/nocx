@@ -53,11 +53,16 @@ export interface SecretPickerSource {
    *  unlock prompt and retries; resolves when the vault is open, rejects on
    *  cancel/refusal. */
   requestUnseal(): Promise<void>
-  /** The user activated the uninitialized offer row: silent setup when the
-   *  OS key is capable; otherwise the host raises the setup dialog. Resolves
-   *  true when a dialog took over the surface (the panel closes — the
-   *  dialog is the surface now), false when setup happened silently and the
-   *  list can reload. */
+  /** The user activated the uninitialized offer row: the host raises the
+   *  setup dialog. Resolves true when a dialog took over the surface (the
+   *  panel closes — the dialog is the surface now), false when nothing did
+   *  and the list can reload.
+   *
+   *  It is a boolean and not a void because it USED to have two answers: a
+   *  machine whose OS keystore could carry the vault was set up silently and
+   *  the panel stayed put. ADR-0050 step 1 removed that, so every
+   *  implementation returns true today — the contract is kept because the
+   *  panel's two behaviours are still the panel's to choose between. */
   requestSetup(): Promise<boolean>
   /** The user activated a create row. Form hosts return the newly
    *  created row so the field can insert its opaque handle in place; hosts

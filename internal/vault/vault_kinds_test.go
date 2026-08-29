@@ -11,7 +11,7 @@ import (
 func TestCreateNamed_APITokenAppearsInInventoryWithMeaningfulKind(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	id, err := v.CreateNamed(context.Background(), credential.NewSecret("token"), SecretMeta{Kind: "api-token"})
@@ -40,7 +40,7 @@ func TestCreateNamed_APITokenAppearsInInventoryWithMeaningfulKind(t *testing.T) 
 func TestCreateNamed_RejectsDisplayNameThatLooksLikeRowBeforeWriting(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	_, err := v.CreateNamed(context.Background(), credential.NewSecret("token"), SecretMeta{
@@ -61,7 +61,7 @@ func TestCreateNamed_RejectsDisplayNameThatLooksLikeRowBeforeWriting(t *testing.
 func TestRenameSecret_RejectsDisplayNameThatLooksLikeRowBeforeWriting(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	id, err := v.CreateNamed(context.Background(), credential.NewSecret("token"), SecretMeta{
@@ -91,7 +91,7 @@ func TestRenameSecret_RejectsDisplayNameThatLooksLikeRowBeforeWriting(t *testing
 func TestCreateNamed_AcceptsNameContainingRowPrefixLater(t *testing.T) {
 	loweredCost(t)
 	v, _, _ := testVault(t, newTestProvider(ProviderSystem))
-	mustSetup(t, v, "")
+	mustSetup(t, v, "test-pass")
 	defer v.Close()
 
 	id, err := v.CreateNamed(context.Background(), credential.NewSecret("token"), SecretMeta{

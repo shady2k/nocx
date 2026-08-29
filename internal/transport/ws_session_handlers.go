@@ -999,8 +999,16 @@ func (h sessionOpsHandlers) handleAttach(ctx context.Context, wconn *wsConn, r R
 // ackHandler answers "ack": ingress-critical ring trimming. It holds no
 // capability — the ring is transport-owned state (migration map) — and runs
 // inline on the read loop via the ImmediateSubmission.
+//
+// It is CONNECTION-SCOPED, and that is the whole of nocx-7ih2d: the ack
+// cursor is what trim frees bytes against, so the answer to "may this ack
+// move it" is "does this connection hold the session", which only the
+// subscriber slot knows. The handler set is materialised per connection
+// anyway (registration.go), so the connection is simply kept rather than
+// looked up.
 type ackHandler struct {
 	machine sessionMachine
+	conn    *wsConn
 	log     log.Logger
 }
 
@@ -1022,6 +1030,20 @@ func (h ackHandler) handleAck(req jsonrpcRequest) {
 	rx := h.machine.getRx(sid)
 	if rx == nil {
 		h.log.Warn("ack for unknown session", "session_id", string(sid))
+		return
+	}
+
+	// Only the connection that HOLDS the session may free its bytes
+	// (nocx-7ih2d). A displacement takes the claim and leaves the socket up,
+	// so the loser goes on being read; an ack it had already queued would
+	// otherwise trim the ring past the position the new subscriber's pump is
+	// streaming from, and the ring cannot then serve that pump at all. The
+	// subscriber slot is the existing owner of "whose session is this" and
+	// the same comparison ringToConn makes on every pass; nothing new decides
+	// it here.
+	if sub, _ := rx.getSubscriber(); sub != h.conn {
+		h.log.Warn("ack from a connection that does not hold the session",
+			"session_id", string(sid), "conn", h.conn.id)
 		return
 	}
 
@@ -1111,7 +1133,7 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleSessionOutput(ctx, req) }
 		}), func() bool { return s.sessionRecorder != nil }, "method not found: session output store not wired"),
 		reg(immediate, "ack", params(validateAckRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := ackHandler{machine: s, log: s.log}
+			h := ackHandler{machine: s, conn: w, log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleAck(req) }
 		}),
 	}

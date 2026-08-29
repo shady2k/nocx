@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { describe, expect, it, vi } from 'vitest'
 import { createSignal } from 'solid-js'
-import { render, fireEvent } from '@solidjs/testing-library'
+import { render, fireEvent, within } from '@solidjs/testing-library'
 import { NotificationsPanel } from './notifications-panel'
 import { createFeedStore, type FeedStore } from './feed-store'
 import type { NotifyCatalogue } from '../generated/notify.catalogue'
@@ -207,6 +207,29 @@ describe('NotificationsPanel', () => {
     const title = container.querySelector('.notifications-panel__list .ui-record-row__title')
     fireEvent.click(title!)
     expect(onActivate).not.toHaveBeenCalled()
+  })
+
+  it('offers a row with no live session nothing at all, and that is the decision (nocx-4ii6g)', () => {
+    const { store } = fakeStore({ occurrences: [occurrence({ host: 'web-1' })] })
+    const { container } = render(() => (
+      <NotificationsPanel store={store} onActivate={() => {}} canActivate={() => false} />
+    ))
+    const row = container.querySelector<HTMLElement>(
+      '.notifications-panel__list > .ui-collection-row',
+    )!
+
+    // Read by ROLE, not by class: the question the bead asked is what a row
+    // with no live session OFFERS, and the answer is nothing. There is no
+    // saved scrollback to open and no detail to expand — inventing either
+    // here would be a feature nobody asked for, and offering a control that
+    // cannot be honoured is the lie the panel already refuses elsewhere.
+    expect(within(row).queryByRole('button')).toBeNull()
+    expect(row.tabIndex).toBe(-1)
+    expect(row.getAttribute('data-activatable')).toBeNull()
+
+    // And it SAYS why, in the meta line, rather than looking the same as a
+    // row that works.
+    expect(row.querySelector('.ui-record-row__meta-text')?.textContent).toContain('session closed')
   })
 
   it('a local occurrence has no host, and the meta line does not open with a separator', () => {

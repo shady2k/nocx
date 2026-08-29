@@ -143,10 +143,13 @@ export interface StandManifest {
    * per-user keystore and the startup probe is allowed to run (design D10).
    *
    * One spec uses it, and only where a Secret Service is actually reachable:
-   * the silent vault setup, whose whole subject is a machine whose OS key can
-   * carry the vault without a passphrase sheet. Every other spec takes the
-   * default build, which has no keystore to reach — which is the point, and
-   * is why nothing has to remember to switch it off.
+   * the vault setup case whose whole subject is that a machine WITH a
+   * reachable keystore is asked for a passphrase anyway (ADR-0050 step 1).
+   * That case used to assert the opposite — no sheet at all — which is why
+   * the build is still worth having: it is the only way to run the assertion
+   * against a real keystore rather than against its absence. Every other spec
+   * takes the default build, which has no keystore to reach — which is the
+   * point, and is why nothing has to remember to switch it off.
    */
   serverLoginSession: string
 }

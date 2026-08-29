@@ -2957,8 +2957,29 @@ func (s *WSServer) ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]b
 		}
 
 		if len(pending) == 0 {
-			var data []byte
-			data, _, _ = ring.snapshot(pos)
+			data, from, needsReset := ring.snapshot(pos)
+			if needsReset {
+				// The ring no longer holds the byte this pump is asking for,
+				// so it can never be served and asking again is the one thing
+				// that must not happen: `waitForData` returns AT ONCE here —
+				// `written` is far ahead of a position that has been freed —
+				// so a loop that treated this as "nothing new yet" turned at
+				// full speed, queued nothing, and held a core while the
+				// subscriber's tab went silent for good (nocx-5v9zf).
+				//
+				// Unreachable now that only the subscriber's own ack may free
+				// bytes (nocx-7ih2d): base ≤ acked ≤ what this connection has
+				// received ≤ pos. Checked rather than assumed, in the same
+				// words and for the same reason as the recorder's cursor
+				// (ws_session_record.go) — the cost of being wrong is a
+				// stream that stops without saying so, and a client that is
+				// told nothing re-attaches and is answered `reset`, which is
+				// AD-9's own answer to a gap. Resyncing here instead would
+				// hand it the gap silently.
+				s.log.Warn("session output pump lost its place in the ring; this subscriber's stream stops here",
+					"session_id", session.IDFromBytes(sidBytes), "at", pos, "ring_from", from)
+				return
+			}
 			if len(data) == 0 {
 				select {
 				case <-ctx.Done():

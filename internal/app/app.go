@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 
@@ -2185,6 +2186,37 @@ func (p *lifecyclePTY) WaitErr() (error, bool) {
 		return nil, false
 	}
 	return provider.WaitErr()
+}
+
+// SignalForeground forwards the signal to the pty this wraps, for exactly the
+// reason WaitErr above does and with a costlier consequence (nocx-7l4ex.13).
+//
+// Without it the optional-method assertion in realSession.SignalForeground
+// found nothing on an ENHANCED local session, answered pty.ErrNoForeground for
+// every signal, and session.signal told the person "nothing is running in this
+// pane" while their command plainly was — the incident nocx-92gfl.4 was filed
+// as. The shell's protected process group had nothing to do with it: nothing
+// ever asked the pty at all.
+//
+// ForegroundProcessGroup travels with it because it is the same seam asked a
+// question instead of told to act, and a wrapper that can signal a group it
+// cannot name is half-wired in the way that hides.
+func (p *lifecyclePTY) SignalForeground(sig syscall.Signal) error {
+	sg, ok := p.Pty.(interface {
+		SignalForeground(sig syscall.Signal) error
+	})
+	if !ok {
+		return pty.ErrNoForeground
+	}
+	return sg.SignalForeground(sig)
+}
+
+func (p *lifecyclePTY) ForegroundProcessGroup() (int, error) {
+	fg, ok := p.Pty.(interface{ ForegroundProcessGroup() (int, error) })
+	if !ok {
+		return 0, pty.ErrNoForeground
+	}
+	return fg.ForegroundProcessGroup()
 }
 
 func (p *lifecyclePTY) Close() error {

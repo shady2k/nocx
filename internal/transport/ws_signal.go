@@ -191,6 +191,9 @@ func (p sessionProtectedForeground) Attempt() (lifecycle.AttemptID, bool) {
 		}
 		attempt, ok := p.s.lifecyclePub.Attempt(snapshot.Attempt)
 		if !ok || attempt.State != lifecycle.AttemptOpen || !attempt.Started {
+			p.s.log.Warn("foreground signal: lane names an attempt that is not an authenticated running execution",
+				"session_id", string(p.sid), "lane", string(lane), "attempt", string(snapshot.Attempt),
+				"known", ok, "state", string(attempt.State), "started", attempt.Started)
 			continue
 		}
 		if found != "" {

@@ -637,3 +637,49 @@ func TestSessionSignal_UnreconciledOverTheWire(t *testing.T) {
 		t.Fatalf("stop over an unstoppable protected group = %q, want unreconciled", env.Result.Outcome)
 	}
 }
+
+// TestSessionSignal_AppSubmitBecomesStartedWhenTheShellAttaches is the other
+// half of the resolver's Started rule, and it exists because requiring Started
+// would be useless if the ordinary path never set it: an app attempt is created
+// at submit (origin app, Started false) and the shell's own start ATTACHES to
+// it, flipping Started while the id, command text and origin stay app-owned
+// (lifecycle-protocol §7, kernel.go's attach branch). So the rule refuses a
+// submit that nothing has begun, and admits the same attempt one envelope later.
+func TestSessionSignal_AppSubmitBecomesStartedWhenTheShellAttaches(t *testing.T) {
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
+	e := newLifecycleTestEnv(t, WithLifecyclePublisher(pub))
+	pub.SetEmitter(e.ws)
+	sid := session.ID(e.openSession(t, 1))
+	if err := pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatal(err)
+	}
+	const lane = lifecycle.LaneID("lane-attach")
+	e.ws.RegisterLifecycleLane(lane, sid)
+	h, err := pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 1, lifecycleHelloEvt()))
+	ackEstablishmentFrom(t, pub, lane, h, e.conn)
+
+	got := decodeSubmitAttemptResult(t, jsonrpcCallWithID(t, e.conn, "lifecycle.submitAttempt",
+		map[string]string{"domain": string(h.Domain), "command": "set +m; sh job.sh", "cwd": "/tmp", "host": "", "source": "user"}, 40))
+	resolver := sessionProtectedForeground{ctx: t.Context(), s: e.ws, sid: sid}
+	if named, ok := resolver.Attempt(); ok {
+		t.Fatalf("a submitted attempt was named before anything started it: %q", named)
+	}
+
+	// The shell begins the line, naming it in its OWN namespace — which is
+	// what the real integration sends, and what the e2e journey depends on.
+	shellID := lifecycle.AttemptID("s-" + string(h.Domain) + "-1")
+	mustLifecycleIngest(t, pub, "T", lifecycleEnv(lane, h, 2, lifecycleStartEvt(&shellID, "set +m; sh job.sh")))
+
+	named, ok := resolver.Attempt()
+	if !ok {
+		t.Fatal("the attempt was not named after the shell's start attached to it")
+	}
+	if string(named) != got.ID {
+		t.Fatalf("named %q, want the app-minted id %q — the app id stays authoritative", named, got.ID)
+	}
+}

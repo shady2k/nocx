@@ -270,7 +270,11 @@ func protectedAttempt(lg log.Logger, sid session.ID, fb protectedForeground) (li
 	}
 	attempt, ok := fb.Attempt()
 	if !ok {
-		lg.Debug("foreground signal: protected group with no started attempt — reporting the prompt",
+		// Warn rather than Debug: this line is the difference between "the
+		// pane really was at a prompt" and "a program was in there and nocx
+		// would not touch it", and the second is a person's Stop doing
+		// nothing. It is the first thing to read when that is reported.
+		lg.Warn("foreground signal: protected group, no authenticated started attempt — reporting the prompt",
 			"session_id", string(sid))
 		return "", false
 	}

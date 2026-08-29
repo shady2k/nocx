@@ -237,7 +237,14 @@ describe('mountClientHost — the renderer performs what the coordinator asks', 
   // The dev-web harness, the headless suite, a plain browser: there is no
   // shell here. Said once, honestly, rather than leaving the coordinator
   // waiting on a client that will never act.
-  it('answers failed when this client has no native host at all', async () => {
+  // Absence, not failure, and the difference is visible in the product. A
+  // plain browser has no OS banner and never will, so the coordinator has
+  // nobody who can present one — the same fact as no client attached at all.
+  // Answering `failed` here made every notification the coordinator routed to
+  // the banner channel land a "Not delivered" row in the notification centre
+  // (nocx-bu8fl), because notify's one exemption from the failure feed is
+  // written against absence.
+  it('answers unavailable when this client has no native host at all', async () => {
     reachable.value = false
     const d = scriptedDispatcher()
     const b = scriptedBindings()
@@ -246,8 +253,46 @@ describe('mountClientHost — the renderer performs what the coordinator asks', 
     expect(b.seen).toEqual([])
     expect(lastResolution(d)).toEqual({
       requestId: 'r11',
-      outcome: 'failed',
+      outcome: 'unavailable',
       error: 'this client has no native host',
+    })
+  })
+
+  // And every capability, not just the picker: the banner is the one the
+  // regression was found on, and a per-capability branch is exactly what must
+  // not exist here.
+  it.each([
+    'dialog.file',
+    'dialog.directory',
+    'shell.openUrl',
+    'attention.banner',
+    'attention.badge',
+    'attention.bounce',
+    'window.focus',
+  ] as const)('answers unavailable for %s with no native host', async (capability) => {
+    reachable.value = false
+    const d = scriptedDispatcher()
+    const b = scriptedBindings()
+    mount(d, b)
+    await request(d, { requestId: 'r-na', capability })
+    expect(b.seen).toEqual([])
+    expect(lastResolution(d).outcome).toBe('unavailable')
+  })
+
+  // The true positive the fix must not remove: a client that HAS a native
+  // host and whose binding throws did attempt the effect and lose it, so it
+  // still answers failed and still earns its "Not delivered" row.
+  it('still answers failed when a reachable binding throws', async () => {
+    const d = scriptedDispatcher()
+    const b = scriptedBindings({
+      banner: () => Promise.reject(new Error('notification permission denied')),
+    })
+    mount(d, b)
+    await request(d, { requestId: 'r11b', capability: 'attention.banner' })
+    expect(lastResolution(d)).toEqual({
+      requestId: 'r11b',
+      outcome: 'failed',
+      error: 'notification permission denied',
     })
   })
 

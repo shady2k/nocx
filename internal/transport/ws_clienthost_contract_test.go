@@ -59,10 +59,12 @@ func TestHostRequest_OverTheWireConformsToContract(t *testing.T) {
 func TestHostResolved_DTOConformsToContract(t *testing.T) {
 	schema := loadSchema(t, "host.resolved.schema.json")
 	for name, p := range map[string]hostResolvedParams{
-		"ok with a path": {Outcome: "ok", Path: "/home/dev/key"},
-		"ok with none":   {Outcome: "ok"},
-		"cancelled":      {Outcome: "cancelled"},
-		"failed":         {Outcome: "failed", Error: "no D-Bus session"},
+		"ok with a path":               {Outcome: "ok", Path: "/home/dev/key"},
+		"ok with none":                 {Outcome: "ok"},
+		"cancelled":                    {Outcome: "cancelled"},
+		"failed":                       {Outcome: "failed", Error: "no D-Bus session"},
+		"unavailable":                  {Outcome: "unavailable", Error: "this client has no native host"},
+		"unavailable with no sentence": {Outcome: "unavailable"},
 	} {
 		body, err := json.Marshal(p)
 		if err != nil {

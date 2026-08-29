@@ -10,7 +10,7 @@
  */
 
 /**
- * Params of the host.resolved RPC (nocx-uo1k6, design D3): the client answers one host.request with a closed outcome. ok means the effect was performed — for a picker it carries the chosen absolute path in path; cancelled means the person dismissed a picker, which is an outcome and not a failure; failed carries why the client could not perform the effect, so the coordinator answers its caller honestly instead of hanging. requestId is the broker-minted id from the request, echoed back.
+ * Params of the host.resolved RPC (nocx-uo1k6, design D3): the client answers one host.request with a closed outcome. ok means the effect was performed — for a picker it carries the chosen absolute path in path; cancelled means the person dismissed a picker, which is an outcome and not a failure; failed carries why the client could not perform the effect, so the coordinator answers its caller honestly instead of hanging; unavailable says this client has no such native surface AT ALL — a plain browser has no OS banner and never will — which is absence rather than a delivery that was attempted and lost, and the coordinator maps it to its own no-UI-host answer. requestId is the broker-minted id from the request, echoed back.
  */
 export interface HostResolved {
   /**
@@ -20,13 +20,13 @@ export interface HostResolved {
   /**
    * The closed outcome of the asked-for effect.
    */
-  outcome: 'ok' | 'cancelled' | 'failed'
+  outcome: 'ok' | 'cancelled' | 'failed' | 'unavailable'
   /**
    * ok, for a picker only: the chosen ABSOLUTE path.
    */
   path?: string
   /**
-   * failed only: why the client could not perform the effect.
+   * failed or unavailable only: why the client could not perform the effect, or which surface it does not have.
    */
   error?: string
 }

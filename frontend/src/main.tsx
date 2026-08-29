@@ -1101,6 +1101,12 @@ async function main() {
           if (pane) void tm.activate(pane)
         }}
         canActivate={(backendId, sessionId) => tm.findBySession(backendId, sessionId) !== undefined}
+        // A row's inertness is a fact about the TAB, and this panel stays
+        // mounted while the sidebar is collapsed, so it outlives the tabs it
+        // is about. Without this the answer above was read once, as the row
+        // was built — which for a session.ended row is the moment its own tab
+        // is closing (nocx-bu8fl).
+        subscribe={(listener) => tm.onPanesChanged(listener)}
       />
     ),
     // Last in the bar, after Operations (3) — see OPERATIONS_VIEW_ORDER for

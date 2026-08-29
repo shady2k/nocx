@@ -1149,3 +1149,28 @@ func (s *realSession) SignalForeground(sig syscall.Signal) error {
 	}
 	return sg.SignalForeground(sig)
 }
+
+// ForegroundJob names the foreground job's process group so a caller that
+// signals more than once keeps ONE addressee across the whole escalation
+// (nocx-uvac6.11). Same channel rule as SignalForeground: local pty answers,
+// remote and stub report pty.ErrNoForeground.
+func (s *realSession) ForegroundJob() (int, error) {
+	fg, ok := s.ch.(interface {
+		ForegroundJob() (int, error)
+	})
+	if !ok {
+		return 0, pty.ErrNoForeground
+	}
+	return fg.ForegroundJob()
+}
+
+// SignalProcessGroup signals the exact group a previous ForegroundJob named.
+func (s *realSession) SignalProcessGroup(pgid int, sig syscall.Signal) error {
+	sg, ok := s.ch.(interface {
+		SignalProcessGroup(pgid int, sig syscall.Signal) error
+	})
+	if !ok {
+		return pty.ErrNoForeground
+	}
+	return sg.SignalProcessGroup(pgid, sig)
+}

@@ -253,6 +253,26 @@ dead states: the summon was unreachable from anywhere but the grid, so pressing 
 after reading the scrollback did nothing, and an open block menu swallowed the chord in
 silence.
 
+**The target chord has one owner, and it reads the state rather than the focus.**
+⌘/Ctrl+Enter means one thing — "I want the assistant" — and one capture-phase listener at
+the document root, per pane, recognises it: `editor.isVisible` chooses between flipping the
+active target and summoning the editor over a running command, which is the same fact
+`canSummonEditor` tests first. Capture at the root is what makes a single owner possible at
+all: it precedes xterm's helper textarea, which would otherwise turn the chord into a CR in
+the running command's stdin, and CodeMirror's `Mod-Enter` binding, which would otherwise
+insert a blank line into the draft. The editor's own surfaces keep first refusal through the
+one arbiter chain (`§8.9.4` of the command-blocks design), so an open recall, picker or
+completion dropdown still owns the keys it already owned; an overlay owns the keyboard while
+it is up; and a text control outside this pane keeps its own key stream. Nothing else in the
+renderer tests `Enter` with a Command/Ctrl modifier.
+
+Splitting that recognition across surfaces is what the rule exists against. It was split
+three ways once — a listener on the editor root, one on the xterm host, one on `document` —
+each keyed on wherever the browser had parked the focus, and between them the gesture had two
+dead states: the summon was unreachable from anywhere but the grid, so pressing the chord
+after reading the scrollback did nothing, and an open block menu swallowed the chord in
+silence.
+
 A summon over a running program reuses that machine and the **same `CommandEditor`** for
 follow-ups. The existing editor and every summoned answer are reparented into one absolute
 presentation stack: the current streaming answer hides the composer; any wire-terminal state

@@ -36,6 +36,24 @@ type fakeLeaseSession struct {
 	dieOn syscall.Signal
 }
 
+// The fake is one pty with one job in front of it. The lease's escalation
+// now names that job's group once and talks to it (nocx-uvac6.11), so the
+// fake answers with a stable group and routes the signal through the same
+// bookkeeping SignalForeground has always used — every assertion below still
+// reads `signals`.
+const fakeLeaseJobGroup = 1
+
+func (f *fakeLeaseSession) ForegroundJob() (int, error) {
+	return fakeLeaseJobGroup, nil
+}
+
+func (f *fakeLeaseSession) SignalProcessGroup(pgid int, sig syscall.Signal) error {
+	if pgid != fakeLeaseJobGroup {
+		return pty.ErrNoForeground
+	}
+	return f.SignalForeground(sig)
+}
+
 func (f *fakeLeaseSession) SignalForeground(sig syscall.Signal) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -427,6 +445,10 @@ type errSession struct{ err error }
 
 func (e *errSession) SignalForeground(syscall.Signal) error { return e.err }
 
+func (e *errSession) ForegroundJob() (int, error) { return 0, e.err }
+
+func (e *errSession) SignalProcessGroup(int, syscall.Signal) error { return e.err }
+
 func TestRunLeaseError_NamesTheBoundAndCarriesTheReason(t *testing.T) {
 	le := &assistant.RunLeaseError{Reason: content.TermInactivity, Err: context.Canceled}
 	if !strings.Contains(le.Error(), "inactivity") {
@@ -438,5 +460,34 @@ func TestRunLeaseError_NamesTheBoundAndCarriesTheReason(t *testing.T) {
 	var got *assistant.RunLeaseError
 	if !errors.As(le, &got) || got.Reason != content.TermInactivity {
 		t.Fatal("errors.As must recover the reason")
+	}
+}
+
+// THE ADDRESSEE IS NAMED BEFORE THE WITHDRAWAL (nocx-uvac6.11).
+//
+// cancelExecution used to withdraw the broker request and only then ask what
+// was in front. Withdrawing is exactly what lets the request's command exit,
+// so the answer could be the command the person started in its place — and the
+// ladder went to that one.
+//
+// The naming now happens first, while the request still owns the foreground by
+// construction. The withdrawal itself is the injection point here, because it
+// is what ends the request: a cancel that hands the foreground to another group
+// IS the race, deterministically.
+func TestRunLease_CancelExecutionNamesItsOwnGroupBeforeWithdrawing(t *testing.T) {
+	const owned, personStarted = 5100, 5200
+	sess := newHandoffSession(owned)
+	sess.diesOn = syscall.SIGINT
+	lease, _ := newUnitLease(t, sess, RunLeaseConfig{})
+	lease.cancel = func() { sess.takeOver(personStarted) }
+
+	if got := lease.cancelExecution(); got != foregroundDelivered {
+		t.Fatalf("cancel outcome = %q, want %q", got, foregroundDelivered)
+	}
+	if got := sess.signalsTo(owned); len(got) != 1 || got[0] != syscall.SIGINT {
+		t.Fatalf("the request's own group got %v, want exactly [SIGINT]", got)
+	}
+	if got := sess.signalsTo(personStarted); len(got) != 0 {
+		t.Fatalf("a command the person started under the withdrawal was signalled: %v", got)
 	}
 }

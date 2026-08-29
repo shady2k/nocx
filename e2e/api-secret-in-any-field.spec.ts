@@ -21,7 +21,13 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, statSync } from 'no
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { bindEndpoint, settingsReady, VaultBackend, type DisposableRoot } from './harness'
+import {
+  bindEndpoint,
+  openImportDestination,
+  settingsReady,
+  VaultBackend,
+  type DisposableRoot,
+} from './harness'
 import {
   startHeaderSecretServer,
   type HeaderSecretServer,
@@ -229,8 +235,7 @@ test.describe('vault secrets in Auth and header fields with no environment', () 
     const importAsk = page.getByRole('dialog').filter({ hasText: 'Import collection' })
     await expect(importAsk).toBeVisible()
     await page.locator('#api-import-paste').fill(collectionExport(server.baseUrl))
-    await importAsk.getByRole('button', { name: 'Change where this goes' }).click()
-    await page.locator('#api-import-postman-dest').fill(collectionRoot)
+    await (await openImportDestination(importAsk, page)).fill(collectionRoot)
     await importAsk.getByRole('button', { name: 'Import', exact: true }).click()
 
     const requestRow = workbench.locator('.api-tree__row').filter({ hasText: REQUEST_NAME })

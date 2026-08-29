@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/session.output.schema.json",
+  "title": "SessionOutput",
+  "description": "Result of the session.output JSON-RPC method (nocx-22k1c.2): the bytes the backend RECORDED for one session, asked for by stream offset. It is what a client attaching an hour into a run recovers, and the replay ring cannot be: the ring is 256 KiB of transport-side buffering (AD-9, internal/transport/ring.go) and is deliberately not scrollback, so before this method a window that opened an hour late saw about ten screens of an hour's work. THE COORDINATE IS THE ONE THE CLIENT ALREADY SPEAKS. `from`, `offset`, `produced` and every gap bound are byte offsets in the session's output stream — the same offsets the AD-9 ack sends and the ring keys on — so a recording, a ring replay and a client's own cursor are all measured against one origin and can be joined without translation. A second coordinate system for the same stream is the defect this shape exists to avoid. BYTES, NOT A SCREEN. The backend hands back what the session printed and never interprets it (AD-6): there is no grid here, no cursor and no rows. The renderer feeds these bytes to its OWN VT at `effectiveSize` — the size the BACKEND decided this session runs at (nocx-eidfb.1) — and the same bytes plus the same size give the same screen, which is how two clients agree on what a session looks like without the backend ever holding a grid. HOW IT JOINS THE RING. `produced` is the recording's end offset, and the ring may not free a byte the recorder has not passed (ring.go's trim and reclaimRecorded), so `produced` is never below the ring's oldest retained offset while recording is on. A client therefore reads to `produced` and attaches THERE, and the two halves meet with nothing missing between them. When recording is off the recording stops advancing while acks go on freeing the ring, so `produced` can fall behind the `replayFrom` sessions.live reports; the client compares the two, attaches at the later of them, and knows the difference is a hole. That comparison is the renderer's, deliberately: the ring's oldest offset is sessions.live's to state and whether output is being recorded at all is history.status's, and copying either here would be the second owner AD-8 forbids.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessionId", "effectiveSize", "from", "runs", "gaps", "produced"],
+  "properties": {
+    "sessionId": {
+      "description": "The session whose recording this is, server-minted and server-authoritative (AD-7). Echoed so a client with several reads in flight can tell them apart without tracking request ids.",
+      "type": "string",
+      "minLength": 1
+    },
+    "effectiveSize": {
+      "$ref": "open.schema.json#/properties/effectiveSize"
+    },
+    "from": {
+      "description": "The stream offset this answer is measured from — what the caller asked for, or 0 when it asked for nothing. Everything in `runs` and `gaps` lies at or after it, and together they account for every byte of [from, produced) with nothing unstated: what is present is a run, what is gone is a gap. Echoed rather than assumed because a client that pages reads it back to confirm which page it is holding.",
+      "type": "integer",
+      "minimum": 0
+    },
+    "runs": {
+      "description": "The stretches of recorded bytes at or after `from`, in stream order, never overlapping. A LIST rather than one blob because the retention bound drops the middle of a long recording: head and tail are two runs with a hole between them, and a single body would silently join bytes that are not adjacent. Never null: a recording with nothing left in the requested span is [], because the renderer maps over it. A run is bounded by the per-answer byte budget, so a recording larger than one answer arrives over several calls — the caller pages by asking again from the end of the last run it received, and knows there is more whenever that end is below `produced`.",
+      "type": "array",
+      "items": { "$ref": "#/$defs/run" }
+    },
+    "gaps": {
+      "description": "The byte ranges inside [from, produced) that the recording no longer holds, in stream order. This is the 'never silently less' half of the answer: the retention bound keeps the head and the tail of a session's output and drops the middle (internal/content/policy.go, and capBody in the renderer cuts a frozen block the same way), so an offset the bound has dropped is answered with what remains AND with the range that is gone, rather than with a shorter run nobody can tell from a shorter session. Never null: a whole recording is []. Derived from the runs that are actually there rather than accumulated as bytes are dropped, so it cannot drift from them.",
+      "type": "array",
+      "items": { "$ref": "ledger.get.schema.json#/$defs/gap" }
+    },
+    "produced": {
+      "description": "How many bytes this session has produced in total, INCLUDING everything the bound dropped — the recording's end offset. It is what makes a hole measurable rather than invisible, it is where the next page starts, and it is the offset a client attaches at once it has read this far. Zero on a session that has printed nothing, and zero on one whose output is not being recorded at all — history.status says which, and this method deliberately does not.",
+      "type": "integer",
+      "minimum": 0
+    }
+  },
+  "$defs": {
+    "run": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["offset", "body"],
+      "properties": {
+        "offset": {
+          "description": "The stream offset of this run's first byte — the same coordinate an ack carries, so a client can place the run against its own cursor without counting anything.",
+          "type": "integer",
+          "minimum": 0
+        },
+        "body": {
+          "description": "The bytes, base64-encoded. Bytes and not text: the backend never decodes the stream (AD-6), a UTF-8 rune can straddle any boundary the recorder happened to write at, and a run that arrived as a string would have to be decoded by something that does not own the decoder. Never empty — a run with no bytes is not a run, and its absence is a gap.",
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    }
+  }
+}

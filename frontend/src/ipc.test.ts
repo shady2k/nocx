@@ -1359,6 +1359,57 @@ describe('reclaiming a live session', () => {
     ws.deliverText({ jsonrpc: '2.0', id: req?.id, result })
   }
 
+  function b64(text: string): string {
+    return btoa(text)
+  }
+
+  /** Answer the recording read a reclaim now makes before it claims, and let
+   *  the promise chain run on so the attach reaches the socket. Every reclaim
+   *  test goes through here: the read is not optional decoration on the
+   *  claim, it is the step that makes a reclaimed pane show the hour of work
+   *  it was reclaimed for. */
+  async function answerRecording(
+    ws: MockWebSocket,
+    over: Partial<{
+      runs: { offset: number; body: string }[]
+      gaps: unknown[]
+      produced: number
+    }> = {},
+  ): Promise<void> {
+    answerLast(ws, 'session.output', {
+      sessionId: SID,
+      effectiveSize: { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
+      from: 0,
+      runs: over.runs ?? [],
+      gaps: over.gaps ?? [],
+      produced: over.produced ?? 0,
+    })
+    await settle()
+  }
+
+  /** Let the read's promise chain run to its next request. A fixed number of
+   *  microtask turns rather than a timer: the chain is all `.then`, so it
+   *  advances without the clock, and a test that waited on the clock would be
+   *  waiting on a duration (AGENTS.md). */
+  async function settle(): Promise<void> {
+    for (let i = 0; i < 20; i++) await Promise.resolve()
+  }
+
+  /** The read fails — no content store is wired on that backend. The claim
+   *  must go on regardless. */
+  async function refuseRecording(ws: MockWebSocket): Promise<void> {
+    const req = ws
+      .requests()
+      .filter((r) => r.method === 'session.output')
+      .pop()
+    ws.deliverText({
+      jsonrpc: '2.0',
+      id: req?.id,
+      error: { code: -32601, message: 'method not found: session output store not wired' },
+    })
+    await settle()
+  }
+
   it('asks the backend what is live instead of its own memory', async () => {
     const { client, ws } = await freshClient()
     const listing = client.listLiveSessions()
@@ -1373,6 +1424,7 @@ describe('reclaiming a live session', () => {
   it('claims one at the offset the backend named, carrying its identity', async () => {
     const { client, ws } = await freshClient()
     const reclaiming = client.reclaimSession(liveEntry({ replayFrom: 42 }))
+    await refuseRecording(ws)
     const attach = ws
       .requests()
       .filter((r) => r.method === 'attach')
@@ -1389,12 +1441,211 @@ describe('reclaiming a live session', () => {
     expect(session.sessionId).toBe(SID)
   })
 
+  // THE ACCEPTANCE AT THIS LAYER (nocx-22k1c.2): a window that opens an hour
+  // into a run draws the hour. The recording is read before the claim, its
+  // bytes are queued ahead of the live stream, and the attach starts where
+  // the recording stopped — so the two halves meet with nothing between them
+  // and nothing drawn twice.
+  it('recovers the recorded output and attaches where it ends', async () => {
+    const { client, ws } = await freshClient()
+    const reclaiming = client.reclaimSession(liveEntry({ replayFrom: 4 }))
+
+    const read = ws
+      .requests()
+      .filter((r) => r.method === 'session.output')
+      .pop()
+    expect(read?.params).toEqual({
+      sessionId: SID,
+      instanceId: OPEN_IDENTITY.instanceId,
+      sessionEpoch: OPEN_IDENTITY.sessionEpoch,
+      from: 0,
+    })
+
+    await answerRecording(ws, {
+      runs: [{ offset: 0, body: b64('an hour of work') }],
+      produced: 15,
+    })
+
+    const attach = ws
+      .requests()
+      .filter((r) => r.method === 'attach')
+      .pop()
+    expect((attach?.params as { offset: number }).offset).toBe(15)
+
+    answerLast(ws, 'attach', { resumed: true, reset: false, from: 15 })
+    const session = await reclaiming
+
+    const seen: string[] = []
+    session.onData((d) => seen.push(d))
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode(' and the next second')))
+
+    expect(seen.join('')).toBe('an hour of work and the next second')
+    expect(session.recovered).toEqual({
+      bytes: 15,
+      gaps: [],
+      // The size the SESSION runs at, carried through so the surface renders
+      // the recovered bytes at the geometry that produced them.
+      size: { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
+    })
+  })
+
+  // A recording larger than one answer arrives over several, and the client
+  // pages by asking again from where the last run ended. The target is the
+  // `produced` the FIRST answer reported: the session is live, so chasing the
+  // latest one would never terminate.
+  it('pages until it has the whole recording', async () => {
+    const { client, ws } = await freshClient()
+    const reclaiming = client.reclaimSession(liveEntry())
+
+    await answerRecording(ws, { runs: [{ offset: 0, body: b64('first ') }], produced: 12 })
+    const second = ws.requests().filter((r) => r.method === 'session.output')
+    expect(second).toHaveLength(2)
+    expect((second[1].params as { from: number }).from).toBe(6)
+
+    // The session has printed more since; the page still stops at the target
+    // the first answer named, and the rest is the ring's to replay.
+    await answerRecording(ws, { runs: [{ offset: 6, body: b64('second') }], produced: 90 })
+    expect(ws.requests().filter((r) => r.method === 'session.output')).toHaveLength(2)
+
+    answerLast(ws, 'attach', { resumed: true, reset: false, from: 12 })
+    const session = await reclaiming
+    const seen: string[] = []
+    session.onData((d) => seen.push(d))
+    expect(seen.join('')).toBe('first second')
+  })
+
+  // What the retention bound dropped is CARRIED, not swallowed. The surface
+  // that draws the pane is the only thing that can say it where a person
+  // sees it, so the handle carries it there.
+  it('carries what the recording is missing', async () => {
+    const { client, ws } = await freshClient()
+    const reclaiming = client.reclaimSession(liveEntry())
+
+    await answerRecording(ws, {
+      runs: [
+        { offset: 0, body: b64('head') },
+        { offset: 900, body: b64('tail') },
+      ],
+      gaps: [{ start: 4, end: 900, reason: 'cap' }],
+      produced: 904,
+    })
+    answerLast(ws, 'attach', { resumed: true, reset: false, from: 904 })
+    const session = await reclaiming
+
+    expect(session.recovered).toEqual({
+      bytes: 8,
+      gaps: [{ start: 4, end: 900, reason: 'cap' }],
+      size: { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
+    })
+  })
+
+  // The stretch NEITHER owner holds: recording was off, so the recording
+  // stood still while acks went on freeing the ring. The client can see both
+  // numbers and nothing else can, so it is the one that has to say so — and
+  // it attaches at the ring's window rather than below it, where the claim
+  // would be answered with a reset that loses the recording too.
+  it('names the stretch that neither the recording nor the ring holds', async () => {
+    const { client, ws } = await freshClient()
+    const reclaiming = client.reclaimSession(liveEntry({ replayFrom: 500 }))
+
+    await answerRecording(ws, { runs: [{ offset: 0, body: b64('head') }], produced: 4 })
+    const attach = ws
+      .requests()
+      .filter((r) => r.method === 'attach')
+      .pop()
+    expect((attach?.params as { offset: number }).offset).toBe(500)
+
+    answerLast(ws, 'attach', { resumed: true, reset: false, from: 500 })
+    const session = await reclaiming
+
+    expect(session.recovered?.gaps).toEqual([{ start: 4, end: 500, reason: 'unrecorded' }])
+  })
+
+  // A rune split by the seam between the recording and the ring survives it.
+  // The recording's bytes and the live frames go through ONE decoder — the
+  // session's own — precisely so the join is a byte join and not a character
+  // one, and the attach starts exactly where the recording ended so there is
+  // a seam to survive at all.
+  it('joins the recording and the live stream mid-rune', async () => {
+    const { client, ws } = await freshClient()
+    const reclaiming = client.reclaimSession(liveEntry())
+
+    // "é" is 0xC3 0xA9. The recorder wrote the first byte and nothing more.
+    await answerRecording(ws, {
+      runs: [{ offset: 0, body: btoa('ok\xc3') }],
+      produced: 3,
+    })
+    answerLast(ws, 'attach', { resumed: true, reset: false, from: 3 })
+    const session = await reclaiming
+
+    const seen: string[] = []
+    session.onData((d) => seen.push(d))
+    ws.deliverBinary(encodeFrame(SID, new Uint8Array([0xa9, 0x21])))
+
+    expect(seen.join('')).toBe('oké!')
+  })
+
+  // And a rune the recording ends on where the live stream does NOT continue
+  // it is dropped rather than fused onto the first byte past the hole. The
+  // two halves are not adjacent, so joining them would draw a character
+  // neither of them contained. Dropped and not replaced with U+FFFD, which
+  // is what the decoder's reset already does everywhere else: the hole is
+  // named once, in the recovery's gaps, and a glyph inside a range already
+  // reported missing would be a second, vaguer statement of it.
+  it('does not fuse a partial rune across a hole', async () => {
+    const { client, ws } = await freshClient()
+    const reclaiming = client.reclaimSession(liveEntry({ replayFrom: 90 }))
+
+    await answerRecording(ws, {
+      runs: [{ offset: 0, body: btoa('ok\xc3') }],
+      produced: 3,
+    })
+    answerLast(ws, 'attach', { resumed: true, reset: false, from: 90 })
+    const session = await reclaiming
+
+    const seen: string[] = []
+    session.onData((d) => seen.push(d))
+    ws.deliverBinary(encodeFrame(SID, new TextEncoder().encode('!')))
+
+    expect(seen.join('')).toBe('ok!')
+  })
+
+  // The read's failure path, paired with every success above: a backend with
+  // no content store answers the read "method not found", and the claim is
+  // unaffected. Recovering the scrollback is a bonus; taking the session back
+  // is the job.
+  //
+  // What is recovered is nothing, and the answer SAYS nothing was recovered:
+  // the ring's window starts at 7, so those first bytes will not be drawn,
+  // and a reclaim that recovered nothing while reporting no hole would look
+  // exactly like one that recovered a session which had printed nothing.
+  // Why the recording is unavailable is history.status's to say, not this
+  // handle's — one fact, one owner.
+  it('claims the session even when the recording cannot be read', async () => {
+    const { client, ws } = await freshClient()
+    const reclaiming = client.reclaimSession(liveEntry({ replayFrom: 7 }))
+    await refuseRecording(ws)
+
+    answerLast(ws, 'attach', { resumed: true, reset: false, from: 7 })
+    const session = await reclaiming
+    expect(session.sessionId).toBe(SID)
+    expect(session.recovered).toEqual({
+      bytes: 0,
+      gaps: [{ start: 0, end: 7, reason: 'unrecorded' }],
+      // The named default a session with no client holds: a read that could
+      // not happen reports no geometry of its own, and 80x24 is what the
+      // backend would have said.
+      size: { cols: 80, rows: 24, xpixel: 0, ypixel: 0 },
+    })
+  })
+
   // The acceptance at this layer: after the reclaim, output for that session
   // reaches the renderer. Before it, the client would drop every frame — the
   // map is what routes them, and a fresh window's map is empty.
   it('receives the session output once it holds it', async () => {
     const { client, ws } = await freshClient()
     const reclaiming = client.reclaimSession(liveEntry({ replayFrom: 8 }))
+    await refuseRecording(ws)
     answerLast(ws, 'attach', { resumed: true, reset: false, from: 8 })
     const session = await reclaiming
 
@@ -1411,6 +1662,7 @@ describe('reclaiming a live session', () => {
   it('holds nothing when the claim is refused', async () => {
     const { client, ws } = await freshClient()
     const reclaiming = client.reclaimSession(liveEntry())
+    await refuseRecording(ws)
     const attach = ws
       .requests()
       .filter((r) => r.method === 'attach')

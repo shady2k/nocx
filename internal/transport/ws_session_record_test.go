@@ -70,8 +70,10 @@ type fakeRecorder struct {
 	firstAt  uint64
 	appends  int
 	calls    int
+	reads    int
 	stance   content.SessionOutputStance
 	failWith error
+	readErr  error
 }
 
 func newFakeRecorder() *fakeRecorder {
@@ -94,6 +96,43 @@ func (r *fakeRecorder) Append(_ context.Context, in content.SessionOutputAppend)
 	r.stream = append(r.stream, in.Body...)
 	r.appends++
 	return content.SessionOutputResult{Kept: true}, nil
+}
+
+// Read hands back what this fake kept, as ONE run: the fake never drops, so
+// a hole here would be a fiction. readErr is separate from failWith because
+// a store that cannot be read and a store that cannot be written are
+// different failures with different answers, and a test that could only set
+// both together could not tell which one it had provoked.
+func (r *fakeRecorder) Read(_ context.Context, _ string) (content.SessionOutputRecording, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.reads++
+	if r.readErr != nil {
+		return content.SessionOutputRecording{}, r.readErr
+	}
+	out := content.SessionOutputRecording{
+		Bytes:    uint64(len(r.stream)),
+		Produced: r.firstAt + uint64(len(r.stream)),
+	}
+	if len(r.stream) > 0 {
+		out.Runs = []content.SessionOutputRun{{
+			Offset: r.firstAt,
+			Body:   append([]byte(nil), r.stream...),
+		}}
+	}
+	return out, nil
+}
+
+func (r *fakeRecorder) setReadFailure(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.readErr = err
+}
+
+func (r *fakeRecorder) readCount() int {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.reads
 }
 
 func (r *fakeRecorder) Stance() content.SessionOutputStance {

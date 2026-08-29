@@ -27,6 +27,64 @@ import (
 // FSConn — the owned SFTP lease for the file manager (spec §3, D3)
 // ---------------------------------------------------------------------------
 
+// TestFSConnStateErr_Precedence pins the ladder every call path derives its
+// lease error from. The three signals are CAUSALLY ordered, not merely ranked:
+// poisoning closes the subsystem and Close releases the pooled reference that
+// shuts the transport, so the later ones routinely fire as consequences of the
+// earlier one and reporting them would name our own action a fact about the
+// host.
+//
+// The slot wait in run() used to answer from whichever case its select woke
+// on, which picks at random among ready ones — the same defect nocx-4c5d7
+// fixed in the discovery lease (nocx-76duc).
+func TestFSConnStateErr_Precedence(t *testing.T) {
+	newLease := func() *fsConn {
+		return &fsConn{done: make(chan struct{}), closed: make(chan struct{}), dead: make(chan struct{})}
+	}
+
+	live := newLease()
+	if err := live.stateErr(); err != nil {
+		t.Fatalf("a usable lease has no state error, got %v", err)
+	}
+
+	for _, tc := range []struct {
+		name string
+		shut []string
+		want error
+		why  string
+	}{
+		{"lost only", []string{"done"}, ErrFSLost, "the transport went away on its own"},
+		{"closed only", []string{"closed"}, ErrFSClosed, "the caller released the lease"},
+		{"dead only", []string{"dead"}, ErrFSDead, "the hard timeout poisoned the lease"},
+		{"closed then lost", []string{"closed", "done"}, ErrFSClosed, "Close released the reference that shut the transport"},
+		{"dead then closed", []string{"dead", "closed"}, ErrFSDead, "poison closes the subsystem, so the close follows from it"},
+		{"all three", []string{"dead", "closed", "done"}, ErrFSDead, "poison is the first cause of the other two"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newLease()
+			for _, ch := range tc.shut {
+				switch ch {
+				case "done":
+					close(c.done)
+				case "closed":
+					close(c.closed)
+				case "dead":
+					close(c.dead)
+				}
+			}
+			if err := c.stateErr(); !errors.Is(err, tc.want) {
+				t.Fatalf("stateErr = %v, want %v — %s", err, tc.want, tc.why)
+			}
+			// classify is the second reader of that fact and must not carry
+			// an ordering of its own.
+			raw := errors.New("sftp: some transport noise")
+			if err := c.classify(raw); !errors.Is(err, tc.want) {
+				t.Fatalf("classify = %v, want %v — %s", err, tc.want, tc.why)
+			}
+		})
+	}
+}
+
 func TestFSConn_ImplementsInterface(t *testing.T) {
 	var _ FSConn = (*fsConn)(nil)
 }

@@ -221,9 +221,9 @@ type fsConn struct {
 
 	// done closes on transport shutdown (the loss signal); closed closes on
 	// Close; dead closes when the lane's hard timeout poisons the lease.
-	// Calls check dead, then closed, then done — sequentially, not in one
-	// select: when several have fired, the lease's own state is the
-	// deterministic answer.
+	// When several have fired, the lease's own state is the deterministic
+	// answer and stateErr is the single place it is derived — never a
+	// select over the three, which picks a ready case at random.
 	done   chan struct{}
 	closed chan struct{}
 	dead   chan struct{}
@@ -454,34 +454,24 @@ func (c *fsConn) poison() {
 // reports ErrFSDead. The watchdog is joined before run returns, so no
 // goroutine from this lease outlives the call.
 func (c *fsConn) run(ctx context.Context, fn func() error) error {
-	// State is checked before and inside the slot wait — sequentially, not
-	// in one select: when several have fired, the lease's own state is the
-	// deterministic answer.
-	select {
-	case <-c.dead:
-		return ErrFSDead
-	default:
-	}
-	select {
-	case <-c.closed:
-		return ErrFSClosed
-	default:
-	}
-	select {
-	case <-c.done:
-		return ErrFSLost
-	default:
+	if err := c.stateErr(); err != nil {
+		return err
 	}
 	select {
 	case c.lane <- struct{}{}:
 	case <-ctx.Done():
 		return ctx.Err()
+	// Waking is allowed on any of the three; DECIDING from which one woke
+	// us is not — a select picks a ready case at random, and by the time
+	// the slot wait ends several are routinely shut at once (poison closes
+	// the subsystem, Close releases the reference that shuts the
+	// transport). stateErr is non-nil in each of these branches.
 	case <-c.dead:
-		return ErrFSDead
+		return c.stateErr()
 	case <-c.closed:
-		return ErrFSClosed
+		return c.stateErr()
 	case <-c.done:
-		return ErrFSLost
+		return c.stateErr()
 	}
 	defer func() { <-c.lane }()
 
@@ -509,10 +499,21 @@ func (c *fsConn) run(ctx context.Context, fn func() error) error {
 	return err
 }
 
-// classify maps a call error to the lease's typed errors. The lease's own
-// state is checked first because a select race may deliver the call error
-// after dead/closed/done fired — the deterministic answer wins.
-func (c *fsConn) classify(err error) error {
+// stateErr answers which lease-level fact ended a call, and it is the ONLY
+// place that answer is derived. Dead outranks closed outranks lost, and the
+// order is causal rather than a preference: poisoning closes the subsystem
+// and Close releases the pooled reference that shuts the transport, so the
+// later signals are CONSEQUENCES of the earlier one and reporting them would
+// describe our own action as a fact about the host.
+//
+// Which means the three channels may never be raced against each other for
+// the answer. A select with them as cases picks a ready one at random — the
+// defect nocx-4c5d7 fixed in the discovery lease, which had the same ladder
+// written out three times and one select that ignored it. Wake on any of
+// them; derive the error here.
+//
+// Returns nil only while the lease is still usable.
+func (c *fsConn) stateErr() error {
 	select {
 	case <-c.dead:
 		return ErrFSDead
@@ -527,6 +528,16 @@ func (c *fsConn) classify(err error) error {
 	case <-c.done:
 		return ErrFSLost
 	default:
+	}
+	return nil
+}
+
+// classify maps a call error to the lease's typed errors. The lease's own
+// state is checked first because a select race may deliver the call error
+// after dead/closed/done fired — the deterministic answer wins.
+func (c *fsConn) classify(err error) error {
+	if stateErr := c.stateErr(); stateErr != nil {
+		return stateErr
 	}
 	// pkg/sftp delivers ErrSSHFxConnectionLost to every in-flight request
 	// when its reader observes the channel close — the client side of a

@@ -18,8 +18,8 @@ import (
 //
 // This is a real integration test, not a fixture unit test. It proves that a
 // genuinely built .app can survive a pack → extract round-trip through the
-// darwin Platform implementation with its executable bits, symlinks, ad-hoc
-// codesign signature, and universal slices intact.
+// darwin Platform implementation with its executable bits, symlinks, codesign
+// signature, and universal slices intact.
 //
 // Three constraints gate this test to macOS CI:
 //  1. Build tag: //go:build darwin — the file compiles only on darwin.

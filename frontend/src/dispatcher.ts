@@ -10,6 +10,7 @@ import type {
   EndpointResult,
 } from './endpoint'
 import type { ControlSaturated } from './generated/control.saturated'
+import type { TransportPingResult } from './generated/transport.ping'
 import type { ControlSaturatedNotification } from './generated/control.saturated.notification'
 import { log } from './log'
 export type NotificationHandler = (params: unknown) => void
@@ -102,6 +103,16 @@ function isSaturationData(data: unknown): data is Pick<ControlSaturated, 'reason
 const MIN_BACKOFF_MS = 250
 const MAX_BACKOFF_MS = 5000
 
+/**
+ * An idle control socket is probed after 15 s, long enough to avoid adding
+ * chatter while a user is active. A response has 5 s to arrive; closing then
+ * deliberately reuses the existing WebSocket close path.
+ */
+export const HEARTBEAT_IDLE_WINDOW_MS = 15_000
+const HEARTBEAT_RESPONSE_TIMEOUT_MS = 5_000
+
+type TimerHandle = ReturnType<typeof setTimeout>
+
 interface PendingCall {
   resolve: (v: unknown) => void
   reject: (e: Error) => void
@@ -136,6 +147,11 @@ export class Dispatcher {
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
   private _started = false
   private _attemptInFlight = false
+
+  private _heartbeatIdleTimer: TimerHandle | null = null
+  private _heartbeatResponseTimer: TimerHandle | null = null
+  private _heartbeatSocket: WebSocket | null = null
+  private _heartbeatRequestID: number | null = null
 
   constructor(private readonly provider: EndpointProvider) {
     this.subscribe('control.saturated', (params: unknown) => {
@@ -220,6 +236,7 @@ export class Dispatcher {
       const ws = new WebSocket(`ws://${endpoint.host}:${endpoint.port}/session`, subprotocol)
       ws.binaryType = 'arraybuffer'
       let settled = false
+      const onMessage = (event: MessageEvent) => this._onSocketMessage(event, ws)
 
       ws.onopen = () => {
         // A retry can replace this socket before its handshake callback runs.
@@ -228,23 +245,26 @@ export class Dispatcher {
         if (settled) return
         settled = true
         this.setConnectionState({ kind: 'online' })
+        this._armHeartbeatIdle(ws)
         this.fireConnect()
         resolve()
       }
       ws.onerror = () => {
         if (this.ws !== ws || settled) return
         settled = true
-        ws.removeEventListener('message', this._onSocketMessage)
+        ws.removeEventListener('message', onMessage)
+        this._clearHeartbeatTimers()
         this.ws = null
         reject(new Error('ws connection failed'))
       }
 
-      ws.addEventListener('message', this._onSocketMessage)
+      ws.addEventListener('message', onMessage)
       ws.addEventListener(
         'close',
         () => {
           if (this.ws !== ws) return
-          ws.removeEventListener('message', this._onSocketMessage)
+          ws.removeEventListener('message', onMessage)
+          this._clearHeartbeatTimers()
           this.ws = null
           if (!settled) {
             settled = true
@@ -253,9 +273,8 @@ export class Dispatcher {
           this.rejectAllPending('ws closed')
           // Decide the reconnect policy BEFORE the lifecycle event: a
           // subscriber reading `reconnectPending` at event time must see
-          // the state that will hold after the event (nocx-gbhwh). It also
-          // means a throwing subscriber cannot prevent the reconnect from
-          // being scheduled.
+          // the state that will hold — the sentence can say "reconnecting"
+          // instead of guessing (nocx-gbhwh).
           if (!this._closingDeliberately) {
             this._scheduleReconnect()
           }
@@ -281,6 +300,7 @@ export class Dispatcher {
     if (typeof window !== 'undefined') {
       window.removeEventListener('online', this._onOnline)
     }
+    this._clearHeartbeatTimers()
     this.ws?.close()
     this.ws = null
     this.rejectAllPending('closed')
@@ -312,19 +332,23 @@ export class Dispatcher {
         params,
         sealedRetried: false,
       })
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      const ws = this.ws
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
         this.pending.delete(id)
         reject(new Error('not connected'))
         return
       }
-      this.ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
+      this._noteOutboundActivity(ws)
     })
   }
 
   /** Send a JSON-RPC notification (no id, no response expected). */
   notify(method: string, params: unknown): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-    this.ws.send(JSON.stringify({ jsonrpc: '2.0', method, params }))
+    const ws = this.ws
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ jsonrpc: '2.0', method, params }))
+    this._noteOutboundActivity(ws)
   }
 
   // --- Notifications -------------------------------------------------------
@@ -394,7 +418,9 @@ export class Dispatcher {
 
   // --- Internal message handling -------------------------------------------
 
-  private _onSocketMessage = (ev: MessageEvent): void => {
+  private _onSocketMessage = (ev: MessageEvent, source: WebSocket | null = this.ws): void => {
+    if (source === null || source !== this.ws) return
+    this._noteInboundActivity(source)
     if (typeof ev.data !== 'string') return
     let msg: {
       id?: number
@@ -406,6 +432,22 @@ export class Dispatcher {
     try {
       msg = JSON.parse(ev.data) as typeof msg
     } catch {
+      return
+    }
+
+    // Response to a heartbeat request. Its timer is transport-owned rather
+    // than a PendingCall timeout, so ordinary RPCs keep their existing
+    // lifetime semantics.
+    if (msg.id !== undefined && this._heartbeatRequestID === msg.id) {
+      if (
+        typeof msg.result !== 'object' ||
+        msg.result === null ||
+        typeof (msg.result as TransportPingResult).serverTimeMs !== 'number'
+      ) {
+        return
+      }
+      this._clearHeartbeatResponse()
+      this._armHeartbeatIdle(source)
       return
     }
 
@@ -431,14 +473,14 @@ export class Dispatcher {
             () => {
               const id = this.nextID++
               this.pending.set(id, p)
-              if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+              const ws = this.ws
+              if (!ws || ws.readyState !== WebSocket.OPEN) {
                 this.pending.delete(id)
                 p.reject(new Error('not connected'))
                 return
               }
-              this.ws.send(
-                JSON.stringify({ jsonrpc: '2.0', id, method: p.method, params: p.params }),
-              )
+              ws.send(JSON.stringify({ jsonrpc: '2.0', id, method: p.method, params: p.params }))
+              this._noteOutboundActivity(ws)
             },
             (e: unknown) => {
               p.reject(e instanceof Error ? e : new Error(String(e)))
@@ -475,6 +517,71 @@ export class Dispatcher {
   }
 
   // --- Reconnect plumbing --------------------------------------------------
+  private _clearHeartbeatResponse(): void {
+    if (this._heartbeatResponseTimer !== null) {
+      clearTimeout(this._heartbeatResponseTimer)
+      this._heartbeatResponseTimer = null
+    }
+    this._heartbeatRequestID = null
+  }
+
+  private _clearHeartbeatTimers(): void {
+    if (this._heartbeatIdleTimer !== null) {
+      clearTimeout(this._heartbeatIdleTimer)
+      this._heartbeatIdleTimer = null
+    }
+    this._clearHeartbeatResponse()
+    this._heartbeatSocket = null
+  }
+
+  private _armHeartbeatIdle(ws: WebSocket): void {
+    if (
+      this.ws !== ws ||
+      ws.readyState !== WebSocket.OPEN ||
+      this._closingDeliberately ||
+      this._heartbeatRequestID !== null
+    ) {
+      return
+    }
+    this._heartbeatSocket = ws
+    if (this._heartbeatIdleTimer !== null) clearTimeout(this._heartbeatIdleTimer)
+    this._heartbeatIdleTimer = setTimeout(() => {
+      if (this._heartbeatSocket !== ws || this.ws !== ws || ws.readyState !== WebSocket.OPEN) return
+      this._heartbeatIdleTimer = null
+      if (this.pending.size !== 0) {
+        this._armHeartbeatIdle(ws)
+        return
+      }
+      const id = this.nextID++
+      this._heartbeatRequestID = id
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id, method: 'transport.ping', params: {} }))
+      this._heartbeatResponseTimer = setTimeout(() => {
+        if (
+          this._heartbeatSocket !== ws ||
+          this.ws !== ws ||
+          this._heartbeatRequestID !== id ||
+          this._closingDeliberately
+        ) {
+          return
+        }
+        // Deliberately use the existing close path. It rejects pending calls,
+        // publishes waiting, schedules the retry, and fires onDisconnect.
+        ws.close()
+      }, HEARTBEAT_RESPONSE_TIMEOUT_MS)
+    }, HEARTBEAT_IDLE_WINDOW_MS)
+  }
+
+  private _noteOutboundActivity(ws: WebSocket): void {
+    if (this.ws !== ws || ws.readyState !== WebSocket.OPEN || this._heartbeatRequestID !== null)
+      return
+    this._armHeartbeatIdle(ws)
+  }
+
+  private _noteInboundActivity(ws: WebSocket): void {
+    if (this.ws !== ws || ws.readyState !== WebSocket.OPEN || this._heartbeatRequestID !== null)
+      return
+    this._armHeartbeatIdle(ws)
+  }
 
   private _scheduleReconnect(): void {
     if (this._reconnectTimer !== null || this._closingDeliberately) return

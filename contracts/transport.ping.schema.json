@@ -1,0 +1,15 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/transport.ping.schema.json",
+  "title": "TransportPingResult",
+  "description": "Result of the transport.ping JSON-RPC method.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["serverTimeMs"],
+  "properties": {
+    "serverTimeMs": {
+      "type": "integer",
+      "description": "Unix time in milliseconds according to the server clock."
+    }
+  }
+}

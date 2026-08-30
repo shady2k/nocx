@@ -1,7 +1,12 @@
 // @vitest-environment jsdom
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { EndpointProvider, EndpointResult } from './endpoint'
-import { Dispatcher, SATURATION_TOAST_WINDOW_MS, resetSaturationToastDedup } from './dispatcher'
+import {
+  Dispatcher,
+  HEARTBEAT_IDLE_WINDOW_MS,
+  SATURATION_TOAST_WINDOW_MS,
+  resetSaturationToastDedup,
+} from './dispatcher'
 import { clearToasts, toasts } from './ui/toast'
 
 /**
@@ -336,6 +341,111 @@ describe('dispatcher endpoint state machine', () => {
     await flush()
     expect(d.connectionState).toEqual({ kind: 'online' })
     expect(provider.calls).toBe(1)
+  })
+})
+
+describe('dispatcher heartbeat', () => {
+  it('pings an idle socket and stays online when the response arrives', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connected(d)
+
+    vi.advanceTimersByTime(HEARTBEAT_IDLE_WINDOW_MS - 1)
+    expect(
+      socket()
+        .requests()
+        .filter((request) => request.method === 'transport.ping'),
+    ).toHaveLength(0)
+
+    vi.advanceTimersByTime(1)
+    const ping = socket()
+      .requests()
+      .find((request) => request.method === 'transport.ping')
+    expect(ping).toBeDefined()
+    socket().deliverText({
+      jsonrpc: '2.0',
+      id: ping!.id,
+      result: { serverTimeMs: 1756500000000 },
+    })
+    await flush()
+    vi.advanceTimersByTime(5_000)
+
+    expect(socket().closeCalled).toBe(false)
+    expect(d.connectionState).toEqual({ kind: 'online' })
+  })
+
+  it('does not ping while control traffic keeps the socket busy', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connected(d)
+
+    d.notify('activity', {})
+    vi.advanceTimersByTime(HEARTBEAT_IDLE_WINDOW_MS - 1)
+    expect(
+      socket()
+        .requests()
+        .filter((request) => request.method === 'transport.ping'),
+    ).toHaveLength(0)
+
+    socket().deliverText({ jsonrpc: '2.0', method: 'activity', params: {} })
+    vi.advanceTimersByTime(HEARTBEAT_IDLE_WINDOW_MS - 1)
+
+    expect(
+      socket()
+        .requests()
+        .filter((request) => request.method === 'transport.ping'),
+    ).toHaveLength(0)
+    expect(socket().closeCalled).toBe(false)
+  })
+
+  it('closes an idle socket when the heartbeat response times out through close', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connected(d)
+    const disconnect = vi.fn()
+    d.onDisconnect(disconnect)
+
+    vi.advanceTimersByTime(HEARTBEAT_IDLE_WINDOW_MS)
+    const ping = socket()
+      .requests()
+      .find((request) => request.method === 'transport.ping')
+    expect(ping).toBeDefined()
+    const pending = d.call('long.operation', {})
+    pending.catch(() => {})
+
+    vi.advanceTimersByTime(4_999)
+    expect(socket().closeCalled).toBe(false)
+
+    vi.advanceTimersByTime(1)
+    await expect(pending).rejects.toThrow('ws closed')
+    expect(socket().closeCalled).toBe(true)
+    expect(disconnect).toHaveBeenCalledTimes(1)
+    expect(d.connectionState.kind).toBe('waiting')
+  })
+
+  it('keeps a healthy idle socket alive across three heartbeat windows', async () => {
+    const d = new Dispatcher(new TestEndpointProvider())
+    await connected(d)
+
+    for (let id = 1; id <= 3; id++) {
+      vi.advanceTimersByTime(HEARTBEAT_IDLE_WINDOW_MS)
+      const pings = socket()
+        .requests()
+        .filter((request) => request.method === 'transport.ping')
+      const ping = pings[pings.length - 1]
+      expect(ping).toBeDefined()
+      if (!ping) throw new Error('heartbeat ping was not sent')
+      socket().deliverText({
+        jsonrpc: '2.0',
+        id: ping.id,
+        result: { serverTimeMs: 1756500000000 + id },
+      })
+      await flush()
+    }
+
+    expect(socket().closeCalled).toBe(false)
+    expect(
+      socket()
+        .requests()
+        .filter((request) => request.method === 'transport.ping'),
+    ).toHaveLength(3)
   })
 })
 

@@ -621,6 +621,51 @@ export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promi
     { p: endpoint.port, t: endpoint.token },
   )
 }
+type ResolvableBackendResolution =
+  | {
+      ok: true
+      host: string
+      port: number
+      token: string
+      kind: ''
+      message: ''
+      remedy: ''
+    }
+  | { ok: false; kind: string; message: string; remedy: string }
+
+/**
+ * Point a page at a Node-owned endpoint that is resolved afresh on every
+ * frontend connection attempt. Unlike bindEndpoint, this is intentionally
+ * callable: restart-oriented specs must not keep returning a dead port or
+ * token from the first launch.
+ */
+export async function bindResolvableEndpoint(
+  page: Page,
+  resolver: () => Promise<ResolvableBackendResolution>,
+): Promise<void> {
+  await page.exposeFunction('__nocxResolveBackend', resolver)
+  await page.context().addInitScript(() => {
+    type ResolverWindow = Window & {
+      __nocxResolveBackend?: () => Promise<ResolvableBackendResolution>
+    }
+    const workbenchGo = {
+      main: {
+        WailsApp: {
+          ResolveBackend: () => (window as ResolverWindow).__nocxResolveBackend!(),
+          CheckForUpdate: () => Promise.resolve(null),
+          ReportHealthy: () => Promise.resolve(),
+          ApplyUpdate: () => Promise.resolve(),
+        },
+      },
+    }
+    Object.defineProperty(window, 'go', {
+      configurable: true,
+      enumerable: true,
+      get: () => workbenchGo,
+      set: () => undefined,
+    })
+  })
+}
 
 /**
  * What an AI endpoint is created with, through the dialog a person uses.

@@ -109,7 +109,7 @@ func TestRun_EndToEndOverTheRealSocket(t *testing.T) {
 	fake, srv := newRunToolCallingServer("")
 	defer srv.Close()
 
-	client, err := assistant.NewClient(nil, nil, content.NoFloor())
+	client, err := assistant.NewClient(nil, nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

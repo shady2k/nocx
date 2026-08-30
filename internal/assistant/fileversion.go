@@ -117,30 +117,6 @@ func CaptureFileVersionFrom(path string, source FileVersionSource, policy FileVe
 	return version, nil
 }
 
-// CaptureWrittenFileVersion binds bytes already held by a writer. It performs
-// one stat and never reads the path again; the supplied bytes are the content
-// evidence for a hash-bound small or executable file.
-func CaptureWrittenFileVersion(path string, data []byte) (FileVersion, error) {
-	return CaptureWrittenFileVersionFrom(path, data, osFileVersionSource{})
-}
-
-func CaptureWrittenFileVersionFrom(path string, data []byte, source FileVersionSource) (FileVersion, error) {
-	if source == nil {
-		return FileVersion{}, fmt.Errorf("file version %q: nil source", path)
-	}
-	info, err := source.Stat(path)
-	if err != nil {
-		return FileVersion{}, fmt.Errorf("file version %q: stat written file: %w", path, err)
-	}
-	version, err := versionFromInfo(path, info)
-	if err != nil {
-		return FileVersion{}, err
-	}
-	version.Strategy = FileVersionHash
-	version.SHA256 = hashBytes(data)
-	return version, nil
-}
-
 // VerifyFileVersion checks the path immediately before dispatch. For a
 // hash-bound version, the evidence interval begins at the first stat and ends
 // at the second stat after the content read; a stat-bound version is one

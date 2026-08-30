@@ -162,6 +162,7 @@ export interface RendererMock extends TerminalRenderer {
   /** The mock's bracketed-paste-mode answer is a spy: tests flip mode 2004
    *  on and off. */
   bracketedPasteActive: Mock<() => boolean>
+  awaitWriteBarrier: Mock<() => Promise<void>>
   /** The snippet-palette chord handler — stored, so a test can fire it the
    *  way xterm's custom key handler would. */
   onSnippetChord: Mock<(cb: (() => void) | null) => void>
@@ -279,6 +280,11 @@ export function createRendererMock(): RendererMock {
     // Mode 2004 off by default — a test that wants bracketed paste on
     // flips it with mockReturnValue(true) on this same vi.fn.
     bracketedPasteActive: vi.fn(() => false),
+    // The parse fence the real renderer offers. Settled by default: a test
+    // about the mode alone must not have to know this exists, and one about
+    // the ORDER (nocx-8rtr.1 — write() is fire-and-forget, so a synchronous
+    // read can answer about the terminal before the bytes) overrides it.
+    awaitWriteBarrier: vi.fn(async () => {}),
     onSnippetChord: vi.fn((cb: (() => void) | null) => {
       snippetChordCb = cb
     }),

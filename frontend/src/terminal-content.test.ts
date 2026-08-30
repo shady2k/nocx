@@ -7327,6 +7327,126 @@ describe('a pane draws its past (nocx-m3fqk)', () => {
     }
   })
 
+  it('copying a restored answer yields the answer, never the provider request (nocx-3dteo)', async () => {
+    // THE WIRING, NOT A STUB OF IT. The block manager is handed a reader by
+    // terminal-content, and every frontend test of the copy path so far
+    // injected its own — so the one line that decides WHICH reader was
+    // never asserted, and it pointed at a lookup by media type.
+    //
+    // What that lookup found on a turn is the provider wiretap: the raw
+    // chat-completions request and response, hung on the ask entry as
+    // text/plain by internal/app/assistant_wire_capture.go. So "Copy
+    // output" on an answer put the system prompt and every tool schema on
+    // the person's clipboard, live and restored alike.
+    const WIRE =
+      '{"model":"gpt-5","messages":[{"role":"system","content":"You are the assistant"}],' +
+      '"tools":[{"type":"function","function":{"name":"files.edit"}}]}'
+    const PROSE = 'Nothing went wrong — the tree is clean.'
+
+    const turn = entry({ id: 'turn-1', seq: 1, kind: 'ask', intent: 'what went wrong?' })
+    const client = makeClient()
+    client.call.mockImplementation((method: string, params?: unknown) => {
+      if (method === 'ledger.query') {
+        const p = params as { paneId?: string }
+        return Promise.resolve({
+          entries: p.paneId ? [turn] : [],
+          scope: 'everywhere',
+          exhausted: true,
+          hasRows: true,
+          coverage: null,
+        })
+      }
+      if (method === 'ledger.get') {
+        const id = (params as { id?: string }).id
+        if (id === 'turn-1')
+          return Promise.resolve({
+            entry: { ...turn },
+            edges: [],
+            // The turn's OWN artifacts are the wiretap captures and nothing
+            // else — which is the real shape of an ask entry.
+            artifacts: [
+              { id: 'art-wire-req', mediaType: 'text/plain', captureMethod: 'raw-output' },
+              { id: 'art-wire-res', mediaType: 'text/plain', captureMethod: 'raw-output' },
+            ],
+            proseEvicted: false,
+            caused: [
+              {
+                entryId: 'txt-1',
+                position: 0,
+                kind: 'text',
+                source: 'assistant',
+                intent: '',
+                args: null,
+                effect: null,
+                resource: null,
+                opensBlock: false,
+              },
+            ],
+          })
+        return Promise.resolve({
+          entry: { kind: 'text' },
+          edges: [],
+          artifacts: [{ id: 'art-prose', mediaType: 'text/plain', captureMethod: 'none' }],
+          caused: [],
+          proseEvicted: false,
+        })
+      }
+      if (method === 'ledger.artifact') {
+        const id = (params as { id?: string }).id
+        const body = id === 'art-prose' ? PROSE : WIRE
+        return Promise.resolve({ body, truncated: null, byteLen: body.length })
+      }
+      return Promise.reject(new Error('no store wired (fake)'))
+    })
+
+    const copied: string[] = []
+    const realClipboard = navigator.clipboard
+    Object.defineProperty(navigator, 'clipboard', {
+      value: {
+        writeText: (text: string) => {
+          copied.push(text)
+          return Promise.resolve()
+        },
+      },
+      configurable: true,
+    })
+
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      content.setVisible(true)
+      const inner = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .scrollbackInner
+      let turnBlock: HTMLElement | null = null
+      await vi.waitFor(() => {
+        turnBlock = inner.querySelector<HTMLElement>(
+          '.cmd-block[data-block-kind="ask"][data-restored="true"]',
+        )
+        expect(turnBlock).not.toBeNull()
+      })
+      // The turn draws NO body of its own — the wiretap is not an answer.
+      expect(turnBlock!.querySelector(':scope > [data-answer-body]')).toBeNull()
+
+      turnBlock!.querySelector<HTMLElement>('.cmd-overflow-btn')!.click()
+      const copyOut = Array.from(
+        document.querySelectorAll<HTMLElement>('.cmd-overflow-menu-item'),
+      ).find((el) => el.textContent === 'Copy output')
+      expect(copyOut).toBeDefined()
+      copyOut!.click()
+
+      await vi.waitFor(() => {
+        expect(copied).toEqual([PROSE])
+      })
+      expect(copied[0]).not.toContain('tools')
+      expect(copied[0]).not.toContain('You are the assistant')
+    } finally {
+      Object.defineProperty(navigator, 'clipboard', {
+        value: realClipboard,
+        configurable: true,
+      })
+      teardown()
+    }
+  })
+
   it('survives being shown before it is mounted, which is what really happens', async () => {
     // The activation seam calls setVisible(true) while the pane is still
     // being built, so the first show finds no scrollback. Spending the

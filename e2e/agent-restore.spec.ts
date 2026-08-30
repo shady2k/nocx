@@ -428,6 +428,14 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
     // a turn whose answer is right there gets (ADR-0019 §7).
     await expect(turn).not.toHaveAttribute('data-output-evicted', 'true')
 
+    // A TURN DRAWS NO BODY OF ITS OWN (nocx-3dteo). The provider wiretap
+    // hangs the raw chat-completions request and response on the turn entry
+    // as text/plain artifacts, so a restore that picked a body by media type
+    // drew the whole request — system prompt, every tool schema — above the
+    // prose. The children are asserted above; this asserts the ABSENCE the
+    // spec had no line for, which is why it watched the defect ship.
+    await expect(turn.locator(':scope > [data-answer-body]')).toHaveCount(0)
+
     // The turn that RAN something comes back arranged exactly as it was
     // drawn (ADR-0040 criterion 9): the relation and the prose anchors are
     // stored, so the restored view of one turn is the live one it came
@@ -437,6 +445,7 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
     await expect(restoredTurnBlock).toHaveCount(1)
     await expect(restoredTurnBlock).toHaveAttribute('data-restored', 'true')
     await expect(restoredTurnBlock).toHaveAttribute('data-block-kind', 'ask')
+    await expect(restoredTurnBlock.locator(':scope > [data-answer-body]')).toHaveCount(0)
 
     const restoredHeaders = await restoredTurnBlock
       .locator(':scope > .cmd-header .cmd-header-text')

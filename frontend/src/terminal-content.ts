@@ -110,7 +110,13 @@ import {
 } from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
 import { captureBlock } from './capture-client'
-import { answerTextForEntry, arrangedByCause, blocksForPane, restoredBody } from './restore-client'
+import {
+  answerTextForEntry,
+  answerTextForTurn,
+  arrangedByCause,
+  blocksForPane,
+  restoredBody,
+} from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
 import { toolCallTitle } from './scrollback/tool-call-title'
 import { fromITheme } from './scrollback/serializer'
@@ -1745,7 +1751,11 @@ export class TerminalContent extends BasePaneContent {
         onClear: () => this.clearGrants(),
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
         sessionName: (id) => this.hooks.sessionName?.(id) ?? null,
-        answerText: (entryId) => answerTextForEntry(this.client, entryId),
+        // The copy path is handed a TURN's entry id (blocks.ts reaches it
+        // only for a block whose kind is `ask`), and a turn's answer is its
+        // `text` children joined — never an artifact of its own, which since
+        // ADR-0040 it does not have (nocx-3dteo).
+        answerText: (entryId) => answerTextForTurn(this.client, entryId),
         dump: (entryId) => agentClient.dump(entryId),
         runningActions: this.runningActions,
       })
@@ -4177,10 +4187,10 @@ export class TerminalContent extends BasePaneContent {
       // causal sequence — prose, tool calls, commands — in the seats the
       // ledger stored, through the SAME builders the live path ends at.
       //
-      // The PROSE was already fetched: `restoredBody` returned the turn's
-      // text/plain artifact, and the children ride the same `ledger.get`
-      // call as `caused`. A `text` child's body is its own artifact, read
-      // here per child exactly as a top-level block's body is read.
+      // THE PROSE IS THE CHILDREN'S. `restoredBody` returns no body for a
+      // turn — it has none since ADR-0040 — and the children ride the same
+      // `ledger.get` call as `caused`. A `text` child's body is its own
+      // artifact, read here per child exactly as a top-level block's is.
       const childBody = new Map<string, string | null>()
       for (const c of restored?.caused ?? []) {
         if (c.kind !== 'text') continue

@@ -203,14 +203,44 @@ test.describe('a saved snippet reaches a running program', () => {
     })
   })
 
-  // The OTHER multi-line branch — bracketed paste ON, body delivered — is
-  // NOT here, and that is a finding rather than an omission: neither a
-  // program setting DECSET 2004 itself nor a nested interactive bash made
-  // the mode read as active at fire time in this container, while the
-  // renderer's own read answers correctly against the real parser
-  // (renderers/xterm.test.ts, 'bracketed paste, read from the real
-  // parser'). Either the bytes never reach xterm in the stand or something
-  // resets the mode; nocx-8rtr.1 carries the question and this test.
+  // The OTHER multi-line branch: bracketed paste ON, body delivered. It could
+  // not be arranged here until nocx-8rtr.1 was root-caused, and the cause was
+  // not the stand — the wire carries the program's DECSET (an ON/off/ON probe
+  // recorded it), while renderer.write() is fire-and-forget and insertSnippet
+  // read the mode a parse pass too early. The product fences on the parse now,
+  // so this branch is reachable, and it is the check that keeps it that way.
+  test('a multi-line body is delivered when the program HAS enabled bracketed paste', async ({
+    page,
+  }) => {
+    await page.goto('/')
+    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await createSnippet(page, 'e2e two lines', 'first line\nsecond line')
+
+    // The program turns mode 2004 on itself and then holds the pane on stdin.
+    // `read -r` keeps the backslashes the two-line body does not have, and
+    // keeps the whole paste as ONE value, which is what makes the assertion
+    // below about delivery rather than about the shell's word splitting.
+    const blocksBefore = await programWaitingOnStdin(
+      page,
+      "printf '\\033[?2004h'; read -r x; printf 'got-%s\\n' \"$x\"",
+    )
+
+    await pickSnippet(page, 'e2e two lines')
+
+    // No refusal: the palette closes on delivery rather than re-opening with
+    // the notice the OFF branch asserts.
+    await expectPaletteClosed(page)
+    // And nothing was submitted — the fire never sends a newline (§9.3),
+    // even when the destination could carry one.
+    await expect(page.locator('.cmd-block')).toHaveCount(blocksBefore)
+
+    // The person presses Enter themselves, and the program echoes what it
+    // read: both lines arrived, as one bracketed paste.
+    await page.keyboard.press('Enter')
+    const block = page.locator('.cmd-block', { hasText: 'got-first line' }).first()
+    await expect(block).toBeVisible({ timeout: 10_000 })
+    await expect(block).toContainText('second line')
+  })
 
   test('a snippet whose secret cannot be resolved refuses, and writes nothing', async ({
     page,

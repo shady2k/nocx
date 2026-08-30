@@ -11,9 +11,10 @@ import (
 // Disqualified are parser facts, not operator input and are omitted from the
 // persisted rule form.
 type Invocation struct {
-	Commands     [][]string `json:"commands,omitempty"`
-	Parsed       bool       `json:"-"`
-	Disqualified bool       `json:"-"`
+	Commands     [][]string     `json:"commands,omitempty"`
+	Parsed       bool           `json:"-"`
+	Disqualified bool           `json:"-"`
+	Resources    ResourceReport `json:"-"`
 }
 
 // InvocationRule is an exception to the effect matrix for one exact command

@@ -2385,7 +2385,7 @@ func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate con
 			h := assistantProbeHandlers{
 				op: configOp, secrets: s.credentialResolver(),
 				client: s.assistantClient, probes: s.assistantProbes,
-				wired: s.assistantClient != nil, r: r,
+				wired: s.assistantClient != nil, admit: s.agentProbeAdmit, r: r,
 			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleEndpointProbe(ctx, req) }
 		}),

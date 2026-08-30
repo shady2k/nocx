@@ -60,6 +60,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"strings"
 	"sync"
@@ -964,17 +965,30 @@ type APIImportService interface {
 	// srcPath is a path on the machine running THIS process, which is the
 	// person's machine only when the desktop app is what is calling. It is
 	// therefore the NARROW route; ImportPostmanDocument is the general one.
-	ImportPostman(ctx context.Context, srcPath, dest string) ([]apiimport.Unsupported, error)
+	ImportPostman(ctx context.Context, srcPath, dest string, storeSecrets bool) ([]apiimport.Unsupported, error)
 	// ImportPostmanArchive reads a Postman workspace archive and writes each
 	// named document below dest, rolling the fan-out back if one arrival fails.
-	ImportPostmanArchive(ctx context.Context, srcPath, dest string) ([]apiimport.ArchiveImportResult, error)
+	ImportPostmanArchive(ctx context.Context, srcPath, dest string, storeSecrets bool) ([]apiimport.ArchiveImportResult, error)
 	// ImportPostmanArchiveBytes is the same archive route for a renderer that
 	// holds the ZIP bytes rather than a path on the backend's machine.
-	ImportPostmanArchiveBytes(ctx context.Context, archive []byte, dest string) ([]apiimport.ArchiveImportResult, error)
+	ImportPostmanArchiveBytes(ctx context.Context, archive []byte, dest string, storeSecrets bool) ([]apiimport.ArchiveImportResult, error)
 	// PreviewPostmanArchive reads and validates a path archive without writing.
 	PreviewPostmanArchive(ctx context.Context, srcPath, dest string) ([]apiimport.ArchiveDocument, error)
 	// PreviewPostmanArchiveBytes reads and validates archive bytes without writing.
 	PreviewPostmanArchiveBytes(ctx context.Context, archive []byte, dest string) ([]apiimport.ArchiveDocument, error)
+	// PreviewPostmanDocument answers the same shape for a SINGLE document —
+	// one entry, named from inside itself, carrying the variables it marked
+	// secret. The ask needs the same answer whichever entrance a person
+	// used, and an offer that existed for archives alone would be an offer
+	// decided by how the export happened to arrive (nocx-zn386).
+	PreviewPostmanDocument(ctx context.Context, document string) ([]apiimport.ArchiveDocument, error)
+	// PreviewPostmanPath is that preview for a path on this machine.
+	//
+	// There is deliberately no preview for a URL. Reading one means FETCHING
+	// it, and a surface that quietly calls somebody's server because a field
+	// lost focus is doing something nobody asked for; the transport refuses
+	// that combination by name. A URL export is read once, by the import.
+	PreviewPostmanPath(ctx context.Context, srcPath string) ([]apiimport.ArchiveDocument, error)
 
 	// ImportPostmanDocument writes the same collection from the export's
 	// BYTES, which the caller already holds. It is not a second import: the
@@ -982,7 +996,7 @@ type APIImportService interface {
 	// differs only by opening a file to get one. A renderer reached over a
 	// forwarded port has the bytes and cannot name a file the backend can
 	// see, which is the case the path route cannot serve.
-	ImportPostmanDocument(ctx context.Context, document, dest string) ([]apiimport.Unsupported, error)
+	ImportPostmanDocument(ctx context.Context, document, dest string, storeSecrets bool) ([]apiimport.Unsupported, error)
 
 	// ImportPostmanURL fetches the export over route and writes the same
 	// collection. It is the general route in the other direction from
@@ -993,47 +1007,109 @@ type APIImportService interface {
 	// route is how to REACH the document, and the environment the import
 	// mints inherits it (apiimport.ImportInto): a collection fetched from
 	// behind a bastion must not arrive routed direct.
-	ImportPostmanURL(ctx context.Context, rawURL string, route apicoll.Route, dest string) ([]apiimport.Unsupported, error)
+	ImportPostmanURL(ctx context.Context, rawURL string, route apicoll.Route, dest string, storeSecrets bool) ([]apiimport.Unsupported, error)
 }
 
-// APIImportOperation is the typed operation for api.import.postman. The
-// importer writes only a collection folder under the api gate. An imported
-// document yields no secret, so it does not take charge of credential
-// material and has no vault gate to protect.
+// APIImportOperation is the typed operation for api.import.postman. It
+// writes a collection folder under the api gate, and it holds the VAULT gate
+// too, because an import may be asked to store the variables the export
+// marked `secret` (nocx-zn386). It is one gate for the operation rather than
+// one per call: an import that stores nothing still may, and a gate that
+// depended on a parameter would be a second answer to "what does this
+// operation touch".
 type APIImportOperation interface {
 	AssistantOperation
 	Run(context.Context, func(context.Context, APIImportService) error) error
 }
 
-// NewAPIImportOperation builds the import operation. fsys is every
-// filesystem touch the writer makes; this constructor names no vault
-// lifecycle because imported documents never write credential material.
+// NewAPIImportOperation builds the import operation, acquiring the api gate
+// before the vault gate (the canonical order) and then the execution lane.
+// fsys is every filesystem touch the writer makes.
 //
 // fetch acquires a document by URL and may be nil, which is a build without
 // the URL entrance rather than a build with a broken one: ImportPostmanURL
 // then refuses by name (ErrImportURLUnavailable) and the other entrances
-// are untouched.
+// are untouched. secrets is the vault this import mints into and may be nil
+// too — a build with no vault stores the export's values as it found them,
+// and the offer is simply never taken.
 func NewAPIImportOperation(
-	apiGate, lane control.Admission,
+	apiGate, vaultGate, lane control.Admission,
 	fsys apiimport.FS,
 	fetch apifetch.Fetcher,
+	secrets APIImportVault,
 ) APIImportOperation {
 	g := &guard{}
 	return newOperation[APIImportService](
 		Direct("APIImportOperation"),
-		control.NewComposite(apiGate, lane),
+		control.NewComposite(apiGate, vaultGate, lane),
 		g,
-		&apiImportService{guard: g, fsys: fsys, fetch: fetch},
+		&apiImportService{guard: g, fsys: fsys, fetch: fetch, secrets: secrets},
 	)
 }
 
-type apiImportService struct {
-	guard *guard
-	fsys  apiimport.FS
-	fetch apifetch.Fetcher
+// APIImportVault is the vault surface an import needs and no more: mint a
+// named record, and FORGET one when the import it was minted for did not
+// arrive. Satisfied by *vault.Vault.
+//
+// Both halves are the interval: a record exists from before the collection
+// is written until either the write arrives or the record is deleted. A mint
+// with no rollback would leave a vault entry for a collection that is not on
+// disk, which is the partial-failure shape AGENTS.md's rule 3 is about.
+type APIImportVault interface {
+	CreateNamedResolved(ctx context.Context, value credential.Secret, meta vault.SecretMeta) (credential.SecretID, string, error)
+	Delete(ctx context.Context, id credential.SecretID) error
 }
 
-func (s *apiImportService) ImportPostman(ctx context.Context, srcPath, dest string) ([]apiimport.Unsupported, error) {
+type apiImportService struct {
+	guard   *guard
+	fsys    apiimport.FS
+	fetch   apifetch.Fetcher
+	secrets APIImportVault
+}
+
+// mintOffered stores the variables a document marked `secret` and answers
+// the references that replace their values, with the ids to forget if the
+// import does not arrive.
+//
+// A build with no vault mints nothing and says so by answering no
+// references: the values are then written as the export carried them, which
+// is what happens when the offer is declined.
+func (s *apiImportService) mintOffered(
+	ctx context.Context,
+	offered []apiimport.SecretVariable,
+) (apiimport.SecretRefs, []credential.SecretID, error) {
+	if len(offered) == 0 || s.secrets == nil {
+		return nil, nil, nil
+	}
+	refs := make(apiimport.SecretRefs, len(offered))
+	minted := make([]credential.SecretID, 0, len(offered))
+	for _, v := range offered {
+		if v.Value == "" {
+			continue
+		}
+		id, _, err := s.secrets.CreateNamedResolved(ctx, credential.NewSecret(v.Value),
+			vault.SecretMeta{Name: v.Name, Kind: vault.KindAPIToken})
+		if err != nil {
+			s.forget(ctx, minted)
+			return nil, nil, fmt.Errorf("capability: store the imported secret %q: %w", v.Name, err)
+		}
+		minted = append(minted, id)
+		refs[v.Name] = "{{secret:" + vault.RowFor(id) + "}}"
+	}
+	return refs, minted, nil
+}
+
+// forget removes records minted for an import that did not arrive.
+func (s *apiImportService) forget(ctx context.Context, minted []credential.SecretID) {
+	if s.secrets == nil {
+		return
+	}
+	for _, id := range minted {
+		_ = s.secrets.Delete(ctx, id)
+	}
+}
+
+func (s *apiImportService) ImportPostman(ctx context.Context, srcPath, dest string, storeSecrets bool) ([]apiimport.Unsupported, error) {
 	if err := s.guard.check(); err != nil {
 		return nil, err
 	}
@@ -1050,41 +1126,107 @@ func (s *apiImportService) ImportPostman(ctx context.Context, srcPath, dest stri
 	if !fi.Mode().IsRegular() {
 		return nil, fmt.Errorf("%w: %s", ErrImportNotAFile, srcPath)
 	}
-	f, err := os.Open(srcPath) //nolint:gosec // the import document is the path the user chose; it is Lstat-checked as a regular file just above
+	document, err := os.ReadFile(srcPath) //nolint:gosec // the import document is the path the user chose; it is Lstat-checked as a regular file just above
 	if err != nil {
 		return nil, fmt.Errorf("capability: read the import document: %w", err)
 	}
-	defer func() { _ = f.Close() }()
-	return apiimport.ImportInto(ctx, s.fsys, dest, f, apicoll.Route{Kind: apicoll.RouteDirect})
+	return s.importDocument(ctx, document, dest, apicoll.Route{Kind: apicoll.RouteDirect}, storeSecrets)
 }
 
-func (s *apiImportService) ImportPostmanArchive(ctx context.Context, srcPath, dest string) ([]apiimport.ArchiveImportResult, error) {
+// importDocument is the one place a single document is written, and the one
+// place the offer is answered: mint what was accepted, write, and forget the
+// records if the write did not arrive.
+func (s *apiImportService) importDocument(
+	ctx context.Context,
+	document []byte,
+	dest string,
+	route apicoll.Route,
+	storeSecrets bool,
+) ([]apiimport.Unsupported, error) {
+	var (
+		refs   apiimport.SecretRefs
+		minted []credential.SecretID
+	)
+	if storeSecrets {
+		offered, err := apiimport.PostmanSecrets(bytes.NewReader(document))
+		if err != nil {
+			return nil, err
+		}
+		if refs, minted, err = s.mintOffered(ctx, offered); err != nil {
+			return nil, err
+		}
+	}
+	unsupported, err := apiimport.ImportInto(ctx, s.fsys, dest, bytes.NewReader(document), route, refs)
+	if err != nil {
+		s.forget(ctx, minted)
+		return nil, err
+	}
+	return unsupported, nil
+}
+
+func (s *apiImportService) ImportPostmanArchive(ctx context.Context, srcPath, dest string, storeSecrets bool) ([]apiimport.ArchiveImportResult, error) {
 	if err := s.guard.check(); err != nil {
 		return nil, err
 	}
-	fi, err := os.Lstat(srcPath)
+	f, err := openImportArchive(srcPath)
 	if err != nil {
-		return nil, fmt.Errorf("capability: read the Postman archive: %w", err)
-	}
-	if !fi.Mode().IsRegular() {
-		return nil, fmt.Errorf("%w: %s", ErrImportNotAFile, srcPath)
-	}
-	f, err := os.Open(srcPath) //nolint:gosec // the archive path is chosen by the user and was Lstat-checked above
-	if err != nil {
-		return nil, fmt.Errorf("capability: read the Postman archive: %w", err)
+		return nil, err
 	}
 	defer func() { _ = f.Close() }()
-	return apiimport.ImportPostmanArchive(ctx, s.fsys, dest, f, apicoll.Route{Kind: apicoll.RouteDirect})
+	archive, err := io.ReadAll(f)
+	if err != nil {
+		return nil, fmt.Errorf("capability: read the Postman archive: %w", err)
+	}
+	return s.importArchive(ctx, archive, dest, storeSecrets)
+}
+
+// importArchive is the archive half of the same act. The offer is answered
+// PER DOCUMENT, because two documents in one export may declare the same
+// variable name holding different values.
+func (s *apiImportService) importArchive(
+	ctx context.Context,
+	archive []byte,
+	dest string,
+	storeSecrets bool,
+) ([]apiimport.ArchiveImportResult, error) {
+	var (
+		refs   apiimport.ArchiveSecretRefs
+		minted []credential.SecretID
+	)
+	if storeSecrets {
+		documents, err := apiimport.ReadPostmanArchive(bytes.NewReader(archive))
+		if err != nil {
+			return nil, err
+		}
+		refs = make(apiimport.ArchiveSecretRefs, len(documents))
+		for _, doc := range documents {
+			docRefs, docMinted, mintErr := s.mintOffered(ctx, doc.Secrets)
+			minted = append(minted, docMinted...)
+			if mintErr != nil {
+				s.forget(ctx, minted)
+				return nil, mintErr
+			}
+			if len(docRefs) > 0 {
+				refs[doc.Path] = docRefs
+			}
+		}
+	}
+	results, err := apiimport.ImportPostmanArchive(ctx, s.fsys, dest, bytes.NewReader(archive), apicoll.Route{Kind: apicoll.RouteDirect}, refs)
+	if err != nil {
+		s.forget(ctx, minted)
+		return nil, err
+	}
+	return results, nil
 }
 
 // ImportPostmanArchiveBytes runs the archive writer over bytes carried by the
 // control plane. The transport has already decoded and bounded the base64;
 // this method keeps the writer's one MaxDocumentBytes limit authoritative.
-func (s *apiImportService) ImportPostmanArchiveBytes(ctx context.Context, archive []byte, dest string) ([]apiimport.ArchiveImportResult, error) {
+func (s *apiImportService) ImportPostmanArchiveBytes(ctx context.Context, archive []byte, dest string, storeSecrets bool) ([]apiimport.ArchiveImportResult, error) {
 	if err := s.guard.check(); err != nil {
 		return nil, err
 	}
-	return apiimport.ImportPostmanArchive(ctx, s.fsys, dest, bytes.NewReader(archive), apicoll.Route{Kind: apicoll.RouteDirect})
+	return s.importArchive(ctx, archive, dest, storeSecrets)
 }
 
 func (s *apiImportService) PreviewPostmanArchive(ctx context.Context, srcPath, dest string) ([]apiimport.ArchiveDocument, error) {
@@ -1144,11 +1286,11 @@ func openImportArchive(srcPath string) (*os.File, error) {
 // bounds this route is the caller's: the transport refuses a document over
 // maxAPIImportDocumentRunes before the call, and apiimport's own 16 MiB cap
 // governs the parse whichever way the document arrived.
-func (s *apiImportService) ImportPostmanDocument(ctx context.Context, document, dest string) ([]apiimport.Unsupported, error) {
+func (s *apiImportService) ImportPostmanDocument(ctx context.Context, document, dest string, storeSecrets bool) ([]apiimport.Unsupported, error) {
 	if err := s.guard.check(); err != nil {
 		return nil, err
 	}
-	return apiimport.ImportInto(ctx, s.fsys, dest, strings.NewReader(document), apicoll.Route{Kind: apicoll.RouteDirect})
+	return s.importDocument(ctx, []byte(document), dest, apicoll.Route{Kind: apicoll.RouteDirect}, storeSecrets)
 }
 
 // ImportPostmanURL fetches the export and imports it over the same route.
@@ -1164,7 +1306,7 @@ func (s *apiImportService) ImportPostmanDocument(ctx context.Context, document, 
 // scheme this cannot GET, a body over the ceiling, an address whose bytes
 // are not a document. Restating them here would be a second refusal
 // vocabulary for one act.
-func (s *apiImportService) ImportPostmanURL(ctx context.Context, rawURL string, route apicoll.Route, dest string) ([]apiimport.Unsupported, error) {
+func (s *apiImportService) ImportPostmanURL(ctx context.Context, rawURL string, route apicoll.Route, dest string, storeSecrets bool) ([]apiimport.Unsupported, error) {
 	if err := s.guard.check(); err != nil {
 		return nil, err
 	}
@@ -1175,5 +1317,33 @@ func (s *apiImportService) ImportPostmanURL(ctx context.Context, rawURL string, 
 	if err != nil {
 		return nil, err
 	}
-	return apiimport.ImportInto(ctx, s.fsys, dest, bytes.NewReader(doc), route)
+	return s.importDocument(ctx, doc, dest, route, storeSecrets)
+}
+
+// PreviewPostmanDocument, PreviewPostmanPath and PreviewPostmanURL answer the
+// archive preview's shape for ONE document: its kind, the name it calls
+// itself, and the variables it marked secret. Nothing is written.
+func (s *apiImportService) PreviewPostmanDocument(ctx context.Context, document string) ([]apiimport.ArchiveDocument, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	return apiimport.PreviewPostmanDocument([]byte(document))
+}
+
+func (s *apiImportService) PreviewPostmanPath(ctx context.Context, srcPath string) ([]apiimport.ArchiveDocument, error) {
+	if err := s.guard.check(); err != nil {
+		return nil, err
+	}
+	fi, err := os.Lstat(srcPath)
+	if err != nil {
+		return nil, fmt.Errorf("capability: read the import document: %w", err)
+	}
+	if !fi.Mode().IsRegular() {
+		return nil, fmt.Errorf("%w: %s", ErrImportNotAFile, srcPath)
+	}
+	document, err := os.ReadFile(srcPath) //nolint:gosec // the path is the user's own choice and was Lstat-checked just above
+	if err != nil {
+		return nil, fmt.Errorf("capability: read the import document: %w", err)
+	}
+	return apiimport.PreviewPostmanDocument(document)
 }

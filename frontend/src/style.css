@@ -51,6 +51,7 @@
 @import './styles/components/block-receipt.css';
 @import './styles/components/empty-state.css';
 @import './styles/components/status-card.css';
+@import './styles/components/connection-indicator.css';
 @import './styles/components/status-dot.css';
 @import './styles/components/action-group.css';
 @import './styles/components/toolbar.css';
@@ -723,6 +724,32 @@
   flex-direction: column;
   flex: 1 1 auto;
   min-height: 0;
+  /* THE SCROLLBAR IS THE PANE'S TRAILING EDGE, NOT AN OBJECT NEAR IT.
+
+     `.pane` insets its children by `--pane-inline-padding` on both sides —
+     breathing room around terminal text — so the scroller, and with it the
+     stable gutter the thumb is drawn in, used to stop 10px short of the
+     pane's border edge. With the activity bar on the window's trailing edge
+     that left canvas on BOTH sides of the thumb: text, gutter, thumb, 10px of
+     canvas, the rail's divider. A bar with a margin either side reads as a
+     free-standing stripe and the eye keeps catching on it; a bar flush
+     against the surface it borders reads as that surface's edge and goes
+     quiet (nocx-mvbne).
+
+     Cancelling on the LAYOUT rather than on `.scrollback-area` is the whole
+     of it. `usableViewport` fits the grid to the scroller's `clientWidth`
+     (terminal-content.ts), and padding counts in `clientWidth` — so pushing
+     the box out and paying for it with `padding-right` on the scroller would
+     fit a grid 10px wider than the box it is drawn in, which is the overhang
+     nocx-vydj closed. The layout's margin moves the box and nothing else: the
+     content edge and the measured width stay one number, and the text column
+     simply gains the 10px the gap was holding.
+
+     The leading inset stays. Nothing about a trailing scrollbar asks for the
+     first column to sit on the pane's edge. The composer is unaffected — it
+     is absolutely positioned against the pane and states both insets itself
+     (`.nocx-summon-stack`). */
+  margin-right: calc(-1 * var(--pane-inline-padding));
 }
 
 .scrollback-area {

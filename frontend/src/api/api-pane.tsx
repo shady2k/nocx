@@ -311,8 +311,15 @@ function sourcePath(held: HeldSource): string {
   return ''
 }
 
+/** Whether a NAME — a file's or a path's — is the archive route's. One
+ *  derivation, because the two entrances ask the same question about the
+ *  same suffix and a second spelling of it is the defect AGENTS.md names. */
+function isArchiveName(name: string): boolean {
+  return name.toLowerCase().endsWith('.zip')
+}
+
 function isArchiveFile(file: File): boolean {
-  return file.name.toLowerCase().endsWith('.zip') || file.type === 'application/zip'
+  return isArchiveName(file.name) || file.type === 'application/zip'
 }
 
 function encodeBase64(buffer: ArrayBuffer): string {
@@ -798,7 +805,42 @@ export function ApiPane(props: ApiPaneProps) {
    */
   const [importRoute, setImportRoute] = createSignal<ApiRoute>(DIRECT_ROUTE)
   const [postmanDest, setPostmanDest] = createSignal('')
-  const [importRefused, setImportRefused] = createSignal('')
+  /** Whether the person took the offer over the variables Postman marked
+   *  `secret`. False from the moment the ask opens: the program may ask and
+   *  may not choose (ADR-0047), and minting vault records because nobody
+   *  said otherwise is choosing. */
+  const [storeSecrets, setStoreSecrets] = createSignal(false)
+  /**
+   * HOW THIS ASK REFUSES — a toast, and never a line in its own layout.
+   *
+   * Every refusal here is the OUTCOME OF A CALL: the archive could not be
+   * read, the import was refused, the picker failed, two files were dropped
+   * where one was asked for. The kit owns that distinction and states it
+   * (ui/README.md, §Toast): what belongs on a field is validation of what is
+   * IN the field, answered by editing it; the outcome of the call the box
+   * triggered is a toast.
+   *
+   * It used to be neither. The reason was rendered into the DESTINATION
+   * field's validation slot, and a refusal FORCED that field open so there
+   * would be somewhere to put it — so "this ZIP is not a Postman export"
+   * arrived as a complaint about a path nobody had disputed, and the ask
+   * changed shape to deliver it (nocx-bvxf2.6). That is the status line in
+   * the document flow the kit's Toast was built to replace.
+   *
+   * STICKY, because `danger` is: a failure the person was not looking at is
+   * a failure they never saw. ONE AT A TIME, for the reason
+   * `tellWhatWasNotImported` holds its own id — two sticky refusals leave
+   * one attempt's reason standing beside another's.
+   */
+  let standingRefusal = 0
+  const clearImportRefusal = (): void => {
+    dismissToast(standingRefusal)
+    standingRefusal = 0
+  }
+  const refuseImport = (message: string): void => {
+    dismissToast(standingRefusal)
+    standingRefusal = showToast({ level: 'danger', message })
+  }
   /**
    * Whether the person has TYPED into the destination.
    *
@@ -813,7 +855,17 @@ export function ApiPane(props: ApiPaneProps) {
    * value this surface wrote is not a value the person chose.
    */
   const [destTyped, setDestTyped] = createSignal(false)
+  /** Whether an IMPORT is in flight — the one thing that refuses a second
+   *  press of Import. Reading is not: see previewSource. */
   const [importingBusy, setImportingBusy] = createSignal(false)
+  /** Whether the ask is READING an export it has just been handed — the one
+   *  wait a person sits through, and the only one that says so. A
+   *  destination re-check draws nothing: it is fast, it was not asked for,
+   *  and a spinner for it would be motion nobody caused. */
+  const [readingArchive, setReadingArchive] = createSignal(false)
+  /** How many reads are in flight. See previewSource for why this is a count
+   *  and the request id is not. */
+  let reads = 0
   const [archivePreview, setArchivePreview] = createSignal<ArchiveDocument[] | null>(null)
   let archivePreviewRequest = 0
   /**
@@ -1627,7 +1679,7 @@ export function ApiPane(props: ApiPaneProps) {
    *  destination and not the export, because `dialog.openDirectory` chooses
    *  a directory — the export has a picker of its own over `dialog.openFile`
    *  (`browseForExport`), and the two capabilities retire independently. */
-  const browseForImportDest = (): void => browseInto(setPostmanDest, setImportRefused)
+  const browseForImportDest = (): void => browseInto(setPostmanDest, refuseImport)
 
   /**
    * PROPOSE WHERE THE COLLECTION LANDS, from the export's PLACE — the
@@ -1681,12 +1733,61 @@ export function ApiPane(props: ApiPaneProps) {
     // A path REPLACES whatever was held, and the paste box empties with it:
     // exactly one source at a time (spec §2), and a box still showing the
     // text it was holding would go on offering a source the ask has let go.
-    archivePreviewRequest++
+    const requestId = ++archivePreviewRequest
     setPostmanSource(path === '' ? { kind: 'none' } : { kind: 'path', path })
     setArchivePreview(null)
     clearPaste()
     proposeDestination(path)
+    // AND THE EXPORT IS READ BEFORE IT IS WRITTEN, on this route as much as
+    // on the one carrying bytes. The system picker and a native drop both
+    // answer with a path, and they are the ONLY pair the shipped app has —
+    // so a preview wired to the bytes alone existed in `make dev-web` and in
+    // the suite, and nowhere a person works (nocx-bvxf2.5). A single
+    // document is read the same way: it is what says whether there is
+    // anything to offer (nocx-zn386).
+    if (path === '') return
+    const dest = untrack(() => {
+      const proposed = proposedDestination(store.defaultRoot(), path)
+      return postmanDest().trim() || proposed
+    })
+    void previewSource({ path }, dest, requestId, true)
   }
+
+  /**
+   * WHAT CAN BE READ WITHOUT GOING TO THE NETWORK, as the one derivation of
+   * it.
+   *
+   * Every source but a URL is bytes somebody already has: the renderer's, or
+   * a file on the machine running Go. A URL is not previewed, and that is
+   * not an oversight — reading it means FETCHING it, and a surface that
+   * quietly calls somebody's server because a field lost focus is doing
+   * something nobody asked for. Its export is read once, by the import.
+   */
+  const readableSource = (held: HeldSource): ImportSource | null => {
+    switch (held.kind) {
+      case 'archive':
+        return { archiveBytes: held.bytes }
+      case 'path':
+        return { path: held.path }
+      case 'document':
+        return { document: held.text }
+      case 'file':
+        return null // its bytes are read at the gesture; see chooseDocument
+      default:
+        return null
+    }
+  }
+
+  /**
+   * The variables the preview says this export marked `type: secret` — the
+   * OFFER's whole input, and empty for almost every export (nought of six in
+   * the one that bought nocx-zn386).
+   *
+   * NAMES only: the values stay on the backend's side of the socket, which
+   * is what lets the ask offer without ever holding a credential.
+   */
+  const offeredSecrets = (): string[] =>
+    (archivePreview() ?? []).flatMap((document) => document.secrets ?? [])
 
   /** Empty the paste box and its refusal, without touching the held source —
    *  the half every OTHER entrance performs when it takes the answer over. */
@@ -1724,7 +1825,7 @@ export function ApiPane(props: ApiPaneProps) {
     // The last attempt's refusal belonged to the source it was refused
     // about. A new one is a new attempt, and leaving the old sentence up
     // would have it read as a verdict on this one.
-    setImportRefused('')
+    clearImportRefusal()
     const root = untrack(() => store.defaultRoot())
     if (source.kind === 'url') {
       setPostmanSource({ kind: 'url', url: source.url })
@@ -1741,13 +1842,81 @@ export function ApiPane(props: ApiPaneProps) {
   const clearSource = (): void => {
     archivePreviewRequest++
     setPostmanSource({ kind: 'none' })
+    setStoreSecrets(false)
     setArchivePreview(null)
     clearPaste()
-    setImportRefused('')
+    clearImportRefusal()
     // The route belonged to the source that travelled. Letting it stand
     // would leave a connection chosen for a URL nobody is importing any
     // more, ready to ride out with the next one unasked.
     setImportRoute(DIRECT_ROUTE)
+  }
+
+  /**
+   * READ THE EXPORT, AND WITH IT THE DESTINATION — one preview, whichever
+   * currency the export arrived in and whichever of the two questions moved.
+   *
+   * `api.import.postman` with `preview` answers both at once: what the
+   * archive holds, which depends only on the archive, and whether the
+   * destination can take it, which depends only on the destination. There
+   * were two copies of this call — one inside the file handler, one inside
+   * the destination field's `onInput` — and two copies of one call is the
+   * shape that agrees until it does not.
+   *
+   * `firstRead` is the difference between them and the only one. A read of
+   * the SOURCE announces itself, because it is the wait a person is sitting
+   * through — a file read, a base64 encode and a round trip — and on a
+   * refusal it forgets the source, because the source is what was refused. A
+   * re-check of the DESTINATION says nothing and keeps the source, because
+   * the archive is fine and the place is not.
+   */
+  const previewSource = (
+    source: ImportSource,
+    dest: string,
+    requestId: number,
+    firstRead: boolean,
+  ): Promise<void> => {
+    // BUSY IS A COUNT, NOT A FLAG. The request id decides whose RESULT is
+    // applied — a superseded read must not overwrite a newer one — and it
+    // may not also decide who clears the wait, because a bump can happen
+    // with no new read behind it (a keystroke in the paste box, a source
+    // taken back). Clearing on the id alone left `busy` true for ever after
+    // one of those, and Import is disabled while busy: the ask went quietly
+    // dead, which is what the e2e suite caught.
+    // A READ DOES NOT DISABLE IMPORT. It used to: `busy` was one flag for
+    // both, so clicking Import right after typing in the paste box lost the
+    // click — the click's own blur committed the field, which started a
+    // read, which disabled the button under the pointer. The two are
+    // different facts, and only the second is a reason to refuse a press:
+    // `reading` says a preview is in flight, `importingBusy` says an import
+    // is. An archive is still held back until it has been read, by
+    // `archiveReady`, which is about the ARCHIVE rather than about waiting.
+    reads++
+    if (firstRead) setReadingArchive(true)
+    return store
+      .previewPostman(source, dest)
+      .then((result) =>
+        untrack(() => {
+          if (requestId !== archivePreviewRequest) return
+          setArchivePreview(result.documents ?? [])
+          clearImportRefusal()
+        }),
+      )
+      .catch((err: unknown) =>
+        untrack(() => {
+          if (requestId !== archivePreviewRequest) return
+          if (firstRead) setPostmanSource({ kind: 'none' })
+          setArchivePreview(null)
+          refuseImport(err instanceof Error ? err.message : String(err))
+        }),
+      )
+      .finally(() =>
+        untrack(() => {
+          reads--
+          if (reads > 0) return
+          setReadingArchive(false)
+        }),
+      )
   }
 
   /**
@@ -1770,26 +1939,51 @@ export function ApiPane(props: ApiPaneProps) {
    */
   const chooseDocument = (files: File[]): void => {
     if (files.length > 1) {
-      setImportRefused(MULTIPLE_EXPORTS_REFUSAL)
+      refuseImport(MULTIPLE_EXPORTS_REFUSAL)
       return
     }
     const file = files[0]
     if (file === undefined) return
     const requestId = ++archivePreviewRequest
-    setImportRefused('')
+    clearImportRefusal()
     setArchivePreview(null)
     clearPaste()
     if (!isArchiveFile(file)) {
       setPostmanSource({ kind: 'file', file })
       proposeDestination(file.name)
+      // A single document is read too, for what it says about ITSELF: the
+      // offer over a `type: secret` variable needs to know there is one
+      // before anything is written, and an offer that existed for archives
+      // alone would be an offer decided by how the export arrived
+      // (nocx-zn386). The held source stays the FILE — the bytes travel
+      // again at import, as they always did — because a document read into
+      // the ask is a second copy of the same export.
+      void file
+        .text()
+        .then((text) =>
+          untrack(() => {
+            if (requestId !== archivePreviewRequest) return
+            const dest = postmanDest().trim() || proposedDestination(store.defaultRoot(), file.name)
+            return previewSource({ document: text }, dest, requestId, true)
+          }),
+        )
+        .catch((err: unknown) =>
+          untrack(() => {
+            if (requestId !== archivePreviewRequest) return
+            refuseImport(err instanceof Error ? err.message : String(err))
+          }),
+        )
       return
     }
-    setImportingBusy(true)
+    // The BYTES are read here rather than in previewSource, so the wait
+    // starts at the gesture and not one turn of the event loop later.
+    reads++
+    setReadingArchive(true)
     void file
       .arrayBuffer()
       .then((buffer) =>
         untrack(() => {
-          if (requestId !== archivePreviewRequest) return null
+          if (requestId !== archivePreviewRequest) return
           const archiveBytes = encodeBase64(buffer)
           setPostmanSource({ kind: 'archive', name: file.name, bytes: archiveBytes })
           const proposed = proposedDestination(
@@ -1798,40 +1992,29 @@ export function ApiPane(props: ApiPaneProps) {
           )
           proposeDestination(file.name)
           const dest = postmanDest().trim() || proposed
-          return store.previewPostman({ archiveBytes }, dest).then((result) => ({
-            result,
-            archiveBytes,
-          }))
-        }),
-      )
-      .then((payload) =>
-        untrack(() => {
-          if (payload === null || requestId !== archivePreviewRequest) return
-          const { result, archiveBytes } = payload
-          const held = postmanSource()
-          if (held.kind !== 'archive' || held.bytes !== archiveBytes) return
-          setArchivePreview(result.documents ?? [])
-          setImportRefused('')
+          return previewSource({ archiveBytes }, dest, requestId, true)
         }),
       )
       .catch((err: unknown) =>
         untrack(() => {
-          if (requestId !== archivePreviewRequest) return
-          setPostmanSource({ kind: 'none' })
-          setArchivePreview(null)
-          setImportRefused(err instanceof Error ? err.message : String(err))
+          if (requestId === archivePreviewRequest) {
+            setPostmanSource({ kind: 'none' })
+            refuseImport(err instanceof Error ? err.message : String(err))
+          }
         }),
       )
       .finally(() =>
         untrack(() => {
-          if (requestId === archivePreviewRequest) setImportingBusy(false)
+          reads--
+          if (reads > 0) return
+          setReadingArchive(false)
         }),
       )
   }
 
   const browseForExport = (): void => {
     if (!filePicker) return
-    setImportRefused('')
+    clearImportRefusal()
     void filePicker().then(
       (chosen) => {
         // An EMPTY path is a cancellation, not an answer — writing it into
@@ -1841,7 +2024,7 @@ export function ApiPane(props: ApiPaneProps) {
       },
       (err: unknown) => {
         setFilePickerLive(false)
-        setImportRefused(err instanceof Error ? err.message : String(err))
+        refuseImport(err instanceof Error ? err.message : String(err))
       },
     )
   }
@@ -1864,14 +2047,14 @@ export function ApiPane(props: ApiPaneProps) {
           // One import makes one collection, and N collections is N
           // destinations — a different question, and not one this ask can
           // answer by guessing which of them was meant.
-          setImportRefused(MULTIPLE_EXPORTS_REFUSAL)
+          refuseImport(MULTIPLE_EXPORTS_REFUSAL)
           return
         }
         const path = p.sources[0]?.localPath
         // No path means the drop was minted rather than described — a remote
         // tab. Nothing here can read a ticket.
         if (path === undefined || path === '') return
-        setImportRefused('')
+        clearImportRefusal()
         chooseExport(path)
       }),
     )
@@ -1892,6 +2075,7 @@ export function ApiPane(props: ApiPaneProps) {
 
   const askForImport = (): void => {
     setPostmanSource({ kind: 'none' })
+    setStoreSecrets(false)
     setPostmanPasted('')
     setPasteRefused('')
     // The destination opens as a SENTENCE, whatever the last ask left it as:
@@ -1917,7 +2101,7 @@ export function ApiPane(props: ApiPaneProps) {
     const root = store.defaultRoot()
     setPostmanDest(root === '' ? '' : `${root.replace(/[\\/]+$/, '')}/`)
     setDestTyped(false)
-    setImportRefused('')
+    clearImportRefusal()
     setImporting(true)
   }
 
@@ -2329,12 +2513,19 @@ export function ApiPane(props: ApiPaneProps) {
                   ? { document: held.text }
                   : urlSource(held.url),
             )
+    // Read HERE, where the person pressed Import, rather than inside the
+    // promise: the answer that travels is the one the ask was holding when
+    // they pressed it.
+    const offerTaken = storeSecrets()
     void source
-      .then((chosen) => store.importPostman(chosen, dest))
+      .then((chosen) => store.importPostman(chosen, dest, offerTaken))
       .then(async (): Promise<void> => {
         const refused = store.error()
-        setImportRefused(refused)
-        if (refused !== '') return
+        if (refused !== '') {
+          refuseImport(refused)
+          return
+        }
+        clearImportRefusal()
         tellWhatWasNotImported(dest)
         const notOpened = await putInTree(dest)
         setImporting(false)
@@ -2348,7 +2539,7 @@ export function ApiPane(props: ApiPaneProps) {
         showToast({ level: 'success', message: `Imported into ${dest}` })
       })
       .catch((err: unknown) => {
-        setImportRefused(err instanceof Error ? err.message : String(err))
+        refuseImport(err instanceof Error ? err.message : String(err))
       })
       .finally(() => {
         setImportingBusy(false)
@@ -2905,38 +3096,20 @@ export function ApiPane(props: ApiPaneProps) {
           onDest={(value) => {
             setDestTyped(true)
             setPostmanDest(value)
-            const held = postmanSource()
-            if (held.kind !== 'archive') return
+          }}
+          // WHEN THE PERSON IS FINISHED WITH THE VALUE, not on every
+          // character of it. This used to re-preview per keystroke, and a
+          // preview carries the whole archive as base64 — 58 KB a character
+          // on an ordinary export and 21 MB a character at the limit, to
+          // re-ask a question about the destination that the bytes have no
+          // part in. The kit already owns "finished with the value"
+          // (TextField's onCommit: focus left, or Enter), so this is one
+          // call per settled destination (nocx-bvxf2.5).
+          onCommitDest={(value) => {
+            const readable = readableSource(postmanSource())
+            if (readable === null) return
             const requestId = ++archivePreviewRequest
-            setArchivePreview(null)
-            setImportingBusy(true)
-            void store
-              .previewPostman({ archiveBytes: held.bytes }, value.trim())
-              .then((result) =>
-                untrack(() => {
-                  const current = postmanSource()
-                  if (
-                    requestId !== archivePreviewRequest ||
-                    current.kind !== 'archive' ||
-                    current.bytes !== held.bytes
-                  ) {
-                    return
-                  }
-                  setArchivePreview(result.documents ?? [])
-                  setImportRefused('')
-                }),
-              )
-              .catch((err: unknown) =>
-                untrack(() => {
-                  if (requestId !== archivePreviewRequest) return
-                  setImportRefused(err instanceof Error ? err.message : String(err))
-                }),
-              )
-              .finally(() =>
-                untrack(() => {
-                  if (requestId === archivePreviewRequest) setImportingBusy(false)
-                }),
-              )
+            void previewSource(readable, value.trim(), requestId, false)
           }}
           defaultRoot={store.defaultRoot()}
           dropSession={nativeDrop?.session() ?? null}
@@ -2947,8 +3120,22 @@ export function ApiPane(props: ApiPaneProps) {
           // asks that runtime a second time.
           nativeWindow={nativeDrop !== undefined}
           onFiles={chooseDocument}
-          error={importRefused()}
           busy={importingBusy()}
+          reading={readingArchive()}
+          offeredSecrets={offeredSecrets()}
+          storeSecrets={storeSecrets()}
+          onStoreSecrets={setStoreSecrets}
+          onCommitPaste={() => {
+            // The paste box classifies on every keystroke (that is what
+            // fills the field and proposes the destination); READING the
+            // document is a call, so it waits until the person is finished
+            // with the value — the destination field's rule, in the other
+            // control.
+            const readable = readableSource(postmanSource())
+            if (readable === null || !('document' in readable)) return
+            const requestId = ++archivePreviewRequest
+            void previewSource(readable, postmanDest().trim(), requestId, true)
+          }}
           onBrowseFile={filePickerLive() ? browseForExport : undefined}
           onBrowse={pickerLive() ? browseForImportDest : undefined}
           onCancel={() => setImporting(false)}

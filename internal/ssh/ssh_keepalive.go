@@ -1,6 +1,7 @@
 package ssh
 
 import (
+	"errors"
 	"time"
 )
 
@@ -19,7 +20,26 @@ import (
 // share one transport, and the observer belongs to whichever Connect dialed
 // it. What it reports is therefore a fact about a machine, not about one tab —
 // which is exactly what a keepalive knows.
-type LivenessObserver func(responsive bool)
+type LivenessObserver func(Reachability)
+
+// Reachability is one probe's finding about the far end: whether it answered,
+// and how long it took to do so.
+//
+// The round trip is here because this prober is the ONLY thing in nocx that
+// measures one. Without it the product can say a host is gone and cannot say
+// a host is struggling — and "struggling" is the state a person actually
+// meets, on a loaded server or a long link. It is a measurement and not a
+// second liveness value: whether the host is REACHABLE and how FAST it
+// answers are two questions, and folding the second into the first would make
+// a slow host look like a half-dead one (AD-8: one owner per fact).
+//
+// RoundTrip is zero for a probe that never answered — an unanswered probe has
+// no duration, and reporting the budget it spent would be reporting the
+// timeout rather than the host.
+type Reachability struct {
+	Responsive bool
+	RoundTrip  time.Duration
+}
 
 // keepaliveTarget is the part of *gossh.Client the prober uses. An interface
 // so the fold above it can be driven without a server: the failure path is the
@@ -77,6 +97,51 @@ func (t *keepaliveTally) probe(ok bool) keepaliveVerdict {
 	return keepaliveUnresponsive
 }
 
+// errProbeSilent is returned when a probe did not come back inside its budget.
+// It is not one more failure: see the comment at its only use.
+var errProbeSilent = errors.New("ssh: keepalive probe did not return")
+
+// sendProbe sends one keepalive and waits at most budget for it.
+//
+// WHY A GOROUTINE AT ALL. x/crypto's SendRequest takes no context and no
+// deadline: it writes the global request and then blocks on a bare channel
+// receive (mux.go), holding globalSentMu for the whole wait. Against a socket
+// whose peer has silently gone — a suspended laptop, a NAT that dropped the
+// flow — that wait is bounded only by the kernel's own retransmit timer, and
+// nothing above it can be interrupted. The keepalive that exists to notice
+// exactly this condition was therefore the one thing that could not notice it.
+//
+// WHAT COUNTS AS ALIVE. Any answer, whatever it says. A server replies
+// SSH_MSG_REQUEST_FAILURE to keepalive@openssh.com because the request type is
+// not one it implements — that is what x/crypto's own DiscardRequests does and
+// what OpenSSH's server does — so `ok` is false on a perfectly healthy link
+// and OpenSSH's client counts any reply as proof of life for the same reason.
+// The previous predicate (err == nil && ok) therefore called every healthy
+// server unresponsive; nobody had noticed because production never started a
+// prober at all (internal/session's option translation dropped the interval).
+//
+// The returned channel closes when the probe's goroutine has actually
+// finished, so a caller that gives up on a probe can still wait for it rather
+// than leak it.
+func sendProbe(target keepaliveTarget, budget time.Duration) (<-chan struct{}, error) {
+	type result struct{ err error }
+	res := make(chan result, 1)
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		_, _, err := target.SendRequest("keepalive@openssh.com", true, nil)
+		res <- result{err: err}
+	}()
+	timer := time.NewTimer(budget)
+	defer timer.Stop()
+	select {
+	case r := <-res:
+		return finished, r.err
+	case <-timer.C:
+		return finished, errProbeSilent
+	}
+}
+
 // startKeepalive launches a goroutine that sends keepalive@openssh.com probes
 // on the SSH connection at the given interval. It returns a stop function that
 // signals the goroutine to exit, and a done channel that is closed when the
@@ -98,11 +163,22 @@ func startKeepalive(target keepaliveTarget, interval time.Duration, countMax int
 	}
 	stopCh := make(chan struct{})
 	doneCh := make(chan struct{})
-	report := func(responsive bool) {
+	report := func(r Reachability) {
 		if observe != nil {
-			observe(responsive)
+			observe(r)
 		}
 	}
+	// The budget one silent probe is allowed to spend, and it is the SAME
+	// budget the tally spends on refusals: interval x countMax. Two ways to
+	// lose a host — it answers "no" countMax times, or it answers nothing at
+	// all — and a prober that gave the second one a different allowance would
+	// be two policies for one question.
+	//
+	// It is deliberately NOT the interval. A loaded host answering in two
+	// intervals is SLOW, not gone, and killing its session is lost work; the
+	// slowness is reported by how long the probe took, never by ending it.
+	budget := interval * time.Duration(max(countMax, 1))
+
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()
@@ -111,16 +187,47 @@ func startKeepalive(target keepaliveTarget, interval time.Duration, countMax int
 		for {
 			select {
 			case <-ticker.C:
-				ok, _, err := target.SendRequest("keepalive@openssh.com", true, nil)
-				switch tally.probe(err == nil && ok) {
+				started := time.Now()
+				answered, err := sendProbe(target, budget)
+				rtt := time.Since(started)
+				if err != nil && errors.Is(err, errProbeSilent) {
+					// The probe never came back inside the budget. This is
+					// TERMINAL and cannot be counted as one failure of
+					// countMax, because there is no way to retry it: the
+					// call is still parked inside x/crypto holding
+					// globalSentMu, and the only thing that can free it is
+					// closing the connection — after which there is nothing
+					// left to probe. Report the loss on the way out so the
+					// session's last word is "not answering" rather than
+					// silence (nocx-iarf9).
+					report(Reachability{Responsive: false})
+					_ = target.Close()
+					// And WAIT for it. Closing the transport is what unparks
+					// the blocked call; returning before it does leaves a
+					// goroutine on every probe, which is the same leak
+					// wearing a fix.
+					<-answered
+					return
+				}
+				switch tally.probe(err == nil) {
 				case keepaliveGiveUp:
 					_ = target.Close()
 					return
 				case keepaliveUnresponsive:
-					report(false)
+					report(Reachability{Responsive: false})
 				case keepaliveResponsive:
-					report(true)
+					report(Reachability{Responsive: true, RoundTrip: rtt})
 				case keepaliveSteady:
+					// A healthy link says nothing about its LIVENESS — that
+					// is what "steady" means and why it was silent. It does
+					// say how long it took, and that is a different fact
+					// with a different consumer: the indicator that tells a
+					// person their host has become slow. Reported every
+					// probe; whoever consumes it decides what is worth
+					// publishing (internal/session grades it and republishes
+					// only when the grade changes, so a healthy connection
+					// still puts nothing on the wire).
+					report(Reachability{Responsive: true, RoundTrip: rtt})
 				}
 			case <-stopCh:
 				return

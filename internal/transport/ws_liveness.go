@@ -35,6 +35,18 @@ type livenessNotificationParams struct {
 	Liveness      string `json:"liveness"`
 	LivenessEpoch uint64 `json:"livenessEpoch"`
 	ObservedAt    string `json:"observedAt"`
+	// RoundTripMS is how long the last probe to this session's host took.
+	// Omitted when nothing measured one — a local session, or a host that
+	// never answered. Absent and zero are the same statement here and the
+	// renderer must treat them alike: "no measurement", never "instant".
+	RoundTripMS int64 `json:"roundTripMs,omitempty"`
+	// Slow is the backend's GRADE of that measurement. It is sent rather
+	// than left to the renderer to threshold for itself, because the grade
+	// has hysteresis — it enters and leaves at different numbers — and a
+	// reader holding only the milliseconds cannot reproduce it. Two
+	// derivations of one concept would agree everywhere anyone looked and
+	// disagree exactly at the boundary.
+	Slow bool `json:"slow,omitempty"`
 }
 
 // PublishLiveness tells the session's subscriber that the backend's belief
@@ -85,6 +97,8 @@ func (s *WSServer) PublishLiveness(ref session.Ref) {
 		Liveness:      string(st.Liveness),
 		LivenessEpoch: st.Epoch,
 		ObservedAt:    st.ObservedAt.UTC().Format(time.RFC3339),
+		RoundTripMS:   st.RoundTrip.Milliseconds(),
+		Slow:          st.Slow,
 	})); err != nil {
 		s.log.Debug("write session.liveness notification", "error", err)
 	}

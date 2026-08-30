@@ -447,12 +447,28 @@ type WSServer struct {
 	// the run terminalizes or the process restarts.
 	pendingRuns   map[int64]askRunContext
 	pendingRunsMu sync.Mutex
-	// agentProbeSub admits and runs endpoints.probe probes off the read
-	// loop: a streaming probe can take tens of seconds and must never
-	// freeze the socket that feeds every other tab. Capacity one composed
-	// with the lane, exactly like probeSub: a second test is refused with
-	// the control-saturated error.
+	// agentProbeSub runs endpoints.probe probes off the read loop: a
+	// streaming probe can take tens of seconds and must never freeze the
+	// socket that feeds every other tab. It is a bounded QUEUE, not the
+	// capacity-one resource gate it used to be — the serialisation lives in
+	// agentProbeAdmit, which the handler acquires on the task goroutine.
 	agentProbeSub control.Submission
+	// agentProbeAdmit is the one-probe-at-a-time gate, and it WAITS
+	// (nocx-bxafj). It used to be an instant refusal, on the argument that a
+	// probe competes for a scarce worker. Two things were wrong with that.
+	//
+	// A probe is a SERIALISATION POINT, not a scarce worker: one at a time,
+	// and the second may proceed the moment the first is done. That is the
+	// same conclusion the native picker reached (see buildControlPlane), and
+	// the same remedy — ADR-0026 item 4's waiting class.
+	//
+	// And the refusal was reachable by a person, not only by a sequential
+	// client falling into the release window. The renderer disables the Test
+	// button of the row being probed, keyed by endpoint id; every OTHER
+	// endpoint's Test stays enabled while one gate serves the whole server.
+	// Test on one endpoint, then Test on another, was "Control plane busy"
+	// for doing nothing wrong.
+	agentProbeAdmit control.Admission
 	// askSub admits and runs the ask STREAM tasks (nocx-x8s2.2) off the
 	// read loop: a model stream can take minutes, so it must not freeze
 	// the socket. Bounded at askStreamCapacity — several asks overlap (the
@@ -1283,6 +1299,13 @@ const DefaultControlLaneCapacity = 8
 // held by a long operation.
 const DefaultDomainConflictWaitTimeout = time.Second
 
+// probeGateWaitMargin is the slack added to a probe's own timeout when sizing
+// how long the NEXT probe may wait for the gate. It covers the handler work
+// either side of the call itself; without it the second probe's wait and the
+// first probe's run would expire together, which is a coin toss rather than a
+// bound.
+const probeGateWaitMargin = 5 * time.Second
+
 // DefaultDomainMaxQueue is the default number of requests that may wait on
 // one domain gate; a conflicting request beyond it is refused instantly.
 const DefaultDomainMaxQueue = 8
@@ -1383,8 +1406,14 @@ func (s *WSServer) buildControlPlane() {
 	// permits, and every task still occupies one lane permit.
 	s.probeSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("probe", 1), lane))}
-	s.agentProbeSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
-		control.NewSemaphore("agent-probe", 1), lane))}
+	s.agentProbeSub = &inflightSubmission{inflight: &s.inflight, inner: s.operationQueue("agent-probe")}
+	// The wait bound is sized against the probe's OWN limit, not the domain
+	// default: a probe may run for assistant.ProbeTimeout, so a second probe
+	// has to be able to wait that long to queue behind it. A shorter bound
+	// would refuse the second press for no reason but arithmetic, which is
+	// the defect this gate was changed to remove.
+	s.agentProbeAdmit = control.NewComposite(
+		control.NewWaitingSemaphore("agent-probe", 1, s.domainMaxQueue, assistant.ProbeTimeout+probeGateWaitMargin), lane)
 	s.askSub = &inflightSubmission{inflight: &s.inflight, inner: control.NewBoundedSubmission(control.NewCompositeNonblocking(
 		control.NewSemaphore("agent-ask", askStreamCapacity), lane))}
 	// The native picker is the one of these that is NOT an execution bound.
@@ -1437,7 +1466,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.secretSpecs(lane, gates.config, gates.vault, gates.content)...)
 	specs = append(specs, s.gitSpecs(lane, gates.session, gates.git)...)
 	specs = append(specs, s.filesSpecs(lane, gates.session, gates.filesystem)...)
-	specs = append(specs, s.apiSpecs(lane, gates.api)...)
+	specs = append(specs, s.apiSpecs(lane, gates.api, gates.vault)...)
 	contentSub := s.operationQueue("content")
 	specs = append(specs, s.contentSpecs(lane, gates.content, contentSub)...)
 	// history.status rides the plain lane, not the content queue: it is a

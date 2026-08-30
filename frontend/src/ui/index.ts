@@ -42,6 +42,11 @@ export { WatchBadge, type WatchBadgeProps } from './watch-badge'
 export { FileInput, type FileInputProps } from './file-input'
 export { EmptyState, type EmptyStateProps } from './empty-state'
 export { StatusCard, type StatusCardProps, type StatusCardTone } from './status-card'
+export {
+  ConnectionIndicator,
+  type ConnectionCondition,
+  type ConnectionIndicatorProps,
+} from './connection-indicator'
 export { StatusDot, type StatusDotProps, type StatusDotTone } from './status-dot'
 export {
   CollectionView,

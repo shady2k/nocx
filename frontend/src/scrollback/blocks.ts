@@ -1848,6 +1848,32 @@ export class BlockManager {
     this._own(boundary, anchor)
   }
 
+  /**
+   * Mark where a lost session ended and a NEW shell begins (nocx-rtzo4).
+   *
+   * The same element and the same sentence-with-a-rule as `restorePast`'s
+   * boundary, because it answers the same question — "is this the shell that
+   * printed the text above?" — and a second vocabulary for one concept is the
+   * defect this repository names most often. Only two things differ, and both
+   * follow from WHEN it is drawn: the wording, and the anchor. A restore puts
+   * the past above a present that is already there; a reconnect turns the
+   * present into the past, so the mark goes at the tail, above the live
+   * region and below every block the dead session left.
+   *
+   * It says what actually happened rather than "reconnected". The shell is a
+   * new one and the process the old shell was running may still be alive on
+   * the far host, so a person reading the scrollback as one continuous session
+   * would be wrong about which machine state their earlier commands left
+   * behind. The line is where they find that out.
+   */
+  markReconnected(): void {
+    const boundary = document.createElement('div')
+    boundary.className = 'scrollback-restore-boundary'
+    boundary.dataset.reconnectBoundary = 'true'
+    boundary.textContent = 'New shell — the one above is gone'
+    this._own(boundary, this._xtermContainer)
+  }
+
   /** An id for a block this manager did not create: a RESTORED one, built
    *  from the store and handed back to `restorePast` (nocx-m3fqk).
    *

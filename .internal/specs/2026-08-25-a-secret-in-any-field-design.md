@@ -290,17 +290,36 @@ a person is typing into, and §2.3 says the product does not push. A person asks
 
 A Postman document never yields a secret reference **[owner]**.
 
-- The importer does not mint vault records and does not write `{{secret:…}}` — `secretOffer`
-  and `BindWriter` go away with `apibind`.
-- A Postman variable of `type: secret` becomes an ordinary collection variable with **no
-  value**. The person gives it one, and may make that value a secret reference through the
-  same door as everything else.
 - Any `{{secret:…}}` the source document happens to contain is **dropped and reported** in
-  the existing `apiimport.Unsupported` list. Dropping in silence is a known defect
-  (`nocx-6hg2w.16`) and is not repeated here.
+  the existing `apiimport.Unsupported` list. A handle from elsewhere addresses a record in
+  THIS machine's vault, and a document that arrived from anywhere may not name one.
+  Dropping in silence is a known defect (`nocx-6hg2w.16`) and is not repeated here.
+- `internal/apiimport` has no path reaching a vault write; `secretOffer` and the
+  `BindWriter` seam go away with `apibind`.
 
-This is also why no import-time scan or consent step is needed: a handle from elsewhere
-resolves to nothing anyway, so the report is for the person's information, not a guard.
+> **The two bullets below were amended on 2026-08-29 by ADR-0051.** They were read as part
+> of the owner's line above and were not: the `[owner]` mark is on "never yields a secret
+> REFERENCE", which is about a handle a document names, not about the values a document
+> carries. Under the removed bullets the importer DESTROYED every credential it found —
+> 93 of them in one real workspace — while the same credential entering through the curl
+> door was written to the request file untouched.
+>
+> Today: a credential an import finds is carried, exactly as a curl-imported one is when
+> the request is saved. A variable the export marked `type: secret` is the one case that
+> ASKS: the import offers to store it in the vault and write a reference in its place, and
+> a fresh ask opens with the offer untaken (ADR-0047). The mint belongs to
+> `internal/capability`, which holds the vault gate — the bullet above about `apiimport`
+> reaching no vault write is unchanged and is what keeps that split honest.
+>
+> ~~A Postman variable of `type: secret` becomes an ordinary collection variable with **no
+> value**.~~
+>
+> ~~This is also why no import-time scan or consent step is needed.~~
+
+A handle from elsewhere resolves to nothing anyway, so the report of a dropped
+`{{secret:…}}` is for the person's information rather than a guard. The offer over a
+`type: secret` variable is a different thing and is a real consent step: it moves a value
+into the vault, which is not something a program may decide.
 
 ## 11. Security: what this covers, and what it does not
 

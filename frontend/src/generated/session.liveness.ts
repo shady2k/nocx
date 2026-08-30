@@ -37,4 +37,12 @@ export interface SessionLiveness {
    * When the backend observed this, RFC3339 in UTC. The projection's freshness, which is a different question from its order: the epoch decides which of two observations is newer, and this says how old the belief is when it is displayed. The renderer displays it and never subtracts it.
    */
   observedAt: string
+  /**
+   * How long the last keepalive probe to this session's HOST took, in milliseconds. Absent when nothing measured one — a local session, or a host that stopped answering, because an unanswered probe has no duration and reporting the budget it spent would report the timeout rather than the host. Absent and zero are the same statement and the renderer must treat them alike: 'no measurement', never 'instant'. It is a MEASUREMENT beside the value and never a value of its own (nocx-iarf9 keeps its two-word enum): whether a host is reachable and how fast it answers are two questions, and folding the second into the first would make a slow host render as a half-dead one. It is what lets the product say a server is struggling — the state a person actually meets — where the enum alone can only say gone. It is republished only when the measurement crosses a grade boundary, so a healthy connection is silent on this axis rather than sending a number every keepalive interval.
+   */
+  roundTripMs?: number
+  /**
+   * Whether the backend GRADES the last round trip as slow — the host is answering, just late. Absent means it is not. It is sent rather than left to the renderer to threshold for itself from roundTripMs, because the grade has HYSTERESIS: it enters slow at one number and leaves at a lower one, so it is a function of the measurement AND the previous grade, which a reader holding only the milliseconds cannot reproduce. Two derivations of one concept would agree everywhere anyone looked and disagree exactly at the boundary, which is this repository's most recurrent defect. roundTripMs is the EVIDENCE behind this flag, for a tooltip; this flag is what a surface draws.
+   */
+  slow?: boolean
 }

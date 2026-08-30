@@ -100,6 +100,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0048 | [UI state is a document, not a setting](0048-ui-state-is-a-document-not-a-setting.md)                                             | Accepted (was ADR-0033)               |
 | 0049 | [The channel we own is the carrier, not the command line](0049-the-channel-we-own-is-the-carrier.md)                              | Accepted 2026-08-20 (was ADR-0035)    |
 | 0050 | [The OS keystore holds a key only a person can take](0050-the-keystore-holds-a-key-only-a-person-can-take.md)                     | Accepted 2026-08-29                   |
+| 0051 | [An imported credential stays the person's](0051-an-imported-credential-stays-the-persons.md)                                     | Accepted 2026-08-29                   |
 
 ## Adding one
 

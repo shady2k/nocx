@@ -38,6 +38,21 @@ type postmanResult struct {
 	Requests     []apicoll.Request
 	Environments []apicoll.Environment
 	Unsupported  []Unsupported
+	// Secrets are the variables the EXPORT ITSELF marked `type: secret`.
+	// They are in Environments as ordinary values like everything else —
+	// this is the list the import OFFERS to store in the vault instead, and
+	// naming them is all it is: nothing here writes to a vault, and the
+	// offer is answered by a person (ADR-0047).
+	Secrets []SecretVariable
+}
+
+// SecretVariable is one variable a Postman export marked `type: secret`,
+// with the value the export carried. Postman marks few of them — nought of
+// six in the export that bought nocx-zn386 — so this list is usually empty
+// and the ask that reads it draws nothing.
+type SecretVariable struct {
+	Name  string
+	Value string
 }
 
 // ---- the document, as much of it as we read ----
@@ -197,7 +212,6 @@ type pmEvent struct {
 type pmConv struct {
 	res   postmanResult
 	alloc *pathAllocator
-	namer *varNamer
 	env   *apicoll.Environment
 	// route is how the DOCUMENT arrived, not where its requests go: every
 	// environment this converter mints leaves by it (§6).
@@ -243,7 +257,7 @@ func parsePostman(r io.Reader, route apicoll.Route) (postmanResult, error) {
 		return res, errors.New("apiimport: trailing data after the import document")
 	}
 
-	c := &pmConv{alloc: newPathAllocator(), namer: newVarNamer(), route: route}
+	c := &pmConv{alloc: newPathAllocator(), route: route}
 
 	switch {
 	case doc.Info == nil && doc.Item == nil && doc.Values != nil:
@@ -312,15 +326,22 @@ func (c *pmConv) collection(doc pmDoc) (postmanResult, error) {
 	return c.res, nil
 }
 
-// readVariables splits a Postman variable list into what the environment
-// file may hold and what it may not.
+// readVariables reads a Postman variable list into the environment file.
 //
-// The rule is §6.3 exactly: a "secret" variable contributes its NAME and
-// nothing else. A variable NOT marked secret whose value is
-// credential-shaped is promoted to the same treatment and said out loud —
-// The import keeps ordinary collection variables and drops every imported
-// credential value. A Postman secret is still an ordinary variable so the
-// person can supply its value after import.
+// EVERY VALUE THE EXPORT CARRIED, including the ones it marked `secret`.
+// This used to be §6.3's rule — a secret variable contributed its NAME and
+// nothing else, and a variable merely SHAPED like a credential was promoted
+// to the same treatment — and §6.3 said the value went to the vault instead.
+// The vault seam was removed with apibind (nocx-jjnch), so what was left was
+// half a rule: taken out of the file, and nowhere to put. The person then
+// retyped every credential the workspace held (nocx-zn386).
+//
+// A variable Postman marked `secret` is still that fact, and it is what the
+// import OFFERS to store in the vault. An offer is not a condition: whether
+// or not it is taken, nothing here destroys a value.
+//
+// `{{secret:…}}` is the one thing still removed — a reference the document
+// names into THIS machine's vault — and it is reported, never silent.
 func (c *pmConv) readVariables(vars []pmVariable) {
 	for _, v := range vars {
 		name := strings.TrimSpace(v.Key.String())
@@ -328,22 +349,19 @@ func (c *pmConv) readVariables(vars []pmVariable) {
 			c.itemise("a variable with no name", "a variable is addressed by name and this one has none")
 			continue
 		}
-		c.namer.reserve(name)
 		if v.off() {
 			c.itemise("disabled variable "+clip(name), "the model has no disabled state for a variable; an environment holds the ones in use")
 			continue
 		}
 		value := c.dropSecretReferences(v.Value.String(), "variable "+clip(name))
-		if strings.EqualFold(v.Type, "secret") || headerValueIsSecret(name, value) {
-			c.ensureEnv()
-			c.itemise("variable "+clip(name), "imported credential material is not carried; supply the value after import")
-			continue
-		}
 		c.ensureEnv()
 		if c.env.Values == nil {
 			c.env.Values = map[string]string{}
 		}
 		c.env.Values[name] = value
+		if strings.EqualFold(v.Type, "secret") {
+			c.res.Secrets = append(c.res.Secrets, SecretVariable{Name: name, Value: value})
+		}
 	}
 }
 
@@ -461,12 +479,11 @@ func (c *pmConv) request(it pmItem, dir string, inherited *pmAuth) {
 	}
 	headers = c.applyAuth(&req, auth, headers, clip(it.Name.String()))
 
-	kept, headerAuth, unsup := absorbHeaderSecrets(headers, c.namer)
-	req.Headers = kept
-	c.res.Unsupported = append(c.res.Unsupported, unsup...)
-	if headerAuth != nil {
-		req.Auth = *headerAuth
-	}
+	// EVERY HEADER THE DOCUMENT CARRIED, in its own order. There was an
+	// absorption step here that turned a credential-shaped header into an
+	// itemised loss; the curl door never had one, and one question may not
+	// have two answers (nocx-zn386).
+	req.Headers = headers
 
 	c.res.Requests = append(c.res.Requests, req)
 	c.res.Collection.Requests = append(c.res.Collection.Requests, apicoll.RequestRef{
@@ -484,8 +501,14 @@ func (c *pmConv) request(it pmItem, dir string, inherited *pmAuth) {
 // hold one. Rather than add a second field meaning what a header already
 // means, an apikey becomes the header or query parameter it actually is.
 // applyAuth maps Postman's auth onto the model's, returning the headers
-// with any auth-carrying header added. Imported credential literals are
-// dropped; ordinary collection variable references remain text.
+// with any auth-carrying header added.
+//
+// A LITERAL IS CARRIED, exactly as a `{{variable}}` reference is. It used to
+// be itemised away — "imported credential material is not carried" — which
+// destroyed the value and left the request unable to authenticate; the same
+// credential arriving through the curl door was written into the file
+// unchanged (nocx-zn386). A `{{secret:…}}` is the one thing still removed,
+// upstream of here, by dropSecretReferences.
 func (c *pmConv) applyAuth(req *apicoll.Request, a *pmAuth, headers []apicoll.Header, item string) []apicoll.Header {
 	if a == nil {
 		return headers
@@ -497,12 +520,10 @@ func (c *pmConv) applyAuth(req *apicoll.Request, a *pmAuth, headers []apicoll.He
 	case "bearer":
 		token := c.dropSecretReferences(a.param(a.Bearer, "token"), "bearer auth on "+item)
 		if name, ok := varRef(token); ok {
-			c.namer.reserve(name)
-			req.Auth = apicoll.Auth{Kind: apicoll.AuthBearer, Token: "{{" + name + "}}"}
-			return headers
+			token = "{{" + name + "}}"
 		}
 		if token != "" {
-			c.itemise("bearer auth on "+item, "imported credential material is not carried; supply the value after import")
+			req.Auth = apicoll.Auth{Kind: apicoll.AuthBearer, Token: token}
 		}
 		return headers
 
@@ -510,12 +531,10 @@ func (c *pmConv) applyAuth(req *apicoll.Request, a *pmAuth, headers []apicoll.He
 		user := c.dropSecretReferences(a.param(a.Basic, "username"), "basic auth username on "+item)
 		pass := c.dropSecretReferences(a.param(a.Basic, "password"), "basic auth password on "+item)
 		if name, ok := varRef(pass); ok {
-			c.namer.reserve(name)
-			req.Auth = apicoll.Auth{Kind: apicoll.AuthBasic, User: user, Password: "{{" + name + "}}"}
-			return headers
+			pass = "{{" + name + "}}"
 		}
-		if pass != "" {
-			c.itemise("basic auth on "+item, "imported credential material is not carried; supply the value after import")
+		if user != "" || pass != "" {
+			req.Auth = apicoll.Auth{Kind: apicoll.AuthBasic, User: user, Password: pass}
 		}
 		return headers
 
@@ -525,12 +544,6 @@ func (c *pmConv) applyAuth(req *apicoll.Request, a *pmAuth, headers []apicoll.He
 		in := strings.ToLower(a.param(a.APIKey, "in"))
 		if key == "" {
 			c.itemise("apikey auth on "+item, "it names no header or parameter to carry the key")
-			return headers
-		}
-		if _, ok := varRef(value); !ok {
-			if value != "" {
-				c.itemise("apikey auth on "+item, "imported credential material is not carried; supply the value after import")
-			}
 			return headers
 		}
 		if in == "query" {
@@ -928,4 +941,47 @@ func encodeFormParams(parts []pmFormParam) string {
 		enc = append(enc, url.QueryEscape(name)+"="+url.QueryEscape(p.Value.String()))
 	}
 	return strings.Join(enc, "&")
+}
+
+// PostmanSecrets reads one import document and answers the variables it
+// marked `type: secret`, with the values it carried.
+//
+// It is the OFFER's input and nothing else: the caller — which holds the
+// vault gate, because this package does not — decides with a person whether
+// those values go to the vault, and hands back the references through
+// ImportInto's SecretRefs. A document that marks nothing answers an empty
+// list, which is the ordinary case: nought of six variables in the export
+// that bought nocx-zn386.
+func PostmanSecrets(r io.Reader) ([]SecretVariable, error) {
+	res, err := parseImport(r, apicoll.Route{})
+	if err != nil {
+		return nil, err
+	}
+	return res.Secrets, nil
+}
+
+// PreviewPostmanDocument answers the archive preview's shape for ONE
+// document: what it is, what it calls itself, and the variables it marked
+// `type: secret`.
+//
+// One shape for both entrances is the point. The ask asks the same question
+// of a pasted export and of a workspace ZIP — what is in this, and is there
+// anything to offer — and two shapes would be two answers to it.
+func PreviewPostmanDocument(document []byte) ([]ArchiveDocument, error) {
+	res, err := parseImport(bytes.NewReader(document), apicoll.Route{})
+	if err != nil {
+		return nil, err
+	}
+	kind := ArchiveCollection
+	name := strings.TrimSpace(res.Collection.Name)
+	if len(res.Requests) == 0 && len(res.Environments) == 1 && res.Collection.Name == "" {
+		kind = ArchiveEnvironment
+		name = strings.TrimSpace(res.Environments[0].Name)
+	}
+	return []ArchiveDocument{{
+		Kind:     kind,
+		Name:     name,
+		Document: document,
+		Secrets:  res.Secrets,
+	}}, nil
 }

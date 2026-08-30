@@ -20,49 +20,37 @@ import (
 //
 // # It mints no variable it cannot bind (nocx-14exx)
 //
-// This entrance writes no file and holds no credential writer: what it returns
-// goes straight back to the person who pasted the line, into the request
-// form, with no collection and no environment behind it yet. It therefore
-// leaves a credential the line carries exactly where the line put it — in
-// the Authorization header, in the -u argument — and names no variable for
-// it.
+// A credential the line carries is left exactly where the line put it — in
+// the Authorization header, in the -u argument — and no variable is named
+// for it.
 //
 // It used to do the opposite: an Authorization header became
 // Auth{bearer, Var: "token"} and the value was dropped on the floor, so the
 // person got a request naming a variable that had nowhere to be bound, no
 // Variables row to bind it in, and a Send that refused with `the auth
 // variable "token" is not bound in this environment` about a name they had
-// never chosen. The credential was not protected by that, only lost; the
-// only thing §8 protects is a FILE, and this entrance writes none.
-// ImportInto is the entrance that writes files, and there the old
-// behaviour is still exactly right — see parseCurl's credentials argument.
+// never chosen. The credential was not protected by that, only lost.
+//
+// # And ImportInto now answers the same way (nocx-zn386)
+//
+// There used to be a second answer here, chosen by a `credentials` argument:
+// the file-writing entrance dropped what this one kept, on §8's rule that a
+// collection file may never spell a token. That rule is no longer the
+// product's — nocx-14exx decided a credential the person pasted stays
+// theirs, and nocx-flidy rewrote the panel's promise to say so, after which
+// a request SAVED from the form put the very same header in the very same
+// file. Keeping the split meant one question with two answers, decided by
+// which door a person came in through, and the import door's answer
+// destroyed values nobody could get back.
+//
+// What is still refused is a `{{secret:…}}` the document names, which
+// addresses a record in this machine's vault: see dropSecretReferences.
 //
 // Everything the bounded flag set does not carry comes back in
 // []Unsupported. Nothing is only logged.
 func FromCurl(line string) (apicoll.Request, []Unsupported, error) {
-	req, unsup, err := parseCurl(line, newVarNamer(), credentialsStayOnRequest)
-	return req, unsup, err
+	return parseCurl(line)
 }
-
-// credentials says where a credential the curl line carries is allowed to
-// go, which is a property of THE CALLER and not of the line.
-//
-// Two entrances, two answers, one converter (§10). Getting this wrong in
-// either direction is a defect with a name: a collection file that spells a
-// token is what §8 exists to prevent, and a form that names an unbindable
-// variable is nocx-14exx.
-type credentials int
-
-const (
-	// credentialsToImport is the ImportInto route: a collection is being
-	// written, so imported credential material is dropped and itemised.
-	credentialsToImport credentials = iota
-	// credentialsStayOnRequest is the FromCurl route: nothing here can bind
-	// a value, so nothing here mints a name for one. A variable the LINE
-	// ITSELF spells — `Authorization: Bearer {{tok}}` — is still honoured,
-	// because that name is the person's own and not one we invented.
-	credentialsStayOnRequest
-)
 
 // disposition is what becomes of one recognised flag. THREE STATES, NOT
 // TWO, and the third is the whole of nocx-q2cx5's first half.
@@ -247,10 +235,9 @@ type dataPart struct {
 	ref   string // file reference
 }
 
-// parseCurl is the shared converter. creds distinguishes the form entrance,
-// which preserves the line's own credential-bearing headers, from collection
-// import, which drops imported credential material.
-func parseCurl(line string, namer *varNamer, creds credentials) (apicoll.Request, []Unsupported, error) {
+// parseCurl is the converter both entrances use, and it is one converter
+// with one answer: see FromCurl for the argument that used to be here.
+func parseCurl(line string) (apicoll.Request, []Unsupported, error) {
 	var (
 		req     apicoll.Request
 		unsup   []Unsupported
@@ -417,44 +404,25 @@ func parseCurl(line string, namer *varNamer, creds credentials) (apicoll.Request
 		}
 	}
 
-	// -u first, so an explicit Authorization header still wins — which is
-	// the order curl resolves them in.
-	switch creds {
-	case credentialsToImport:
-		if hasUser {
-			auth, bad := basicFromUserArg(userArg, namer)
-			if bad != "" {
-				itemise("-u", "the imported credential was not written into the request; supply it after import")
-			} else {
-				req.Auth = auth
-			}
-		}
-		kept, headerAuth, headerUnsup := absorbHeaderSecrets(headers, namer)
-		req.Headers = kept
-		unsup = append(unsup, headerUnsup...)
-		if headerAuth != nil {
-			req.Auth = *headerAuth
-		}
-
-	case credentialsStayOnRequest:
-		// EVERY HEADER THE LINE CARRIES, IN THE ORDER IT GAVE THEM. There
-		// is no absorption here and no secret detector: a header is a
-		// header, which is the only shape in which the request that comes
-		// out is the command that went in (nocx-9jnu6).
-		req.Headers = headers
-		if hasUser {
-			auth, header, why := userArgOnRequest(userArg, hasHeader(headers, "Authorization"))
-			switch {
-			case why != "":
-				itemise("-u without a password", why)
-			case auth != nil:
-				req.Auth = *auth
-			case header != nil:
-				// After the line's own headers: curl generates this one
-				// itself, so it was never among them, and appending keeps
-				// the order the person wrote.
-				req.Headers = append(req.Headers, *header)
-			}
+	// EVERY HEADER THE LINE CARRIES, IN THE ORDER IT GAVE THEM. There is no
+	// absorption here and no secret detector: a header is a header, which is
+	// the only shape in which the request that comes out is the command that
+	// went in (nocx-9jnu6).
+	req.Headers = headers
+	if hasUser {
+		// -u is read AFTER the headers, so an explicit Authorization header
+		// still wins — which is the order curl resolves them in.
+		auth, header, why := userArgOnRequest(userArg, hasHeader(headers, "Authorization"))
+		switch {
+		case why != "":
+			itemise("-u without a password", why)
+		case auth != nil:
+			req.Auth = *auth
+		case header != nil:
+			// After the line's own headers: curl generates this one itself,
+			// so it was never among them, and appending keeps the order the
+			// person wrote.
+			req.Headers = append(req.Headers, *header)
 		}
 	}
 
@@ -578,59 +546,6 @@ func hasHeader(hs []apicoll.Header, name string) bool {
 		}
 	}
 	return false
-}
-
-// authFromHeader maps an Authorization value onto the model. The second
-// return is a refusal reason for imported credential material; ordinary
-// variable references remain text.
-func authFromHeader(value string, namer *varNamer) (apicoll.Auth, string) {
-	value = strings.TrimSpace(value)
-	scheme, cred, _ := strings.Cut(value, " ")
-	cred = strings.TrimSpace(cred)
-	switch strings.ToLower(scheme) {
-	case "bearer":
-		if name, ok := varRef(cred); ok {
-			namer.reserve(name)
-			return apicoll.Auth{Kind: apicoll.AuthBearer, Token: "{{" + name + "}}"}, ""
-		}
-		return apicoll.Auth{}, "Bearer credential"
-	case "basic":
-		if name, ok := varRef(cred); ok {
-			namer.reserve(name)
-			return apicoll.Auth{Kind: apicoll.AuthBasic, User: "", Password: "{{" + name + "}}"}, ""
-		}
-		raw, err := base64.StdEncoding.DecodeString(cred)
-		if err != nil {
-			return apicoll.Auth{}, "Basic (not decodable)"
-		}
-		if _, _, ok := strings.Cut(string(raw), ":"); !ok {
-			return apicoll.Auth{}, "Basic (not user:password)"
-		}
-		return apicoll.Auth{}, "Basic credential"
-	default:
-		if scheme == "" {
-			return apicoll.Auth{}, "(empty)"
-		}
-		return apicoll.Auth{}, scheme
-	}
-}
-
-// basicFromUserArg maps -u for the collection-import entrance. A literal
-// password is dropped; an explicitly named variable remains an ordinary
-// reference with an empty value for the person to fill in.
-func basicFromUserArg(arg string, namer *varNamer) (apicoll.Auth, string) {
-	user, pass, ok := strings.Cut(arg, ":")
-	auth := apicoll.Auth{Kind: apicoll.AuthBasic, User: user}
-	if !ok {
-		auth.Password = "{{" + namer.take("password") + "}}"
-		return auth, ""
-	}
-	if name, isRef := varRef(pass); isRef {
-		namer.reserve(name)
-		auth.Password = "{{" + name + "}}"
-		return auth, ""
-	}
-	return apicoll.Auth{}, "credential"
 }
 
 // userArgOnRequest maps -u for the entrance that binds nothing, and returns

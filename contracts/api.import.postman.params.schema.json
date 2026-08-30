@@ -13,7 +13,8 @@
     "url": { "type": "string", "minLength": 1 },
     "route": { "$ref": "#/$defs/route" },
     "dest": { "type": "string", "pattern": "^/", "maxLength": 4096 },
-    "preview": { "type": "boolean" }
+    "preview": { "type": "boolean" },
+    "storeSecrets": { "type": "boolean" }
   },
   "$defs": {
     "route": {

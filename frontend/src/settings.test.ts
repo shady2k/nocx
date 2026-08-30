@@ -245,9 +245,9 @@ describe('SettingsContent', () => {
    * objects fresh on every run, `activePage()` finds one in that array, and
    * the body renders it through a `keyed` Show — and keying re-creates the
    * subtree whenever the identity changes, deliberately, so that switching
-   * pages replaces the body. Today a refresh does not reach that far. Anything
-   * that makes the refresh recompute those objects would, and would look like
-   * a page that quietly resets itself while somebody is working in it.
+   * pages replaces the body. A refresh replaces the declarations array, which
+   * recomputes every one of those objects, so the page's identity has to be
+   * its ID rather than the object that describes it.
    *
    * THE MOCKS HAND BACK FRESH OBJECTS ON PURPOSE. Every answer off the wire is
    * parsed from its own JSON, so nothing the renderer stores is ever
@@ -255,6 +255,14 @@ describe('SettingsContent', () => {
    * object to every call, which stops the second snapshot from propagating at
    * all — the test then passes without ever exercising a refresh, which is
    * what the first draft of it did.
+   *
+   * AND IT WAITS FOR THE REFRESH TO LAND, not for it to start. `getSnapshot`
+   * is called at the top of `refresh`, before a single store write; a test
+   * that waits on the call count asserts in the gap between the request and
+   * the rebuild it triggers, and passes whatever the rebuild does. The second
+   * answer therefore carries a section the first did not, and the assertion
+   * comes after that section is on the rail — the one moment where the whole
+   * of the refresh is known to have been applied.
    */
   it('a settings refresh does not take back the file you chose', async () => {
     let invalidate: ((params: unknown) => void) | null = null
@@ -272,28 +280,40 @@ describe('SettingsContent', () => {
     // answer is parsed from its own JSON, so no array or record the renderer
     // stores is ever reference-equal to the one before it. A mock that hands
     // back one object hides exactly the propagation this test is about.
-    vi.spyOn(client, 'describeSettings').mockImplementation(() =>
-      Promise.resolve({
-        declarations: TEST_DECLARATIONS.map((d) => ({ ...d })),
-        groups: TEST_GROUPS.map((g) => ({ ...g })),
-        sectionGroups: { ...TEST_SECTION_GROUPS },
-      }),
-    )
-    // The second snapshot carries an override the first did not, so the rail's
-    // modified badge is an OBSERVABLE that the refresh has LANDED. Waiting on
-    // getSnapshot having been CALLED is not that, and this test used to: the
-    // call is made before the page state it rewrites is written, so the
-    // assertion below ran in the gap and passed while the rebuild happened
-    // behind it (nocx-3icu1).
-    let snapshotCalls = 0
-    const snapshot = vi.spyOn(client, 'getSnapshot').mockImplementation(() => {
-      snapshotCalls++
+    // The second answer carries one declaration the first did not, in a
+    // section of its own. That is what the assertion below waits for: a rail
+    // row that can only exist once `setDeclarations` has propagated all the
+    // way through the page registry — the same propagation that would rebuild
+    // the body if the body were keyed on the page object.
+    const LATE_SECTION = 'Latecomer'
+    let describeCalls = 0
+    vi.spyOn(client, 'describeSettings').mockImplementation(() => {
+      describeCalls++
+      const declarations = TEST_DECLARATIONS.map((d) => ({ ...d }))
+      if (describeCalls > 1) {
+        declarations.push({
+          key: 'late.arrival',
+          section: LATE_SECTION,
+          label: 'Late Arrival',
+          description: 'A setting the first describe did not carry',
+          control: 'toggle',
+          dataClass: 'publicConfig',
+          default: false,
+        })
+      }
       return Promise.resolve({
-        values: snapshotCalls > 1 ? { 'terminal.fontSize': 20 } : {},
-        overridden: snapshotCalls > 1 ? ['terminal.fontSize'] : [],
-        revision: snapshotCalls > 1 ? 1 : 0,
+        declarations,
+        groups: TEST_GROUPS.map((g) => ({ ...g })),
+        sectionGroups: { ...TEST_SECTION_GROUPS, [LATE_SECTION]: 'application' },
       })
     })
+    vi.spyOn(client, 'getSnapshot').mockImplementation(() =>
+      Promise.resolve({
+        values: {},
+        overridden: [],
+        revision: 0,
+      }),
+    )
     vi.spyOn(client, 'previewBackupRestore').mockResolvedValue({
       strategy: 'merge',
       settings: { changed: 1, unchanged: 0 },
@@ -324,8 +344,10 @@ describe('SettingsContent', () => {
     expect(invalidate).toBeTruthy()
     invalidate!({ revision: 1, keys: ['tab.placement'] })
     await vi.waitFor(() => {
-      expect(snapshot).toHaveBeenCalledTimes(2)
-      expect(target.querySelector('.ui-page__rail .ui-badge')?.textContent).toBe('1')
+      const rows = Array.from(
+        target.querySelectorAll<HTMLButtonElement>('.ui-grouped-nav__item > .ui-button'),
+      )
+      expect(rows.some((r) => r.textContent.includes(LATE_SECTION))).toBe(true)
     })
 
     expect(target.querySelector('.ui-file-input__name')!.textContent).toBe('backup.json')
@@ -334,17 +356,23 @@ describe('SettingsContent', () => {
   /**
    * AND THE PREVIEW IT PRODUCED SURVIVES THE SAME REFRESH (nocx-3icu1).
    *
-   * The test above stops at the file input, which is the first thing a
-   * refresh could take back. It is not the last: the preview the file
-   * triggered, and the Merge button that acts on it, live in the same
-   * component's store, and a rebuilt page loses all of it. The webkit trace
-   * for run 33277630612 caught exactly that — the preview heading was on
-   * screen at one snapshot and fourteen milliseconds later the surface said
-   * "No file selected" again.
+   * The test above stops at the file input, which is the first thing a refresh
+   * could take back. It is not the last, and it is not what CI actually caught.
+   * The webkit trace for run 33277630612 failed on the Merge button: the
+   * preview heading was on screen at one frame snapshot and the whole section
+   * said "No file selected" fourteen milliseconds later. File input and preview
+   * go together because they are one component, but only this one watches the
+   * half a person acts on.
    *
-   * The preview mock is COMPLETE on purpose. A partial one throws inside the
-   * preview block on the first field it does not carry, so the block never
-   * renders and the assertion below cannot fail for the reason it is here for.
+   * THE PREVIEW MOCK IS COMPLETE, AND THE ONE ABOVE IS NOT. A partial payload
+   * throws inside the preview block on the first field it does not carry —
+   * `connectionsRequiringCredential.length` reaches it before anything is
+   * drawn — so a test with one never renders the preview at all and cannot
+   * report that it vanished.
+   *
+   * It waits for the refresh the same way its neighbour does, on the late
+   * section reaching the rail. One way of knowing a refresh has landed, not
+   * two.
    */
   it('a settings refresh does not take back the preview you are looking at', async () => {
     let invalidate: ((params: unknown) => void) | null = null
@@ -358,27 +386,31 @@ describe('SettingsContent', () => {
     const observer = new SettingsObserver(dispatcher as unknown as Dispatcher)
     content = new SettingsContent(client, observer)
     mockReady(client)
-    vi.spyOn(client, 'describeSettings').mockImplementation(() =>
-      Promise.resolve({
-        declarations: TEST_DECLARATIONS.map((d) => ({ ...d })),
-        groups: TEST_GROUPS.map((g) => ({ ...g })),
-        sectionGroups: { ...TEST_SECTION_GROUPS },
-      }),
-    )
-    // The second snapshot carries an override the first did not, so the rail's
-    // modified badge is an OBSERVABLE that the refresh has landed. Waiting on
-    // getSnapshot having been CALLED is not that: the call is made before the
-    // page state it rewrites is written, so assertions placed after it run in
-    // the gap and the rebuild happens behind them.
-    let snapshotCalls = 0
-    const snapshot = vi.spyOn(client, 'getSnapshot').mockImplementation(() => {
-      snapshotCalls++
+    const LATE_SECTION = 'Latecomer'
+    let describeCalls = 0
+    vi.spyOn(client, 'describeSettings').mockImplementation(() => {
+      describeCalls++
+      const declarations = TEST_DECLARATIONS.map((d) => ({ ...d }))
+      if (describeCalls > 1) {
+        declarations.push({
+          key: 'late.arrival',
+          section: LATE_SECTION,
+          label: 'Late Arrival',
+          description: 'A setting the first describe did not carry',
+          control: 'toggle',
+          dataClass: 'publicConfig',
+          default: false,
+        })
+      }
       return Promise.resolve({
-        values: snapshotCalls > 1 ? { 'terminal.fontSize': 20 } : {},
-        overridden: snapshotCalls > 1 ? ['terminal.fontSize'] : [],
-        revision: snapshotCalls > 1 ? 1 : 0,
+        declarations,
+        groups: TEST_GROUPS.map((g) => ({ ...g })),
+        sectionGroups: { ...TEST_SECTION_GROUPS, [LATE_SECTION]: 'application' },
       })
     })
+    vi.spyOn(client, 'getSnapshot').mockImplementation(() =>
+      Promise.resolve({ values: {}, overridden: [], revision: 0 }),
+    )
     vi.spyOn(client, 'previewBackupRestore').mockImplementation(() =>
       Promise.resolve({
         previewToken: 'tok-1',
@@ -418,14 +450,17 @@ describe('SettingsContent', () => {
       expect(mergeButton()).toBeTruthy()
     })
 
+    expect(invalidate).toBeTruthy()
     invalidate!({ revision: 1, keys: ['tab.placement'] })
     await vi.waitFor(() => {
-      expect(snapshot).toHaveBeenCalledTimes(2)
-      expect(target.querySelector('.ui-page__rail .ui-badge')?.textContent).toBe('1')
+      const rows = Array.from(
+        target.querySelectorAll<HTMLButtonElement>('.ui-grouped-nav__item > .ui-button'),
+      )
+      expect(rows.some((r) => r.textContent.includes(LATE_SECTION))).toBe(true)
     })
 
-    expect(target.querySelector('.ui-file-input__name')!.textContent).toBe('backup.json')
     expect(mergeButton()).toBeTruthy()
+    expect(target.querySelector('.ui-file-input__name')!.textContent).toBe('backup.json')
   })
 
   it('rail has exactly one search input', async () => {

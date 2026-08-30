@@ -26,7 +26,7 @@ type ArchiveImportResult struct {
 // collection-shaped folder per document below dest. Every document is
 // preflighted before the first write, so malformed members, duplicate names,
 // and occupied targets cannot leave a partial archive import behind.
-func ImportPostmanArchive(ctx context.Context, fsys FS, dest string, r io.Reader, route apicoll.Route) ([]ArchiveImportResult, error) {
+func ImportPostmanArchive(ctx context.Context, fsys FS, dest string, r io.Reader, route apicoll.Route, refs ArchiveSecretRefs) ([]ArchiveImportResult, error) {
 	dest = strings.TrimRight(filepath.Clean(dest), string(filepath.Separator))
 	if dest == "" || dest == "." || dest == ".." || dest == string(filepath.Separator) {
 		return nil, fmt.Errorf("apiimport: %q is not a usable archive destination", dest)
@@ -67,7 +67,7 @@ func ImportPostmanArchive(ctx context.Context, fsys FS, dest string, r io.Reader
 			return nil, err
 		}
 		child := filepath.Join(dest, doc.Name)
-		unsupported, err := ImportInto(ctx, fsys, child, bytes.NewReader(doc.Document), route)
+		unsupported, err := ImportInto(ctx, fsys, child, bytes.NewReader(doc.Document), route, refs[doc.Path])
 		if err != nil {
 			return nil, fmt.Errorf("apiimport: import %s %q: %w", doc.Kind, doc.Name, err)
 		}
@@ -114,3 +114,11 @@ func ValidatePostmanArchiveDestination(fsys FS, dest string, documents []Archive
 	}
 	return destExisted, nil
 }
+
+// ArchiveSecretRefs maps an archive MEMBER PATH to the references minted for
+// that document's secret variables.
+//
+// Keyed by path rather than by name because two documents in one archive may
+// declare the same variable name carrying different values, and a map keyed
+// by name would hand the second document the first one's record.
+type ArchiveSecretRefs map[string]SecretRefs

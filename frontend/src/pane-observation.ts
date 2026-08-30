@@ -107,6 +107,35 @@ function fromDriver(state: DriverState): PaneActivity {
 export function paneIndicator(
   observation: DriverState | null,
   titleStatus: AgentStatus | null,
+  reachable: boolean = true,
+): PaneIndicator | null {
+  // AND AN UNREACHABLE HOST DISPLACES BOTH — but only down to `unknown`, and
+  // only when there was something to say in the first place.
+  //
+  // This is not a priority rule and the difference matters. Both sources
+  // describe what an agent was doing when it was last OBSERVED, and neither
+  // can be observed through a host that has stopped answering: the driver's
+  // classification is a reading of a screen no bytes are arriving from, and
+  // the title is the last one that reached us. Reporting "waiting for you"
+  // over a dead pipe calls a person to answer something that cannot be
+  // delivered. So the fact stops being asserted, exactly as AD-6 refuses to
+  // assert a grid's state for a pane it did not watch from byte zero.
+  //
+  // `unknown` rather than null, because null means "there is no agent in this
+  // pane" — a meaning the tab already draws by showing no dot at all. An
+  // unobservable agent is not an absent one, and losing that distinction is
+  // worst at the moment it matters: scanning a strip of tabs after a suspend,
+  // deciding which to rescue first, "this one has an agent in it" is the
+  // deciding fact.
+  const indicator = observedIndicator(observation, titleStatus)
+  if (indicator === null) return null
+  if (!reachable) return { activity: 'unknown', source: indicator.source }
+  return indicator
+}
+
+function observedIndicator(
+  observation: DriverState | null,
+  titleStatus: AgentStatus | null,
 ): PaneIndicator | null {
   if (observation !== null) return { activity: fromDriver(observation), source: 'driver' }
   if (titleStatus !== null) return { activity: titleStatus, source: 'title' }

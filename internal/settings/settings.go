@@ -742,6 +742,42 @@ var TabPlacement = MustRegisterSelect(SelectSpec{
 	},
 })
 
+// SSHReconnect decides what a pane does when its SSH connection is LOST — not
+// when the WebSocket drops (AD-9 replays that underneath a session that never
+// died) and not when the host merely stops answering, which is a state the
+// session may well survive.
+//
+// It reconnects a PANE, never a shell. The old shell is gone the moment the
+// transport is, and whatever it was running may still be alive on the far
+// host with its own cwd and its own descriptors; what comes back is a new
+// shell at the same endpoint, under a divider that says so. Nothing here
+// resurrects anything, and nothing in the product may suggest otherwise —
+// the same promise RestoreOnStartup makes below, for the same reason.
+//
+// WHY THE DEFAULT IS ASK. `auto` is the convenient answer and it is the one
+// that can duplicate work: a reconnect that lands while the old process is
+// still running on the host leaves two, and the person did not ask for the
+// second. Being asked costs a click on an event that is already an
+// interruption; being surprised costs whatever the duplicate did. `never`
+// leaves the tab exactly as it is — marked, readable, with the offer on it —
+// which is what every value does when the attempts are spent.
+//
+// The TAB IS NEVER CLOSED by any of them. Its scrollback is the work, and
+// losing it is the failure this setting exists to prevent.
+var SSHReconnect = MustRegisterSelect(SelectSpec{
+	Key:         "ssh.reconnect",
+	Section:     "Interface",
+	Label:       "When an SSH connection is lost",
+	Description: "Ask offers a button on the tab. Automatically opens a new shell at the same endpoint by itself, and falls back to the button when the attempts are spent. Never leaves the tab alone with the button. In every case the tab stays open with everything it printed, and the shell that comes back is a NEW one — anything the old shell was running may still be going on the host.",
+	DataClass:   PublicConfig,
+	Default:     "ask",
+	Options: []SelectOption{
+		{Value: "ask", Label: "Ask"},
+		{Value: "auto", Label: "Automatically"},
+		{Value: "never", Label: "Never"},
+	},
+})
+
 // RestoreOnStartup decides whether the application reopens on what was left
 // (nocx-l21ib): the workspaces, their tabs, the panes with their directories
 // and the blocks those panes printed.

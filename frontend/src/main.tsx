@@ -96,6 +96,7 @@ import { OUTPUT_WRAP_DEFAULT, OUTPUT_WRAP_KEY, applyOutputWrap } from './output-
 import { REASONING_EXPANDED_KEY, applyReasoningExpanded } from './reasoning-expanded'
 import { applyOutputCap, OUTPUT_CAP_KEY } from './output-cap'
 import { applyRestoreOnStartup, RESTORE_ON_STARTUP_KEY } from './restore-setting'
+import { applySSHReconnect, SSH_RECONNECT_KEY } from './reconnect-setting'
 import type { TunnelOpenResult } from './generated/tunnel.open'
 import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
@@ -423,6 +424,7 @@ async function main() {
     // once: flipping it mid-session must not make tabs appear or vanish
     // under the person.
     applyRestoreOnStartup(snap.values[RESTORE_ON_STARTUP_KEY])
+    applySSHReconnect(snap.values[SSH_RECONNECT_KEY])
   } catch {
     // Backend may not be ready yet — safe fallback.
   }

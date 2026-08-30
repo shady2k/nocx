@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 
 	"github.com/shady2k/nocx/internal/log"
 	gossh "golang.org/x/crypto/ssh"
@@ -29,12 +30,18 @@ type pooledSSHConn struct {
 	release   func() // releases the jump handle, nil for direct conns
 	closeOnce sync.Once
 
+	// mu guards stopKeepalive, which is written after construction (see
+	// setKeepaliveStop) and read by Close from another goroutine.
+	mu sync.Mutex
 	// stopKeepalive cancels the keepalive goroutine when non-nil. Set by
 	// the dial factory when KeepaliveInterval > 0; called from Close before
 	// closing the transport so the ticker stops before the connection goes
 	// away (proved in TestKeepaliveTickerStopsOnClose). Nil when keepalive is
 	// disabled or this is a test fake.
 	stopKeepalive func()
+	// dead records that this connection has been closed, so the pool can
+	// refuse to hand it to anyone else. See isDead.
+	dead atomic.Bool
 
 	// agentForwardOnce guards agent.ForwardToRemote so it is called exactly
 	// once per pooled connection, even when multiple tabs share the client.
@@ -72,8 +79,17 @@ func (c *pooledSSHConn) initAgentForward(gclient *gossh.Client, addr string) err
 func (c *pooledSSHConn) Close() error {
 	var err error
 	c.closeOnce.Do(func() {
-		if c.stopKeepalive != nil {
-			c.stopKeepalive()
+		// Marked BEFORE anything is torn down, so the interval "this
+		// connection may still be handed to a caller" closes at the first
+		// instant it stops being true rather than at the last. A closed
+		// transport that still reads as live for the length of its own
+		// teardown is exactly the window a new tab falls into.
+		c.dead.Store(true)
+		c.mu.Lock()
+		stop := c.stopKeepalive
+		c.mu.Unlock()
+		if stop != nil {
+			stop()
 		}
 		err = c.client.Close()
 		if c.release != nil {
@@ -81,6 +97,59 @@ func (c *pooledSSHConn) Close() error {
 		}
 	})
 	return err
+}
+
+// globalRequester is the part of a transport that can carry an SSH global
+// request. *gossh.Client has it; a test fake standing in for a connection
+// need not.
+type globalRequester interface {
+	SendRequest(name string, wantReply bool, payload []byte) (bool, []byte, error)
+}
+
+// SendRequest forwards a global request to the underlying transport, which is
+// what makes the POOLED connection — rather than the raw client inside it —
+// the thing the keepalive prober both probes and closes. One object, one
+// owner: the prober cannot reach past the wrapper to close a transport whose
+// teardown the wrapper is responsible for (AD-4).
+func (c *pooledSSHConn) SendRequest(name string, wantReply bool, payload []byte) (bool, []byte, error) {
+	r, ok := c.client.(globalRequester)
+	if !ok {
+		return false, nil, errNoGlobalRequests
+	}
+	return r.SendRequest(name, wantReply, payload)
+}
+
+// errNoGlobalRequests is what a connection whose transport cannot carry a
+// global request answers a probe with. It reads as a failed probe, which for
+// a transport that cannot be probed is the honest answer.
+var errNoGlobalRequests = errors.New("ssh: transport carries no global requests")
+
+// setKeepaliveStop arms the prober's cancel after the connection exists. The
+// prober is started with this connection as the thing it closes when it gives
+// up, so the two are constructed in that order and the field is written after
+// the goroutine is already running — under the mutex, because Close reads it
+// from whichever goroutine gets there first.
+func (c *pooledSSHConn) setKeepaliveStop(stop func()) {
+	c.mu.Lock()
+	c.stopKeepalive = stop
+	c.mu.Unlock()
+}
+
+// isDead reports whether this connection has been closed. It is a MARK, never
+// a probe: asking the far end would put a network round trip under the pool's
+// mutex, which is the shape of defect the keepalive prober was just cured of
+// (ssh_keepalive.go).
+func (c *pooledSSHConn) isDead() bool { return c.dead.Load() }
+
+// deadConn is the part of a pooled connection the pool consults before
+// handing it to a second caller. Only *pooledSSHConn implements it; a test
+// fake that does not is treated as live, which is what it is.
+type deadConn interface{ isDead() bool }
+
+// connIsDead reports whether a pooled connection has already been closed.
+func connIsDead(c sshClientConn) bool {
+	d, ok := c.(deadConn)
+	return ok && d.isDead()
 }
 
 // poolKey identifies a shared SSH connection. Two Connect calls whose keys
@@ -249,10 +318,23 @@ func (p *ConnPool) AcquireDial(ctx context.Context, key poolKey, dial func(key p
 // dialInProgress slot before waking waiters.
 func (p *ConnPool) acquire(ctx context.Context, key poolKey, dial func(key poolKey) (sshClientConn, error)) (*poolHandle, error) {
 	p.mu.Lock()
-	if entry, ok := p.pool[key]; ok {
+	if entry, ok := p.pool[key]; ok && !connIsDead(entry.conn) {
 		entry.ref.n++
 		p.mu.Unlock()
 		return &poolHandle{key: key, conn: entry.conn, ref: entry.ref, pool: p}, nil
+	} else if ok {
+		// The entry is a corpse: its transport is closed and the sessions
+		// still holding references have not finished noticing yet. Evict it
+		// here rather than waiting for the last Release, and fall through to
+		// a fresh dial.
+		//
+		// The holders are not disturbed. Release compares the ref it holds
+		// against the entry it finds (see Release), so a later Release for
+		// this generation deletes nothing — the replacement dialled below is
+		// a different entry with a different ref and cannot be removed by
+		// somebody unwinding the old one.
+		delete(p.pool, key)
+		p.log.Info("evicting a closed pooled connection", "host", key.host, "port", key.port, "user", key.user)
 	}
 
 	// No existing entry — check if another goroutine is already dialing this
@@ -293,7 +375,7 @@ func (p *ConnPool) acquire(ctx context.Context, key poolKey, dial func(key poolK
 	// inserted an entry (it re-enters acquire only after we close d.done),
 	// but CloseAll could have run between the unlock and here. Be safe: if
 	// an entry now exists, discard our dial and reuse it.
-	if entry, ok := p.pool[key]; ok {
+	if entry, ok := p.pool[key]; ok && !connIsDead(entry.conn) {
 		entry.ref.n++
 		p.mu.Unlock()
 		_ = conn.Close() // discard our dial; close outside mutex (may release a jump handle)

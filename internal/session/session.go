@@ -781,6 +781,36 @@ func sshOptionsFromConfig(cfg *ssh.ConnectConfig) []ssh.ConnectOption {
 	if cfg.RemoteInstaller != nil {
 		opts = append(opts, ssh.WithRemoteInstaller(cfg.RemoteInstaller))
 	}
+	// THE FOUR THE RESOLVER COMPUTES AND THIS FUNCTION USED TO EAT.
+	// internal/connection.Resolver resolves a profile's effective options and
+	// writes keepalive, the connect deadline and agent forwarding onto the
+	// config (resolver.go:175-190); none of them was translated here, so all
+	// four arrived at the dial as zero.
+	//
+	// Keepalive is the one that cost a person their session. A zero interval
+	// makes startKeepalive return before it starts anything (ssh_keepalive.go),
+	// so there was no prober in the shipped product at all: nothing ever
+	// noticed a transport that died without saying so, the LivenessObserver
+	// wired two hundred lines above this could not fire, and liveness's whole
+	// `unknown` vocabulary was unreachable. A pane whose host went away — a
+	// closed laptop lid is enough — sat on a dead pipe in silence, with no
+	// exit, no mark and nothing to reconnect from.
+	//
+	// This is the third time a field has been carried to this function and
+	// dropped by it (DesiredMode, nocx-mlm7; Shell, nocx-pu4.1), and both of
+	// those comments say why it is worse than a field that was never there:
+	// it looks configured. TestSSHOptions_Carry* is the ratchet — a field
+	// added to ConnectConfig and not to this list now fails a test rather
+	// than waiting to be noticed.
+	if cfg.KeepaliveInterval > 0 {
+		opts = append(opts, ssh.WithKeepalive(cfg.KeepaliveInterval, cfg.KeepaliveCountMax))
+	}
+	if cfg.ReadyTimeout > 0 {
+		opts = append(opts, ssh.WithTimeout(cfg.ReadyTimeout))
+	}
+	if cfg.AgentForward {
+		opts = append(opts, ssh.WithAgentForward())
+	}
 	return opts
 }
 

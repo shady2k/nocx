@@ -223,15 +223,20 @@ func rawRowCount(t *testing.T, path, table string) int {
 	return n
 }
 
-// The rebuild is one transaction: a DROP that fails midway rolls the file
-// back whole. The file below carries a foreign key the drop order does not
-// expect — entries references artifacts, so the DROP of artifacts (fourth
-// in the order, after grant_scopes, artifact_chunks and authority_grants
-// have gone) fails under foreign_keys=ON. The old code left those earlier
-// drops committed, the file half-destroyed, and logged the pre-read count
-// as if it had been discarded. The assertion is on what the file holds
-// afterwards, not on the code.
-func TestRebuildFailureMidwayLeavesTheOldFileWhole(t *testing.T) {
+// A foreign key the drop order does not expect is no longer an outcome at
+// all. The file below is the shape that used to prove the rebuild's
+// atomicity: entries references artifacts, and artifacts is dropped fourth,
+// while entries still holds a row pointing at it — which under
+// foreign_keys=ON aborted the DROP and, before nocx-rtg0.17, left the file
+// half-destroyed with the pre-read count logged as if it had been discarded.
+//
+// The rebuild now suspends foreign keys for the demolition, because a
+// self-referencing ON DELETE SET NULL made ordering unable to satisfy them at
+// all (see TestRebuildDiscardsAFileHoldingANestedEntry). So this file is
+// DISCARDED, wholly and in one transaction — the honest answer for a file
+// made entirely of tables this build owns. What is asserted is the same
+// thing as before: the file afterwards is whole, not half of each schema.
+func TestRebuildDiscardsAFileWhoseForeignKeysCrossTheDropOrder(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "content.db")
 	rawExec(
 		t, path,
@@ -273,31 +278,31 @@ func TestRebuildFailureMidwayLeavesTheOldFileWhole(t *testing.T) {
 			VALUES ('e1', 1, 'c', 'd', 'env', '/', 'shell', 'x', 'closed', 'success', 0, 'a1')`,
 		`PRAGMA user_version=1`,
 	)
-	warned := 0
-	recording := &captureLogger{warn: func(string, ...any) { warned++ }}
-	if _, err := Open(context.Background(), Config{
+	discarded := -1
+	recording := &captureLogger{warn: func(string, ...any) { discarded++ }}
+	db, err := Open(context.Background(), Config{
 		Path: path, Key: schemaTestKey(), Budget: testBudgetInternal(), Logger: recording,
-	}); err == nil {
-		t.Fatal("Open over the FK-crossed file succeeded — the rebuild did not fail where the review said it would")
+	})
+	if err != nil {
+		t.Fatalf("Open over the FK-crossed file: %v — a file made only of tables this build owns must be rebuilt", err)
 	}
-	// Wholly old: every table and row the file held is still there, and the
-	// version stamp was not moved.
-	want := []string{"artifact_chunks", "artifacts", "authority_grants", "command_history", "entries", "grant_scopes"}
-	if got := rawTableNames(t, path); !slices.Equal(want, got) {
-		t.Fatalf("tables after the failed rebuild = %v, want %v — the file is half-destroyed", got, want)
+	t.Cleanup(func() { _ = db.Close() })
+	// Wholly new: not one table of the old shape survives, and the stamp
+	// moved. `command_history` is the old file's table and this build creates
+	// none, so its absence is the check that the demolition finished.
+	if got := rawTableNames(t, path); slices.Contains(got, "command_history") {
+		t.Fatalf("tables after the rebuild = %v — command_history survived, so the file is half of each schema", got)
 	}
-	if n := rawRowCount(t, path, "command_history"); n != 2 {
-		t.Fatalf("command_history rows = %d, want 2", n)
+	if n := rawRowCount(t, path, "entries"); n != 0 {
+		t.Fatalf("entries rows = %d, want 0 — the old rows were not discarded", n)
 	}
-	if n := rawRowCount(t, path, "entries"); n != 1 {
-		t.Fatalf("entries rows = %d, want 1", n)
+	if got := rawUserVersion(t, path); got != schemaVersion {
+		t.Fatalf("user_version = %d, want %d — the rebuild did not stamp the file", got, schemaVersion)
 	}
-	if got := rawUserVersion(t, path); got != 1 {
-		t.Fatalf("user_version = %d, want 1 — the failed rebuild stamped the file", got)
-	}
-	// Nothing was discarded, so no discard claim was made.
-	if warned != 0 {
-		t.Fatalf("the failed rebuild logged %d warnings — a count was reported that no commit discarded", warned)
+	// Three rows went (two command_history, one entries), and the discard was
+	// announced: a commit that loses history says so.
+	if discarded < 0 {
+		t.Fatal("the rebuild discarded the file without warning that history was lost")
 	}
 }
 
@@ -403,5 +408,48 @@ func TestRebuildDropsTheLayoutChainIncludingSelfReferencingTabs(t *testing.T) {
 	}
 	if _, err := again.Layout().Panes(ctx, "tab-1"); err != nil {
 		t.Fatalf("Panes after the rebuild: %v", err)
+	}
+}
+
+// A file holding a NESTED entry is rebuilt, not refused (nocx-dev stand,
+// 2026-08-30). entries.parent_id is a SELF-reference with ON DELETE SET
+// NULL, so under foreign_keys=ON the implicit delete inside `DROP TABLE
+// entries` nulls every child's parent_id — and the table's own
+// `CHECK (parent_id IS NOT NULL OR pos IS NULL)` then refuses the row that
+// still holds a seat. Children-first ordering cannot help: a self-referencing
+// table is its own child, so there is no order that drops it after its
+// children. The rebuild aborts, Open fails, the app falls back to the content
+// stub, and layout.read answers ErrNotImplemented — which the renderer shows
+// as "Tabs are not being remembered — the layout store is unavailable". Every
+// user with one nested block is permanently pinned to the old schema.
+func TestRebuildDiscardsAFileHoldingANestedEntry(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.db")
+	rawExec(
+		t, path,
+		`CREATE TABLE entries (
+			id TEXT PRIMARY KEY, ingest_seq INTEGER NOT NULL UNIQUE,
+			client TEXT NOT NULL, digest TEXT NOT NULL, environment_id TEXT NOT NULL,
+			parent_id TEXT REFERENCES entries(id) ON DELETE SET NULL,
+			pos INTEGER,
+			cwd TEXT NOT NULL, kind TEXT NOT NULL, intent TEXT NOT NULL,
+			phase TEXT NOT NULL, status TEXT NOT NULL, submitted_at INTEGER NOT NULL,
+			UNIQUE (parent_id, pos),
+			CHECK (parent_id IS NOT NULL OR pos IS NULL)
+		) STRICT`,
+		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, parent_id, pos, cwd, kind, intent, phase, status, submitted_at)
+			VALUES ('root', 1, 'c', 'd', 'env', NULL, NULL, '/', 'shell', 'x', 'closed', 'success', 0)`,
+		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, parent_id, pos, cwd, kind, intent, phase, status, submitted_at)
+			VALUES ('child', 2, 'c', 'd', 'env', 'root', 0, '/', 'text', '', 'closed', 'success', 0)`,
+		`PRAGMA user_version=14`,
+	)
+	db, err := Open(context.Background(), Config{
+		Path: path, Key: schemaTestKey(), Budget: testBudgetInternal(), Logger: log.NewSlogAdapter(nil),
+	})
+	if err != nil {
+		t.Fatalf("Open over a file with a nested entry: %v — the rebuild refused a file it owns, so the app runs on the stub", err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	if got := rawUserVersion(t, path); got != schemaVersion {
+		t.Fatalf("user_version = %d, want %d — the file was not rebuilt", got, schemaVersion)
 	}
 }

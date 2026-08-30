@@ -2468,7 +2468,14 @@ export class TerminalContent extends BasePaneContent {
       })
 
       renderer.onBufferChange((type) => {
+        const thawing = this._bufferType === 'alternate' && type === 'normal'
         this._bufferType = type
+        // The ask interval ends at the program's thaw: the frozen frame and
+        // every answer drawn over it are removed before the normal buffer
+        // resumes ownership of these rows. Completion is different — it
+        // keeps answers to seat them in scrollback — but a thaw leaves the
+        // command running and therefore has no seat to inherit.
+        if (thawing && this._summoned) this._endSummon(true)
         // The buffer is its own axis (ADR-0024 §6): a renderer-owned
         // presentation fact, never an authority. The kernel tracks it
         // independently of the lifecycle, so entering or leaving the
@@ -3950,6 +3957,10 @@ export class TerminalContent extends BasePaneContent {
     // this pane leaves the front.
     if (visible) this.reconcileGrantPresentation()
     else {
+      // Tab changes hide rather than unmount this pane. End the summon at
+      // that visibility boundary so its answers and frozen frame cannot
+      // remain painted over the program when this pane returns.
+      this._endSummon(true)
       this.markAffordance?.hide()
       this.grantController?.setVisible(false)
       this.scrollback?.blockManager.closeOverflowMenus()
@@ -4842,8 +4853,14 @@ export class TerminalContent extends BasePaneContent {
     // so their grid keeps its size and the program receives no resize.
 
     this._summonPending = true
+    // The alternate buffer is the program's complete screen, so its frozen
+    // photograph owns absolute row zero. Normal-buffer nil keeps xterm's
+    // visible viewport semantics, which may begin above buffer row zero.
     try {
-      const frame = await this.captureLiveFrame()
+      const frame =
+        this._bufferType === 'alternate'
+          ? await this.captureLiveFrame({ start: 0, end: this.rows })
+          : await this.captureLiveFrame()
       // The command may have finished, the tab may have closed, or another
       // path may have shown the editor while capture was in flight. All are
       // refusals: no stale frame, marker, placement or target mutation.
@@ -5041,7 +5058,7 @@ export class TerminalContent extends BasePaneContent {
     // away, the command finished, the prompt came back wearing a mode
     // nobody had chosen, and their next Enter went to the model. Caught by
     // the e2e, because no unit followed a dismissal past the command's end.
-    this._endSummon()
+    this._endSummon(true)
     this._syncLifecycleOwnership()
     // Escape is the discoverable hand-back gesture. Read-only state alone
     // does not route the next physical key: focus can remain on the hidden
@@ -5106,16 +5123,26 @@ export class TerminalContent extends BasePaneContent {
   /** The summon is over — dismissed by Escape, or outlived by the command
    *  it was opened over. Both exits come through here.
    *
+   *  Explicit dismissal ends the answer's lifetime at the same synchronous
+   *  boundary as the frozen frame: neither can remain painted over the
+   *  program after the ask is left. Command completion keeps the answers so
+   *  they can be seated in scrollback by `_seatSummonedAnswers`.
+   *
    *  The target goes back to what the summon displaced ONLY if the draft is
    *  empty. A half-typed question re-pointed at the shell would turn the
    *  person's next Enter into a command they never wrote — the exact reason
    *  the dropped auto-switching design was dropped. */
-  private _endSummon(): void {
+  private _endSummon(discardAnswers = false): void {
     this._summoned = false
     const restore = this._summonRestoreTargetId
     this._summonRestoreTargetId = null
     this._pendingReadFrame = null
     this._clearFreezePresentation()
+    if (discardAnswers) {
+      for (const answer of this._summonedAnswers) answer.el.remove()
+      this._summonedAnswers = []
+      this._summonedCommand = null
+    }
     this._restoreEditorHome()
     this._removeSummonStackIfEmpty()
     if (restore === null || this.editor === null) return
@@ -5612,16 +5639,7 @@ export class TerminalContent extends BasePaneContent {
       document.removeEventListener('keydown', this._targetChordKeydown, true)
       this._targetChordKeydown = null
     }
-    this._summoned = false
-    this._summonRestoreTargetId = null
-    this._clearFreezePresentation()
-    this._restoreEditorHome()
-    for (const answer of this._summonedAnswers) answer.el.remove()
-    this._summonedAnswers = []
-    this._summonedCommand = null
-    this._summonStack?.remove()
-    this._summonStack = null
-    this._summonAnswerList = null
+    this._endSummon(true)
     this.session?.close()
     this._connectionMark?.dispose()
     this._connectionMark = null

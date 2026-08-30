@@ -70,7 +70,7 @@ endif
 # e2e/run-in-container.sh straight after a bare checkout. A prerequisite here
 # bought the make target artifacts CI would not have had, and two SSH git
 # specs that could only ever pass locally (nocx-eoijp).
-HELPER_TARGETS := linux/amd64 linux/arm64 darwin/arm64
+HELPER_TARGETS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 HELPER_ARTIFACT_DIR := internal/helper/deploy/artifacts
 
 .PHONY: helpers

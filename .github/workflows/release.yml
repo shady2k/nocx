@@ -42,6 +42,7 @@ jobs:
     outputs:
       version: ${{ steps.v.outputs.version }}
       release: ${{ steps.v.outputs.release }}
+      notes: ${{ steps.notes.outputs.present }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -75,6 +76,51 @@ jobs:
             echo "version=0.0.0" >> "$GITHUB_OUTPUT"
             echo "release=false" >> "$GITHUB_OUTPUT"
           fi
+
+      # THE NOTES TRAVEL AS AN ARTEFACT, because `publish` holds no source.
+      # `publish` used to test `-f docs/release-notes/v${VERSION}.md` against
+      # its own empty working directory, so the test could never pass and every
+      # release shipped the fallback with a ::warning:: nobody read — v0.2.0 and
+      # v0.3.0 both had notes written for them and neither published them
+      # (nocx-woh3s).
+      #
+      # The fix is not a checkout in `publish`: the comment on that job's
+      # `GH_REPO` says why, and it still holds — cloning the source to satisfy
+      # an implicit lookup hides what the lookup actually needed. This job
+      # already has the source and already resolves VERSION, so it is the one
+      # that can answer "are there notes for this version" and hand the answer
+      # forward. `publish` then consumes the notes the way it consumes the
+      # binaries and the manifest.
+      #
+      # No file, no artefact, and the `notes` output says so: `publish` skips
+      # the download and its fallback fires for the real reason. A dry run
+      # (VERSION 0.0.0, no such file) takes that branch and uploads nothing,
+      # which is why the upload is conditional rather than
+      # `if-no-files-found`-tolerant — an artefact that does not exist must not
+      # be downloaded either.
+      - id: notes
+        name: Stage the release notes, if this version has any
+        env:
+          VERSION: ${{ steps.v.outputs.version }}
+        run: |
+          set -euo pipefail
+          notes_file="docs/release-notes/v${VERSION}.md"
+          if [ -f "$notes_file" ]; then
+            mkdir -p staged-notes
+            cp "$notes_file" staged-notes/notes.md
+            echo "present=true" >> "$GITHUB_OUTPUT"
+            echo "staged $notes_file ($(wc -c < "$notes_file") bytes)"
+          else
+            echo "present=false" >> "$GITHUB_OUTPUT"
+            echo "no $notes_file in the tree; publish will use the install caveat"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        if: steps.notes.outputs.present == 'true'
+        with:
+          name: release-notes
+          path: staged-notes/notes.md
+          retention-days: 7
 
   # ONE ORIGIN FOR THE HELPER BYTES (nocx-6de7c). The helpers used to be
   # built by BOTH build jobs and `sign` compared the two results; run
@@ -1011,6 +1057,16 @@ jobs:
           name: manifest
           path: dist
 
+      # The notes `validate` staged, when that version had any. Guarded on the
+      # same output that decided whether to upload them: no artefact exists in
+      # the other case, and downloading one that does not exist fails the run.
+      - name: Download the release notes `validate` staged
+        if: needs.validate.outputs.notes == 'true'
+        uses: actions/download-artifact@v8
+        with:
+          name: release-notes
+          path: notes
+
       # GH_REPO, because this job never checks the repository out — it only
       # downloads the three artefacts above — and `gh` falls back to asking
       # git which remote it is talking about. With no .git it does not fail
@@ -1034,15 +1090,17 @@ jobs:
           set -euo pipefail
           # THE NOTES ARE A FILE IN THE REPOSITORY when one exists for this
           # version, so what a release says is written, reviewed and diffed
-          # like everything else that ships. The fallback is the sentence this
-          # step used to carry alone: it is the install caveat, which is true
-          # of every build and belongs in every release whether or not anybody
-          # wrote notes for that one.
-          notes_file="docs/release-notes/v${VERSION}.md"
+          # like everything else that ships. It reaches this job as the
+          # `release-notes` artefact `validate` staged from the checked-out
+          # tree — this job has no working copy to read it from. The fallback
+          # is the sentence this step used to carry alone: it is the install
+          # caveat, which is true of every build and belongs in every release
+          # whether or not anybody wrote notes for that one.
+          notes_file="notes/notes.md"
           if [ -f "$notes_file" ]; then
             notes_arg=(--notes-file "$notes_file")
           else
-            echo "::warning::no $notes_file — publishing with the install caveat alone"
+            echo "::warning::no docs/release-notes/v${VERSION}.md — publishing with the install caveat alone"
             notes_arg=(--notes "Automated release. macOS: first launch needs the manual quarantine step. Linux: chmod +x the AppImage. See the README for both.")
           fi
           gh release create "v${VERSION}" \

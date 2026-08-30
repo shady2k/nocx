@@ -201,6 +201,40 @@ func TestCommandEffect_PathPrefixedDisqualifiersMatchBareNames(t *testing.T) {
 	}
 }
 
+func TestCommandEffect_AllowListProgramNamesRemainCaseSensitive(t *testing.T) {
+	tests := []struct {
+		name      string
+		known     string
+		upperCase string
+	}{
+		{name: "ls", known: "ls /etc", upperCase: "LS /etc"},
+		{name: "cat", known: "cat /etc/passwd", upperCase: "CAT /etc/passwd"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			known := parseCanonicalInvocation(tc.known)
+			if got := commandEffect(known, content.EffectDelegate); got != content.EffectObserve ||
+				len(known.Resources.Unresolved) != 0 {
+				t.Fatalf("known = %+v (effect %q), want resolved observe", known, got)
+			}
+
+			upperCase := parseCanonicalInvocation(tc.upperCase)
+			if got := commandEffect(upperCase, content.EffectDelegate); got != content.EffectDelegate ||
+				len(upperCase.Resources.Unresolved) == 0 {
+				t.Fatalf("upper-case = %+v (effect %q), want unresolved delegate", upperCase, got)
+			}
+		})
+	}
+
+	t.Run("unknown", func(t *testing.T) {
+		inv := parseCanonicalInvocation("NOTAPROGRAM /etc")
+		if got := commandEffect(inv, content.EffectDelegate); got != content.EffectDelegate ||
+			len(inv.Resources.Unresolved) == 0 {
+			t.Fatalf("unknown = %+v (effect %q), want unresolved delegate", inv, got)
+		}
+	})
+}
+
 func TestCommandEffect_UnparseableAndUnknownAreWorstCase(t *testing.T) {
 	for _, command := range []string{
 		"ls 'unterminated",

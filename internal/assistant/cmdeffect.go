@@ -153,7 +153,8 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 	for _, fact := range facts {
 		words = append(words, fact.value)
 	}
-	program := normalizedProgram(words[0])
+	// This is an allow-list: over-matching would permit more, so preserve case.
+	program := allowListProgram(words[0])
 
 	if reason := shellFeatureReason(subcommand); reason != "" {
 		report.Unresolved = append(report.Unresolved, content.UnresolvedResource{
@@ -543,7 +544,8 @@ func shellHasCommandString(words []string) bool {
 }
 
 func disqualifierReason(words []string) string {
-	program := normalizedProgram(words[0])
+	// This is a deny-list: over-matching only refuses more, so fold case.
+	program := denyListProgram(words[0])
 	switch {
 	case strings.HasPrefix(program, "$"):
 		return "the program name comes from a shell variable"
@@ -819,7 +821,11 @@ func commandWordFacts(command string) ([]commandWordFact, bool) {
 	return facts, true
 }
 
-func normalizedProgram(program string) string {
+func allowListProgram(program string) string {
+	return filepath.Base(program)
+}
+
+func denyListProgram(program string) string {
 	return strings.ToLower(filepath.Base(program))
 }
 
@@ -827,7 +833,8 @@ func disqualifyingWords(words []string) bool {
 	if len(words) == 0 {
 		return true
 	}
-	program := normalizedProgram(words[0])
+	// This is a deny-list: over-matching only refuses more, so fold case.
+	program := denyListProgram(words[0])
 	if strings.HasPrefix(program, "$") {
 		return true
 	}

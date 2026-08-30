@@ -222,12 +222,12 @@ func (s *WSServer) brokerSpecs(immediate control.ImmediateSubmission) []methodSp
 // is the matrix of the amended §7, resolved by content.ResolvePolicy — the
 // ONE place the order is stated: the workspace override when nocx-mp2vd
 // lands, the global default now (the store the composition root wired).
-// The mint adds the run's OWN session as a base scope of every row and the
-// whole accessible local filesystem as its path scope. The path fence is wide
-// on purpose: the policy matrix is the narrowing surface, so a row can still
-// refuse or ask for a path without a second, weaker per-run path rule. The
-// matrix derives the grant's effects and the declaration filter's scope union
-// (EffectPolicy.AsGrant).
+// The mint supplies the run's own session, the whole accessible local
+// filesystem, and the content root as the RUN FENCE. EffectPolicy.AsGrant
+// keeps those fence scopes distinct from each policy row's POLICY SELECTOR:
+// a selector is intersected with the fence, while an empty selector applies
+// across it. This is why a narrow path row remains narrow even though the
+// run's outer path fence is "/"; the two lists are not unioned.
 //
 // This is the workspace's default grant: the workspace concept (which
 // sessions read as one story) is not wired yet, so the single-session
@@ -247,9 +247,41 @@ func (s *WSServer) runGrantFor(sessionID string) *content.Grant {
 	// scope is already this session, so the overlay carries no scope of its
 	// own: the run cannot reach outside its session anyway.
 	p := content.ResolvePolicy(s.agentPolicy.Policy(), nil, s.sessionPolicy.For(session.ID(sessionID)))
+	// The endpoint's session is the run-authoritative session resource. A
+	// policy may narrow paths or content, but an operator session selector
+	// names a different domain and must not erase the current session from
+	// the run. Drop session selectors before the generic fence intersection;
+	// the single-session run fence still prevents access to any other session.
+	p = preserveRunSessionScope(p)
 	g := p.AsGrant([]content.GrantScope{
 		{Kind: content.ResourceSession, ID: sessionID},
 		{Kind: content.ResourcePath, ID: "/"},
+		{Kind: content.ResourceContent, ID: "content"},
 	})
 	return &g
+}
+
+// preserveRunSessionScope removes operator session selectors from a policy
+// copy. The run mint owns exactly one session scope, so session authority is
+// endpoint-derived while other resource selectors remain policy-controlled.
+func preserveRunSessionScope(p content.EffectPolicy) content.EffectPolicy {
+	rows := []*content.EffectRow{
+		&p.Observe,
+		&p.MutateReversible,
+		&p.MutateDestructive,
+		&p.PrivilegeChange,
+		&p.Disclose,
+		&p.CrossBoundary,
+		&p.Delegate,
+	}
+	for _, row := range rows {
+		scopes := make([]content.GrantScope, 0, len(row.Scopes))
+		for _, scope := range row.Scopes {
+			if scope.Kind != content.ResourceSession {
+				scopes = append(scopes, scope)
+			}
+		}
+		row.Scopes = scopes
+	}
+	return p
 }

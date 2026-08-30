@@ -7,11 +7,17 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/note"
+	"github.com/shady2k/nocx/internal/snippet"
 )
 
 type grantPromptClient struct {
@@ -91,6 +97,104 @@ func TestAgentAsk_GrantsAreNamedWithoutInlining_OverTheWire(t *testing.T) {
 	}
 	if _, readErr := h.ws.ReadSessionItem(t.Context(), sid, third, 0, 200); !errors.Is(readErr, assistant.ErrSessionItemNotFound) {
 		t.Fatalf("cleared item error = %v, want assistant.ErrSessionItemNotFound", readErr)
+	}
+}
+
+func TestRunGrantForOffersContentTools(t *testing.T) {
+	server := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithAgentPolicy(autonomousPolicyStore(t)))
+	grant := server.runGrantFor("session-a")
+	if grant == nil {
+		t.Fatal("runGrantFor returned no grant")
+	}
+	reg, err := agenttools.Assemble(os.DirFS("../../contracts/tools"))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	tools := reg.ForGrant(*grant)
+	names := make(map[string]bool, len(tools))
+	for _, tool := range tools {
+		names[tool.Name] = true
+	}
+	for _, want := range []string{"notes.search", "snippets.list"} {
+		if !names[want] {
+			t.Fatalf("run grant offered tools %v, missing %q", names, want)
+		}
+	}
+}
+
+func TestAgentAskReceivesContentOperationsFromCompositionRoot(t *testing.T) {
+	client := &grantPromptClient{seen: make(chan assistant.AskParams, 1)}
+
+	key := make([]byte, 32)
+	for i := range key {
+		key[i] = byte(i + 9)
+	}
+	noteStore, err := note.Open(t.Context(), note.Config{
+		Path: t.TempDir() + "/notes.db",
+		Key:  key,
+	})
+	if err != nil {
+		t.Fatalf("note.Open: %v", err)
+	}
+	t.Cleanup(func() { _ = noteStore.Close() })
+	noteID := 0
+	noteSvc := note.NewService(noteStore, func() string {
+		noteID++
+		return fmt.Sprintf("note-%d", noteID)
+	}, nil)
+	snippetID := 0
+	snippetSvc := snippet.NewService(&memSnippetStore{existed: true}, func() string {
+		snippetID++
+		return fmt.Sprintf("snippet-%d", snippetID)
+	})
+
+	h := newAskHarnessWithOpts(t, client,
+		WithAgentPolicy(autonomousPolicyStore(t)),
+		WithNotes(noteSvc),
+		WithSnippets(snippetSvc),
+	)
+	h.createEndpoint()
+	sid := openLocalSession(t, h.conn)
+	if _, errObj := askOverWire(t, h.conn, map[string]any{
+		"askId":     "ask-content-operations",
+		"sessionId": sid,
+		"question":  "what is here?",
+		"cwd":       "/repo",
+	}, 1); errObj != nil {
+		t.Fatalf("agent.ask: %+v", errObj)
+	}
+
+	params := <-client.seen
+	if params.NoteOperation == nil {
+		t.Fatal("assistant AskParams.NoteOperation is nil")
+	}
+	if params.SnippetOperation == nil {
+		t.Fatal("assistant AskParams.SnippetOperation is nil")
+	}
+
+	var createdNote note.Note
+	if err := params.NoteOperation.Run(t.Context(), func(ctx context.Context, svc capability.NoteService) error {
+		var err error
+		createdNote, err = svc.Create(ctx, "created through assistant operation")
+		return err
+	}); err != nil {
+		t.Fatalf("note operation create: %v", err)
+	}
+	if createdNote.Body != "created through assistant operation" {
+		t.Fatalf("note operation created %+v", createdNote)
+	}
+
+	var createdSnippet snippet.Snippet
+	if err := params.SnippetOperation.Run(t.Context(), func(_ context.Context, svc capability.SnippetService) error {
+		var err error
+		createdSnippet, err = svc.Create("Assistant", "created through assistant operation")
+		return err
+	}); err != nil {
+		t.Fatalf("snippet operation create: %v", err)
+	}
+	if createdSnippet.Title != "Assistant" || createdSnippet.Body != "created through assistant operation" {
+		t.Fatalf("snippet operation created %+v", createdSnippet)
 	}
 }
 

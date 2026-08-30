@@ -547,8 +547,10 @@ type agentHandlers struct {
 	dumpOp capability.LedgerOperation
 	// configOp resolves the endpoint the run uses (the ONE config operation,
 	// shared with the config handlers — AD-8). nil → no endpoint store.
-	configOp capability.ConfigOperation
-	log      log.Logger
+	configOp  capability.ConfigOperation
+	noteOp    capability.NoteOperation
+	snippetOp capability.SnippetOperation
+	log       log.Logger
 	// endpointWired is the config handlers' "endpoints not available" gate:
 	// with no endpoint repository, ListEndpoints would nil-panic inside the
 	// service, so the ask refuses before the call.
@@ -1211,19 +1213,21 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	ctx = assistant.WithWireIdentity(ctx, strconv.FormatInt(rc.runID, 10), rc.entryID)
 	ctx = assistant.WithWireToolOfferState(ctx, strconv.FormatInt(rc.runID, 10), rc.grant, rc.offerState)
 	err := h.client.Ask(ctx, assistant.AskParams{
-		Key:           secret,
-		BaseURL:       rc.endpoint.BaseURL,
-		Model:         rc.model,
-		Headers:       headers,
-		Messages:      msgs,
-		Grant:         rc.grant,
-		AttemptLedger: h.attemptLedger,
-		Requester:     h.requester,
-		KnownMaterial: h.knownMaterial,
-		Approvals:     h.approvals,
-		RunID:         strconv.FormatInt(rc.runID, 10),
-		SessionID:     string(rc.sessionID),
-		Attempt:       rc.attempt,
+		Key:              secret,
+		BaseURL:          rc.endpoint.BaseURL,
+		Model:            rc.model,
+		Headers:          headers,
+		Messages:         msgs,
+		Grant:            rc.grant,
+		AttemptLedger:    h.attemptLedger,
+		Requester:        h.requester,
+		NoteOperation:    h.noteOp,
+		SnippetOperation: h.snippetOp,
+		KnownMaterial:    h.knownMaterial,
+		Approvals:        h.approvals,
+		RunID:            strconv.FormatInt(rc.runID, 10),
+		SessionID:        string(rc.sessionID),
+		Attempt:          rc.attempt,
 		// The turn every entry this run causes is joined to (nocx-h1l4o).
 		// It comes off the SAME askRunContext the run id does — both were
 		// set from one SubmitAgentAsk result — so the relation is written
@@ -2379,7 +2383,7 @@ func derefOrEmpty(s *string) string {
 // agentSpecs declares the agent.* control methods on the CONTENT operation
 // queue (the ask transaction is the ledger — ADR-0019's one writer — so it
 // shares the content domain's gate and queue).
-func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
+func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
 	var agentOp capability.AgentOperation
 	if s.contentDB != nil {
 		agentOp = capability.NewAgentOperation(contentGate, lane, s.contentDB)
@@ -2398,6 +2402,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		// to a renderer-minted tab.
 		return agentHandlers{
 			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
+			noteOp: noteOp, snippetOp: snippetOp,
 			credentials: credentials, client: client, askSub: askSub,
 			attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, knownMaterial: s.agentKnownMaterial,

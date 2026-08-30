@@ -2,12 +2,57 @@ package content
 
 import "testing"
 
-func TestResourceReportEffectKeepsWorstCaseForWrites(t *testing.T) {
-	declared := EffectMutateDestructive
+func TestResourceReportEffectMapsEachResolvedVerb(t *testing.T) {
+	tests := []struct {
+		name   string
+		verb   ResourceVerb
+		effect Effect
+	}{
+		{name: "read", verb: ResourceRead, effect: EffectObserve},
+		{name: "write", verb: ResourceWrite, effect: EffectMutateReversible},
+		{name: "delete", verb: ResourceDelete, effect: EffectMutateDestructive},
+		{name: "network", verb: ResourceNetwork, effect: EffectCrossBoundary},
+		{name: "execute", verb: ResourceExecute, effect: EffectDelegate},
+		{name: "source", verb: ResourceSource, effect: EffectPrivilegeChange},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			report := ResourceReport{Resources: []Resource{{Path: "/tmp/x", Verb: tc.verb}}}
+			if got := report.Effect(EffectDelegate); got != tc.effect {
+				t.Fatalf("verb %s lowered effect to %q, want %q", tc.verb, got, tc.effect)
+			}
+		})
+	}
+}
+
+func TestResourceReportEffectKeepsDeclaredAboveCeiling(t *testing.T) {
+	tests := []struct {
+		name     string
+		declared Effect
+		verb     ResourceVerb
+	}{
+		{name: "execute cannot lower destructive", declared: EffectMutateDestructive, verb: ResourceExecute},
+		{name: "network cannot lower destructive", declared: EffectMutateDestructive, verb: ResourceNetwork},
+		{name: "write cannot raise observe", declared: EffectObserve, verb: ResourceWrite},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			report := ResourceReport{Resources: []Resource{{Path: "/tmp/x", Verb: tc.verb}}}
+			if got := report.Effect(tc.declared); got != tc.declared {
+				t.Fatalf("verb %s changed declared %q to %q", tc.verb, tc.declared, got)
+			}
+		})
+	}
+}
+
+func TestResourceReportEffectKeepsDeclaredForUnresolvedUnknownAndMixed(t *testing.T) {
+	declared := EffectDelegate
 	for _, report := range []ResourceReport{
-		{Resources: []Resource{{Path: "/etc/x", Verb: ResourceWrite}}},
-		{Resources: []Resource{{Path: "/tmp/x", Verb: ResourceDelete}}},
-		{Resources: []Resource{{Path: "example.com", Verb: ResourceNetwork}}},
+		{Resources: []Resource{{Path: "/tmp/x", Verb: ResourceUnknown}}},
+		{Resources: []Resource{
+			{Path: "/tmp/x", Verb: ResourceRead},
+			{Path: "/tmp/y", Verb: ResourceWrite},
+		}},
 		{Unresolved: []UnresolvedResource{{Path: "$BUILD", Verb: ResourceDelete, Reason: "contains a shell variable"}}},
 	} {
 		if got := report.Effect(declared); got != declared {

@@ -2,6 +2,7 @@ package assistant
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/content"
@@ -23,6 +24,13 @@ import (
 // CommandInvocation is the parser result shared by effect classification and
 // invocation-rule policy. The parser is deliberately owned here: policy
 // consumers receive this result instead of tokenizing the command again.
+//
+// The invariant is `Disqualified ⇒ non-empty Unresolved`. Its CONVERSE has
+// never held: `Disqualified` is false for a path-prefixed program that a bare
+// name would have disqualified. What made that safe was `Unresolved`, filled
+// by the `readPrograms` default at the bottom of the switch — not
+// `Disqualified`. An audit that reads `Disqualified` as the guard is reading
+// the wrong field.
 func parseCanonicalInvocation(command string) content.Invocation {
 	subcommands, disqualified, ok := splitCommand(command)
 	inv := content.Invocation{Parsed: ok, Disqualified: disqualified}
@@ -145,14 +153,15 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 	for _, fact := range facts {
 		words = append(words, fact.value)
 	}
-	program := words[0]
+	program := normalizedProgram(words[0])
 
 	if reason := shellFeatureReason(subcommand); reason != "" {
 		report.Unresolved = append(report.Unresolved, content.UnresolvedResource{
 			Path: subcommand, Verb: content.ResourceUnknown, Reason: reason,
 		})
 	}
-	if disqualifyingWords(words) {
+	disqualified := disqualifyingWords(words)
+	if disqualified {
 		report.Unresolved = append(report.Unresolved, content.UnresolvedResource{
 			Path: program, Verb: content.ResourceUnknown,
 			Reason: disqualifierReason(words),
@@ -160,6 +169,7 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 	}
 
 	args := withoutRedirections(facts, &report)
+
 	switch program {
 	case "cp":
 		operands, target := cpOperands(args)
@@ -254,6 +264,23 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 			report = addResource(report, operand, verb)
 		}
 		return report
+	case "source", ".":
+		// Sourcing runs in the current shell and can permanently change its
+		// environment; it is not subprocess execution of a file.
+		operands := resourceOperands(program, args)
+		if len(operands) == 0 {
+			return unresolvedCommand(report, program, "has no statically named source file")
+		}
+		return addResource(report, operands[0], content.ResourceSource)
+	case "bash", "sh":
+		script, ok := shellScriptOperand(program, args)
+		if !ok {
+			return unresolvedCommand(report, program, "has no statically named script file")
+		}
+		if disqualified {
+			return report
+		}
+		return addResource(report, script, content.ResourceExecute)
 	case "curl":
 		operands := resourceOperands("curl", args)
 		if len(operands) == 0 {
@@ -274,6 +301,9 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 	}
 
 	if _, known := readPrograms[program]; !known {
+		if isExecutablePath(facts[0].value) && !disqualified {
+			return addResource(report, facts[0], content.ResourceExecute)
+		}
 		return unresolvedCommand(report, program, "is not a recognized resource access form")
 	}
 	for _, operand := range readOperands(program, args) {
@@ -365,6 +395,12 @@ func isFileDescriptor(word string) bool {
 	return word != "" && strings.Trim(word, "0123456789") == ""
 }
 
+func isExecutablePath(program string) bool {
+	return strings.HasPrefix(program, "/") ||
+		strings.HasPrefix(program, "./") ||
+		strings.HasPrefix(program, "../")
+}
+
 func resourceOperands(program string, args []commandWordFact) []commandWordFact {
 	operands := make([]commandWordFact, 0, len(args))
 	optionsEnded := false
@@ -383,6 +419,29 @@ func resourceOperands(program string, args []commandWordFact) []commandWordFact 
 		operands = append(operands, arg)
 	}
 	return operands
+}
+
+func shellScriptOperand(program string, args []commandWordFact) (commandWordFact, bool) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg.value == "--" {
+			if i+1 < len(args) {
+				return args[i+1], true
+			}
+			return commandWordFact{}, false
+		}
+		if !strings.HasPrefix(arg.value, "-") {
+			return arg, true
+		}
+		if arg.value == "-c" || arg.value == "--command" ||
+			(!strings.HasPrefix(arg.value, "--") && strings.Contains(arg.value[1:], "c")) {
+			return commandWordFact{}, false
+		}
+		if optionTakesNextValue(program, arg.value) && i+1 < len(args) {
+			i++
+		}
+	}
+	return commandWordFact{}, false
 }
 
 func optionTakesNextValue(program, option string) bool {
@@ -407,6 +466,8 @@ func optionTakesNextValue(program, option string) bool {
 			option == "-L" || option == "-l" || option == "-o" ||
 			option == "-p" || option == "-R" || option == "-S" ||
 			option == "-W"
+	case "bash", "sh":
+		return option == "-o" || option == "--option" || option == "--rcfile"
 	case "curl":
 		return option == "-A" || option == "-b" || option == "-d" ||
 			option == "-e" || option == "-F" || option == "-H" ||
@@ -468,8 +529,21 @@ func readOperands(program string, args []commandWordFact) []commandWordFact {
 	return operands[1:]
 }
 
+func shellHasCommandString(words []string) bool {
+	for _, word := range words {
+		if word == "-c" || word == "--command" {
+			return true
+		}
+		if strings.HasPrefix(word, "-") && !strings.HasPrefix(word, "--") &&
+			strings.Contains(word[1:], "c") {
+			return true
+		}
+	}
+	return false
+}
+
 func disqualifierReason(words []string) string {
-	program := words[0]
+	program := normalizedProgram(words[0])
 	switch {
 	case strings.HasPrefix(program, "$"):
 		return "the program name comes from a shell variable"
@@ -481,7 +555,7 @@ func disqualifierReason(words []string) string {
 		return "xargs constructs further commands from input"
 	case program == "tee":
 		return "tee writes named paths"
-	case (program == "sh" || program == "bash") && containsWord(words[1:], "-c"):
+	case (program == "sh" || program == "bash") && shellHasCommandString(words[1:]):
 		return "the shell will interpret a nested command string"
 	case program == "find" && containsWord(words[1:], "-exec"):
 		return "find executes a command for discovered paths"
@@ -745,11 +819,15 @@ func commandWordFacts(command string) ([]commandWordFact, bool) {
 	return facts, true
 }
 
+func normalizedProgram(program string) string {
+	return strings.ToLower(filepath.Base(program))
+}
+
 func disqualifyingWords(words []string) bool {
 	if len(words) == 0 {
 		return true
 	}
-	program := words[0]
+	program := normalizedProgram(words[0])
 	if strings.HasPrefix(program, "$") {
 		return true
 	}
@@ -759,7 +837,7 @@ func disqualifyingWords(words []string) bool {
 		program == "tee" {
 		return true
 	}
-	if (program == "sh" || program == "bash") && containsWord(words[1:], "-c") {
+	if (program == "sh" || program == "bash") && shellHasCommandString(words[1:]) {
 		return true
 	}
 	if program == "find" && (containsWord(words[1:], "-exec") || containsWord(words[1:], "-delete")) {

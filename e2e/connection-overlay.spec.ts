@@ -29,6 +29,11 @@
  *     source. The server-binary remedy is platform-specific; this run is Linux.
  *  5. Test 7 opens the real vault unlock surface before stopping the backend and
  *     proves the overlay becomes the remaining interactive surface.
+ *  6. Test 6 supplies failures through the resolver shim, so it proves the
+ *     overlay renders the supplied message and remedy, not that Go's strings
+ *     reach the page. `main_test.go` (`TestResolveBackendReportsSuccessAndFailure`)
+ *     holds that transport half; these literals mirror launcher.go so drift is
+ *     found by grep.
  *
  * No duration is used as an assertion. Every wait below observes a DOM state,
  * visibility, prompt readiness, or backend recording state.
@@ -74,7 +79,8 @@ const NOT_READY_FAILURE: Resolution = {
   ok: false,
   kind: 'not-ready',
   message: 'The nocx backend could not be reached.',
-  remedy: "Retry the launch, then check the backend's startup log if it continues.",
+  remedy:
+    'The backend could not start or respond. If retrying does not help, check whether another instance is already running and look for the backend’s startup error.',
 }
 
 function endpointResolution(endpoint: BackendEndpoint): Resolution {
@@ -153,7 +159,8 @@ async function recording(endpoint: BackendEndpoint, live: LiveSession): Promise<
 const FAILURE_CASES = [
   {
     name: 'profile-unusable',
-    message: 'The profile directories at /tmp/nocx-overlay-profile could not be read or written.',
+    message:
+      'The profile runtime directory /tmp/nocx-overlay-profile could not be created or used.',
     remedy: 'Check that /tmp/nocx-overlay-profile can be read and written, then retry.',
   },
   {
@@ -170,7 +177,8 @@ const FAILURE_CASES = [
   {
     name: 'not-ready',
     message: 'The nocx backend could not be reached.',
-    remedy: "Retry the launch, then check the backend's startup log if it continues.",
+    remedy:
+      'The backend could not start or respond. If retrying does not help, check whether another instance is already running and look for the backend’s startup error.',
   },
 ] as const
 

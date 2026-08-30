@@ -40,7 +40,7 @@ func askWithGrant(t *testing.T, grant *content.Grant) *fakeOpenAIServer {
 	p := testAskParams(srv.URL)
 	p.Grant = grant
 	p.KnownMaterial = &fakeKnownMaterial{}
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -161,7 +161,7 @@ func TestAsk_NoGrantTakesTheNoToolsPath(t *testing.T) {
 	f, srv := newFakeOpenAI(nil)
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}

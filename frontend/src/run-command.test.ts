@@ -55,7 +55,7 @@ describe('mountRunCommandHandler — the renderer half of the run tool', () => {
       command: 'ls -la',
     })
 
-    await vi.waitFor(() => expect(submitAgentCommand).toHaveBeenCalledWith('ls -la'))
+    await vi.waitFor(() => expect(submitAgentCommand).toHaveBeenCalledWith('ls -la', 'req-1'))
     await vi.waitFor(() => expect(d.call).toHaveBeenCalled())
     expect(d.calls[0].method).toBe('agent.runResolved')
     const params = d.calls[0].params as Record<string, unknown>

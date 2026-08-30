@@ -75,6 +75,9 @@ func validateLifecycleSubmitAttemptRaw(raw json.RawMessage) string {
 	if utf8.RuneCountInString(p.Host) > maxDestinationRunes {
 		return "host exceeds the length bound"
 	}
+	if p.RequestID != "" && utf8.RuneCountInString(p.RequestID) > maxIDRunes {
+		return "requestId exceeds the id length bound"
+	}
 	// Refused HERE rather than at the store write: an attempt opened and
 	// then refused would hold the domain and poison the next attach, and a
 	// submit whose provenance is unknown must not open one at all.
@@ -430,10 +433,13 @@ func (s *WSServer) replayLifecycleFacts(sid session.ID) {
 // command text is the reference-intact record line — never the resolved
 // send line (decision 5's privacy rule).
 type submitAttemptParams struct {
-	Domain  string `json:"domain"`
-	Command string `json:"command"`
-	Cwd     string `json:"cwd"`
-	Host    string `json:"host"`
+	Domain string `json:"domain"`
+	// RequestID is the optional broker id of the assistant run that caused
+	// this submit. It is transport correlation only: user submits omit it.
+	RequestID string `json:"requestId,omitempty"`
+	Command   string `json:"command"`
+	Cwd       string `json:"cwd"`
+	Host      string `json:"host"`
 	// Source is WHO submitted this command, in the ledger's own vocabulary
 	// ('user' is the person at the keyboard, 'assistant' is the agent's
 	// lane) — minted by the submitting target at submit and carried
@@ -513,6 +519,12 @@ func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsCo
 	if err != nil {
 		_ = r.TryError(req.ID, RPCError{Code: lifecycleSubmitErrorCode(err), Message: err.Error()})
 		return
+	}
+	if params.Source == string(content.SourceAssistant) && params.RequestID != "" {
+		if !s.broker.bindRunAttempt(params.RequestID, string(att.ID), wconn) {
+			s.log.Warn("lifecycle submit attempt has no authorized live assistant run to bind",
+				"request_id", params.RequestID, "attempt", att.ID)
+		}
 	}
 	if s.contentDB != nil {
 		masked, maskErr := maskLedgerCommand(params.Command)

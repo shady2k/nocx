@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/content"
 )
 
 // runToolCallingServer is the fake provider for the run wire tests: the
@@ -118,7 +119,7 @@ func TestRun_EndToEndOverTheRealSocket(t *testing.T) {
 	fake, srv := newRunToolCallingServer("")
 	defer srv.Close()
 
-	client, err := assistant.NewClient(nil, nil)
+	client, err := assistant.NewClient(nil, nil, content.NoFloor())
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/shady2k/nocx/internal/assistant"
+	"github.com/shady2k/nocx/internal/content"
 )
 
 func TestEndpointsProbe_RequiredCredentialMissingIsRefused(t *testing.T) {
@@ -63,7 +64,7 @@ func TestAgentAsk_NoKeyEndpointAnswersWithoutAuthorization(t *testing.T) {
 	}))
 	defer model.Close()
 
-	client, err := assistant.NewClient(nil, nil)
+	client, err := assistant.NewClient(nil, nil, content.NoFloor())
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

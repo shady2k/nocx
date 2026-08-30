@@ -33,7 +33,7 @@ func newPolicyHarness(t *testing.T) (*askHarness, *assistant.GlobalPolicyStore) 
 
 func mustClient(t *testing.T) assistant.Client {
 	t.Helper()
-	client, err := assistant.NewClient(nil, nil)
+	client, err := assistant.NewClient(nil, nil, content.NoFloor())
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

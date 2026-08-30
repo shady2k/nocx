@@ -66,7 +66,7 @@ func TestAsk_EgressKnownVaultValueSuspends(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -126,7 +126,7 @@ func TestAsk_EgressHeuristicSuspendsDistinguishably(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: fmt.Sprintf(`{"path":%q}`, filepath.Join(dir, "a.txt"))}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -168,7 +168,7 @@ func TestAsk_EgressErrorStringScreened(t *testing.T) {
 	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "session.read", args: `{}`}))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -317,7 +317,7 @@ func TestAsk_EgressFindingStopsLaterCallsInTheBatch(t *testing.T) {
 	))
 	defer srv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}

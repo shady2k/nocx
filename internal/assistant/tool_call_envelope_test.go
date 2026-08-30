@@ -8,6 +8,8 @@ import (
 	"os"
 	"strings"
 	"testing"
+
+	"github.com/shady2k/nocx/internal/content"
 )
 
 func TestIsUnexecutedToolCallEnvelope_RecognizesWholeKnownDialects(t *testing.T) {
@@ -92,7 +94,7 @@ func TestAsk_OfferedToolsAndWholeEnvelopeReturnTypedFailure(t *testing.T) {
 	defer srv.Close()
 
 	grant, _ := testDirGrant(t, autonomousMatrix())
-	cl, err := newClient(nil, os.DirFS(realToolsFS), nil)
+	cl, err := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -112,7 +114,7 @@ func TestAsk_OrdinaryAnswerWithToolMarkupQuotedStillCompletes(t *testing.T) {
 	defer srv.Close()
 
 	grant, _ := testDirGrant(t, autonomousMatrix())
-	cl, err := newClient(nil, os.DirFS(realToolsFS), nil)
+	cl, err := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}

@@ -60,6 +60,9 @@ export interface LifecycleSubmitAttemptParams {
    *  quietly attribute the assistant's command to the person — which is
    *  exactly what a restored pane then showed (nocx-1druc). */
   readonly source: 'user' | 'assistant'
+  /** The broker request that caused an assistant submission; absent for
+   *  commands entered by the person. */
+  readonly requestId?: string
 }
 
 export class LifecycleClient {

@@ -53,7 +53,7 @@ export interface AgentRunCompletion {
  *  resolves when the block freezes. */
 export interface RunCommandContent {
   sessionId(): string
-  submitAgentCommand(command: string): Promise<AgentRunCompletion>
+  submitAgentCommand(command: string, requestId: string): Promise<AgentRunCompletion>
 }
 
 /** Mount the run pull handler on the app's dispatcher. Returns the
@@ -86,7 +86,7 @@ async function answerRun(
     return
   }
   try {
-    const run = await content.submitAgentCommand(p.command)
+    const run = await content.submitAgentCommand(p.command, p.requestId)
     resolve(dispatcher, {
       requestId: p.requestId,
       outcome: 'completed',

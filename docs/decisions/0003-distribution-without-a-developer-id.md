@@ -1,6 +1,6 @@
 # ADR-0003 — Distribution without a Developer ID
 
-- **Status:** Accepted
+- **Status:** Accepted (amended 2026-08-30 by [ADR-0052](0052-a-code-identity-without-a-publisher-identity.md))
 - **Date:** 2026-07-23
 - **Related:** epic `nocx-a75` (Distribution and updates), `nocx-a75.1` (release
   builds), `nocx-a75.3` (auto-update); design
@@ -36,6 +36,16 @@ and the packaging pipeline preserves and verifies it (`ditto`, not `zip`).
 
 **Ship unsigned builds through GitHub Releases, and own update integrity
 ourselves.**
+
+> **Amended by [ADR-0052](0052-a-code-identity-without-a-publisher-identity.md)
+> (2026-08-30):** publisher identity is still absent — no Developer ID, no
+> notarization, no Gatekeeper policy, no hardened runtime, Homebrew still closed,
+> and the manual quarantine step stands. What changed is that the bundle no longer
+> signs itself ad-hoc: it carries a self-signed project certificate, because the
+> keychain needs a designated requirement that survives a release (ADR-0050 step
+> 3), and an ad-hoc requirement is the code hash. Integrity of a download is still
+> the ed25519-signed manifest below; a self-signed certificate proves nothing to a
+> stranger. Read the paragraph above about Wails' ad-hoc signature as history.
 
 - Developer ID signing and notarization are **out of scope** (D3). What is out of
   scope is _distribution_ signing; Wails' ad-hoc signature is existing behaviour

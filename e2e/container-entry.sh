@@ -21,8 +21,13 @@ set -euo pipefail
 git config --global --add safe.directory /work
 
 echo "=== npm ci (root + frontend) ==="
-npm ci --silent
-(cd frontend && npm ci --silent)
+# NOT --silent: it hides the reason the install died, and the install is where
+# this script fails when it fails. A registry timeout used to reach the reader
+# as an exit code and two header lines (nocx-7jt3u). --prefer-offline is what
+# makes the cache volume worth mounting; --no-audit and --no-fund drop two
+# network round trips that decide nothing here.
+npm ci --prefer-offline --no-audit --no-fund
+(cd frontend && npm ci --prefer-offline --no-audit --no-fund)
 
 # Hand the run's output back to the host user before leaving.
 #

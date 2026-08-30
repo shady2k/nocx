@@ -2,11 +2,9 @@
 // `make dev-web`, which starts the backend and passes the two values below in.
 // Never used by `wails dev`, `wails build` or the e2e suite.
 //
-// It shims the two Wails bindings a plain browser cannot get: the WS port and
-// the capability token. Without them the frontend's GetWSPort() throws, the
-// token falls back to "" and the auth gate refuses the socket, so the app
-// renders and connects to nothing. Everything else is inherited from
-// vite.config.ts, so what you look at is the shipped build config.
+// It shims the Wails binding a plain browser cannot get: ResolveBackend.
+// Everything else is inherited from vite.config.ts, so what you look at is
+// the shipped build config.
 import { defineConfig, mergeConfig, type Plugin } from 'vite'
 import base from './vite.config'
 
@@ -29,8 +27,16 @@ const wailsShim: Plugin = {
           window.go = {
             main: {
               WailsApp: {
-                GetWSPort: () => Promise.resolve(${port}),
-                GetWSToken: () => Promise.resolve(${JSON.stringify(token)}),
+                ResolveBackend: () =>
+                  Promise.resolve({
+                    ok: true,
+                    host: '127.0.0.1',
+                    port: ${port},
+                    token: ${JSON.stringify(token)},
+                    kind: '',
+                    message: '',
+                    remedy: '',
+                  }),
                 CheckForUpdate: () => Promise.resolve(null),
                 ReportHealthy: () => Promise.resolve(),
                 ApplyUpdate: () => Promise.resolve(),

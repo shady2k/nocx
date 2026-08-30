@@ -126,8 +126,16 @@ async function injectWailsShim(page: Page): Promise<void> {
       ;(window as unknown as { go: unknown }).go = {
         main: {
           WailsApp: {
-            GetWSPort: () => Promise.resolve(opts.p),
-            GetWSToken: () => Promise.resolve(opts.t),
+            ResolveBackend: () =>
+              Promise.resolve({
+                ok: true,
+                host: '127.0.0.1',
+                port: opts.p,
+                token: opts.t,
+                kind: '',
+                message: '',
+                remedy: '',
+              }),
             CheckForUpdate: () => Promise.resolve(null),
             ReportHealthy: () => Promise.resolve(),
             ApplyUpdate: () => Promise.resolve(),
@@ -429,6 +437,27 @@ export interface BackendEndpoint {
   port: number
   token: string
 }
+
+export async function resolveBackend(page: Page): Promise<BackendEndpoint> {
+  return page.evaluate(async () => {
+    type Resolution = { ok: true; port: number; token: string } | { ok: false; message: string }
+    type WailsBridge = {
+      go?: {
+        main?: {
+          WailsApp?: {
+            ResolveBackend?: () => Promise<Resolution>
+          }
+        }
+      }
+    }
+    const bridgeWindow = window as unknown as WailsBridge
+    const resolve = bridgeWindow.go?.main?.WailsApp?.ResolveBackend
+    if (!resolve) throw new Error('ResolveBackend binding not available')
+    const result = await resolve()
+    if (!result.ok) throw new Error(result.message)
+    return { port: result.port, token: result.token }
+  })
+}
 /**
  * Read the vault lifecycle from the backend the spec is actually exercising.
  *
@@ -517,8 +546,8 @@ export function collectionsDir(isolatedHome: string, name: string): string {
 }
 
 /**
- * Point the page at a backend THIS SPEC started, by supplying the two wails
- * bindings the frontend reads at startup.
+ * Point the page at a backend THIS SPEC started, by supplying ResolveBackend,
+ * the binding the frontend reads at startup.
  *
  * Legal only on the headless path, and it refuses everywhere else. Under
  * `wails dev` the HTML wails serves is:
@@ -563,8 +592,16 @@ export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promi
       const workbenchGo = {
         main: {
           WailsApp: {
-            GetWSPort: () => Promise.resolve(opts.p),
-            GetWSToken: () => Promise.resolve(opts.t),
+            ResolveBackend: () =>
+              Promise.resolve({
+                ok: true,
+                host: '127.0.0.1',
+                port: opts.p,
+                token: opts.t,
+                kind: '',
+                message: '',
+                remedy: '',
+              }),
             CheckForUpdate: () => Promise.resolve(null),
             ReportHealthy: () => Promise.resolve(),
             ApplyUpdate: () => Promise.resolve(),

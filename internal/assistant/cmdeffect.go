@@ -2,6 +2,7 @@ package assistant
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/content"
@@ -23,6 +24,13 @@ import (
 // CommandInvocation is the parser result shared by effect classification and
 // invocation-rule policy. The parser is deliberately owned here: policy
 // consumers receive this result instead of tokenizing the command again.
+//
+// The invariant is `Disqualified ⇒ non-empty Unresolved`. Its CONVERSE has
+// never held: `Disqualified` is false for a path-prefixed program that a bare
+// name would have disqualified. What made that safe was `Unresolved`, filled
+// by the `readPrograms` default at the bottom of the switch — not
+// `Disqualified`. An audit that reads `Disqualified` as the guard is reading
+// the wrong field.
 func parseCanonicalInvocation(command string) content.Invocation {
 	subcommands, disqualified, ok := splitCommand(command)
 	inv := content.Invocation{Parsed: ok, Disqualified: disqualified}
@@ -145,14 +153,16 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 	for _, fact := range facts {
 		words = append(words, fact.value)
 	}
-	program := words[0]
+	// This is an allow-list: over-matching would permit more, so preserve case.
+	program := allowListProgram(words[0])
 
 	if reason := shellFeatureReason(subcommand); reason != "" {
 		report.Unresolved = append(report.Unresolved, content.UnresolvedResource{
 			Path: subcommand, Verb: content.ResourceUnknown, Reason: reason,
 		})
 	}
-	if disqualifyingWords(words) {
+	disqualified := disqualifyingWords(words)
+	if disqualified {
 		report.Unresolved = append(report.Unresolved, content.UnresolvedResource{
 			Path: program, Verb: content.ResourceUnknown,
 			Reason: disqualifierReason(words),
@@ -160,9 +170,7 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 	}
 
 	args := withoutRedirections(facts, &report)
-	if isExecutablePath(facts[0].value) {
-		return addResource(report, facts[0], content.ResourceExecute)
-	}
+
 	switch program {
 	case "cp":
 		operands, target := cpOperands(args)
@@ -270,7 +278,7 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 		if !ok {
 			return unresolvedCommand(report, program, "has no statically named script file")
 		}
-		if disqualifyingWords(words) {
+		if disqualified {
 			return report
 		}
 		return addResource(report, script, content.ResourceExecute)
@@ -294,6 +302,9 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 	}
 
 	if _, known := readPrograms[program]; !known {
+		if isExecutablePath(facts[0].value) && !disqualified {
+			return addResource(report, facts[0], content.ResourceExecute)
+		}
 		return unresolvedCommand(report, program, "is not a recognized resource access form")
 	}
 	for _, operand := range readOperands(program, args) {
@@ -533,7 +544,8 @@ func shellHasCommandString(words []string) bool {
 }
 
 func disqualifierReason(words []string) string {
-	program := words[0]
+	// This is a deny-list: over-matching only refuses more, so fold case.
+	program := denyListProgram(words[0])
 	switch {
 	case strings.HasPrefix(program, "$"):
 		return "the program name comes from a shell variable"
@@ -809,11 +821,20 @@ func commandWordFacts(command string) ([]commandWordFact, bool) {
 	return facts, true
 }
 
+func allowListProgram(program string) string {
+	return filepath.Base(program)
+}
+
+func denyListProgram(program string) string {
+	return strings.ToLower(filepath.Base(program))
+}
+
 func disqualifyingWords(words []string) bool {
 	if len(words) == 0 {
 		return true
 	}
-	program := words[0]
+	// This is a deny-list: over-matching only refuses more, so fold case.
+	program := denyListProgram(words[0])
 	if strings.HasPrefix(program, "$") {
 		return true
 	}

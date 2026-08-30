@@ -160,6 +160,81 @@ func TestCommandEffect_DisqualifiersKeepDeclaredWorstCase(t *testing.T) {
 	}
 }
 
+func TestCommandEffect_PathPrefixedDisqualifiersMatchBareNames(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{name: "sudo", command: "sudo rm -rf /home/me/x"},
+		{name: "env", command: "env rm -rf /home/me/x"},
+		{name: "xargs", command: "xargs rm"},
+		{name: "watch", command: "watch ls"},
+		{name: "setsid", command: "setsid ls"},
+		{name: "ionice", command: "ionice ls"},
+		{name: "flock", command: "flock /tmp/l ls"},
+		{name: "nohup", command: "nohup ls"},
+		{name: "timeout", command: "timeout 5 rm -rf /home/me/x"},
+		{name: "tee", command: "tee /home/me/x"},
+		{name: "bash -c", command: "bash -c 'rm -rf /home/me/x'"},
+		{name: "sh -c", command: "sh -c 'rm -rf /home/me/x'"},
+		{name: "find -delete", command: "find . -delete"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			bare := parseCanonicalInvocation(tc.command)
+			bareEffect := commandEffect(bare, content.EffectDelegate)
+			prefixed := parseCanonicalInvocation("/usr/bin/" + tc.command)
+			prefixedEffect := commandEffect(prefixed, content.EffectDelegate)
+
+			bareUnresolved := len(bare.Resources.Unresolved) > 0
+			prefixedUnresolved := len(prefixed.Resources.Unresolved) > 0
+			if prefixed.Disqualified != bare.Disqualified ||
+				prefixedUnresolved != bareUnresolved ||
+				prefixedEffect != bareEffect {
+				t.Fatalf("bare = %+v (effect %q), prefixed = %+v (effect %q)",
+					bare, bareEffect, prefixed, prefixedEffect)
+			}
+			if !bare.Disqualified || !bareUnresolved {
+				t.Fatalf("bare = %+v, want disqualified with unresolved resources", bare)
+			}
+		})
+	}
+}
+
+func TestCommandEffect_AllowListProgramNamesRemainCaseSensitive(t *testing.T) {
+	tests := []struct {
+		name      string
+		known     string
+		upperCase string
+	}{
+		{name: "ls", known: "ls /etc", upperCase: "LS /etc"},
+		{name: "cat", known: "cat /etc/passwd", upperCase: "CAT /etc/passwd"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			known := parseCanonicalInvocation(tc.known)
+			if got := commandEffect(known, content.EffectDelegate); got != content.EffectObserve ||
+				len(known.Resources.Unresolved) != 0 {
+				t.Fatalf("known = %+v (effect %q), want resolved observe", known, got)
+			}
+
+			upperCase := parseCanonicalInvocation(tc.upperCase)
+			if got := commandEffect(upperCase, content.EffectDelegate); got != content.EffectDelegate ||
+				len(upperCase.Resources.Unresolved) == 0 {
+				t.Fatalf("upper-case = %+v (effect %q), want unresolved delegate", upperCase, got)
+			}
+		})
+	}
+
+	t.Run("unknown", func(t *testing.T) {
+		inv := parseCanonicalInvocation("NOTAPROGRAM /etc")
+		if got := commandEffect(inv, content.EffectDelegate); got != content.EffectDelegate ||
+			len(inv.Resources.Unresolved) == 0 {
+			t.Fatalf("unknown = %+v (effect %q), want unresolved delegate", inv, got)
+		}
+	})
+}
+
 func TestCommandEffect_UnparseableAndUnknownAreWorstCase(t *testing.T) {
 	for _, command := range []string{
 		"ls 'unterminated",

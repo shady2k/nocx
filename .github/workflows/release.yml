@@ -83,12 +83,108 @@ jobs:
             echo "release=false" >> "$GITHUB_OUTPUT"
           fi
 
+  # ONE ORIGIN FOR THE HELPER BYTES (nocx-6de7c). The helpers used to be
+  # built by BOTH build jobs and `sign` compared the two results; run
+  # 33319938229 found all four differing. The cause is the toolchain, not
+  # the code: `go-version: '1.26'` resolves whatever patch release the
+  # runner image happens to hold — go1.26.5 on macOS, go1.26.7 on Linux —
+  # and a different compiler is different bytes. The consequence was not
+  # corruption, because install.go keys the install directory by content
+  # hash (D7), but a published helper that was not the one half the
+  # installs deploy, costing a hand-installed helper one automatic
+  # reinstall (D6).
+  #
+  # The owner chose ONE ORIGIN over a reproducibility promise on
+  # 2026-08-30: build them once, here, and have both build jobs embed THIS
+  # artefact. Identity by construction rather than by two toolchains
+  # happening to agree.
+  #
+  # `needs: [validate]` is for VERSION alone — the published file names
+  # carry it.
+  helpers:
+    needs: [validate]
+    runs-on: ubuntu-latest
+    env:
+      VERSION: ${{ needs.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-go@v7
+        with:
+          go-version: '1.26'
+          cache: true
+
+      - name: Build the remote helpers
+        run: make helpers
+
+      # The COMPRESSED artefacts, exactly as `make helpers` leaves them:
+      # //go:embed all:artifacts takes the .gz files, so these are what the
+      # build jobs download back into place before the Go build that embeds
+      # them.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: helper-artifacts
+          path: internal/helper/deploy/artifacts/*.gz
+          retention-days: 7
+
+      - name: Stage the helper binaries for publication
+        run: |
+          set -euo pipefail
+          # PUBLISHED UNCOMPRESSED, deliberately. `make helpers` gzips, and
+          # gzip stamps the source file's mtime into its header, so the .gz
+          # bytes differ between two runs even when the binary inside is
+          # identical. The DECOMPRESSED bytes are what
+          # internal/helper/deploy/install.go hashes to key the install
+          # directory, so publishing those makes "the same bytes the ssh
+          # path would have sent" a checkable claim: a hand-installed
+          # helper lands in the same directory name, and no
+          # reinstall-on-hash-mismatch follows.
+          #
+          # The loop takes the platforms from the artifacts on disk rather
+          # than from a list written here, so the matrix can grow (it goes
+          # 2x2 in nocx-psjfb) without this step being edited to match.
+          #
+          # shasum -a 256, not sha256sum: macOS has no sha256sum, Linux has
+          # both, and one spelling that works in either job is worth more
+          # than the shorter one.
+          mkdir -p dist
+          : > helper-hashes.txt
+          for gz in internal/helper/deploy/artifacts/nocx-helper-*.gz; do
+            name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
+            plat="${name#nocx-helper-}"
+            out="dist/nocx-helper-${VERSION}-${plat}"
+            gunzip -c "$gz" > "$out"
+            chmod +x "$out"
+            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> helper-hashes.txt
+          done
+          sort -o helper-hashes.txt helper-hashes.txt
+          cat helper-hashes.txt
+
+      # The published binaries, for `publish`, and for `sign` to size in
+      # the manifest. They come from this job and from nowhere else: no
+      # build job stages a helper under dist/ any more, so one file name
+      # cannot arrive twice in one download directory and let step
+      # ordering decide which bytes users get.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: helper-binaries
+          path: dist/nocx-helper-*
+          retention-days: 7
+
+      # The hashes of those same bytes — what `sign` holds both build jobs
+      # against, and what the manifest publishes as each helper's sha256.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: helper-hashes
+          path: helper-hashes.txt
+          retention-days: 7
+
   # Named for its platform, like build-linux. It was `build` back when macOS was
   # the only target and the qualifier carried no information; once ADR-0007
   # reversed D1 and added the AppImage, an unqualified `build` next to a
   # `build-linux` read as "the build" and hid which platform had failed.
   build-macos:
-    needs: [validate] # TEMPORARY (nocx-hid2u): `ci` removed with the gate above; restore both together
+    needs: [validate, helpers] # TEMPORARY (nocx-hid2u): `ci` removed with the gate above; restore both together
     runs-on: macos-15
     env:
       VERSION: ${{ needs.validate.outputs.version }}
@@ -220,66 +316,34 @@ jobs:
 
       # The helpers are EMBEDDED in the app (//go:embed all:artifacts), so
       # they must exist before the Go build that embeds them. Until
-      # nocx-mchgh this step did not exist and every published release
-      # answered ErrArtifactsNotBuilt for every platform: remote git could
-      # not work in any release, and worked from a checkout, which is why
-      # nothing reported it (Makefile:125 makes build-release depend on
-      # helpers; release.yml never did).
-      - name: Build the remote helpers
-        run: make helpers
+      # nocx-mchgh no step put them there at all and every published
+      # release answered ErrArtifactsNotBuilt for every platform: remote
+      # git could not work in any release, and worked from a checkout,
+      # which is why nothing reported it (Makefile:125 makes build-release
+      # depend on helpers; release.yml never did).
+      #
+      # They are DOWNLOADED rather than built here since nocx-6de7c — see
+      # the `helpers` job for why two `make helpers` runs are not two
+      # copies of one binary.
+      - name: Download the helpers the `helpers` job built
+        uses: actions/download-artifact@v8
+        with:
+          name: helper-artifacts
+          path: internal/helper/deploy/artifacts
 
       # The gate, expressed as a test rather than as a file listing: a
       # build that embedded nothing answers ErrArtifactsNotBuilt for every
       # platform, and NOCX_REQUIRE_HELPER_ARTIFACTS turns the skip that
       # protects a fresh checkout into the failure a release needs.
+      #
+      # Since nocx-6de7c it asserts THE DOWNLOAD LANDED AND WAS EMBEDDED,
+      # not that `make helpers` ran in this job — and that is exactly the
+      # failure a download step can produce silently. An artefact that
+      # arrives empty, or under a path //go:embed does not read, leaves a
+      # build that compiles cleanly and ships an app with no helper for
+      # any platform.
       - name: The built binary embeds a helper for every matrix platform
         run: NOCX_REQUIRE_HELPER_ARTIFACTS=1 go test ./internal/helper/deploy/ -run 'TestEveryMatrixPlatformResolves|TestArtifactReturnsCompressedBytesAndDecompressedHash' -count=1
-
-      - name: Hash the helper binaries for the cross-job comparison
-        run: |
-          set -euo pipefail
-          # THIS JOB'S HELPER BINARIES ARE HASHED AND THROWN AWAY. They are
-          # staged under $RUNNER_TEMP and never under dist/, because dist/*
-          # is what this job uploads as `macos-universal`, and the Linux
-          # job uploads the identically-named files inside `linux-amd64`.
-          # `sign` and `publish` download both artefacts into ONE dist/
-          # directory, so a helper in both would be published by whichever
-          # download ran last — an accident of step ordering deciding which
-          # binary users get. That is precisely the ambiguity the hash
-          # comparison in `sign` exists to rule out, so the ambiguity is
-          # removed at the source instead: only build-linux contributes
-          # helper binaries, and this job contributes only its opinion of
-          # what their bytes should be.
-          #
-          # UNCOMPRESSED, deliberately, on both sides. `make helpers`
-          # gzips, and gzip stamps the source file's mtime into its header,
-          # so the .gz bytes differ between the two jobs even when the
-          # binary inside is identical — hashing those would compare the
-          # wrong thing. The DECOMPRESSED bytes are what
-          # internal/helper/deploy/install.go hashes to key the install
-          # directory, so they are what both the comparison and the
-          # published asset are about.
-          #
-          # The loop takes the platforms from the artifacts on disk rather
-          # than from a list written here, so the matrix can grow (it goes
-          # 2x2 in nocx-psjfb) without this step being edited to match.
-          #
-          # shasum -a 256, not sha256sum: macOS has no sha256sum, Linux has
-          # both, and one spelling that works in either job is worth more
-          # than the shorter one.
-          stage="$RUNNER_TEMP/helper-stage"
-          mkdir -p "$stage"
-          : > helper-hashes.txt
-          for gz in internal/helper/deploy/artifacts/nocx-helper-*.gz; do
-            name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
-            plat="${name#nocx-helper-}"
-            out="$stage/nocx-helper-${VERSION}-${plat}"
-            gunzip -c "$gz" > "$out"
-            chmod +x "$out"
-            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> helper-hashes.txt
-          done
-          sort -o helper-hashes.txt helper-hashes.txt
-          cat helper-hashes.txt
 
       - name: Build universal bundle
         run: |
@@ -355,6 +419,52 @@ jobs:
           codesign --force --sign "$SIGN_IDENTITY" -i com.nocx.server \
             build/bin/nocx.app/Contents/MacOS/nocx-server
           codesign --force --sign "$SIGN_IDENTITY" build/bin/nocx.app
+
+      # WHAT THIS JOB ACTUALLY EMBEDDED, hashed and thrown away. The
+      # `helpers` job is the one origin for the bytes; this file is the
+      # evidence that the origin is what landed here, and `sign` holds it
+      # against that job's helper-hashes.txt. A build job that quietly
+      # built helpers of its own, or that received a stale artefact, is red
+      # there instead of shipping an app whose embedded helper is not the
+      # published one — which is the whole reason a check survives in
+      # `sign` at all.
+      #
+      # Staged under $RUNNER_TEMP and never under dist/, because dist/* is
+      # what this job uploads, and the helper binaries are published from
+      # the `helpers` job alone. One file name arriving twice in one
+      # download directory would let step ordering decide which bytes users
+      # get.
+      #
+      # UNCOMPRESSED, deliberately. `make helpers` gzips, and gzip stamps
+      # the source file's mtime into its header, so the .gz bytes differ
+      # between runs even when the binary inside is identical — hashing
+      # those would compare the wrong thing. The DECOMPRESSED bytes are
+      # what internal/helper/deploy/install.go hashes to key the install
+      # directory, so they are what both this comparison and the published
+      # asset are about.
+      #
+      # The loop takes the platforms from the artifacts on disk rather
+      # than from a list written here, so the matrix can grow (it goes
+      # 2x2 in nocx-psjfb) without this step being edited to match.
+      #
+      # shasum -a 256, not sha256sum: macOS has no sha256sum, Linux has
+      # both, and one spelling that works in either job is worth more
+      # than the shorter one.
+      - name: Hash the helper bytes this job embedded
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/helper-stage"
+          mkdir -p "$stage"
+          : > embedded-hashes.txt
+          for gz in internal/helper/deploy/artifacts/nocx-helper-*.gz; do
+            name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
+            plat="${name#nocx-helper-}"
+            out="$stage/nocx-helper-${VERSION}-${plat}"
+            gunzip -c "$gz" > "$out"
+            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> embedded-hashes.txt
+          done
+          sort -o embedded-hashes.txt embedded-hashes.txt
+          cat embedded-hashes.txt
 
       - name: Smoke checks
         run: |
@@ -498,12 +608,12 @@ jobs:
       # The hash file, and from this job nothing else: `macos-universal`
       # above carries no helper binaries, because the step that unpacked
       # them staged them under $RUNNER_TEMP for exactly that reason. The
-      # LINUX job's copies are the published ones — one origin for the
-      # bytes, two independent witnesses to their hashes.
+      # `helpers` job's copies are the published ones; this is only this
+      # job's account of what it embedded.
       - uses: actions/upload-artifact@v7
         with:
-          name: helper-hashes-macos
-          path: helper-hashes.txt
+          name: embedded-hashes-macos
+          path: embedded-hashes.txt
           retention-days: 7
 
       # The keychain outlives the job's success or failure, so its removal
@@ -517,7 +627,7 @@ jobs:
   # ubuntu-22.04 provides glibc 2.35, the baseline the support envelope
   # promises (see ADR-0007 and the Linux section in README.md).
   build-linux:
-    needs: [validate] # TEMPORARY (nocx-hid2u): `ci` removed with the gate above; restore both together
+    needs: [validate, helpers] # TEMPORARY (nocx-hid2u): `ci` removed with the gate above; restore both together
     runs-on: ubuntu-22.04
     env:
       VERSION: ${{ needs.validate.outputs.version }}
@@ -553,53 +663,34 @@ jobs:
 
       # The helpers are EMBEDDED in the app (//go:embed all:artifacts), so
       # they must exist before the Go build that embeds them. Until
-      # nocx-mchgh this step did not exist and every published release
-      # answered ErrArtifactsNotBuilt for every platform: remote git could
-      # not work in any release, and worked from a checkout, which is why
-      # nothing reported it (Makefile:125 makes build-release depend on
-      # helpers; release.yml never did).
-      - name: Build the remote helpers
-        run: make helpers
+      # nocx-mchgh no step put them there at all and every published
+      # release answered ErrArtifactsNotBuilt for every platform: remote
+      # git could not work in any release, and worked from a checkout,
+      # which is why nothing reported it (Makefile:125 makes build-release
+      # depend on helpers; release.yml never did).
+      #
+      # They are DOWNLOADED rather than built here since nocx-6de7c — see
+      # the `helpers` job for why two `make helpers` runs are not two
+      # copies of one binary.
+      - name: Download the helpers the `helpers` job built
+        uses: actions/download-artifact@v8
+        with:
+          name: helper-artifacts
+          path: internal/helper/deploy/artifacts
 
       # The gate, expressed as a test rather than as a file listing: a
       # build that embedded nothing answers ErrArtifactsNotBuilt for every
       # platform, and NOCX_REQUIRE_HELPER_ARTIFACTS turns the skip that
       # protects a fresh checkout into the failure a release needs.
+      #
+      # Since nocx-6de7c it asserts THE DOWNLOAD LANDED AND WAS EMBEDDED,
+      # not that `make helpers` ran in this job — and that is exactly the
+      # failure a download step can produce silently. An artefact that
+      # arrives empty, or under a path //go:embed does not read, leaves a
+      # build that compiles cleanly and ships an app with no helper for
+      # any platform.
       - name: The built binary embeds a helper for every matrix platform
         run: NOCX_REQUIRE_HELPER_ARTIFACTS=1 go test ./internal/helper/deploy/ -run 'TestEveryMatrixPlatformResolves|TestArtifactReturnsCompressedBytesAndDecompressedHash' -count=1
-
-      - name: Stage the helper binaries for publication
-        run: |
-          set -euo pipefail
-          # PUBLISHED UNCOMPRESSED, deliberately. `make helpers` gzips, and
-          # gzip stamps the source file's mtime into its header, so the .gz
-          # bytes differ between this job and the other one even when the
-          # binary inside is identical. The DECOMPRESSED bytes are what
-          # internal/helper/deploy/install.go hashes to key the install
-          # directory, so publishing those makes "the same bytes the ssh
-          # path would have sent" a checkable claim: a hand-installed
-          # helper lands in the same directory name, and no
-          # reinstall-on-hash-mismatch follows.
-          #
-          # The loop takes the platforms from the artifacts on disk rather
-          # than from a list written here, so the matrix can grow (it goes
-          # 2x2 in nocx-psjfb) without this step being edited to match.
-          #
-          # shasum -a 256, not sha256sum: macOS has no sha256sum, Linux has
-          # both, and one spelling that works in either job is worth more
-          # than the shorter one.
-          mkdir -p dist
-          : > helper-hashes.txt
-          for gz in internal/helper/deploy/artifacts/nocx-helper-*.gz; do
-            name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
-            plat="${name#nocx-helper-}"
-            out="dist/nocx-helper-${VERSION}-${plat}"
-            gunzip -c "$gz" > "$out"
-            chmod +x "$out"
-            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> helper-hashes.txt
-          done
-          sort -o helper-hashes.txt helper-hashes.txt
-          cat helper-hashes.txt
 
       - name: Build Linux binary
         run: |
@@ -627,6 +718,52 @@ jobs:
           # CGO_ENABLED=0: no GTK, no WebKit, and a static binary is one the
           # AppImage's bundled library set is irrelevant to.
           CGO_ENABLED=0 go build -tags release -ldflags "$LDFLAGS" -o build/bin/nocx-server ./cmd/nocx-server
+
+      # WHAT THIS JOB ACTUALLY EMBEDDED, hashed and thrown away. The
+      # `helpers` job is the one origin for the bytes; this file is the
+      # evidence that the origin is what landed here, and `sign` holds it
+      # against that job's helper-hashes.txt. A build job that quietly
+      # built helpers of its own, or that received a stale artefact, is red
+      # there instead of shipping an app whose embedded helper is not the
+      # published one — which is the whole reason a check survives in
+      # `sign` at all.
+      #
+      # Staged under $RUNNER_TEMP and never under dist/, because dist/* is
+      # what this job uploads, and the helper binaries are published from
+      # the `helpers` job alone. One file name arriving twice in one
+      # download directory would let step ordering decide which bytes users
+      # get.
+      #
+      # UNCOMPRESSED, deliberately. `make helpers` gzips, and gzip stamps
+      # the source file's mtime into its header, so the .gz bytes differ
+      # between runs even when the binary inside is identical — hashing
+      # those would compare the wrong thing. The DECOMPRESSED bytes are
+      # what internal/helper/deploy/install.go hashes to key the install
+      # directory, so they are what both this comparison and the published
+      # asset are about.
+      #
+      # The loop takes the platforms from the artifacts on disk rather
+      # than from a list written here, so the matrix can grow (it goes
+      # 2x2 in nocx-psjfb) without this step being edited to match.
+      #
+      # shasum -a 256, not sha256sum: macOS has no sha256sum, Linux has
+      # both, and one spelling that works in either job is worth more
+      # than the shorter one.
+      - name: Hash the helper bytes this job embedded
+        run: |
+          set -euo pipefail
+          stage="$RUNNER_TEMP/helper-stage"
+          mkdir -p "$stage"
+          : > embedded-hashes.txt
+          for gz in internal/helper/deploy/artifacts/nocx-helper-*.gz; do
+            name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
+            plat="${name#nocx-helper-}"
+            out="$stage/nocx-helper-${VERSION}-${plat}"
+            gunzip -c "$gz" > "$out"
+            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> embedded-hashes.txt
+          done
+          sort -o embedded-hashes.txt embedded-hashes.txt
+          cat embedded-hashes.txt
 
       - name: Smoke checks (binary)
         run: |
@@ -661,13 +798,14 @@ jobs:
           path: dist/*
           retention-days: 7
 
-      # THIS job's helper binaries are the published ones — see the note on
-      # the macOS side. This upload is its hash file, for the cross-job
-      # comparison in `sign`.
+      # `linux-amd64` above carries no helper binaries either: since
+      # nocx-6de7c they are staged and published by the `helpers` job
+      # alone. This upload is this job's account of what it embedded, for
+      # the check in `sign`.
       - uses: actions/upload-artifact@v7
         with:
-          name: helper-hashes-linux
-          path: helper-hashes.txt
+          name: embedded-hashes-linux
+          path: embedded-hashes.txt
           retention-days: 7
 
   # Separate from build so the signing key is never present in a job that runs
@@ -684,7 +822,7 @@ jobs:
   # Only `contents: write` and `gh release create` need the tag, and they stay
   # behind it in the job below. This job keeps the workflow's read-only default.
   sign:
-    needs: [validate, build-macos, build-linux]
+    needs: [validate, helpers, build-macos, build-linux]
     runs-on: ubuntu-latest
     env:
       VERSION: ${{ needs.validate.outputs.version }}
@@ -706,30 +844,52 @@ jobs:
           name: linux-amd64
           path: dist
 
+      # The published helper binaries, from their one origin. `sign` needs
+      # them for their size in the manifest; `publish` uploads them.
       - uses: actions/download-artifact@v8
         with:
-          name: helper-hashes-macos
+          name: helper-binaries
+          path: dist
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: helper-hashes
+          path: hashes/published
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: embedded-hashes-macos
           path: hashes/macos
 
       - uses: actions/download-artifact@v8
         with:
-          name: helper-hashes-linux
+          name: embedded-hashes-linux
           path: hashes/linux
 
-      - name: The two build jobs produced the same helpers
+      - name: Both build jobs embedded the published helper bytes
         run: |
           set -euo pipefail
-          # Two jobs cross-compile the same helpers from the same commit
-          # with -trimpath, so they must be byte-identical. If they are
-          # not, a macOS-built app and a Linux-built app would deploy
-          # DIFFERENT binaries to one host under one version, and D6's
-          # "exactly one automatic reinstall" would fire on every
-          # connection, forever, silently.
-          if ! diff -u hashes/macos/helper-hashes.txt hashes/linux/helper-hashes.txt; then
-            echo "::error::the macOS and Linux jobs built different helper binaries — the published helper would not be the one half the installs deploy"
-            exit 1
-          fi
-          echo "helper content hashes agree across both build jobs"
+          # There is one origin for the helper bytes now (nocx-6de7c), so
+          # this is no longer two toolchains being asked to agree — it is
+          # the check that the origin is what each build job actually
+          # embedded. A job that quietly built helpers of its own, or that
+          # received a stale artefact from a previous run, produces an app
+          # whose embedded helper is NOT the published one: a macOS-built
+          # app and a Linux-built app would then deploy different binaries
+          # to one host under one version, and D6's "exactly one automatic
+          # reinstall" would fire on every connection, forever, silently.
+          # That is the failure this step still exists to catch.
+          want="hashes/published/helper-hashes.txt"
+          [ -s "$want" ] || { echo "::error::the helpers job published no hash file"; exit 1; }
+          for job in macos linux; do
+            got="hashes/$job/embedded-hashes.txt"
+            [ -s "$got" ] || { echo "::error::build-$job uploaded no embedded-hashes.txt"; exit 1; }
+            if ! diff -u "$want" "$got"; then
+              echo "::error::build-$job embedded helper bytes that are not the published ones"
+              exit 1
+            fi
+          done
+          echo "both build jobs embedded the bytes the helpers job published"
 
       - name: Generate manifest.json
         run: |
@@ -750,13 +910,12 @@ jobs:
           linux_url="https://github.com/shady2k/nocx/releases/download/v${VERSION}/${linux_base}.AppImage"
 
           # ── helpers ──────────────────────────────────────────────────
-          # Read from hashes/linux, because THE LINUX JOB'S BINARIES ARE
-          # THE ONES PUBLISHED, and they are the only ones that exist: the
-          # macOS job hashes its helpers under $RUNNER_TEMP and uploads no
-          # binary, so dist/nocx-helper-* here came from `linux-amd64` and
-          # from nowhere else. The step above has already proved the two
-          # jobs agree about their content, so this is a choice of origin,
-          # not of content.
+          # Read from hashes/published, because THE HELPERS JOB'S BINARIES
+          # ARE THE ONES PUBLISHED, and they are the only ones that exist:
+          # neither build job stages a helper under dist/, so
+          # dist/nocx-helper-* here came from `helper-binaries` and from
+          # nowhere else. The step above has already proved both build jobs
+          # embedded exactly these bytes.
           #
           # sha256 here is the content hash install.go keys the install
           # directory by (D7), so a hand-installed helper and an
@@ -772,7 +931,7 @@ jobs:
                 --arg url "https://github.com/shady2k/nocx/releases/download/v${VERSION}/nocx-helper-${VERSION}-${plat}" \
                 --arg sha "$sha" --argjson size "$(stat -c%s "$f")" \
                 '{os: $os, arch: $arch, url: $url, sha256: $sha, size: $size}'
-            done < hashes/linux/helper-hashes.txt | jq -s .
+            done < hashes/published/helper-hashes.txt | jq -s .
           )"
 
           released="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
@@ -829,7 +988,7 @@ jobs:
   # The only tag-gated job, and the only one holding contents: write. It runs no
   # build tooling and no signing — it uploads what the jobs above produced.
   publish:
-    needs: [validate, build-macos, build-linux, sign]
+    needs: [validate, helpers, build-macos, build-linux, sign]
     if: needs.validate.outputs.release == 'true'
     runs-on: ubuntu-latest
     permissions:
@@ -845,6 +1004,13 @@ jobs:
       - uses: actions/download-artifact@v8
         with:
           name: linux-amd64
+          path: dist
+
+      # The four helper assets, from the one job that built them. The file
+      # names are unchanged; only their origin is.
+      - uses: actions/download-artifact@v8
+        with:
+          name: helper-binaries
           path: dist
 
       - uses: actions/download-artifact@v8

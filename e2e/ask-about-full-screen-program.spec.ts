@@ -634,17 +634,34 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
     expect(fileText(resizePath)).toBe(fileText(baselinePath))
     await expect(page.locator(GRID)).toHaveClass(/live-fullscreen/)
 
-    // Escape is the door back to the program after either a streaming or a
-    // settled turn. It thaws without discarding either answer; both remain in
-    // ask order until the command owns no foreground program.
+    // Owner decision, nocx-7l4ex.18: Escape returns the pane to the
+    // foreground program by seating both answers in scrollback immediately.
+    // The overlay is empty, while the exact answer nodes remain in ask order.
     await page.keyboard.press('Escape')
     await expect(page.locator(FREEZE)).toHaveCount(0, { timeout: 10_000 })
     await expect(page.locator(INPUT)).toBeHidden({ timeout: 10_000 })
     await expect(page.locator(GRID)).toHaveClass(/live-fullscreen/)
     await expect(page.locator(GRID)).toBeVisible()
-    await expect(overlayAnswers).toHaveCount(2)
-    await expect(overlayAnswers.nth(0)).toContainText(question)
-    await expect(overlayAnswers.nth(1)).toContainText(followUpQuestion)
+    await expect(overlayAnswers).toHaveCount(0)
+    await expect(answer).toHaveCount(1)
+    await expect(followUpAnswer).toHaveCount(1)
+    const escapedSeating = await followUpAnswer.evaluate(
+      (second, expected) => {
+        const inner = second.parentElement
+        if (!inner) return null
+        const children = Array.from(inner.children)
+        const first = children.find((el) => el.textContent?.includes(expected.first))
+        const secondAnswer = children.find((el) => el.textContent?.includes(expected.second))
+        return {
+          seated: inner.classList.contains('scrollback-inner'),
+          first: first ? children.indexOf(first) : -1,
+          second: secondAnswer ? children.indexOf(secondAnswer) : -1,
+        }
+      },
+      { first: question, second: followUpQuestion },
+    )
+    expect(escapedSeating).toMatchObject({ seated: true })
+    expect(escapedSeating!.first).toBeLessThan(escapedSeating!.second)
     expect(fileText(resizePath)).toBe(fileText(baselinePath))
 
     // The program exits normally. Both exact answer nodes then take one

@@ -10572,7 +10572,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
-  it('Escape removes the answer overlay before the running program resumes', async () => {
+  it('Escape seats the answer in scrollback before the running program resumes', async () => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
@@ -10602,12 +10602,15 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       delta!({ runId: 42, entryId: 'entry-42', text: 'overlay prose' })
 
       const pane = answer.parentElement?.parentElement?.parentElement
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
 
       document.body.dispatchEvent(
         new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
       )
 
-      expect(answer.isConnected).toBe(false)
+      expect(answer.isConnected).toBe(true)
+      expect(answer.parentElement).toBe(scrollback.scrollbackInner)
+      expect(answer.classList.contains('nocx-answer-overlay')).toBe(false)
       expect(pane?.querySelector('.nocx-summon-stack')).toBeNull()
       expect(content.pinnedFrame()).toBeNull()
       expect(content.presentation).toBe('terminal')
@@ -10663,6 +10666,10 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         ).toEqual([['agent.cancel', { runId: 42 }]]),
       )
       expect(sessionOf(content).signal).not.toHaveBeenCalled()
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      expect(answer.isConnected).toBe(true)
+      expect(answer.parentElement).toBe(scrollback.scrollbackInner)
+      expect(answer.classList.contains('nocx-answer-overlay')).toBe(false)
       expect(
         (content as unknown as { scrollback: ScrollbackController }).scrollback.blockManager
           .runningBlock,
@@ -10685,7 +10692,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
-  it('leaving the alternate buffer removes the answer and frozen frame while the command runs', async () => {
+  it('leaving the alternate buffer seats the answer and clears the frozen frame', async () => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
@@ -10716,7 +10723,11 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
 
       renderer._fireBufferChange('normal')
 
-      expect(answer.isConnected).toBe(false)
+      expect(answer.isConnected).toBe(true)
+      expect(answer.parentElement).toBe(
+        (content as unknown as { scrollback: ScrollbackController }).scrollback.scrollbackInner,
+      )
+      expect(answer.classList.contains('nocx-answer-overlay')).toBe(false)
       expect(paneElement.querySelector('.nocx-summon-stack')).toBeNull()
       expect(paneElement.querySelector('.nocx-freeze-frame')).toBeNull()
       expect(content.pinnedFrame()).toBeNull()
@@ -10727,7 +10738,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
-  it('tab change removes the answer and frozen frame before the pane hides', async () => {
+  it('tab change seats the answer before the pane hides', async () => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
@@ -10756,7 +10767,11 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
 
       content.setVisible(false)
 
-      expect(answer.isConnected).toBe(false)
+      expect(answer.isConnected).toBe(true)
+      expect(answer.parentElement).toBe(
+        (content as unknown as { scrollback: ScrollbackController }).scrollback.scrollbackInner,
+      )
+      expect(answer.classList.contains('nocx-answer-overlay')).toBe(false)
       expect(paneElement.querySelector('.nocx-summon-stack')).toBeNull()
       expect(paneElement.querySelector('.nocx-freeze-frame')).toBeNull()
       expect(content.pinnedFrame()).toBeNull()

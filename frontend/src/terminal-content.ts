@@ -2470,12 +2470,10 @@ export class TerminalContent extends BasePaneContent {
       renderer.onBufferChange((type) => {
         const thawing = this._bufferType === 'alternate' && type === 'normal'
         this._bufferType = type
-        // The ask interval ends at the program's thaw: the frozen frame and
-        // every answer drawn over it are removed before the normal buffer
-        // resumes ownership of these rows. Completion is different — it
-        // keeps answers to seat them in scrollback — but a thaw leaves the
-        // command running and therefore has no seat to inherit.
-        if (thawing && this._summoned) this._endSummon(true)
+        // The ask interval ends at the program's thaw: clear the frozen
+        // presentation, then seat every answer before normal-buffer ownership
+        // resumes. The shared helper preserves each exact answer node.
+        if (thawing && this._summoned) this._endSummonAndSeatAnswers()
         // The buffer is its own axis (ADR-0024 §6): a renderer-owned
         // presentation fact, never an authority. The kernel tracks it
         // independently of the lifecycle, so entering or leaving the
@@ -3957,10 +3955,10 @@ export class TerminalContent extends BasePaneContent {
     // this pane leaves the front.
     if (visible) this.reconcileGrantPresentation()
     else {
-      // Tab changes hide rather than unmount this pane. End the summon at
-      // that visibility boundary so its answers and frozen frame cannot
-      // remain painted over the program when this pane returns.
-      this._endSummon(true)
+      // Tab changes hide rather than unmount this pane. End the summon and
+      // seat its answers at that visibility boundary, so nothing remains
+      // painted over the program when this pane returns.
+      this._endSummonAndSeatAnswers()
       this.markAffordance?.hide()
       this.grantController?.setVisible(false)
       this.scrollback?.blockManager.closeOverflowMenus()
@@ -5058,7 +5056,7 @@ export class TerminalContent extends BasePaneContent {
     // away, the command finished, the prompt came back wearing a mode
     // nobody had chosen, and their next Enter went to the model. Caught by
     // the e2e, because no unit followed a dismissal past the command's end.
-    this._endSummon(true)
+    this._endSummonAndSeatAnswers()
     this._syncLifecycleOwnership()
     // Escape is the discoverable hand-back gesture. Read-only state alone
     // does not route the next physical key: focus can remain on the hidden
@@ -5121,12 +5119,12 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /** The summon is over — dismissed by Escape, or outlived by the command
-   *  it was opened over. Both exits come through here.
+   *  it was opened over. Both exits clear the frozen presentation.
    *
-   *  Explicit dismissal ends the answer's lifetime at the same synchronous
-   *  boundary as the frozen frame: neither can remain painted over the
-   *  program after the ask is left. Command completion keeps the answers so
-   *  they can be seated in scrollback by `_seatSummonedAnswers`.
+   *  Normal exits preserve answer nodes; `_endSummonAndSeatAnswers` immediately
+   *  reparents them into scrollback so the program owns the pane again without
+   *  losing streamed or settled prose. `discardAnswers` is reserved for
+   *  teardown/reset paths that cannot provide a valid command seat.
    *
    *  The target goes back to what the summon displaced ONLY if the draft is
    *  empty. A half-typed question re-pointed at the shell would turn the
@@ -5149,6 +5147,15 @@ export class TerminalContent extends BasePaneContent {
     if (this.editor.getDoc() !== '') return
     if (this.inputTargets?.active().id === restore) return
     this.inputTargets?.setActive(restore)
+  }
+
+  /** End the summon while preserving its answers, then seat those exact nodes
+   * in scrollback. Escape, a thaw, and a hidden tab all return ownership to
+   * the program while its command is still running, so they must use the same
+   * reparenting path as normal command completion. */
+  private _endSummonAndSeatAnswers(): void {
+    this._endSummon()
+    this._seatSummonedAnswers()
   }
 
   /** Remove the static frame, marker, and temporary containing-block style. */

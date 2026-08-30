@@ -353,13 +353,11 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     //    the second call).
     fake.setScript({
       chunks: [PROSE_BEFORE],
-      toolCalls: [{ name: 'run', id: 'call_run', arguments: { sessionId, command: RUN_CMD } }],
+      toolCalls: [{ name: 'session.run', id: 'call_run', arguments: { command: RUN_CMD } }],
     })
     fake.setScript({
       chunks: [PROSE_MIDDLE],
-      toolCalls: [
-        { name: 'session.read', id: 'call_read', arguments: { sessionId, ...READ_WINDOW } },
-      ],
+      toolCalls: [{ name: 'session.read', id: 'call_read', arguments: { ...READ_WINDOW } }],
     })
     fake.setScript({ chunks: [PROSE_AFTER] })
     await askFromPrompt(page, QUESTION)
@@ -442,7 +440,7 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     //    race rather than the restore.
     await storedTurn(page, endpoint, QUESTION, [
       { kind: 'text' },
-      { kind: 'action', intent: 'run' },
+      { kind: 'action', intent: 'session.run' },
       { kind: 'shell' },
       { kind: 'text' },
       { kind: 'action', intent: 'session.read' },

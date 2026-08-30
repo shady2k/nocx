@@ -391,7 +391,7 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     // `session.read` with no item id is "the screen now" (contracts/tools/
     // session.read.schema.json) — the tool that replaced the deleted screen
     // reader in nocx-2ryxf.1.
-    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: { sessionId } }] })
+    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: {} }] })
     fake.setScript({ chunks: answerFromWhatTheModelWasSent })
 
     const QUESTION = 'What is on my screen right now?'

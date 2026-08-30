@@ -325,7 +325,7 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
     // answer written from the tool's result.
     fake.setScript({
       chunks: ['Let me check.'],
-      toolCalls: [{ name: 'run', arguments: { sessionId, command: AGENT_COMMAND } }],
+      toolCalls: [{ name: 'session.run', arguments: { command: AGENT_COMMAND } }],
     })
     fake.setScript({ chunks: ['Plenty.'] })
     await askFromPrompt(page, SECOND_QUESTION)

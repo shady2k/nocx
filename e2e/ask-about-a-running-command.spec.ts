@@ -387,7 +387,7 @@ test.describe('asking about a command that is still running (nocx-92gfl)', () =>
     // without one is "the screen now" (contracts/tools/session.read.schema
     // .json), which for a RUNNING command is its live grid rather than a
     // transcript of something finished.
-    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: { sessionId } }] })
+    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: {} }] })
     fake.setScript({ chunks: answerFromWhatTheModelWasSent, holdAfter: 2 })
 
     const QUESTION = 'What is this command showing right now?'

@@ -19,7 +19,7 @@
      not as something a program drew. */
   padding: 4px;
   border-radius: 6px;
-  background: color-mix(in srgb, var(--color-bg-elevated), transparent 8%);
+  background: color-mix(in srgb, var(--color-surface-raised), transparent 8%);
   box-shadow: 0 1px 3px color-mix(in srgb, black, transparent 80%);
   pointer-events: auto;
   /* No animation, deliberately. The measurement behind this is one probe
@@ -43,13 +43,13 @@
    while the session may still be alive on the far side. */
 .ui-connection-indicator[data-condition='unreachable'] {
   color: var(--color-warning);
-  background: color-mix(in srgb, var(--color-warning), var(--color-bg-elevated) 88%);
+  background: color-mix(in srgb, var(--color-warning), var(--color-surface-raised) 88%);
 }
 
 /* Gone. */
 .ui-connection-indicator[data-condition='lost'] {
   color: var(--color-danger);
-  background: color-mix(in srgb, var(--color-danger), var(--color-bg-elevated) 88%);
+  background: color-mix(in srgb, var(--color-danger), var(--color-surface-raised) 88%);
 }
 
 /* The overlay badge on the lost state: the plug, struck through by a warning

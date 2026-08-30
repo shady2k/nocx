@@ -47,9 +47,9 @@
  * test then waits for controls that are gone. A panel is dismissed here the
  * way the adapter dismisses it — by removing the '@' the trigger is made of.
  */
-import { mkdtempSync } from 'node:fs'
+import { mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, resolve } from 'node:path'
 
 import type { Locator } from '@playwright/test'
 import {
@@ -192,6 +192,30 @@ async function measure(page: Page, fieldId: string): Promise<Measured> {
   }, fieldId)
 }
 
+/** The anchor gap the component applies, READ from the component rather than
+ *  retyped here: a spec carrying its own copy of the number goes on passing
+ *  after the layout changes, and asserts nothing about the product.
+ *  floating-panel.ts owns it; this is the same read scroll-ownership.spec.ts
+ *  does of the stylesheets it is about. */
+const ANCHOR_GAP_PX = readAnchorGap()
+
+function readAnchorGap(): number {
+  const src = readFileSync(resolve(__dirname, '../frontend/src/ui/floating-panel.ts'), 'utf8')
+  const found = /const ANCHOR_GAP_PX = (\d+(?:\.\d+)?)/.exec(src)
+  if (found === null) {
+    throw new Error('floating-panel.ts no longer declares ANCHOR_GAP_PX — this spec reads it')
+  }
+  return Number(found[1])
+}
+
+/** The placement is computed from `offsetHeight`, which is an integer, and
+ *  measured here through `getBoundingClientRect`, which is not: the two
+ *  disagree by less than a device pixel, and a device pixel is 2 CSS px at
+ *  the 0.5 DPR steps these browsers use. It is a rounding allowance and
+ *  nothing else — the 17.5px gap that opened nocx-brf45 was never rounding,
+ *  it was the clamp below going unnamed. */
+const SUBPIXEL_PX = 2
+
 /** Criterion 1 and 3: the whole panel is on screen, on both axes. */
 function expectInsideViewport(m: Measured): void {
   expect(m.panel.top).toBeGreaterThanOrEqual(0)
@@ -210,11 +234,47 @@ function expectInsideViewport(m: Measured): void {
  *  which floating-panel.ts does deliberately when the panel fits neither above
  *  nor below, and in that mode the six-pixel anchor gap is given up on purpose. */
 function expectAnchoredToField(m: Measured): void {
-  const gap = Math.min(
-    Math.abs(m.field.top - m.panel.bottom),
-    Math.abs(m.panel.top - m.field.bottom),
+  const why = JSON.stringify(m)
+
+  // floating-panel.ts has exactly three outcomes and each promises something
+  // different, so the spec names which one it got and holds it to that. The
+  // old assertion — one number, 16, for all three — held none of them: it was
+  // loose enough to pass a clamped panel and tight enough to fail on a
+  // subpixel, which is how the same tree went red once in five runs while
+  // nothing a person could see had changed (nocx-brf45).
+  if (m.panel.bottom <= m.field.top + SUBPIXEL_PX) {
+    // It fitted above: `above = rect.top - ANCHOR_GAP_PX - height`.
+    expect(m.field.top - m.panel.bottom, `panel above its field: ${why}`).toBeLessThanOrEqual(
+      ANCHOR_GAP_PX + SUBPIXEL_PX,
+    )
+    return
+  }
+
+  if (m.panel.top >= m.field.bottom - SUBPIXEL_PX) {
+    // It fitted below: `below = rect.bottom + ANCHOR_GAP_PX`.
+    expect(m.panel.top - m.field.bottom, `panel below its field: ${why}`).toBeLessThanOrEqual(
+      ANCHOR_GAP_PX + SUBPIXEL_PX,
+    )
+    return
+  }
+
+  // Neither side had room, so the panel was clamped to the window's bottom
+  // edge and the anchor gap was given up deliberately. What survives of
+  // "anchored" in that mode is that the panel is over the field it belongs to
+  // rather than parked somewhere in the window: the field's own edge is
+  // inside the panel's vertical span. A panel placed against the initial
+  // containing block — the defect this whole spec exists for — sits at the
+  // top of the window and fails all three branches.
+  expect(
+    m.viewport.height - m.panel.bottom,
+    `neither above nor below, so clamped: ${why}`,
+  ).toBeLessThanOrEqual(SUBPIXEL_PX)
+  expect(m.panel.top, `clamped panel does not reach its field: ${why}`).toBeLessThanOrEqual(
+    m.field.bottom,
   )
-  expect(gap, JSON.stringify(m)).toBeLessThanOrEqual(16)
+  expect(m.panel.bottom, `clamped panel does not reach its field: ${why}`).toBeGreaterThanOrEqual(
+    m.field.top,
+  )
 }
 
 test.describe('the secret panel opens where a person can reach it', () => {

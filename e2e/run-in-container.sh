@@ -54,6 +54,15 @@ FENODE_VOL="nocx-e2e-fenode-${WORKTREE_KEY}"
 docker volume create "$NODE_VOL" >/dev/null
 docker volume create "$FENODE_VOL" >/dev/null
 docker volume create nocx-e2e-gocache >/dev/null
+# AND THE NPM CACHE, for exactly the reason the Go module cache below has one,
+# and missing for exactly as long: with no /root/.npm every run re-fetches the
+# whole dependency tree from the registry, so a slow or IPv6-only route turns
+# `npm ci` into ETIMEDOUT and the suite dies before a spec starts. Measured
+# 2026-08-30: five consecutive runs exited 146 there. Shared rather than keyed
+# by worktree — unlike node_modules, a cache entry is content-addressed, so two
+# branches on two lockfiles cannot write different bytes under one key
+# (nocx-7jt3u).
+docker volume create nocx-e2e-npmcache >/dev/null
 # AND THE MODULE CACHE, which was missing and made every run need the network.
 # globalSetup builds cmd/nocx-server before a single spec runs, so with no
 # /root/go/pkg/mod the build re-downloads the whole module graph each time and
@@ -165,6 +174,7 @@ exec docker run --rm -i ${tty_flag[@]+"${tty_flag[@]}"} \
   -v "$repo_root:/work" \
   -v "$NODE_VOL":/work/node_modules \
   -v "$FENODE_VOL":/work/frontend/node_modules \
+  -v nocx-e2e-npmcache:/root/.npm \
   -v nocx-e2e-gocache:/root/.cache/go-build \
   -v nocx-e2e-gomod:/root/go/pkg/mod \
   -e PW_PROJECTS="${PW_PROJECTS:-}" \

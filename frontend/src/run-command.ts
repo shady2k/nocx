@@ -39,6 +39,7 @@ export interface AgentRunCompletion {
   entryId: string
   exitCode: number | null
   status: 'success' | 'failure' | 'entered' | 'unknown'
+  stopped: boolean
   total: number
   start: number
   end: number
@@ -92,6 +93,7 @@ async function answerRun(
       entryId: run.entryId,
       exitCode: run.exitCode,
       status: run.status,
+      stopped: run.stopped,
       total: run.total,
       start: run.start,
       end: run.end,

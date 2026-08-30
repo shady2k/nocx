@@ -13,6 +13,7 @@
     "entryId": { "type": "string", "maxLength": 256 },
     "exitCode": { "type": ["integer", "null"] },
     "status": { "type": "string", "enum": ["success", "failure", "entered", "unknown"] },
+    "stopped": { "type": "boolean" },
     "total": { "type": "integer", "minimum": 0 },
     "start": { "type": "integer", "minimum": 0 },
     "end": { "type": "integer", "minimum": 0 },
@@ -22,7 +23,7 @@
     {
       "if": { "properties": { "outcome": { "const": "completed" } }, "required": ["outcome"] },
       "then": {
-        "required": ["entryId", "status", "total", "start", "end", "text"],
+        "required": ["entryId", "status", "stopped", "total", "start", "end", "text"],
         "properties": { "error": { "type": "null" } }
       }
     },

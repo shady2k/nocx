@@ -666,11 +666,15 @@ type frameBodyWire struct {
 //
 //	path a person uses, executed by the renderer — the backend never
 //	writes to the PTY, design §2.1) ──────────────────────────────────────
+const runStoppedMessage = "The person stopped this command. Do not retry it."
+
 type runResult struct {
 	SessionID string           `json:"sessionId"`
 	EntryID   string           `json:"entryId"`
 	ExitCode  *int             `json:"exitCode"`
 	Status    string           `json:"status"`
+	Stopped   bool             `json:"stopped"`
+	Message   string           `json:"message,omitempty"`
 	Total     int              `json:"total"`
 	Window    readScreenWindow `json:"window"`
 	Returned  readScreenWindow `json:"returned"`
@@ -680,10 +684,24 @@ type runResult struct {
 	Remaining int64            `json:"remaining,omitempty"`
 }
 
+// runResultStopped is the one interpretation of the renderer's explicit
+// stop fact. It deliberately does not inspect exitCode: a command may exit
+// 130 without anybody pressing Stop.
+func runResultStopped(tool, out string) bool {
+	if tool != "session.run" {
+		return false
+	}
+	var result struct {
+		Stopped bool `json:"stopped"`
+	}
+	return json.Unmarshal([]byte(out), &result) == nil && result.Stopped
+}
+
 // runBodyWire is this tool's consumer view of the resolved run body the
 // requester returned: the entry id, the exit status, the block's frozen
-// status vocabulary (success | failure | entered | unknown), the output's
-// total line count, the span of the window actually returned and its text.
+// status vocabulary (success | failure | entered | unknown), the explicit
+// person-stop fact, the output's total line count, the span of the window
+// actually returned and its text.
 // The wire vocabulary is owned by the transport's run kind validation; this
 // decode reads the fields the window contract needs and never re-validates
 // them.
@@ -691,6 +709,7 @@ type runBodyWire struct {
 	EntryID  string `json:"entryId"`
 	ExitCode *int   `json:"exitCode"`
 	Status   string `json:"status"`
+	Stopped  bool   `json:"stopped"`
 	Total    int    `json:"total"`
 	Start    int    `json:"start"`
 	End      int    `json:"end"`
@@ -775,11 +794,16 @@ func executeRun(ctx context.Context, runner *agenttools.Runner, requester Render
 		EntryID:   b.EntryID,
 		ExitCode:  b.ExitCode,
 		Status:    b.Status,
+		Stopped:   b.Stopped,
+		Message:   "",
 		Total:     total,
 		Window:    asked,
 		Returned:  returned,
 		Text:      text,
 		Truncated: truncated,
+	}
+	if out.Stopped {
+		out.Message = runStoppedMessage
 	}
 	if truncated {
 		out.Dropped = int64(len(b.Text) - len(text))

@@ -93,6 +93,7 @@ type runResolvedParams struct {
 	EntryID   string `json:"entryId"`
 	ExitCode  *int   `json:"exitCode"`
 	Status    string `json:"status"`
+	Stopped   bool   `json:"stopped"`
 	Total     int    `json:"total"`
 	Start     int    `json:"start"`
 	End       int    `json:"end"`
@@ -102,11 +103,13 @@ type runResolvedParams struct {
 // runResolvedBody is the resolved result the broker's Request decodes into:
 // the run body only, requestId and outcome consumed by the correlation. The
 // assistant executor reads this shape (its own minimal consumer view) to
-// build the tool's windowed return.
+// build the tool's windowed return. Stopped is explicit renderer evidence
+// that the person ended this command; it is never inferred from ExitCode.
 type runResolvedBody struct {
 	EntryID  string `json:"entryId"`
 	ExitCode *int   `json:"exitCode"`
 	Status   string `json:"status"`
+	Stopped  bool   `json:"stopped"`
 	Total    int    `json:"total"`
 	Start    int    `json:"start"`
 	End      int    `json:"end"`
@@ -147,7 +150,7 @@ func resolveRun(raw json.RawMessage) (json.RawMessage, error) {
 	}
 	body, err := json.Marshal(runResolvedBody{
 		EntryID: p.EntryID, ExitCode: p.ExitCode, Status: p.Status,
-		Total: p.Total, Start: p.Start, End: p.End, Text: p.Text,
+		Stopped: p.Stopped, Total: p.Total, Start: p.Start, End: p.End, Text: p.Text,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("run: body: %w", err)
@@ -168,8 +171,15 @@ func validateRunResolvedRaw(raw json.RawMessage) string {
 	if msg := decodeParams(raw, &p); msg != "" {
 		return msg
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return "params must be a JSON object"
+	}
 	switch p.Outcome {
 	case "completed":
+		if _, ok := fields["stopped"]; !ok {
+			return "a completed outcome requires the stopped fact"
+		}
 		if p.Error != "" {
 			return "a completed outcome carries no error"
 		}

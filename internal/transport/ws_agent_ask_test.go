@@ -9,6 +9,7 @@ package transport
 // without dialling anything.
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -32,6 +33,23 @@ import (
 	"github.com/shady2k/nocx/internal/vault/file"
 	"github.com/shady2k/nocx/internal/waittest"
 )
+
+type synchronizedBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *synchronizedBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *synchronizedBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
 
 // scriptedAssistantClient is the injected engine: Ask plays back a script of
 // deltas and an outcome, so the orchestration is deterministic.
@@ -79,13 +97,12 @@ func (s *scriptedAssistantClient) Ask(ctx context.Context, p assistant.AskParams
 // askHarness is a full transport env for the ask flow: real content store,
 // real vault, real profile store, scripted engine.
 type askHarness struct {
-	t    *testing.T
-	v    *vault.Vault
-	db   content.ContentDB
-	ws   *WSServer
-	conn *websocket.Conn
-	// fakeRequests counts provider requests the readScreen failure-path
-	// tests drive (the harness itself never dials a provider).
+	t            *testing.T
+	v            *vault.Vault
+	db           content.ContentDB
+	ws           *WSServer
+	conn         *websocket.Conn
+	logs         *synchronizedBuffer
 	fakeRequests atomic.Int64
 }
 
@@ -139,7 +156,9 @@ func newAskHarnessWithOpts(t *testing.T, client assistant.Client, extra ...WSSer
 		WithAssistantProbeStore(assistant.NewProbeStore()),
 	}
 	opts = append(opts, extra...)
-	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), opts...)
+	serverLogs := &synchronizedBuffer{}
+	serverLogger := log.NewSlogAdapter(slog.New(slog.NewJSONHandler(serverLogs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	ws := NewWSServer(serverLogger, newRegWithStub(serverLogger), opts...)
 	ctx := t.Context()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -147,7 +166,7 @@ func newAskHarnessWithOpts(t *testing.T, client assistant.Client, extra ...WSSer
 	t.Cleanup(func() { _ = ws.Stop(ctx) })
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
-	return &askHarness{t: t, v: v, db: db, ws: ws, conn: conn}
+	return &askHarness{t: t, v: v, db: db, ws: ws, conn: conn, logs: serverLogs}
 }
 
 // createEndpoint makes one endpoint with a resolvable key.

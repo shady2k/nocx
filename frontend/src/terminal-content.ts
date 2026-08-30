@@ -659,6 +659,7 @@ export class TerminalContent extends BasePaneContent {
     BlockRecord,
     {
       ledgerId: number
+      stopped: boolean
       resolve: (run: AgentRunCompletion) => void
       reject: (reason: unknown) => void
     }
@@ -5209,6 +5210,7 @@ export class TerminalContent extends BasePaneContent {
   private signalActiveCommand(signal: SessionSignal['signal']): void {
     const session = this.session
     if (session === null || !this.hasRunningCommand()) return
+    const targetBlock = this.scrollback?.blockManager.runningBlock ?? null
     void session.signal(signal).then(
       (result) => {
         // A SWITCH, AND EXHAUSTIVE ON PURPOSE. The outcome set is closed by
@@ -5221,6 +5223,10 @@ export class TerminalContent extends BasePaneContent {
         let message: string
         switch (result.outcome) {
           case 'delivered':
+            if (signal === 'stop') {
+              const waiter = targetBlock === null ? undefined : this.agentRuns.get(targetBlock)
+              if (waiter) waiter.stopped = true
+            }
             return
           case 'unsupported':
             message =
@@ -6001,7 +6007,7 @@ export class TerminalContent extends BasePaneContent {
       reject(new Error('run: the submission could not open a block — the agent lane is not usable'))
       return promise
     }
-    this.agentRuns.set(block, { ledgerId, resolve, reject })
+    this.agentRuns.set(block, { ledgerId, stopped: false, resolve, reject })
     // The slot the store's answer lands in. Opened HERE, at the submit,
     // because the ack can arrive before the block finishes freezing and a
     // slot created at the freeze would miss it.
@@ -6034,6 +6040,7 @@ export class TerminalContent extends BasePaneContent {
     const body = {
       exitCode: rec.exitCode,
       status: rec.status === 'running' ? ('unknown' as const) : rec.status,
+      stopped: waiter.stopped,
       total: lines.length,
       start: 0,
       end,

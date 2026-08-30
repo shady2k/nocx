@@ -40,6 +40,10 @@ export type AgentRunResolved = {
    */
   status?: 'success' | 'failure' | 'entered' | 'unknown'
   /**
+   * True only when the person stopped this command.
+   */
+  stopped?: boolean
+  /**
    * The block's output line count — how much output the command produced in total.
    */
   total?: number

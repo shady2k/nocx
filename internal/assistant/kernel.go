@@ -1592,6 +1592,18 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		}
 	}
 
+	// A person's Stop is a successful tool exchange carrying an explicit
+	// renderer fact, not a tool error. Preserve that fact in the action
+	// ledger: the command's own exit code may also be 130, so it cannot
+	// select the user-killed reason. The result remains model-visible so the
+	// model is told not to retry it.
+	if runErr == nil && runResultStopped(decl.Name, out) {
+		if err := k.closeAttempt(ctx, execID, content.TermUserKilled, content.EntryInterrupted); err != nil {
+			return modelResult{}, fmt.Errorf("agent tool %q: record stopped outcome: %w", decl.Name, err)
+		}
+		return modelResult{text: out, kind: modelToolOutput}, nil
+	}
+
 	// 8. The outcome is recorded on the attempt — the interval closes
 	// with the outcome or the terminal reason, never before.
 	if runErr != nil {

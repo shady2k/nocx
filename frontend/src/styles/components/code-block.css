@@ -30,22 +30,88 @@
   border: 1px solid var(--color-border);
 }
 
+/* The copy affordance turns the reserved line into a real header: the block's
+   kind is visible on the left and the one copy control sits on the right. */
+.ui-code-block-wrap--copy > .ui-code-block__header {
+  display: flex;
+  align-items: center;
+  min-height: 22px;
+  padding: var(--space-1) var(--space-2);
+  background: var(--color-canvas);
+  border: 1px solid var(--color-surface-raised);
+  border-bottom: none;
+  border-radius: var(--control-radius-sm) var(--control-radius-sm) 0 0;
+  box-sizing: border-box;
+  color: var(--color-text-muted);
+  font-family: var(--font-family-mono);
+  font-size: var(--font-size-sm);
+}
+
+.ui-code-block__header > .ui-code-block__label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ui-code-block__header > .ui-icon-button {
+  position: static;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.ui-code-block__header > .ui-code-block__copy-host > .ui-icon-button {
+  position: static;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+/* The imperative caller gives us a host inside the block before rows exist.
+   `display: contents` makes that host transparent to the header's flex layout
+   without retaining the old absolute-positioned surface vocabulary. */
+.ui-code-block__header > .ui-code-block__copy-host {
+  position: static;
+  display: contents;
+}
+
 .ui-code-block-wrap--copy > .ui-code-block {
-  padding-top: calc(var(--space-2) + 22px);
+  padding-top: var(--space-2);
+  border-top-left-radius: 0;
+  border-top-right-radius: 0;
 }
 
 /* Compact approval prompts keep the copy affordance in the block's corner
    without reserving a second line above a one-line command. */
-.ui-prompt[data-density='compact'] .ui-code-block-wrap--copy > .ui-code-block {
-  padding-top: var(--space-2);
-  padding-right: calc(var(--space-3) + 22px);
+.ui-prompt[data-density='compact'] .ui-code-block-wrap--copy > .ui-code-block__header {
+  display: contents;
 }
 
-.ui-code-block-wrap > .ui-icon-button {
+.ui-prompt[data-density='compact']
+  .ui-code-block-wrap--copy
+  > .ui-code-block__header
+  > .ui-code-block__label {
+  display: none;
+}
+
+.ui-prompt[data-density='compact']
+  .ui-code-block-wrap--copy
+  > .ui-code-block__header
+  > .ui-icon-button,
+.ui-prompt[data-density='compact']
+  .ui-code-block-wrap--copy
+  > .ui-code-block__header
+  > .ui-code-block__copy-host
+  > .ui-icon-button {
   position: absolute;
   top: var(--space-1);
   right: var(--space-1);
   z-index: 1;
+}
+
+.ui-prompt[data-density='compact'] .ui-code-block-wrap--copy > .ui-code-block {
+  padding-top: var(--space-2);
+  padding-right: calc(var(--space-3) + 22px);
+  border-radius: var(--control-radius-sm);
 }
 
 /* The block that holds BYTES rather than a list of lines. A long line is

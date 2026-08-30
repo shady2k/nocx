@@ -40,15 +40,16 @@
  * its own background, border, type size and scroll cap — which is the exact
  * defect this component was extracted to end. Plain strings are unaffected.
  *
- * `copy` is the optional clipboard operation behind a copy control in the
- * block's corner, injected rather than reached for so the kit never names a
+ * `copy` is the optional clipboard operation behind a copy control in a real
+ * header strip, injected rather than reached for so the kit never names a
  * platform. It is offered only for a block whose children ARE the text: a
  * block carrying an inline component has no text to hand over, and where that
  * component is a `SecretChip` the bytes behind it are precisely what must not
  * leave through the clipboard. Callers that already own a copy affordance omit
- * the prop and render the read-only block, and an imperative surface — the
- * assistant's streamed answer, which builds its blocks by hand — mounts the
- * same control through `mountCodeBlockCopyButton` so there is one copy
+ * the prop and render the read-only block. `label` names the fence language or
+ * block kind on the left; it defaults to `Code`. An imperative surface — the
+ * assistant's streamed answer, which builds its blocks by hand — passes the
+ * same label through `mountCodeBlockCopyButton`, so there is one copy
  * vocabulary rather than two.
  */
 import { Show, children, createSignal } from 'solid-js'
@@ -58,10 +59,14 @@ import { CopyIcon } from './icons'
 import { IconButton } from './icon-button'
 import { showToast } from './toast'
 
+const DEFAULT_CODE_LABEL = 'Code'
+
 export interface CodeBlockProps {
   children: JSX.Element
   /** Accessible name, when the block needs one beyond its surrounding label. */
   ariaLabel?: string
+  /** Visible kind in the copy header; defaults to `Code`. */
+  label?: string
   /** Whether a long line wraps. Default true; see the note above for when a
    *  block says false. */
   wrap?: boolean
@@ -75,6 +80,8 @@ export interface CodeBlockProps {
 export interface CodeBlockCopyButtonProps {
   /** Read at click time so an imperative streaming block copies current code. */
   getText: () => string
+  /** Visible kind in the imperative copy header; defaults to `Code`. */
+  label?: string
   copy: (text: string) => Promise<void>
 }
 
@@ -104,12 +111,51 @@ function CodeBlockCopyButton(props: CodeBlockCopyButtonProps) {
   )
 }
 
+function createCodeBlockHeader(label: string): HTMLDivElement {
+  const header = document.createElement('div')
+  header.className = 'ui-code-block__header'
+  const labelEl = document.createElement('span')
+  labelEl.className = 'ui-code-block__label'
+  labelEl.textContent = label
+  header.append(labelEl)
+  return header
+}
+
+/**
+ * Give an imperative block the same structure as the JSX component.
+ *
+ * The scrollback creates a block before it knows its rows, so the copy host
+ * starts inside the block. Move it into a kit-owned header and put the existing
+ * block under a kit wrapper; no surface needs to know either structure.
+ */
+function mountImperativeCodeBlockHeader(host: HTMLElement, label: string): void {
+  const block = host.parentElement
+  if (!block?.classList.contains('ui-code-block')) {
+    const header = createCodeBlockHeader(label)
+    host.before(header)
+    header.append(host)
+    return
+  }
+
+  const wrapper = document.createElement('div')
+  wrapper.className = 'ui-code-block-wrap ui-code-block-wrap--copy'
+  block.replaceWith(wrapper)
+  block.classList.remove('ui-code-block-wrap')
+  host.classList.add('ui-code-block__copy-host')
+
+  const header = createCodeBlockHeader(label)
+  header.append(host)
+  wrapper.append(header, block)
+}
+
 /** Mount the CodeBlock copy control into an imperative DOM surface. */
 export function mountCodeBlockCopyButton(
   host: HTMLElement,
   props: CodeBlockCopyButtonProps,
 ): () => void {
-  return render(() => <CodeBlockCopyButton {...props} />, host)
+  const { label, ...buttonProps } = props
+  mountImperativeCodeBlockHeader(host, label ?? DEFAULT_CODE_LABEL)
+  return render(() => <CodeBlockCopyButton {...buttonProps} />, host)
 }
 
 export function CodeBlock(props: CodeBlockProps) {
@@ -136,6 +182,14 @@ export function CodeBlock(props: CodeBlockProps) {
       class="ui-code-block-wrap"
       classList={{ 'ui-code-block-wrap--copy': Boolean(props.copy) && copyText() !== undefined }}
     >
+      <Show when={props.copy && copyText() !== undefined ? props.copy : undefined}>
+        {(copy) => (
+          <div class="ui-code-block__header">
+            <span class="ui-code-block__label">{props.label ?? DEFAULT_CODE_LABEL}</span>
+            <CodeBlockCopyButton getText={() => copyText() ?? ''} copy={copy()} />
+          </div>
+        )}
+      </Show>
       <pre
         class="ui-code-block"
         data-variant={props.variant}
@@ -145,9 +199,6 @@ export function CodeBlock(props: CodeBlockProps) {
       >
         {held()}
       </pre>
-      <Show when={props.copy && copyText() !== undefined ? props.copy : undefined}>
-        {(copy) => <CodeBlockCopyButton getText={() => copyText() ?? ''} copy={copy()} />}
-      </Show>
     </div>
   )
 }

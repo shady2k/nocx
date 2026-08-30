@@ -92,14 +92,17 @@ func mergeShellExitCode(payload string, exitCode *int) (string, error) {
 //
 // The rung's coordinates change shape and nothing else does: history.query
 // names a HOST, the ledger names an ENVIRONMENT, and the two are one hash
-// apart (environmentForHost above, with its expiry note). The rung itself,
-// the directory, the search text and the page size cross unchanged.
-func historyLedgerQuery(scope content.Scope, cwd, host string, limit int, before *string, text string) content.LedgerQuery {
+// apart (environmentForHost above, with its expiry note). The pane rung names
+// the durable pane directly, because that identity survives a backend restart
+// while the terminal session id does not. The rung itself, the directory, the
+// search text and the page size cross unchanged.
+func historyLedgerQuery(scope content.Scope, paneID, cwd, host string, limit int, before *string, text string) content.LedgerQuery {
 	q := content.LedgerQuery{
-		Scope: scope,
-		Cwd:   cwd,
-		Text:  text,
-		Limit: limit,
+		Scope:  scope,
+		PaneID: paneID,
+		Cwd:    cwd,
+		Text:   text,
+		Limit:  limit,
 	}
 	// The rung's coordinates are only meaningful on the rungs that have
 	// them; `everywhere` carries none, and sending one would be a filter the

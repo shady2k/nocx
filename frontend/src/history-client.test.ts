@@ -232,6 +232,21 @@ describe('recordCommand', () => {
 })
 
 describe('queryHistory', () => {
+  it('pane rung carries the durable pane id', async () => {
+    const client = fakeClient()
+    client.call.mockResolvedValue({
+      entries: [],
+      scope: 'pane',
+      exhausted: true,
+      source: 'store',
+      coverage: null,
+    })
+    await queryHistory(client as unknown as WSClient, 'pane', '/repo', '', '', 'pane-a')
+    expect(client.call).toHaveBeenCalledWith('history.query', {
+      scope: 'pane',
+      paneId: 'pane-a',
+    })
+  })
   it('directory rung carries cwd and host', async () => {
     const client = fakeClient()
     client.call.mockResolvedValue({
@@ -276,7 +291,7 @@ describe('queryHistory', () => {
       source: 'store',
       coverage: null,
     })
-    await queryHistory(client as unknown as WSClient, 'everywhere', '/repo', '', 'deploy')
+    await queryHistory(client as unknown as WSClient, 'pane', '/repo', '', 'deploy', 'pane-a')
     expect(client.call).toHaveBeenCalledWith('history.query', {
       scope: 'everywhere',
       text: 'deploy',

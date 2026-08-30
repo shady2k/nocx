@@ -2226,7 +2226,7 @@ export class TerminalContent extends BasePaneContent {
           /** Up on the first line (or an empty draft): no further caret
            *  movement, so open the recall overlay (design §8.10 v6). */
           onUpAtTop: () => {
-            void this.recall?.open('directory')
+            void this.recall?.open('pane')
           },
           /** Tab opens the completion dropdown (§8.7's decided option 1). */
           onTab: () => this.completion?.open(),
@@ -2316,14 +2316,28 @@ export class TerminalContent extends BasePaneContent {
       // registry, exactly as the targets themselves are.
       this.targetRecall.set('shell', async (scope, text) => {
         try {
-          const page = await queryHistory(this.client, scope, this._cwd, this._host, text)
+          const page = await queryHistory(
+            this.client,
+            scope,
+            this._cwd,
+            this._host,
+            text,
+            this.pane.paneId,
+          )
           // A command run in THIS session comes back as it was run, not as
           // the store had to keep it (nocx-xkve.4). Recall only — the
           // completion provider above keeps reading the store, so ghost
           // text and candidates stay masked.
           return withSessionText(page, this.ledger)
         } catch {
-          return queryLedgerHistory(this.ledger, scope, this._cwd, this._host, text)
+          return queryLedgerHistory(
+            this.ledger,
+            text !== undefined && text !== '' ? 'everywhere' : scope,
+            this._cwd,
+            this._host,
+            text,
+            this.pane.paneId,
+          )
         }
       })
       this.recall = new RecallOverlay({

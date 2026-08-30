@@ -89,6 +89,24 @@ func spawnAndWait(t *testing.T, home string, relativeWrite bool, release func())
 	return string(reported[:len(reported)-1]), waitErr // strip pwd's newline
 }
 
+// sameDir compares two paths after resolving symlinks, because on macOS
+// t.TempDir() hands back /var/folders/… while a process that chdir'd there
+// reports /private/var/folders/… — the same directory through the /var
+// symlink. A string comparison is green on Linux and red on the runner
+// this project ships from (CI run 33321753715).
+func sameDir(t *testing.T, a, b string) bool {
+	t.Helper()
+	ra, err := filepath.EvalSymlinks(a)
+	if err != nil {
+		ra = a
+	}
+	rb, err := filepath.EvalSymlinks(b)
+	if err != nil {
+		rb = b
+	}
+	return ra == rb
+}
+
 func TestSpawnDoesNotInheritTheLaunchersWorkingDirectory(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("the fake server is a POSIX shell script")
@@ -101,11 +119,11 @@ func TestSpawnDoesNotInheritTheLaunchersWorkingDirectory(t *testing.T) {
 	if waitErr != nil {
 		t.Fatalf("the spawned process failed: %v", waitErr)
 	}
-	if reported == launchDir {
+	if sameDir(t, reported, launchDir) {
 		t.Errorf("the daemon stands in the launcher's directory %q; that directory belongs to "+
 			"the window, and the daemon outlives the window", launchDir)
 	}
-	if reported != home {
+	if !sameDir(t, reported, home) {
 		t.Errorf("the daemon reported cwd %q, want the chosen directory %q", reported, home)
 	}
 }
@@ -133,7 +151,7 @@ func TestSpawnSurvivesItsLaunchDirectoryBeingRemoved(t *testing.T) {
 	if waitErr != nil {
 		t.Fatalf("the daemon failed after its launch directory was removed: %v", waitErr)
 	}
-	if reported != home {
+	if !sameDir(t, reported, home) {
 		t.Errorf("the daemon reported cwd %q, want %q", reported, home)
 	}
 	if _, err := os.Stat(filepath.Join(home, "child-artifact")); err != nil {

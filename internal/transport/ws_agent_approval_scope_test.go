@@ -562,7 +562,7 @@ func TestAgentApprove_ParamsWithScopeConformToContract(t *testing.T) {
 // chose. On the scripted path the transport creates the store record itself
 // and could record the effect there; here the record already exists.
 func TestAgentApprove_ScopeAlways_RealEscalationWritesTheGatesRow(t *testing.T) {
-	fake, srv := newToolCallingServer("")
+	fake, srv := newToolCallingServer()
 	defer srv.Close()
 	client, err := assistant.NewClient(nil, nil)
 	if err != nil {
@@ -573,7 +573,6 @@ func TestAgentApprove_ScopeAlways_RealEscalationWritesTheGatesRow(t *testing.T) 
 	h.createEndpointAt(srv.URL)
 
 	sid := openLocalSession(t, h.conn)
-	fake.session = sid
 
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-always-1", "sessionId": sid, "question": "what is on the screen?", "cwd": "/repo",
@@ -626,7 +625,7 @@ func TestAgentApprove_ScopeAlways_RealRunClassificationWritesAnInvocationRule(t 
 	h.createEndpointAt(srv.URL)
 
 	sid := openLocalSession(t, h.conn)
-	fake.args = `{"sessionId":"` + sid + `","command":"df -h"}`
+	fake.args = `{"command":"df -h"}`
 
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-always-1", "sessionId": sid, "question": "how much disk is free?", "cwd": "/repo",
@@ -687,7 +686,7 @@ func TestAgentApprove_ScopeAlways_RealRunClassificationReadsTheObserveGrantBefor
 	var sid string
 	var requests atomic.Int64
 	argsFor := func(command string) string {
-		raw, err := json.Marshal(map[string]string{"sessionId": sid, "command": command})
+		raw, err := json.Marshal(map[string]string{"command": command})
 		if err != nil {
 			t.Fatalf("marshal session.run args: %v", err)
 		}

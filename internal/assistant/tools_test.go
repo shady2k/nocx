@@ -24,10 +24,11 @@ const realToolsFS = "../../contracts/tools"
 
 func testAskParams(baseURL string) AskParams {
 	return AskParams{
-		Key:      credential.NewSecret("sk-test-123"),
-		BaseURL:  baseURL,
-		Model:    "probe-model",
-		Messages: []Message{{Role: "user", Content: "hi"}},
+		Key:       credential.NewSecret("sk-test-123"),
+		BaseURL:   baseURL,
+		Model:     "probe-model",
+		SessionID: "lane-1",
+		Messages:  []Message{{Role: "user", Content: "hi"}},
 	}
 }
 

@@ -36,7 +36,7 @@ func kernelFor(t *testing.T, grant content.Grant, ledger AttemptLedger) *effectK
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	k, err := newEffectKernel(nil, grant, reg, ledger, nil, &fakeKnownMaterial{}, "run-1", 1, "turn-entry", nil, nil, nil)
+	k, err := newEffectKernel(nil, grant, reg, ledger, nil, &fakeKnownMaterial{}, "run-1", "", 1, "turn-entry", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("newEffectKernel: %v", err)
 	}

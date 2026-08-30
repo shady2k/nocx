@@ -217,7 +217,7 @@ func TestACommandTheTurnRanJoinsTheTurnFromTheBackendsOwnResolution(t *testing.T
 	mw := middlewareForTurn(t, grant, led, nil, req, &fakeKnownMaterial{}, "turn-entry")
 
 	if _, err := wrappedEndpoint(mw, "session.run", "call-1",
-		`{"sessionId":"`+sess+`","command":"ls"}`); err != nil {
+		`{"command":"ls"}`); err != nil {
 		t.Fatalf("session.run: %v", err)
 	}
 	if req.asked != 1 {
@@ -252,7 +252,7 @@ func TestTheRendererSendsNoArrangementOfItsOwn(t *testing.T) {
 	mw := middlewareForTurn(t, grant, led, nil, req, &fakeKnownMaterial{}, "turn-entry")
 
 	if _, err := wrappedEndpoint(mw, "session.run", "call-1",
-		`{"sessionId":"`+sess+`","command":"ls"}`); err != nil {
+		`{"command":"ls"}`); err != nil {
 		t.Fatalf("session.run: %v", err)
 	}
 	// The resolution the renderer sent carries exactly the fields the wire
@@ -284,7 +284,7 @@ func TestTheRelationIsWrittenWhenTheCauseIsKnownNotWhenTheTurnCloses(t *testing.
 	mw := middlewareForTurn(t, grant, led, nil, req, &fakeKnownMaterial{}, "turn-entry")
 
 	if _, err := wrappedEndpoint(mw, "session.run", "call-1",
-		`{"sessionId":"`+sess+`","command":"sleep 30"}`); err != nil {
+		`{"command":"sleep 30"}`); err != nil {
 		t.Fatalf("session.run: %v", err)
 	}
 	got := led.recordedCauses()
@@ -309,7 +309,7 @@ func TestAFailedRunJoinsTheCallItMadeAndNoCommand(t *testing.T) {
 	mw := middlewareForTurn(t, grant, led, nil, &failingRunRequester{}, &fakeKnownMaterial{}, "turn-entry")
 
 	if _, err := wrappedEndpoint(mw, "session.run", "call-1",
-		`{"sessionId":"`+sess+`","command":"ls"}`); err == nil {
+		`{"command":"ls"}`); err == nil {
 		t.Fatal("session.run succeeded — the failing requester should have failed the call")
 	}
 	got := led.recordedCauses()

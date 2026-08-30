@@ -290,7 +290,6 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 	if errObj != nil {
 		t.Fatalf("open session: %+v", errObj)
 	}
-	provider.session = sid
 
 	const lane = lifecycle.LaneID("lane-block-read")
 	h.ws.RegisterLifecycleLane(lane, session.ID(sid))
@@ -349,8 +348,8 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 	if err := json.Unmarshal(firstCall, &first); err != nil {
 		t.Fatalf("first agent.runToolCall: %v\nraw: %s", err, firstCall)
 	}
-	if first.Tool != "session.read" || first.Args.SessionID != sid || first.Args.ID != promptID {
-		t.Fatalf("first session.read = %+v, want session %q and prompt id %q", first, sid, promptID)
+	if first.Tool != "session.read" || first.Args.SessionID != "" || first.Args.ID != promptID {
+		t.Fatalf("first session.read = %+v, want no model session id and prompt id %q", first, promptID)
 	}
 
 	screenRaw := readNotification(t, h.conn, "agent.readScreenRequest", 10*time.Second)
@@ -410,8 +409,8 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 	if err := json.Unmarshal(secondCall, &second); err != nil {
 		t.Fatalf("second agent.runToolCall: %v\nraw: %s", err, secondCall)
 	}
-	if second.Tool != "session.read" || second.Args.SessionID != sid || second.Args.ID != promptID {
-		t.Fatalf("second session.read = %+v, want session %q and the same prompt id %q", second, sid, promptID)
+	if second.Tool != "session.read" || second.Args.SessionID != "" || second.Args.ID != promptID {
+		t.Fatalf("second session.read = %+v, want no model session id and the same prompt id %q", second, promptID)
 	}
 
 	select {
@@ -456,7 +455,6 @@ func TestLifecycleLedger_RunningBlockReadKeepsAttemptIDThroughCompletion(t *test
 }
 
 type lifecycleBlockReadProvider struct {
-	session        string
 	promptID       chan string
 	runningResult  chan struct{}
 	finishedResult chan struct{}
@@ -488,7 +486,7 @@ func (p *lifecycleBlockReadProvider) serve(w http.ResponseWriter, r *http.Reques
 		p.mu.Unlock()
 		p.promptID <- learned
 		streamToolCallChunk(w, "session.read", fmt.Sprintf(
-			`{"sessionId":%q,"id":%q,"start":0,"count":20}`, p.session, learned))
+			`{"id":%q,"start":0,"count":20}`, learned))
 		return
 	}
 	learned := p.learned
@@ -503,7 +501,7 @@ func (p *lifecycleBlockReadProvider) serve(w http.ResponseWriter, r *http.Reques
 		close(p.runningResult)
 		<-p.releaseSecond
 		streamToolCallChunk(w, "session.read", fmt.Sprintf(
-			`{"sessionId":%q,"id":%q,"start":0,"count":20}`, p.session, learned))
+			`{"id":%q,"start":0,"count":20}`, learned))
 	case strings.Contains(tool, `"state":"exited"`) &&
 		strings.Contains(tool, `"exitCode":7`) &&
 		strings.Contains(tool, "finished block output"):
@@ -512,7 +510,7 @@ func (p *lifecycleBlockReadProvider) serve(w http.ResponseWriter, r *http.Reques
 		}
 		close(p.finishedResult)
 		streamToolCallChunk(w, "session.read",
-			`{"sessionId":"`+p.session+`","id":"unmarked-block-id","start":0,"count":20}`)
+			`{"id":"unmarked-block-id","start":0,"count":20}`)
 	default:
 		p.fail("unexpected model tool result: %s", tool)
 		streamAnswerChunk(w, "unexpected provider request")

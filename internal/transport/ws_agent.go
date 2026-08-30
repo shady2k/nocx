@@ -653,9 +653,8 @@ func environmentForSession(sess session.Session) content.Environment {
 //     the request path, and handed in — the prompt function never looks a
 //     setting up. Read fresh per ask, so a change on the settings screen
 //     governs the next question with no restart and nothing to invalidate.
-func systemPromptFactsFor(sessionID, cwd string, env content.Environment, attached []assistant.AttachedContentItem, personal string) assistant.SystemPromptFacts {
+func systemPromptFactsFor(cwd string, env content.Environment, attached []assistant.AttachedContentItem, personal string) assistant.SystemPromptFacts {
 	f := assistant.SystemPromptFacts{
-		SessionID:            sessionID,
 		Cwd:                  cwd,
 		Env:                  env,
 		AttachedContent:      attached,
@@ -873,13 +872,11 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		// SUBSEQUENT attempt (attempt 2), recorded by the middleware.
 		attempt:   1,
 		sessionID: sid,
-		// The facts the model is told, from their existing owners: the
-		// session id exactly as the ask spelled it (the string the tools'
-		// sessionId parameter is matched against), the cwd this question
-		// carried and the ledger recorded with it, the pane's environment
-		// as environmentForSession already derived it, and the person's
-		// own paragraph as the settings document holds it right now.
-		promptFacts: systemPromptFactsFor(p.SessionID, in.Cwd, in.Env, attached, h.personalParagraph()),
+		// The facts the model is told come from their existing owners: the cwd
+		// this question carried and the ledger recorded with it, the pane's
+		// environment as environmentForSession already derived it, and the
+		// person's own paragraph as the settings document holds it right now.
+		promptFacts: systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph()),
 	}
 	h.pendingRunsMu.Lock()
 	h.pendingRuns[rc.runID] = rc
@@ -1090,12 +1087,9 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// Resolution is complete before the streaming transition. The stream
 	// never reaches for the vault again, so a later seal cannot strand it.
 
-	// Context assembly. The standing prompt (design §1) rides EVERY ask —
-	// it is what tells the model where it is, and without it a tool call
-	// naming this session is a guess the policy's exact scope match refuses
-	// terminally (nocx-avogl.1). It is assembled here, from the facts
-	// pinned when the ask arrived, and never stored: the same run resumed
-	// after an approval rebuilds the same text from the same facts.
+	// Context assembly. The standing prompt (design §1) rides every ask and
+	// is assembled from facts pinned when the ask arrived. It is never stored:
+	// a run resumed after approval rebuilds the same text from the same facts.
 	promptFacts := rc.promptFacts
 	msgs := make([]assistant.Message, 0, 8)
 	msgs = append(msgs, assistant.Message{
@@ -1175,6 +1169,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		KnownMaterial: h.knownMaterial,
 		Approvals:     h.approvals,
 		RunID:         strconv.FormatInt(rc.runID, 10),
+		SessionID:     string(rc.sessionID),
 		Attempt:       rc.attempt,
 		// The turn every entry this run causes is joined to (nocx-h1l4o).
 		// It comes off the SAME askRunContext the run id does — both were

@@ -3,10 +3,12 @@ package transport
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/log"
 )
 
@@ -56,6 +58,34 @@ func TestLogAgentStreamEnded_DistinguishesRequestedExecutedAndResume(t *testing.
 		if got[key] != value {
 			t.Fatalf("field %q = %#v, want %#v; all fields %#v", key, got[key], value, got)
 		}
+	}
+}
+
+func TestAgentAsk_SealFailureDoesNotCountToolAsExecuted(t *testing.T) {
+	svc := &fakeAgentService{sealErr: errors.New("seal failed")}
+	logger := &instrumentLogger{}
+	h := newGapHandlers(svc, &toolCallScript{events: []assistant.AskEvent{
+		answerEvent("before"),
+		callEvent("call-1", "files.read", "action-1"),
+	}}, assistant.NewApprovalStore())
+	h.log = logger
+
+	h.runAskStream(context.Background(), gapRunContext(), &gapResponder{})
+
+	if logger.record.message != "agent ask: the stream ended" {
+		t.Fatalf("message = %q, want stream-ended record", logger.record.message)
+	}
+	values := make(map[string]any)
+	for i := 0; i < len(logger.record.args); i += 2 {
+		key, ok := logger.record.args[i].(string)
+		if !ok {
+			t.Fatalf("argument %d key = %#v, want string", i, logger.record.args[i])
+		}
+		values[key] = logger.record.args[i+1]
+	}
+	if values["toolCallsRequested"] != 1 || values["toolCallsExecuted"] != 0 {
+		t.Fatalf("tool counts = requested %v executed %v, want 1/0 after seal failure",
+			values["toolCallsRequested"], values["toolCallsExecuted"])
 	}
 }
 

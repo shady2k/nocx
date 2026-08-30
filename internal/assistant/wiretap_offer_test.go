@@ -140,10 +140,28 @@ func TestWireTap_LogsOfferOncePerRun(t *testing.T) {
 		return &http.Response{Status: "200 OK", StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok"))}, nil
 	})
 	tap := newWireTapWith(inner, "", nil, logger)
+	state7 := NewWireToolOfferState()
+	req, err := http.NewRequestWithContext(
+		WithWireToolOfferState(context.Background(), "run-7", &grant, state7),
+		http.MethodPost, "https://example.test/v1", strings.NewReader(`{"messages":[]}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := tap.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
 	body := `{"tools":[{"function":{"name":"session.run"}}]}`
 	for _, runID := range []string{"run-7", "run-7", "run-8"} {
 		req, err := http.NewRequestWithContext(
-			WithWireToolOffer(context.Background(), runID, &grant),
+			WithWireToolOfferState(context.Background(), runID, &grant, func() *WireToolOfferState {
+				if runID == "run-7" {
+					return state7
+				}
+				return NewWireToolOfferState()
+			}()),
 			http.MethodPost, "https://example.test/v1", strings.NewReader(body))
 		if err != nil {
 			t.Fatal(err)
@@ -167,5 +185,39 @@ func TestWireTap_LogsOfferOncePerRun(t *testing.T) {
 		if record["run"] != want {
 			t.Fatalf("line %d run = %v, want %s", i, record["run"], want)
 		}
+	}
+}
+
+func TestWireTap_LogsEmptyStructuralOffer(t *testing.T) {
+	var logs bytes.Buffer
+	logger := internalLog.NewSlogAdapter(slog.New(slog.NewJSONHandler(&logs, &slog.HandlerOptions{Level: slog.LevelInfo})))
+	grant := (content.EffectPolicy{}).AsGrant([]content.GrantScope{{Kind: content.ResourceSession, ID: "session-1"}})
+	inner := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
+		_, _ = io.ReadAll(req.Body)
+		return &http.Response{Status: "200 OK", StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader("ok"))}, nil
+	})
+	tap := newWireTapWith(inner, "", nil, logger)
+	req, err := http.NewRequestWithContext(
+		WithWireToolOffer(context.Background(), "run-empty", &grant),
+		http.MethodPost, "https://example.test/v1", strings.NewReader(`{"messages":[],"tools":null}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := tap.RoundTrip(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, _ = io.ReadAll(resp.Body)
+	_ = resp.Body.Close()
+
+	var record map[string]any
+	if err := json.Unmarshal(logs.Bytes(), &record); err != nil {
+		t.Fatalf("log = %q: %v", logs.String(), err)
+	}
+	if record["msg"] != "agent ask: tools offered" || record["count"] != float64(0) {
+		t.Fatalf("offer record = %v, want empty structural offer", record)
+	}
+	if tools, ok := record["tools"].([]any); !ok || len(tools) != 0 {
+		t.Fatalf("tools = %v, want []", record["tools"])
 	}
 }

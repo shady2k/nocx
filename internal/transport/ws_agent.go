@@ -857,14 +857,15 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	runCtx := log.WithTraceID(ctx, runTrace(askRes.RunID))
 	runControl := &agentRunControl{cancelDone: make(chan struct{})}
 	rc := askRunContext{
-		runID:    askRes.RunID,
-		control:  runControl,
-		entryID:  askRes.EntryID,
-		paneID:   in.PaneID,
-		question: in.Question,
-		endpoint: endpoint,
-		model:    facts.Model,
-		grant:    runGrant,
+		runID:      askRes.RunID,
+		control:    runControl,
+		entryID:    askRes.EntryID,
+		paneID:     in.PaneID,
+		question:   in.Question,
+		endpoint:   endpoint,
+		model:      facts.Model,
+		grant:      runGrant,
+		offerState: assistant.NewWireToolOfferState(),
 		// attempt is the run's attempt — the ledger inserted the run row at
 		// attempt 1 (SubmitAgentAsk), and it is the value the approval
 		// binding names. The resume passes the SAME attempt, so the
@@ -995,6 +996,9 @@ type askRunContext struct {
 	// workspace policy the composition root named (runGrantFor). Nil: the
 	// run executes no tools — the model is offered none.
 	grant *content.Grant
+	// offerState survives retries and approval resumes so the structural
+	// offer remains once-per-run without process-lifetime run-id storage.
+	offerState *assistant.WireToolOfferState
 	// attempt is the run's attempt — the ledger inserted the run row at
 	// attempt 1 (SubmitAgentAsk), and it is the value the approval binding
 	// names. The resume passes the SAME attempt so the middleware's
@@ -1205,7 +1209,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// tool call: the first delta then opens the next block.
 	prose := rc.prose
 	ctx = assistant.WithWireIdentity(ctx, strconv.FormatInt(rc.runID, 10), rc.entryID)
-	ctx = assistant.WithWireToolOffer(ctx, strconv.FormatInt(rc.runID, 10), rc.grant)
+	ctx = assistant.WithWireToolOfferState(ctx, strconv.FormatInt(rc.runID, 10), rc.grant, rc.offerState)
 	err := h.client.Ask(ctx, assistant.AskParams{
 		Key:           secret,
 		BaseURL:       rc.endpoint.BaseURL,
@@ -1255,7 +1259,6 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 				return nil
 			}
 			recordRequested(ev.Call.CallID)
-			toolCallsExecuted.Add(1)
 			// THE BOUNDARY, and it is the backend's (ADR-0040). The prose
 			// that was streaming ends HERE, where the call arrived, because
 			// a sentence written before a command explains why the command
@@ -1313,6 +1316,10 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 					rc.control.recordDroppedDelta()
 				}
 			}
+			// Count only after the durable prose boundary succeeds. A seal
+			// failure aborts before this point, so the metric distinguishes
+			// accepted tool-call events from requests that merely arrived.
+			toolCallsExecuted.Add(1)
 			return nil
 		case assistant.AskReasoning:
 			reasoningChars.Add(int64(len(ev.Text)))

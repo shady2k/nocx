@@ -371,21 +371,27 @@ func (b *Broker) bindRunAttempt(requestID, attemptID string, conn Conn) bool {
 		return false
 	}
 	b.mu.Lock()
-	defer b.mu.Unlock()
 	p, ok := b.pending[requestID]
 	if !ok || p.recipients == nil {
+		b.mu.Unlock()
 		return false
 	}
-	if _, ok := p.recipients[conn]; !ok {
+	if _, recipientOK := p.recipients[conn]; !recipientOK {
+		b.mu.Unlock()
 		return false
 	}
-	if _, ok := b.runLeases[requestID]; !ok {
+	lease, ok := b.runLeases[requestID]
+	if !ok {
+		b.mu.Unlock()
 		return false
 	}
 	if _, ok := b.runAttempts[requestID]; ok {
+		b.mu.Unlock()
 		return false
 	}
 	b.runAttempts[requestID] = attemptID
+	b.mu.Unlock()
+	lease.onAttemptStart()
 	return true
 }
 

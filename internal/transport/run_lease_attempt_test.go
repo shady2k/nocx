@@ -90,11 +90,20 @@ func TestRunLeaseAttemptBindingKeepsConcurrentRunsDistinct(t *testing.T) {
 	if _, ok := broker.runAttemptForLease(first); ok {
 		t.Fatal("connection B's refused bind changed connection A's lease")
 	}
+	if _, started, _ := leaseAccounting(first); started {
+		t.Fatal("refused connection bind started accounting")
+	}
 	if !broker.bindRunAttempt(firstID, "attempt-first", connA) {
 		t.Fatal("connection A could not bind its own run request")
 	}
 	if !broker.bindRunAttempt(secondID, "attempt-second", connB) {
 		t.Fatal("connection B could not bind its own run request")
+	}
+	if output, started, reason := leaseAccounting(first); output != 0 || !started || reason != "" {
+		t.Fatalf("first authenticated start accounting = output %d, started %v, reason %q; want zero and active", output, started, reason)
+	}
+	if output, started, reason := leaseAccounting(second); output != 0 || !started || reason != "" {
+		t.Fatalf("second authenticated start accounting = output %d, started %v, reason %q; want zero and active", output, started, reason)
 	}
 	if got, ok := broker.runAttemptForLease(first); !ok || got != "attempt-first" {
 		t.Fatalf("first run attempt = %q (ok=%v), want attempt-first", got, ok)

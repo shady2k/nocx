@@ -176,6 +176,7 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"id":"group:test:1","name":"group"}`),
 		},
 		"history.query": {
+			[]byte(`{"scope":"pane","paneId":"pane-1"}`),
 			[]byte(`{"scope":"everywhere"}`),
 			[]byte(`{"scope":"directory","cwd":"/tmp"}`),
 			[]byte(`{"scope":"host","host":""}`),
@@ -356,7 +357,7 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"sidebar":{"activeViewId":"home","width":240},"activeTab":"tab-1"}`),
 		},
 		"agent.approve": {
-			[]byte(`{"runId":"run-1","attempt":1,"tool":"run","callId":"call-1","argHash":"hash","scope":"once"}`),
+			[]byte(`{"runId":"run-1","attempt":1,"tool":"session.run","callId":"call-1","argHash":"hash","scope":"once"}`),
 		},
 		"agent.ask": {
 			[]byte(`{"askId":"ask-1","sessionId":"session-1","question":"What happened?","attachedContent":[{"itemId":"item-1","command":"echo hi","state":"exited"}],"cwd":"/tmp"}`),

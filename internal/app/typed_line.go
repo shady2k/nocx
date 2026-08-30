@@ -86,6 +86,9 @@ type TypedMaster interface {
 	// Aux opens one auxiliary channel on the master's connection. A refusal
 	// is a refusal: the adapter never opens a connection of its own.
 	Aux(req mux.SessionRequest) (io.ReadWriteCloser, error)
+	// OpenRemoteForward asks the master to bind a remote loopback port and
+	// returns the port the far kernel assigned.
+	OpenRemoteForward(listenHost string, listenPort int, connectHost string, connectPort int) (int, error)
 	// Exit asks the master to terminate.
 	Exit() error
 	// Close drops this client's control connection without stopping the
@@ -115,6 +118,10 @@ func (r realMuxMaster) Aux(req mux.SessionRequest) (io.ReadWriteCloser, error) {
 	return s, nil
 }
 
+func (r realMuxMaster) OpenRemoteForward(listenHost string, listenPort int, connectHost string, connectPort int) (int, error) {
+	return r.m.OpenRemoteForward(listenHost, listenPort, connectHost, connectPort)
+}
+
 // DialTypedMux is the production dialer.
 func DialTypedMux(controlPath string) (TypedMaster, error) {
 	m, err := mux.Open(controlPath)
@@ -130,11 +137,12 @@ type typedPublisher interface {
 }
 
 // typedSessions opens the bootstrap window on the session that owns the
-// terminal the frames travel on. One method, deliberately: what this path
-// needs of a session is the window and nothing else, and a seam that asked
-// for the whole Session would be asking for authority it does not use.
+// terminal the frames travel on, and exposes that session's closing signal.
+// The two methods are the narrow authority this path needs: the window for
+// delivery and Done for transferring a listener after accepted integration.
 type typedSessions interface {
 	OpenBootstrapWindow(id session.ID) (session.BootstrapWindow, error)
+	SessionDone(id session.ID) (<-chan struct{}, error)
 }
 
 // sessionWindows adapts the session registry to that seam.
@@ -146,6 +154,14 @@ func (s sessionWindows) OpenBootstrapWindow(id session.ID) (session.BootstrapWin
 		return nil, err
 	}
 	return sess.OpenBootstrapWindow()
+}
+
+func (s sessionWindows) SessionDone(id session.ID) (<-chan struct{}, error) {
+	sess, err := s.reg.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	return sess.Done(), nil
 }
 
 // typedRunner holds everything the typed path needs beyond one grant.
@@ -170,6 +186,12 @@ type typedRunner struct {
 	// path they were told nothing while the same refusal on the saved path
 	// was a structured reason — a soft degrade the UI contradicts, which is
 	// how a feature that does not exist survives a release (AGENTS.md).
+	//
+	// reportListenerPort is a test-only observation seam for the loopback
+	// listener created by the child-domain composer. It lets the live
+	// assembly proof connect a candidate to the exact listener the grant
+	// established; it cannot affect delivery.
+	reportListenerPort func(port int)
 	//
 	// Nil reports nowhere, which is the state before this and the safe
 	// direction: a delivery driven without a composition root still runs.
@@ -259,13 +281,19 @@ func composeSSHLine(wrap ssh.TypedWrap, extra []string, inv ssh.TypedInvocation,
 
 // typedDelivery is one typed session's delivery, armed BEFORE the grant is
 // handed to the parent shell and run once the line is going.
+// typedDelivery owns the listener until bootstrap acceptance; an accepted
+// bootstrap transfers it to the parent session's Done signal.
 type typedDelivery struct {
-	runner      *typedRunner
-	sessionID   string
-	lane        string
-	controlPath string
-	plan        shellintegration.BootstrapPlan
-	window      session.BootstrapWindow
+	runner       *typedRunner
+	sessionID    string
+	lane         string
+	controlPath  string
+	plan         shellintegration.BootstrapPlan
+	window       session.BootstrapWindow
+	listener     io.Closer
+	sessionDone  <-chan struct{}
+	listenerPort int
+	remotePort   int
 	// publishSettled closes when the publish attempt has reached a terminal
 	// outcome — committed, unchanged, failed or contended. Design §6.1 step
 	// 5: the secret is minted only after it, so a stage-1 that verifies
@@ -294,6 +322,15 @@ func (r *typedRunner) arm(sessionID, lane, controlPath string, plan shellintegra
 	if err != nil {
 		return nil, fmt.Errorf("typed ssh: the parent session's terminal is not available: %w", err)
 	}
+	sessionDone, err := r.sessions.SessionDone(session.ID(sessionID))
+	if err != nil {
+		_ = w.Close()
+		return nil, fmt.Errorf("typed ssh: the parent session's lifetime is not available: %w", err)
+	}
+	if sessionDone == nil {
+		_ = w.Close()
+		return nil, errors.New("typed ssh: the parent session has no lifetime signal")
+	}
 	// The session's axis opens a NEW attempt here, and it has to be opened
 	// for the outcome below to land at all: the axis answers once per
 	// registration, and this session's answer is already in — the parent's
@@ -319,6 +356,7 @@ func (r *typedRunner) arm(sessionID, lane, controlPath string, plan shellintegra
 		controlPath:    controlPath,
 		plan:           plan,
 		window:         w,
+		sessionDone:    sessionDone,
 		publishSettled: make(chan struct{}),
 	}, nil
 }
@@ -337,6 +375,29 @@ func (d *typedDelivery) reportOutcome(reason ssh.RefusalReason) {
 	d.runner.reportBootstrapOutcome(d.lane, reason)
 }
 
+// handoffListener transfers the listener's ownership only after an accepted
+// bootstrap. The interval opens when NewListener returns in
+// buildSSHChildBootstrap and closes when the owning parent session's Done
+// signal closes; early outcomes retain the delivery's deferred close.
+func (d *typedDelivery) handoffListener() {
+	listener := d.listener
+	d.listener = nil
+	if listener == nil {
+		return
+	}
+	done := d.sessionDone
+	if done == nil {
+		// arm rejects this state in production; keep the fallback fail-closed
+		// for directly constructed deliveries and never leak the listener.
+		_ = listener.Close()
+		return
+	}
+	go func() {
+		<-done
+		_ = listener.Close()
+	}()
+}
+
 // run drives the whole delivery to one terminal outcome and closes the
 // ownership interval behind it. It is the §6.1 order, in order.
 func (d *typedDelivery) run(ctx context.Context) {
@@ -345,7 +406,12 @@ func (d *typedDelivery) run(ctx context.Context) {
 
 func (d *typedDelivery) doRun(ctx context.Context) {
 	lg := d.runner.log
-	defer func() { _ = d.window.Close() }()
+	defer func() {
+		_ = d.window.Close()
+		if d.listener != nil {
+			_ = d.listener.Close()
+		}
+	}()
 
 	// 1. Ownership proven — and NOT ASSUMED. Nothing before this line
 	//    publishes, mints or touches remote state; what happens in this wait
@@ -372,7 +438,23 @@ func (d *typedDelivery) doRun(ctx context.Context) {
 	}
 	defer func() { _ = master.Close() }()
 
-	// The input quarantine opens HERE and not earlier (design §5.3): from
+	// The forward is opened by the proven master, not guessed into argv.
+	// A refusal is terminal: only the non-secret abort frame may reach the
+	// loader, and no publish or secret frame may start.
+	remotePort, err := master.OpenRemoteForward("127.0.0.1", 0, "127.0.0.1", d.listenerPort)
+	if err != nil || remotePort < 1 || remotePort > 65535 {
+		if err == nil {
+			err = fmt.Errorf("master returned invalid lifecycle port %d", remotePort)
+		}
+		lg.Warn("typed ssh: the master refused the lifecycle forward; the session stays a plain ssh",
+			"session_id", d.sessionID, "error", err)
+		if _, werr := d.window.Write(shellintegration.AbortFrame()); werr != nil {
+			lg.Debug("typed ssh: the abort frame could not be written", "error", werr)
+		}
+		d.reportOutcome(ssh.ReasonChannelUnavailable)
+		return
+	}
+	d.remotePort = remotePort
 	// now until the terminal outcome the user's keystrokes are refused, not
 	// buffered.
 	d.window.QuarantineInput()
@@ -405,6 +487,7 @@ func (d *typedDelivery) doRun(ctx context.Context) {
 		own.MarkIntegrated()
 		lg.Info("typed ssh: the session came up integrated on the user's own connection",
 			"session_id", d.sessionID, "socket", d.controlPath)
+		d.handoffListener()
 	} else {
 		lg.Warn("typed ssh: the session did not integrate; the far side is at a native login shell",
 			"session_id", d.sessionID, "outcome", string(outcome), "reason", string(reason))

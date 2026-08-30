@@ -9,7 +9,10 @@ import (
 	"log/slog"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -892,5 +895,153 @@ func TestServiceErrorCrossesWithCodeAndDetails(t *testing.T) {
 	_ = inW.Close()
 	if err := <-serveDone; err != nil {
 		t.Fatalf("serve: %v", err)
+	}
+}
+
+// eofSeenReader is an io.Reader that announces the moment the read loop has
+// consumed the EOF, so a test never has to guess when Serve stopped reading.
+// Without it the only way to know is to wait a while, which is the timing
+// dependency this repository forbids.
+type eofSeenReader struct {
+	r    io.Reader
+	once sync.Once
+	seen chan struct{}
+}
+
+func newEOFSeenReader(r io.Reader) *eofSeenReader {
+	return &eofSeenReader{r: r, seen: make(chan struct{})}
+}
+
+func (e *eofSeenReader) Read(p []byte) (int, error) {
+	n, err := e.r.Read(p)
+	if errors.Is(err, io.EOF) {
+		e.once.Do(func() { close(e.seen) })
+	}
+	return n, err
+}
+
+// TestServeWaitsForItsHandlersBeforeReturning is the closing end of D13's
+// interval. D13 buys concurrency: `frame` dispatches every request on its own
+// goroutine so a blocking handler cannot stall the read loop. That opens an
+// interval — a handler is running while the loop moves on — and nothing
+// closed it: Serve returned the moment `in` reached EOF, with handlers still
+// executing.
+//
+// The consequence is not academic. cmd/nocx-helper's main returns as soon as
+// Serve does, so on a real remote host a transport that dies mid-mutation
+// took the helper process down with the `git commit` it had spawned still
+// writing into .git — the half-written repository D12 exists to prevent. In
+// the tests it showed up as internal/git/helper failing in t.TempDir's
+// RemoveAll while every assertion passed (nocx-x2e53, nocx-t76b9): those
+// tests wait on the peer's exit, and the peer's exit did not mean what its
+// comment claimed it meant.
+//
+// So: Serve has returned implies no handler is still running.
+//
+// The bound below gates only a false GREEN, never a red. In a correct host
+// Serve CANNOT return while the handler sits on `release`, whatever the
+// machine is doing, so no bound of any length can make this test flaky; a
+// machine slow enough to miss a broken host's return within two seconds
+// would have to stall two statements for that long.
+func TestServeWaitsForItsHandlersBeforeReturning(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	in := newEOFSeenReader(inR)
+	h := host.New(in, outW, "hash", "inst", discardLogger())
+
+	started := make(chan struct{})
+	release := make(chan struct{})
+	var handlerDone atomic.Bool
+	h.Register(&fakeService{
+		name: "test",
+		ops:  map[string]any{"slow": struct{}{}},
+		// A mutation: it refuses cancellation (D11), so the dead transport
+		// cannot abandon it and Serve has nothing to do but wait.
+		refuses: map[string]bool{"slow": true},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			close(started)
+			<-release
+			handlerDone.Store(true)
+			return map[string]any{"op": op}, nil
+		},
+	})
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 1, Service: "test", Op: "slow", Corr: "c1"}))
+	<-started // the handler is now inside Call, holding the request open
+
+	_ = inW.Close() // the transport dies mid-request
+	<-in.seen       // and the read loop has taken the EOF: only the handler can hold Serve now
+
+	select {
+	case err := <-serveDone:
+		t.Fatalf("Serve returned while its handler was still running (err %v): a helper process would exit here, killing the git it spawned mid-write", err)
+	case <-time.After(2 * time.Second):
+	}
+
+	close(release)
+	if err := <-serveDone; err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	if !handlerDone.Load() {
+		t.Fatal("Serve returned before its handler finished")
+	}
+}
+
+// TestADeadTransportAbandonsWhatMayBeCancelled is the other end of the same
+// change. Waiting for every handler would trade a half-written repository for
+// a helper process that never exits: a read still running when the transport
+// dies has nobody left to answer it. So a request whose service does not
+// refuse cancellation has its context cancelled when the read loop ends, and
+// only the refusing half — the mutations of D11 — is waited for.
+func TestADeadTransportAbandonsWhatMayBeCancelled(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	h := host.New(inR, outW, "hash", "inst", discardLogger())
+
+	started := make(chan struct{})
+	var sawCancel atomic.Bool
+	h.Register(&fakeService{
+		name: "test",
+		ops:  map[string]any{"read": struct{}{}},
+		callFn: func(ctx context.Context, op string, params json.RawMessage) (any, error) {
+			close(started)
+			<-ctx.Done() // the observable: nothing else can release this handler
+			sawCancel.Store(true)
+			return nil, ctx.Err()
+		},
+	})
+
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 1, Service: "test", Op: "read", Corr: "c1"}))
+	<-started
+
+	// Nothing ever closes a release channel here: if the dead transport did
+	// not cancel the handler, Serve waits for it forever and go test's own
+	// timeout reports that, rather than a duration deciding the result.
+	_ = inW.Close()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+	if !sawCancel.Load() {
+		t.Fatal("the handler was never cancelled")
 	}
 }

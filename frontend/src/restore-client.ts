@@ -161,13 +161,17 @@ export async function bodyForBlock(client: WSClient, entryId: string): Promise<s
 }
 
 /**
- * The text one ANSWER entry recorded, or null when it is no longer stored.
+ * The prose ONE `text` child recorded, or null when it is no longer stored.
  *
- * This is the artifact SubmitAgentAsk wrote for the answer, so it is what the
- * model actually said — not a rendering of it. Copying an answer reads THIS
- * (nocx-v13pd): the flow consumes the markdown markers it paints, so the DOM
- * is no longer the answer, and a copy scraped from it would quietly differ
- * from the record.
+ * This is the artifact OpenProse wrote for one run of prose, so it is what the
+ * model actually said — not a rendering of it. Reading the record rather than
+ * the DOM is nocx-v13pd: the flow consumes the markdown markers it paints, so
+ * the DOM is no longer the answer, and text scraped from it would quietly
+ * differ from what was stored.
+ *
+ * A `text` CHILD is the whole domain of this: since ADR-0040 a turn owns no
+ * prose artifact, so calling it with a turn's id asks the wrong entry — see
+ * answerTextForTurn, which is what a whole answer is assembled by.
  *
  * Null is a refusal the caller must SAY. Falling back to the painted text
  * would be the defect this exists to close, silently.
@@ -177,6 +181,43 @@ export async function answerTextForEntry(
   entryId: string,
 ): Promise<string | null> {
   return artifactBody(client, entryId, 'text/plain')
+}
+
+/**
+ * A whole turn's answer, assembled from the `text` children its prose lives
+ * in — or null when there is none to hand back.
+ *
+ * ADR-0040 moved the stored unit: a turn is an entry with no body of its own,
+ * and each run of prose between two calls is a `text` child with a seat. So
+ * the answer a person copies is the concatenation of those children in the
+ * causal order the ledger assigned, and there is no single artifact to read.
+ *
+ * ASKING THE TURN FOR ONE ARTIFACT IS WHAT THIS REPLACES (nocx-3dteo). The
+ * only `text/plain` artifacts an ask entry has are the provider wiretap
+ * captures — the raw chat-completions request and response, hung on the turn
+ * by the wire recorder — so a lookup by media type put the system prompt and
+ * every tool schema on the clipboard, and drew them as the answer on restore.
+ *
+ * Null is the same refusal answerTextForEntry makes, for the same reason: a
+ * turn whose prose retention took, and a store that cannot be asked, are one
+ * fact to a person — it is not here.
+ */
+export async function answerTextForTurn(client: WSClient, entryId: string): Promise<string | null> {
+  try {
+    const entry = await client.call<LedgerGet>('ledger.get', { id: entryId })
+    const prose = (entry.caused ?? []).filter((c) => c.kind === 'text')
+    if (prose.length === 0) return null
+    // The children are independent reads, and the order that matters is the
+    // ledger's, not the network's — so they are joined by their position in
+    // `caused`, whatever order the answers arrive in.
+    const runs = await Promise.all(prose.map((c) => answerTextForEntry(client, c.entryId)))
+    const kept = runs.filter((r): r is string => r !== null)
+    return kept.length === 0 ? null : kept.join('')
+  } catch {
+    // Quiet for the reason artifactBody is quiet: the surface that reports a
+    // degraded history says it once, in the product.
+    return null
+  }
 }
 
 /** One entry a turn caused, at its position inside the turn — the ledger's
@@ -251,10 +292,22 @@ export async function restoredBody(client: WSClient, entryId: string): Promise<R
     const caused = entry.caused ?? []
     const vt = entry.artifacts.find((a) => a.mediaType === 'application/vt')
     const text = entry.artifacts.find((a) => a.mediaType === 'text/plain')
-    // What the block DRAWS with: a command's grid is the vt; a turn's
-    // prose is text/plain. When both survive on an ask entry, the prose
-    // is what a turn draws — the grid beside it predates the grammar.
-    const chosen = entry.entry.kind === 'ask' ? (text ?? vt) : (vt ?? text)
+    // What the block DRAWS with: a command's grid is the vt, and its plain
+    // copy beside it is the fallback when retention took the grid.
+    //
+    // A TURN DRAWS WITH NOTHING OF ITS OWN. Since ADR-0040 its prose is
+    // `text` children with seats, so an ask entry has no body artifact —
+    // and the artifacts it DOES carry are the provider wiretap captures
+    // (internal/app/assistant_wire_capture.go: the raw request and the raw
+    // response, both text/plain). Picking a turn's body by media type
+    // therefore drew the chat-completions request — system prompt, every
+    // tool schema, stream_options — above the real prose, on restore only,
+    // because the live path never reads artifacts (nocx-3dteo).
+    //
+    // Not filtered by capture method, but not chosen at all: a filter would
+    // still be asking an entry for a body it does not have, and the next
+    // artifact hung on a turn would arrive as the next wrong answer.
+    const chosen = entry.entry.kind === 'ask' ? undefined : (vt ?? text)
     if (!chosen) {
       // The BLOCK'S KIND is the ENTRY's kind, never a guess from which
       // artifact survived: since ADR-0040 a turn carries NO artifact of its

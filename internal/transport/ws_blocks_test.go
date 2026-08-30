@@ -422,7 +422,7 @@ func TestBlocks_EndToEndOverTheRealSocket(t *testing.T) {
 
 	// The provider: list, then read the window the total points at, then
 	// answer with what the tool result actually carried.
-	prov := &blockToolProvider{session: "", marker: marker}
+	prov := &blockToolProvider{marker: marker}
 	srv := httptest.NewServer(http.HandlerFunc(prov.serve))
 	defer srv.Close()
 
@@ -438,7 +438,6 @@ func TestBlocks_EndToEndOverTheRealSocket(t *testing.T) {
 	if openErr != nil {
 		t.Fatalf("open in pane: %+v", openErr)
 	}
-	prov.session = sid
 	// The session is open: everything recorded from here is its own.
 	waitPastMilli(sessionOpenedAt(t, h.ws, sid))
 	recordBlockWithBody(t, h.db, blockPaneThis, "make -j8",
@@ -484,7 +483,6 @@ func TestBlocks_EndToEndOverTheRealSocket(t *testing.T) {
 // handed actually contained it. The last step is what makes the assertion
 // about the product rather than about the test.
 type blockToolProvider struct {
-	session   string
 	marker    string
 	requests  int
 	lastCall  string
@@ -497,7 +495,7 @@ func (p *blockToolProvider) serve(w http.ResponseWriter, r *http.Request) {
 	switch p.requests {
 	case 1:
 		p.lastCall = "session.list"
-		streamToolCallChunk(w, "session.list", fmt.Sprintf(`{"sessionId":%q}`, p.session))
+		streamToolCallChunk(w, "session.list", `{}`)
 	case 2:
 		itemID, total := listedItemFrom(string(body))
 		p.readStart = total - 20
@@ -506,7 +504,7 @@ func (p *blockToolProvider) serve(w http.ResponseWriter, r *http.Request) {
 		}
 		p.lastCall = "session.read"
 		streamToolCallChunk(w, "session.read", fmt.Sprintf(
-			`{"sessionId":%q,"id":%q,"start":%d,"count":20}`, p.session, itemID, p.readStart))
+			`{"id":%q,"start":%d,"count":20}`, itemID, p.readStart))
 	default:
 		if strings.Contains(string(body), p.marker) {
 			streamAnswerChunk(w, p.marker)

@@ -17,15 +17,17 @@ import (
 // decision to leave params unpinned was wrong: history.query.params.schema.json
 // is now the wire contract, and its registered validator remains runtime enforcement.
 //
-//	scope  — required; directory | host | everywhere
-//	cwd    — required when scope=directory; the exact directory rung
-//	host   — required when scope=host; "" is the local machine
-//	limit  — optional; <1 → 50, >200 → 200
-//	before — optional; the opaque row id the previous page ended at
-//	text   — optional; the search filter (nocx-ms7v), a case-insensitive
-//	         substring over command within the rung; empty means no filter
+//	scope     — required; pane | directory | host | everywhere
+//	paneId    — required when scope=pane; the durable pane identity
+//	cwd       — required when scope=directory; the exact directory rung
+//	host      — required when scope=host; "" is the local machine
+//	limit     — optional; <1 → 50, >200 → 200
+//	before    — optional; the opaque row id the previous page ended at
+//	text      — optional; the search filter (nocx-ms7v), a case-insensitive
+//	            substring over command within the rung; empty means no filter
 type historyQueryParams struct {
 	Scope  string  `json:"scope"`
+	PaneID *string `json:"paneId"`
 	Cwd    *string `json:"cwd"`
 	Host   *string `json:"host"`
 	Limit  *int    `json:"limit"`
@@ -101,10 +103,8 @@ type historyQueryHandlers struct {
 }
 
 // handleHistoryQuery serves the history.query method.
-//
-// Three behaviours carry the decisions the schema names:
 func (h historyQueryHandlers) handleHistoryQuery(ctx context.Context, req jsonrpcRequest) {
-	scope, cwd, host, limit, before, text, errMsg := parseHistoryQueryParams(req)
+	scope, paneID, cwd, host, limit, before, text, errMsg := parseHistoryQueryParams(req)
 	if errMsg != "" {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: " + errMsg})
 		return
@@ -129,9 +129,8 @@ func (h historyQueryHandlers) handleHistoryQuery(ctx context.Context, req jsonrp
 		_ = h.r.TryResult(req.ID, mustMarshal(resp))
 		return
 	}
-
 	err := h.op.Run(ctx, func(ctx context.Context, svc capability.ContentService) error {
-		page, err := svc.QueryHistory(ctx, historyLedgerQuery(scope, cwd, host, limit, before, text))
+		page, err := svc.QueryHistory(ctx, historyLedgerQuery(scope, paneID, cwd, host, limit, before, text))
 		if err != nil {
 			return err
 		}
@@ -167,14 +166,16 @@ func (h historyQueryHandlers) handleHistoryQuery(ctx context.Context, req jsonrp
 
 // parseHistoryQueryParams validates the request against the handler contract
 // above. The returned message is empty when the params are usable.
-func parseHistoryQueryParams(req jsonrpcRequest) (content.Scope, string, string, int, *string, string, string) {
+func parseHistoryQueryParams(req jsonrpcRequest) (content.Scope, string, string, string, int, *string, string, string) {
 	var p historyQueryParams
 	if err := json.Unmarshal(req.Params, &p); err != nil {
-		return "", "", "", 0, nil, "", "params must be an object"
+		return "", "", "", "", 0, nil, "", "params must be an object"
 	}
 
 	var scope content.Scope
 	switch p.Scope {
+	case "pane":
+		scope = content.ScopePane
 	case "directory":
 		scope = content.ScopeDirectory
 	case "host":
@@ -182,10 +183,13 @@ func parseHistoryQueryParams(req jsonrpcRequest) (content.Scope, string, string,
 	case "everywhere":
 		scope = content.ScopeEverywhere
 	default:
-		return "", "", "", 0, nil, "", "scope must be one of directory, host, everywhere"
+		return "", "", "", "", 0, nil, "", "scope must be one of pane, directory, host, everywhere"
 	}
 
-	var cwd, host string
+	var paneID, cwd, host string
+	if p.PaneID != nil {
+		paneID = *p.PaneID
+	}
 	if p.Cwd != nil {
 		cwd = *p.Cwd
 	}
@@ -193,12 +197,16 @@ func parseHistoryQueryParams(req jsonrpcRequest) (content.Scope, string, string,
 		host = *p.Host
 	}
 	// Presence, not value: "" is a legitimate directory rung (a command whose
-	// cwd was never known) and the local-machine host rung.
+	// cwd was never known) and the local-machine host rung. Pane identity is
+	// different: an empty value names no durable tab and cannot answer safely.
+	if scope == content.ScopePane && paneID == "" {
+		return "", "", "", "", 0, nil, "", "paneId is required and must be non-empty for scope=pane"
+	}
 	if scope == content.ScopeDirectory && p.Cwd == nil {
-		return "", "", "", 0, nil, "", "cwd is required for scope=directory"
+		return "", "", "", "", 0, nil, "", "cwd is required for scope=directory"
 	}
 	if scope == content.ScopeHost && p.Host == nil {
-		return "", "", "", 0, nil, "", "host is required for scope=host"
+		return "", "", "", "", 0, nil, "", "host is required for scope=host"
 	}
 
 	limit := defaultHistoryPageLimit
@@ -220,7 +228,7 @@ func parseHistoryQueryParams(req jsonrpcRequest) (content.Scope, string, string,
 	var before *string
 	if p.Before != nil {
 		if *p.Before == "" {
-			return "", "", "", 0, nil, "", "before must be the opaque row id of the previous page"
+			return "", "", "", "", 0, nil, "", "before must be the opaque row id of the previous page"
 		}
 		before = p.Before
 	}
@@ -232,5 +240,5 @@ func parseHistoryQueryParams(req jsonrpcRequest) (content.Scope, string, string,
 	if p.Text != nil {
 		text = *p.Text
 	}
-	return scope, cwd, host, limit, before, text, ""
+	return scope, paneID, cwd, host, limit, before, text, ""
 }

@@ -5,13 +5,8 @@
   "description": "Parameters for the session.read agent tool: read one item in a terminal session, or the current screen when id is omitted. The result identifies whether it is a running item, an exited item, or the current screen; an alternate-buffer result is current screen content, not scrollback.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["sessionId"],
+  "required": [],
   "properties": {
-    "sessionId": {
-      "type": "string",
-      "minLength": 1,
-      "description": "The session containing the item or screen."
-    },
     "id": {
       "type": "string",
       "minLength": 1,

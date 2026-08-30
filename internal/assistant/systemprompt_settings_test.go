@@ -22,7 +22,6 @@ func TestSettingsSystemPromptArtifactMatchesPrompt(t *testing.T) {
 		t.Fatalf("settings prompt artifact drifted from SystemPrompt:\nartifact:\n%s\nsource:\n%s", artifact, got)
 	}
 	for _, placeholder := range []string{
-		"<session id>",
 		"<working directory>",
 		"<local shell or ssh session>",
 		"<host or local machine>",
@@ -30,6 +29,11 @@ func TestSettingsSystemPromptArtifactMatchesPrompt(t *testing.T) {
 	} {
 		if !strings.Contains(got, placeholder) {
 			t.Errorf("settings prompt lacks placeholder %q:\n%s", placeholder, got)
+		}
+	}
+	for _, forbidden := range []string{"Session id:", "sessionId"} {
+		if strings.Contains(got, forbidden) {
+			t.Errorf("settings prompt contains backend-owned session instruction %q:\n%s", forbidden, got)
 		}
 	}
 	for _, example := range []string{

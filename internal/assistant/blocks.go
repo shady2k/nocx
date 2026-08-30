@@ -173,14 +173,14 @@ func executeSessionList(ctx context.Context, reader *agenttools.SessionReader, s
 		return "", err
 	}
 	var p struct {
-		SessionID string `json:"sessionId"`
-		Limit     int    `json:"limit"`
+		Limit int `json:"limit"`
 	}
 	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
 		return "", fmt.Errorf("session.list: args: %w", unmarshalErr)
 	}
-	if !reader.Allows(p.SessionID) {
-		return "", fmt.Errorf("session.list: session %q is outside the run's grant", p.SessionID)
+	sessionID := reader.SessionID()
+	if !reader.Allows(sessionID) {
+		return "", fmt.Errorf("session.list: session %q is outside the run's grant", sessionID)
 	}
 	if source == nil {
 		return "", errors.New("session.list: no session source is wired for this run")
@@ -191,12 +191,12 @@ func executeSessionList(ctx context.Context, reader *agenttools.SessionReader, s
 	if p.Limit > maxBlockListLimit {
 		p.Limit = maxBlockListLimit
 	}
-	items, err := source.ListSessionItems(ctx, p.SessionID, p.Limit)
+	items, err := source.ListSessionItems(ctx, sessionID, p.Limit)
 	if err != nil {
 		return "", fmt.Errorf("session.list: %w", err)
 	}
 	out := sessionListResult{
-		SessionID: p.SessionID,
+		SessionID: sessionID,
 		Items:     make([]sessionListItem, 0, len(items.Items)),
 		More:      items.More,
 	}
@@ -240,22 +240,22 @@ func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, s
 		return "", err
 	}
 	var p struct {
-		SessionID string `json:"sessionId"`
-		ID        string `json:"id"`
-		Start     int    `json:"start"`
-		Count     int    `json:"count"`
+		ID    string `json:"id"`
+		Start int    `json:"start"`
+		Count int    `json:"count"`
 	}
 	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
 		return "", fmt.Errorf("session.read: args: %w", unmarshalErr)
 	}
+	sessionID := reader.SessionID()
 	if p.Start < 0 || p.Count < 0 {
 		return "", errors.New("session.read: start and count must be non-negative")
 	}
-	if !reader.Allows(p.SessionID) {
-		return "", fmt.Errorf("session.read: session %q is outside the run's grant", p.SessionID)
+	if !reader.Allows(sessionID) {
+		return "", fmt.Errorf("session.read: session %q is outside the run's grant", sessionID)
 	}
 	if p.ID == "" {
-		return executeSessionScreen(ctx, p.SessionID, requester, p.Start, p.Count, bound.MaxBytes)
+		return executeSessionScreen(ctx, sessionID, requester, p.Start, p.Count, bound.MaxBytes)
 	}
 	if source == nil {
 		return "", errors.New("session.read: no session source is wired for this run")
@@ -266,16 +266,16 @@ func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, s
 	if p.Count > maxBlockLines {
 		p.Count = maxBlockLines
 	}
-	item, err := source.ReadSessionItem(ctx, p.SessionID, p.ID, p.Start, p.Count)
+	item, err := source.ReadSessionItem(ctx, sessionID, p.ID, p.Start, p.Count)
 	if err != nil {
 		return "", fmt.Errorf("session.read: %w", err)
 	}
 	if item.State == "running" {
-		return executeSessionItemScreen(ctx, p.SessionID, p.ID, requester, p.Start, p.Count, bound.MaxBytes)
+		return executeSessionItemScreen(ctx, sessionID, p.ID, requester, p.Start, p.Count, bound.MaxBytes)
 	}
 	outText, returnedEnd := boundBlockText(item.Text, item.Start, item.End, bound.MaxBytes)
 	out := sessionReadResult{
-		SessionID: p.SessionID,
+		SessionID: sessionID,
 		ID:        item.ID,
 		State:     item.State,
 		Source:    "ledger",

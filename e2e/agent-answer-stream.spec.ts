@@ -189,7 +189,7 @@ test.describe('the assistant’s tool call is visible, where it happened (nocx-s
 
     // A real tool-calling run is TWO model responses: the proposal, then the
     // answer written from the result.
-    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: { sessionId } }] })
+    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: {} }] })
     fake.setScript({ chunks: ['The screen ', 'is empty.'] })
 
     const QUESTION = 'What command did I run?'

@@ -26,21 +26,18 @@ package app
 //     not: the child starts conventional, never establishes, and the parent
 //     stillborn-activates (§9) — asserted by the fd-closed su test. The
 //     full reasoning lives at the launcher site in nocx.bash/nocx.zsh.
-//   - ssh: the bootstrap is the user's OWN `ssh` invocation with two
-//     multiplex options added — ADR-0049, "the channel we own is the
-//     carrier" — carrying the child's forwarded lifecycle port as a -R
-//     reverse forward on that same connection and, as its remote command,
-//     the bounded loader. Nothing of variable size and no secret travels in
-//     the line: the bundle is published over an auxiliary channel of the
+//   - ssh: the bootstrap is the user's OWN `ssh` invocation with multiplex
+//     options added — ADR-0049, "the channel we own is the carrier". The
+//     proven master opens the reverse forward out-of-band, and frame 2 carries
+//     the allocated lifecycle port. Nothing variable-size or secret travels
+//     in the line: the bundle is published over an auxiliary channel of the
 //     master, and stage-1 and the secret travel as frames on the pty the
 //     parent shell is already using. typed_line.go is that delivery.
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"math/big"
 	"sync"
 	"time"
 
@@ -112,7 +109,7 @@ func (r *sessionRegistry) lookup(lane lifecycle.LaneID) (string, bool) {
 
 // newChildGrantBuilder wires the child-domain bootstrap builder behind the
 // domain_grant outbound. It is the single owner of "how do we reach a
-// host" (ADR-0022): the composition root decides the transport and the
+// host" (ADR-0049): the composition root decides the transport and the
 // launch, and the shell never parses the bootstrap.
 //
 // pub is a LAZY accessor, not the publisher: the composition root builds
@@ -220,7 +217,7 @@ func buildLocalChildBootstrap(pub *lifecyclepub.Publisher, sessions *sessionRegi
 
 // buildSSHChildBootstrap composes the ssh child: the user's own `ssh`
 // invocation with our two multiplex options added, a loopback listener
-// transport (the local endpoint of the child's -R reverse forward), the child
+// transport (the local endpoint of the master's reverse forward), the child
 // minted on it, and the bounded loader as the remote command.
 //
 // It is the typed path's entry point, and the order in it is the order design
@@ -274,13 +271,15 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions
 	if err != nil {
 		return lifecyclepub.GrantBootstrap{}, err
 	}
+	if typed.reportListenerPort != nil {
+		typed.reportListenerPort(ln.Port())
+	}
 	h, err := pub.RequestDomain(req.Lane, &req.Parent, ln.TransportID())
 	if err != nil {
 		_ = ln.Close()
 		return lifecyclepub.GrantBootstrap{}, err
 	}
-	remotePort, err := randomPort()
-	if err != nil {
+	if err = ln.ExpectDomain(req.Lane, h.Domain); err != nil {
 		_ = ln.Close()
 		return lifecyclepub.GrantBootstrap{}, err
 	}
@@ -297,14 +296,13 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions
 	// bytes nobody will send is a far side blocking on a frame that never
 	// arrives.
 	opts := shellintegration.LaunchOptions{
-		SessionID:     sid,
-		Enhanced:      true,
-		Lane:          string(req.Lane),
-		Domain:        string(h.Domain),
-		Epoch:         h.Epoch,
-		LifecyclePort: remotePort,
-		Capability:    hex.EncodeToString(h.Capability[:]),
-		Recovery:      hex.EncodeToString(h.Recovery[:]),
+		SessionID:  sid,
+		Enhanced:   true,
+		Lane:       string(req.Lane),
+		Domain:     string(h.Domain),
+		Epoch:      h.Epoch,
+		Capability: hex.EncodeToString(h.Capability[:]),
+		Recovery:   hex.EncodeToString(h.Recovery[:]),
 	}
 	stage, err := shellintegration.Stage1Frame(shellintegration.ShellAuto, opts)
 	if err != nil {
@@ -335,6 +333,8 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions
 		_ = ln.Close()
 		return lifecyclepub.GrantBootstrap{}, err
 	}
+	delivery.listener = ln
+	delivery.listenerPort = ln.Port()
 	// Frame 2 is delivered only after the publish has reached a terminal
 	// outcome (design §6.1 step 5), and never before stage-1 has verified
 	// itself — DeliverBootstrap runs the barrier at exactly that point. The
@@ -360,25 +360,15 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions
 		}
 	}
 	plan.Secret = shellintegration.SecretFunc(func(context.Context) ([]byte, error) {
-		return shellintegration.SecretFrame(opts)
+		frameOpts := opts
+		frameOpts.LifecyclePort = delivery.remotePort
+		return shellintegration.SecretFrame(frameOpts)
 	})
 	delivery.plan = plan
 
-	extra := []string{"-t", "-R", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", remotePort, ln.Port())}
-	line := composeSSHLine(wrap, extra, inv, carrier)
+	line := composeSSHLine(wrap, []string{"-t"}, inv, carrier)
 
 	go delivery.run(context.Background())
 
 	return lifecyclepub.GrantBootstrap{Domain: h.Domain, Epoch: h.Epoch, Bootstrap: line}, nil
-}
-
-// randomPort picks a high loopback port for the -R bind. A collision with
-// an occupied remote port makes the forward fail and the child fall back
-// conventionally — the honest degrade, never a silent one.
-func randomPort() (int, error) {
-	n, err := rand.Int(rand.Reader, big.NewInt(20000))
-	if err != nil {
-		return 0, err
-	}
-	return 40000 + int(n.Int64()), nil
 }

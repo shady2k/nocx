@@ -110,7 +110,13 @@ import {
 } from './command-ledger'
 import { recordCommand, queryHistory } from './history-client'
 import { captureBlock } from './capture-client'
-import { answerTextForEntry, arrangedByCause, blocksForPane, restoredBody } from './restore-client'
+import {
+  answerTextForEntry,
+  answerTextForTurn,
+  arrangedByCause,
+  blocksForPane,
+  restoredBody,
+} from './restore-client'
 import { restoredBlock, restoredTurn } from './scrollback/restored-block'
 import { toolCallTitle } from './scrollback/tool-call-title'
 import { fromITheme } from './scrollback/serializer'
@@ -1745,7 +1751,11 @@ export class TerminalContent extends BasePaneContent {
         onClear: () => this.clearGrants(),
         onBlockFrozen: (rec) => this._onBlockFrozen(rec),
         sessionName: (id) => this.hooks.sessionName?.(id) ?? null,
-        answerText: (entryId) => answerTextForEntry(this.client, entryId),
+        // The copy path is handed a TURN's entry id (blocks.ts reaches it
+        // only for a block whose kind is `ask`), and a turn's answer is its
+        // `text` children joined — never an artifact of its own, which since
+        // ADR-0040 it does not have (nocx-3dteo).
+        answerText: (entryId) => answerTextForTurn(this.client, entryId),
         dump: (entryId) => agentClient.dump(entryId),
         runningActions: this.runningActions,
       })
@@ -2216,7 +2226,7 @@ export class TerminalContent extends BasePaneContent {
           /** Up on the first line (or an empty draft): no further caret
            *  movement, so open the recall overlay (design §8.10 v6). */
           onUpAtTop: () => {
-            void this.recall?.open('directory')
+            void this.recall?.open('pane')
           },
           /** Tab opens the completion dropdown (§8.7's decided option 1). */
           onTab: () => this.completion?.open(),
@@ -2306,14 +2316,28 @@ export class TerminalContent extends BasePaneContent {
       // registry, exactly as the targets themselves are.
       this.targetRecall.set('shell', async (scope, text) => {
         try {
-          const page = await queryHistory(this.client, scope, this._cwd, this._host, text)
+          const page = await queryHistory(
+            this.client,
+            scope,
+            this._cwd,
+            this._host,
+            text,
+            this.pane.paneId,
+          )
           // A command run in THIS session comes back as it was run, not as
           // the store had to keep it (nocx-xkve.4). Recall only — the
           // completion provider above keeps reading the store, so ghost
           // text and candidates stay masked.
           return withSessionText(page, this.ledger)
         } catch {
-          return queryLedgerHistory(this.ledger, scope, this._cwd, this._host, text)
+          return queryLedgerHistory(
+            this.ledger,
+            text !== undefined && text !== '' ? 'everywhere' : scope,
+            this._cwd,
+            this._host,
+            text,
+            this.pane.paneId,
+          )
         }
       })
       this.recall = new RecallOverlay({
@@ -4177,10 +4201,10 @@ export class TerminalContent extends BasePaneContent {
       // causal sequence — prose, tool calls, commands — in the seats the
       // ledger stored, through the SAME builders the live path ends at.
       //
-      // The PROSE was already fetched: `restoredBody` returned the turn's
-      // text/plain artifact, and the children ride the same `ledger.get`
-      // call as `caused`. A `text` child's body is its own artifact, read
-      // here per child exactly as a top-level block's body is read.
+      // THE PROSE IS THE CHILDREN'S. `restoredBody` returns no body for a
+      // turn — it has none since ADR-0040 — and the children ride the same
+      // `ledger.get` call as `caused`. A `text` child's body is its own
+      // artifact, read here per child exactly as a top-level block's is.
       const childBody = new Map<string, string | null>()
       for (const c of restored?.caused ?? []) {
         if (c.kind !== 'text') continue
@@ -4213,6 +4237,7 @@ export class TerminalContent extends BasePaneContent {
                   location: '',
                   kind: 'text',
                   body: childBody.get(cause.entryId) ?? null,
+                  entryId: cause.entryId,
                   // A run of the assistant's prose is the assistant's —
                   // the child's own source says so (nocx-dc2fr).
                   author: cause.source === 'assistant' ? 'agent' : 'shell',
@@ -4226,6 +4251,9 @@ export class TerminalContent extends BasePaneContent {
                 snapshotStore,
                 this.runningActions,
                 this.dumpSource ?? undefined,
+                // A text child owns its single text/plain artifact; it must
+                // never borrow the enclosing turn's assembled answer.
+                (entryId) => answerTextForEntry(this.client, entryId),
               )
             }
             // An ACTION child is a tool line — a header naming what was
@@ -4283,6 +4311,7 @@ export class TerminalContent extends BasePaneContent {
           },
           this.runningActions,
           this.dumpSource ?? undefined,
+          (entryId) => answerTextForTurn(this.client, entryId),
         ),
       )
     }

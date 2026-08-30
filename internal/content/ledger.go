@@ -1246,9 +1246,11 @@ const MaxLedgerPageLimit = 200
 // LedgerQuery is one recall query over the ledger (design §6.2). Scope is
 // the ladder's rung (§10.6) and EnvironmentID/Cwd are its coordinates: the
 // server answers from the rung it was asked for and never silently widens,
-// because a ladder whose rung you cannot see is a filter. Kind and Status
-// are the closed enums the CHECK constraints name — a value they do not name
-// is a refused request, never an empty result set.
+// because a ladder whose rung you cannot see is a filter. PaneID is the
+// durable identity for the narrowest pane rung; unlike a session id, it
+// survives a backend restart. Kind and Status are the closed enums the CHECK
+// constraints name — a value they do not name is a refused request, never an
+// empty result set.
 //
 // The two bounds read DIFFERENT columns, deliberately:
 //

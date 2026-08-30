@@ -197,7 +197,7 @@ func TestAgentRunToolCall_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
-// The other value of the same fact, off the same socket: `run` submits a
+// The other value of the same fact, off the same socket: `session.run` submits a
 // command, so the block that command opens is the account of the call and
 // the flow draws no line beside it (nocx-9sqii). Asserted here because a
 // boolean asserted in one state is a field nobody has checked.
@@ -205,7 +205,7 @@ func TestAgentRunToolCall_ACallThatOpensABlockSaysSoOverTheWire(t *testing.T) {
 	schema := loadSchema(t, "agent.runToolCall.schema.json")
 	client := &scriptedEventClient{events: []assistant.AskEvent{
 		{Kind: assistant.AskToolCall, Call: &assistant.ToolCall{
-			Tool: "run", CallID: "call_r", EntryID: "entry-action-r",
+			Tool: "session.run", CallID: "call_r", EntryID: "entry-action-r",
 			Effect: content.EffectMutateDestructive, OpensBlock: true,
 		}},
 		{Kind: assistant.AskAnswer, Text: "41G free"},
@@ -228,8 +228,8 @@ func TestAgentRunToolCall_ACallThatOpensABlockSaysSoOverTheWire(t *testing.T) {
 	if err := json.Unmarshal(raw, &got); err != nil {
 		t.Fatalf("unmarshal: %v", err)
 	}
-	if got.Tool != "run" || !got.OpensBlock {
-		t.Fatalf("payload = %s, want run announcing opensBlock=true", raw)
+	if got.Tool != "session.run" || !got.OpensBlock {
+		t.Fatalf("payload = %s, want session.run announcing opensBlock=true", raw)
 	}
 }
 

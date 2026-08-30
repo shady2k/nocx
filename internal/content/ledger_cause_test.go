@@ -440,7 +440,7 @@ func TestAnActionSaysWhetherItOpenedABlockOfItsOwn(t *testing.T) {
 	envReady(t, led, "local")
 
 	turn := submitTurn(t, led, "00000000-0000-7000-8000-00000000000a", "how much disk is left?")
-	opens := submitOpeningAction(t, led, "00000000-0000-7000-8000-00000000000b", "run")
+	opens := submitOpeningAction(t, led, "00000000-0000-7000-8000-00000000000b", "session.run")
 	quiet := submitAction(t, led, "00000000-0000-7000-8000-00000000000c",
 		"readScreen", content.EffectObserve,
 		&content.GrantScope{Kind: content.ResourceSession, ID: "sess-1"})

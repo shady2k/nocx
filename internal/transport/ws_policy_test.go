@@ -111,6 +111,52 @@ func TestPolicySet_PersistsAndTheRunMintSeesIt(t *testing.T) {
 	}
 }
 
+// TestPolicySet_PreservesStoredRulesWhenRowsOnlyPayloadOmitsThem proves the
+// document owner protects standing answers from a forgetful matrix caller:
+// policy.set carries only rows, then a fresh store reads the persisted rule
+// back unchanged.
+func TestPolicySet_PreservesStoredRulesWhenRowsOnlyPayloadOmitsThem(t *testing.T) {
+	dir := t.TempDir()
+	doc := storage.NewDocumentStore(dir)
+	const name = "agent-policy.json"
+	store := assistant.NewGlobalPolicyStore(doc, name)
+	rule := content.InvocationRule{
+		Pattern:  [][]string{{"df", "-h"}},
+		Decision: content.DecisionPermit,
+	}
+	initial := content.EffectPolicy{
+		Observe: content.EffectRow{Decision: content.DecisionAsk},
+		Rules:   []content.InvocationRule{rule},
+	}
+	if err := store.SetPolicy(initial); err != nil {
+		t.Fatalf("seed policy: %v", err)
+	}
+	h := newAskHarnessWithOpts(t, mustClient(t), WithAgentPolicy(store))
+
+	raw := jsonrpcCall(t, h.conn, "policy.set", map[string]any{
+		"policy": map[string]any{
+			"observe": map[string]any{
+				"decision": "permit",
+				"scopes":   []any{},
+			},
+		},
+	})
+	var envelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil {
+		t.Fatalf("policy.set %s: %v", raw, err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("policy.set error: %+v", envelope.Error)
+	}
+
+	reloaded := assistant.NewGlobalPolicyStore(doc, name)
+	if got := reloaded.Policy().Rules; !reflect.DeepEqual(got, []content.InvocationRule{rule}) {
+		t.Fatalf("reloaded rules = %+v, want the seeded rule preserved", got)
+	}
+}
+
 // TestPolicySet_NoConfigurationPathNamesATool drives the wire's own refusal:
 // a policy that keys a row by a tool name, and one whose row carries a
 // tool-kind scope, are invalid params — there is no set that sticks.

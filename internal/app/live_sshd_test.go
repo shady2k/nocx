@@ -1047,15 +1047,17 @@ func TestLiveSshd_ZshAdapterReachesAcceptedDomain(t *testing.T) {
 	kernel := newRecordingKernel()
 	ch, out := fx.connect(t, kernel, ssh.ShellZsh, shellintegration.New(log.NewSlogAdapter(nil)))
 
-	waittest.WaitForTimeout(t, "domain established", 15*time.Second, func() bool {
-		kernel.mu.Lock()
-		defer kernel.mu.Unlock()
-		if kernel.minted != 1 {
-			return false
-		}
-		d, ok := kernel.Domain(kernel.domain)
-		return ok && d.State == lifecycle.DomainEstablished
-	})
+	waittest.WaitForTimeoutDetail(t, "domain established", 15*time.Second,
+		func() string { return fmt.Sprintf("terminal:\n%s", out.String()) },
+		func() bool {
+			kernel.mu.Lock()
+			defer kernel.mu.Unlock()
+			if kernel.minted != 1 {
+				return false
+			}
+			d, ok := kernel.Domain(kernel.domain)
+			return ok && d.State == lifecycle.DomainEstablished
+		})
 
 	att := runLine(t, ch, kernel, "printf 'PROOF_ZSH_123\\n'; sleep 0.3", 0)
 	fence := fmt.Sprintf("\x1b]1337;NOCX_FENCE;%x\x07", att.Fence)

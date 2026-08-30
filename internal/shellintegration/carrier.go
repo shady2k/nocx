@@ -38,8 +38,9 @@ import (
 //     owner of "is this installation valid"; that verification runs after the
 //     bootstrap has settled, inside stage-1, not in the command.
 //  2. CAPABILITY-FREE AND PAYLOAD-FREE. Only addressing arguments travel:
-//     session id, lane, domain, epoch, lifecycle port, the stage descriptor
-//     number and the stage-1 digest. Those are names, not secrets — the
+//     session id, lane, domain, epoch, the stage descriptor number and the
+//     stage-1 digest. The lifecycle port is allocated by the proven master
+//     and travels in frame 2 instead. These are names, not secrets — the
 //     digest names public bytes, and knowing it yields nothing about either
 //     bearer.
 //  3. BOUNDED. Under MaxCarrierLen for every ShellKind, and the assertion is
@@ -526,7 +527,7 @@ R @SOURCEFAILED@`
 // the digest is the last of them. Both numbers are load-bearing: the loader
 // reads the digest as a positional parameter, and the grammar assertion
 // counts the words.
-const carrierArgCount = 7
+const carrierArgCount = 6
 
 // carrierLoader renders the loader text. Every value it substitutes comes
 // from a constant above, so the Go side and the shell side cannot drift.
@@ -588,7 +589,6 @@ func carrierCommand(shell ShellKind, opts LaunchOptions) (string, RefusalReason,
 		opts.Lane,
 		opts.Domain,
 		strconv.FormatUint(opts.Epoch, 10),
-		strconv.Itoa(opts.LifecyclePort),
 		strconv.Itoa(StageFD),
 		digest,
 	}

@@ -203,10 +203,12 @@ func typedAxisDelivery(t *testing.T, s *typedAxisStack) (*typedDelivery, *harnes
 	t.Helper()
 	runner, _, _, _ := typedTestRunner(t, refusingOracle{})
 	bindTypedIntegrationAxis(runner, s.ws)
-	runner.dial = func(string) (TypedMaster, error) { return refusingMaster{}, nil }
+	runner.dial = func(string) (TypedMaster, error) { return &livingMaster{}, nil }
 	win := newHarnessWindow()
 	win.attach(devNull(t))
-	runner.sessions = &countingTerminals{win: win}
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
+	runner.sessions = &countingTerminals{win: win, done: done}
 
 	opts := shellintegration.LaunchOptions{
 		SessionID: s.sid, Enhanced: true,

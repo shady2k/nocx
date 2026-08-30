@@ -294,7 +294,7 @@ func (h *runLeaseHarness) createEndpointAt() {
 // with the given session and command, and returns the ask result.
 func (h *runLeaseHarness) askRunsTool(sid, command string) askWireResult {
 	h.t.Helper()
-	h.fake.args = `{"sessionId":` + strconv.Quote(sid) + `,"command":` + strconv.Quote(command) + `}`
+	h.fake.args = `{"command":` + strconv.Quote(command) + `}`
 	res, errObj := askOverWire(h.t, h.conn, map[string]any{
 		"askId":     "ask-lease-" + strconv.FormatInt(time.Now().UnixNano(), 10),
 		"sessionId": sid,
@@ -320,7 +320,7 @@ func runToolActionEntry(t *testing.T, led content.LedgerRepository) *content.Led
 		t.Fatalf("ListEntries: %v", err)
 	}
 	for _, s := range summaries {
-		if s.Kind == content.EntryAction && s.Intent == "run" {
+		if s.Kind == content.EntryAction && s.Intent == "session.run" {
 			e, err := led.Entry(context.Background(), s.ID)
 			if err != nil {
 				t.Fatalf("Entry(%s): %v", s.ID, err)

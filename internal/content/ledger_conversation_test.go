@@ -34,27 +34,27 @@ func conversationPane(t *testing.T) content.LedgerRepository {
 	return led
 }
 
-// callingAToolWithOpenedBlock records the production shape of a run tool:
+// callingAToolWithOpenedBlock records the production shape of a session.run tool:
 // the action opens a following shell block whose execution owns its output.
 func callingAToolWithOpenedBlock(t *testing.T, led content.LedgerRepository, turnID, actionID, blockID, command string, record, finish bool, body string) {
 	t.Helper()
 	payload, err := json.Marshal(map[string]any{
-		"tool":       "run",
+		"tool":       "session.run",
 		"effect":     string(content.EffectObserve),
 		"args":       map[string]any{"command": command},
 		"opensBlock": true,
 	})
 	if err != nil {
-		t.Fatalf("marshal run action: %v", err)
+		t.Fatalf("marshal session.run action: %v", err)
 	}
 	if _, submitErr := led.Submit(context.Background(), content.SubmitEntry{
 		ID: "00000000-0000-7000-8000-" + actionID, Client: "agent", EnvironmentID: "local",
-		Cwd: "/", Kind: content.EntryAction, Intent: "run", Payload: string(payload),
+		Cwd: "/", Kind: content.EntryAction, Intent: "session.run", Payload: string(payload),
 	}); submitErr != nil {
-		t.Fatalf("Submit run action: %v", submitErr)
+		t.Fatalf("Submit session.run action: %v", submitErr)
 	}
 	if _, causeErr := led.AddCause(context.Background(), turnID, "00000000-0000-7000-8000-"+actionID); causeErr != nil {
-		t.Fatalf("AddCause(run): %v", causeErr)
+		t.Fatalf("AddCause(session.run): %v", causeErr)
 	}
 	if _, submitBlockErr := led.Submit(context.Background(), content.SubmitEntry{
 		ID: "00000000-0000-7000-8000-" + blockID, Client: "agent", EnvironmentID: "local",

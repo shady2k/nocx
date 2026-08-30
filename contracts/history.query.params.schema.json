@@ -9,7 +9,11 @@
   "properties": {
     "scope": {
       "type": "string",
-      "enum": ["directory", "host", "everywhere"]
+      "enum": ["pane", "directory", "host", "everywhere"]
+    },
+    "paneId": {
+      "type": "string",
+      "minLength": 1
     },
     "cwd": {
       "type": "string"
@@ -39,6 +43,18 @@
       },
       "then": {
         "required": ["cwd"]
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "scope": {
+            "const": "pane"
+          }
+        }
+      },
+      "then": {
+        "required": ["paneId"]
       }
     },
     {

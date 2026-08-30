@@ -1,13 +1,20 @@
-// One fetch path, two media types (nocx-v13pd).
+// One fetch path for one entry's artifact (nocx-v13pd), and one assembly for
+// a whole turn's answer (nocx-3dteo).
 //
-// A block's body and an answer's text are the SAME two round trips —
+// A block's body and ONE run of prose are the SAME two round trips —
 // ledger.get for the entry, ledger.artifact for the payload — differing only
 // in which artifact of the entry is asked for. A second fetch path would be
 // two answers to one question, and they would agree until the day the
 // artifact list changed shape.
+//
+// A TURN'S ANSWER IS NOT ONE ARTIFACT. Since ADR-0040 a turn owns no body:
+// its prose is `text` children with seats, and the answer a person copies is
+// those joined. The artifacts an ask entry does carry are the provider
+// wiretap captures, which is why asking it for one drew the raw request.
 import { describe, it, expect, vi } from 'vitest'
 import {
   answerTextForEntry,
+  answerTextForTurn,
   arrangedByCause,
   blocksForPane,
   bodyForBlock,
@@ -82,16 +89,19 @@ describe('restore-client — one helper, two media types', () => {
   })
 })
 
-// ── what a restored entry IS, read from its body (nocx-4em1z) ─────────────
+// ── what a restored entry IS, read from its KIND (nocx-4em1z) ─────────────
 //
 // The restore path has to pick a block's grammar — a terminal grid must not
-// re-wrap, prose must — and the fact it picks from is STORED rather than
-// inferred: a command's body is `application/vt` (its plain copy beside it is
-// marked derived from that one), and an assistant turn's body is a
-// `text/plain` original with no terminal body at all, ever.
+// re-wrap, prose must — and the fact it picks from is the entry's own kind,
+// never a guess from which artifact survived.
 //
-// So this is not sniffing. It is asking the entry what it has.
-describe('restore-client — a block says what it is by what its body is', () => {
+// The BODY follows from that: a command draws its `application/vt` grid, with
+// the plain copy marked derived from it as the fallback retention leaves. A
+// turn draws NOTHING of its own — since ADR-0040 its prose is `text` children
+// — so the artifacts on an ask entry are somebody else's business, and asking
+// it for a body is how the provider wiretap came back as an answer
+// (nocx-3dteo).
+describe('restore-client — a block says what it is by its kind, and a turn owns no body', () => {
   it('a terminal body makes it a command block, and the body is the SGR one', async () => {
     const { client } = fakeLedger(BOTH)
     expect(await restoredBody(client, 'entry-1')).toEqual({
@@ -102,11 +112,15 @@ describe('restore-client — a block says what it is by what its body is', () =>
     })
   })
 
-  it('no terminal body makes it an assistant turn, drawn from its text', async () => {
+  it('a turn draws no body of its own, whatever text/plain it carries', async () => {
+    // This used to assert the opposite — that a turn is "drawn from its
+    // text" — and it was written before ADR-0040 moved the stored unit into
+    // `text` children. What it pinned after that was the wiretap: the only
+    // text/plain an ask entry has is the raw provider request and response.
     const { client } = fakeLedger([BOTH[1]], 'ask')
     expect(await restoredBody(client, 'entry-1')).toEqual({
       kind: 'ask',
-      body: ANSWER_TEXT,
+      body: null,
       caused: [],
       proseEvicted: false,
     })
@@ -412,5 +426,132 @@ describe('restore-client — blocks arranged by the relation', () => {
     )
     expect(arranged.map((b) => b.entryId).sort()).toEqual(['a', 'b'])
     expect(arranged).toHaveLength(2)
+  })
+})
+
+// ── a turn owns no body, and the wiretap is not one (nocx-3dteo) ──────────
+//
+// The provider wiretap (internal/app/assistant_wire_capture.go) hangs the RAW
+// chat-completions request and response on the TURN entry as `text/plain`
+// artifacts with `captureMethod: 'raw-output'` and no execution. Since
+// ADR-0040 the turn owns no body of its own — its prose is `text` children —
+// so those captures are the ONLY `text/plain` artifacts an ask entry has, and
+// a body picked by media type alone is the system prompt and every tool
+// schema, drawn as the answer.
+//
+// The store orders an entry's own artifacts by artifact id, so WHICH capture
+// wins is arbitrary; the fixture carries both for that reason.
+
+const WIRE_REQUEST =
+  '{"model":"gpt-5","messages":[{"role":"system","content":"You are the assistant built into nocx"}],' +
+  '"tools":[{"type":"function","function":{"name":"files.edit"}}],"stream_options":{"include_usage":true}}'
+const WIRE_RESPONSE = 'data: {"choices":[{"delta":{"content":"Вот мои инструменты"}}]}'
+
+const WIRETAP = [
+  { id: 'art-wire-1', mediaType: 'text/plain', captureMethod: 'raw-output', body: WIRE_REQUEST },
+  { id: 'art-wire-2', mediaType: 'text/plain', captureMethod: 'raw-output', body: WIRE_RESPONSE },
+]
+
+/** One prose run of a turn: a `text` child owning its own artifact. */
+type ProseChild = { entryId: string; artifactId: string; text: string }
+
+/** A ledger holding ONE turn — its own artifacts, and the `text` children its
+ *  prose actually lives in. `ledger.get` answers for the turn and for every
+ *  child; `ledger.artifact` answers for any artifact either holds. */
+function fakeTurn(
+  own: Array<{ id: string; mediaType: string; captureMethod?: string; body: string }>,
+  children: ProseChild[] = [],
+) {
+  const calls: Array<{ method: string; params: unknown }> = []
+  const bodies = new Map<string, string>([
+    ...own.map((a) => [a.id, a.body] as const),
+    ...children.map((c) => [c.artifactId, c.text] as const),
+  ])
+  const client = {
+    call: vi.fn((method: string, params: unknown) => {
+      calls.push({ method, params })
+      if (method === 'ledger.get') {
+        const id = (params as { id: string }).id
+        const child = children.find((c) => c.entryId === id)
+        if (child) {
+          return Promise.resolve({
+            entry: { kind: 'text' },
+            artifacts: [{ id: child.artifactId, mediaType: 'text/plain', captureMethod: 'none' }],
+            caused: [],
+            proseEvicted: false,
+          })
+        }
+        return Promise.resolve({
+          entry: { kind: 'ask' },
+          artifacts: own.map((a) => ({
+            id: a.id,
+            mediaType: a.mediaType,
+            captureMethod: a.captureMethod ?? 'none',
+          })),
+          caused: children.map((c, i) => ({
+            entryId: c.entryId,
+            position: i,
+            kind: 'text',
+            source: 'assistant',
+            intent: '',
+          })),
+          proseEvicted: false,
+        })
+      }
+      return Promise.resolve({ body: bodies.get((params as { id: string }).id) ?? '' })
+    }),
+  } as unknown as WSClient
+  return { client, calls }
+}
+
+describe('restore-client — a restored turn draws its children, never the provider wire', () => {
+  it('a turn whose only artifacts are wiretap captures restores with NO body', async () => {
+    const { client, calls } = fakeTurn(WIRETAP)
+    const restored = await restoredBody(client, 'turn-1')
+    expect(restored.kind).toBe('ask')
+    expect(restored.body).toBeNull()
+    // And it did not even fetch one: a turn has no body to ask for.
+    expect(calls.map((c) => c.method)).toEqual(['ledger.get'])
+  })
+
+  it('a turn that also has prose children still draws none of its own', async () => {
+    const { client } = fakeTurn(WIRETAP, [
+      { entryId: 'prose-1', artifactId: 'art-p1', text: 'Вот мои инструменты:\n' },
+    ])
+    expect((await restoredBody(client, 'turn-1')).body).toBeNull()
+  })
+})
+
+describe('restore-client — copying an answer yields the answer', () => {
+  it('assembles the turn’s prose from its text children, in causal order', async () => {
+    const { client } = fakeTurn(WIRETAP, [
+      { entryId: 'prose-1', artifactId: 'art-p1', text: '## Findings\n' },
+      { entryId: 'prose-2', artifactId: 'art-p2', text: '- run `ls`\n' },
+    ])
+    expect(await answerTextForTurn(client, 'turn-1')).toBe('## Findings\n- run `ls`\n')
+  })
+
+  it('never hands back a wiretap capture — the request is not the answer', async () => {
+    const { client } = fakeTurn(WIRETAP, [
+      { entryId: 'prose-1', artifactId: 'art-p1', text: 'Вот мои инструменты:\n' },
+    ])
+    const copied = await answerTextForTurn(client, 'turn-1')
+    expect(copied).toBe('Вот мои инструменты:\n')
+    expect(copied).not.toContain('stream_options')
+    expect(copied).not.toContain('You are the assistant built into nocx')
+  })
+
+  it('a turn with nothing but wiretap captures refuses, rather than copying them', async () => {
+    // Nothing kept means nothing to copy, which the caller SAYS rather than
+    // papering over with the wire — or with the painted text.
+    const { client } = fakeTurn(WIRETAP)
+    expect(await answerTextForTurn(client, 'turn-1')).toBeNull()
+  })
+
+  it('a store that cannot be asked refuses rather than inventing a body', async () => {
+    const client = {
+      call: vi.fn(() => Promise.reject(new Error('socket closed'))),
+    } as unknown as WSClient
+    expect(await answerTextForTurn(client, 'turn-1')).toBeNull()
   })
 })

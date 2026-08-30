@@ -431,8 +431,8 @@ func TestSecretFrame_EndsInExactlyOneNewline(t *testing.T) {
 	if !bytes.HasSuffix(frame, []byte("\n")) || bytes.HasSuffix(frame, []byte("\n\n")) {
 		t.Errorf("the frame does not end in exactly one newline: %q", frame)
 	}
-	if lines := bytes.Count(frame, []byte("\n")); lines != 3 {
-		t.Errorf("the frame has %d lines, want the header, the capability and the fence", lines)
+	if lines := bytes.Count(frame, []byte("\n")); lines != 4 {
+		t.Errorf("the frame has %d lines, want the header, capability, fence and port", lines)
 	}
 }
 

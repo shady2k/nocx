@@ -29,7 +29,7 @@ func TestSSHChildBootstrap_FitsInALifecycleFrame(t *testing.T) {
 		shellintegration.LaunchOptions{
 			SessionID: "aabbccddeeff00112233445566778899", Enhanced: true,
 			Lane: "lane-0123456789abcdef", Domain: "dom-0123456789abcdef", Epoch: 1,
-			LifecyclePort: 40123, StageDigest: strings.Repeat("a", 64),
+			StageDigest: strings.Repeat("a", 64),
 		})
 	if !ok {
 		t.Fatal("the carrier declined the transient start command")
@@ -45,7 +45,7 @@ func TestSSHChildBootstrap_FitsInALifecycleFrame(t *testing.T) {
 		Port: 22022,
 		Opts: []string{"-i", "/home/a-long-user-name/.ssh/id_ed25519", "-J", "bastion.example.com"},
 	}
-	line := composeSSHLine(wrap, []string{"-t", "-R", "127.0.0.1:40123:127.0.0.1:37777"}, inv, carrier)
+	line := composeSSHLine(wrap, []string{"-t"}, inv, carrier)
 	if len(line) >= lifecycle.MaxFrameBytes {
 		t.Errorf("composed child line is %d bytes, which does not fit a %d-byte frame: "+
 			"the grant is never delivered and the parent hangs until its grant timeout",

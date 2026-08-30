@@ -460,11 +460,11 @@ func TestAgentAsk_DestructiveCommandEvidenceSurvivesIntoNextTurn(t *testing.T) {
 		t.Fatalf("RecordObservation: %v", err)
 	}
 	actionID := "11111111-1111-7111-8111-111111111111"
-	actionPayload := `{"tool":"run","effect":"mutate-destructive","args":{"command":"rm -f target.txt"},"opensBlock":true}`
+	actionPayload := `{"tool":"session.run","effect":"mutate-destructive","args":{"command":"rm -f target.txt"},"opensBlock":true}`
 	if _, err := led.Submit(ctx, content.SubmitEntry{
 		ID: actionID, Client: "agent", EnvironmentID: envID, Cwd: "/repo",
 		Kind: content.EntryAction, Source: content.SourceAssistant,
-		Intent: "run", Payload: actionPayload,
+		Intent: "session.run", Payload: actionPayload,
 	}); err != nil {
 		t.Fatalf("Submit action: %v", err)
 	}

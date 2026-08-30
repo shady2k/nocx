@@ -257,6 +257,8 @@ func askParams(baseURL string, grant *content.Grant, ledger AttemptLedger, appro
 	p := testAskParams(baseURL)
 	p.Grant = grant
 	p.AttemptLedger = ledger
+	// Session-tool assistant tests use the explicit fixture session.
+	p.SessionID = "session-a"
 	p.Approvals = approvals
 	p.KnownMaterial = &fakeKnownMaterial{}
 	p.RunID = "run-1"
@@ -301,7 +303,15 @@ func middlewareForTurn(t *testing.T, grant content.Grant, ledger AttemptLedger, 
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, known, "run-1", 1, turnEntryID, requester, nil, nil)
+	sessionID := ""
+	for _, scope := range grant.Scopes {
+		if scope.Kind == content.ResourceSession {
+			sessionID = scope.ID
+			break
+		}
+	}
+	// Test grants carry the pane identity; production receives it from transport.
+	mw, err := newPolicyMiddleware(nil, grant, reg, ledger, approvals, known, "run-1", sessionID, 1, turnEntryID, requester, nil, nil)
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}
@@ -727,7 +737,7 @@ func TestMiddleware_StandingDeclineDoesNotLeakAcrossRuns(t *testing.T) {
 	if regErr != nil {
 		t.Fatalf("Assemble: %v", regErr)
 	}
-	mw2, mwErr := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, approvals, &fakeKnownMaterial{}, "run-2", 1, "", nil, nil, nil)
+	mw2, mwErr := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, approvals, &fakeKnownMaterial{}, "run-2", "", 1, "", nil, nil, nil)
 	if mwErr != nil {
 		t.Fatalf("newPolicyMiddleware(run-2): %v", mwErr)
 	}
@@ -1278,7 +1288,7 @@ func TestNewClient_AssemblesFromTheEmbedOutsideTheRepo(t *testing.T) {
 	for _, tl := range internal.tools.All() {
 		names = append(names, tl.Name)
 	}
-	want := []string{"files.read", "session.list", "session.read", "run", "files.edit", "files.create", "git.status", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder"}
+	want := []string{"files.read", "session.list", "session.read", "session.run", "files.edit", "files.create", "git.status", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("assembled tools = %v, want %v", names, want)
 	}
@@ -1430,8 +1440,8 @@ func TestMiddleware_RunCommandClassifiesTheCallEffect(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ledger := &fakeLedger{}
 			_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{
-				name: "run",
-				args: `{"sessionId":"session-a","command":"` + tc.command + `"}`,
+				name: "session.run",
+				args: `{"command":"` + tc.command + `"}`,
 			}))
 			defer srv.Close()
 			cl, err := newClient(nil, os.DirFS(realToolsFS), nil)
@@ -1488,7 +1498,7 @@ func TestAsk_EscalationWithoutAResourceResolverCarriesNoResource(t *testing.T) {
 	}
 	grant := sessionGrant("session-a", askEveryTimeMatrix())
 
-	_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "session.list", args: `{"sessionId":"session-a"}`}))
+	_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "session.list", args: `{}`}))
 	defer srv.Close()
 
 	cl := newClientWithRegistry(nil, reg, nil)
@@ -1588,8 +1598,8 @@ func TestAsk_ObserveToolResultIsFramedAsDataBeforeModelActs(t *testing.T) {
 				return
 			}
 			streamToolCalls(w, toolCallSpec{
-				name: "run",
-				args: `{"sessionId":"session-a","command":"rm -rf /"}`,
+				name: "session.run",
+				args: `{"command":"rm -rf /"}`,
 				id:   "call-run",
 			})
 		default:
@@ -1642,7 +1652,7 @@ func TestMiddleware_RefusesWhenAnyResolvedResourceIsOutsideScope(t *testing.T) {
 	if !found {
 		t.Fatal("files.read declaration not found")
 	}
-	mw, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-1", 1, "", nil, nil, nil)
+	mw, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-1", "", 1, "", nil, nil, nil)
 	if err != nil {
 		t.Fatalf("newPolicyMiddleware: %v", err)
 	}

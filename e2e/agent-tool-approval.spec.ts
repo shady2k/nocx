@@ -203,7 +203,7 @@ test.describe('a proposed tool reaches the approval prompt (nocx-aospw)', () => 
     // and the question reaches the person.
     fake.setScript({
       chunks: [],
-      toolCalls: [{ name: 'session.read', arguments: { sessionId } }],
+      toolCalls: [{ name: 'session.read', arguments: {} }],
     })
     await askFromPrompt(page, 'Read the screen and tell me what is there.')
 

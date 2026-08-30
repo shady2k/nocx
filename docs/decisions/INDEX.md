@@ -53,7 +53,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | ---- | --------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------- |
 | 0001 | [xterm.js as the VT frontend](0001-xterm-js-as-vt-frontend.md)                                                                    | Accepted (amended 2026-07-26)         |
 | 0002 | [Native tabs; no embedded multiplexer](0002-native-tabs-no-embedded-multiplexer.md)                                               | Accepted                              |
-| 0003 | [Distribution without a Developer ID](0003-distribution-without-a-developer-id.md)                                                | Accepted                              |
+| 0003 | [Distribution without a Developer ID](0003-distribution-without-a-developer-id.md)                                                | Accepted (amended 2026-08-30)         |
 | 0004 | [Input ownership state machine and a pluggable editor](0004-input-ownership-and-editor-abstraction.md)                            | Accepted                              |
 | 0005 | [Linux/WebKitGTK: periodic forced-refresh pump](0005-linux-webkitgtk-forced-refresh-pump.md)                                      | Accepted                              |
 | 0006 | [Marker-only prompt mode](0006-marker-only-prompt-mode.md)                                                                        | Accepted                              |
@@ -101,6 +101,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0049 | [The channel we own is the carrier, not the command line](0049-the-channel-we-own-is-the-carrier.md)                              | Accepted 2026-08-20 (was ADR-0035)    |
 | 0050 | [The OS keystore holds a key only a person can take](0050-the-keystore-holds-a-key-only-a-person-can-take.md)                     | Accepted 2026-08-29                   |
 | 0051 | [An imported credential stays the person's](0051-an-imported-credential-stays-the-persons.md)                                     | Accepted 2026-08-29                   |
+| 0052 | [A code identity without a publisher identity](0052-a-code-identity-without-a-publisher-identity.md)                              | Accepted 2026-08-30                   |
 
 ## Adding one
 

@@ -1633,7 +1633,12 @@ describe("the person's own instructions to the assistant", () => {
     expect(prompt).toBeTruthy()
     expect(prompt!.getAttribute('aria-label')).toBe('nocx system prompt')
     expect(prompt!.getAttribute('tabindex')).toBe('0')
-    expect(prompt!.textContent).toContain('<session id>')
+    // No session id, and its ABSENCE is the assertion (nocx-i4gg7). The
+    // prompt used to state one and instruct the model to echo it into every
+    // call, to carry a fact the backend already held; the session is now
+    // supplied by the backend and there is no placeholder to preview.
+    expect(prompt!.textContent).not.toContain('<session id>')
+    expect(prompt!.textContent).not.toContain('Session id')
     expect(prompt!.textContent).toContain('<working directory>')
     expect(prompt!.textContent).toContain('<local shell or ssh session>')
     expect(prompt!.textContent).toContain('<host or local machine>')

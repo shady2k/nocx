@@ -44,9 +44,15 @@ const listenerWriteTimeout = 5 * time.Second
 // — not the port — is what authenticates.
 const listenerMaxCandidates = 8
 
+// ErrInvalidExpectation is returned when an expectation has no lane or
+// domain to address.
+var ErrInvalidExpectation = errors.New("lifecyclechannel: invalid expectation")
+
 // Listener is one loopback TCP listener transport. It implements
 // lifecycle.Port (the outbound half the kernel sends accept and
 // refresh_request over) and drives the inbound half through the kernel.
+// Expectations are per-domain: registering one starts a bounded interval
+// before any connection exists, so a missing reverse forward is observable.
 type Listener struct {
 	log    log.Logger
 	kernel Kernel
@@ -60,13 +66,137 @@ type Listener struct {
 	claim   map[lifecycle.DomainID]net.Conn
 	speaker map[lifecycle.DomainID]net.Conn
 	slots   chan struct{}
+
+	helloTimeout time.Duration
+	report       LossReporter
+	expectations map[lifecycle.DomainID]*listenerExpectation
+	wg           sync.WaitGroup
+}
+
+type listenerExpectation struct {
+	domain lifecycle.DomainID
+	lane   lifecycle.LaneID
+	timer  *time.Timer
+	done   chan struct{}
+
+	mu     sync.Mutex
+	active bool
+}
+
+func (e *listenerExpectation) cancel() {
+	e.mu.Lock()
+	if !e.active {
+		e.mu.Unlock()
+		<-e.done
+		return
+	}
+	e.active = false
+	stopped := e.timer.Stop()
+	e.mu.Unlock()
+	if stopped {
+		close(e.done)
+		return
+	}
+	<-e.done
+}
+
+// ExpectDomain opens the interval in which a named domain must prove its
+// capability: it starts when this method returns and ends at the first
+// accepted hello, a timeout firing, or CancelExpectation or Close disposing
+// it. A timeout reports LossHelloTimeout for the domain's lane. Repeating
+// this call for the same domain leaves the original interval and timer in
+// place. The lane is supplied by the caller because it is the reporter's
+// address; the listener does not derive or guess it. Invalid lane/domain
+// inputs return ErrInvalidExpectation, a closed listener returns ErrClosed,
+// and duplicate registration returns nil without changing the interval.
+func (l *Listener) ExpectDomain(lane lifecycle.LaneID, domain lifecycle.DomainID) error {
+	if lane == "" || domain == "" {
+		return ErrInvalidExpectation
+	}
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.closed {
+		return ErrClosed
+	}
+	if l.expectations[domain] != nil {
+		return nil
+	}
+	e := &listenerExpectation{
+		domain: domain,
+		lane:   lane,
+		done:   make(chan struct{}),
+		active: true,
+	}
+	e.timer = time.AfterFunc(l.helloTimeout, func() { l.expireExpectation(e) })
+	l.expectations[domain] = e
+	return nil
+}
+
+// CancelExpectation closes the named domain's expectation interval without
+// reporting a loss. It is safe to call after the interval already ended, and
+// repeated calls are no-ops.
+func (l *Listener) CancelExpectation(domain lifecycle.DomainID) {
+	l.mu.Lock()
+	e := l.expectations[domain]
+	if e != nil {
+		delete(l.expectations, domain)
+	}
+	l.mu.Unlock()
+	if e != nil {
+		e.cancel()
+	}
+}
+
+func (l *Listener) fulfillExpectation(domain lifecycle.DomainID) {
+	l.mu.Lock()
+	e := l.expectations[domain]
+	if e != nil {
+		delete(l.expectations, domain)
+	}
+	l.mu.Unlock()
+	if e != nil {
+		e.cancel()
+	}
+}
+
+func (l *Listener) expireExpectation(e *listenerExpectation) {
+	defer close(e.done)
+
+	e.mu.Lock()
+	if !e.active {
+		e.mu.Unlock()
+		return
+	}
+	e.active = false
+	e.mu.Unlock()
+
+	l.mu.Lock()
+	closed := l.closed
+	l.mu.Unlock()
+	if closed {
+		return
+	}
+	l.log.Info("lifecycle listener expected domain hello timed out",
+		"domain", e.domain, "lane", e.lane, "cause", string(LossHelloTimeout))
+	if l.report != nil {
+		l.report(e.lane, LossHelloTimeout)
+	}
 }
 
 // NewListener creates the loopback listener and binds the transport to the
 // kernel. It mints nothing: the caller mints the child domain this
 // transport serves (RequestDomain with the parent — the kernel stays the
-// sole minter of capabilities).
-func NewListener(log log.Logger, k Kernel) (*Listener, error) {
+// sole minter of capabilities). Options bound the candidate handshake and
+// expected-domain intervals.
+func NewListener(log log.Logger, k Kernel, opts ...Option) (*Listener, error) {
+	o := options{helloTimeout: lifecycle.HelloTimeout}
+	for _, opt := range opts {
+		opt(&o)
+	}
+	if o.helloTimeout <= 0 {
+		o.helloTimeout = lifecycle.HelloTimeout
+	}
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		return nil, fmt.Errorf("lifecyclechannel: loopback listener: %w", err)
@@ -86,21 +216,25 @@ func NewListener(log log.Logger, k Kernel) (*Listener, error) {
 		return nil, herr
 	}
 	l := &Listener{
-		log:     log,
-		kernel:  k,
-		id:      lifecycle.TransportID("tpt-" + tptHex),
-		ln:      ln,
-		port:    addr.Port,
-		conns:   make(map[net.Conn]struct{}),
-		claim:   make(map[lifecycle.DomainID]net.Conn),
-		speaker: make(map[lifecycle.DomainID]net.Conn),
-		slots:   make(chan struct{}, listenerMaxCandidates),
+		log:          log,
+		kernel:       k,
+		id:           lifecycle.TransportID("tpt-" + tptHex),
+		ln:           ln,
+		port:         addr.Port,
+		conns:        make(map[net.Conn]struct{}),
+		claim:        make(map[lifecycle.DomainID]net.Conn),
+		speaker:      make(map[lifecycle.DomainID]net.Conn),
+		slots:        make(chan struct{}, listenerMaxCandidates),
+		helloTimeout: o.helloTimeout,
+		report:       o.lossReporter,
+		expectations: make(map[lifecycle.DomainID]*listenerExpectation),
 	}
 	cleanup := func() { _ = ln.Close() }
 	if berr := k.BindTransport(l.id, l); berr != nil {
 		cleanup()
 		return nil, fmt.Errorf("lifecyclechannel: bind listener transport: %w", berr)
 	}
+	l.wg.Add(1)
 	go l.acceptLoop()
 	return l, nil
 }
@@ -175,13 +309,23 @@ func (l *Listener) lose() {
 	for c := range l.conns {
 		_ = c.Close()
 	}
+	expectations := make([]*listenerExpectation, 0, len(l.expectations))
+	for _, e := range l.expectations {
+		expectations = append(expectations, e)
+	}
+	l.expectations = make(map[lifecycle.DomainID]*listenerExpectation)
 	l.mu.Unlock()
+	for _, e := range expectations {
+		e.cancel()
+	}
+	l.wg.Wait()
 	_ = l.kernel.TransportLost(l.id)
 }
 
 // acceptLoop serves candidate connections from the loopback listener until
 // the transport closes. Candidates are bounded like the remote adapter's.
 func (l *Listener) acceptLoop() {
+	defer l.wg.Done()
 	for {
 		c, err := l.ln.Accept()
 		if err != nil {
@@ -202,6 +346,7 @@ func (l *Listener) acceptLoop() {
 			return
 		}
 		l.conns[c] = struct{}{}
+		l.wg.Add(1)
 		l.mu.Unlock()
 		go l.serveCandidate(c)
 	}
@@ -213,6 +358,7 @@ func (l *Listener) acceptLoop() {
 // envelopes to the kernel, report gaps for the authenticated speaker, and
 // apply the end-of-stream policy.
 func (l *Listener) serveCandidate(c net.Conn) {
+	defer l.wg.Done()
 	defer func() {
 		<-l.slots
 		l.mu.Lock()
@@ -228,7 +374,7 @@ func (l *Listener) serveCandidate(c net.Conn) {
 
 	// Handshake bound: a candidate that cannot prove the capability within
 	// the window is closed.
-	_ = c.SetReadDeadline(time.Now().Add(lifecycle.HelloTimeout))
+	_ = c.SetReadDeadline(time.Now().Add(l.helloTimeout))
 
 	dec := lifecyclecodec.NewDecoder(c, lifecyclecodec.Config{}, l.gapSink(c))
 	for {
@@ -249,6 +395,7 @@ func (l *Listener) serveCandidate(c net.Conn) {
 						"domain", env.Domain, "error", ierr)
 					return
 				}
+				l.fulfillExpectation(env.Domain)
 				continue // the accept comes through Send once acknowledged
 			}
 			if ierr := l.kernel.Ingest(l.id, env); ierr != nil {

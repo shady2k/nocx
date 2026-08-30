@@ -464,7 +464,216 @@ export function SettingsComponent(props: SettingsComponentProps) {
     return result
   })
 
-  /** The typed page registry — generated sections + component pages. */
+  /** The component pages — one stable object each, built ONCE.
+   *
+   *  Their identity is load-bearing rather than incidental: `activePage()`
+   *  finds one of these and the body renders it through a `keyed` Show, which
+   *  re-creates the subtree whenever the identity changes. Built inside the
+   *  memo below, they were minted fresh on every recompute, so every
+   *  settings.changed broadcast — the person's own write, a moment earlier —
+   *  tore down and rebuilt whatever component page they were working in. On
+   *  Backup & Restore that is a chosen file and the preview it produced, gone
+   *  mid-task, with the surface back to "No file selected" and nothing on
+   *  screen to explain it (nocx-3icu1).
+   *
+   *  Nothing is lost by building them once: every reactive read they make is
+   *  inside `renderContent`, which runs when the page is rendered, not here.
+   */
+  const backupPage: SettingsPage = {
+    kind: 'component',
+    id: 'backup',
+    title: 'Backup & Restore',
+    groupId: 'application',
+    scrollMode: 'page',
+    renderContent: () => <BackupRestoreSection profileClient={props.profileClient} />,
+  }
+  const connectionPage: SettingsPage = {
+    kind: 'component',
+    id: 'connections',
+    scrollMode: 'contained',
+    title: 'Connections',
+    renderContent: () => (
+      <ConnectionsView
+        client={props.profileClient}
+        vaultController={props.vaultController}
+        vaultClient={props.vaultClient}
+        secretSource={props.secretSource}
+        dialogClient={props.dialogClient}
+        footprintClient={props.footprintClient}
+        onConnect={props.onConnect}
+        newProfileRequest={newConnectionRequest()}
+        onNavigateToSecrets={() => setActiveComponentPage('secrets')}
+      />
+    ),
+  }
+  const secretsPage: SettingsPage = {
+    kind: 'component',
+    id: 'secrets',
+    title: 'Secrets',
+    groupId: 'vault',
+    scrollMode: 'contained',
+    renderContent: () => (
+      <Show
+        when={props.vaultClient && props.vaultController}
+        fallback={
+          <PageSection title="Secrets">Vault secrets are not available in this window.</PageSection>
+        }
+      >
+        <SecretsSection
+          vaultClient={props.vaultClient!}
+          vaultController={props.vaultController!}
+          dialogClient={props.dialogClient}
+          profileClient={props.profileClient}
+          addSecretRequest={newSecretRequest()}
+          addSecretName={newSecretName()}
+          addSecretValue={newSecretValue()}
+        />
+      </Show>
+    ),
+  }
+  const vaultPage: SettingsPage = {
+    kind: 'component',
+    id: 'vault',
+    title: 'Protection',
+    groupId: 'vault',
+    scrollMode: 'page',
+    // The section is listed unconditionally — a surface that appears only
+    // once some other state exists is how a feature ships unreachable. The
+    // guard is for the client being absent, which the composition root never
+    // does and a bare-bones embedding might; it renders a sentence rather
+    // than throwing on a non-null assertion.
+    renderContent: () => (
+      <Show
+        when={props.vaultClient && props.vaultController}
+        fallback={
+          <PageSection title="Protection">Vault is not available in this window.</PageSection>
+        }
+      >
+        <VaultSection vaultClient={props.vaultClient!} vaultController={props.vaultController!} />
+      </Show>
+    ),
+  }
+  const endpointsPage: SettingsPage = {
+    kind: 'component',
+    id: 'endpoints',
+    title: 'Endpoints',
+    groupId: 'assistant',
+    scrollMode: 'contained',
+    // Registered unconditionally for the same reason vaultPage is: a
+    // surface that appears only once some other state exists is how a
+    // feature ships unreachable. The guard is the client being absent.
+    renderContent: () => (
+      <Show
+        when={props.endpointsClient}
+        fallback={
+          <PageSection title="Endpoints">
+            AI endpoints are not available in this window.
+          </PageSection>
+        }
+      >
+        <EndpointsSection
+          client={props.endpointsClient!}
+          agentClient={props.agentClient}
+          vaultController={props.vaultController}
+          vaultClient={props.vaultClient}
+          secretSource={props.secretSource}
+          addEndpointRequest={newEndpointRequest()}
+        />
+      </Show>
+    ),
+  }
+  const snippetsPage: SettingsPage = {
+    kind: 'component',
+    id: 'snippets',
+    title: 'Snippets',
+    groupId: 'application',
+    scrollMode: 'contained',
+    // Registered unconditionally for the same reason vaultPage is: a
+    // surface that appears only once some other state exists is how a
+    // feature ships unreachable — and until this page existed, the
+    // library's create/update/delete/reorder had no caller at all.
+    renderContent: () => (
+      <Show
+        when={props.snippetsStore}
+        fallback={
+          <PageSection title="Snippets">Snippets are not available in this window.</PageSection>
+        }
+      >
+        <SnippetsSection store={props.snippetsStore!} />
+      </Show>
+    ),
+  }
+
+  const rolesPage: SettingsPage = {
+    kind: 'component',
+    id: 'roles',
+    title: 'Roles',
+    groupId: 'assistant',
+    scrollMode: 'page',
+    // Registered unconditionally for the same reason endpointsPage is: a
+    // surface that appears only once some other state exists is how a
+    // feature ships unreachable. The guard is the client being absent.
+    renderContent: () => (
+      <Show
+        when={props.endpointsClient}
+        fallback={
+          <PageSection title="Roles">Model roles are not available in this window.</PageSection>
+        }
+      >
+        <RolesSection client={props.endpointsClient} />
+      </Show>
+    ),
+  }
+
+  const policyPage: SettingsPage = {
+    kind: 'component',
+    id: 'policy',
+    title: 'Agent policy',
+    groupId: 'assistant',
+    scrollMode: 'page',
+    renderContent: () => (
+      <Show
+        when={props.policyClient}
+        fallback={
+          <PageSection title="Agent policy">
+            The agent policy is not available in this window.
+          </PageSection>
+        }
+      >
+        <AgentPolicySection client={props.policyClient!} />
+      </Show>
+    ),
+  }
+
+  // LAST IN THE RAIL, and in the 'application' group with Backup and
+  // Snippets. It is the page nobody navigates to on purpose until something
+  // has gone wrong, which is exactly why it must be findable in the obvious
+  // place rather than clever about where it sits.
+  const aboutPage: SettingsPage = {
+    kind: 'component',
+    id: 'about',
+    title: 'About',
+    groupId: 'application',
+    scrollMode: 'page',
+    // Registered unconditionally, like the pages above it: a surface that
+    // appears only once some other state exists is how a feature ships
+    // unreachable. Without a client it says so, which is a state the page
+    // already has for an unreachable backend.
+    renderContent: () => (
+      <AboutSection
+        load={() =>
+          props.aboutClient
+            ? props.aboutClient.load()
+            : Promise.reject(new Error('the build description is not available in this window'))
+        }
+        clipboard={props.clipboard ?? unavailableClipboard}
+      />
+    ),
+  }
+
+  /** The typed page registry — generated sections + the component pages above.
+   *  Only the generated half is derived; the component pages keep the identity
+   *  they were created with, so a refresh does not rebuild the active one. */
   const settingsPages = createMemo<SettingsPage[]>(() => {
     const generated: SettingsPage[] = sections().map((s) => ({
       kind: 'generated' as const,
@@ -472,199 +681,6 @@ export function SettingsComponent(props: SettingsComponentProps) {
       title: s,
       groupId: sectionGroups()[s],
     }))
-    const backupPage: SettingsPage = {
-      kind: 'component',
-      id: 'backup',
-      title: 'Backup & Restore',
-      groupId: 'application',
-      scrollMode: 'page',
-      renderContent: () => <BackupRestoreSection profileClient={props.profileClient} />,
-    }
-    const connectionPage: SettingsPage = {
-      kind: 'component',
-      id: 'connections',
-      scrollMode: 'contained',
-      title: 'Connections',
-      renderContent: () => (
-        <ConnectionsView
-          client={props.profileClient}
-          vaultController={props.vaultController}
-          vaultClient={props.vaultClient}
-          secretSource={props.secretSource}
-          dialogClient={props.dialogClient}
-          footprintClient={props.footprintClient}
-          onConnect={props.onConnect}
-          newProfileRequest={newConnectionRequest()}
-          onNavigateToSecrets={() => setActiveComponentPage('secrets')}
-        />
-      ),
-    }
-    const secretsPage: SettingsPage = {
-      kind: 'component',
-      id: 'secrets',
-      title: 'Secrets',
-      groupId: 'vault',
-      scrollMode: 'contained',
-      renderContent: () => (
-        <Show
-          when={props.vaultClient && props.vaultController}
-          fallback={
-            <PageSection title="Secrets">
-              Vault secrets are not available in this window.
-            </PageSection>
-          }
-        >
-          <SecretsSection
-            vaultClient={props.vaultClient!}
-            vaultController={props.vaultController!}
-            dialogClient={props.dialogClient}
-            profileClient={props.profileClient}
-            addSecretRequest={newSecretRequest()}
-            addSecretName={newSecretName()}
-            addSecretValue={newSecretValue()}
-          />
-        </Show>
-      ),
-    }
-    const vaultPage: SettingsPage = {
-      kind: 'component',
-      id: 'vault',
-      title: 'Protection',
-      groupId: 'vault',
-      scrollMode: 'page',
-      // The section is listed unconditionally — a surface that appears only
-      // once some other state exists is how a feature ships unreachable. The
-      // guard is for the client being absent, which the composition root never
-      // does and a bare-bones embedding might; it renders a sentence rather
-      // than throwing on a non-null assertion.
-      renderContent: () => (
-        <Show
-          when={props.vaultClient && props.vaultController}
-          fallback={
-            <PageSection title="Protection">Vault is not available in this window.</PageSection>
-          }
-        >
-          <VaultSection vaultClient={props.vaultClient!} vaultController={props.vaultController!} />
-        </Show>
-      ),
-    }
-    const endpointsPage: SettingsPage = {
-      kind: 'component',
-      id: 'endpoints',
-      title: 'Endpoints',
-      groupId: 'assistant',
-      scrollMode: 'contained',
-      // Registered unconditionally for the same reason vaultPage is: a
-      // surface that appears only once some other state exists is how a
-      // feature ships unreachable. The guard is the client being absent.
-      renderContent: () => (
-        <Show
-          when={props.endpointsClient}
-          fallback={
-            <PageSection title="Endpoints">
-              AI endpoints are not available in this window.
-            </PageSection>
-          }
-        >
-          <EndpointsSection
-            client={props.endpointsClient!}
-            agentClient={props.agentClient}
-            vaultController={props.vaultController}
-            vaultClient={props.vaultClient}
-            secretSource={props.secretSource}
-            addEndpointRequest={newEndpointRequest()}
-          />
-        </Show>
-      ),
-    }
-    const snippetsPage: SettingsPage = {
-      kind: 'component',
-      id: 'snippets',
-      title: 'Snippets',
-      groupId: 'application',
-      scrollMode: 'contained',
-      // Registered unconditionally for the same reason vaultPage is: a
-      // surface that appears only once some other state exists is how a
-      // feature ships unreachable — and until this page existed, the
-      // library's create/update/delete/reorder had no caller at all.
-      renderContent: () => (
-        <Show
-          when={props.snippetsStore}
-          fallback={
-            <PageSection title="Snippets">Snippets are not available in this window.</PageSection>
-          }
-        >
-          <SnippetsSection store={props.snippetsStore!} />
-        </Show>
-      ),
-    }
-
-    const rolesPage: SettingsPage = {
-      kind: 'component',
-      id: 'roles',
-      title: 'Roles',
-      groupId: 'assistant',
-      scrollMode: 'page',
-      // Registered unconditionally for the same reason endpointsPage is: a
-      // surface that appears only once some other state exists is how a
-      // feature ships unreachable. The guard is the client being absent.
-      renderContent: () => (
-        <Show
-          when={props.endpointsClient}
-          fallback={
-            <PageSection title="Roles">Model roles are not available in this window.</PageSection>
-          }
-        >
-          <RolesSection client={props.endpointsClient} />
-        </Show>
-      ),
-    }
-
-    const policyPage: SettingsPage = {
-      kind: 'component',
-      id: 'policy',
-      title: 'Agent policy',
-      groupId: 'assistant',
-      scrollMode: 'page',
-      renderContent: () => (
-        <Show
-          when={props.policyClient}
-          fallback={
-            <PageSection title="Agent policy">
-              The agent policy is not available in this window.
-            </PageSection>
-          }
-        >
-          <AgentPolicySection client={props.policyClient!} />
-        </Show>
-      ),
-    }
-
-    // LAST IN THE RAIL, and in the 'application' group with Backup and
-    // Snippets. It is the page nobody navigates to on purpose until something
-    // has gone wrong, which is exactly why it must be findable in the obvious
-    // place rather than clever about where it sits.
-    const aboutPage: SettingsPage = {
-      kind: 'component',
-      id: 'about',
-      title: 'About',
-      groupId: 'application',
-      scrollMode: 'page',
-      // Registered unconditionally, like the pages above it: a surface that
-      // appears only once some other state exists is how a feature ships
-      // unreachable. Without a client it says so, which is a state the page
-      // already has for an unreachable backend.
-      renderContent: () => (
-        <AboutSection
-          load={() =>
-            props.aboutClient
-              ? props.aboutClient.load()
-              : Promise.reject(new Error('the build description is not available in this window'))
-          }
-          clipboard={props.clipboard ?? unavailableClipboard}
-        />
-      ),
-    }
     return [
       connectionPage,
       ...generated,

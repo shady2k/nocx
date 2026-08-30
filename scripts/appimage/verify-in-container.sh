@@ -70,24 +70,100 @@ timeout -k 5 90 strace -f -qq -e trace=execve -o "$TRACE" \
   xvfb-run -a "$APPDIR/AppRun" >"$LOG" 2>&1 &
 runner=$!
 
-shell_cwd=""
+# ---- finding the session's shell ---------------------------------------
+# THE SHELL IS NO LONGER A CHILD OF THE APP. Since the coordinator cutover
+# (nocx-gpyxp) the PTY belongs to cmd/nocx-server, which the window spawns
+# DETACHED — setsid, and on Linux from a versioned copy under the profile's
+# data directory rather than from the bundle, because the AppImage's FUSE
+# mount dies with the window and the daemon exists to outlive it. So the
+# shell hangs off the coordinator and `pgrep -P "$app_pid"` finds nothing:
+# an empty result that used to read as "could not observe" (nocx-k2q5l).
+#
+# What replaces the parent test is ANCESTRY, never a name. "Any bash on the
+# machine" is not an option: this script is itself bash in this container and
+# the app runs as its descendant, so a name-only match would have the gate
+# assert its OWN working directory — the mistake recorded just below, arriving
+# by a second door. Walking UP cannot make it, because this script's shell is
+# an ancestor of the app and never a descendant of it.
+
+# PPID out of /proc/<pid>/stat. Field 2 is comm, parenthesised and free to
+# contain spaces, so cut after the LAST ')': what is left is "<state> <ppid> …".
+ppid_of() {
+  _stat="$(cat "/proc/$1/stat" 2>/dev/null)" || return 1
+  [ -n "$_stat" ] || return 1
+  _rest="${_stat##*) }"
+  # shellcheck disable=SC2086 # deliberate split of the stat tail into fields
+  set -- $_rest
+  [ $# -ge 2 ] || return 1
+  echo "$2"
+}
+
+# True when pid $1's PPID chain reaches any of the remaining arguments. The hop
+# cap is a cheap guard against a chain that does not terminate; nothing in this
+# container is anywhere near sixty-four deep.
+descends_from() {
+  _p="$1"; shift
+  _hops=0
+  while [ -n "$_p" ] && [ "$_p" != 1 ] && [ "$_p" != 0 ] && [ "$_hops" -lt 64 ]; do
+    for _want in "$@"; do
+      [ "$_p" = "$_want" ] && return 0
+    done
+    _p="$(ppid_of "$_p")" || return 1
+    _hops=$((_hops + 1))
+  done
+  return 1
+}
+
+# Every shell whose ancestry reaches one of the given pids, one "<pid> <cwd>"
+# per line. Empty output means none — which the assertion below turns into a
+# failure, never a pass.
+session_shells() {
+  for _pid in $(ls /proc 2>/dev/null); do
+    case "$_pid" in ''|*[!0-9]*) continue ;; esac
+    case "$(cat "/proc/$_pid/comm" 2>/dev/null)" in
+      bash|sh|zsh|dash) ;;
+      *) continue ;;
+    esac
+    descends_from "$_pid" "$@" || continue
+    _cwd="$(readlink "/proc/$_pid/cwd" 2>/dev/null)"
+    [ -n "$_cwd" ] || continue
+    echo "$_pid $_cwd"
+  done
+}
+
+shell_cwds=""
 for _ in $(seq 1 60); do
   if grep -qa "session opened" "$LOG" 2>/dev/null; then
-    # Capture while it is alive: the PTY's shell is a child of the app, and its
-    # working directory is the invariant the AppRun chdir must not disturb.
+    # Capture while it is alive: the PTY's shell is a descendant of the app or
+    # of the coordinator the app spawned, and its working directory is the
+    # invariant the AppRun chdir must not disturb.
     #
-    # The process is AppRun.wrapped, not usr/bin/nocx — linuxdeploy's AppRun
+    # The app process is AppRun.wrapped, not usr/bin/nocx — linuxdeploy's AppRun
     # execs the wrapper symlink, so that is the cmdline. Matching the wrong name
     # left the pid empty, `pgrep -P 0` then answered with PID 1, and the check
     # sampled THIS SCRIPT's working directory and called it a leak.
-    sleep 2   # the shell is spawned just after the session is announced
     app_pid="$(pgrep -f "$APPDIR/AppRun\.wrapped" | head -1)"
     [ -n "$app_pid" ] || app_pid="$(pgrep -f "$APPDIR/usr/bin/nocx" | head -1)"
     [ -n "$app_pid" ] || fail "the app announced a session but no process matches it"
-    for child in $(pgrep -P "$app_pid" 2>/dev/null); do
-      case "$(cat "/proc/$child/comm" 2>/dev/null)" in
-        bash|sh|zsh|dash) shell_cwd="$(readlink "/proc/$child/cwd" 2>/dev/null)" ;;
+    # The coordinator is usually a child of the app, but it is setsid and an
+    # already-running one would have been adopted by init, so name it as a
+    # second root rather than assuming the edge. comm is truncated to 15 bytes
+    # and the installed copy is nocx-server-<version>-<sha256>, hence a prefix.
+    coord_pids=""
+    for pid in $(ls /proc 2>/dev/null); do
+      case "$pid" in ''|*[!0-9]*) continue ;; esac
+      case "$(cat "/proc/$pid/comm" 2>/dev/null)" in
+        nocx-server*) coord_pids="$coord_pids $pid" ;;
       esac
+    done
+    # The shell appears a moment after the session is announced. Wait for the
+    # observation itself rather than for a fixed sleep; if it never arrives the
+    # list stays empty and the assertion below says so.
+    for _try in $(seq 1 15); do
+      # shellcheck disable=SC2086 # coord_pids is a deliberate list of pids
+      shell_cwds="$(session_shells "$app_pid" $coord_pids)"
+      [ -n "$shell_cwds" ] && break
+      sleep 1
     done
     break
   fi
@@ -145,9 +221,14 @@ escaped="$(helper_execs | grep '^/' | grep -v "^$APPDIR/" || true)"
 note "no WebKit helper was reached outside the AppDir"
 
 # ---- the AppRun chdir stayed invisible to the user ---------------------
-[ -n "$shell_cwd" ] || fail "could not observe the session's shell to check its cwd"
-[ "$shell_cwd" = "$HOME" ] \
-  || fail "the session's shell started in '$shell_cwd', not \$HOME ('$HOME') — the AppRun chdir leaked"
-note "the session's shell started in \$HOME, not the AppDir"
+[ -n "$shell_cwds" ] || fail "could not observe the session's shell to check its cwd"
+# Every shell under the app or the coordinator, not just the first: the chdir
+# leaks into all of them or none, and naming the pid makes a failure readable.
+while read -r shell_pid shell_cwd; do
+  [ -n "$shell_pid" ] || continue
+  [ "$shell_cwd" = "$HOME" ] \
+    || fail "the session's shell (pid $shell_pid) started in '$shell_cwd', not \$HOME ('$HOME') — the AppRun chdir leaked"
+done <<<"$shell_cwds"
+note "the session's shell started in \$HOME, not the AppDir ($(echo "$shell_cwds" | wc -l) observed)"
 
 echo "PASS: $(basename "$APPIMAGE") works on a host with no GTK and no WebKit"

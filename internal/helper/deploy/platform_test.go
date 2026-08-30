@@ -2,31 +2,40 @@ package deploy_test
 
 // The platform probe and artifact-selection tests (plan Task 9, D20): the
 // probe parses exactly one bounded command's output into a Platform, and
-// the artifact source answers the three build targets with the
+// the artifact source answers the four build targets with the
 // still-compressed bytes and the decompressed content hash, refusing
-// darwin/amd64 and anything else the matrix does not contain. The refusal
-// tests use the DEFAULT source (the embedded binaries) — unsupported-
-// platform is a fact about the matrix, independent of whether `make
-// helpers` has run — and exactly one test needs the real embedded bytes to
-// exist, so only that one is gated on them.
+// anything the matrix does not contain. The refusal tests use the DEFAULT
+// source (the embedded binaries) — unsupported-platform is a fact about
+// the matrix, independent of whether `make helpers` has run — and the
+// tests that need the real embedded bytes to exist are the only ones gated
+// on them.
 
 import (
 	"context"
 	"errors"
+	"os"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/helper/deploy"
 )
 
-// requireArtifacts gates the ONE test in this package that asserts the
-// real embedded binaries: a fresh checkout compiles without them (the
-// artifacts directory embeds its .gitignore), and that test is about the
-// build output itself, so it can only run where the build ran. Nothing
-// else in the package is gated on them — the install semantics run on
-// synthetic bytes everywhere.
+// requireArtifacts gates the tests in this package that assert the real
+// embedded binaries: a fresh checkout compiles without them (the artifacts
+// directory embeds its .gitignore), and those tests are about the build
+// output itself, so they can only run where the build ran. Nothing else in
+// the package is gated on them — the install semantics run on synthetic
+// bytes everywhere.
+//
+// NOCX_REQUIRE_HELPER_ARTIFACTS turns the skip into a failure: a RELEASE
+// build was supposed to run `make helpers`, and a skip there is exactly
+// how every published release came to embed nothing (nocx-mchgh). The
+// default stays the skip, because a fresh checkout is not a broken build.
 func requireArtifacts(t *testing.T) {
 	t.Helper()
 	if _, _, err := deploy.DefaultSource.Artifact(deploy.Platform{GOOS: "linux", GOARCH: "amd64"}); errors.Is(err, deploy.ErrArtifactsNotBuilt) {
+		if os.Getenv("NOCX_REQUIRE_HELPER_ARTIFACTS") != "" {
+			t.Fatal("embedded helper artifacts absent while NOCX_REQUIRE_HELPER_ARTIFACTS is set: this build was supposed to run `make helpers` and did not")
+		}
 		t.Skip("embedded helper artifacts absent — run `make helpers` first")
 	}
 }
@@ -84,17 +93,11 @@ func TestProbeRejectsUnparseableOutput(t *testing.T) {
 	}
 }
 
-// TestArtifactDarwinAMD64IsUnsupported is D20: darwin/amd64 is deliberately
-// NOT built, and asking for it is a distinct refusal — a fact about the
-// matrix, independent of whether `make helpers` has run.
-func TestArtifactDarwinAMD64IsUnsupported(t *testing.T) {
-	if _, _, err := deploy.DefaultSource.Artifact(deploy.Platform{GOOS: "darwin", GOARCH: "amd64"}); !errors.Is(err, deploy.ErrUnsupportedPlatform) {
-		t.Fatalf("Artifact(darwin/amd64) error = %v, want ErrUnsupportedPlatform", err)
-	}
-}
-
 // TestArtifactUnknownPlatformIsUnsupported: a platform outside the matrix
 // (including one no probe can produce) is unsupported, never a build gap.
+// (darwin/amd64 was in this list until the matrix went 2x2 on 2026-08-30 —
+// D20 amended. The distinction it protected lives on in the platforms
+// below, which the matrix genuinely does not contain.)
 func TestArtifactUnknownPlatformIsUnsupported(t *testing.T) {
 	for _, p := range []deploy.Platform{
 		{GOOS: "windows", GOARCH: "amd64"},
@@ -103,6 +106,28 @@ func TestArtifactUnknownPlatformIsUnsupported(t *testing.T) {
 	} {
 		if _, _, err := deploy.DefaultSource.Artifact(p); !errors.Is(err, deploy.ErrUnsupportedPlatform) {
 			t.Fatalf("Artifact(%+v) error = %v, want ErrUnsupportedPlatform", p, err)
+		}
+	}
+}
+
+// TestEveryMatrixPlatformResolves is the release's gate expressed as a
+// test: a build that embedded nothing answers ErrArtifactsNotBuilt for
+// every platform, which is exactly what every published release did until
+// nocx-mchgh — release.yml never ran `make helpers`, and the refusal was
+// invisible because a checkout-built binary has them (Makefile:104).
+//
+// It skips where the artifacts are genuinely absent (a fresh checkout) and
+// FAILS where NOCX_REQUIRE_HELPER_ARTIFACTS says a build should have them.
+func TestEveryMatrixPlatformResolves(t *testing.T) {
+	requireArtifacts(t)
+	for _, p := range []deploy.Platform{
+		{GOOS: "linux", GOARCH: "amd64"},
+		{GOOS: "linux", GOARCH: "arm64"},
+		{GOOS: "darwin", GOARCH: "amd64"},
+		{GOOS: "darwin", GOARCH: "arm64"},
+	} {
+		if _, _, err := deploy.DefaultSource.Artifact(p); err != nil {
+			t.Fatalf("Artifact(%+v): %v", p, err)
 		}
 	}
 }

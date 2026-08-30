@@ -74,19 +74,22 @@ func (p *darwinPlatform) Extract(ctx context.Context, archivePath, destDir strin
 
 // VerifyExtracted implements [Platform.VerifyExtracted].
 //
-// Two checks: codesign --verify --deep --strict confirms the ad-hoc
-// signature Wails applied at build time has not been damaged, and
-// lipo -archs confirms the universal binary still carries both
-// slices. Either failure means the bundle must not be swapped in.
+// Two checks: codesign --verify --deep --strict confirms the bundle's
+// signature has not been damaged, and lipo -archs confirms the
+// universal binary still carries both slices. Either failure means the
+// bundle must not be swapped in.
 func (p *darwinPlatform) VerifyExtracted(ctx context.Context, bundlePath string) error {
-	// codesign integrity check. Wails v2.13 unconditionally runs
-	// codesign --force --deep --sign - on a production build, so the
-	// bundle carries a real (ad-hoc) signature even without a
-	// Developer ID. Packaging must not damage it.
+	// codesign integrity check. The shipped bundle carries the project
+	// code-signing certificate (ADR-0052); it used to carry the ad-hoc
+	// signature Wails applied, and this check long predates the change
+	// of signer. What it verifies is unchanged either way: that the
+	// extracted bundle's seal is intact, not who signed it — who signed
+	// it proves nothing to a stranger, and the download's integrity is
+	// the ed25519-signed manifest. Packaging must not damage the seal.
 	{
 		cmd := exec.CommandContext(ctx, "codesign", "--verify", "--deep", "--strict", bundlePath)
 		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("codesign verification of %s failed (the ad-hoc signature Wails applied may have been damaged): %w\n%s", bundlePath, err, string(out))
+			return fmt.Errorf("codesign verification of %s failed (the bundle's signature may have been damaged in transit or extraction): %w\n%s", bundlePath, err, string(out))
 		}
 	}
 

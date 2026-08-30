@@ -225,13 +225,39 @@ test.describe('a saved snippet reaches a running program', () => {
       "printf '\\033[?2004h'; read -r x; printf 'got-%s\\n' \"$x\"",
     )
 
-    await pickSnippet(page, 'e2e two lines')
+    // WHY THIS RETRIES, and why retrying is not a disguised sleep.
+    //
+    // The DECSET the program sends crosses the wire AFTER the editor hides:
+    // the editor hides on the shell-integration marker that says a command
+    // started, and the program's printf runs after that marker. So the moment
+    // this spec can first act is, by construction, a moment at which the byte
+    // may still be in flight. The product's fence covers bytes that have
+    // ARRIVED and are not yet parsed; nothing can make it wait for a byte
+    // nobody has announced, and it should not try.
+    //
+    // So the wait is on the observable outcome rather than on a duration
+    // (AGENTS.md: a test may not depend on timing). Each refused attempt is
+    // provably side-effect-free — the OFF-branch test above asserts a refusal
+    // writes nothing and submits nothing — so re-attempting costs a keystroke
+    // and proves the same thing a person's slower hand would.
+    await expect
+      .poll(
+        async () => {
+          await pickSnippet(page, 'e2e two lines')
+          if ((await page.locator(NOTICE).count()) > 0) {
+            await page.keyboard.press('Escape')
+            await expectPaletteClosed(page)
+            return 'refused'
+          }
+          await expectPaletteClosed(page)
+          return 'delivered'
+        },
+        { timeout: 15_000 },
+      )
+      .toBe('delivered')
 
-    // No refusal: the palette closes on delivery rather than re-opening with
-    // the notice the OFF branch asserts.
-    await expectPaletteClosed(page)
-    // And nothing was submitted — the fire never sends a newline (§9.3),
-    // even when the destination could carry one.
+    // Nothing was submitted — the fire never sends a newline (§9.3), even when
+    // the destination could carry one.
     await expect(page.locator('.cmd-block')).toHaveCount(blocksBefore)
 
     // The person presses Enter themselves, and the program echoes what it

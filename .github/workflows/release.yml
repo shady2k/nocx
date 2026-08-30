@@ -30,14 +30,7 @@ permissions:
 jobs:
   # The gate. A release cannot exist without green backend, frontend and e2e on
   # this commit.
-  #
-  # >>> TEMPORARY (nocx-hid2u): the gate runs for a TAG only, so a dry run
-  # >>> reaches build-macos in a minute instead of twenty while the signing
-  # >>> steps are debugged on the only Mac we have. REVERT BEFORE MERGE:
-  # >>> delete the `if:` here and put `ci` back into both build jobs'
-  # >>> `needs:`. A release must not be buildable without the suite.
   ci:
-    if: github.ref_type == 'tag'
     uses: ./.github/workflows/ci.yml
     permissions:
       contents: read
@@ -184,7 +177,7 @@ jobs:
   # reversed D1 and added the AppImage, an unqualified `build` next to a
   # `build-linux` read as "the build" and hid which platform had failed.
   build-macos:
-    needs: [validate, helpers] # TEMPORARY (nocx-hid2u): `ci` removed with the gate above; restore both together
+    needs: [ci, validate, helpers]
     runs-on: macos-15
     env:
       VERSION: ${{ needs.validate.outputs.version }}
@@ -627,7 +620,7 @@ jobs:
   # ubuntu-22.04 provides glibc 2.35, the baseline the support envelope
   # promises (see ADR-0007 and the Linux section in README.md).
   build-linux:
-    needs: [validate, helpers] # TEMPORARY (nocx-hid2u): `ci` removed with the gate above; restore both together
+    needs: [ci, validate, helpers]
     runs-on: ubuntu-22.04
     env:
       VERSION: ${{ needs.validate.outputs.version }}

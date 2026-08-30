@@ -203,9 +203,16 @@ describe('DropZone, the browser half', () => {
     const zone = container.querySelector<HTMLElement>('.ui-drop-zone')!
     expect(zone.querySelector('.ui-drop-zone__region')).not.toBeNull()
     expect(zone.querySelector('.ui-drop-zone__hint')?.textContent).toBe('Drop an export here')
-    // And it claims NO native target: those two attributes are what Wails
-    // reads off the dropped-on element, and there is no Wails here.
-    expect(zone.hasAttribute('data-file-drop-target')).toBe(false)
+    // AND IT NAMES ITSELF A DROP TARGET, with no session to attribute a drop
+    // to. The attribute used to be withheld here, on the argument that it is
+    // what Wails reads and there is no Wails — but `@wailsio/runtime` ships
+    // its global drag listeners into the browser bundle too, and they set
+    // `dropEffect = 'none'` on any file drag whose target has no
+    // `[data-file-drop-target]` ancestor, which is what stops the browser
+    // delivering the `drop` event at all (nocx-x1ti1; drop-zone.tsx says the
+    // rest). `data-session-id` stays absent: that is the ATTRIBUTION, and
+    // there is nothing in a browser to attribute a drop to.
+    expect(zone.getAttribute('data-file-drop-target')).toBe('api-import')
     expect(zone.hasAttribute('data-session-id')).toBe(false)
     expect(container.querySelector('[data-testid="child"]')).not.toBeNull()
   })

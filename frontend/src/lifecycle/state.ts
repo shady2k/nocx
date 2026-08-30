@@ -234,7 +234,23 @@ export class LifecycleKernel {
 
   /** Return to the initial condition (session exit / reset). Closed domain
    *  ids stay closed — a new session is a new epoch, and a stale fact for a
-   *  dead domain stays rejected. */
+   *  dead domain stays rejected.
+   *
+   *  THE LANE IS RELEASED, and it is the one thing here that is not merely
+   *  tidying. This kernel belongs to the PANE and outlives any one session;
+   *  the adopted lane belongs to the SESSION. Keeping it across a reset made
+   *  the next session undescribable: a reconnect opens a new lane, every fact
+   *  it published failed the guard below, and the pane held a live shell it
+   *  could never present — native forever, ownership never moving, the editor
+   *  never shown (nocx-7z3sr).
+   *
+   *  Releasing it cannot let a stale fact back in. The kernel is fed by one
+   *  subscription per bind, and that subscription delivers only facts whose
+   *  sessionId matches the session it was bound to (lifecycle/client.ts); the
+   *  previous one is unsubscribed before this runs. So after a reset the only
+   *  facts that can arrive are the new session's, and adopting the first of
+   *  them is exactly right. The guard's real work — one lane per session,
+   *  every other rejected — is unchanged, and pinned by its own test. */
   reset(): void {
     const changed =
       this._state.kind !== 'native' ||
@@ -245,6 +261,7 @@ export class LifecycleKernel {
     this._buffer = 'normal'
     this._stack = emptyStack()
     this._attempts.clear()
+    this._lane = null
     if (changed) this.notify()
   }
 

@@ -451,8 +451,10 @@ func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 const schemaVersion = 15
 
 // rebuildDropOrder is the complete set of user tables this build owns,
-// children first so a parent DROP never meets a surviving child under
-// foreign_keys=ON. It is also the membership gate in resetIfSchemaChanged: a
+// children first — a habit kept for readability rather than for correctness,
+// since resetIfSchemaChanged suspends foreign keys for the demolition and no
+// ordering could satisfy entries' self-reference anyway. It is also the
+// membership gate in resetIfSchemaChanged: a
 // file whose user tables are all in this set was written by an earlier
 // schema of THIS store and is discarded deliberately; one containing any
 // other table is refused.
@@ -523,10 +525,11 @@ func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger
 	// A table this build does not know about is refused, deliberately: its
 	// content is unaccounted for, so discarding it is not the "history
 	// discarded" the rebuild promises — it is data this build cannot name.
-	// Dropping it would also hand the outcome to the foreign-key check,
-	// which is exactly the half-destroyed file this function exists to
-	// prevent. A file that reaches here with an unknown table was written
-	// by a newer schema (or is not a ContentDB file at all).
+	// This gate is what makes the foreign-key suspension below safe to
+	// reason about: everything that will be dropped is a table this build
+	// owns, so there is no relationship left for the engine to protect. A
+	// file that reaches here with an unknown table was written by a newer
+	// schema (or is not a ContentDB file at all).
 	for _, name := range tables {
 		known := false
 		for _, t := range rebuildDropOrder {
@@ -547,6 +550,36 @@ func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger
 	// number came from the interim table beside it. A count that fails (a
 	// file written before the ledger existed has no such table) is not a
 	// reason to abandon the rebuild — report it as unknown and carry on.
+	// FOREIGN KEYS OFF FOR THE DEMOLITION, and it is not a relaxation — it is
+	// the only order that exists. `DROP TABLE` runs an implicit DELETE of
+	// every row, which fires ON DELETE actions; entries.parent_id is a SELF
+	// reference with ON DELETE SET NULL, so dropping `entries` nulls its own
+	// children's parent_id and the table's
+	// `CHECK (parent_id IS NOT NULL OR pos IS NULL)` then refuses the child
+	// that still holds a seat. rebuildDropOrder's children-first rule cannot
+	// reach this: a self-referencing table is its own child, so no ordering
+	// drops it after its children. The result was a hard stop — every user
+	// with one nested block could never open a file written by an older
+	// schema again, so app.go fell back to the content stub and the renderer
+	// said "Tabs are not being remembered" for good.
+	//
+	// Referential integrity has nothing to protect here anyway: the whole
+	// point of a rebuild is that every table this build owns goes, and the
+	// membership gate above has already refused a file holding anything
+	// else. This is SQLite's own documented procedure for a schema change.
+	//
+	// It is set OUTSIDE the transaction because `PRAGMA foreign_keys` is a
+	// no-op inside one, and restored on every path — the connection is the
+	// store's one connection (nocx-4p3l2) and everything after this depends
+	// on the ON that Open set.
+	if _, offErr := conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); offErr != nil {
+		return fmt.Errorf("content: suspend foreign keys for rebuild: %w", offErr)
+	}
+	defer func() {
+		if _, onErr := conn.ExecContext(ctx, "PRAGMA foreign_keys=ON"); onErr != nil && logger != nil {
+			logger.Warn("content: foreign keys could not be restored after the rebuild", "error", onErr)
+		}
+	}()
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("content: begin rebuild: %w", err)

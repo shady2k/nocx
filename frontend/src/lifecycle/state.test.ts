@@ -445,6 +445,46 @@ describe('the lifecycle kernel (ADR-0024 §6)', () => {
     expect(attemptOf(k.state)).toBeNull()
   })
 
+  it('reset releases the adopted lane, so the next session can be described at all', () => {
+    // The defect this pins (nocx-7z3sr): the kernel belongs to the PANE and
+    // the adopted lane belongs to the SESSION, and reset() cleared everything
+    // except the lane. A reconnect is a new session on a NEW lane, so every
+    // fact it published hit the lane guard and was dropped in silence. The
+    // pane held a live shell it could never present: the state stayed native,
+    // ownership never moved, and the editor stayed hidden forever.
+    //
+    // Measured end to end before the fix (e2e/ssh-reconnect.spec.ts): after a
+    // reconnect the offer card cleared and the scrollback survived, and the
+    // editor root sat at display:none for the full eighty seconds it was
+    // watched.
+    //
+    // No unit test could have caught it, because every one of them — every
+    // helper in this file included — uses a single lane.
+    const k = new LifecycleKernel()
+    k.applyFact(promptReady('d1', 1))
+    expect(k.lane).toBe(LANE)
+
+    k.reset()
+    expect(k.lane).toBeNull()
+
+    // The next session, on its own lane. It is describable.
+    const nextLane = 'lane-2'
+    k.applyFact({ lane: nextLane, lifecycle: 'prompt_ready', domain: 'd2', epoch: 1 })
+    expect(k.lane).toBe(nextLane)
+    expect(k.state.kind).toBe('prompt_ready')
+  })
+
+  it('still rejects a second lane while one session is live', () => {
+    // The guard is not weakened by the above: within one session the kernel
+    // adopts one lane and rejects the rest, which is what reset() releasing
+    // the lane must not cost. Only an intervening reset may change the lane.
+    const k = new LifecycleKernel()
+    k.applyFact(promptReady('d1', 1))
+    k.applyFact({ lane: 'lane-other', lifecycle: 'native' })
+    expect(k.lane).toBe(LANE)
+    expect(k.state.kind).toBe('prompt_ready')
+  })
+
   it('has no boolean named trusted anywhere in the module', () => {
     // The state carries no such member (compile-time).
     const k = new LifecycleKernel()

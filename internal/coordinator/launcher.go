@@ -468,13 +468,6 @@ func (l *Launcher) waitReady(ctx context.Context, spawned Spawned) (Hello, error
 	}
 }
 
-// describe names a running coordinator in one phrase, for a message a
-// person reads.
-func describe(s Sighting) string {
-	return fmt.Sprintf("nocx %s, commit %s, protocol %d, pid %d",
-		s.Hello.Build.Version, s.Hello.Build.Commit, s.Hello.Protocol, s.PID)
-}
-
 func (l *Launcher) profileFailure(message string, cause error) *LaunchFailure {
 	return NewLaunchFailure(
 		FailureProfileUnusable,

@@ -179,15 +179,35 @@ jobs:
           printf '%s' "$MACOS_SIGNING_P12" | base64 --decode > "$RUNNER_TEMP/signing.p12"
           security import "$RUNNER_TEMP/signing.p12" -k build.keychain \
             -P "$MACOS_SIGNING_P12_PASSWORD" -T /usr/bin/codesign -f pkcs12
-          rm -f "$RUNNER_TEMP/signing.p12"
+          # SELF-SIGNED MEANS UNTRUSTED, and `find-identity -v` lists only
+          # VALID identities — an untrusted certificate is not one. The
+          # first run of this step reported "0 valid identities found" and
+          # codesign failed 90 seconds later with "The specified item could
+          # not be found in the keychain". Trusting our own certificate for
+          # code signing is what makes the identity resolvable, and it
+          # grants nothing beyond this ephemeral runner VM.
+          openssl pkcs12 -in "$RUNNER_TEMP/signing.p12" -clcerts -nokeys \
+            -passin "pass:$MACOS_SIGNING_P12_PASSWORD" -out "$RUNNER_TEMP/signing.crt"
+          sudo security add-trusted-cert -d -r trustRoot -p codeSign \
+            -k /Library/Keychains/System.keychain "$RUNNER_TEMP/signing.crt"
+          rm -f "$RUNNER_TEMP/signing.p12" "$RUNNER_TEMP/signing.crt"
           # WITHOUT THIS LINE codesign asks for the keychain password
           # interactively and the job hangs instead of failing. -T on the
           # import grants codesign the ACL entry; the partition list is the
           # second half of the same permission on modern macOS.
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$kc_pass" build.keychain >/dev/null
           security list-keychains -d user -s build.keychain login.keychain
-          id="$(security find-identity -v -p codesigning build.keychain | awk 'NR==1 {print $2}')"
-          [ -n "$id" ] || { echo "::error::no code-signing identity in the imported keychain"; exit 1; }
+          # The SHA-1 is matched as a 40-hex field wherever it appears,
+          # never by column on line 1: that parse read `0 valid identities
+          # found` and yielded the word "valid", which is non-empty, so the
+          # guard below passed and the failure surfaced in codesign instead
+          # of here. A guard that cannot reject a wrong answer is not one.
+          id="$(security find-identity -v -p codesigning build.keychain | awk '{ if (match($0, /[0-9A-F]{40}/)) { print substr($0, RSTART, RLENGTH); exit } }')"
+          if ! printf '%s' "$id" | grep -Eq '^[0-9A-F]{40}$'; then
+            echo "::error::no code-signing identity in the imported keychain (got '"'"'$id'"'"')"
+            security find-identity -p codesigning build.keychain
+            exit 1
+          fi
           echo "SIGN_IDENTITY=$id" >> "$GITHUB_ENV"
           security find-identity -v -p codesigning build.keychain
 

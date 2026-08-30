@@ -326,11 +326,17 @@ jobs:
           # certificate produces, read out of a dry run's log. An absent or
           # empty file is therefore an unfinished setup, not a passing
           # build, and it says so rather than comparing against "".
+          # The built string is read FIRST and printed on the failure path,
+          # because the run that has no committed file is exactly the run
+          # somebody has to copy the string out of. Exiting without printing
+          # it would cost a second full dry run to learn what this one
+          # already knew.
+          got="$(codesign -d -r- "build/bin/nocx.app/Contents/MacOS/nocx-server" 2>/dev/null)"
           [ -s build/darwin/requirement.txt ] || {
-            echo "::error::build/darwin/requirement.txt is absent or empty — fill it from the 'codesign -d -r-' output of a dry run before this workflow can gate on the requirement"
+            echo "::error::build/darwin/requirement.txt is absent or empty — this build's requirement is the line below; commit it to that file and re-run"
+            echo "$got"
             exit 1; }
           want="$(cat build/darwin/requirement.txt)"
-          got="$(codesign -d -r- "build/bin/nocx.app/Contents/MacOS/nocx-server" 2>/dev/null)"
           if [ "$got" != "$want" ]; then
             echo "::error::designated requirement changed"
             echo "committed: $want"

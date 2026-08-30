@@ -400,9 +400,11 @@ meaning already spoken for is not spoken for twice.
 
 | Primitive             | Implementation                        | Why                                                                                                                                                                                                                                                                                        |
 | --------------------- | ------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| Dialog                | `dialog.tsx` + `overlay/` core        | Native `<dialog>` + `showModal()` — top-layer rendering, Escape/cancel, native focus, and a keyboard-reachable visible close control. The universal close control is distinct from a caller's contextual footer Cancel action. ADR-0014. Built in nocx-vxqj.5.                             |
+| Dialog                | `dialog.tsx` + `overlay/` core        | Native `<dialog>` + `showModal()` — top-layer rendering, Escape/cancel, native focus, and a typed dismissible close-control variance. The universal close control is distinct from a caller's contextual footer Cancel action. ADR-0014. Built in nocx-vxqj.5.                             |
 | Tooltip               | Native `title` attribute              | ~8 call sites, none need rich content.                                                                                                                                                                                                                                                     |
 | Popover/Menu/Combobox | **ContextMenu** + **SuggestionField** | The menu half is built (`context-menu.tsx`) for the Files panel's row actions; the combobox half is **SuggestionField** (a form-field combobox, built in fix-kit-rowlist — free-text suggestions with the full combobox ARIA and keyboard contract); popover still awaits a real consumer. |
+
+`Dialog`'s typed `dismissible` variance defaults to true. Set `dismissible={false}` for a blocking overlay: the close control is not rendered and Escape, native cancel, and light dismiss do nothing; focus still follows the same initial-control policy.
 
 ### Page primitives (separate ownership — not merged with kit Section)
 

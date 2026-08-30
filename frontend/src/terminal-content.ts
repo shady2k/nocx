@@ -4223,6 +4223,7 @@ export class TerminalContent extends BasePaneContent {
                   location: '',
                   kind: 'text',
                   body: childBody.get(cause.entryId) ?? null,
+                  entryId: cause.entryId,
                   // A run of the assistant's prose is the assistant's —
                   // the child's own source says so (nocx-dc2fr).
                   author: cause.source === 'assistant' ? 'agent' : 'shell',
@@ -4236,6 +4237,9 @@ export class TerminalContent extends BasePaneContent {
                 snapshotStore,
                 this.runningActions,
                 this.dumpSource ?? undefined,
+                // A text child owns its single text/plain artifact; it must
+                // never borrow the enclosing turn's assembled answer.
+                (entryId) => answerTextForEntry(this.client, entryId),
               )
             }
             // An ACTION child is a tool line — a header naming what was
@@ -4293,6 +4297,7 @@ export class TerminalContent extends BasePaneContent {
           },
           this.runningActions,
           this.dumpSource ?? undefined,
+          (entryId) => answerTextForTurn(this.client, entryId),
         ),
       )
     }

@@ -14,6 +14,7 @@ import {
   blockKindRules,
   copyToClipboard,
   createCommandBlock,
+  type AnswerTextSource,
   type BlockKind,
   type DumpSource,
   type FrozenStatus,
@@ -116,6 +117,7 @@ export function restoredBlock(
   store: CommandSnapshotStore,
   menuActions?: RunningBlockActions,
   dump?: DumpSource,
+  answerText?: AnswerTextSource,
 ): HTMLElement {
   // A TURN's body is prose and is drawn by the answer body's own renderer —
   // the one the live stream draws through (nocx-4em1z). A `text` CHILD's
@@ -155,7 +157,7 @@ export function restoredBlock(
     onSelect,
     store,
     facts.author,
-    undefined,
+    answerText,
     menuActions,
     facts.entryId,
     dump,
@@ -259,6 +261,7 @@ export function restoredTurn(
   drawCaused: (cause: RestoredCause) => HTMLElement | null,
   menuActions?: RunningBlockActions,
   dump?: DumpSource,
+  answerText?: AnswerTextSource,
 ): HTMLElement[] {
   const el = restoredBlock(
     { ...facts, id: nextId() },
@@ -268,6 +271,7 @@ export function restoredTurn(
     store,
     menuActions,
     dump,
+    answerText,
   )
   // The turn's prose, when the run still had it, is drawn by the block
   // builder's own answer-body path; when it is GONE the block says the

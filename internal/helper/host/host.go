@@ -50,6 +50,13 @@ type Host struct {
 	// the sentinel and its chunks may interleave with other responses, and
 	// the stream id is what routes them.
 	streamSeq uint64
+
+	// inflight counts the request goroutines `frame` dispatched. D13 opens
+	// the interval — a handler runs while the read loop moves on — and this
+	// is what closes it: Serve does not return while one is still running.
+	// Not guarded by mu: Add happens on the read loop before the goroutine
+	// starts, which is the ordering sync.WaitGroup requires.
+	inflight sync.WaitGroup
 }
 
 // pendingRequest is the per-request state a TypeCancel reaches: the
@@ -116,6 +123,21 @@ func (h *Host) Services() []Service {
 // TypeHelloOK echo, then serves frames until the input reaches EOF, at which
 // point it returns nil.
 func (h *Host) Serve(ctx context.Context) error {
+	// A returning Serve means the connection is over, and cmd/nocx-helper's
+	// main exits on it — so it must also mean no handler is still working.
+	// Otherwise a transport that dies mid-mutation takes the process down
+	// with the git it spawned still writing into .git, which is the
+	// half-written repository D12 exists to prevent (nocx-t76b9). A mutation
+	// is never cancelled (D11), so this waits for it rather than bounding it.
+	//
+	// Waiting for EVERYTHING would be the wrong end of the same stick: a read
+	// still in flight when the transport dies has nobody left to answer, and
+	// would hold the process open for as long as it felt like running. So the
+	// cancellable half is abandoned first and only the refusing half is
+	// waited for. Deferred in this order because defers run last-first.
+	defer h.inflight.Wait()
+	defer h.abandonCancellable()
+
 	var helloErr error
 	helloDone := false
 	dec := proto.NewDecoder(func(ty proto.FrameType, seq, ack uint32, payload []byte) {
@@ -187,7 +209,11 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 			h.log.Warn("malformed request", "err", err)
 			return
 		}
-		go h.request(ctx, req)
+		h.inflight.Add(1)
+		go func() {
+			defer h.inflight.Done()
+			h.request(ctx, req)
+		}()
 	case proto.TypeCancel:
 		h.cancel(payload)
 	case proto.TypeKeepAlive:
@@ -247,6 +273,27 @@ func (h *Host) request(ctx context.Context, req proto.Request) {
 	}
 	resp.Result = raw
 	h.respond(resp)
+}
+
+// abandonCancellable cancels every in-flight request whose service allows
+// cancellation, which is what a dead transport means for a read: the answer
+// has nowhere to go. A mutation whose service refuses cancellation (D11) is
+// left alone and runs to completion — that is what Serve then waits for.
+func (h *Host) abandonCancellable() {
+	h.mu.Lock()
+	pending := make([]pendingRequest, 0, len(h.requests))
+	for _, entry := range h.requests {
+		pending = append(pending, entry)
+	}
+	h.mu.Unlock()
+	for _, entry := range pending {
+		if svc := h.serviceByName(entry.service); svc != nil {
+			if policy, ok := svc.(CancelPolicy); ok && policy.RefusesCancel(entry.op) {
+				continue
+			}
+		}
+		entry.stop()
+	}
 }
 
 // refusal codes a service error for the wire: the service's own

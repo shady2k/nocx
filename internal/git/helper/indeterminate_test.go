@@ -202,12 +202,19 @@ func dialKillable(t *testing.T, conn *killableConn) *client.Client {
 	// where cleanup outruns the peer, so it was green here and red on CI.
 	//
 	// `exited` is the observable that closes the gap — never a sleep, the
-	// repo's rule. The host serves frames synchronously inside Serve's read
-	// loop (internal/helper/host/host.go), so the commit runs ON that
-	// goroutine and Serve cannot reach its next Read until git is done.
-	// Closing the client closes the peer's stdin, that Read then sees EOF,
-	// Serve returns and `exited` closes — by which point nothing is writing
-	// into the repository any more.
+	// repo's rule. Closing the client closes the peer's stdin, the host's
+	// read loop sees EOF, Serve returns and `exited` closes.
+	//
+	// What makes that mean "nothing is writing into the repository any more"
+	// is host.Serve waiting for its in-flight handlers before it returns.
+	// It does NOT serve frames on the read loop: `frame` dispatches every
+	// request on its own goroutine (D13), so for a while this comment was
+	// wrong about the very thing it was justifying, and the wait it
+	// describes was a coincidence of scheduling. TestLostMutation... then
+	// failed in RemoveAll on CI with every assertion passing (nocx-t76b9),
+	// which is the same red-on-green shape this cleanup was written for.
+	// The closing end now lives in the host, where the interval is opened:
+	// see TestServeWaitsForItsHandlersBeforeReturning.
 	//
 	// It is registered here rather than in the test bodies so no future test
 	// on a killable conn can forget it, and it runs BEFORE every t.TempDir

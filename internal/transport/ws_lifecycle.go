@@ -521,8 +521,8 @@ func (s *WSServer) handleLifecycleSubmitAttempt(ctx context.Context, wconn *wsCo
 		return
 	}
 	if params.Source == string(content.SourceAssistant) && params.RequestID != "" {
-		if !s.broker.bindRunAttempt(params.RequestID, string(att.ID)) {
-			s.log.Warn("lifecycle submit attempt has no live assistant run to bind",
+		if !s.broker.bindRunAttempt(params.RequestID, string(att.ID), wconn) {
+			s.log.Warn("lifecycle submit attempt has no authorized live assistant run to bind",
 				"request_id", params.RequestID, "attempt", att.ID)
 		}
 	}

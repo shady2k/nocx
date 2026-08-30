@@ -358,14 +358,22 @@ func (b *Broker) registerRunLease(requestID string, lease *runLease) {
 }
 
 // bindRunAttempt records the lifecycle-owned attempt for its parent request.
-// A missing or already-bound request is refused, so a stale renderer cannot
-// make a different run's lease address its attempt.
-func (b *Broker) bindRunAttempt(requestID, attemptID string) bool {
-	if requestID == "" || attemptID == "" {
+// The lifecycle submit must come from a connection that received this
+// request's notification; knowing a request id alone is not authority to
+// name its attempt.
+func (b *Broker) bindRunAttempt(requestID, attemptID string, conn Conn) bool {
+	if requestID == "" || attemptID == "" || !comparableConn(conn) {
 		return false
 	}
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	p, ok := b.pending[requestID]
+	if !ok || p.recipients == nil {
+		return false
+	}
+	if _, ok := p.recipients[conn]; !ok {
+		return false
+	}
 	if _, ok := b.runLeases[requestID]; !ok {
 		return false
 	}

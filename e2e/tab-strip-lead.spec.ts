@@ -25,29 +25,25 @@ async function leftWithin(
   }, selector)
 }
 
-// THE NOTICES ARE CONDITIONS, AND A CONDITION THAT IS NOT TRUE TAKES NO ROOM.
-// `.update-notice` and `.connection-notice` are the strip's first two children.
-// Both carry `hidden`, and both declared `display: flex` — which beats the UA
-// stylesheet's `[hidden] { display: none }`, so neither was hidden at all: two
-// empty flex boxes with `padding: 0 12px` owned 48px of the row at all times,
-// on every platform. On macOS that landed immediately after the traffic-light
-// inset, which is where it was noticed.
-test('a hidden notice takes no width in the tab strip', async ({ page }) => {
+// The update notice is the only optional child before the tab strip lead.
+// Connection state now owns a top-layer overlay, so it must not add a second
+// child to the tab bar or participate in this layout contract.
+test('the tab strip lead follows the update notice without another condition child', async ({
+  page,
+}) => {
   await page.goto('/')
   await expect(page.locator(BAR)).toBeVisible()
-
-  // The precondition, stated rather than assumed: this asserts nothing about
-  // hiding if the notices are showing.
   await expect(page.locator('.update-notice')).toBeHidden()
-  await expect(page.locator('.connection-notice')).toBeHidden()
+  await expect(page.locator(LEAD)).toBeVisible()
 
-  const widths = await page.evaluate(() =>
-    [...(document.querySelector('.tabbar') as HTMLElement).children]
-      .filter((c) => c.querySelector('.update-notice, .connection-notice'))
-      .map((c) => c.getBoundingClientRect().width),
+  const roles = await page.evaluate(() =>
+    [...(document.querySelector('.tabbar') as HTMLElement).children].map((child) => {
+      if (child.querySelector('.update-notice')) return 'update'
+      if (child.querySelector('.tabstrip-lead')) return 'lead'
+      return 'other'
+    }),
   )
-  expect(widths.length).toBeGreaterThan(0)
-  for (const w of widths) expect(w).toBe(0)
+  expect(roles.slice(0, 2)).toEqual(['update', 'lead'])
 })
 
 // AND THEREFORE the first control sits exactly where the platform's window

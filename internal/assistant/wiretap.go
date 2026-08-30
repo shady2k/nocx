@@ -78,6 +78,9 @@ func wireIdentityFrom(ctx context.Context) (wireIdentity, bool) {
 // one artifact's budget, while truncation remains visible in the dump.
 const wireCaptureCap = 1 << 20
 
+// wireTap is an http.RoundTripper that copies a request and its response into
+// the optional developer log and product recorder, and derives the run's tool
+// offer from the request it observed. It changes none of them.
 type wireTap struct {
 	inner    http.RoundTripper
 	logPath  string

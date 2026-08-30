@@ -670,6 +670,22 @@ export class WSClient {
       if (value !== 'alive' && value !== 'unknown') return
       const observedAt = raw.observedAt
       if (typeof observedAt !== 'string') return
+      // The MEASUREMENT travels with the belief, and both halves of it.
+      //
+      // This rebuilds the fact rather than passing the payload on — the
+      // identity fields are taken from the session's own record, not from the
+      // wire — and that is exactly how these two came to be dropped: they are
+      // the only fields with no local counterpart to copy from, so a
+      // reconstruction written field by field simply never named them. The
+      // renderer then saw slow === undefined for every host and drew nothing,
+      // however slow the link got (nocx-y3i0s).
+      //
+      // Absent stays absent. The contract says absent and zero are one
+      // statement — "nothing was measured" — so a host that never answered
+      // must not arrive looking like one that answered instantly, and a
+      // default of 0 or false here would be exactly that lie.
+      const roundTripMs = typeof raw.roundTripMs === 'number' ? raw.roundTripMs : undefined
+      const slow = typeof raw.slow === 'boolean' ? raw.slow : undefined
       state.livenessEpoch = epoch
       state.livenessCallback?.({
         sessionId: sid,
@@ -678,6 +694,8 @@ export class WSClient {
         liveness: value,
         livenessEpoch: epoch,
         observedAt,
+        ...(roundTripMs !== undefined ? { roundTripMs } : {}),
+        ...(slow !== undefined ? { slow } : {}),
       })
     })
 

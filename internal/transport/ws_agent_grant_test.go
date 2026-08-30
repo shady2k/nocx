@@ -185,7 +185,7 @@ type missingGrantProvider struct {
 
 func (p *missingGrantProvider) serve(w http.ResponseWriter, _ *http.Request) {
 	streamToolCallChunk(w, "session.read", fmt.Sprintf(
-		`{"sessionId":%q,"id":%q,"start":0,"count":20}`, p.session, p.missingID))
+		`{"id":%q,"start":0,"count":20}`, p.missingID))
 }
 
 func TestAgentAsk_MissingGrantedItemTerminalizesWithReason(t *testing.T) {

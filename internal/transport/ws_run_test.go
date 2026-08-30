@@ -12,7 +12,6 @@ package transport
 
 import (
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -117,7 +116,7 @@ func TestRun_EndToEndOverTheRealSocket(t *testing.T) {
 	h.createEndpointAt(srv.URL)
 
 	sid := openLocalSession(t, h.conn)
-	fake.args = fmt.Sprintf(`{"sessionId":%q,"command":"ls -la"}`, sid)
+	fake.args = `{"command":"ls -la"}`
 
 	res, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId":     "ask-run-1",
@@ -216,87 +215,5 @@ func TestRun_EndToEndOverTheRealSocket(t *testing.T) {
 	second := fake.bodies[1]
 	if !strings.Contains(second, "file1") || !strings.Contains(second, "file2") {
 		t.Fatalf("the tool message lacks the command's output; second body: %s", second)
-	}
-}
-
-// TestRun_GrantRefusesBeforeAnySubmission (nocx-uvac6.1): a run call naming
-// a lane the grant does not cover is REFUSED — the refusal is that call's
-// result, in our words, and the run continues to a terminal state of its
-// own accord. The refusal must precede every submission, so no runRequest
-// may appear, and the run completes with the model's answer.
-func TestRun_GrantRefusesBeforeAnySubmission(t *testing.T) {
-	fake, srv := newRunToolCallingServer(`{"sessionId":"foreign-session","command":"rm -rf /"}`)
-	defer srv.Close()
-	client, err := assistant.NewClient(nil, nil)
-	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
-	}
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(autonomousPolicyStore(t)))
-	h.createEndpointAt(srv.URL)
-
-	sid := openLocalSession(t, h.conn)
-	askOverWire(t, h.conn, map[string]any{
-		"askId":     "ask-run-refused",
-		"sessionId": sid,
-		"question":  "clean up",
-		"cwd":       "/repo",
-	}, 3)
-
-	// Drain notifications until the run terminalizes, watching for any
-	// agent.runRequest: the refusal must precede every submission, so none
-	// may appear.
-	var st struct {
-		RunID int64  `json:"runId"`
-		State string `json:"state"`
-		Error string `json:"error"`
-	}
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			t.Fatalf("run never terminalized; state=%+v", st)
-		}
-		_ = h.conn.SetReadDeadline(time.Now().Add(remaining))
-		_, msg, err := h.conn.ReadMessage()
-		if err != nil {
-			t.Fatalf("reading notifications: %v (state=%+v)", err, st)
-		}
-		var n struct {
-			ID     *json.RawMessage `json:"id"`
-			Method string           `json:"method"`
-			Params json.RawMessage  `json:"params"`
-		}
-		if err := json.Unmarshal(msg, &n); err != nil {
-			continue
-		}
-		if n.ID == nil && n.Method == "agent.runRequest" {
-			t.Fatalf("a run request reached the renderer for a lane the grant does not cover: %s", n.Params)
-		}
-		if n.ID == nil && n.Method == "agent.runState" {
-			if err := json.Unmarshal(n.Params, &st); err != nil {
-				t.Fatalf("runState unmarshal: %v\nraw: %s", err, n.Params)
-			}
-			break
-		}
-	}
-	// The refusal is an answer, not a fault: the run went on and the model
-	// answered, so the turn completed.
-	if st.State != "completed" {
-		t.Fatalf("runState = %q, want completed — a refused call must not fail the run", st.State)
-	}
-	if st.Error != "" {
-		t.Fatalf("runState error = %q, want none on a completed run", st.Error)
-	}
-	// The refusal rode the second request as a tool result: the provider
-	// was asked again, and the answer it got carried the refusal in our
-	// words, never the framework's.
-	if fake.requests.Load() != 2 {
-		t.Fatalf("provider received %d requests, want 2 (the refused call, then the answer) — the run must continue", fake.requests.Load())
-	}
-	if len(fake.bodies) < 2 || !strings.Contains(fake.bodies[1], "REFUSED") {
-		t.Fatalf("the second request did not carry the refusal as a tool result: %v", fake.bodies)
-	}
-	if len(fake.bodies) >= 2 && strings.Contains(fake.bodies[1], "NodeRunError") {
-		t.Fatalf("the refusal text carried the framework's words: %v", fake.bodies[1])
 	}
 }

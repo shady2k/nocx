@@ -171,7 +171,7 @@ func askObserveStore(t *testing.T) *assistant.GlobalPolicyStore {
 func TestAgentApprovalRequested_RealEscalationOverTheWireNamesItsEffect(t *testing.T) {
 	schema := loadSchema(t, "agent.approvalRequested.schema.json")
 
-	fake, srv := newToolCallingServer("") // session filled per ask below
+	fake, srv := newToolCallingServer()
 	defer srv.Close()
 	client, err := assistant.NewClient(nil, nil)
 	if err != nil {
@@ -181,7 +181,6 @@ func TestAgentApprovalRequested_RealEscalationOverTheWireNamesItsEffect(t *testi
 	h.createEndpointAt(srv.URL)
 
 	sid := openLocalSession(t, h.conn)
-	fake.session = sid
 
 	if _, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "ask-effect-1", "sessionId": sid, "question": "what is on the screen?", "cwd": "/repo",

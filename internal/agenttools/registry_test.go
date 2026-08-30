@@ -109,9 +109,8 @@ const gitStatusSchema = `{
 const sessionListSchema = `{
   "type": "object",
   "additionalProperties": false,
-  "required": ["sessionId"],
+  "required": [],
   "properties": {
-    "sessionId": {"type": "string"},
     "limit": {"type": "integer"}
   },
   "$defs": {"result": {
@@ -125,9 +124,8 @@ const sessionListSchema = `{
 const sessionReadSchema = `{
   "type": "object",
   "additionalProperties": false,
-  "required": ["sessionId"],
+  "required": [],
   "properties": {
-    "sessionId": {"type": "string"},
     "id": {"type": "string"},
     "start": {"type": "integer"},
     "count": {"type": "integer"}
@@ -143,9 +141,8 @@ const sessionReadSchema = `{
 const runSchema = `{
   "type": "object",
   "additionalProperties": false,
-  "required": ["sessionId", "command"],
+  "required": ["command"],
   "properties": {
-    "sessionId": {"type": "string"},
     "command": {"type": "string"}
   },
   "$defs": {"result": {

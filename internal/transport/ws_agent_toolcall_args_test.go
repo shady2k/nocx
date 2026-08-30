@@ -37,7 +37,6 @@ import (
 // another, then answers. One tool, one session, two different blocks — the
 // exact shape the owner could not tell apart.
 type twoReadsProvider struct {
-	session  string
 	first    string
 	second   string
 	requests int
@@ -55,10 +54,10 @@ func (p *twoReadsProvider) serve(w http.ResponseWriter, r *http.Request) {
 	switch p.requests {
 	case 1:
 		streamToolCallChunk(w, "session.read", fmt.Sprintf(
-			`{"sessionId":%q,"id":%q,"start":0,"count":1}`, p.session, p.first))
+			`{"id":%q,"start":0,"count":1}`, p.first))
 	case 2:
 		streamToolCallChunk(w, "session.read", fmt.Sprintf(
-			`{"sessionId":%q,"id":%q,"start":0,"count":1}`, p.session, p.second))
+			`{"id":%q,"start":0,"count":1}`, p.second))
 	default:
 		streamAnswerChunk(w, "both of them")
 	}
@@ -83,7 +82,6 @@ func TestAgentRunToolCall_ArgumentsOverTheWireConformToContract(t *testing.T) {
 	if openErr != nil {
 		t.Fatalf("open in pane: %+v", openErr)
 	}
-	prov.session = sid
 	waitPastMilli(sessionOpenedAt(t, h.ws, sid))
 	prov.first = recordBlockWithBody(t, h.db, blockPaneThis, "df -h",
 		"0198f2b0-0000-7000-8000-0000000000f1", "Filesystem  Size")
@@ -155,8 +153,8 @@ func TestAgentRunToolCall_ArgumentsOverTheWireConformToContract(t *testing.T) {
 	if calls[1].Args["id"] != prov.second {
 		t.Fatalf("second call args = %v, want id %q", calls[1].Args, prov.second)
 	}
-	if calls[0].Args["sessionId"] != sid {
-		t.Fatalf("first call args = %v, want sessionId %q", calls[0].Args, sid)
+	if calls[0].Args["sessionId"] != nil || calls[1].Args["sessionId"] != nil {
+		t.Fatalf("session.read calls carried model sessionId arguments: %v / %v", calls[0].Args, calls[1].Args)
 	}
 }
 

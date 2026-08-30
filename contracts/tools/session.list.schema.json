@@ -5,13 +5,8 @@
   "description": "Parameters for the session.list agent tool: list the items currently addressable in one terminal session. An empty list is valid when the pane has no recorded blocks.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["sessionId"],
+  "required": [],
   "properties": {
-    "sessionId": {
-      "type": "string",
-      "minLength": 1,
-      "description": "The session whose current items are listed."
-    },
     "limit": {
       "type": "integer",
       "minimum": 1,

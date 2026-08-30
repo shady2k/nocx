@@ -260,11 +260,12 @@ type AskParams struct {
 	// visibility only; the grant and kernel remain the authority boundary.
 	Presentation *agenttools.PresentationConfig
 
-	// RunID and Attempt are the run's identity — what approvals bind to.
-	// The transport passes the run's execution row id; empty with attempt 0
-	// is the un-bound shape every caller has today.
-	RunID   string
-	Attempt int
+	// RunID and SessionID are the run's backend-owned identities. The
+	// transport passes both from the ask context; SessionID is the pane the
+	// run is executing in, not a value recovered from grant scopes.
+	RunID     string
+	SessionID string
+	Attempt   int
 	// TurnEntryID is the TURN's own ledger entry — the one entry a turn is
 	// since ADR-0039, and what everything this run causes is joined to by a
 	// `caused-by` edge (nocx-h1l4o).

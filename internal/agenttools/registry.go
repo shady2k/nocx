@@ -54,6 +54,13 @@ func resourceArgument(arg string, kind content.ResourceKind) ResolveResources {
 	}
 }
 
+func resourceSession(_ map[string]any, runCtx RunContext) ([]ResourceRef, error) {
+	if runCtx.Session == "" {
+		return nil, errors.New("session resource is absent from the run context")
+	}
+	return []ResourceRef{{Kind: content.ResourceSession, ID: runCtx.Session}}, nil
+}
+
 // Narrow is a capability constructor: grant → capability. It is the
 // declaration's own builder, so the middleware needs no per-tool switch to
 // know how to narrow a tool — the row carries it.
@@ -263,7 +270,7 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
-		ResolveResources: resourceArgument("sessionId", content.ResourceSession),
+		ResolveResources: resourceSession,
 		Executes:         InGo,
 		Params:           "session.list.schema.json",
 		Narrow:           narrowSession,
@@ -277,7 +284,7 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
-		ResolveResources: resourceArgument("sessionId", content.ResourceSession),
+		ResolveResources: resourceSession,
 		Executes:         Dynamic,
 		Params:           "session.read.schema.json",
 		Narrow:           narrowSession,
@@ -291,7 +298,7 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
-		ResolveResources: resourceArgument("sessionId", content.ResourceSession),
+		ResolveResources: resourceSession,
 		CommandArg:       "command",
 		Executes:         InRenderer,
 		Params:           "session.run.schema.json",

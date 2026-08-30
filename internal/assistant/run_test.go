@@ -81,27 +81,15 @@ func runResolvedBody(entryID string, exitCode *int, status string, total, start,
 	return b
 }
 
-// TestExecuteRun_SessionOutsideGrantNeverRequests is criterion 4: a grant
-// naming session A cannot run a command in session B — asserted by trying,
-// at the executor, through the narrowed capability. Naming B is refused
-// BEFORE any renderer request: the recording runner proves the broker was
-// never asked about B. The paired end: a run in A succeeds and the runner
-// was asked exactly about A with the command.
-func TestExecuteRun_SessionOutsideGrantNeverRequests(t *testing.T) {
+// TestExecuteRun_UsesTheRunnerSessionWithoutModelArgument proves the
+// narrowed capability supplies the pane identity to execution.
+func TestExecuteRun_UsesTheRunnerSessionWithoutModelArgument(t *testing.T) {
 	runner := agenttools.NewRunner([]content.GrantScope{{Kind: content.ResourceSession, ID: "session-a"}})
 	req := &recordingRunner{body: runResolvedBody("entry-1", new(0), "success", 2, 0, 2, "hello\nworld")}
 
-	_, err := executeRun(toolTestContext(), runner, req, json.RawMessage(`{"sessionId":"session-b","command":"ls"}`), nil)
-	if err == nil || !strings.Contains(err.Error(), "outside the run's grant") {
-		t.Fatalf("run in session-b error = %v, want the grant refusal", err)
-	}
-	if calls := req.runCalls(); len(calls) != 0 {
-		t.Fatalf("a refused session reached the renderer: %+v", calls)
-	}
-
-	out, err := executeRun(toolTestContext(), runner, req, json.RawMessage(`{"sessionId":"session-a","command":"ls -la"}`), nil)
+	out, err := executeRun(toolTestContext(), runner, req, json.RawMessage(`{"command":"ls -la"}`), nil)
 	if err != nil {
-		t.Fatalf("run in session-a failed: %v", err)
+		t.Fatalf("run in the runner's session failed: %v", err)
 	}
 	calls := req.runCalls()
 	if len(calls) != 1 || calls[0].sessionID != "session-a" || calls[0].command != "ls -la" {
@@ -121,6 +109,19 @@ func TestExecuteRun_SessionOutsideGrantNeverRequests(t *testing.T) {
 	}
 }
 
+func TestExecuteRun_WithoutRunnerSessionRefuses(t *testing.T) {
+	runner := agenttools.NewRunner(nil)
+	req := &recordingRunner{body: runResolvedBody("entry-1", new(0), "success", 2, 0, 2, "hello\nworld")}
+
+	_, err := executeRun(toolTestContext(), runner, req, json.RawMessage(`{"command":"ls"}`), nil)
+	if err == nil || !strings.Contains(err.Error(), "outside the run's grant") {
+		t.Fatalf("run without a session scope error = %v, want the grant refusal", err)
+	}
+	if calls := req.runCalls(); len(calls) != 0 {
+		t.Fatalf("a run without a session reached the renderer: %+v", calls)
+	}
+}
+
 // A resolution that names NO entry is the store having written no row for
 // the command — History is off, or the record was dropped — and it is not a
 // corrupt resolution. The command RAN: its output is the tool's result and
@@ -137,8 +138,7 @@ func TestExecuteRun_AResolutionNamingNoEntryStillReturnsTheOutputAndJoinsNothing
 
 	var joined []string
 	out, err := executeRun(toolTestContext(), runner, req,
-		json.RawMessage(`{"sessionId":"session-a","command":"ls"}`),
-		func(entryID string) { joined = append(joined, entryID) })
+		json.RawMessage(`{"command":"ls"}`), nil)
 	if err != nil {
 		t.Fatalf("a run the store wrote no row for failed: %v", err)
 	}
@@ -168,43 +168,37 @@ func TestExecuteRun_AResolutionNamingNoEntryStillReturnsTheOutputAndJoinsNothing
 // grant does not cover is REFUSED — the refusal is the call's result in our
 // words (nocx-uvac6.1), and the renderer is never asked. The grant names
 // session-a; the model names session-b.
-func TestMiddleware_RunRefusedOutsideGrantIsAResult(t *testing.T) {
+// An explicit sessionId is no longer a valid model argument. The schema
+// rejects it before policy or execution can run.
+func TestMiddleware_RunRejectsModelSessionID(t *testing.T) {
 	grant := sessionGrant("session-a", autonomousMatrix())
 	req := &recordingRunner{body: runResolvedBody("entry-1", new(0), "success", 1, 0, 1, "x")}
 	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, req)
 
-	out, err := wrappedEndpoint(mw, "session.run", "c1", `{"sessionId":"session-b","command":"ls"}`)
-	if err != nil {
-		t.Fatalf("out-of-grant session.run error = %v, want the refusal as a tool result", err)
-	}
-	if !strings.Contains(out, "REFUSED") || !strings.Contains(out, "session.run") {
-		t.Fatalf("refusal result = %q, want a refusal naming the tool in our words", out)
-	}
-	if calls := req.runCalls(); len(calls) != 0 {
-		t.Fatalf("a refused call reached the renderer: %+v", calls)
+	if _, err := wrappedEndpoint(mw, "session.run", "c1", `{"sessionId":"session-a","command":"ls"}`); err == nil {
+		t.Fatal("session.run with sessionId succeeded; want schema refusal")
 	}
 
-	out, err = wrappedEndpoint(mw, "session.run", "c2", `{"sessionId":"session-a","command":"ls"}`)
+	out, err := wrappedEndpoint(mw, "session.run", "c2", `{"command":"ls"}`)
 	if err != nil {
-		t.Fatalf("in-grant session.run failed: %v", err)
-	}
-	calls := req.runCalls()
-	if len(calls) != 1 || calls[0].sessionID != "session-a" || calls[0].command != "ls" {
-		t.Fatalf("runner asked %+v, want exactly one run of session-a", calls)
+		t.Fatalf("session.run without sessionId: %v", err)
 	}
 	if !strings.Contains(out, `"entryId":"entry-1"`) {
 		t.Fatalf("result %q lacks the entry id", out)
+	}
+	calls := req.runCalls()
+	if len(calls) != 1 || calls[0].sessionID != "session-a" {
+		t.Fatalf("runner asked %+v, want one run of session-a", calls)
 	}
 }
 
 // TestMiddleware_RunWithoutRequesterIsHonest: a run whose transport wired no
 // renderer-request seam reports the wiring gap as an error — a declared
-// InRenderer tool never silently no-ops.
 func TestMiddleware_RunWithoutRequesterIsHonest(t *testing.T) {
 	grant := sessionGrant("session-a", autonomousMatrix())
 	mw := middlewareFor(t, grant, &fakeLedger{}, nil) // requester nil
 
-	_, err := wrappedEndpoint(mw, "session.run", "c1", `{"sessionId":"session-a","command":"ls"}`)
+	_, err := wrappedEndpoint(mw, "session.run", "c1", `{"command":"ls"}`)
 	if err == nil || !strings.Contains(err.Error(), "no renderer requester is wired") {
 		t.Fatalf("error = %v, want the wiring-gap refusal", err)
 	}
@@ -221,7 +215,7 @@ func TestExecuteRun_WindowIsHonest(t *testing.T) {
 	// three — the window statement tells the model the rest exists.
 	req := &recordingRunner{body: runResolvedBody("e1", new(0), "success", 5, 0, 3, "one\ntwo\nthree")}
 
-	out, err := executeRun(toolTestContext(), runner, req, json.RawMessage(`{"sessionId":"session-a","command":"seq 5"}`), nil)
+	out, err := executeRun(toolTestContext(), runner, req, json.RawMessage(`{"command":"seq 5"}`), nil)
 	if err != nil {
 		t.Fatalf("run failed: %v", err)
 	}
@@ -270,7 +264,7 @@ func TestExecuteRun_EnteredCarriesNoExitCode(t *testing.T) {
 	runner := agenttools.NewRunner([]content.GrantScope{{Kind: content.ResourceSession, ID: "session-a"}})
 	req := &recordingRunner{body: runResolvedBody("e-ssh", nil, "entered", 1, 0, 1, "deploy@host:~$")}
 
-	out, err := executeRun(toolTestContext(), runner, req, json.RawMessage(`{"sessionId":"session-a","command":"ssh host"}`), nil)
+	out, err := executeRun(toolTestContext(), runner, req, json.RawMessage(`{"command":"ssh host"}`), nil)
 	if err != nil {
 		t.Fatalf("run failed: %v", err)
 	}
@@ -297,7 +291,7 @@ func TestExecuteRun_FailedOutcomeSurfaces(t *testing.T) {
 	runner := agenttools.NewRunner([]content.GrantScope{{Kind: content.ResourceSession, ID: "session-a"}})
 	req := &recordingRunner{err: errors.New("run: the renderer refused the submission: the agent lane is not prompt-ready")}
 
-	_, err := executeRun(toolTestContext(), runner, req, json.RawMessage(`{"sessionId":"session-a","command":"ls"}`), nil)
+	_, err := executeRun(toolTestContext(), runner, req, json.RawMessage(`{"command":"ls"}`), nil)
 	if err == nil || !strings.Contains(err.Error(), "refused the submission") {
 		t.Fatalf("error = %v, want the renderer's failure sentence", err)
 	}

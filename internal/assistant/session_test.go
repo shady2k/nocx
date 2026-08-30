@@ -24,14 +24,16 @@ func testResultMaxBytes() int64 {
 }
 
 type sessionSourceFake struct {
-	items SessionItems
-	item  SessionItemRead
-	err   error
-	calls int
+	items     SessionItems
+	item      SessionItemRead
+	err       error
+	calls     int
+	sessionID string
 }
 
-func (f *sessionSourceFake) ListSessionItems(context.Context, string, int) (SessionItems, error) {
+func (f *sessionSourceFake) ListSessionItems(_ context.Context, sessionID string, _ int) (SessionItems, error) {
 	f.calls++
+	f.sessionID = sessionID
 	if f.err != nil {
 		return SessionItems{}, f.err
 	}
@@ -72,6 +74,23 @@ func TestExecuteSessionList_EmptyPaneIsAnHonestEmptyResult(t *testing.T) {
 	}
 	if source.calls != 1 {
 		t.Fatalf("source calls = %d, want 1", source.calls)
+	}
+}
+
+func TestMiddleware_SessionListUsesPaneSessionWithoutModelSessionID(t *testing.T) {
+	grant := sessionGrant("pane-a", autonomousMatrix())
+	source := &sessionSourceFake{items: SessionItems{Items: []SessionItem{}}}
+	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, &blocksOnlyRequester{blocks: source})
+
+	out, err := wrappedEndpoint(mw, "session.list", "call-1", `{}`)
+	if err != nil {
+		t.Fatalf("session.list without sessionId: %v", err)
+	}
+	if !strings.Contains(out, `"items":[]`) {
+		t.Fatalf("session.list result = %s, want empty items", out)
+	}
+	if source.calls != 1 || source.sessionID != "pane-a" {
+		t.Fatalf("session source saw calls=%d session=%q, want one call for pane-a", source.calls, source.sessionID)
 	}
 }
 

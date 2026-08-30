@@ -718,8 +718,7 @@ func executeRun(ctx context.Context, runner *agenttools.Runner, requester Render
 		return "", err
 	}
 	var p struct {
-		SessionID string `json:"sessionId"`
-		Command   string `json:"command"`
+		Command string `json:"command"`
 	}
 	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
 		// Unreachable through the middleware (validation precedes policy,
@@ -729,13 +728,14 @@ func executeRun(ctx context.Context, runner *agenttools.Runner, requester Render
 	if p.Command == "" {
 		return "", errors.New("run: an empty command is a bare newline, not an execution")
 	}
-	if !runner.Allows(p.SessionID) {
-		return "", fmt.Errorf("run: session %q is outside the run's grant — the request never reached the renderer", p.SessionID)
+	sessionID := runner.SessionID()
+	if !runner.Allows(sessionID) {
+		return "", fmt.Errorf("run: session %q is outside the run's grant — the request never reached the renderer", sessionID)
 	}
 	if requester == nil {
 		return "", errors.New("run: no renderer requester is wired for this run")
 	}
-	body, err := requester.RequestRun(ctx, p.SessionID, p.Command)
+	body, err := requester.RequestRun(ctx, sessionID, p.Command)
 	if err != nil {
 		return "", err
 	}
@@ -771,7 +771,7 @@ func executeRun(ctx context.Context, runner *agenttools.Runner, requester Render
 	truncated := len(text) < len(b.Text)
 
 	out := runResult{
-		SessionID: p.SessionID,
+		SessionID: sessionID,
 		EntryID:   b.EntryID,
 		ExitCode:  b.ExitCode,
 		Status:    b.Status,

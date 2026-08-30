@@ -19,11 +19,9 @@ package transport
 // would prove the mapping and not the classification.
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -125,7 +123,7 @@ func failingRun(t *testing.T, baseURL string, handler http.HandlerFunc) (state, 
 // middleware rather than the framework's own index lookup — with an argument
 // object the schema the model was shown does not allow.
 func malformedReadScreen(w http.ResponseWriter, _ *http.Request) {
-	streamToolCallChunk(w, "session.read", `{"sessionId":"s","notADeclaredProperty":1}`)
+	streamToolCallChunk(w, "session.read", `{"notADeclaredProperty":1}`)
 }
 
 type failingKnownMaterial struct {
@@ -142,7 +140,7 @@ func (f failingKnownMaterial) FindKnown(context.Context, string) ([]assistant.Kn
 func TestAskFailure_EgressScreeningNamesSealedVault(t *testing.T) {
 	var sessionID string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		streamToolCallChunk(w, "session.list", fmt.Sprintf(`{"sessionId":%q}`, sessionID))
+		streamToolCallChunk(w, "session.list", `{}`)
 	}))
 	defer srv.Close()
 
@@ -231,7 +229,7 @@ func TestAsk_EgressSealedVaultUnlocksAndContinues(t *testing.T) {
 	h.v.Seal()
 	h.v.SetUnlockRequester(unlockRequesterFunc(h.ws.RequestUnlock))
 	sid := openLocalSession(t, h.conn)
-	fake.args = fmt.Sprintf(`{"sessionId":%q,"command":"printf output"}`, sid)
+	fake.args = `{"command":"printf output"}`
 
 	res, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId": "sealed-egress", "sessionId": sid, "question": "show the result",
@@ -316,42 +314,6 @@ func TestAsk_EgressSealedVaultUnlocksAndContinues(t *testing.T) {
 // permitted there by the guarded client, so the failure is the dial and
 // nothing before it.
 const unreachableEndpoint = "http://127.0.0.1:1/v1"
-
-// ── the refusal is an answer, not a failure (nocx-uvac6.1) ──────────────
-
-// outOfScopeReadScreenThenAnswer is the owner's own scenario — the model
-// calls readScreen naming a session this run's grant does not cover — and
-// then answers once it has seen the refusal as a tool result: a provider
-// that stops proposing is every real one.
-func outOfScopeReadScreenThenAnswer(w http.ResponseWriter, r *http.Request) {
-	body, _ := io.ReadAll(r.Body)
-	r.Body = io.NopCloser(bytes.NewReader(body))
-	if strings.Contains(string(body), `"role":"tool"`) {
-		streamOKChunks(w)
-		return
-	}
-	streamToolCallChunk(w, "session.read", `{"sessionId":"a-session-this-grant-does-not-cover"}`)
-}
-
-// TestAsk_RefusalCompletesTheRun is the transport half of nocx-uvac6.1: a
-// policy refusal is the call's result, not a terminal error, so the run
-// reaches a terminal state of its own accord — completed, with no error
-// sentence on the wire and none of the framework's words anywhere. The
-// refusal's own text is asserted where it lives, in the assistant package,
-// on the request the engine actually sent; here the wire is the contract.
-func TestAsk_RefusalCompletesTheRun(t *testing.T) {
-	state, sentence, engineErr := failingRun(t, "", outOfScopeReadScreenThenAnswer)
-	if state != "completed" {
-		t.Fatalf("runState = %q, want completed — a refusal is an answer, not a failure", state)
-	}
-	if sentence != "" {
-		t.Fatalf("the completed run carries an error sentence %q, want none", sentence)
-	}
-	if engineErr != nil {
-		t.Fatalf("the engine returned an error %v for a run that completed", engineErr)
-	}
-	assertNoFrameworkWords(t, state+" "+sentence)
-}
 
 // unknownToolThenAnswer is a provider that first proposes one tool call and
 // then answers after receiving the model-visible result. The atomic flag is

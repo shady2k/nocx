@@ -165,7 +165,7 @@ func TestAsk_EgressErrorStringScreened(t *testing.T) {
 	requester := &recordingRequester{err: errors.New("capture failed: token sk-proj-abcdefghijklmnopqrstuvwx")}
 
 	ledger := &fakeLedger{}
-	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "session.read", args: `{"sessionId":"session-a"}`}))
+	f, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "session.read", args: `{}`}))
 	defer srv.Close()
 
 	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil)
@@ -349,7 +349,7 @@ func TestMiddleware_NewPolicyFailsClosedWithoutKnownMaterial(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	if _, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), nil, "run-1", 1, "", nil, nil, nil); err == nil {
+	if _, err := newPolicyMiddleware(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), nil, "run-1", "", 1, "", nil, nil, nil); err == nil {
 		t.Fatal("newPolicyMiddleware accepted a run with no egress vault comparison")
 	}
 }

@@ -1,13 +1,13 @@
 import { test, expect } from './harness'
 
 /**
- * e2e: what stands between the window's edge and the first control of the tab
- * strip (nocx-gm4fj).
+ * e2e: a hidden update notice must not reserve width in the tab strip
+ * (nocx-gm4fj).
  *
- * Measured in a browser and not asserted in jsdom, because both halves of the
- * defect are layout: an attribute that a `display` declaration overrode, and a
- * padding calibrated for a title bar the app stopped asking for. Neither is
- * visible to a test that reads the DOM.
+ * Measured in a browser and not asserted in jsdom, because this is a layout
+ * defect: `.update-notice` uses `display: flex`, which can override the
+ * browser's `[hidden] { display: none }` rule. Its padding then leaves a
+ * blank 48px box even while the notice is hidden.
  */
 
 const BAR = '.tabbar'
@@ -28,6 +28,20 @@ async function leftWithin(
 // The update notice is the only optional child before the tab strip lead.
 // Connection state now owns a top-layer overlay, so it must not add a second
 // child to the tab bar or participate in this layout contract.
+test('a hidden update notice does not occupy tab strip width', async ({ page }) => {
+  await page.goto('/')
+  await expect(page.locator(BAR)).toBeVisible()
+  await expect(page.locator('.update-notice')).toBeHidden()
+
+  const widths = await page.evaluate(() =>
+    [...(document.querySelector(BAR) as HTMLElement).children]
+      .filter((child) => child.querySelector('.update-notice'))
+      .map((child) => child.getBoundingClientRect().width),
+  )
+  expect(widths.length).toBeGreaterThan(0)
+  for (const w of widths) expect(w).toBe(0)
+})
+
 test('the tab strip lead follows the update notice without another condition child', async ({
   page,
 }) => {

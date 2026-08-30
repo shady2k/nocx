@@ -133,7 +133,7 @@ function hiddenNotificationKinds(values: Record<string, unknown>): ReadonlySet<s
   return hidden
 }
 
-async function main() {
+function main(): void {
   // The browser transport must be installed before any binding call: in the
   // dev-web and headless-e2e browsers the window.go shim carries the binding
   // methods used by this composition root. A no-op in the packaged webview.
@@ -1538,14 +1538,16 @@ async function main() {
   })
 
   // Check for updates. Failures are silent (airplane mode, DNS hiccup, etc.).
-  try {
-    const info = await CheckForUpdate()
-    if (info) {
-      notice.showAvailable(info.Version, info.NotesURL)
+  void (async () => {
+    try {
+      const info = await CheckForUpdate()
+      if (info) {
+        notice.showAvailable(info.Version, info.NotesURL)
+      }
+    } catch {
+      // Silent — automatic check failures are not surfaced to the user.
     }
-  } catch {
-    // Silent — automatic check failures are not surfaced to the user.
-  }
+  })()
 
   // Re-check every 24 hours.
   const DAY_MS = 24 * 60 * 60 * 1000
@@ -1729,4 +1731,8 @@ async function main() {
   dispatcher.start()
 }
 
-main().catch((err) => log.error('nocx: main error', { message: (err as Error).message }))
+try {
+  main()
+} catch (err) {
+  log.error('nocx: main error', { message: (err as Error).message })
+}

@@ -8,9 +8,18 @@ A frame model in a new `frontend/src/frame/` module, per spec §2.1–2.4 and AD
 and **comparability** (`same | moved | notComparable` — a distinct union value, never a stale
 flag). **Generation** advances on `onWriteParsed` + buffer switch + resize + clear + reset,
 NEVER on `onRender` (ADR-0005). **Capture fence**: `awaitSettled()` defers a capture while
-writes are mid-parse and only opens when the FINAL parse pass settles (xterm fires
-onWriteParsed between chunks of a large write, so the fence re-checks
-`hasUnsettledWrite()` after every fire — verified against xterm 5.5.0 WriteBuffer source).
+writes are mid-parse.
+
+> **Superseded, 2026-08-29 (`nocx-2ryxf.3`).** As built, the fence waited for the write
+> queue to EMPTY, and this report's reading of xterm — "onWriteParsed fires between the
+> chunks of one large write" — was wrong: `WriteBuffer._innerWrite` hands each chunk to the
+> parser WHOLE and fires that chunk's callback before it checks its 12 ms budget, so a pass
+> stops between chunks and never inside one. Emptiness then starves a continuously
+> repainting TUI (`top`): one repaint settles while the next replaces it. The fence is now a
+> **write barrier** (`awaitWriteBarrier()`, an empty `write('', cb)` on xterm's FIFO queue):
+> everything queued before the request, nothing queued after it. The live description is
+> §2.3 of the assistant surface design; read the rest of this report as the record of the
+> original build.
 
 **Two sources, both recorded, never substituted:**
 
@@ -27,8 +36,9 @@ onWriteParsed between chunks of a large write, so the fence re-checks
 task-mandated exposure; subscribers registered before mount are attached at mount via
 `_ensureWriteParsed()` so the generation signal is never lost), `onClear`/`onReset`
 (renderer-fired AFTER its own `clearViewport()`/`reset()` executed), `hasUnsettledWrite()`
-(the fence state — pending count settled via write()'s per-chunk callback, exact even when
-onWriteParsed fires mid-write), and `cursorCol()`.
+(the pending count, settled via write()'s per-write callback; since `nocx-2ryxf.3` it only
+decides whether a capture needs the fence, and `awaitWriteBarrier()` IS the fence), and
+`cursorCol()`.
 
 ## Files
 

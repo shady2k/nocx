@@ -17,12 +17,15 @@
 # gate. This script learns both from the coordinator's discovery socket and
 # hands them to vite, so the pair is never copied by hand.
 #
-# THE BACKEND PORT IS NO LONGER YOURS TO CHOOSE. nocx-server binds loopback on
-# a port the OS picks and takes no flags at all — a token must never reach
-# argv, and a daemon that took its address from the environment could be told
-# to bind off loopback (design §6). So the port changes on every restart and
-# the SSH forward has to be re-made; the command to copy is printed below with
-# the real number in it. NOCX_WEB_PORT=5180 still pins vite.
+# THE BACKEND PORT IS STABLE HERE, AND ONLY HERE. nocx-server binds loopback
+# on a port the OS picks in every shipped build, because a token must never
+# reach argv and a daemon that took its ADDRESS from the environment could be
+# told to bind off loopback (design §6). This stand is built with
+# `-tags nocx_dev_bind`, which makes the port — a number, never an address — a
+# settable thing, so the `ssh -L` line below survives a restart instead of
+# going stale on every one. Override with NOCX_WS_PORT; NOCX_WEB_PORT=5180
+# still pins vite. See internal/transport/dev_bind_dev.go for why it is a
+# build tag rather than an environment variable the shipped binary reads.
 #
 # Vite's port is deliberately off every other consumer's, because a dev stand
 # that quietly shares a socket with the test suite is worse than one that
@@ -40,6 +43,12 @@ set -euo pipefail
 # look-and-see session evict each other, or worse, one silently attaches to the
 # other's server and reports on a tree it never built.
 WEB_PORT="${NOCX_WEB_PORT:-5180}"
+# The backend's WS port. 9880 is the number this stand used before the
+# coordinator cutover, so an ssh forward written down back then still lands.
+# It is passed to the binary in the environment and read only because the build
+# carries `-tags nocx_dev_bind`; the same variable set against a shipped
+# nocx-server moves nothing.
+WS_PORT="${NOCX_WS_PORT:-9880}"
 # Loopback by design, not caution: the WS auth rejects any Host that is not
 # loopback, so a page served on a LAN address gets a UI that cannot connect.
 # Reach it by forwarding both ports to localhost.
@@ -81,11 +90,17 @@ check_port_free() {
 		echo "port $port ($what) is already in use:" >&2
 		echo "$holders" >&2
 		echo "" >&2
-		echo "stop it, or pick another: NOCX_WEB_PORT=... make dev-web" >&2
+		echo "stop it, or pick another: NOCX_WS_PORT=... NOCX_WEB_PORT=... make dev-web" >&2
 		exit 1
 	fi
 }
 check_port_free "$WEB_PORT" "frontend"
+# Checked before the build rather than after it, so a stand that cannot start
+# says so in a second rather than after a Go compile. The backend refuses the
+# port outright rather than sliding to another (TestDevBindPortRefusesAPortInUse)
+# — a stand that quietly moved would print an ssh line that is already wrong —
+# but its message names a listener, and this one names the process holding it.
+check_port_free "$WS_PORT" "backend WS"
 
 work="$(mktemp -d)"
 backend_pid=""
@@ -106,10 +121,11 @@ trap cleanup EXIT INT TERM
 # dialog about it. That is exactly the declaration design D10 asks for, and
 # without it the dev stand's vault would take the file provider and ask for a
 # passphrase where the developer's OS key would have carried it.
+# `-tags nocx_dev_bind` alongside it, for the stable WS port: see the header.
 echo "=== building nocx-server ==="
-go build -tags nocx_login_session -o "$work/nocx-server" ./cmd/nocx-server
+go build -tags "nocx_login_session nocx_dev_bind" -o "$work/nocx-server" ./cmd/nocx-server
 
-echo "=== backend on loopback, port chosen by the OS ==="
+echo "=== backend on 127.0.0.1:$WS_PORT ==="
 backend_dbus_address="${DBUS_SESSION_BUS_ADDRESS:-}"
 session_bus="/run/user/$(id -u)/bus"
 if [[ ( -z "$backend_dbus_address" || "$backend_dbus_address" == "disabled:" ) && -S "$session_bus" ]]; then
@@ -124,13 +140,14 @@ fi
 # is never written to it (internal/assistant/wiretap.go). Point NOCX_WIRE_LOG
 # somewhere else to keep one, or set it empty to turn the tap off.
 DBUS_SESSION_BUS_ADDRESS="$backend_dbus_address" \
+	NOCX_DEV_WS_PORT="$WS_PORT" \
 	NOCX_WIRE_LOG="${NOCX_WIRE_LOG-$work/wire.log}" \
 	"$work/nocx-server" >"$work/backend.log" 2>&1 &
 backend_pid=$!
 
 # The server names its discovery socket on its readiness line; the port and the
 # token come from the socket and from nowhere else, because a token on stdout
-# is what design §6 forbids. e2e/coordinator.ts is the one implementation of
+# is what design §6 forbids. e2e/coordinator.mts is the one implementation of
 # that exchange — Node 24 runs it straight, with no build step.
 socket=""
 for _ in $(seq 1 200); do
@@ -149,7 +166,7 @@ if [ -z "$socket" ]; then
 	exit 1
 fi
 
-if ! hello="$(node "$repo_root/e2e/coordinator.ts" "$socket")"; then
+if ! hello="$(node "$repo_root/e2e/coordinator.mts" "$socket")"; then
 	echo "the coordinator on $socket refused the handshake:" >&2
 	cat "$work/backend.log" >&2
 	exit 1
@@ -174,9 +191,8 @@ What was sent to the model and what it said back, verbatim:
 
   ${NOCX_WIRE_LOG-$work/wire.log}
 
-The backend port changes every restart — the OS picks it — so re-copy the
-line above each time. The remote side of both forwards is spelled 127.0.0.1,
-not localhost: both
+Both ports are stable across restarts, so the forward above is made once and
+kept. The remote side of both is spelled 127.0.0.1, not localhost: both
 servers bind IPv4 loopback, and localhost resolves to ::1 first here — a
 forward aimed at localhost would land on nothing (or on someone else's
 server). Set NOCX_WEB_HOST to change what vite binds.

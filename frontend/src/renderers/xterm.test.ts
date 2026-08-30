@@ -1112,6 +1112,63 @@ describe('XtermRenderer frame capture surface (nocx-3j9b)', () => {
     r.dispose()
   })
 
+  it('awaitWriteBarrier resolves once the writes queued before it have parsed', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    r.write('barrier subject')
+    const barrier = r.awaitWriteBarrier()
+    let opened = false
+    void barrier.then(() => {
+      opened = true
+    })
+    expect(r.hasUnsettledWrite()).toBe(true)
+    await barrier
+    expect(opened).toBe(true)
+    expect(r.hasUnsettledWrite()).toBe(false)
+    r.dispose()
+  })
+
+  it('captureLiveFrame answers on the REAL terminal while a writer always has the next repaint queued (nocx-2ryxf.3)', async () => {
+    stubBrowser()
+    const r = new XtermRenderer()
+    const container = document.createElement('div')
+    Object.defineProperty(container, 'clientWidth', { value: 800 })
+    Object.defineProperty(container, 'clientHeight', { value: 600 })
+    await r.mount(container)
+
+    // The `top` shape against xterm itself: every completed parse pass queues
+    // the next repaint, so the unsettled count settles one write while the
+    // next replaces it and never reaches zero. A fence waiting for the queue
+    // to empty parks here until the broker's 30-second timeout.
+    let repaints = 0
+    let stopped = false
+    r.onWriteParsed(() => {
+      if (stopped || repaints >= 100) return
+      repaints++
+      r.write(`\r\u001b[Krepaint ${repaints}`)
+    })
+    r.write('\u001b[H\u001b[2Jrepaint 0')
+
+    const frame = await r.captureLiveFrame({ start: 0, end: 1 })
+    // Read the queue in the same continuation the capture resolved in: the
+    // witness is that the fence opened with work still queued.
+    const pendingWhenTheFenceOpened = r.hasUnsettledWrite()
+    stopped = true
+
+    expect(frame.provenance.source).toBe('live')
+    expect(repaints).toBeGreaterThan(0)
+    expect(
+      pendingWhenTheFenceOpened,
+      `the fence must open without the queue emptying (repaints: ${repaints})`,
+    ).toBe(true)
+    r.dispose()
+  })
+
   it('attaches a subscriber registered BEFORE mount — the generation signal is not lost', async () => {
     stubBrowser()
     const r = new XtermRenderer()

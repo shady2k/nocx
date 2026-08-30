@@ -123,7 +123,8 @@ export interface TerminalRenderer {
   /**
    * Write PTY output into the terminal. The write is QUEUED, not applied:
    * parsing is async, so hasUnsettledWrite() stays true until the bytes
-   * have been parsed (the capture fence).
+   * have been parsed, and awaitWriteBarrier() is how a capture waits for
+   * them.
    *
    * MAY THROW when the underlying terminal refuses the write under flow
    * control (xterm's pending-data watermark): nothing was queued, and the
@@ -338,12 +339,11 @@ export interface TerminalRenderer {
 
   // ── Frame capture surface (nocx-3j9b) ───────────────────────────────
 
-  // onWriteParsed fires after a written chunk has been parsed into the
-  // buffer. It is the frame generation's advance signal AND the capture
-  // fence: write() queues parsing, so a snapshot taken mid-queue can hold
-  // row 1 from before a write and row 20 from after it. Note xterm fires it
-  // at the end of EVERY parse pass — BETWEEN chunks of a large write — so
-  // hasUnsettledWrite() distinguishes "settled" from "chunk done".
+  // onWriteParsed fires at the end of every parse pass. It is the frame
+  // generation's advance signal and NOTHING ELSE: xterm breaks its parse
+  // loop on a 12 ms budget between chunks, so a pass can end with bytes that
+  // were queued before the capture was asked for still unparsed. The capture
+  // fence is awaitWriteBarrier().
   onWriteParsed(cb: () => void): void
 
   // onClear/onReset fire AFTER the renderer executed a full clear
@@ -352,10 +352,17 @@ export interface TerminalRenderer {
   onClear(cb: () => void): void
   onReset(cb: () => void): void
 
-  /** True while bytes queued via write() have not finished parsing — the
-   *  capture fence. The per-write settle is tracked via write()'s callback,
-   *  so this is exact even when onWriteParsed fires mid-write. */
+  /** True while bytes queued via write() have not finished parsing, tracked
+   *  exactly through write()'s per-write callback. It decides whether a
+   *  capture needs the fence at all — a barrier on an idle terminal would
+   *  cost a parse pass and advance the generation of a motionless screen. */
   hasUnsettledWrite(): boolean
+
+  /** The capture fence: a write barrier over xterm's FIFO write queue.
+   *  Resolves once every write queued BEFORE this call has been parsed, and
+   *  no later — so it is complete under a bulk write and cannot be starved
+   *  by a continuously repainting TUI (nocx-2ryxf.3). */
+  awaitWriteBarrier(): Promise<void>
 
   /**
    * Capture the live frame of the current buffer (nocx-ljfwz): the readScreen

@@ -24,13 +24,14 @@
  *
  * Runnable directly for the shell caller:
  *
- *   node e2e/coordinator.ts <socket-path>
+ *   node e2e/coordinator.mts <socket-path>
  *
  * which prints `WSPORT=` and `WSTOKEN=` — the shape the shell already parsed,
  * now derived from the socket instead of from the backend's stdout. Node 24
  * strips the types; nothing is compiled first.
  */
 import net from 'node:net'
+import { basename } from 'node:path'
 
 /**
  * The discovery protocol version this client speaks. It MUST equal
@@ -191,13 +192,28 @@ export async function awaitCoordinator(opts: {
   )
 }
 
-// The shell entry point — see the module comment. `require.main` is undefined
-// under Playwright's loader and defined when node runs this file directly, so
-// importing it costs nothing.
-if (typeof require !== 'undefined' && require.main === module) {
+// The shell entry point — and the reason it is spelled this way rather than
+// either of the two obvious ways.
+//
+// This file's two loaders disagree about what it is, and neither can be talked
+// out of it. Node's type-stripper only STRIPS: it leaves `import` statements
+// standing, so it needs a file that really is ESM, and under the root
+// package.json's `"type": "commonjs"` only the `.mts` extension buys that.
+// Playwright TRANSPILES: it takes the format from that same package.json, so it
+// rewrites this file to CommonJS whatever the extension says — which the rest of
+// e2e/ depends on, because fifteen specs plus stand.ts read `__dirname`.
+//
+// So the guard may use neither module system's identity. `require.main ===
+// module` is undefined under real ESM (that was the original defect: a CommonJS
+// guard in a file written in ESM syntax, which could never both be honoured),
+// and `import.meta.url` is what Playwright's CommonJS output cannot express —
+// it fails to parse, taking global-setup.ts and the whole suite with it.
+// argv[1] is in both. Under Playwright it names the test runner, so importing
+// this module still costs nothing.
+if (process.argv[1] && basename(process.argv[1]) === 'coordinator.mts') {
   const socketPath = process.argv[2]
   if (!socketPath) {
-    console.error('usage: node e2e/coordinator.ts <socket-path>')
+    console.error('usage: node e2e/coordinator.mts <socket-path>')
     process.exit(2)
   }
   hello(socketPath).then(

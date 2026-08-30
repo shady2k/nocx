@@ -73,8 +73,10 @@ export function toolCallTitle(call: ToolCallTitleSpec, deps: ToolCallTitleDeps =
   const args = call.args ?? {}
   const sessionId = call.resource?.kind === 'session' ? call.resource.id : null
   const parts: string[] = []
+  let sessionCarried = false
   for (const [key, raw] of Object.entries(args)) {
     if (sessionId !== null && raw === sessionId) {
+      sessionCarried = true
       const named = deps.sessionName?.(sessionId) ?? null
       if (named) parts.push(`${key}=${named}`)
       continue
@@ -82,6 +84,18 @@ export function toolCallTitle(call: ToolCallTitleSpec, deps: ToolCallTitleDeps =
     const text = valueText(raw)
     if (text === '') continue
     parts.push(`${key}=${text}`)
+  }
+  // THE RESOURCE NAMES THE PANE, NOT THE ARGUMENT (nocx-i4gg7). The session
+  // used to arrive as a parameter the model spelled out, and the title read
+  // it from there; the backend supplies it from the transport now, so for a
+  // session-scoped tool the arguments carry no session at all. The derived
+  // resource was always the authority — the comment above says so — and the
+  // argument was only its carrier, so WHERE a call acted is still printed
+  // when nothing carried it. Without this a person reads `session.read` and
+  // cannot tell which pane was read, which is the defect nocx-vnzek fixed.
+  if (sessionId !== null && !sessionCarried) {
+    const named = deps.sessionName?.(sessionId) ?? null
+    if (named) parts.unshift(`session=${named}`)
   }
   if (parts.length === 0) return call.tool
   return `${call.tool} ${parts.join(' ')}`

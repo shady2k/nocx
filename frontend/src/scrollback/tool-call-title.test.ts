@@ -40,6 +40,41 @@ describe('toolCallTitle', () => {
     expect(title).not.toContain(SESSION)
   })
 
+  it('names the pane even when no argument carried the session (nocx-i4gg7)', () => {
+    // The model no longer spells the session out: the backend supplies it
+    // from the transport, so the ARGUMENTS hold no session at all. The
+    // derived resource is what names the pane and always was — the argument
+    // was only ever the carrier — so a person still reads WHERE the call
+    // acted, which is the whole point of nocx-vnzek.
+    const title = toolCallTitle(
+      {
+        tool: 'session.read',
+        args: { start: 0, count: 24 },
+        resource: { kind: 'session', id: SESSION },
+      },
+      inThisWindow,
+    )
+    expect(title).toBe('session.read session=home/dev start=0 count=24')
+    expect(title).not.toContain(SESSION)
+  })
+
+  it('a session-only call with no arguments still names its pane', () => {
+    const title = toolCallTitle(
+      { tool: 'session.read', args: {}, resource: { kind: 'session', id: SESSION } },
+      inThisWindow,
+    )
+    expect(title).toBe('session.read session=home/dev')
+  })
+
+  it('an unnameable session with no argument is the tool alone, never the id', () => {
+    const title = toolCallTitle(
+      { tool: 'session.read', args: {}, resource: { kind: 'session', id: SESSION } },
+      { sessionName: () => null },
+    )
+    expect(title).toBe('session.read')
+    expect(title).not.toContain(SESSION)
+  })
+
   it('leaves an unnameable session out rather than printing the id', () => {
     // The pane was closed, or it belongs to another window. Null is a real
     // answer, and the id is never the fallback.

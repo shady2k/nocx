@@ -406,7 +406,7 @@ import { spawn, execSync, type ChildProcess } from 'node:child_process'
 import { existsSync, readFileSync, openSync, mkdirSync, copyFileSync } from 'node:fs'
 import { resolve, basename, join } from 'node:path'
 
-import { awaitCoordinator } from './coordinator'
+import { awaitCoordinator } from './coordinator.mjs'
 import { createHomeIsolation, type HomeIsolation } from './home-isolation'
 
 /**
@@ -794,7 +794,7 @@ export class VaultBackend {
    * NO PORT, and nothing to collide over. nocx-server binds loopback on a
    * port the OS picks and takes no flags at all — the token must never reach
    * argv (design §6) — so the address is learnt the way the desktop launcher
-   * learns it: off the discovery socket, through e2e/coordinator.ts. That
+   * learns it: off the discovery socket, through e2e/coordinator.mts. That
    * closes by construction what nocx-z9s9.11 closed by convention. Three
    * pairs of specs once claimed the same hand-picked port (19880, 19878,
    * 19901); in a full run whichever went second found it held and came up

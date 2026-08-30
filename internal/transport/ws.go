@@ -1553,14 +1553,30 @@ func (s *WSServer) Start(ctx context.Context) error {
 	// because a page reading this with fetch needs them.
 	mux.HandleFunc("GET "+downloadRoutePrefix+"{ticket}", s.handleDownloadFetch)
 
-	// LOOPBACK, AND A PORT THE OS PICKS, with nothing that can change
-	// either. Both halves are the design's (§6): loopback keeps the PTY off
-	// the network entirely, and the option that used to override this went
-	// with cmd/devharness — a coordinator that lives for days and could be
+	// LOOPBACK, ALWAYS, AND A PORT THE OS PICKS IN EVERY SHIPPED BUILD.
+	//
+	// The host is a literal and is not a parameter of anything, which is the
+	// half of §6 that carries the weight: loopback keeps the PTY off the
+	// network entirely, and a coordinator that lives for days and could be
 	// told where to bind is a coordinator that can be told to bind off
-	// loopback. Where it actually landed is Addr's to answer, and the
-	// discovery socket is how a client learns it.
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	// loopback. The option that used to take a whole ADDRESS went with
+	// cmd/devharness and is not coming back.
+	//
+	// [devBindPort] is a NUMBER and only in a `-tags nocx_dev_bind` build,
+	// where it answers zero — the OS picks — in every other, and zero there
+	// too unless something asked. It exists because `make dev-web` prints an
+	// `ssh -L` line that an OS-chosen port invalidates on every restart
+	// (dev_bind_dev.go). It cannot move this listener off 127.0.0.1, and
+	// TestDevBindNeverLeavesLoopback is the assertion that says so under both
+	// builds.
+	//
+	// Where it actually landed is Addr's to answer, and the discovery socket
+	// is how a client learns it.
+	bindPort, err := devBindPort()
+	if err != nil {
+		return fmt.Errorf("ws listen: %w", err)
+	}
+	listener, err := net.Listen("tcp", "127.0.0.1:"+strconv.Itoa(bindPort))
 	if err != nil {
 		return fmt.Errorf("ws listen: %w", err)
 	}

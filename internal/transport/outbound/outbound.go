@@ -127,6 +127,8 @@ func NewWebSocket(conn *websocket.Conn, readLimit int64) WebSocket {
 
 func (w WebSocket) ReadMessage() (int, []byte, error) { return w.Conn.ReadMessage() }
 
+func (w WebSocket) SetReadDeadline(t time.Time) error { return w.Conn.SetReadDeadline(t) }
+
 func (w WebSocket) SetWriteDeadline(t time.Time) error { return w.Conn.SetWriteDeadline(t) }
 
 func (w WebSocket) WriteMessage(msgType int, data []byte) error {
@@ -387,6 +389,17 @@ func (c *Conn) WaitForRoom(ctx context.Context) error {
 // it. gorilla permits concurrent ReadMessage/WriteMessage, so the pump
 // writing while this reads is the supported configuration.
 func (c *Conn) ReadMessage() (int, []byte, error) { return c.sock.ReadMessage() }
+
+// SetReadDeadline forwards the transport's liveness deadline when the socket
+// supports it. The optional assertion keeps test sockets focused on the
+// behavior they model while the WebSocket adapter always provides the seam.
+func (c *Conn) SetReadDeadline(t time.Time) error {
+	setter, ok := c.sock.(interface{ SetReadDeadline(time.Time) error })
+	if !ok {
+		return nil
+	}
+	return setter.SetReadDeadline(t)
+}
 
 // Stalled reports whether the connection is currently outbound-stalled
 // (the queue overflowed and has not accepted a frame since).

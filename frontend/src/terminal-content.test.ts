@@ -157,6 +157,12 @@ const rendererOf = (content: TerminalContent): RendererMock => {
 const sessionOf = (content: TerminalContent): SessionFake =>
   (content as unknown as { session: SessionFake }).session
 
+/** The scrollback owner behind TerminalContent, for placement assertions. */
+const scrollbackFor = (content: TerminalContent): ScrollbackController => {
+  const withScrollback = content as unknown as { scrollback: ScrollbackController }
+  return withScrollback.scrollback
+}
+
 /** The live recall overlay behind TerminalContent's private field — the
  *  same escape hatch editorOf uses. */
 const recallOf = (content: TerminalContent): { isOpen: boolean } => {
@@ -10619,7 +10625,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
-  it('Escape stops the exact current answer once, thaws the summon, and leaves the command running', async () => {
+  it('Escape cancellation seats a stopped answer, never failed, after runState', async () => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
@@ -10666,23 +10672,34 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         ).toEqual([['agent.cancel', { runId: 42 }]]),
       )
       expect(sessionOf(content).signal).not.toHaveBeenCalled()
-      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
       expect(answer.isConnected).toBe(true)
-      expect(answer.parentElement).toBe(scrollback.scrollbackInner)
+      expect(answer.parentElement).toBe(scrollbackFor(content).scrollbackInner)
       expect(answer.classList.contains('nocx-answer-overlay')).toBe(false)
-      expect(
-        (content as unknown as { scrollback: ScrollbackController }).scrollback.blockManager
-          .runningBlock,
-      ).not.toBeNull()
+      expect(scrollbackFor(content).blockManager.runningBlock).not.toBeNull()
       expect(content.pinnedFrame()).toBeNull()
       expect(editorOf(content).isVisible).toBe(false)
 
+      await vi.waitFor(() =>
+        expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).toBe(
+          'stopped',
+        ),
+      )
+      expect(answer.dataset.turnState).toBe('cancelled')
+      expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).not.toBe(
+        'failed',
+      )
+      expect(answer.querySelector('[data-answer-body]')?.textContent).toContain(
+        'partial prose survives',
+      )
+
+      // The notification is allowed to arrive after the reserved cancellation
+      // response; it must be idempotent and cannot replace the stopped chip.
       const state = client.dispatcher.subscribe.mock.calls.find(
         ([method]) => method === 'agent.runState',
       )?.[1] as ((params: unknown) => void) | undefined
       state!({ runId: 42, entryId: 'entry-42', state: 'cancelled', droppedDeltas: 0 })
-      expect(answer.querySelector('[data-answer-body]')?.textContent).toContain(
-        'partial prose survives',
+      expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).not.toBe(
+        'failed',
       )
       expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).toBe(
         'stopped',

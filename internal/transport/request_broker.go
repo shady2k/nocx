@@ -79,9 +79,11 @@ type Deliver func(conn Conn, method string, params json.RawMessage) error
 // outcome becomes a result payload or a terminal error — so a caller using
 // the broker writes no request machinery at all.
 //
-// NotifyMethod and ResolveMethod are the only per-ask names; the renderer
-// half of the wire contract for a real effect is decided by the bead that
-// lands it, not by this mechanism.
+// NotifyMethod and ResolveMethod are the per-ask names. CancelMethod is an
+// optional renderer notification sent when the caller's context is cancelled
+// or the request deadline expires before the renderer resolves it. It carries
+// the same requestId, so the renderer can withdraw the effect before writing
+// to its data plane.
 type RequestKind struct {
 	// NotifyMethod is the server→client notification that carries the
 	// request (with requestId merged into its params), e.g.
@@ -93,6 +95,9 @@ type RequestKind struct {
 	// to it: taking one kind's request id and submitting it through another
 	// kind's *Resolved method never consumes the request.
 	ResolveMethod string
+	// CancelMethod is the optional server→client notification that withdraws
+	// a request before execution. It carries the same requestId as NotifyMethod.
+	CancelMethod string
 	// NoClientErr is returned by Request when no renderer is attached to
 	// receive the notification. Each ask names its own outcome, the way
 	// ErrNoClientConnected and ErrPasswordNoClientConnected already do.
@@ -243,13 +248,13 @@ func NewBroker(conns Conns, deliver Deliver) *Broker {
 // Arming precedes delivery: the request is resolvable from before the
 // notification, so the renderer can never answer faster than the broker can
 // correlate. A caller whose context is already cancelled performs no
-// delivery at all; a context cancelled after delivery still terminalizes the
-// pending request through the wait below.
+// delivery at all; a context cancelled after delivery withdraws the request
+// notification before returning.
 func (b *Broker) Request(ctx context.Context, kind RequestKind, params any, result any) error {
 	// A caller that is already terminal must not cause a delivery: the
 	// renderer would be asked to perform an effect for a request nobody is
 	// waiting for. Cancellation after this point is observed by the select
-	// below, which drops the pending request and returns ctx.Err().
+	// below, which withdraws the pending request and returns ctx.Err().
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -326,10 +331,10 @@ func (b *Broker) Request(ctx context.Context, kind RequestKind, params any, resu
 		}
 		return nil
 	case <-timerC:
-		b.drop(rid)
+		b.cancel(rid, kind)
 		return ErrRequestTimedOut
 	case <-ctx.Done():
-		b.drop(rid)
+		b.cancel(rid, kind)
 		return ctx.Err()
 	}
 }
@@ -642,14 +647,45 @@ func (b *Broker) pruneRecipient(rid string, conn Conn) {
 	}
 }
 
-// drop abandons the pending request for rid (no recipient reached, context
-// done, timeout) so a late resolution cannot wake a waiter nobody is
+// drop abandons a pending request for rid before it is delivered (or when
+// delivery cannot start), so a late resolution cannot wake a waiter nobody is
 // listening to.
 func (b *Broker) drop(rid string) {
 	b.mu.Lock()
 	b.forgetRunLeaseLocked(rid)
 	delete(b.pending, rid)
 	b.mu.Unlock()
+}
+
+// cancel withdraws a pending request and, when the kind declares a cancel
+// notification, tells every renderer that received the original request.
+// The request id stays bound to its run lease until Request returns; the
+// lease's deferred cleanup closes that identity interval after the caller has
+// observed the cancellation.
+func (b *Broker) cancel(rid string, kind RequestKind) {
+	b.mu.Lock()
+	p, ok := b.pending[rid]
+	if !ok {
+		b.mu.Unlock()
+		return
+	}
+	delete(b.pending, rid)
+	recipients := make([]Conn, 0, len(p.recipients))
+	for conn := range p.recipients {
+		recipients = append(recipients, conn)
+	}
+	b.mu.Unlock()
+
+	if kind.CancelMethod == "" {
+		return
+	}
+	payload, err := marshalWithRequestID(rid, nil)
+	if err != nil {
+		return
+	}
+	for _, conn := range recipients {
+		_ = b.deliver(conn, kind.CancelMethod, payload)
+	}
 }
 
 // comparableConn reports whether c can be a map key — the contract every

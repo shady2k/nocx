@@ -43,6 +43,11 @@ import (
 // bead closes.
 const runRequestTimeout = 10 * time.Minute
 
+// errRunSubmissionExpired is the user-facing result when a run request was
+// withdrawn before its renderer could open a lifecycle attempt. It must not
+// use terminalization language: no command existed to terminate.
+var errRunSubmissionExpired = errors.New("submission expired before execution")
+
 // maxRunOutputWindowChars is the renderer-side clamp on the output window
 // text one run resolution carries: the model reads this much output per
 // command, and the honest window statement says how much more the block
@@ -131,6 +136,7 @@ func runKind() RequestKind {
 	return RequestKind{
 		NotifyMethod:       "agent.runRequest",
 		ResolveMethod:      "agent.runResolved",
+		CancelMethod:       "agent.runCancel",
 		NoClientErr:        errRunNoRenderer,
 		Timeout:            runRequestTimeout,
 		MaxResolutionBytes: budgetDocument,
@@ -289,6 +295,25 @@ func (s *WSServer) RequestRun(ctx context.Context, sessionID string, command str
 		return s.broker.Request(ctx, kind, runRequestParams{SessionID: sessionID, Command: command}, &body)
 	})
 	if err != nil {
+		// The two branches below cannot both match, and saying so is the point
+		// of this comment. RunLeaseError is minted in exactly one place, under
+		// `reason != ""` (run_lease.go); the pre-execution case requires
+		// firedReason == "". So the order is NOT load-bearing and nothing here
+		// guards against one swallowing the other. Pre-execution is written
+		// first only because it returns, so a reader asking "what happens when
+		// nothing started" meets it before an enrichment that cannot apply.
+		cancelledBeforeExecution := errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) ||
+			errors.Is(err, ErrRequestTimedOut)
+		lease.mu.Lock()
+		firedReason := lease.firedReason
+		lease.mu.Unlock()
+		if cancelledBeforeExecution && firedReason == "" {
+			_, started := s.broker.runAttemptForLease(lease)
+			if !started {
+				return nil, fmt.Errorf("run: %w", errRunSubmissionExpired)
+			}
+		}
 		var leaseErr *assistant.RunLeaseError
 		if errors.As(err, &leaseErr) {
 			if attempt, ok := s.broker.runAttemptForLease(lease); ok {

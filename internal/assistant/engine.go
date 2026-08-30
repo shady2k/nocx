@@ -387,7 +387,9 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 	var unknownTool func(ctx context.Context, name, rawArgs string) (string, error)
 	var handlers []adk.ChatModelAgentMiddleware
 	if p.Grant != nil {
-		permitted := c.tools.ForGrant(*p.Grant)
+		grant := *p.Grant
+		grant.Policy = grant.Policy.WithFloor(c.floor)
+		permitted := c.tools.ForGrant(grant)
 		// The approval store is the client's own (process-lifetime, one
 		// per client, keyed by run id — ADR-0028: checkpoints are
 		// process-lifetime state); a caller may pass one explicitly.
@@ -404,7 +406,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		if p.Classifier != nil {
 			classifier = newClassifierEngine(askLog, c.http, p.Classifier)
 		}
-		mw, err := newPolicyMiddleware(askLog, *p.Grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.SessionID, p.Attempt, p.TurnEntryID, p.Requester, classifier, func(call ToolCall) error {
+		mw, err := newPolicyMiddleware(askLog, grant, c.tools, p.AttemptLedger, approvals, p.KnownMaterial, p.RunID, p.SessionID, p.Attempt, p.TurnEntryID, p.Requester, classifier, func(call ToolCall) error {
 			return sink(AskEvent{Kind: AskToolCall, Call: &call})
 		}, toolSeams{
 			noteOperation:    p.NoteOperation,
@@ -417,7 +419,7 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 			mw.presentation = *p.Presentation
 			mw.presentationState = newPresentationState(p.Presentation.Loaded)
 			mw.grantProvider = func() content.Grant {
-				return *p.Grant
+				return grant
 			}
 			mw.searchSchema = append([]byte(nil), c.searchSchema...)
 		}

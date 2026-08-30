@@ -375,6 +375,48 @@ func TestCommandResources_InstallCompareFlagKeepsRoles(t *testing.T) {
 	}
 }
 
+func TestCommandResources_DistinguishesExecutionFromSourcing(t *testing.T) {
+	tests := []struct {
+		command string
+		path    string
+		verb    content.ResourceVerb
+	}{
+		{command: "./deploy.sh", path: "./deploy.sh", verb: content.ResourceExecute},
+		{command: "bash deploy.sh", path: "deploy.sh", verb: content.ResourceExecute},
+		{command: "source env.sh", path: "env.sh", verb: content.ResourceSource},
+		{command: ". env.sh", path: "env.sh", verb: content.ResourceSource},
+	}
+	for _, tc := range tests {
+		t.Run(tc.command, func(t *testing.T) {
+			inv := parseCanonicalInvocation(tc.command)
+			if len(inv.Resources.Unresolved) != 0 {
+				t.Fatalf("unresolved = %+v, want resolved resource", inv.Resources.Unresolved)
+			}
+			if len(inv.Resources.Resources) != 1 ||
+				inv.Resources.Resources[0].Path != tc.path ||
+				inv.Resources.Resources[0].Verb != tc.verb {
+				t.Fatalf("resources = %+v, want %s %s", inv.Resources.Resources, tc.path, tc.verb)
+			}
+		})
+	}
+}
+
+func TestCommandResources_ShellCommandStringRemainsUnresolved(t *testing.T) {
+	for _, command := range []string{"bash -c 'cat deploy.sh'", "sh -ec 'cat deploy.sh'"} {
+		t.Run(command, func(t *testing.T) {
+			inv := parseCanonicalInvocation(command)
+			if !inv.Disqualified || len(inv.Resources.Unresolved) == 0 {
+				t.Fatalf("invocation = %+v, want disqualified unresolved command", inv)
+			}
+			for _, resource := range inv.Resources.Resources {
+				if resource.Verb == content.ResourceExecute {
+					t.Fatalf("resources = %+v, shell command string must not be an executable path", inv.Resources.Resources)
+				}
+			}
+		})
+	}
+}
+
 func TestCommandEffect_DisqualifiedAlwaysHasUnresolvedCause(t *testing.T) {
 	commands := []string{
 		`ls "$(pwd)"`,

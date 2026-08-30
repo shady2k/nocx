@@ -1689,3 +1689,65 @@ func TestMiddleware_RefusesWhenAnyResolvedResourceIsOutsideScope(t *testing.T) {
 		t.Fatalf("result = %q, want a refusal when the second resource is outside scope", out)
 	}
 }
+
+// TestPolicy_DistinguishesReadPermitFromExecuteAskOnOnePath is the user seam
+// that was impossible while commands collapsed every non-read case into one
+// declared class: reading this script is permitted, while executing that same
+// path asks under Delegate.
+func TestPolicy_DistinguishesReadPermitFromExecuteAskOnOnePath(t *testing.T) {
+	sess := "session-a"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "deploy.sh")
+	writeFile(t, path, "#!/bin/sh\necho deploy\n")
+
+	policy := askEveryTimeMatrix()
+	policy.Observe = content.EffectRow{
+		Decision: content.DecisionPermit,
+		Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: dir}},
+	}
+	policy.MutateDestructive = content.EffectRow{
+		Decision: content.DecisionAsk,
+		Scopes:   []content.GrantScope{{Kind: content.ResourceSession, ID: sess}},
+	}
+	policy.Delegate = content.EffectRow{
+		Decision: content.DecisionAsk,
+		Scopes:   []content.GrantScope{{Kind: content.ResourceSession, ID: sess}},
+	}
+	grant := policy.AsGrant(nil)
+
+	_, readServer := newFakeOpenAI(callThenAnswer(toolCallSpec{
+		name: "files.read",
+		args: fmt.Sprintf(`{"path":%q}`, path),
+	}))
+	defer readServer.Close()
+	readClient, err := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
+	if err != nil {
+		t.Fatalf("new read client: %v", err)
+	}
+	err = readClient.Ask(context.Background(), askParams(readServer.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(AskEvent) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read of the script was not permitted: %v", err)
+	}
+
+	_, executeServer := newFakeOpenAI(callThenAnswer(toolCallSpec{
+		name: "session.run",
+		args: fmt.Sprintf(`{"command":%q}`, path),
+	}))
+	defer executeServer.Close()
+	executeClient, err := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
+	if err != nil {
+		t.Fatalf("new execute client: %v", err)
+	}
+	err = executeClient.Ask(context.Background(), askParams(executeServer.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(AskEvent) error {
+		return nil
+	})
+	var asked *ApprovalRequestedError
+	if !errors.As(err, &asked) || asked.Request == nil {
+		t.Fatalf("execute of the script error = %v, want a Delegate approval request", err)
+	}
+	if asked.Request.Effect != content.EffectDelegate {
+		t.Fatalf("execute of the script effect = %q, want %q", asked.Request.Effect, content.EffectDelegate)
+	}
+}

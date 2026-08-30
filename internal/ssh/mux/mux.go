@@ -56,17 +56,28 @@ const protocolVersion = 4
 // Message types, PROTOCOL.mux. Only the ones this client sends or expects are
 // named; an unnamed type arriving is an error, never a silent skip.
 const (
-	msgHello    = 0x00000001
-	cNewSession = 0x10000002
-	cAliveCheck = 0x10000004
-	cTerminate  = 0x10000005
+	msgHello     = 0x00000001
+	cNewSession  = 0x10000002
+	cAliveCheck  = 0x10000004
+	cTerminate   = 0x10000005
+	cOpenForward = 0x10000006
 
 	sOK               = 0x80000001
 	sPermissionDenied = 0x80000002
 	sFailure          = 0x80000003
 	sAlive            = 0x80000005
 	sSessionOpened    = 0x80000006
+	sRemotePort       = 0x80000007
 	sTTYAllocFail     = 0x80000008
+)
+
+// Forwarding types, PROTOCOL.mux: MUX_FWD_LOCAL=1, MUX_FWD_REMOTE=2, and
+// MUX_FWD_DYNAMIC=3. This client only sends MUX_FWD_REMOTE; all three stay
+// named here so the unused local and dynamic values need not be looked up.
+const (
+	fwdLocal   = 1
+	fwdRemote  = 2
+	fwdDynamic = 3
 )
 
 // maxPacket bounds one control-socket message. The vocabulary is short and
@@ -111,6 +122,22 @@ var (
 	// It is the whole of D3's fallback question: a caller that sees this
 	// refuses the delivery, and there is nothing else it may do.
 	ErrSessionRefused = errors.New("mux: the master refused the session request")
+
+	// ErrForwardPermissionDenied is the master rejecting a remote-forward
+	// request because this client lacks permission to create it.
+	ErrForwardPermissionDenied = errors.New("mux: remote forward permission denied")
+
+	// ErrForwardFailed is the master reporting that a remote-forward request
+	// could not be established for its own reason.
+	ErrForwardFailed = errors.New("mux: remote forward failed")
+
+	// ErrForwardDynamicPortMissing is a dynamic remote-forward request that
+	// the master answered with MUX_S_OK instead of naming an allocated port.
+	ErrForwardDynamicPortMissing = errors.New("mux: master answered OK without an allocated remote-forward port")
+
+	// ErrForwardUnexpectedPort is a fixed remote-forward request that the
+	// master answered with an allocated port instead of MUX_S_OK.
+	ErrForwardUnexpectedPort = errors.New("mux: master returned an allocated port for a fixed remote forward")
 
 	// ErrCommandTooLong is a SessionRequest whose Command is at or above
 	// MaxCommandLen. Nothing is dialled, nothing is encoded and nothing is
@@ -200,6 +227,91 @@ func (m *Master) Alive() (int, error) {
 		return 0, err
 	}
 	return aliveOn(c, 1)
+}
+
+// OpenRemoteForward asks the master to open a remote (-R) forward.
+// Like Alive and Exit, it uses a fresh control connection. Open's held
+// connection proves ownership and remains attached until Master.Close; keeping
+// this request on its own connection lets it complete after that proof
+// connection is released, without reusing it.
+// listenPort 0 asks the far side to allocate; it must answer MUX_S_REMOTE_PORT.
+// MUX_S_OK then is ErrForwardDynamicPortMissing because zero is not a dialable
+// endpoint. Conversely, a fixed listenPort must answer MUX_S_OK; a
+// MUX_S_REMOTE_PORT reply is ErrForwardUnexpectedPort, not an accepted
+// contradictory allocation.
+func (m *Master) OpenRemoteForward(listenHost string, listenPort int, connectHost string, connectPort int) (int, error) {
+	c, err := dialControl(m.path)
+	if err != nil {
+		return 0, err
+	}
+	defer func() { _ = c.Close() }()
+	if err := helloExchange(c); err != nil {
+		return 0, err
+	}
+
+	m.mu.Lock()
+	m.rid++
+	rid := m.rid
+	m.mu.Unlock()
+
+	e := &encoder{}
+	e.u32(cOpenForward)
+	e.u32(rid)
+	e.u32(fwdRemote)
+	e.str(listenHost)
+	e.u32(uint32(listenPort))
+	e.str(connectHost)
+	e.u32(uint32(connectPort))
+	if err := writePacket(c, e.b); err != nil {
+		return 0, err
+	}
+
+	body, err := readPacket(c)
+	if err != nil {
+		return 0, err
+	}
+	d := &decoder{b: body}
+	typ := d.u32()
+	if d.err != nil {
+		return 0, fmt.Errorf("mux: malformed remote-forward reply: %w", d.err)
+	}
+	replyRID := d.u32()
+	if d.err != nil {
+		return 0, fmt.Errorf("mux: malformed remote-forward reply: %w", d.err)
+	}
+	if replyRID != rid {
+		return 0, fmt.Errorf("mux: remote-forward reply request id %d, want %d", replyRID, rid)
+	}
+	switch typ {
+	case sOK:
+		if listenPort == 0 {
+			return 0, ErrForwardDynamicPortMissing
+		}
+		return listenPort, nil
+	case sRemotePort:
+		port := d.u32()
+		if d.err != nil {
+			return 0, fmt.Errorf("mux: malformed remote-forward reply: %w", d.err)
+		}
+		if listenPort != 0 {
+			return 0, ErrForwardUnexpectedPort
+		}
+		return int(port), nil
+	case sPermissionDenied:
+		reason := d.str()
+		if d.err != nil {
+			return 0, fmt.Errorf("mux: malformed remote-forward reply: %w", d.err)
+		}
+		return 0, fmt.Errorf("%w: %s", ErrForwardPermissionDenied, reason)
+	case sFailure:
+		reason := d.str()
+		if d.err != nil {
+			return 0, fmt.Errorf("mux: malformed remote-forward reply: %w", d.err)
+		}
+		return 0, fmt.Errorf("%w: %s", ErrForwardFailed, reason)
+	default:
+		return 0, fmt.Errorf("mux: unexpected reply 0x%08x to the remote-forward request", typ)
+	}
 }
 
 func (m *Master) alive() (int, error) {

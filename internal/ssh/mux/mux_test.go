@@ -49,6 +49,21 @@ type fakeMaster struct {
 	terminate int
 	opened    []openedSession
 	pid       uint32
+	openForwardReply          uint32
+	openForwardPort           uint32
+	openForwardReason         string
+	openForwardRequestIDDelta uint32
+	openForwardTruncated      bool
+	forward                   forwardRequest
+}
+
+type forwardRequest struct {
+	requestID      uint32
+	forwardingType uint32
+	listenHost     string
+	listenPort     uint32
+	connectHost    string
+	connectPort    uint32
 }
 
 type openedSession struct {
@@ -94,6 +109,14 @@ func (m *fakeMaster) lastOpened() (openedSession, bool) {
 		return openedSession{}, false
 	}
 	return m.opened[len(m.opened)-1], true
+}
+func (m *fakeMaster) lastForward() (forwardRequest, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.forward.requestID == 0 {
+		return forwardRequest{}, false
+	}
+	return m.forward, true
 }
 
 func (m *fakeMaster) serve() {
@@ -233,6 +256,9 @@ func (m *fakeMaster) handle(c *net.UnixConn) {
 			if fakeWritePacket(c, r.b) != nil {
 				return
 			}
+		case cOpenForward:
+			m.openForward(c, d)
+			return
 		case cNewSession:
 			m.newSession(c, d)
 			return
@@ -240,6 +266,47 @@ func (m *fakeMaster) handle(c *net.UnixConn) {
 			return
 		}
 	}
+}
+
+func (m *fakeMaster) openForward(c *net.UnixConn, d *dec) {
+	req := forwardRequest{
+		requestID:      d.u32(),
+		forwardingType: d.u32(),
+		listenHost:     d.str(),
+		listenPort:     d.u32(),
+		connectHost:    d.str(),
+		connectPort:    d.u32(),
+	}
+	if d.err != nil {
+		return
+	}
+
+	m.mu.Lock()
+	m.forward = req
+	reply := m.openForwardReply
+	if reply == 0 {
+		reply = sOK
+	}
+	port := m.openForwardPort
+	reason := m.openForwardReason
+	ridDelta := m.openForwardRequestIDDelta
+	truncated := m.openForwardTruncated
+	m.mu.Unlock()
+
+	r := &enc{}
+	r.u32(reply)
+	if truncated {
+		_ = fakeWritePacket(c, r.b)
+		return
+	}
+	r.u32(req.requestID + ridDelta)
+	switch reply {
+	case sPermissionDenied, sFailure:
+		r.str(reason)
+	case sRemotePort:
+		r.u32(port)
+	}
+	_ = fakeWritePacket(c, r.b)
 }
 
 func (m *fakeMaster) newSession(c *net.UnixConn, d *dec) {
@@ -454,6 +521,171 @@ func TestSession_PermissionDeniedIsAlsoARefusal(t *testing.T) {
 	defer func() { _ = master.Close() }()
 	if _, err := master.Session(SessionRequest{Command: "true"}); !errors.Is(err, ErrSessionRefused) {
 		t.Fatalf("permission denied reported as %v, want ErrSessionRefused", err)
+	}
+}
+
+func TestOpenRemoteForward_AllocatedPortReturnsMastersPort(t *testing.T) {
+	m := newFakeMaster(t)
+	m.openForwardReply = sRemotePort
+	m.openForwardPort = 43123
+	master, err := Open(m.path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = master.Close() }()
+
+	got, err := master.OpenRemoteForward("0.0.0.0", 0, "127.0.0.1", 8080)
+	if err != nil {
+		t.Fatalf("OpenRemoteForward: %v", err)
+	}
+	if got != int(m.openForwardPort) {
+		t.Fatalf("allocated port = %d, want %d", got, m.openForwardPort)
+	}
+	req, ok := m.lastForward()
+	if !ok {
+		t.Fatal("fake master recorded no remote-forward request")
+	}
+	if req.forwardingType != fwdRemote {
+		t.Fatalf("forwarding type = %d, want MUX_FWD_REMOTE (2)", req.forwardingType)
+	}
+	if req.listenHost != "0.0.0.0" || req.listenPort != 0 || req.connectHost != "127.0.0.1" || req.connectPort != 8080 {
+		t.Fatalf("request = %+v, want listen 0.0.0.0:0 connect 127.0.0.1:8080", req)
+	}
+}
+
+func TestOpenRemoteForward_FixedPortReturnsRequestedPort(t *testing.T) {
+	m := newFakeMaster(t)
+	m.openForwardReply = sOK
+	master, err := Open(m.path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = master.Close() }()
+
+	const listenPort = 4242
+	got, err := master.OpenRemoteForward("127.0.0.1", listenPort, "127.0.0.1", 8080)
+	if err != nil {
+		t.Fatalf("OpenRemoteForward: %v", err)
+	}
+	if got != listenPort {
+		t.Fatalf("fixed port = %d, want %d", got, listenPort)
+	}
+}
+
+func TestOpenRemoteForward_DynamicOKWithoutPortIsRefused(t *testing.T) {
+	m := newFakeMaster(t)
+	m.openForwardReply = sOK
+	master, err := Open(m.path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = master.Close() }()
+
+	if _, err := master.OpenRemoteForward("127.0.0.1", 0, "127.0.0.1", 8080); !errors.Is(err, ErrForwardDynamicPortMissing) {
+		t.Fatalf("error = %v, want ErrForwardDynamicPortMissing", err)
+	}
+}
+
+func TestOpenRemoteForward_AllocatedPortForFixedRequestIsRefused(t *testing.T) {
+	m := newFakeMaster(t)
+	m.openForwardReply = sRemotePort
+	m.openForwardPort = 43123
+	master, err := Open(m.path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = master.Close() }()
+
+	if _, err := master.OpenRemoteForward("127.0.0.1", 4242, "127.0.0.1", 8080); !errors.Is(err, ErrForwardUnexpectedPort) {
+		t.Fatalf("error = %v, want ErrForwardUnexpectedPort", err)
+	}
+}
+
+func TestOpenRemoteForward_PermissionDeniedPreservesNamedErrorAndReason(t *testing.T) {
+	m := newFakeMaster(t)
+	m.openForwardReply = sPermissionDenied
+	m.openForwardReason = "forwarding is not permitted"
+	master, err := Open(m.path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = master.Close() }()
+
+	_, err = master.OpenRemoteForward("127.0.0.1", 0, "127.0.0.1", 8080)
+	if !errors.Is(err, ErrForwardPermissionDenied) {
+		t.Fatalf("error = %v, want ErrForwardPermissionDenied", err)
+	}
+	if errors.Is(err, ErrForwardFailed) {
+		t.Fatalf("permission error = %v, also matches ErrForwardFailed", err)
+	}
+	if !strings.Contains(err.Error(), m.openForwardReason) {
+		t.Fatalf("error = %v, want master's reason %q", err, m.openForwardReason)
+	}
+}
+
+func TestOpenRemoteForward_FailurePreservesNamedErrorAndReason(t *testing.T) {
+	m := newFakeMaster(t)
+	m.openForwardReply = sFailure
+	m.openForwardReason = "remote forwarding failed"
+	master, err := Open(m.path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = master.Close() }()
+
+	_, err = master.OpenRemoteForward("127.0.0.1", 0, "127.0.0.1", 8080)
+	if !errors.Is(err, ErrForwardFailed) {
+		t.Fatalf("error = %v, want ErrForwardFailed", err)
+	}
+	if errors.Is(err, ErrForwardPermissionDenied) {
+		t.Fatalf("failure error = %v, also matches ErrForwardPermissionDenied", err)
+	}
+	if !strings.Contains(err.Error(), m.openForwardReason) {
+		t.Fatalf("error = %v, want master's reason %q", err, m.openForwardReason)
+	}
+}
+
+func TestOpenRemoteForward_UnknownReplyIsAnError(t *testing.T) {
+	m := newFakeMaster(t)
+	m.openForwardReply = 0x80000099
+	master, err := Open(m.path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = master.Close() }()
+
+	if _, err := master.OpenRemoteForward("127.0.0.1", 4242, "127.0.0.1", 8080); err == nil {
+		t.Fatal("OpenRemoteForward accepted an unnamed reply type")
+	}
+}
+
+func TestOpenRemoteForward_MismatchedRequestIDIsAnError(t *testing.T) {
+	m := newFakeMaster(t)
+	m.openForwardReply = sOK
+	m.openForwardRequestIDDelta = 1
+	master, err := Open(m.path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = master.Close() }()
+
+	if _, err := master.OpenRemoteForward("127.0.0.1", 4242, "127.0.0.1", 8080); err == nil {
+		t.Fatal("OpenRemoteForward accepted a reply for another request")
+	}
+}
+
+func TestOpenRemoteForward_TruncatedReplyIsAnError(t *testing.T) {
+	m := newFakeMaster(t)
+	m.openForwardReply = sOK
+	m.openForwardTruncated = true
+	master, err := Open(m.path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer func() { _ = master.Close() }()
+
+	if _, err := master.OpenRemoteForward("127.0.0.1", 4242, "127.0.0.1", 8080); err == nil {
+		t.Fatal("OpenRemoteForward accepted a truncated reply")
 	}
 }
 

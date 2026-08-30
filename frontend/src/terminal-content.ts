@@ -5817,6 +5817,8 @@ export class TerminalContent extends BasePaneContent {
      *  ordinary settle. */
     callerOwnsGlide: boolean
     sendLine: (d: string) => void
+    /** The broker request that caused this assistant submission. */
+    requestId?: string
   }): { block: BlockRecord | null; ledgerId: number | null } {
     const { doc, recordLine, author, takeKeys, callerOwnsGlide, sendLine } = opts
     if (takeKeys) {
@@ -5933,6 +5935,7 @@ export class TerminalContent extends BasePaneContent {
         // same mapping history-client.ts makes, because both calls write
         // one column (design §3.1, nocx-iadtt).
         source: author === 'agent' ? 'assistant' : 'user',
+        ...(opts.requestId ? { requestId: opts.requestId } : {}),
       })
       .then(write, write)
     return { block, ledgerId }
@@ -5969,7 +5972,7 @@ export class TerminalContent extends BasePaneContent {
    *  and it necessarily appended BELOW an answer that was already
    *  streaming. Deleting the block would have hidden a real command to fix
    *  a rendering-order defect. */
-  submitAgentCommand(command: string): Promise<AgentRunCompletion> {
+  submitAgentCommand(command: string, requestId?: string): Promise<AgentRunCompletion> {
     if (command === '') {
       return Promise.reject(new Error('run: an empty command is a bare newline, not an execution'))
     }
@@ -5986,6 +5989,7 @@ export class TerminalContent extends BasePaneContent {
       doc: command,
       recordLine: command,
       author: 'agent',
+      requestId,
       takeKeys: false,
       callerOwnsGlide: false,
       sendLine: (d) => {

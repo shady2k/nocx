@@ -42,6 +42,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io/fs"
 	"strings"
 	"sync"
 	"time"
@@ -80,6 +81,12 @@ const (
 	// policy's no, and the standing half of it ("in this session", "from
 	// now on") is carried by the approval store's DeclineKind.
 	RefusedByPerson PolicyRefusalReason = "refused-by-person"
+	// RefusedByFloor: a fixed safety floor rejected the call before policy,
+	// standing answers, or session overlays could consider it.
+	RefusedByFloor PolicyRefusalReason = "refused-by-floor"
+	// RefusedFileChanged: the approved path no longer has the version the
+	// person agreed to, so the old approval does not cover this execution.
+	RefusedFileChanged PolicyRefusalReason = "refused-file-changed"
 )
 
 // ToolFailedError is the FOURTH cause a run can end on, and the one the
@@ -500,17 +507,33 @@ const (
 )
 
 func (m *effectKernel) decideInvocation(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool, invocation content.Invocation) (policyOutcome, PolicyRefusalReason) {
+	outcome, reason, _ := m.decideInvocationWithReason(t, resources, resourceDeclaration, invocation)
+	return outcome, reason
+}
+
+func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool, invocation content.Invocation) (policyOutcome, PolicyRefusalReason, string) {
+	if reason, denied := m.floorRefusal(invocation, resources); denied {
+		return policyRefuse, RefusedByFloor, reason
+	}
 	decision := m.grant.Policy.DecisionForInvocation(t.Effect, invocation)
 	if decision == content.DecisionRefuse {
-		return policyRefuse, RefusedByDecision
+		return policyRefuse, RefusedByDecision, ""
 	}
 	if !m.inScope(t, resources, resourceDeclaration) {
-		return policyRefuse, RefusedOutOfScope
+		return policyRefuse, RefusedOutOfScope, ""
 	}
 	if decision == content.DecisionPermit {
-		return policyPermit, ""
+		return policyPermit, "", ""
 	}
-	return policyAsk, ""
+	return policyAsk, "", ""
+}
+
+func (m *effectKernel) floorRefusal(invocation content.Invocation, resources []agenttools.ResourceRef) (string, bool) {
+	scopes := make([]content.GrantScope, 0, len(resources))
+	for _, resource := range resources {
+		scopes = append(scopes, content.GrantScope{Kind: resource.Kind, ID: resource.ID})
+	}
+	return m.grant.Policy.FloorRefusal(invocation, scopes)
 }
 
 // inScope is the policy's scope check: the resource the call names must be
@@ -614,6 +637,40 @@ func pathUnder(path, scope string) bool {
 	return strings.HasPrefix(path, strings.TrimSuffix(scope, "/")+"/")
 }
 
+// bindApprovalFileVersions captures path identities before an approval is
+// requested. files.create treats ENOENT as NotApplicable because creating a
+// missing path is its successful precondition; every other capture failure
+// remains Required and therefore fails closed at execution.
+func bindApprovalFileVersions(ap *Approval, decl agenttools.Tool, resources []agenttools.ResourceRef) {
+	pathCount := 0
+	versions := make([]FileVersion, 0, len(resources))
+	for _, resource := range resources {
+		if resource.Kind != content.ResourcePath {
+			continue
+		}
+		pathCount++
+		version, err := CaptureFileVersion(resource.ID)
+		if err != nil {
+			if decl.Name == "files.create" && errors.Is(err, fs.ErrNotExist) {
+				continue
+			}
+			ap.FileVersionState = FileVersionBindingRequired
+			return
+		}
+		versions = append(versions, version)
+	}
+	if pathCount == 0 || (decl.Name == "files.create" && len(versions) == 0) {
+		ap.FileVersionState = FileVersionBindingNotApplicable
+		return
+	}
+	if len(versions) != pathCount {
+		ap.FileVersionState = FileVersionBindingRequired
+		return
+	}
+	ap.FileVersionState = FileVersionBindingCaptured
+	ap.FileVersions = versions
+}
+
 // ── the ask and the latch ─────────────────────────────────────────────────
 
 // escalate suspends the run BEFORE next — the call that is asking has not
@@ -629,6 +686,7 @@ func pathUnder(path, scope string) bool {
 func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, args map[string]any, resources []agenttools.ResourceRef, invocation content.Invocation) error {
 	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
 	ap.CommandInvocation = decl.CommandArg != ""
+	bindApprovalFileVersions(&ap, decl, resources)
 	var entryID string
 	if m.ledger != nil {
 		id, err := m.recordProposal(ctx, decl, rawArgs, resources, ap, nil)
@@ -661,6 +719,7 @@ func (m *effectKernel) escalate(ctx context.Context, decl agenttools.Tool, callI
 func (m *effectKernel) escalateClassifier(ctx context.Context, decl agenttools.Tool, callID, rawArgs string, ask *ApprovalRequest, fact *classifierFact, resources []agenttools.ResourceRef, invocation content.Invocation) error {
 	ap := m.proposalWithInvocation(decl.Name, callID, rawArgs, invocation)
 	ap.CommandInvocation = decl.CommandArg != ""
+	bindApprovalFileVersions(&ap, decl, resources)
 	var entryID string
 	if m.ledger != nil {
 		id, err := m.recordProposal(ctx, decl, rawArgs, resources, ap, fact)
@@ -806,10 +865,18 @@ func canonicalArgHash(raw string) string {
 //
 // kind is the declined proposal's standing half (the person's own no); empty
 // for a policy refusal, which is standing only when the matrix row says so.
-func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind) string {
+// detail is supplied only by the fixed floor, whose sentence names the
+// operation rather than exposing policy internals.
+func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind, detail ...string) string {
 	switch reason {
 	case RefusedOutOfScope:
 		return "REFUSED: nocx did not run your call to " + tool + ": it named something outside what this question is allowed to reach. Say what you wanted in words, or propose a call within what you were given — never a different spelling of the same call."
+	case RefusedByFloor:
+		floorReason := "This operation is protected by the floor and can never be enabled by policy."
+		if len(detail) > 0 && detail[0] != "" {
+			floorReason = detail[0] + " It can never be enabled by policy."
+		}
+		return "REFUSED: nocx did not run your call to " + tool + ": " + floorReason
 	case RefusedByPerson:
 		switch kind {
 		case DeclineCallSession:
@@ -819,6 +886,12 @@ func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind) st
 		default:
 			return "REFUSED: the person declined your call to " + tool + " — it did not run. Say what you needed in words instead."
 		}
+	case RefusedFileChanged:
+		reason := "the file changed since approval, so the old approval no longer applies"
+		if len(detail) > 0 && detail[0] != "" {
+			reason = detail[0]
+		}
+		return "REFUSED: nocx did not run your call to " + tool + ": " + reason
 	default: // RefusedByDecision — the matrix row, standing by nature
 		return "REFUSED: nocx did not run your call to " + tool + ": this kind of action is refused by the policy this question runs under, and that refusal stands. Do not propose it again, or try a different spelling of the same call."
 	}
@@ -1279,6 +1352,20 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	if err != nil {
 		return modelResult{}, fmt.Errorf("%w: tool %q: resolve resources: %v", ErrMalformedModelOutput, decl.Name, err)
 	}
+	if reason, denied := k.floorRefusal(invocation, resources); denied {
+		return modelResult{text: refusalResult(decl.Name, RefusedByFloor, "", reason), kind: modelNocxMessage}, nil
+	}
+	if decl.CommandArg != "" {
+		if command, ok := args[decl.CommandArg].(string); ok {
+			// The canonical parser intentionally splits shell operators for
+			// rule matching. Re-check the raw command only for the floor's
+			// exact self-replication signature, which would otherwise lose
+			// those operator bytes during tokenization.
+			if reason, denied := k.grant.Policy.FloorRawCommandRefusal(command); denied {
+				return modelResult{text: refusalResult(decl.Name, RefusedByFloor, "", reason), kind: modelNocxMessage}, nil
+			}
+		}
+	}
 	// 3. Policy — permit / ask / refuse over the ADR-0020 lattice.
 	//    FIRST, the person's own no (nocx-uvac6.1): the resume re-runs
 	//    this very call through the pipeline, and the refusal is the
@@ -1301,7 +1388,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			return modelResult{text: refusalResult(decl.Name, RefusedByPerson, kind), kind: modelNocxMessage}, nil
 		}
 	}
-	outcome, refusal := k.decideInvocation(decl, resources, resourceDeclaration, invocation)
+	outcome, refusal, floorReason := k.decideInvocationWithReason(decl, resources, resourceDeclaration, invocation)
 	switch outcome {
 	case policyRefuse:
 		// (nocx-uvac6.1) The refusal IS the call's result: a tool
@@ -1314,14 +1401,14 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		// outcome instead of ending the run. No latch trip: the run
 		// continues, and every other call in this response is decided
 		// on its own merits.
-		return modelResult{text: refusalResult(decl.Name, refusal, ""), kind: modelNocxMessage}, nil
+		return modelResult{text: refusalResult(decl.Name, refusal, "", floorReason), kind: modelNocxMessage}, nil
 	case policyAsk:
 		// Approval binds to the exact proposal: an approved call skips
 		// the ask; a changed argument hashes differently and does NOT
 		// resume under the old approval (design §7.2).
 		ap := k.proposal(decl.Name, callID, rawArgs)
 		if k.approvals != nil && k.approvals.IsApproved(ap) {
-			break // the exact proposal was approved; execute it
+			break // the exact proposal was approved; verify before dispatch
 		}
 		return modelResult{}, k.escalate(ctx, decl, callID, rawArgs, args, resources, invocation)
 
@@ -1352,6 +1439,17 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			return modelResult{}, k.escalateClassifier(ctx, decl, callID, rawArgs, ask, fact, resources, invocation)
 		}
 		classifierFact = fact
+	}
+
+	// An approved proposal may reach here through either policyAsk or the
+	// classifier's ask path; both must verify the captured versions now.
+	if k.approvals != nil {
+		ap := k.proposal(decl.Name, callID, rawArgs)
+		if k.approvals.IsApproved(ap) {
+			if verifyErr := k.approvals.VerifyApprovedFileVersions(ap); verifyErr != nil {
+				return modelResult{text: refusalResult(decl.Name, RefusedFileChanged, "", verifyErr.Error()), kind: modelNocxMessage}, nil
+			}
+		}
 	}
 
 	// 4. The attempt is written BEFORE the call. If that write fails, no
@@ -1477,6 +1575,9 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			req := k.egressRequest(decl, callID, rawArgs, resources, egress, runErr != nil)
 			if k.approvals != nil {
 				ap.EntryID = entryID
+				// Egress approval releases an already-retained result; it
+				// does not authorise another file operation.
+				ap.FileVersionState = FileVersionBindingNotApplicable
 				k.approvals.Request(ap)
 				// The withheld result is retained so the approved
 				// resume sends the EXACT bytes the person was shown —

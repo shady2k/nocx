@@ -123,12 +123,13 @@ type runLeaseSession interface {
 // (disarm before the read), so a callback can never be mid-flight when the
 // caller decides. State read by observers is guarded by mu.
 type runLease struct {
-	log  log.Logger
-	sid  session.ID
-	sess runLeaseSession // nil → no local process group to signal
-	ring *outputRing     // nil → no output observation (wall-clock only)
-	lane *laneState      // nil → no awaiting-takeover observation
-	cfg  RunLeaseConfig
+	log       log.Logger
+	sid       session.ID
+	sess      runLeaseSession // nil → no local process group to signal
+	ring      *outputRing     // nil → no output observation (wall-clock only)
+	lane      *laneState      // nil → no awaiting-takeover observation
+	protected protectedForeground
+	cfg       RunLeaseConfig
 
 	mu            sync.Mutex
 	cancel        context.CancelFunc
@@ -342,11 +343,11 @@ func (l *runLease) escalate() foregroundOutcome {
 			"session_id", string(l.sid))
 		return foregroundUnsupported
 	}
-	// No protected-group fallback (nocx-7l4ex.10): the lease supervises the
-	// agent's run and holds no authenticated lifecycle attempt, so over a
-	// protected group it has nothing that says a program is in there. It
-	// takes the honest refusal rather than writing a byte on a guess.
-	return stopForeground(l.log, l.sid, l.sess, l.cfg.SignalGrace, nil)
+	// The exact-attempt fallback is used only for this run's correlated
+	// lifecycle attempt. The ordinary session projection intentionally
+	// refuses to choose among multiple lanes, which is correct for a
+	// human stop but not for an assistant request that already has an id.
+	return stopForeground(l.log, l.sid, l.sess, l.cfg.SignalGrace, l.protected)
 }
 
 // cancelExecution withdraws this exact broker request and synchronously runs

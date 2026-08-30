@@ -1,6 +1,6 @@
 package deploy
 
-// The embedded helper artifacts (D20): the three build targets ship inside
+// The embedded helper artifacts (D20): the four build targets ship inside
 // the app, gzip-compressed, and are decompressed locally before upload —
 // nothing is downloaded at runtime. The embed is package-local
 // (//go:embed paths are relative to the source package and may not contain
@@ -40,8 +40,11 @@ import (
 var ErrArtifactsNotBuilt = errors.New("deploy: helper artifacts not built (run make helpers)")
 
 // ErrUnsupportedPlatform is returned by the embedded source for a platform
-// the build matrix deliberately does not ship a helper for (D20:
-// darwin/amd64, and anything a probe cannot map onto a target).
+// the build matrix deliberately does not ship a helper for (anything a
+// probe cannot map onto one of the four targets: windows, 32-bit, the
+// BSDs). darwin/amd64 was such a platform until 2026-08-30; it is shipped
+// now, because the app itself is universal and an Intel Mac is a host we
+// support.
 var ErrUnsupportedPlatform = errors.New("deploy: no helper artifact for this platform")
 
 // ArtifactSource supplies the helper artifact for a platform: the
@@ -88,6 +91,7 @@ var artifactsFS embed.FS
 var supportedTargets = []Platform{
 	{GOOS: "linux", GOARCH: "amd64"},
 	{GOOS: "linux", GOARCH: "arm64"},
+	{GOOS: "darwin", GOARCH: "amd64"},
 	{GOOS: "darwin", GOARCH: "arm64"},
 }
 

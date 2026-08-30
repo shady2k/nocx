@@ -140,10 +140,11 @@ func (h signalHandlers) handleSignal(ctx context.Context, state *connState, req 
 // It holds the request's context because it belongs to this one request; the
 // policy it is handed to is shared with callers that have no request.
 type sessionProtectedForeground struct {
-	ctx  context.Context
-	s    *WSServer
-	sid  session.ID
-	sess session.Session
+	ctx          context.Context
+	s            *WSServer
+	sid          session.ID
+	sess         session.Session
+	exactAttempt func() (lifecycle.AttemptID, bool)
 }
 
 // Attempt names the one authenticated, STARTED execution the backend
@@ -177,6 +178,17 @@ type sessionProtectedForeground struct {
 func (p sessionProtectedForeground) Attempt() (lifecycle.AttemptID, bool) {
 	if p.s.lifecyclePub == nil {
 		return "", false
+	}
+	if p.exactAttempt != nil {
+		attempt, ok := p.exactAttempt()
+		if !ok {
+			return "", false
+		}
+		current, ok := p.s.lifecyclePub.Attempt(attempt)
+		if !ok || current.State != lifecycle.AttemptOpen || !current.Started {
+			return "", false
+		}
+		return attempt, true
 	}
 	p.s.lifecycleMu.Lock()
 	defer p.s.lifecycleMu.Unlock()

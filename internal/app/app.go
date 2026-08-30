@@ -1584,11 +1584,11 @@ func New(opts ...Option) (*App, error) {
 	// process-lifetime: agent.status's "last probe result" fact, whose
 	// meaning expires with the endpoint that produced it.
 	assistantProbes := assistant.NewProbeStore()
-	// NewClient fails loudly when the tool schemas did not reach the binary
-	// (nocx-jtz3q): an assistant whose registry assembled empty would offer
-	// no tools to any run and fail silently — the composition root refuses
-	// to start with a broken registry instead.
-	assistantClient, err := assistant.NewClient(logger, &ledgerWireRecorder{ledger: contentDB.Ledger()})
+	// The floor is fixed here from the same roots that own nocx's policy,
+	// vault, ledger, and shell-integration documents; no policy layer can
+	// widen it.
+	floor := content.NewFloor(paths.ConfigDir(), paths.DataDir())
+	assistantClient, err := assistant.NewClient(logger, &ledgerWireRecorder{ledger: contentDB.Ledger()}, floor)
 	if err != nil {
 		return nil, err
 	}

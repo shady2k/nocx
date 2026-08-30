@@ -102,6 +102,7 @@ for f in docs/decisions/0*.md; do n=$(basename $f | cut -c1-4); \
 | 0050 | [The OS keystore holds a key only a person can take](0050-the-keystore-holds-a-key-only-a-person-can-take.md)                     | Accepted 2026-08-29                   |
 | 0051 | [An imported credential stays the person's](0051-an-imported-credential-stays-the-persons.md)                                     | Accepted 2026-08-29                   |
 | 0052 | [A code identity without a publisher identity](0052-a-code-identity-without-a-publisher-identity.md)                              | Accepted 2026-08-30                   |
+| 0053 | [A tool declares the classes it can reach](0053-a-tool-declares-the-classes-it-can-reach.md)                                      | Accepted 2026-08-31                   |
 
 ## Adding one
 

@@ -19,6 +19,7 @@
 import { describe, it, expect, vi, afterEach } from 'vitest'
 import { cleanup, render, fireEvent, within } from '@solidjs/testing-library'
 import { Dispatcher } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import {
   EFFECT_KEYS,
   PolicyClient,
@@ -70,7 +71,7 @@ function mount(client: PolicyClient): HTMLElement {
 /** A client whose reads answer `reads` in order (the last one repeating) and
  *  whose writes resolve, unless `setError` says otherwise. */
 function fakeClient(reads: PolicyView[], setError?: Error) {
-  const client = new PolicyClient(new Dispatcher())
+  const client = new PolicyClient(new Dispatcher(fixedEndpoint(9876)))
   let n = 0
   const get = vi.spyOn(client, 'get').mockImplementation(() => {
     const answer = reads[Math.min(n, reads.length - 1)]
@@ -368,7 +369,7 @@ describe('agent policy surface', () => {
   })
 
   it('says the read failed rather than drawing a policy nobody sent', async () => {
-    const client = new PolicyClient(new Dispatcher())
+    const client = new PolicyClient(new Dispatcher(fixedEndpoint(9876)))
     vi.spyOn(client, 'get').mockRejectedValue(new Error('store unavailable'))
     const container = mount(client)
 

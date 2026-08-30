@@ -23,6 +23,7 @@ import { cleanup, render, fireEvent } from '@solidjs/testing-library'
 import { RolesSection, roleStateLine } from './roles-section'
 import { EndpointClient, type Endpoint, type RoleAssignInput } from './endpoints'
 import { Dispatcher } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import { clearToasts, toasts } from './ui'
 import type { Role, RolesListResult } from './generated/roles.list'
 import type { RolesAssignResult } from './generated/roles.assign'
@@ -67,7 +68,7 @@ function mountRoles(
   assignRole: MockInstance<(input: RoleAssignInput) => Promise<RolesAssignResult>>
   container: HTMLElement
 } {
-  const client = new EndpointClient(new Dispatcher())
+  const client = new EndpointClient(new Dispatcher(fixedEndpoint(9876)))
   // The client returns the WHOLE result (bead nocx-rikz5) — the table AND
   // the default in one answer — so the mocks return it too.
   const assignRole = vi.spyOn(client, 'assignRole').mockImplementation((input) =>
@@ -98,7 +99,7 @@ function seam(replies: Record<string, () => unknown>): {
   client: EndpointClient
   sent: { method: string; params: unknown }[]
 } {
-  const dispatcher = new Dispatcher()
+  const dispatcher = new Dispatcher(fixedEndpoint(9876))
   const sent: { method: string; params: unknown }[] = []
   vi.spyOn(dispatcher, 'call').mockImplementation((method: string, params: unknown) => {
     sent.push({ method, params })

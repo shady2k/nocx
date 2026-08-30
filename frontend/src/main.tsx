@@ -11,6 +11,7 @@ import App from './App'
 import { log } from './log'
 import { hasWailsWebview, installBrowserTransport } from './wails-runtime'
 import { WSClient } from './ipc'
+import { fixedEndpoint } from './endpoint'
 import { LayoutStore } from './layout/layout-store'
 import { LayoutClient } from './layout/layout-client'
 import { LOCAL_BACKEND_ID, PaneManager } from './panes'
@@ -182,7 +183,7 @@ async function main() {
     host = location.hostname
     console.warn('nocx: no Wails runtime, using fallback WS port', port)
   }
-  const dispatcher = new Dispatcher()
+  const dispatcher = new Dispatcher(fixedEndpoint(port, host, token))
   // What build this is, for the About page (nocx-8bbp). Constructed here with
   // every other client: the page is registered unconditionally, so the client
   // has to exist for it to have anything to read.
@@ -194,7 +195,8 @@ async function main() {
   // ONE subscriber to the dispatcher's disconnect lifecycle (nocx-gbhwh);
   // the return value is for tests, the wiring here ignores it.
   mountConnectionNotice(bar, dispatcher, client)
-  await client.connect(port, host, token)
+  // Temporary fixed endpoint bridge until T5/T7 provide the desktop provider.
+  dispatcher.start()
   const profileClient = new ProfileClient(dispatcher)
   const vaultClient = new VaultClient(dispatcher)
   const dialogClient = new DialogClient(dispatcher)

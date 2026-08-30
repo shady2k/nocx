@@ -11,12 +11,13 @@ import { cleanup, render, fireEvent } from '@solidjs/testing-library'
 import { ConnectionsView } from './connections'
 import { ProfileClient } from './profiles'
 import { Dispatcher } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import { FootprintClient } from './footprint-client'
 import type { ShellFootprintStatusResult } from './generated/shell.footprint.status'
 import { clearToasts, toasts } from './ui'
 
 function mockProfileClient(): ProfileClient {
-  const pc = new ProfileClient(new Dispatcher())
+  const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
   vi.spyOn(pc, 'listProfiles').mockResolvedValue([])
   vi.spyOn(pc, 'listGroups').mockResolvedValue([])
   vi.spyOn(pc, 'sessionStatus').mockResolvedValue({ statuses: {} })
@@ -79,7 +80,7 @@ const WITH_HELPER_NO_SAVED_CONNECTION: ShellFootprintStatusResult = {
 
 function mountWithFootprint(status: ShellFootprintStatusResult) {
   const client = mockProfileClient()
-  const footprintClient = new FootprintClient(new Dispatcher())
+  const footprintClient = new FootprintClient(new Dispatcher(fixedEndpoint(9876)))
   const statusSpy = vi.spyOn(footprintClient, 'status').mockResolvedValue(status)
   const uninstallSpy = vi.spyOn(footprintClient, 'uninstall').mockResolvedValue({
     removed: ['integration/v10/nocx.zsh', 'manifest.json'],

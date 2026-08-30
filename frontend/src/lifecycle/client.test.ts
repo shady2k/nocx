@@ -6,6 +6,7 @@
 // composition root forgets to register, or a guard that drops real facts.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Dispatcher } from '../dispatcher'
+import { fixedEndpoint } from '../endpoint'
 import { LifecycleClient } from './client'
 import type { LifecycleChanged } from '../generated/lifecycle.changed'
 
@@ -109,9 +110,9 @@ function lastSocket(): MockSocket {
 }
 
 async function connectAndAccept(d: Dispatcher): Promise<void> {
-  const p = d.connect(9876)
+  d.start()
+  await Promise.resolve()
   lastSocket().accept()
-  await p
 }
 
 function fact(over: Partial<LifecycleChanged> = {}): LifecycleChanged {
@@ -129,7 +130,7 @@ function fact(over: Partial<LifecycleChanged> = {}): LifecycleChanged {
 
 describe('LifecycleClient', () => {
   it('routes a lifecycle.changed notification from the wire into the handler', async () => {
-    const dispatcher = new Dispatcher()
+    const dispatcher = new Dispatcher(fixedEndpoint(9876))
     await connectAndAccept(dispatcher)
     const client = new LifecycleClient(dispatcher)
     const handler = vi.fn()
@@ -143,7 +144,7 @@ describe('LifecycleClient', () => {
   })
 
   it('delivers a shared-socket notification only to its owning session', async () => {
-    const dispatcher = new Dispatcher()
+    const dispatcher = new Dispatcher(fixedEndpoint(9876))
     await connectAndAccept(dispatcher)
     const client = new LifecycleClient(dispatcher)
     const first = vi.fn()
@@ -165,7 +166,7 @@ describe('LifecycleClient', () => {
   // open result and replays the projection there, so catch-up has one owner
   // and it is not this one.
   it('delivers nothing until the open result binds its session id', async () => {
-    const dispatcher = new Dispatcher()
+    const dispatcher = new Dispatcher(fixedEndpoint(9876))
     await connectAndAccept(dispatcher)
     const client = new LifecycleClient(dispatcher)
     const handler = vi.fn()
@@ -185,7 +186,7 @@ describe('LifecycleClient', () => {
   })
 
   it('does not deliver a payload without a lane (not a fact)', async () => {
-    const dispatcher = new Dispatcher()
+    const dispatcher = new Dispatcher(fixedEndpoint(9876))
     await connectAndAccept(dispatcher)
     const client = new LifecycleClient(dispatcher)
     const handler = vi.fn()
@@ -198,7 +199,7 @@ describe('LifecycleClient', () => {
   })
 
   it('unsubscribe stops delivery without affecting the socket', async () => {
-    const dispatcher = new Dispatcher()
+    const dispatcher = new Dispatcher(fixedEndpoint(9876))
     await connectAndAccept(dispatcher)
     const client = new LifecycleClient(dispatcher)
     const handler = vi.fn()
@@ -212,7 +213,7 @@ describe('LifecycleClient', () => {
   })
 
   it('submitAttempt sends the app-owned params and resolves the created attempt', async () => {
-    const dispatcher = new Dispatcher()
+    const dispatcher = new Dispatcher(fixedEndpoint(9876))
     await connectAndAccept(dispatcher)
     const client = new LifecycleClient(dispatcher)
     const p = client.submitAttempt({
@@ -256,7 +257,7 @@ describe('LifecycleClient', () => {
   })
 
   it('submitAttempt surfaces a backend refusal as a rejected promise', async () => {
-    const dispatcher = new Dispatcher()
+    const dispatcher = new Dispatcher(fixedEndpoint(9876))
     await connectAndAccept(dispatcher)
     const client = new LifecycleClient(dispatcher)
     const p = client.submitAttempt({

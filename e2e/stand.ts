@@ -31,7 +31,7 @@
  * printed. The coordinator hands them out over its discovery socket and
  * nowhere else, because a token on stdout is what design §6 forbids. What the
  * stand waits for now is the socket PATH on the server's own readiness line,
- * and e2e/coordinator.ts does the handshake that follows.
+ * and e2e/coordinator.mts does the handshake that follows.
  *
  * The keystore stance came with the move and stopped being a variable anybody
  * has to remember. A build without `-tags nocx_login_session` makes no claim
@@ -64,7 +64,7 @@ import { execFileSync, spawn, type ChildProcess } from 'node:child_process'
 import { mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
-import { awaitCoordinator } from './coordinator'
+import { awaitCoordinator } from './coordinator.mjs'
 import { createHomeIsolation } from './home-isolation'
 
 const repoRoot = path.resolve(__dirname, '..')

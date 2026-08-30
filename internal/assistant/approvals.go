@@ -18,9 +18,23 @@ package assistant
 // the approved resume sends THAT, never a newly produced one.
 
 import (
+	"fmt"
 	"sync"
 
 	"github.com/shady2k/nocx/internal/content"
+)
+
+// FileVersionBindingState says whether a proposal names files whose versions
+// must be captured. The zero value is deliberately unknown and fails closed:
+// no-file approvals must say NotApplicable, while file-bearing approvals must
+// say Captured and carry at least one version.
+type FileVersionBindingState string
+
+const (
+	FileVersionBindingUnknown       FileVersionBindingState = ""
+	FileVersionBindingNotApplicable FileVersionBindingState = "not-applicable"
+	FileVersionBindingRequired      FileVersionBindingState = "required"
+	FileVersionBindingCaptured      FileVersionBindingState = "captured"
 )
 
 // Approval is one human decision about one exact proposal.
@@ -44,6 +58,12 @@ type Approval struct {
 	// CommandInvocation preserves command-vs-non-command provenance even when
 	// a malformed command has no parsed invocation to carry.
 	CommandInvocation bool
+	// FileVersionState distinguishes an explicit no-file proposal from a
+	// file-bearing proposal whose identities were never captured.
+	FileVersionState FileVersionBindingState
+	// FileVersions are the exact path versions the proposal is allowed to
+	// read or execute. They are carriers, not part of the proposal key.
+	FileVersions []FileVersion
 }
 
 type approvalKey struct {
@@ -59,6 +79,8 @@ type approvalEntry struct {
 	effect            content.Effect
 	invocation        content.Invocation
 	commandInvocation bool
+	fileVersionState  FileVersionBindingState
+	fileVersions      []FileVersion
 }
 
 // DeclineKind is what a person's no means, recorded with the declined
@@ -84,6 +106,8 @@ type declinedEntry struct {
 	effect            content.Effect
 	invocation        content.Invocation
 	commandInvocation bool
+	fileVersionState  FileVersionBindingState
+	fileVersions      []FileVersion
 }
 
 // retainedValue is the withheld result of an egress finding (design §7.1):
@@ -125,6 +149,8 @@ func (s *ApprovalStore) Request(ap Approval) {
 	s.pending[keyOf(ap)] = approvalEntry{
 		entryID: ap.EntryID, effect: ap.Effect, invocation: cloneInvocation(ap.Invocation),
 		commandInvocation: ap.CommandInvocation || (ap.Invocation.Parsed && ap.Invocation.Commands != nil),
+		fileVersionState:  ap.FileVersionState,
+		fileVersions:      cloneFileVersions(ap.FileVersions),
 	}
 }
 
@@ -159,6 +185,8 @@ func (s *ApprovalStore) Approve(ap Approval) bool {
 	s.approved[keyOf(ap)] = approvalEntry{
 		entryID: ap.EntryID, effect: ap.Effect, invocation: cloneInvocation(ap.Invocation),
 		commandInvocation: cur.commandInvocation,
+		fileVersionState:  cur.fileVersionState,
+		fileVersions:      cloneFileVersions(cur.fileVersions),
 	}
 	return true
 }
@@ -169,6 +197,48 @@ func (s *ApprovalStore) IsApproved(ap Approval) bool {
 	defer s.mu.Unlock()
 	_, ok := s.approved[keyOf(ap)]
 	return ok
+}
+
+// ApprovedFileVersions returns a copy of every path identity carried by the
+// approved proposal. The copy keeps callers from mutating the store's binding.
+func (s *ApprovalStore) ApprovedFileVersions(ap Approval) ([]FileVersion, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	entry, ok := s.approved[keyOf(ap)]
+	if !ok {
+		return nil, false
+	}
+	return cloneFileVersions(entry.fileVersions), true
+}
+
+// VerifyApprovedFileVersions checks all approved paths immediately before
+// dispatch. The first failure names the file whose approval is no longer
+// valid; no caller should execute the tool after a non-nil error.
+func (s *ApprovalStore) VerifyApprovedFileVersions(ap Approval) error {
+	s.mu.Lock()
+	entry, ok := s.approved[keyOf(ap)]
+	state := entry.fileVersionState
+	versions := cloneFileVersions(entry.fileVersions)
+	s.mu.Unlock()
+	if !ok {
+		return fmt.Errorf("approval: proposal is not approved")
+	}
+	switch state {
+	case FileVersionBindingNotApplicable:
+		return nil
+	case FileVersionBindingCaptured:
+		if len(versions) == 0 {
+			return fmt.Errorf("approval: file version binding is marked captured but contains no versions")
+		}
+	default:
+		return fmt.Errorf("approval: file version binding is missing")
+	}
+	for _, version := range versions {
+		if err := VerifyFileVersion(version); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Decline records a NO to this exact proposal (nocx-uvac6.1): the pending
@@ -197,6 +267,8 @@ func (s *ApprovalStore) Decline(ap Approval, kind DeclineKind) bool {
 		runID: ap.RunID, kind: kind, effect: cur.effect,
 		invocation:        cloneInvocation(cur.invocation),
 		commandInvocation: cur.commandInvocation,
+		fileVersionState:  cur.fileVersionState,
+		fileVersions:      cloneFileVersions(cur.fileVersions),
 	}
 	return true
 }

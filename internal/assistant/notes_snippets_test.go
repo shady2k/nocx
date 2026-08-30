@@ -215,7 +215,7 @@ func TestAsk_NotesAndSnippetsUseOperationsForCreateFindEditDelete(t *testing.T) 
 	_, srv := newFakeOpenAI(handler)
 	defer srv.Close()
 
-	cl, err := newClient(nil, os.DirFS(realToolsFS), nil)
+	cl, err := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -263,7 +263,7 @@ func TestAsk_NoteScopeRefusesSibling(t *testing.T) {
 	op := assistantNoteOperation{service: noteServiceSpy{assistantNoteService: notes, ran: &ran}}
 	_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "notes.update", args: `{"id":"note-b","body":"changed"}`}))
 	defer srv.Close()
-	cl, err := newClient(nil, os.DirFS(realToolsFS), nil)
+	cl, err := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}

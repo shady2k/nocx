@@ -368,13 +368,13 @@ type ProbeResult struct {
 	At time.Time `json:"at"`
 }
 
-// NewClient builds the engine client. The recorder is optional; when non-nil,
-// it persists provider bytes under each turn.
-func NewClient(logger log.Logger, recorder WireRecorder) (Client, error) {
-	return newClient(logger, tools.Schemas, recorder)
+// NewClient builds the engine client with the caller-declared safety floor.
+// The floor is mandatory so production and tests cannot silently omit it.
+func NewClient(logger log.Logger, recorder WireRecorder, floor content.Floor) (Client, error) {
+	return newClient(logger, tools.Schemas, recorder, floor)
 }
 
-func newClient(logger log.Logger, toolsFS fs.FS, recorder WireRecorder) (Client, error) {
+func newClient(logger log.Logger, toolsFS fs.FS, recorder WireRecorder, floor content.Floor) (Client, error) {
 	reg, err := agenttools.Assemble(toolsFS)
 	if err != nil {
 		return nil, fmt.Errorf("assistant: tool registry: %w", err)
@@ -383,10 +383,10 @@ func newClient(logger log.Logger, toolsFS fs.FS, recorder WireRecorder) (Client,
 		return nil, errors.New("assistant: tool registry assembled EMPTY — the tool schemas did not reach the binary; a model would be offered no tools")
 	}
 	searchSchema, _ := fs.ReadFile(toolsFS, "search.schema.json")
-	return newClientWithRegistry(logger, reg, recorder, searchSchema), nil
+	return newClientWithRegistry(logger, reg, recorder, floor, searchSchema), nil
 }
 
-func newClientWithRegistry(logger log.Logger, reg agenttools.Registry, recorder WireRecorder, searchSchema ...[]byte) Client {
+func newClientWithRegistry(logger log.Logger, reg agenttools.Registry, recorder WireRecorder, floor content.Floor, searchSchema ...[]byte) Client {
 	var schema []byte
 	if len(searchSchema) > 0 {
 		schema = append([]byte(nil), searchSchema[0]...)
@@ -396,6 +396,7 @@ func newClientWithRegistry(logger log.Logger, reg agenttools.Registry, recorder 
 		http:         newGuardedHTTPClient(logger, nil, recorder),
 		tools:        reg,
 		searchSchema: schema,
+		floor:        floor,
 		approvals:    NewApprovalStore(),
 		checkpoints:  newRunCheckpoints(),
 	}
@@ -406,6 +407,7 @@ type client struct {
 	http         *http.Client
 	tools        agenttools.Registry
 	searchSchema []byte
+	floor        content.Floor
 
 	approvals   *ApprovalStore
 	checkpoints *runCheckpoints

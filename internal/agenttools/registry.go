@@ -283,7 +283,7 @@ var declarations = []Declaration{
 		Narrow:           narrowSession,
 	},
 	{
-		Name:             "run",
+		Name:             "session.run",
 		Description:      "Run a shell command in a terminal session exactly as the person would type it, and get back its exit status and a window of its output; reach for this to find something out about the machine, or to change it, when no narrower tool will do — the person may be asked to approve the command first, and a refusal is an answer.",
 		Effect:           content.EffectMutateDestructive,
 		OutputTrust:      OutputTrustUntrusted,
@@ -294,7 +294,7 @@ var declarations = []Declaration{
 		ResolveResources: resourceArgument("sessionId", content.ResourceSession),
 		CommandArg:       "command",
 		Executes:         InRenderer,
-		Params:           "run.schema.json",
+		Params:           "session.run.schema.json",
 		Narrow:           narrowRun,
 		OpensBlock:       true,
 	},

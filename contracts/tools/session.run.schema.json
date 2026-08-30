@@ -1,8 +1,8 @@
 {
   "$schema": "https://json-schema.org/draft/2020-12/schema",
-  "$id": "https://nocx.local/contracts/tools/run.schema.json",
-  "title": "RunParams",
-  "description": "Params of the run agent tool (design §4.1): run a command in a session — the agent's lane — through the same submit path a person uses (the renderer's ordinary orchestration: block, ledger entry, attempt, output artifact, all minted at submit). The backend never writes to the PTY (design §2.1 — rejected). The session the tool may run in is bounded by the grant's session scopes, enforced by the narrowed capability (ADR-0028 decision 4); the window contract of the return (design §4.4) is the tool's return contract, not a parameter. The model is untrusted input and gets the same check the renderer's parameters get — additionalProperties: false plus an explicit required list.",
+  "$id": "https://nocx.local/contracts/tools/session.run.schema.json",
+  "title": "SessionRunParams",
+  "description": "Params of the session.run agent tool (design §4.1): run a command in a session — the agent's lane — through the same submit path a person uses (the renderer's ordinary orchestration: block, ledger entry, attempt, output artifact, all minted at submit). The backend never writes to the PTY (design §2.1 — rejected). The session the tool may run in is bounded by the grant's session scopes, enforced by the narrowed capability (ADR-0028 decision 4); the window contract of the return (design §4.4) is the tool's return contract, not a parameter. The model is untrusted input and gets the same check the renderer's parameters get — additionalProperties: false plus an explicit required list.",
   "type": "object",
   "additionalProperties": false,
   "required": ["sessionId", "command"],
@@ -20,8 +20,8 @@
   },
   "$defs": {
     "result": {
-      "title": "RunResult",
-      "description": "What the run tool hands back to whoever asked for it — the model under a declared call. The command's output is `text`; there is no `output` and no `stdout` (a live model guessed both). The window contract of design §4.4 is stated here rather than in the params: the renderer clamps a long output and says which span it actually returned, so a truncation is visible instead of silent.",
+      "title": "SessionRunResult",
+      "description": "What session.run hands back to whoever asked for it — the model under a declared call. The command's output is `text`; there is no `output` and no `stdout` (a live model guessed both). The window contract of design §4.4 is stated here rather than in the params: the renderer clamps a long output and says which span it actually returned, so a truncation is visible instead of silent.",
       "type": "object",
       "additionalProperties": false,
       "required": [

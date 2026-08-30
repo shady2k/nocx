@@ -41,7 +41,7 @@ func newRunToolCallingServer(args string) (*runToolCallingServer, *httptest.Serv
 		n := s.requests.Add(1)
 		s.bodies = append(s.bodies, string(body))
 		if n == 1 {
-			streamToolCallChunk(w, "run", s.args)
+			streamToolCallChunk(w, "session.run", s.args)
 			return
 		}
 		streamOKChunks(w)

@@ -80,7 +80,7 @@ func authorisedRunServer(args string) (*runToolCallingServer, *httptest.Server) 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		if s.requests.Add(1) == 1 {
-			streamToolCallChunk(w, "run", s.args)
+			streamToolCallChunk(w, "session.run", s.args)
 			return
 		}
 		streamOKChunks(w)
@@ -247,8 +247,8 @@ func driveOneAuthorisedRun(t *testing.T) (*askHarness, askWireResult, string, ap
 	if err := json.Unmarshal(raw, &ap); err != nil {
 		t.Fatalf("approvalRequested unmarshal: %v\nraw: %s", err, raw)
 	}
-	if ap.RunID != strconv.FormatInt(res.RunID, 10) || ap.Tool != "run" || ap.Attempt != 1 {
-		t.Fatalf("approvalRequested binding = %+v, want run %d attempt 1 tool run", ap, res.RunID)
+	if ap.RunID != strconv.FormatInt(res.RunID, 10) || ap.Tool != "session.run" || ap.Attempt != 1 {
+		t.Fatalf("approvalRequested binding = %+v, want session.run %d attempt 1 tool session.run", ap, res.RunID)
 	}
 	got, errObj := approveOverWire(t, h.conn, map[string]any{
 		"runId": ap.RunID, "attempt": ap.Attempt, "tool": ap.Tool,
@@ -336,7 +336,7 @@ func findRunActionEntry(t *testing.T, led content.LedgerRepository) *content.Led
 		t.Fatalf("ListEntries: %v", err)
 	}
 	for _, s := range summaries {
-		if s.Kind == content.EntryAction && s.Intent == "run" {
+		if s.Kind == content.EntryAction && s.Intent == "session.run" {
 			e, err := led.Entry(context.Background(), s.ID)
 			if err != nil {
 				t.Fatalf("Entry(%s): %v", s.ID, err)
@@ -889,7 +889,7 @@ func TestRun_TheCommandTheTurnRanJoinsTheTurnWithAPosition(t *testing.T) {
 		t.Fatalf("Caused: %v", err)
 	}
 	// Three things, in the order the turn did them: the tool call's own
-	// action entry — the line that says WHEN the assistant reached for run —
+	// action entry — the line that says WHEN the assistant reached for session.run —
 	// then the command that really opened a block, and then the run of prose
 	// the model wrote from its output (ADR-0040). The prose is a CHILD like
 	// the other two, at a seat of its own, which is the whole of what the
@@ -898,8 +898,8 @@ func TestRun_TheCommandTheTurnRanJoinsTheTurnWithAPosition(t *testing.T) {
 		got[0] != content.EntryAction || got[1] != content.EntryShell || got[2] != content.EntryText {
 		t.Fatalf("the turn's children read %v, want the call, the command it opened, and the answer written after it", got)
 	}
-	if caused[0].Kind != content.EntryAction || caused[0].Intent != "run" || caused[0].Position != 0 {
-		t.Errorf("first cause = %+v, want the run action at position 0", caused[0])
+	if caused[0].Kind != content.EntryAction || caused[0].Intent != "session.run" || caused[0].Position != 0 {
+		t.Errorf("first cause = %+v, want the session.run action at position 0", caused[0])
 	}
 	if caused[1].EntryID != commandEntry || caused[1].Kind != content.EntryShell || caused[1].Position != 1 {
 		t.Errorf("second cause = %+v, want the shell entry at position 1", caused[1])
@@ -938,7 +938,7 @@ func TestRun_AResolutionNamingNoRowJoinsNothingAndDoesNotFailTheRun(t *testing.T
 	// prose the model wrote after the call — a child of the turn like any
 	// other since ADR-0040, and the reason this list is two long rather than
 	// one.
-	if len(caused) != 2 || caused[0].Intent != "run" || caused[0].Kind != content.EntryAction {
+	if len(caused) != 2 || caused[0].Intent != "session.run" || caused[0].Kind != content.EntryAction {
 		t.Fatalf("the turn caused %+v, want the call it made and the prose it wrote after it", caused)
 	}
 	if caused[1].Kind != content.EntryText || caused[1].Position != 1 {

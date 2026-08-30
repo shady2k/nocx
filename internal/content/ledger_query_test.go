@@ -162,8 +162,9 @@ func TestQueryEntriesOrdersBySeqDescInsideOneMillisecond(t *testing.T) {
 // ── the filters, each proved by what it excludes ─────────────────────────
 
 // The recall ladder's rungs (§10.6). The server answers from the rung it was
-// asked for and never silently widens: directory is the exact (environment,
-// cwd) pair, host is the environment, everywhere is no rung at all.
+// asked for and never silently widens: pane is the exact durable pane,
+// directory is the exact (environment, cwd) pair, host is the environment,
+// everywhere is no rung filter.
 func TestQueryEntriesAnswersFromTheRungItWasAskedFor(t *testing.T) {
 	_, led := newLedger(t)
 	envReady(t, led, "local")
@@ -192,6 +193,38 @@ func TestQueryEntriesAnswersFromTheRungItWasAskedFor(t *testing.T) {
 		page := queryOK(t, led, content.LedgerQuery{Scope: content.ScopeEverywhere, Limit: 10})
 		wantOnly(t, page, remote, elsewhere, here)
 	})
+}
+// Pane is the narrowest recall rung. Two panes can share an environment and
+// directory, so a directory query cannot prove that Up belongs to this tab.
+func TestQueryEntriesPaneRungExcludesAnotherPanesCommands(t *testing.T) {
+	db, led := newLedger(t)
+	aPaneUnder(t, db, "ws-a", "tab-a", "pane-a")
+	aPaneUnder(t, db, "ws-b", "tab-b", "pane-b")
+	envReady(t, led, "local")
+
+	const here = "00000000-0000-7000-8000-00000000a101"
+	const there = "00000000-0000-7000-8000-00000000a102"
+	for _, row := range []struct {
+		id    string
+		pane  string
+		intent string
+	}{
+		{id: here, pane: "pane-a", intent: "run in this tab"},
+		{id: there, pane: "pane-b", intent: "run in another tab"},
+	} {
+		if _, err := led.Submit(context.Background(), content.SubmitEntry{
+			ID: row.id, Client: "test-client", EnvironmentID: "local",
+			PaneID: strPtr(row.pane), Cwd: "/repo",
+			Kind: content.EntryShell, Intent: row.intent, Payload: "{}",
+		}); err != nil {
+			t.Fatalf("Submit(%q): %v", row.id, err)
+		}
+	}
+
+	page := queryOK(t, led, content.LedgerQuery{
+		Scope: content.ScopePane, PaneID: "pane-a", Limit: 10,
+	})
+	wantOnly(t, page, here)
 }
 
 // Each row says which host it ran on, resolved through the join the page

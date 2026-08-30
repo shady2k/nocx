@@ -20,7 +20,7 @@ export interface HistoryQuery {
   /**
    * The rung this page was drawn from, echoed back. The caller asks for a rung and the server answers from it — it never silently widens, because a ladder whose rung you cannot see is a filter.
    */
-  scope: 'directory' | 'host' | 'everywhere'
+  scope: 'pane' | 'directory' | 'host' | 'everywhere'
   /**
    * True when this rung has no further entries beyond this page. The overlay uses it to decide whether the next Up climbs to a wider rung rather than paging further down this one.
    */

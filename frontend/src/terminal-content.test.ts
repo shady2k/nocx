@@ -814,6 +814,51 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
       teardown()
     }
   })
+  it('Up recalls the command from this pane, not another tab', async () => {
+    const client = makeClient()
+    const paneId = 'pane-a'
+    client.call.mockImplementation(async (method: string, raw?: unknown) => {
+      if (method !== 'history.query') throw new Error('unexpected control call')
+      const params = raw as { scope?: string; paneId?: string }
+      const thisPane = params.scope === 'pane' && params.paneId === paneId
+      return {
+        entries: (thisPane
+          ? ['echo from pane a', 'echo from pane a middle', 'echo from pane a older']
+          : ['echo from pane b']).map((command, index) => ({
+            id: thisPane ? `pane-a-command-${index}` : 'pane-b-command',
+            command,
+            cwd: FIXTURE_CWD,
+            host: '',
+            status: 'success',
+            exitCode: 0,
+            startedAt: 1_750_000_000_000,
+            endedAt: 1_750_000_000_100,
+            maskedCount: 0,
+            maskedKinds: [],
+          })),
+        scope: thisPane ? 'pane' : 'directory',
+        exhausted: true,
+        source: 'store',
+        coverage: null,
+      }
+    })
+    const { view, ed, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        pane: anchoredPane(paneId),
+      },
+      client,
+    )
+    try {
+      ed.show()
+      view.contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true, cancelable: true }),
+      )
+      await vi.waitFor(() => expect(ed.getDoc()).toBe('echo from pane a'))
+    } finally {
+      teardown()
+    }
+  })
 })
 
 describe("the dropdown owns the arrows while it is open; recall's bare-Up gesture waits for it to close (nocx-mlm7)", () => {

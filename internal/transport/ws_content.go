@@ -24,21 +24,23 @@ const maxRecordCommandRunes = 16_384
 const maxSearchTextRunes = maxRecordCommandRunes
 
 // validateHistoryQueryRaw checks history.query against the recall contract:
-// the closed scope enum, the conditional cwd/host presence ("" is a
-// legitimate rung — a command whose cwd was never known — so PRESENCE is
-// what is required, never a non-empty value), the opaque `before` row
-// handle, and the search-filter bound. The limit is deliberately left to the
-// handler's documented clamp (<1 → 50, >200 → 200): the clamp is the
-// product contract for that field, not a refusal.
+// the closed scope enum, the conditional pane/cwd/host presence ("" is a
+// legitimate directory rung and local host, but pane ids must be non-empty),
+// the opaque `before` row handle, and the search-filter bound. The limit is
+// deliberately left to the handler's documented clamp (<1 → 50, >200 → 200):
+// the clamp is the product contract for that field, not a refusal.
 func validateHistoryQueryRaw(raw json.RawMessage) string {
 	var p historyQueryParams
 	if msg := decodeParams(raw, &p); msg != "" {
 		return msg
 	}
 	switch p.Scope {
-	case "directory", "host", "everywhere":
+	case "pane", "directory", "host", "everywhere":
 	default:
-		return "scope must be one of directory, host, everywhere"
+		return "scope must be one of pane, directory, host, everywhere"
+	}
+	if p.Scope == "pane" && (p.PaneID == nil || *p.PaneID == "") {
+		return "paneId is required and must be non-empty for scope=pane"
 	}
 	if p.Scope == "directory" && p.Cwd == nil {
 		return "cwd is required for scope=directory"

@@ -106,7 +106,11 @@ function filteringQuery(
   }
 }
 
-function setupRecall(opts: { query?: RecallQuery; actions?: Partial<EditorActions> }) {
+function setupRecall(opts: {
+  query?: RecallQuery
+  actions?: Partial<EditorActions>
+  openScope?: RecallScope
+}) {
   const container = document.createElement('div')
   document.body.appendChild(container)
   const submit = opts.actions?.submit ?? vi.fn()
@@ -119,7 +123,7 @@ function setupRecall(opts: { query?: RecallQuery; actions?: Partial<EditorAction
   ed.setKeyArbiter((e) => recall.handleKey(e))
   // The terminal-content wiring: Up at the top of a draft opens recall.
   actions.onUpAtTop = () => {
-    void recall.open('directory')
+    void recall.open(opts.openScope ?? 'directory')
   }
   return { container, ed, view, recall, submit }
 }
@@ -135,6 +139,41 @@ const panelOf = (container: HTMLElement): HTMLElement => {
 const fieldValue = (container: HTMLElement): string =>
   container.querySelector<HTMLElement>('.ui-floating-panel__search .ui-search-field__input')
     ?.textContent ?? ''
+
+describe('recall: Up starts at this pane and climbs wider', () => {
+  it('shows this tab history before another pane in the shared directory', async () => {
+    const seenScopes: RecallScope[] = []
+    const tabA = ['tab-a newest', 'tab-a middle', 'tab-a first']
+    const query: RecallQuery = (scope) => {
+      seenScopes.push(scope)
+      const commands =
+        scope === 'pane' ? tabA : [...tabA, 'tab-b newest', 'other directory command']
+      return Promise.resolve({
+        entries: commands.map((command, i) => mkEntry(command, 1000 - i)),
+        scope,
+        exhausted: true,
+        source: 'store' as const,
+        coverage: 1000 - (commands.length - 1),
+      })
+    }
+    const { container, ed, view, recall } = setupRecall({ query, openScope: 'pane' })
+
+    key(view, { key: 'ArrowUp' })
+    await settled(container)
+
+    expect(recall.isOpen).toBe(true)
+    expect(seenScopes).toEqual(['pane'])
+    expect(panelOf(container).textContent).toContain('this tab')
+    expect(ed.getDoc()).toBe('tab-a newest')
+    expect(panelOf(container).textContent).not.toContain('tab-b newest')
+
+    key(view, { key: 'ArrowUp', shiftKey: true })
+    await vi.waitFor(() => {
+      expect(seenScopes).toEqual(['pane', 'directory'])
+      expect(panelOf(container).textContent).toContain('tab-b newest')
+    })
+  })
+})
 
 describe('recall: Enter takes the command, it does not run it', () => {
   it('Enter while navigating leaves the command in the line and submits nothing', async () => {
@@ -447,9 +486,11 @@ describe('recall: typing narrows the rung (nocx-ms7v)', () => {
     expect(ed.getDoc()).toBe('git s') // the draft captured at open, exactly
   })
 
-  it('the filter rides the ladder climb — shift+Up keeps narrowing', async () => {
+  it('a non-empty filter searches everywhere, not only the current rung', async () => {
+    const seenScopes: RecallScope[] = []
     const { container, view } = setupRecall({
       query: (scope, text) => {
+        seenScopes.push(scope)
         const needle = text ?? ''
         const pool =
           scope === 'directory'
@@ -460,28 +501,26 @@ describe('recall: typing narrows the rung (nocx-ms7v)', () => {
           entries: matched.map((c, i) => mkEntry(c, 1000 - i)),
           scope,
           exhausted: true,
-          source: 'session',
+          source: 'session' as const,
           coverage: matched.length > 0 ? 1000 - (matched.length - 1) : null,
         })
       },
     })
     key(view, { key: 'ArrowUp' })
-    await settled(container) // 3 rows on the directory rung: no open-time climb
+    await settled(container)
     expect(panelOf(container).textContent).toContain('this directory')
     key(view, { key: 'm' })
-    await vi.waitFor(() => expect(fieldValue(container)).toBe('m'))
-    key(view, { key: 'ArrowUp', shiftKey: true }) // widen to host
     await vi.waitFor(() => {
       const text = panelOf(container).textContent ?? ''
-      expect(text).toContain('this host')
-      expect(fieldValue(container)).toBe('m') // the filter survived the climb
+      expect(seenScopes).toEqual(['directory', 'everywhere'])
+      expect(text).toContain('everywhere')
       expect(text).toContain('make deploy')
-      expect(text).not.toContain('docker build') // still narrowed
+      expect(text).toContain('make test')
       expect(text).not.toContain('git status')
     })
   })
-})
 
+})
 describe('recall: a search hands the input to the field (brief search-ui)', () => {
   it('Enter with a non-empty filter INSERTS without running; the second Enter runs it', async () => {
     const { container, ed, view, recall, submit } = setupRecall({

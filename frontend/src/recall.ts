@@ -86,7 +86,7 @@ export function scrollTopToReveal(list: HTMLElement, row: HTMLElement): number {
 }
 
 /** The ladder rung a page of history was drawn from. */
-export type RecallScope = 'directory' | 'host' | 'everywhere'
+export type RecallScope = 'pane' | 'directory' | 'host' | 'everywhere'
 
 /** The smallest page a rung may show before opening on the next rung up.
  *  A directory holding one match is honest and useless: it reads as results
@@ -97,8 +97,9 @@ export type RecallScope = 'directory' | 'host' | 'everywhere'
 export const MIN_USEFUL_ROWS = 3
 
 /** What each ladder rung means, in the user's words — the raw scope names
- *  (`directory`, `host`) are the schema's jargon and explain nothing. */
+ *  (`pane`, `directory`, `host`) are the schema's jargon and explain nothing. */
 export const SCOPE_LABELS: Record<RecallScope, string> = {
+  pane: 'this tab',
   directory: 'this directory',
   host: 'this host',
   everywhere: 'everywhere',
@@ -177,6 +178,8 @@ function isFilterKey(e: KeyboardEvent): boolean {
 /** The next wider rung, or the same rung at the top of the ladder. */
 export function nextScope(scope: RecallScope): RecallScope {
   switch (scope) {
+    case 'pane':
+      return 'directory'
     case 'directory':
       return 'host'
     case 'host':
@@ -281,9 +284,12 @@ export function withSessionText(page: HistoryQuery, ledger: CommandLedger | null
 
 /**
  * Serve a history page from the in-memory ledger, newest first, filtered to
- * the requested rung. `source` is always 'session': this is the stopgap
- * behind the generated types until the persistent store answers. Only the
- * fetch changes when the backend lands.
+ * the requested rung. The ledger is owned by one TerminalContent, hence one
+ * pane; paneId is still required for the pane rung so the fallback cannot
+ * accidentally become a cross-tab corpus if ownership changes later.
+ * `source` is always 'session': this is the stopgap behind the generated
+ * types until the persistent store answers. Only the fetch changes when the
+ * backend lands.
  */
 export function queryLedgerHistory(
   ledger: CommandLedger | null,
@@ -291,8 +297,14 @@ export function queryLedgerHistory(
   cwd: string,
   host: string,
   text?: string,
+  paneId?: string,
 ): HistoryQuery {
-  const records = ledger ? [...ledger.records()].reverse() : []
+  const records =
+    scope === 'pane' && paneId === undefined
+      ? []
+      : ledger
+        ? [...ledger.records()].reverse()
+        : []
   // Coverage: the session's own horizon — the oldest completed entry's
   // endedAt, session-wide. The rung narrows rows, never the horizon; the
   // store's coverage is store-wide for the same reason.
@@ -441,7 +453,7 @@ export class RecallOverlay {
         if (isRecallShortcut(e)) {
           e.preventDefault()
           e.stopPropagation()
-          void this.open('directory')
+          void this.open('everywhere')
           return true
         }
         return false
@@ -718,8 +730,11 @@ export class RecallOverlay {
     const wasNavigating = s.name === 'navigating'
     const previous = s
     this.state = { ...s, filter }
+    // A non-empty search is global by design. Pane scope belongs only to the
+    // empty Up rung; a search term must not silently turn into a pane filter.
+    const queryScope: RecallScope = filter === '' ? s.scope : 'everywhere'
     this.render()
-    void this.query(s.scope, filter).then((result) => {
+    void this.query(queryScope, filter).then((result) => {
       // The panel moved on, or a newer keystroke superseded this answer:
       // apply nothing.
       if (this.state.name !== 'opened' && this.state.name !== 'navigating') return
@@ -728,7 +743,7 @@ export class RecallOverlay {
       if (result.entries.length === 0) {
         // Nothing matches: back to the empty rung state. `opened` means
         // "the editor holds the draft", so the stale preview must go.
-        this.state = { name: 'opened', draft: s.draft, scope: s.scope, query: result, filter }
+        this.state = { name: 'opened', draft: s.draft, scope: result.scope, query: result, filter }
         const d = s.draft
         this.editor.replaceDoc(d.text, d.from, d.to)
         this.announceDocContent(d.text, [])
@@ -744,7 +759,7 @@ export class RecallOverlay {
         const at = id !== undefined ? result.entries.findIndex((e) => e.id === id) : -1
         if (at >= 0) selected = result.entries.length - 1 - at
       }
-      this.enterNavigating(s.scope, result, selected, filter)
+      this.enterNavigating(result.scope, result, selected, filter)
     })
   }
 

@@ -320,7 +320,7 @@ func runToolActionEntry(t *testing.T, led content.LedgerRepository) *content.Led
 		t.Fatalf("ListEntries: %v", err)
 	}
 	for _, s := range summaries {
-		if s.Kind == content.EntryAction && s.Intent == "run" {
+		if s.Kind == content.EntryAction && s.Intent == "session.run" {
 			e, err := led.Entry(context.Background(), s.ID)
 			if err != nil {
 				t.Fatalf("Entry(%s): %v", s.ID, err)

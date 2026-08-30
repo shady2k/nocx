@@ -89,7 +89,7 @@ func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
 	for _, tool := range reg.ForGrant(*grant) {
 		names = append(names, tool.Name)
 	}
-	want := []string{"files.read", "session.list", "session.read", "run", "files.edit", "files.create"}
+	want := []string{"files.read", "session.list", "session.read", "session.run", "files.edit", "files.create"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("tools offered by the product-minted grant = %v, want %v", names, want)
 	}

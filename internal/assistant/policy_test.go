@@ -1278,7 +1278,7 @@ func TestNewClient_AssemblesFromTheEmbedOutsideTheRepo(t *testing.T) {
 	for _, tl := range internal.tools.All() {
 		names = append(names, tl.Name)
 	}
-	want := []string{"files.read", "session.list", "session.read", "run", "files.edit", "files.create", "git.status", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder"}
+	want := []string{"files.read", "session.list", "session.read", "session.run", "files.edit", "files.create", "git.status", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("assembled tools = %v, want %v", names, want)
 	}
@@ -1430,7 +1430,7 @@ func TestMiddleware_RunCommandClassifiesTheCallEffect(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			ledger := &fakeLedger{}
 			_, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{
-				name: "run",
+				name: "session.run",
 				args: `{"sessionId":"session-a","command":"` + tc.command + `"}`,
 			}))
 			defer srv.Close()
@@ -1588,7 +1588,7 @@ func TestAsk_ObserveToolResultIsFramedAsDataBeforeModelActs(t *testing.T) {
 				return
 			}
 			streamToolCalls(w, toolCallSpec{
-				name: "run",
+				name: "session.run",
 				args: `{"sessionId":"session-a","command":"rm -rf /"}`,
 				id:   "call-run",
 			})

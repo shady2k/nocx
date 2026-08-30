@@ -173,20 +173,20 @@ func TestMiddleware_RunRefusedOutsideGrantIsAResult(t *testing.T) {
 	req := &recordingRunner{body: runResolvedBody("entry-1", new(0), "success", 1, 0, 1, "x")}
 	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, req)
 
-	out, err := wrappedEndpoint(mw, "run", "c1", `{"sessionId":"session-b","command":"ls"}`)
+	out, err := wrappedEndpoint(mw, "session.run", "c1", `{"sessionId":"session-b","command":"ls"}`)
 	if err != nil {
-		t.Fatalf("out-of-grant run error = %v, want the refusal as a tool result", err)
+		t.Fatalf("out-of-grant session.run error = %v, want the refusal as a tool result", err)
 	}
-	if !strings.Contains(out, "REFUSED") || !strings.Contains(out, "run") {
+	if !strings.Contains(out, "REFUSED") || !strings.Contains(out, "session.run") {
 		t.Fatalf("refusal result = %q, want a refusal naming the tool in our words", out)
 	}
 	if calls := req.runCalls(); len(calls) != 0 {
 		t.Fatalf("a refused call reached the renderer: %+v", calls)
 	}
 
-	out, err = wrappedEndpoint(mw, "run", "c2", `{"sessionId":"session-a","command":"ls"}`)
+	out, err = wrappedEndpoint(mw, "session.run", "c2", `{"sessionId":"session-a","command":"ls"}`)
 	if err != nil {
-		t.Fatalf("in-grant run failed: %v", err)
+		t.Fatalf("in-grant session.run failed: %v", err)
 	}
 	calls := req.runCalls()
 	if len(calls) != 1 || calls[0].sessionID != "session-a" || calls[0].command != "ls" {
@@ -204,7 +204,7 @@ func TestMiddleware_RunWithoutRequesterIsHonest(t *testing.T) {
 	grant := sessionGrant("session-a", autonomousMatrix())
 	mw := middlewareFor(t, grant, &fakeLedger{}, nil) // requester nil
 
-	_, err := wrappedEndpoint(mw, "run", "c1", `{"sessionId":"session-a","command":"ls"}`)
+	_, err := wrappedEndpoint(mw, "session.run", "c1", `{"sessionId":"session-a","command":"ls"}`)
 	if err == nil || !strings.Contains(err.Error(), "no renderer requester is wired") {
 		t.Fatalf("error = %v, want the wiring-gap refusal", err)
 	}

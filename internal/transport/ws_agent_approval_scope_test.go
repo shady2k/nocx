@@ -75,7 +75,7 @@ func suspendedUnshowableRun(t *testing.T, policy assistant.GlobalPolicy) *scopeH
 	client := &scriptedApprovalClient{script: []approvalScriptStep{
 		{suspend: func(runID string) error {
 			return &assistant.ApprovalRequestedError{Request: &assistant.ApprovalRequest{
-				RunID: runID, Attempt: 1, Tool: "run", CallID: "call_1",
+				RunID: runID, Attempt: 1, Tool: "session.run", CallID: "call_1",
 				Arguments: `{"command":"echo hi"}`, ArgHash: "hash-a",
 				Effect:            content.EffectObserve,
 				Resource:          &content.GrantScope{Kind: content.ResourceSession, ID: "session-a"},
@@ -641,8 +641,8 @@ func TestAgentApprove_ScopeAlways_RealRunClassificationWritesAnInvocationRule(t 
 	if uerr := json.Unmarshal(raw, &n); uerr != nil {
 		t.Fatalf("approvalRequested unmarshal: %v\nraw: %s", uerr, raw)
 	}
-	if n.Tool != "run" {
-		t.Fatalf("approval tool = %q, want run", n.Tool)
+	if n.Tool != "session.run" {
+		t.Fatalf("approval tool = %q, want session.run", n.Tool)
 	}
 	if n.Effect != string(content.EffectObserve) {
 		t.Fatalf("approval effect = %q, want observe — the call is read-only", n.Effect)
@@ -689,16 +689,16 @@ func TestAgentApprove_ScopeAlways_RealRunClassificationReadsTheObserveGrantBefor
 	argsFor := func(command string) string {
 		raw, err := json.Marshal(map[string]string{"sessionId": sid, "command": command})
 		if err != nil {
-			t.Fatalf("marshal run args: %v", err)
+			t.Fatalf("marshal session.run args: %v", err)
 		}
 		return string(raw)
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		switch requests.Add(1) {
 		case 1:
-			streamToolCallChunk(w, "run", argsFor("df -h"))
+			streamToolCallChunk(w, "session.run", argsFor("df -h"))
 		case 2:
-			streamToolCallChunk(w, "run", argsFor("rm -rf /"))
+			streamToolCallChunk(w, "session.run", argsFor("rm -rf /"))
 		default:
 			streamOKChunks(w)
 		}
@@ -729,8 +729,8 @@ func TestAgentApprove_ScopeAlways_RealRunClassificationReadsTheObserveGrantBefor
 	if err := json.Unmarshal(raw, &first); err != nil {
 		t.Fatalf("first approvalRequested unmarshal: %v\nraw: %s", err, raw)
 	}
-	if first.Tool != "run" || first.Effect != string(content.EffectObserve) {
-		t.Fatalf("first proposal = tool %q effect %q, want run/observe", first.Tool, first.Effect)
+	if first.Tool != "session.run" || first.Effect != string(content.EffectObserve) {
+		t.Fatalf("first proposal = tool %q effect %q, want session.run/observe", first.Tool, first.Effect)
 	}
 
 	got, errObj := approveOverWire(t, h.conn, map[string]any{
@@ -774,8 +774,8 @@ func TestAgentApprove_ScopeAlways_RealRunClassificationReadsTheObserveGrantBefor
 	if err := json.Unmarshal(secondRaw, &second); err != nil {
 		t.Fatalf("second approvalRequested unmarshal: %v\nraw: %s", err, secondRaw)
 	}
-	if second.Tool != "run" {
-		t.Fatalf("second proposal tool = %q, want run", second.Tool)
+	if second.Tool != "session.run" {
+		t.Fatalf("second proposal tool = %q, want session.run", second.Tool)
 	}
 	if second.RunID != first.RunID {
 		t.Fatalf("second proposal runId = %q, want the first run %q", second.RunID, first.RunID)

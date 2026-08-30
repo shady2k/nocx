@@ -152,6 +152,7 @@ type EffectPolicy struct {
 	CrossBoundary     EffectRow        `json:"cross-boundary"`
 	Delegate          EffectRow        `json:"delegate"`
 	Rules             []InvocationRule `json:"rules,omitempty"`
+	floor             *Floor
 }
 
 // rowFor returns the row of one effect; an effect outside the lattice has no
@@ -359,9 +360,13 @@ type SessionOverrides struct {
 // together so DecisionForInvocation can apply most-restrictive-wins.
 func ResolvePolicy(global EffectPolicy, workspace *EffectPolicy, session SessionOverrides) EffectPolicy {
 	out := global
+	floor := global.floor
 	if workspace != nil {
 		out = *workspace
 	}
+	// The floor is composition-root authority, not matrix state; preserve it
+	// even when a workspace replaces the global policy.
+	out.floor = floor
 	out.Rules = append([]InvocationRule(nil), out.Rules...)
 	out.Rules = append(out.Rules, session.Rules...)
 	for _, e := range []Effect{

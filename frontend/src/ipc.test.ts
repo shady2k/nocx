@@ -3,6 +3,7 @@ import { Dispatcher } from './dispatcher'
 import { SessionHandle, WSClient } from './ipc'
 import { FRAME_HEADER_SIZE, FRAME_VERSION, MSG_TYPE_DATA, encodeFrame } from './frame'
 import { MockWebSocket } from './test-support/panes-fixtures'
+import type { SessionLiveness } from './generated/session.liveness'
 
 // Must match the un-exported constants in ipc.ts.
 const ACK_INTERVAL_MS = 100
@@ -1278,6 +1279,49 @@ describe('session.liveness notification', () => {
     ws.deliverText(liveness({ liveness: 'alive', livenessEpoch: 5 }))
 
     expect(seen).toEqual(['unknown@5'])
+  })
+
+  // The measurement, which is the half a surface actually DRAWS.
+  //
+  // This dispatcher does not hand the payload on: it rebuilds the fact field
+  // by field, and it used to name six of the eight. roundTripMs and slow were
+  // dropped in the reconstruction, so `slow` reached the renderer as undefined
+  // and connectionCondition answered `reachable` for every host — the pane's
+  // "this host is answering slowly" indicator could never draw, in production,
+  // however slow the host got (nocx-y3i0s; measured against a real sshd behind
+  // an 800ms link: the backend graded slow=true and published, and no
+  // indicator ever appeared in the document).
+  //
+  // The same shape as vault.status losing defaultProvider (AGENTS.md rule 5):
+  // the schema declares the field, the Go side marshals it, the renderer's
+  // generated type has it, and the one hand-written copy in between forgets
+  // it. Every test on this axis asserted the fields it was about, and none
+  // asserted "and the rest arrived too".
+  it('carries the round trip and its grade, which are what a surface draws', async () => {
+    const { session, ws } = await connectedSession()
+    const seen: SessionLiveness[] = []
+    session.onLiveness((l) => seen.push(l))
+
+    ws.deliverText(liveness({ liveness: 'alive', livenessEpoch: 7, roundTripMs: 801, slow: true }))
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0].slow).toBe(true)
+    expect(seen[0].roundTripMs).toBe(801)
+  })
+
+  // Absent stays absent. The contract says absent and zero are the same
+  // statement — "no measurement" — so inventing a 0 here would make a host
+  // that never answered read as one that answered instantly.
+  it('invents no measurement when the backend sent none', async () => {
+    const { session, ws } = await connectedSession()
+    const seen: SessionLiveness[] = []
+    session.onLiveness((l) => seen.push(l))
+
+    ws.deliverText(liveness())
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0].roundTripMs).toBeUndefined()
+    expect(seen[0].slow).toBeUndefined()
   })
 
   // A report naming another incarnation is about a different session that

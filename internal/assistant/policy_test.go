@@ -344,6 +344,73 @@ func TestEinoAdapter_RefusalIsNotFramedAsToolOutput(t *testing.T) {
 	}
 }
 
+func TestPolicyNarrowRowRefusesOutsideRunFence(t *testing.T) {
+	policy := autonomousMatrix()
+	rowRoot := t.TempDir()
+	policy.Observe.Scopes = []content.GrantScope{{
+		Kind: content.ResourcePath,
+		ID:   rowRoot,
+	}}
+	grant := policy.AsGrant([]content.GrantScope{
+		{Kind: content.ResourceSession, ID: "session-a"},
+		{Kind: content.ResourcePath, ID: "/"},
+	})
+	kernel := &effectKernel{grant: grant}
+	tool := agenttools.Tool{
+		Declaration: agenttools.Declaration{Effect: content.EffectObserve},
+	}
+	outside := filepath.Join(filepath.Dir(rowRoot), "outside.txt")
+	if kernel.inScope(tool, []agenttools.ResourceRef{{
+		Kind: content.ResourcePath,
+		ID:   outside,
+	}}, true) {
+		t.Fatalf("outside-row path %q passed the narrowed policy row", outside)
+	}
+}
+
+func TestPolicySelectorsDoNotEraseRunFenceKinds(t *testing.T) {
+	policy := autonomousMatrix()
+	root := t.TempDir()
+	selector := []content.GrantScope{{Kind: content.ResourcePath, ID: root}}
+	for _, row := range []*content.EffectRow{
+		&policy.Observe,
+		&policy.MutateReversible,
+		&policy.MutateDestructive,
+		&policy.PrivilegeChange,
+		&policy.Disclose,
+		&policy.CrossBoundary,
+		&policy.Delegate,
+	} {
+		row.Scopes = selector
+	}
+	runFence := []content.GrantScope{
+		{Kind: content.ResourceSession, ID: "session-a"},
+		{Kind: content.ResourcePath, ID: "/"},
+		{Kind: content.ResourceContent, ID: "content"},
+	}
+	grant := policy.AsGrant(runFence)
+
+	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	names := make(map[string]bool)
+	for _, tool := range reg.ForGrant(grant) {
+		names[tool.Name] = true
+	}
+	for _, want := range []string{"session.run", "notes.search", "snippets.list"} {
+		if !names[want] {
+			t.Fatalf("tool %q was dropped from grant: names=%v scopes=%v", want, names, grant.Scopes)
+		}
+	}
+	if got := grant.Policy.RowScopes(content.EffectObserve); len(got) != 3 ||
+		got[0] != (content.GrantScope{Kind: content.ResourceSession, ID: "session-a"}) ||
+		got[1] != (content.GrantScope{Kind: content.ResourcePath, ID: root}) ||
+		got[2] != (content.GrantScope{Kind: content.ResourceContent, ID: "content"}) {
+		t.Fatalf("observe effective scopes = %+v, want the path selector plus absent fence kinds", got)
+	}
+}
+
 // ── criterion 1: a refusal is an answer (nocx-uvac6.1) ───────────────────
 
 // TestAsk_RefusalContinuesAsToolResult is the brief's first acceptance

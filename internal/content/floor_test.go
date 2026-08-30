@@ -134,6 +134,17 @@ func TestFloor_SurvivesWorkspaceAndSessionPolicyResolution(t *testing.T) {
 	if !denied || !strings.Contains(reason, "floor") {
 		t.Fatalf("resolved policy floor refusal = (%q, %v), want immutable floor refusal", reason, denied)
 	}
+	grant := resolved.AsGrant([]GrantScope{{
+		Kind: ResourcePath,
+		ID:   "/workspace",
+	}})
+	reason, denied = grant.Policy.FloorRefusal(Invocation{Parsed: true}, []GrantScope{{
+		Kind: ResourcePath,
+		ID:   filepath.Join(configDir, "agent-policy.json"),
+	}})
+	if !denied || !strings.Contains(reason, "floor") {
+		t.Fatalf("minted policy floor refusal = (%q, %v), want immutable floor refusal", reason, denied)
+	}
 }
 
 func TestFloor_DoesNotRefuseUnrelatedDisqualifiedInvocation(t *testing.T) {

@@ -155,6 +155,12 @@ const rendererOf = (content: TerminalContent): RendererMock => {
 const sessionOf = (content: TerminalContent): SessionFake =>
   (content as unknown as { session: SessionFake }).session
 
+/** The scrollback owner behind TerminalContent, for placement assertions. */
+const scrollbackFor = (content: TerminalContent): ScrollbackController => {
+  const withScrollback = content as unknown as { scrollback: ScrollbackController }
+  return withScrollback.scrollback
+}
+
 /** The live recall overlay behind TerminalContent's private field — the
  *  same escape hatch editorOf uses. */
 const recallOf = (content: TerminalContent): { isOpen: boolean } => {
@@ -10471,7 +10477,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
-  it('Escape cancellation renders stopped, never failed, and remains stable after runState', async () => {
+  it('Escape cancellation seats a stopped answer, never failed, after runState', async () => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
@@ -10518,10 +10524,10 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         ).toEqual([['agent.cancel', { runId: 42 }]]),
       )
       expect(sessionOf(content).signal).not.toHaveBeenCalled()
-      expect(
-        (content as unknown as { scrollback: ScrollbackController }).scrollback.blockManager
-          .runningBlock,
-      ).not.toBeNull()
+      const inner = scrollbackFor(content).scrollbackInner
+      expect(answer.parentElement).toBe(inner)
+      expect(answer.classList.contains('nocx-answer-overlay')).toBe(false)
+      expect(scrollbackFor(content).blockManager.runningBlock).not.toBeNull()
       expect(content.pinnedFrame()).toBeNull()
       expect(editorOf(content).isVisible).toBe(false)
 
@@ -10530,6 +10536,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
           'stopped',
         ),
       )
+      expect(answer.dataset.turnState).toBe('cancelled')
       expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).not.toBe(
         'failed',
       )

@@ -5009,7 +5009,11 @@ export class TerminalContent extends BasePaneContent {
     owned.terminal = true
     // The close is the authoritative terminal seam. Returning the composer
     // from here avoids deriving completion from text, time, or DOM classes.
+    // Escape can have already thawed the summon while the command remains
+    // live; in that case lifecycle ownership will not seat the answer, so
+    // preserve the terminalized turn in ordinary scrollback directly.
     if (this._summoned) this._syncLifecycleOwnership()
+    else this._seatSummonedAnswers()
   }
 
   /** AgentInputTarget removes a refused handle before reporting the refusal.

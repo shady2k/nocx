@@ -5,11 +5,10 @@
 // code (the renderer's captureLiveFrame + the frame wire conversion).
 //
 // The session the request names has already been narrowed by the run's grant
-// before it left the backend; the renderer's only job is to produce the
-// frame or answer honestly why it cannot (a session it does not know, a
-// capture aborted by disposal, a region past the end of the buffer). The
-// renderer never learns the word "grant" (design §2.2) — it cannot widen
-// anything, only answer.
+// before it left the backend; the renderer can only produce the frame or
+// answer honestly why it cannot: unknown session, disposal, an invalid range,
+// or no completed parse boundary within the local capture bound. It never
+// learns the word "grant" (design §2.2) and cannot widen anything.
 
 import { liveFrameToWire } from './frame/wire'
 import type { Dispatcher } from './dispatcher'

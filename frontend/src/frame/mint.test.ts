@@ -131,7 +131,7 @@ describe('frozen mint', () => {
 })
 
 describe('the capture fence', () => {
-  it('mints after the parse settles when ONE write spans parse passes — no frame mixes rows from before and after the write', async () => {
+  it('mints after the whole queued backlog is parsed — no frame mixes rows from before and after a write, and none is half-parsed', async () => {
     const source = seedSource(['AAAA'])
     // Park the cursor at the start of the buffer so each chunk lands on its
     // own row, like fresh output in a real terminal.
@@ -143,16 +143,28 @@ describe('the capture fence', () => {
     const unfenced = mintLiveFrame(before, { start: 0, end: 1 }, seamFor(source))
     expect(rowText(unfenced)).toEqual(['AAAA'])
 
-    // ONE write, split by xterm's WriteBuffer across parse passes (the
-    // per-write callback fires only on the pass that empties it — the old
-    // test issued two writes and settled each by hand, testing the model
-    // the fake chose, not xterm's interleaving). Start the fence, then run
-    // the passes one at a time.
-    source.write('BBBB\nCCCC\n')
-    const settled = tracker.awaitSettled()
+    // Two chunks queued before the fence is asked for — the backlog xterm's
+    // 12 ms budget can split across passes. Start the fence, then run the
+    // passes one at a time and watch that it does NOT open at the first
+    // boundary: a frame minted there would hold BBBB and not CCCC, which is
+    // the half-parsed screen this test's title forbids.
+    source.write('BBBB\n')
+    source.write('CCCC\n')
+    let opened = false
+    const settled = tracker.awaitSettled().then(() => {
+      opened = true
+    })
 
-    source.parseOnePass(5) // 'BBBB\n' — the write is still pending
-    source.parseOnePass(5) // 'CCCC\n' — the write settles
+    source.parseOnePass() // 'BBBB\n' — a boundary fired, the backlog remains
+    // A task hop drains the microtask queue, so "not opened" is a fact about
+    // the fence rather than about how many ticks the assertion waited.
+    await new Promise((resolve) => setTimeout(resolve, 0))
+    expect(opened).toBe(false)
+    expect(
+      rowText(mintLiveFrame(tracker.identity(), { start: 0, end: 2 }, seamFor(source))),
+    ).toEqual(['BBBB', ''])
+
+    source.parseOnePass(2) // 'CCCC\n', then the barrier behind it
     await settled
 
     const after = tracker.identity()

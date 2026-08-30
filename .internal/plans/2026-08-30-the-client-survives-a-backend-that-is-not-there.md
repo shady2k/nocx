@@ -568,6 +568,18 @@ requires the schema and its type as a pair.
 Corrected: **T6 is folded into T2** (bead `nocx-kgfe7` closed into `nocx-x6ggy`), which now
 delivers both halves in one commit and waits on T4 for the dispatcher it must attach to.
 
+**The instrument, which is cheaper than estimating better.** Both errors above were
+predictions where a count was available. So: **when a brief removes or renames a symbol, the
+brief states the call-site count and how it was counted.** Two seconds, mechanical, and it
+would have said 106 rather than 2:
+
+```bash
+grep -rn 'Dispatcher.connect\|\.connect(' --include=*.ts --include=*.tsx frontend/src | wc -l
+```
+
+The point is not the number. It is that without it a worker discovers mid-flight that no
+commit can pass the hook, which costs a round trip and cannot be briefed away.
+
 **The general rule for this plan, and for the next one:** a contract lands with its
 consumer, a package lands with its caller, and an API change lands with its call sites. If
 a task's output has no consumer inside the task, the task boundary is wrong — check it

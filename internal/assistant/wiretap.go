@@ -8,6 +8,7 @@ package assistant
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +16,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/log"
 )
 
 // WireRecorder receives the bytes of one provider exchange. Implementations
@@ -38,6 +42,32 @@ func WithWireIdentity(ctx context.Context, runID, entryID string) context.Contex
 	return context.WithValue(ctx, wireIdentityKey{}, wireIdentity{runID: runID, entryID: entryID})
 }
 
+type wireToolOffer struct {
+	runID   string
+	effects []content.Effect
+	scopes  []content.GrantScope
+}
+
+type wireToolOfferKey struct{}
+
+// WithWireToolOffer carries the structural authority context to the HTTP
+// recorder. It contains no question, prompt, arguments or tool output.
+func WithWireToolOffer(ctx context.Context, runID string, grant *content.Grant) context.Context {
+	if grant == nil || runID == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, wireToolOfferKey{}, wireToolOffer{
+		runID:   runID,
+		effects: append([]content.Effect(nil), grant.Effects...),
+		scopes:  append([]content.GrantScope(nil), grant.Scopes...),
+	})
+}
+
+func wireToolOfferFrom(ctx context.Context) (wireToolOffer, bool) {
+	v, ok := ctx.Value(wireToolOfferKey{}).(wireToolOffer)
+	return v, ok && v.runID != ""
+}
+
 func wireIdentityFrom(ctx context.Context) (wireIdentity, bool) {
 	v, ok := ctx.Value(wireIdentityKey{}).(wireIdentity)
 	return v, ok && v.runID != "" && v.entryID != ""
@@ -48,20 +78,20 @@ func wireIdentityFrom(ctx context.Context) (wireIdentity, bool) {
 // one artifact's budget, while truncation remains visible in the dump.
 const wireCaptureCap = 1 << 20
 
-// wireTap is an http.RoundTripper that copies a request and its response into
-// the optional developer log and product recorder. It changes neither.
 type wireTap struct {
 	inner    http.RoundTripper
 	logPath  string
 	recorder WireRecorder
+	logger   log.Logger
 	mu       sync.Mutex
+	offered  map[string]struct{}
 }
 
-func newWireTapWith(inner http.RoundTripper, logPath string, recorder WireRecorder) http.RoundTripper {
-	if logPath == "" && recorder == nil {
+func newWireTapWith(inner http.RoundTripper, logPath string, recorder WireRecorder, logger log.Logger) http.RoundTripper {
+	if logPath == "" && recorder == nil && logger == nil {
 		return inner
 	}
-	return &wireTap{inner: inner, logPath: logPath, recorder: recorder}
+	return &wireTap{inner: inner, logPath: logPath, recorder: recorder, logger: logger, offered: make(map[string]struct{})}
 }
 
 func (w *wireTap) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -96,6 +126,43 @@ func (w *wireTap) RoundTrip(req *http.Request) (*http.Response, error) {
 		buf:    make([]byte, 0, minInt(wireCaptureCap, 64*1024)),
 	}
 	return resp, nil
+}
+
+func (w *wireTap) logToolOffer(ctx context.Context, body []byte) {
+	if w.logger == nil {
+		return
+	}
+	offer, ok := wireToolOfferFrom(ctx)
+	if !ok {
+		return
+	}
+
+	var envelope struct {
+		Tools []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		w.logger.Warn("agent ask: tool offer could not be parsed", "run", offer.runID, "parseError", true)
+		return
+	}
+	names := make([]string, 0, len(envelope.Tools))
+	for _, tool := range envelope.Tools {
+		if tool.Function.Name != "" {
+			names = append(names, tool.Function.Name)
+		}
+	}
+	w.mu.Lock()
+	if _, seen := w.offered[offer.runID]; seen {
+		w.mu.Unlock()
+		return
+	}
+	w.offered[offer.runID] = struct{}{}
+	w.mu.Unlock()
+	w.logger.Info("agent ask: tools offered", "run", offer.runID, "count", len(names),
+		"tools", names, "effects", offer.effects, "scopes", offer.scopes)
 }
 
 func (w *wireTap) record(ctx context.Context, kind string, body []byte, early bool) {
@@ -180,6 +247,7 @@ func (b *wireRequestBody) finish(closedEarly bool) {
 	b.mu.Unlock()
 	b.parent.write(b.label + "\n" + string(body))
 	b.parent.record(b.ctx, "request", body, truncated)
+	b.parent.logToolOffer(b.ctx, body)
 }
 
 type wireResponseBody struct {

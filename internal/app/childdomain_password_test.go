@@ -130,7 +130,7 @@ func runComposedLine(t *testing.T, line, pathDir, password string) string {
 // second factor at all.
 func TestComposeSSHChildLine_ClientKeepsTheTerminalOnStdin(t *testing.T) {
 	dir, _ := fakeSSHOnPath(t)
-	line := composeSSHChildLine(testChildStartCommand(), 40123, 37777, lifecyclepub.GrantRequest{
+	line := composeSSHChildLine(testChildStartCommand(), lifecyclepub.GrantRequest{
 		Env: "ssh", Host: "box.example.com", User: "alice",
 	})
 
@@ -151,7 +151,7 @@ func TestComposeSSHChildLine_ClientKeepsTheTerminalOnStdin(t *testing.T) {
 // wrapper.
 func TestComposeSSHChildLine_FirstReadIsTheTypedPassword(t *testing.T) {
 	dir, _ := fakeSSHOnPath(t)
-	line := composeSSHChildLine(testChildStartCommand(), 40123, 37777, lifecyclepub.GrantRequest{
+	line := composeSSHChildLine(testChildStartCommand(), lifecyclepub.GrantRequest{
 		Env: "ssh", Host: "box.example.com", User: "alice",
 	})
 
@@ -163,11 +163,11 @@ func TestComposeSSHChildLine_FirstReadIsTheTypedPassword(t *testing.T) {
 	}
 }
 
-// The delivery still has to happen: the forward and the destination remain
-// on the command line, which is where ADR-0022 put them.
-func TestComposeSSHChildLine_StillCarriesForwardAndDestination(t *testing.T) {
+// The reverse forward is not a command-line value: the proven master opens it
+// after authentication and frame 2 carries the allocated port.
+func TestComposeSSHChildLine_CarriesDestinationWithoutAForward(t *testing.T) {
 	dir, argsFile := fakeSSHOnPath(t)
-	line := composeSSHChildLine(testChildStartCommand(), 40123, 37777, lifecyclepub.GrantRequest{
+	line := composeSSHChildLine(testChildStartCommand(), lifecyclepub.GrantRequest{
 		Env: "ssh", Host: "box.example.com", User: "alice", Port: 2222,
 	})
 
@@ -179,9 +179,12 @@ func TestComposeSSHChildLine_StillCarriesForwardAndDestination(t *testing.T) {
 	}
 	argv := strings.Split(strings.TrimSpace(string(raw)), "\n")
 	joined := strings.Join(argv, " ")
-	for _, want := range []string{"-R", "127.0.0.1:40123:127.0.0.1:37777", "-p", "2222", "alice@box.example.com"} {
+	for _, want := range []string{"-p", "2222", "alice@box.example.com"} {
 		if !strings.Contains(joined, want) {
 			t.Errorf("argv %q does not carry %q", joined, want)
 		}
+	}
+	if strings.Contains(joined, "-R") {
+		t.Errorf("argv %q carries a guessed reverse forward", joined)
 	}
 }

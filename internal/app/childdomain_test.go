@@ -1,7 +1,6 @@
 package app
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"strings"
@@ -12,22 +11,17 @@ import (
 )
 
 // composeSSHChildLine is the production composer called the way the ssh child
-// calls it: our own multiplex options, the -t and the -R forward the child
-// needs, the user's own words, and the remote command last. It stands in for
-// the call site so each test below states only what it is about.
-//
-// The composer used to be a function of its own with this signature. ADR-0049
-// merged it with the typed wrapper's: there is one composer for "the line a
-// parent shell runs" now, and the ssh child is one of its callers.
-func composeSSHChildLine(startCmd string, remotePort, localPort int, req lifecyclepub.GrantRequest) string {
+// calls it: our own multiplex options, the user's own words, and the remote
+// command last. The reverse forward is opened later by the proven master and
+// delivered in the lifecycle frame, not guessed into this command.
+func composeSSHChildLine(startCmd string, req lifecyclepub.GrantRequest) string {
 	wrap := ssh.TypedWrap{MuxOptions: []string{
 		"-o", "ControlMaster=auto",
 		"-o", "ControlPath=/tmp/nocx-mux-0/m-%C",
 		"-o", "ControlPersist=no",
 	}}
 	inv := ssh.TypedInvocation{Opts: req.Opts, Host: req.Host, User: req.User, Port: req.Port}
-	extra := []string{"-t", "-R", fmt.Sprintf("127.0.0.1:%d:127.0.0.1:%d", remotePort, localPort)}
-	return composeSSHLine(wrap, extra, inv, startCmd)
+	return composeSSHLine(wrap, []string{"-t"}, inv, startCmd)
 }
 
 // TestComposeSSHChildLine_LineIsExecutableAndCarriesTheForward is the ssh
@@ -43,26 +37,17 @@ func composeSSHChildLine(startCmd string, remotePort, localPort int, req lifecyc
 // terminal away from the authentication phase; the behavioural proof of
 // that lives in childdomain_password_test.go, and the shape assertions
 // here keep the pipe from creeping back.
-func TestComposeSSHChildLine_LineIsExecutableAndCarriesTheForward(t *testing.T) {
+func TestComposeSSHChildLine_LineIsExecutableWithoutAForward(t *testing.T) {
 	startCmd := `env -u BASH_ENV bash -c 'printf "it'"'"'s"'`
-	line := composeSSHChildLine(startCmd, 40123, 37777, lifecyclepub.GrantRequest{
+	line := composeSSHChildLine(startCmd, lifecyclepub.GrantRequest{
 		Env: "ssh", Host: "box.example.com", User: "alice", Port: 2222,
 	})
 
-	if !strings.Contains(line, "'127.0.0.1:40123:127.0.0.1:37777'") {
-		t.Errorf("line does not carry the -R forward: %s", line)
-	}
 	if !strings.Contains(line, "-p 2222") {
 		t.Errorf("line does not carry the typed port: %s", line)
 	}
 	if !strings.Contains(line, "'alice@box.example.com'") {
 		t.Errorf("line does not carry the quoted destination: %s", line)
-	}
-	// One -t: the client's stdin is the parent's terminal, so OpenSSH
-	// allocates the remote pty without being forced. -tt was a consequence
-	// of the pipe and must not return with it.
-	if !strings.Contains(line, "'-t'") {
-		t.Errorf("line does not request a remote pty with a single -t: %s", line)
 	}
 	// Our own two options, and only ours: the user's process is the
 	// multiplex master and the interactive session both (ADR-0049).
@@ -106,7 +91,7 @@ func TestComposeSSHChildLine_LineIsExecutableAndCarriesTheForward(t *testing.T) 
 // dies on a syntax error with the user watching.
 func TestComposeSSHChildLine_StartCommandSurvivesQuoting(t *testing.T) {
 	startCmd := "line one\nline two with 'quotes' and \"double\" and \\backslashes\\ and $dollars\n"
-	line := composeSSHChildLine(startCmd, 40123, 37777, lifecyclepub.GrantRequest{Env: "ssh", Host: "h"})
+	line := composeSSHChildLine(startCmd, lifecyclepub.GrantRequest{Env: "ssh", Host: "h"})
 
 	// A stand-in ssh that prints its LAST argument — the command sshd would
 	// run — so the bytes can be compared against what went in.
@@ -155,7 +140,7 @@ func TestComposeSSHChildLine_CarriesTheOptionsTheUserTyped(t *testing.T) {
 		"-J", "bastion.example.com", // a jump host, silently dropped before
 		"-l", "alice", // a login name given as an option
 	}
-	line := composeSSHChildLine("true", 40123, 37777, lifecyclepub.GrantRequest{
+	line := composeSSHChildLine("true", lifecyclepub.GrantRequest{
 		Env: "ssh", Host: "box.example.com", Port: 2222, Opts: opts,
 	})
 

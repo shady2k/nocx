@@ -81,7 +81,7 @@ var carrierScriptTokens = map[string]bool{
 	"bad-digest": true, "no-fd": true, "no-source": true,
 	// numeric literals: descriptor numbers and redirections, the frame
 	// sequence, the digest tool's algorithm argument, the frame cap
-	"0": true, "1": true, "2": true, "7": true, "9": true,
+	"0": true, "1": true, "2": true, "6": true, "7": true, "9": true,
 	"17": true, "256": true, "32768": true,
 }
 
@@ -98,7 +98,6 @@ var carrierArgRE = []*regexp.Regexp{
 	regexp.MustCompile(`^[A-Za-z0-9._:-]{0,64}$`), // lane
 	regexp.MustCompile(`^[A-Za-z0-9._:-]{0,64}$`), // domain
 	regexp.MustCompile(`^[0-9]{1,20}$`),           // epoch
-	regexp.MustCompile(`^[0-9]{1,5}$`),            // lifecycle port
 	regexp.MustCompile(`^[0-9]$`),                 // stage descriptor
 	regexp.MustCompile(`^(|[0-9a-f]{64})$`),       // stage-1 digest
 }

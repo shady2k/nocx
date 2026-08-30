@@ -261,7 +261,7 @@ func loaderEnv(home, path string, tmp string) []string {
 // package): it proves only what the loader promises — that a verified frame
 // is what gets sourced, that it inherits the addressing arguments, and that
 // the temp name is already gone by the time it runs.
-const fakeStageOne = `printf "STAGE1_RAN sid=%s lane=%s dom=%s epoch=%s port=%s fd=%s dig=%s\n" "$1" "$2" "$3" "$4" "$5" "$6" "$7"
+const fakeStageOne = `printf "STAGE1_RAN sid=%s lane=%s dom=%s epoch=%s fd=%s dig=%s\n" "$1" "$2" "$3" "$4" "$5" "$6"
 if ls "${TMPDIR:-/tmp}"/nocx.* >/dev/null 2>&1; then printf "TEMP_PRESENT\n"; else printf "TEMP_GONE\n"; fi
 exec /bin/sh -i
 `
@@ -310,6 +310,9 @@ func TestLoader_SourcesVerifiedStageOne_WithSha256sum(t *testing.T) {
 	}
 	if !strings.Contains(out, "fd="+fmt.Sprint(StageFD)) {
 		t.Errorf("stage-1 did not inherit the stage descriptor number; output:\n%s", out)
+	}
+	if !strings.Contains(out, "dig="+StageDigest(payload)) {
+		t.Errorf("stage-1 did not inherit the stage digest; output:\n%s", out)
 	}
 	if strings.Contains(out, "CANARY") {
 		t.Errorf("a secret canary reached the far side; output:\n%s", out)

@@ -91,6 +91,17 @@ func prepareMint(t *testing.T) (*remoteLauncherAdapter, ssh.BootstrapRun, ssh.Bo
 	return a, run, gate, buf
 }
 
+func TestPrepare_RejectsCapabilityWithoutLifecyclePort(t *testing.T) {
+	lg, _ := captureAdapterLogs(t)
+	a := &remoteLauncherAdapter{inner: shellintegration.NewRemoteLauncher(), logger: lg}
+	opts := mintOpts()
+	opts.LifecyclePort = 0
+
+	if _, _, _, ok := a.Prepare(ssh.ShellAuto, opts); ok {
+		t.Fatal("Prepare accepted a capability without an established lifecycle channel")
+	}
+}
+
 // happy is the far side of a bootstrap that reaches the frame and then
 // accepts.
 func happyScript() *scriptedStream {

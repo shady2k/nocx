@@ -373,6 +373,215 @@ func (refusingMaster) Aux(mux.SessionRequest) (io.ReadWriteCloser, error) {
 	return nil, mux.ErrSessionRefused
 }
 
+func (refusingMaster) OpenRemoteForward(string, int, string, int) (int, error) {
+	return 0, mux.ErrForwardFailed
+}
+
+type recordingForwardMaster struct {
+	forwardPort int
+	forwardErr  error
+	forwardArgs []struct {
+		listenHost  string
+		listenPort  int
+		connectHost string
+		connectPort int
+	}
+	auxCalls int
+}
+
+func (m *recordingForwardMaster) PID() int     { return 1 }
+func (m *recordingForwardMaster) Exit() error  { return nil }
+func (m *recordingForwardMaster) Close() error { return nil }
+
+func (m *recordingForwardMaster) Aux(mux.SessionRequest) (io.ReadWriteCloser, error) {
+	m.auxCalls++
+	return nil, mux.ErrSessionRefused
+}
+
+func (m *recordingForwardMaster) OpenRemoteForward(listenHost string, listenPort int, connectHost string, connectPort int) (int, error) {
+	m.forwardArgs = append(m.forwardArgs, struct {
+		listenHost  string
+		listenPort  int
+		connectHost string
+		connectPort int
+	}{listenHost, listenPort, connectHost, connectPort})
+	return m.forwardPort, m.forwardErr
+}
+
+type closeRecorder struct {
+	closed bool
+}
+
+func (c *closeRecorder) Close() error {
+	c.closed = true
+	return nil
+}
+
+func TestTypedDelivery_RefusedForwardAbortsWithoutPublishing(t *testing.T) {
+	runner, _, pub, _ := typedTestRunner(t, refusingOracle{})
+	master := &recordingForwardMaster{forwardErr: mux.ErrForwardFailed}
+	runner.dial = func(string) (TypedMaster, error) { return master, nil }
+	runner.probes = func(string, int, TypedMaster) ssh.MasterProbes {
+		return ssh.MasterProbes{ProcessAlive: func(int) bool { return false }}
+	}
+	var reported ssh.RefusalReason
+	runner.reportBootstrapOutcome = func(_ string, reason ssh.RefusalReason) { reported = reason }
+	win := newHarnessWindow()
+	win.attach(devNull(t))
+	listener := &closeRecorder{}
+	d := &typedDelivery{
+		runner:         runner,
+		sessionID:      "sid",
+		lane:           "lane",
+		controlPath:    "/tmp/control",
+		window:         win,
+		listener:       listener,
+		listenerPort:   43210,
+		publishSettled: make(chan struct{}),
+	}
+
+	d.doRun(context.Background())
+
+	if len(master.forwardArgs) != 1 {
+		t.Fatalf("OpenRemoteForward calls = %d, want 1", len(master.forwardArgs))
+	}
+	got := master.forwardArgs[0]
+	if got.listenHost != "127.0.0.1" || got.listenPort != 0 ||
+		got.connectHost != "127.0.0.1" || got.connectPort != 43210 {
+		t.Fatalf("forward args = %+v, want loopback:0 to loopback:43210", got)
+	}
+	if reported != ssh.ReasonChannelUnavailable {
+		t.Fatalf("reported reason = %q, want %q", reported, ssh.ReasonChannelUnavailable)
+	}
+	if pub.callCount() != 0 {
+		t.Fatalf("publish calls = %d, want 0", pub.callCount())
+	}
+	if listener.closed != true {
+		t.Fatal("refused forward left the listener open")
+	}
+	win.mu.Lock()
+	written := append([]byte(nil), win.written...)
+	win.mu.Unlock()
+	if got := string(written); got != string(shellintegration.AbortFrame()) {
+		t.Fatalf("refused forward wrote %q, want abort frame %q", got, shellintegration.AbortFrame())
+	}
+}
+
+func TestTypedDelivery_ZeroAllocatedForwardAbortsWithoutPublishing(t *testing.T) {
+	runner, _, pub, _ := typedTestRunner(t, refusingOracle{})
+	master := &recordingForwardMaster{}
+	runner.dial = func(string) (TypedMaster, error) { return master, nil }
+	var reported ssh.RefusalReason
+	runner.reportBootstrapOutcome = func(_ string, reason ssh.RefusalReason) { reported = reason }
+	win := newHarnessWindow()
+	win.attach(devNull(t))
+	listener := &closeRecorder{}
+	d := &typedDelivery{
+		runner:         runner,
+		sessionID:      "sid",
+		lane:           "lane",
+		controlPath:    "/tmp/control",
+		window:         win,
+		listener:       listener,
+		listenerPort:   43210,
+		publishSettled: make(chan struct{}),
+	}
+
+	d.doRun(context.Background())
+
+	if reported != ssh.ReasonChannelUnavailable {
+		t.Fatalf("reported reason = %q, want %q", reported, ssh.ReasonChannelUnavailable)
+	}
+	if pub.callCount() != 0 {
+		t.Fatalf("publish calls = %d, want 0", pub.callCount())
+	}
+	if !listener.closed {
+		t.Fatal("zero allocated port left the listener open")
+	}
+	win.mu.Lock()
+	written := append([]byte(nil), win.written...)
+	win.mu.Unlock()
+	if got := string(written); got != string(shellintegration.AbortFrame()) {
+		t.Fatalf("zero allocated port wrote %q, want abort frame %q", got, shellintegration.AbortFrame())
+	}
+}
+
+func TestTypedDelivery_AllocatedForwardPutsPortInSecretFrame(t *testing.T) {
+	runner, _, _, _ := typedTestRunner(t, refusingOracle{})
+	master := &recordingForwardMaster{forwardPort: 45123}
+	runner.dial = func(string) (TypedMaster, error) { return master, nil }
+	runner.probes = func(string, int, TypedMaster) ssh.MasterProbes {
+		return ssh.MasterProbes{ProcessAlive: func(int) bool { return false }}
+	}
+	win := newHarnessWindow()
+	win.attach(devNull(t))
+	opts := shellintegration.LaunchOptions{
+		SessionID:  "sid",
+		Enhanced:   true,
+		Lane:       "lane",
+		Domain:     "domain",
+		Epoch:      7,
+		Capability: strings.Repeat("a", 64),
+		Recovery:   strings.Repeat("b", 64),
+	}
+	stage, err := shellintegration.Stage1Frame(shellintegration.ShellAuto, opts)
+	if err != nil {
+		t.Fatalf("Stage1Frame: %v", err)
+	}
+	d := &typedDelivery{
+		runner:         runner,
+		sessionID:      opts.SessionID,
+		lane:           opts.Lane,
+		controlPath:    "/tmp/control",
+		window:         win,
+		listener:       &closeRecorder{},
+		listenerPort:   43210,
+		publishSettled: make(chan struct{}),
+	}
+	var secretFrame []byte
+	d.plan = shellintegration.BootstrapPlan{
+		Stage1: stage,
+		Ordered: func(context.Context) error {
+			<-d.publishSettled
+			return nil
+		},
+		Secret: shellintegration.SecretFunc(func(context.Context) ([]byte, error) {
+			frameOpts := opts
+			frameOpts.LifecyclePort = d.remotePort
+			var err error
+			secretFrame, err = shellintegration.SecretFrame(frameOpts)
+			return secretFrame, err
+		}),
+	}
+	win.feed([]byte(shellintegration.LoaderReadyToken + "\n"))
+	win.feed([]byte(shellintegration.StageReadyToken + "\n"))
+	win.feed([]byte(shellintegration.OutcomePrefix +
+		shellintegration.OutcomeToken(shellintegration.OutcomeBootstrapAccepted) + "\n"))
+
+	d.doRun(context.Background())
+
+	if len(master.forwardArgs) != 1 {
+		t.Fatalf("OpenRemoteForward calls = %d, want 1", len(master.forwardArgs))
+	}
+	got := master.forwardArgs[0]
+	if got.listenHost != "127.0.0.1" || got.listenPort != 0 ||
+		got.connectHost != "127.0.0.1" || got.connectPort != d.listenerPort {
+		t.Fatalf("forward args = %+v, want loopback:0 to loopback:%d", got, d.listenerPort)
+	}
+	if d.remotePort != 45123 {
+		t.Fatalf("remote port = %d, want master allocation 45123", d.remotePort)
+	}
+	win.mu.Lock()
+	written := append([]byte(nil), win.written...)
+	win.mu.Unlock()
+	gotWire := string(written)
+	wantSecret := "NOCX1 SECRET sid domain 7\n" +
+		opts.Capability + "\n" + opts.Recovery + "\n45123\n"
+	if !strings.Contains(gotWire, wantSecret) {
+		t.Fatalf("frame 2 = %q, want secret frame containing allocated port %q", gotWire, wantSecret)
+	}
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 
@@ -432,7 +641,7 @@ func TestTypedLine_TheLineCarriesNeitherBearerNorTheBundle(t *testing.T) {
 		"-o", "ControlMaster=auto", "-o", "ControlPath=/tmp/nocx-mux-0/m-%C", "-o", "ControlPersist=no",
 	}}
 	inv := ssh.TypedInvocation{Host: "box.example.com", User: "alice", Port: 2222}
-	line := composeSSHLine(wrap, []string{"-t", "-R", "127.0.0.1:40123:127.0.0.1:37777"}, inv, carrier)
+	line := composeSSHLine(wrap, []string{"-t"}, inv, carrier)
 
 	for name, secret := range map[string]string{"capability": canaryCapability, "recovery fence": canaryRecovery} {
 		if strings.Contains(line, secret) {
@@ -574,6 +783,10 @@ func (*livingMaster) PID() int    { return os.Getpid() }
 func (*livingMaster) Exit() error { return nil }
 func (*livingMaster) Close() error {
 	return nil
+}
+
+func (*livingMaster) OpenRemoteForward(string, int, string, int) (int, error) {
+	return 43123, nil
 }
 
 func (*livingMaster) Aux(mux.SessionRequest) (io.ReadWriteCloser, error) {

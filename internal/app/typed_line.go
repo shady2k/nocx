@@ -86,6 +86,9 @@ type TypedMaster interface {
 	// Aux opens one auxiliary channel on the master's connection. A refusal
 	// is a refusal: the adapter never opens a connection of its own.
 	Aux(req mux.SessionRequest) (io.ReadWriteCloser, error)
+	// OpenRemoteForward asks the master to bind a remote loopback port and
+	// returns the port the far kernel assigned.
+	OpenRemoteForward(listenHost string, listenPort int, connectHost string, connectPort int) (int, error)
 	// Exit asks the master to terminate.
 	Exit() error
 	// Close drops this client's control connection without stopping the
@@ -113,6 +116,10 @@ func (r realMuxMaster) Aux(req mux.SessionRequest) (io.ReadWriteCloser, error) {
 		return nil, err
 	}
 	return s, nil
+}
+
+func (r realMuxMaster) OpenRemoteForward(listenHost string, listenPort int, connectHost string, connectPort int) (int, error) {
+	return r.m.OpenRemoteForward(listenHost, listenPort, connectHost, connectPort)
 }
 
 // DialTypedMux is the production dialer.
@@ -170,6 +177,12 @@ type typedRunner struct {
 	// path they were told nothing while the same refusal on the saved path
 	// was a structured reason — a soft degrade the UI contradicts, which is
 	// how a feature that does not exist survives a release (AGENTS.md).
+	//
+	// reportListenerPort is a test-only observation seam for the loopback
+	// listener created by the child-domain composer. It lets the live
+	// assembly proof connect a candidate to the exact listener the grant
+	// established; it cannot affect delivery.
+	reportListenerPort func(port int)
 	//
 	// Nil reports nowhere, which is the state before this and the safe
 	// direction: a delivery driven without a composition root still runs.
@@ -260,12 +273,15 @@ func composeSSHLine(wrap ssh.TypedWrap, extra []string, inv ssh.TypedInvocation,
 // typedDelivery is one typed session's delivery, armed BEFORE the grant is
 // handed to the parent shell and run once the line is going.
 type typedDelivery struct {
-	runner      *typedRunner
-	sessionID   string
-	lane        string
-	controlPath string
-	plan        shellintegration.BootstrapPlan
-	window      session.BootstrapWindow
+	runner       *typedRunner
+	sessionID    string
+	lane         string
+	controlPath  string
+	plan         shellintegration.BootstrapPlan
+	window       session.BootstrapWindow
+	listener     io.Closer
+	listenerPort int
+	remotePort   int
 	// publishSettled closes when the publish attempt has reached a terminal
 	// outcome — committed, unchanged, failed or contended. Design §6.1 step
 	// 5: the secret is minted only after it, so a stage-1 that verifies
@@ -345,7 +361,12 @@ func (d *typedDelivery) run(ctx context.Context) {
 
 func (d *typedDelivery) doRun(ctx context.Context) {
 	lg := d.runner.log
-	defer func() { _ = d.window.Close() }()
+	defer func() {
+		_ = d.window.Close()
+		if d.listener != nil {
+			_ = d.listener.Close()
+		}
+	}()
 
 	// 1. Ownership proven — and NOT ASSUMED. Nothing before this line
 	//    publishes, mints or touches remote state; what happens in this wait
@@ -372,7 +393,23 @@ func (d *typedDelivery) doRun(ctx context.Context) {
 	}
 	defer func() { _ = master.Close() }()
 
-	// The input quarantine opens HERE and not earlier (design §5.3): from
+	// The forward is opened by the proven master, not guessed into argv.
+	// A refusal is terminal: only the non-secret abort frame may reach the
+	// loader, and no publish or secret frame may start.
+	remotePort, err := master.OpenRemoteForward("127.0.0.1", 0, "127.0.0.1", d.listenerPort)
+	if err != nil || remotePort < 1 || remotePort > 65535 {
+		if err == nil {
+			err = fmt.Errorf("master returned invalid lifecycle port %d", remotePort)
+		}
+		lg.Warn("typed ssh: the master refused the lifecycle forward; the session stays a plain ssh",
+			"session_id", d.sessionID, "error", err)
+		if _, werr := d.window.Write(shellintegration.AbortFrame()); werr != nil {
+			lg.Debug("typed ssh: the abort frame could not be written", "error", werr)
+		}
+		d.reportOutcome(ssh.ReasonChannelUnavailable)
+		return
+	}
+	d.remotePort = remotePort
 	// now until the terminal outcome the user's keystrokes are refused, not
 	// buffered.
 	d.window.QuarantineInput()

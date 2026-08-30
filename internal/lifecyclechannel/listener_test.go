@@ -138,6 +138,23 @@ func TestListenerExpectationTimeoutReportsHelloTimeoutOnce(t *testing.T) {
 	}
 }
 
+func TestListenerExpectationWithoutHelloReportsTimeout(t *testing.T) {
+	f := newListenerFixture(t, time.Hour)
+	mustExpectListenerDomain(t, f)
+	expectation := getListenerExpectation(t, f.listener, f.handle.Domain)
+
+	// Drive the timeout callback directly: the test proves the no-hello
+	// outcome without making correctness depend on a wall-clock duration.
+	f.listener.expireExpectation(expectation)
+
+	if causes := f.recorder.all(); len(causes) != 1 || causes[0] != LossHelloTimeout {
+		t.Fatalf("no-hello causes = %v, want exactly [%s]", causes, LossHelloTimeout)
+	}
+	if lanes := f.recorder.allLanes(); len(lanes) != 1 || lanes[0] != f.lane {
+		t.Fatalf("no-hello lanes = %v, want exactly [%s]", lanes, f.lane)
+	}
+}
+
 func TestListenerLateHelloAfterExpectationTimeoutHasNoSecondLoss(t *testing.T) {
 	f := newListenerFixture(t, 100*time.Millisecond)
 	mustExpectListenerDomain(t, f)

@@ -42,13 +42,13 @@ type fakeMaster struct {
 	// silentHello closes the connection instead of answering the hello.
 	silentHello bool
 
-	mu        sync.Mutex
-	hellos    int
-	alives    int
-	sessions  int
-	terminate int
-	opened    []openedSession
-	pid       uint32
+	mu                        sync.Mutex
+	hellos                    int
+	alives                    int
+	sessions                  int
+	terminate                 int
+	opened                    []openedSession
+	pid                       uint32
 	openForwardReply          uint32
 	openForwardPort           uint32
 	openForwardReason         string
@@ -110,6 +110,7 @@ func (m *fakeMaster) lastOpened() (openedSession, bool) {
 	}
 	return m.opened[len(m.opened)-1], true
 }
+
 func (m *fakeMaster) lastForward() (forwardRequest, bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()

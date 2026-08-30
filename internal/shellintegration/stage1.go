@@ -185,7 +185,6 @@ const stage1Template = `_S=$1
 _L=$2
 _D=$3
 _E=$4
-_P=$5
 G=
 C=
 W=
@@ -210,14 +209,18 @@ NL='
 '
 H=${S%%"$NL"*}
 if [ "$H" = "@MAGIC@ @KSECRET@ $_S $_D $_E" ]; then
-case "$S" in *"$NL"*"$NL"*) ;; *) Q @INTERRUPTED@ ;; esac
+case "$S" in *"$NL"*"$NL"*"$NL"*) ;; *) Q @INTERRUPTED@ ;; esac
 Y=${S#*"$NL"}
 CP=${Y%%"$NL"*}
-FN=${Y#*"$NL"}
+Y=${Y#*"$NL"}
+FN=${Y%%"$NL"*}
+LP=${Y#*"$NL"}
 S=
 Y=
 case "$CP" in ''|*[!0-9a-f]*) Q @BADSECRET@ ;; esac
 case "$FN" in *[!0-9a-f]*) Q @BADSECRET@ ;; esac
+case "$LP" in ''|*[!0-9]*) Q @BADSECRET@ ;; esac
+[ "$LP" -ge 1 ] 2>/dev/null && [ "$LP" -le 65535 ] 2>/dev/null || Q @BADSECRET@
 G=$(mktemp "${TMPDIR:-/tmp}/nocx.XXXXXX") || Q @NOTEMP@
 [ -n "$G" ] || Q @NOTEMP@
 ( : <"$G" ) || Q @NOCAPFD@
@@ -246,7 +249,7 @@ if [ -n "$A" ]; then
 NOCX_LIFECYCLE_LANE=$_L
 NOCX_LIFECYCLE_DOMAIN=$_D
 NOCX_LIFECYCLE_EPOCH=$_E
-NOCX_LIFECYCLE_PORT=$_P
+NOCX_LIFECYCLE_PORT=$LP
 export @CAPFDENV@ NOCX_LIFECYCLE_LANE NOCX_LIFECYCLE_DOMAIN NOCX_LIFECYCLE_EPOCH NOCX_LIFECYCLE_PORT
 fi
 @BOOTENV@=1
@@ -364,8 +367,8 @@ func hexFieldOK(s string) bool {
 }
 
 // SecretFrame builds frame 2 for one session: the header naming the session,
-// domain and epoch this pair belongs to, then the capability and the fence,
-// one per line.
+// domain and epoch this pair belongs to, then the capability, fence and
+// allocated lifecycle port, one per line.
 //
 // The header is what makes assertion 9 mechanical. Stage-1 compares it as a
 // whole against the addressing arguments the COMMAND gave it, so a frame
@@ -396,9 +399,12 @@ func SecretFrame(opts LaunchOptions) ([]byte, error) {
 	if !hexFieldOK(opts.Recovery) {
 		return nil, fmt.Errorf("shellintegration: recovery fence is not lowercase hex")
 	}
-	body := fmt.Sprintf("%s %s %s %s %d\n%s\n%s\n",
+	if opts.LifecyclePort < 1 || opts.LifecyclePort > 65535 {
+		return nil, fmt.Errorf("shellintegration: lifecycle port %d is outside 1..65535", opts.LifecyclePort)
+	}
+	body := fmt.Sprintf("%s %s %s %s %d\n%s\n%s\n%d\n",
 		FrameMagic, secretFrameSecret, sid, opts.Domain, opts.Epoch,
-		opts.Capability, opts.Recovery)
+		opts.Capability, opts.Recovery, opts.LifecyclePort)
 	if len(body) > MaxSecretFrameLen {
 		return nil, fmt.Errorf("shellintegration: secret frame is %d bytes, over the %d cap",
 			len(body), MaxSecretFrameLen)

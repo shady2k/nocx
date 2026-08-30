@@ -135,17 +135,16 @@ func TestLaunchClassifiesAnIncompatibleDiscoveryAnswer(t *testing.T) {
 	}
 }
 
-func TestLaunchClassifiesAReadinessFailureAndNamesTheDaemonLog(t *testing.T) {
+func TestLaunchClassifiesAReadinessFailureWithoutGuessingTheDaemonLog(t *testing.T) {
 	dir := t.TempDir()
-	logPath := filepath.Join(filepath.Dir(dir), "nocx.log")
 	launcher := newLaunchFailureTestLauncher(t, dir, launchFailureDiscoverer{err: coordinator.ErrNoCoordinator}, launchFailureSpawner{})
 
 	failure := requireLaunchFailure(t, func() error {
 		_, err := launcher.Launch(context.Background())
 		return err
 	}(), coordinator.FailureNotReady)
-	if !strings.Contains(failure.Remedy, logPath) {
-		t.Fatalf("remedy %q does not name daemon log %q", failure.Remedy, logPath)
+	if failure.Remedy != "Retry the launch; the daemon did not become ready." {
+		t.Fatalf("remedy = %q, want a path-free readiness instruction", failure.Remedy)
 	}
 }
 

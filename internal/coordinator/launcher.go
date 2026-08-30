@@ -478,11 +478,10 @@ func (l *Launcher) profileFailure(message string, cause error) *LaunchFailure {
 }
 
 func (l *Launcher) notReadyFailure(message string, cause error) *LaunchFailure {
-	logPath := filepath.Join(filepath.Dir(l.cfg.Dir), "nocx.log")
 	return NewLaunchFailure(
 		FailureNotReady,
 		message,
-		fmt.Sprintf("Check the daemon log at %s and retry.", logPath),
+		"Retry the launch; the daemon did not become ready.",
 		cause,
 	)
 }

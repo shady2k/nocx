@@ -135,10 +135,34 @@ test('a person can choose visible notification kinds without losing rows or read
     fs.writeFileSync(gateA, '')
     await showSidebarView(page, 'notifications')
     const badge = page.locator(BELL).locator(BADGE)
-    await expect(badge).toHaveText(/^\d+$/, { timeout: 30_000 })
-    await expect(badge).toHaveText('2')
-    await expect(rowsOfKind(page, TERMINAL_BELL)).toHaveCount(bellRowsBefore + 1)
-    await expect(rowsOfKind(page, COMMAND_FINISHED)).toHaveCount(finishedRowsBefore + 1)
+    // One wait on all three facts, and it carries the numbers.
+    //
+    // A raised tab produces TWO events on two different paths: the BEL is a
+    // byte the renderer sees, while the command's completion is the ledger's
+    // KindBlockFinished, which travels history.record to the backend and comes
+    // back through the notification pipeline. So the badge can pass through
+    // "1" on its way to "2", and a wait that closes on the badge merely BEING
+    // a number closes on that "1" — the state the next assertion rejects. That
+    // is the repo's recurring flake shape, and it went red on a loaded runner
+    // exactly as recorded: fourteen polls at "1" while webkit passed.
+    //
+    // Polling the conjunction fixes the shape; returning the counts rather
+    // than a boolean is what makes a red run useful, because the timeout then
+    // names which half never arrived instead of only that the badge read "1".
+    await expect
+      .poll(
+        async () => ({
+          badge: await badge.textContent(),
+          bells: await rowsOfKind(page, TERMINAL_BELL).count(),
+          finished: await rowsOfKind(page, COMMAND_FINISHED).count(),
+        }),
+        { timeout: 30_000 },
+      )
+      .toEqual({
+        badge: '2',
+        bells: bellRowsBefore + 1,
+        finished: finishedRowsBefore + 1,
+      })
 
     // Read A before B is admitted. This gives the restore assertion two
     // states to preserve: A is read, while B and C remain unread.

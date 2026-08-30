@@ -1,0 +1,82 @@
+/* ConnectionIndicator — the pane's corner mark for a connection in trouble.
+   Identity: .ui-connection-indicator. Variance: data-condition.
+
+   Absent in the healthy state, so it has no "reachable" rule: the component
+   renders nothing there, and a style for a state that never reaches the DOM
+   would be a promise the markup does not keep. */
+
+.ui-connection-indicator {
+  position: absolute;
+  top: 8px;
+  right: 12px;
+  z-index: 2;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  /* It sits over a terminal grid whose colours are the user's, not the
+     theme's, so it carries its own ground rather than trusting what is
+     underneath. Rounded and inset so it reads as chrome laid on the pane and
+     not as something a program drew. */
+  padding: 4px;
+  border-radius: 6px;
+  background: color-mix(in srgb, var(--color-surface-raised), transparent 8%);
+  box-shadow: 0 1px 3px color-mix(in srgb, black, transparent 80%);
+  pointer-events: auto;
+  /* No animation, deliberately. The measurement behind this is one probe
+     every thirty seconds; anything that moves faster than that is describing
+     a resolution the data does not have. */
+}
+
+.ui-connection-indicator svg {
+  width: 14px;
+  height: 14px;
+  display: block;
+}
+
+/* Answering, just late. The host is fine and the link is not — a warning, not
+   a failure, and it must not wear the colour that means work was lost. */
+.ui-connection-indicator[data-condition='slow'] {
+  color: var(--color-warning);
+}
+
+/* Not answering, and nothing has ended. The loudest thing this axis says
+   while the session may still be alive on the far side. */
+.ui-connection-indicator[data-condition='unreachable'] {
+  color: var(--color-warning);
+  background: color-mix(in srgb, var(--color-warning), var(--color-surface-raised) 88%);
+}
+
+/* Gone. */
+.ui-connection-indicator[data-condition='lost'] {
+  color: var(--color-danger);
+  background: color-mix(in srgb, var(--color-danger), var(--color-surface-raised) 88%);
+}
+
+/* The overlay badge on the lost state: the plug, struck through by a warning
+   triangle, is the one condition that earns two glyphs — it is terminal and
+   the others are not. */
+.ui-connection-indicator__overlay {
+  position: absolute;
+  right: -3px;
+  bottom: -3px;
+  display: block;
+  color: var(--color-danger);
+}
+
+.ui-connection-indicator__overlay svg {
+  width: 9px;
+  height: 9px;
+}
+
+/* The pane's host for the mark. It is positioned, not laid out: the mark
+   overlays the grid and must take no height, or it would reflow the terminal
+   down to the pty — the reflow the integration notice deliberately accepts
+   because it is a card, and this one must not because it is a glyph. */
+.nocx-connection-mark {
+  position: absolute;
+  top: 0;
+  right: 0;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+}

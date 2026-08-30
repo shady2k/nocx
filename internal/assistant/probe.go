@@ -19,7 +19,13 @@ import (
 // probeTimeout bounds one probe: a Test button that can hang forever is a
 // control that lies. The stream must produce its one-word answer well inside
 // this; the connection's own cancellation still applies.
-const probeTimeout = 30 * time.Second
+const probeTimeout = ProbeTimeout
+
+// ProbeTimeout is the same bound, exported because the transport has to size
+// the probe gate's WAIT against it: a second probe must be able to queue
+// behind a first that runs to its own limit, and a wait bound shorter than
+// this would refuse it for no reason but arithmetic (nocx-bxafj).
+const ProbeTimeout = 30 * time.Second
 
 // probePrompt asks for the smallest honest completion: one word. The probe
 // asserts streaming works end to end, not that the model is eloquent.

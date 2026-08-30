@@ -24,6 +24,7 @@ import (
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/profile"
+	"github.com/shady2k/nocx/internal/transport/control"
 	"github.com/shady2k/nocx/internal/vault"
 )
 
@@ -305,13 +306,32 @@ type assistantProbeHandlers struct {
 	client  assistant.Client
 	probes  *assistant.ProbeStore
 	wired   bool
-	r       Responder
+	// admit is the one-probe-at-a-time gate, acquired HERE on the task
+	// goroutine rather than at submission (nocx-bxafj). That is what states
+	// the interval with both ends in the code that owns it: it opens where
+	// this handler takes the gate and closes where this handler returns —
+	// after its response has been enqueued, never an unbounded moment later
+	// on a goroutine the handler cannot see. A waiting gate, so a second
+	// probe queues; only exhausting its bound is a refusal.
+	admit control.Admission
+	r     Responder
 }
 
 func (h assistantProbeHandlers) handleEndpointProbe(ctx context.Context, req jsonrpcRequest) {
 	if !h.wired {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "agent not available"})
 		return
+	}
+	// Taken before anything is resolved: the gate exists to serialise the
+	// call to the provider, and every refusal path below it answers the
+	// client and returns, which releases it.
+	if h.admit != nil {
+		permit, rej := h.admit.TryAcquire(ctx)
+		if rej != nil {
+			_ = h.r.TryError(req.ID, saturationRPCError(req.Method, rej))
+			return
+		}
+		defer permit.Release()
 	}
 	var params endpointProbeParams
 	if err := json.Unmarshal(req.Params, &params); err != nil {

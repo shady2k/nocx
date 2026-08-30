@@ -31,6 +31,8 @@ package session
 
 import (
 	"time"
+
+	"github.com/shady2k/nocx/internal/ssh"
 )
 
 // Liveness is the projection's value.
@@ -67,6 +69,26 @@ type LivenessState struct {
 	Liveness   Liveness
 	Epoch      uint64
 	ObservedAt time.Time
+	// RoundTrip is how long the last probe to this session's host took, or
+	// zero when nothing measured one (a local session, or a probe that never
+	// answered — an unanswered probe has no duration).
+	//
+	// A MEASUREMENT beside the value, never a value of its own: "can we reach
+	// this host" and "how fast does it answer" are two questions, and folding
+	// the second into the first would make a slow host render as a half-dead
+	// one. It is what lets the product say a server is struggling, which is
+	// the state a person actually meets — the vocabulary above can otherwise
+	// only say gone.
+	RoundTrip time.Duration
+	// Slow is the GRADE of that measurement, and it is stored rather than
+	// left to be re-derived because the grade has hysteresis: it enters and
+	// leaves at different numbers, so it is a function of the measurement AND
+	// the previous grade, which a reader holding only RoundTrip cannot
+	// reproduce. A renderer that thresholded the milliseconds for itself
+	// would be a second derivation of one concept — the shape AGENTS.md calls
+	// this repository's most recurrent defect — and the two would agree
+	// everywhere anyone looked and disagree exactly at the boundary.
+	Slow bool
 }
 
 // Observation is one assertion about a session's reachability, addressed to a
@@ -83,6 +105,39 @@ type Observation struct {
 	Liveness   Liveness
 	Epoch      uint64
 	ObservedAt time.Time
+	RoundTrip  time.Duration
+}
+
+// The two round-trip thresholds, and why there are two.
+//
+// A link sitting exactly at one threshold would flap: probe, slow, probe,
+// fine, probe, slow — an indicator blinking at the probe interval, which is
+// worse than no indicator because it draws the eye and says nothing. So the
+// grade ENTERS slow at one number and LEAVES it at a lower one, and the gap
+// between them is what a steady link cannot cross by jitter alone.
+//
+// The numbers are chosen against what an SSH keepalive round trip normally
+// is: single-digit milliseconds on a LAN, tens across a continent, and low
+// hundreds on a satellite or a badly congested link. Half a second is past
+// all of those — a host that takes that long to answer a request it does not
+// even parse is busy, not far away.
+const (
+	slowRoundTripEnter = 500 * time.Millisecond
+	slowRoundTripLeave = 300 * time.Millisecond
+)
+
+// roundTripGrade folds a measured round trip into the two states the product
+// draws, carrying the previous grade so the thresholds can differ by
+// direction. A zero measurement is not a grade: nothing was measured, so the
+// previous one stands.
+func roundTripGrade(prevSlow bool, rtt time.Duration) bool {
+	if rtt <= 0 {
+		return prevSlow
+	}
+	if prevSlow {
+		return rtt > slowRoundTripLeave
+	}
+	return rtt >= slowRoundTripEnter
 }
 
 // livenessForExit maps how a session ended onto the terminal half of the set.
@@ -152,12 +207,12 @@ func (r *Reg) Observe(ref Ref, obs Observation) bool {
 //
 // The epoch is minted per session, from that session's own counter, at the
 // moment the observation is made.
-func (r *Reg) observeHost(host string, responsive bool) {
+func (r *Reg) observeHost(host string, reach ssh.Reachability) {
 	if host == "" {
 		return
 	}
 	value := LivenessUnknown
-	if responsive {
+	if reach.Responsive {
 		value = LivenessAlive
 	}
 	at := time.Now()
@@ -179,7 +234,7 @@ func (r *Reg) observeHost(host string, responsive bool) {
 		if !ok {
 			continue
 		}
-		r.Observe(ref, Observation{Liveness: value, Epoch: epoch, ObservedAt: at})
+		r.Observe(ref, Observation{Liveness: value, Epoch: epoch, ObservedAt: at, RoundTrip: reach.RoundTrip})
 	}
 }
 
@@ -208,8 +263,8 @@ func (r *Reg) mintLivenessEpoch(ref Ref) (uint64, bool) {
 // callback the ssh package's keepalive prober calls. The ssh package never
 // learns which host it is talking about — the connection is pooled and belongs
 // to no single session — so the name is captured here, where the open knew it.
-func (r *Reg) hostLivenessObserver(host string) func(bool) {
-	return func(responsive bool) { r.observeHost(host, responsive) }
+func (r *Reg) hostLivenessObserver(host string) ssh.LivenessObserver {
+	return func(reach ssh.Reachability) { r.observeHost(host, reach) }
 }
 
 // Liveness returns the session's current projection, deriving the terminal
@@ -277,8 +332,38 @@ func (s *realSession) applyObservation(obs Observation) (applied, changed bool) 
 		return false, false
 	}
 	// The conversion is the point rather than a shortcut: an Observation and
-	// a LivenessState are the same three words, one asserted and one recorded,
-	// so a field added to either without the other stops compiling here.
-	s.liveness = LivenessState(obs)
-	return true, obs.Liveness != cur.Liveness
+	// a LivenessState are the same words, one asserted and one recorded, so a
+	// field added to either without the other stops compiling here.
+	// Field by field rather than a conversion. It USED to be
+	// `LivenessState(obs)`, and the conversion was the guard: the two structs
+	// were the same words, one asserted and one recorded, so a field added to
+	// either without the other stopped compiling. That guard is spent now
+	// that the record holds something no observer may assert — the grade,
+	// which is derived here from the observation and the previous grade. What
+	// replaces it is TestApplyObservation_CarriesEveryObservedField, which
+	// fails if an observed field stops reaching the record.
+	next := LivenessState{
+		Liveness:   obs.Liveness,
+		Epoch:      obs.Epoch,
+		ObservedAt: obs.ObservedAt,
+		RoundTrip:  obs.RoundTrip,
+	}
+	// A measurement the probe did not make must not erase the last one: an
+	// unanswered probe says nothing about how fast the host answers, and
+	// zeroing the record here would make the indicator drop to "fine" at the
+	// exact moment the host stopped answering.
+	if next.RoundTrip <= 0 {
+		next.RoundTrip = cur.RoundTrip
+	}
+	wasSlow := cur.Slow
+	nowSlow := roundTripGrade(wasSlow, next.RoundTrip)
+	next.Slow = nowSlow
+	s.liveness = next
+	// Two reasons to tell the watcher, and only these two. The VALUE changed
+	// (reachable ↔ not), or the round trip crossed a GRADE boundary. A probe
+	// that merely confirms what is believed — including one reporting a round
+	// trip a millisecond off the last — publishes nothing, which is what keeps
+	// a healthy connection silent on the wire while still being measured
+	// every probe.
+	return true, obs.Liveness != cur.Liveness || nowSlow != wasSlow
 }

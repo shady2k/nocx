@@ -68,3 +68,34 @@ describe('what the tab shows', () => {
     expect(paneIndicator(null, null)).toBeNull()
   })
 })
+
+describe('an unreachable host', () => {
+  // The dot must not go OUT: no dot means "there is no agent in this pane",
+  // which is a different fact and one the tab already draws. An unobservable
+  // agent is not an absent one — and that distinction is worth most exactly
+  // when it is lost, scanning tabs after a suspend to see which to rescue.
+  it('leaves the dot showing, as unknown', () => {
+    expect(paneIndicator('working', null, false)).toEqual({
+      activity: 'unknown',
+      source: 'driver',
+    })
+  })
+
+  // "Waiting for you" over a dead pipe calls a person to answer something
+  // that cannot be delivered.
+  it('stops asserting that the agent is waiting for a person', () => {
+    expect(paneIndicator('permission_choice', null, false)?.activity).toBe('unknown')
+    expect(paneIndicator(null, 'idle', false)?.activity).toBe('unknown')
+  })
+
+  // A pane with no agent still has no agent.
+  it('invents nothing for a pane that had nothing to say', () => {
+    expect(paneIndicator(null, null, false)).toBeNull()
+  })
+
+  // A slow host is still an observed one: bytes are arriving, just late.
+  it('does not touch the indicator while the host is merely reachable', () => {
+    expect(paneIndicator('working', null, true)?.activity).toBe('working')
+    expect(paneIndicator('working', null)?.activity).toBe('working')
+  })
+})

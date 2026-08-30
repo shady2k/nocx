@@ -411,6 +411,11 @@ export interface SessionFake {
   fireData(data: string): void
   /** Fire the registered liveness callback with one observation. */
   fireLiveness(liveness: 'alive' | 'unknown', livenessEpoch?: number): void
+  /** Fire a liveness observation whose round trip the BACKEND graded slow.
+   *  Separate from fireLiveness because the grade is a different fact from
+   *  the value, and a test asking for one should not have to state the
+   *  other. */
+  fireSlowLiveness(livenessEpoch?: number): void
   /** Fire the registered pane-observation callback with one classification. */
   fireObservation(state: DriverState, agent?: string): void
 }
@@ -471,6 +476,19 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
         liveness,
         livenessEpoch,
         observedAt: '2026-08-17T10:00:00Z',
+        roundTripMs: 12,
+      })
+    },
+    fireSlowLiveness: (livenessEpoch = 2) => {
+      livenessCb?.({
+        sessionId,
+        instanceId: 'fedcba9876543210fedcba9876543210',
+        sessionEpoch: 1,
+        liveness: 'alive',
+        livenessEpoch,
+        observedAt: '2026-08-17T10:00:00Z',
+        slow: true,
+        roundTripMs: 900,
       })
     },
     ...overrides,

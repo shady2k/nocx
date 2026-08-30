@@ -221,11 +221,18 @@ func (rc *RealClient) dialForConnect(ctx context.Context, host string, resolved 
 			if derr != nil {
 				return nil, derr
 			}
-			stopKA, _ := startKeepalive(gclient, cfg.KeepaliveInterval, cfg.KeepaliveCountMax, cfg.Liveness)
-			conn = &pooledSSHConn{
-				client:        gclient,
-				stopKeepalive: stopKA,
-			}
+			// The prober closes the POOLED connection, never the raw
+			// client underneath it. Closing the client directly skipped
+			// three things the wrapper owns (AD-4: the pool owns the
+			// connection, not the prober): the ticker's own cancel, the
+			// jump handle's release, and the mark that stops the pool
+			// handing this connection to the next tab. Constructed first
+			// and armed after, because the prober's give-up target is the
+			// wrapper itself.
+			pconn := &pooledSSHConn{client: gclient}
+			stopKA, _ := startKeepalive(pconn, cfg.KeepaliveInterval, cfg.KeepaliveCountMax, cfg.Liveness)
+			pconn.setKeepaliveStop(stopKA)
+			conn = pconn
 		}
 		if err != nil {
 			return nil, err
@@ -427,12 +434,17 @@ func (d *dialer) dialViaJumpHost(ctx context.Context, cfg *ConnectConfig, resolv
 		// refcount drops to zero and the bastion connection closes. The bastion
 		// handle is released exactly once because pooledSSHConn.Close is guarded
 		// by its own sync.Once.
-		stop, _ := startKeepalive(target, cfg.KeepaliveInterval, cfg.KeepaliveCountMax, cfg.Liveness)
-		return &pooledSSHConn{
-			client:        target,
-			release:       func() { d.client.pool.Release(jumpHandle) },
-			stopKeepalive: stop,
-		}, nil
+		// Same ownership rule as the direct dial above, and it matters more
+		// here: this wrapper's Close is what releases the bastion's own pool
+		// handle, so a prober closing the raw target would strand the jump
+		// connection for the life of the process.
+		pconn := &pooledSSHConn{
+			client:  target,
+			release: func() { d.client.pool.Release(jumpHandle) },
+		}
+		stop, _ := startKeepalive(pconn, cfg.KeepaliveInterval, cfg.KeepaliveCountMax, cfg.Liveness)
+		pconn.setKeepaliveStop(stop)
+		return pconn, nil
 	}
 }
 

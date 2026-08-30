@@ -662,6 +662,19 @@ export class XtermRenderer implements TerminalRenderer {
     }
   }
 
+  diagnostics(): { bufferRows: number; accelerated: boolean } {
+    // Guarded rather than asserted: this is read at wake, and a renderer
+    // mid-teardown must answer rather than throw — a diagnostic that can
+    // crash the thing it observes is worse than no diagnostic.
+    let bufferRows = 0
+    try {
+      bufferRows = this.term?.buffer.active.length ?? 0
+    } catch {
+      bufferRows = -1
+    }
+    return { bufferRows, accelerated: this.webgl !== undefined }
+  }
+
   private onContextLoss(): void {
     this.webgl?.dispose()
     this.webgl = undefined

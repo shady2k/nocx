@@ -53,6 +53,7 @@
 @import './styles/components/status-card.css';
 @import './styles/components/connection-indicator.css';
 @import './styles/components/status-dot.css';
+@import './styles/components/connection-overlay.css';
 @import './styles/components/action-group.css';
 @import './styles/components/toolbar.css';
 @import './styles/components/dialog.css';

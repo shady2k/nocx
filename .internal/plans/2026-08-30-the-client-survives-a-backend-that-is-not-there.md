@@ -39,6 +39,11 @@ TypeScript + Solid (`frontend/src`), `gorilla/websocket`, vitest, Playwright.
 - **Exact frontend targeted test** (from `frontend/`):
   `./node_modules/.bin/vitest run src/<your-file>.test.ts`
 - **Exact Go targeted test:** `go test ./internal/<your-package>/...`
+- **Go commands that reach `main.go` need `-tags gtk3` on Linux.** Without it cgo fails on
+  the GTK/WebKitGTK pkg-config before it reaches our code, and `go vet ./...` reports an
+  environment problem that reads like a broken build. `go build -tags gtk3 .` and
+  `go vet -tags gtk3 .` are the working forms. `internal/notify/wailsadapter` is the package
+  that fails first; three `internal/shellintegration` tests separately need `dash` installed.
 - A test asserts what a user can do, not what the code currently does. For every
   "returns an error when…" there is a paired "and on an ordinary machine it succeeds".
 

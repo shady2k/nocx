@@ -279,7 +279,7 @@ func buildSSHChildBootstrap(lg log.Logger, pub *lifecyclepub.Publisher, sessions
 		_ = ln.Close()
 		return lifecyclepub.GrantBootstrap{}, err
 	}
-	if err := ln.ExpectDomain(req.Lane, h.Domain); err != nil {
+	if err = ln.ExpectDomain(req.Lane, h.Domain); err != nil {
 		_ = ln.Close()
 		return lifecyclepub.GrantBootstrap{}, err
 	}

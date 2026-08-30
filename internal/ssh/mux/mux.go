@@ -135,6 +135,11 @@ var (
 	// the master answered with MUX_S_OK instead of naming an allocated port.
 	ErrForwardDynamicPortMissing = errors.New("mux: master answered OK without an allocated remote-forward port")
 
+	// ErrForwardPortOutOfRange is a remote-forward request whose listen or
+	// connect port cannot travel in the protocol's uint32 field. Refused
+	// before anything is dialled, because the conversion itself is silent.
+	ErrForwardPortOutOfRange = errors.New("mux: remote-forward port is outside its protocol range")
+
 	// ErrForwardUnexpectedPort is a fixed remote-forward request that the
 	// master answered with an allocated port instead of MUX_S_OK.
 	ErrForwardUnexpectedPort = errors.New("mux: master returned an allocated port for a fixed remote forward")
@@ -240,12 +245,27 @@ func (m *Master) Alive() (int, error) {
 // MUX_S_REMOTE_PORT reply is ErrForwardUnexpectedPort, not an accepted
 // contradictory allocation.
 func (m *Master) OpenRemoteForward(listenHost string, listenPort int, connectHost string, connectPort int) (int, error) {
+	// Bounded BEFORE the conversion below, not after. The protocol's port
+	// fields are uint32, so a negative or oversized int does not fail — it
+	// arrives at the master as some other port entirely, and the master
+	// binds a number nobody chose. A caller asking for one has a bug, and
+	// this names it before anything is dialled. Zero is admissible on the
+	// listen side alone, where it IS the request to allocate.
+	if listenPort < 0 || listenPort > 65535 {
+		return 0, fmt.Errorf("%w: listen port %d", ErrForwardPortOutOfRange, listenPort)
+	}
+	listen32 := uint32(listenPort)
+	if connectPort < 1 || connectPort > 65535 {
+		return 0, fmt.Errorf("%w: connect port %d", ErrForwardPortOutOfRange, connectPort)
+	}
+	connect32 := uint32(connectPort)
+
 	c, err := dialControl(m.path)
 	if err != nil {
 		return 0, err
 	}
 	defer func() { _ = c.Close() }()
-	if err := helloExchange(c); err != nil {
+	if err = helloExchange(c); err != nil {
 		return 0, err
 	}
 
@@ -259,10 +279,10 @@ func (m *Master) OpenRemoteForward(listenHost string, listenPort int, connectHos
 	e.u32(rid)
 	e.u32(fwdRemote)
 	e.str(listenHost)
-	e.u32(uint32(listenPort))
+	e.u32(listen32)
 	e.str(connectHost)
-	e.u32(uint32(connectPort))
-	if err := writePacket(c, e.b); err != nil {
+	e.u32(connect32)
+	if err = writePacket(c, e.b); err != nil {
 		return 0, err
 	}
 

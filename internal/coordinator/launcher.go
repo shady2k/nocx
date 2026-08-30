@@ -481,7 +481,7 @@ func (l *Launcher) notReadyFailure(message string, cause error) *LaunchFailure {
 	return NewLaunchFailure(
 		FailureNotReady,
 		message,
-		"Retry the launch; the daemon did not become ready.",
+		"The backend could not start or respond. If retrying does not help, check whether another instance is already running and look for the backend’s startup error.",
 		cause,
 	)
 }

@@ -143,8 +143,8 @@ func TestLaunchClassifiesAReadinessFailureWithoutGuessingTheDaemonLog(t *testing
 		_, err := launcher.Launch(context.Background())
 		return err
 	}(), coordinator.FailureNotReady)
-	if failure.Remedy != "Retry the launch; the daemon did not become ready." {
-		t.Fatalf("remedy = %q, want a path-free readiness instruction", failure.Remedy)
+	if failure.Remedy != "The backend could not start or respond. If retrying does not help, check whether another instance is already running and look for the backend’s startup error." {
+		t.Fatalf("remedy = %q, want a path-free diagnostic instruction", failure.Remedy)
 	}
 }
 

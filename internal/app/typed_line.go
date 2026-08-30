@@ -137,11 +137,12 @@ type typedPublisher interface {
 }
 
 // typedSessions opens the bootstrap window on the session that owns the
-// terminal the frames travel on. One method, deliberately: what this path
-// needs of a session is the window and nothing else, and a seam that asked
-// for the whole Session would be asking for authority it does not use.
+// terminal the frames travel on, and exposes that session's closing signal.
+// The two methods are the narrow authority this path needs: the window for
+// delivery and Done for transferring a listener after accepted integration.
 type typedSessions interface {
 	OpenBootstrapWindow(id session.ID) (session.BootstrapWindow, error)
+	SessionDone(id session.ID) (<-chan struct{}, error)
 }
 
 // sessionWindows adapts the session registry to that seam.
@@ -153,6 +154,14 @@ func (s sessionWindows) OpenBootstrapWindow(id session.ID) (session.BootstrapWin
 		return nil, err
 	}
 	return sess.OpenBootstrapWindow()
+}
+
+func (s sessionWindows) SessionDone(id session.ID) (<-chan struct{}, error) {
+	sess, err := s.reg.Get(id)
+	if err != nil {
+		return nil, err
+	}
+	return sess.Done(), nil
 }
 
 // typedRunner holds everything the typed path needs beyond one grant.
@@ -272,6 +281,8 @@ func composeSSHLine(wrap ssh.TypedWrap, extra []string, inv ssh.TypedInvocation,
 
 // typedDelivery is one typed session's delivery, armed BEFORE the grant is
 // handed to the parent shell and run once the line is going.
+// typedDelivery owns the listener until bootstrap acceptance; an accepted
+// bootstrap transfers it to the parent session's Done signal.
 type typedDelivery struct {
 	runner       *typedRunner
 	sessionID    string
@@ -280,6 +291,7 @@ type typedDelivery struct {
 	plan         shellintegration.BootstrapPlan
 	window       session.BootstrapWindow
 	listener     io.Closer
+	sessionDone  <-chan struct{}
 	listenerPort int
 	remotePort   int
 	// publishSettled closes when the publish attempt has reached a terminal
@@ -310,6 +322,15 @@ func (r *typedRunner) arm(sessionID, lane, controlPath string, plan shellintegra
 	if err != nil {
 		return nil, fmt.Errorf("typed ssh: the parent session's terminal is not available: %w", err)
 	}
+	sessionDone, err := r.sessions.SessionDone(session.ID(sessionID))
+	if err != nil {
+		_ = w.Close()
+		return nil, fmt.Errorf("typed ssh: the parent session's lifetime is not available: %w", err)
+	}
+	if sessionDone == nil {
+		_ = w.Close()
+		return nil, errors.New("typed ssh: the parent session has no lifetime signal")
+	}
 	// The session's axis opens a NEW attempt here, and it has to be opened
 	// for the outcome below to land at all: the axis answers once per
 	// registration, and this session's answer is already in — the parent's
@@ -335,6 +356,7 @@ func (r *typedRunner) arm(sessionID, lane, controlPath string, plan shellintegra
 		controlPath:    controlPath,
 		plan:           plan,
 		window:         w,
+		sessionDone:    sessionDone,
 		publishSettled: make(chan struct{}),
 	}, nil
 }
@@ -351,6 +373,29 @@ func (d *typedDelivery) reportOutcome(reason ssh.RefusalReason) {
 		return
 	}
 	d.runner.reportBootstrapOutcome(d.lane, reason)
+}
+
+// handoffListener transfers the listener's ownership only after an accepted
+// bootstrap. The interval opens when NewListener returns in
+// buildSSHChildBootstrap and closes when the owning parent session's Done
+// signal closes; early outcomes retain the delivery's deferred close.
+func (d *typedDelivery) handoffListener() {
+	listener := d.listener
+	d.listener = nil
+	if listener == nil {
+		return
+	}
+	done := d.sessionDone
+	if done == nil {
+		// arm rejects this state in production; keep the fallback fail-closed
+		// for directly constructed deliveries and never leak the listener.
+		_ = listener.Close()
+		return
+	}
+	go func() {
+		<-done
+		_ = listener.Close()
+	}()
 }
 
 // run drives the whole delivery to one terminal outcome and closes the
@@ -442,6 +487,7 @@ func (d *typedDelivery) doRun(ctx context.Context) {
 		own.MarkIntegrated()
 		lg.Info("typed ssh: the session came up integrated on the user's own connection",
 			"session_id", d.sessionID, "socket", d.controlPath)
+		d.handoffListener()
 	} else {
 		lg.Warn("typed ssh: the session did not integrate; the far side is at a native login shell",
 			"session_id", d.sessionID, "outcome", string(outcome), "reason", string(reason))

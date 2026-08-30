@@ -211,12 +211,19 @@ func (w *harnessWindow) capability(t *testing.T, what string) lifecycle.Capabili
 	return cap
 }
 
-// harnessTerminals is the typedSessions seam: one window, for the one session
-// this harness has.
-type harnessTerminals struct{ win *harnessWindow }
+// harnessTerminals is the typedSessions seam: one window and one lifetime,
+// for the one session this harness has.
+type harnessTerminals struct {
+	win  *harnessWindow
+	done <-chan struct{}
+}
 
 func (h harnessTerminals) OpenBootstrapWindow(session.ID) (session.BootstrapWindow, error) {
 	return h.win, nil
+}
+
+func (h harnessTerminals) SessionDone(session.ID) (<-chan struct{}, error) {
+	return h.done, nil
 }
 
 // fixturePort extracts the sshd port from the fixture address.
@@ -451,13 +458,15 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(sockRoot) })
 	win := newHarnessWindow()
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
 	typed := &typedRunner{
 		log: logger,
 		wrapper: ssh.NewTypedWrapper(logger,
 			ssh.NewSSHConfigResolver(logger, os.DevNull, ""), sockRoot),
 		dial:     DialTypedMux,
 		publish:  shellintegration.New(logger),
-		sessions: harnessTerminals{win: win},
+		sessions: harnessTerminals{win: win, done: done},
 		probes:   defaultMasterProbes,
 	}
 

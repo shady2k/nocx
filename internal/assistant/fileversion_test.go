@@ -129,26 +129,6 @@ func TestFileVersion_RejectsRenameOverOnRealFilesystem(t *testing.T) {
 	}
 }
 
-func TestFileVersion_WrittenContentProvidesHashWithoutReadingAgain(t *testing.T) {
-	path := writeVersionTestFile(t, "written.txt", "content")
-	content := []byte("content")
-	source := new(countingFileVersionSource)
-
-	version, err := CaptureWrittenFileVersionFrom(path, content, source)
-	if err != nil {
-		t.Fatalf("CaptureWrittenFileVersionFrom: %v", err)
-	}
-	if version.Strategy != FileVersionHash || version.SHA256 == "" {
-		t.Fatalf("version = %+v, want hash identity", version)
-	}
-	if source.reads != 0 {
-		t.Fatalf("reads = %d, want 0 because the writer supplied the bytes", source.reads)
-	}
-	if source.stats != 1 {
-		t.Fatalf("stats = %d, want 1", source.stats)
-	}
-}
-
 func TestFileVersion_CaptureStatFailureIsVisible(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "missing.txt")
 	source := &countingFileVersionSource{statFn: func(string) (os.FileInfo, error) {

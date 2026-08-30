@@ -66,6 +66,7 @@ import { SURFACE_TERMINAL } from './pane-content'
 import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
 import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import type { WSClient } from './ipc'
 import { createCommandBlock } from './scrollback/blocks'
 import { mountReadScreenHandler } from './read-screen'
@@ -865,7 +866,7 @@ describe('recall overlay is actually wired (nocx-w7h.4)', () => {
 describe("the dropdown owns the arrows while it is open; recall's bare-Up gesture waits for it to close (nocx-mlm7)", () => {
   /** A profile client whose quick-connect assembly answers two hosts. */
   const hostsClient = (): ProfileClient => {
-    const pc = new ProfileClient(new Dispatcher())
+    const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     vi.spyOn(pc, 'listProfiles').mockResolvedValue([
       {
         id: 'prof:ssh:pi',

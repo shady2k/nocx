@@ -21,6 +21,7 @@ import { cleanup, render, fireEvent } from '@solidjs/testing-library'
 import { ConnectionsView } from './connections'
 import { ProfileClient } from './profiles'
 import { Dispatcher } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import { clearToasts, toasts } from './ui'
 import type { SSHProfile } from './profiles'
 
@@ -45,7 +46,7 @@ const PROFILE: SSHProfile = {
 // a wrongly-passing gate fails on `toHaveBeenCalled`, not on a dispatcher
 // error from the un-wired real implementation.
 function createMockClient() {
-  const pc = new ProfileClient(new Dispatcher())
+  const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
   vi.spyOn(pc, 'listProfiles').mockResolvedValue([PROFILE])
   vi.spyOn(pc, 'listGroups').mockResolvedValue([])
   vi.spyOn(pc, 'sessionStatus').mockResolvedValue({ statuses: {} })

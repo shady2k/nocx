@@ -9,6 +9,7 @@ import {
 // and the session reattach outcomes are the product's events, not a stub's.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Dispatcher } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import { WSClient } from './ipc'
 
 const SID = '0123456789abcdef0011223344556677'
@@ -115,16 +116,16 @@ function mount(): {
 } {
   const bar = document.createElement('div')
   document.body.append(bar)
-  const dispatcher = new Dispatcher()
+  const dispatcher = new Dispatcher(fixedEndpoint(9876))
   const client = new WSClient(dispatcher)
   const controller = mountConnectionNotice(bar, dispatcher, client)
   return { bar, client, controller }
 }
 
 async function connect(client: WSClient): Promise<void> {
-  const connecting = client.connect(9876)
+  client.start()
+  await Promise.resolve()
   socket().serverAccepts()
-  await connecting
 }
 
 async function openSession(client: WSClient): Promise<void> {

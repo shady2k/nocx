@@ -10,6 +10,7 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest'
 
 import { Dispatcher } from '../dispatcher'
+import { fixedEndpoint } from '../endpoint'
 import { createDownloadServices } from './download-client'
 import type { FilesDownloadDone } from '../generated/files.downloadDone'
 import type { FilesDownloadProgress } from '../generated/files.downloadProgress'
@@ -75,10 +76,11 @@ function socket(): MockSocket {
 }
 
 async function connected(): Promise<{ d: Dispatcher; s: MockSocket }> {
-  const d = new Dispatcher()
-  const p = d.connect(9876)
+  const d = new Dispatcher(fixedEndpoint(9876))
+  d.start()
+  await Promise.resolve()
   socket().accept()
-  await p
+
   return { d, s: socket() }
 }
 

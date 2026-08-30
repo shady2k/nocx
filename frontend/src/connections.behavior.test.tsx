@@ -16,6 +16,7 @@ import { createVaultState, UnlockDialog, type VaultController } from './vault'
 import type { VaultClient, InventoryEntry } from './vault-client'
 import type { DialogClient } from './dialog-client'
 import { Dispatcher, RpcError } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import { clearToasts, toasts } from './ui'
 import type {
   SSHProfile,
@@ -131,7 +132,7 @@ function createMockClient(overrides?: {
   effectiveProfiles?: EffectiveProfileDTO[]
   connectionTestResult?: ConnectionTestResult
 }) {
-  const pc = new ProfileClient(new Dispatcher())
+  const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
 
   vi.spyOn(pc, 'listProfiles').mockResolvedValue(overrides?.profiles ?? [])
   vi.spyOn(pc, 'listGroups').mockResolvedValue(overrides?.groups ?? [])

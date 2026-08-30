@@ -16,6 +16,7 @@ import { cleanup, render, fireEvent } from '@solidjs/testing-library'
 import { EndpointsSection } from './endpoints-section'
 import { EndpointClient, type Endpoint, type EndpointWrite } from './endpoints'
 import { Dispatcher, RpcError } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import { clearToasts, toasts } from './ui'
 import {
   SetupDialog,
@@ -49,7 +50,7 @@ function ep(overrides: Partial<Endpoint> = {}): Endpoint {
 function createHarness(initial: Endpoint[] = [], opts: { firstListError?: Error } = {}) {
   const store: Endpoint[] = [...initial]
   let next = 1
-  const client = new EndpointClient(new Dispatcher())
+  const client = new EndpointClient(new Dispatcher(fixedEndpoint(9876)))
   // The real client's methods are async; these fakes match their signatures
   // and answer from the store, so there is nothing to await.
   // eslint-disable-next-line @typescript-eslint/require-await

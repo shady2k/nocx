@@ -6,6 +6,7 @@
 // leaves the renderer.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Dispatcher } from '../dispatcher'
+import { fixedEndpoint } from '../endpoint'
 import { createUploadServices, type FetchLike, type UploadDecision } from './upload-client'
 import type { FilesUploadDone } from '../generated/files.uploadDone'
 import type { FilesUploadProgress } from '../generated/files.uploadProgress'
@@ -85,9 +86,9 @@ function lastSocket(): MockSocket {
 }
 
 async function connect(d: Dispatcher): Promise<void> {
-  const p = d.connect(9876)
+  d.start()
+  await Promise.resolve()
   lastSocket().accept()
-  await p
 }
 
 /** The frames the renderer put on the wire, parsed. */
@@ -124,7 +125,7 @@ const OK = () => Promise.resolve({ ok: true, status: 200 } as Response)
 
 describe('the upload control plane on the wire', () => {
   it('names the destination and never a source path', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const services = createUploadServices(d, OK)
     void services.upload({ bindingId: 'b1', destDir: '/srv/data', name: 'notes.txt', size: 12 })
@@ -143,7 +144,7 @@ describe('the upload control plane on the wire', () => {
   })
 
   it('echoes a source ticket and the collision decision when it has them', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const services = createUploadServices(d, OK)
     void services.upload({
@@ -171,7 +172,7 @@ describe('the upload control plane on the wire', () => {
     // of it — and the two would agree until somebody added a fourth.
     const decisions: UploadDecision[] = ['overwrite', 'keepBoth', 'skip']
     for (const onExists of decisions) {
-      const d = new Dispatcher()
+      const d = new Dispatcher(fixedEndpoint(9876))
       await connect(d)
       void createUploadServices(d, OK).upload({
         bindingId: 'b1',
@@ -185,21 +186,21 @@ describe('the upload control plane on the wire', () => {
   })
 
   it('cancels by transfer id', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     void createUploadServices(d, OK).cancel('t1')
     expect(frameFor('files.uploadCancel').params).toEqual({ transferId: 't1' })
   })
 
   it('asks for a source ticket, never a path', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     void createUploadServices(d, OK).pickSource()
     expect(frameFor('dialog.openFileForUpload').params).toEqual({})
   })
 
   it('delivers progress, done and dropped notifications off the socket', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const services = createUploadServices(d, OK)
     const progress: FilesUploadProgress[] = []
@@ -231,7 +232,7 @@ describe('the upload control plane on the wire', () => {
   })
 
   it('drops a notification that is not the shape the contract declares', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const services = createUploadServices(d, OK)
     const done: FilesUploadDone[] = []
@@ -247,7 +248,7 @@ describe('the upload control plane on the wire', () => {
   })
 
   it('unsubscribes', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const services = createUploadServices(d, OK)
     const seen: FilesUploadProgress[] = []
@@ -272,7 +273,7 @@ describe('sendBody — the one request that is not JSON-RPC', () => {
   // makes the length the browser computes the declared one — and never by
   // a header this side can write.
   it('sends the blob and sets no header a browser would refuse to send', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const f = fakeFetch(OK)
     const body = new Blob([new Uint8Array(12)])
@@ -286,7 +287,7 @@ describe('sendBody — the one request that is not JSON-RPC', () => {
   })
 
   it('posts to the backend the socket is on, not to the page origin', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const f = fakeFetch(OK)
     await createUploadServices(d, f.fetch).sendBody('/upload/tk', new Blob([new Uint8Array(3)]), 3)
@@ -294,7 +295,7 @@ describe('sendBody — the one request that is not JSON-RPC', () => {
   })
 
   it('surfaces the STATUS, so 409 and 410 are two different answers', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const conflict = createUploadServices(d, () =>
       Promise.resolve({ ok: false, status: 409 } as Response),
@@ -316,7 +317,7 @@ describe('sendBody — the one request that is not JSON-RPC', () => {
   })
 
   it('reports a network failure as its own kind — the request got no answer at all', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const services = createUploadServices(d, () => Promise.reject(new Error('connection reset')))
     const out = await services.sendBody('/upload/tk', new Blob([new Uint8Array(3)]), 3)
@@ -324,7 +325,7 @@ describe('sendBody — the one request that is not JSON-RPC', () => {
   })
 
   it('refuses a body that is not the declared size, and sends nothing', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const f = fakeFetch(OK)
     const out = await createUploadServices(d, f.fetch).sendBody(
@@ -337,7 +338,7 @@ describe('sendBody — the one request that is not JSON-RPC', () => {
   })
 
   it('reports no connection rather than guessing where the backend is', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     const f = fakeFetch(OK)
     const out = await createUploadServices(d, f.fetch).sendBody(
       '/upload/tk',
@@ -349,7 +350,7 @@ describe('sendBody — the one request that is not JSON-RPC', () => {
   })
 
   it('passes the abort signal through, so a cancel stops the body', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const f = fakeFetch(OK)
     const ctrl = new AbortController()
@@ -365,7 +366,7 @@ describe('sendBody — the one request that is not JSON-RPC', () => {
 
 describe('the fetch it uses by default', () => {
   it('is the platform one — the seam exists for tests, not for a second transport', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const spy = vi.fn(() => Promise.resolve({ ok: true, status: 200 } as Response))
     const original = globalThis.fetch

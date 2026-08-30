@@ -534,3 +534,49 @@ record, a frame — never on a duration.
 1. Write the specs.
 2. Run **only your own file**: `PW_PROJECTS=chromium e2e/run-in-container.sh e2e/connection-overlay.spec.ts`.
 3. Commit. The coordinator runs the full suite.
+
+---
+
+## Amendment, 2026-08-30: two planning errors, both the same shape
+
+Both were found by workers blocking rather than by review, both cost a round trip, and both
+are the lesson `AGENTS.md` already records as `nocx-z7s6` — **a task lands together with
+the wiring that makes its output reachable, or its commit cannot pass the gate at all. The
+gate is the hook, not the brief, so a worker cannot be briefed out of it.** Written down
+here because the plan above is what produced them.
+
+**T4's blast radius was measured wrong.** The task said removing `Dispatcher.connect` would
+break `main.tsx` and that this was expected and T7's. It breaks **25 files**, because
+`WSClient.connect(port, host, token)` (`frontend/src/ipc.ts:759`) is a second public layer
+over the dispatcher and is what every test actually calls. And `pre-commit` type-checks the
+whole frontend, so "my files are green, someone else's are red" is not a state anything can
+be committed from. The worker blocked, correctly, rather than reaching for `--no-verify`.
+
+Corrected: **an API change owns its call sites.** T4's scope now includes `ipc.ts`, every
+test that constructs a `Dispatcher`, and a `fixedEndpoint()` helper exported from
+`endpoint.ts` that makes each of those 25 sites a one-line change. It also makes the one
+minimal edit in `main.tsx` needed to compile — a temporary bridge, clearly commented, with
+the real lifetime split still T7's.
+
+**T2 and T6 cannot be separate tasks.** The plan split the `transport.ping` contract from
+its only consumer. That makes `frontend/src/generated/transport.ping.ts` dead on arrival,
+and the dead-export ratchet fails the commit. There is no deferral: `check-dead-exports.mjs`
+states the baseline may only **shrink**, and `update-dead-exports-baseline.mjs` refuses to
+write one that grows. Deleting the generated file is not an escape either — `contracts:check`
+requires the schema and its type as a pair.
+
+Corrected: **T6 is folded into T2** (bead `nocx-kgfe7` closed into `nocx-x6ggy`), which now
+delivers both halves in one commit and waits on T4 for the dispatcher it must attach to.
+
+**The general rule for this plan, and for the next one:** a contract lands with its
+consumer, a package lands with its caller, and an API change lands with its call sites. If
+a task's output has no consumer inside the task, the task boundary is wrong — check it
+against the ratchets before dispatching, not after.
+
+### Revised ordering
+
+```
+wave 1:  T1 ✅ merged 929ebb1d   T3 ✅ merged 8cc22fca   T4 (in flight, critical path)
+wave 2:  T5 (needs T1 ✅, T4)    T2+T6 (needs T4, work preserved, waiting)
+wave 3:  T7 (needs T3 ✅, T4, T5)  →  T8
+```

@@ -2292,16 +2292,14 @@ func (s *WSServer) buildConfigOp(lane, configGate, vaultGate control.Admission) 
 // configSpecs declares the config-domain control methods. The ConfigOperation
 // is built ONCE by buildConfigOp (in buildControlPlane) and shared with the
 // agent specs; the handler families receive it.
-func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate control.Admission, configOp capability.ConfigOperation, endpointWired bool) []methodSpec {
+func (s *WSServer) configSpecs(lane control.Admission, configGate, vaultGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation) []methodSpec {
 	profilesWired := s.profiles != nil
 	groupsWired := s.groups != nil
 	settingsWired := s.settings != nil
 	snippetWired := s.snippets != nil
 	executeWired := profilesWired && groupsWired && s.credentials != nil && s.profileSvc != nil
 
-	snippetOp := capability.NewSnippetOperation(configGate, lane, s.snippets)
 	noteWired := s.notes != nil
-	noteOp := capability.NewNoteOperation(configGate, lane, s.notes)
 	uiStateWired := s.uiState != nil
 	uiStateOp := capability.NewUIStateOperation(configGate, lane, s.uiState)
 	var tabbyOp capability.TabbyImportOperation

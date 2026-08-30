@@ -84,7 +84,7 @@ func TestMethodSpecOperationsAcquireEachDomainGateOnce(t *testing.T) {
 		{
 			name:   "config",
 			gate:   "config",
-			specs:  server.configSpecs(lane, gates["config"], gates["vault"], configOp, endpointWired),
+			specs:  server.configSpecs(lane, gates["config"], gates["vault"], configOp, endpointWired, nil, nil),
 			method: "groups.list",
 			raw:    `{}`,
 		},

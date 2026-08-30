@@ -63,7 +63,7 @@ function description(
   )
 }
 
-export function ReconnectOffer(props: ReconnectOfferProps) {
+function ReconnectOffer(props: ReconnectOfferProps) {
   return (
     <StatusCard
       tone="danger"

@@ -65,7 +65,7 @@ export interface WakeSource {
 /** The browser's account of coming back: the document becoming visible again,
  *  and the window regaining focus. Both fire on a lid opening and neither is
  *  reliable alone, so the reporter debounces rather than choosing one. */
-export const documentWakeSource: WakeSource = {
+const documentWakeSource: WakeSource = {
   subscribe(onWake: () => void): () => void {
     const onVisibility = () => {
       if (document.visibilityState === 'visible') onWake()

@@ -121,10 +121,10 @@ export interface CapturedFrame {
  *  generation, which is exactly the false "unchanged" the spec forbids.
  */
 export interface CaptureEventSource {
-  /** Fires after a written chunk has been parsed into the buffer — the
-   *  generation's advance signal AND the capture fence. xterm fires this at
-   *  the end of every parse pass, which can be BETWEEN chunks of a large
-   *  write; hasUnsettledWrite() distinguishes "settled" from "chunk done". */
+  /** Fires at the end of every parse pass — the generation's advance signal.
+   *  It is NOT the capture fence: xterm breaks its parse loop on a 12 ms
+   *  budget, so a pass can end with bytes that were already queued still
+   *  unparsed. The fence is awaitWriteBarrier(). */
   onWriteParsed(cb: () => void): void
   onBufferChange(cb: (type: 'normal' | 'alternate') => void): void
   onResize(cb: (cols: number, rows: number) => void): void
@@ -140,10 +140,23 @@ export interface CaptureEventSource {
    *  tracker reject pending awaitSettled() waiters instead of orphaning
    *  them. */
   onDispose(cb: () => void): void
-  /** True while bytes queued via write() have not finished parsing. The
-   *  capture fence: a frame minted mid-queue can hold row 1 from before a
-   *  write and row 20 from after it — a state that never existed. */
+  /** True while bytes queued via write() have not finished parsing. This
+   *  decides whether a capture needs the fence at all: with nothing queued
+   *  the buffer already holds every byte the renderer was given, and issuing
+   *  a barrier would cost a parse pass that ADVANCES THE GENERATION on a
+   *  motionless screen (ADR-0029: never manufacture a false "moved"). */
   hasUnsettledWrite(): boolean
+
+  /** THE CAPTURE FENCE: a write barrier. Resolves once every write queued
+   *  BEFORE this call has been parsed — and no later. xterm's WriteBuffer is
+   *  FIFO, so writes arriving afterwards queue behind the barrier and cannot
+   *  postpone it: a continuously repainting TUI cannot starve the fence, and
+   *  a bulk write cannot be answered half-parsed.
+   *
+   *  It settles for the renderer that is alive, however busy. A barrier that
+   *  never settles means a wedged parse queue, which the tracker bounds
+   *  locally and answers as a failed capture. */
+  awaitWriteBarrier(): Promise<void>
   readonly cols: number
   readonly rows: number
 }

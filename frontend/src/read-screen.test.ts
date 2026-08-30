@@ -6,9 +6,13 @@
 
 import { describe, expect, it, vi } from 'vitest'
 import { mountReadScreenHandler } from './read-screen'
-import { CaptureAbortedError, ReadScreenRangeError } from './frame/capture-identity'
+import {
+  CaptureAbortedError,
+  CaptureIdentityTracker,
+  CaptureUnsettledError,
+  ReadScreenRangeError,
+} from './frame/capture-identity'
 import { mintLiveFrame } from './frame/mint'
-import { CaptureIdentityTracker } from './frame/capture-identity'
 import { seedSource } from './frame/test-source'
 import { DEFAULT_SNAPSHOT } from './scrollback/serializer'
 import type { CapturedFrame } from './frame/types'
@@ -147,6 +151,28 @@ describe('mountReadScreenHandler — the renderer half of the pull', () => {
     const params = d.calls[0].params as Record<string, unknown>
     expect(params.outcome).toBe('failed')
     expect(String(params.error)).toContain('frame capture aborted')
+  })
+
+  it('answers a capture whose barrier never settled as failed before the broker can hang', async () => {
+    const d = scriptedDispatcher()
+    const content = {
+      sessionId: () => 'session-a',
+      captureLiveFrame: vi.fn(() => Promise.reject(new CaptureUnsettledError(5000))),
+    }
+    mountReadScreenHandler(d as unknown as Dispatcher, () => content)
+
+    d.handlers.get('agent.readScreenRequest')!({
+      requestId: 'req-unsettled',
+      sessionId: 'session-a',
+    })
+
+    await vi.waitFor(() => expect(d.call).toHaveBeenCalled())
+    const params = d.calls[0].params as Record<string, unknown>
+    expect(params).toMatchObject({
+      requestId: 'req-unsettled',
+      outcome: 'failed',
+      error: 'frame capture did not settle within 5000ms',
+    })
   })
 
   it('a resolution the broker refuses is not a crash — a stale request answers itself', async () => {

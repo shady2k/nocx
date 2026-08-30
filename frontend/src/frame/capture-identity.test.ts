@@ -7,10 +7,11 @@
 // staleness. Nothing here wires generation inequality to a refusal (that
 // belongs to DRIVE), and no surface may present drift as "stale".
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import {
   CaptureAbortedError,
   CaptureIdentityTracker,
+  CaptureUnsettledError,
   ReadScreenRangeError,
 } from './capture-identity'
 import { FakeSource } from './test-source'
@@ -157,55 +158,128 @@ describe('CaptureIdentityTracker — comparability, not staleness', () => {
   })
 })
 
+/** Drain the microtask queue by hopping to the next task. Not a delay: the
+ *  assertions that use it are about what the fence did, and a promise chain
+ *  several hops long must not read as "not settled yet". */
+const flushMicrotasks = (): Promise<void> => new Promise((resolve) => setTimeout(resolve, 0))
+
 describe('CaptureIdentityTracker — the capture fence', () => {
-  it('defers a capture while ONE write is still mid-parse, and waits for the FINAL parse pass, not the first onWriteParsed', async () => {
+  it('is not starved by a writer that always has the next repaint queued', async () => {
+    // The nocx-2ryxf.3 shape, as an assertion: `top` repaints forever, so the
+    // unsettled count settles one write while the next replaces it and NEVER
+    // reaches zero. The barrier is behind the repaint that was queued when
+    // the capture was asked for, so it opens anyway.
     const source = new FakeSource()
-    source.seed(['AAAA'])
     const tracker = new CaptureIdentityTracker(source)
-    const before = tracker.identity()
-
-    // ONE write, split by xterm's WriteBuffer across parse passes (the
-    // per-write callback fires only on the pass that empties it). So
-    // onWriteParsed CAN fire while the write's own callback is still
-    // pending — the exact interleaving the fence exists for. The old model
-    // equated one write with one pass and issued two writes instead.
-    source.write('BBBBCCCC')
-    expect(source.hasUnsettledWrite()).toBe(true)
-
+    source.write('first repaint')
     let settled = false
-    const settledPromise = tracker.awaitSettled().then(() => {
+    const capture = tracker.awaitSettled().then(() => {
       settled = true
     })
 
-    // Pass 1 parses PART of the write: onWriteParsed fires with the write
-    // still pending. A naive "wait for the next onWriteParsed" would mint
-    // now, mid-write.
-    source.parseOnePass(4)
-    await Promise.resolve()
-    expect(settled).toBe(false)
-    expect(source.hasUnsettledWrite()).toBe(true)
+    // Every pass the writer queues its next repaint before the pass runs.
+    for (let repaint = 0; repaint < 5 && !settled; repaint++) {
+      source.write(`repaint ${repaint}`)
+      source.parseOnePass()
+      await flushMicrotasks()
+    }
 
-    // The final pass empties the write: its callback settles and the fence
-    // opens.
-    source.parseOnePass(4)
-    await settledPromise
-    expect(settled).toBe(true)
-
-    const after = tracker.identity()
-    // The one write was parsed across two passes: each pass advanced the
-    // generation (conservative — a false "moved" costs a re-ask).
-    expect(after.generation).toBe(before.generation + 2)
+    await capture
+    const evidence = {
+      settled,
+      pendingAtCapture: source.unsettledWriteCount(),
+    }
+    // The witness: the capture resolved WHILE the queue still had work. A
+    // fence waiting for global emptiness would still be parked here.
+    expect(evidence.settled).toBe(true)
+    expect(
+      evidence.pendingAtCapture,
+      `the fence must open with writes still queued: ${JSON.stringify(evidence)}`,
+    ).toBeGreaterThan(0)
   })
 
-  it('takes a frame immediately when nothing is queued — no wait for an event that never comes', async () => {
+  it('waits for EVERY write queued before the request, not just the pass that follows it', async () => {
+    // xterm breaks its parse loop on a 12 ms budget BETWEEN chunks, so a
+    // completed parse pass can leave bytes that were already queued when the
+    // capture was asked for unparsed. Answering at that boundary would hand
+    // back a screen from several passes ago on a bulk write; the barrier
+    // waits for the whole backlog, and for none of the future.
+    const source = new FakeSource()
+    const tracker = new CaptureIdentityTracker(source)
+    source.write('backlog chunk 1')
+    source.write('backlog chunk 2')
+
+    let settled = false
+    const capture = tracker.awaitSettled().then(() => {
+      settled = true
+    })
+
+    // A pass that gets through only the first chunk: a boundary fired and the
+    // generation advanced, but the backlog is not in the buffer yet. Drain
+    // the microtask queue (a task hop, not a delay) so "not settled" is a
+    // fact about the fence and not about how many ticks the assertion waited.
+    source.parseOnePass()
+    await flushMicrotasks()
+    expect(settled).toBe(false)
+    expect(source.unsettledWriteCount()).toBe(1)
+
+    // The pass that finishes the backlog reaches the barrier behind it.
+    source.parseOnePass(2)
+    await capture
+    expect(settled).toBe(true)
+    expect(source.unsettledWriteCount()).toBe(0)
+  })
+
+  it('a write that arrives AFTER the request cannot postpone the fence', async () => {
+    const source = new FakeSource()
+    const tracker = new CaptureIdentityTracker(source)
+    source.write('the backlog')
+    const capture = tracker.awaitSettled()
+
+    // Queued behind the barrier: it is the next screen, not this one.
+    source.write('the next repaint')
+    source.parseOnePass(2) // the backlog chunk, then the barrier
+
+    await capture
+    expect(source.unsettledWriteCount()).toBe(1)
+  })
+
+  it('rejects a barrier that never settles — a wedged parse queue is bounded locally, not by the broker', async () => {
+    vi.useFakeTimers()
+    try {
+      const source = new FakeSource()
+      const tracker = new CaptureIdentityTracker(source, 5000)
+      source.write('a chunk whose pass is never scheduled')
+      const failure = expect(tracker.awaitSettled()).rejects.toThrow(CaptureUnsettledError)
+
+      await vi.advanceTimersByTimeAsync(5000)
+
+      await failure
+      expect(source.unsettledWriteCount()).toBe(1)
+      // The parked capture was removed: a later pass is ordinary cleanup,
+      // not a late resolution of a request that already failed.
+      source.flush()
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('takes a frame immediately when nothing is queued, and does NOT advance the generation of a motionless screen', async () => {
     const source = new FakeSource()
     source.seed(['x'])
     const tracker = new CaptureIdentityTracker(source)
+    const before = tracker.identity()
     let resolved = false
     await tracker.awaitSettled().then(() => {
       resolved = true
     })
     expect(resolved).toBe(true)
+    // A barrier costs a parse pass, and a parse pass advances the generation.
+    // Issuing one here would report a screen nobody wrote to as `moved` —
+    // ADR-0029 tolerates a false positive, it never manufactures one.
+    expect(tracker.compareIdentity(before)).toEqual({ status: 'same' })
+    await tracker.awaitSettled()
+    expect(tracker.compareIdentity(before)).toEqual({ status: 'same' })
   })
 
   it('disposing the source mid-capture settles (rejects) the pending awaitSettled — the fence has a closing event (AGENTS.md rule 3)', async () => {
@@ -217,6 +291,14 @@ describe('CaptureIdentityTracker — the capture fence', () => {
     const pending = tracker.awaitSettled()
     source.dispose()
     await expect(pending).rejects.toThrow(CaptureAbortedError)
+  })
+
+  it('rejects a disposed source even when its pending count is already zero', async () => {
+    const source = new FakeSource()
+    const tracker = new CaptureIdentityTracker(source)
+    source.dispose()
+
+    await expect(tracker.awaitSettled()).rejects.toThrow(CaptureAbortedError)
   })
 
   it('an awaitSettled issued AFTER disposal rejects immediately — a stuck counter cannot hang a later capture', async () => {

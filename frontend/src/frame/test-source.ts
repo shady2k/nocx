@@ -1,12 +1,20 @@
 // Shared test double: an xterm-shaped CaptureEventSource.
 //
-// Models WriteBuffer's real contract (verified against xterm 5.5.0 source):
-// write() QUEUES data (nothing applied, hasUnsettledWrite() true); a parse
-// pass applies a SLICE of the front write and fires onWriteParsed — the
-// write's own settle (its per-write callback) fires only on the pass that
-// EMPTIES it, so ONE write can span several passes with onWriteParsed
-// firing while the write is still pending (xterm's own doc note on the
-// event), which is exactly the trap the capture fence exists for.
+// Models WriteBuffer's real contract (xterm 5.5.0, common/input/WriteBuffer.ts):
+//
+//   - write() QUEUES a chunk; nothing is applied yet.
+//   - a parse pass takes chunks off the front and applies each one WHOLE —
+//     _innerWrite hands the entire chunk to the parser, fires that chunk's
+//     callback, and only THEN checks its 12 ms budget. So a pass can stop
+//     between chunks and never inside one; parseOnePass(n) models the budget
+//     as "n chunks get through".
+//   - onWriteParsed fires once per pass, at its end, whether or not the queue
+//     is now empty.
+//   - a callback queued behind the chunks is a BARRIER: it runs when the
+//     chunks ahead of it have been applied, and chunks written afterwards go
+//     behind it. awaitWriteBarrier() models that, and carries no bytes — so
+//     it does not move the unsettled count, exactly as the renderer writes it
+//     straight to the terminal rather than through write().
 
 import { BufferLine, type BufferLine as BufferLineType } from '../scrollback/test-helpers'
 import type { CaptureEventSource } from './types'
@@ -17,8 +25,10 @@ export class FakeSource implements CaptureEventSource {
   private cells = new Map<number, string[]>()
   private styled = new Map<number, BufferLineType>()
   cursor = { line: 0, col: 0 }
-  /** Queued writes, front entry = remaining bytes of the oldest write. */
-  private queued: string[] = []
+  /** The write queue, front entry first. A chunk carries the callback that
+   *  runs when it has been applied — a real write settles the unsettled
+   *  count, a barrier resolves its promise. */
+  private queued: Array<{ data: string; settle: () => void }> = []
   private pending = 0
   private writeParsedSubs: Array<() => void> = []
   private bufferChangeSubs: Array<(t: 'normal' | 'alternate') => void> = []
@@ -56,6 +66,24 @@ export class FakeSource implements CaptureEventSource {
     return this.pending > 0
   }
 
+  /** The capture fence: a callback queued behind everything written so far.
+   *  A disposed source returns a promise that never settles — the terminal
+   *  took its callbacks with it, which is exactly the hang the tracker's
+   *  disposal rejection exists to close. */
+  awaitWriteBarrier(): Promise<void> {
+    if (this.disposed) return new Promise<void>(() => {})
+    return new Promise<void>((resolve) => {
+      this.queued.push({ data: '', settle: resolve })
+    })
+  }
+
+  /** Instrumented pending count for capture-fence tests. The product seam
+   *  stays boolean; only the witness needs to distinguish 1 → 1 starvation
+   *  from a count that never receives callbacks. */
+  unsettledWriteCount(): number {
+    return this.pending
+  }
+
   // ── test drivers ────────────────────────────────────────────────────────
 
   /** The buffer as the seam reads it: an IBufferLine for absolute line y
@@ -84,38 +112,36 @@ export class FakeSource implements CaptureEventSource {
     this.cells.set(y, line.translateToString().split(''))
   }
 
-  /** Queue a write — mirrors xterm: queued, not yet parsed. The write's
-   *  settle fires only when its LAST byte has been parsed, so one write
-   *  can span several parseOnePass() calls. */
+  /** Queue a write — mirrors xterm: queued, not yet parsed, and settled as
+   *  a whole by the pass that applies it. */
   write(data: string): void {
-    this.queued.push(data)
+    this.queued.push({
+      data,
+      settle: () => {
+        this.pending = Math.max(0, this.pending - 1)
+      },
+    })
     this.pending++
   }
 
-  /** One parse pass: parse up to `chars` bytes of the FRONT write (default:
-   *  the whole front write). The pass settles the write only when it empties
-   *  — so a single write can be split across passes, with onWriteParsed
-   *  firing while the write's own callback is still pending: the exact
-   *  interleaving xterm's WriteBuffer produces for a large write. */
-  parseOnePass(chars = Number.POSITIVE_INFINITY): void {
-    const front = this.queued[0]
-    if (front !== undefined) {
-      const take = Math.min(chars, front.length)
-      if (take > 0) {
-        this.apply(front.slice(0, take))
-        this.queued[0] = front.slice(take)
-      }
-      if (this.queued[0].length === 0) {
-        this.queued.shift()
-        this.pending = Math.max(0, this.pending - 1)
-      }
+  /** One parse pass: apply up to `chunks` whole queued chunks (default: the
+   *  whole queue), settling each, then fire onWriteParsed once. The default
+   *  of one chunk per call is deliberate — it is how a test shows that a
+   *  pass CAN end with queued bytes still unparsed, which is why the fence
+   *  is a barrier and not the next parse boundary. */
+  parseOnePass(chunks = 1): void {
+    for (let i = 0; i < chunks && this.queued.length > 0; i++) {
+      const entry = this.queued.shift()
+      if (!entry) break
+      this.apply(entry.data)
+      entry.settle()
     }
     for (const sub of this.writeParsedSubs) sub()
   }
 
   /** Drain every queued chunk (the common small-write case). */
   flush(): void {
-    while (this.queued.length > 0) this.parseOnePass()
+    while (this.queued.length > 0) this.parseOnePass(Number.POSITIVE_INFINITY)
   }
 
   private apply(chunk: string): void {

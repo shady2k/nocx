@@ -18,22 +18,22 @@ func TestIsUnexecutedToolCallEnvelope_RecognizesWholeKnownDialects(t *testing.T)
 	}{
 		{
 			name: "xml envelope",
-			text: "  <tool_call><function=run><parameter=command>df -h</parameter><parameter=sessionId>abc</parameter></function></tool_call>  ",
+			text: "  <tool_call><function=session.run><parameter=command>df -h</parameter><parameter=sessionId>abc</parameter></function></tool_call>  ",
 			want: true,
 		},
 		{
 			name: "json envelope",
-			text: `<tool_call>{"name":"run","arguments":{"command":"df -h"}}</tool_call>`,
+			text: `<tool_call>{"name":"session.run","arguments":{"command":"df -h"}}</tool_call>`,
 			want: true,
 		},
 		{
 			name: "quoted in an answer",
-			text: `I cannot run that here; the model might emit <tool_call>{"name":"run","arguments":{}}</tool_call>.`,
+			text: `I cannot run that here; the model might emit <tool_call>{"name":"session.run","arguments":{}}</tool_call>.`,
 			want: false,
 		},
 		{
 			name: "envelope with answer around it",
-			text: `I will check that. <tool_call>{"name":"run","arguments":{}}</tool_call>`,
+			text: `I will check that. <tool_call>{"name":"session.run","arguments":{}}</tool_call>`,
 			want: false,
 		},
 		{
@@ -43,36 +43,36 @@ func TestIsUnexecutedToolCallEnvelope_RecognizesWholeKnownDialects(t *testing.T)
 		},
 		{
 			name: "json missing arguments object",
-			text: `<tool_call>{"name":"run"}</tool_call>`,
+			text: `<tool_call>{"name":"session.run"}</tool_call>`,
 			want: false,
 		},
 		{
 			name: "two xml envelopes",
-			text: "<tool_call><function=run><parameter=command>df -h</parameter></function></tool_call>\n\n<tool_call><function=run><parameter=command>du -sh .</parameter></function></tool_call>",
+			text: "<tool_call><function=session.run><parameter=command>df -h</parameter></function></tool_call>\n\n<tool_call><function=session.run><parameter=command>du -sh .</parameter></function></tool_call>",
 			want: true,
 		},
 		{
 			name: "two json envelopes",
-			text: `<tool_call>{"name":"run","arguments":{"command":"df -h"}}</tool_call>
+			text: `<tool_call>{"name":"session.run","arguments":{"command":"df -h"}}</tool_call>
 
-<tool_call>{"name":"run","arguments":{"command":"du -sh ."}}</tool_call>`,
+<tool_call>{"name":"session.run","arguments":{"command":"du -sh ."}}</tool_call>`,
 			want: true,
 		},
 		{
 			name: "mixed dialect envelopes",
-			text: `<tool_call>{"name":"run","arguments":{"command":"df -h"}}</tool_call>
+			text: `<tool_call>{"name":"session.run","arguments":{"command":"df -h"}}</tool_call>
 
-<tool_call><function=run><parameter=command>du -sh .</parameter></function></tool_call>`,
+<tool_call><function=session.run><parameter=command>du -sh .</parameter></function></tool_call>`,
 			want: true,
 		},
 		{
 			name: "trailing prose after sequence",
-			text: "<tool_call><function=run><parameter=command>df -h</parameter></function></tool_call>\n\n<tool_call><function=run><parameter=command>du -sh .</parameter></function></tool_call>\nI also checked the logs.",
+			text: "<tool_call><function=session.run><parameter=command>df -h</parameter></function></tool_call>\n\n<tool_call><function=session.run><parameter=command>du -sh .</parameter></function></tool_call>\nI also checked the logs.",
 			want: false,
 		},
 		{
 			name: "nested envelope",
-			text: "<tool_call><function=run><parameter=command><tool_call>{\"name\":\"run\",\"arguments\":{}}</tool_call></parameter></function></tool_call>",
+			text: "<tool_call><function=session.run><parameter=command><tool_call>{\"name\":\"session.run\",\"arguments\":{}}</tool_call></parameter></function></tool_call>",
 			want: false,
 		},
 	}
@@ -87,7 +87,7 @@ func TestIsUnexecutedToolCallEnvelope_RecognizesWholeKnownDialects(t *testing.T)
 
 func TestAsk_OfferedToolsAndWholeEnvelopeReturnTypedFailure(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		streamAnswer(w, `<tool_call>{"name":"run","arguments":{"command":"df -h"}}</tool_call>`)
+		streamAnswer(w, `<tool_call>{"name":"session.run","arguments":{"command":"df -h"}}</tool_call>`)
 	}))
 	defer srv.Close()
 

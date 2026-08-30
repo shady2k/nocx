@@ -19,7 +19,8 @@ import "github.com/shady2k/nocx/internal/content"
 // and stays trivially testable. Out-of-grant sessions are refused here,
 // before any request could name them — criterion 4 of nocx-tjppv.
 type Runner struct {
-	sessions map[string]struct{}
+	sessions  map[string]struct{}
+	sessionID string
 }
 
 // NewRunner builds the narrowed capability from the grant's session scopes.
@@ -31,6 +32,11 @@ func NewRunner(scopes []content.GrantScope) *Runner {
 	for _, sc := range scopes {
 		if sc.Kind == content.ResourceSession && sc.ID != "" {
 			r.sessions[sc.ID] = struct{}{}
+		}
+	}
+	if len(r.sessions) == 1 {
+		for id := range r.sessions {
+			r.sessionID = id
 		}
 	}
 	return r
@@ -45,4 +51,13 @@ func (r *Runner) Allows(sessionID string) bool {
 	}
 	_, ok := r.sessions[sessionID]
 	return ok
+}
+
+// SessionID returns the sole session resolved for this call. A run grant
+// normally names one pane; multiple scopes deliberately do not choose one.
+func (r *Runner) SessionID() string {
+	if r == nil {
+		return ""
+	}
+	return r.sessionID
 }

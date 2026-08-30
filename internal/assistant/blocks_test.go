@@ -151,7 +151,7 @@ func toolsDirFS(t *testing.T) fs.FS {
 func TestMiddleware_BlocksWithoutSourceIsHonest(t *testing.T) {
 	grant := sessionGrant("session-a", autonomousMatrix())
 	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, nil)
-	_, err := wrappedEndpoint(mw, "session.list", "call-1", `{"sessionId":"session-a"}`)
+	_, err := wrappedEndpoint(mw, "session.list", "call-1", `{}`)
 	if err == nil {
 		t.Fatal("session.list with no session source succeeded; want an honest failure")
 	}
@@ -160,32 +160,26 @@ func TestMiddleware_BlocksWithoutSourceIsHonest(t *testing.T) {
 	}
 }
 
-// The middleware's dispatch reaches the executors, and the narrowing holds
-// through it: a call naming another session is refused — the refusal is the
-// call's result, in our words (nocx-uvac6.1) — and the ledger is never
-// asked.
-func TestMiddleware_BlocksRefusedOutsideGrantIsAResult(t *testing.T) {
+// The session resource is resolved from the run's grant, so the model cannot
+// select another pane. An explicit sessionId remains invalid input.
+func TestMiddleware_BlocksUseGrantSessionAndRejectModelSessionID(t *testing.T) {
 	grant := sessionGrant("session-a", autonomousMatrix())
 	src := &fakeBlocks{items: SessionItems{Items: []SessionItem{{ID: "blk-1", Command: "ls", State: "exited"}}}}
 	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, &blocksOnlyRequester{blocks: src})
 
-	out, err := wrappedEndpoint(mw, "session.list", "call-1", `{"sessionId":"session-b"}`)
+	out, err := wrappedEndpoint(mw, "session.list", "call-1", `{}`)
 	if err != nil {
-		t.Fatalf("session.list on another session gave an error %v — want the refusal as a tool result", err)
-	}
-	if !strings.Contains(out, "REFUSED") {
-		t.Fatalf("session.list on another session result = %q, want a refusal in our words", out)
-	}
-	if calls := src.listCalls(); len(calls) != 0 {
-		t.Fatalf("the ledger was asked %v; want never asked", calls)
-	}
-
-	out, err = wrappedEndpoint(mw, "session.list", "call-2", `{"sessionId":"session-a"}`)
-	if err != nil {
-		t.Fatalf("session.list on the granted session: %v", err)
+		t.Fatalf("session.list without sessionId: %v", err)
 	}
 	if !strings.Contains(out, "blk-1") {
-		t.Errorf("result %s does not carry the block", out)
+		t.Fatalf("result %s does not carry the block", out)
+	}
+	if calls := src.listCalls(); len(calls) != 1 || calls[0].sessionID != "session-a" {
+		t.Fatalf("the ledger calls were %v; want one call for session-a", calls)
+	}
+
+	if _, err := wrappedEndpoint(mw, "session.list", "call-2", `{"sessionId":"session-a"}`); err == nil {
+		t.Fatal("session.list with sessionId succeeded; want schema refusal")
 	}
 }
 
@@ -235,11 +229,11 @@ func TestAsk_LongOutputIsAnsweredFromTheEnd(t *testing.T) {
 		turn++
 		switch turn {
 		case 1:
-			streamToolCalls(w, toolCallSpec{name: "session.list", args: `{"sessionId":"session-a"}`, id: "call_list"})
+			streamToolCalls(w, toolCallSpec{name: "session.list", args: `{}`, id: "call_list"})
 		case 2:
 			// The model read the total off the list result and aims at the end.
 			total := totalFromListBody(t, requestBody(r))
-			args := fmt.Sprintf(`{"sessionId":"session-a","id":"blk-df","start":%d,"count":20}`, total-20)
+			args := fmt.Sprintf(`{"id":"blk-df","start":%d,"count":20}`, total-20)
 			streamToolCalls(w, toolCallSpec{name: "session.read", args: args, id: "call_read"})
 		default:
 			answer := "the output ends with something else"

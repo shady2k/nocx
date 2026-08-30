@@ -2,12 +2,9 @@ package transport
 
 // The system prompt reaches the model on every ask (nocx-avogl.1).
 //
-// The defect these tests close is the one in the owner's screenshot: the
-// model was never told the session id its tools require, and the policy's
-// scope check refuses an invented one BEFORE it would ask the person. So
-// the assertion is not "a system message exists" but "the message names the
-// session THIS run is scoped to, verbatim" — and the paired end, in
-// internal/assistant, is that the same string passes the scope check.
+// These tests prove the standing prompt is present and carries only facts
+// owned by the question and its pane. Session identity is backend-owned tool
+// context, so it must not be copied into model-facing prompt text.
 
 import (
 	"bytes"
@@ -32,9 +29,8 @@ func systemMessages(msgs []assistant.Message) []assistant.Message {
 	return out
 }
 
-// TestAgentAsk_QuestionWithNoReferencesStillCarriesTheSystemPrompt is the
-// bead's third criterion at the near end: nothing attached, and the model is
-// still told where it is — with the session id spelled as the tools take it.
+// TestAgentAsk_QuestionWithNoReferencesStillCarriesTheSystemPrompt verifies
+// that an ask with no attached items still receives the standing facts.
 func TestAgentAsk_QuestionWithNoReferencesStillCarriesTheSystemPrompt(t *testing.T) {
 	client := &scriptedAssistantClient{deltas: []string{"sure"}}
 	h := newAskHarness(t, client)
@@ -66,8 +62,8 @@ func TestAgentAsk_QuestionWithNoReferencesStillCarriesTheSystemPrompt(t *testing
 	if msgs[0].Role != "system" {
 		t.Fatalf("the first message is %q, want the system prompt ahead of the question", msgs[0].Role)
 	}
-	if !strings.Contains(sys[0].Content, sid) {
-		t.Fatalf("the prompt never names this run's session %q:\n%s", sid, sys[0].Content)
+	if strings.Contains(sys[0].Content, sid) {
+		t.Fatalf("the prompt copied the backend-owned session identity %q:\n%s", sid, sys[0].Content)
 	}
 	if !strings.Contains(sys[0].Content, "/home/dev/repos/nocx") {
 		t.Fatalf("the prompt never names the working directory the ask carried:\n%s", sys[0].Content)
@@ -85,11 +81,9 @@ func TestAgentAsk_QuestionWithNoReferencesStillCarriesTheSystemPrompt(t *testing
 	}
 }
 
-// TestAgentAsk_AttachedContentIsAnnouncedInTheOneSystemPrompt is the far
-// end: with terminal items attached the standing prompt is still there,
-// still names the session, and carries the data-not-instructions sentence —
-// one system message, not two, because there is one owner of what the model
-// is told.
+// TestAgentAsk_AttachedContentIsAnnouncedInTheOneSystemPrompt verifies that
+// attached terminal content remains in the one standing prompt without
+// copying the backend-owned session identity.
 func TestAgentAsk_AttachedContentIsAnnouncedInTheOneSystemPrompt(t *testing.T) {
 	client := &scriptedAssistantClient{deltas: []string{"ok"}}
 	h := newAskHarness(t, client)
@@ -117,8 +111,8 @@ func TestAgentAsk_AttachedContentIsAnnouncedInTheOneSystemPrompt(t *testing.T) {
 	if len(sys) != 1 {
 		t.Fatalf("engine received %d system message(s), want exactly one: %#v", len(sys), msgs)
 	}
-	if !strings.Contains(sys[0].Content, sid) {
-		t.Fatalf("the prompt never names this run's session %q:\n%s", sid, sys[0].Content)
+	if strings.Contains(sys[0].Content, sid) {
+		t.Fatalf("the prompt copied the backend-owned session identity %q:\n%s", sid, sys[0].Content)
 	}
 	if !strings.Contains(sys[0].Content, "Attached terminal content") {
 		t.Fatalf("content was attached and the prompt never says so:\n%s", sys[0].Content)

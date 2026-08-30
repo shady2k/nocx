@@ -34,7 +34,6 @@ package transport
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -80,7 +79,7 @@ func authorisedRunServer(args string) (*runToolCallingServer, *httptest.Server) 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		if s.requests.Add(1) == 1 {
-			streamToolCallChunk(w, "run", s.args)
+			streamToolCallChunk(w, "session.run", s.args)
 			return
 		}
 		streamOKChunks(w)
@@ -120,7 +119,7 @@ func driveOneCompletedRunResolvingWith(t *testing.T, entryIDFor func(h *askHarne
 	h.createEndpointAt(srv.URL)
 
 	sid := openLocalSession(t, h.conn)
-	fake.args = fmt.Sprintf(`{"sessionId":%q,"command":"ls -la"}`, sid)
+	fake.args = `{"command":"ls -la"}`
 
 	res, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId":     "ask-thread-1",
@@ -224,7 +223,7 @@ func driveOneAuthorisedRun(t *testing.T) (*askHarness, askWireResult, string, ap
 	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(askPolicyStore(t)))
 
 	sid := openLocalSession(t, h.conn)
-	fake, srv := authorisedRunServer(fmt.Sprintf(`{"sessionId":%q,"command":"ls -la"}`, sid))
+	fake, srv := authorisedRunServer(`{"command":"ls -la"}`)
 	t.Cleanup(srv.Close)
 	h.createEndpointAt(srv.URL)
 
@@ -247,8 +246,8 @@ func driveOneAuthorisedRun(t *testing.T) (*askHarness, askWireResult, string, ap
 	if err := json.Unmarshal(raw, &ap); err != nil {
 		t.Fatalf("approvalRequested unmarshal: %v\nraw: %s", err, raw)
 	}
-	if ap.RunID != strconv.FormatInt(res.RunID, 10) || ap.Tool != "run" || ap.Attempt != 1 {
-		t.Fatalf("approvalRequested binding = %+v, want run %d attempt 1 tool run", ap, res.RunID)
+	if ap.RunID != strconv.FormatInt(res.RunID, 10) || ap.Tool != "session.run" || ap.Attempt != 1 {
+		t.Fatalf("approvalRequested binding = %+v, want session.run %d attempt 1 tool session.run", ap, res.RunID)
 	}
 	got, errObj := approveOverWire(t, h.conn, map[string]any{
 		"runId": ap.RunID, "attempt": ap.Attempt, "tool": ap.Tool,
@@ -336,7 +335,7 @@ func findRunActionEntry(t *testing.T, led content.LedgerRepository) *content.Led
 		t.Fatalf("ListEntries: %v", err)
 	}
 	for _, s := range summaries {
-		if s.Kind == content.EntryAction && s.Intent == "run" {
+		if s.Kind == content.EntryAction && s.Intent == "session.run" {
 			e, err := led.Entry(context.Background(), s.ID)
 			if err != nil {
 				t.Fatalf("Entry(%s): %v", s.ID, err)
@@ -659,152 +658,6 @@ func TestRun_GrantedPathThreadReadsBackFromTheLedger(t *testing.T) {
 	}
 }
 
-// TestRun_RefusedExchangeReadsBackFromTheLedger is criterion 2's end: the
-// model proposes the run tool on a session the grant does NOT cover; the
-// policy refuses BEFORE anything is submitted — the broker is never asked,
-// no tool attempt is ever recorded — and the run continues: the refusal is
-// that call's result, the model answers, and the turn completes
-// (nocx-uvac6.1). The decision is in the thread, not only in a log: the
-// question closes success, the answer is prose, and the ledger holds no
-// action row — the refusal preceded every submission.
-func TestRun_RefusedExchangeReadsBackFromTheLedger(t *testing.T) {
-	fake, srv := newRunToolCallingServer(`{"sessionId":"foreign-session","command":"rm -rf /"}`)
-	t.Cleanup(srv.Close)
-
-	client, err := assistant.NewClient(nil, nil)
-	if err != nil {
-		t.Fatalf("assistant.NewClient: %v", err)
-	}
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(autonomousPolicyStore(t)))
-	h.createEndpointAt(srv.URL)
-
-	sid := openLocalSession(t, h.conn)
-	res, errObj := askOverWire(t, h.conn, map[string]any{
-		"askId":     "ask-thread-refused",
-		"sessionId": sid,
-		"question":  "clean up",
-		"cwd":       "/repo",
-	}, 3)
-	if errObj != nil {
-		t.Fatalf("ask: %+v", errObj)
-	}
-
-	// Drain notifications until the run terminalizes, watching for any
-	// agent.runRequest: the refusal must precede every submission.
-	var st struct {
-		RunID int64  `json:"runId"`
-		State string `json:"state"`
-		Error string `json:"error"`
-	}
-	deadline := time.Now().Add(15 * time.Second)
-	for {
-		remaining := time.Until(deadline)
-		if remaining <= 0 {
-			t.Fatalf("run never terminalized; state=%+v", st)
-		}
-		_ = h.conn.SetReadDeadline(time.Now().Add(remaining))
-		_, msg, readErr := h.conn.ReadMessage()
-		if readErr != nil {
-			t.Fatalf("reading notifications: %v (state=%+v)", readErr, st)
-		}
-		var n struct {
-			ID     *json.RawMessage `json:"id"`
-			Method string           `json:"method"`
-			Params json.RawMessage  `json:"params"`
-		}
-		if umErr := json.Unmarshal(msg, &n); umErr != nil {
-			continue
-		}
-		if n.ID == nil && n.Method == "agent.runRequest" {
-			t.Fatalf("a run request reached the renderer for a lane the grant does not cover: %s", n.Params)
-		}
-		if n.ID == nil && n.Method == "agent.runState" {
-			if stErr := json.Unmarshal(n.Params, &st); stErr != nil {
-				t.Fatalf("runState unmarshal: %v\nraw: %s", stErr, n.Params)
-			}
-			break
-		}
-	}
-	if st.RunID != res.RunID || st.State != "completed" {
-		t.Fatalf("runState = runId %d state %q, want %d completed — a refused call is an answer, not a fault", st.RunID, st.State, res.RunID)
-	}
-	if st.Error != "" {
-		t.Fatalf("runState error = %q, want none on a completed run", st.Error)
-	}
-	// The refusal rode the second request as a tool result — the run went
-	// on and the model answered.
-	if fake.requests.Load() != 2 {
-		t.Fatalf("provider received %d requests, want 2 (the refused call, then the answer) — the run must continue", fake.requests.Load())
-	}
-	if len(fake.bodies) < 2 || !strings.Contains(fake.bodies[1], "REFUSED") {
-		t.Fatalf("the second request did not carry the refusal as a tool result: %v", fake.bodies)
-	}
-
-	// ── the thread readback: the refusal is in the ledger ───────────────
-	ctx := context.Background()
-	led := h.db.Ledger()
-
-	q, err := led.Entry(ctx, res.EntryID)
-	if err != nil || q == nil {
-		t.Fatalf("question entry: %v (nil=%v)", err, q == nil)
-	}
-	if q.Phase != content.PhaseClosed || q.Status != content.EntrySuccess {
-		t.Errorf("question phase/status = %q/%q, want closed/success — the turn answered after the refusal", q.Phase, q.Status)
-	}
-	if len(q.Executions) != 1 {
-		t.Fatalf("question executions = %d, want one run", len(q.Executions))
-	}
-	run := q.Executions[0]
-	if run.ID != res.RunID {
-		t.Errorf("run id = %d, want %d", run.ID, res.RunID)
-	}
-	if run.State == nil || *run.State != content.RunCompleted {
-		t.Errorf("run state = %v, want completed", run.State)
-	}
-	if run.TerminationReason == nil || *run.TerminationReason != content.TermCompleted {
-		t.Errorf("run termination = %v, want completed", run.TerminationReason)
-	}
-	if run.EndedAt == nil {
-		t.Error("completed run has no ended_at — a terminal run has an end")
-	}
-
-	ans, err := led.Entry(ctx, res.EntryID)
-	if err != nil || ans == nil {
-		t.Fatalf("turn entry: %v (nil=%v)", err, ans == nil)
-	}
-	if ans.ParentID != nil {
-		t.Errorf("the turn is drawn inside %q — the answer is its own body (nocx-4em1z)", *ans.ParentID)
-	}
-	if ans.Phase != content.PhaseClosed || ans.Status != content.EntrySuccess {
-		t.Errorf("turn phase/status = %q/%q, want closed/success — the turn closes with the run", ans.Phase, ans.Status)
-	}
-	if len(ans.Executions) != 1 {
-		t.Fatalf("turn executions = %d, want exactly 1", len(ans.Executions))
-	}
-	// The answer streamed: the model's reply after the refusal is prose in
-	// the thread (ADR-0040), exactly what the brief's "with prose in it"
-	// means.
-	if prose := proseUnder(t, led, res.EntryID); len(prose) == 0 {
-		t.Error("the answered turn has no prose block — the model's words after the refusal must be in the thread")
-	}
-
-	// The refusal precedes every submission: the ledger holds the TURN and
-	// the prose block the answer streamed into — and NOTHING ELSE: no tool
-	// attempt was ever opened.
-	summaries, err := led.ListEntries(ctx, 10)
-	if err != nil {
-		t.Fatalf("ListEntries: %v", err)
-	}
-	if len(summaries) != 2 {
-		t.Fatalf("ledger has %d entries, want 2 (the turn and its prose child) — a refused call opens no action entry", len(summaries))
-	}
-	for _, s := range summaries {
-		if s.Kind == content.EntryAction {
-			t.Errorf("refused exchange recorded an action entry: %+v — the refusal precedes every submission", s)
-		}
-	}
-}
-
 // ── the caused-by relation, read back from the store (nocx-h1l4o) ────────
 
 // assertNothingClaimsToBeTheAnswer is nocx-4em1z's invariant in the form the
@@ -889,7 +742,7 @@ func TestRun_TheCommandTheTurnRanJoinsTheTurnWithAPosition(t *testing.T) {
 		t.Fatalf("Caused: %v", err)
 	}
 	// Three things, in the order the turn did them: the tool call's own
-	// action entry — the line that says WHEN the assistant reached for run —
+	// action entry — the line that says WHEN the assistant reached for session.run —
 	// then the command that really opened a block, and then the run of prose
 	// the model wrote from its output (ADR-0040). The prose is a CHILD like
 	// the other two, at a seat of its own, which is the whole of what the
@@ -898,8 +751,8 @@ func TestRun_TheCommandTheTurnRanJoinsTheTurnWithAPosition(t *testing.T) {
 		got[0] != content.EntryAction || got[1] != content.EntryShell || got[2] != content.EntryText {
 		t.Fatalf("the turn's children read %v, want the call, the command it opened, and the answer written after it", got)
 	}
-	if caused[0].Kind != content.EntryAction || caused[0].Intent != "run" || caused[0].Position != 0 {
-		t.Errorf("first cause = %+v, want the run action at position 0", caused[0])
+	if caused[0].Kind != content.EntryAction || caused[0].Intent != "session.run" || caused[0].Position != 0 {
+		t.Errorf("first cause = %+v, want the session.run action at position 0", caused[0])
 	}
 	if caused[1].EntryID != commandEntry || caused[1].Kind != content.EntryShell || caused[1].Position != 1 {
 		t.Errorf("second cause = %+v, want the shell entry at position 1", caused[1])
@@ -938,7 +791,7 @@ func TestRun_AResolutionNamingNoRowJoinsNothingAndDoesNotFailTheRun(t *testing.T
 	// prose the model wrote after the call — a child of the turn like any
 	// other since ADR-0040, and the reason this list is two long rather than
 	// one.
-	if len(caused) != 2 || caused[0].Intent != "run" || caused[0].Kind != content.EntryAction {
+	if len(caused) != 2 || caused[0].Intent != "session.run" || caused[0].Kind != content.EntryAction {
 		t.Fatalf("the turn caused %+v, want the call it made and the prose it wrote after it", caused)
 	}
 	if caused[1].Kind != content.EntryText || caused[1].Position != 1 {

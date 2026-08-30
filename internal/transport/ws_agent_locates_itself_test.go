@@ -2,27 +2,17 @@ package transport
 
 // The epic's own sentence, watched end to end (nocx-z4hgm, closing
 // nocx-avogl): a person asks the assistant to look at THEIR session; it
-// calls readScreen with the right session id and answers.
+// calls readScreen for the session the backend granted to the run.
 //
-// What makes this test different from the readScreen wiring test beside it
-// (ws_readscreen_test.go) is where the model learns the id. There, the test
-// hands the fake provider the session id in Go — `fake.session = sid` — so
-// the call would name the right session even if the backend told the model
-// nothing at all. Here the provider is told NOTHING by the test: it reads
-// the id out of the system message it was sent, the way the real model has
-// to, and the assertion is on the id that then travelled back through the
-// broker. Stop pinning the id into the prompt (nocx-avogl.1) and there is
-// nothing for the provider to find, so the call names a session the run's
-// grant does not cover, the scope check refuses it before the broker is
-// asked, and this test goes red — on the id, not on the prompt's wording.
-//
-// A second session is open the whole time. "The right session id" is only a
+// The model receives no session identity in its tool arguments. The backend
+// injects the grant's sole session scope into the resolver, and this test
+// asserts that the broker request still names the pane the person asked about.
+// A second session is open the whole time, so "the right session" is only a
 // claim if there was another one to get wrong.
 
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -34,6 +24,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/storage"
 )
 
 // sessionIDInSystemPrompt is the model's own path to where it is: the
@@ -74,6 +65,20 @@ func sessionIDInSystemPrompt(body string) string {
 	return ""
 }
 
+func operatorSessionScopedPolicyStore(t *testing.T) *assistant.GlobalPolicyStore {
+	t.Helper()
+	matrix := autonomousMatrixForTests()
+	matrix.Observe.Scopes = []content.GrantScope{{
+		Kind: content.ResourceSession,
+		ID:   "operator-authored-session",
+	}}
+	store := assistant.NewGlobalPolicyStore(storage.NewDocumentStore(t.TempDir()), "agent-policy.json")
+	if err := store.SetPolicy(matrix); err != nil {
+		t.Fatalf("seed operator-scoped policy: %v", err)
+	}
+	return store
+}
+
 // selfLocatingProvider is the fake model. The test never tells it which
 // session it is in; it finds out the way the real one does, and it answers
 // with what the tool result actually carried — so the answer is evidence
@@ -97,12 +102,11 @@ func (p *selfLocatingProvider) serve(w http.ResponseWriter, r *http.Request) {
 	if n == 1 {
 		p.learned = sessionIDInSystemPrompt(body)
 	}
-	learned := p.learned
 	marker := p.marker
 	p.mu.Unlock()
 
 	if n == 1 {
-		streamToolCallChunk(w, "session.read", fmt.Sprintf(`{"sessionId":%q}`, learned))
+		streamToolCallChunk(w, "session.read", `{}`)
 		return
 	}
 	if strings.Contains(body, marker) {
@@ -172,11 +176,10 @@ func awaitReadScreenRequest(t *testing.T, h *askHarness, prov *selfLocatingProvi
 	}
 }
 
-// TestAssistant_LooksAtThePaneTheQuestionWasAskedIn is nocx-avogl's success
-// criterion, end to end against the real backend: the real engine with the
-// embedded schemas, the real socket, the real ledger, a real grant. The
-// renderer half is this test.
-func TestAssistant_LooksAtThePaneTheQuestionWasAskedIn(t *testing.T) {
+// TestAssistant_LooksAtPaneDespiteOperatorSessionScope is the transport
+// regression for a policy row that names another session. The real engine,
+// socket, ledger, broker and grant are exercised; only the model is scripted.
+func TestAssistant_LooksAtPaneDespiteOperatorSessionScope(t *testing.T) {
 	const marker = "(publickey)."
 
 	prov := &selfLocatingProvider{marker: marker}
@@ -187,7 +190,7 @@ func TestAssistant_LooksAtThePaneTheQuestionWasAskedIn(t *testing.T) {
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
-	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(autonomousPolicyStore(t)))
+	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(operatorSessionScopedPolicyStore(t)))
 	h.createEndpointAt(srv.URL)
 
 	// Two real panes on the layout chain, each with a live session as its

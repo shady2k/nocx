@@ -109,9 +109,8 @@ const gitStatusSchema = `{
 const sessionListSchema = `{
   "type": "object",
   "additionalProperties": false,
-  "required": ["sessionId"],
+  "required": [],
   "properties": {
-    "sessionId": {"type": "string"},
     "limit": {"type": "integer"}
   },
   "$defs": {"result": {
@@ -125,9 +124,8 @@ const sessionListSchema = `{
 const sessionReadSchema = `{
   "type": "object",
   "additionalProperties": false,
-  "required": ["sessionId"],
+  "required": [],
   "properties": {
-    "sessionId": {"type": "string"},
     "id": {"type": "string"},
     "start": {"type": "integer"},
     "count": {"type": "integer"}
@@ -143,9 +141,8 @@ const sessionReadSchema = `{
 const runSchema = `{
   "type": "object",
   "additionalProperties": false,
-  "required": ["sessionId", "command"],
+  "required": ["command"],
   "properties": {
-    "sessionId": {"type": "string"},
     "command": {"type": "string"}
   },
   "$defs": {"result": {
@@ -345,7 +342,7 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"session.read.schema.json":     sessionReadSchema,
 		"files.edit.schema.json":       filesEditSchema,
 		"files.create.schema.json":     filesCreateSchema,
-		"run.schema.json":              runSchema,
+		"session.run.schema.json":      runSchema,
 		"notes.search.schema.json":     contentToolSchema,
 		"notes.create.schema.json":     contentToolSchema,
 		"notes.update.schema.json":     contentToolSchema,
@@ -391,12 +388,12 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 	if !reflect.DeepEqual(sessionObserve, wantSession) {
 		t.Fatalf("ForGrant(observe+session) = %v, want exactly %v", sessionObserve, wantSession)
 	}
-	// The run row's classification: mutate-destructive + session. A grant
-	// carrying exactly that effect and kind offers exactly run; an observe
+	// The session.run row's classification: mutate-destructive + session. A grant
+	// carrying exactly that effect and kind offers exactly session.run; an observe
 	// grant offers the read tool instead, never the mutating one.
 	runGrant := grant([]content.Effect{content.EffectMutateDestructive}, content.ResourceSession)
-	if got := reg.ForGrant(runGrant); !containsName(got, "run") || len(got) != 1 {
-		t.Fatalf("ForGrant(mutate-destructive+session) = %v, want exactly [run]", toolNames(got))
+	if got := reg.ForGrant(runGrant); !containsName(got, "session.run") || len(got) != 1 {
+		t.Fatalf("ForGrant(mutate-destructive+session) = %v, want exactly [session.run]", toolNames(got))
 	}
 	// Empty grant offers nothing.
 	if got := reg.ForGrant(content.Grant{}); len(got) != 0 {
@@ -468,7 +465,7 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"session.read.schema.json":     sessionReadSchema,
 		"files.edit.schema.json":       filesEditSchema,
 		"files.create.schema.json":     filesCreateSchema,
-		"run.schema.json":              runSchema,
+		"session.run.schema.json":      runSchema,
 		"notes.search.schema.json":     contentToolSchema,
 		"notes.create.schema.json":     contentToolSchema,
 		"notes.update.schema.json":     contentToolSchema,
@@ -729,7 +726,7 @@ func TestAssemble_RejectsDeclarationWithoutDescription(t *testing.T) {
 // disagreeing with it the day a tool is added.
 func TestDeclarations_OpensBlockIsRunAlone(t *testing.T) {
 	for _, d := range declarations {
-		want := d.Name == "run"
+		want := d.Name == "session.run"
 		if d.OpensBlock != want {
 			t.Errorf("declaration %q: OpensBlock = %v, want %v", d.Name, d.OpensBlock, want)
 		}

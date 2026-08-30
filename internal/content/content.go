@@ -103,6 +103,7 @@ type Redaction struct {
 type Scope string
 
 const (
+	ScopePane       Scope = "pane"       // the exact durable pane
 	ScopeDirectory  Scope = "directory"  // the exact working directory
 	ScopeHost       Scope = "host"       // the exact host; "" is the local machine
 	ScopeEverywhere Scope = "everywhere" // no rung filter

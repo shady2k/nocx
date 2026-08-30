@@ -16,15 +16,15 @@ func TestAskFailure_UnexecutedToolCallEnvelopeDialectsFailAtTransportPayload(t *
 	}{
 		{
 			name:    "xml",
-			payload: "<tool_call><function=run><parameter=command>df -h</parameter></function></tool_call>",
+			payload: "<tool_call><function=session.run><parameter=command>df -h</parameter></function></tool_call>",
 		},
 		{
 			name:    "json",
-			payload: `<tool_call>{"name":"run","arguments":{"command":"df -h"}}</tool_call>`,
+			payload: `<tool_call>{"name":"session.run","arguments":{"command":"df -h"}}</tool_call>`,
 		},
 		{
 			name:    "multiple mixed dialect envelopes",
-			payload: "<tool_call>{\"name\":\"run\",\"arguments\":{\"command\":\"df -h\"}}</tool_call>\n\n<tool_call><function=run><parameter=command>du -sh .</parameter></function></tool_call>",
+			payload: "<tool_call>{\"name\":\"session.run\",\"arguments\":{\"command\":\"df -h\"}}</tool_call>\n\n<tool_call><function=session.run><parameter=command>du -sh .</parameter></function></tool_call>",
 		},
 	}
 	for _, tt := range tests {
@@ -65,7 +65,7 @@ func TestAskFailure_OrdinaryProseThatMentionsToolCallCompletes(t *testing.T) {
 }
 
 func TestAgentAsk_FailedToolEnvelopeIsNotReplayedAsAssistantMessage(t *testing.T) {
-	const envelope = `<tool_call>{"name":"run","arguments":{"command":"df -h"}}</tool_call>`
+	const envelope = `<tool_call>{"name":"session.run","arguments":{"command":"df -h"}}</tool_call>`
 	client := &conversationClient{
 		scripts: [][]assistant.AskEvent{
 			{answerEvent(envelope)},
@@ -92,7 +92,7 @@ func TestAgentAsk_FailedToolEnvelopeIsNotReplayedAsAssistantMessage(t *testing.T
 }
 
 func TestAgentAsk_CompletedToolEnvelopeIsNotReplayedAsAssistantMessage(t *testing.T) {
-	const envelope = `<tool_call>{"name":"run","arguments":{"command":"df -h"}}</tool_call>`
+	const envelope = `<tool_call>{"name":"session.run","arguments":{"command":"df -h"}}</tool_call>`
 	client := &conversationClient{
 		scripts: [][]assistant.AskEvent{
 			{answerEvent(envelope)},

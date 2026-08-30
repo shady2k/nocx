@@ -444,6 +444,11 @@ func ledgerWhere(q LedgerQuery) (string, []any) {
 	var conds []string
 	var args []any
 	switch q.Scope {
+	case ScopePane:
+		// The pane rung has no environment coordinate: PaneID is the
+		// durable identity that outlives backend and session restarts, so it
+		// is the correct meaning of "this tab"; a session id would die with
+		// the backend. The shared PaneID predicate below is the whole rung.
 	case ScopeDirectory:
 		conds = append(conds, "e.environment_id = ?", "e.cwd = ?")
 		args = append(args, q.EnvironmentID, q.Cwd)
@@ -502,6 +507,10 @@ func ledgerWhere(q LedgerQuery) (string, []any) {
 // host" is indistinguishable from "you misspelled the status".
 func validateLedgerQuery(q LedgerQuery) error {
 	switch q.Scope {
+	case ScopePane:
+		if q.PaneID == "" {
+			return fmt.Errorf("content: query: scope %q needs a pane id", q.Scope)
+		}
 	case ScopeDirectory, ScopeHost:
 		if q.EnvironmentID == "" {
 			return fmt.Errorf("content: query: scope %q needs an environment id — a rung with no coordinates matches nothing", q.Scope)

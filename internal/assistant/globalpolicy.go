@@ -66,12 +66,20 @@ func (s *GlobalPolicyStore) Policy() content.EffectPolicy {
 	return s.current
 }
 
-// SetPolicy persists a new policy and makes it current. The write happens
-// before the value is served (AD-8: one owner of the number; a policy that
-// was not persisted is a policy that vanished on restart).
+// SetPolicy persists a new policy and makes it current. A matrix-only caller
+// cannot express invocation rules, so an omitted or null rules field must
+// preserve the stored rules; only a non-nil rules slice can replace them.
+// This keeps a forgetful caller from revoking standing answers it never
+// received.
+// The write happens before the value is served (AD-8: one owner of the
+// number; a policy that was not persisted is a policy that vanished on
+// restart).
 func (s *GlobalPolicyStore) SetPolicy(p content.EffectPolicy) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if p.Rules == nil {
+		p.Rules = append([]content.InvocationRule(nil), s.current.Rules...)
+	}
 	if err := s.doc.Write(s.name, p); err != nil {
 		return err
 	}

@@ -236,7 +236,7 @@ test.describe('a refusal is an answer, and a turn can be stopped (nocx-uvac6.7)'
     // same turn, so this second script is armed before the human gesture.
     fake.setScript({
       chunks: [],
-      toolCalls: [{ name: 'session.read', arguments: { sessionId } }],
+      toolCalls: [{ name: 'session.read', arguments: {} }],
     })
     fake.setScript({ chunks: (body) => answerFromRefusal(body, 'read this session') })
     await askFromPrompt(page, QUESTION)
@@ -292,7 +292,7 @@ test.describe('a refusal is an answer, and a turn can be stopped (nocx-uvac6.7)'
     const base = fake.requests().length
     fake.setScript({
       chunks: [],
-      toolCalls: [{ name: 'run', arguments: { sessionId, command: COMMAND } }],
+      toolCalls: [{ name: 'session.run', arguments: { command: COMMAND } }],
     })
     // Deny resumes the turn with a second model request. Its answer is
     // derived from the refusal result, so a missing result cannot fall back

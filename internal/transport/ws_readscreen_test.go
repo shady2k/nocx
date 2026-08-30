@@ -89,7 +89,7 @@ func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
 	for _, tool := range reg.ForGrant(*grant) {
 		names = append(names, tool.Name)
 	}
-	want := []string{"files.read", "session.list", "session.read", "run", "files.edit", "files.create"}
+	want := []string{"files.read", "session.list", "session.read", "session.run", "files.edit", "files.create"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("tools offered by the product-minted grant = %v, want %v", names, want)
 	}
@@ -107,11 +107,10 @@ func hasGrantScope(scopes []content.GrantScope, kind content.ResourceKind, id st
 type toolCallingServer struct {
 	requests atomic.Int64
 	bodies   []string
-	session  string
 }
 
-func newToolCallingServer(session string) (*toolCallingServer, *httptest.Server) {
-	s := &toolCallingServer{session: session}
+func newToolCallingServer() (*toolCallingServer, *httptest.Server) {
+	s := &toolCallingServer{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		n := s.requests.Add(1)
@@ -120,7 +119,7 @@ func newToolCallingServer(session string) (*toolCallingServer, *httptest.Server)
 			// The exact SSE shape the assistant engine tests use: one chunk
 			// carrying the tool call and finish_reason tool_calls, then the
 			// end-of-stream marker (policy_test.go's streamToolCalls).
-			streamToolCallChunk(w, "session.read", fmt.Sprintf(`{"sessionId":%q}`, s.session))
+			streamToolCallChunk(w, "session.read", `{}`)
 			return
 		}
 		streamOKChunks(w)
@@ -292,7 +291,7 @@ func (h *askHarness) createEndpointAt(baseURL string) {
 // off the socket and answers it with a frame. Everything asserted crossed a
 // wire.
 func TestReadScreen_EndToEndOverTheRealSocket(t *testing.T) {
-	fake, srv := newToolCallingServer("") // session filled per ask below
+	fake, srv := newToolCallingServer()
 	defer srv.Close()
 
 	// The REAL engine: the embedded schemas include readScreen.
@@ -307,7 +306,6 @@ func TestReadScreen_EndToEndOverTheRealSocket(t *testing.T) {
 	h.createEndpointAt(srv.URL)
 
 	sid := openLocalSession(t, h.conn)
-	fake.session = sid
 
 	// The ask that starts a grant-bearing run: the harness names the
 	// workspace policy preset (autonomous within the routine local
@@ -423,14 +421,13 @@ func TestReadScreen_FailedCaptureAnswersHonestly(t *testing.T) {
 	// own that direction). The RENDERER is what fails here: it answers the
 	// request honestly with outcome failed, and the failure sentence must
 	// cross as a tool error the run proceeds past — never a hang.
-	var toolSession atomic.Value
 	// The same composition-root seam, at construction: the autonomous
 	// matrix, run-scoped to the harness session.
 	h := newAskHarnessWithOpts(t, client, WithAgentPolicy(autonomousPolicyStore(t)))
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		if h.fakeRequests.Add(1) == 1 {
-			streamToolCallChunk(w, "session.read", fmt.Sprintf(`{"sessionId":%q}`, toolSession.Load()))
+			streamToolCallChunk(w, "session.read", `{}`)
 			return
 		}
 		streamOKChunks(w)
@@ -439,7 +436,6 @@ func TestReadScreen_FailedCaptureAnswersHonestly(t *testing.T) {
 	h.createEndpointAt(srv.URL)
 
 	sid := openLocalSession(t, h.conn)
-	toolSession.Store(sid)
 
 	askOverWire(t, h.conn, map[string]any{
 		"askId":     "ask-readscreen-2",
@@ -510,7 +506,6 @@ func TestReadScreen_DisconnectedRendererTerminalizes(t *testing.T) {
 	// The tool call names the ASK's session (the grant's scope): a call
 	// naming any other session would be refused by policy before the broker
 	// is ever asked, which is the test the grant tests own.
-	var toolSession atomic.Value
 	// The composition-root seam (WithAgentPolicy), named at construction:
 	// the autonomous matrix minted with the run's own session permits
 	// observe on its own session — exactly readScreen's scope.
@@ -518,7 +513,7 @@ func TestReadScreen_DisconnectedRendererTerminalizes(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.ReadAll(r.Body)
 		if h.fakeRequests.Add(1) == 1 {
-			streamToolCallChunk(w, "session.read", fmt.Sprintf(`{"sessionId":%q}`, toolSession.Load()))
+			streamToolCallChunk(w, "session.read", `{}`)
 			return
 		}
 		streamOKChunks(w)
@@ -527,7 +522,6 @@ func TestReadScreen_DisconnectedRendererTerminalizes(t *testing.T) {
 	h.createEndpointAt(srv.URL)
 
 	sid := openLocalSession(t, h.conn)
-	toolSession.Store(sid)
 
 	res, errObj := askOverWire(t, h.conn, map[string]any{
 		"askId":     "ask-readscreen-3",

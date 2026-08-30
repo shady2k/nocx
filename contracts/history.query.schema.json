@@ -16,7 +16,7 @@
     },
     "scope": {
       "description": "The rung this page was drawn from, echoed back. The caller asks for a rung and the server answers from it — it never silently widens, because a ladder whose rung you cannot see is a filter.",
-      "enum": ["directory", "host", "everywhere"]
+      "enum": ["pane", "directory", "host", "everywhere"]
     },
     "exhausted": {
       "description": "True when this rung has no further entries beyond this page. The overlay uses it to decide whether the next Up climbs to a wider rung rather than paging further down this one.",

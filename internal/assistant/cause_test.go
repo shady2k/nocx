@@ -216,22 +216,22 @@ func TestACommandTheTurnRanJoinsTheTurnFromTheBackendsOwnResolution(t *testing.T
 	req := &runRequester{entryID: "shell-entry-1"}
 	mw := middlewareForTurn(t, grant, led, nil, req, &fakeKnownMaterial{}, "turn-entry")
 
-	if _, err := wrappedEndpoint(mw, "run", "call-1",
-		`{"sessionId":"`+sess+`","command":"ls"}`); err != nil {
-		t.Fatalf("run: %v", err)
+	if _, err := wrappedEndpoint(mw, "session.run", "call-1",
+		`{"command":"ls"}`); err != nil {
+		t.Fatalf("session.run: %v", err)
 	}
 	if req.asked != 1 {
 		t.Fatalf("the renderer was asked %d times, want 1", req.asked)
 	}
 	got := led.recordedCauses()
 	// Two causes, in the order the turn made them: the tool call's own
-	// action entry — the line that says WHEN the assistant reached for run
+	// action entry — the line that says WHEN the assistant reached for session.run
 	// — and then the shell entry the command really opened.
 	if len(got) != 2 {
 		t.Fatalf("causes recorded = %+v, want the action and the command", got)
 	}
-	if got[0].caused != "entry-run" || got[0].turn != "turn-entry" {
-		t.Fatalf("first cause = %+v, want the run tool's action entry", got[0])
+	if got[0].caused != "entry-session.run" || got[0].turn != "turn-entry" {
+		t.Fatalf("first cause = %+v, want the session.run tool's action entry", got[0])
 	}
 	if got[1].caused != "shell-entry-1" || got[1].turn != "turn-entry" {
 		t.Fatalf("second cause = %+v, want the shell entry the renderer minted", got[1])
@@ -251,9 +251,9 @@ func TestTheRendererSendsNoArrangementOfItsOwn(t *testing.T) {
 	req := &runRequester{entryID: "shell-entry-1"}
 	mw := middlewareForTurn(t, grant, led, nil, req, &fakeKnownMaterial{}, "turn-entry")
 
-	if _, err := wrappedEndpoint(mw, "run", "call-1",
-		`{"sessionId":"`+sess+`","command":"ls"}`); err != nil {
-		t.Fatalf("run: %v", err)
+	if _, err := wrappedEndpoint(mw, "session.run", "call-1",
+		`{"command":"ls"}`); err != nil {
+		t.Fatalf("session.run: %v", err)
 	}
 	// The resolution the renderer sent carries exactly the fields the wire
 	// declares (runResolvedParams) — no turn, no position, no parent. The
@@ -283,9 +283,9 @@ func TestTheRelationIsWrittenWhenTheCauseIsKnownNotWhenTheTurnCloses(t *testing.
 	req := &runRequester{entryID: "shell-entry-1"}
 	mw := middlewareForTurn(t, grant, led, nil, req, &fakeKnownMaterial{}, "turn-entry")
 
-	if _, err := wrappedEndpoint(mw, "run", "call-1",
-		`{"sessionId":"`+sess+`","command":"sleep 30"}`); err != nil {
-		t.Fatalf("run: %v", err)
+	if _, err := wrappedEndpoint(mw, "session.run", "call-1",
+		`{"command":"sleep 30"}`); err != nil {
+		t.Fatalf("session.run: %v", err)
 	}
 	got := led.recordedCauses()
 	if len(got) != 2 || got[1].caused != "shell-entry-1" {
@@ -308,13 +308,13 @@ func TestAFailedRunJoinsTheCallItMadeAndNoCommand(t *testing.T) {
 	led := &fakeLedger{}
 	mw := middlewareForTurn(t, grant, led, nil, &failingRunRequester{}, &fakeKnownMaterial{}, "turn-entry")
 
-	if _, err := wrappedEndpoint(mw, "run", "call-1",
-		`{"sessionId":"`+sess+`","command":"ls"}`); err == nil {
-		t.Fatal("run succeeded — the failing requester should have failed the call")
+	if _, err := wrappedEndpoint(mw, "session.run", "call-1",
+		`{"command":"ls"}`); err == nil {
+		t.Fatal("session.run succeeded — the failing requester should have failed the call")
 	}
 	got := led.recordedCauses()
-	if len(got) != 1 || got[0].caused != "entry-run" {
-		t.Fatalf("causes = %+v, want only the call the turn made", got)
+	if len(got) != 1 || got[0].caused != "entry-session.run" {
+		t.Fatalf("causes = %+v, want only the session.run call the turn made", got)
 	}
 }
 

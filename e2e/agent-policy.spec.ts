@@ -304,14 +304,17 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     await configureAssistant(page, ENDPOINT_NAME)
     await backToTerminal(page)
 
-    // ── The session this person is working in, learned from the product's
+    // ── The session this person is working in, established by the product's
     // own first ask. Content-only, so it also re-establishes that a script
-    // without toolCalls behaves exactly as it always did.
-    const sessionId = await askAndLearnSession(page, asks, 'What is on the screen right now?')
+    // without toolCalls behaves exactly as it always did. The id itself is no
+    // longer read here: the model does not name the session any more, the
+    // backend supplies it from the transport (nocx-i4gg7), so what this ask
+    // still buys is the session existing and the plain path working.
+    await askAndLearnSession(page, asks, 'What is on the screen right now?')
 
     // ── 1. The first question escalates: nothing has been decided about
     // `observe`, and an unstated row asks.
-    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: { sessionId } }] })
+    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: {} }] })
     await askFromPrompt(page, 'What went wrong in that build?')
     const prompt = approvalPrompt(page)
     await expect(prompt).toBeVisible({ timeout: 30_000 })
@@ -337,7 +340,7 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     // decides it this time. The chip is waited for FIRST — the run reached a
     // terminal state, so the gate was passed and not merely not-yet-reached
     // — and only then is the prompt's absence a fact about the product.
-    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: { sessionId } }] })
+    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: {} }] })
     await askFromPrompt(page, 'And if I fix the type?')
     await answerFinished(page, 'And if I fix the type?')
     await expect(approvalPrompt(page)).toHaveCount(0)
@@ -364,7 +367,7 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
 
     // ── 7. And the question comes back on the next one.
     await backToTerminal(page)
-    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: { sessionId } }] })
+    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: {} }] })
     await askFromPrompt(page, 'And now what should I try?')
     await expect(approvalPrompt(page)).toBeVisible({ timeout: 30_000 })
     // Left answered rather than hanging: the run is terminalized by the
@@ -384,7 +387,7 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     // time" and nothing else has been decided.
     fake.setScript({
       chunks: [],
-      toolCalls: [{ name: 'session.read', arguments: { sessionId: sessionA } }],
+      toolCalls: [{ name: 'session.read', arguments: {} }],
     })
     await askFromPrompt(page, 'Why did that command fail?')
     const prompt = approvalPrompt(page)
@@ -398,7 +401,7 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     // ── In force for the rest of THIS session.
     fake.setScript({
       chunks: [],
-      toolCalls: [{ name: 'session.read', arguments: { sessionId: sessionA } }],
+      toolCalls: [{ name: 'session.read', arguments: {} }],
     })
     await askFromPrompt(page, 'What about the second error?')
     await answerFinished(page, 'What about the second error?')
@@ -434,7 +437,7 @@ test.describe('a person answers "stop asking me this", and can undo it (nocx-fc4
     // never answered for.
     fake.setScript({
       chunks: [],
-      toolCalls: [{ name: 'session.read', arguments: { sessionId: sessionB } }],
+      toolCalls: [{ name: 'session.read', arguments: {} }],
     })
     await askFromPrompt(page, 'Why did that command fail again?')
     await expect(approvalPrompt(page)).toBeVisible({ timeout: 30_000 })

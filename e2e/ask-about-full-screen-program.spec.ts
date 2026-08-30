@@ -531,7 +531,7 @@ test.describe('asking about a full-screen program without leaving it (nocx-7l4ex
     // Ask while the full-screen process still owns its pty. The second model
     // response is held after its first delta so output written after capture
     // can be observed as genuinely happening under the pinned frame.
-    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: { sessionId } }] })
+    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: {} }] })
     fake.setScript({ chunks: answerFromPinnedFrame, holdAfter: 1 })
     const requestBase = fake.requests().length
     const question = 'What was on the screen?'

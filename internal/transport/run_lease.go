@@ -132,17 +132,18 @@ type runLease struct {
 	protected protectedForeground
 	cfg       RunLeaseConfig
 
-	mu            sync.Mutex
-	cancel        context.CancelFunc
-	wallTimer     *time.Timer
-	inactTimer    *time.Timer
-	unwatch       func()
-	lastOutput    time.Time
-	output        int64
-	firedReason   content.TerminationReason
-	done          bool
-	suspended     bool
-	cancelStarted bool
+	mu                sync.Mutex
+	cancel            context.CancelFunc
+	wallTimer         *time.Timer
+	inactTimer        *time.Timer
+	unwatch           func()
+	lastOutput        time.Time
+	output            int64
+	accountingStarted bool
+	firedReason       content.TerminationReason
+	done              bool
+	suspended         bool
+	cancelStarted     bool
 }
 
 // supervise runs fn (the broker request) under the lease, INLINE on the
@@ -183,12 +184,8 @@ func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) e
 		return context.Canceled
 	}
 	if enabled {
-		l.lastOutput = time.Now()
 		if cfg.WallClock > 0 {
 			l.wallTimer = time.AfterFunc(cfg.WallClock, func() { l.fire(content.TermTimeout) })
-		}
-		if cfg.Inactivity > 0 {
-			l.inactTimer = time.AfterFunc(cfg.Inactivity, l.checkInactivity)
 		}
 		if l.lane != nil {
 			l.unwatch = l.lane.watch(l.sid, l.onLane)
@@ -257,11 +254,42 @@ func (l *runLease) fire(reason content.TerminationReason) {
 	}
 }
 
+// onAttemptStart begins output and inactivity accounting at the authenticated
+// lifecycle start. The ring lock is taken first so a write racing this
+// callback is ordered: bytes completed before the start are ignored, while
+// bytes written after it are counted exactly once.
+//
+// The observer is deliberately installed by supervise, before broker
+// delivery. This method only opens the accounting interval; it never changes
+// the observer under l.mu, preserving ring.mu → l.mu.
+func (l *runLease) onAttemptStart() {
+	if l.ring != nil {
+		l.ring.mu.Lock()
+		defer l.ring.mu.Unlock()
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.done || l.suspended || l.firedReason != "" || l.accountingStarted {
+		return
+	}
+	l.accountingStarted = true
+	l.output = 0
+	l.lastOutput = time.Now()
+	if l.cfg.Inactivity > 0 {
+		l.inactTimer = time.AfterFunc(l.cfg.Inactivity, l.checkInactivity)
+	}
+}
+
 // onOutput is the ring observer: it counts bytes for the budget and stamps
-// the last-output time for the inactivity deadline. It runs under the
-// ring's lock and never blocks — the budget check fires outside the lock.
+// the last-output time for the inactivity deadline after authenticated start.
+// It runs under the ring's lock and never blocks — the budget check fires
+// outside the lock.
 func (l *runLease) onOutput(n int) {
 	l.mu.Lock()
+	if !l.accountingStarted || l.done || l.suspended || l.firedReason != "" {
+		l.mu.Unlock()
+		return
+	}
 	l.output += int64(n)
 	l.lastOutput = time.Now()
 	budget := l.cfg.OutputBudget
@@ -281,7 +309,7 @@ func (l *runLease) onOutput(n int) {
 // no other goroutine resets it.
 func (l *runLease) checkInactivity() {
 	l.mu.Lock()
-	if l.done || l.suspended || l.firedReason != "" {
+	if !l.accountingStarted || l.done || l.suspended || l.firedReason != "" {
 		l.mu.Unlock()
 		return
 	}

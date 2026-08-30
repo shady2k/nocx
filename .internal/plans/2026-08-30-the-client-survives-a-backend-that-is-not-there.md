@@ -590,6 +590,37 @@ consumer, a package lands with its caller, and an API change lands with its call
 a task's output has no consumer inside the task, the task boundary is wrong — check it
 against the ratchets before dispatching, not after.
 
+### Amendment, 2026-08-31: the third one, and it was in an acceptance criterion
+
+T8's criterion 4 read "Restart the same daemon: ... the terminal's scrollback is
+byte-identical to before the drop." The worker blocked on it rather than weakening it,
+which is the right outcome and is what the brief asked for. The criterion is
+unsatisfiable as written, and checking the code says so in one read:
+`internal/transport/ws_reclaim.go:238` and `internal/session/lineage.go:59` refuse a
+claim that names another backend instance, because "a record out of a previous backend
+can never resolve to a current session". `VaultBackend.restart()` IS another instance —
+new `InstanceID`, new port, new token, and the previous daemon's PTYs died with it. So
+"restart the same daemon" contradicts itself: byte-identical scrollback across a backend
+restart would require sessions to survive one, which nocx deliberately does not do.
+
+What the criterion is worth is the REPLAY RING (AD-9, `internal/transport/ring.go`),
+and the ring's condition is the opposite one — **the socket dies while the daemon
+lives**. Corrected: criterion 4 is now a fault-proxy `cut()` → `pass()` against a live
+daemon, asserting the scrollback carries both what preceded the outage AND what the
+daemon wrote during it. The stronger half is the point: the ring proves nothing was
+lost, not merely that nothing was erased. The daemon restart keeps criterion 3, which
+gains the assertion that the refused claim never reaches the person as raw text
+(`Invalid params`, `different backend instance`) — the exact place an RPC error would
+leak into the UI against the owner's ban on inline errors.
+
+**Same shape as the two errors above, one layer earlier.** T4 and T2 were task
+boundaries written from what sounded right; this was an ACCEPTANCE CRITERION written the
+same way, in the spec, and it survived the plan, the bead and the brief because each
+step copied it forward. The instrument generalises: **a criterion that names a mechanism
+states where that mechanism is implemented, and the plan checks it there before the
+criterion is written down.** Two minutes in `ws_reclaim.go` would have caught this
+before a worker spent a container run on it.
+
 ### Revised ordering
 
 ```

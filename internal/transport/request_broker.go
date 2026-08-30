@@ -110,19 +110,22 @@ type RequestKind struct {
 	// whose resolution legitimately carries a payload (readScreen's frame)
 	// declares its own bound here, and the broker enforces it on the
 	// read-loop ingress, before the pending request is consumed — the
-	// renderer cannot make the broker ingest an unbounded answer by
-	// volume.
+	// renderer cannot make the broker ingest an unbounded answer by volume.
 	MaxResolutionBytes int
 	// Validate is the per-field shape check on a resolution's params,
-	// applied on the read-loop ingress before the pending request is
-	// consumed (the discipline validateUnlockResolvedRaw already applies to
-	// the two existing resolvers). It may be nil when the envelope — the
-	// requestId and the size bound — is all there is to check.
+	// applied on the read-loop ingress before the broker consumes the
+	// request. It may be nil when the envelope and size bound are all
+	// there is to check.
 	Validate func(raw json.RawMessage) string
 	// Resolve maps an accepted resolution's params to the result payload
 	// Request decodes into the caller's typed result, or to a terminal
 	// error (the ask's cancelled outcome, say). Required.
 	Resolve func(raw json.RawMessage) (json.RawMessage, error)
+	// BeforeDeliver is called after the request is armed and before the
+	// first notification is delivered. A caller that needs to correlate a
+	// renderer-side action with this request uses this hook, rather than
+	// learning the id from a delivery side effect.
+	BeforeDeliver func(requestID string)
 }
 
 // resolutionBound is the size bound this kind's resolutions are held to:
@@ -183,6 +186,12 @@ type Broker struct {
 	// pending for the bound to hold. A method that never registered a
 	// request falls back to the mechanism default.
 	methodBounds map[string]int
+	// runLeases and runAttempts carry the transport-only identity bridge
+	// from an agent.runRequest to the lifecycle attempt the renderer opens
+	// for it. The bridge lasts until RequestRun returns, so lease escalation
+	// can still name the attempt after it cancels the broker request.
+	runLeases   map[string]*runLease
+	runAttempts map[string]string
 }
 
 // pendingRequest tracks one in-flight request. It is resolvable from before
@@ -214,7 +223,14 @@ func NewBroker(conns Conns, deliver Deliver) *Broker {
 	if conns == nil || deliver == nil {
 		panic("nocx: request broker requires conns and deliver seams")
 	}
-	return &Broker{conns: conns, deliver: deliver, pending: make(map[string]*pendingRequest), methodBounds: make(map[string]int)}
+	return &Broker{
+		conns:        conns,
+		deliver:      deliver,
+		pending:      make(map[string]*pendingRequest),
+		methodBounds: make(map[string]int),
+		runLeases:    make(map[string]*runLease),
+		runAttempts:  make(map[string]string),
+	}
 }
 
 // Request issues one server→client request. It mints a request id, merges it
@@ -278,6 +294,11 @@ func (b *Broker) Request(ctx context.Context, kind RequestKind, params any, resu
 	}
 
 	b.arm(rid, recipients)
+	if kind.BeforeDeliver != nil {
+		// The request is armed before this hook: a lifecycle submit can
+		// race the first delivery, and the bridge must already be live.
+		kind.BeforeDeliver(rid)
+	}
 	for _, c := range recipients {
 		if err := b.deliver(c, kind.NotifyMethod, payload); err != nil {
 			// The notification never reached this connection, so it cannot
@@ -319,6 +340,75 @@ func (b *Broker) Pending() int {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return len(b.pending)
+}
+
+// registerRunLease starts the identity interval for one agent.runRequest.
+// It is called by RequestKind.BeforeDeliver, after the broker has armed the
+// request and before any renderer can submit its lifecycle attempt.
+func (b *Broker) registerRunLease(requestID string, lease *runLease) {
+	if requestID == "" || lease == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.pending[requestID]; !ok {
+		return
+	}
+	b.runLeases[requestID] = lease
+}
+
+// bindRunAttempt records the lifecycle-owned attempt for its parent request.
+// A missing or already-bound request is refused, so a stale renderer cannot
+// make a different run's lease address its attempt.
+func (b *Broker) bindRunAttempt(requestID, attemptID string) bool {
+	if requestID == "" || attemptID == "" {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if _, ok := b.runLeases[requestID]; !ok {
+		return false
+	}
+	if _, ok := b.runAttempts[requestID]; ok {
+		return false
+	}
+	b.runAttempts[requestID] = attemptID
+	return true
+}
+
+// unregisterRunLease closes the request→attempt interval when RequestRun
+// returns, including paths where the broker terminalizes the request first.
+func (b *Broker) unregisterRunLease(lease *runLease) {
+	if lease == nil {
+		return
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for requestID, current := range b.runLeases {
+		if current == lease {
+			b.forgetRunLeaseLocked(requestID)
+		}
+	}
+}
+
+// runAttemptForLease returns the attempt associated with this exact run
+// lease, not an arbitrary attempt projected by the session.
+func (b *Broker) runAttemptForLease(lease *runLease) (string, bool) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	for requestID, current := range b.runLeases {
+		if current != lease {
+			continue
+		}
+		attemptID, ok := b.runAttempts[requestID]
+		return attemptID, ok
+	}
+	return "", false
+}
+
+func (b *Broker) forgetRunLeaseLocked(requestID string) {
+	delete(b.runLeases, requestID)
+	delete(b.runAttempts, requestID)
 }
 
 // Resolve handles one resolution RPC on the read-loop ingress. The
@@ -549,6 +639,7 @@ func (b *Broker) pruneRecipient(rid string, conn Conn) {
 // listening to.
 func (b *Broker) drop(rid string) {
 	b.mu.Lock()
+	b.forgetRunLeaseLocked(rid)
 	delete(b.pending, rid)
 	b.mu.Unlock()
 }

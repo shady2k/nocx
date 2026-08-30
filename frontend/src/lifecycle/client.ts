@@ -59,6 +59,9 @@ export interface LifecycleSubmitAttemptParams {
    *  column alone. A default here would let a submit path forget it and
    *  quietly attribute the assistant's command to the person — which is
    *  exactly what a restored pane then showed (nocx-1druc). */
+  /** The broker request that caused an assistant submission; absent for
+   *  commands entered by the person. */
+  readonly requestId?: string
   readonly source: 'user' | 'assistant'
 }
 

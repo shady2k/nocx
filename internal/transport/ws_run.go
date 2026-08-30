@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
 )
@@ -250,6 +251,22 @@ func (s *WSServer) RequestRun(ctx context.Context, sessionID string, command str
 	}
 
 	lease := s.newRunLease(sid, cfg)
+	if sess, ok := lease.sess.(session.Session); ok {
+		lease.protected = sessionProtectedForeground{
+			ctx:  ctx,
+			s:    s,
+			sid:  sid,
+			sess: sess,
+			exactAttempt: func() (lifecycle.AttemptID, bool) {
+				attempt, ok := s.broker.runAttemptForLease(lease)
+				return lifecycle.AttemptID(attempt), ok
+			},
+		}
+	}
+	kind.BeforeDeliver = func(requestID string) {
+		s.broker.registerRunLease(requestID, lease)
+	}
+	defer s.broker.unregisterRunLease(lease)
 	if control := agentRunControlFromContext(ctx); control != nil {
 		if !control.attachRunLease(lease) {
 			return nil, fmt.Errorf("run: %w", context.Canceled)

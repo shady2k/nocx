@@ -10471,7 +10471,7 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
-  it('Escape stops the exact current answer once, thaws the summon, and leaves the command running', async () => {
+  it('Escape cancellation renders stopped, never failed, and remains stable after runState', async () => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
@@ -10525,12 +10525,26 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       expect(content.pinnedFrame()).toBeNull()
       expect(editorOf(content).isVisible).toBe(false)
 
+      await vi.waitFor(() =>
+        expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).toBe(
+          'stopped',
+        ),
+      )
+      expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).not.toBe(
+        'failed',
+      )
+      expect(answer.querySelector('[data-answer-body]')?.textContent).toContain(
+        'partial prose survives',
+      )
+
+      // The notification is allowed to arrive after the reserved cancellation
+      // response; it must be idempotent and cannot replace the stopped chip.
       const state = client.dispatcher.subscribe.mock.calls.find(
         ([method]) => method === 'agent.runState',
       )?.[1] as ((params: unknown) => void) | undefined
       state!({ runId: 42, entryId: 'entry-42', state: 'cancelled', droppedDeltas: 0 })
-      expect(answer.querySelector('[data-answer-body]')?.textContent).toContain(
-        'partial prose survives',
+      expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).not.toBe(
+        'failed',
       )
       expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).toBe(
         'stopped',

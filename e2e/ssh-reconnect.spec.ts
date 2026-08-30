@@ -48,7 +48,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
-import { test, expect, type Page } from './harness'
+import { test, expect, resolveBackend, type Page } from './harness'
 import { startFaultProxy, type FaultProxy } from './fault-proxy'
 import { startSshd, rpc, type SshdFixture } from './sshd-fixture'
 import { readStand } from './stand'
@@ -87,18 +87,6 @@ function trustHostKey(line: string): void {
   const sshDir = path.join(readStand().home, '.ssh')
   mkdirSync(sshDir, { recursive: true, mode: 0o700 })
   writeFileSync(path.join(sshDir, 'known_hosts'), line + '\n')
-}
-
-async function wsInfo(page: Page): Promise<{ port: number; token: string }> {
-  return page.evaluate(async () => {
-    const w = window as unknown as Record<string, unknown>
-    const main = (w.go as Record<string, unknown>).main as Record<string, unknown>
-    const app = main.WailsApp as {
-      GetWSPort: () => Promise<number>
-      GetWSToken: () => Promise<string>
-    }
-    return { port: await app.GetWSPort(), token: await app.GetWSToken() }
-  })
 }
 
 /**
@@ -167,7 +155,7 @@ async function wire(page: Page, home: string): Promise<Wired> {
   await page.goto('/')
   await expect(page.locator(TAB)).toHaveCount(1)
 
-  const endpoint = await wsInfo(page)
+  const endpoint = await resolveBackend(page)
   // Unique per run: the stand's store persists across runs in this home, and a
   // stale profile would dial a relay that no longer exists.
   const profileName = `e2e-reconnect-${Date.now()}`
@@ -191,7 +179,7 @@ async function wire(page: Page, home: string): Promise<Wired> {
 async function unwire(page: Page, w: Wired | null): Promise<void> {
   if (!w) return
   try {
-    const endpoint = await wsInfo(page)
+    const endpoint = await resolveBackend(page)
     await rpc(page, endpoint, 'profiles.delete', { id: w.profileId })
   } catch {
     // A cleanup that throws would replace the real failure with its own.

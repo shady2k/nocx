@@ -17,7 +17,7 @@
 // races the poll waits for the CONDITION (a row appearing, a list emptying,
 // a value landing) and never for a duration. Post-mutation status arrives
 // immediately (design D12), so most waits resolve fast.
-import { test, expect, promptReady } from './harness'
+import { test, expect, promptReady, resolveBackend } from './harness'
 import { execFileSync, spawn } from 'node:child_process'
 import { appendFileSync, chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -718,15 +718,7 @@ test('on an SSH tab with no consent the consent offer is present and the mutatio
 
     // Read the backend port/token through the bindings (stubbed on the
     // headless path, real under wails dev) — the same seam shell-mode uses.
-    const wsInfo = await page.evaluate(async () => {
-      const w = window as unknown as Record<string, unknown>
-      const main = (w.go as Record<string, unknown>).main as Record<string, unknown>
-      const app = main.WailsApp as {
-        GetWSPort: () => Promise<number>
-        GetWSToken: () => Promise<string>
-      }
-      return { port: await app.GetWSPort(), token: await app.GetWSToken() }
-    })
+    const wsInfo = await resolveBackend(page)
 
     // Seed the connection the way Settings would. The name is unique per
     // run: the nocx-server store persists across runs in this home.

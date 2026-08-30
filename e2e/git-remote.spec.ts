@@ -45,7 +45,7 @@
 // Timing: every wait is on an observable state change — a row appearing, a
 // badge appearing, a marker file existing. There is no waitForTimeout in
 // this file.
-import { test, expect } from './harness'
+import { test, expect, resolveBackend } from './harness'
 import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -268,15 +268,7 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
 
     // Read the backend port/token through the bindings (stubbed on the
     // headless path, real under wails dev) — the same seam shell-mode uses.
-    const wsInfo = await page.evaluate(async () => {
-      const w = window as unknown as Record<string, unknown>
-      const main = (w.go as Record<string, unknown>).main as Record<string, unknown>
-      const app = main.WailsApp as {
-        GetWSPort: () => Promise<number>
-        GetWSToken: () => Promise<string>
-      }
-      return { port: await app.GetWSPort(), token: await app.GetWSToken() }
-    })
+    const wsInfo = await resolveBackend(page)
 
     // Seed the connection the way Settings would. The name is unique per
     // run: the nocx-server store persists across runs in this home.

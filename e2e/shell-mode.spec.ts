@@ -1,4 +1,4 @@
-import { test, expect } from './harness'
+import { test, expect, resolveBackend } from './harness'
 import { readStand } from './stand'
 import { spawn, execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
@@ -156,15 +156,7 @@ test('an SSH connection comes up integrated and its commands become blocks', asy
 
     // Read the backend port/token through the bindings (stubbed on the
     // headless path, real under wails dev) — the same seam auth.spec uses.
-    const wsInfo = await page.evaluate(async () => {
-      const w = window as unknown as Record<string, unknown>
-      const main = (w.go as Record<string, unknown>).main as Record<string, unknown>
-      const app = main.WailsApp as {
-        GetWSPort: () => Promise<number>
-        GetWSToken: () => Promise<string>
-      }
-      return { port: await app.GetWSPort(), token: await app.GetWSToken() }
-    })
+    const wsInfo = await resolveBackend(page)
 
     // Seed the connection the way Settings would: a profile pointing at the
     // fixture, on the default destination mode (script). The name is unique per
@@ -250,15 +242,7 @@ test('an SSH connection comes up integrated and its commands become blocks', asy
     // server list is EMPTY, and went red on this one across the project
     // boundary, where nothing in either file points at the other (nocx-8rda).
     try {
-      const info = await page.evaluate(async () => {
-        const w = window as unknown as Record<string, unknown>
-        const main = (w.go as Record<string, unknown>).main as Record<string, unknown>
-        const app = main.WailsApp as {
-          GetWSPort: () => Promise<number>
-          GetWSToken: () => Promise<string>
-        }
-        return { port: await app.GetWSPort(), token: await app.GetWSToken() }
-      })
+      const info = await resolveBackend(page)
       if (createdId) await rpc(page, info.port, info.token, 'profiles.delete', { id: createdId })
     } catch {
       // A cleanup that throws would replace the real failure with its own.

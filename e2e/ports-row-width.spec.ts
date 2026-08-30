@@ -38,7 +38,7 @@
 // profile carries a single forward, and a second replay of it would fail
 // its bind rather than mint a second running record.
 //
-import { test, expect, promptReady } from './harness'
+import { test, expect, promptReady, resolveBackend } from './harness'
 import { readStand } from './stand'
 import { spawn, execFileSync } from 'node:child_process'
 import { createServer, connect } from 'node:net'
@@ -168,19 +168,6 @@ async function rpc<T>(
       }),
     { port, token, method, params },
   )
-}
-
-/** The backend port/token through the (stubbed) wails bindings. */
-async function wsInfo(page: Page): Promise<{ port: number; token: string }> {
-  return page.evaluate(async () => {
-    const w = window as unknown as Record<string, unknown>
-    const main = (w.go as Record<string, unknown>).main as Record<string, unknown>
-    const app = main.WailsApp as {
-      GetWSPort: () => Promise<number>
-      GetWSToken: () => Promise<string>
-    }
-    return { port: await app.GetWSPort(), token: await app.GetWSToken() }
-  })
 }
 
 /** The measurement the spec is about: does the element's content overflow its
@@ -316,7 +303,7 @@ test('a forwarded row keeps its destination readable at the default rail width, 
     trustHostKey(fixture)
 
     await page.goto('/')
-    const info = await wsInfo(page)
+    const info = await resolveBackend(page)
 
     // A profile whose stored REMOTE forward replays at connection open. The
     // fixture implements tcpip-forward (the -R direction); it deliberately
@@ -402,7 +389,7 @@ test('a forwarded row keeps its destination readable at the default rail width, 
     // the run, and a stale profile would become the next spec's starting
     // state (nocx-8rda).
     try {
-      const info = await wsInfo(page)
+      const info = await resolveBackend(page)
       if (createdId) await rpc(page, info.port, info.token, 'profiles.delete', { id: createdId })
     } catch {
       // A cleanup that throws would replace the real failure with its own.

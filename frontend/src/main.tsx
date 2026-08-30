@@ -1,17 +1,12 @@
 import './style.css'
-import {
-  GetWSPort,
-  GetWSToken,
-  CheckForUpdate,
-  ReportHealthy,
-} from '../bindings/github.com/shady2k/nocx/wailsapp'
+import { CheckForUpdate, ReportHealthy } from '../bindings/github.com/shady2k/nocx/wailsapp'
 import { render } from 'solid-js/web'
 import { Show, createSignal, untrack } from 'solid-js'
 import App from './App'
 import { log } from './log'
 import { hasWailsWebview, installBrowserTransport } from './wails-runtime'
 import { WSClient } from './ipc'
-import { fixedEndpoint } from './endpoint'
+import { createDesktopEndpointProvider } from './endpoint-desktop'
 import { LayoutStore } from './layout/layout-store'
 import { LayoutClient } from './layout/layout-client'
 import { LOCAL_BACKEND_ID, PaneManager } from './panes'
@@ -135,8 +130,8 @@ function hiddenNotificationKinds(values: Record<string, unknown>): ReadonlySet<s
 
 async function main() {
   // The browser transport must be installed before any binding call: in the
-  // dev-web and headless-e2e browsers the window.go shim is the only thing
-  // that can answer GetWSPort/GetWSToken. A no-op in the packaged webview.
+  // dev-web and headless-e2e browsers the window.go shim carries the binding
+  // methods used by this composition root. A no-op in the packaged webview.
   installBrowserTransport()
 
   log.info('nocx: main() called')
@@ -169,21 +164,9 @@ async function main() {
   const gate = new ClipboardGate()
   const banner = new ClipboardBannerImpl()
 
-  // Bound Go method — no startup-event race. Guarded so the renderers still
-  // mount without a Wails runtime (plain browser), where GetWSPort throws.
-  // In that dev path the backend lives on the page's own host (e.g. a remote
-  // dev VM), not necessarily on loopback.
-  let port = 9876
-  let token = ''
-  let host: string | undefined
-  try {
-    port = await GetWSPort()
-    token = await GetWSToken()
-  } catch {
-    host = location.hostname
-    console.warn('nocx: no Wails runtime, using fallback WS port', port)
-  }
-  const dispatcher = new Dispatcher(fixedEndpoint(port, host, token))
+  // The desktop provider re-runs coordinator discovery for each attempt; the
+  // renderer owns when to attempt and how often to retry.
+  const dispatcher = new Dispatcher(createDesktopEndpointProvider())
   // What build this is, for the About page (nocx-8bbp). Constructed here with
   // every other client: the page is registered unconditionally, so the client
   // has to exist for it to have anything to read.

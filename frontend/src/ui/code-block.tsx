@@ -83,6 +83,8 @@ export interface CodeBlockCopyButtonProps {
   /** Visible kind in the imperative copy header; defaults to `Code`. */
   label?: string
   copy: (text: string) => Promise<void>
+  /** Keep the host inside an existing imperative code container. */
+  keepHostInBlock?: boolean
 }
 
 function CodeBlockCopyButton(props: CodeBlockCopyButtonProps) {
@@ -128,7 +130,11 @@ function createCodeBlockHeader(label: string): HTMLDivElement {
  * starts inside the block. Move it into a kit-owned header and put the existing
  * block under a kit wrapper; no surface needs to know either structure.
  */
-function mountImperativeCodeBlockHeader(host: HTMLElement, label: string): void {
+function mountImperativeCodeBlockHeader(
+  host: HTMLElement,
+  label: string,
+  keepHostInBlock: boolean,
+): void {
   const block = host.parentElement
   if (!block?.classList.contains('ui-code-block')) {
     const header = createCodeBlockHeader(label)
@@ -137,11 +143,19 @@ function mountImperativeCodeBlockHeader(host: HTMLElement, label: string): void 
     return
   }
 
+  host.classList.add('ui-code-block__copy-host')
+  if (keepHostInBlock) {
+    block.classList.add('ui-code-block-wrap--copy')
+    const header = createCodeBlockHeader(label)
+    header.append(host)
+    block.prepend(header)
+    return
+  }
+
   const wrapper = document.createElement('div')
   wrapper.className = 'ui-code-block-wrap ui-code-block-wrap--copy'
   block.replaceWith(wrapper)
   block.classList.remove('ui-code-block-wrap')
-  host.classList.add('ui-code-block__copy-host')
 
   const header = createCodeBlockHeader(label)
   header.append(host)
@@ -153,8 +167,8 @@ export function mountCodeBlockCopyButton(
   host: HTMLElement,
   props: CodeBlockCopyButtonProps,
 ): () => void {
-  const { label, ...buttonProps } = props
-  mountImperativeCodeBlockHeader(host, label ?? DEFAULT_CODE_LABEL)
+  const { label, keepHostInBlock, ...buttonProps } = props
+  mountImperativeCodeBlockHeader(host, label ?? DEFAULT_CODE_LABEL, keepHostInBlock ?? false)
   return render(() => <CodeBlockCopyButton {...buttonProps} />, host)
 }
 

@@ -257,6 +257,58 @@ describe('Dialog', () => {
     expect(onClose).toHaveBeenCalledOnce()
   })
 
+  it('keeps the close control and its behavior when dismissible is unset', () => {
+    const onClose = vi.fn()
+    subject({ open: true, onClose })
+
+    const close = document.querySelector<HTMLButtonElement>(
+      '.nocx-dialog__close [aria-label="Close dialog"]',
+    )
+    expect(close).not.toBeNull()
+    close!.click()
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('renders no way out and ignores close events when dismissible is false', () => {
+    const onClose = vi.fn()
+    subject({
+      open: true,
+      onClose,
+      dismissible: false,
+      children: <button>Continue</button>,
+    })
+
+    const dialog = document.querySelector<HTMLDialogElement>('dialog.nocx-dialog')!
+    expect(dialog.dataset.dismissible).toBe('false')
+    expect(dialog.querySelector('.nocx-dialog__close')).toBeNull()
+
+    fireEvent(dialog, new Event('cancel', { bubbles: true, cancelable: true }))
+    fireEvent(
+      document,
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+    )
+    fireEvent.mouseDown(dialog, { clientX: 300, clientY: 300 })
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('focuses the first contextual action with or without the close control', () => {
+    const first = subject({ open: true, children: <button>Continue</button> })
+    const firstButton = first.container.querySelector('.nocx-dialog__body button')
+    expect(firstButton?.textContent).toBe('Continue')
+    expect(document.activeElement).toBe(firstButton)
+    cleanup()
+    clearStack()
+
+    const second = subject({
+      open: true,
+      dismissible: false,
+      children: <button>Continue</button>,
+    })
+    const secondButton = second.container.querySelector('.nocx-dialog__body button')
+    expect(secondButton?.textContent).toBe('Continue')
+    expect(document.activeElement).toBe(secondButton)
+  })
+
   it('renders footer actions', () => {
     subject({
       open: true,

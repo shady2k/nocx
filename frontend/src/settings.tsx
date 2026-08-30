@@ -697,13 +697,32 @@ export function SettingsComponent(props: SettingsComponentProps) {
     })),
   )
 
-  /** The active component page, or null when a generated section is showing. */
-  const activePage = createMemo<Extract<SettingsPage, { kind: 'component' }> | null>(() => {
-    const id = activeComponentPage()
-    if (id === null) return null
-    const page = settingsPages().find((p) => p.id === id)
-    return page !== undefined && page.kind === 'component' ? page : null
-  })
+  /**
+   * The active component page, or null when a generated section is showing.
+   *
+   * A PAGE'S IDENTITY IS ITS ID, not the object that describes it. The body
+   * renders this through a `keyed` Show, so whatever this memo hands back is
+   * what decides when the subtree is destroyed and built again — and
+   * `settingsPages()` mints fresh objects on every run, off `declarations()`,
+   * which a refresh replaces wholesale because every answer is parsed from
+   * its own JSON. Without the equality below, any settings write anywhere —
+   * the person's own, a moment earlier, or another window's — rebuilt the
+   * page they were working in: the chosen backup file went back to "No file
+   * selected" with nothing on screen to explain it (nocx-zn386 e2e, webkit).
+   */
+  const activePage = createMemo<Extract<SettingsPage, { kind: 'component' }> | null>(
+    () => {
+      const id = activeComponentPage()
+      if (id === null) return null
+      const page = settingsPages().find((p) => p.id === id)
+      return page !== undefined && page.kind === 'component' ? page : null
+    },
+    // The seed is `null`, which is also what the memo answers before anything
+    // is chosen — `equals` needs a previous value to compare against on the
+    // first run, and `undefined` is not one of this memo's answers.
+    null,
+    { equals: (prev, next) => (prev?.id ?? null) === (next?.id ?? null) },
+  )
 
   /** The active scroll mode — derived from the active component page,
    *  falling back to 'page' for generated sections. */

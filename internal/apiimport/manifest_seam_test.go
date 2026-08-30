@@ -25,7 +25,7 @@ import (
 func mustImportAndOpen(t *testing.T, doc string) (apicoll.Collections, apicoll.HandleID, apicoll.Collection) {
 	t.Helper()
 	dest := destUnder(t)
-	if _, err := ImportInto(t.Context(), NewOSFS(), dest, strings.NewReader(doc), apicoll.Route{}); err != nil {
+	if _, err := ImportInto(t.Context(), NewOSFS(), dest, strings.NewReader(doc), apicoll.Route{}, nil); err != nil {
 		t.Fatalf("ImportInto: %v", err)
 	}
 	// nil Paths: this service reads the folder the user chose and mints
@@ -119,12 +119,11 @@ func TestImportedPostmanCollectionOpensItsEnvironments(t *testing.T) {
 	if envs[0].Environment.Name != converted.Environments[0].Name {
 		t.Errorf("environment is called %q, want %q", envs[0].Environment.Name, converted.Environments[0].Name)
 	}
-	// Imported credential-shaped values are ABSENT from the environment, not
-	// present and empty: apicoll treats an empty bound value as a value, so
-	// absence is what makes a later resolution refuse by name. The format also
-	// no longer has anywhere to declare a secret variable at all.
-	if _, ok := envs[0].Environment.Values["apiToken"]; ok {
-		t.Errorf("apiToken is present in the environment; an imported credential must be absent")
+	// And the value the export carried is in the environment the reader
+	// opens, so the first Send after an import resolves rather than refusing
+	// about a variable nobody chose (nocx-zn386).
+	if envs[0].Environment.Values["apiToken"] != pmSecretValue {
+		t.Errorf("apiToken = %q, want the value the export carried", envs[0].Environment.Values["apiToken"])
 	}
 }
 

@@ -264,8 +264,16 @@ class ApiClient {
    * the document or archive bytes themselves, or a URL the backend fetches
    * over a route. The four spread onto the params as the one field each
    * carries, so this method never has to know which is which. */
-  importPostman(source: ImportSource, dest: string): Promise<ApiImportPostmanResult> {
-    return this.dispatcher.call<ApiImportPostmanResult>('api.import.postman', { ...source, dest })
+  importPostman(
+    source: ImportSource,
+    dest: string,
+    storeSecrets = false,
+  ): Promise<ApiImportPostmanResult> {
+    return this.dispatcher.call<ApiImportPostmanResult>('api.import.postman', {
+      ...source,
+      dest,
+      ...(storeSecrets ? { storeSecrets: true } : {}),
+    })
   }
 
   /** Inspect a Postman archive without writing it. The destination is still
@@ -514,7 +522,11 @@ export interface ApiWorkbenchServices {
   ): Promise<ApiRequestSendResult>
   /** Stop the exchange running under a token this surface minted. */
   cancelRequest(token: string): Promise<ApiRequestCancelResult>
-  importPostman(source: ImportSource, dest: string): Promise<ApiImportPostmanResult>
+  importPostman(
+    source: ImportSource,
+    dest: string,
+    storeSecrets?: boolean,
+  ): Promise<ApiImportPostmanResult>
   previewPostman(source: ImportSource, dest: string): Promise<ApiImportPostmanResult>
   importCurl(line: string): Promise<ApiImportCurlResult>
   /**
@@ -647,7 +659,7 @@ export function createApiWorkbenchServices(
     sendRequest: (handle, relPath, envRelPath, token) =>
       client.sendRequest(handle, relPath, envRelPath, token),
     cancelRequest: (token) => client.cancelRequest(token),
-    importPostman: (source, dest) => client.importPostman(source, dest),
+    importPostman: (source, dest, storeSecrets) => client.importPostman(source, dest, storeSecrets),
     previewPostman: (source, dest) => client.previewPostman(source, dest),
     importCurl: (line) => client.importCurl(line),
   }

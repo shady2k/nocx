@@ -512,7 +512,7 @@ export interface ApiStore {
    *  wherever it runs, and an export can sit behind a network only the
    *  backend is on (api-client.ts). */
   previewPostman(source: ImportSource, dest: string): Promise<ApiImportPostmanResult>
-  importPostman(source: ImportSource, dest: string): Promise<void>
+  importPostman(source: ImportSource, dest: string, storeSecrets?: boolean): Promise<void>
   setRunView(id: number, view: ApiRunView): void
 }
 
@@ -1939,9 +1939,13 @@ export function createApiStore(
     // state and the one `unsavedWork` still describes.
     await saveDraftAs()
   }
-  const importPostman = async (source: ImportSource, dest: string): Promise<void> => {
+  const importPostman = async (
+    source: ImportSource,
+    dest: string,
+    storeSecrets = false,
+  ): Promise<void> => {
     try {
-      const result = await services.importPostman(source, dest)
+      const result = await services.importPostman(source, dest, storeSecrets)
       // Archive reports are flattened into the store's one note list so the
       // existing single sticky toast can name every document without a second
       // reporting mechanism.

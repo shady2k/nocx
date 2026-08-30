@@ -48,7 +48,14 @@ const (
 // Kind and ProfileID are inherited — InsecureTLS is the environment's own
 // choice (apicoll/collection.go:126) and a one-off fetch may not make it
 // for every request the collection will ever send.
-func ImportInto(ctx context.Context, fsys FS, dest string, r io.Reader, route apicoll.Route) ([]Unsupported, error) {
+//
+// refs is how a variable the export marked `secret` reaches the vault
+// instead of the file: the caller has already minted the record and hands
+// the reference in, so nothing here touches a vault. That split is the point
+// — the mint belongs to whoever holds the vault gate, and this package still
+// has no path reaching a vault write (nocx-zn386, and nocx-jjnch's rule that
+// survives its reason).
+func ImportInto(ctx context.Context, fsys FS, dest string, r io.Reader, route apicoll.Route, refs SecretRefs) ([]Unsupported, error) {
 	dest = strings.TrimRight(filepath.Clean(dest), string(filepath.Separator))
 	if dest == "" || dest == "." || dest == ".." || dest == string(filepath.Separator) {
 		return nil, fmt.Errorf("apiimport: %q is not a usable collection folder", dest)
@@ -65,6 +72,7 @@ func ImportInto(ctx context.Context, fsys FS, dest string, r io.Reader, route ap
 	if err != nil {
 		return nil, err
 	}
+	refs.applyTo(&res)
 
 	// An existing destination is refused rather than replaced, and a plain
 	// file at that path is refused too: treating it as absent would put a
@@ -179,8 +187,7 @@ func parseImport(r io.Reader, route apicoll.Route) (postmanResult, error) {
 // turned out to need.
 func curlImport(line string) (postmanResult, error) {
 	var res postmanResult
-	namer := newVarNamer()
-	req, unsup, err := parseCurl(line, namer, credentialsToImport)
+	req, unsup, err := parseCurl(line)
 	if err != nil {
 		return res, err
 	}
@@ -402,3 +409,27 @@ func (osFS) Sync(name string) error {
 func (osFS) Rename(oldpath, newpath string) error { return os.Rename(oldpath, newpath) }
 
 func (osFS) RemoveAll(p string) error { return os.RemoveAll(p) }
+
+// SecretRefs maps a variable name to the text written in place of its value:
+// the `{{secret:secrow:…}}` reference minted for it. Absent or empty, every
+// value is written as the export carried it.
+//
+// It names ENVIRONMENT variables only, because `type: secret` is a fact
+// about a variable and a request refers to one by name. A literal a request
+// carries in a header or an auth block is not addressed here: it is the
+// person's to move into the vault afterwards, through the door every field
+// already has.
+type SecretRefs map[string]string
+
+func (refs SecretRefs) applyTo(res *postmanResult) {
+	if len(refs) == 0 {
+		return
+	}
+	for i := range res.Environments {
+		for name := range res.Environments[i].Values {
+			if ref, ok := refs[name]; ok {
+				res.Environments[i].Values[name] = ref
+			}
+		}
+	}
+}

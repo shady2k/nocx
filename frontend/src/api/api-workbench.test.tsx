@@ -2017,9 +2017,9 @@ describe('a Postman export is imported through an ask', () => {
     expect(field('api-import-postman-file').disabled).toBe(false)
     fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/acme.json' } })
     fireEvent.input(field('api-import-postman-dest'), { target: { value: '/w/acme-api' } })
-    fireEvent.click(button('Import'))
+    await pressImport()
     await vi.waitFor(() =>
-      expect(importPostman).toHaveBeenCalledWith({ path: '/w/acme.json' }, '/w/acme-api'),
+      expect(importPostman).toHaveBeenCalledWith({ path: '/w/acme.json' }, '/w/acme-api', false),
     )
   })
 
@@ -2119,9 +2119,10 @@ describe('a Postman export is imported through an ask', () => {
       expect(importAskBody().querySelector('.ui-file-input__native')).not.toBeNull(),
     )
     // The refusal costs the person nothing they typed, and is said where
-    // every other refusal in this ask is said.
+    // every other refusal in this ask is said — the toast, which is not part
+    // of this ask's layout and therefore not part of the workbench's text.
     expect(field('api-import-postman-file').value).toBe('/w/half-typed.json')
-    expect(workbench().textContent).toContain('method not found')
+    await vi.waitFor(() => expect(toastMessages()).toContain('method not found'))
   })
 
   it('cancelling the file picker leaves what was typed untouched', async () => {
@@ -2147,10 +2148,10 @@ describe('a Postman export is imported through an ask', () => {
     await vi.waitFor(() => expect(reachable(field('api-import-paste'))).toBe(true))
     fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/acme.json' } })
     fireEvent.input(field('api-import-postman-dest'), { target: { value: '/w/acme-api' } })
-    fireEvent.click(button('Import'))
+    await pressImport()
 
     await vi.waitFor(() =>
-      expect(importPostman).toHaveBeenCalledWith({ path: '/w/acme.json' }, '/w/acme-api'),
+      expect(importPostman).toHaveBeenCalledWith({ path: '/w/acme.json' }, '/w/acme-api', false),
     )
   })
 })
@@ -2247,12 +2248,13 @@ describe('the import ask asks one question', () => {
     // A path first, the way the picker and a native drop answer.
     fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/acme.json' } })
     paste('{"info":{"name":"Acme"}}')
-    fireEvent.click(button('Import'))
+    await pressImport()
 
     await vi.waitFor(() =>
       expect(importPostman).toHaveBeenCalledWith(
         { document: '{"info":{"name":"Acme"}}' },
         `${DEFAULT_ROOT}/acme`,
+        false,
       ),
     )
     // Exactly one source is held: the path is gone from the seam it landed
@@ -2268,11 +2270,12 @@ describe('the import ask asks one question', () => {
     paste('https://example.test/exports/acme.postman_collection.json')
 
     await vi.waitFor(() => expect(destSummary()).toBe(`${DEFAULT_ROOT}/acme`))
-    fireEvent.click(button('Import'))
+    await pressImport()
     await vi.waitFor(() =>
       expect(importPostman).toHaveBeenCalledWith(
         { url: 'https://example.test/exports/acme.postman_collection.json' },
         `${DEFAULT_ROOT}/acme`,
+        false,
       ),
     )
   })
@@ -2364,6 +2367,169 @@ describe('the import ask asks one question', () => {
     await vi.waitFor(() => expect(sourceLine()).not.toBe(''))
     expect(field('api-import-postman-dest').value).toBe('/elsewhere/mine')
   })
+  /** The inventory a previewed archive answers with, as three documents. */
+  function archiveDocuments() {
+    return {
+      unsupported: [],
+      documents: [
+        { kind: 'collection' as const, name: 'Accounts', unsupported: [] },
+        { kind: 'collection' as const, name: 'Billing', unsupported: [] },
+        { kind: 'environment' as const, name: 'Development', unsupported: [] },
+      ],
+    }
+  }
+
+  // ── The archive routes, and there are two of them ────────────────────────
+  //
+  // A browser drop and the kit's file input carry BYTES. The system picker
+  // and a native drop carry a PATH, and that is the only pair the shipped
+  // app has: inside the Wails window the runtime hands Go the path and the
+  // DOM event is never ours. The preview used to be wired to the bytes route
+  // alone, so the summary — and everything gated on it — existed in
+  // `make dev-web` and in this suite, and nowhere a person actually works
+  // (nocx-bvxf2.5).
+
+  it('previews a .zip chosen with the SYSTEM PICKER — the route the shipped app has', async () => {
+    const previewPostman = vi
+      .fn<ApiWorkbenchServices['previewPostman']>()
+      .mockResolvedValue(archiveDocuments())
+    const { bar } = await mountApp({
+      listCollections: vi
+        .fn()
+        .mockResolvedValue({ collections: [], defaultRoot: '/data/collections' }),
+      openFile: vi.fn().mockResolvedValue({ path: '/downloads/workspace.zip' }),
+      previewPostman,
+    })
+    await openImportAsk(bar)
+
+    fireEvent.click(button('Or select a file'))
+
+    await vi.waitFor(() => expect(archiveSummary()).toContain('2 collections'))
+    expect(archiveSummary()).toContain('1 environment')
+    const call = previewPostman.mock.calls[0]
+    if (call === undefined) throw new Error('preview call missing')
+    const [source, dest] = call
+    // A PATH travels as a path. The picker's answer names a file on the
+    // machine running Go, and re-reading it here to send bytes would be the
+    // renderer answering a question the backend already holds.
+    expect('path' in source && source.path).toBe('/downloads/workspace.zip')
+    expect(dest).toBe('/data/collections/workspace')
+  })
+
+  it('previews a .zip that arrives as a NATIVE drop, by the same route', async () => {
+    const previewPostman = vi
+      .fn<ApiWorkbenchServices['previewPostman']>()
+      .mockResolvedValue(archiveDocuments())
+    const drop = nativeDropFixture()
+    const { bar } = await mountApp({ nativeDrop: drop, previewPostman })
+    await openImportAsk(bar)
+
+    drop.emit({
+      sessionId: DROP_SESSION,
+      target: 'api-import',
+      sources: [droppedSource('workspace.zip', '/downloads/workspace.zip')],
+    })
+
+    await vi.waitFor(() => expect(archiveSummary()).toContain('2 collections'))
+    const call = previewPostman.mock.calls[0]
+    if (call === undefined) throw new Error('preview call missing')
+    expect('path' in call[0] && call[0].path).toBe('/downloads/workspace.zip')
+  })
+
+  it('a .json chosen with the system picker is read too — one document, and what it offers', async () => {
+    // A single document is previewed for what it says about ITSELF: the
+    // offer over a `type: secret` variable has to be makeable before
+    // anything is written, and an offer that existed for archives alone
+    // would be an offer decided by how the export arrived (nocx-zn386).
+    const previewPostman = vi.fn<ApiWorkbenchServices['previewPostman']>().mockResolvedValue({
+      unsupported: [],
+      documents: [{ kind: 'collection', name: 'Acme', unsupported: [], secrets: ['apiToken'] }],
+    })
+    const { bar } = await mountApp({
+      listCollections: vi
+        .fn()
+        .mockResolvedValue({ collections: [], defaultRoot: '/data/collections' }),
+      openFile: vi.fn().mockResolvedValue({ path: '/downloads/acme.json' }),
+      previewPostman,
+    })
+    await openImportAsk(bar)
+
+    fireEvent.click(button('Or select a file'))
+
+    await vi.waitFor(() => expect(sourceLine()).toContain('acme.json'))
+    const call = previewPostman.mock.calls[0]
+    if (call === undefined) throw new Error('preview call missing')
+    expect('path' in call[0] && call[0].path).toBe('/downloads/acme.json')
+  })
+
+  it('a read that is superseded does not leave the ask busy for ever', async () => {
+    // The request id decides whose RESULT is applied. It may not also decide
+    // who ends the wait: a bump can happen with no new read behind it — a
+    // keystroke in the paste box, a source taken back — and the read already
+    // in flight then found the id changed and cleared nothing. Import is
+    // disabled while the ask is busy, so the ask went quietly dead. Caught by
+    // the e2e suite; held here (nocx-zn386).
+    const previewPostman = vi.fn<ApiWorkbenchServices['previewPostman']>().mockResolvedValue({
+      unsupported: [],
+      documents: [{ kind: 'collection', name: 'Acme', unsupported: [] }],
+    })
+    await openBrowserAsk({ previewPostman })
+
+    paste('{"info":{"name":"Acme"}}')
+    fireEvent.blur(field('api-import-paste'))
+    // …and a keystroke lands while that read is still in flight.
+    paste('{"info":{"name":"Acme"}} ')
+
+    await vi.waitFor(() => expect(button('Import').disabled).toBe(false))
+  })
+
+  it('does not re-send the archive on every keystroke: the destination is re-checked when it is left', async () => {
+    const previewPostman = vi
+      .fn<ApiWorkbenchServices['previewPostman']>()
+      .mockResolvedValue(archiveDocuments())
+    await openBrowserAsk({ previewPostman })
+
+    const input = importAskBody().querySelector<HTMLInputElement>('.ui-file-input__native')
+    const file = exportFile('workspace.zip')
+    Object.defineProperty(input!, 'files', { value: [file] })
+    fireEvent.change(input!)
+    await vi.waitFor(() => expect(previewPostman).toHaveBeenCalledTimes(1))
+
+    fireEvent.click(button('Change where this goes'))
+    await vi.waitFor(() => expect(reachable(field('api-import-postman-dest'))).toBe(true))
+    const dest = field('api-import-postman-dest')
+    for (const value of ['/elsewhere/a', '/elsewhere/ab', '/elsewhere/abc']) {
+      fireEvent.input(dest, { target: { value } })
+    }
+    // Three characters, and the archive has not travelled again: what
+    // changed is the destination, and the bytes are the same bytes.
+    expect(previewPostman).toHaveBeenCalledTimes(1)
+
+    fireEvent.blur(dest)
+    await vi.waitFor(() => expect(previewPostman).toHaveBeenCalledTimes(2))
+    expect(previewPostman.mock.calls[1]?.[1]).toBe('/elsewhere/abc')
+  })
+
+  it('says it is reading while the first read is in flight, and stops saying it', async () => {
+    let release: (value: ReturnType<typeof archiveDocuments>) => void = () => {}
+    const previewPostman = vi
+      .fn<ApiWorkbenchServices['previewPostman']>()
+      .mockReturnValue(new Promise((resolve) => (release = resolve)))
+    await openBrowserAsk({ previewPostman })
+
+    const input = importAskBody().querySelector<HTMLInputElement>('.ui-file-input__native')
+    const file = exportFile('workspace.zip')
+    Object.defineProperty(input!, 'files', { value: [file] })
+    fireEvent.change(input!)
+
+    // The one wait a person sits through — read, encode, round trip — says
+    // so. A disabled button says only that it is disabled.
+    await vi.waitFor(() => expect(importAskBody().querySelector('.ui-spinner')).not.toBeNull())
+    release(archiveDocuments())
+    await vi.waitFor(() => expect(importAskBody().querySelector('.ui-spinner')).toBeNull())
+    expect(archiveSummary()).toContain('2 collections')
+  })
+
   it('accepts a zip, previews its inventory before writing, and uses one destination', async () => {
     const previewPostman = vi.fn<ApiWorkbenchServices['previewPostman']>().mockResolvedValue({
       unsupported: [],
@@ -2399,7 +2565,7 @@ describe('the import ask asks one question', () => {
     await vi.waitFor(() => expect(reachable(field('api-import-postman-dest'))).toBe(true))
     fireEvent.input(field('api-import-postman-dest'), { target: { value: '/elsewhere/workspace' } })
     await vi.waitFor(() => expect(button('Import').disabled).toBe(false))
-    fireEvent.click(button('Import'))
+    await pressImport()
 
     await vi.waitFor(() => expect(importPostman).toHaveBeenCalled())
     const importCall = importPostman.mock.calls[0]
@@ -2423,7 +2589,16 @@ describe('the import ask asks one question', () => {
     Object.defineProperty(input!, 'files', { value: [file] })
     fireEvent.change(input!)
 
-    await vi.waitFor(() => expect(destError()).toContain('archive preview refused'))
+    // THE OUTCOME OF THE CALL IS A TOAST, and the destination field is not
+    // its witness: the path nobody complained about does not carry the
+    // reason the archive could not be read (ui/README.md, §Toast).
+    await vi.waitFor(() => expect(toastMessages()).toContain('archive preview refused'))
+    // Sticky, because a refusal nobody happened to be looking at is a
+    // refusal they never saw. Asserted on the refusal's OWN toast: the ask
+    // reads the export as it is chosen now, so this gesture is no longer
+    // the only thing that can have spoken.
+    expect(toasts().find((t) => t.message === 'archive preview refused')?.level).toBe('danger')
+    expect(destError()).toBe('')
     expect(archiveSummary()).toBe('')
     expect(button('Import').disabled).toBe(true)
     expect(importPostman).not.toHaveBeenCalled()
@@ -2448,7 +2623,7 @@ describe('the import ask asks one question', () => {
     await openBrowserAsk({ importPostman })
     paste('{"info":{"name":"workspace"}}')
     await vi.waitFor(() => expect(destSummary()).toBe('/data/collections/workspace'))
-    fireEvent.click(button('Import'))
+    await pressImport()
 
     await vi.waitFor(() => expect(notImportedToast()).toBeDefined())
     const message = notImportedToast()?.message ?? ''
@@ -2541,7 +2716,7 @@ describe('a URL import says which connection it travels through', () => {
     paste('https://h/acme.json')
     await vi.waitFor(() => expect(routePicker()).not.toBeNull())
     fireEvent.change(routePicker()!, { target: { value: 'p1' } })
-    fireEvent.click(button('Import'))
+    await pressImport()
 
     await vi.waitFor(() =>
       expect(importPostman).toHaveBeenCalledWith(
@@ -2550,6 +2725,7 @@ describe('a URL import says which connection it travels through', () => {
           route: { kind: 'connection', profileId: 'p1', insecureTls: false },
         },
         `${DEFAULT_ROOT}/acme`,
+        false,
       ),
     )
   })
@@ -2566,12 +2742,13 @@ describe('a URL import says which connection it travels through', () => {
 
     paste('https://h/acme.json')
     await vi.waitFor(() => expect(routePicker()).not.toBeNull())
-    fireEvent.click(button('Import'))
+    await pressImport()
 
     await vi.waitFor(() =>
       expect(importPostman).toHaveBeenCalledWith(
         { url: 'https://h/acme.json' },
         `${DEFAULT_ROOT}/acme`,
+        false,
       ),
     )
     // The KEY SET, and not only the value: `toHaveBeenCalledWith` treats an
@@ -2595,11 +2772,12 @@ describe('a URL import says which connection it travels through', () => {
     paste('{"info":{"name":"Acme"}}')
 
     await vi.waitFor(() => expect(routePicker()).toBeNull())
-    fireEvent.click(button('Import'))
+    await pressImport()
     await vi.waitFor(() =>
       expect(importPostman).toHaveBeenCalledWith(
         { document: '{"info":{"name":"Acme"}}' },
         `${DEFAULT_ROOT}/acme`,
+        false,
       ),
     )
   })
@@ -2637,7 +2815,9 @@ describe('the import ask proposes our folder', () => {
     fireEvent.input(field('api-import-postman-dest'), {
       target: { value: '/data/collections/acme' },
     })
-    expect(button('Import').disabled).toBe(false)
+    // Enabled once the export has been READ — the ask reads before it writes
+    // now (nocx-zn386), and what is waited on is the button's own state.
+    await vi.waitFor(() => expect(button('Import').disabled).toBe(false))
   })
 
   it('refuses the root without its separator too', async () => {
@@ -2741,6 +2921,17 @@ function importAskBody(): HTMLElement {
   return el
 }
 
+/** Press Import once the ask will take it.
+ *
+ * The ask reads the export before it writes it (nocx-zn386), and Import is
+ * disabled while that read is in flight — so a click sent in the same tick
+ * as the gesture that chose the source lands on a disabled button. Waiting
+ * on the button's own state is the observable, never a duration. */
+async function pressImport(): Promise<void> {
+  await vi.waitFor(() => expect(button('Import').disabled).toBe(false))
+  fireEvent.click(button('Import'))
+}
+
 /** What the destination field's validation slot says right now, or ''. */
 function destError(): string {
   return importAskBody().querySelector('#api-import-postman-dest__error')?.textContent ?? ''
@@ -2812,7 +3003,8 @@ describe('the import ask accepts a drop', () => {
 
     expect(field('api-import-postman-file').value).toBe('')
     expect(field('api-import-postman-dest').value).toBe('/data/collections/')
-    expect(destError()).toMatch(/one export/i)
+    await vi.waitFor(() => expect(toastMessages().join(' ')).toMatch(/one export/i))
+    expect(destError()).toBe('')
   })
 
   it('ignores a drop that names no path — a remote tab mints a ticket instead', async () => {
@@ -2986,11 +3178,12 @@ describe('the import ask accepts a browser drop', () => {
     )
     expect(field('api-import-postman-dest').value).toBe('/data/collections/acme')
 
-    fireEvent.click(button('Import'))
+    await pressImport()
     await vi.waitFor(() =>
       expect(importPostman).toHaveBeenCalledWith(
         { document: EXPORT_TEXT },
         '/data/collections/acme',
+        false,
       ),
     )
   })
@@ -3002,7 +3195,8 @@ describe('the import ask accepts a browser drop', () => {
 
     dropOnAsk([exportFile('a.json'), exportFile('b.json')])
 
-    await vi.waitFor(() => expect(destError()).toMatch(/one export/i))
+    await vi.waitFor(() => expect(toastMessages().join(' ')).toMatch(/one export/i))
+    expect(destError()).toBe('')
     expect(field('api-import-postman-file').value).toBe('')
     expect(field('api-import-postman-dest').value).toBe('/data/collections/')
   })
@@ -3025,11 +3219,12 @@ describe('the import ask accepts a browser drop', () => {
     )
     expect(field('api-import-postman-dest').value).toBe('/data/collections/acme')
 
-    fireEvent.click(button('Import'))
+    await pressImport()
     await vi.waitFor(() =>
       expect(importPostman).toHaveBeenCalledWith(
         { document: EXPORT_TEXT },
         '/data/collections/acme',
+        false,
       ),
     )
   })
@@ -3043,10 +3238,10 @@ describe('the import ask accepts a browser drop', () => {
 
     fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/acme.json' } })
     fireEvent.input(field('api-import-postman-dest'), { target: { value: '/w/acme-api' } })
-    fireEvent.click(button('Import'))
+    await pressImport()
 
     await vi.waitFor(() =>
-      expect(importPostman).toHaveBeenCalledWith({ path: '/w/acme.json' }, '/w/acme-api'),
+      expect(importPostman).toHaveBeenCalledWith({ path: '/w/acme.json' }, '/w/acme-api', false),
     )
   })
 
@@ -3062,7 +3257,7 @@ describe('the import ask accepts a browser drop', () => {
       expect(field('api-import-postman-file').value).toBe('acme.postman_collection.json'),
     )
     fireEvent.input(field('api-import-postman-file'), { target: { value: '/w/other.json' } })
-    fireEvent.click(button('Import'))
+    await pressImport()
 
     // And the destination follows the new source, because nobody has typed
     // into that field — the `nocx-6hg2w.14` rule, unchanged by any of this.
@@ -3070,6 +3265,7 @@ describe('the import ask accepts a browser drop', () => {
       expect(importPostman).toHaveBeenCalledWith(
         { path: '/w/other.json' },
         '/data/collections/other',
+        false,
       ),
     )
   })
@@ -3106,7 +3302,7 @@ async function importInto(dest: string, over: Partial<ApiWorkbenchServices> = {}
   await openImportAsk(bar)
   fireEvent.input(field('api-import-postman-file'), { target: { value: '/downloads/acme.json' } })
   fireEvent.input(field('api-import-postman-dest'), { target: { value: dest } })
-  fireEvent.click(button('Import'))
+  await pressImport()
 }
 
 /** Every message the person has been shown, newest last. */
@@ -3147,17 +3343,26 @@ describe('an import opens its destination', () => {
     expect(toastMessages()).toHaveLength(1)
   })
 
-  it('a REFUSED import opens nothing and keeps the ask, with the reason under the field', async () => {
+  it('a REFUSED import opens nothing, keeps the ask, and says why in a sticky toast', async () => {
     const openCollection = vi.fn()
     await importInto('/data/collections/acme', {
       importPostman: vi.fn().mockRejectedValue(new Error('a folder is already there')),
       openCollection,
     })
 
-    await vi.waitFor(() => expect(destError()).toContain('a folder is already there'))
+    // The refusal is the outcome of the call the button triggered, so it is
+    // a toast — sticky, because a failure nobody happened to be looking at
+    // is a failure they never saw. It is NOT validation of the destination
+    // field, which is why that field's slot stays empty and the ask does not
+    // reshape itself to hold a sentence.
+    await vi.waitFor(() => expect(toastMessages()).toContain('a folder is already there'))
+    expect(toasts()[0]?.level).toBe('danger')
+    expect(destError()).toBe('')
+    // The ask keeps the shape it had: the destination is still the sentence
+    // it was, not a field forced open to carry a message.
+    expect(reachable(field('api-import-postman-dest'))).toBe(false)
     expect(dialogFor('api-import-postman-file').open).toBe(true)
     expect(openCollection).not.toHaveBeenCalled()
-    expect(toastMessages()).toHaveLength(0)
     // What was typed survives — the destination is what has to change.
     expect(field('api-import-postman-dest').value).toBe('/data/collections/acme')
   })
@@ -5919,7 +6124,7 @@ describe('the import report says whose it is and can be ended', () => {
     await openImportAsk(bar)
     paste('{"info":{"name":"Acme"}}')
     await vi.waitFor(() => expect(destSummary()).toBe(`${DEFAULT_ROOT}/acme`))
-    fireEvent.click(button('Import'))
+    await pressImport()
 
     await vi.waitFor(() => expect(notImportedToast()).toBeDefined())
     expect(notImportedToast()?.message ?? '').toContain(`${DEFAULT_ROOT}/acme`)

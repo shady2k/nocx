@@ -30,7 +30,7 @@ func TestOperationDispositionsMatchMap(t *testing.T) {
 	}{
 		{"AgentOperation", NewAgentOperation(gate(GateContent), gate("lane"), db), DispositionDirect},
 		{"APICollectionOperation", NewAPICollectionOperation(gate(GateAPI), gate("lane"), nil), DispositionDirect},
-		{"APIImportOperation", NewAPIImportOperation(gate(GateAPI), gate("lane"), nil, nil), DispositionDirect},
+		{"APIImportOperation", NewAPIImportOperation(gate(GateAPI), gate(GateVault), gate("lane"), nil, nil, nil), DispositionDirect},
 		{"BackupOperation", NewBackupOperation(gate(GateConfig), gate("lane"), nil), DispositionDirect},
 		{"CaptureSaveOperation", NewCaptureSaveOperation(gate(GateVault), gate(GateContent), gate("lane"), nil, nil), DispositionDirect},
 		{"TabbyImportOperation", NewTabbyImportOperation(gate(GateConfig), gate(GateVault), gate("lane"), nil, nil, nil, nil, nil), DispositionDirect},

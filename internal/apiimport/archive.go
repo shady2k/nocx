@@ -37,7 +37,16 @@ type ArchiveDocument struct {
 	Name     string
 	Path     string
 	Document []byte
+	// Secrets are the variables this document marked `type: secret`, with
+	// the values it carried. They are what the import OFFERS to store in
+	// the vault; nothing here decides that, and the wire sends only their
+	// NAMES (nocx-zn386).
+	Secrets []SecretVariable
 }
+
+// manifestName is the one member every Postman archive has, and the member
+// whose position decides what every other path is relative to.
+const manifestName = "archive.json"
 
 type postmanArchiveManifest struct {
 	Environment map[string]bool `json:"environment"`
@@ -61,21 +70,37 @@ func ReadPostmanArchive(r io.Reader) ([]ArchiveDocument, error) {
 		return nil, fmt.Errorf("apiimport: read Postman archive: %w: %v", ErrInvalidArchive, err)
 	}
 
-	members := make(map[string]*zip.File, len(zr.File))
 	for _, member := range zr.File {
 		if pathErr := validateArchiveMember(member.Name); pathErr != nil {
 			return nil, pathErr
 		}
-		if _, exists := members[member.Name]; exists {
-			return nil, fmt.Errorf("apiimport: archive contains duplicate member %q", member.Name)
-		}
-		members[member.Name] = member
+	}
+	prefix, err := archiveRoot(zr.File)
+	if err != nil {
+		return nil, err
 	}
 
-	manifestMember, ok := members["archive.json"]
-	if !ok || manifestMember.FileInfo().IsDir() {
-		return nil, errors.New("apiimport: Postman archive has no archive.json manifest")
+	// KEYED BY WHERE THE MANIFEST PUT THEM, not by where the ZIP did. Every
+	// path from here down — the ones the manifest implies, the ones reported
+	// back, the ones a refusal names — is relative to the export directory,
+	// so the reader below is the same reader whether Postman wrapped the
+	// export or somebody handed us its contents (nocx-bvxf2.4).
+	members := make(map[string]*zip.File, len(zr.File))
+	for _, member := range zr.File {
+		if member.FileInfo().IsDir() {
+			continue
+		}
+		rel, under := strings.CutPrefix(member.Name, prefix)
+		if !under {
+			return nil, fmt.Errorf("apiimport: archive member %q lies outside the export directory %q", member.Name, prefix)
+		}
+		if _, exists := members[rel]; exists {
+			return nil, fmt.Errorf("apiimport: archive contains duplicate member %q", member.Name)
+		}
+		members[rel] = member
 	}
+
+	manifestMember := members[manifestName]
 	remaining := int64(MaxDocumentBytes)
 	manifestBytes, err := readArchiveMember(manifestMember, &remaining)
 	if err != nil {
@@ -120,13 +145,12 @@ func ReadPostmanArchive(r io.Reader) ([]ArchiveDocument, error) {
 	}
 
 	for memberPath := range expected {
-		member, ok := members[memberPath]
-		if !ok || member.FileInfo().IsDir() {
+		if _, ok := members[memberPath]; !ok {
 			return nil, fmt.Errorf("apiimport: archive manifest names %s, but that member is missing", memberPath)
 		}
 	}
-	for memberPath, member := range members {
-		if memberPath == "archive.json" || member.FileInfo().IsDir() {
+	for memberPath := range members {
+		if memberPath == manifestName {
 			continue
 		}
 		if _, ok := expected[memberPath]; !ok {
@@ -163,6 +187,7 @@ func ReadPostmanArchive(r io.Reader) ([]ArchiveDocument, error) {
 			Name:     name,
 			Path:     memberPath,
 			Document: contents,
+			Secrets:  converted.Secrets,
 		})
 	}
 	return documents, nil
@@ -206,7 +231,52 @@ func archiveDocumentName(contents []byte, res postmanResult, kind ArchiveDocumen
 	}
 }
 
+// archiveRoot answers WHERE THE MANIFEST LIES, and therefore what every other
+// member is named relative to.
+//
+// A Postman export nests the whole export under one directory named for it —
+// `<export-uuid>/archive.json`, measured on a real one in nocx-r1uk0 — while
+// an archive assembled by hand has no such directory. They are one archive
+// with a prefix of a different length, so the prefix is a value here rather
+// than a second reader, and it is taken from the MANIFEST rather than from
+// whatever the first member happened to be: an archive with no manifest is
+// then refused for having no manifest, which is what is wrong with it.
+//
+// Depth one, and no deeper. `a/b/archive.json` is not an export directory
+// with a manifest in it, it is an export directory holding something we
+// cannot name, and treating `a/b/` as the root would silently accept an
+// archive whose shape nobody has read.
+func archiveRoot(files []*zip.File) (string, error) {
+	prefixes := make([]string, 0, 1)
+	for _, member := range files {
+		if member.FileInfo().IsDir() {
+			continue
+		}
+		switch name := member.Name; {
+		case name == manifestName:
+			prefixes = append(prefixes, "")
+		case strings.HasSuffix(name, "/"+manifestName) && strings.Count(name, "/") == 1:
+			prefixes = append(prefixes, strings.TrimSuffix(name, manifestName))
+		}
+	}
+	switch len(prefixes) {
+	case 0:
+		return "", errors.New("apiimport: Postman archive has no archive.json manifest")
+	case 1:
+		return prefixes[0], nil
+	default:
+		return "", fmt.Errorf(
+			"apiimport: Postman archive holds %d archive.json manifests, and only one export can be imported at a time",
+			len(prefixes))
+	}
+}
+
 func validateArchiveMember(name string) error {
+	// A ZIP DIRECTORY ENTRY IS A NAME WITH A TRAILING SLASH and no contents.
+	// It is skipped by the reader rather than refused: a real export carries
+	// them, and refusing one here rejected the whole archive before anything
+	// had looked at what it held. What is checked is the path it names.
+	name = strings.TrimSuffix(name, "/")
 	if name == "" || strings.HasPrefix(name, "/") || path.IsAbs(name) || path.Clean(name) != name {
 		return fmt.Errorf("apiimport: refusing archive member path %q", name)
 	}

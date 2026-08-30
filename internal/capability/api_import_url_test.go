@@ -52,9 +52,11 @@ func newImportOpWithFetcher(t *testing.T, f apifetch.Fetcher) capability.APIImpo
 	t.Helper()
 	return capability.NewAPIImportOperation(
 		capability.Gate(capability.GateAPI, 1, 64, 5*time.Second),
+		capability.Gate(capability.GateVault, 1, 64, 5*time.Second),
 		capability.Gate("lane", 8, 64, 5*time.Second),
 		apiimport.NewOSFS(),
 		f,
+		nil,
 	)
 }
 
@@ -70,7 +72,7 @@ func TestAPIImportService_ImportsAnExportByURLAndKeepsTheRoute(t *testing.T) {
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.APIImportService) error {
 		dest := filepath.Join(t.TempDir(), "dest")
-		unsup, err := svc.ImportPostmanURL(ctx, "https://acme.test/export.json", route, dest)
+		unsup, err := svc.ImportPostmanURL(ctx, "https://acme.test/export.json", route, dest, false)
 		if err != nil {
 			t.Fatalf("ImportPostmanURL: %v", err)
 		}
@@ -120,7 +122,7 @@ func TestAPIImportService_AFailedFetchWritesNothingAtDest(t *testing.T) {
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.APIImportService) error {
 		dest := filepath.Join(t.TempDir(), "dest")
-		if _, err := svc.ImportPostmanURL(ctx, "https://acme.test/export.json", apicoll.Route{Kind: apicoll.RouteDirect}, dest); !errors.Is(err, refusal) {
+		if _, err := svc.ImportPostmanURL(ctx, "https://acme.test/export.json", apicoll.Route{Kind: apicoll.RouteDirect}, dest, false); !errors.Is(err, refusal) {
 			t.Fatalf("err = %v, want the fetcher's own refusal, not restated as something else", err)
 		}
 		if _, statErr := os.Lstat(dest); !errors.Is(statErr, os.ErrNotExist) {
@@ -140,7 +142,7 @@ func TestAPIImportService_WithoutAFetcherRefusesTheURLEntranceByName(t *testing.
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.APIImportService) error {
 		dest := filepath.Join(t.TempDir(), "dest")
-		if _, err := svc.ImportPostmanURL(ctx, "https://acme.test/export.json", apicoll.Route{Kind: apicoll.RouteDirect}, dest); !errors.Is(err, capability.ErrImportURLUnavailable) {
+		if _, err := svc.ImportPostmanURL(ctx, "https://acme.test/export.json", apicoll.Route{Kind: apicoll.RouteDirect}, dest, false); !errors.Is(err, capability.ErrImportURLUnavailable) {
 			t.Fatalf("err = %v, want ErrImportURLUnavailable", err)
 		}
 		if _, statErr := os.Lstat(dest); !errors.Is(statErr, os.ErrNotExist) {
@@ -150,7 +152,7 @@ func TestAPIImportService_WithoutAFetcherRefusesTheURLEntranceByName(t *testing.
 		// need no network still work, so a missing fetcher costs the URL
 		// route and nothing else.
 		byDoc := filepath.Join(t.TempDir(), "by-document")
-		if _, err := svc.ImportPostmanDocument(ctx, urlExport, byDoc); err != nil {
+		if _, err := svc.ImportPostmanDocument(ctx, urlExport, byDoc, false); err != nil {
 			t.Errorf("ImportPostmanDocument on a build with no fetcher: %v", err)
 		}
 		return nil
@@ -167,7 +169,7 @@ func TestAPIImportService_AFetchedDocumentThatIsNotAnExportLeavesNothing(t *test
 
 	if err := op.Run(context.Background(), func(ctx context.Context, svc capability.APIImportService) error {
 		dest := filepath.Join(t.TempDir(), "dest")
-		if _, err := svc.ImportPostmanURL(ctx, "https://acme.test/export.json", apicoll.Route{Kind: apicoll.RouteDirect}, dest); err == nil {
+		if _, err := svc.ImportPostmanURL(ctx, "https://acme.test/export.json", apicoll.Route{Kind: apicoll.RouteDirect}, dest, false); err == nil {
 			t.Fatal("a fetched document that is not an export was imported")
 		}
 		if _, statErr := os.Lstat(dest); !errors.Is(statErr, os.ErrNotExist) {

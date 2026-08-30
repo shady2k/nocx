@@ -245,9 +245,9 @@ describe('SettingsContent', () => {
    * objects fresh on every run, `activePage()` finds one in that array, and
    * the body renders it through a `keyed` Show — and keying re-creates the
    * subtree whenever the identity changes, deliberately, so that switching
-   * pages replaces the body. Today a refresh does not reach that far. Anything
-   * that makes the refresh recompute those objects would, and would look like
-   * a page that quietly resets itself while somebody is working in it.
+   * pages replaces the body. A refresh replaces the declarations array, which
+   * recomputes every one of those objects, so the page's identity has to be
+   * its ID rather than the object that describes it.
    *
    * THE MOCKS HAND BACK FRESH OBJECTS ON PURPOSE. Every answer off the wire is
    * parsed from its own JSON, so nothing the renderer stores is ever
@@ -255,6 +255,14 @@ describe('SettingsContent', () => {
    * object to every call, which stops the second snapshot from propagating at
    * all — the test then passes without ever exercising a refresh, which is
    * what the first draft of it did.
+   *
+   * AND IT WAITS FOR THE REFRESH TO LAND, not for it to start. `getSnapshot`
+   * is called at the top of `refresh`, before a single store write; a test
+   * that waits on the call count asserts in the gap between the request and
+   * the rebuild it triggers, and passes whatever the rebuild does. The second
+   * answer therefore carries a section the first did not, and the assertion
+   * comes after that section is on the rail — the one moment where the whole
+   * of the refresh is known to have been applied.
    */
   it('a settings refresh does not take back the file you chose', async () => {
     let invalidate: ((params: unknown) => void) | null = null
@@ -272,14 +280,34 @@ describe('SettingsContent', () => {
     // answer is parsed from its own JSON, so no array or record the renderer
     // stores is ever reference-equal to the one before it. A mock that hands
     // back one object hides exactly the propagation this test is about.
-    vi.spyOn(client, 'describeSettings').mockImplementation(() =>
-      Promise.resolve({
-        declarations: TEST_DECLARATIONS.map((d) => ({ ...d })),
+    // The second answer carries one declaration the first did not, in a
+    // section of its own. That is what the assertion below waits for: a rail
+    // row that can only exist once `setDeclarations` has propagated all the
+    // way through the page registry — the same propagation that would rebuild
+    // the body if the body were keyed on the page object.
+    const LATE_SECTION = 'Latecomer'
+    let describeCalls = 0
+    vi.spyOn(client, 'describeSettings').mockImplementation(() => {
+      describeCalls++
+      const declarations = TEST_DECLARATIONS.map((d) => ({ ...d }))
+      if (describeCalls > 1) {
+        declarations.push({
+          key: 'late.arrival',
+          section: LATE_SECTION,
+          label: 'Late Arrival',
+          description: 'A setting the first describe did not carry',
+          control: 'toggle',
+          dataClass: 'publicConfig',
+          default: false,
+        })
+      }
+      return Promise.resolve({
+        declarations,
         groups: TEST_GROUPS.map((g) => ({ ...g })),
-        sectionGroups: { ...TEST_SECTION_GROUPS },
-      }),
-    )
-    const snapshot = vi.spyOn(client, 'getSnapshot').mockImplementation(() =>
+        sectionGroups: { ...TEST_SECTION_GROUPS, [LATE_SECTION]: 'application' },
+      })
+    })
+    vi.spyOn(client, 'getSnapshot').mockImplementation(() =>
       Promise.resolve({
         values: {},
         overridden: [],
@@ -316,7 +344,10 @@ describe('SettingsContent', () => {
     expect(invalidate).toBeTruthy()
     invalidate!({ revision: 1, keys: ['tab.placement'] })
     await vi.waitFor(() => {
-      expect(snapshot).toHaveBeenCalledTimes(2)
+      const rows = Array.from(
+        target.querySelectorAll<HTMLButtonElement>('.ui-grouped-nav__item > .ui-button'),
+      )
+      expect(rows.some((r) => r.textContent.includes(LATE_SECTION))).toBe(true)
     })
 
     expect(target.querySelector('.ui-file-input__name')!.textContent).toBe('backup.json')

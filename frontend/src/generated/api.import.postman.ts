@@ -33,4 +33,8 @@ export interface ArchiveDocument {
   kind: 'collection' | 'environment'
   name: string
   unsupported: Unsupported[]
+  /**
+   * The NAMES of the variables this document marked `type: secret`, so the ask can offer to store them in the vault. Never their values: what the renderer needs in order to ask is which variables there are, and a value it never receives is a value it cannot leak. Absent when the document marked none, which is the ordinary case.
+   */
+  secrets?: string[]
 }

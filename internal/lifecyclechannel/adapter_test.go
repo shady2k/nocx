@@ -456,6 +456,7 @@ func TestChildDescriptorReachesSpawnedProcess(t *testing.T) {
 // recordCauses collects the causes reported for an adapter's lane.
 type causeRecorder struct {
 	mu     chan struct{} // a 1-buffered channel as a mutex, so waitFor can read
+	lanes  []lifecycle.LaneID
 	causes []LossCause
 }
 
@@ -465,8 +466,9 @@ func newCauseRecorder() *causeRecorder {
 	return r
 }
 
-func (r *causeRecorder) report(_ lifecycle.LaneID, c LossCause) {
+func (r *causeRecorder) report(lane lifecycle.LaneID, c LossCause) {
 	<-r.mu
+	r.lanes = append(r.lanes, lane)
 	r.causes = append(r.causes, c)
 	r.mu <- struct{}{}
 }
@@ -474,6 +476,13 @@ func (r *causeRecorder) report(_ lifecycle.LaneID, c LossCause) {
 func (r *causeRecorder) all() []LossCause {
 	<-r.mu
 	out := append([]LossCause(nil), r.causes...)
+	r.mu <- struct{}{}
+	return out
+}
+
+func (r *causeRecorder) allLanes() []lifecycle.LaneID {
+	<-r.mu
+	out := append([]lifecycle.LaneID(nil), r.lanes...)
 	r.mu <- struct{}{}
 	return out
 }

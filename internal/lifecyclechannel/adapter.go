@@ -85,19 +85,20 @@ const (
 	LossClosed LossCause = "closed"
 )
 
-// LossReporter is told which path ended one adapter's transport, keyed by the
-// adapter's own lane. It exists because the kernel cannot answer this: a
-// handshake that times out never establishes a domain, so the lane's
-// projection never changes and no lifecycle fact is published at all — the
-// publisher deliberately announces only lanes whose projection moved. The
-// cause is transport knowledge (ADR-0024 decision 8: the two losses "must not
-// share a code path"), and the composition root routes it to the session
-// integration status the product renders. Reported before the kernel's
-// TransportLost, so a consumer that also watches published facts has the
-// cause in hand by the time one arrives.
+// LossReporter is told which path ended an adapter's transport or which
+// expected listener domain failed to prove its capability, keyed by lane.
+// It exists because the kernel cannot answer this: a handshake that times
+// out never establishes a domain, so the lane's projection never changes and
+// no lifecycle fact is published at all — the publisher deliberately
+// announces only lanes whose projection moved. The cause is transport
+// knowledge (ADR-0024 decision 8: the two losses "must not share a code
+// path"), and the composition root routes it to the session integration
+// status the product renders. Adapter loss is reported before its
+// TransportLost; listener expectation loss does not tear down the shared
+// transport.
 type LossReporter func(lane lifecycle.LaneID, cause LossCause)
 
-// Option configures an Adapter.
+// Option configures an Adapter or Listener.
 type Option func(*options)
 
 type options struct {
@@ -105,17 +106,18 @@ type options struct {
 	lossReporter LossReporter
 }
 
-// WithHelloTimeout bounds the handshake: unless an authenticated hello is
-// accepted within the window, the domain is abandoned (TransportLost) and
-// the session stays conventional (protocol §5). Zero uses
-// lifecycle.HelloTimeout. Test-only in practice; the default is the
-// protocol constant.
+// WithHelloTimeout bounds an adapter handshake and listener expectation:
+// unless an authenticated hello is accepted within the window, the domain is
+// abandoned on an adapter or the listener reports LossHelloTimeout for an
+// expected domain. Zero uses lifecycle.HelloTimeout. Test-only in practice;
+// the default is the protocol constant.
 func WithHelloTimeout(d time.Duration) Option {
 	return func(o *options) { o.helloTimeout = d }
 }
 
-// WithLossReporter registers the sink for this adapter's loss cause. Nil (the
-// default) reports nowhere and the loss is still logged.
+// WithLossReporter registers the sink for an adapter loss or a listener
+// expectation timeout. Nil (the default) reports nowhere and the loss is still
+// logged.
 func WithLossReporter(r LossReporter) Option {
 	return func(o *options) { o.lossReporter = r }
 }

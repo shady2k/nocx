@@ -1447,6 +1447,43 @@ describe('firing a snippet into the pane in front (nocx-xqu5)', () => {
     }
   })
 
+  // nocx-8rtr.1. The bytes a program sent HAVE arrived — the wire carries
+  // them, measured in the stand — but renderer.write() is fire-and-forget
+  // and the parse is one pass behind. A synchronous read of the mode at the
+  // moment of the fire therefore answers about the terminal BEFORE the
+  // program's DECSET, and refuses a body the destination can honour.
+  //
+  // Measured on the real renderer (renderers/xterm.test.ts's own
+  // 'bracketed paste, read from the real parser' seam): immediately after
+  // write('\x1b[?2004h') the read is false, and after the parse it is true.
+  // So the fire must fence on the parse before it decides.
+  it('a multi-line body is delivered when the program enabled the mode and the parse is still one pass behind', async () => {
+    const client = resolvingClient('line1\nhunter2')
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const renderer = rendererOf(content)
+      editorOf(content).hide()
+
+      // The terminal as it is at the instant of the fire: the DECSET is in
+      // the write queue, not yet in the parser. It becomes true only once
+      // the barrier the renderer already offers has settled.
+      let parsed = false
+      renderer.bracketedPasteActive.mockImplementation(() => parsed)
+      renderer.awaitWriteBarrier.mockImplementation(() => {
+        parsed = true
+        return Promise.resolve()
+      })
+
+      await expect(content.insertSnippet('line1\n{{secret:pi@far}}')).resolves.toEqual({
+        ok: true,
+        where: 'pty',
+      })
+      expect(renderer.paste).toHaveBeenCalledWith('line1\nhunter2')
+    } finally {
+      teardown()
+    }
+  })
+
   it('a single-line body is unaffected by the paste mode either way', async () => {
     for (const active of [false, true]) {
       const client = resolvingClient('echo hunter2')

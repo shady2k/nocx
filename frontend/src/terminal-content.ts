@@ -5316,8 +5316,24 @@ export class TerminalContent extends BasePaneContent {
     }
     if (owner === 'none') return { ok: false, reason: 'no-owner' }
     const renderer = this.renderer
-    if (text.includes('\n') && !(renderer?.bracketedPasteActive() ?? false)) {
-      return { ok: false, reason: 'multi-line-no-bracketed-paste' }
+    if (text.includes('\n')) {
+      // FENCE BEFORE DECIDING (nocx-8rtr.1). write() is fire-and-forget and
+      // the parse runs one pass behind it, so a synchronous read of the mode
+      // answers about the terminal as it was BEFORE the bytes the program
+      // just sent. A program that enables mode 2004 and then waits on stdin
+      // is exactly the case: its DECSET is in the queue at the moment the
+      // person fires, and the fire refused a body the destination could
+      // honour. Measured both ways — the wire carries the DECSET (an e2e
+      // probe recorded ON/off/ON), and the real renderer answers false
+      // immediately after write() and true after the parse.
+      //
+      // The barrier is the renderer's own, the same one a capture uses; this
+      // method is already async, so the wait costs the multi-line path one
+      // parse pass and the single-line path nothing.
+      await renderer?.awaitWriteBarrier()
+      if (!(renderer?.bracketedPasteActive() ?? false)) {
+        return { ok: false, reason: 'multi-line-no-bracketed-paste' }
+      }
     }
     let line = text
     if (hasSecretReference(text)) {

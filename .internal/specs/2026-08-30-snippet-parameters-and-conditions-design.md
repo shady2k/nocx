@@ -161,7 +161,11 @@ produces come from one computation**, so they cannot disagree.
 | `unknown-tag`             | `{% for x %}`                                        |
 | `condition-on-parameter`  | `{% if worker %}` where `worker` is substituted (§5) |
 | `conflicting-declaration` | `{{w=claude}}` … `{{w=a\|b}}` (§5)                   |
-| `unrecognised-span`       | `{{ask:port}` — one brace; today's behaviour, kept   |
+
+**An unrecognised span is not a diagnostic.** `{{evn:cwd}}`, `{{ask:port}}` and a
+one-braced `{{ask:port}` parse as `unrecognised` value spans, are reported in the preview,
+and are **sent literally** — §4.1 says so, and a fire that refused on one would contradict
+it. A diagnostic is a shape that makes a body unfireable; a literal is not one.
 
 ## 7. Resolution order
 

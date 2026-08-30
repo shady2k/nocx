@@ -23,13 +23,18 @@ import { Stack } from '../ui/stack'
 import { StatusCard } from '../ui/status-card'
 import { TextField } from '../ui/text-field'
 import { askFields } from './resolve'
+import type { SnippetDestination } from './fire'
 import type { Snippet } from './snippets-store'
 
 export interface SnippetAskDialogDeps {
   /** Fire the snippet with the answers. Resolves to the refusal sentence
    *  when the fire was refused, or null when it was delivered — the form
    *  stays open on a refusal, beside the answers that caused it. */
-  fire: (snippet: Snippet, answers: ReadonlyMap<string, string>) => Promise<string | null>
+  fire: (
+    snippet: Snippet,
+    answers: ReadonlyMap<string, string>,
+    destination: SnippetDestination,
+  ) => Promise<string | null>
   /** Called AFTER the form closes on a delivered fire, so the keyboard goes
    *  back to the pane rather than to whatever the dialog left it on. The
    *  order matters: focusing before the close lets the closing dialog take
@@ -38,9 +43,12 @@ export interface SnippetAskDialogDeps {
 }
 
 export interface SnippetAskDialogHandle {
-  /** Ask for this snippet's fields. Does nothing for a body with none —
-   *  the caller fires those directly. */
-  ask(snippet: Snippet): void
+  /** Ask for this snippet's fields, for the destination the person chose
+   *  BEFORE answering: which destination it is never depends on the answers,
+   *  and asking twice for one fire would be a second question about a thing
+   *  already decided. Does nothing for a body with none — the caller fires
+   *  those directly. */
+  ask(snippet: Snippet, destination: SnippetDestination): void
   dispose(): void
 }
 
@@ -49,6 +57,7 @@ export function mountSnippetAskDialog(
   deps: SnippetAskDialogDeps,
 ): SnippetAskDialogHandle {
   const [snippet, setSnippet] = createSignal<Snippet | null>(null)
+  const [destination, setDestination] = createSignal<SnippetDestination>('input')
   const [names, setNames] = createSignal<string[]>([])
   const [values, setValues] = createSignal<string[]>([])
   const [error, setError] = createSignal('')
@@ -66,7 +75,7 @@ export function mountSnippetAskDialog(
     setFiring(true)
     const answers = new Map<string, string>(names().map((name, i) => [name, values()[i] ?? '']))
     try {
-      const refusal = await deps.fire(s, answers)
+      const refusal = await deps.fire(s, answers, destination())
       if (refusal !== null) {
         // Stays open with the reason and the answers: the person is one
         // edit away from a fire that works, and closing would take both
@@ -127,9 +136,10 @@ export function mountSnippetAskDialog(
   )
 
   return {
-    ask(s: Snippet): void {
+    ask(s: Snippet, dest: SnippetDestination): void {
       const fields = askFields(s.body)
       if (fields.length === 0) return
+      setDestination(dest)
       setNames(fields.map((f) => f.name))
       // The defaults are the starting answers, so Enter on an untouched
       // form is the common case and costs nothing.

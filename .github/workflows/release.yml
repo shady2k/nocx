@@ -191,6 +191,69 @@ jobs:
           echo "SIGN_IDENTITY=$id" >> "$GITHUB_ENV"
           security find-identity -v -p codesigning build.keychain
 
+      # The helpers are EMBEDDED in the app (//go:embed all:artifacts), so
+      # they must exist before the Go build that embeds them. Until
+      # nocx-mchgh this step did not exist and every published release
+      # answered ErrArtifactsNotBuilt for every platform: remote git could
+      # not work in any release, and worked from a checkout, which is why
+      # nothing reported it (Makefile:125 makes build-release depend on
+      # helpers; release.yml never did).
+      - name: Build the remote helpers
+        run: make helpers
+
+      # The gate, expressed as a test rather than as a file listing: a
+      # build that embedded nothing answers ErrArtifactsNotBuilt for every
+      # platform, and NOCX_REQUIRE_HELPER_ARTIFACTS turns the skip that
+      # protects a fresh checkout into the failure a release needs.
+      - name: The built binary embeds a helper for every matrix platform
+        run: NOCX_REQUIRE_HELPER_ARTIFACTS=1 go test ./internal/helper/deploy/ -run 'TestEveryMatrixPlatformResolves|TestArtifactReturnsCompressedBytesAndDecompressedHash' -count=1
+
+      - name: Hash the helper binaries for the cross-job comparison
+        run: |
+          set -euo pipefail
+          # THIS JOB'S HELPER BINARIES ARE HASHED AND THROWN AWAY. They are
+          # staged under $RUNNER_TEMP and never under dist/, because dist/*
+          # is what this job uploads as `macos-universal`, and the Linux
+          # job uploads the identically-named files inside `linux-amd64`.
+          # `sign` and `publish` download both artefacts into ONE dist/
+          # directory, so a helper in both would be published by whichever
+          # download ran last — an accident of step ordering deciding which
+          # binary users get. That is precisely the ambiguity the hash
+          # comparison in `sign` exists to rule out, so the ambiguity is
+          # removed at the source instead: only build-linux contributes
+          # helper binaries, and this job contributes only its opinion of
+          # what their bytes should be.
+          #
+          # UNCOMPRESSED, deliberately, on both sides. `make helpers`
+          # gzips, and gzip stamps the source file's mtime into its header,
+          # so the .gz bytes differ between the two jobs even when the
+          # binary inside is identical — hashing those would compare the
+          # wrong thing. The DECOMPRESSED bytes are what
+          # internal/helper/deploy/install.go hashes to key the install
+          # directory, so they are what both the comparison and the
+          # published asset are about.
+          #
+          # The loop takes the platforms from the artifacts on disk rather
+          # than from a list written here, so the matrix can grow (it goes
+          # 2x2 in nocx-psjfb) without this step being edited to match.
+          #
+          # shasum -a 256, not sha256sum: macOS has no sha256sum, Linux has
+          # both, and one spelling that works in either job is worth more
+          # than the shorter one.
+          stage="$RUNNER_TEMP/helper-stage"
+          mkdir -p "$stage"
+          : > helper-hashes.txt
+          for gz in internal/helper/deploy/artifacts/nocx-helper-*.gz; do
+            name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
+            plat="${name#nocx-helper-}"
+            out="$stage/nocx-helper-${VERSION}-${plat}"
+            gunzip -c "$gz" > "$out"
+            chmod +x "$out"
+            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> helper-hashes.txt
+          done
+          sort -o helper-hashes.txt helper-hashes.txt
+          cat helper-hashes.txt
+
       - name: Build universal bundle
         run: |
           set -euo pipefail
@@ -405,6 +468,17 @@ jobs:
           path: dist/*
           retention-days: 7
 
+      # The hash file, and from this job nothing else: `macos-universal`
+      # above carries no helper binaries, because the step that unpacked
+      # them staged them under $RUNNER_TEMP for exactly that reason. The
+      # LINUX job's copies are the published ones — one origin for the
+      # bytes, two independent witnesses to their hashes.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: helper-hashes-macos
+          path: helper-hashes.txt
+          retention-days: 7
+
       # The keychain outlives the job's success or failure, so its removal
       # must too. A hosted runner is discarded anyway; a self-hosted one is
       # where this line earns its keep.
@@ -449,6 +523,56 @@ jobs:
       - name: Build frontend
         run: npm ci && npm run build
         working-directory: frontend
+
+      # The helpers are EMBEDDED in the app (//go:embed all:artifacts), so
+      # they must exist before the Go build that embeds them. Until
+      # nocx-mchgh this step did not exist and every published release
+      # answered ErrArtifactsNotBuilt for every platform: remote git could
+      # not work in any release, and worked from a checkout, which is why
+      # nothing reported it (Makefile:125 makes build-release depend on
+      # helpers; release.yml never did).
+      - name: Build the remote helpers
+        run: make helpers
+
+      # The gate, expressed as a test rather than as a file listing: a
+      # build that embedded nothing answers ErrArtifactsNotBuilt for every
+      # platform, and NOCX_REQUIRE_HELPER_ARTIFACTS turns the skip that
+      # protects a fresh checkout into the failure a release needs.
+      - name: The built binary embeds a helper for every matrix platform
+        run: NOCX_REQUIRE_HELPER_ARTIFACTS=1 go test ./internal/helper/deploy/ -run 'TestEveryMatrixPlatformResolves|TestArtifactReturnsCompressedBytesAndDecompressedHash' -count=1
+
+      - name: Stage the helper binaries for publication
+        run: |
+          set -euo pipefail
+          # PUBLISHED UNCOMPRESSED, deliberately. `make helpers` gzips, and
+          # gzip stamps the source file's mtime into its header, so the .gz
+          # bytes differ between this job and the other one even when the
+          # binary inside is identical. The DECOMPRESSED bytes are what
+          # internal/helper/deploy/install.go hashes to key the install
+          # directory, so publishing those makes "the same bytes the ssh
+          # path would have sent" a checkable claim: a hand-installed
+          # helper lands in the same directory name, and no
+          # reinstall-on-hash-mismatch follows.
+          #
+          # The loop takes the platforms from the artifacts on disk rather
+          # than from a list written here, so the matrix can grow (it goes
+          # 2x2 in nocx-psjfb) without this step being edited to match.
+          #
+          # shasum -a 256, not sha256sum: macOS has no sha256sum, Linux has
+          # both, and one spelling that works in either job is worth more
+          # than the shorter one.
+          mkdir -p dist
+          : > helper-hashes.txt
+          for gz in internal/helper/deploy/artifacts/nocx-helper-*.gz; do
+            name="$(basename "$gz" .gz)"          # nocx-helper-<goos>-<goarch>
+            plat="${name#nocx-helper-}"
+            out="dist/nocx-helper-${VERSION}-${plat}"
+            gunzip -c "$gz" > "$out"
+            chmod +x "$out"
+            printf '%s %s\n' "$plat" "$(shasum -a 256 "$out" | awk '{print $1}')" >> helper-hashes.txt
+          done
+          sort -o helper-hashes.txt helper-hashes.txt
+          cat helper-hashes.txt
 
       - name: Build Linux binary
         run: |
@@ -510,6 +634,15 @@ jobs:
           path: dist/*
           retention-days: 7
 
+      # THIS job's helper binaries are the published ones — see the note on
+      # the macOS side. This upload is its hash file, for the cross-job
+      # comparison in `sign`.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: helper-hashes-linux
+          path: helper-hashes.txt
+          retention-days: 7
+
   # Separate from build so the signing key is never present in a job that runs
   # build tooling (§5). Manifest work, so it runs on ubuntu.
   #
@@ -546,6 +679,31 @@ jobs:
           name: linux-amd64
           path: dist
 
+      - uses: actions/download-artifact@v8
+        with:
+          name: helper-hashes-macos
+          path: hashes/macos
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: helper-hashes-linux
+          path: hashes/linux
+
+      - name: The two build jobs produced the same helpers
+        run: |
+          set -euo pipefail
+          # Two jobs cross-compile the same helpers from the same commit
+          # with -trimpath, so they must be byte-identical. If they are
+          # not, a macOS-built app and a Linux-built app would deploy
+          # DIFFERENT binaries to one host under one version, and D6's
+          # "exactly one automatic reinstall" would fire on every
+          # connection, forever, silently.
+          if ! diff -u hashes/macos/helper-hashes.txt hashes/linux/helper-hashes.txt; then
+            echo "::error::the macOS and Linux jobs built different helper binaries — the published helper would not be the one half the installs deploy"
+            exit 1
+          fi
+          echo "helper content hashes agree across both build jobs"
+
       - name: Generate manifest.json
         run: |
           set -euo pipefail
@@ -564,6 +722,32 @@ jobs:
           linux_size="$(stat -c%s "$linux_appimage")"
           linux_url="https://github.com/shady2k/nocx/releases/download/v${VERSION}/${linux_base}.AppImage"
 
+          # ── helpers ──────────────────────────────────────────────────
+          # Read from hashes/linux, because THE LINUX JOB'S BINARIES ARE
+          # THE ONES PUBLISHED, and they are the only ones that exist: the
+          # macOS job hashes its helpers under $RUNNER_TEMP and uploads no
+          # binary, so dist/nocx-helper-* here came from `linux-amd64` and
+          # from nowhere else. The step above has already proved the two
+          # jobs agree about their content, so this is a choice of origin,
+          # not of content.
+          #
+          # sha256 here is the content hash install.go keys the install
+          # directory by (D7), so a hand-installed helper and an
+          # ssh-delivered one resolve to the same directory.
+          #
+          # The loop is driven by the hash file, so the array is however
+          # many helpers the matrix built — no count is written here.
+          helpers_json="$(
+            while read -r plat sha; do
+              os="${plat%-*}"; arch="${plat#*-}"
+              f="dist/nocx-helper-${VERSION}-${plat}"
+              jq -n --arg os "$os" --arg arch "$arch" \
+                --arg url "https://github.com/shady2k/nocx/releases/download/v${VERSION}/nocx-helper-${VERSION}-${plat}" \
+                --arg sha "$sha" --argjson size "$(stat -c%s "$f")" \
+                '{os: $os, arch: $arch, url: $url, sha256: $sha, size: $size}'
+            done < hashes/linux/helper-hashes.txt | jq -s .
+          )"
+
           released="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
 
           jq -n \
@@ -576,13 +760,15 @@ jobs:
             --arg linux_url "$linux_url" \
             --arg linux_sha "$linux_sha" \
             --argjson linux_size "$linux_size" \
+            --argjson helpers "$helpers_json" \
             '{version: $v, released: $r, notesUrl: $notes,
               artifacts: [
                 {os: "darwin", arch: "universal", format: "zip",
                  url: $mac_url, sha256: $mac_sha, size: $mac_size},
                 {os: "linux", arch: "amd64", format: "AppImage",
                  url: $linux_url, sha256: $linux_sha, size: $linux_size}
-              ]}' > dist/manifest.json
+              ],
+              helpers: $helpers}' > dist/manifest.json
           cat dist/manifest.json
 
       - name: Sign manifest.json
@@ -679,5 +865,9 @@ jobs:
             "dist/nocx-${VERSION}-darwin-universal.dmg" \
             "dist/nocx-${VERSION}-darwin-universal.zip" \
             "dist/nocx-${VERSION}-linux-amd64.AppImage" \
+            "dist/nocx-helper-${VERSION}-linux-amd64" \
+            "dist/nocx-helper-${VERSION}-linux-arm64" \
+            "dist/nocx-helper-${VERSION}-darwin-amd64" \
+            "dist/nocx-helper-${VERSION}-darwin-arm64" \
             "dist/manifest.json" \
             "dist/manifest.json.sig"

@@ -50,7 +50,7 @@
  * disk.
  */
 import { test as base, expect, type Page } from '@playwright/test'
-import { existsSync, mkdtempSync } from 'node:fs'
+import { existsSync, mkdtempSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -88,6 +88,10 @@ const PROPOSED_STEM = POSTMAN_COLLECTION_NAME
  *  server is started — so it only has to be a URL the import can carry into
  *  the environment it writes. */
 const UNREACHED_BASE_URL = 'http://127.0.0.1:9'
+
+/** The name the dropped file carries. A stem the destination proposal can be
+ *  read off, and the string the ask's source line must show back. */
+const DROPPED_EXPORT_NAME = 'dropped-export.json'
 
 test.describe('the import ask on a stand with no Wails', () => {
   // Three columns — tree, request, runs — must all be on screen for a person
@@ -267,14 +271,15 @@ test.describe('the import ask on a stand with no Wails', () => {
 
     // The picker beside it is asserted separately — see the test below.
 
-    // What is still absent is the NATIVE route. `data-file-drop-target` is
-    // the attribute Wails reads off the dropped-on element and
-    // `data-session-id` is the tab it would be attributed to; there is no
-    // Wails here to read either, and the import is not a terminal session's
-    // gesture in any case (spec §1a). Asserted on the whole page rather than
-    // inside the ask, because an api-import target anywhere is the same
-    // broken promise.
-    await expect(page.locator('[data-file-drop-target="api-import"]')).toHaveCount(0)
+    // THE SURFACE NAMES ITSELF, and the ATTRIBUTION is what is absent.
+    // `data-file-drop-target` was withheld here until nocx-x1ti1, on the
+    // reading that it is Wails's attribute and there is no Wails — true of
+    // the Go side and false of the runtime's JavaScript, which ships in this
+    // bundle too and refuses every file drag that has no such ancestor by
+    // setting `dropEffect = 'none'`. The drop event then never fires and the
+    // gesture below could not exist. `data-session-id` is the half that
+    // stays absent: a browser drop is attributed to no session.
+    await expect(zone).toHaveAttribute('data-file-drop-target', 'api-import')
     await expect(zone).not.toHaveAttribute('data-session-id', /.*/)
   })
 
@@ -303,5 +308,58 @@ test.describe('the import ask on a stand with no Wails', () => {
     // trigger, which is a button too and sits one level down inside
     // `.ui-file-input` (file-input.tsx).
     await expect(zone.locator('.ui-drop-zone__region > button')).toHaveCount(0)
+  })
+
+  /**
+   * THE GESTURE THE OWNER MADE, watched through the browser's OWN drag
+   * machinery — and a synthesized `DragEvent` could not have watched it.
+   *
+   * A person at localhost:5180 dragged a Postman export onto the dashed box
+   * and nothing happened at all (nocx-x1ti1). Every check the ask had was
+   * green while it did: the two tests above assert the region is DRAWN, the
+   * archive spec hands its bytes to the kit's file input, and a `DragEvent`
+   * built in the page and dispatched at the zone reaches the handler exactly
+   * as it should. What none of them exercise is the part that was broken —
+   * the browser deciding, from `dropEffect`, whether to deliver a `drop` at
+   * all. `@wailsio/runtime`'s global listener was answering that question
+   * with 'none' for this surface, so the handler was never reached.
+   *
+   * `Input.dispatchDragEvent` is the only gesture available here that goes
+   * through that decision, which is why this test is chromium-only rather
+   * than written twice. The file is a real one on disk, as an OS drag's is.
+   */
+  test('a file dragged onto the ask becomes its held source', async ({ page, browserName }) => {
+    test.skip(browserName !== 'chromium', "only CDP can drive the browser's own drag machinery")
+    const { ask } = await openTheAsk(page)
+
+    const region = ask.locator('.ui-drop-zone__region')
+    const box = await region.boundingBox()
+    if (box === null) throw new Error('the ask draws no drop region to drag onto')
+    const x = box.x + box.width / 2
+    const y = box.y + box.height / 2
+
+    const dragged = join(disposable.root, DROPPED_EXPORT_NAME)
+    writeFileSync(dragged, postmanExport(UNREACHED_BASE_URL))
+
+    const cdp = await page.context().newCDPSession(page)
+    const data = {
+      items: [{ mimeType: 'text/uri-list', data: `file://${dragged}` }],
+      files: [dragged],
+      dragOperationsMask: 1,
+    }
+    await cdp.send('Input.dispatchDragEvent', { type: 'dragEnter', x, y, data })
+    await cdp.send('Input.dispatchDragEvent', { type: 'dragOver', x, y, data })
+    // The region says it took the drag — DropZone's own statement, and the
+    // one thing that was still true while the bug was live. Asserting it
+    // here is what makes the failure below read as "the drop never came"
+    // rather than as "the drag never arrived".
+    await expect(ask.locator('.ui-drop-zone')).toHaveAttribute('data-drop-active', '')
+    await cdp.send('Input.dispatchDragEvent', { type: 'drop', x, y, data })
+
+    // What the ask is holding, said in the currency a person recognises.
+    await expect(ask.locator('.api-import-source')).toContainText(DROPPED_EXPORT_NAME, {
+      timeout: 15_000,
+    })
+    await expect(ask.getByRole('button', { name: 'Import', exact: true })).toBeEnabled()
   })
 })

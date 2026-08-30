@@ -128,7 +128,35 @@ export function DropZone(props: DropZoneProps) {
     <div
       ref={zone}
       class="ui-drop-zone"
-      data-file-drop-target={nativeHalf() ? props.target : undefined}
+      // NAMED FOR EITHER HALF, and the browser one is why. The attribute
+      // was the NATIVE route's marker alone — what Go reads off the
+      // dropped-on element — and withholding it in a browser looked like
+      // honesty: no Wails, no route, no promise. It is not honest, because
+      // the attribute has a SECOND reader that ships in every build.
+      //
+      // `@wailsio/runtime` installs global `dragenter`/`dragover` listeners
+      // on `<html>` the moment the module is imported, in a plain browser as
+      // much as in the webview (window.ts, setupDropTargetListeners). For
+      // every drag carrying `Files` it calls preventDefault — so the browser
+      // will not navigate — and then sets `dropEffect` from ONE question:
+      // does the element under the pointer have a `[data-file-drop-target]`
+      // ancestor. No ancestor, `dropEffect = 'none'`, and Chrome then
+      // delivers `dragleave` instead of `drop`. The zone's own handler runs
+      // FIRST (it is a descendant, and `<html>` is the last stop before the
+      // document) and is overruled: the region lights up under the drag and
+      // the drop never arrives. That is the whole of "I drag the file onto
+      // the ask and nothing at all happens" (nocx-x1ti1), and it is also why
+      // the terminal pane's browser drop always worked — TerminalContent
+      // marks it for the native route, so the global listener blesses it by
+      // accident.
+      //
+      // The runtime cannot be left out of a browser build: `wails-runtime.ts`
+      // imports it precisely to install the browser transport. So the
+      // attribute is what says "this surface takes file drops" to both
+      // readers, which is one derivation rather than two. `data-session-id`
+      // below stays the native half's alone: it is what a drop is
+      // ATTRIBUTED to, and there is nothing in a browser to attribute one to.
+      data-file-drop-target={live() ? props.target : undefined}
       // The region is drawn: what the stylesheet keys its layout on, because
       // EITHER half draws it and only the native one names a target.
       data-drop-live={live() ? '' : undefined}

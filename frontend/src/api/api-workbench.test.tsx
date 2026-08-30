@@ -3022,18 +3022,24 @@ describe('the import ask accepts a drop', () => {
     expect(field('api-import-postman-file').value).toBe('')
   })
 
-  // The two absences fail independently, so they are two tests. A build with
+  // The two cases fail independently, so they are two tests. A build with
   // no Wails still has local sessions — `make dev-web` and the e2e harness
-  // both do — so a target gated on the session alone would light up under a
-  // drag there and then deliver nothing.
-  it('names no NATIVE drop target where there is no Wails runtime', async () => {
-    // The attributes are what Wails reads off the dropped-on element, so
-    // without a runtime they would name a route nothing travels. The REGION
-    // is a different question and is drawn anyway — the browser half answers
-    // it (see the browser-drop block below).
+  // both do — so what each attribute says has to be asserted separately.
+  it('names itself a drop target with no Wails, and attributes it to no session', async () => {
+    // THE NAME IS THERE AND THE ATTRIBUTION IS NOT, and the name was missing
+    // until nocx-x1ti1. `@wailsio/runtime` installs global drag listeners on
+    // `<html>` from the browser bundle as well as the webview's, and they
+    // set `dropEffect = 'none'` for any file drag whose target has no
+    // `[data-file-drop-target]` ancestor — so the browser never delivers the
+    // `drop` event and the ask sat there doing nothing while a person
+    // dropped an export on it. `data-session-id` is the half that stays
+    // absent: it is what a NATIVE drop is attributed to, and there is no
+    // runtime here to deliver one.
     await openAskWithDrop(undefined)
 
-    expect(importAskBody().querySelector('[data-file-drop-target]')).toBeNull()
+    const zone = importAskBody().querySelector<HTMLElement>('[data-file-drop-target]')
+    expect(zone?.getAttribute('data-file-drop-target')).toBe('api-import')
+    expect(zone?.hasAttribute('data-session-id')).toBe(false)
     fireEvent.input(field('api-import-postman-file'), { target: { value: '/downloads/a.json' } })
     expect(field('api-import-postman-file').value).toBe('/downloads/a.json')
   })
@@ -3074,7 +3080,10 @@ describe('the import ask accepts a drop', () => {
 
     const zone = importAskBody().querySelector<HTMLElement>('.ui-drop-zone')!
     expect(zone.querySelector('.ui-drop-zone__region')).not.toBeNull()
-    expect(zone.hasAttribute('data-file-drop-target')).toBe(false)
+    // …and the region NAMES itself, which is the half nocx-1gfbw left out and
+    // nocx-x1ti1 paid for: drawn but unnamed, the bundled Wails runtime
+    // refuses the drop the region is advertising (drop-zone.tsx).
+    expect(zone.getAttribute('data-file-drop-target')).toBe('api-import')
   })
 
   it("the region's picker is the ask's ONLY picker, and it answers the whole gesture", async () => {

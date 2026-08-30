@@ -353,6 +353,116 @@ describe('SettingsContent', () => {
     expect(target.querySelector('.ui-file-input__name')!.textContent).toBe('backup.json')
   })
 
+  /**
+   * AND THE PREVIEW IT PRODUCED SURVIVES THE SAME REFRESH (nocx-3icu1).
+   *
+   * The test above stops at the file input, which is the first thing a refresh
+   * could take back. It is not the last, and it is not what CI actually caught.
+   * The webkit trace for run 33277630612 failed on the Merge button: the
+   * preview heading was on screen at one frame snapshot and the whole section
+   * said "No file selected" fourteen milliseconds later. File input and preview
+   * go together because they are one component, but only this one watches the
+   * half a person acts on.
+   *
+   * THE PREVIEW MOCK IS COMPLETE, AND THE ONE ABOVE IS NOT. A partial payload
+   * throws inside the preview block on the first field it does not carry —
+   * `connectionsRequiringCredential.length` reaches it before anything is
+   * drawn — so a test with one never renders the preview at all and cannot
+   * report that it vanished.
+   *
+   * It waits for the refresh the same way its neighbour does, on the late
+   * section reaching the rail. One way of knowing a refresh has landed, not
+   * two.
+   */
+  it('a settings refresh does not take back the preview you are looking at', async () => {
+    let invalidate: ((params: unknown) => void) | null = null
+    const dispatcher = {
+      subscribe: (method: string, cb: (params: unknown) => void) => {
+        if (method === 'settings.changed') invalidate = cb
+        return () => {}
+      },
+      onConnect: () => () => {},
+    }
+    const observer = new SettingsObserver(dispatcher as unknown as Dispatcher)
+    content = new SettingsContent(client, observer)
+    mockReady(client)
+    const LATE_SECTION = 'Latecomer'
+    let describeCalls = 0
+    vi.spyOn(client, 'describeSettings').mockImplementation(() => {
+      describeCalls++
+      const declarations = TEST_DECLARATIONS.map((d) => ({ ...d }))
+      if (describeCalls > 1) {
+        declarations.push({
+          key: 'late.arrival',
+          section: LATE_SECTION,
+          label: 'Late Arrival',
+          description: 'A setting the first describe did not carry',
+          control: 'toggle',
+          dataClass: 'publicConfig',
+          default: false,
+        })
+      }
+      return Promise.resolve({
+        declarations,
+        groups: TEST_GROUPS.map((g) => ({ ...g })),
+        sectionGroups: { ...TEST_SECTION_GROUPS, [LATE_SECTION]: 'application' },
+      })
+    })
+    vi.spyOn(client, 'getSnapshot').mockImplementation(() =>
+      Promise.resolve({ values: {}, overridden: [], revision: 0 }),
+    )
+    vi.spyOn(client, 'previewBackupRestore').mockImplementation(() =>
+      Promise.resolve({
+        previewToken: 'tok-1',
+        createdAt: '2026-08-30T00:00:00Z',
+        strategy: 'merge',
+        settings: { included: 1, changed: 1, reset: 0 },
+        connections: { included: 0, added: 0, updated: 0, removed: 0 },
+        groups: { included: 0, added: 0, updated: 0, removed: 0 },
+        snippets: { included: 0 },
+        notes: { included: 0 },
+        connectionsRequiringCredential: [],
+        omissions: {
+          credentialBindingsRemoved: 0,
+          groupCredentialBindingsRemoved: 0,
+          groupDefaultKeysOmitted: 0,
+        },
+      }),
+    )
+    await content.mount(target, host, signal)
+
+    openSection(target, 'Backup & Restore')
+    const input = await vi.waitFor(() => {
+      const el = target.querySelector<HTMLInputElement>('.ui-file-input__native')
+      expect(el).toBeTruthy()
+      return el!
+    })
+
+    const file = new File(['{}'], 'backup.json', { type: 'application/json' })
+    Object.defineProperty(input, 'files', { value: [file], configurable: true })
+    fireEvent.change(input)
+
+    const mergeButton = (): HTMLElement | undefined =>
+      Array.from(target.querySelectorAll<HTMLElement>('button')).find(
+        (b) => b.textContent.trim() === 'Merge backup',
+      )
+    await vi.waitFor(() => {
+      expect(mergeButton()).toBeTruthy()
+    })
+
+    expect(invalidate).toBeTruthy()
+    invalidate!({ revision: 1, keys: ['tab.placement'] })
+    await vi.waitFor(() => {
+      const rows = Array.from(
+        target.querySelectorAll<HTMLButtonElement>('.ui-grouped-nav__item > .ui-button'),
+      )
+      expect(rows.some((r) => r.textContent.includes(LATE_SECTION))).toBe(true)
+    })
+
+    expect(mergeButton()).toBeTruthy()
+    expect(target.querySelector('.ui-file-input__name')!.textContent).toBe('backup.json')
+  })
+
   it('rail has exactly one search input', async () => {
     mockReady(client)
     await content.mount(target, host, signal)

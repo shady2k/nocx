@@ -2703,6 +2703,11 @@ func (a *remoteLauncherAdapter) mapRefusalReason(r shellintegration.RefusalReaso
 // a terminal outcome — design §6.1's steps 3, 4 and 5, the last two behind the
 // MintGate this returns.
 func (a *remoteLauncherAdapter) Prepare(shell ssh.ShellKind, opts ssh.LaunchOptions) (string, ssh.BootstrapRun, ssh.BootstrapGate, bool) {
+	if opts.Capability != "" && (opts.LifecyclePort < 1 || opts.LifecyclePort > 65535) {
+		a.logger.Error("shellintegration: capability supplied without a valid lifecycle port; the session runs a plain shell",
+			"session_id", opts.SessionID, "port", opts.LifecyclePort)
+		return "", nil, nil, false
+	}
 	sopts := shellintegration.LaunchOptions{
 		SessionID:     opts.SessionID,
 		Enhanced:      opts.Enhanced,

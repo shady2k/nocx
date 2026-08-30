@@ -454,8 +454,28 @@ func TestStage1_MalformedSecretsAreRefused(t *testing.T) {
 	// Built by hand: SecretFrame refuses this at the sender, which is the
 	// point — the far side must refuse it too, because a frame is not
 	// trusted for having been well-formed when it left.
-	body := fmt.Sprintf("%s %s %s %s %d\nnot-hex\n%s\n",
-		FrameMagic, secretFrameSecret, opts.SessionID, opts.Domain, opts.Epoch, canaryFence)
+	body := fmt.Sprintf("%s %s %s %s %d\nnot-hex\n%s\n%d\n",
+		FrameMagic, secretFrameSecret, opts.SessionID, opts.Domain, opts.Epoch, canaryFence, opts.LifecyclePort)
+	s.sendFrame(FrameSecretSeq, []byte(body))
+	s.assertRefused(OutcomeSecretMalformed)
+}
+
+func TestStage1_NonNumericPortIsRefused(t *testing.T) {
+	opts := stageOpts()
+	s := startStage(t, ShellAuto, opts, nil)
+	body := fmt.Sprintf("%s %s %s %s %d\n%s\n%s\nnot-a-port\n",
+		FrameMagic, secretFrameSecret, opts.SessionID, opts.Domain, opts.Epoch,
+		canaryCap, canaryFence)
+	s.sendFrame(FrameSecretSeq, []byte(body))
+	s.assertRefused(OutcomeSecretMalformed)
+}
+
+func TestStage1_OutOfRangePortIsRefused(t *testing.T) {
+	opts := stageOpts()
+	s := startStage(t, ShellAuto, opts, nil)
+	body := fmt.Sprintf("%s %s %s %s %d\n%s\n%s\n65536\n",
+		FrameMagic, secretFrameSecret, opts.SessionID, opts.Domain, opts.Epoch,
+		canaryCap, canaryFence)
 	s.sendFrame(FrameSecretSeq, []byte(body))
 	s.assertRefused(OutcomeSecretMalformed)
 }

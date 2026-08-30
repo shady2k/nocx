@@ -60,19 +60,13 @@ import (
 // shell is treated as the owning session.
 const assemblySID = "aabbccddeeff00112233445566778899"
 
-var (
-	// childCapRe finds a per-epoch capability. It is no longer looked for in
-	// the composed LINE — ADR-0049 took both bearers out of the command, and
-	// requestChild now asserts their absence — but in FRAME 2, which the
-	// delivery writes onto the parent's terminal after ownership of the
-	// multiplex socket has been proven. That is where the harness learns the
-	// child's capability, by watching exactly what the product delivers.
-	childCapRe = regexp.MustCompile(`(?m)^([0-9a-f]{64})$`)
-	// childForwardRe pulls the -R ports out of the composed line. The words
-	// are shell-quoted one token at a time, so the port triple is its own
-	// quoted argument.
-	childForwardRe = regexp.MustCompile(`'127\.0\.0\.1:(\d+):127\.0\.0\.1:(\d+)'`)
-)
+// childCapRe finds a per-epoch capability. It is no longer looked for in
+// the composed LINE — ADR-0049 took both bearers out of the command, and
+// requestChild now asserts their absence — but in FRAME 2, which the
+// delivery writes onto the parent's terminal after ownership of the
+// multiplex socket has been proven. That is where the harness learns the
+// child's capability, by watching exactly what the product delivers.
+var childCapRe = regexp.MustCompile(`(?m)^([0-9a-f]{64})$`)
 
 // ---------------------------------------------------------------------------
 // The parent's terminal, as the typed delivery sees it.
@@ -217,12 +211,19 @@ func (w *harnessWindow) capability(t *testing.T, what string) lifecycle.Capabili
 	return cap
 }
 
-// harnessTerminals is the typedSessions seam: one window, for the one session
-// this harness has.
-type harnessTerminals struct{ win *harnessWindow }
+// harnessTerminals is the typedSessions seam: one window and one lifetime,
+// for the one session this harness has.
+type harnessTerminals struct {
+	win  *harnessWindow
+	done <-chan struct{}
+}
 
 func (h harnessTerminals) OpenBootstrapWindow(session.ID) (session.BootstrapWindow, error) {
 	return h.win, nil
+}
+
+func (h harnessTerminals) SessionDone(session.ID) (<-chan struct{}, error) {
+	return h.done, nil
 }
 
 // fixturePort extracts the sshd port from the fixture address.
@@ -349,13 +350,11 @@ type sshChildHarness struct {
 	child      lifecycle.DomainID
 	childEpoch uint64
 	bootstrap  string
-	childCap   lifecycle.Capability
+	childLPort int
 	// win is the parent's terminal as the typed delivery sees it: the
 	// window the frames travel on, and where the harness learns the child's
 	// capability from (ADR-0049 took it out of the composed line).
-	win        *harnessWindow
-	childLPort int // the listener transport's local port (the -R target)
-	childRPort int // the remote bind the sshd opens (CPORT)
+	win *harnessWindow
 	// Every fact the publisher emitted, in order — the renderer's whole
 	// input (nocx-mlyu). An attempt the kernel abandons as its domain
 	// closes is never named by a later fact, so the sequence is the only
@@ -459,13 +458,15 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 	}
 	t.Cleanup(func() { _ = os.RemoveAll(sockRoot) })
 	win := newHarnessWindow()
+	done := make(chan struct{})
+	t.Cleanup(func() { close(done) })
 	typed := &typedRunner{
 		log: logger,
 		wrapper: ssh.NewTypedWrapper(logger,
 			ssh.NewSSHConfigResolver(logger, os.DevNull, ""), sockRoot),
 		dial:     DialTypedMux,
 		publish:  shellintegration.New(logger),
-		sessions: harnessTerminals{win: win},
+		sessions: harnessTerminals{win: win, done: done},
 		probes:   defaultMasterProbes,
 	}
 
@@ -476,6 +477,10 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 	facts := &factLog{pub: pub}
 	pub.SetEmitter(facts)
 	kernel := &recordingKernel{Publisher: pub}
+	harness := &sshChildHarness{
+		t: t, kernel: kernel, lane: lane, facts: facts, win: win,
+	}
+	typed.reportListenerPort = func(port int) { harness.childLPort = port }
 
 	parentLn, lnErr := lifecyclechannel.NewListener(logger, pub)
 	if lnErr != nil {
@@ -486,7 +491,7 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 	// which is the kind buildSSHChildBootstrap requires.
 	transports.register(parentLn.TransportID(), transportKind{local: true})
 
-	h, err := pub.RequestDomain(lane, nil, parentLn.TransportID())
+	parentHandle, err := pub.RequestDomain(lane, nil, parentLn.TransportID())
 	if err != nil {
 		t.Fatalf("mint parent: %v", err)
 	}
@@ -495,19 +500,13 @@ func newSSHChildHarness(t *testing.T, fx *liveSshd) *sshChildHarness {
 		t.Fatalf("dial parent listener: %v", err)
 	}
 	t.Cleanup(func() { _ = conn.Close() })
-	return &sshChildHarness{
-		t:           t,
-		kernel:      kernel,
-		lane:        lane,
-		parentLn:    parentLn,
-		conn:        conn,
-		dec:         lifecyclecodec.NewDecoder(conn, lifecyclecodec.Config{}, nil),
-		parent:      h.Domain,
-		parentEpoch: h.Epoch,
-		parentCap:   h.Capability,
-		facts:       facts,
-		win:         win,
-	}
+	harness.parentLn = parentLn
+	harness.conn = conn
+	harness.dec = lifecyclecodec.NewDecoder(conn, lifecyclecodec.Config{}, nil)
+	harness.parent = parentHandle.Domain
+	harness.parentEpoch = parentHandle.Epoch
+	harness.parentCap = parentHandle.Capability
+	return harness
 }
 
 // send writes one authenticated parent frame with the next sequence number.
@@ -550,8 +549,8 @@ func (h *sshChildHarness) establishParent() {
 }
 
 // requestChild sends the ssh domain_request and captures the grant: the
-// child's identity and the opaque composed line, plus the child's capability
-// and listener port parsed out of the line.
+// child's identity and the opaque composed line. The reverse forward is
+// opened later by the proven master, and its allocated port travels in frame 2.
 func (h *sshChildHarness) requestChild(host string, port int, user string) {
 	h.send(lifecycle.Event{
 		Kind: lifecycle.KindDomainRequest,
@@ -584,15 +583,8 @@ func (h *sshChildHarness) requestChild(host string, port int, user string) {
 		h.t.Fatalf("composed line is %d bytes: the bundle is back in the command", len(h.bootstrap))
 	}
 
-	ports := childForwardRe.FindStringSubmatch(h.bootstrap)
-	if ports == nil {
-		h.t.Fatalf("composed line carries no -R forward: %s", h.bootstrap)
-	}
-	if _, err := fmt.Sscanf(ports[1], "%d", &h.childRPort); err != nil {
-		h.t.Fatalf("remote -R port %q: %v", ports[1], err)
-	}
-	if _, err := fmt.Sscanf(ports[2], "%d", &h.childLPort); err != nil {
-		h.t.Fatalf("local -R port %q: %v", ports[2], err)
+	if strings.Contains(h.bootstrap, " -R ") {
+		h.t.Fatalf("composed line still carries a reverse-forward argument: %s", h.bootstrap)
 	}
 }
 
@@ -984,11 +976,9 @@ func TestLiveSshd_SSHChildAssembly_ExitFreezesTheChildBlockAndCompletesTheParent
 // activates, late frame rejected.
 
 // TestLiveSshd_SSHChildAssembly_ForwardingRefusedParentStillActivates proves
-// the stillborn interval (protocol doc §9): a host whose sshd refuses the -R
-// bind leaves the child Pending forever; the parent still activates at its
-// next prompt boundary (a Pending child is not on the stack), and a late
-// hello from the stillborn child is rejected against the restored parent —
-// the reject mutates nothing.
+// the terminal refusal path: the proven master declines the reverse forward,
+// the delivery sends only the non-secret abort frame, and the parent can still
+// activate at its next prompt boundary.
 func TestLiveSshd_SSHChildAssembly_ForwardingRefusedParentStillActivates(t *testing.T) {
 	fx := startLiveSshd(t, false) // AllowTcpForwarding no
 	h := newSSHChildHarness(t, fx)
@@ -1004,27 +994,21 @@ func TestLiveSshd_SSHChildAssembly_ForwardingRefusedParentStillActivates(t *test
 	proc := h.runComposedLine(agentSock, wrapperDir)
 	t.Cleanup(proc.kill)
 
-	// The refusal is observable: sshd rejects the tcpip-forward and the
-	// client reports it. The client shares the parent's terminal now
-	// (nocx-beib), so the report lands there — which is also what a user
-	// would see, and the refusal-leak contract for a CONVENTIONAL session
-	// is asserted separately by its own proof.
-	waittest.WaitForTimeoutDetail(t, "ssh reporting the refused reverse forward", 30*time.Second,
+	// The abort frame is deliberately not a FrameMagic header: it unblocks
+	// stage-1 without carrying a secret, so the loader reports protocol and
+	// then falls back to the native shell.
+	waittest.WaitForTimeoutDetail(t, "ssh loader reports abort protocol", 30*time.Second,
 		func() string { return fmt.Sprintf("terminal:\n%s", proc.out.String()) },
 		func() bool {
-			return strings.Contains(proc.out.String(), "remote port forwarding failed")
+			return strings.Contains(proc.out.String(),
+				shellintegration.OutcomeToken(shellintegration.OutcomeBootstrapProtocol))
 		})
-	// The refusal is the terminal outcome for the reverse-forward attempt.
-	// The child remains Pending in the kernel read model; no duration is
-	// needed to establish that state.
-	if st := h.domainState(h.child); st != lifecycle.DomainPending {
-		t.Fatalf("stillborn child = %d, want Pending (never established)", st)
-	}
+	// Closing the owned listener ends the child's transport interval. The
+	// kernel records that terminal loss rather than leaving a Pending domain.
+	waittest.WaitForTimeout(t, "refused child reaches DomainLost", 10*time.Second, func() bool {
+		return h.domainState(h.child) == lifecycle.DomainLost
+	})
 
-	// The refused forward can be reported before the remote loader finishes
-	// delivering frame 2. Wait for that capability frame before closing the
-	// far shell; the frame is the observable bootstrap completion.
-	h.win.capability(h.t, "a capability delivered to the far side; the late-hello proof needs one")
 	// The user gives up on the nested session; the far shell exits and the
 	// composed line returns.
 	proc.typeExit()
@@ -1039,21 +1023,55 @@ func TestLiveSshd_SSHChildAssembly_ForwardingRefusedParentStillActivates(t *test
 		return ls.Domain == h.parent && ls.Lifecycle == lifecycle.LifecyclePromptReady
 	})
 
-	// A late frame from the stillborn child is rejected against the
-	// restored parent: its hello cannot establish a child over an active
-	// parent, the listener closes the candidate, and nothing mutates.
-	h.assertLateChildHelloRejected()
+	// The listener was owned by the delivery and closed on the refusal.
+	waittest.WaitForTimeout(t, "refused child listener closes", 10*time.Second, func() bool {
+		conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", h.childLPort))
+		if err == nil {
+			_ = conn.Close()
+			return false
+		}
+		return true
+	})
 }
 
-// assertLateChildHelloRejected sends the stillborn child's authenticated
-// hello over its own listener transport after the parent re-activated: the
-// kernel must reject it (the child's parent is not Suspended), the listener
-// must close the candidate without any accept, and both domains must keep
-// their states.
-func (h *sshChildHarness) assertLateChildHelloRejected() {
+// TestLiveSshd_SSHChildAssembly_LateCandidateAfterParentActivation proves the
+// stillborn interval at the assembled listener: the child remains Pending,
+// the parent is restored to Established, and a late candidate is rejected and
+// closed without changing either domain. The candidate deliberately presents
+// the parent's bearer, not the pending child's, so this also proves that a
+// stale or misaddressed candidate cannot claim the listener.
+func TestLiveSshd_SSHChildAssembly_LateCandidateAfterParentActivation(t *testing.T) {
+	fx := startLiveSshd(t, false)
+	h := newSSHChildHarness(t, fx)
+	h.establishParent()
+	h.requestChild("127.0.0.1", fx.fixturePort(), fx.user)
+	h.suspendParent()
+	h.activateParent()
+	waittest.WaitForTimeout(t, "parent re-established after pending child", 10*time.Second, func() bool {
+		return h.domainState(h.parent) == lifecycle.DomainEstablished &&
+			h.laneSnapshot().Domain == h.parent
+	})
+	if st := h.domainState(h.child); st != lifecycle.DomainPending {
+		t.Fatalf("child state after parent activation = %d, want Pending", st)
+	}
+
+	h.assertLateChildCandidateRejected()
+
+	// Finish the delivery so its owned listener is closed and its goroutine
+	// does not outlive this test. The forward is refused by this fixture.
+	agentSock := startInProcessAgent(t, fx)
+	wrapperDir := installSSHWrapper(t, fx)
+	proc := h.runComposedLine(agentSock, wrapperDir)
+	t.Cleanup(proc.kill)
+	waittest.WaitForTimeout(t, "refused forward abort reaches loader", 30*time.Second, func() bool {
+		return strings.Contains(proc.out.String(),
+			shellintegration.OutcomeToken(shellintegration.OutcomeBootstrapProtocol))
+	})
+	proc.typeExit()
+}
+
+func (h *sshChildHarness) assertLateChildCandidateRejected() {
 	h.t.Helper()
-	h.childCap = h.win.capability(h.t,
-		"a capability delivered to the far side; the late-hello proof needs one")
 	conn, err := net.Dial("tcp", fmt.Sprintf("127.0.0.1:%d", h.childLPort))
 	if err != nil {
 		h.t.Fatalf("dial child listener: %v", err)
@@ -1065,26 +1083,28 @@ func (h *sshChildHarness) assertLateChildHelloRejected() {
 		Domain:     h.child,
 		Epoch:      h.childEpoch,
 		Sequence:   1,
-		Capability: h.childCap,
-		Event:      lifecycle.Event{Kind: lifecycle.KindHello, Hello: &lifecycle.Hello{Shell: "late"}},
+		Capability: h.parentCap,
+		Event: lifecycle.Event{
+			Kind:  lifecycle.KindHello,
+			Hello: &lifecycle.Hello{Shell: "late"},
+		},
 	}
 	if _, encErr := lifecyclecodec.Encode(conn, env); encErr != nil {
 		h.t.Fatalf("encode late hello: %v", encErr)
 	}
 	_ = conn.SetReadDeadline(time.Now().Add(5 * time.Second))
 	buf := make([]byte, 256)
-	n, err := conn.Read(buf)
-	if err == nil {
+	n, readErr := conn.Read(buf)
+	if readErr == nil {
 		h.t.Fatalf("late child hello was answered with %d bytes, want a rejected-and-closed candidate", n)
 	}
-	if errors.Is(err, os.ErrDeadlineExceeded) {
-		h.t.Fatalf("late child hello left the candidate open: the listener did not close it")
+	if errors.Is(readErr, os.ErrDeadlineExceeded) {
+		h.t.Fatal("late child hello left the candidate open: the listener did not close it")
 	}
-	// The reject mutated nothing.
 	if st := h.domainState(h.child); st != lifecycle.DomainPending {
-		h.t.Fatalf("child state after the late hello = %d, want Pending", st)
+		h.t.Fatalf("child state after late hello = %d, want Pending", st)
 	}
 	if st := h.domainState(h.parent); st != lifecycle.DomainEstablished {
-		h.t.Fatalf("parent state after the late hello = %d, want Established", st)
+		h.t.Fatalf("parent state after late hello = %d, want Established", st)
 	}
 }

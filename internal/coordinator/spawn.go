@@ -108,6 +108,16 @@ func (s *ExecSpawner) Spawn(ctx context.Context) (Spawned, error) {
 	// A nil Stdin/Stdout/Stderr is /dev/null for os/exec, which is exactly
 	// what is wanted and is stated here because "nil" does not say it.
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = nil, nil, nil
+	// A working directory of its own, because a daemon may not inherit its
+	// launcher's: the window's cwd belongs to the window, and this process
+	// is started precisely to outlive it. Under an AppImage that is not a
+	// nicety — AppRun chdirs into the FUSE mount before exec, the mount is
+	// unmounted when the window exits, and an inherited cwd would leave the
+	// daemon (and everything it spawns without a directory of its own)
+	// standing in a directory that no longer exists. CI run 33320751321 saw
+	// it from the far end: a session shell reporting '/work/squashfs-root'
+	// instead of $HOME.
+	cmd.Dir = SpawnDirectory(cmd.Env)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 
 	if err := cmd.Start(); err != nil {
@@ -133,6 +143,55 @@ func (s *ExecSpawner) environ() []string {
 		return s.cfg.Environ()
 	}
 	return os.Environ()
+}
+
+// spawnFallbackDir is where a daemon stands when it has no home to stand
+// in. The root directory is the one path on a POSIX machine that is always
+// present and is never a mount that somebody unmounts underneath us, which
+// is the same property $HOME is chosen for below.
+const spawnFallbackDir = "/"
+
+// SpawnDirectory answers "where does the daemon stand", from the very
+// environment the daemon will run with — so the directory it stands in and
+// the $HOME it resolves are one fact rather than two that can disagree.
+//
+// # Why the home directory rather than the profile data directory
+//
+// Both outlive the window, which is the property actually required, and
+// internal/storage already owns the data directory (AppDirName). The home
+// directory wins on two counts. It is the directory the daemon is already
+// guaranteed to resolve — it is in the environment being handed over, and
+// nothing here has to import storage or agree with it about a path — and it
+// exists before nocx does. The profile directory is one the app creates:
+// on a first run it may not exist yet at the moment of the spawn, and a
+// cmd.Dir that is absent makes Start fail. Trading a leaked directory for a
+// coordinator that will not start on a fresh machine is not a fix.
+//
+// # And why absence is a fallback rather than an error
+//
+// A spawn must not begin failing on a machine where it works today, so an
+// unresolvable, absent or non-directory HOME falls through to
+// [spawnFallbackDir] instead of refusing. The last HOME in the environment
+// is the one taken, because that is the one the child's own libc will read.
+//
+// Exported for the same reason [SpawnEnvironment] is: the choice is the
+// point, and a test that had to raise a process to read it would be testing
+// exec rather than the decision.
+func SpawnDirectory(environ []string) string {
+	home := ""
+	for _, entry := range environ {
+		if name, value, ok := strings.Cut(entry, "="); ok && name == "HOME" {
+			home = value
+		}
+	}
+	if home == "" {
+		return spawnFallbackDir
+	}
+	info, err := os.Stat(home)
+	if err != nil || !info.IsDir() {
+		return spawnFallbackDir
+	}
+	return home
 }
 
 // inheritedOverrides are the variables a daemon must not inherit from

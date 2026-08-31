@@ -413,19 +413,14 @@ frontend/               — TypeScript frontend (xterm.js + Wails)
     main.ts               app entry
   package.json
 
-_bmad/, .claude/,
-.agents/, .opencode/    — vendored agent tooling
+.claude/, .agents/      — vendored agent tooling
 ```
 
 ## Built by AI agents
 
-Development is driven by AI coding agents. The tooling comes in two layers that
-install differently:
-
-- **Vendored — clone and go.** The BMAD workflow lives in the repo under
-  `_bmad/`, `.claude/`, `.agents/`, `.opencode/`.
-- **Per-machine — you install it.** The issue tracker and the Claude Code agent
-  tooling below.
+Development is driven by AI coding agents. The repo vendors what it can under
+`.claude/` and `.agents/`; the issue tracker and the Claude Code agent tooling
+below are per-machine and you install them yourself.
 
 ### Agent tooling
 
@@ -444,15 +439,6 @@ not install them:
   [marketplace README](https://github.com/DollarDill/beads-superpowers) has the
   per-agent variant. (Inside a running session the same two steps are
   `/plugin marketplace add …` and `/plugin install …`.)
-
-### Set your BMAD identity
-
-```bash
-# If you have the BMAD CLI installed:
-#   bmad setup
-# Otherwise, edit _bmad/config.user.toml with your user_name and
-# communication_language (not committed).
-```
 
 ## License
 

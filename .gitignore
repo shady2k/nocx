@@ -1,7 +1,4 @@
 
-_bmad-output/
-_bmad/bmm/config.yaml
-_bmad/core/config.yaml
 .beads-credential-key
 .beads/issues.jsonl
 .beads/proxieddb/
@@ -21,8 +18,6 @@ _bmad/core/config.yaml
 *.so
 *.swp
 *.test
-**/config.user.toml
-**/config.user.yaml
 /bin/
 /build/*
 !/build/darwin/
@@ -31,15 +26,12 @@ _bmad/core/config.yaml
 /go/build/
 /tools/bin/
 # --- Beads / Dolt files (added by bd init) ---
-# --- BMAD resolved config: installer-generated, bakes in personal identity ---
-# --- BMAD working scratch: canonical outputs are promoted to docs/ ---
 # --- Build output (grows with the app) ---
 # --- Go ---
 # --- Node / frontend ---
 # --- OS / editor noise ---
 # --- Personal / per-contributor (never shared) ---
 # --- Wails ---
-# Source of truth is the committed *.toml. Regenerate via the BMAD installer.
 frontend/dist/*
 # .gitkeep is the stable anchor for //go:embed all:frontend/dist so `go build
 # ./...` compiles on a clean checkout without a frontend build. The real build

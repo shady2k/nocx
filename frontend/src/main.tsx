@@ -181,6 +181,7 @@ function main(): void {
   // The connection condition is the only startup surface that depends on the
   // socket. Mount it now, before the first attempt, so an unavailable backend
   // still leaves a populated application window.
+  let focusActive: () => void = () => undefined
   const [connectionState, setConnectionState] = createSignal<ConnectionOverlayState>({
     kind: 'waiting',
     nextAttemptInMs: dispatcher.backoffMs,
@@ -190,6 +191,7 @@ function main(): void {
   mountConnectionOverlay(connectionOverlayRoot, {
     state: () => connectionState(),
     onRetry: () => dispatcher.retryNow(),
+    onHidden: () => focusActive(),
   })
 
   const profileClient = new ProfileClient(dispatcher)
@@ -448,6 +450,7 @@ function main(): void {
     // online lifecycle event, immediately before PaneManager boots.
     uiStateClient,
   )
+  focusActive = () => tm.overviewPort().focusActive()
   tm.onDisplayRevision(notifyDisplayChange)
   // A plain tab records its output and produces no blocks; the card that
   // says so reads the recording half from the store that owns it, rather

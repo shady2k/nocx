@@ -160,6 +160,33 @@ func TestSystemPrompt_AttachedContentNamesEveryGrantedItem(t *testing.T) {
 	}
 }
 
+func TestSystemPrompt_AutomaticFrozenFrameIsNamedAsAutomatic(t *testing.T) {
+	got := SystemPrompt(SystemPromptFacts{
+		Cwd: "/repo",
+		Env: content.Environment{Kind: content.EnvLocal},
+		OS:  "linux",
+		AttachedContent: []AttachedContentItem{{
+			ItemID:    "attempt-top",
+			Command:   "top",
+			State:     "running",
+			Automatic: true,
+		}},
+	})
+	for _, want := range []string{
+		"frozen screen was attached automatically",
+		"id: attempt-top",
+		"command: \"top\"",
+		"state: running",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt lacks %q:\n%s", want, got)
+		}
+	}
+	if strings.Contains(got, "The person marked these terminal items") {
+		t.Fatalf("automatic frame was described as a person's mark:\n%s", got)
+	}
+}
+
 // TestSystemPrompt_AttachedContentSentenceIsConditional keeps the bought
 // rule (nocx-4wtlh): a question with nothing attached must not claim
 // content was attached — the sentence is derived from the facts, never a

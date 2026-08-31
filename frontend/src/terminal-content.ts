@@ -1935,10 +1935,14 @@ export class TerminalContent extends BasePaneContent {
         cancel: (runId) => agentClient.cancel(runId),
         sessionId: () => this.session?.sessionId ?? '',
         cwd: () => this._cwd,
-        // The ask's payload is the whole-block grants, never re-derived from
-        // DOM selection at submit time (AD-8: selection is copy; the grant is
-        // the record).
-        grants: () => this.grantedBlocks,
+        // The ask's payload is the whole-block grants plus the renderer-owned
+        // frozen frame when this editor was summoned over a running command.
+        // The frame's block id is the same durable item id session.read accepts;
+        // no rows or frame text cross the control plane.
+        grants: () => {
+          const automatic = this.automaticFrozenGrant()
+          return automatic === null ? this.grantedBlocks : [...this.grantedBlocks, automatic]
+        },
         onTurnAccepted: () => {
           // Agent asks keep the editor visible by default. A summoned answer
           // is the one accepted case where the submitted question must give
@@ -4833,6 +4837,15 @@ export class TerminalContent extends BasePaneContent {
     return { kind: 'ok', editor, targets, agentId }
   }
 
+  /** Build the one automatic grant for the captured frozen screen. The
+   * attachment is derived from the same frozen command block that owns the
+   * display, and carries no copied rows or frame payload. */
+  private automaticFrozenGrant(): GrantBlock | null {
+    if (this._pinnedFrame === null || this._summonedCommand === null) return null
+    const grant = grantBlockFromElement(this._summonedCommand.el)
+    return grant === null ? null : { ...grant, automatic: true }
+  }
+
   /** Summon the editor over a running command, in ask mode (nocx-92gfl).
    *
    *  The renderer is the one owner of the grid (AD-6). Capture therefore
@@ -4892,6 +4905,7 @@ export class TerminalContent extends BasePaneContent {
       markerHost.appendChild(marker)
       this._freezeMarker = marker
       this._summonedCommand = this.scrollback?.blockManager.runningBlock ?? null
+      this.grantController?.setAutomaticBlock(this.automaticFrozenGrant())
 
       this._summonRestoreTargetId = targets.active().id
       this._summoned = true
@@ -5142,6 +5156,7 @@ export class TerminalContent extends BasePaneContent {
     const restore = this._summonRestoreTargetId
     this._summonRestoreTargetId = null
     this._pendingReadFrame = null
+    this.grantController?.setAutomaticBlock(null)
     this._clearFreezePresentation()
     if (discardAnswers) {
       for (const answer of this._summonedAnswers) answer.el.remove()

@@ -17,6 +17,9 @@ export interface GrantBlock {
   /** The selected output window; omitted means the whole block. */
   readonly start?: number
   readonly count?: number
+  /** Present only on the renderer's frozen-frame attachment; it is not a
+   *  person mark and must never be counted or painted as one. */
+  readonly automatic?: true
 }
 
 function selectedWindow(

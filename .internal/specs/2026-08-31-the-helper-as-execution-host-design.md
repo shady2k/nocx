@@ -452,9 +452,31 @@ _recording_ of a session's output. Ledger entries — blocks — are frontend-de
 the control plane, so a block whose bytes were partly missed is still an entry; what it loses
 is its output. The product says which recording has a gap and where.
 
-**The bound is 256 KiB today, and it is no longer deferred** — see §6. It is the number that
-decides how much an ordinary coordinator restart destroys, and `ring.go:10`'s own illustrative
-256 KiB/s means the whole window can roll in about a second.
+**The bound is a configurable cap, defaulting to 4 MiB** — raised from the shipped 256 KiB,
+and see §6 for what the measurements say it buys.
+
+**It is a cap, not an allocation.** `write` computes `free := RingCapacity - len(r.buf)` and
+`buf` grows by append, so a quiet session holds nothing and only a producing one pays. Raising
+the ceiling therefore costs idle sessions **zero**, which is what makes a generous default the
+cheap answer rather than the expensive one.
+
+**It resolves through the cascade that already exists** — profile → group → global → hardcoded
+default — the same one `DesiredMode` and `RelayConsent` use (`internal/profile/profile.go`).
+Not a new mechanism, and per-destination on purpose: a laptop over a phone tether and a build
+server deserve different answers.
+
+**The coordinator decides, the helper applies** (D2). The bound travels at spawn, and a
+generation keeps the bound it was given for the life of its sessions — changing the setting
+affects the next session, never a running one.
+
+**The floor is enforced, not documented.** AD-10's `CreditLimit` is 64 KiB and `ring.go:20`
+says why it matters: it "must be less than `RingCapacity`, otherwise the credit never binds and
+AD-10 is dead code". A value at or below it is **refused** rather than silently disabling
+backpressure.
+
+**And the cost is named because it is spent on someone else's machine.** The worst case on a
+host is its live session count times the bound, in the helper's memory — on a VM that may be
+small. That is the other reason the setting is per-destination.
 
 ### D9 — Reconnect replays; a fresh attach may ask for a repaint, and may not get one
 
@@ -771,7 +793,14 @@ pass while the product was broken, the reason is recorded beside its replacement
     writes an explicit gap through `Skip`, its produced cursor advances, and **subsequent
     appends succeed** — the recording is not abandoned at the first discontinuity.
 18. Producing more than capacity with nothing attached **does not block the producer**, and the
-    reset a later reader gets carries the base, not the written offset. (`ring.go:316` returns
+    reset a later reader gets carries the base, not the written offset.
+    18a. **The bound is a cap, not an allocation**: a session that produces a hundred bytes holds a
+    hundred bytes at any configured bound, asserted on resident buffer length rather than on
+    the setting.
+    18b. **The floor is enforced**: a configured bound at or below `CreditLimit` is refused with a
+    named error, and no build starts a session whose credit cannot bind.
+    18c. **A running session keeps the bound it was given**: changing the setting while a session
+    runs does not resize its window, and the next session gets the new value. (`ring.go:316` returns
     the written offset today; the change is expected and this is what catches it.)
 19. One shared trace suite drives the real helper window through the real coordinator adapters
     and the real wire — write, attach, read-from-offset, overflow, reset, detach, close —
@@ -844,9 +873,9 @@ today's direct PTY; sustained output throughput; coordinator and helper CPU; wak
 context switches; fairness of an interactive tab beside a flooding one; and backpressure onset
 with its memory bound. Failing the budget optimises the carrier, never the ownership.
 
-**Measured, and no longer owed: the window's bound** (D8). An earlier draft carried 256 KiB
-forward as a named deferral, which satisfied `nocx-8mllr` procedurally and evaded it in
-substance. Measured 2026-08-31 on this machine, each command run on a **real pty** — so
+**Measured, and answered: the window's bound** (D8). An earlier draft carried 256 KiB forward
+as a named deferral, which satisfied `nocx-8mllr` procedurally and evaded it in substance. It
+is now measured, raised to 4 MiB and made configurable per destination. Measured 2026-08-31 on this machine, each command run on a **real pty** — so
 colour, progress and repaints are present, which piping suppresses — with peak bytes in any
 rolling one-second window, because an average tells a bounded buffer nothing:
 
@@ -882,11 +911,15 @@ loses two thirds.
 
 Four conclusions, and the last two each changed a decision:
 
-1. **Sized for the gap, the bound is right and its margin is known.** Fifteen-fold headroom for
-   ordinary work; 1.04× for the pathological case at the measured floor.
-2. **A bigger window still cannot buy its way out.** The per-second spread is four orders of
-   magnitude; 32× the memory turns bulk's 20 ms into 640 ms and costs every idle session the
-   difference.
+1. **At 256 KiB the margin is thin exactly where it should not be.** Fifteen-fold headroom for
+   ordinary work, and 1.04× for a filesystem walk — against a _local_ floor. The remote gap is
+   larger and unmeasured (conclusion 4), so the pathological row would go negative there.
+2. **The window is raised to 4 MiB and made configurable** (D8). What that buys, from the same
+   measurements: ~7 s of `go test -v`'s bursts, seventeen file dumps, and **~0.5 s of a
+   filesystem walk at its measured 8 MB/s instantaneous** — which is the order of a remote
+   reattach including SSH. An earlier draft argued against a bigger window on the grounds that
+   it "costs every idle session the difference"; **that was wrong**, because the bound is a cap
+   on `len(buf)` and not an allocation. A quiet session holds nothing at any bound.
 3. **The bound is not what decides the loss — the read gap is.** Against 17 ms nothing measured
    overflows. But a replacement can wait on a **person**: the vault seals after a departure
    window and a session needing a secret suspends until someone returns. Human time inside the
@@ -903,9 +936,9 @@ today's direct PTY; sustained output throughput; coordinator and helper CPU; wak
 context switches; fairness of an interactive tab beside a flooding one; and backpressure onset
 with its memory bound. Failing the budget optimises the carrier, never the ownership.
 
-**Measured, and no longer owed: the window's bound** (D8). An earlier draft carried 256 KiB
-forward as a named deferral, which satisfied `nocx-8mllr` procedurally and evaded it in
-substance. Measured 2026-08-31 on this machine, each command run on a **real pty** — so
+**Measured, and answered: the window's bound** (D8). An earlier draft carried 256 KiB forward
+as a named deferral, which satisfied `nocx-8mllr` procedurally and evaded it in substance. It
+is now measured, raised to 4 MiB and made configurable per destination. Measured 2026-08-31 on this machine, each command run on a **real pty** — so
 colour, progress and repaints are present, which piping suppresses — with peak bytes in any
 rolling one-second window, because an average tells a bounded buffer nothing:
 

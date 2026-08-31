@@ -41,6 +41,7 @@ type fakeAgentService struct {
 	transitions []content.RunState
 	appended    []string
 	finish      *content.FinishAgentRun
+	sealErr     error
 	// opened and sealed are the prose-block boundary the stream draws
 	// (ADR-0040): which `text` children it asked the store to open, and which
 	// it sealed. Recorded in order, because the order IS the assertion — a
@@ -97,7 +98,7 @@ func (f *fakeAgentService) SealProse(_ context.Context, entryID string) error {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.sealed = append(f.sealed, entryID)
-	return nil
+	return f.sealErr
 }
 
 // appendedTo records the ARTIFACT each chunk landed in beside the chunk

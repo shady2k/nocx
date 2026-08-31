@@ -9,14 +9,35 @@
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen } from '@solidjs/testing-library'
+import { cleanup, fireEvent, render } from '@solidjs/testing-library'
 import { clearToasts, toasts } from './toast'
-import { CodeBlock } from './code-block'
+import { CodeBlock, mountCodeBlockCopyButton } from './code-block'
 
 afterEach(() => {
   cleanup()
   clearToasts()
+  document.body.innerHTML = ''
 })
+
+function imperativeBlock() {
+  const wrapper = document.createElement('div')
+  const block = document.createElement('div')
+  block.className = 'ui-code-block ui-code-block-wrap'
+  const host = document.createElement('div')
+  block.append(host)
+  wrapper.append(block)
+  document.body.append(wrapper)
+  return { wrapper, block, host }
+}
+
+function assertHeader(wrapper: HTMLElement, label: string): HTMLElement {
+  const header = wrapper.querySelector<HTMLElement>('.ui-code-block__header')
+  if (!header) throw new Error('CodeBlock rendered no header')
+  expect(header.textContent).toContain(label)
+  expect(header.querySelector('[aria-label="Copy code"]')).not.toBeNull()
+  expect(header.nextElementSibling?.classList.contains('ui-code-block')).toBe(true)
+  return header
+}
 
 function block(wrap?: boolean): HTMLElement {
   const { container } = render(() => (
@@ -50,6 +71,18 @@ describe('CodeBlock', () => {
     expect(CSS).toMatch(/\[data-wrap='false'\][^}]*white-space:\s*pre;/)
   })
 
+  it('keeps compact prompts cornered and hides the header label', () => {
+    expect(CSS).toMatch(
+      /\.ui-prompt\[data-density='compact'\] \.ui-code-block-wrap--copy > \.ui-code-block__header\s*\{[^}]*display:\s*contents;/s,
+    )
+    expect(CSS).toMatch(
+      /\.ui-prompt\[data-density='compact'\] \.ui-code-block-wrap--copy > \.ui-code-block__header > \.ui-code-block__label\s*\{[^}]*display:\s*none;/s,
+    )
+    expect(CSS).toMatch(
+      /\.ui-code-block__header > \.ui-code-block__copy-host > \.ui-icon-button\s*\{[^}]*margin-left:\s*auto;/s,
+    )
+  })
+
   it('keeps its identity and its accessible name in both forms', () => {
     for (const el of [block(), block(false)]) {
       expect(el.tagName).toBe('PRE')
@@ -74,6 +107,52 @@ describe('CodeBlock', () => {
 
     expect(host.querySelector('.ui-code-block')?.textContent).toBe('alpha\nbeta')
     expect(host.querySelector('[aria-label="Copy code"]')).not.toBeNull()
+  })
+
+  it('renders a labeled header strip beside the copy control', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    render(
+      () => (
+        <CodeBlock copy={() => Promise.resolve()} label="bash" ariaLabel="Payload">
+          {'printf hello'}
+        </CodeBlock>
+      ),
+      { container: host },
+    )
+
+    assertHeader(host, 'bash')
+    expect(host.querySelector('.ui-code-block')?.textContent).toBe('printf hello')
+  })
+
+  it('uses a generic code label when the caller has no kind', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    render(
+      () => (
+        <CodeBlock copy={() => Promise.resolve()} ariaLabel="Payload">
+          {'printf hello'}
+        </CodeBlock>
+      ),
+      { container: host },
+    )
+
+    assertHeader(host, 'Code')
+  })
+
+  it('mounts the same labeled header around an imperative block', () => {
+    const { wrapper, host } = imperativeBlock()
+    const dispose = mountCodeBlockCopyButton(host, {
+      label: 'bash',
+      getText: () => 'printf hello',
+      copy: () => Promise.resolve(),
+    })
+
+    assertHeader(wrapper, 'bash')
+    expect(wrapper.querySelector('.ui-code-block')?.contains(host)).toBe(false)
+
+    dispose()
+    wrapper.remove()
   })
 
   it('does not reserve copy-control space when no copy operation is supplied', () => {
@@ -121,7 +200,7 @@ describe('CodeBlock', () => {
       { container: host },
     )
 
-    const button = screen.getByRole('button', { name: /copy code/i })
+    const button = host.querySelector<HTMLButtonElement>('[aria-label="Copy code"]')!
     fireEvent.click(button)
 
     await vi.waitFor(() => expect(copy).toHaveBeenCalledWith('alpha\nbeta'))
@@ -143,7 +222,7 @@ describe('CodeBlock', () => {
       { container: host },
     )
 
-    const button = screen.getByRole('button', { name: /copy code/i })
+    const button = host.querySelector<HTMLButtonElement>('[aria-label="Copy code"]')!
     fireEvent.click(button)
 
     await vi.waitFor(() => expect(toasts().length).toBe(1))

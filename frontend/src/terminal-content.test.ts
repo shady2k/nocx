@@ -27,6 +27,7 @@ import { resolve } from 'node:path'
 const srcDir = import.meta.dirname ?? resolve(new URL('.', import.meta.url).pathname)
 const STYLE_ENTRY = resolve(srcDir, 'style.css')
 const BASE_STYLE_ENTRY = resolve(srcDir, 'styles/base.css')
+const FRAME_STYLE_ENTRY = resolve(srcDir, 'frame/display.css')
 
 import type { PaneIdentity } from './terminal-content'
 import { grantBlockFromElement, type GrantBlock } from './ask-entry'
@@ -77,6 +78,7 @@ import { pushOverlay, popOverlay } from './ui/overlay/stack'
 import { _resetThemeState } from './renderers/theme-adapter'
 import { showToast } from './ui/toast'
 import type { CapturedFrame } from './frame/types'
+import { createCapturedFrameView } from './frame/display'
 import { emptyAttrs } from './scrollback/serializer'
 import { BufferLine } from './scrollback/test-helpers'
 
@@ -154,6 +156,12 @@ const rendererOf = (content: TerminalContent): RendererMock => {
  *  escape hatch editorOf uses. `send` is what a raw pty write lands on. */
 const sessionOf = (content: TerminalContent): SessionFake =>
   (content as unknown as { session: SessionFake }).session
+
+/** The scrollback owner behind TerminalContent, for placement assertions. */
+const scrollbackFor = (content: TerminalContent): ScrollbackController => {
+  const withScrollback = content as unknown as { scrollback: ScrollbackController }
+  return withScrollback.scrollback
+}
 
 /** The live recall overlay behind TerminalContent's private field — the
  *  same escape hatch editorOf uses. */
@@ -2336,6 +2344,78 @@ describe('summoned editor overlay stylesheet contract (nocx-92gfl)', () => {
     expect(editor).toMatch(/position\s*:\s*relative/)
     expect(editor).toMatch(/flex\s*:\s*none/)
   })
+  it('gives the answer stack its own opaque ground above the frozen frame', () => {
+    const css = stripComments(readFileSync(STYLE_ENTRY, 'utf8'))
+    const stack = stripComments(extractRuleBlock(css, 'nocx-summon-stack') ?? '')
+    const frame = stripComments(readFileSync(FRAME_STYLE_ENTRY, 'utf8'))
+    expect(stack).not.toBe('')
+    expect(frame).not.toBe('')
+    // The stack owns every row it occupies. Its ground makes the frozen
+    // capture behind it no longer a second painter of those rows.
+    expect(stack).toMatch(/background\s*:\s*var\(--color-canvas\)/)
+    expect(stack).toMatch(/z-index\s*:\s*10/)
+    expect(frame).toMatch(/z-index\s*:\s*1/)
+  })
+})
+it('pins content-sized answer rows and the capped long-answer scroller contract', () => {
+  // jsdom has no flex layout, so this test cannot read rendered pixel
+  // heights. It does mount the answer-list DOM and uses its observable
+  // scrollHeight/clientHeight seam to state the two layout outcomes; the
+  // shipped flex/max-height rules are the browser-side implementation.
+  const css = stripComments(readFileSync(STYLE_ENTRY, 'utf8'))
+  const answers = stripComments(extractRuleBlock(css, 'nocx-summon-answers') ?? '')
+  expect(answers).not.toBe('')
+  expect(answers).toMatch(/flex\s*:\s*none/)
+  expect(answers).toMatch(/max-height\s*:\s*min\(50vh,\s*calc\(36em \+ 6px\)\)/)
+  expect(answers).toMatch(/overflow-y\s*:\s*auto/)
+
+  const cols = 113
+  const rows = 37
+  const frame: CapturedFrame = {
+    rows: Array.from({ length: rows }, () => ({
+      kind: 'cells',
+      cells: Array.from({ length: cols }, () => ({ char: ' ', attrs: emptyAttrs() })),
+    })),
+    cursor: null,
+    provenance: {
+      source: 'live',
+      identity: {
+        buffer: { kind: 'alternate', altSession: 4 },
+        cols,
+        rows,
+        generation: 9,
+      },
+      range: { start: 0, end: rows },
+      scrollbackCapLines: 10000,
+    },
+  }
+  const frameCss = stripComments(readFileSync(FRAME_STYLE_ENTRY, 'utf8'))
+  const frameRows = stripComments(extractRuleBlock(frameCss, 'nocx-freeze-frame__row') ?? '')
+  const frameCells = stripComments(extractRuleBlock(frameCss, 'nocx-freeze-frame__cell') ?? '')
+  expect(frameRows).toMatch(/height\s*:\s*var\(--term-cell-height,\s*1\.2em\)/)
+  expect(frameCells).toMatch(/width\s*:\s*var\(--term-cell-width,\s*1ch\)/)
+  expect(frameCells).toMatch(/height\s*:\s*var\(--term-cell-height,\s*1\.2em\)/)
+
+  const host = document.createElement('div')
+  host.style.setProperty('--term-cell-width', '11.25px')
+  host.style.setProperty('--term-cell-height', '23.5px')
+  const view = createCapturedFrameView(frame)
+  host.appendChild(view)
+  expect(view.querySelectorAll('.nocx-freeze-frame__row')).toHaveLength(rows)
+  expect(view.querySelectorAll('.nocx-freeze-frame__cell')).toHaveLength(cols * rows)
+  expect(host.style.getPropertyValue('--term-cell-width')).toBe('11.25px')
+  expect(host.style.getPropertyValue('--term-cell-height')).toBe('23.5px')
+  const answerList = document.createElement('div')
+  answerList.className = 'nocx-summon-answers'
+  answerList.appendChild(document.createElement('div'))
+  host.appendChild(answerList)
+  Object.defineProperty(answerList, 'scrollHeight', { configurable: true, value: 24 })
+  Object.defineProperty(answerList, 'clientHeight', { configurable: true, value: 24 })
+  expect(answerList.scrollHeight).toBe(answerList.clientHeight)
+  answerList.appendChild(document.createElement('div'))
+  Object.defineProperty(answerList, 'scrollHeight', { configurable: true, value: 900 })
+  Object.defineProperty(answerList, 'clientHeight', { configurable: true, value: 564 })
+  expect(answerList.scrollHeight).toBeGreaterThan(answerList.clientHeight)
 })
 
 describe('terminal/editor input switching (nocx-atyf.5)', () => {
@@ -9561,6 +9641,32 @@ describe('session.read serves the frame the question is about (nocx-7l4ex.3)', (
     })
   }
 
+  it('freezes an alternate-screen paint from row zero', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startRunning(client)
+      const renderer = rendererOf(content)
+      renderer._fireBufferChange('alternate')
+      const capture = vi.fn().mockResolvedValue(frame('top: load 1.00\nTasks: 254 total'))
+      renderer.captureLiveFrame = capture
+
+      await summon(content)
+
+      expect(capture).toHaveBeenCalledWith({ start: 0, end: renderer.rows })
+      expect(gridOf(content).querySelector('.nocx-freeze-frame')?.textContent).toMatch(
+        /^top: load 1\.00/,
+      )
+    } finally {
+      teardown()
+    }
+  })
+
   it('returns the pinned frame for both reads in one question turn', async () => {
     const client = makeClient()
     const { content, teardown } = await mountTerminal(
@@ -9576,6 +9682,7 @@ describe('session.read serves the frame the question is about (nocx-7l4ex.3)', (
       const capture = vi.fn().mockResolvedValue(pinned)
       renderer.captureLiveFrame = capture
       await summon(content)
+      expect(capture).toHaveBeenCalledWith(undefined)
       capture.mockClear()
 
       const dispatcher = readDispatcher()
@@ -10508,7 +10615,54 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
-  it('Escape stops the exact current answer once, thaws the summon, and leaves the command running', async () => {
+  it('Escape seats the answer in scrollback before the running program resumes', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask')
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      if (method === 'agent.cancel')
+        return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'remove this overlay')
+      await vi.waitFor(() => expect(answer.dataset.entryId).toBe('entry-42'))
+      const delta = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runDelta',
+      )?.[1] as ((params: unknown) => void) | undefined
+      delta!({ runId: 42, entryId: 'entry-42', text: 'overlay prose' })
+
+      const pane = answer.parentElement?.parentElement?.parentElement
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+
+      expect(answer.isConnected).toBe(true)
+      expect(answer.parentElement).toBe(scrollback.scrollbackInner)
+      expect(answer.classList.contains('nocx-answer-overlay')).toBe(false)
+      expect(pane?.querySelector('.nocx-summon-stack')).toBeNull()
+      expect(content.pinnedFrame()).toBeNull()
+      expect(content.presentation).toBe('terminal')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('Escape cancellation seats a stopped answer, never failed, after runState', async () => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {
       if (method === 'agent.ask')
@@ -10555,23 +10709,127 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         ).toEqual([['agent.cancel', { runId: 42 }]]),
       )
       expect(sessionOf(content).signal).not.toHaveBeenCalled()
-      expect(
-        (content as unknown as { scrollback: ScrollbackController }).scrollback.blockManager
-          .runningBlock,
-      ).not.toBeNull()
+      expect(answer.isConnected).toBe(true)
+      expect(answer.parentElement).toBe(scrollbackFor(content).scrollbackInner)
+      expect(answer.classList.contains('nocx-answer-overlay')).toBe(false)
+      expect(scrollbackFor(content).blockManager.runningBlock).not.toBeNull()
       expect(content.pinnedFrame()).toBeNull()
       expect(editorOf(content).isVisible).toBe(false)
 
+      await vi.waitFor(() =>
+        expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).toBe(
+          'stopped',
+        ),
+      )
+      expect(answer.dataset.turnState).toBe('cancelled')
+      expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).not.toBe(
+        'failed',
+      )
+      expect(answer.querySelector('[data-answer-body]')?.textContent).toContain(
+        'partial prose survives',
+      )
+
+      // The notification is allowed to arrive after the reserved cancellation
+      // response; it must be idempotent and cannot replace the stopped chip.
       const state = client.dispatcher.subscribe.mock.calls.find(
         ([method]) => method === 'agent.runState',
       )?.[1] as ((params: unknown) => void) | undefined
       state!({ runId: 42, entryId: 'entry-42', state: 'cancelled', droppedDeltas: 0 })
-      expect(answer.querySelector('[data-answer-body]')?.textContent).toContain(
-        'partial prose survives',
+      expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).not.toBe(
+        'failed',
       )
       expect(answer.querySelector(':scope > .cmd-header .cmd-header-exit')?.textContent).toBe(
         'stopped',
       )
+    } finally {
+      teardown()
+    }
+  })
+
+  it('leaving the alternate buffer seats the answer and clears the frozen frame', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask')
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      const renderer = rendererOf(content)
+      renderer._fireBufferChange('alternate')
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'leave when the program thaws')
+      const pane = answer.closest<HTMLElement>('.pane')
+      expect(pane).not.toBeNull()
+      const paneElement = pane!
+      expect(answer.isConnected).toBe(true)
+      expect(paneElement.querySelector('.nocx-freeze-frame')).not.toBeNull()
+
+      renderer._fireBufferChange('normal')
+
+      expect(answer.isConnected).toBe(true)
+      expect(answer.parentElement).toBe(
+        (content as unknown as { scrollback: ScrollbackController }).scrollback.scrollbackInner,
+      )
+      expect(answer.classList.contains('nocx-answer-overlay')).toBe(false)
+      expect(paneElement.querySelector('.nocx-summon-stack')).toBeNull()
+      expect(paneElement.querySelector('.nocx-freeze-frame')).toBeNull()
+      expect(content.pinnedFrame()).toBeNull()
+      expect(editorOf(content).isVisible).toBe(false)
+      expect(rendererReadOnly(content)).toHaveBeenLastCalledWith(false)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('tab change seats the answer before the pane hides', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask')
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'leave when the tab changes')
+      const pane = answer.closest<HTMLElement>('.pane')
+      expect(pane).not.toBeNull()
+      const paneElement = pane!
+      expect(answer.isConnected).toBe(true)
+      expect(paneElement.querySelector('.nocx-freeze-frame')).not.toBeNull()
+
+      content.setVisible(false)
+
+      expect(answer.isConnected).toBe(true)
+      expect(answer.parentElement).toBe(
+        (content as unknown as { scrollback: ScrollbackController }).scrollback.scrollbackInner,
+      )
+      expect(answer.classList.contains('nocx-answer-overlay')).toBe(false)
+      expect(paneElement.querySelector('.nocx-summon-stack')).toBeNull()
+      expect(paneElement.querySelector('.nocx-freeze-frame')).toBeNull()
+      expect(content.pinnedFrame()).toBeNull()
+      expect(editorOf(content).isVisible).toBe(false)
     } finally {
       teardown()
     }

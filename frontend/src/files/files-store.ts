@@ -180,6 +180,12 @@ interface FilesBinding {
    *  only when it is true (nocx-ngf3u). */
   revealAvailable: boolean
 }
+export interface FilesRevealHint {
+  bindingId: string
+  parentPath: string
+  listing: Extract<FilesListResult, { state: 'ok' }>
+}
+
 export interface FilesTreeStore {
   phase(): FilesPanelPhase
   openError(): string | null
@@ -211,12 +217,14 @@ export interface FilesTreeStore {
    *  the target ends OPEN with its first page listed (see finishReveal).
    *  NEVER collapses — a directory the user opened by hand stays open.
    *  Idempotent: revealing the path already revealed (or a reveal to it
-   *  in flight) does nothing. Stops honestly: a level that comes back
-   *  tooLarge/timedOut/unreadable, or a path that does not exist under
-   *  the root, ends the walk with what was expanded left expanded and
-   *  the level's state row rendered — the reveal did not reach the
-   *  target and the tree says so where it stopped. */
-  revealPath(path: string): void
+   *  in flight) does nothing. Resolves true when the target is an expandable
+   *  directory, including a non-cyclic directory symlink, and false when the
+   *  target is a regular file or the walk cannot reach it. Stops honestly:
+   *  a level that comes back tooLarge/timedOut/unreadable, or a path that
+   *  does not exist under the root, ends the walk with what was expanded left
+   *  expanded and the level's state row rendered — the reveal did not reach
+   *  the target and the tree says so where it stopped. */
+  revealPath(path: string, hint?: FilesRevealHint): Promise<boolean>
   /** The path the last completed reveal selected, or null when nothing
    *  has been revealed: no verified cwd yet, a viewer origin (no
    *  opinion), or a fresh scope. The view renders the matching row
@@ -295,12 +303,21 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  Reset on every re-scope and dispose — a selection from a previous
    *  machine must not linger. */
   const [revealTarget, setRevealTarget] = createSignal<string | null>(null)
-  /** The reveal walk currently in flight, if any: the path it is walking.
-   *  A NEW path supersedes it (walkId drops the older walk's responses);
-   *  the SAME path while in flight is a no-op — the walk is already doing
-   *  exactly that work. Cleared when the walk ends, so a later reveal of
-   *  the same path walks again (and is still idempotent via revealTarget). */
   let pendingReveal: string | null = null
+  let pendingRevealHint: FilesRevealHint | undefined
+  let pendingRevealPromise: Promise<boolean> | null = null
+  let pendingRevealResolve: ((isDirectory: boolean) => void) | null = null
+  let revealHint: FilesRevealHint | undefined
+  const settleReveal = (isDirectory: boolean): void => {
+    const resolve = pendingRevealResolve
+    pendingRevealResolve = null
+    pendingRevealPromise = null
+    resolve?.(isDirectory)
+  }
+  const cancelReveal = (): void => {
+    revealHint = undefined
+    settleReveal(false)
+  }
   /** True while a reveal walk is in flight. The change stream must not
    *  refresh a directory the walk is paging: a files.changed issued
    *  against the walk's first page would re-list `offset=0, limit=50`,
@@ -763,6 +780,8 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     // the same path.
     setRevealTarget(null)
     pendingReveal = null
+    pendingRevealHint = undefined
+    cancelReveal()
     revealing = false
     revealWalkId++
     // The root is the FILESYSTEM ROOT, pinned here and never derived from
@@ -800,21 +819,38 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
         if (b !== null && r !== null) {
           const listCtx: ListCtx = { paneId: o.paneId, generation, bindingId: b.bindingId }
           void issueList(r, 0, FILES_PAGE_SIZE, listCtx).then(async () => {
-            if (!scopeCurrent(listCtx) || r.state !== 'ok') return
+            if (!scopeCurrent(listCtx)) {
+              cancelReveal()
+              return
+            }
+            if (r.state !== 'ok') {
+              cancelReveal()
+              return
+            }
             await syncWatchSet()
-            if (!scopeCurrent(listCtx)) return
+            if (!scopeCurrent(listCtx)) {
+              cancelReveal()
+              return
+            }
+            if (pendingReveal !== null) {
+              startQueuedReveal()
+              return
+            }
             // Reveal-on-open: land where the terminal is. Read the LIVE
             // origin — the cwd may have moved while open/list/watch were in
             // flight, and the walk reads the committed root.
             const live = untrack(origin)
             if (live !== null && live.cwdVerified && live.cwd !== null && live.cwdFollow) {
-              revealPath(live.cwd)
+              void revealPath(live.cwd)
             }
           })
         }
       })
       .catch((e) => {
         if (!openCurrent(ctx)) return
+        pendingReveal = null
+        pendingRevealHint = undefined
+        cancelReveal()
         setPhase('failed')
         setOpenError(messageOf(e))
       })
@@ -850,7 +886,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
       // guess); an origin with no opinion — a viewer tab's frozen origin —
       // reveals nothing either: it is "stay exactly as you are".
       if (next.cwdVerified && next.cwd !== null && next.cwdFollow) {
-        revealPath(next.cwd)
+        void revealPath(next.cwd)
       }
       return
     }
@@ -922,28 +958,62 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  expanding each level that is not already expanded, then select the
    *  target (revealTarget — the view scrolls it into view). NEVER
    *  collapses: a directory the user opened by hand stays open. Stops
-   *  honestly: a level that comes back tooLarge/timedOut/unreadable, or
-   *  a path that does not exist under the root, ends the walk with what
-   *  was expanded left expanded and the level's state row rendered —
-   *  the reveal did not reach the target and the tree says so where it
-   *  stopped. Idempotent: the path already revealed (or a reveal to it
-   *  in flight) is a no-op. Every step rides the {paneId, generation,
-   *  bindingId} discipline (rules 2 and 3): a reveal in flight when the
-   *  origin changes must drop, never paint. */
-  function revealPath(targetPath: string): void {
+   *  honestly: a level that comes back tooLarge/timedOut/unreadable, or a
+   *  path that does not exist under the root, ends the walk with what was
+   *  expanded left expanded and the level's state row rendered — the reveal
+   *  did not reach the target and the tree says so where it stopped.
+   *  Resolves true when the reached target is expandable, including a
+   *  non-cyclic directory symlink, and false otherwise. Idempotent: the path
+   *  already revealed reports true and a matching walk shares its result.
+   *  Every step rides the {paneId, generation, bindingId} discipline (rules 2
+   *  and 3): a reveal in flight when the origin changes must drop. */
+  /** Start a reveal requested while a new binding was opening. The queued
+   *  promise stays owned by the caller while revealPath mints the walk after
+   *  the root's first listing is ready. */
+  function startQueuedReveal(): void {
+    const target = pendingReveal
+    const hint = pendingRevealHint
+    const resolve = pendingRevealResolve
+    if (target === null || resolve === null || revealing || untrack(root) === null) return
+    pendingReveal = null
+    pendingRevealHint = undefined
+    pendingRevealPromise = null
+    pendingRevealResolve = null
+    void revealPath(target, hint).then(resolve, () => resolve(false))
+  }
+
+  function revealPath(targetPath: string, hint?: FilesRevealHint): Promise<boolean> {
     const r = untrack(root)
-    if (r === null) return
-    if (targetPath === revealTarget() || targetPath === pendingReveal) return
+    if (r === null) {
+      if (closed || untrack(origin) === null) return Promise.resolve(false)
+      if (targetPath === pendingReveal) return pendingRevealPromise ?? Promise.resolve(false)
+      cancelReveal()
+      pendingReveal = targetPath
+      pendingRevealHint = hint
+      const promise = new Promise<boolean>((resolve) => {
+        pendingRevealResolve = resolve
+      })
+      pendingRevealPromise = promise
+      return promise
+    }
+    if (targetPath === revealTarget()) return Promise.resolve(true)
+    if (targetPath === pendingReveal) return pendingRevealPromise ?? Promise.resolve(false)
     const ctx = captureCtx()
-    if (ctx === null) return
+    if (ctx === null) return Promise.resolve(false)
     // The target must sit under the root. The root is the filesystem
     // root, so in practice every absolute cwd does; the guard is the
     // walk's honesty about a path it cannot reach. (The '/' case below
     // is the only one the panel reaches; the general form stays honest
     // if a provider ever answers a different root.)
     const under = r.path === '/' ? targetPath.startsWith('/') : targetPath.startsWith(r.path + '/')
-    if (targetPath !== r.path && !under) return
+    if (targetPath !== r.path && !under) return Promise.resolve(false)
+    cancelReveal()
     pendingReveal = targetPath
+    revealHint = hint?.bindingId === ctx.bindingId ? hint : undefined
+    const promise = new Promise<boolean>((resolve) => {
+      pendingRevealResolve = resolve
+    })
+    pendingRevealPromise = promise
     const walk = ++revealWalkId
     revealing = true
     // The path segments of the target below the root, in order; empty
@@ -952,6 +1022,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     const rest = r.path === '/' ? targetPath.slice(1) : targetPath.slice(r.path.length + 1)
     const segments = targetPath === r.path ? [] : rest.split('/').filter((s) => s !== '')
     descend(r, segments, 0, walk)
+    return promise
   }
 
   /** One walk step. `dir` is the parent at level `i`; the child named by
@@ -1040,61 +1111,74 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   ): void {
     dir.busy = true
     bumpTree()
-    services.list(ctx.bindingId as string, dir.path, dir.nextOffset, FILES_PAGE_SIZE).then(
-      (res) => {
-        // The walk-identity check guards CONTINUING the walk, never applying
-        // the answer. A superseded walk has already committed its expansion
-        // to the tree — the directory is open and on screen — so dropping its
-        // listing left that row spinning on a busy flag nothing would ever
-        // clear, and left the directory out of the watch set, which is a row
-        // the user is looking at that never reports a change again. Scope is
-        // what decides whether the answer is ours at all.
-        if (!scopeCurrent(ctx)) return
-        if (ctx.generation < dir.appliedGeneration) {
-          dir.busy = false
-          bumpTree()
-          if (walk === revealWalkId) onDone()
-          return
-        }
-        if (res.state === 'ok') {
-          dir.state = 'ok'
-          dir.canonical = res.canonical
-          dir.rev = res.rev
-          dir.total = res.total
-          // Dedupe by path: a refresh that slipped in mid-walk (the
-          // manual header refresh supersedes by generation, but a change
-          // stream notification can race the same cycle) must not
-          // duplicate rows the walk already holds.
-          const known = new Set(dir.children.map((c) => c.path))
-          for (const e of res.entries) {
-            if (!known.has(e.path)) {
-              dir.children.push(entryToNode(e))
-              known.add(e.path)
-            }
-          }
-          dir.hasMore = res.hasMore
-          dir.nextOffset = res.offset + res.entries.length
-          dir.error = null
-          dir.appliedGeneration = ctx.generation
-          dir.busy = false
-          bumpTree()
-          // This apply is the walk's own, so it does not run through
-          // applyListing's wrapper: reconcile here for the same reason.
-          void syncWatchSet()
-          if (walk === revealWalkId) onDone()
-          return
-        }
-        // tooLarge/timedOut: apply through the same path every other
-        // refusal rides, so the state row renders identically.
-        applyListing(dir, ctx, res)
+    const apply = (res: FilesListResult): void => {
+      // The walk-identity check guards CONTINUING the walk, never applying
+      // the answer. A superseded walk has already committed its expansion
+      // to the tree — the directory is open and on screen — so dropping its
+      // listing left that row spinning on a busy flag nothing would ever
+      // clear, and left the directory out of the watch set, which is a row
+      // the user is looking at that never reports a change again. Scope is
+      // what decides whether the answer is ours at all.
+      if (!scopeCurrent(ctx)) return
+      if (ctx.generation < dir.appliedGeneration) {
+        dir.busy = false
+        bumpTree()
         if (walk === revealWalkId) onDone()
-      },
-      (e) => {
+        return
+      }
+      if (res.state === 'ok') {
+        dir.state = 'ok'
+        dir.canonical = res.canonical
+        dir.rev = res.rev
+        dir.total = res.total
+        // Dedupe by path: a refresh that slipped in mid-walk (the
+        // manual header refresh supersedes by generation, but a change
+        // stream notification can race the same cycle) must not
+        // duplicate rows the walk already holds.
+        const known = new Set(dir.children.map((c) => c.path))
+        for (const e of res.entries) {
+          if (!known.has(e.path)) {
+            dir.children.push(entryToNode(e))
+            known.add(e.path)
+          }
+        }
+        dir.hasMore = res.hasMore
+        dir.nextOffset = res.offset + res.entries.length
+        dir.error = null
+        dir.appliedGeneration = ctx.generation
+        dir.busy = false
+        bumpTree()
+        // This apply is the walk's own, so it does not run through
+        // applyListing's wrapper: reconcile here for the same reason.
+        void syncWatchSet()
+        if (walk === revealWalkId) onDone()
+        return
+      }
+      // tooLarge/timedOut: apply through the same path every other
+      // refusal rides, so the state row renders identically.
+      applyListing(dir, ctx, res)
+      if (walk === revealWalkId) onDone()
+    }
+    const hint = revealHint
+    if (
+      hint !== undefined &&
+      hint.bindingId === ctx.bindingId &&
+      hint.parentPath === dir.path &&
+      hint.listing.offset === dir.nextOffset &&
+      (dir.state !== 'ok' || hint.listing.rev === dir.rev)
+    ) {
+      revealHint = undefined
+      apply(hint.listing)
+      return
+    }
+    revealHint = undefined
+    services
+      .list(ctx.bindingId as string, dir.path, dir.nextOffset, FILES_PAGE_SIZE)
+      .then(apply, (e) => {
         if (!scopeCurrent(ctx)) return
         applyListError(dir, ctx, e)
         if (walk === revealWalkId) onDone()
-      },
-    )
+      })
   }
 
   /** The walk reached the target: EXPAND it, then select it. Expanding is
@@ -1135,9 +1219,12 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   function completeReveal(dir: FilesRoot | FilesNode, walk: number): void {
     if (walk !== revealWalkId) return
     pendingReveal = null
+    pendingRevealHint = undefined
+    revealHint = undefined
     revealing = false
     setRevealTarget(dir.path)
     bumpTree()
+    settleReveal(true)
     void syncWatchSet()
   }
   /** A stopped walk (a refused level, a missing child) keeps what it did
@@ -1148,7 +1235,10 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   function endWalk(walk: number): void {
     if (walk !== revealWalkId) return
     pendingReveal = null
+    pendingRevealHint = undefined
+    revealHint = undefined
     revealing = false
+    settleReveal(false)
     void syncWatchSet()
   }
 
@@ -1281,11 +1371,13 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     setWatchDegradedReason(null)
     setWatchFailed(null)
     setRevealTarget(null)
+    pendingRevealHint = undefined
     // Supersede any walk still in flight: closed already drops its
     // responses, and the pending marker must not suppress the next
     // scope's reveal of the same path.
     pendingReveal = null
     revealing = false
+    cancelReveal()
     revealWalkId++
     bumpTree()
     if (b !== null) void services.close(b.bindingId).catch(() => {})

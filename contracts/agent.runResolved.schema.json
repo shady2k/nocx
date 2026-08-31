@@ -34,6 +34,10 @@
       "enum": ["success", "failure", "entered", "unknown"],
       "description": "The block's own frozen status vocabulary."
     },
+    "stopped": {
+      "type": "boolean",
+      "description": "True only when the person stopped this command."
+    },
     "total": {
       "type": "integer",
       "minimum": 0,
@@ -60,7 +64,7 @@
         "required": ["outcome"]
       },
       "then": {
-        "required": ["entryId", "status", "total", "start", "end", "text"]
+        "required": ["entryId", "status", "stopped", "total", "start", "end", "text"]
       }
     },
     {

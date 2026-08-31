@@ -344,6 +344,73 @@ func TestEinoAdapter_RefusalIsNotFramedAsToolOutput(t *testing.T) {
 	}
 }
 
+func TestPolicyNarrowRowRefusesOutsideRunFence(t *testing.T) {
+	policy := autonomousMatrix()
+	rowRoot := t.TempDir()
+	policy.Observe.Scopes = []content.GrantScope{{
+		Kind: content.ResourcePath,
+		ID:   rowRoot,
+	}}
+	grant := policy.AsGrant([]content.GrantScope{
+		{Kind: content.ResourceSession, ID: "session-a"},
+		{Kind: content.ResourcePath, ID: "/"},
+	})
+	kernel := &effectKernel{grant: grant}
+	tool := agenttools.Tool{
+		Declaration: agenttools.Declaration{Effect: content.EffectObserve},
+	}
+	outside := filepath.Join(filepath.Dir(rowRoot), "outside.txt")
+	if kernel.inScope(tool, []agenttools.ResourceRef{{
+		Kind: content.ResourcePath,
+		ID:   outside,
+	}}, true) {
+		t.Fatalf("outside-row path %q passed the narrowed policy row", outside)
+	}
+}
+
+func TestPolicySelectorsDoNotEraseRunFenceKinds(t *testing.T) {
+	policy := autonomousMatrix()
+	root := t.TempDir()
+	selector := []content.GrantScope{{Kind: content.ResourcePath, ID: root}}
+	for _, row := range []*content.EffectRow{
+		&policy.Observe,
+		&policy.MutateReversible,
+		&policy.MutateDestructive,
+		&policy.PrivilegeChange,
+		&policy.Disclose,
+		&policy.CrossBoundary,
+		&policy.Delegate,
+	} {
+		row.Scopes = selector
+	}
+	runFence := []content.GrantScope{
+		{Kind: content.ResourceSession, ID: "session-a"},
+		{Kind: content.ResourcePath, ID: "/"},
+		{Kind: content.ResourceContent, ID: "content"},
+	}
+	grant := policy.AsGrant(runFence)
+
+	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	names := make(map[string]bool)
+	for _, tool := range reg.ForGrant(grant) {
+		names[tool.Name] = true
+	}
+	for _, want := range []string{"session.run", "notes.search", "snippets.list"} {
+		if !names[want] {
+			t.Fatalf("tool %q was dropped from grant: names=%v scopes=%v", want, names, grant.Scopes)
+		}
+	}
+	if got := grant.Policy.RowScopes(content.EffectObserve); len(got) != 3 ||
+		got[0] != (content.GrantScope{Kind: content.ResourceSession, ID: "session-a"}) ||
+		got[1] != (content.GrantScope{Kind: content.ResourcePath, ID: root}) ||
+		got[2] != (content.GrantScope{Kind: content.ResourceContent, ID: "content"}) {
+		t.Fatalf("observe effective scopes = %+v, want the path selector plus absent fence kinds", got)
+	}
+}
+
 // ── criterion 1: a refusal is an answer (nocx-uvac6.1) ───────────────────
 
 // TestAsk_RefusalContinuesAsToolResult is the brief's first acceptance
@@ -1687,5 +1754,68 @@ func TestMiddleware_RefusesWhenAnyResolvedResourceIsOutsideScope(t *testing.T) {
 	}
 	if !strings.Contains(out, "REFUSED") {
 		t.Fatalf("result = %q, want a refusal when the second resource is outside scope", out)
+	}
+}
+
+// TestPolicy_DistinguishesReadPermitFromExecuteAskOnOnePath is the user seam
+// that was impossible while commands collapsed every non-read case into one
+// declared class: reading this script is permitted, while executing that same
+// path asks under Delegate.
+func TestPolicy_DistinguishesReadPermitFromExecuteAskOnOnePath(t *testing.T) {
+	t.Skip("nocx-tyhel: session.run must declare Delegate before this distinction exists")
+	sess := "session-a"
+	dir := t.TempDir()
+	path := filepath.Join(dir, "deploy.sh")
+	writeFile(t, path, "#!/bin/sh\necho deploy\n")
+
+	policy := askEveryTimeMatrix()
+	policy.Observe = content.EffectRow{
+		Decision: content.DecisionPermit,
+		Scopes:   []content.GrantScope{{Kind: content.ResourcePath, ID: dir}},
+	}
+	policy.MutateDestructive = content.EffectRow{
+		Decision: content.DecisionAsk,
+		Scopes:   []content.GrantScope{{Kind: content.ResourceSession, ID: sess}},
+	}
+	policy.Delegate = content.EffectRow{
+		Decision: content.DecisionAsk,
+		Scopes:   []content.GrantScope{{Kind: content.ResourceSession, ID: sess}},
+	}
+	grant := policy.AsGrant(nil)
+
+	_, readServer := newFakeOpenAI(callThenAnswer(toolCallSpec{
+		name: "files.read",
+		args: fmt.Sprintf(`{"path":%q}`, path),
+	}))
+	defer readServer.Close()
+	readClient, err := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	if err != nil {
+		t.Fatalf("new read client: %v", err)
+	}
+	err = readClient.Ask(context.Background(), askParams(readServer.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(AskEvent) error {
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("read of the script was not permitted: %v", err)
+	}
+
+	_, executeServer := newFakeOpenAI(callThenAnswer(toolCallSpec{
+		name: "session.run",
+		args: fmt.Sprintf(`{"command":%q}`, path),
+	}))
+	defer executeServer.Close()
+	executeClient, err := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	if err != nil {
+		t.Fatalf("new execute client: %v", err)
+	}
+	err = executeClient.Ask(context.Background(), askParams(executeServer.URL, &grant, &fakeLedger{}, NewApprovalStore()), func(AskEvent) error {
+		return nil
+	})
+	var asked *ApprovalRequestedError
+	if !errors.As(err, &asked) || asked.Request == nil {
+		t.Fatalf("execute of the script error = %v, want a Delegate approval request", err)
+	}
+	if asked.Request.Effect != content.EffectDelegate {
+		t.Fatalf("execute of the script effect = %q, want %q", asked.Request.Effect, content.EffectDelegate)
 	}
 }

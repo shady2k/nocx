@@ -15,7 +15,7 @@
 // there to report. The root the panel is actually showing lives on the panel
 // element as data-root, which is what the checks read.
 
-import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, on, Show } from 'solid-js'
 import type { Component } from 'solid-js'
 import type { SidebarViewDescriptor } from '../sidebar'
 import type { ActiveOrigin } from '../pane-content'
@@ -198,9 +198,11 @@ function FilesPanel(props: FilesPanelProps) {
       },
     ),
   )
-  // The view unmounts when another view takes the panel; its binding closes
-  // with it, and the next mount re-opens through the rescope above.
-  onCleanup(() => props.store.dispose())
+  // The descriptor owns this store for the app's lifetime rather than for
+  // one panel mount. Terminal links can focus Files and reveal immediately
+  // while Solid swaps the visible view; disposing here would leave the
+  // composition root holding a dead reveal handle. A later active-origin
+  // effect re-scopes and closes the old binding when the machine changes.
   /** The primary action: resolve the file's canonical (files.read — the
    *  only shape that carries identity for a file, D12) and hand the target
    *  to the opener. A refusal here is an action outcome: a toast, never a
@@ -682,6 +684,9 @@ function FilesPanel(props: FilesPanelProps) {
 export interface FilesViewDeps {
   /** The panel's backend surface (createFilesPanelServices(dispatcher)). */
   services: FilesPanelServices
+  /** Receives the one Files tree store so another surface can ask the
+   *  existing panel to reveal a path rather than creating a second tree. */
+  onStore?: (store: FilesTreeStore) => void
   /** The viewer-tab opener; a no-op default keeps the panel runnable before
    *  the viewer lands. */
   opener?: FileOpener
@@ -725,6 +730,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
   const opener = deps.opener ?? NOOP_OPENER
   const clipboard = deps.clipboard ?? createClipboardAccess()
   const store = createFilesTreeStore(deps.services)
+  deps.onStore?.(store)
   const upload = deps.upload ?? null
   const download = deps.download ?? null
   const native = deps.native ?? hasWailsWebview

@@ -6,7 +6,7 @@ package assistant
 // minted at the renderer), waits for the completion, and resolves the
 // broker request with the entry id, the exit status and a window of the
 // output. The backend never writes to the PTY (design §2.1 — rejected, not
-// open for re-litigation): the executor asks the renderer through the run's
+// open for re-litigation): the executor asks the renderer through the
 // requester seam, exactly as readScreen does.
 //
 // These tests mirror readscreen_test.go: the session narrowing (criterion 4
@@ -72,11 +72,17 @@ func (r *recordingRunner) runCalls() []askedRun {
 // runResolvedBody builds the resolved body the transport's run kind would
 // deliver: the entry id, the exit status (null when the block froze without
 // one — an entered environment), the output's total line count, the span of
-// the window actually returned and its text.
+// the window actually returned and its text. stopped is an explicit fact
+// about who ended the command; it is never inferred from exitCode.
 func runResolvedBody(entryID string, exitCode *int, status string, total, start, end int, text string) json.RawMessage {
+	return runResolvedBodyWithStopped(entryID, exitCode, status, total, start, end, text, false)
+}
+
+func runResolvedBodyWithStopped(entryID string, exitCode *int, status string, total, start, end int, text string, stopped bool) json.RawMessage {
 	b, _ := json.Marshal(map[string]any{
 		"entryId": entryID, "exitCode": exitCode, "status": status,
 		"total": total, "start": start, "end": end, "text": text,
+		"stopped": stopped,
 	})
 	return b
 }
@@ -281,6 +287,56 @@ func TestExecuteRun_EnteredCarriesNoExitCode(t *testing.T) {
 	if res.Status != "entered" {
 		t.Errorf("status = %q, want entered", res.Status)
 	}
+}
+
+func TestExecuteRun_StoppedFactIsDirectiveAndNotExitCode(t *testing.T) {
+	runner := agenttools.NewRunner([]content.GrantScope{{Kind: content.ResourceSession, ID: "session-a"}})
+	code := 130
+
+	t.Run("person stopped", func(t *testing.T) {
+		req := &recordingRunner{body: runResolvedBodyWithStopped("entry-stop", &code, "failure", 1, 0, 1, "partial", true)}
+		out, err := executeRun(toolTestContext(), runner, req, json.RawMessage(`{"command":"scan"}`), nil)
+		if err != nil {
+			t.Fatalf("stopped run failed: %v", err)
+		}
+		var res struct {
+			ExitCode *int   `json:"exitCode"`
+			Status   string `json:"status"`
+			Stopped  bool   `json:"stopped"`
+			Message  string `json:"message"`
+			Text     string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(out), &res); err != nil {
+			t.Fatalf("result does not parse: %v", err)
+		}
+		if res.ExitCode == nil || *res.ExitCode != 130 || res.Status != "failure" || !res.Stopped {
+			t.Fatalf("stopped result = %+v, want failure/exit 130/stopped", res)
+		}
+		if res.Message != runStoppedMessage {
+			t.Fatalf("message = %q, want %q", res.Message, runStoppedMessage)
+		}
+		if res.Text != "partial" {
+			t.Fatalf("text = %q, want command output kept separate", res.Text)
+		}
+	})
+
+	t.Run("command exited 130", func(t *testing.T) {
+		req := &recordingRunner{body: runResolvedBodyWithStopped("entry-exit", &code, "failure", 1, 0, 1, "self-interrupted", false)}
+		out, err := executeRun(toolTestContext(), runner, req, json.RawMessage(`{"command":"scan"}`), nil)
+		if err != nil {
+			t.Fatalf("exit-130 run failed: %v", err)
+		}
+		var res struct {
+			Stopped bool   `json:"stopped"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(out), &res); err != nil {
+			t.Fatalf("result does not parse: %v", err)
+		}
+		if res.Stopped || res.Message != "" {
+			t.Fatalf("self-interrupted result = %+v, want stopped=false and no stop directive", res)
+		}
+	})
 }
 
 // TestExecuteRun_FailedOutcomeSurfaces: a renderer that refuses or fails the

@@ -95,7 +95,7 @@ func TestWireTap_CapsCaptureWithoutTruncatingProviderRequest(t *testing.T) {
 				}, nil
 			})
 			recorder := &wireTestRecorder{}
-			tap := newWireTapWith(inner, "", recorder)
+			tap := newWireTapWith(inner, "", recorder, nil)
 			req, err := http.NewRequestWithContext(
 				WithWireIdentity(context.Background(), "run-1", "entry-1"),
 				http.MethodPost, "https://example.test/v1", bytes.NewReader(want),
@@ -149,7 +149,7 @@ func TestWireTap_ResponseCapDistinguishesEOFFromEarlyClose(t *testing.T) {
 					))),
 				}, nil
 			})
-			tap := newWireTapWith(inner, "", recorder)
+			tap := newWireTapWith(inner, "", recorder, nil)
 			req, err := http.NewRequestWithContext(
 				WithWireIdentity(context.Background(), "run-1", "entry-1"),
 				http.MethodGet, "https://example.test/v1", nil,

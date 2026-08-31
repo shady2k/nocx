@@ -26,6 +26,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -546,8 +547,10 @@ type agentHandlers struct {
 	dumpOp capability.LedgerOperation
 	// configOp resolves the endpoint the run uses (the ONE config operation,
 	// shared with the config handlers — AD-8). nil → no endpoint store.
-	configOp capability.ConfigOperation
-	log      log.Logger
+	configOp  capability.ConfigOperation
+	noteOp    capability.NoteOperation
+	snippetOp capability.SnippetOperation
+	log       log.Logger
 	// endpointWired is the config handlers' "endpoints not available" gate:
 	// with no endpoint repository, ListEndpoints would nil-panic inside the
 	// service, so the ask refuses before the call.
@@ -856,14 +859,15 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 	runCtx := log.WithTraceID(ctx, runTrace(askRes.RunID))
 	runControl := &agentRunControl{cancelDone: make(chan struct{})}
 	rc := askRunContext{
-		runID:    askRes.RunID,
-		control:  runControl,
-		entryID:  askRes.EntryID,
-		paneID:   in.PaneID,
-		question: in.Question,
-		endpoint: endpoint,
-		model:    facts.Model,
-		grant:    runGrant,
+		runID:      askRes.RunID,
+		control:    runControl,
+		entryID:    askRes.EntryID,
+		paneID:     in.PaneID,
+		question:   in.Question,
+		endpoint:   endpoint,
+		model:      facts.Model,
+		grant:      runGrant,
+		offerState: assistant.NewWireToolOfferState(),
 		// attempt is the run's attempt — the ledger inserted the run row at
 		// attempt 1 (SubmitAgentAsk), and it is the value the approval
 		// binding names. The resume passes the SAME attempt, so the
@@ -994,6 +998,9 @@ type askRunContext struct {
 	// workspace policy the composition root named (runGrantFor). Nil: the
 	// run executes no tools — the model is offered none.
 	grant *content.Grant
+	// offerState survives retries and approval resumes so the structural
+	// offer remains once-per-run without process-lifetime run-id storage.
+	offerState *assistant.WireToolOfferState
 	// attempt is the run's attempt — the ledger inserted the run row at
 	// attempt 1 (SubmitAgentAsk), and it is the value the approval binding
 	// names. The resume passes the SAME attempt so the middleware's
@@ -1039,12 +1046,57 @@ type askRunContext struct {
 	// It is a fact about the OPEN QUESTION, not about the proposal; only the
 	// transport knows which of the two gates asked.
 	pendingReason string
+	// resumed is explicit because a fresh run can also have non-zero
+	// sequencing state after a later refactor; only the resume path sets it.
+	resumed bool
+}
+
+func logAgentStreamEnded(logger log.Logger, runID int64, started time.Time, reasoning, answer, requested, executed int, resumed bool, suspensionTool, suspensionEffect string, streamErr error) {
+	if logger == nil {
+		return
+	}
+	outcome := "completed"
+	if suspensionTool != "" {
+		outcome = "suspended"
+	} else if streamErr != nil {
+		outcome = "failed"
+	}
+	logger.Info("agent ask: the stream ended",
+		"run", runID,
+		"elapsed", time.Since(started).Round(time.Millisecond).String(),
+		"reasoning", reasoning,
+		"answer", answer,
+		"toolCallsRequested", requested,
+		"toolCallsExecuted", executed,
+		"resume", resumed,
+		"suspensionTool", suspensionTool,
+		"suspensionEffect", suspensionEffect,
+		"outcome", outcome)
 }
 
 // runAskStream drives the prepared run to completion. Secret material resolves
 // first, outside a capability admission and before any external request. A
 // sealed vault therefore waits and continues this same durable run.
 func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Responder) {
+	streamStarted := time.Now()
+	var reasoningChars, answerChars atomic.Int64
+	var toolCallsRequested, toolCallsExecuted atomic.Int64
+	var toolStatsMu sync.Mutex
+	requestedCalls := make(map[string]struct{})
+	recordRequested := func(callID string) {
+		toolStatsMu.Lock()
+		defer toolStatsMu.Unlock()
+		if _, seen := requestedCalls[callID]; !seen {
+			requestedCalls[callID] = struct{}{}
+			toolCallsRequested.Add(1)
+		}
+	}
+	var suspensionTool, suspensionEffect string
+	var streamErr error
+	emitStreamEnded := func() {
+		logAgentStreamEnded(h.log, rc.runID, streamStarted, int(reasoningChars.Load()), int(answerChars.Load()),
+			int(toolCallsRequested.Load()), int(toolCallsExecuted.Load()), rc.resumed, suspensionTool, suspensionEffect, streamErr)
+	}
 	if rc.control != nil {
 		var finishDrive func()
 		ctx, finishDrive = rc.control.beginDrive(ctx)
@@ -1055,6 +1107,8 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// continues this same durable run, and a dismissed unlock cancels it.
 	secret, headers, materialErr := h.resolveEndpointMaterial(ctx, rc.endpoint)
 	if materialErr != nil {
+		streamErr = materialErr
+		emitStreamEnded()
 		if errors.Is(materialErr, ErrUnlockCancelled) {
 			h.terminalize(ctx, rc, content.RunCancelled, content.TermUserKilled, "", r)
 			return
@@ -1069,8 +1123,6 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// watched a spinner and the log had no word for it. These three counters
 	// and the pair of lines around the stream make "it went off into
 	// reasoning" a number instead of an impression.
-	var reasoningChars, answerChars, toolCalls int
-	streamStarted := time.Now()
 	h.log.Info("agent ask: streaming", "run", rc.runID, "model", rc.model,
 		"question", len(rc.question))
 	// The gate deltas may not pass before: a delta persisted before the
@@ -1079,6 +1131,8 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	if err := h.op.Run(ctx, func(ctx context.Context, svc capability.AgentService) error {
 		return svc.TransitionRun(ctx, rc.runID, content.RunStreaming)
 	}); err != nil {
+		streamErr = err
+		emitStreamEnded()
 		// The transition was refused: the run is already terminal (closed
 		// by another path). Nothing to drive; stop.
 		return
@@ -1157,20 +1211,23 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// tool call: the first delta then opens the next block.
 	prose := rc.prose
 	ctx = assistant.WithWireIdentity(ctx, strconv.FormatInt(rc.runID, 10), rc.entryID)
+	ctx = assistant.WithWireToolOfferState(ctx, strconv.FormatInt(rc.runID, 10), rc.grant, rc.offerState)
 	err := h.client.Ask(ctx, assistant.AskParams{
-		Key:           secret,
-		BaseURL:       rc.endpoint.BaseURL,
-		Model:         rc.model,
-		Headers:       headers,
-		Messages:      msgs,
-		Grant:         rc.grant,
-		AttemptLedger: h.attemptLedger,
-		Requester:     h.requester,
-		KnownMaterial: h.knownMaterial,
-		Approvals:     h.approvals,
-		RunID:         strconv.FormatInt(rc.runID, 10),
-		SessionID:     string(rc.sessionID),
-		Attempt:       rc.attempt,
+		Key:              secret,
+		BaseURL:          rc.endpoint.BaseURL,
+		Model:            rc.model,
+		Headers:          headers,
+		Messages:         msgs,
+		Grant:            rc.grant,
+		AttemptLedger:    h.attemptLedger,
+		Requester:        h.requester,
+		NoteOperation:    h.noteOp,
+		SnippetOperation: h.snippetOp,
+		KnownMaterial:    h.knownMaterial,
+		Approvals:        h.approvals,
+		RunID:            strconv.FormatInt(rc.runID, 10),
+		SessionID:        string(rc.sessionID),
+		Attempt:          rc.attempt,
 		// The turn every entry this run causes is joined to (nocx-h1l4o).
 		// It comes off the SAME askRunContext the run id does — both were
 		// set from one SubmitAgentAsk result — so the relation is written
@@ -1196,7 +1253,6 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// delivers what this callback emits in the order it emits it.
 		switch ev.Kind {
 		case assistant.AskToolCall:
-			toolCalls++
 			// NOT PERSISTED AS PROSE, and that is not an omission: the
 			// durable account of a tool call is the LEDGER's action entry,
 			// which the middleware wrote before the call ran and whose id
@@ -1206,6 +1262,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			if ev.Call == nil {
 				return nil
 			}
+			recordRequested(ev.Call.CallID)
 			// THE BOUNDARY, and it is the backend's (ADR-0040). The prose
 			// that was streaming ends HERE, where the call arrived, because
 			// a sentence written before a command explains why the command
@@ -1263,9 +1320,13 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 					rc.control.recordDroppedDelta()
 				}
 			}
+			// Count only after the durable prose boundary succeeds. A seal
+			// failure aborts before this point, so the metric distinguishes
+			// accepted tool-call events from requests that merely arrived.
+			toolCallsExecuted.Add(1)
 			return nil
 		case assistant.AskReasoning:
-			reasoningChars += len(ev.Text)
+			reasoningChars.Add(int64(len(ev.Text)))
 			// Also not persisted, and for the stronger reason: the durable
 			// answer is the ANSWER, and appending the thinking to the open
 			// prose block would put it back inside the answer by another
@@ -1285,7 +1346,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 			return nil
 		}
 		text := ev.Text
-		answerChars += len(text)
+		answerChars.Add(int64(len(text)))
 		// The other half of the boundary: the FIRST delta after a call opens
 		// the next run of prose — a `text` child of the turn at the next free
 		// seat, with a body of its own (ADR-0040). Opened lazily and never up
@@ -1353,39 +1414,37 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		seq++
 		return nil
 	})
-	h.log.Info("agent ask: the stream ended", "run", rc.runID,
-		"elapsed", time.Since(streamStarted).Round(time.Millisecond).String(),
-		"reasoning", reasoningChars, "answer", answerChars, "calls", toolCalls,
-		"outcome", askOutcome(err))
+	streamErr = err
 	if err != nil {
 		// A suspension is NOT a failure (criterion 1): the policy or the
-		// egress gate asked a person a question, the run moves to
-		// awaiting_approval, and the question reaches the renderer. The
-		// classifyAskFailure path that would report it as a model failure
-		// is asserted against here — it must never see a suspension.
+		// egress gate asked a person a question, and the run remains open.
 		var apErr *assistant.ApprovalRequestedError
 		var egErr *assistant.EgressRequestedError
 		if errors.As(err, &apErr) && apErr.Request != nil {
+			suspensionTool = apErr.Request.Tool
+			suspensionEffect = string(apErr.Request.Effect)
+			recordRequested(apErr.Request.CallID)
+			emitStreamEnded()
 			h.suspendForApproval(ctx, rc, r, seq, prose, apErr.Request, nil)
 			return
 		}
 		if errors.As(err, &egErr) && egErr.Request != nil {
+			suspensionTool = egErr.Request.Tool
+			suspensionEffect = string(egErr.Request.Effect)
+			recordRequested(egErr.Request.CallID)
+			emitStreamEnded()
 			h.suspendForApproval(ctx, rc, r, seq, prose, nil, egErr.Request)
 			return
 		}
 		reason, sentence := classifyAskFailure(err, rc.model)
-		// This is the boundary that catches the framework's error, so this
-		// is where its text is kept — once, with the run id, and nowhere
-		// else (nocx-avogl.3). The wire carries the sentence; the log
-		// carries eino's "[NodeRunError] … node path: [node_1, ToolNode]"
-		// and whatever else the engine wrapped, which is the only place
-		// that trace survives at all.
 		h.log.Warn("agent ask: the run failed",
 			"run", rc.runID, "reason", string(reason), "sentence", sentence,
 			"error", err, "callPath", log.CallPath(0))
+		emitStreamEnded()
 		h.terminalize(ctx, rc, content.RunFailed, reason, sentence, r)
 		return
 	}
+	emitStreamEnded()
 	h.terminalize(ctx, rc, content.RunCompleted, content.TermCompleted, "", r)
 }
 
@@ -1771,6 +1830,7 @@ func (h agentHandlers) resumeRun(ctx context.Context, rc askRunContext, r Respon
 		// another path). Nothing to resume; the approval stands harmless.
 		return
 	}
+	rc.resumed = true
 	h.runAskStream(ctx, rc, r)
 }
 
@@ -1841,6 +1901,7 @@ func (h agentHandlers) resumeRunDeclined(ctx context.Context, rc askRunContext, 
 		// another path). Nothing to resume; the decline stands harmless.
 		return
 	}
+	rc.resumed = true
 	h.runAskStream(ctx, rc, r)
 }
 
@@ -2322,7 +2383,7 @@ func derefOrEmpty(s *string) string {
 // agentSpecs declares the agent.* control methods on the CONTENT operation
 // queue (the ask transaction is the ledger — ADR-0019's one writer — so it
 // shares the content domain's gate and queue).
-func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
+func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
 	var agentOp capability.AgentOperation
 	if s.contentDB != nil {
 		agentOp = capability.NewAgentOperation(contentGate, lane, s.contentDB)
@@ -2341,6 +2402,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		// to a renderer-minted tab.
 		return agentHandlers{
 			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
+			noteOp: noteOp, snippetOp: snippetOp,
 			credentials: credentials, client: client, askSub: askSub,
 			attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, knownMaterial: s.agentKnownMaterial,
@@ -2375,18 +2437,3 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 // belonging to it names it. One derivation, so the ask, the approval and
 // the resume cannot disagree about which exchange they are part of.
 func runTrace(runID int64) string { return "run-" + strconv.FormatInt(runID, 10) }
-
-// askOutcome names how a stream ended in one word, so the line that carries
-// the counters says which of the three it was without a reader matching an
-// error string.
-func askOutcome(err error) string {
-	if err == nil {
-		return "answered"
-	}
-	var apErr *assistant.ApprovalRequestedError
-	var egErr *assistant.EgressRequestedError
-	if errors.As(err, &apErr) || errors.As(err, &egErr) {
-		return "suspended"
-	}
-	return "failed"
-}

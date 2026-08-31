@@ -153,6 +153,9 @@ type EffectPolicy struct {
 	Delegate          EffectRow        `json:"delegate"`
 	Rules             []InvocationRule `json:"rules,omitempty"`
 	floor             *Floor
+	// runFence is mint metadata, not operator policy: it is the outer bound
+	// of a run, while each row's Scopes remains that effect's selector.
+	runFence []GrantScope
 }
 
 // rowFor returns the row of one effect; an effect outside the lattice has no
@@ -284,44 +287,115 @@ func (p EffectPolicy) PermittedEffects() []Effect {
 	return out
 }
 
-// WithRunScopes copies the policy with the run's base scopes added to EVERY
-// row: a grant is minted per run, the run bound holds for every effect
-// whatever scopes the operator stated. Rows keep their operator scopes; the
-// union is additive, never a replacement.
+// WithRunScopes copies the policy with the run's base scopes kept as a
+// separate fence. The fence bounds every row for the run's lifetime; each
+// row's scopes are materialized as the intersection of its operator selector
+// and that fence, because the kernel consumes row scopes.
 func (p EffectPolicy) WithRunScopes(run []GrantScope) EffectPolicy {
 	q := p
-	q.Observe.Scopes = appendScopeSet(p.Observe.Scopes, run)
-	q.MutateReversible.Scopes = appendScopeSet(p.MutateReversible.Scopes, run)
-	q.MutateDestructive.Scopes = appendScopeSet(p.MutateDestructive.Scopes, run)
-	q.PrivilegeChange.Scopes = appendScopeSet(p.PrivilegeChange.Scopes, run)
-	q.Disclose.Scopes = appendScopeSet(p.Disclose.Scopes, run)
-	q.CrossBoundary.Scopes = appendScopeSet(p.CrossBoundary.Scopes, run)
-	q.Delegate.Scopes = appendScopeSet(p.Delegate.Scopes, run)
+	q.runFence = append([]GrantScope(nil), run...)
+	q.Observe = narrowRow(p.Observe, run)
+	q.MutateReversible = narrowRow(p.MutateReversible, run)
+	q.MutateDestructive = narrowRow(p.MutateDestructive, run)
+	q.PrivilegeChange = narrowRow(p.PrivilegeChange, run)
+	q.Disclose = narrowRow(p.Disclose, run)
+	q.CrossBoundary = narrowRow(p.CrossBoundary, run)
+	q.Delegate = narrowRow(p.Delegate, run)
 	return q
 }
 
-// AsGrant mints the grant a run executes under (ADR-0020 decision 5: the
-// workspace mints the default grant from its policy — amended §7 makes that
-// policy the matrix). runScopes are the run's own bound (the transport mints
-// with the run's session). The minted grant's ROWS carry the effective scopes
-// (operator scopes + run scopes), and its Effects are derived from the rows —
-// the matrix is the ONE source of "what may this run do". A grant built any
-// other way is authority nobody minted.
-//
-// Grant.Scopes is the derived union of every row's effective scopes, and it
-// exists for ONE consumer only: the declaration filter's resource-KIND
-// coverage. Enforcement never consults the union — a call is judged against
-// the SELECTED EFFECT's row scopes, so an observe row scoped to /home refuses
-// a call on /etc even when another row covers /etc. The split is deliberate:
-// declaration is kind-shaped, enforcement is row-shaped.
+// RunFence returns the mint-supplied outer bound. It is distinct from every
+// row's effective selector: an empty operator selector is expanded to this
+// fence, while a stated selector is narrowed by it.
+func (p EffectPolicy) RunFence() []GrantScope {
+	return append([]GrantScope(nil), p.runFence...)
+}
+
+// AsGrant mints a grant with two distinct scope concepts. The run fence is
+// the outer bound supplied by the mint; each policy row is the selector for
+// that effect, materialized to the fence for the kernel. A selector narrows
+// within the fence — it is never unioned with the fence — while an empty
+// selector means the row applies to the whole fence. Grant.Scopes is the
+// derived, kind-shaped declaration coverage consumed by Registry.ForGrant;
+// enforcement is row-shaped and never consults that union. With a fence,
+// declaration coverage intentionally includes its resource kinds even when a
+// row selector does not, so an offered call can still be refused by the row;
+// nocx-tyhel is where offer-time explanation learns to say so.
 func (p EffectPolicy) AsGrant(runScopes []GrantScope) Grant {
 	effective := p.WithRunScopes(runScopes)
 	g := Grant{Version: 1, Policy: effective}
 	g.Effects = effective.PermittedEffects()
-	for _, row := range effective.rows() {
-		g.Scopes = appendScopeSet(g.Scopes, row.Scopes)
+	if len(effective.runFence) > 0 {
+		// Grant scopes are the run fence's declaration coverage. Row
+		// selectors remain the per-effect enforcement scopes.
+		g.Scopes = appendScopeSet(g.Scopes, effective.runFence)
+	} else {
+		// Grants without a run fence retain the direct-policy behavior:
+		// declaration coverage is derived from the row selectors.
+		for _, row := range effective.rows() {
+			g.Scopes = appendScopeSet(g.Scopes, row.Scopes)
+		}
 	}
 	return g
+}
+
+func narrowRow(row EffectRow, fence []GrantScope) EffectRow {
+	var empty bool
+	row.Scopes, empty = intersectScopeSet(row.Scopes, fence)
+	if empty {
+		// A stated selector with no intersection cannot be represented by
+		// empty Scopes: empty means unbounded. Refuse the whole effect at
+		// mint time so it is never offered as an executable capability.
+		row.Decision = DecisionRefuse
+	}
+	return row
+}
+
+func intersectScopeSet(selectors, fence []GrantScope) ([]GrantScope, bool) {
+	if len(fence) == 0 {
+		return append([]GrantScope(nil), selectors...), false
+	}
+	if len(selectors) == 0 {
+		return append([]GrantScope(nil), fence...), false
+	}
+	var out []GrantScope
+	namedKinds := make(map[ResourceKind]bool, len(selectors))
+	fenceKinds := make(map[ResourceKind]bool, len(fence))
+	overlappingKinds := make(map[ResourceKind]bool, len(fence))
+	for _, selector := range selectors {
+		namedKinds[selector.Kind] = true
+	}
+	// A selector narrows only the fence kinds it names. For a named kind,
+	// only overlapping IDs survive; a disjoint selector therefore grants no
+	// coverage for that kind. Fence kinds the selector does not name remain
+	// bounded by the run fence.
+	for _, bound := range fence {
+		fenceKinds[bound.Kind] = true
+		kindMatched := false
+		for _, selector := range selectors {
+			if selector.Kind != bound.Kind {
+				continue
+			}
+			kindMatched = true
+			switch {
+			case selector.Contains(bound):
+				out = appendScopeSet(out, []GrantScope{bound})
+				overlappingKinds[bound.Kind] = true
+			case bound.Contains(selector):
+				out = appendScopeSet(out, []GrantScope{selector})
+				overlappingKinds[bound.Kind] = true
+			}
+		}
+		if !kindMatched {
+			out = appendScopeSet(out, []GrantScope{bound})
+		}
+	}
+	for kind := range namedKinds {
+		if fenceKinds[kind] && !overlappingKinds[kind] {
+			return out, true
+		}
+	}
+	return out, false
 }
 
 // appendScopeSet appends the members of b not already present (kind+id) in a,

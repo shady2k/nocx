@@ -13,11 +13,11 @@ package assistant
 // — asserted by trying: a grant naming session A cannot run in session B,
 // and the renderer is never asked), the wiring-gap honesty, and the window
 // contract of the return (design §4.4).
-
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -33,12 +33,13 @@ import (
 type recordingRunner struct {
 	unscriptedBlocks
 
-	mu      sync.Mutex
-	asked   []askedRun
-	body    json.RawMessage
-	err     error
-	screen  json.RawMessage
-	screenE error
+	mu          sync.Mutex
+	asked       []askedRun
+	body        json.RawMessage
+	err         error
+	screen      json.RawMessage
+	screenE     error
+	requireLive bool
 }
 
 type askedRun struct {
@@ -57,6 +58,9 @@ func (r *recordingRunner) RequestRun(ctx context.Context, sessionID string, comm
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.asked = append(r.asked, askedRun{sessionID: sessionID, command: command})
+	if r.requireLive && ctx.Err() != nil {
+		return nil, fmt.Errorf("request context canceled before renderer call: %w", ctx.Err())
+	}
 	if r.err != nil {
 		return nil, r.err
 	}
@@ -207,6 +211,86 @@ func TestMiddleware_RunWithoutRequesterIsHonest(t *testing.T) {
 	_, err := wrappedEndpoint(mw, "session.run", "c1", `{"command":"ls"}`)
 	if err == nil || !strings.Contains(err.Error(), "no renderer requester is wired") {
 		t.Fatalf("error = %v, want the wiring-gap refusal", err)
+	}
+}
+
+// A zero declaration deadline means the run lease owns the execution bound;
+// it must not become an already-cancelled context at the kernel boundary.
+func TestMiddleware_RunZeroDeadlineStillReachesRenderer(t *testing.T) {
+	grant := sessionGrant("session-a", autonomousMatrix())
+	req := &recordingRunner{
+		body:        runResolvedBody("entry-live", new(0), "success", 1, 0, 1, "ok"),
+		requireLive: true,
+	}
+	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, req)
+
+	out, err := wrappedEndpoint(mw, "session.run", "c1", `{"command":"printf ok"}`)
+	if err != nil {
+		t.Fatalf("session.run with lease-owned deadline: %v", err)
+	}
+	if !strings.Contains(out, `"entryId":"entry-live"`) {
+		t.Fatalf("result %q lacks the renderer response", out)
+	}
+	if calls := req.runCalls(); len(calls) != 1 {
+		t.Fatalf("renderer calls = %+v, want one call", calls)
+	}
+}
+
+// A lease timeout is a product-caused outcome. It occupies the tool result
+// slot with the bound's sentence so the model can explain it and continue.
+func TestMiddleware_RunLeaseOutcomeIsAResult(t *testing.T) {
+	grant := sessionGrant("session-a", autonomousMatrix())
+	req := &recordingRunner{
+		err: &RunLeaseError{Reason: content.TermTimeout, Err: context.Canceled, EntryID: "entry-abandoned"},
+	}
+	led := &fakeLedger{}
+	mw := middlewareForTurn(t, grant, led, nil, req, &fakeKnownMaterial{}, "turn-entry")
+
+	out, err := wrappedEndpoint(mw, "session.run", "c1", `{"command":"du -sh /"}`)
+	if err != nil {
+		t.Fatalf("lease outcome returned an error: %v", err)
+	}
+	if !strings.Contains(out, "wall-clock deadline") {
+		t.Fatalf("lease result = %q, want the wall-clock bound named", out)
+	}
+	if strings.Contains(out, "context deadline exceeded") || strings.Contains(out, "NodeRunError") {
+		t.Fatalf("lease result leaked an implementation error: %q", out)
+	}
+	causes := led.recordedCauses()
+	found := false
+	for _, cause := range causes {
+		if cause.caused == "entry-abandoned" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("causes = %+v, want the abandoned command joined to the turn", causes)
+	}
+}
+
+// Lease errors arrive with the run context already canceled. Cause persistence
+// still has to complete because it closes the command-to-turn interval.
+func TestMiddleware_RunLeaseOutcomeRecordsCauseAfterCancellation(t *testing.T) {
+	grant := sessionGrant("session-a", autonomousMatrix())
+	req := &recordingRunner{
+		err: &RunLeaseError{Reason: content.TermTimeout, Err: context.Canceled, EntryID: "entry-abandoned"},
+	}
+	led := &fakeLedger{rejectCanceledCause: true}
+	mw := middlewareForTurn(t, grant, led, nil, req, &fakeKnownMaterial{}, "turn-entry")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	out, err := wrappedEndpointContext(mw, ctx, "session.run", "canceled-lease", `{"command":"du -sh /"}`)
+	if err != nil {
+		t.Fatalf("lease outcome returned an error: %v", err)
+	}
+	if !strings.Contains(out, "wall-clock deadline") {
+		t.Fatalf("lease result = %q, want the wall-clock bound named", out)
+	}
+	causes := led.recordedCauses()
+	if len(causes) != 1 || causes[0].caused != "entry-abandoned" {
+		t.Fatalf("causes = %+v, want one abandoned command relation", causes)
 	}
 }
 

@@ -191,7 +191,7 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{"id":"artifact-1"}`),
 		},
 		"ledger.bind": {
-			[]byte(`{"envelope":{"id":"entry-1","sessionId":"session-1","cwd":"/tmp","kind":"shell","sensitivity":"normal"}}`),
+			[]byte(`{"envelope":{"id":"entry-1","sessionId":"session-1","cwd":"/tmp","kind":"shell","sensitivity":"normal","attemptId":"attempt-1"}}`),
 		},
 		"ledger.capture": {
 			[]byte(`{"entryId":"entry-1","artifactId":"0198f2b0-0000-7000-8000-00000000c001","mediaType":"application/vt","captureVersion":1,"seq":1,"body":"body"}`),

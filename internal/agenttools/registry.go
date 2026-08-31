@@ -124,6 +124,8 @@ type Declaration struct {
 	// truncation policy requires the returned result to describe omitted data.
 	ResultBound ResultBound
 	// Deadline bounds the execution context, including renderer requests.
+	// Zero is permitted only when CancellationReturnResult explicitly says
+	// the run lease owns the bound.
 	Deadline time.Duration
 	// Cancellation states the result of cancelling that execution context.
 	Cancellation CancellationPolicy
@@ -290,13 +292,15 @@ var declarations = []Declaration{
 		Narrow:           narrowSession,
 	},
 	{
-		Name:             "session.run",
-		Description:      "Run a shell command in a terminal session exactly as the person would type it, and get back its exit status and a window of its output; reach for this to find something out about the machine, or to change it, when no narrower tool will do — the person may be asked to approve the command first, and a refusal is an answer.",
-		Effect:           content.EffectMutateDestructive,
-		OutputTrust:      OutputTrustUntrusted,
-		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
-		Deadline:         30 * time.Second,
-		Cancellation:     CancellationReturnError,
+		Name:        "session.run",
+		Description: "Run a shell command in a terminal session exactly as the person would type it, and get back its exit status and a window of its output; reach for this to find something out about the machine, or to change it, when no narrower tool will do — the person may be asked to approve the command first, and a refusal is an answer.",
+		Effect:      content.EffectMutateDestructive,
+		OutputTrust: OutputTrustUntrusted,
+		ResultBound: ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		// session.run is a command carrier: the transport run lease is its
+		// sole execution bound, rather than a second deadline above it.
+		Deadline:         0,
+		Cancellation:     CancellationReturnResult,
 		ResourceKinds:    []content.ResourceKind{content.ResourceSession},
 		ResolveResources: resourceSession,
 		CommandArg:       "command",
@@ -551,11 +555,10 @@ func validateDeclaration(d Declaration) string {
 	} else if !supportedTruncation(d.ResultBound.Truncation) {
 		bad = append(bad, fmt.Sprintf("unsupported truncation policy %q", d.ResultBound.Truncation))
 	}
-	if !validToolDeadline(d.Deadline) {
-		bad = append(bad, "missing deadline")
-	}
 	if !supportedCancellation(d.Cancellation) {
 		bad = append(bad, fmt.Sprintf("unsupported cancellation policy %q", d.Cancellation))
+	} else if !validToolDeadline(d.Deadline, d.Cancellation) {
+		bad = append(bad, "missing deadline")
 	}
 	for _, k := range d.ResourceKinds {
 		if !supportedResourceKind(k) {

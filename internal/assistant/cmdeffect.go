@@ -54,6 +54,9 @@ func parseCanonicalInvocation(command string) content.Invocation {
 			inv.Disqualified = true
 		}
 		inv.Resources = appendResourceReport(inv.Resources, subcommand, facts)
+		if redirectionDisqualifies(facts) {
+			inv.Disqualified = true
+		}
 	}
 	if reason := shellFeatureReason(command); strings.HasPrefix(reason, "runs in the background") {
 		inv.Resources.Unresolved = append(inv.Resources.Unresolved, content.UnresolvedResource{
@@ -144,13 +147,19 @@ func uniqWrites(args []string) bool {
 }
 
 type commandWordFact struct {
-	value   string
-	dynamic bool
+	value       string
+	dynamic     bool
+	fdDupTarget bool
 }
 
 func appendResourceReport(report content.ResourceReport, subcommand string, facts []commandWordFact) content.ResourceReport {
-	words := make([]string, 0, len(facts))
-	for _, fact := range facts {
+	programFacts := commandProgramFacts(facts)
+	if len(programFacts) == 0 {
+		withoutRedirections(facts, &report)
+		return unresolvedCommand(report, facts[0].value, "has no command")
+	}
+	words := make([]string, 0, len(programFacts))
+	for _, fact := range programFacts {
 		words = append(words, fact.value)
 	}
 	// This is an allow-list: over-matching would permit more, so preserve case.
@@ -313,6 +322,16 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 	return report
 }
 
+func commandProgramFacts(facts []commandWordFact) []commandWordFact {
+	for i := 0; i < len(facts); {
+		if !isRedirection(facts[i].value) {
+			return facts[i:]
+		}
+		i += 2
+	}
+	return nil
+}
+
 func addResource(report content.ResourceReport, fact commandWordFact, verb content.ResourceVerb) content.ResourceReport {
 	if fact.dynamic {
 		report.Unresolved = append(report.Unresolved, content.UnresolvedResource{
@@ -343,21 +362,33 @@ func appendUnresolvedRedirection(report content.ResourceReport, operator, target
 
 func withoutRedirections(facts []commandWordFact, report *content.ResourceReport) []commandWordFact {
 	args := make([]commandWordFact, 0, len(facts)-1)
-	for i := 1; i < len(facts); i++ {
+	programSeen := false
+	for i := 0; i < len(facts); i++ {
 		fact := facts[i]
 		if isRedirection(fact.value) {
 			if i+1 >= len(facts) {
 				*report = unresolvedCommand(*report, fact.value, "has no target path")
 				continue
 			}
-			if isReadWriteRedirection(fact.value) {
-				*report = addResource(*report, facts[i+1], content.ResourceRead)
-				*report = addResource(*report, facts[i+1], content.ResourceWrite)
-			} else {
-				*report = addResource(*report, facts[i+1], redirectionVerb(fact.value))
+			target := facts[i+1].value
+			// A null-device sink and a file-descriptor duplication only
+			// redirect or discard streams; neither mutates a filesystem path.
+			// Keep recording and marking real file targets unresolved because
+			// their writes remain genuine mutations.
+			if !isNonMutatingRedirectionTarget(target, facts[i+1].fdDupTarget) {
+				if isReadWriteRedirection(fact.value) {
+					*report = addResource(*report, facts[i+1], content.ResourceRead)
+					*report = addResource(*report, facts[i+1], content.ResourceWrite)
+				} else {
+					*report = addResource(*report, facts[i+1], redirectionVerb(fact.value))
+				}
+				*report = appendUnresolvedRedirection(*report, fact.value, target)
 			}
-			*report = appendUnresolvedRedirection(*report, fact.value, facts[i+1].value)
 			i++
+			continue
+		}
+		if !programSeen {
+			programSeen = true
 			continue
 		}
 		args = append(args, fact)
@@ -365,8 +396,27 @@ func withoutRedirections(facts []commandWordFact, report *content.ResourceReport
 	return args
 }
 
+func redirectionDisqualifies(facts []commandWordFact) bool {
+	for i := 0; i < len(facts); i++ {
+		if !isRedirection(facts[i].value) {
+			continue
+		}
+		if i+1 >= len(facts) ||
+			!isNonMutatingRedirectionTarget(facts[i+1].value, facts[i+1].fdDupTarget) {
+			return true
+		}
+		i++
+	}
+	return false
+}
+
+func isNonMutatingRedirectionTarget(target string, fdDupTarget bool) bool {
+	return target == "/dev/null" ||
+		(fdDupTarget && strings.HasPrefix(target, "&") && isFileDescriptor(target[1:]))
+}
+
 func isRedirection(word string) bool {
-	if word == ">" || word == ">>" || word == "<" || word == "<<" || word == "<>" {
+	if word == ">" || word == ">>" || word == "<" || word == "<<" || word == "<>" || word == "&>" {
 		return true
 	}
 	if strings.HasSuffix(word, ">>") || strings.HasSuffix(word, "<<") {
@@ -611,6 +661,10 @@ func shellFeatureReason(command string) string {
 			if i > 0 && (command[i-1] == '|' || command[i-1] == '&') {
 				continue
 			}
+			if (i > 0 && (command[i-1] == '>' || command[i-1] == '<')) ||
+				(i+1 < len(command) && command[i+1] == '>') {
+				continue
+			}
 			if i+1 >= len(command) || command[i+1] != '&' {
 				return "runs in the background, so its resource use cannot be bounded here"
 			}
@@ -669,14 +723,12 @@ func splitCommand(command string) (subcommands []string, disqualified, ok bool) 
 			disqualified = true
 		case '>':
 			current.WriteByte(c)
-			disqualified = true
 			if i+1 < len(command) && command[i+1] == '>' {
 				i++
 				current.WriteByte(command[i])
 			}
 		case '<':
 			current.WriteByte(c)
-			disqualified = true
 			if i+1 < len(command) && command[i+1] == '(' {
 				disqualified = true
 			}
@@ -685,6 +737,11 @@ func splitCommand(command string) (subcommands []string, disqualified, ok bool) 
 				return nil, false, false
 			}
 		case '&':
+			if (i > 0 && (command[i-1] == '>' || command[i-1] == '<')) ||
+				(i+1 < len(command) && command[i+1] == '>') {
+				current.WriteByte(c)
+				continue
+			}
 			if i+1 < len(command) && command[i+1] == '&' {
 				if !appendSubcommand(&subcommands, &current) {
 					return nil, false, false
@@ -734,13 +791,19 @@ func commandWordFacts(command string) ([]commandWordFact, bool) {
 	var quote byte
 	wordStarted := false
 	wordDynamic := false
+	wordFDDupTarget := false
 
 	flush := func() {
 		if wordStarted {
-			facts = append(facts, commandWordFact{value: word.String(), dynamic: wordDynamic})
+			facts = append(facts, commandWordFact{
+				value:       word.String(),
+				dynamic:     wordDynamic,
+				fdDupTarget: wordFDDupTarget,
+			})
 			word.Reset()
 			wordStarted = false
 			wordDynamic = false
+			wordFDDupTarget = false
 		}
 	}
 
@@ -788,6 +851,11 @@ func commandWordFacts(command string) ([]commandWordFact, bool) {
 		case ' ', '\t', '\r':
 			flush()
 		case '>', '<':
+			if c == '>' && wordStarted && word.String() == "&" {
+				word.WriteByte(c)
+				flush()
+				continue
+			}
 			if wordStarted && isFileDescriptor(word.String()) {
 				word.WriteByte(c)
 				if i+1 < len(command) && (command[i+1] == c || (c == '<' && command[i+1] == '>')) {
@@ -806,6 +874,9 @@ func commandWordFacts(command string) ([]commandWordFact, bool) {
 			}
 			flush()
 		default:
+			if c == '&' && i > 0 && (command[i-1] == '>' || command[i-1] == '<') {
+				wordFDDupTarget = true
+			}
 			if c == '$' || c == '`' {
 				wordDynamic = true
 			}

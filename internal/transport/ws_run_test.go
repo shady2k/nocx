@@ -11,10 +11,12 @@ package transport
 // is on bytes that actually crossed the socket or the fake provider.
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -107,6 +109,55 @@ func TestRunResolved_ACompletedOutcomeMayNameNoEntry(t *testing.T) {
 	}
 	if msg := validateRunResolvedRaw(raw); msg == "" {
 		t.Fatal("an over-long entry id was accepted")
+	}
+}
+
+// TestRun_ContextCancellationWithdrawsBeforeExecution proves the first
+// protocol phase: cancellation addresses the broker request id, the renderer
+// is told to withdraw it, and no command can create an execution artifact.
+func TestRun_ContextCancellationWithdrawsBeforeExecution(t *testing.T) {
+	client, err := assistant.NewClient(nil, nil, content.Floor{})
+	if err != nil {
+		t.Fatalf("assistant.NewClient: %v", err)
+	}
+	h := newAskHarness(t, client)
+	sid := openLocalSession(t, h.conn)
+	pidFile := t.TempDir() + "/child.pid"
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, reqErr := h.ws.RequestRun(ctx, sid, "printf %s $$ > "+pidFile)
+		done <- reqErr
+	}()
+	request := readNotification(t, h.conn, "agent.runRequest", 10*time.Second)
+	var req struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal(request, &req); err != nil {
+		t.Fatalf("runRequest unmarshal: %v", err)
+	}
+	if req.RequestID == "" {
+		t.Fatal("runRequest carries no requestId")
+	}
+
+	cancel()
+	withdrawal := readNotification(t, h.conn, "agent.runCancel", 10*time.Second)
+	var withdrawn struct {
+		RequestID string `json:"requestId"`
+	}
+	if err := json.Unmarshal(withdrawal, &withdrawn); err != nil {
+		t.Fatalf("runCancel unmarshal: %v", err)
+	}
+	if withdrawn.RequestID != req.RequestID {
+		t.Fatalf("runCancel requestId = %q, want %q", withdrawn.RequestID, req.RequestID)
+	}
+	if reqErr := <-done; reqErr == nil || reqErr.Error() != "run: submission expired before execution" {
+		t.Fatalf("RequestRun error = %v, want exact pre-execution sentence", reqErr)
+	}
+	if _, statErr := os.Stat(pidFile); !os.IsNotExist(statErr) {
+		t.Fatalf("command created pid file after withdrawal: stat error %v", statErr)
 	}
 }
 

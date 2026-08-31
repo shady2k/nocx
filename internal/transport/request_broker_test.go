@@ -745,14 +745,16 @@ func TestBroker_ConnectionLossOfOneRendererLeavesRequestAnswerableByAnother(t *t
 // ErrRequestTimedOut on a context that never cancels, and the dropped id is
 // answered honestly if it arrives late.
 func TestBroker_TimeoutTerminalizesPendingRequest(t *testing.T) {
-	h := newHarness(t, testPasswordKind(200*time.Millisecond))
+	kind := testPasswordKind(200 * time.Millisecond)
+	kind.CancelMethod = "test.passwordCancel"
+	h := newHarness(t, kind)
 	conn := h.dial(t)
 	h.waitForRenderers(t, 1)
 
 	var ans testAnswer
 	done := make(chan error, 1)
 	go func() {
-		done <- h.broker.Request(context.Background(), testPasswordKind(200*time.Millisecond),
+		done <- h.broker.Request(context.Background(), kind,
 			map[string]any{"reason": "silent renderer"}, &ans)
 	}()
 	raw := readRequestNotification(t, conn, "test.passwordRequest")
@@ -761,6 +763,10 @@ func TestBroker_TimeoutTerminalizesPendingRequest(t *testing.T) {
 	wantResult(t, done, ErrRequestTimedOut)
 	if n := h.broker.Pending(); n != 0 {
 		t.Fatalf("%d pending requests leaked after the timeout", n)
+	}
+	cancelled := readRequestNotification(t, conn, kind.CancelMethod)
+	if got := notificationRequestID(t, cancelled); got != rid {
+		t.Fatalf("timeout cancellation requestId = %q, want %q", got, rid)
 	}
 
 	// The late resolution is answered honestly, and resolves nothing.
@@ -807,6 +813,35 @@ func TestBroker_ContextCancellationDropsPending(t *testing.T) {
 	})
 	if reply.Error == nil || reply.Error.Message != "Unknown request id" {
 		t.Fatalf("resolution after cancellation: got %+v, want refusal", reply)
+	}
+}
+
+// A cancelled broker request withdraws the renderer-side submission by the
+// same id before the caller is released. The renderer can then abort its
+// pre-write gate instead of writing an effect nobody owns.
+func TestBroker_ContextCancellationNotifiesRendererToWithdraw(t *testing.T) {
+	h := newHarness(t, testPasswordKind(0))
+	conn := h.dial(t)
+	h.waitForRenderers(t, 1)
+	kind := testPasswordKind(0)
+	kind.CancelMethod = "test.passwordCancel"
+
+	ctx, cancel := context.WithCancel(context.Background())
+	var ans testAnswer
+	done := make(chan error, 1)
+	go func() {
+		done <- h.broker.Request(ctx, kind, map[string]any{"reason": "cancel me"}, &ans)
+	}()
+	rid := notificationRequestID(t, readRequestNotification(t, conn, kind.NotifyMethod))
+
+	cancel()
+	withdraw := readRequestNotification(t, conn, kind.CancelMethod)
+	if got := notificationRequestID(t, withdraw); got != rid {
+		t.Fatalf("withdrawal requestId = %q, want %q", got, rid)
+	}
+	wantResult(t, done, context.Canceled)
+	if n := h.broker.Pending(); n != 0 {
+		t.Fatalf("%d pending requests leaked after cancellation", n)
 	}
 }
 
@@ -1079,10 +1114,16 @@ func TestBroker_AllDeliveriesFailTerminalizes(t *testing.T) {
 	)
 
 	var ans testAnswer
-	err := broker.Request(context.Background(), testPasswordKind(0),
+	kind := testPasswordKind(0)
+	var delivered bool
+	kind.AfterDeliver = func(_ string) { delivered = true }
+	err := broker.Request(context.Background(), kind,
 		map[string]any{"reason": "undeliverable"}, &ans)
 	if !errors.Is(err, ErrRequestUndelivered) {
 		t.Fatalf("Request returned %v, want ErrRequestUndelivered", err)
+	}
+	if delivered {
+		t.Fatal("AfterDeliver reported delivery after every recipient failed")
 	}
 	if n := broker.Pending(); n != 0 {
 		t.Fatalf("%d pending requests leaked after the undelivered failure", n)
@@ -1192,10 +1233,14 @@ func TestBroker_FailedDeliveryIsNotARecipient(t *testing.T) {
 		},
 	)
 
+	var delivered bool
+	kind := testPasswordKind(0)
+	kind.AfterDeliver = func(_ string) { delivered = true }
+
 	var ans testAnswer
 	done := make(chan error, 1)
 	go func() {
-		done <- broker.Request(context.Background(), testPasswordKind(0),
+		done <- broker.Request(context.Background(), kind,
 			map[string]any{"reason": "c1 lost, c2 live"}, &ans)
 	}()
 
@@ -1220,6 +1265,9 @@ func TestBroker_FailedDeliveryIsNotARecipient(t *testing.T) {
 		}
 	case <-time.After(wantWithin):
 		t.Fatal("Request did not settle after the surviving recipient resolved")
+	}
+	if !delivered {
+		t.Fatal("AfterDeliver reported no successful recipient")
 	}
 	if ans.Password != "hunter2" {
 		t.Fatalf("typed result: got %+v", ans)

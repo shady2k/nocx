@@ -30,6 +30,15 @@
       "description": "The authoritative whole-run count of streamed chunks refused by the wire. Present only when non-zero so the reserved response preserves the same visible gap marker as agent.runState.",
       "type": "integer",
       "minimum": 1
+    },
+    "unarmedBounds": {
+      "description": "Human-readable sentences naming lease bounds that could not be armed because shell integration was unavailable. Present only when at least one bound did not apply; never null or empty.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     }
   }
 }

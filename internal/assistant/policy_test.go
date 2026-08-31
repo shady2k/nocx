@@ -46,13 +46,14 @@ func toolResultJSON(content string) []byte {
 // the ledger is a party to the contract, and criterion 4 needs exactly the
 // StartExecution write to fail.
 type fakeLedger struct {
-	mu          sync.Mutex
-	log         []string
-	failStart   bool
-	failSubmit  bool
-	failCause   bool
-	nextExec    int64
-	submissions []fakeSubmission
+	mu                  sync.Mutex
+	log                 []string
+	failStart           bool
+	failSubmit          bool
+	failCause           bool
+	rejectCanceledCause bool
+	nextExec            int64
+	submissions         []fakeSubmission
 	// causes is every (turn, caused) pair AddCause was asked for, in call
 	// order — the relation nocx-h1l4o records. The fake assigns positions
 	// the way the store does (one counter per turn) so a test can assert
@@ -127,10 +128,13 @@ func (f *fakeLedger) recordedSubmissions() []fakeSubmission {
 	return append([]fakeSubmission(nil), f.submissions...)
 }
 
-func (f *fakeLedger) AddCause(_ context.Context, turnID, causedID string) (int, error) {
+func (f *fakeLedger) AddCause(ctx context.Context, turnID, causedID string) (int, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	f.log = append(f.log, "cause:"+causedID)
+	if f.rejectCanceledCause && ctx.Err() != nil {
+		return 0, context.Canceled
+	}
 	if f.failCause {
 		return 0, errors.New("fake ledger: the relation could not be recorded")
 	}
@@ -320,11 +324,15 @@ func middlewareForTurn(t *testing.T, grant content.Grant, ledger AttemptLedger, 
 
 // wrappedEndpoint drives one tool call through the middleware's pipeline.
 func wrappedEndpoint(mw *policyMiddleware, name, callID, args string) (string, error) {
+	return wrappedEndpointContext(mw, context.Background(), name, callID, args)
+}
+
+func wrappedEndpointContext(mw *policyMiddleware, ctx context.Context, name, callID, args string) (string, error) {
 	wrapped, err := mw.WrapInvokableToolCall(context.Background(), nil, &adk.ToolContext{Name: name, CallID: callID})
 	if err != nil {
 		return "", err
 	}
-	return wrapped(context.Background(), args)
+	return wrapped(ctx, args)
 }
 
 func TestEinoAdapter_RefusalIsNotFramedAsToolOutput(t *testing.T) {

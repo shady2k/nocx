@@ -892,6 +892,18 @@ func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind, de
 	}
 }
 
+// leaseResult is the model-visible answer for a run lease outcome.
+// It follows refusalResult's contract: the tool call receives our sentence
+// as a result, so the model can explain the real outcome and continue rather
+// than receiving a framework error with no call result.
+func leaseResult(tool string, leaseErr *RunLeaseError) string {
+	sentence := RunLeaseSentence(leaseErr.Reason, leaseErr.SubmissionExpired)
+	if leaseErr.SubmissionExpired {
+		return "NOT RUN: nocx did not run your call to " + tool + ": " + sentence + ". Do not treat this as a command result or retry it without explaining why."
+	}
+	return "TERMINATED: nocx ended your call to " + tool + ": " + sentence + ". Do not treat this as a command result or retry it without explaining why."
+}
+
 // ── the attempt ───────────────────────────────────────────────────────────
 
 // recordProposal writes the escalation's ledger facts BEFORE the run
@@ -1183,7 +1195,11 @@ func (m *effectKernel) run(decl agenttools.Tool, ctx context.Context, capability
 	if !decl.ResultBound.Valid() {
 		return "", fmt.Errorf("tool %q has no valid result bound", decl.Name)
 	}
-	runCtx, cancel := context.WithTimeout(ctx, decl.Deadline)
+	runCtx := ctx
+	cancel := func() {}
+	if decl.Deadline > 0 {
+		runCtx, cancel = context.WithTimeout(ctx, decl.Deadline)
+	}
 	defer cancel()
 	runCtx = withToolBound(runCtx, decl.ResultBound)
 	switch decl.Executes {
@@ -1242,7 +1258,10 @@ func (m *effectKernel) executeInRenderer(ctx context.Context, decl agenttools.To
 	switch cap := capability.(type) {
 	case *agenttools.Runner:
 		return executeRun(ctx, cap, m.requester, rawArgs, func(entryID string) {
-			m.noteCause(ctx, entryID)
+			// Lease cancellation has already ended the execution context;
+			// durable cause bookkeeping must still close the command→turn
+			// interval.
+			m.noteCause(context.WithoutCancel(ctx), entryID)
 		})
 	default:
 		return "", fmt.Errorf("tool %q: capability is %T, not a renderer-executable capability", decl.Name, capability)
@@ -1599,9 +1618,20 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		return modelResult{text: out, kind: modelToolOutput}, nil
 	}
 
-	// 8. The outcome is recorded on the attempt — the interval closes
-	// with the outcome or the terminal reason, never before.
+	// A delivered lease bound is a product-caused outcome, so return it in
+	// the tool's slot and let the model explain it instead of failing the
+	// whole stream. An undelivered submission is different: no command
+	// existed, so it remains a run-level failure and its sentence belongs in
+	// agent.runState.Error.
 	if runErr != nil {
+		var leaseErr *RunLeaseError
+		if errors.As(runErr, &leaseErr) {
+			_ = k.closeAttempt(ctx, execID, leaseErr.Reason, content.EntryFailure)
+			if leaseErr.SubmissionExpired {
+				return modelResult{}, leaseErr
+			}
+			return modelResult{text: leaseResult(decl.Name, leaseErr), kind: modelToolOutput}, nil
+		}
 		_ = k.closeAttempt(ctx, execID, terminationReasonOf(runErr), content.EntryFailure)
 		// Named, so the transport can say WHICH tool failed without
 		// stringifying the framework's wrapper around it.

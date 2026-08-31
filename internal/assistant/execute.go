@@ -756,6 +756,10 @@ func executeRun(ctx context.Context, runner *agenttools.Runner, requester Render
 	}
 	body, err := requester.RequestRun(ctx, sessionID, p.Command)
 	if err != nil {
+		var leaseErr *RunLeaseError
+		if errors.As(err, &leaseErr) && caused != nil && leaseErr.EntryID != "" {
+			caused(leaseErr.EntryID)
+		}
 		return "", err
 	}
 	var b runBodyWire

@@ -53,7 +53,9 @@ func parseCanonicalInvocation(command string) content.Invocation {
 		if disqualifyingWords(words) {
 			inv.Disqualified = true
 		}
-		inv.Resources = appendResourceReport(inv.Resources, subcommand, facts)
+		inv.Resources = appendDynamicUnresolved(
+			appendResourceReport(inv.Resources, subcommand, facts), facts,
+		)
 	}
 	if reason := shellFeatureReason(command); strings.HasPrefix(reason, "runs in the background") {
 		inv.Resources.Unresolved = append(inv.Resources.Unresolved, content.UnresolvedResource{
@@ -309,6 +311,31 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 	}
 	for _, operand := range readOperands(program, args) {
 		report = addResource(report, operand, content.ResourceRead)
+	}
+	return report
+}
+
+// Dynamic tokens are recorded even when they are options rather than resource
+// operands, because a standing rule must cover every token it was shown.
+func appendDynamicUnresolved(report content.ResourceReport, facts []commandWordFact) content.ResourceReport {
+	for _, fact := range facts {
+		if !fact.dynamic {
+			continue
+		}
+		alreadyUnresolved := false
+		for _, unresolved := range report.Unresolved {
+			if unresolved.Path == fact.value {
+				alreadyUnresolved = true
+				break
+			}
+		}
+		if alreadyUnresolved {
+			continue
+		}
+		report.Unresolved = append(report.Unresolved, content.UnresolvedResource{
+			Path: fact.value, Verb: content.ResourceUnknown,
+			Reason: fmt.Sprintf("could not resolve %s without executing shell expansion", fact.value),
+		})
 	}
 	return report
 }

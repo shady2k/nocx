@@ -331,6 +331,20 @@ func TestCommandResources_RMVariableIsUnresolvedDeletion(t *testing.T) {
 	}
 }
 
+func TestStandingRuleRejectsDynamicTokensInAnyPosition(t *testing.T) {
+	for _, command := range []string{"cat $LOGFILE", "df --output=$FORMAT /"} {
+		t.Run(command, func(t *testing.T) {
+			inv := parseCanonicalInvocation(command)
+			if len(inv.Resources.Unresolved) == 0 {
+				t.Fatalf("unresolved = %+v, want the dynamic token recorded", inv.Resources)
+			}
+			if _, reason := content.StandingRule(inv); reason == "" {
+				t.Fatalf("standing rule for %q was not refused", command)
+			}
+		})
+	}
+}
+
 func TestCommandEffect_BackgroundWithFollowingCommandStaysWorstCase(t *testing.T) {
 	if got := commandEffect(parseCanonicalInvocation("ls & echo done"), content.EffectMutateDestructive); got != content.EffectMutateDestructive {
 		t.Fatalf("effect = %q, want declared worst case", got)

@@ -406,7 +406,14 @@ func (s *ApprovalStore) InvocationFor(ap Approval) (content.Invocation, bool, bo
 }
 
 func cloneInvocation(inv content.Invocation) content.Invocation {
-	out := content.Invocation{Parsed: inv.Parsed, Disqualified: inv.Disqualified}
+	out := content.Invocation{
+		Parsed:       inv.Parsed,
+		Disqualified: inv.Disqualified,
+		Resources: content.ResourceReport{
+			Resources:  append([]content.Resource(nil), inv.Resources.Resources...),
+			Unresolved: append([]content.UnresolvedResource(nil), inv.Resources.Unresolved...),
+		},
+	}
 	if inv.Commands == nil {
 		return out
 	}

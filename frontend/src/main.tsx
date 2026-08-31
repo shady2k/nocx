@@ -207,7 +207,14 @@ function main(): void {
   const vaultClient = new VaultClient(dispatcher)
   dispatcher.onConnectionStateChange((state) => {
     if (state.kind === 'waiting') {
-      setConnectionState({ kind: 'waiting', nextAttemptInMs: state.backoffMs })
+      setConnectionState({
+        kind: 'waiting',
+        nextAttemptInMs: state.backoffMs,
+        // A transient discovery failure says more than the overlay's default
+        // sentence does — "the coordinator is not running" rather than "cannot
+        // reach the backend". The countdown under it is the same either way.
+        message: state.failure?.message,
+      })
     } else if (state.kind === 'blocked') {
       setConnectionState({
         kind: 'blocked',

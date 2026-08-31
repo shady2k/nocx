@@ -92,9 +92,90 @@ describe('ConnectionOverlay', () => {
   })
 
   it('counts the last second down to now rather than to zero', () => {
+    vi.useFakeTimers()
     const { host } = subject({ kind: 'waiting', nextAttemptInMs: 0 }, { minimumVisibleMs: 0 })
 
     expect(text(host, 'detail')).toBe('Retrying now')
+  })
+
+  it('counts the wait DOWN, second by second, without the caller restating it', () => {
+    vi.useFakeTimers()
+    const { host } = subject({ kind: 'waiting', nextAttemptInMs: 3000 }, { minimumVisibleMs: 0 })
+
+    // The dispatcher publishes a wait once, when it schedules the attempt, and
+    // the number it publishes GROWS with the backoff — so a screen that renders
+    // the published value counted 1, 2, 3, 6 seconds upwards and never arrived.
+    expect(text(host, 'detail')).toBe('Next attempt in 3 seconds')
+    vi.advanceTimersByTime(1000)
+    expect(text(host, 'detail')).toBe('Next attempt in 2 seconds')
+    vi.advanceTimersByTime(1000)
+    expect(text(host, 'detail')).toBe('Next attempt in 1 second')
+    vi.advanceTimersByTime(1000)
+    expect(text(host, 'detail')).toBe('Retrying now')
+  })
+
+  it('restarts the countdown when the next wait is published', () => {
+    vi.useFakeTimers()
+    const { host, state } = subject(
+      { kind: 'waiting', nextAttemptInMs: 2000 },
+      { minimumVisibleMs: 0 },
+    )
+    vi.advanceTimersByTime(1500)
+    expect(text(host, 'detail')).toBe('Next attempt in 1 second')
+
+    state({ kind: 'connecting' })
+    state({ kind: 'waiting', nextAttemptInMs: 5000 })
+    expect(text(host, 'detail')).toBe('Next attempt in 5 seconds')
+  })
+
+  it('takes the caller sentence for a wait when there is one', () => {
+    vi.useFakeTimers()
+    const { host } = subject(
+      { kind: 'waiting', nextAttemptInMs: 2000, message: 'The nocx coordinator is not running.' },
+      { minimumVisibleMs: 0 },
+    )
+
+    expect(text(host, 'headline')).toBe('The nocx coordinator is not running.')
+    expect(text(host, 'detail')).toBe('Next attempt in 2 seconds')
+  })
+
+  it('does not retitle the screen for each attempt of one outage', () => {
+    vi.useFakeTimers()
+    const { host, state } = subject({ kind: 'connecting' }, { minimumVisibleMs: 0 })
+
+    // The first connect of a session is a connect and says so.
+    expect(text(host, 'headline')).toBe('Connecting to nocx…')
+
+    state({ kind: 'waiting', nextAttemptInMs: 1000 })
+    state({ kind: 'connecting' })
+
+    // Every later attempt lasts a few hundred milliseconds. Letting each one
+    // retitle the screen made the sentence flip between two headlines for as
+    // long as the backend stayed down; the condition has not changed, and the
+    // ring is what says an attempt is in flight.
+    expect(text(host, 'headline')).toBe('Cannot reach the nocx backend')
+    expect(text(host, 'detail')).toBe('Reconnecting…')
+  })
+
+  it('does not move the mark between the states of one outage', () => {
+    vi.useFakeTimers()
+    const { host, state } = subject(
+      { kind: 'waiting', nextAttemptInMs: 1000 },
+      { minimumVisibleMs: 0 },
+    )
+    const action = () => host.querySelector<HTMLElement>('.ui-connection-overlay__action')
+
+    // Measured in a browser as a 28px jump of the icon on every attempt: the
+    // action row was removed in `connecting`, the group is centred, so the
+    // whole composition rose and fell. The row now stays and the control
+    // inside it is hidden.
+    expect(action()?.dataset.available).toBe('true')
+    state({ kind: 'connecting' })
+    expect(action()).not.toBeNull()
+    expect(action()?.dataset.available).toBe('false')
+    expect(rule(".ui-connection-overlay__action[data-available='false']")).toMatch(
+      /visibility\s*:\s*hidden/,
+    )
   })
 
   it('uses a native modal dialog and calls showModal', () => {
@@ -127,7 +208,9 @@ describe('ConnectionOverlay', () => {
     // The ring around the mark IS the indicator. A Spinner under it would be
     // two things saying one thing.
     expect(host.querySelector('.ui-spinner')).toBeNull()
-    expect(host.querySelector<HTMLButtonElement>('.ui-button')).toBeNull()
+    expect(
+      host.querySelector<HTMLElement>('.ui-connection-overlay__action')?.dataset.available,
+    ).toBe('false')
     expect(host.querySelector('.ui-connection-overlay')?.getAttribute('style')).toBeNull()
   })
 
@@ -184,10 +267,15 @@ describe('ConnectionOverlay', () => {
     ['waiting', { kind: 'waiting', nextAttemptInMs: 1250 } as const, true],
     ['blocked', { kind: 'blocked', message: 'm', remedy: 'r' } as const, true],
   ])('offers Retry in %s only when it can act', (_name, initial, present) => {
+    vi.useFakeTimers()
     const { host, retry } = subject(initial, { minimumVisibleMs: 0 })
+    const row = host.querySelector<HTMLElement>('.ui-connection-overlay__action')
     const button = host.querySelector<HTMLButtonElement>('button.ui-button')
-    expect(button !== null).toBe(present)
-    if (button) {
+    // The row is always there — it holds the height. Whether the control in it
+    // can act is the variance.
+    expect(row).not.toBeNull()
+    expect(row?.dataset.available === 'true').toBe(present)
+    if (present && button) {
       fireEvent.click(button)
       expect(retry).toHaveBeenCalledOnce()
     }
@@ -201,6 +289,9 @@ describe('ConnectionOverlay', () => {
     expect(text(host, 'headline')).toBe(message)
     expect(text(host, 'detail')).toBe(remedy)
     expect(overlay(host).textContent).toBe(`${message}${remedy}Retry`)
+    expect(
+      host.querySelector<HTMLElement>('.ui-connection-overlay__action')?.dataset.available,
+    ).toBe('true')
   })
 
   it('never shows an empty sentence: a held overlay keeps the state it was in', () => {

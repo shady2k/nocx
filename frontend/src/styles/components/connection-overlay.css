@@ -168,6 +168,16 @@ dialog.ui-connection-overlay::backdrop {
   margin-top: var(--space-8);
 }
 
+/* The row is present in every state; the control inside it is hidden where it
+   cannot act. `visibility: hidden` and not `display: none` on purpose — the
+   row must keep occupying the button's height, because the group is centred
+   and a row that comes and goes moved the mark 28px on every attempt. It also
+   takes the button out of the tab order and the accessibility tree, so a
+   keyboard or screen-reader user is not offered a Retry that does nothing. */
+.ui-connection-overlay__action[data-available='false'] {
+  visibility: hidden;
+}
+
 /* ── Departure ──────────────────────────────────────────────────────────── */
 
 /* Arrival is instantaneous and deliberately so: an outage is already motion,

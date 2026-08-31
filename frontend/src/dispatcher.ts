@@ -126,8 +126,34 @@ interface PendingCall {
 export type ConnectionState =
   | { kind: 'connecting' }
   | { kind: 'online' }
-  | { kind: 'waiting'; backoffMs: number }
+  /**
+   * An attempt is scheduled. `failure` is the discovery failure that caused
+   * this wait, when there was one — a transient failure has a better sentence
+   * than "cannot reach the backend", and losing it was what made a stopped
+   * coordinator and an unreachable port look identical.
+   */
+  | { kind: 'waiting'; backoffMs: number; failure?: EndpointFailure }
   | { kind: 'blocked'; failure: EndpointFailure }
+
+/**
+ * Discovery failures a bare repeat can fix.
+ *
+ * `blocked` means "repeating this changes nothing", and it stops the retry
+ * loop dead — nothing schedules another attempt and neither the visibility nor
+ * the online listener retries out of it. That is right for a broken profile or
+ * an incompatible coordinator, and it was wrong for exactly the case the owner
+ * hit: the backend was not running, he started it, and the client sat on
+ * "The desktop backend could not be reached." for as long as he left it,
+ * because the one state it was in was the one state that never tries again.
+ *
+ * `not-ready` is the same shape — the coordinator is coming up — and
+ * `token-refused` is deliberately NOT here: a token the backend rejects is not
+ * fixed by offering it again, only by discovery handing out a new one.
+ */
+const TRANSIENT_FAILURE_KINDS: ReadonlySet<EndpointFailureKind> = new Set([
+  'no-server',
+  'not-ready',
+])
 
 export class Dispatcher {
   private ws: WebSocket | null = null
@@ -216,7 +242,11 @@ export class Dispatcher {
         return
       }
       if (!result.ok) {
-        this.setConnectionState({ kind: 'blocked', failure: result.failure })
+        if (TRANSIENT_FAILURE_KINDS.has(result.failure.kind)) {
+          this._scheduleReconnect(result.failure)
+        } else {
+          this.setConnectionState({ kind: 'blocked', failure: result.failure })
+        }
         return
       }
       try {
@@ -583,11 +613,11 @@ export class Dispatcher {
     this._armHeartbeatIdle(ws)
   }
 
-  private _scheduleReconnect(): void {
+  private _scheduleReconnect(failure?: EndpointFailure): void {
     if (this._reconnectTimer !== null || this._closingDeliberately) return
     const jitter = Math.random() * this._backoffMs * 0.5
     const delay = this._backoffMs + jitter
-    this.setConnectionState({ kind: 'waiting', backoffMs: delay })
+    this.setConnectionState({ kind: 'waiting', backoffMs: delay, failure })
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null
       void this._attemptConnection()
@@ -607,7 +637,9 @@ export class Dispatcher {
 
   private sameConnectionState(a: ConnectionState, b: ConnectionState): boolean {
     if (a.kind !== b.kind) return false
-    if (a.kind === 'waiting' && b.kind === 'waiting') return a.backoffMs === b.backoffMs
+    if (a.kind === 'waiting' && b.kind === 'waiting') {
+      return a.backoffMs === b.backoffMs && a.failure?.kind === b.failure?.kind
+    }
     if (a.kind === 'blocked' && b.kind === 'blocked') {
       const aFailureKind: EndpointFailureKind = a.failure.kind
       const bFailureKind: EndpointFailureKind = b.failure.kind

@@ -75,7 +75,6 @@ import { registerTerminalLinks } from './terminal-links'
 import type { LinkPathProbe } from './terminal-links/open'
 import { createUrlOpener } from './open-url'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
-import { type FilesRevealHint } from './files/files-store'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
 import { uploadSurfaceFor } from './files/upload-surface'
 import { uploadOperations } from './files/upload-operations'
@@ -663,7 +662,7 @@ async function main() {
   // same reason: one store per dispatcher, because a transfer has one state.
   // Without this the panel's Download item would be dead code.
   const downloadSurface = downloadSurfaceFor(dispatcher)
-  let revealFilesPath: ((path: string, hint?: FilesRevealHint) => Promise<boolean>) | null = null
+  let revealFilesPath: ((path: string) => Promise<boolean>) | null = null
   let revealFilesView: () => void = () => {}
   const filesView = createFilesView({
     services: filesServicesTracked,
@@ -673,7 +672,7 @@ async function main() {
     upload: uploadSurface,
     download: downloadSurface,
     onStore: (store) => {
-      revealFilesPath = (path, hint) => store.revealPath(path, hint)
+      revealFilesPath = (path) => store.revealPath(path)
       rescopeFiles = () => store.rescope(untrack(() => activeOrigin()))
     },
   })
@@ -883,12 +882,12 @@ async function main() {
     openUrl: (url) => terminalLinkUrlOpener.open(url),
     openBinding: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),
     pathKind,
-    openDirectory: async (path, probe) => {
+    openDirectory: async (path) => {
       const reveal = revealFilesPath
       if (reveal === null) return false
       rescopeFiles()
       revealFilesView()
-      return reveal(path, probe.hint)
+      return reveal(path)
     },
     openViewer: (target) => openFileViewer(target),
     onBindingLiveness: onFilesBindingLiveness,

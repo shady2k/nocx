@@ -21,14 +21,12 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import type { FilesOpenResult } from '../generated/files.open'
-import type { FilesRevealHint } from '../files/files-store'
 import type { ActiveOrigin } from '../pane-content'
 import type { FileViewerTarget } from '../file-viewer'
 import type { LinkTarget } from './detect'
 import { resolvePath } from './resolve'
 
-export type LinkPathProbe =
-  { kind: 'directory'; hint?: FilesRevealHint } | { kind: 'file' } | { kind: 'unknown' }
+export type LinkPathProbe = { kind: 'directory' } | { kind: 'file' } | { kind: 'unknown' }
 
 /** The opener's entire window onto the app. */
 // Every member is declared as a PROPERTY holding a function, never as a

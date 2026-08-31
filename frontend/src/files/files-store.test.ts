@@ -14,12 +14,7 @@ import { describe, expect, it, vi } from 'vitest'
 import type { FilesListEntry, FilesListResult } from '../generated/files.list'
 import type { FilesChanged } from '../generated/files.changed'
 import type { FilesPanelServices } from './files-client'
-import {
-  createFilesTreeStore,
-  FILES_PAGE_SIZE,
-  type FilesRevealHint,
-  type FilesTreeStore,
-} from './files-store'
+import { createFilesTreeStore, FILES_PAGE_SIZE, type FilesTreeStore } from './files-store'
 import type { ActiveOrigin } from '../pane-content'
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
@@ -416,7 +411,7 @@ describe('files tree store', () => {
     await expect(store.revealPath('/notes.md')).resolves.toBe(false)
     expect(store.revealTarget()).toBe('/')
   })
-  it('consumes a probed parent listing during directory reveal', async () => {
+  it('walks each directory level during directory reveal', async () => {
     const list = vi.fn().mockImplementation((_bindingId: string, path: string) => {
       if (path === '/')
         return Promise.resolve(listOk('C:/', [entry({ name: 'home', path: '/home', kind: 'dir' })]))
@@ -431,44 +426,12 @@ describe('files tree store', () => {
     store.rescope(LOCAL_A)
     await settle()
 
-    const hint: FilesRevealHint = {
-      bindingId: 'b1',
-      parentPath: '/home',
-      listing: listOk('C:/home', [entry({ name: 'alice', path: '/home/alice', kind: 'dir' })], {
-        path: '/home',
-      }) as Extract<FilesListResult, { state: 'ok' }>,
-    }
-    await expect(store.revealPath('/home/alice', hint)).resolves.toBe(true)
-    expect(list).toHaveBeenCalledTimes(2)
+    await expect(store.revealPath('/home/alice')).resolves.toBe(true)
+    expect(list).toHaveBeenCalledTimes(3)
     expect(list).toHaveBeenNthCalledWith(1, 'b1', '/', 0, FILES_PAGE_SIZE)
-    expect(list).toHaveBeenNthCalledWith(2, 'b1', '/home/alice', 0, FILES_PAGE_SIZE)
+    expect(list).toHaveBeenNthCalledWith(2, 'b1', '/home', 0, FILES_PAGE_SIZE)
+    expect(list).toHaveBeenNthCalledWith(3, 'b1', '/home/alice', 0, FILES_PAGE_SIZE)
   })
-  it('does not consume a directory hint from another binding', async () => {
-    const list = vi.fn().mockImplementation((_bindingId: string, path: string) => {
-      if (path === '/')
-        return Promise.resolve(listOk('C:/', [entry({ name: 'home', path: '/home', kind: 'dir' })]))
-      if (path === '/home') {
-        return Promise.resolve(
-          listOk('C:/home', [entry({ name: 'alice', path: '/home/alice', kind: 'dir' })]),
-        )
-      }
-      return Promise.resolve(listOk(`C:${path}`, []))
-    })
-    const store = createFilesTreeStore(makeServices({ list }))
-    store.rescope(LOCAL_A)
-    await settle()
-
-    const hint: FilesRevealHint = {
-      bindingId: 'other-binding',
-      parentPath: '/home',
-      listing: listOk('C:/home', [entry({ name: 'alice', path: '/home/alice', kind: 'dir' })], {
-        path: '/home',
-      }) as Extract<FilesListResult, { state: 'ok' }>,
-    }
-    await expect(store.revealPath('/home/alice', hint)).resolves.toBe(true)
-    expect(list).toHaveBeenCalledWith('b1', '/home', 0, FILES_PAGE_SIZE)
-  })
-
   it('queues a reveal until a newly opened binding has listed its root', async () => {
     const opening = deferred<typeof OPEN_RESULT>()
     const list = vi

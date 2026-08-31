@@ -2636,6 +2636,32 @@ export class TerminalContent extends BasePaneContent {
             this.settleStoredEntry(rec.id, ack?.entryId ?? '')
             return ack
           }),
+        (rec, attempt) => {
+          const sessionId = this.session?.sessionId
+          if (!sessionId) return
+          void this.client
+            .call('ledger.bind', {
+              envelope: {
+                // attempt.id is the server identity used to create the row
+                // here; rec.id is only a renderer-local record counter.
+                id: attempt.id,
+                sessionId,
+                cwd: rec.cwd || '/',
+                kind: 'shell',
+                intent: rec.command,
+                sensitivity: 'normal',
+                clientSeq: 0,
+                attemptId: attempt.id,
+              },
+              facts: {},
+            })
+            .catch((error: unknown) => {
+              log.warn('nocx: ledger bind failed', {
+                attempt: attempt.id,
+                error: String(error),
+              })
+            })
+        },
       )
       this._projections.attach()
 
@@ -3298,6 +3324,7 @@ export class TerminalContent extends BasePaneContent {
       // handshake generation that was acknowledged to a backend lane that no
       // longer exists. Left standing, each of them would answer a question
       // about the new shell with a fact about the old one.
+      this._projections?.reset()
       this.lifecycle.reset()
       this._disposeAllMarkers()
       this._recovery = null
@@ -3662,6 +3689,7 @@ export class TerminalContent extends BasePaneContent {
       // that no longer exists (B.9). True for a clean exit AND a loss.
       this._sessionExited = true
       this.hooks.onActiveOriginChange?.()
+      this._projections?.reset()
       this.lifecycle.reset()
       this._disposeAllMarkers()
       if (exit.cause === 'interrupted') {
@@ -3713,6 +3741,7 @@ export class TerminalContent extends BasePaneContent {
     })
     session.onReset(() => {
       renderer.reset()
+      this._projections?.reset()
       this.lifecycle.reset()
       this._disposeAllMarkers()
     })

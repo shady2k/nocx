@@ -173,8 +173,9 @@ func tapDataFor(t *testing.T, tap *socketTap, sid, needle string, timeout time.D
 // completes before the command bytes enter the data plane. A blank requestID
 // is the ordinary human-command path and deliberately skips the assistant
 // lifecycle RPC.
-func (h *runLeaseHarness) submitLeaseCommand(t *testing.T, tap *socketTap, sid, command, requestID string) {
+func (h *runLeaseHarness) submitLeaseCommand(t *testing.T, tap *socketTap, sid, command, requestID string) string {
 	t.Helper()
+	attemptID := ""
 	if requestID != "" {
 		resp := tapCall(t, h.conn, tap, 41, "lifecycle.submitAttempt", map[string]string{
 			"domain":    string(h.domain.Domain),
@@ -199,6 +200,7 @@ func (h *runLeaseHarness) submitLeaseCommand(t *testing.T, tap *socketTap, sid, 
 		if envelope.Result.ID == "" {
 			t.Fatal("lifecycle.submitAttempt returned no attempt id")
 		}
+		attemptID = envelope.Result.ID
 	}
 	sidBytes, err := session.IDToBytes(session.ID(sid))
 	if err != nil {
@@ -208,6 +210,39 @@ func (h *runLeaseHarness) submitLeaseCommand(t *testing.T, tap *socketTap, sid, 
 	if err := h.conn.WriteMessage(websocket.BinaryMessage, f.Encode()); err != nil {
 		t.Fatalf("write command: %v", err)
 	}
+	if attemptID == "" {
+		return attemptID
+	}
+
+	// OSC 133 C is represented by the authenticated lifecycle fact. It is
+	// emitted after the shell echoes the submitted command, so the bind RPC
+	// opens accounting after the echo and before command output.
+	tapDataFor(t, tap, sid, command, 10*time.Second)
+	attempt := lifecycle.AttemptID(attemptID)
+	mustLifecycleIngest(t, h.pub, "T", lifecycleEnv("lane-run-lease", h.domain, 2, lifecycleStartEvt(&attempt, command)))
+	resp := tapCall(t, h.conn, tap, 42, "ledger.bind", map[string]any{
+		"envelope": map[string]any{
+			"id":          attemptID,
+			"sessionId":   sid,
+			"cwd":         "/repo",
+			"kind":        "shell",
+			"intent":      command,
+			"sensitivity": "normal",
+			"clientSeq":   0,
+			"attemptId":   attemptID,
+		},
+		"facts": map[string]any{},
+	})
+	var bind struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &bind); err != nil {
+		t.Fatalf("ledger.bind: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if bind.Error != nil {
+		t.Fatalf("ledger.bind: %+v", bind.Error)
+	}
+	return attemptID
 }
 
 // submitCommand writes a human command into the session over the data plane.

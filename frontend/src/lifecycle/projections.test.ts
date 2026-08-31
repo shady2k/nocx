@@ -340,6 +340,31 @@ describe('the projections consume the kernel (ADR-0024, bead nocx-u7uh.7)', () =
     expect(abandoned?.state).toBe('unknown')
     expect(kernel.attempt('nope')).toBeUndefined()
   })
+  it('resets projection guards before a new session can reuse attempt identity', () => {
+    const { kernel, ledger, blocks, projections } = makeEnv()
+    const first = ledger.open('first', '/', '', () => undefined, 'shell')
+    kernel.applyFact(promptReady())
+    kernel.applyFact(running('d1', 1, { id: 'att-reused', origin: 'app', command: 'first' }))
+    const pending = ledger.open('pending', '/', '', () => undefined, 'shell')
+    expect(blocks.events).toEqual(['bind:att-reused'])
+
+    projections.reset()
+    expect(first.status).toBe('unknown')
+    expect(pending.status).toBe('unknown')
+    expect(blocks.events).toEqual(['bind:att-reused', 'abandon:att-reused', 'abandon-pending'])
+
+    kernel.reset()
+    ledger.open('second', '/', '', () => undefined, 'shell')
+    kernel.applyFact(promptReady('d2', 1))
+    kernel.applyFact(running('d2', 1, { id: 'att-reused', origin: 'app', command: 'second' }))
+
+    expect(blocks.events).toEqual([
+      'bind:att-reused',
+      'abandon:att-reused',
+      'abandon-pending',
+      'bind:att-reused',
+    ])
+  })
 })
 
 function nativeFact(): LifecycleFact {

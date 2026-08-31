@@ -39,9 +39,14 @@
         "clientSeq": {
           "type": "integer",
           "minimum": 0
+        },
+        "attemptId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
         }
       },
-      "required": ["id", "sessionId", "cwd", "kind", "sensitivity"]
+      "required": ["id", "sessionId", "cwd", "kind", "sensitivity", "attemptId"]
     },
     "facts": {
       "type": "object",

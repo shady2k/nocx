@@ -76,6 +76,12 @@ func ledgerEnv(sid, id, intent string, clientSeq int) map[string]any {
 	}
 }
 
+func ledgerBindEnv(sid, id, intent string, clientSeq int) map[string]any {
+	env := ledgerEnv(sid, id, intent, clientSeq)
+	env["attemptId"] = "attempt-" + id
+	return env
+}
+
 type ledgerAck struct {
 	ID          string `json:"id"`
 	ClientSeq   int64  `json:"clientSeq"`
@@ -154,7 +160,7 @@ func TestLedgerOpenBindClose_WalksThePhasesOverTheWire(t *testing.T) {
 		t.Fatalf("after open: phase=%q status=%q, want open/pending", row.Phase, row.Status)
 	}
 
-	env2 := ledgerEnv(sid, "entry-1", "make test", 2)
+	env2 := ledgerBindEnv(sid, "entry-1", "make test", 2)
 	ack, errObj = ledgerCall(t, conn, "ledger.bind", map[string]any{"envelope": env2}, 3)
 	if errObj != nil {
 		t.Fatalf("ledger.bind error: %+v", errObj)
@@ -526,7 +532,7 @@ func TestLedgerBindAfterClose_IsDroppedAndLogged(t *testing.T) {
 	}
 
 	ack, errObj := ledgerCall(t, conn, "ledger.bind",
-		map[string]any{"envelope": ledgerEnv(sid, "late-1", "ls", 2)}, 3)
+		map[string]any{"envelope": ledgerBindEnv(sid, "late-1", "ls", 2)}, 3)
 	if errObj != nil {
 		t.Fatalf("ledger.bind error: %+v", errObj)
 	}
@@ -593,7 +599,7 @@ func TestLedgerOpenAfterBind_IsDropped(t *testing.T) {
 	sid := openLocalSession(t, conn)
 
 	if _, errObj := ledgerCall(t, conn, "ledger.bind",
-		map[string]any{"envelope": ledgerEnv(sid, "back-1", "ls", 1)}, 2); errObj != nil {
+		map[string]any{"envelope": ledgerBindEnv(sid, "back-1", "ls", 1)}, 2); errObj != nil {
 		t.Fatalf("ledger.bind error: %+v", errObj)
 	}
 	ack, errObj := ledgerCall(t, conn, "ledger.open",
@@ -619,7 +625,7 @@ func TestLedgerEventsSentTwice_ProduceOneRowAndOneExecution(t *testing.T) {
 	sid := openLocalSession(t, conn)
 
 	open := map[string]any{"envelope": ledgerEnv(sid, "dup-1", "echo hi", 1)}
-	bind := map[string]any{"envelope": ledgerEnv(sid, "dup-1", "echo hi", 2)}
+	bind := map[string]any{"envelope": ledgerBindEnv(sid, "dup-1", "echo hi", 2)}
 	closeP := map[string]any{
 		"envelope": ledgerEnv(sid, "dup-1", "echo hi", 3),
 		"status":   "success",
@@ -680,7 +686,7 @@ func TestLedgerEntry_ExistsFromOpenUntilClosedOrDeleted(t *testing.T) {
 	for _, when := range []string{"after open", "after bind"} {
 		if when == "after bind" {
 			if _, errObj := ledgerCall(t, conn, "ledger.bind",
-				map[string]any{"envelope": ledgerEnv(sid, "span-1", "sleep 1", 2)}, 3); errObj != nil {
+				map[string]any{"envelope": ledgerBindEnv(sid, "span-1", "sleep 1", 2)}, 3); errObj != nil {
 				t.Fatalf("ledger.bind error: %+v", errObj)
 			}
 		}
@@ -786,8 +792,11 @@ func TestLedgerEvents_RefuseUnusableParams(t *testing.T) {
 			"status":   "success",
 		}},
 		{"unknown interactivity", "ledger.bind", map[string]any{
-			"envelope": ledgerEnv(sid, "k-10", "ls", 1),
+			"envelope": ledgerBindEnv(sid, "k-10", "ls", 1),
 			"facts":    map[string]any{"interactivity": "telepathy"},
+		}},
+		{"missing attempt identity", "ledger.bind", map[string]any{
+			"envelope": ledgerEnv(sid, "k-14", "ls", 1),
 		}},
 		{"negative durationMs", "ledger.close", map[string]any{
 			"envelope":   ledgerEnv(sid, "k-11", "ls", 1),
@@ -996,7 +1005,7 @@ func TestLedgerEvents_EveryStoreCallFails(t *testing.T) {
 			t.Fatalf("ledger.open error: %+v", errObj)
 		}
 		_, errObj := ledgerCall(t, conn, "ledger.bind",
-			map[string]any{"envelope": ledgerEnv(sid, "fail-2", "ls", 2)}, 3)
+			map[string]any{"envelope": ledgerBindEnv(sid, "fail-2", "ls", 2)}, 3)
 		if errObj == nil {
 			t.Fatal("ledger.bind succeeded with StartExecution failing")
 		}
@@ -1024,7 +1033,7 @@ func TestLedgerEvents_EveryStoreCallFails(t *testing.T) {
 			params map[string]any
 		}{
 			{"ledger.open", map[string]any{"envelope": ledgerEnv(sid, "fail-3", "ls", 1)}},
-			{"ledger.bind", map[string]any{"envelope": ledgerEnv(sid, "fail-3", "ls", 2)}},
+			{"ledger.bind", map[string]any{"envelope": ledgerBindEnv(sid, "fail-3", "ls", 2)}},
 		} {
 			if _, errObj := ledgerCall(t, conn, m.method, m.params, 2); errObj != nil {
 				t.Fatalf("%s error: %+v", m.method, errObj)

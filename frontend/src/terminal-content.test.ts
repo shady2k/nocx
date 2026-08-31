@@ -4435,6 +4435,31 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       await vi.waitFor(() =>
         expect(session.send.mock.calls.map((c: unknown[]) => c[0])).toEqual(['make deploy', '\r']),
       )
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-9',
+          state: 'open',
+          origin: 'app',
+          command: 'make deploy',
+        },
+      })
+      expect(client.call).toHaveBeenCalledWith('ledger.bind', {
+        envelope: {
+          id: 'att-9',
+          sessionId: session.sessionId,
+          cwd: FIXTURE_CWD,
+          kind: 'shell',
+          intent: 'make deploy',
+          sensitivity: 'normal',
+          clientSeq: 0,
+          attemptId: 'att-9',
+        },
+        facts: {},
+      })
     } finally {
       restoreScroll()
       teardown()

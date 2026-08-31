@@ -195,8 +195,9 @@ type Broker struct {
 	// from an agent.runRequest to the lifecycle attempt the renderer opens
 	// for it. The bridge lasts until RequestRun returns, so lease escalation
 	// can still name the attempt after it cancels the broker request.
-	runLeases   map[string]*runLease
-	runAttempts map[string]string
+	runLeases       map[string]*runLease
+	runAttempts     map[string]string
+	runLeaseStarted map[string]bool
 }
 
 // pendingRequest tracks one in-flight request. It is resolvable from before
@@ -229,12 +230,13 @@ func NewBroker(conns Conns, deliver Deliver) *Broker {
 		panic("nocx: request broker requires conns and deliver seams")
 	}
 	return &Broker{
-		conns:        conns,
-		deliver:      deliver,
-		pending:      make(map[string]*pendingRequest),
-		methodBounds: make(map[string]int),
-		runLeases:    make(map[string]*runLease),
-		runAttempts:  make(map[string]string),
+		conns:           conns,
+		deliver:         deliver,
+		pending:         make(map[string]*pendingRequest),
+		methodBounds:    make(map[string]int),
+		runLeases:       make(map[string]*runLease),
+		runAttempts:     make(map[string]string),
+		runLeaseStarted: make(map[string]bool),
 	}
 }
 
@@ -365,7 +367,9 @@ func (b *Broker) registerRunLease(requestID string, lease *runLease) {
 // bindRunAttempt records the lifecycle-owned attempt for its parent request.
 // The lifecycle submit must come from a connection that received this
 // request's notification; knowing a request id alone is not authority to
-// name its attempt.
+// name its attempt. Binding only installs the identity bridge. Output and
+// inactivity accounting starts when the authenticated running fact arrives,
+// not when the renderer opens the app-owned attempt.
 func (b *Broker) bindRunAttempt(requestID, attemptID string, conn Conn) bool {
 	if requestID == "" || attemptID == "" || !comparableConn(conn) {
 		return false
@@ -380,8 +384,7 @@ func (b *Broker) bindRunAttempt(requestID, attemptID string, conn Conn) bool {
 		b.mu.Unlock()
 		return false
 	}
-	lease, ok := b.runLeases[requestID]
-	if !ok {
+	if _, ok := b.runLeases[requestID]; !ok {
 		b.mu.Unlock()
 		return false
 	}
@@ -390,6 +393,38 @@ func (b *Broker) bindRunAttempt(requestID, attemptID string, conn Conn) bool {
 		return false
 	}
 	b.runAttempts[requestID] = attemptID
+	b.mu.Unlock()
+	return true
+}
+
+// startRunLeaseForAttempt opens output and inactivity accounting for the
+// exact lifecycle attempt named by an authenticated running fact. The
+// request-to-attempt bridge was authorized by bindRunAttempt; this lookup
+// preserves that identity without inferring a lease from session or timing.
+func (b *Broker) startRunLeaseForAttempt(attemptID string) bool {
+	if attemptID == "" {
+		return false
+	}
+	b.mu.Lock()
+	var lease *runLease
+	var requestID string
+	for id, boundAttemptID := range b.runAttempts {
+		if boundAttemptID != attemptID {
+			continue
+		}
+		requestID = id
+		lease = b.runLeases[id]
+		if lease != nil && b.runLeaseStarted[id] {
+			b.mu.Unlock()
+			return false
+		}
+		break
+	}
+	if lease == nil {
+		b.mu.Unlock()
+		return false
+	}
+	b.runLeaseStarted[requestID] = true
 	b.mu.Unlock()
 	lease.onAttemptStart()
 	return true
@@ -428,6 +463,7 @@ func (b *Broker) runAttemptForLease(lease *runLease) (string, bool) {
 func (b *Broker) forgetRunLeaseLocked(requestID string) {
 	delete(b.runLeases, requestID)
 	delete(b.runAttempts, requestID)
+	delete(b.runLeaseStarted, requestID)
 }
 
 // Resolve handles one resolution RPC on the read-loop ingress. The

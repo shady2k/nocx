@@ -96,23 +96,38 @@ func TestRunLeaseAttemptBindingKeepsConcurrentRunsDistinct(t *testing.T) {
 	if !broker.bindRunAttempt(firstID, "attempt-first", connA) {
 		t.Fatal("connection A could not bind its own run request")
 	}
+	if broker.bindRunAttempt(firstID, "attempt-other", connA) {
+		t.Fatal("a run request accepted a second attempt binding")
+	}
 	if !broker.bindRunAttempt(secondID, "attempt-second", connB) {
 		t.Fatal("connection B could not bind its own run request")
 	}
+	if output, started, reason := leaseAccounting(first); output != 0 || started || reason != "" {
+		t.Fatalf("first pre-marker accounting = output %d, started %v, reason %q; want zero and inactive", output, started, reason)
+	}
+	if output, started, reason := leaseAccounting(second); output != 0 || started || reason != "" {
+		t.Fatalf("second pre-marker accounting = output %d, started %v, reason %q; want zero and inactive", output, started, reason)
+	}
+	if broker.startRunLeaseForAttempt("attempt-foreign") {
+		t.Fatal("an unknown attempt started a lease")
+	}
+	if !broker.startRunLeaseForAttempt("attempt-first") {
+		t.Fatal("the authenticated attempt could not start its lease")
+	}
+	if broker.startRunLeaseForAttempt("attempt-first") {
+		t.Fatal("the authenticated attempt started its lease twice")
+	}
+	if !broker.startRunLeaseForAttempt("attempt-second") {
+		t.Fatal("the second authenticated attempt could not start its lease")
+	}
 	if output, started, reason := leaseAccounting(first); output != 0 || !started || reason != "" {
-		t.Fatalf("first authenticated start accounting = output %d, started %v, reason %q; want zero and active", output, started, reason)
+		t.Fatalf("first post-marker accounting = output %d, started %v, reason %q; want zero and active", output, started, reason)
 	}
 	if output, started, reason := leaseAccounting(second); output != 0 || !started || reason != "" {
-		t.Fatalf("second authenticated start accounting = output %d, started %v, reason %q; want zero and active", output, started, reason)
+		t.Fatalf("second post-marker accounting = output %d, started %v, reason %q; want zero and active", output, started, reason)
 	}
 	if got, ok := broker.runAttemptForLease(first); !ok || got != "attempt-first" {
-		t.Fatalf("first run attempt = %q (ok=%v), want attempt-first", got, ok)
-	}
-	if got, ok := broker.runAttemptForLease(second); !ok || got != "attempt-second" {
-		t.Fatalf("second run attempt = %q (ok=%v), want attempt-second", got, ok)
-	}
-	if broker.bindRunAttempt(firstID, "attempt-other", connA) {
-		t.Fatal("a run request accepted a second attempt binding")
+		t.Fatal("run request binding lookup returned the wrong attempt")
 	}
 	if broker.bindRunAttempt("foreign-request", "attempt-foreign", connA) {
 		t.Fatal("a stale request id accepted an attempt binding")

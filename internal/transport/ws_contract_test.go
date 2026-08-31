@@ -6149,12 +6149,12 @@ func TestLedgerEvents_OverTheWireConformToContract(t *testing.T) {
 		{"open creates", "ledger.open", openSchema, map[string]any{"envelope": ledgerEnv(sid, "wire-1", "make", 1)}},
 		{"open replayed", "ledger.open", openSchema, map[string]any{"envelope": ledgerEnv(sid, "wire-1", "make", 1)}},
 		{"bind advances", "ledger.bind", bindSchema, map[string]any{
-			"envelope": ledgerEnv(sid, "wire-1", "make", 2),
+			"envelope": ledgerBindEnv(sid, "wire-1", "make", 2),
 			"facts":    map[string]any{"interactivity": "tty", "executor": "zsh"},
 		}},
 		{"close advances", "ledger.close", closeSchema, closeParams("wire-1", 3)},
 		{"bind dropped after close", "ledger.bind", bindSchema, map[string]any{
-			"envelope": ledgerEnv(sid, "wire-1", "make", 4),
+			"envelope": ledgerBindEnv(sid, "wire-1", "make", 4),
 		}},
 		{"close creates a row nobody opened", "ledger.close", closeSchema, closeParams("wire-2", 1)},
 	}

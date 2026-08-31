@@ -5869,10 +5869,24 @@ func TestAgentRunNotifications_DTOsConformToContract(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	validateJSON(t, stateSchema, raw, "agent.runState DTO (failed with error)")
+	raw, err = json.Marshal(agentRunState{
+		RunID: 7, State: string(content.RunCompleted),
+		UnarmedBounds: []string{
+			"the inactivity bound is not active because shell integration is unavailable",
+			"the output bound is not active because shell integration is unavailable",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal degraded: %v", err)
+	}
+	validateJSON(t, stateSchema, raw, "agent.runState DTO (completed with unavailable bounds)")
 
 	raw, err = json.Marshal(agentRunState{RunID: 7, State: string(content.RunCompleted)})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "unarmedBounds") {
+		t.Fatalf("clean completed runState includes unavailable bounds: %s", raw)
 	}
 	validateJSON(t, stateSchema, raw, "agent.runState DTO (completed, no error)")
 }

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "https://nocx.local/contracts/agent.runState.schema.json",
   "title": "AgentRunState",
-  "description": "Params of the agent.runState server-to-client notification (nocx-x8s2.2, design §7): the run's state. A renderer that reconnects mid-answer reads the run's state and its appended chunks from the ledger; it never infers liveness from notifications having stopped. error is present for failed runs and for cancelled runs only when cancellation has additional turn-specific detail; it is a sentence a person reads — never a Go error string. Cancelling a turn stops only assistant-run child executions registered to that exact run. A user-started or summoned host command is not registered, is never reported here, and is never changed. droppedDeltas is the authoritative whole-run count and is present only when the live view is incomplete.",
+  "description": "Params of the agent.runState server-to-client notification (nocx-x8s2.2, design §7): the run's state. A renderer that reconnects mid-answer reads the run's state and its appended chunks from the ledger; it never infers liveness from notifications having stopped. error is present for failed runs and for cancelled runs only when cancellation has additional turn-specific detail; it is a sentence a person reads — never a Go error string. Cancelling a turn stops only assistant-run child executions registered to that exact run. A user-started or summoned host command is not registered, is never reported here, and is never changed. droppedDeltas is the authoritative whole-run count and is present only when the live view is incomplete. unarmedBounds is present only when shell integration was unavailable; it names bounds that did not apply while the run still executed.",
   "type": "object",
   "additionalProperties": false,
   "required": ["runId", "state"],
@@ -33,6 +33,15 @@
       "description": "The authoritative whole-run count of streamed chunks the wire refused. Present only when non-zero: the renderer marks the block's gap instead of reading it as a complete answer. The ledger holds the whole answer regardless.",
       "type": "integer",
       "minimum": 1
+    },
+    "unarmedBounds": {
+      "description": "Human-readable sentences naming lease bounds that could not be armed because shell integration was unavailable. Present only when at least one bound did not apply; never null or empty.",
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "type": "string",
+        "minLength": 1
+      }
     }
   }
 }

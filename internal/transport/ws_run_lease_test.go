@@ -24,6 +24,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -510,6 +511,28 @@ func waitForRunState(t *testing.T, tap *socketTap, wantState string) (runID int6
 	return 0, ""
 }
 
+func waitForRunStateDetails(t *testing.T, tap *socketTap, wantState string) (int64, string, []string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		raw := tapNotify(t, tap, "agent.runState", 30*time.Second)
+		var st struct {
+			RunID         int64    `json:"runId"`
+			State         string   `json:"state"`
+			Error         string   `json:"error"`
+			UnarmedBounds []string `json:"unarmedBounds"`
+		}
+		if err := json.Unmarshal(raw, &st); err != nil {
+			t.Fatalf("runState unmarshal: %v\nraw: %s", err, raw)
+		}
+		if st.State == wantState {
+			return st.RunID, st.Error, st.UnarmedBounds
+		}
+	}
+	t.Fatalf("the run never reached %s", wantState)
+	return 0, "", nil
+}
+
 // runRequestParams decodes the agent.runRequest notification.
 func decodeRunRequest(t *testing.T, raw json.RawMessage) (rid, sid, command string) {
 	t.Helper()
@@ -717,12 +740,15 @@ func TestRunLease_ShortCommandRunsUntouched(t *testing.T) {
 
 	// The run completes — no deadline fired, nothing was bounded — and the
 	// ledger agrees: the execution's reason is a plain completed.
-	runID, sentence := waitForRunState(t, tap, "completed")
+	runID, sentence, unarmed := waitForRunStateDetails(t, tap, "completed")
 	if runID != res.RunID {
 		t.Fatalf("runState runId = %d, want %d", runID, res.RunID)
 	}
 	if sentence != "" {
 		t.Fatalf("completed runState carries an error: %q", sentence)
+	}
+	if len(unarmed) != 0 {
+		t.Fatalf("integrated runState unarmedBounds = %v, want absent", unarmed)
 	}
 	reason := terminationReasonOfRun(t, h)
 	if reason == nil || *reason != content.TermCompleted {
@@ -858,10 +884,9 @@ func TestRunLease_OutputBudgetBoundsAndTheBlockNamesIt(t *testing.T) {
 	}
 }
 
-// A session without a lifecycle lane cannot authenticate the attempt that
-// opens the output and inactivity bounds. The run is refused before the
-// renderer receives a command, and the failed block says why instead of
-// promising bounds that can never fire.
+// A session without a lifecycle lane still runs the command, but the
+// output and inactivity bounds are explicitly named as unavailable. The
+// wall-clock bound remains active and is the only bound advertised.
 func TestRunLease_NoShellIntegrationMakesUnavailableBoundsVisible(t *testing.T) {
 	h := newRunLeaseHarness(t, RunLeaseConfig{
 		WallClock:    time.Minute,
@@ -874,19 +899,49 @@ func TestRunLease_NoShellIntegrationMakesUnavailableBoundsVisible(t *testing.T) 
 	// The session's axis explicitly reports a conventional terminal: shell
 	// integration was attempted but no authenticated lifecycle lane exists.
 	h.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationConventional, ssh.ReasonUnsupportedShell)
-	res := h.askRunsTool(sid, "printf never-runs")
+	cmd := "printf degraded-runs"
+	res := h.askRunsTool(sid, cmd)
 	tap := newSocketTap(h.conn)
 
-	runID, sentence := waitForRunState(t, tap, "failed")
-	if runID != res.RunID {
-		t.Fatalf("runState runId = %d, want %d", runID, res.RunID)
+	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
+	requestID, wantSid, wantCommand := decodeRunRequest(t, raw)
+	if wantSid != sid || wantCommand != cmd {
+		t.Fatalf("runRequest = (%q, %q), want (%q, %q)", wantSid, wantCommand, sid, cmd)
 	}
-	for _, want := range []string{"shell integration", "inactivity", "output", "not run"} {
-		if !strings.Contains(strings.ToLower(sentence), want) {
-			t.Fatalf("runState error = %q, want the visible refusal to name %q", sentence, want)
-		}
+	h.submitLeaseCommand(t, tap, sid, cmd, "")
+	tapDataFor(t, tap, sid, "degraded-runs", 15*time.Second)
+	reply := tapCall(t, h.conn, tap, 42, "agent.runResolved",
+		runResolvedWire(requestID, "entry-degraded", 0, "success", 1, 0, 1, "degraded-runs"))
+	var rerr struct {
+		Error *jsonrpcErrorObj `json:"error"`
 	}
-	if reason := terminationReasonOfRun(t, h); reason == nil || *reason != content.TermFailed {
-		t.Fatalf("ledger termination = %v, want failed for a refused unsupervised run", reason)
+	if err := json.Unmarshal(reply, &rerr); err != nil {
+		t.Fatalf("runResolved unmarshal: %v", err)
+	}
+	if rerr.Error != nil {
+		t.Fatalf("runResolved refused: %+v", rerr.Error)
+	}
+
+	raw = tapNotify(t, tap, "agent.runState", 15*time.Second)
+	var state struct {
+		RunID         int64    `json:"runId"`
+		State         string   `json:"state"`
+		UnarmedBounds []string `json:"unarmedBounds"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("runState unmarshal: %v\nraw: %s", err, raw)
+	}
+	if state.RunID != res.RunID || state.State != "completed" {
+		t.Fatalf("runState = %+v, want run %d completed", state, res.RunID)
+	}
+	wantBounds := []string{
+		"the inactivity bound is not active because shell integration is unavailable",
+		"the output bound is not active because shell integration is unavailable",
+	}
+	if !reflect.DeepEqual(state.UnarmedBounds, wantBounds) {
+		t.Fatalf("unarmedBounds = %v, want %v", state.UnarmedBounds, wantBounds)
+	}
+	if reason := terminationReasonOfRun(t, h); reason == nil || *reason != content.TermCompleted {
+		t.Fatalf("ledger termination = %v, want completed for the command that ran", reason)
 	}
 }

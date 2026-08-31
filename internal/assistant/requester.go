@@ -4,9 +4,92 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 
 	"github.com/shady2k/nocx/internal/content"
 )
+
+// RunLeaseBound names a lease bound whose enforcement depends on the
+// authenticated shell-integration lifecycle.
+type RunLeaseBound string
+
+const (
+	RunLeaseBoundInactivity RunLeaseBound = "inactivity"
+	RunLeaseBoundOutput     RunLeaseBound = "output"
+)
+
+// RunLeaseUnavailableBounds maps the configured integration-dependent bounds
+// to their wire names. The transport still uses needsShellIntegration as the
+// single gate for checking lifecycle availability.
+func RunLeaseUnavailableBounds(inactivity, output bool) []RunLeaseBound {
+	var bounds []RunLeaseBound
+	if inactivity {
+		bounds = append(bounds, RunLeaseBoundInactivity)
+	}
+	if output {
+		bounds = append(bounds, RunLeaseBoundOutput)
+	}
+	return bounds
+}
+
+// RunLeaseDegradation carries the bounds that could not be armed for one
+// assistant run. It is mutable because the renderer requester discovers the
+// availability while the stream is executing, before terminalize publishes
+// the final run state.
+type RunLeaseDegradation struct {
+	mu     sync.Mutex
+	bounds []RunLeaseBound
+}
+
+func NewRunLeaseDegradation() *RunLeaseDegradation {
+	return &RunLeaseDegradation{}
+}
+
+func (d *RunLeaseDegradation) Add(bounds ...RunLeaseBound) {
+	if d == nil {
+		return
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	for _, bound := range bounds {
+		if bound == "" {
+			continue
+		}
+		seen := false
+		for _, existing := range d.bounds {
+			if existing == bound {
+				seen = true
+				break
+			}
+		}
+		if !seen {
+			d.bounds = append(d.bounds, bound)
+		}
+	}
+}
+
+func (d *RunLeaseDegradation) Bounds() []RunLeaseBound {
+	if d == nil {
+		return nil
+	}
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	return append([]RunLeaseBound(nil), d.bounds...)
+}
+
+type runLeaseDegradationContextKey struct{}
+
+func WithRunLeaseDegradation(ctx context.Context, degradation *RunLeaseDegradation) context.Context {
+	return context.WithValue(ctx, runLeaseDegradationContextKey{}, degradation)
+}
+
+func RunLeaseDegradationFromContext(ctx context.Context) *RunLeaseDegradation {
+	if ctx == nil {
+		return nil
+	}
+	degradation, _ := ctx.Value(runLeaseDegradationContextKey{}).(*RunLeaseDegradation)
+	return degradation
+}
 
 // FrameRegion is an absolute buffer row span [Start, End) of a session's
 // screen. The renderer interprets it against ITS grid; the backend never
@@ -86,5 +169,20 @@ func RunLeaseSentence(reason content.TerminationReason) string {
 		return "the command was terminalized: its output exceeded the budget, and was bounded rather than truncated"
 	default:
 		return "the command was terminalized by its lease"
+	}
+}
+
+// RunLeaseUnavailableSentence names a bound that could not be armed because
+// shell integration was unavailable. This is separate from RunLeaseSentence:
+// one describes a bound that ended a command, while the other describes a
+// bound that never applied and therefore must not become a termination reason.
+func RunLeaseUnavailableSentence(bound RunLeaseBound) string {
+	switch bound {
+	case RunLeaseBoundInactivity:
+		return "the inactivity bound is not active because shell integration is unavailable"
+	case RunLeaseBoundOutput:
+		return "the output bound is not active because shell integration is unavailable"
+	default:
+		return "this lease bound is not active because shell integration is unavailable"
 	}
 }

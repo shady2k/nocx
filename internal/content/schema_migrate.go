@@ -103,7 +103,9 @@ package content
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 
@@ -115,6 +117,11 @@ import (
 // nothing about what committed before it beyond `from` being on disk, and it
 // must not commit, roll back or open a transaction of its own.
 //
+// The final rung also pins the exact schemaV1 text that fresh installs receive.
+// Keeping that digest on the rung, rather than beside schemaVersion, makes a
+// schemaV1 edit require the new rung that carries existing files to the new
+// shape; a standalone digest could be updated while the ladder stayed still.
+//
 // apply is a FIELD rather than a method on a named type because that is the
 // seam a test injects a failure through: a ladder is an ordinary slice, so a
 // test can hand `migrateSchema` a step that runs the real edge's DDL and then
@@ -122,9 +129,10 @@ import (
 // database's point of view. No build tag, no hook, no exported test-only
 // entry point.
 type migrationStep struct {
-	from  int
-	to    int
-	apply func(ctx context.Context, tx *sql.Tx) error
+	from         int
+	to           int
+	apply        func(ctx context.Context, tx *sql.Tx) error
+	schemaDigest string
 }
 
 // schemaLadder is the chain, ascending, one edge per rung, ending at
@@ -141,15 +149,19 @@ type migrationStep struct {
 // are not this build's to destroy.
 var schemaLadder = []migrationStep{
 	{from: 14, to: 15, apply: migrateGrantScopeKinds14to15},
-	{from: 15, to: 16, apply: migrateRetireTheAPIRunCounter15to16},
+	{from: 15, to: 16, apply: migrateRetireTheAPIRunCounter15to16, schemaDigest: "4688f8fcbae121444ed4726726fc598737220fd4fd09bc428e3230c13cfe3cd9"},
 }
 
-// validateLadder refuses a chain with a hole in it, a rung that spans more
-// than one version, or an end that is not the version this build creates from
-// scratch. It runs before the walk rather than only in a test, because a
-// mis-authored ladder must stop the migration rather than leave a database at
-// whatever version the walk ran out at.
+// validateLadder validates the shipped ladder against the current schema.
 func validateLadder(ladder []migrationStep) error {
+	return validateLadderForSchema(ladder, schemaVersion, schemaV1)
+}
+
+// validateLadderForSchema is parameterized so the gate's paired positive can
+// prove that a changed schema passes when a new final rung carries its digest.
+// Production always calls validateLadder with the compiled-in schemaVersion and
+// schemaV1.
+func validateLadderForSchema(ladder []migrationStep, version int, schema string) error {
 	for i, step := range ladder {
 		if step.to != step.from+1 {
 			return fmt.Errorf("content: migration ladder: step %d spans %d→%d; one edge is one version", i, step.from, step.to)
@@ -162,9 +174,17 @@ func validateLadder(ladder []migrationStep) error {
 				ladder[i-1].to, ladder[i-1].to, step.from)
 		}
 	}
-	if len(ladder) > 0 && ladder[len(ladder)-1].to != schemaVersion {
+	if len(ladder) > 0 && ladder[len(ladder)-1].to != version {
 		return fmt.Errorf("content: migration ladder ends at %d but this build creates schema %d",
-			ladder[len(ladder)-1].to, schemaVersion)
+			ladder[len(ladder)-1].to, version)
+	}
+	if len(ladder) > 0 {
+		got := sha256.Sum256([]byte(schema))
+		gotHex := hex.EncodeToString(got[:])
+		if ladder[len(ladder)-1].schemaDigest != gotHex {
+			return fmt.Errorf("content: migration ladder: schemaV1 changed without a migration rung; add a new rung and update its schema digest for schema %d (got %s, want %s)",
+				version, gotHex, ladder[len(ladder)-1].schemaDigest)
+		}
 	}
 	return nil
 }

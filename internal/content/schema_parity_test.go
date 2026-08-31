@@ -70,7 +70,9 @@ package content
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -80,6 +82,40 @@ import (
 
 	"github.com/shady2k/nocx/internal/log"
 )
+
+// THE FINAL MIGRATION RUNG PINS THE FRESH SCHEMA. A schemaV1 edit without a
+// new rung must fail here, before fresh installs and upgraded databases can
+// silently become different populations.
+func TestTheFinalMigrationRungPinsSchemaV1(t *testing.T) {
+	t.Helper()
+	if len(schemaLadder) == 0 {
+		t.Fatal("the migration ladder has no final rung to pin schemaV1; add a rung")
+	}
+	got := sha256.Sum256([]byte(schemaV1))
+	gotHex := hex.EncodeToString(got[:])
+	want := schemaLadder[len(schemaLadder)-1].schemaDigest
+	if gotHex != want {
+		t.Fatalf("schemaV1 changed without a migration rung: add a new rung and update its schema digest (schema version %d); got %s, want %s",
+			schemaVersion, gotHex, want)
+	}
+}
+
+// A CHANGED SCHEMA PASSES WHEN A NEW RUNG CARRIES IT. This paired positive
+// keeps the gate from accepting only the unchanged current shape.
+func TestAChangedSchemaPassesWhenANewFinalRungCarriesIt(t *testing.T) {
+	changedSchema := schemaV1 + "\n-- schema 17"
+	digest := sha256.Sum256([]byte(changedSchema))
+	ladder := append([]migrationStep(nil), schemaLadder...)
+	ladder = append(ladder, migrationStep{
+		from: schemaVersion, to: schemaVersion + 1,
+		apply:        func(context.Context, *sql.Tx) error { return nil },
+		schemaDigest: hex.EncodeToString(digest[:]),
+	})
+
+	if err := validateLadderForSchema(ladder, schemaVersion+1, changedSchema); err != nil {
+		t.Fatalf("a changed schema with its new final rung was refused: %v", err)
+	}
+}
 
 // ── the two databases ─────────────────────────────────────────────────────
 

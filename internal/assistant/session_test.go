@@ -63,7 +63,7 @@ func (r sessionScreenRequester) RequestRun(context.Context, string, string) (jso
 
 func TestExecuteSessionList_EmptyPaneIsAnHonestEmptyResult(t *testing.T) {
 	source := &sessionSourceFake{items: SessionItems{Items: []SessionItem{}}}
-	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
+	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil)
 
 	out, err := executeSessionList(toolTestContext(), reader, source, json.RawMessage(`{"sessionId":"pane-a"}`))
 	if err != nil {
@@ -95,7 +95,7 @@ func TestMiddleware_SessionListUsesPaneSessionWithoutModelSessionID(t *testing.T
 }
 
 func TestExecuteSessionList_PropagatesSourceFailure(t *testing.T) {
-	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
+	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil)
 	_, err := executeSessionList(toolTestContext(), reader, &sessionSourceFake{err: errors.New("ledger unavailable")}, json.RawMessage(`{"sessionId":"pane-a"}`))
 	if err == nil || !strings.Contains(err.Error(), "ledger unavailable") {
 		t.Fatalf("list error = %v, want source failure", err)
@@ -104,7 +104,7 @@ func TestExecuteSessionList_PropagatesSourceFailure(t *testing.T) {
 
 func TestExecuteSessionRead_ExitedCarriesStateAndCode(t *testing.T) {
 	source := &sessionSourceFake{item: SessionItemRead{ID: "item-1", State: "exited", ExitCode: intPtr(7), Text: "done"}}
-	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
+	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil)
 
 	out, err := executeSessionRead(toolTestContext(), reader, source, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`))
 	if err != nil {
@@ -117,7 +117,7 @@ func TestExecuteSessionRead_ExitedCarriesStateAndCode(t *testing.T) {
 
 func TestExecuteSessionRead_ExitedNoBodyCarriesRetentionNote(t *testing.T) {
 	source := &sessionSourceFake{item: SessionItemRead{ID: "item-1", State: "exited", Note: "output was not kept"}}
-	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
+	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil)
 
 	out, err := executeSessionRead(toolTestContext(), reader, source, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`))
 	if err != nil {
@@ -130,7 +130,7 @@ func TestExecuteSessionRead_ExitedNoBodyCarriesRetentionNote(t *testing.T) {
 
 func TestExecuteSessionRead_RunningUsesRendererAndCarriesState(t *testing.T) {
 	source := &sessionSourceFake{item: SessionItemRead{ID: "item-1", State: "running"}}
-	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
+	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil)
 	req := sessionScreenRequester{body: liveFrameBody("current")}
 
 	out, err := executeSessionRead(toolTestContext(), reader, source, req, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`))
@@ -144,7 +144,7 @@ func TestExecuteSessionRead_RunningUsesRendererAndCarriesState(t *testing.T) {
 
 func TestExecuteSessionRead_AutomaticItemUsesRendererWithoutLedgerRow(t *testing.T) {
 	source := &sessionSourceFake{err: errors.New("item not found")}
-	reader := agenttools.NewSessionReaderWithAutomaticItems(
+	reader := agenttools.NewSessionReader(
 		[]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}},
 		[]string{"att-shell"},
 	)
@@ -163,7 +163,7 @@ func TestExecuteSessionRead_AutomaticItemUsesRendererWithoutLedgerRow(t *testing
 }
 
 func TestExecuteSessionRead_NoIDReturnsCurrentScreenAndAlternateCaveat(t *testing.T) {
-	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
+	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil)
 	body := liveFrameBody("fullscreen")
 	var frame map[string]any
 	if err := json.Unmarshal(body, &frame); err != nil {
@@ -194,7 +194,7 @@ func TestExecuteSessionRead_NoIDReturnsCurrentScreenAndAlternateCaveat(t *testin
 }
 
 func TestExecuteSessionRead_PropagatesLedgerAndRendererFailures(t *testing.T) {
-	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
+	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil)
 	ledgerErr := errors.New("ledger unavailable")
 	if _, err := executeSessionRead(toolTestContext(), reader, &sessionSourceFake{err: ledgerErr}, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1"}`)); !strings.Contains(err.Error(), "ledger unavailable") {
 		t.Fatalf("ledger error = %v, want source failure", err)
@@ -218,7 +218,7 @@ func TestExecuteSessionRead_ExitedBoundsTextAndReturnedEnd(t *testing.T) {
 	source := &sessionSourceFake{item: SessionItemRead{
 		ID: "item-1", State: "exited", Total: len(lines), Start: 0, End: len(lines), Text: text,
 	}}
-	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
+	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil)
 
 	out, err := executeSessionRead(toolTestContext(), reader, source, sessionScreenRequester{}, json.RawMessage(`{"sessionId":"pane-a","id":"item-1","count":2000}`))
 	if err != nil {
@@ -247,7 +247,7 @@ func TestExecuteSessionRead_LiveScreenBoundsTextAndReturnedEnd(t *testing.T) {
 	}
 	expectedLines := int(testResultMaxBytes()) / (len(line) + 1)
 	expectedText := strings.Join(lines[:expectedLines], "\n")
-	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
+	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}}, nil)
 
 	out, err := executeSessionRead(toolTestContext(), reader, nil, sessionScreenRequester{body: liveFrameBody(lines...)}, json.RawMessage(`{"sessionId":"pane-a"}`))
 	if err != nil {

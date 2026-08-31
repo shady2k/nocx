@@ -11,19 +11,11 @@ type SessionReader struct {
 	automaticItems map[string]struct{}
 }
 
-func NewSessionReader(scopes []content.GrantScope) *SessionReader {
-	return newSessionReader(scopes, nil)
-}
-
-// NewSessionReaderWithAutomaticItems adds renderer-owned item ids whose
-// session.read calls must use the current renderer screen rather than a
-// durable ledger row. These ids are validated as part of the ask envelope and
-// remain scoped to this run's session grant.
-func NewSessionReaderWithAutomaticItems(scopes []content.GrantScope, automaticItems []string) *SessionReader {
-	return newSessionReader(scopes, automaticItems)
-}
-
-func newSessionReader(scopes []content.GrantScope, automaticItems []string) *SessionReader {
+// NewSessionReader adds renderer-owned item ids whose session.read calls must
+// use the current renderer screen rather than a durable ledger row. These ids
+// are validated as part of the ask envelope and remain scoped to this run's
+// session grant. Pass nil for an ordinary session reader.
+func NewSessionReader(scopes []content.GrantScope, automaticItems []string) *SessionReader {
 	r := &SessionReader{
 		sessions:       make(map[string]struct{}),
 		automaticItems: make(map[string]struct{}, len(automaticItems)),

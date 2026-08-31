@@ -566,10 +566,10 @@ func TestAStaleLeaseEpochIsRejectedRatherThanAppliedLate(t *testing.T) {
 
 	// The displaced holder's frame arrives late, carrying its old epoch.
 	subRaw, _ := proto.SessionBytes(string(first))
-	svc.SessionData(proto.SessionFrame{Session: raw, Subscriber: subRaw, Epoch: a.Write.Epoch, Payload: []byte("stale\n")})
+	svc.SessionData(callCtx(), proto.SessionFrame{Session: raw, Subscriber: subRaw, Epoch: a.Write.Epoch, Payload: []byte("stale\n")})
 	// The current holder's frame is applied.
 	cur, _ := proto.SessionBytes(string(second))
-	svc.SessionData(proto.SessionFrame{Session: raw, Subscriber: cur, Epoch: b.Write.Epoch, Payload: []byte("live\n")})
+	svc.SessionData(callCtx(), proto.SessionFrame{Session: raw, Subscriber: cur, Epoch: b.Write.Epoch, Payload: []byte("live\n")})
 
 	if got := spawner.last().typed(); got != "live\n" {
 		t.Fatalf("the PTY received %q, want only the current holder's bytes", got)
@@ -586,7 +586,7 @@ func TestAWriteFromNoHolderNeverReachesThePTY(t *testing.T) {
 	raw, _ := proto.SessionBytes(entry.Session.Session)
 	someone, _ := proto.SessionBytes("77777777777777777777777777777777")
 
-	svc.SessionData(proto.SessionFrame{Session: raw, Subscriber: someone, Epoch: 1, Payload: []byte("rm -rf /\n")})
+	svc.SessionData(callCtx(), proto.SessionFrame{Session: raw, Subscriber: someone, Epoch: 1, Payload: []byte("rm -rf /\n")})
 	if got := spawner.last().typed(); got != "" {
 		t.Fatalf("the PTY received %q from a subscriber holding no capability", got)
 	}
@@ -603,7 +603,7 @@ func TestADataFrameForAnUnknownSessionIsDroppedNotFatal(t *testing.T) {
 
 	var nobody [16]byte
 	nobody[0] = 0xff
-	svc.SessionData(proto.SessionFrame{Session: nobody, Epoch: 1, Payload: []byte("x")})
+	svc.SessionData(callCtx(), proto.SessionFrame{Session: nobody, Epoch: 1, Payload: []byte("x")})
 
 	inv := call[proto.SessionsResult](t, svc, proto.OpSessions, proto.SessionsParams{})
 	if len(inv.Sessions) != 1 {
@@ -789,17 +789,17 @@ func TestAckAdvancesTheCursorAndRefusesAnImpossibleOne(t *testing.T) {
 	subRaw, _ := proto.SessionBytes(string(sub))
 	awaitSink(t, sink, "ten bytes", func() bool { return len(sink.bytesFor(subRaw)) == 10 })
 
-	if _, err := svc.Call(context.Background(), proto.OpAck, mustJSON(t, proto.AckParams{
+	if _, err := svc.Call(callCtx(), proto.OpAck, mustJSON(t, proto.AckParams{
 		Subscriber: sub, Session: entry.Session, Offset: 5,
 	})); err != nil {
 		t.Fatalf("ack: %v", err)
 	}
-	if _, err := svc.Call(context.Background(), proto.OpAck, mustJSON(t, proto.AckParams{
+	if _, err := svc.Call(callCtx(), proto.OpAck, mustJSON(t, proto.AckParams{
 		Subscriber: sub, Session: entry.Session, Offset: 1000,
 	})); err == nil {
 		t.Error("an ack ahead of what was produced was accepted")
 	}
-	if _, err := svc.Call(context.Background(), proto.OpAck, mustJSON(t, proto.AckParams{
+	if _, err := svc.Call(callCtx(), proto.OpAck, mustJSON(t, proto.AckParams{
 		Subscriber: sub, Session: entry.Session, Offset: 1,
 	})); err == nil {
 		t.Error("an ack behind the current cursor was accepted")

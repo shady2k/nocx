@@ -356,7 +356,8 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		if err != nil {
 			return nil, err
 		}
-		if err := hs.ack(p.Subscriber, p.Offset); err != nil {
+		sink, _ := host.ConnectionFrom(ctx).(Sink)
+		if err := hs.ack(sink, p.Subscriber, p.Offset); err != nil {
 			return nil, err
 		}
 		return proto.AckResult{}, nil
@@ -365,7 +366,8 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		if err := decode(params, &p); err != nil {
 			return nil, err
 		}
-		return s.detach(p), nil
+		sink, _ := host.ConnectionFrom(ctx).(Sink)
+		return s.detach(sink, p), nil
 	case proto.OpResize:
 		var p proto.ResizeParams
 		if err := decode(params, &p); err != nil {
@@ -539,12 +541,12 @@ func (s *Service) attach(ctx context.Context, p proto.AttachParams) (proto.Attac
 	return hs.attach(p, sink, s.mintAttachment, s.log)
 }
 
-func (s *Service) detach(p proto.DetachParams) proto.DetachResult {
+func (s *Service) detach(sink Sink, p proto.DetachParams) proto.DetachResult {
 	s.mu.Lock()
 	live := s.live()
 	s.mu.Unlock()
 	for _, hs := range live {
-		if released, found := hs.detach(p.Attachment); found {
+		if released, found := hs.detach(sink, p.Attachment); found {
 			return proto.DetachResult{ReleasedWrite: released}
 		}
 	}
@@ -607,7 +609,7 @@ func (s *Service) notifyExit(e proto.SessionExit) {
 // a coordinator holding a handle this generation no longer has is the ordinary
 // case across a restart, not an attack, and the frame's own bytes are never
 // interpreted on the way past (AD-6).
-func (s *Service) SessionData(f proto.SessionFrame) {
+func (s *Service) SessionData(ctx context.Context, f proto.SessionFrame) {
 	hex := proto.SessionHex(f.Session)
 	s.mu.Lock()
 	hs, ok := s.sessions[hex]
@@ -616,7 +618,8 @@ func (s *Service) SessionData(f proto.SessionFrame) {
 		s.log.Warn("session data frame dropped: no such session", "session", hex, "bytes", len(f.Payload))
 		return
 	}
-	if err := hs.write(f); err != nil {
+	sink, _ := host.ConnectionFrom(ctx).(Sink)
+	if err := hs.write(sink, f); err != nil {
 		s.log.Warn("session write refused", "session", hex, "subscriber", proto.SessionHex(f.Subscriber),
 			"epoch", uint64(f.Epoch), "bytes", len(f.Payload), "err", err)
 	}

@@ -236,7 +236,7 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 	case proto.TypeKeepAlive:
 		// nothing to answer; keepalives keep the transport warm
 	case proto.TypeSessionData:
-		h.sessionData(payload)
+		h.sessionData(ctx, payload)
 	default:
 		h.log.Warn("unexpected frame", "type", ty)
 	}
@@ -257,7 +257,7 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 //
 // The bytes are counted here, never read: the helper moves PTY bytes and does
 // not interpret them (AD-6).
-func (h *Host) sessionData(payload []byte) {
+func (h *Host) sessionData(ctx context.Context, payload []byte) {
 	f, err := proto.DecodeSessionFrame(payload)
 	if err != nil {
 		h.log.Warn("malformed session data frame", "err", err, "bytes", len(payload))
@@ -265,7 +265,7 @@ func (h *Host) sessionData(payload []byte) {
 	}
 	if svc := h.serviceByName(proto.ServiceSession); svc != nil {
 		if plane, ok := svc.(DataPlane); ok {
-			plane.SessionData(f)
+			plane.SessionData(WithConnection(ctx, h), f)
 			return
 		}
 	}

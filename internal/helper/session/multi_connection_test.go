@@ -169,3 +169,74 @@ func TestAnExitReachesEveryConnectionWatchingIt(t *testing.T) {
 		return len(second.notifications(proto.EventSessionExit)) == 1
 	})
 }
+
+func sessionDataOn(svc *session.Service, sink session.Sink, f proto.SessionFrame) {
+	svc.SessionData(host.WithConnection(context.Background(), sink), f)
+}
+
+func TestAWriteFrameCannotUseAnotherConnectionsAttachment(t *testing.T) {
+	spawner := &fakeSpawner{}
+	svc, first, second := twoConnections(t, spawner)
+	entry := decodeInto[proto.SpawnResult](t, on(t, svc, first, proto.OpSpawn,
+		proto.SpawnParams{Cols: 80, Rows: 24})).Entry
+	sub := proto.SubscriberID("5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a5a")
+	sessionRaw, _ := proto.SessionBytes(entry.Session.Session)
+	subRaw, _ := proto.SessionBytes(string(sub))
+
+	attached := decodeInto[proto.AttachResult](t, on(t, svc, first, proto.OpAttach,
+		proto.AttachParams{Subscriber: sub, Session: entry.Session, RequestWrite: true}))
+	if !attached.Write.Granted {
+		t.Fatalf("first connection did not receive write capability: %+v", attached.Write)
+	}
+
+	sessionDataOn(svc, second, proto.SessionFrame{
+		Session: sessionRaw, Subscriber: subRaw, Epoch: attached.Write.Epoch, Payload: []byte("wrong\n"),
+	})
+	sessionDataOn(svc, first, proto.SessionFrame{
+		Session: sessionRaw, Subscriber: subRaw, Epoch: attached.Write.Epoch, Payload: []byte("right\n"),
+	})
+
+	if got := spawner.last().typed(); got != "right\n" {
+		t.Fatalf("PTY received %q, want only the legitimate holder's write", got)
+	}
+}
+
+func TestAckAndDetachAreBoundToTheAttachmentConnection(t *testing.T) {
+	spawner := &fakeSpawner{}
+	svc, first, second := twoConnections(t, spawner)
+	entry := decodeInto[proto.SpawnResult](t, on(t, svc, first, proto.OpSpawn,
+		proto.SpawnParams{Cols: 80, Rows: 24})).Entry
+	sub := proto.SubscriberID("6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b6b")
+	sessionRaw, _ := proto.SessionBytes(entry.Session.Session)
+	subRaw, _ := proto.SessionBytes(string(sub))
+
+	old := decodeInto[proto.AttachResult](t, on(t, svc, first, proto.OpAttach,
+		proto.AttachParams{Subscriber: sub, Session: entry.Session, RequestWrite: true}))
+	replacement := decodeInto[proto.AttachResult](t, on(t, svc, second, proto.OpAttach,
+		proto.AttachParams{Subscriber: sub, Session: entry.Session, RequestWrite: true}))
+	if !replacement.Write.Granted {
+		t.Fatalf("replacement connection did not receive write capability: %+v", replacement.Write)
+	}
+
+	if _, err := svc.Call(host.WithConnection(context.Background(), first), proto.OpAck,
+		mustJSON(t, proto.AckParams{Subscriber: sub, Session: entry.Session, Offset: 0})); err == nil {
+		t.Fatal("old connection acknowledged the replacement's subscriber")
+	}
+	if result := decodeInto[proto.DetachResult](t, on(t, svc, first, proto.OpDetach,
+		proto.DetachParams{Attachment: old.Attachment})); result.ReleasedWrite {
+		t.Fatal("old connection detached a replacement write capability")
+	}
+
+	sessionDataOn(svc, second, proto.SessionFrame{
+		Session: sessionRaw, Subscriber: subRaw, Epoch: replacement.Write.Epoch, Payload: []byte("survives\n"),
+	})
+	if got := spawner.last().typed(); got != "survives\n" {
+		t.Fatalf("replacement attachment was removed by stale detach: PTY received %q", got)
+	}
+
+	detached := decodeInto[proto.DetachResult](t, on(t, svc, second, proto.OpDetach,
+		proto.DetachParams{Attachment: replacement.Attachment}))
+	if !detached.ReleasedWrite {
+		t.Fatal("legitimate detach did not release the write capability")
+	}
+}

@@ -96,9 +96,11 @@ func TestASessionDataFrameReachesTheServiceThatOwnsTheName(t *testing.T) {
 	h := host.New(inR, outW, "hash", "inst", discardLogger())
 
 	got := make(chan proto.SessionFrame, 1)
+	connection := make(chan any, 1)
 	h.Register(&dataPlaneService{
 		fakeService: fakeService{name: proto.ServiceSession, ops: map[string]any{proto.OpSpawn: struct{}{}}},
 		received:    got,
+		connection:  connection,
 	})
 	serveDone := make(chan error, 1)
 	go func() { serveDone <- h.Serve(context.Background()) }()
@@ -128,6 +130,15 @@ func TestASessionDataFrameReachesTheServiceThatOwnsTheName(t *testing.T) {
 		}
 	case <-t.Context().Done():
 		t.Fatal("the data frame never reached the session service")
+	}
+
+	select {
+	case conn := <-connection:
+		if conn != h {
+			t.Fatalf("data-plane context connection = %p, want this host %p", conn, h)
+		}
+	case <-t.Context().Done():
+		t.Fatal("the data-plane frame carried no connection identity")
 	}
 
 	_ = inW.Close()
@@ -207,15 +218,21 @@ func TestTheSessionServiceNameHasOneOwner(t *testing.T) {
 // dataPlaneService is a fakeService that also implements host.DataPlane.
 type dataPlaneService struct {
 	fakeService
-	received chan proto.SessionFrame
+	received   chan proto.SessionFrame
+	connection chan any
 }
 
-func (d *dataPlaneService) SessionData(f proto.SessionFrame) {
-	if d.received == nil {
-		return
+func (d *dataPlaneService) SessionData(ctx context.Context, f proto.SessionFrame) {
+	if d.received != nil {
+		select {
+		case d.received <- f:
+		default:
+		}
 	}
-	select {
-	case d.received <- f:
-	default:
+	if d.connection != nil {
+		select {
+		case d.connection <- host.ConnectionFrom(ctx):
+		default:
+		}
 	}
 }

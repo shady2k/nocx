@@ -118,21 +118,24 @@ type subscriber struct {
 	sent  proto.StreamOffset
 	acked proto.StreamOffset
 
-	// wake fires on an ack, so a credit-blocked pump waits on an observable
-	// state change rather than polling.
-	wake *gate
+	// cursorMu guards the reader cursor, which the serving pump advances while
+	// ack requests may advance the confirmed side concurrently.
+	cursorMu sync.Mutex
+	wake     *gate
 
 	stop context.CancelFunc
 	done chan struct{}
 	// sink is the connection this subscriber's pump writes to. It is captured
 	// at attach: a pump must not start writing to a connection that replaced
 	// the one it was attached on.
-	sink Sink
+	sink       Sink
+	attachment proto.AttachmentID
 }
 
 type attachment struct {
 	id         proto.AttachmentID
 	subscriber proto.SubscriberID
+	sink       Sink
 }
 
 // hostSession is one PTY and everything the helper knows about it.
@@ -276,32 +279,45 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 
 	base, written := s.win.span()
 	resume := proto.ResumeAt(base, written, p.Offset)
+	att := mintAttachment()
+	ctx, stop := context.WithCancel(context.Background())
 
 	s.mu.Lock()
 	if s.stopped {
 		s.mu.Unlock()
+		stop()
 		return proto.AttachResult{}, ErrNoSuchSession
 	}
 
 	// One pump per subscriber: a second attach by the same subscriber
 	// REPLACES the first, because a subscriber is one reader and two pumps on
 	// one cursor would interleave frames into a stream that must stay ordered.
-	if old, ok := s.subs[p.Subscriber]; ok {
-		s.mu.Unlock()
-		s.stopSubscriber(old)
-		s.mu.Lock()
+	// Remove the old attachment record while holding the same mutex as the
+	// replacement, so a stale detach can never find the new subscriber.
+	var old *subscriber
+	oldWriter := false
+	if previous, ok := s.subs[p.Subscriber]; ok {
+		old = previous
+		oldWriter = s.writer != nil && *s.writer == p.Subscriber && s.writerAtt == previous.attachment
+		delete(s.subs, p.Subscriber)
+		delete(s.attachments, previous.attachment)
+		if oldWriter {
+			s.writer = nil
+			s.writerAtt = ""
+		}
 	}
 
-	ctx, stop := context.WithCancel(context.Background())
 	sub := &subscriber{
 		id: p.Subscriber, raw: raw,
 		sent: resume.From, acked: resume.From,
-		wake: newGate(), stop: stop, done: make(chan struct{}), sink: sink,
+		wake: newGate(), stop: stop, done: make(chan struct{}), sink: sink, attachment: att,
 	}
 	s.subs[p.Subscriber] = sub
-
-	att := mintAttachment()
-	s.attachments[att] = &attachment{id: att, subscriber: p.Subscriber}
+	s.attachments[att] = &attachment{id: att, subscriber: p.Subscriber, sink: sink}
+	if oldWriter && !p.RequestWrite {
+		s.writer = &p.Subscriber
+		s.writerAtt = att
+	}
 
 	grant := proto.WriteGrant{}
 	if p.RequestWrite {
@@ -318,6 +334,7 @@ func (s *hostSession) attach(p proto.AttachParams, sink Sink, mintAttachment fun
 	}
 	s.mu.Unlock()
 
+	s.stopSubscriber(old)
 	go s.serve(ctx, sub, log)
 	return proto.AttachResult{Attachment: att, Resume: resume, Write: grant}, nil
 }
@@ -338,8 +355,11 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 		// between the read and the park is not lost.
 		dataChanged := s.win.changed()
 		acked := sub.wake.wait()
+		sub.cursorMu.Lock()
+		sent, confirmed := sub.sent, sub.acked
+		sub.cursorMu.Unlock()
 
-		data, resume := s.win.read(sub.sent)
+		data, resume := s.win.read(sent)
 		if resume.Reset {
 			// The live reset: stated, never only logged. The reader clears and
 			// resumes at the base, and its credit floor moves with it — a
@@ -353,8 +373,10 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 				log.Warn("session reset not delivered", "session", s.id.Session, "err", err)
 				return
 			}
+			sub.cursorMu.Lock()
 			sub.sent = resume.From
 			sub.acked = resume.From
+			sub.cursorMu.Unlock()
 			continue
 		}
 
@@ -362,28 +384,8 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 			// The credit floor is the reader's OWN ack cursor, and nothing
 			// else. internal/transport's creditFloor also takes the ring's
 			// base, on the sound argument that bytes the ring no longer holds
-			// cannot be in flight — and copying that here is a defect, which
-			// this code shipped and which showed up as a test that passed or
-			// hung depending on scheduling.
-			//
-			// The difference is the one between the two buffers. That ring is
-			// LOSSLESS, so its base only ever advances over acked bytes and the
-			// term changes nothing. This window is CAPACITY-RECLAIMED, so its
-			// base advances over bytes nobody acked — and a floor that followed
-			// it would rise as fast as the window reclaimed, letting a reader
-			// that acks NOTHING stay permanently within its allowance. Credit
-			// would never bind, the pump would never fall behind the base, and
-			// the reset path below would be unreachable by construction.
-			//
-			// A reader's own acks are therefore the only thing that frees its
-			// credit, and the one place they are moved on its behalf is the
-			// reset itself — because a reader charged for bytes it will never
-			// be sent can never reopen its window, which is the lesson
-			// creditFloor was written for in the first place.
-			if sub.sent > sub.acked && sub.sent-sub.acked >= creditLimit {
-				// Credit-blocked. The window goes on reclaiming underneath
-				// this reader, which is exactly what D8 says happens and why
-				// the live reset above exists.
+			// cannot be in flight.
+			if sent > confirmed && sent-confirmed >= creditLimit {
 				select {
 				case <-acked:
 				case <-dataChanged:
@@ -400,7 +402,9 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 				log.Warn("session data not delivered", "session", s.id.Session, "err", err)
 				return
 			}
+			sub.cursorMu.Lock()
 			sub.sent += proto.StreamOffset(len(data))
+			sub.cursorMu.Unlock()
 			continue
 		}
 
@@ -408,7 +412,10 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 		// is over and so is this pump.
 		if s.win.isClosed() {
 			_, written := s.win.span()
-			if sub.sent >= written {
+			sub.cursorMu.Lock()
+			done := sub.sent >= written
+			sub.cursorMu.Unlock()
+			if done {
 				return
 			}
 		}
@@ -425,31 +432,36 @@ func (s *hostSession) serve(ctx context.Context, sub *subscriber, log *slog.Logg
 // coordinator's ring validates its own, and for the same two reasons: an
 // offset ahead of what was produced would free a reader to be sent bytes that
 // do not exist, and one behind the cursor is a stale report.
-func (s *hostSession) ack(id proto.SubscriberID, offset proto.StreamOffset) error {
+func (s *hostSession) ack(sink Sink, id proto.SubscriberID, offset proto.StreamOffset) error {
 	_, written := s.win.span()
 	if offset > written {
 		return ErrAckAhead
 	}
 	s.mu.Lock()
 	sub, ok := s.subs[id]
-	s.mu.Unlock()
-	if !ok {
+	if !ok || sub.sink != sink {
+		s.mu.Unlock()
 		return ErrNotAttached
 	}
+	sub.cursorMu.Lock()
 	if offset < sub.acked {
+		sub.cursorMu.Unlock()
+		s.mu.Unlock()
 		return ErrAckBehind
 	}
 	sub.acked = offset
+	sub.cursorMu.Unlock()
+	s.mu.Unlock()
 	sub.wake.signal()
 	return nil
 }
 
 // detach drops one attachment and reports whether it was holding the write
 // capability, because that is the fact the next caller acts on.
-func (s *hostSession) detach(att proto.AttachmentID) (bool, bool) {
+func (s *hostSession) detach(sink Sink, att proto.AttachmentID) (bool, bool) {
 	s.mu.Lock()
 	entry, ok := s.attachments[att]
-	if !ok {
+	if !ok || entry.sink != sink {
 		s.mu.Unlock()
 		return false, false
 	}
@@ -522,22 +534,25 @@ func (s *hostSession) releaseConnection(sink Sink) {
 }
 
 // write applies one inbound data frame to the PTY, if and only if it comes
-// from the current holder of the write capability at the current lease epoch.
-// A frame from anybody else, or at a stale epoch, is REJECTED rather than
-// applied late — which is what makes "exactly one writer" survive a carrier
-// that delivers a displaced holder's bytes after it was displaced.
-func (s *hostSession) write(f proto.SessionFrame) error {
+// from the current holder of the write capability at the current lease epoch
+// and from the connection that owns that attachment. Validation and the PTY
+// write share s.mu, so a lease transition cannot complete between them.
+func (s *hostSession) write(sink Sink, f proto.SessionFrame) error {
 	s.mu.Lock()
-	holder, epoch := s.writer, s.epoch
-	s.mu.Unlock()
-	if holder == nil {
+	defer s.mu.Unlock()
+
+	if s.writer == nil {
 		return ErrNoWriter
 	}
-	held, err := proto.SessionBytes(string(*holder))
+	attachment, ok := s.attachments[s.writerAtt]
+	if !ok || attachment.sink != sink || attachment.subscriber != *s.writer {
+		return ErrNotTheWriter
+	}
+	held, err := proto.SessionBytes(string(*s.writer))
 	if err != nil || held != f.Subscriber {
 		return ErrNotTheWriter
 	}
-	if f.Epoch != epoch {
+	if f.Epoch != s.epoch {
 		return ErrStaleLease
 	}
 	_, werr := s.proc.Write(f.Payload)

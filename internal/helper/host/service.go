@@ -43,7 +43,9 @@ type CancelPolicy interface {
 type DataPlane interface {
 	// SessionData is called on the host's read loop, once per frame, in wire
 	// order. An implementation must not block on the wire it was called from.
-	SessionData(f proto.SessionFrame)
+	// The context carries this host's connection identity without changing the
+	// frozen frame ABI.
+	SessionData(ctx context.Context, f proto.SessionFrame)
 }
 
 // RefusalCoder is an optional capability a Service implements to give its

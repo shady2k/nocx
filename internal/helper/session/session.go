@@ -60,9 +60,18 @@ type Spawner interface {
 	Spawn(req SpawnRequest) (Process, error)
 }
 
-// Inspector is the OS-evidence seam (D10). It answers with nil when this
-// platform, or this moment, has no evidence to offer — never with an empty
-// record, because an empty record decodes as "we looked and there is nothing".
+// Inspector is the OS-evidence seam (D10), and it draws two distinctions
+// rather than one.
+//
+// NIL means nobody could be asked at all — a pid the kernel no longer has, or
+// a platform with no implementation. Never an empty record, because an empty
+// record decodes as "we looked and there is nothing".
+//
+// A non-nil observation naming a diagnostic in Unavailable means it WAS asked
+// and could not answer that one. That case used to look like the first, and it
+// is the whole of nocx-k6p18.10: a reader that cannot tell them apart falls
+// back to the launch record and shows where a shell started as though it were
+// where the shell is (see inspect.go).
 type Inspector interface {
 	Observe(pid, foregroundPgid int) *proto.Observation
 }

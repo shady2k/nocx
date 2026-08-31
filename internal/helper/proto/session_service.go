@@ -222,9 +222,10 @@ type LaunchRecord struct {
 // cross-check against the launch record and a source of the derived
 // diagnostics D3 permits, never the canonical identity.
 type Observation struct {
-	// Source names where the evidence came from — "procfs" today. Evidence
-	// that cannot say where it came from cannot be weighed against a launch
-	// record it contradicts.
+	// Source names where the evidence came from — "procfs" on Linux, "sysctl"
+	// on macOS. Evidence that cannot say where it came from cannot be weighed
+	// against a launch record it contradicts, and the two sources answer
+	// different subsets: see Unavailable.
 	Source string `json:"source"`
 	// Cwd is the process's current working directory. It CHANGES as the user
 	// cds, which is exactly why it is here and not in the launch record.
@@ -241,7 +242,54 @@ type Observation struct {
 	// wants. Zero and empty when the shell itself is in the foreground.
 	ForegroundPgid    int    `json:"foregroundPgid,omitempty"`
 	ForegroundCommand string `json:"foregroundCommand,omitempty"`
+	// Unavailable names every diagnostic above that this inspector was asked
+	// for and could not supply. It is ALWAYS present — `[]` when everything
+	// asked for was answered — and never omitted, for the same reason
+	// `observed` itself is never omitted.
+	//
+	// # Why a field rather than an empty value (nocx-k6p18.10)
+	//
+	// A missing diagnostic and a stale one must not look alike, and here they
+	// otherwise would. Every field above is `omitempty`, so a diagnostic the
+	// OS could not answer arrives as nothing at all — and a reader with
+	// nothing falls back to the LAUNCH record, which was true once and goes
+	// stale the moment the user cds. That is a stale value presented as a
+	// current observation: exactly the lie the authority/evidence split exists
+	// to prevent, arriving by the back door.
+	//
+	// macOS is where it bites and why this exists. There is no /proc, and the
+	// only route to another process's working directory is
+	// proc_pidinfo(PROC_PIDVNODEPATHINFO), which needs cgo — refused by the
+	// helper's size argument (~2.8 MiB against ~40 MiB, D3). sysctl answers
+	// argv and the foreground command cgo-free and cannot answer cwd at all,
+	// so the shipped platform reports `["cwd"]` here and a reader can say "we
+	// do not know where this shell is" instead of showing where it started.
+	//
+	// The rule is per-OBSERVATION and not per-platform: a /proc read that was
+	// refused is named the same way, because the reader's problem is identical
+	// and the reason is not its business.
+	Unavailable []Diagnostic `json:"unavailable"`
 }
+
+// Diagnostic names one derived observation the helper may report. The set is
+// closed and matches Observation's own optional fields, so a reader can switch
+// on it exhaustively: a free-form string here would let a later generation
+// invent a name nothing understands, which is the same defect
+// additionalProperties:false refuses one level up.
+type Diagnostic string
+
+const (
+	// DiagnosticCwd is the process's current working directory — the one that
+	// changes as the user cds, and the one macOS cannot answer cgo-free.
+	DiagnosticCwd Diagnostic = "cwd"
+	// DiagnosticArgv is the shell's own argument vector as the OS reports it.
+	DiagnosticArgv Diagnostic = "argv"
+	// DiagnosticForegroundCommand is the command name of whatever holds the
+	// terminal's foreground group. It is named unavailable only when there
+	// WAS a foreground group to ask about: a shell alone in the foreground is
+	// an answer, said by omission, and not a diagnostic that went missing.
+	DiagnosticForegroundCommand Diagnostic = "foregroundCommand"
+)
 
 // WindowSpan is the current extent of a session's output window: Base is the
 // oldest offset that still exists, Written is the total ever produced. The

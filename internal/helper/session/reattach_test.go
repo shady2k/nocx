@@ -229,7 +229,7 @@ func TestTheSessionSurvivesTheCoordinatorAndTheProcessRanAcrossTheGap(t *testing
 	svc := session.New(session.Options{
 		Generation: "content-hash",
 		Spawner:    session.NewLocalSpawner(discardLog(), session.Shell{Path: "/bin/sh", Args: []string{"-i"}}),
-		Inspector:  session.NewProcFS(),
+		Inspector:  session.NewInspector(),
 		Log:        discardLog(),
 		Limits:     session.DefaultLimits(),
 	})

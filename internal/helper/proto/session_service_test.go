@@ -281,3 +281,50 @@ func TestSessionIDBytesRoundTripThroughTheirHexSpelling(t *testing.T) {
 		t.Error("a session id that is not 32 hex characters was accepted")
 	}
 }
+
+// TestADiagnosticThisPlatformCannotAnswerIsNamedRatherThanOmitted is the
+// distinction nocx-k6p18.10 exists to draw, and it is not the same one as
+// TestAbsenceIsSaidExplicitlyRatherThanOmitted above.
+//
+// That one separates "no observation at all" (null) from "this generation does
+// not observe" (an omitted field). This one separates two cases INSIDE a
+// non-null observation: a diagnostic the OS was asked for and could not
+// supply, and a diagnostic that simply is not set. They matter because the
+// reader's fallback is the LAUNCH record — a value that was true once and goes
+// stale the moment the user cds. A reader that cannot tell the two apart shows
+// the launch directory as though it were the current one, which is exactly the
+// lie the authority/evidence split exists to prevent, arriving by the back
+// door. macOS is where this bites: sysctl answers argv and the foreground
+// command cgo-free and cannot answer cwd at all.
+func TestADiagnosticThisPlatformCannotAnswerIsNamedRatherThanOmitted(t *testing.T) {
+	f, ok := reflect.TypeOf(Observation{}).FieldByName("Unavailable")
+	if !ok {
+		t.Fatal("Observation has no Unavailable: a diagnostic the platform cannot answer must be SAID, or a reader falls back to the launch record and shows a stale value as a current one")
+	}
+	if strings.Contains(string(f.Tag), "omitempty") {
+		t.Errorf("Observation.Unavailable is omitempty (%s): the empty list is the answer 'everything asked for was answered', and omitting it makes that indistinguishable from a generation that does not report the field at all", f.Tag)
+	}
+
+	answered, err := json.Marshal(Observation{Source: "procfs", Cwd: "/tmp", Unavailable: []Diagnostic{}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	unanswered, err := json.Marshal(Observation{Source: "sysctl", Unavailable: []Diagnostic{DiagnosticCwd}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if !strings.Contains(string(answered), `"unavailable":[]`) {
+		t.Errorf("an inspector that answered everything does not say so: %s", answered)
+	}
+	if !strings.Contains(string(unanswered), `"unavailable":["cwd"]`) {
+		t.Errorf("an inspector that cannot answer cwd does not name it: %s", unanswered)
+	}
+	if strings.Contains(string(unanswered), `"cwd"`) && !strings.Contains(string(unanswered), `"unavailable"`) {
+		t.Errorf("cwd leaked into an observation that cannot answer it: %s", unanswered)
+	}
+	// The whole point, stated as bytes: the two cases are not the same
+	// payload, so no decoder can conflate them by accident.
+	if string(answered) == string(unanswered) {
+		t.Fatal("an answered cwd and an unanswerable one marshal identically")
+	}
+}

@@ -75,6 +75,7 @@ import { EnvironmentView, toRows, toStored, type ValueRow } from './environment-
 import {
   classifyPastedSource,
   environmentPath,
+  isCollectionsRoot,
   proposedDestination,
   proposedDestinationFromDocument,
   proposedDestinationFromURL,
@@ -309,6 +310,38 @@ function sourcePath(held: HeldSource): string {
   if (held.kind === 'file') return held.file.name
   if (held.kind === 'archive') return held.name
   return ''
+}
+
+/**
+ * THE DESTINATION A HELD SOURCE PROPOSES — every entrance, one derivation.
+ *
+ * The three functions in api-paths.ts read three different things (a file's
+ * stem, a pasted export's `info.name`, a URL's last segment) and this is the
+ * one place that says which of them a source is asked. It exists so that the
+ * offer made at the gesture and the offer re-made when the root lands are
+ * the SAME derivation rather than two that agree until they do not — which
+ * is what made a paste and a drop propose different folders before
+ * `offerDestination` was written, and would have made the late offer differ
+ * from the eager one now (nocx-s47is).
+ *
+ * '' is "nothing to propose yet": no source held, or no root to hang one
+ * off. Both are ordinary states, and neither is a refusal.
+ */
+function proposalFor(held: HeldSource, defaultRoot: string): string {
+  switch (held.kind) {
+    case 'path':
+      return proposedDestination(defaultRoot, held.path)
+    case 'file':
+      return proposedDestination(defaultRoot, held.file.name)
+    case 'archive':
+      return proposedDestination(defaultRoot, held.name)
+    case 'document':
+      return proposedDestinationFromDocument(defaultRoot, held.text)
+    case 'url':
+      return proposedDestinationFromURL(defaultRoot, held.url)
+    default:
+      return ''
+  }
 }
 
 /** Whether a NAME — a file's or a path's — is the archive route's. One
@@ -1697,18 +1730,58 @@ export function ApiPane(props: ApiPaneProps) {
    * and then its stem, and a bare `acme.postman_collection.json` is already
    * both (api-paths.ts).
    */
-  const proposeDestination = (nameOrPath: string): void => {
+  const proposeForHeldSource = (): void => {
     offerDestination(
-      proposedDestination(
+      proposalFor(
+        untrack(postmanSource),
         // A READ AT A MOMENT rather than a subscription — this runs from a
         // click, a picker's answer or a drop, never from a render — so it is
         // untracked: nothing here should re-run when the listing refreshes
-        // and rewrite a field somebody is typing into.
+        // and rewrite a field somebody is typing into. What happens when the
+        // moment has no root to read is the effect below, not a subscription
+        // here.
         untrack(() => store.defaultRoot()),
-        nameOrPath,
       ),
     )
   }
+
+  /**
+   * WHEN THE ROOT LANDS AFTER THE SOURCE DOES (nocx-s47is).
+   *
+   * `defaultRoot` rides `api.collections.list`, so it is a round trip and not
+   * a fact the renderer is born knowing. The ask can be opened, and an export
+   * pasted into it, while that trip is still in flight — a person clicking
+   * straight through, or a loaded machine. Every proposal above is a read at
+   * a moment, and a moment with no root proposes '', which `offerDestination`
+   * drops on the floor. Nothing asked again: the ask then held a source,
+   * named no folder, and no event existed that would ever give it one, so
+   * Import was disabled for as long as anybody was willing to wait. Under
+   * webkit in CI that was two specs eating their whole timeout window.
+   *
+   * The interval this closes, with both ends: from the moment a source is
+   * held until the ask names a folder for it, and the root arriving is the
+   * closing event.
+   *
+   * It does not argue with the person, which is the rule `offerDestination`
+   * owns and this one repeats deliberately for the two conditions that are
+   * its own: it acts only while the ask is OPEN, and only when the field
+   * still holds nothing a person could import onto — empty, or the bare root
+   * the ask prefilled.
+   */
+  createEffect(() => {
+    const root = store.defaultRoot()
+    if (root === '') return
+    untrack(() => {
+      if (!importing() || destTyped()) return
+      const dest = postmanDest().trim()
+      if (dest !== '' && !isCollectionsRoot(root, dest)) return
+      const proposal = proposalFor(postmanSource(), root)
+      // With no source held yet there is nothing to propose, and the ask
+      // gets the prefill `askForImport` could not make — the same value, at
+      // the first moment it can be spelled.
+      setPostmanDest(proposal !== '' ? proposal : `${root.replace(/[\\/]+$/, '')}/`)
+    })
+  })
 
   /**
    * THE OFFER ITSELF, once, whichever of the three derivations made it — a
@@ -1737,7 +1810,7 @@ export function ApiPane(props: ApiPaneProps) {
     setPostmanSource(path === '' ? { kind: 'none' } : { kind: 'path', path })
     setArchivePreview(null)
     clearPaste()
-    proposeDestination(path)
+    proposeForHeldSource()
     // AND THE EXPORT IS READ BEFORE IT IS WRITTEN, on this route as much as
     // on the one carrying bytes. The system picker and a native drop both
     // answer with a path, and they are the ONLY pair the shipped app has —
@@ -1826,14 +1899,13 @@ export function ApiPane(props: ApiPaneProps) {
     // about. A new one is a new attempt, and leaving the old sentence up
     // would have it read as a verdict on this one.
     clearImportRefusal()
-    const root = untrack(() => store.defaultRoot())
     if (source.kind === 'url') {
       setPostmanSource({ kind: 'url', url: source.url })
-      offerDestination(proposedDestinationFromURL(root, source.url))
+      proposeForHeldSource()
       return
     }
     setPostmanSource({ kind: 'document', text: source.document })
-    offerDestination(proposedDestinationFromDocument(root, source.document))
+    proposeForHeldSource()
   }
 
   /** Let the held source go, whichever entrance it came through. The person
@@ -1950,7 +2022,7 @@ export function ApiPane(props: ApiPaneProps) {
     clearPaste()
     if (!isArchiveFile(file)) {
       setPostmanSource({ kind: 'file', file })
-      proposeDestination(file.name)
+      proposeForHeldSource()
       // A single document is read too, for what it says about ITSELF: the
       // offer over a `type: secret` variable needs to know there is one
       // before anything is written, and an offer that existed for archives
@@ -1990,7 +2062,7 @@ export function ApiPane(props: ApiPaneProps) {
             untrack(() => store.defaultRoot()),
             file.name,
           )
-          proposeDestination(file.name)
+          proposeForHeldSource()
           const dest = postmanDest().trim() || proposed
           return previewSource({ archiveBytes }, dest, requestId, true)
         }),

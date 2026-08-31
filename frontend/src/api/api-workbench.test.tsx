@@ -2218,6 +2218,50 @@ describe('the import ask asks one question', () => {
     expect(sourceLine()).not.toBe('')
   })
 
+  // ── THE ROOT CAN ARRIVE AFTER THE PASTE DOES (nocx-s47is) ──────────────
+  //
+  // `defaultRoot` is not a fact about the build the renderer is born
+  // knowing: it rides `api.collections.list`, which is a round trip. The ask
+  // can be opened, and an export pasted into it, while that trip is still in
+  // flight — a person clicking straight through, or a slow machine, and in
+  // CI's webkit that is what happened.
+  //
+  // Every proposal was a READ AT A MOMENT, deliberately, so that a refreshed
+  // listing could not rewrite a field somebody was typing into. What the
+  // moment had no answer for was silently dropped — `offerDestination`
+  // ignores an empty proposal — and nothing ever asked again. The ask was
+  // then permanently un-ready: it held a source, named no folder, and no
+  // event existed that would ever give it one. Import stayed disabled for as
+  // long as anybody was willing to wait, which in CI was two specs eating
+  // their whole timeout window.
+  //
+  // The invariant with BOTH ends: from the moment a source is held until the
+  // ask names a folder for it, and the root landing is the closing event.
+  it('a root that lands after the paste still proposes a folder for it', async () => {
+    let land: () => void = () => {}
+    const listCollections = vi.fn(
+      () =>
+        new Promise<{ collections: never[]; defaultRoot: string }>((resolve) => {
+          land = () => resolve({ collections: [], defaultRoot: DEFAULT_ROOT })
+        }),
+    )
+    const { bar } = await mountApp({ listCollections })
+    await openImportAsk(bar)
+
+    // The paste lands FIRST, while the listing is still in flight — which is
+    // the whole case. The source is held, and there is nothing to propose.
+    paste('{"info":{"name":"Acme API"}}')
+    await vi.waitFor(() => expect(sourceLine()).not.toBe(''))
+    expect(destSummary()).toBe('')
+    expect(button('Import').disabled).toBe(true)
+
+    // And now the round trip comes back.
+    land()
+
+    await vi.waitFor(() => expect(destSummary()).toBe(`${DEFAULT_ROOT}/acme-api`))
+    await vi.waitFor(() => expect(button('Import').disabled).toBe(false))
+  })
+
   it('refuses a curl line here rather than spending a round trip on it', async () => {
     // curl has its own door in the request editor and is deliberately not
     // this ask's question: `parseImport` would hand it to the curl parser,

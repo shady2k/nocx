@@ -23,6 +23,7 @@
  *    a surface somebody else owns.
  */
 import type { QuickConnectItem, QuickConnectProvider } from '../quick-connect'
+import { CopyIcon } from '../ui/icons'
 import { askFields } from './resolve'
 import type {
   SnippetDestination,
@@ -46,8 +47,13 @@ export interface SnippetsQuickConnectDeps {
    *  vault's "Add a secret…" does: the person whose library is empty is
    *  exactly the person who needs the page that fills it. */
   onManage: () => void
-  /** This body asks for values: the palette closes and the form opens. */
-  onAsk: (snippet: Snippet) => void
+  /** This body asks for values: the palette closes and the form opens, for
+   *  the destination the row's activation chose. */
+  onAsk: (snippet: Snippet, destination: SnippetDestination) => void
+  /** The resolved text reached the clipboard. Said as a toast rather than on
+   *  the palette: the palette is gone by then, and there is nothing left on
+   *  screen for the sentence to be about. */
+  onCopied: (title: string) => void
   /** A fire landed. The keyboard goes back to the pane: the person fired
    *  INTO something, and their next keystroke belongs to it (design §9.5).
    *  Without this the palette's dialog leaves focus on the document and the
@@ -121,14 +127,43 @@ export class SnippetsQuickConnectProvider implements QuickConnectProvider {
     return null
   }
 
+  /** Put the snippet on the clipboard instead of into the pane — the row's
+   *  second destination. A body with fields is answered first, exactly as
+   *  the insert path answers it: the destination changes where the resolved
+   *  text lands, never what it is (design §9.2). */
+  private async copy(snippet: Snippet): Promise<void> {
+    if (askFields(snippet.body).length > 0) {
+      this.deps.onAsk(snippet, 'clipboard')
+      return
+    }
+    const outcome = await this.deps.fire({
+      snippet,
+      answers: new Map(),
+      destination: 'clipboard',
+    })
+    const message = snippetRefusalMessage(outcome)
+    if (message !== null) {
+      this.deps.onRefused(message)
+      return
+    }
+    this.deps.onCopied(snippet.title)
+  }
+
   /** The same fire, without the palette notice — for a caller that shows
    *  the refusal itself (the ask form). */
   async fireReporting(
     snippet: Snippet,
     answers: ReadonlyMap<string, string>,
+    destination: SnippetDestination,
   ): Promise<string | null> {
-    const destination: SnippetDestination = 'input'
-    return snippetRefusalMessage(await this.deps.fire({ snippet, answers, destination }))
+    const outcome = await this.deps.fire({ snippet, answers, destination })
+    const message = snippetRefusalMessage(outcome)
+    if (message === null && destination === 'clipboard') {
+      // The form owns the refusal sentence, but a DELIVERY to the clipboard
+      // leaves nothing on screen to say so — the form closes behind it.
+      this.deps.onCopied(snippet.title)
+    }
+    return message
   }
 
   /** The offer that outlives an empty list — and an unavailable one, since
@@ -177,6 +212,17 @@ export class SnippetsQuickConnectProvider implements QuickConnectProvider {
       label: snippet.title,
       detail: summary(snippet.body),
       kind: 'snippet' as const,
+      // The clipboard is a DESTINATION, not a remedy. It was reachable only
+      // as the alternative offered after a refusal, so it went with the
+      // floating panel and left SnippetDestination with one caller
+      // (nocx-8rtr.2). Offering it on every row is what it always was: a
+      // person who wants the phrase somewhere else asks for it before
+      // anything has gone wrong, and never learns it exists by being told no.
+      action: {
+        icon: () => CopyIcon({}),
+        ariaLabel: `Copy "${snippet.title}" to the clipboard`,
+        run: () => void this.copy(snippet),
+      },
     }
     if (fields.length === 0) {
       return { ...base, run: () => void this.fire(snippet, new Map()) }
@@ -184,7 +230,7 @@ export class SnippetsQuickConnectProvider implements QuickConnectProvider {
     // Fields to answer: the palette closes on activation (it closes after
     // any run) and the form takes over with all of them at once. The
     // answers come back through the same fire, resolved at fire time (§8).
-    return { ...base, run: () => this.deps.onAsk(snippet) }
+    return { ...base, run: () => this.deps.onAsk(snippet, 'input') }
   }
 }
 

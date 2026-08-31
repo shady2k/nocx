@@ -58,12 +58,14 @@ import {
   createMemo,
   createEffect,
   type Component,
+  type JSX,
   type Setter,
 } from 'solid-js'
 import { render } from 'solid-js/web'
 import { parseQuickConnect, type ProfileClient } from './profiles'
 import type { Pane } from './panes'
 import { Dialog } from './ui/dialog'
+import { IconButton } from './ui/icon-button'
 import { SearchField } from './ui/search-field'
 import { VAULT_OFFER_SETUP, VAULT_OFFER_UNSEAL, addSecretLabel } from './ui/secret-picker'
 import { aliasRows, profileRows } from './quick-connect-assembly'
@@ -110,6 +112,26 @@ export interface QuickConnectItem {
   /** When present, activating this command drills into its steps inside the
    *  same surface instead of running (nocx-4t37). */
   readonly drill?: DrillCommand
+  /** A second thing this row can do, shown as an icon at its trailing edge.
+   *  OPTIONAL and rare: a row's meaning is its `run`, and an action beside it
+   *  is for a genuine SECOND destination rather than for a remedy after a
+   *  refusal — snippets offer "copy this instead of inserting it", which a
+   *  person wants before anything has gone wrong (nocx-8rtr.2).
+   *
+   *  It is a mouse affordance: the row is a listbox option, and a focusable
+   *  control inside one breaks the roving the field owns, so the button is
+   *  taken out of the tab order. A keyboard route is nocx-2jbxg, deliberately
+   *  not invented here — a chord on this surface is inherited by the server
+   *  list, the command palette and the secret picker at once. */
+  readonly action?: {
+    /** A THUNK, not an element: a provider builds its rows wherever it likes,
+     *  including a test with no DOM, and an eagerly-built icon would need one
+     *  there. It is called during render, where there is always a document. */
+    readonly icon: () => JSX.Element
+    /** Required: an icon-only control with no accessible name is a defect. */
+    readonly ariaLabel: string
+    readonly run: () => void
+  }
   /** Invoked when the item is activated (click or Enter). */
   readonly run: () => void
 }
@@ -1035,6 +1057,26 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
                     </Show>
                     <Show when={props.variant === 'palette' && drill() === null}>
                       <span class="quick-connect__item-kind">{KIND_LABELS[item.kind]}</span>
+                    </Show>
+                    <Show when={item.action !== undefined} keyed>
+                      <span class="quick-connect__item-action">
+                        <IconButton
+                          ariaLabel={item.action!.ariaLabel}
+                          title={item.action!.ariaLabel}
+                          size="sm"
+                          // Out of the roving order: see QuickConnectItem.action.
+                          tabIndex={-1}
+                          onClick={(e: MouseEvent) => {
+                            // The row's own onClick would activate the PRIMARY
+                            // action underneath this one, so the second
+                            // destination would always fire the first as well.
+                            e.stopPropagation()
+                            item.action!.run()
+                          }}
+                        >
+                          {item.action!.icon()}
+                        </IconButton>
+                      </span>
                     </Show>
                   </div>
                 </>

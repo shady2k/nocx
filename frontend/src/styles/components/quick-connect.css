@@ -169,6 +169,21 @@
   color: var(--color-text-dim);
 }
 
+/* ── Row action (nocx-8rtr.2) ───────────────────────────────────────── */
+
+/* A row's optional second destination — snippets' "copy this instead of
+   inserting it". PLACEMENT ONLY: the button inside is a kit IconButton and
+   this surface may not repaint it (AGENTS.md). `margin-left: auto` pushes it
+   to the trailing edge the same way the type badge is pushed, and `auto` on
+   both is harmless: the first one wins the free space and the second sits
+   beside it. */
+.quick-connect__item-action {
+  margin-left: auto;
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+}
+
 /* ── Drill-in breadcrumbs (nocx-4t37) ───────────────────────────────── */
 
 /* The command's path above the filter: command name › chosen steps › the

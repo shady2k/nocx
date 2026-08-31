@@ -923,21 +923,27 @@ async function main() {
   const snippetsProvider = new SnippetsQuickConnectProvider({
     store: snippetsStore,
     fire: snippetFire,
-    // A refusal re-opens the list with the reason on it: the surface it is
-    // about is still there, and a toast would take the explanation away
-    // from it (design §11).
-    onRefused: (message) => qc.showSnippets(message),
+    // A refusal is a TOAST now, and the reason the spec gave for putting it
+    // back on the palette has expired (design §11). That reason was that the
+    // surface the refusal is about is still there — true while the palette
+    // carried the only way out, which was "copy this instead". The way out
+    // lives on every row now (nocx-8rtr.2), so the sentence has nothing left
+    // to be anchored to, and Toast is the kit's one notification affordance
+    // (ui/README.md).
+    onRefused: (message) => showToast({ message, level: 'danger' }),
+    onCopied: (title) => showToast({ message: `Copied "${title}" to the clipboard.` }),
     onManage: () => openSettingsPane().openPage('snippets'),
     // A body with {{ask:…}} fields: the palette closes and the form asks
     // for all of them at once (owner review — a step that filters a list
     // cannot also be where a value is typed).
-    onAsk: (snippet) => snippetAsk.ask(snippet),
+    onAsk: (snippet, destination) => snippetAsk.ask(snippet, destination),
     onDelivered: returnKeyboardToThePane,
   })
   // The form the fields are answered in. It reports its own refusals, so a
   // person who mistyped an answer sees why beside what they typed.
   const snippetAsk = mountSnippetAskDialog(document.body, {
-    fire: (snippet, answers) => snippetsProvider.fireReporting(snippet, answers),
+    fire: (snippet, answers, destination) =>
+      snippetsProvider.fireReporting(snippet, answers, destination),
     onDelivered: returnKeyboardToThePane,
   })
   /**
@@ -1475,7 +1481,7 @@ async function main() {
     // completion dropdown today): a body that asks for values opens the
     // form; a plain one fires.
     if (askFields(snippet.body).length > 0) {
-      snippetAsk.ask(snippet)
+      snippetAsk.ask(snippet, 'input')
       return
     }
     void snippetsProvider.fire(snippet, new Map())

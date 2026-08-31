@@ -32,7 +32,7 @@ Every event travels in an envelope. **Every** envelope carries the full addressi
 tuple — protocol version, lane id, domain id, epoch, monotonic sequence, and the
 bearer capability. No API anywhere obtains lane, domain or epoch from a singleton;
 they are addressed explicitly in every message. This is the property that keeps
-the future relay a third adapter instead of a protocol rewrite.
+the remote helper a third adapter instead of a protocol rewrite.
 
 ```
 +--------+--------+--------+--------+------------------+
@@ -329,7 +329,7 @@ payload. Where the local platform cannot preserve the descriptor (sudo
 policy, su that closes fds), the honest fallback is the conventional
 terminal, visible in the product. `docker exec` is conventional-only by
 owner decision: neither an inherited descriptor nor a loopback port crosses
-the container boundary — that is a container relay, a Tier-B transport.
+the container boundary — that is a container transport of its own.
 Events from a suspended, closed or lost domain are rejected against the active
 lane — stale events can never touch the live domain.
 

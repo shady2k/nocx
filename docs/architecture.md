@@ -35,7 +35,7 @@ graph TB
         shellint["shellintegration<br/>(OSC 7/133 substrate)"]
     end
 
-    remote["Remote helper binary<br/>(Tier B) — Phase 2 seam"]
+    remote["nocx-helper<br/>(execution host: PTY, git, fs, completion)"]
 
     wails -.embeds.-> core
     webhost -.serves.-> core
@@ -218,7 +218,7 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 
 - **Web version** — same core served over the network. Revisit when a non-macOS or remote-access need appears (Phase 2/3).
 - **Secrets vault** — separate encrypted single-machine store, credentials injected through the SSH interface. Revisit at Phase 2 start.
-- **Tier-B remote helper** — cross-compiled Go binary augmenting the remote shell, feeding the reserved `metadata` msg-type (AD-1). Revisit when Tier A cwd fidelity proves insufficient or richer remote metadata (file-tree) is wanted. **Not** what Warp calls warpify: warpify is Tier A shell hooks, which is `nocx-pu4` and is being built now. This entry used to carry that name, which invited a reader to defer the wrong thing — the helper binary is deferred; the shell integration is not.
+- **The remote helper, and it is no longer a seam to revisit** — a cross-compiled Go binary that SPAWNS THE SHELL AND OWNS ITS PTY on the host, and answers git, filesystem, environment and completion natively. It is the EXECUTION HOST, not a metadata feed: it replaces the script substrate for hosts that install it by consent, while Tier A remains the substrate everywhere else, so AD-5's purpose — no MVP feature coupled to a remote install — is preserved. Because it holds the PTY, a session outlives the ssh channel and survives a nocx update; that is what turns this from an optional enrichment into the thing levels above it stand on. Planned and ordered rather than deferred: `bd list --label remote-host`. **Not** what Warp calls warpify: warpify is Tier A shell hooks, which is `nocx-pu4` and is being built now. This entry used to carry that name, which invited a reader to defer the wrong thing.
 - **Splits / panes** — in-window layout above the session model. Revisit at Phase 2.
 - **Scrollback search (find-in-output)** — frontend-owned over existing render state. Revisit at Phase 2.
 - **Plugin API** — no runtime built now; the interface-first + DI + composition-root design already is the seam. Revisit only if third-party extension becomes a goal.

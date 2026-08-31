@@ -357,6 +357,12 @@ rule.
 > binding document for the boundary being crossed. The owner caught all three. The third one
 > would have shipped a provider seam the relay had to be forked into.
 
+The anecdote stands; the vocabulary in it does not. Since 2026-08-31 there is no **relay** —
+the remote binary is the **helper**, it owns the PTY on the host rather than augmenting a
+shell beside it, and `nocx-if6` is closed as superseded. The boundary the third failure
+crossed is exactly where it was; only its name changed. The live chain is
+`bd list --label remote-host`.
+
 ## Before you investigate: two checks that beat reasoning
 
 **Search the memories before fighting the environment.** `bd memories <keyword>` costs

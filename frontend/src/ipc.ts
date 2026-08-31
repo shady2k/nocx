@@ -173,8 +173,13 @@ const EMPTY_RECORDING: SessionRecording = {
 /** The gap reason for a stretch that neither the recording nor the ring
  *  holds. It is the renderer's word because the fact is the renderer's to
  *  derive: `produced` belongs to session.output and `replayFrom` to
- *  sessions.live, and neither owner can see the other's number. */
-const UNRECORDED = 'unrecorded'
+ *  sessions.live, and neither owner can see the other's number.
+ *
+ *  EXPORTED so the surface that reports the hole (recovery-notice.ts) reads
+ *  the same word this file mints rather than spelling a second copy of it
+ *  (nocx-fz4qa). Two string literals that must agree and only meet at
+ *  runtime is the shape AGENTS.md calls a regression with a delay fuse. */
+export const UNRECORDED = 'unrecorded'
 
 /** base64 → bytes. atob is the platform's, and its output is one byte per
  *  code unit by definition, so the copy below is exact rather than a

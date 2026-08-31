@@ -68,7 +68,7 @@ import { LifecycleKernel, shouldShowEditor } from './lifecycle/state'
 import { ProfileClient, type SSHProfile } from './profiles'
 import { Dispatcher, RpcError } from './dispatcher'
 import { fixedEndpoint } from './endpoint'
-import type { WSClient } from './ipc'
+import type { SessionHandle, SessionRecovery, WSClient } from './ipc'
 import { createCommandBlock } from './scrollback/blocks'
 import { mountReadScreenHandler } from './read-screen'
 import { CommandSnapshotStore } from './command-snapshot'
@@ -11142,6 +11142,119 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       ).toHaveLength(0)
       expect(editorOf(content).isVisible).toBe(false)
       expect(content.pinnedFrame()).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+})
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A reclaimed pane says what is missing (nocx-fz4qa)
+// ═══════════════════════════════════════════════════════════════════════════
+// The backend already tells a reclaiming client which byte ranges it could
+// not give back (session.output's `gaps`, plus the renderer-derived
+// `unrecorded` stretch nothing kept), and until this bead nothing read it: a
+// pane came back short and said nothing about it. AGENTS.md forbids exactly
+// that — a soft degrade must be visible in the product.
+//
+// These go through the ADOPTION seam a restored tab actually takes
+// (TerminalContentHooks.adoptSession), not through the notice module, so
+// they can report the wiring being absent.
+describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
+  const RECLAIM_SIZE = { cols: 80, rows: 24, xpixel: 0, ypixel: 0 }
+
+  /** The pane's own reclaim: a session handle carrying what the claim
+   *  recovered, handed back by the thunk PaneManager supplies. */
+  function reclaiming(recovered: SessionRecovery | null) {
+    const session = { ...makeSession(), recovered }
+    return {
+      session,
+      hooks: { adoptSession: () => Promise.resolve(session as unknown as SessionHandle) },
+    }
+  }
+
+  const cardTitle = (tab: Pane) =>
+    tab.pane.querySelector('.nocx-recovery-notice .ui-status-card__title')?.textContent ?? null
+  const cardDesc = (tab: Pane) =>
+    tab.pane.querySelector('.nocx-recovery-notice .ui-status-card__desc')?.textContent ?? null
+
+  it('tells the user how much of the run is gone and that the size limit took it', async () => {
+    const { hooks } = reclaiming({
+      bytes: 8192,
+      gaps: [{ start: 0, end: 3_000_000, reason: 'cap' }],
+      size: RECLAIM_SIZE,
+    })
+    const { tab, teardown } = await mountTerminal(makeClipboard(), { hooks })
+    try {
+      await vi.waitFor(() => expect(cardTitle(tab)).not.toBeNull())
+      expect(cardTitle(tab)).toContain('3.0 MB')
+      expect(cardDesc(tab)).toContain('size limit')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('names the unrecorded stretch, which is a different fact from the bound', async () => {
+    const { hooks } = reclaiming({
+      bytes: 0,
+      gaps: [{ start: 100, end: 5100, reason: 'unrecorded' }],
+      size: RECLAIM_SIZE,
+    })
+    const { tab, teardown } = await mountTerminal(makeClipboard(), { hooks })
+    try {
+      await vi.waitFor(() => expect(cardTitle(tab)).not.toBeNull())
+      expect(cardDesc(tab)).toContain('never recorded')
+      expect(cardDesc(tab)).not.toContain('size limit')
+    } finally {
+      teardown()
+    }
+  })
+
+  // The negative, and the reason the positive means anything.
+  it('says nothing when the reclaim recovered the whole recording', async () => {
+    const { hooks } = reclaiming({ bytes: 8192, gaps: [], size: RECLAIM_SIZE })
+    const { content, tab, teardown } = await mountTerminal(makeClipboard(), { hooks })
+    try {
+      await expect(content.ready).resolves.toBe(true)
+      expect(tab.pane.querySelector('.nocx-recovery-notice')).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  // A pane that opened a fresh session recovered nothing and has nothing to
+  // report — `recovered` is null, and a card here would be a claim about a
+  // session that never had a past.
+  it('says nothing on a pane that opened its own session', async () => {
+    const { content, tab, teardown } = await mountTerminal()
+    try {
+      await expect(content.ready).resolves.toBe(true)
+      expect(tab.pane.querySelector('.nocx-recovery-notice')).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('is taken away when the user dismisses it', async () => {
+    const { hooks } = reclaiming({
+      bytes: 8192,
+      gaps: [{ start: 0, end: 1000, reason: 'cap' }],
+      size: RECLAIM_SIZE,
+    })
+    // In the document: Solid delegates `click` at the document root, so a
+    // detached pane never sees the press a user makes.
+    const { tab, teardown } = await mountTerminal(makeClipboard(), {
+      hooks,
+      attachToDocument: true,
+    })
+    try {
+      await vi.waitFor(() => expect(cardTitle(tab)).not.toBeNull())
+      const cross = [...tab.pane.querySelectorAll('button')].find(
+        (b) => b.getAttribute('aria-label') === 'Dismiss',
+      )
+      expect(cross).toBeDefined()
+      cross!.click()
+      await vi.waitFor(() => expect(tab.pane.querySelector('.nocx-recovery-notice')).toBeNull())
     } finally {
       teardown()
     }

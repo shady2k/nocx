@@ -97,6 +97,7 @@
 @import './styles/components/toggle-matrix.css';
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/integration-notice.css';
+@import './styles/surfaces/recovery-notice.css';
 @import './styles/surfaces/update-notice.css';
 @import './styles/surfaces/about.css';
 @import './styles/surfaces/settings.css';

@@ -62,6 +62,7 @@ import {
   type OutputRecordingSource,
 } from './integration/status'
 import { mountIntegrationNotice } from './integration/notice'
+import { mountRecoveryNotice } from './recovery-notice'
 import { mountConnectionMark } from './connection-mark'
 import { mountReconnectOffer, type ReconnectOfferHandle } from './reconnect-offer'
 import {
@@ -917,6 +918,12 @@ export class TerminalContent extends BasePaneContent {
   private _integrationUnsub: (() => void) | null = null
   /** The disposer for the mounted degraded-session card, when one is up. */
   private _noticeDispose: (() => void) | null = null
+  /** The disposer for the reclaimed-pane card that names the output this
+   *  session produced and nothing kept (nocx-fz4qa). Separate from the card
+   *  above because the two report different KINDS of fact: that one is a
+   *  session state that comes and goes, this one is a settled fact about one
+   *  reclaim that will never stop being true. */
+  private _recoveryNoticeDispose: (() => void) | null = null
   /** The pane the card mounts over. */
   private _paneTarget: HTMLElement | null = null
   // The last thing the backend said about REACHING this pane's host, and the
@@ -3515,6 +3522,13 @@ export class TerminalContent extends BasePaneContent {
     }
 
     this.session = session
+    // What the reclaim could NOT give back, said where a person will see it
+    // (nocx-fz4qa). The recovered bytes are already queued for the terminal
+    // by the time this handle exists; the hole is the half the terminal
+    // cannot show, because a missing stretch of a byte stream looks exactly
+    // like a session that printed less. Mounted here, with the session,
+    // because that is where the fact arrives and where the pane is known.
+    this._showRecoveryNotice(session, target)
     lifecycleSubscription.bindSession(session.sessionId)
     // THE PANE IS THE DROP TARGET, and this is where it can say so: the
     // session is what the drop has to be routed to, and it does not exist
@@ -4448,6 +4462,40 @@ export class TerminalContent extends BasePaneContent {
    *  nothing is kept — that is a different sentence and it would be wrong. */
   private _recording(): OutputRecordingSource {
     return this.hooks.outputRecording ?? RECORDING_UNKNOWN
+  }
+
+  /** Raise the reclaimed-pane card, when this session came back short
+   *  (nocx-fz4qa).
+   *
+   *  A FRESH SESSION RAISES NOTHING: `recovered` is null for a pane that
+   *  opened its own, and a reclaim that got the whole recording back has no
+   *  gaps — mountRecoveryNotice answers null for both, and the decision lives
+   *  there so this side is not a second reader of it.
+   *
+   *  Any card from a PREVIOUS session goes first. A rebind is a new session
+   *  with its own past, and a card left over from the old one would be
+   *  describing bytes that have nothing to do with what is on screen now. */
+  private _showRecoveryNotice(session: SessionHandle, target: HTMLElement): void {
+    this._dropRecoveryNotice()
+    this._recoveryNoticeDispose = session.recovered
+      ? mountRecoveryNotice(target, {
+          recovery: session.recovered,
+          onDismiss: () => this._dropRecoveryNotice(),
+        })
+      : null
+    // The card takes its height off the top of the pane, so the scroller is
+    // smaller than the grid fitted to it — the same re-measure the
+    // integration card goes through, and for the same reason: the pane's own
+    // box is unchanged, so no viewport observer fires for this.
+    if (this._recoveryNoticeDispose) this.scheduleLiveResize()
+  }
+
+  /** Take the reclaim card down and give the pane back to the terminal. */
+  private _dropRecoveryNotice(): void {
+    if (!this._recoveryNoticeDispose) return
+    this._recoveryNoticeDispose()
+    this._recoveryNoticeDispose = null
+    this.scheduleLiveResize()
   }
 
   /** Take the card down and give the pane back to the terminal. */
@@ -5678,6 +5726,8 @@ export class TerminalContent extends BasePaneContent {
     this._integrationUnsub = null
     this._noticeDispose?.()
     this._noticeDispose = null
+    this._recoveryNoticeDispose?.()
+    this._recoveryNoticeDispose = null
     this._lifecycleChangeUnsub?.()
     this._lifecycleChangeUnsub = null
     this._projections?.detach()

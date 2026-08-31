@@ -1042,14 +1042,14 @@ Two things, and neither is deferred implementation detail: each is a place where
 plausible implementations satisfy every word above and make D1a **false**. (The window's
 bound was a third until it was measured — see §6.)
 
-**1. Content-store restart reconciliation, as its own document.** `dropDeadSessions`
+**1. Content-store restart reconciliation** — written:
+`.internal/specs/2026-08-31-content-store-restart-reconciliation-design.md`. `dropDeadSessions`
 (`sqlite.go:410`) deletes every session row and every `session_output` recording at store open,
-because a session "cannot outlive" its backend — the premise this design removes. As it stands a
-fresh coordinator destroys the recordings of live sessions and terminalizes their open ledger
-entries as `unknown`. It must define: how live sessions are discovered from the helper before
-the sweep runs; which rows are preserved and which are proven absent; how an open entry is
-reconciled without declaring a running process finished; and how all of that happens without a
-second connection to the encrypted store (ADR-0043).
+and `closeOpenEntries` (`:365`) closes every open entry as `unknown`, both on the premise that a
+session cannot outlive its backend — the premise this design removes. That document moves the
+sweep out of `Open` (which has no carrier and therefore cannot ask), introduces the third class
+`unreconciled` beside live and absent, and replaces the bound that the unconditional delete was
+silently providing.
 
 **2. The durable lifecycle protocol** — written:
 `.internal/specs/2026-08-31-the-generation-daemon-lifecycle-design.md`. The clearest way to satisfy every

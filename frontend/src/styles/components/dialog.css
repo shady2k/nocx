@@ -115,6 +115,15 @@ dialog.nocx-dialog::backdrop {
   width: 640px;
 }
 
+/* Full-page readers use the available viewport rather than the dialog's
+   ordinary content width. */
+.nocx-dialog__panel[data-size='full'] {
+  width: calc(100vw - var(--space-6, 24px) - var(--space-6, 24px));
+  height: calc(100vh - var(--space-6, 24px) - var(--space-6, 24px));
+  max-width: calc(100vw - var(--space-6, 24px) - var(--space-6, 24px));
+  max-height: calc(100vh - var(--space-6, 24px) - var(--space-6, 24px));
+}
+
 /* The heading row keeps the universal dismiss affordance visible even for a
    title-less dialog. Footer Cancel buttons remain the caller's explicit action. */
 .nocx-dialog__header {

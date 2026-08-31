@@ -243,6 +243,11 @@ describe('Dialog', () => {
     )
   })
 
+  it('renders the full-page panel size requested by a reader', () => {
+    subject({ open: true, size: 'full' })
+    expect(document.querySelector('.nocx-dialog__panel')?.getAttribute('data-size')).toBe('full')
+  })
+
   it('renders a keyboard-reachable close control even without a title', () => {
     const onClose = vi.fn()
     subject({ open: true, title: undefined, onClose })

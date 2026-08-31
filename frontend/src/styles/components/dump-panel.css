@@ -44,3 +44,31 @@
   font-size: var(--font-size-sm);
   font-weight: 600;
 }
+
+.ui-dump-panel__toolbar {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--space-3);
+}
+
+.ui-dump-panel__toolbar > .ui-dump-panel__intro {
+  flex: 1 1 auto;
+}
+
+.ui-dump-panel__raw {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.ui-dump-panel__raw > summary {
+  cursor: pointer;
+}
+
+.ui-dump-panel__assembled {
+  min-width: 0;
+}
+
+.ui-dump-panel__highlighted {
+  white-space: inherit;
+}

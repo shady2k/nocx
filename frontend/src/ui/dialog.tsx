@@ -71,7 +71,7 @@ export interface DialogProps {
    * overflowed the panel — which is exactly what a class would have let it keep
    * doing, silently.
    */
-  size?: 'md' | 'lg'
+  size?: 'md' | 'lg' | 'full'
   /**
    * The dialog's affirmative action, triggered by Enter in a single-line field.
    *

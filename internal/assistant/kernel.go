@@ -340,7 +340,7 @@ type effectKernel struct {
 // logger may be nil for the same callers — the only thing it reports is a
 // relation that could not be written, which is a degrade the reader already
 // handles.
-func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID, sessionID string, attempt int, turnEntryID string, requester RendererRequester, classifier CallClassifier, onCall func(ToolCall) error, seams ...toolSeams) (*effectKernel, error) {
+func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID, sessionID string, attempt int, turnEntryID string, requester RendererRequester, automaticItems []string, classifier CallClassifier, onCall func(ToolCall) error, seams ...toolSeams) (*effectKernel, error) {
 	if known == nil {
 		return nil, errors.New("agent run: no egress vault comparison wired — a run that may execute tools must screen its results against known vault material (design §7.1)")
 	}
@@ -360,11 +360,15 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 		turnEntryID: turnEntryID,
 		requester:   requester,
 		classifier:  classifier,
-		runCtx:      agenttools.RunContext{RunID: runID, Session: sessionID},
-		validators:  make(map[string]*jsonschema.Schema, len(registry.All())),
-		results:     make(map[string]*jsonschema.Schema, len(registry.All())),
-		onCall:      onCall,
-		runSeams:    runSeams,
+		runCtx: agenttools.RunContext{
+			RunID:                 runID,
+			Session:               sessionID,
+			AutomaticSessionItems: append([]string(nil), automaticItems...),
+		},
+		validators: make(map[string]*jsonschema.Schema, len(registry.All())),
+		results:    make(map[string]*jsonschema.Schema, len(registry.All())),
+		onCall:     onCall,
+		runSeams:   runSeams,
 	}
 	for _, t := range registry.All() {
 		v, err := compileToolSchema(t)

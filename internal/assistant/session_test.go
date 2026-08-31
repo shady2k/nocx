@@ -142,6 +142,26 @@ func TestExecuteSessionRead_RunningUsesRendererAndCarriesState(t *testing.T) {
 	}
 }
 
+func TestExecuteSessionRead_AutomaticItemUsesRendererWithoutLedgerRow(t *testing.T) {
+	source := &sessionSourceFake{err: errors.New("item not found")}
+	reader := agenttools.NewSessionReaderWithAutomaticItems(
+		[]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}},
+		[]string{"att-shell"},
+	)
+	req := sessionScreenRequester{body: liveFrameBody("current screen")}
+
+	out, err := executeSessionRead(toolTestContext(), reader, source, req, json.RawMessage(`{"id":"att-shell"}`))
+	if err != nil {
+		t.Fatalf("executeSessionRead: %v", err)
+	}
+	if !strings.Contains(out, `"state":"running"`) || !strings.Contains(out, `"text":"current screen"`) {
+		t.Fatalf("automatic result = %s, want renderer screen", out)
+	}
+	if source.calls != 0 {
+		t.Fatalf("source calls = %d, want no ledger read for renderer-owned item", source.calls)
+	}
+}
+
 func TestExecuteSessionRead_NoIDReturnsCurrentScreenAndAlternateCaveat(t *testing.T) {
 	reader := agenttools.NewSessionReader([]content.GrantScope{{Kind: content.ResourceSession, ID: "pane-a"}})
 	body := liveFrameBody("fullscreen")

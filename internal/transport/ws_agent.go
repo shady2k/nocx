@@ -673,6 +673,16 @@ func systemPromptFactsFor(cwd string, env content.Environment, attached []assist
 	return f
 }
 
+func automaticSessionItems(attached []assistant.AttachedContentItem) []string {
+	ids := make([]string, 0, len(attached))
+	for _, item := range attached {
+		if item.Automatic {
+			ids = append(ids, item.ItemID)
+		}
+	}
+	return ids
+}
+
 // personalParagraph is the seam read, or "" when this handler was built
 // without it — a unit test constructing agentHandlers directly, never the
 // registration builder.
@@ -884,7 +894,8 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		// this question carried and the ledger recorded with it, the pane's
 		// environment as environmentForSession already derived it, and the
 		// person's own paragraph as the settings document holds it right now.
-		promptFacts: systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph()),
+		promptFacts:           systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph()),
+		automaticSessionItems: automaticSessionItems(attached),
 	}
 	h.pendingRunsMu.Lock()
 	h.pendingRuns[rc.runID] = rc
@@ -1021,6 +1032,9 @@ type askRunContext struct {
 	// resume must re-drive the run the person answered about, not a run
 	// described differently.
 	promptFacts assistant.SystemPromptFacts
+	// automaticSessionItems is pinned from the renderer's attached-content
+	// metadata at ask submission and reused on approval resume.
+	automaticSessionItems []string
 	// sessionID is the session the run lives in — the session an "allow in
 	// this session" answer is about. Carried EXPLICITLY, from the ask that
 	// named it, rather than read back out of the grant: the grant's scope
@@ -1238,7 +1252,8 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// set from one SubmitAgentAsk result — so the relation is written
 		// from a fact the backend is already holding, and the renderer
 		// never sends an arrangement of its own.
-		TurnEntryID: rc.entryID,
+		TurnEntryID:           rc.entryID,
+		AutomaticSessionItems: rc.automaticSessionItems,
 	}, func(ev assistant.AskEvent) error {
 		if rc.control != nil {
 			// Declared inside the branch, like the other two: outside it

@@ -59,6 +59,10 @@ type RunContext struct {
 	RunID     string
 	Workspace string
 	Session   string
+	// AutomaticSessionItems are renderer-owned screen attachments. They are
+	// immutable ids carried by this run so session.read can route them to the
+	// renderer even when the shell-originated attempt has no ledger row.
+	AutomaticSessionItems []string
 }
 
 // ResolveResources derives every resource touched by one validated call.
@@ -283,11 +287,11 @@ type Registry struct {
 // The table covers the tool rows and execution states described in design
 // §4.1–§4.2: files.read executes
 // in Go; session.list executes in Go against the ledger; session.read uses
-// Dynamic dispatch, selecting the ledger for an exited item and the
-// renderer broker for a running item or the current screen; run executes in
-// the renderer; and git.status remains declared-but-not-executable (Narrow
-// nil). The dynamic row is explicit so state-dependent ownership cannot hide
-// behind either InGo or InRenderer.
+// Dynamic dispatch, selecting the ledger for an ordinary exited item and the
+// renderer broker for a running item, a renderer-owned automatic item, or the
+// current screen; run executes in the renderer; and git.status remains
+// declared-but-not-executable (Narrow nil). The dynamic row is explicit so
+// state-dependent ownership cannot hide behind either InGo or InRenderer.
 var declarations = []Declaration{
 	{
 		Name:             "files.read",

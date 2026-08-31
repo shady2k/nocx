@@ -4,7 +4,8 @@
  * This is a kit component because a connection outage is one application-wide
  * condition, not a sentence each surface should invent. The native Dialog
  * supplies the top-layer and inertness contract; this component supplies only
- * the connection states and the one action that can act in each state.
+ * the connection states, the one action that can act in each state, and a
+ * notification when it leaves the top layer.
  */
 import {
   Show,
@@ -33,6 +34,8 @@ export interface ConnectionOverlayProps {
   state: Accessor<ConnectionOverlayState>
   /** Invoked by Retry. The component decides nothing about when to retry. */
   onRetry: () => void
+  /** Invoked after the modal has transitioned from visible to hidden. */
+  onHidden?: () => void
   /** Minimum visible time from first mount, in ms. */
   minimumVisibleMs?: number
 }
@@ -100,15 +103,28 @@ const ConnectionOverlay: Component<ConnectionOverlayProps> = (props) => {
     untrack(() => props.minimumVisibleMs ?? 1000),
   )
   const initialState = untrack(() => props.state())
+  const initialVisible = minimumVisibleMs > 0 || initialState.kind !== 'online'
+  let currentVisible = initialVisible
   let minimumElapsed = minimumVisibleMs === 0
   let minimumTimer: ReturnType<typeof setTimeout> | null = null
-  const [visible, setVisible] = createSignal(minimumVisibleMs > 0 || initialState.kind !== 'online')
+  const [visible, setVisible] = createSignal(initialVisible)
+
+  const setVisibility = (nextVisible: boolean): void => {
+    if (nextVisible === currentVisible) return
+    const wasVisible = currentVisible
+    currentVisible = nextVisible
+    setVisible(nextVisible)
+    if (wasVisible && !nextVisible) {
+      const onHidden = untrack(() => props.onHidden)
+      queueMicrotask(() => onHidden?.())
+    }
+  }
 
   createEffect(() => {
     if (props.state().kind === 'online') {
-      if (minimumElapsed) setVisible(false)
+      if (minimumElapsed) setVisibility(false)
     } else {
-      setVisible(true)
+      setVisibility(true)
     }
   })
 
@@ -117,7 +133,7 @@ const ConnectionOverlay: Component<ConnectionOverlayProps> = (props) => {
     minimumTimer = setTimeout(() => {
       minimumTimer = null
       minimumElapsed = true
-      if (props.state().kind === 'online') setVisible(false)
+      if (props.state().kind === 'online') setVisibility(false)
     }, minimumVisibleMs)
   })
 

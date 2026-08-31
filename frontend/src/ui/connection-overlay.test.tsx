@@ -14,7 +14,10 @@ afterEach(() => {
   vi.restoreAllMocks()
 })
 
-function subject(initial: ConnectionOverlayState, options: { minimumVisibleMs?: number } = {}) {
+function subject(
+  initial: ConnectionOverlayState,
+  options: { minimumVisibleMs?: number; onHidden?: () => void } = {},
+) {
   const [state, setState] = createSignal<ConnectionOverlayState>(initial)
   const retry = vi.fn()
   const host = document.createElement('div')
@@ -147,5 +150,48 @@ describe('ConnectionOverlay', () => {
 
     state({ kind: 'online' })
     expect(dialog(host).open).toBe(false)
+  })
+  it('notifies after becoming hidden, including repeated visibility cycles', async () => {
+    const onHidden = vi.fn()
+    const { state } = subject({ kind: 'connecting' }, { minimumVisibleMs: 0, onHidden })
+
+    expect(onHidden).not.toHaveBeenCalled()
+    state({ kind: 'online' })
+    await Promise.resolve()
+    expect(onHidden).toHaveBeenCalledOnce()
+
+    state({ kind: 'connecting' })
+    state({ kind: 'online' })
+    await Promise.resolve()
+    expect(onHidden).toHaveBeenCalledTimes(2)
+  })
+
+  it('waits for a nonzero startup minimum before notifying hidden', async () => {
+    vi.useFakeTimers()
+    const onHidden = vi.fn()
+    const { host, state } = subject({ kind: 'connecting' }, { minimumVisibleMs: 100, onHidden })
+
+    state({ kind: 'online' })
+    await Promise.resolve()
+    expect(onHidden).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(99)
+    expect(onHidden).not.toHaveBeenCalled()
+    vi.advanceTimersByTime(1)
+    await Promise.resolve()
+    expect(onHidden).toHaveBeenCalledOnce()
+
+    state({ kind: 'connecting' })
+    state({ kind: 'online' })
+    await Promise.resolve()
+    expect(onHidden).toHaveBeenCalledTimes(2)
+    expect(host.querySelector('dialog')?.open).toBe(false)
+  })
+
+  it('does not notify for an initially hidden online overlay', async () => {
+    const onHidden = vi.fn()
+    subject({ kind: 'online' }, { minimumVisibleMs: 0, onHidden })
+
+    await Promise.resolve()
+    expect(onHidden).not.toHaveBeenCalled()
   })
 })

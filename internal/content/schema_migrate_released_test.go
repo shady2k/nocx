@@ -482,7 +482,7 @@ func TestAStepThatLeavesADanglingReferenceIsRefusedAndRolledBack(t *testing.T) {
 	aReleasedSchema14Database(t, dangling)
 
 	conn, done := rawConn(t, dangling)
-	err := migrateSchema(context.Background(), conn, []migrationStep{{
+	err := migrateSchema(context.Background(), conn, theLadderWithThisEdgeSwapped(migrationStep{
 		from: 14, to: 15,
 		apply: func(ctx context.Context, tx *sql.Tx) error {
 			if err := migrateGrantScopeKinds14to15(ctx, tx); err != nil {
@@ -495,7 +495,7 @@ func TestAStepThatLeavesADanglingReferenceIsRefusedAndRolledBack(t *testing.T) {
 				`INSERT INTO grant_scopes (grant_id, resource_kind, resource_id) VALUES (4242, 'session', 'dangling')`)
 			return insertErr
 		},
-	}}, log.NewSlogAdapter(nil))
+	}), log.NewSlogAdapter(nil))
 	done()
 	if err == nil {
 		t.Fatal("a step that left a dangling foreign key committed — the check that stands in for the suspended enforcement is not working")
@@ -516,7 +516,7 @@ func TestAStepThatLeavesADanglingReferenceIsRefusedAndRolledBack(t *testing.T) {
 	clean := filepath.Join(t.TempDir(), "content.db")
 	aReleasedSchema14Database(t, clean)
 	conn, done = rawConn(t, clean)
-	err = migrateSchema(context.Background(), conn, []migrationStep{{
+	err = migrateSchema(context.Background(), conn, theLadderWithThisEdgeSwapped(migrationStep{
 		from: 14, to: 15,
 		apply: func(ctx context.Context, tx *sql.Tx) error {
 			if edgeErr := migrateGrantScopeKinds14to15(ctx, tx); edgeErr != nil {
@@ -526,7 +526,7 @@ func TestAStepThatLeavesADanglingReferenceIsRefusedAndRolledBack(t *testing.T) {
 				`INSERT INTO grant_scopes (grant_id, resource_kind, resource_id) VALUES (1, 'content', 'note/kept')`)
 			return insertErr
 		},
-	}}, log.NewSlogAdapter(nil))
+	}), log.NewSlogAdapter(nil))
 	done()
 	if err != nil {
 		t.Fatalf("a step whose references are all intact was refused: %v", err)
@@ -561,7 +561,7 @@ func TestAFailureMidEdgeLeavesTheFileByteForByteAsItWas(t *testing.T) {
 
 	boom := errors.New("the edge failed half way through")
 	conn, done := rawConn(t, path)
-	err := migrateSchema(context.Background(), conn, []migrationStep{{
+	err := migrateSchema(context.Background(), conn, theLadderWithThisEdgeSwapped(migrationStep{
 		from: 14, to: 15,
 		apply: func(ctx context.Context, tx *sql.Tx) error {
 			if err := migrateGrantScopeKinds14to15(ctx, tx); err != nil {
@@ -569,7 +569,7 @@ func TestAFailureMidEdgeLeavesTheFileByteForByteAsItWas(t *testing.T) {
 			}
 			return boom
 		},
-	}}, log.NewSlogAdapter(nil))
+	}), log.NewSlogAdapter(nil))
 	done()
 	if !errors.Is(err, boom) {
 		t.Fatalf("migrateSchema returned %v, want the injected failure", err)

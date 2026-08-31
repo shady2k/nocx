@@ -92,6 +92,26 @@ func rawTry(t *testing.T, path, statement string) error {
 
 const aContentScope = `INSERT INTO grant_scopes (grant_id, resource_kind, resource_id) VALUES (1, 'content', 'note/1')`
 
+// theLadderWithThisEdgeSwapped is the shipped ladder with one rung replaced by
+// the caller's — the same `from`/`to`, a different `apply`.
+//
+// A test that varies ONE edge (injects a failure into it, gives it different
+// DDL) must still hand `migrateSchema` a chain that ENDS at `schemaVersion`,
+// because `validateLadder` refuses anything else before it walks a step. A
+// one-rung literal restated inline goes stale the moment a rung is added,
+// which is what happened when 15→16 arrived; composing from the shipped ladder
+// is what keeps these tests about the edge they are varying.
+func theLadderWithThisEdgeSwapped(swap migrationStep) []migrationStep {
+	out := append([]migrationStep(nil), schemaLadder...)
+	for i := range out {
+		if out[i].from == swap.from && out[i].to == swap.to {
+			out[i] = swap
+			return out
+		}
+	}
+	return append(out, swap)
+}
+
 // THE HEADLINE: a database one version behind opens, and every row is still
 // there afterwards.
 //
@@ -163,7 +183,7 @@ func TestAnEdgeThatFailsPartWayLeavesTheDatabaseWhollyAtTheVersionItStarted(t *t
 	aDatabaseAtSchema14(t, path)
 
 	boom := errors.New("killed in the middle of the edge")
-	ladder := []migrationStep{{
+	ladder := theLadderWithThisEdgeSwapped(migrationStep{
 		from: 14, to: 15,
 		apply: func(ctx context.Context, tx *sql.Tx) error {
 			if err := migrateGrantScopeKinds14to15(ctx, tx); err != nil {
@@ -171,7 +191,7 @@ func TestAnEdgeThatFailsPartWayLeavesTheDatabaseWhollyAtTheVersionItStarted(t *t
 			}
 			return boom
 		},
-	}}
+	})
 
 	conn, done := rawConn(t, path)
 	err := migrateSchema(context.Background(), conn, ladder, log.NewSlogAdapter(nil))

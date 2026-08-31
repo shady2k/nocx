@@ -51,6 +51,48 @@ package content
 // the table is rebuilt and its rows copied), a dropped or reshaped index, and
 // any backfill of data.
 //
+// ONE COUNTER, FOR ONE FILE — THE GRANULARITY, DECIDED (nocx-lmb6v.3,
+// nocx-lmb6v.5). content.db holds three subsystems' state: the ledger, the
+// layout (tabs and panes) and the api runs. They share ONE `user_version`,
+// and that is a decision rather than an accident, so here is the argument.
+//
+// THE UNIT OF THE DECISION IS THE FILE. `Open` is handed a path and must
+// answer open / migrate / refuse once, for the whole of it, before it hands
+// out anything. There is one file, one handle and one caller, so there is one
+// answer; a version number finer than the thing being versioned has nowhere
+// to put its extra resolution.
+//
+// A PER-SUBSYSTEM VERSION WOULD NEED A PER-SUBSYSTEM REFUSAL, AND NOTHING CAN
+// EXPRESS ONE. Suppose the layout were stamped ahead of this build and the
+// ledger were not. The only honest response is to refuse the file: this
+// process cannot read the layout, and `ContentDB` is a single interface with
+// all three repositories hanging off it (content.go), so there is no partial
+// store to hand out. "Open the ledger half" would be a store reporting itself
+// healthy while a third of it is missing — the silent degrade AGENTS.md names
+// as its own defect class. A refusal that has to be total is a version that
+// may as well be single.
+//
+// THE COST nocx-lmb6v.3 NAMES IS REAL, SMALL, AND FALLS ON THE RIGHT PERSON.
+// A layout-only change bumps the number for all three; the rung it adds is a
+// no-op for the ledger and the api runs, which costs its author one `apply`
+// that does nothing to two of them and costs a reader nothing at all. The
+// other half — "an older binary refuses over a bump that touched nothing it
+// owns" — is not a cost but the CORRECT answer: that binary cannot know the
+// new layout is compatible with its own reads, and guessing is precisely what
+// this ladder exists to stop. Refusing on a stamp it does not recognise is
+// the protocol working, not the protocol being coarse.
+//
+// AND THREE COUNTERS WOULD BE THREE LADDERS OVER ONE SET OF TABLES, with a
+// walk that has to be ordered across them the moment a foreign key crosses a
+// boundary (`grant_scopes` → `authority_grants` shows how ordinary that is).
+// One ordered chain over one file is the smallest thing that expresses it.
+//
+// So: ONE counter, and it is `user_version`. Everything in the file is inside
+// it, which is why the `api_run*` tables were folded in at 15→16 and their
+// private `api_run_schema` counter retired — two numbers answering one
+// question agree everywhere anyone looks, and on the day they disagree
+// nothing says which one is right.
+//
 // WHAT IS DELIBERATELY NOT HERE. No `minMigratable` floor is declared: while
 // the chain is contiguous there is nothing to declare, and the floor a person
 // meets is simply the first rung — `schemaLadder[0].from`, derived rather
@@ -62,6 +104,7 @@ package content
 import (
 	"context"
 	"database/sql"
+	"errors"
 	"fmt"
 
 	"github.com/shady2k/nocx/internal/log"
@@ -98,6 +141,7 @@ type migrationStep struct {
 // are not this build's to destroy.
 var schemaLadder = []migrationStep{
 	{from: 14, to: 15, apply: migrateGrantScopeKinds14to15},
+	{from: 15, to: 16, apply: migrateRetireTheAPIRunCounter15to16},
 }
 
 // validateLadder refuses a chain with a hole in it, a rung that spans more
@@ -166,6 +210,25 @@ func migrateSchema(ctx context.Context, conn *sql.Conn, ladder []migrationStep, 
 	if onDisk > schemaVersion {
 		return fmt.Errorf("content: refusing to open a database written by schema %d: this build understands schema %d, and rebuilding it would discard rows it cannot read — update nocx to a build that understands schema %d; no rows were discarded",
 			onDisk, schemaVersion, onDisk)
+	}
+	// THE SAME REFUSAL, FOR THE FILES THE STAMP CANNOT SPEAK FOR YET. Before
+	// 16 the `api_run*` tables were versioned by a counter of their own, so a
+	// file written then says "what shape am I in" twice and the two halves
+	// are independent: a database stamped 14 or 15 can carry api-run tables
+	// from any build at all. This is the second half of that answer, and it
+	// is read HERE — beside the other refusals, before a single step runs —
+	// because the old code asked it LAST, after the walk had migrated and
+	// stamped the file, and a refusal that has already rewritten what it
+	// refuses is not a refusal.
+	//
+	// It is not a second counter kept alive. It is the retirement's
+	// precondition: 15→16 drops `api_run_schema`, and dropping a counter
+	// whose value this build does not understand would erase the evidence
+	// that the file is ahead. From 16 on no file carries the table and this
+	// clause is inert, which is what makes it a rung's precondition rather
+	// than a rule.
+	if err := refuseAPIRunTablesFromANewerBuild(ctx, conn); err != nil {
+		return err
 	}
 	// A file with no user tables is a CREATION, not a migration: version 0
 	// with nothing in it is what a fresh install looks like, and Open stamps
@@ -343,6 +406,82 @@ func migrateGrantScopeKinds14to15(ctx context.Context, tx *sql.Tx) error {
 		if _, err := tx.ExecContext(ctx, statement); err != nil {
 			return fmt.Errorf("widen grant_scopes.resource_kind, statement %d: %w", i+1, err)
 		}
+	}
+	return nil
+}
+
+// apiRunCounterFinalVersion is the only value `api_run_schema.version` ever
+// held. The api-run tables shipped once, at 1, and were never changed again
+// before 15→16 folded them into this ladder — so a file claiming anything
+// above it was written by a build ahead of this one, and a file at or below it
+// is an ordinary released database.
+const apiRunCounterFinalVersion = 1
+
+// refuseAPIRunTablesFromANewerBuild is the `onDisk > current` refusal for the
+// quarter of this file that used not to be covered by it (nocx-lmb6v.5).
+//
+// Its message is the ladder's rather than the feature's, deliberately: it
+// names what to do about the file and promises the rows, because Open's error
+// becomes the `detail` of the history.status degrade at the composition root
+// and is what the Settings notice prints. The one it replaced said "version 2
+// is newer than supported version 1" from inside a step that had already let
+// the file be migrated and stamped.
+//
+// A file with no `api_run_schema` table has nothing to say here — either it is
+// from 16 or later, where the table does not exist, or it is a fresh file, or
+// it is old enough that the api runs never ran. All three are ordinary.
+func refuseAPIRunTablesFromANewerBuild(ctx context.Context, conn *sql.Conn) error {
+	var present int
+	if err := conn.QueryRowContext(ctx,
+		"SELECT count(*) FROM sqlite_master WHERE type='table' AND name='api_run_schema'").Scan(&present); err != nil {
+		return fmt.Errorf("content: probe the api-run schema counter: %w", err)
+	}
+	if present == 0 {
+		return nil
+	}
+	var version int
+	err := conn.QueryRowContext(ctx, "SELECT version FROM api_run_schema WHERE id = 1").Scan(&version)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("content: read the api-run schema counter: %w", err)
+	}
+	if version > apiRunCounterFinalVersion {
+		return fmt.Errorf("content: refusing to open a database whose api-run tables were written by api-run schema %d: "+
+			"this build understands api-run schema %d, and it cannot read a shape it has no step for — "+
+			"update nocx to a build that understands it; no rows were discarded",
+			version, apiRunCounterFinalVersion)
+	}
+	return nil
+}
+
+// migrateRetireTheAPIRunCounter15to16 is the fold itself: the `api_run*`
+// tables stop being versioned by a private counter and become ordinary tables
+// of this file, governed by `user_version` like everything else.
+//
+// The edge has nothing to do to the tables THEMSELVES — schema 16 wants them
+// in exactly the shape the old third step created, and `schemaV1` now carries
+// that DDL, so a fresh file gets them from there and a file that already has
+// them keeps them untouched. All that changes is who answers for them, and the
+// only physical trace of the old answer is the counter table, which is dropped
+// here. Leaving it would be worse than untidy: nothing would own it, and an
+// upgraded database would differ permanently from a fresh one in a way
+// `schemaV1` could never repair, since `IF NOT EXISTS` cannot remove a table
+// (nocx-lmb6v.7).
+//
+// `IF EXISTS` because both populations reach this rung: a released 15 database
+// has the table, and a schema 14 file that has just come across the rung below
+// this one may not — the old third step ran on every open, but a fixture, or a
+// build that crashed before it, need not have one.
+//
+// Whether the counter's VALUE is one this build understands is decided before
+// the walk starts (refuseAPIRunTablesFromANewerBuild), not here: a step that
+// refused inside its own transaction would refuse correctly, but only after
+// the rungs below it had already committed.
+func migrateRetireTheAPIRunCounter15to16(ctx context.Context, tx *sql.Tx) error {
+	if _, err := tx.ExecContext(ctx, `DROP TABLE IF EXISTS api_run_schema`); err != nil {
+		return fmt.Errorf("retire the api-run schema counter: %w", err)
 	}
 	return nil
 }

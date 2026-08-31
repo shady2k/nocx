@@ -245,6 +245,13 @@ export interface FilesTreeStore {
    *  header's refresh action); re-opens when the binding is gone. Also
    *  re-sends the watch set, so it is the Retry for a failed watch. */
   refresh(): void
+  /** Whether the panel showing this tree is on screen. Collapsing the
+   *  sidebar or switching to another view counts as hidden, and while it is
+   *  hidden the BACKEND stops polling entirely — the Files poll is
+   *  backend-driven, so unlike Git and Ports the panel cannot stop it by
+   *  simply not asking (nocx-8hdia.1). Idempotent per binding: re-asserting
+   *  the same value sends nothing, and a new binding re-sends. */
+  setVisible(visible: boolean): void
   /** The backend's reported refresh mode for the current watch set: null
    *  until the first files.watch response (§5.5). */
   watchMode(): 'watching' | 'polling' | null
@@ -587,6 +594,42 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     const b = untrack(binding)
     if (o === null || b === null) return null
     return { paneId: o.paneId, generation, bindingId: b.bindingId }
+  }
+
+  /** The last (binding, visibility) pair the backend was actually told, so
+   *  a re-render cannot re-send what it already knows and a NEW binding
+   *  re-sends even when the flag itself did not move — a fresh watcher
+   *  starts visible, so a rescope while the panel is hidden must correct it.
+   *
+   *  Cleared on failure rather than left standing: a refused "I am hidden"
+   *  would otherwise be remembered as sent, and the poll it was meant to
+   *  stop would run until the next transition. */
+  let publishedVisible: { bindingId: string; visible: boolean } | null = null
+
+  function setVisible(visible: boolean): void {
+    const ctx = captureCtx()
+    if (ctx === null) return
+    const bindingId = ctx.bindingId as string
+    if (
+      publishedVisible !== null &&
+      publishedVisible.bindingId === bindingId &&
+      publishedVisible.visible === visible
+    ) {
+      return
+    }
+    publishedVisible = { bindingId, visible }
+    void services.visible(bindingId, visible).catch(() => {
+      // Sticky nothing: the next transition retries. A visibility signal is
+      // not worth a message in the panel — the cost of losing one is a poll
+      // that keeps running, which the next transition corrects.
+      if (
+        publishedVisible !== null &&
+        publishedVisible.bindingId === bindingId &&
+        publishedVisible.visible === visible
+      ) {
+        publishedVisible = null
+      }
+    })
   }
 
   function issueList(
@@ -1414,6 +1457,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     showMore,
     retry,
     refresh,
+    setVisible,
     watchMode,
     watchDegradedReason,
     watchFailed,

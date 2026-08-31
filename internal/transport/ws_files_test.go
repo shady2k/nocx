@@ -945,16 +945,7 @@ func (p *countingProvider) count(path string) int {
 // enumeration PER ALREADY-WATCHED DIRECTORY to every expand gesture, and the
 // cost grew with the number of folders the person had open.
 func TestFilesWatch_ReplacementBaselinesOnlyTheAddedPath(t *testing.T) {
-	var prov *countingProvider
-	factory := func(sess session.Session, rootPath string) (filesystem.Provider, error) {
-		inner, err := filesLocalFactory(sess, rootPath)
-		if err != nil {
-			return nil, err
-		}
-		prov = &countingProvider{Provider: inner, lists: map[string]int{}}
-		return prov, nil
-	}
-	e := newFilesTestEnv(t, WithFilesystemProviderFactory(factory))
+	e, count := newCountingFilesEnv(t)
 	// No poll tick may run during the measurement: the loop lists too, and
 	// what is being counted is what files.watch itself enumerated.
 	e.ws.filesPollInterval = time.Hour
@@ -970,19 +961,19 @@ func TestFilesWatch_ReplacementBaselinesOnlyTheAddedPath(t *testing.T) {
 	bid := e.openBinding(t, sid, root, 2)
 
 	e.watchDir(t, bid, []string{dirs[0], dirs[1]}, 3)
-	before := []int{prov.count(dirs[0]), prov.count(dirs[1])}
+	before := []int{count(dirs[0]), count(dirs[1])}
 
 	// One more folder expanded: the client resends the whole set with one
 	// path added. Only that path is new information.
 	e.watchDir(t, bid, []string{dirs[0], dirs[1], dirs[2]}, 4)
 
-	if got := prov.count(dirs[0]) - before[0]; got != 0 {
+	if got := count(dirs[0]) - before[0]; got != 0 {
 		t.Errorf("already-watched %s was listed %d more times, want 0", dirs[0], got)
 	}
-	if got := prov.count(dirs[1]) - before[1]; got != 0 {
+	if got := count(dirs[1]) - before[1]; got != 0 {
 		t.Errorf("already-watched %s was listed %d more times, want 0", dirs[1], got)
 	}
-	if got := prov.count(dirs[2]); got != 1 {
+	if got := count(dirs[2]); got != 1 {
 		t.Errorf("added %s was listed %d times, want exactly 1", dirs[2], got)
 	}
 }
@@ -1031,5 +1022,149 @@ func TestFilesChanged_AChangeIsNotSwallowedByAWatchSetReplacement(t *testing.T) 
 		t.Errorf("files.changed path = %v, want %s — the change to the "+
 			"already-watched directory was swallowed by the replacement",
 			params["path"], dir1)
+	}
+}
+
+// ── the visibility gate (nocx-8hdia.1) ─────────────────────────────────────
+
+// setVisible sends files.visible and fails on a refusal.
+func (e *filesTestEnv) setVisible(t *testing.T, bid string, visible bool, id int) {
+	t.Helper()
+	resp := jsonrpcCallWithID(t, e.conn, "files.visible", map[string]any{
+		"bindingId": bid,
+		"visible":   visible,
+	}, id)
+	var envelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("files.visible: unmarshal: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.visible: %+v", envelope.Error)
+	}
+}
+
+// newCountingFilesEnv boots the env with a provider that counts List calls,
+// so a test can assert what the poll loop actually enumerated.
+func newCountingFilesEnv(t *testing.T) (*filesTestEnv, func(path string) int) {
+	t.Helper()
+	// The factory runs on the goroutine serving files.open and the counter is
+	// read from the test's, with only a WebSocket between them — and the race
+	// detector cannot derive a happens-before edge through a socket. So the
+	// handle itself is guarded, not just the counts behind it.
+	var mu sync.Mutex
+	var prov *countingProvider
+	factory := func(sess session.Session, rootPath string) (filesystem.Provider, error) {
+		inner, err := filesLocalFactory(sess, rootPath)
+		if err != nil {
+			return nil, err
+		}
+		p := &countingProvider{Provider: inner, lists: map[string]int{}}
+		mu.Lock()
+		prov = p
+		mu.Unlock()
+		return p, nil
+	}
+	e := newFilesTestEnv(t, WithFilesystemProviderFactory(factory))
+	return e, func(path string) int {
+		mu.Lock()
+		p := prov
+		mu.Unlock()
+		if p == nil {
+			return 0
+		}
+		return p.count(path)
+	}
+}
+
+// TestFilesPoll_HiddenPanelIssuesNoListing is the gate itself. The Files
+// poll is BACKEND-driven, so unlike Git and Ports the frontend cannot stop
+// it by going away — a collapsed sidebar used to cost exactly as much as an
+// open one, and one tick is a full enumeration of every watched directory
+// (both providers enumerate before slicing the page, so Limit does not bound
+// it). Design §5.5 has always required this: polling is "paused while
+// visible() is false".
+//
+// Not a cheaper listing while hidden. None.
+func TestFilesPoll_HiddenPanelIssuesNoListing(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, []string{dir}, 3)
+
+	// The panel goes away. A tick already in flight may still land, so the
+	// measurement starts after one interval has passed.
+	e.setVisible(t, bid, false, 4)
+	interval := e.ws.filesPollInterval
+	time.Sleep(2 * interval)
+	before := count(dir)
+
+	// Many intervals of a hidden panel must cost nothing at all.
+	time.Sleep(10 * interval)
+	if got := count(dir) - before; got != 0 {
+		t.Errorf("hidden panel issued %d listings over 10 intervals, want 0", got)
+	}
+}
+
+// TestFilesPoll_BecomingVisiblePollsImmediately is the other half, and it is
+// what keeps the gate from costing freshness: a person who opens a panel is
+// owed the truth now, not at the next tick. The interval here is an hour, so
+// any listing at all can only be the becoming-visible poll.
+func TestFilesPoll_BecomingVisiblePollsImmediately(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	// No ordinary tick may fire during this test: what is being measured is
+	// the transition, not the cadence.
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, []string{dir}, 3)
+	e.setVisible(t, bid, false, 4)
+	before := count(dir)
+
+	e.setVisible(t, bid, true, 5)
+	waittest.WaitForTimeout(t, "the becoming-visible poll", wantWithin, func() bool {
+		return count(dir) > before
+	})
+	if got := count(dir) - before; got != 1 {
+		t.Errorf("becoming visible issued %d listings, want exactly 1", got)
+	}
+}
+
+// TestFilesPoll_StayingVisibleIsNotAPollTrigger guards the edge rather than
+// the value. The client re-sends its visibility on transitions it considers
+// interesting, and if every "visible: true" produced a poll, the panel would
+// have a second, undeclared cadence that the interval does not govern —
+// which is the whole class of defect this epic exists to remove.
+func TestFilesPoll_StayingVisibleIsNotAPollTrigger(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, []string{dir}, 3)
+	before := count(dir)
+
+	// Already visible: three more of the same must change nothing.
+	for i := range 3 {
+		e.setVisible(t, bid, true, 4+i)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := count(dir) - before; got != 0 {
+		t.Errorf("re-asserting visibility issued %d listings, want 0", got)
 	}
 }

@@ -12,6 +12,7 @@ import type { FilesListResult } from '../generated/files.list'
 import type { FilesReadResult } from '../generated/files.read'
 import type { FilesCloseResult } from '../generated/files.close'
 import type { FilesWatchResult } from '../generated/files.watch'
+import type { FilesVisibleResult } from '../generated/files.visible'
 import type { FilesRevealResult } from '../generated/files.reveal'
 import type { FilesChanged } from '../generated/files.changed'
 
@@ -49,6 +50,16 @@ class FilesClient {
    *  machinery (D14). */
   watch(bindingId: string, paths: string[]): Promise<FilesWatchResult> {
     return this.dispatcher.call<FilesWatchResult>('files.watch', { bindingId, paths })
+  }
+
+  /** Whether the panel showing this binding's tree is on screen. While it
+   *  is not, the backend's digest poll issues NO listing for this binding —
+   *  a tick is a full enumeration of every watched directory, so a
+   *  collapsed sidebar used to cost exactly as much as an open one. A
+   *  hidden→visible edge polls once immediately, so nobody waits an
+   *  interval for a panel they just opened (design §5.5). */
+  visible(bindingId: string, visible: boolean): Promise<FilesVisibleResult> {
+    return this.dispatcher.call<FilesVisibleResult>('files.visible', { bindingId, visible })
   }
 
   /** Show a path in the OS file manager. The backend refuses a remote
@@ -91,6 +102,7 @@ export interface FilesPanelServices {
   list(bindingId: string, path: string, offset: number, limit: number): Promise<FilesListResult>
   read(bindingId: string, path: string, maxBytes: number): Promise<FilesReadResult>
   watch(bindingId: string, paths: string[]): Promise<FilesWatchResult>
+  visible(bindingId: string, visible: boolean): Promise<FilesVisibleResult>
   reveal(bindingId: string, path: string): Promise<FilesRevealResult>
   subscribeFilesChanged(handler: (params: FilesChanged) => void): () => void
   onConnect(handler: () => void): () => void
@@ -105,6 +117,7 @@ export function createFilesPanelServices(dispatcher: Dispatcher): FilesPanelServ
     list: (bindingId, path, offset, limit) => client.list(bindingId, path, offset, limit),
     read: (bindingId, path, maxBytes) => client.read(bindingId, path, maxBytes),
     watch: (bindingId, paths) => client.watch(bindingId, paths),
+    visible: (bindingId, isVisible) => client.visible(bindingId, isVisible),
     reveal: (bindingId, path) => client.reveal(bindingId, path),
     subscribeFilesChanged: (handler) => client.subscribeFilesChanged(handler),
     onConnect: (handler) => client.onConnect(handler),

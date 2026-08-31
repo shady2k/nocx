@@ -15,7 +15,7 @@
 // there to report. The root the panel is actually showing lives on the panel
 // element as data-root, which is what the checks read.
 
-import { createEffect, createMemo, createSignal, For, on, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from 'solid-js'
 import type { Component } from 'solid-js'
 import type { SidebarViewDescriptor } from '../sidebar'
 import type { ActiveOrigin } from '../pane-content'
@@ -135,6 +135,12 @@ interface FilesPanelProps {
   /** The ACTIVE tab's origin — a reactive accessor, never a capture: the
    *  panel follows the tab in front. */
   activeOrigin: () => ActiveOrigin | null
+  /** True while this view is on screen and the panel is expanded — the
+   *  sidebar's own accessor, which a collapsed sidebar makes false. The
+   *  Files poll is BACKEND-driven, so unlike Git and Ports this panel
+   *  cannot stop it by simply not asking: the flag has to travel
+   *  (nocx-8hdia.1). */
+  visible: () => boolean
   /** The app's single upload surface, or null where none was injected —
    *  the panel then shows no transfers and offers no Upload action, rather
    *  than offering one that reaches nothing. */
@@ -168,6 +174,28 @@ function FilesPanel(props: FilesPanelProps) {
       (origin) => props.store.rescope(origin),
     ),
   )
+  // Visibility travels to the backend on every transition AND on every
+  // re-scope, which is why both are sources: a rescope mints a new binding
+  // whose watcher starts visible, so a panel that is hidden at that moment
+  // has to say so again. This is the Ports shape (ports.tsx: an on() over
+  // [profileId, visible]), and it is the same rule for the same reason.
+  createEffect(
+    on(
+      [() => props.store.binding()?.bindingId ?? null, () => props.visible()],
+      ([bindingId, isVisible]) => {
+        if (bindingId === null) return
+        props.store.setVisible(isVisible)
+      },
+    ),
+  )
+  // Collapsing the sidebar leaves this panel MOUNTED with visible() false,
+  // but putting another sidebar view in front UNMOUNTS it — which disposes
+  // the effect above before it can say so, and the backend would go on
+  // polling for a panel that is not on screen and no longer even exists.
+  // The store outlives the panel (it is where the filter and the tree live,
+  // so both survive a swap), so the last word belongs here. A binding that
+  // has already gone simply rejects, which setVisible swallows.
+  onCleanup(() => props.store.setVisible(false))
   // The reveal's SCROLL is the view's job — the store only says which
   // path the last completed reveal reached (revealTarget); this effect
   // watches that answer and scrolls the row into view when it lands.
@@ -923,6 +951,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
         opener={opener}
         clipboard={clipboard}
         activeOrigin={props.activeOrigin}
+        visible={props.visible}
         upload={upload}
         download={download}
         pickSources={pick}

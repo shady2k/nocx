@@ -109,6 +109,7 @@ function fakeServices(over: Partial<FilesPanelServices> = {}): FilesPanelService
     list: vi.fn().mockResolvedValue(listFixture('C:/', [])),
     read: vi.fn().mockResolvedValue(readFixture()),
     watch: vi.fn().mockResolvedValue({ mode: 'watching' }),
+    visible: vi.fn().mockResolvedValue({}),
     reveal: vi.fn().mockResolvedValue({}),
     subscribeFilesChanged: vi.fn().mockReturnValue(() => {}),
     onConnect: vi.fn().mockReturnValue(() => {}),
@@ -1760,5 +1761,70 @@ describe('filtering the tree by name', () => {
     filesIcon(bar).click()
     await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
     await vi.waitFor(() => expect(box(panel).value).toBe('notes'))
+  })
+})
+
+describe('the visibility signal (nocx-8hdia.1)', () => {
+  /** Services whose files.visible records what it was told, kept as a bare
+   *  array rather than read back off the object — the same reason the
+   *  opener's mock is held as a bare reference above: unbound-method exists
+   *  to catch a detached method, and reaching through services.visible to
+   *  its .mock is exactly that detachment. */
+  function recordingServices(): { services: FilesPanelServices; sent: boolean[] } {
+    const sent: boolean[] = []
+    const services = fakeServices({
+      visible: (_bindingId: string, isVisible: boolean) => {
+        sent.push(isVisible)
+        return Promise.resolve({})
+      },
+    })
+    return { services, sent }
+  }
+
+  it('tells the backend when the panel leaves the screen, and when it comes back', async () => {
+    // The Files poll runs on the BACKEND, so unlike Git and Ports this panel
+    // cannot stop it by not asking — the flag has to travel. One poll tick
+    // is a full enumeration of every watched directory, so a collapsed
+    // sidebar used to cost exactly as much as an open one.
+    const { services, sent } = recordingServices()
+    const { bar, panel } = await mountApp(services)
+    await vi.waitFor(() => expect(sent).toEqual([true]))
+
+    filesIcon(bar).click()
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
+    await vi.waitFor(() => expect(sent).toEqual([true, false]))
+
+    filesIcon(bar).click()
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
+    await vi.waitFor(() => expect(sent).toEqual([true, false, true]))
+  })
+
+  it('counts another sidebar view being in front as off screen', async () => {
+    // A view that is not rendered is not being looked at, and the sidebar
+    // already says so — SidebarViewProps.visible is false for every view but
+    // the one in front. Files was the only panel ignoring it.
+    const { services, sent } = recordingServices()
+    const { handle } = await mountApp(services)
+    await vi.waitFor(() => expect(sent).toEqual([true]))
+
+    handle.revealView('ports')
+    await vi.waitFor(() => expect(sent).toEqual([true, false]))
+
+    handle.revealView(FILES_VIEW_ID)
+    await vi.waitFor(() => expect(sent).toEqual([true, false, true]))
+  })
+
+  it('does not re-send a value the backend already has', async () => {
+    // The effect refires on a re-scope as well as on a transition, and a
+    // repeated "visible: true" that reached the backend would make the panel
+    // a poll trigger the cadence does not govern — every becoming-visible
+    // edge costs one immediate enumeration.
+    const { services, sent } = recordingServices()
+    const { filesStore } = await mountApp(services)
+    await vi.waitFor(() => expect(sent).toEqual([true]))
+
+    filesStore.setVisible(true)
+    filesStore.setVisible(true)
+    expect(sent).toEqual([true])
   })
 })

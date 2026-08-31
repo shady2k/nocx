@@ -124,6 +124,7 @@ function makeServices(over: Partial<FilesPanelServices> = {}): FilesPanelService
     list: vi.fn().mockResolvedValue(listOk('C:/', [])),
     read: vi.fn().mockResolvedValue({}),
     watch: vi.fn().mockResolvedValue({ mode: 'watching' }),
+    visible: vi.fn().mockResolvedValue({}),
     reveal: vi.fn().mockResolvedValue({}),
     subscribeFilesChanged: vi.fn().mockReturnValue(() => {}),
     onConnect: vi.fn().mockReturnValue(() => {}),

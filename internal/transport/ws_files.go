@@ -158,6 +158,22 @@ func validateFilesReadRaw(raw json.RawMessage) string {
 // validateFilesWatchRaw checks files.watch: the binding and the watch set.
 // An empty set is the deliberate "no watches" (the loop stops) and stays
 // accepted; a non-empty set is bounded by count and per-path shape.
+// validateFilesVisibleRaw checks files.visible: the binding, and that the
+// flag was actually sent.
+func validateFilesVisibleRaw(raw json.RawMessage) string {
+	var p filesVisibleParams
+	if msg := decodeParams(raw, &p); msg != "" {
+		return msg
+	}
+	if !isLowerHex(p.BindingID, 32) {
+		return "bindingId is required and must be the 32-hex id the backend minted"
+	}
+	if p.Visible == nil {
+		return "visible is required"
+	}
+	return ""
+}
+
 func validateFilesWatchRaw(raw json.RawMessage) string {
 	var p filesWatchParams
 	if msg := decodeParams(raw, &p); msg != "" {
@@ -245,7 +261,8 @@ type filesBinding struct {
 
 // filesWatcher is the transport-side watch state of one binding: the paths
 // under observation and their last-seen listing digests, the dirty set
-// awaiting a subscriber, and the poll loop that detects change. It holds
+// awaiting a subscriber, the panel's visibility, and the poll loop that
+// detects change. It holds
 // the handle the owning connection's files.watch acquired — the
 // authorisation happened there, once — and releases it on stop, before
 // the binding is closed, so the use-guard always drains. It never
@@ -261,10 +278,45 @@ type filesWatcher struct {
 	dirty   map[string]string // path → rev known when it went dirty ("" = unknown); awaiting a subscriber
 	handle  filesystem.Handle
 	release func()
+	// visible is whether the panel showing this tree is on screen (D5 §5.5:
+	// polling is "paused while visible() is false"). True at creation, since
+	// files.watch is sent by a panel that is rendering; the client sends
+	// every transition after that.
+	visible bool
 
 	stopOnce sync.Once
 	stop     chan struct{}
 	done     chan struct{}
+	// wake carries the one immediate poll a becoming-visible transition
+	// owes: nobody may wait an interval to see the truth about a panel they
+	// just opened. Buffered by one and offered non-blockingly, so a burst of
+	// transitions collapses to a single catch-up poll.
+	wake chan struct{}
+}
+
+// setVisible records the panel's visibility and, on a hidden→visible edge,
+// asks the loop for one immediate poll. The edge is what is tested, not the
+// value: re-sending "visible" while already visible must not turn the panel
+// into a poll trigger the cadence does not know about.
+func (w *filesWatcher) setVisible(visible bool) {
+	w.mu.Lock()
+	was := w.visible
+	w.visible = visible
+	w.mu.Unlock()
+	if !visible || was {
+		return
+	}
+	select {
+	case w.wake <- struct{}{}:
+	default: // a catch-up poll is already owed; one is enough
+	}
+}
+
+// isVisible reports whether the poll loop may spend a tick.
+func (w *filesWatcher) isVisible() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.visible
 }
 
 // filesMachine is the transport-owned files.* surface the handlers reach
@@ -412,6 +464,15 @@ type filesWatchResult struct {
 
 type filesCloseParams struct {
 	BindingID string `json:"bindingId"`
+}
+
+// filesVisibleParams is the panel's on-screen signal for one binding. The
+// flag is required rather than defaulted: a caller that omits it means
+// nothing in particular, and a visibility gate that guesses is one that
+// silently stops refreshing a panel somebody is looking at.
+type filesVisibleParams struct {
+	BindingID string `json:"bindingId"`
+	Visible   *bool  `json:"visible"`
 }
 
 type filesRevealParams struct {
@@ -764,8 +825,10 @@ func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState,
 					sessionID: b.sessionID,
 					paths:     added,
 					dirty:     make(map[string]string),
+					visible:   true,
 					stop:      make(chan struct{}),
 					done:      make(chan struct{}),
+					wake:      make(chan struct{}, 1),
 				}
 				w.mu.Lock()
 				w.handle = handle
@@ -831,6 +894,55 @@ func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState,
 // down. Ownership is re-checked like every call (D15) — a binding is closed
 // by the connection that owns its session, not by whoever knows its id. The
 // watcher stops first so the use-guard drains before Close's teardown.
+// handleVisible records whether the panel showing this binding's tree is on
+// screen. While it is not, the poll loop issues no listing at all; a
+// hidden→visible edge polls once immediately (D5 §5.5).
+//
+// It does NOT take the filesystem operation, and that is the decision worth
+// stating. Every other binding method runs through h.op.Run for the D15
+// ownership check, but that composes the filesystem gate — capacity one,
+// queue eight, a one-second wait — against listings bounded at ten seconds
+// locally and thirty over SFTP. A visibility signal put behind that gate is
+// refusable by exactly the contention it exists to reduce: the busier the
+// backend, the more likely the "I am hidden now" never lands, and the poll
+// it was meant to stop goes on running. So the flag flip is answered from
+// the transport's own bookkeeping.
+//
+// The authorisation is the same property, asked of the record the transport
+// already holds rather than of the registry: this connection must own the
+// binding's session. That is not a second answer to the question — the
+// watcher's own comment records that "the authorisation happened there,
+// once", in files.watch, which acquired the handle the loop still holds.
+// This is a flag on that already-authorised object, and it touches no
+// filesystem.
+func (h filesBindingHandlers) handleVisible(state *connState, req jsonrpcRequest) {
+	if h.op == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "files not available"})
+		return
+	}
+	var params filesVisibleParams
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.BindingID == "" || params.Visible == nil {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: bindingId and visible required"})
+		return
+	}
+	b := h.machine.filesBindingOf(params.BindingID)
+	if b == nil || !state.Owns(b.sessionID) {
+		_ = h.r.TryError(req.ID, RPCError{Code: -32602, Message: "Invalid params: unknown bindingId"})
+		return
+	}
+	// A binding with no watcher has nothing to pause: files.watch has not
+	// been sent yet, and the watcher it creates starts visible. Answering OK
+	// rather than erroring keeps the client free to send the signal in
+	// whatever order its own effects run.
+	h.machine.withFilesBinding(params.BindingID, func(b *filesBinding) {
+		if b.watcher == nil {
+			return
+		}
+		b.watcher.setVisible(*params.Visible)
+	})
+	_ = h.r.TryResult(req.ID, mustMarshal(struct{}{}))
+}
+
 func (h filesBindingHandlers) handleClose(ctx context.Context, state *connState, req jsonrpcRequest) {
 	if h.op == nil {
 		_ = h.r.TryError(req.ID, RPCError{Code: -32601, Message: "files not available"})
@@ -955,6 +1067,10 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 		reg(bindingSub, "files.read", params(validateFilesReadRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleRead(ctx, state, req) }
+		}),
+		reg(bindingSub, "files.visible", params(validateFilesVisibleRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
+			return func(_ context.Context, req jsonrpcRequest) { h.handleVisible(state, req) }
 		}),
 		reg(bindingSub, "files.watch", params(validateFilesWatchRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
@@ -1082,7 +1198,24 @@ func (s *WSServer) filesPollLoop(w *filesWatcher) {
 		select {
 		case <-w.stop:
 			return
+		case <-w.wake:
+			// The panel just became visible. Poll now rather than at the
+			// next tick, whatever the cadence is: a person who opens a
+			// panel is owed the truth immediately, and this is the half of
+			// the visibility gate that keeps stopping the poll from costing
+			// them freshness.
+			if !s.filesPollTick(w) {
+				return
+			}
 		case <-t.C:
+			// Hidden: the tick is spent on nothing. Not a cheaper listing —
+			// none. A tick is a full enumeration of every watched directory
+			// (both providers enumerate before slicing the page), so a
+			// collapsed sidebar used to cost exactly as much as an open one
+			// (nocx-8hdia.1).
+			if !w.isVisible() {
+				continue
+			}
 			if !s.filesPollTick(w) {
 				return
 			}

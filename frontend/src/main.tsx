@@ -30,7 +30,7 @@ import type { AgentApprove } from './generated/agent.approve'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import type { FilesDropped } from './generated/files.dropped'
 import { VaultObserver } from './vault-observer'
-import { Dispatcher } from './dispatcher'
+import { Dispatcher, RpcError } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { HistoryStatusStore } from './history-status'
 import { FootprintClient } from './footprint-client'
@@ -73,11 +73,10 @@ import { showToast } from './ui/toast'
 import { registerFileViewerSurface, openFileViewer } from './file-viewer'
 import { registerTerminalLinks } from './terminal-links'
 import type { LinkPathProbe } from './terminal-links/open'
+import type { FilesStatError } from './generated/files.stat.error'
 import { createUrlOpener } from './open-url'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
-import { FILES_PAGE_SIZE, type FilesRevealHint } from './files/files-store'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
-import { isExpandable } from './ui/tree-row-kind'
 import { uploadSurfaceFor } from './files/upload-surface'
 import { uploadOperations } from './files/upload-operations'
 import { downloadSurfaceFor } from './files/download-surface'
@@ -664,7 +663,7 @@ async function main() {
   // same reason: one store per dispatcher, because a transfer has one state.
   // Without this the panel's Download item would be dead code.
   const downloadSurface = downloadSurfaceFor(dispatcher)
-  let revealFilesPath: ((path: string, hint?: FilesRevealHint) => Promise<boolean>) | null = null
+  let revealFilesPath: ((path: string) => Promise<boolean>) | null = null
   let revealFilesView: () => void = () => {}
   const filesView = createFilesView({
     services: filesServicesTracked,
@@ -674,7 +673,7 @@ async function main() {
     upload: uploadSurface,
     download: downloadSurface,
     onStore: (store) => {
-      revealFilesPath = (path, hint) => store.revealPath(path, hint)
+      revealFilesPath = (path) => store.revealPath(path)
       rescopeFiles = () => store.rescope(untrack(() => activeOrigin()))
     },
   })
@@ -869,38 +868,38 @@ async function main() {
   // keeping its own view of whether a session is still there — and the
   // viewer surface itself.
   const terminalLinkUrlOpener = createUrlOpener({ openUrl: (url) => gitServices.openUrl(url) })
+  const pathProbeFromError = (error: unknown): LinkPathProbe => {
+    const data =
+      error instanceof RpcError && typeof error.data === 'object' && error.data !== null
+        ? (error.data as Partial<FilesStatError>)
+        : undefined
+    if (data?.reason === 'not-found') return { kind: 'absent' }
+    if (data?.reason === 'permission-denied') {
+      return { kind: 'unknown', reason: 'permission-denied' }
+    }
+    return { kind: 'unknown', reason: data?.reason === 'unavailable' ? 'unavailable' : 'other' }
+  }
   const pathKind = async (bindingId: string, path: string): Promise<LinkPathProbe> => {
     if (path === '/') return { kind: 'directory' }
-    const slash = path.lastIndexOf('/')
-    if (slash < 0) return { kind: 'unknown' }
-    const parent = slash === 0 ? '/' : path.slice(0, slash)
-    let offset = 0
-    for (;;) {
-      const result = await filesServicesTracked.list(bindingId, parent, offset, FILES_PAGE_SIZE)
-      if (result.state !== 'ok') return { kind: 'unknown' }
-      const entry = result.entries.find((candidate) => candidate.path === path)
-      if (entry !== undefined) {
-        if (!isExpandable(entry.kind, entry.linkKind)) return { kind: 'file' }
-        return {
-          kind: 'directory',
-          hint: { bindingId, parentPath: parent, listing: result },
-        }
-      }
-      if (!result.hasMore || result.entries.length === 0) return { kind: 'unknown' }
-      offset = result.offset + result.entries.length
+    try {
+      const result = await filesServicesTracked.stat(bindingId, path)
+      if (result.kind === 'dir') return { kind: 'directory' }
+      if (result.kind === 'regular') return { kind: 'file' }
+      return { kind: 'unknown', reason: 'other' }
+    } catch (error) {
+      return pathProbeFromError(error)
     }
   }
-
   registerTerminalLinks({
     openUrl: (url) => terminalLinkUrlOpener.open(url),
     openBinding: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),
     pathKind,
-    openDirectory: async (path, probe) => {
+    openDirectory: async (path) => {
       const reveal = revealFilesPath
       if (reveal === null) return false
       rescopeFiles()
       revealFilesView()
-      return reveal(path, probe.hint)
+      return reveal(path)
     },
     openViewer: (target) => openFileViewer(target),
     onBindingLiveness: onFilesBindingLiveness,

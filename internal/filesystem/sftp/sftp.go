@@ -552,6 +552,20 @@ func (p *Provider) Watch(ctx context.Context, pathValue string) (filesystem.Watc
 	return nil, &filesystem.ErrWatchUnavailable{}
 }
 
+// Stat classifies one path through the SFTP lease without enumerating its
+// parent. The lease's Stat follows symlinks, so the result describes the
+// object a link would open or expand; wrapPathErr preserves typed failures.
+func (p *Provider) Stat(ctx context.Context, pathValue string) (filesystem.Stat, error) {
+	if err := checkPath(pathValue); err != nil {
+		return filesystem.Stat{}, err
+	}
+	info, err := p.conn.Stat(pathValue)
+	if err != nil {
+		return filesystem.Stat{}, wrapPathErr("stat", pathValue, err)
+	}
+	return filesystem.Stat{Kind: filesystem.KindOf(info.Mode())}, nil
+}
+
 // Canonical resolves a path to its provider-canonical identity. It exists
 // because the Provider contract declares it; no wire method reaches it today
 // — Listing.Canonical and Content.Canonical carry identity on every list and

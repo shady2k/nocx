@@ -49,21 +49,24 @@ func (b ResultBound) Valid() bool {
 }
 
 // CancellationPolicy states the observable outcome when the run context is
-// cancelled. Cancellation is propagated to the executor and reported as an
-// error; it is never silently converted into a successful empty result.
+// cancelled. Cancellation is propagated to the executor and either reported
+// as an error or returned as a model-visible result; it is never silently
+// converted into a successful empty result.
 type CancellationPolicy string
 
 const (
-	CancellationUnset       CancellationPolicy = ""
-	CancellationReturnError CancellationPolicy = "return-error"
+	CancellationUnset        CancellationPolicy = ""
+	CancellationReturnError  CancellationPolicy = "return-error"
+	CancellationReturnResult CancellationPolicy = "return-result"
 )
 
 func supportedCancellation(policy CancellationPolicy) bool {
-	return policy == CancellationReturnError
+	return policy == CancellationReturnError || policy == CancellationReturnResult
 }
 
-// validToolDeadline is intentionally a finite-duration check. Each row carries
-// its own deadline, and the execution seam applies it to the tool context.
-func validToolDeadline(deadline time.Duration) bool {
-	return deadline > 0
+// validToolDeadline keeps an omitted deadline distinguishable from the one
+// deliberate unbounded declaration: only a row that explicitly chooses
+// CancellationReturnResult may defer its bound to the run lease.
+func validToolDeadline(deadline time.Duration, cancellation CancellationPolicy) bool {
+	return deadline > 0 || (deadline == 0 && cancellation == CancellationReturnResult)
 }

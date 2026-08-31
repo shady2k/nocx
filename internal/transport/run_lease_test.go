@@ -135,6 +135,31 @@ func TestRunLease_WallClockFiresAndEscalates(t *testing.T) {
 	}
 }
 
+// A parent context can end the request without a lease timer firing. The
+// execution still belongs to this run, so supervise must close it rather than
+// return over a live process.
+func TestRunLease_ContextCancellationEscalatesBeforeReturning(t *testing.T) {
+	sess := &fakeLeaseSession{dieOn: 0}
+	lease, _ := newUnitLease(t, sess, RunLeaseConfig{SignalGrace: 20 * time.Millisecond})
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- lease.supervise(ctx, blockForever(nil)) }()
+	cancel()
+
+	select {
+	case err := <-done:
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("supervise error = %v, want context cancellation", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("context cancellation did not terminalize the run")
+	}
+	sig := sess.got()
+	if len(sig) != 3 || sig[0] != syscall.SIGINT || sig[1] != syscall.SIGTERM || sig[2] != syscall.SIGKILL {
+		t.Fatalf("signals = %v, want [INT TERM KILL] — cancellation must not orphan the execution", sig)
+	}
+}
+
 func TestRunLease_EscalationReachesKillWhenTheExecutionIgnoresEverySignal(t *testing.T) {
 	sess := &fakeLeaseSession{dieOn: 0} // nothing but KILL ends it
 	lease, _ := newUnitLease(t, sess, RunLeaseConfig{WallClock: 50 * time.Millisecond, SignalGrace: 20 * time.Millisecond})

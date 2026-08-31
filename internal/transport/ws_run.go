@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
@@ -288,6 +289,12 @@ func (s *WSServer) RequestRun(ctx context.Context, sessionID string, command str
 		return s.broker.Request(ctx, kind, runRequestParams{SessionID: sessionID, Command: command}, &body)
 	})
 	if err != nil {
+		var leaseErr *assistant.RunLeaseError
+		if errors.As(err, &leaseErr) {
+			if attempt, ok := s.broker.runAttemptForLease(lease); ok {
+				leaseErr.EntryID = attempt
+			}
+		}
 		return nil, fmt.Errorf("run: %w", err)
 	}
 	return body, nil

@@ -10822,6 +10822,47 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
+  it('shows pre-execution submission failure in the answer block, not as terminalization', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'run the deployment')
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      state!({
+        runId: 42,
+        entryId: 'entry-42',
+        state: 'failed',
+        error: 'submission expired before execution',
+      })
+
+      expect(answer.querySelector('.cmd-answer-error')?.textContent).toBe(
+        'submission expired before execution',
+      )
+      expect(answer.querySelector('.cmd-answer-error')?.textContent).not.toContain('terminal')
+    } finally {
+      teardown()
+    }
+  })
+
   it('leaving the alternate buffer seats the answer and clears the frozen frame', async () => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {

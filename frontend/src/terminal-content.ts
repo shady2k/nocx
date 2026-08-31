@@ -6067,9 +6067,11 @@ export class TerminalContent extends BasePaneContent {
       if (openedBlock !== null) {
         this.agentRuns.delete(openedBlock)
         // The app-owned block has no attempt to complete it after a
-        // pre-execution withdrawal. Reuse the existing abandonment owner so
-        // it cannot remain a running block forever.
-        this.scrollback?.abandonUnbound(this.renderer?.cursorLine() ?? 0)
+        // pre-execution withdrawal. Reuse the existing abandonment owner only
+        // while this submission still owns the running slot.
+        if (this.scrollback?.blockManager.runningBlock === openedBlock) {
+          this.scrollback.abandonUnbound(this.renderer?.cursorLine() ?? 0)
+        }
       }
       if (openedLedgerId !== null) this.runEntryIds.delete(openedLedgerId)
     }

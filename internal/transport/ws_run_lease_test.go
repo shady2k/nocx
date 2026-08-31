@@ -34,6 +34,8 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
@@ -166,8 +168,48 @@ func tapDataFor(t *testing.T, tap *socketTap, sid, needle string, timeout time.D
 	return ""
 }
 
-// submitCommand writes command into the session the way the renderer's
-// submit path does: the line plus Enter, over the data plane.
+// submitLeaseCommand follows the renderer's assistant path: lifecycle.submitAttempt
+// completes before the command bytes enter the data plane. A blank requestID
+// is the ordinary human-command path and deliberately skips the assistant
+// lifecycle RPC.
+func (h *runLeaseHarness) submitLeaseCommand(t *testing.T, tap *socketTap, sid, command, requestID string) {
+	t.Helper()
+	if requestID != "" {
+		resp := tapCall(t, h.conn, tap, 41, "lifecycle.submitAttempt", map[string]string{
+			"domain":    string(h.domain.Domain),
+			"requestId": requestID,
+			"command":   command,
+			"cwd":       "/repo",
+			"host":      "",
+			"source":    "assistant",
+		})
+		var envelope struct {
+			Error  *jsonrpcErrorObj `json:"error"`
+			Result struct {
+				ID string `json:"id"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(resp, &envelope); err != nil {
+			t.Fatalf("lifecycle.submitAttempt: unmarshal: %v\nraw: %s", err, resp)
+		}
+		if envelope.Error != nil {
+			t.Fatalf("lifecycle.submitAttempt: %+v", envelope.Error)
+		}
+		if envelope.Result.ID == "" {
+			t.Fatal("lifecycle.submitAttempt returned no attempt id")
+		}
+	}
+	sidBytes, err := session.IDToBytes(session.ID(sid))
+	if err != nil {
+		t.Fatalf("id to bytes: %v", err)
+	}
+	f := Frame{Version: FrameVersion, MsgType: MsgTypeData, SessionID: sidBytes, Payload: []byte(command + "\r")}
+	if err := h.conn.WriteMessage(websocket.BinaryMessage, f.Encode()); err != nil {
+		t.Fatalf("write command: %v", err)
+	}
+}
+
+// submitCommand writes a human command into the session over the data plane.
 func submitCommand(t *testing.T, conn *websocket.Conn, sid, command string) {
 	t.Helper()
 	sidBytes, err := session.IDToBytes(session.ID(sid))
@@ -188,10 +230,12 @@ func submitCommand(t *testing.T, conn *websocket.Conn, sid, command string) {
 // the named lease config. The content store is real — the ledger assertion
 // (which bound ended the run) is read back from it.
 type runLeaseHarness struct {
-	t    *testing.T
-	ws   *WSServer
-	conn *websocket.Conn
-	db   content.ContentDB
+	t      *testing.T
+	ws     *WSServer
+	conn   *websocket.Conn
+	db     content.ContentDB
+	pub    *lifecyclepub.Publisher
+	domain lifecycle.DomainHandle
 	// fake is the run-tool provider: first request streams the run tool
 	// call, later requests stream the answer.
 	fake *runToolCallingServer
@@ -248,6 +292,8 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig) *runLeaseHarness 
 	t.Cleanup(func() { _ = db.Close() })
 	askPaneIn(t, db)
 
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithReal(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
 		WithCredentialStore(v), WithVaultLifecycle(v),
@@ -256,15 +302,35 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig) *runLeaseHarness 
 		WithAssistantClient(client),
 		WithAssistantProbeStore(assistant.NewProbeStore()),
 		WithAgentPolicy(autonomousPolicyStore(t)),
+		WithLifecyclePublisher(pub),
 		WithRunLease(leaseCfg),
 	)
+	pub.SetEmitter(ws)
 	if err := ws.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = ws.Stop(t.Context()) })
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
-	return &runLeaseHarness{t: t, ws: ws, conn: conn, db: db, fake: fake, srv: &testSrv{url: srv.URL}}
+	return &runLeaseHarness{t: t, ws: ws, conn: conn, db: db, pub: pub, fake: fake, srv: &testSrv{url: srv.URL}}
+}
+
+func (h *runLeaseHarness) openSession(t *testing.T) string {
+	t.Helper()
+	sid := openLocalSession(t, h.conn)
+	const lane = lifecycle.LaneID("lane-run-lease")
+	h.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	if err := h.pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatalf("BindTransport: %v", err)
+	}
+	domain, err := h.pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, h.pub, "T", lifecycleEnv(lane, domain, 1, lifecycleHelloEvt()))
+	ackEstablishmentFrom(t, h.pub, lane, domain, h.conn)
+	h.domain = domain
+	return sid
 }
 
 // createEndpointAt makes one answering-role endpoint against the fake
@@ -436,7 +502,7 @@ func TestRunLease_WallClockTerminalizesAndTheLedgerNamesIt(t *testing.T) {
 		SignalGrace: 200 * time.Millisecond,
 	})
 	h.createEndpointAt()
-	sid := openLocalSession(t, h.conn)
+	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	res := h.askRunsTool(sid, "sh -c 'echo $$ > "+pidFile+"; exec sleep 100'")
 	tap := newSocketTap(h.conn)
@@ -444,11 +510,11 @@ func TestRunLease_WallClockTerminalizesAndTheLedgerNamesIt(t *testing.T) {
 	// The renderer half: the run request arrives, the command is submitted
 	// into the real session, and never resolves — the block never freezes.
 	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
-	_, wantSid, _ := decodeRunRequest(t, raw)
+	requestID, wantSid, _ := decodeRunRequest(t, raw)
 	if wantSid != sid {
 		t.Fatalf("runRequest session = %q, want %q", wantSid, sid)
 	}
-	submitCommand(t, h.conn, sid, "sh -c 'echo $$ > "+pidFile+"; exec sleep 100'")
+	h.submitLeaseCommand(t, tap, sid, "sh -c 'echo $$ > "+pidFile+"; exec sleep 100'", requestID)
 	pid := readPidFile(t, pidFile)
 	waitChildAlive(t, pid) // the child exists and runs: there is something to cancel
 
@@ -545,18 +611,18 @@ func TestRunLease_InactivityTerminalizesAndTheLedgerNamesIt(t *testing.T) {
 		SignalGrace: 200 * time.Millisecond,
 	})
 	h.createEndpointAt()
-	sid := openLocalSession(t, h.conn)
+	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := "sh -c 'echo $$ > " + pidFile + "; exec sleep 100'"
 	res := h.askRunsTool(sid, cmd)
 	tap := newSocketTap(h.conn)
 
 	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
-	_, wantSid, _ := decodeRunRequest(t, raw)
+	requestID, wantSid, _ := decodeRunRequest(t, raw)
 	if wantSid != sid {
 		t.Fatalf("runRequest session = %q, want %q", wantSid, sid)
 	}
-	submitCommand(t, h.conn, sid, cmd)
+	h.submitLeaseCommand(t, tap, sid, cmd, requestID)
 	pid := readPidFile(t, pidFile)
 	waitChildAlive(t, pid)
 
@@ -587,7 +653,7 @@ func TestRunLease_ShortCommandRunsUntouched(t *testing.T) {
 		SignalGrace:  200 * time.Millisecond,
 	})
 	h.createEndpointAt()
-	sid := openLocalSession(t, h.conn)
+	sid := h.openSession(t)
 	// An ordinary command that COMPLETES on its own — every lease bound is
 	// far beyond it, so none can explain anything that happens to it.
 	cmd := "sh -c 'echo done'"
@@ -596,7 +662,7 @@ func TestRunLease_ShortCommandRunsUntouched(t *testing.T) {
 
 	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
 	rid, _, _ := decodeRunRequest(t, raw)
-	submitCommand(t, h.conn, sid, cmd)
+	h.submitLeaseCommand(t, tap, sid, cmd, rid)
 
 	// The renderer's observable: the command's own output appeared. The
 	// block froze; the renderer resolves with the completed run body.
@@ -641,18 +707,18 @@ func TestRunLease_EscalationReachesTermForAnIntIgnoringProcess(t *testing.T) {
 		SignalGrace: 300 * time.Millisecond,
 	})
 	h.createEndpointAt()
-	sid := openLocalSession(t, h.conn)
+	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := "sh -c 'echo $$ > " + pidFile + "; trap \"\" INT; sleep 100 & wait'"
 	res := h.askRunsTool(sid, cmd)
 	tap := newSocketTap(h.conn)
 
 	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
-	_, wantSid, _ := decodeRunRequest(t, raw)
+	requestID, wantSid, _ := decodeRunRequest(t, raw)
 	if wantSid != sid {
 		t.Fatalf("runRequest session = %q, want %q", wantSid, sid)
 	}
-	submitCommand(t, h.conn, sid, cmd)
+	h.submitLeaseCommand(t, tap, sid, cmd, requestID)
 	pid := readPidFile(t, pidFile)
 	waitChildAlive(t, pid)
 
@@ -676,18 +742,18 @@ func TestRunLease_EscalationReachesKillForAnIntAndTermIgnoringProcess(t *testing
 		SignalGrace: 300 * time.Millisecond,
 	})
 	h.createEndpointAt()
-	sid := openLocalSession(t, h.conn)
+	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := "sh -c 'echo $$ > " + pidFile + "; trap \"\" INT TERM; sleep 100 & wait'"
 	res := h.askRunsTool(sid, cmd)
 	tap := newSocketTap(h.conn)
 
 	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
-	_, wantSid, _ := decodeRunRequest(t, raw)
+	requestID, wantSid, _ := decodeRunRequest(t, raw)
 	if wantSid != sid {
 		t.Fatalf("runRequest session = %q, want %q", wantSid, sid)
 	}
-	submitCommand(t, h.conn, sid, cmd)
+	h.submitLeaseCommand(t, tap, sid, cmd, requestID)
 	pid := readPidFile(t, pidFile)
 	waitChildAlive(t, pid)
 
@@ -715,7 +781,7 @@ func TestRunLease_OutputBudgetBoundsAndTheBlockNamesIt(t *testing.T) {
 		SignalGrace:  200 * time.Millisecond,
 	})
 	h.createEndpointAt()
-	sid := openLocalSession(t, h.conn)
+	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	// 2 KiB of output (past the 512-byte budget), then it waits — so the
 	// budget, not the wall clock or the command's own exit, ends the run.
@@ -724,11 +790,11 @@ func TestRunLease_OutputBudgetBoundsAndTheBlockNamesIt(t *testing.T) {
 	tap := newSocketTap(h.conn)
 
 	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
-	_, wantSid, _ := decodeRunRequest(t, raw)
+	requestID, wantSid, _ := decodeRunRequest(t, raw)
 	if wantSid != sid {
 		t.Fatalf("runRequest session = %q, want %q", wantSid, sid)
 	}
-	submitCommand(t, h.conn, sid, cmd)
+	h.submitLeaseCommand(t, tap, sid, cmd, requestID)
 	pid := readPidFile(t, pidFile)
 
 	// No waitChildAlive here on purpose: the command's own output IS the

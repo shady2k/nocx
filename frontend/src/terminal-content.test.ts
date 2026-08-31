@@ -4465,7 +4465,58 @@ describe('the editor submit opens the attempt before the pty write (ADR-0024 §5
       teardown()
     }
   })
+  it('an agent submission cancelled during the attempt round trip sends no bytes and releases its waiters', async () => {
+    const client = makeClient()
+    let resolveAttempt!: (v: unknown) => void
+    const attemptPromise = new Promise<unknown>((done) => {
+      resolveAttempt = done
+    })
+    client.dispatcher.call.mockImplementation(() => attemptPromise)
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const session = sessionOf(content)
+    const handler = factHandler(client)
+    const restoreScroll = stubScrolling()
+    const controller = new AbortController()
+    try {
+      content.setVisible(true)
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
 
+      const pending = content.submitAgentCommand('touch pid', 'req-cancel', controller.signal)
+      expect(session.send).not.toHaveBeenCalled()
+
+      // The broker cancellation lands while lifecycle.submitAttempt is still
+      // in flight — this is the only window that proves the renderer checks
+      // immediately before its write rather than only at submit entry.
+      controller.abort()
+      resolveAttempt({
+        id: 'att-cancelled',
+        domain: 'd1',
+        state: 'open',
+        command: 'touch pid',
+        cwd: FIXTURE_CWD,
+        host: '',
+        origin: 'app',
+        startedAt: '2026-08-08T12:00:00Z',
+      })
+
+      await expect(pending).rejects.toThrow('submission expired before execution')
+      expect(session.send).not.toHaveBeenCalled()
+      expect(session.signal).not.toHaveBeenCalled()
+      const waiters = content as unknown as {
+        agentRuns: Map<unknown, unknown>
+        runEntryIds: Map<unknown, unknown>
+      }
+      expect(waiters.agentRuns.size).toBe(0)
+      expect(waiters.runEntryIds.size).toBe(0)
+    } finally {
+      restoreScroll()
+      teardown()
+    }
+  })
   it('the attempt receives the reference-intact record line, never the resolved send line', async () => {
     const client = makeClient()
     // vault.resolveLine goes over the WSClient seam (client.call); the

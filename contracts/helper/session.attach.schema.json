@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.attach.schema.json",
+  "title": "HelperSessionAttachResult",
+  "description": "Result of the helper session service's attach op: the attachment that was minted, where the reader now stands, and whether it may write. Three fields for three concerns — conflating any two of them is the defect this ABI exists to prevent. The attachment is disposable and never reaches the ledger; the resume is about the stream, which outlives it; the grant is about the one writer, which is neither.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["attachment", "resume", "write"],
+  "properties": {
+    "attachment": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/attachmentId"
+    },
+    "resume": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/resume"
+    },
+    "write": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/writeGrant"
+    }
+  }
+}

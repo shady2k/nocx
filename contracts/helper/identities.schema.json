@@ -1,0 +1,116 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/identities.schema.json",
+  "title": "HelperABIIdentities",
+  "description": "The shared vocabulary of the FROZEN helper ABI: the three identities a host session is addressed by, and the shapes an attach and a mid-stream reset both speak. It declares $defs and nothing else — every other schema in this directory $refs into it, so one concept has one declaration (AD-8). The three identities are separate types on the wire for the same reason they are separate Go types: before the correction of 2026-08-31 'the session' meant the coordinator-owned PTY channel, so the channel's death was the session's death, and conflating the two is exactly what makes a replacing coordinator delete live work.",
+  "$defs": {
+    "generationId": {
+      "description": "One content-addressed helper install. It qualifies every host session that install minted, so a durable handle addresses its generation rather than needing a lookup service. At least 128 bits, base32-encoded; the identifier is never truncated to fit a path, and a path that does not fit is refused visibly instead.",
+      "type": "string",
+      "minLength": 1
+    },
+    "hostSessionId": {
+      "description": "The PTY and its process group, minted by the helper and qualified by the generation that minted it. It SURVIVES coordinator replacement, and it is what the ledger's entries.session_id references. An object rather than a string because the qualification is load-bearing: there is no way to spell a session without its generation.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["generation", "session"],
+      "properties": {
+        "generation": { "$ref": "#/$defs/generationId" },
+        "session": {
+          "description": "32 lowercase hex characters — the same 16 raw bytes, and the same spelling, the coordinator's own session id already uses, so the data-plane frame header carries it raw exactly as internal/transport's does.",
+          "type": "string",
+          "pattern": "^[0-9a-f]{32}$"
+        }
+      }
+    },
+    "attachmentId": {
+      "description": "One coordinator-to-helper connection and its lease. DISPOSABLE: it dies with the connection, it is what detach names, and it appears NOWHERE in the ledger — a durable row keyed by it would tie surviving work to a pipe.",
+      "type": "string",
+      "minLength": 1
+    },
+    "subscriberId": {
+      "description": "A reader of a host session's output. Several may read one stream at once, each on its own cursor, and one of them may also hold the write capability. It is opaque to the helper and confers nothing: it ADDRESSES, it does not authorize. Any nocx under the same Unix account may connect, no session capability is reserved, and that cannot be retrofitted into a generation already deployed.",
+      "type": "string",
+      "minLength": 1
+    },
+    "streamOffset": {
+      "description": "The monotonic output coordinate of a host session, in bytes from the first byte it ever produced. It survives attachments — a new attachment is a new READER of the same stream, never a new stream — and it is 64-bit deliberately, because 32 bits wrap after 4 GiB and one long build reaches that.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "leaseEpoch": {
+      "description": "Numbers the grants of a session's one write capability, minted from 1 so that zero names no grant. It rises on every grant, and every input frame carries it, so bytes from a displaced holder that were still in flight are rejected rather than applied late.",
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 18446744073709551615
+    },
+    "gap": {
+      "description": "One range of output a reader will never receive, in the ledger's own Gap shape — what is missing is said the same way here as on an artifact and in a recording.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["start", "end", "reason"],
+      "properties": {
+        "start": { "$ref": "#/$defs/streamOffset" },
+        "end": { "$ref": "#/$defs/streamOffset" },
+        "reason": {
+          "description": "Why the bytes are missing, and it is a SECOND VALUE rather than the recording's `cap` on purpose: telling a person the cap dropped bytes nobody ever had is a false statement in the product. `window` is the only reason this generation sends — the helper's bounded output window was reclaimed past this range while the reader was behind it, so nobody ever held these bytes. A coordinator meeting a reason it does not recognise must treat it as an unqualified loss and must not refuse the frame: generations coexist, and a newer one may name a loss this one cannot.",
+          "type": "string",
+          "enum": ["window"]
+        }
+      }
+    },
+    "resume": {
+      "description": "Where a reader stands in the stream. This is the coordinator's own attach vocabulary (contracts/attach.schema.json) unchanged, because AD-9 already owns how a reader resumes a stream and a second notion of resumability here would be two owners that agree everywhere anybody looks. Both booleans are always present rather than one being omitted: the contract is exact only when a reader can tell 'the helper said no reset' from 'the helper did not mention reset'. Exactly one of them is true, and the gap is present exactly when reset is — a reset with no gap hides what was lost, and a gap on a resume claims a loss that did not happen.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["resumed", "reset", "from"],
+      "properties": {
+        "resumed": {
+          "description": "The requested offset was still in the window and the stream continues from it: nothing was lost and the reader keeps what it has drawn.",
+          "type": "boolean"
+        },
+        "reset": {
+          "description": "The requested offset is older than the window's base. The reader must clear its decoder and its screen and resync from `from` — replay cannot begin inside a UTF-8 sequence spliced onto a different stream position.",
+          "type": "boolean"
+        },
+        "from": {
+          "description": "The offset the stream resumes at: the requested offset when resumed, the window's base when reset.",
+          "$ref": "#/$defs/streamOffset"
+        },
+        "gap": { "$ref": "#/$defs/gap" }
+      },
+      "oneOf": [
+        {
+          "required": ["resumed", "reset"],
+          "properties": { "resumed": { "const": true }, "reset": { "const": false } },
+          "not": { "required": ["gap"] }
+        },
+        {
+          "required": ["resumed", "reset", "gap"],
+          "properties": { "resumed": { "const": false }, "reset": { "const": true } }
+        }
+      ]
+    },
+    "writeGrant": {
+      "description": "The answer to an attach that asked for the session's one write capability. Exactly one attachment holds it at a time; a second request is REFUSED and names the holder, never silently promoted and never a displacement — displacement is a product decision the coordinator already makes for its own clients, and a second, lower, divergent policy would be two owners of one behaviour.",
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["granted", "epoch", "holder"],
+      "properties": {
+        "granted": {
+          "description": "Whether this attachment now holds the capability.",
+          "type": "boolean"
+        },
+        "epoch": {
+          "description": "The lease this grant carries, or 0 when it was not granted.",
+          "$ref": "#/$defs/leaseEpoch"
+        },
+        "holder": {
+          "description": "Who holds it, when this request was refused; null otherwise. A refusal that does not say who holds it leaves the caller with nothing to do about it.",
+          "type": ["string", "null"]
+        }
+      }
+    }
+  }
+}

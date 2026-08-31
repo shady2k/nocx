@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.ack.params.schema.json",
+  "title": "HelperSessionAckParams",
+  "description": "Params of the helper session service's ack op: advance one subscriber's read cursor. Keyed by SUBSCRIBER and session, never by attachment — the cursor is the reader's and outlives the connection that carried it, so a reconnect resumes where the reader stood instead of restarting it. Each subscriber's cursor is independent: one reader stalling frees nothing on another's behalf and throttles neither the other reader nor the PTY. The op has no result shape rather than an invented one; what a reader learns about its position it learns from attach and from the mid-stream reset.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["subscriber", "session", "offset"],
+  "properties": {
+    "subscriber": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/subscriberId"
+    },
+    "session": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/hostSessionId"
+    },
+    "offset": {
+      "description": "The furthest offset this subscriber confirms having received. It is the same coordinate the recording keys on and the same one attach answers with, so a recording can be checked against what a reader received by offset rather than by eye.",
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/streamOffset"
+    }
+  }
+}

@@ -232,9 +232,33 @@ func (c *Client) onFrame(ty proto.FrameType, payload []byte) {
 		// nothing to answer; keepalives keep the transport warm
 	case proto.TypeNotify:
 		c.log.Warn("notify frame", "bytes", len(payload))
+	case proto.TypeSessionData:
+		c.sessionData(payload)
 	default:
 		c.log.Warn("unexpected frame", "type", ty)
 	}
+}
+
+// sessionData handles an inbound data-plane frame (AD-1: raw PTY bytes, never
+// JSON and never base64). This coordinator has nothing to route them to yet —
+// the session service is reserved and unbuilt (D15) — so the frame is dropped.
+//
+// It is recognised rather than ignored because generations are immutable and
+// coexist: a helper newer than this build will send these frames, and an
+// unknown type byte is garbage to the decoder, which then scans forward one
+// byte at a time through the PTY stream and through the head of whatever
+// followed it. Dropping one frame is the cheap outcome; resyncing is not.
+//
+// The bytes are counted, never read (AD-6).
+func (c *Client) sessionData(payload []byte) {
+	f, err := proto.DecodeSessionFrame(payload)
+	if err != nil {
+		c.log.Warn("malformed session data frame", "err", err, "bytes", len(payload))
+		return
+	}
+	c.log.Warn("session data frame dropped: no session reader in this coordinator",
+		"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
+		"bytes", len(f.Payload))
 }
 
 // deliverResponse routes one response frame. A response whose result is a

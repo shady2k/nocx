@@ -13,7 +13,7 @@ import { REFERENCE_NAMESPACES, type ReferenceNamespace } from './reference-names
  *  is the only thing that has to. */
 type SpanKind = 'param' | 'env' | 'secret' | 'unrecognised'
 
-export interface ValueSpan {
+interface ValueSpan {
   readonly from: number
   readonly to: number
   readonly kind: SpanKind
@@ -56,7 +56,9 @@ function unrecognisedText(body: string, at: number): string {
 }
 
 /**
- * Every `{{…}}` in the body, classified, in first-occurrence order.
+ * Every `{{…}}` in the body, classified, in first-occurrence order. Internal
+ * because `parse` is the module's one door: a consumer that took the spans
+ * alone would be reading half the grammar and deciding the rest itself.
  *
  * Two passes rather than one, and the second is the point: the first says
  * what a WELL-FORMED opening is, and the second walks every `{{` in the text
@@ -65,7 +67,7 @@ function unrecognisedText(body: string, at: number): string {
  * typo — as invisible literal text, which is how a body that cannot fire
  * looks identical to one that can.
  */
-export function valueSpans(body: string): ValueSpan[] {
+function valueSpans(body: string): ValueSpan[] {
   const secrets = new Map(findReferences(body).map((r) => [r.from, r]))
   const recognised = new Map<number, ValueSpan>()
   for (const m of body.matchAll(VALUE_RE)) {
@@ -119,11 +121,9 @@ export function valueSpans(body: string): ValueSpan[] {
 // `{{secret:…}}` renders to nothing under Handlebars and refuses to parse
 // under Nunjucks, and none of them can express an inline option list.
 //
-// These four are declared and not EXPORTED. Nothing outside this module
-// names them yet, and the frontend's dead-exports ratchet is right to say
-// so: they are exported by the task that gives them a consumer, not by the
-// one that writes them. `SnippetParse` exposes them structurally, so a
-// consumer can already read a block without naming its type.
+// `Block` and `Escape` stay unexported: nothing outside names them, and
+// `SnippetParse` exposes them structurally. `Diagnostic` is exported because
+// the resolver's refusal carries one (nocx-ptfqw).
 
 interface Block {
   readonly openFrom: number
@@ -137,6 +137,11 @@ interface Block {
 interface Escape {
   readonly from: number
   readonly to: number
+  /** What the escape STANDS FOR, carried rather than left for the resolver
+   *  to spell again. `{%%` means `{%` in exactly one place, and a second
+   *  spelling of the pair would agree until somebody changed the delimiter
+   *  in one of them. */
+  readonly text: string
 }
 
 type DiagnosticKind =
@@ -150,7 +155,7 @@ type DiagnosticKind =
   | 'condition-on-parameter'
   | 'conflicting-declaration'
 
-interface Diagnostic {
+export interface Diagnostic {
   readonly from: number
   readonly to: number
   readonly kind: DiagnosticKind
@@ -202,7 +207,7 @@ function scanTags(body: string): TagScan {
   let at = body.indexOf(TAG_OPEN)
   while (at >= 0) {
     if (body.startsWith(ESCAPE, at)) {
-      escapes.push({ from: at, to: at + ESCAPE.length })
+      escapes.push({ from: at, to: at + ESCAPE.length, text: TAG_OPEN })
       at = body.indexOf(TAG_OPEN, at + ESCAPE.length)
       continue
     }
@@ -307,12 +312,12 @@ function scanTags(body: string): TagScan {
 
 type FieldKind = 'text' | 'select' | 'flag'
 
-interface ConditionRef {
+export interface ConditionRef {
   readonly name: string
   readonly negated: boolean
 }
 
-interface Field {
+export interface Field {
   readonly name: string
   readonly kind: FieldKind
   readonly defaultValue: string
@@ -329,7 +334,7 @@ interface Field {
  *  may be answered, the second only asks for the answer again. Without that
  *  distinction a body that uses a name twice would report itself as
  *  declaring it twice. */
-function splitDeclaration(arg: string): {
+export function splitDeclaration(arg: string): {
   name: string
   defaultValue: string
   options: string[]

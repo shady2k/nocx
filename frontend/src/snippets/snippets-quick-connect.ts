@@ -24,7 +24,7 @@
  */
 import type { QuickConnectItem, QuickConnectProvider } from '../quick-connect'
 import { CopyIcon } from '../ui/icons'
-import { askFields } from './resolve'
+import { needsForm } from './resolve'
 import type {
   SnippetDestination,
   SnippetFireOutcome,
@@ -83,6 +83,10 @@ function snippetRefusalMessage(outcome: SnippetFireOutcome): string | null {
       return r.name !== undefined
         ? `{{secret:${r.name}}} could not be resolved — unlock the vault or check the name.`
         : 'A secret in this snippet could not be resolved — unlock the vault or check the name.'
+    case 'malformed':
+      return r.detail !== ''
+        ? `This snippet cannot be read: ${r.detail} — nothing was inserted.`
+        : 'This snippet cannot be read — nothing was inserted.'
     case 'write-failed':
       return 'The write was refused — nothing was inserted.'
     case 'secret-to-clipboard':
@@ -132,7 +136,7 @@ export class SnippetsQuickConnectProvider implements QuickConnectProvider {
    *  the insert path answers it: the destination changes where the resolved
    *  text lands, never what it is (design §9.2). */
   private async copy(snippet: Snippet): Promise<void> {
-    if (askFields(snippet.body).length > 0) {
+    if (needsForm(snippet.body)) {
       this.deps.onAsk(snippet, 'clipboard')
       return
     }
@@ -206,7 +210,7 @@ export class SnippetsQuickConnectProvider implements QuickConnectProvider {
   }
 
   private itemFor(snippet: Snippet): QuickConnectItem {
-    const fields = askFields(snippet.body)
+    const asksFirst = needsForm(snippet.body)
     const base = {
       id: `snippet:${snippet.id}`,
       label: snippet.title,
@@ -224,7 +228,7 @@ export class SnippetsQuickConnectProvider implements QuickConnectProvider {
         run: () => void this.copy(snippet),
       },
     }
-    if (fields.length === 0) {
+    if (!asksFirst) {
       return { ...base, run: () => void this.fire(snippet, new Map()) }
     }
     // Fields to answer: the palette closes on activation (it closes after

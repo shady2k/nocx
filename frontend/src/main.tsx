@@ -118,7 +118,7 @@ import { subscribeNotifyToast } from './notify/toast-bridge'
 import { NotificationsPanel } from './notify/notifications-panel'
 import type { NotifyCatalogue } from './generated/notify.catalogue'
 import { createOverviewController } from './overview/overview-controller'
-import { askFields } from './snippets/resolve'
+import { needsForm } from './snippets/resolve'
 
 const NOTIFICATIONS_CENTRE_PREFIX = 'notifications.centre.'
 
@@ -1480,7 +1480,7 @@ async function main() {
     // One path for every surface that hands over a chosen snippet (the
     // completion dropdown today): a body that asks for values opens the
     // form; a plain one fires.
-    if (askFields(snippet.body).length > 0) {
+    if (needsForm(snippet.body)) {
       snippetAsk.ask(snippet, 'input')
       return
     }

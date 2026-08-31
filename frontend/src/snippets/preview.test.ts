@@ -13,9 +13,9 @@ describe('describeBody (design §10.4)', () => {
     ])
   })
 
-  it('names an ask field and its default', () => {
+  it('names a parameter field and its default', () => {
     expect(describeBody('curl :{{port=8080}}')).toEqual([
-      { kind: 'ask', text: '{{port=8080}}', name: 'port', defaultValue: '8080' },
+      { kind: 'param', text: '{{port=8080}}', name: 'port', defaultValue: '8080', options: [] },
     ])
   })
 
@@ -34,16 +34,43 @@ describe('describeBody (design §10.4)', () => {
     ])
   })
 
-  it('a colon is what decides: a bare name is a field, a misspelt namespace is literal', () => {
+  it('a bare name is a parameter now, not a mistake', () => {
     // This case reversed when `ask` was retired, and the reversal IS the
     // grammar: `{{cwd}}` used to be unrecognised because it named no
-    // namespace, and is now a field precisely because it names none. What
-    // did not move is the other half — a colon commits the span to the
-    // registry, and a namespace nobody owns stays literal text.
-    expect(describeBody('{{cwd}} {{evn:cwd}}')).toEqual([
-      { kind: 'ask', text: '{{cwd}}', name: 'cwd', defaultValue: '' },
-      { kind: 'unrecognised', text: '{{evn:cwd}}' },
+    // namespace, and is now a field precisely because it names none.
+    expect(describeBody('{{cwd}}')).toEqual([
+      { kind: 'param', text: '{{cwd}}', name: 'cwd', defaultValue: '', options: [] },
     ])
+  })
+
+  it('a misspelt namespace is still unrecognised, and so is the retired ask:', () => {
+    // The other half of the rule did not move: a colon commits the span to
+    // the registry, and a namespace nobody owns stays literal text.
+    expect(describeBody('{{evn:cwd}} {{ask:port}}')).toEqual([
+      { kind: 'unrecognised', text: '{{evn:cwd}}' },
+      { kind: 'unrecognised', text: '{{ask:port}}' },
+    ])
+  })
+
+  it('an option list reports what it will offer', () => {
+    expect(describeBody('{{w=a|b}}')).toEqual([
+      { kind: 'param', text: '{{w=a|b}}', name: 'w', defaultValue: 'a', options: ['a', 'b'] },
+    ])
+  })
+
+  it('a condition reports as a flag', () => {
+    const parts = describeBody('{% if fast %}x{% endif %}')
+    expect(parts).toContainEqual({
+      kind: 'flag',
+      text: '{% if fast %}',
+      name: 'fast',
+      negated: false,
+    })
+  })
+
+  it('a malformed body reports its problem', () => {
+    const parts = describeBody('{% if x %}no end')
+    expect(parts.some((p) => p.kind === 'problem')).toBe(true)
   })
 
   it('an env key outside the table is recognised as a span and reported as unknown', () => {
@@ -57,7 +84,7 @@ describe('describeBody (design §10.4)', () => {
 
   it('reports every span in the order it occurs, across namespaces', () => {
     const parts = describeBody('{{name}} in {{env:cwd}} then {{secret:k}} and {{evn:oops}}')
-    expect(parts.map((p) => p.kind)).toEqual(['ask', 'env', 'secret', 'unrecognised'])
+    expect(parts.map((p) => p.kind)).toEqual(['param', 'env', 'secret', 'unrecognised'])
   })
 
   it('a body with nothing to substitute describes nothing', () => {

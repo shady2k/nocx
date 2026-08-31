@@ -63,7 +63,7 @@ describe('parse — blocks', () => {
 
   it('{%% is an escape and never opens a tag', () => {
     const p = parse('write {%% if x %} literally')
-    expect(p.escapes).toEqual([{ from: 6, to: 9 }])
+    expect(p.escapes).toEqual([{ from: 6, to: 9, text: '{%' }])
     expect(p.blocks).toEqual([])
     expect(p.diagnostics).toEqual([])
   })

@@ -53,6 +53,11 @@ import (
 // RunLeaseConfig bounds one run execution. Zero disables the corresponding
 // bound; all zero disables the lease entirely (the broker's pre-lease
 // timeout applies). The WSServer's defaults are defaultRunLease.
+//
+// WallClock is independent of shell integration and arms in supervise.
+// Inactivity and OutputBudget require an authenticated lifecycle attempt,
+// which only shell integration can open; RequestRun refuses a run rather than
+// silently advertising either bound when that integration is unavailable.
 type RunLeaseConfig struct {
 	// WallClock bounds the whole execution, from the run request to the
 	// resolution — the bounded ceiling of decision 2. It is the ONLY bound
@@ -70,6 +75,13 @@ type RunLeaseConfig struct {
 	// the execution to cooperate before escalating. Zero means the default
 	// (defaultRunSignalGrace).
 	SignalGrace time.Duration
+}
+
+// needsShellIntegration is the single declaration of which lease bounds
+// depend on the authenticated lifecycle attempt. WallClock does not: it is
+// armed in supervise before delivery. The output and inactivity observers do.
+func (cfg RunLeaseConfig) needsShellIntegration() bool {
+	return cfg.Inactivity > 0 || cfg.OutputBudget > 0
 }
 
 // DefaultRunLeaseConfig is the production lease, named at the composition
@@ -457,6 +469,31 @@ func (s *WSServer) effectiveRunLease() RunLeaseConfig {
 		return s.runLeaseCfg
 	}
 	return defaultRunLease
+}
+
+// runLeaseIntegrationAvailable reports whether sid currently has an
+// authenticated shell-integration lifecycle lane. The integration axis owns
+// the current status; the lane registry proves the corresponding lane exists.
+// Snapshot both under their locks and never hold either across a broker call.
+func (s *WSServer) runLeaseIntegrationAvailable(sid session.ID) bool {
+	if s.lifecyclePub == nil {
+		return false
+	}
+	s.integrationMu.Lock()
+	st, ok := s.integrations[sid]
+	integrated := ok && st.status == IntegrationIntegrated
+	s.integrationMu.Unlock()
+	if !integrated {
+		return false
+	}
+	s.lifecycleMu.Lock()
+	defer s.lifecycleMu.Unlock()
+	for _, owner := range s.lifecycleLanes {
+		if owner == sid {
+			return true
+		}
+	}
+	return false
 }
 
 // newRunLease builds the lease supervising one run on sid: the session's

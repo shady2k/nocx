@@ -39,6 +39,7 @@ import (
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vault/file"
@@ -318,6 +319,7 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig) *runLeaseHarness 
 func (h *runLeaseHarness) openSession(t *testing.T) string {
 	t.Helper()
 	sid := openLocalSession(t, h.conn)
+	h.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
 	const lane = lifecycle.LaneID("lane-run-lease")
 	h.ws.RegisterLifecycleLane(lane, session.ID(sid))
 	if err := h.pub.BindTransport("T", noopPort{}); err != nil {
@@ -818,5 +820,38 @@ func TestRunLease_OutputBudgetBoundsAndTheBlockNamesIt(t *testing.T) {
 	reason := terminationReasonOfRun(t, h)
 	if reason == nil || *reason != content.TermOutputBudget {
 		t.Fatalf("ledger termination = %v, want output-budget", reason)
+	}
+}
+
+// A session without a lifecycle lane cannot authenticate the attempt that
+// opens the output and inactivity bounds. The run is refused before the
+// renderer receives a command, and the failed block says why instead of
+// promising bounds that can never fire.
+func TestRunLease_NoShellIntegrationMakesUnavailableBoundsVisible(t *testing.T) {
+	h := newRunLeaseHarness(t, RunLeaseConfig{
+		WallClock:    time.Minute,
+		Inactivity:   time.Minute,
+		OutputBudget: 512,
+		SignalGrace:  200 * time.Millisecond,
+	})
+	h.createEndpointAt()
+	sid := openLocalSession(t, h.conn)
+	// The session's axis explicitly reports a conventional terminal: shell
+	// integration was attempted but no authenticated lifecycle lane exists.
+	h.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationConventional, ssh.ReasonUnsupportedShell)
+	res := h.askRunsTool(sid, "printf never-runs")
+	tap := newSocketTap(h.conn)
+
+	runID, sentence := waitForRunState(t, tap, "failed")
+	if runID != res.RunID {
+		t.Fatalf("runState runId = %d, want %d", runID, res.RunID)
+	}
+	for _, want := range []string{"shell integration", "inactivity", "output", "not run"} {
+		if !strings.Contains(strings.ToLower(sentence), want) {
+			t.Fatalf("runState error = %q, want the visible refusal to name %q", sentence, want)
+		}
+	}
+	if reason := terminationReasonOfRun(t, h); reason == nil || *reason != content.TermFailed {
+		t.Fatalf("ledger termination = %v, want failed for a refused unsupervised run", reason)
 	}
 }

@@ -60,6 +60,11 @@ const maxRunOutputWindowChars = 64 << 10 // 64 KiB of output text
 // no-client outcome.
 var errRunNoRenderer = errors.New("no renderer connected to run the command")
 
+// errRunNoShellIntegration is returned before broker delivery when a run
+// needs output or inactivity accounting but the session has no authenticated
+// lifecycle lane. The run driver exposes this error in the failed block.
+var errRunNoShellIntegration = errors.New("shell integration is unavailable; inactivity and output bounds cannot be enforced, so the command was not run")
+
 // ── wire shapes ────────────────────────────────────────────────────────────
 
 // runRequestParams is what the broker sends the renderer (with the minted
@@ -254,6 +259,10 @@ func (s *WSServer) RequestRun(ctx context.Context, sessionID string, command str
 	}
 
 	cfg := s.effectiveRunLease()
+	if cfg.needsShellIntegration() && !s.runLeaseIntegrationAvailable(sid) {
+		return nil, fmt.Errorf("run: %w", errRunNoShellIntegration)
+	}
+
 	kind := runKind()
 	if cfg.WallClock <= 0 && cfg.Inactivity <= 0 && cfg.OutputBudget <= 0 {
 		// Lease disabled: the pre-lease broker bound applies unchanged.

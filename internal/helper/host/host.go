@@ -90,8 +90,8 @@ func New(in io.Reader, out io.Writer, contentHash, instanceID string, log *slog.
 // a rule the registration path cannot get past is stronger than a rule a
 // test must remember to check.
 func (h *Host) Register(s Service) {
-	if s.Name() == "session" {
-		panic(`host: "session" is a reserved service name (D15)`)
+	if s.Name() == proto.ServiceSession {
+		panic("host: " + proto.ServiceSession + " is a reserved service name (D15)")
 	}
 	for _, op := range s.Ops() {
 		schema := s.ParamsSchema(op)
@@ -218,9 +218,37 @@ func (h *Host) frame(ctx context.Context, ty proto.FrameType, payload []byte) {
 		h.cancel(payload)
 	case proto.TypeKeepAlive:
 		// nothing to answer; keepalives keep the transport warm
+	case proto.TypeSessionData:
+		h.sessionData(payload)
 	default:
 		h.log.Warn("unexpected frame", "type", ty)
 	}
+}
+
+// sessionData handles an inbound data-plane frame. This generation has no
+// session service — the name is reserved and Register refuses it (D15) — so
+// there is nothing to route the bytes to and the frame is dropped.
+//
+// It is handled rather than ignored for the reason the frame type was
+// allocated before the service existed: generations are immutable and coexist
+// for months, so a coordinator newer than this helper WILL send these frames,
+// and an unknown type byte is garbage to the decoder, which then resyncs
+// forward one byte at a time through whatever follows — a live PTY stream, in
+// the case that matters. Recognising the frame turns that into one dropped
+// write. This is AD-1's own move for its reserved metadata msg-type: logged
+// and dropped, never a spawn and never a torn-down connection.
+//
+// The bytes are counted, never read: the helper moves PTY bytes and does not
+// interpret them (AD-6).
+func (h *Host) sessionData(payload []byte) {
+	f, err := proto.DecodeSessionFrame(payload)
+	if err != nil {
+		h.log.Warn("malformed session data frame", "err", err, "bytes", len(payload))
+		return
+	}
+	h.log.Warn("session data frame dropped: no session service in this generation",
+		"session", fmt.Sprintf("%x", f.Session), "subscriber", fmt.Sprintf("%x", f.Subscriber),
+		"epoch", uint64(f.Epoch), "bytes", len(f.Payload))
 }
 
 // request serves one request on its own goroutine, so a blocking handler

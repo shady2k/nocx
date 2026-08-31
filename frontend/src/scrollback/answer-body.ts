@@ -24,7 +24,13 @@
 // the machine cannot tell the difference, which is exactly why there is only
 // one of it.
 import { paintShellInto } from './shell-paint'
-import { paintAnswerLine } from '../ui/answer-markdown'
+import {
+  paintAnswerLine,
+  paintTableRow,
+  tableDelimiterAlignments,
+  tableRowParts,
+  type TableAlignment,
+} from '../ui/answer-markdown'
 import { mountCodeBlockCopyButton } from '../ui/code-block'
 import type { CommandSnapshotStore } from '../command-snapshot'
 
@@ -128,10 +134,45 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
       .join('\n')
 
   /** The language the open fence declared — read once, at the opener, and
-   *  used for every row until the closer. */
+   * used for every row until the closer. */
   let fenceLang = ''
   let codeEl: HTMLElement | null = null
+  let tableEl: HTMLElement | null = null
+  let tableAlignments: TableAlignment[] = []
+  let tableColumns = 0
+  let tableCandidate: { row: HTMLSpanElement; text: string } | null = null
 
+  const updateTableColumns = (count: number): void => {
+    if (!tableEl || count <= tableColumns) return
+    tableColumns = count
+    tableEl.style.setProperty('--md-table-columns', String(tableColumns))
+  }
+
+  const endTable = (): void => {
+    tableEl = null
+    tableAlignments = []
+    tableColumns = 0
+  }
+
+  const startTable = (
+    candidate: { row: HTMLSpanElement; text: string },
+    delimiter: HTMLSpanElement,
+    delimiterText: string,
+  ): void => {
+    const container = document.createElement('div')
+    container.className = 'ui-md-table'
+    container.setAttribute('role', 'table')
+    outputEl.insertBefore(container, candidate.row)
+    container.appendChild(candidate.row)
+    tableEl = container
+    tableAlignments = tableDelimiterAlignments(delimiterText) ?? []
+    updateTableColumns(
+      Math.max(tableAlignments.length, tableRowParts(candidate.text)?.cells.length ?? 0),
+    )
+    paintTableRow(candidate.row, candidate.text, tableAlignments, true)
+    container.appendChild(delimiter)
+    paintTableRow(delimiter, delimiterText, tableAlignments, false, true)
+  }
   const codeContainer = (): HTMLElement => {
     if (!codeEl) {
       const container = document.createElement('div')
@@ -161,6 +202,8 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
     }
     started = true
     if (FENCE_MARKER.test(line)) {
+      tableCandidate = null
+      endTable()
       const opening = !inFence
       row.dataset.fenceDelim = opening ? 'open' : 'close'
       inFence = opening
@@ -177,13 +220,6 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
       }
       // The closer was created inside the code region and stays there; the
       // rows after it go back to the prose body.
-      //
-      // NEITHER DELIMITER IS PAINTED. They mark where the region starts
-      // and ends; they are not code, and they are not prose whose
-      // asterisks mean anything. Leaving them as plain text is also
-      // what keeps `Copy output` returning the answer with its fence
-      // markers intact, which is a contract this block already had
-      // (nocx-juau).
     } else if (inFence) {
       // A code row. The EXISTING lexer, on a shell fence only
       // (SHELL_FENCE above says why), through the one painter that also
@@ -192,18 +228,38 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
       // grey forever.
       if (SHELL_FENCE.has(fenceLang) && line !== '') paintShellInto(row, line, store)
     } else {
-      // Prose. The structure a model actually emits, painted per
-      // completed line, with every byte escaped (nocx-swoje;
-      // ui/answer-markdown.ts owns the whole grammar and says what it
-      // deliberately does not render).
+      const delimiter = tableCandidate ? tableDelimiterAlignments(line) : null
+      if (delimiter && tableCandidate) {
+        const candidate = tableCandidate
+        tableCandidate = null
+        startTable(candidate, row, line)
+        return
+      }
+      if (tableEl) {
+        const parts = tableRowParts(line)
+        if (!parts) {
+          row.remove()
+          outputEl.appendChild(row)
+          endTable()
+        } else {
+          tableEl.appendChild(row)
+          updateTableColumns(parts.cells.length)
+          paintTableRow(row, line, tableAlignments, false)
+        }
+        return
+      }
+      // Prose. The structure a model actually emits is painted per completed
+      // line, with every byte escaped (nocx-swoje; the answer-markdown module
+      // owns both the ordinary grammar and table cells).
       paintAnswerLine(row, line)
+      tableCandidate = tableRowParts(line) ? { row, text: line } : null
     }
   }
 
   const makeRow = (): HTMLSpanElement => {
     const span = document.createElement('span')
     span.className = 'term-line'
-    ;(inFence ? codeContainer() : outputEl).appendChild(span)
+    ;(inFence ? codeContainer() : (tableEl ?? outputEl)).appendChild(span)
     return span
   }
 
@@ -244,6 +300,8 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
       if (hadContent) started = true
       if (!started && partial) partial.remove()
       partial = null
+      tableCandidate = null
+      endTable()
       outputEl.appendChild(node)
     },
 
@@ -265,13 +323,14 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
           last.remove()
           continue
         }
-        if (last.classList.contains('cmd-output-code')) {
-          const row = last.lastElementChild
-          if (row?.classList.contains('term-line') && row.textContent?.trim() === '') {
+        if (last.classList.contains('cmd-output-code') || last.classList.contains('ui-md-table')) {
+          const rows = last.querySelectorAll<HTMLElement>(':scope > .term-line')
+          const row = rows[rows.length - 1]
+          if (row?.textContent?.trim() === '') {
             row.remove()
             continue
           }
-          if (!last.hasChildNodes()) {
+          if (last.classList.contains('cmd-output-code') && !last.hasChildNodes()) {
             last.remove()
             continue
           }

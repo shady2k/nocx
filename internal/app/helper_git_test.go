@@ -35,7 +35,9 @@ import (
 	localgit "github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
+	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/host"
+	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -106,8 +108,9 @@ type fakeLaneConn struct {
 
 	startErr error
 
-	mu     sync.Mutex
-	closed int
+	mu      sync.Mutex
+	closed  int
+	started string
 }
 
 func newFakeLaneConn(peer func(stdin io.Reader, stdout io.Writer) int) *fakeLaneConn {
@@ -131,7 +134,12 @@ func newFakeLaneConn(peer func(stdin io.Reader, stdout io.Writer) int) *fakeLane
 func (f *fakeLaneConn) Stdin() io.WriteCloser { return f.stdin }
 func (f *fakeLaneConn) Stdout() io.Reader     { return f.stdout }
 func (f *fakeLaneConn) Stderr() io.Reader     { return f.stderr }
-func (f *fakeLaneConn) Start(string) error    { return f.startErr }
+func (f *fakeLaneConn) Start(command string) error {
+	f.mu.Lock()
+	f.started = command
+	f.mu.Unlock()
+	return f.startErr
+}
 func (f *fakeLaneConn) Wait() (int, error)    { <-f.exited; return f.exitCode, nil }
 func (f *fakeLaneConn) Done() <-chan struct{} { return make(chan struct{}) }
 func (f *fakeLaneConn) LostErr() error        { return nil }
@@ -141,6 +149,15 @@ func (f *fakeLaneConn) Close() error {
 	f.closed++
 	f.mu.Unlock()
 	return f.stdin.Close()
+}
+
+// startedCommand is what the exec lane was asked to run: the whole point of
+// the remote half of D11 is that it is the BRIDGE and not the helper serving
+// over this channel.
+func (f *fakeLaneConn) startedCommand() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.started
 }
 
 func (f *fakeLaneConn) closeCount() int {
@@ -987,5 +1004,48 @@ func TestHelperSelectionExplicitScriptIsNotOfferedTheBinary(t *testing.T) {
 	}
 	if provider.install != nil && provider.install.uploadCount() != 0 {
 		t.Fatalf("explicit script wrote %d uploads, want 0", provider.install.uploadCount())
+	}
+}
+
+// TestTheExecLaneRunsTheBridgeForTheGenerationInstalled is the remote half of
+// the level-1 design's D11, asserted where the coordinator actually decides
+// it: what goes down the pty-less exec lane is `nocx-helper bridge
+// <generation>`, not the helper serving over that channel's stdin and stdout.
+//
+// The distinction is the whole bead. With the helper serving the channel, its
+// sessions died with the channel; with the bridge, the channel reaches an
+// endpoint on the host that outlives it — which is what lets a session survive
+// a coordinator being replaced (D1). The generation is the content hash the
+// installer wrote, so the bridge can never reach a different generation's
+// sessions while two coexist on one host (D4).
+func TestTheExecLaneRunsTheBridgeForTheGenerationInstalled(t *testing.T) {
+	provider := &fakeLaneProvider{peer: realHelperPeer()}
+	sel := configuredSelector(t, provider)
+	selection := sel(&fakeRemoteSession{id: "s1", host: "host.example"})
+	if selection.Factory == nil {
+		t.Fatal("selection returned no factory")
+	}
+	repo, outcome, err := selection.Factory.Open(context.Background(), fixtureRepo(t))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	if outcome.State != git.OpenOK {
+		t.Fatalf("open outcome = %s, want ok", outcome.State)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+
+	started := provider.lane(0).startedCommand()
+	fields := strings.Fields(started)
+	if len(fields) != 3 || fields[1] != endpoint.BridgeCommand {
+		t.Fatalf("the exec lane ran %q, want <path> %s <generation>: it must run the bridge, "+
+			"not a helper serving this channel", started, endpoint.BridgeCommand)
+	}
+	if _, err := endpoint.Path(t.TempDir(), proto.GenerationID(fields[2])); err != nil {
+		t.Fatalf("the generation the bridge was given is not a content hash: %v", err)
+	}
+	// And it is the generation that was INSTALLED, which is what the dial then
+	// verifies the hello-ok's content hash against (D21).
+	if !strings.HasSuffix(path.Dir(fields[0]), "-"+fields[2]) {
+		t.Fatalf("the bridge names generation %q but the binary was installed at %q", fields[2], fields[0])
 	}
 }

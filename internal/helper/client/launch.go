@@ -201,6 +201,15 @@ func (c *Client) pump() {
 					c.handshakeDone(ErrVersionMismatch)
 					return
 				}
+				if r.code == exitNoEndpoint {
+					// The bridge ran, reached the host and found no helper
+					// serving that generation. It is a fact about the HOST,
+					// not about the binary or the protocol, so it must not be
+					// reported as "not our helper": the recovery is a helper
+					// starting, and nothing about the install is wrong.
+					c.handshakeDone(ErrHelperNotServing)
+					return
+				}
 				msg := ""
 				if seen := scan.Bytes(); len(seen) > 0 {
 					msg = fmt.Sprintf(": saw %q", truncate(string(seen)))

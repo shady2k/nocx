@@ -155,10 +155,19 @@ type Service struct {
 	mu       sync.Mutex
 	sessions map[string]*hostSession
 	budget   int64
-	// sink is the CURRENT connection, and it is nil between connections. It
-	// is deliberately a field rather than a constructor argument: the service
-	// outlives every connection it serves, which is the whole of D1.
-	sink Sink
+	// sinks are the connections currently bound, and there may be SEVERAL:
+	// D12 is same-UID trust, so any nocx under that account may connect, and
+	// the helper's accept loop serves them all at once. It is deliberately a
+	// field rather than a constructor argument: the service outlives every
+	// connection it serves, which is the whole of D1.
+	//
+	// It is a set rather than one value because the alternative was measured
+	// and it is wrong: with "the newest connection wins", a second coordinator
+	// binding silently stole the first one's data frames, and the FIRST one's
+	// release then found it no longer held the slot and dropped nothing — so a
+	// dead connection's write capability was never released and no later
+	// coordinator could ever take it.
+	sinks map[Sink]struct{}
 	// attachSeq mints attachment ids, which are disposable and never reach
 	// the ledger (D2) — so a counter is enough and a random id would only
 	// suggest otherwise.
@@ -185,6 +194,7 @@ func New(opts Options) *Service {
 		now:        opts.Now,
 		newID:      opts.NewID,
 		sessions:   make(map[string]*hostSession),
+		sinks:      make(map[Sink]struct{}),
 	}
 	if s.log == nil {
 		s.log = slog.Default()
@@ -198,34 +208,36 @@ func New(opts Options) *Service {
 	return s
 }
 
-// Bind makes sink the connection this service speaks on and returns the
-// release that ends it. Releasing drops every attachment made on that
-// connection — an attachment IS a connection and its lease (D2) — and touches
-// no session, no window and no process.
+// Bind adds sink to the connections this service speaks on and returns the
+// release that ends it. Releasing drops every attachment made ON THAT
+// CONNECTION — an attachment IS a connection and its lease (D2) — and touches
+// no session, no window, no process, and no other connection's attachments.
 //
 // The interval, both ends named: from Bind until the returned release, frames
-// this service produces go to that sink and to nothing else; outside it they
-// go nowhere and are not queued for a connection that may never come. A
-// coordinator that drains into no consumer would be a second window with its
-// own capacity and owner, which is the thing this design has one of (D16).
+// produced for a subscriber that attached on that connection go to that sink
+// and to nothing else; after it they go nowhere and are not queued for a
+// connection that may never come. A coordinator that drained into no consumer
+// would be a second window with its own capacity and owner, which is the thing
+// this design has one of (D16).
+//
+// Several connections may be bound at once and none displaces another: the
+// helper's accept loop puts one protocol engine on each, and this is the seam
+// where "process-scoped registry, connection-scoped engines" is actually
+// enforced rather than described.
 func (s *Service) Bind(sink Sink) (release func()) {
 	s.mu.Lock()
-	s.sink = sink
+	s.sinks[sink] = struct{}{}
 	s.mu.Unlock()
 
 	var once sync.Once
 	return func() {
 		once.Do(func() {
 			s.mu.Lock()
-			if s.sink != sink {
-				s.mu.Unlock()
-				return // a newer connection already took the slot
-			}
-			s.sink = nil
+			delete(s.sinks, sink)
 			live := s.live()
 			s.mu.Unlock()
 			for _, hs := range live {
-				hs.releaseConnection()
+				hs.releaseConnection(sink)
 			}
 		})
 	}
@@ -239,7 +251,7 @@ func (s *Service) Close() {
 	live := s.live()
 	s.sessions = make(map[string]*hostSession)
 	s.budget = 0
-	s.sink = nil
+	s.sinks = make(map[Sink]struct{})
 	s.mu.Unlock()
 	for _, hs := range live {
 		hs.stop()
@@ -334,7 +346,7 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 		if err := decode(params, &p); err != nil {
 			return nil, err
 		}
-		return s.attach(p)
+		return s.attach(ctx, p)
 	case proto.OpAck:
 		var p proto.AckParams
 		if err := decode(params, &p); err != nil {
@@ -504,15 +516,24 @@ func (s *Service) inventory(p proto.SessionsParams) proto.SessionsResult {
 	return proto.SessionsResult{Sessions: out}
 }
 
-func (s *Service) attach(p proto.AttachParams) (proto.AttachResult, error) {
+// attach reads the connection out of the REQUEST rather than out of the
+// service, because the service has several and only the request knows which
+// one asked. Binding a subscriber's pump to "the current connection" was the
+// defect the socket surfaced: with two coordinators connected, the second one
+// to bind received the first one's bytes.
+func (s *Service) attach(ctx context.Context, p proto.AttachParams) (proto.AttachResult, error) {
 	hs, err := s.find(p.Session)
 	if err != nil {
 		return proto.AttachResult{}, err
 	}
+	sink, ok := host.ConnectionFrom(ctx).(Sink)
+	if !ok || sink == nil {
+		return proto.AttachResult{}, ErrNotAttached
+	}
 	s.mu.Lock()
-	sink := s.sink
+	_, bound := s.sinks[sink]
 	s.mu.Unlock()
-	if sink == nil {
+	if !bound {
 		return proto.AttachResult{}, ErrNotAttached
 	}
 	return hs.attach(p, sink, s.mintAttachment, s.log)
@@ -557,19 +578,24 @@ func (s *Service) mintAttachment() proto.AttachmentID {
 	return proto.AttachmentID(fmt.Sprintf("att-%d", s.attachSeq))
 }
 
+// notifyExit tells EVERY bound connection that a session ended. An exit is a
+// fact about a session, not about one attachment, and a coordinator that is
+// watching it must hear it whether or not another coordinator is also
+// watching. With nobody connected the status is not lost: it is in the entry,
+// and the inventory is what a replacing coordinator asks first.
 func (s *Service) notifyExit(e proto.SessionExit) {
 	s.mu.Lock()
-	sink := s.sink
-	s.mu.Unlock()
-	if sink == nil {
-		// Nobody is connected. The status is not lost: it is in the entry,
-		// and the inventory is what a replacing coordinator asks first.
-		return
+	sinks := make([]Sink, 0, len(s.sinks))
+	for sink := range s.sinks {
+		sinks = append(sinks, sink)
 	}
-	if err := sink.SendNotification(proto.Notification{
-		Service: proto.ServiceSession, Event: proto.EventSessionExit, Params: e,
-	}); err != nil {
-		s.log.Warn("exit notification not delivered", "session", e.Session.Session, "err", err)
+	s.mu.Unlock()
+	for _, sink := range sinks {
+		if err := sink.SendNotification(proto.Notification{
+			Service: proto.ServiceSession, Event: proto.EventSessionExit, Params: e,
+		}); err != nil {
+			s.log.Warn("exit notification not delivered", "session", e.Session.Session, "err", err)
+		}
 	}
 }
 

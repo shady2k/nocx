@@ -26,6 +26,12 @@ var (
 	// ErrHashMismatch — a hello-ok whose content hash differs from the one
 	// installed (D21).
 	ErrHashMismatch = errors.New("helper: content hash mismatch")
+	// ErrHelperNotServing — the bridge reached the host, found no helper
+	// serving that generation and could not start one (endpoint.ExitNoEndpoint,
+	// 43). Its own sentinel because it is its own sentence: "no helper is
+	// running there" is not "the host refused the exec" and not "that is not
+	// our helper", and only this one is fixed by starting a helper.
+	ErrHelperNotServing = errors.New("helper: no helper is serving that generation on the host")
 	// ErrLost — the transport died with requests in flight. Distinct from a
 	// refusal so the caller can tell "this may have happened" (D12) from
 	// "this was refused".
@@ -38,6 +44,13 @@ var (
 // rather than imported from the host so the backend never links the remote
 // serving half; the value is the same wire constant.
 const exitVersionMismatch = 42
+
+// exitNoEndpoint is `nocx-helper bridge`'s exit code for a generation nothing
+// is serving on the host (endpoint.ExitNoEndpoint). Restated here for the same
+// reason as the line above — the backend does not link the serving half — and
+// asserted against the endpoint package's constant by a test, so the two
+// cannot drift silently.
+const exitNoEndpoint = 43
 
 // RefusalError is a request the helper refused: the machine-readable code
 // and message from the wire (proto.Error). It is a refusal, never a loss —

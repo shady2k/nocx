@@ -7,8 +7,10 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"sync/atomic"
 	"testing"
 
+	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/helper/session"
 )
@@ -29,9 +31,30 @@ func mustJSON(t *testing.T, v any) json.RawMessage {
 	return raw
 }
 
+// boundSink is the connection the test most recently bound. The production
+// host stamps every request with the connection it arrived on, because a
+// helper daemon serves several at once and a subscriber's pump must write to
+// the one that asked; `call` does the same here so these tests exercise the
+// same path rather than a shortcut through it.
+var boundSink atomic.Value
+
+// bindTo binds sink and records it as the connection `call` speaks on.
+func bindTo(svc *session.Service, sink session.Sink) (release func()) {
+	boundSink.Store(sink)
+	return svc.Bind(sink)
+}
+
+func callCtx() context.Context {
+	ctx := context.Background()
+	if sink, ok := boundSink.Load().(session.Sink); ok && sink != nil {
+		return host.WithConnection(ctx, sink)
+	}
+	return ctx
+}
+
 func call[T any](t *testing.T, svc *session.Service, op string, params any) T {
 	t.Helper()
-	res, err := svc.Call(context.Background(), op, mustJSON(t, params))
+	res, err := svc.Call(callCtx(), op, mustJSON(t, params))
 	if err != nil {
 		t.Fatalf("%s: %v", op, err)
 	}
@@ -270,7 +293,7 @@ func newService(t *testing.T, sink session.Sink, spawner session.Spawner, limits
 		Log:        discardLog(),
 		Limits:     limits,
 	})
-	release := svc.Bind(sink)
+	release := bindTo(svc, sink)
 	t.Cleanup(func() {
 		release()
 		svc.Close()
@@ -816,7 +839,7 @@ func TestReleasingAConnectionKeepsTheSessionsAndDropsTheAttachments(t *testing.T
 	svc := session.New(session.Options{Generation: "gen-under-test", Spawner: spawner, Log: discardLog()})
 	t.Cleanup(svc.Close)
 
-	release := svc.Bind(first)
+	release := bindTo(svc, first)
 	entry := spawnOne(t, svc)
 	sub := proto.SubscriberID("0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f0f")
 	a := call[proto.AttachResult](t, svc, proto.OpAttach, proto.AttachParams{
@@ -837,7 +860,7 @@ func TestReleasingAConnectionKeepsTheSessionsAndDropsTheAttachments(t *testing.T
 	// A replacing connection can take the capability without arbitration,
 	// which is exactly the fact D9 says the next caller acts on.
 	second := newSink()
-	t.Cleanup(svc.Bind(second))
+	t.Cleanup(bindTo(svc, second))
 	b := call[proto.AttachResult](t, svc, proto.OpAttach, proto.AttachParams{
 		Subscriber: sub, Session: entry.Session, RequestWrite: true,
 	})
@@ -883,7 +906,7 @@ func TestObservationIsEvidenceAndNeverOverwritesTheLaunchRecord(t *testing.T) {
 		Inspector:  lyingInspector{},
 	})
 	t.Cleanup(svc.Close)
-	t.Cleanup(svc.Bind(newSink()))
+	t.Cleanup(bindTo(svc, newSink()))
 
 	entry := spawnOne(t, svc)
 	inv := call[proto.SessionsResult](t, svc, proto.OpSessions, proto.SessionsParams{})

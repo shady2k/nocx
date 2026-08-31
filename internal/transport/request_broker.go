@@ -131,6 +131,11 @@ type RequestKind struct {
 	// renderer-side action with this request uses this hook, rather than
 	// learning the id from a delivery side effect.
 	BeforeDeliver func(requestID string)
+	// AfterDeliver is called once after at least one recipient accepted the
+	// notification. A caller that must distinguish a delivered request from
+	// an undelivered request uses this latched fact rather than the
+	// lifecycle-attempt bridge.
+	AfterDeliver func(requestID string)
 }
 
 // resolutionBound is the size bound this kind's resolutions are held to:
@@ -306,6 +311,7 @@ func (b *Broker) Request(ctx context.Context, kind RequestKind, params any, resu
 		// race the first delivery, and the bridge must already be live.
 		kind.BeforeDeliver(rid)
 	}
+	delivered := false
 	for _, c := range recipients {
 		if err := b.deliver(c, kind.NotifyMethod, payload); err != nil {
 			// The notification never reached this connection, so it cannot
@@ -313,7 +319,12 @@ func (b *Broker) Request(ctx context.Context, kind RequestKind, params any, resu
 			// all, the last prune terminalizes the request with
 			// ErrRequestUndelivered.
 			b.pruneRecipient(rid, c)
+			continue
 		}
+		delivered = true
+	}
+	if delivered && kind.AfterDeliver != nil {
+		kind.AfterDeliver(rid)
 	}
 
 	var timerC <-chan time.Time

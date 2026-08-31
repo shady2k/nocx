@@ -892,12 +892,16 @@ func refusalResult(tool string, reason PolicyRefusalReason, kind DeclineKind, de
 	}
 }
 
-// leaseResult is the model-visible answer for a run bound nocx itself ended.
+// leaseResult is the model-visible answer for a run lease outcome.
 // It follows refusalResult's contract: the tool call receives our sentence
 // as a result, so the model can explain the real outcome and continue rather
 // than receiving a framework error with no call result.
-func leaseResult(tool string, reason content.TerminationReason) string {
-	return "TERMINATED: nocx ended your call to " + tool + ": " + RunLeaseSentence(reason) + ". Do not treat this as a command result or retry it without explaining why."
+func leaseResult(tool string, leaseErr *RunLeaseError) string {
+	sentence := RunLeaseSentence(leaseErr.Reason, leaseErr.SubmissionExpired)
+	if leaseErr.SubmissionExpired {
+		return "NOT RUN: nocx did not run your call to " + tool + ": " + sentence + ". Do not treat this as a command result or retry it without explaining why."
+	}
+	return "TERMINATED: nocx ended your call to " + tool + ": " + sentence + ". Do not treat this as a command result or retry it without explaining why."
 }
 
 // ── the attempt ───────────────────────────────────────────────────────────
@@ -1620,7 +1624,7 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		var leaseErr *RunLeaseError
 		if errors.As(runErr, &leaseErr) {
 			_ = k.closeAttempt(ctx, execID, leaseErr.Reason, content.EntryFailure)
-			return modelResult{text: leaseResult(decl.Name, leaseErr.Reason), kind: modelToolOutput}, nil
+			return modelResult{text: leaseResult(decl.Name, leaseErr), kind: modelToolOutput}, nil
 		}
 		_ = k.closeAttempt(ctx, execID, terminationReasonOf(runErr), content.EntryFailure)
 		// Named, so the transport can say WHICH tool failed without

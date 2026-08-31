@@ -102,11 +102,12 @@ func newUnitLease(t *testing.T, sess runLeaseSession, cfg RunLeaseConfig) (*runL
 	}
 	ring := newOutputRing()
 	return &runLease{
-		log:  log.NewSlogAdapter(nil),
-		sid:  session.ID("sid-unit"),
-		sess: sess,
-		ring: ring,
-		cfg:  cfg,
+		log:                 log.NewSlogAdapter(nil),
+		sid:                 session.ID("sid-unit"),
+		sess:                sess,
+		ring:                ring,
+		cfg:                 cfg,
+		submissionDelivered: true,
 	}, ring
 }
 
@@ -132,6 +133,58 @@ func TestRunLease_WallClockFiresAndEscalates(t *testing.T) {
 	sig := sess.got()
 	if len(sig) != 2 || sig[0] != syscall.SIGINT || sig[1] != syscall.SIGTERM {
 		t.Fatalf("signals = %v, want [INT TERM] — the escalation stops at the signal that works", sig)
+	}
+}
+
+func TestRunLease_BoundBeforeSubmissionDoesNotEscalateOrClaimTerminalization(t *testing.T) {
+	sess := &fakeLeaseSession{dieOn: syscall.SIGTERM}
+	lease, _ := newUnitLease(t, sess, RunLeaseConfig{
+		WallClock:   50 * time.Millisecond,
+		SignalGrace: 20 * time.Millisecond,
+	})
+	lease.submissionDelivered = false
+
+	err := lease.supervise(context.Background(), blockForever(nil))
+	le := leaseErrorOf(t, err)
+	if !le.SubmissionExpired {
+		t.Fatal("lease error says the submission started, want an expired pre-execution submission")
+	}
+	_, sentence := classifyAskFailure(le, "qwen3")
+	if sentence != "the run submission expired before execution started" {
+		t.Fatalf("pre-execution sentence = %q, want the submission-expired sentence", sentence)
+	}
+	if strings.Contains(sentence, "terminalized") {
+		t.Fatalf("pre-execution sentence = %q, must not claim terminalization", sentence)
+	}
+	if got := sess.got(); len(got) != 0 {
+		t.Fatalf("signals = %v, want none when no submission exists", got)
+	}
+}
+
+// A conventional shell has no authenticated start fact, but a delivered
+// request still owns the command. The lease must keep the normal
+// terminalization sentence instead of treating accountingStarted as proof
+// that nothing was submitted.
+func TestRunLease_DeliveredWithoutObservedStartStillTerminalizes(t *testing.T) {
+	sess := &fakeLeaseSession{dieOn: syscall.SIGTERM}
+	lease, _ := newUnitLease(t, sess, RunLeaseConfig{
+		WallClock:   50 * time.Millisecond,
+		SignalGrace: 20 * time.Millisecond,
+	})
+	lease.submissionDelivered = true
+
+	err := lease.supervise(context.Background(), blockForever(nil))
+	le := leaseErrorOf(t, err)
+	if le.SubmissionExpired {
+		t.Fatal("delivered request was reported as pre-execution")
+	}
+	sentence := assistant.RunLeaseSentence(le.Reason, le.SubmissionExpired)
+	if !strings.Contains(sentence, "terminalized") ||
+		!strings.Contains(sentence, "wall-clock") {
+		t.Fatalf("delivered no-start sentence = %q, want wall-clock terminalization", sentence)
+	}
+	if got := sess.got(); len(got) == 0 {
+		t.Fatal("delivered request sent no escalation signals")
 	}
 }
 

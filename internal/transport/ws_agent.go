@@ -2075,7 +2075,7 @@ func classifyAskFailure(err error, model string) (content.TerminationReason, str
 	// direction.
 	var leaseErr *assistant.RunLeaseError
 	if errors.As(err, &leaseErr) {
-		return leaseErr.Reason, assistant.RunLeaseSentence(leaseErr.Reason)
+		return leaseErr.Reason, assistant.RunLeaseSentence(leaseErr.Reason, leaseErr.SubmissionExpired)
 	}
 	// The broker reports a renderer death directly when its disconnect
 	// lifecycle wins the race with the ask context's cancellation. It is the

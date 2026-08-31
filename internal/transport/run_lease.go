@@ -143,6 +143,12 @@ type runLease struct {
 	lane      *laneState      // nil → no awaiting-takeover observation
 	protected protectedForeground
 	cfg       RunLeaseConfig
+	// submissionDelivered is the broker-owned fact that the run request
+	// reached at least one renderer. It is distinct from accountingStarted:
+	// the latter is an authenticated lifecycle observation unavailable on
+	// conventional shells. The lifecycle attempt bridge is separate and is
+	// used only to name the exact ledger attempt.
+	submissionDelivered bool
 
 	mu                sync.Mutex
 	cancel            context.CancelFunc
@@ -160,20 +166,19 @@ type runLease struct {
 
 // supervise runs fn (the broker request) under the lease, INLINE on the
 // caller's goroutine. It returns fn's result when the run completes within
-// its bounds, or a RunLeaseError naming the bound that fired — after the
-// escalation has run to completion, so the caller can assert, on
-// RequestRun's return, that the execution is actually dead, not merely
-// scheduled to die.
+// its bounds, or a RunLeaseError naming the bound that fired. For a delivered
+// request the escalation has run to completion before return, so the caller
+// can assert the execution is actually dead, not merely scheduled to die.
 //
 // A transport disconnect is deliberately treated like abandonment, not like
 // a reconnectable pause: the renderer that owns this request is gone and
 // leaving its command alive would recreate the orphan this lease prevents.
 // AD-9 preserves the session, replay ring and ledger for reconnect, so the
 // next connection reads the terminalized run rather than inheriting a live
-// process with no answerer. The lease owns signal authority from the moment
-// this request is armed, before renderer delivery, through fn's return and
-// completion of any escalation; the exact foreground group is still captured
-// by protectedForeground, so no later command can be signalled.
+// process with no answerer. The lease only escalates after broker delivery
+// establishes that a renderer could submit the command; before that point
+// there is no execution for it to signal. The exact foreground group is still
+// captured by protectedForeground, so no later command can be signalled.
 func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) error) error {
 	cfg := l.cfg
 	if cfg.SignalGrace <= 0 {
@@ -220,15 +225,22 @@ func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) e
 	err := fn(ctx)
 
 	// Disarm before the verdict: every trigger is stopped or neutered, so
-	// firedReason is final and no observer can act after this point.
 	l.disarm()
 	l.mu.Lock()
 	reason := l.firedReason
 	cancelStarted := l.cancelStarted
+	submitted := l.submissionDelivered
 	l.mu.Unlock()
 	if reason != "" {
-		l.escalate()
-		return &assistant.RunLeaseError{Reason: reason, Err: err}
+		leaseErr := &assistant.RunLeaseError{
+			Reason:            reason,
+			Err:               err,
+			SubmissionExpired: !submitted,
+		}
+		if submitted {
+			l.escalate()
+		}
+		return leaseErr
 	}
 	// A caller cancellation can end the broker request without a lease
 	// observer firing. A renderer disappearing is the same abandonment under

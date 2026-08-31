@@ -1,6 +1,7 @@
 package assistant
 
 import (
+	"context"
 	"reflect"
 	"strings"
 	"testing"
@@ -8,8 +9,23 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 )
 
+func TestLeaseResultExpiredSubmissionDoesNotClaimTermination(t *testing.T) {
+	got := leaseResult("run", &RunLeaseError{
+		Reason:            content.TermTimeout,
+		Err:               context.Canceled,
+		SubmissionExpired: true,
+	})
+	lower := strings.ToLower(got)
+	if strings.Contains(lower, "terminalized") || strings.Contains(got, "TERMINATED") {
+		t.Fatalf("expired submission result = %q, must not claim termination", got)
+	}
+	if !strings.Contains(got, "run submission expired before execution started") {
+		t.Fatalf("expired submission result = %q, want the submission-expired sentence", got)
+	}
+}
+
 func TestRunLeaseSentenceAndUnavailableSentenceNameTheSameBound(t *testing.T) {
-	terminated := RunLeaseSentence(content.TermInactivity)
+	terminated := RunLeaseSentence(content.TermInactivity, false)
 	unavailable := RunLeaseUnavailableSentence(RunLeaseBoundInactivity)
 
 	if !strings.Contains(terminated, "inactivity") || !strings.Contains(terminated, "terminalized") {

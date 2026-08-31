@@ -293,6 +293,11 @@ func (s *WSServer) RequestRun(ctx context.Context, sessionID string, command str
 	kind.BeforeDeliver = func(requestID string) {
 		s.broker.registerRunLease(requestID, lease)
 	}
+	kind.AfterDeliver = func(_ string) {
+		lease.mu.Lock()
+		lease.submissionDelivered = true
+		lease.mu.Unlock()
+	}
 	defer s.broker.unregisterRunLease(lease)
 	if control := agentRunControlFromContext(ctx); control != nil {
 		if !control.attachRunLease(lease) {

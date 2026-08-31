@@ -133,22 +133,25 @@ type RendererRequester interface {
 }
 
 // RunLeaseError is the terminal failure of a run whose lease bound fired
-// (ADR-0020 decision 2): the execution was terminalized by its wall-clock
-// deadline (TermTimeout), its inactivity deadline (TermInactivity) or its
-// output budget (TermOutputBudget), after cancellation escalated
-// INT → TERM → KILL against the execution's process group. The transport's
-// RequestRun returns it once the escalation has completed; EntryID carries the
-// renderer-minted lifecycle/ledger entry when submission reached that point,
-// so the assistant can preserve the command→turn cause edge even on
-// abandonment. The policy middleware records Reason on the attempt so the
-// ledger says WHICH bound ended the run, and the run driver turns it into the
-// failure sentence the block shows. Err is the underlying broker
-// terminalization (usually context.Canceled — the request was cancelled so a
-// late resolution could not win the race and report the run completed).
+// (ADR-0020 decision 2). When SubmissionExpired is false, the execution was
+// terminalized by its wall-clock deadline (TermTimeout), its inactivity
+// deadline (TermInactivity) or its output budget (TermOutputBudget), after
+// cancellation escalated INT → TERM → KILL against the execution's process
+// group. When SubmissionExpired is true, the bound fired before the broker
+// delivered the run request, so no execution existed to terminalize and no
+// escalation is attempted. The transport's RequestRun returns this once any
+// required escalation has completed; EntryID carries the renderer-minted
+// lifecycle/ledger entry when submission reached that point, so the assistant
+// can preserve the command→turn cause edge even on abandonment. The policy
+// middleware records Reason on the attempt when one exists, and the run driver
+// turns it into the failure sentence the block shows. Err is the underlying
+// broker terminalization (usually context.Canceled — the request was cancelled
+// so a late resolution could not win the race and report the run completed).
 type RunLeaseError struct {
-	Reason  content.TerminationReason
-	Err     error
-	EntryID string
+	Reason            content.TerminationReason
+	Err               error
+	EntryID           string
+	SubmissionExpired bool
 }
 
 func (e *RunLeaseError) Error() string {
@@ -157,9 +160,12 @@ func (e *RunLeaseError) Error() string {
 
 func (e *RunLeaseError) Unwrap() error { return e.Err }
 
-// RunLeaseSentence names the bound that terminalized a command. Both the
-// model-facing tool result and the transport runState use this vocabulary.
-func RunLeaseSentence(reason content.TerminationReason) string {
+// RunLeaseSentence names the outcome of the lease bound. Both the model-facing
+// tool result and the transport runState use this vocabulary.
+func RunLeaseSentence(reason content.TerminationReason, submissionExpired bool) string {
+	if submissionExpired {
+		return "the run submission expired before execution started"
+	}
 	switch reason {
 	case content.TermTimeout:
 		return "the command did not finish within its wall-clock deadline and was terminalized"

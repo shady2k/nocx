@@ -1114,10 +1114,16 @@ func TestBroker_AllDeliveriesFailTerminalizes(t *testing.T) {
 	)
 
 	var ans testAnswer
-	err := broker.Request(context.Background(), testPasswordKind(0),
+	kind := testPasswordKind(0)
+	var delivered bool
+	kind.AfterDeliver = func(_ string) { delivered = true }
+	err := broker.Request(context.Background(), kind,
 		map[string]any{"reason": "undeliverable"}, &ans)
 	if !errors.Is(err, ErrRequestUndelivered) {
 		t.Fatalf("Request returned %v, want ErrRequestUndelivered", err)
+	}
+	if delivered {
+		t.Fatal("AfterDeliver reported delivery after every recipient failed")
 	}
 	if n := broker.Pending(); n != 0 {
 		t.Fatalf("%d pending requests leaked after the undelivered failure", n)
@@ -1227,10 +1233,14 @@ func TestBroker_FailedDeliveryIsNotARecipient(t *testing.T) {
 		},
 	)
 
+	var delivered bool
+	kind := testPasswordKind(0)
+	kind.AfterDeliver = func(_ string) { delivered = true }
+
 	var ans testAnswer
 	done := make(chan error, 1)
 	go func() {
-		done <- broker.Request(context.Background(), testPasswordKind(0),
+		done <- broker.Request(context.Background(), kind,
 			map[string]any{"reason": "c1 lost, c2 live"}, &ans)
 	}()
 
@@ -1255,6 +1265,9 @@ func TestBroker_FailedDeliveryIsNotARecipient(t *testing.T) {
 		}
 	case <-time.After(wantWithin):
 		t.Fatal("Request did not settle after the surviving recipient resolved")
+	}
+	if !delivered {
+		t.Fatal("AfterDeliver reported no successful recipient")
 	}
 	if ans.Password != "hunter2" {
 		t.Fatalf("typed result: got %+v", ans)

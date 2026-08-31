@@ -60,13 +60,32 @@
 // from churning the watch set or racing the reveal walk — so it genuinely
 // cannot match a file nocx has not listed.
 //
-// The structural rows are what keep that honest, and it is why they are
-// retained rather than filtered away: a "Show next 47" under a folder that
-// is on screen says there are 47 entries this filter has not seen, and a
-// too-large or errored folder goes on saying so. They are statements about
-// a LISTING and not entries with names, so there is nothing in them for a
-// name filter to match; they follow their directory instead. The root's own
-// structural rows are always kept, because the root is always shown.
+// The structural rows are what keep that honest. They are statements about
+// a LISTING rather than entries with names, so there is nothing in them for
+// a name filter to match: a "Show next 47" says forty-seven entries here
+// were never searched, a 'loading' row says a listing is in flight, and a
+// too-large or errored folder says it could not be read at all. Three ways
+// of saying NOT SEARCHED.
+//
+// Which is why a structural row brings its ancestors with it, exactly as a
+// match does — rule 2 above applies to both, and for the same reason. This
+// was once the opposite: a structural row was kept only when its directory
+// was already on screen for some other reason, on the argument that it must
+// not drag a folder into view. The argument was wrong in the case that
+// matters. When nothing matched, the folder was not on screen, so its "Show
+// next 211" went with it — and the panel answered "No files match" over a
+// blank tree, having deleted the one row that could explain the answer. The
+// honesty the structural rows were retained FOR was available in every case
+// except the one that needed it (nocx-708q.7).
+//
+// So the rule reads: a row is shown when it matches, when something below
+// it matches, or when something below it was never searched. Still one
+// rule. A folder that is fully listed and holds nothing matching stays out,
+// which is what keeps this from collapsing into "show everything" — the
+// filter really did search it, and can say so by omission.
+//
+// The root's own structural rows are unaffected: at depth 0 there is no
+// ancestor chain to flush, and the root is always shown anyway.
 
 import type { FilesFlatRow } from './files-store'
 
@@ -127,11 +146,13 @@ export function narrowFilesRows(rows: FilesFlatRow[], filter: string): FilesFlat
       continue
     }
     // A structural row ('loading', 'more', 'state') belongs to the
-    // directory one level up — the root when it is at depth 0. It is kept
-    // iff that directory is on screen, so it never drags a folder into
-    // view and never disappears from one that is there.
-    const owner = row.depth === 0 ? null : chain[row.depth - 1]
-    if (owner === null || owner.emitted) out.push(row)
+    // directory one level up — the root when it is at depth 0 — and it says
+    // that directory holds entries this filter has NOT SEEN. So it earns
+    // its ancestors exactly as a match does: flush, then emit. At depth 0
+    // the chain is empty and the flush is a no-op, which is what keeps the
+    // root's own structural rows behaving as they always have.
+    flush()
+    out.push(row)
   }
   return out
 }

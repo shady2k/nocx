@@ -1115,3 +1115,24 @@ func TestAssemble_RejectsMissingResultSafetyMetadata(t *testing.T) {
 		})
 	}
 }
+
+// session.run is a carrier whose execution lease owns the only bound. A
+// declaration deadline here would preempt that lease before a long command
+// can return its output.
+func TestSessionRunDefersToRunLease(t *testing.T) {
+	var run Declaration
+	var found bool
+	for _, d := range declarations {
+		if d.Name == "session.run" {
+			run = d
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatal("session.run declaration is missing")
+	}
+	if run.Deadline != 0 {
+		t.Fatalf("session.run deadline = %s, want zero so the run lease is the only bound", run.Deadline)
+	}
+}

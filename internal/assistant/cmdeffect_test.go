@@ -65,6 +65,31 @@ func TestCommandEffect_RedirectionIsWrite(t *testing.T) {
 	}
 }
 
+func TestCommandEffect_RedirectionSinksAndWrites(t *testing.T) {
+	tests := []struct {
+		command string
+		want    content.Effect
+	}{
+		{"du -sh /* 2>/dev/null", content.EffectObserve},            // stderr discarded; no file is mutated.
+		{"du -sh /* >/dev/null", content.EffectObserve},             // stdout discarded; no file is mutated.
+		{"du -sh /* &>/dev/null", content.EffectObserve},            // both streams discarded; no file is mutated.
+		{"du -sh /* 2>&1", content.EffectObserve},                   // stderr is duplicated to stdout; no file is mutated.
+		{"du -sh /* > real-file", content.EffectMutateDestructive},  // stdout creates or truncates a file.
+		{"du -sh /* 2> real-file", content.EffectMutateDestructive}, // stderr creates or truncates a file.
+		{"du -sh /* > &1", content.EffectMutateDestructive},         // spaced &1 is a filename, not descriptor duplication.
+		{"> /dev/null cat", content.EffectObserve},                  // a leading null sink still discards without mutation.
+		{"> /etc/passwd cat", content.EffectMutateDestructive},      // a leading file target remains a write.
+		{"du -sh /*", content.EffectObserve},                        // no redirection leaves a read-only command.
+	}
+	for _, test := range tests {
+		t.Run(test.command, func(t *testing.T) {
+			if got := commandEffect(parseCanonicalInvocation(test.command), content.EffectMutateDestructive); got != test.want {
+				t.Fatalf("effect = %q, want %q", got, test.want)
+			}
+		})
+	}
+}
+
 func TestCommandEffect_EveryReadAllowlistEntryLowers(t *testing.T) {
 	for _, command := range []string{
 		"cat file",
@@ -283,6 +308,19 @@ func TestCommandResources_RedirectionNamesWriteTarget(t *testing.T) {
 	if !seenRead || !seenWrite {
 		t.Fatalf("resources = %+v, want read f and write /etc/x", inv.Resources.Resources)
 	}
+}
+
+func TestCommandResources_LeadingRedirectionNamesWriteTarget(t *testing.T) {
+	inv := parseCanonicalInvocation("> /etc/x cat")
+	if !inv.Disqualified {
+		t.Fatalf("invocation = %+v, want leading file redirection disqualified", inv)
+	}
+	for _, resource := range inv.Resources.Resources {
+		if resource.Path == "/etc/x" && resource.Verb == content.ResourceWrite {
+			return
+		}
+	}
+	t.Fatalf("resources = %+v, want leading write /etc/x", inv.Resources.Resources)
 }
 
 func TestCommandResources_RedirectionWithoutSpacesNamesWriteTarget(t *testing.T) {

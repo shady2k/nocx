@@ -452,14 +452,17 @@ func TestRunLease_WallClockTerminalizesAndTheLedgerNamesIt(t *testing.T) {
 	pid := readPidFile(t, pidFile)
 	waitChildAlive(t, pid) // the child exists and runs: there is something to cancel
 
-	// The lease fires (wall-clock), kills the execution, terminalizes the
-	// run. The observable is the terminal runState.
-	runID, sentence := waitForRunState(t, tap, "failed")
+	// The lease fires (wall-clock), kills the execution, and returns a
+	// product-authored tool result so the model can explain the outcome.
+	runID, sentence := waitForRunState(t, tap, "completed")
 	if runID != res.RunID {
 		t.Fatalf("runState runId = %d, want %d", runID, res.RunID)
 	}
-	if !strings.Contains(sentence, "wall-clock") {
-		t.Fatalf("runState error = %q, want the wall-clock deadline named", sentence)
+	if sentence != "" {
+		t.Fatalf("completed runState carries an error: %q", sentence)
+	}
+	if len(h.fake.bodies) < 2 || !strings.Contains(h.fake.bodies[1], "wall-clock deadline") {
+		t.Fatalf("model request after lease = %v, want the wall-clock tool result", h.fake.bodies)
 	}
 
 	// Criterion 2: the cancellation reached the CHILD — the pid the command
@@ -471,6 +474,62 @@ func TestRunLease_WallClockTerminalizesAndTheLedgerNamesIt(t *testing.T) {
 	reason := terminationReasonOfRun(t, h)
 	if reason == nil || *reason != content.TermTimeout {
 		t.Fatalf("ledger termination = %v, want timeout — the ledger must say which deadline ended the run", reason)
+	}
+}
+
+// A dropped renderer connection abandons its own live command. The lease owns
+// that process until the request returns, so transport loss runs the same
+// INT -> TERM -> KILL ladder rather than leaving an orphan for reconnect.
+func TestRunLease_ConnectionLossKillsCommandAndRecordsTransportGone(t *testing.T) {
+	h := newRunLeaseHarness(t, RunLeaseConfig{
+		WallClock:   30 * time.Second,
+		Inactivity:  30 * time.Second,
+		SignalGrace: 50 * time.Millisecond,
+	})
+	h.createEndpointAt()
+	sid := openLocalSession(t, h.conn)
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "child.pid")
+	cmd := "sh -c 'echo $$ > " + pidFile + "; trap \"\" INT TERM; sleep 100 & wait'"
+	res := h.askRunsTool(sid, cmd)
+	tap := newSocketTap(h.conn)
+
+	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
+	_, wantSid, wantCommand := decodeRunRequest(t, raw)
+	if wantSid != sid || wantCommand != cmd {
+		t.Fatalf("runRequest = (%q, %q), want (%q, %q)", wantSid, wantCommand, sid, cmd)
+	}
+	submitCommand(t, h.conn, sid, cmd)
+	pid := readPidFile(t, pidFile)
+	waitChildAlive(t, pid)
+
+	// The renderer disappears while this request owns the live command.
+	_ = h.conn.Close()
+	waitChildDead(t, pid)
+
+	var entry *content.LedgerEntry
+	var entryErr error
+	waittest.WaitForTimeoutDetail(t, "the disconnected run to terminalize", 10*time.Second,
+		func() string {
+			return fmt.Sprintf("entry=%v err=%v", entry, entryErr)
+		},
+		func() bool {
+			entry, entryErr = h.db.Ledger().Entry(context.Background(), res.EntryID)
+			if entryErr != nil || entry == nil || len(entry.Executions) != 1 {
+				return false
+			}
+			state := entry.Executions[0].State
+			return state != nil && *state != content.RunPrepared && *state != content.RunStreaming
+		})
+	if entryErr != nil {
+		t.Fatalf("question entry: %v", entryErr)
+	}
+	if entry.Executions[0].TerminationReason == nil ||
+		*entry.Executions[0].TerminationReason != content.TermTransportGone {
+		t.Fatalf("question termination = %v, want transport-gone", entry.Executions[0].TerminationReason)
+	}
+	if !strings.Contains(entry.Executions[0].Payload, "connection was lost") {
+		t.Fatalf("question payload = %q, want the transport-loss sentence", entry.Executions[0].Payload)
 	}
 }
 
@@ -502,12 +561,15 @@ func TestRunLease_InactivityTerminalizesAndTheLedgerNamesIt(t *testing.T) {
 	waitChildAlive(t, pid)
 
 	// The echo above broke the silence once; then nothing for the bound.
-	runID, sentence := waitForRunState(t, tap, "failed")
+	runID, sentence := waitForRunState(t, tap, "completed")
 	if runID != res.RunID {
 		t.Fatalf("runState runId = %d, want %d", runID, res.RunID)
 	}
-	if !strings.Contains(sentence, "inactivity") {
-		t.Fatalf("runState error = %q, want the inactivity bound named", sentence)
+	if sentence != "" {
+		t.Fatalf("completed runState carries an error: %q", sentence)
+	}
+	if len(h.fake.bodies) < 2 || !strings.Contains(h.fake.bodies[1], "inactivity") {
+		t.Fatalf("model request after lease = %v, want the inactivity tool result", h.fake.bodies)
 	}
 	waitChildDead(t, pid)
 
@@ -594,9 +656,12 @@ func TestRunLease_EscalationReachesTermForAnIntIgnoringProcess(t *testing.T) {
 	pid := readPidFile(t, pidFile)
 	waitChildAlive(t, pid)
 
-	runID, _ := waitForRunState(t, tap, "failed")
+	runID, sentence := waitForRunState(t, tap, "completed")
 	if runID != res.RunID {
 		t.Fatalf("runState runId = %d, want %d", runID, res.RunID)
+	}
+	if sentence != "" {
+		t.Fatalf("completed runState carries an error: %q", sentence)
 	}
 	// SIGINT alone could not have ended this child (it ignores INT): its
 	// death is the proof the escalation reached TERM.
@@ -626,9 +691,12 @@ func TestRunLease_EscalationReachesKillForAnIntAndTermIgnoringProcess(t *testing
 	pid := readPidFile(t, pidFile)
 	waitChildAlive(t, pid)
 
-	runID, _ := waitForRunState(t, tap, "failed")
+	runID, sentence := waitForRunState(t, tap, "completed")
 	if runID != res.RunID {
 		t.Fatalf("runState runId = %d, want %d", runID, res.RunID)
+	}
+	if sentence != "" {
+		t.Fatalf("completed runState carries an error: %q", sentence)
 	}
 	// Neither INT nor TERM could have ended this child: only KILL remains,
 	// and KILL cannot be ignored.
@@ -669,12 +737,15 @@ func TestRunLease_OutputBudgetBoundsAndTheBlockNamesIt(t *testing.T) {
 	// The observable is the runState; the child's death is asserted after
 	// it, below.
 
-	runID, sentence := waitForRunState(t, tap, "failed")
+	runID, sentence := waitForRunState(t, tap, "completed")
 	if runID != res.RunID {
 		t.Fatalf("runState runId = %d, want %d", runID, res.RunID)
 	}
-	if !strings.Contains(sentence, "budget") {
-		t.Fatalf("runState error = %q, want the output budget named — a visible bound is the feature", sentence)
+	if sentence != "" {
+		t.Fatalf("completed runState carries an error: %q", sentence)
+	}
+	if len(h.fake.bodies) < 2 || !strings.Contains(h.fake.bodies[1], "output exceeded the budget") {
+		t.Fatalf("model request after lease = %v, want the output-budget tool result", h.fake.bodies)
 	}
 	waitChildDead(t, pid)
 

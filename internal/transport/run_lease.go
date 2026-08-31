@@ -39,6 +39,7 @@ package transport
 
 import (
 	"context"
+	"errors"
 	"sync"
 	"syscall"
 	"time"
@@ -150,6 +151,16 @@ type runLease struct {
 // escalation has run to completion, so the caller can assert, on
 // RequestRun's return, that the execution is actually dead, not merely
 // scheduled to die.
+//
+// A transport disconnect is deliberately treated like abandonment, not like
+// a reconnectable pause: the renderer that owns this request is gone and
+// leaving its command alive would recreate the orphan this lease prevents.
+// AD-9 preserves the session, replay ring and ledger for reconnect, so the
+// next connection reads the terminalized run rather than inheriting a live
+// process with no answerer. The lease owns signal authority from the moment
+// this request is armed, before renderer delivery, through fn's return and
+// completion of any escalation; the exact foreground group is still captured
+// by protectedForeground, so no later command can be signalled.
 func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) error) error {
 	cfg := l.cfg
 	if cfg.SignalGrace <= 0 {
@@ -204,10 +215,24 @@ func (l *runLease) supervise(ctx context.Context, fn func(ctx context.Context) e
 	l.disarm()
 	l.mu.Lock()
 	reason := l.firedReason
+	cancelStarted := l.cancelStarted
 	l.mu.Unlock()
 	if reason != "" {
 		l.escalate()
 		return &assistant.RunLeaseError{Reason: reason, Err: err}
+	}
+	// A caller cancellation can end the broker request without a lease
+	// observer firing. A renderer disappearing is the same abandonment under
+	// the broker's explicit ErrRequestDisconnected/ErrRequestUndelivered
+	// outcomes, even when that error wins the race with ctx.Done. The request
+	// still owns the execution until this return, so synchronously run the
+	// same ladder unless cancelExecution already did.
+	if err != nil && !cancelStarted &&
+		(errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) ||
+			errors.Is(err, ErrRequestDisconnected) ||
+			errors.Is(err, ErrRequestUndelivered)) {
+		l.escalate()
 	}
 	return err
 }

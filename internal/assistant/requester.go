@@ -54,15 +54,18 @@ type RendererRequester interface {
 // deadline (TermTimeout), its inactivity deadline (TermInactivity) or its
 // output budget (TermOutputBudget), after cancellation escalated
 // INT → TERM → KILL against the execution's process group. The transport's
-// RequestRun returns it once the escalation has completed; the policy
-// middleware records Reason on the attempt so the ledger says WHICH bound
-// ended the run, and the run driver turns it into the failure sentence the
-// block shows. Err is the underlying broker terminalization (usually
-// context.Canceled — the request was cancelled so a late resolution could
-// not win the race and report the run completed).
+// RequestRun returns it once the escalation has completed; EntryID carries the
+// renderer-minted lifecycle/ledger entry when submission reached that point,
+// so the assistant can preserve the command→turn cause edge even on
+// abandonment. The policy middleware records Reason on the attempt so the
+// ledger says WHICH bound ended the run, and the run driver turns it into the
+// failure sentence the block shows. Err is the underlying broker
+// terminalization (usually context.Canceled — the request was cancelled so a
+// late resolution could not win the race and report the run completed).
 type RunLeaseError struct {
-	Reason content.TerminationReason
-	Err    error
+	Reason  content.TerminationReason
+	Err     error
+	EntryID string
 }
 
 func (e *RunLeaseError) Error() string {
@@ -70,3 +73,18 @@ func (e *RunLeaseError) Error() string {
 }
 
 func (e *RunLeaseError) Unwrap() error { return e.Err }
+
+// RunLeaseSentence names the bound that terminalized a command. Both the
+// model-facing tool result and the transport runState use this vocabulary.
+func RunLeaseSentence(reason content.TerminationReason) string {
+	switch reason {
+	case content.TermTimeout:
+		return "the command did not finish within its wall-clock deadline and was terminalized"
+	case content.TermInactivity:
+		return "the command was terminalized for inactivity: it produced no output for too long"
+	case content.TermOutputBudget:
+		return "the command was terminalized: its output exceeded the budget, and was bounded rather than truncated"
+	default:
+		return "the command was terminalized by its lease"
+	}
+}

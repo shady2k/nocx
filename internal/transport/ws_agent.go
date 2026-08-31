@@ -2044,7 +2044,14 @@ func classifyAskFailure(err error, model string) (content.TerminationReason, str
 	// direction.
 	var leaseErr *assistant.RunLeaseError
 	if errors.As(err, &leaseErr) {
-		return leaseErr.Reason, runLeaseSentence(leaseErr.Reason)
+		return leaseErr.Reason, assistant.RunLeaseSentence(leaseErr.Reason)
+	}
+	// The broker reports a renderer death directly when its disconnect
+	// lifecycle wins the race with the ask context's cancellation. It is the
+	// same transport-loss fact as context.Canceled, and must not fall through
+	// to the generic failed sentence.
+	if errors.Is(err, ErrRequestDisconnected) || errors.Is(err, ErrRequestUndelivered) {
+		return content.TermTransportGone, "the connection was lost while the answer was streaming"
 	}
 	// Cause 1b: the policy permitted the call, the tool RAN, and it failed.
 	// Its message is already the product's own — the renderer's "could not
@@ -2124,22 +2131,6 @@ func classifyAskFailure(err error, model string) (content.TerminationReason, str
 	// Anything else. It still says nothing eino wrote: the trace is in the
 	// log, named there so a person can find it.
 	return content.TermFailed, assistant.UnexplainedFailureSentence
-}
-
-// runLeaseSentence is the human-readable statement of one lease bound, for
-// the runState error a block shows. A visible bound is the feature; a
-// silent truncation is the defect (the bead's criterion 4).
-func runLeaseSentence(reason content.TerminationReason) string {
-	switch reason {
-	case content.TermTimeout:
-		return "the command did not finish within its wall-clock deadline and was terminalized"
-	case content.TermInactivity:
-		return "the command was terminalized for inactivity: it produced no output for too long"
-	case content.TermOutputBudget:
-		return "the command was terminalized: its output exceeded the budget, and was bounded rather than truncated"
-	default:
-		return "the command was terminalized by its lease"
-	}
 }
 
 // answerError maps ask transaction failures to JSON-RPC errors. A conflict

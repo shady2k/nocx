@@ -41,7 +41,11 @@ func TestTransportPing_OverTheWireConformsToContract(t *testing.T) {
 
 func TestHeartbeat_ReadDeadlineClosesSilentPeer(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
-	ws := NewWSServer(logger, newRegWithStub(logger), WithHeartbeatReadWindow(100*time.Millisecond))
+	ws := NewWSServer(logger, newRegWithStub(logger))
+	// Set directly rather than through an option: an exported option nothing in
+	// production calls is dead weight the ratchet is right to reject, and this
+	// test lives in the same package.
+	ws.heartbeatReadWindow = 100 * time.Millisecond
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)
@@ -65,7 +69,8 @@ func TestHeartbeat_PingWithinWindowKeepsConnectionAlive(t *testing.T) {
 		pings     = 16
 	)
 	logger := log.NewSlogAdapter(nil)
-	ws := NewWSServer(logger, newRegWithStub(logger), WithHeartbeatReadWindow(window))
+	ws := NewWSServer(logger, newRegWithStub(logger))
+	ws.heartbeatReadWindow = window
 	ctx := context.Background()
 	if err := ws.Start(ctx); err != nil {
 		t.Fatalf("Start: %v", err)

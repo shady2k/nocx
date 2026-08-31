@@ -27,13 +27,3 @@ func (s *WSServer) heartbeatSpecs(immediate control.ImmediateSubmission) []metho
 		}),
 	}
 }
-
-// WithHeartbeatReadWindow shortens the server's read-deadline window for
-// deterministic transport tests. Production uses DefaultHeartbeatReadWindow.
-func WithHeartbeatReadWindow(d time.Duration) WSServerOption {
-	return func(s *WSServer) {
-		if d > 0 {
-			s.heartbeatReadWindow = d
-		}
-	}
-}

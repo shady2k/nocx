@@ -140,7 +140,15 @@ interface Escape {
 }
 
 type DiagnosticKind =
-  'unclosed-block' | 'stray-endif' | 'nested-block' | 'unterminated-tag' | 'unknown-tag'
+  // Structural — the tags do not pair up.
+  | 'unclosed-block'
+  | 'stray-endif'
+  | 'nested-block'
+  | 'unterminated-tag'
+  | 'unknown-tag'
+  // Semantic — the tags pair up and the body still cannot mean anything.
+  | 'condition-on-parameter'
+  | 'conflicting-declaration'
 
 interface Diagnostic {
   readonly from: number
@@ -287,19 +295,177 @@ function scanTags(body: string): TagScan {
   return { blocks, escapes, diagnostics }
 }
 
+// ── The FIELDS, which are read off the body rather than declared ─────────
+//
+// A snippet has no schema beside it. What a person is asked for is derived
+// from how the body USES a name, which is the whole reason the ask namespace
+// could be retired: there is no second place for the two to disagree.
+//
+//   substituted into the text        → a field to fill in
+//   named only by a condition        → a tick
+//   both                             → refused, because it cannot be either
+
+type FieldKind = 'text' | 'select' | 'flag'
+
+interface ConditionRef {
+  readonly name: string
+  readonly negated: boolean
+}
+
+interface Field {
+  readonly name: string
+  readonly kind: FieldKind
+  readonly defaultValue: string
+  readonly options: readonly string[]
+  readonly inside: ConditionRef | null
+}
+
+/** A `|` anywhere in the value makes the declaration an option list, and the
+ *  FIRST option is the default. A default containing a literal `|` is
+ *  therefore not expressible — named in design §4.1 as a limitation, not
+ *  solved, because a second escaping mechanism costs more than the case.
+ *
+ *  `declared` is what separates `{{w=a|b}}` from `{{w}}`: the first says what
+ *  may be answered, the second only asks for the answer again. Without that
+ *  distinction a body that uses a name twice would report itself as
+ *  declaring it twice. */
+function splitDeclaration(arg: string): {
+  name: string
+  defaultValue: string
+  options: string[]
+  declared: boolean
+} {
+  const at = arg.indexOf('=')
+  if (at < 0) return { name: arg, defaultValue: '', options: [], declared: false }
+  const name = arg.slice(0, at)
+  const rest = arg.slice(at + 1)
+  if (!rest.includes('|')) return { name, defaultValue: rest, options: [], declared: true }
+  const options = rest.split('|')
+  return { name, defaultValue: options[0], options, declared: true }
+}
+
+/** The block an offset falls INSIDE — at or after the opening tag's end, and
+ *  before the closing tag begins. The lower bound is inclusive because a
+ *  field written immediately after `%}` starts exactly at `openTo`, which is
+ *  the commonest way anybody writes one. */
+function blockAt(blocks: readonly Block[], offset: number): ConditionRef | null {
+  for (const b of blocks) {
+    if (offset >= b.openTo && offset < b.closeFrom) return { name: b.name, negated: b.negated }
+  }
+  return null
+}
+
+function deriveFields(
+  spans: readonly ValueSpan[],
+  blocks: readonly Block[],
+): { fields: Field[]; diagnostics: Diagnostic[] } {
+  const diagnostics: Diagnostic[] = []
+  const byName = new Map<string, Field>()
+  const order: string[] = []
+  const declaredAt = new Map<string, ValueSpan>()
+  // Where each name was FIRST seen, so that parameters and condition names —
+  // gathered in two passes — still come back in the order a reader meets
+  // them in the body. The form asks in this order.
+  const firstAt = new Map<string, number>()
+
+  for (const span of spans) {
+    if (span.kind !== 'param') continue
+    const d = splitDeclaration(span.arg)
+    const existing = byName.get(d.name)
+    if (existing === undefined) {
+      byName.set(d.name, {
+        name: d.name,
+        kind: d.options.length > 0 ? 'select' : 'text',
+        defaultValue: d.defaultValue,
+        options: d.options,
+        inside: blockAt(blocks, span.from),
+      })
+      order.push(d.name)
+      firstAt.set(d.name, span.from)
+      if (d.declared) declaredAt.set(d.name, span)
+      continue
+    }
+    if (!d.declared) continue
+    const prior = declaredAt.get(d.name)
+    if (prior === undefined) {
+      // The first mention was a bare use; this declaration supplies the
+      // shape, and the field keeps the earlier position.
+      byName.set(d.name, {
+        ...existing,
+        kind: d.options.length > 0 ? 'select' : 'text',
+        defaultValue: d.defaultValue,
+        options: d.options,
+      })
+      declaredAt.set(d.name, span)
+      continue
+    }
+    if (
+      existing.defaultValue !== d.defaultValue ||
+      existing.options.join('|') !== d.options.join('|')
+    ) {
+      // Two declarations that disagree have no tie-break worth inventing:
+      // taking the first would make a later edit silently inert, and taking
+      // the last would do the same to the one an author is looking at.
+      diagnostics.push({
+        from: span.from,
+        to: span.to,
+        kind: 'conflicting-declaration',
+        detail: `"${d.name}" is declared twice, with different answers on offer`,
+      })
+    }
+  }
+
+  for (const b of blocks) {
+    const asParam = byName.get(b.name)
+    if (asParam !== undefined && asParam.kind !== 'flag') {
+      // A tick answers yes or no; a parameter answers with text. One name
+      // cannot be both, and the alternative to refusing is deciding for the
+      // author which of the two they meant — silently, and differently
+      // depending on which mention came first.
+      diagnostics.push({
+        from: b.openFrom,
+        to: b.openTo,
+        kind: 'condition-on-parameter',
+        detail: `"${b.name}" is filled into the text, so it cannot also be a condition`,
+      })
+      continue
+    }
+    if (asParam !== undefined) continue
+    byName.set(b.name, {
+      name: b.name,
+      kind: 'flag',
+      defaultValue: '',
+      options: [],
+      inside: null,
+    })
+    order.push(b.name)
+    firstAt.set(b.name, b.openFrom)
+  }
+
+  const fields = order
+    .map((n) => byName.get(n))
+    .filter((f): f is Field => f !== undefined)
+    .sort((a, z) => (firstAt.get(a.name) ?? 0) - (firstAt.get(z.name) ?? 0))
+  return { fields, diagnostics }
+}
+
 export interface SnippetParse {
   readonly spans: readonly ValueSpan[]
   readonly blocks: readonly Block[]
   readonly escapes: readonly Escape[]
+  readonly fields: readonly Field[]
   readonly diagnostics: readonly Diagnostic[]
 }
 
 export function parse(body: string): SnippetParse {
   const tags = scanTags(body)
+  const spans = valueSpans(body)
+  const derived = deriveFields(spans, tags.blocks)
   return {
-    spans: valueSpans(body),
+    spans,
     blocks: tags.blocks,
     escapes: tags.escapes,
-    diagnostics: tags.diagnostics,
+    fields: derived.fields,
+    diagnostics: [...tags.diagnostics, ...derived.diagnostics],
   }
 }

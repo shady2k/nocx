@@ -11147,3 +11147,141 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 })
+
+// ═══════════════════════════════════════════════════════════════════════════
+// A client that is not the one the channel follows draws at the SESSION's
+// grid, not at its own window (nocx-eidfb.3)
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// The size a session runs at is the BACKEND's (nocx-eidfb.1) and it follows
+// the client that attached last (nocx-eidfb.2). Every other client therefore
+// has two answers in front of it — what its own window measures, and what the
+// channel is actually running at — and only one of them describes the bytes
+// arriving down the wire. A window that draws them at its own width wraps
+// them a second time, and no later resize can unpick that: two clients then
+// show two different screens of one session.
+//
+// The seam a person reaches is the window that takes a live session back. It
+// attaches without reporting any geometry (ipc.reclaimSession), so until its
+// own fit runs the session is still at somebody else's size, and the
+// recovered scrollback is written in exactly that interval.
+describe('a pane drawing a session it did not size (nocx-eidfb.3)', () => {
+  const SESSION_GRID = { cols: 132, rows: 43, xpixel: 0, ypixel: 0 }
+  const RECOVERED = 'what the session printed while this window was away'
+
+  /** A pane that takes back a live session running at SESSION_GRID, with the
+   *  recovered scrollback waiting to be flushed the moment the surface
+   *  registers its data callback — which is what WSClient.onSessionData does
+   *  with the bytes reclaimSession queued ahead of the live stream. */
+  const reclaimingPane = async () => {
+    const session = makeSession({
+      recovered: { bytes: RECOVERED.length, gaps: [], size: SESSION_GRID },
+      pendingData: RECOVERED,
+    })
+    const mounted = await mountTerminal(makeClipboard(), {
+      hooks: { adoptSession: () => Promise.resolve(session as unknown as never) },
+    })
+    return { ...mounted, session }
+  }
+
+  it('writes the recovered screen at the grid the session is running at', async () => {
+    const { content, teardown } = await reclaimingPane()
+    try {
+      const renderer = rendererOf(content)
+      /* eslint-disable @typescript-eslint/unbound-method */
+      expect(renderer.setGrid).toHaveBeenCalledWith(132, 43)
+      // ORDER IS THE ASSERTION. Bytes wrapped at 132 columns written into an
+      // 80-column grid are wrapped twice over, and the grid change has to
+      // land before them or there is nothing left to correct.
+      const sized = (renderer.setGrid as Mock).mock.invocationCallOrder[0]
+      const wrote = (renderer.write as Mock).mock.invocationCallOrder[0]
+      /* eslint-enable @typescript-eslint/unbound-method */
+      expect(wrote).toBeGreaterThan(sized)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('does not report the session grid back as a size this window measured', async () => {
+    const { content, session, teardown } = await reclaimingPane()
+    try {
+      // The grid moved to 132×43, and xterm reports every grid change the
+      // same way whoever caused it. A report sent from here would be this
+      // window claiming a size it never measured — and under nocx-eidfb.2 a
+      // report is a claim on the session.
+      //
+      // Fake time rather than a wait: the report is debounced, so "it was not
+      // sent" is only a fact once the debounce has had its chance, and a real
+      // delay would be a test measuring a duration.
+      vi.useFakeTimers()
+      try {
+        rendererOf(content)._fireResize(132, 43)
+        vi.advanceTimersByTime(10_000)
+        expect(session.sendResize).not.toHaveBeenCalled()
+
+        // And the control, so the assertion above cannot pass by the report
+        // being broken for everyone: this window's OWN measurement is still
+        // reported, and it is what ends the borrowed grid.
+        content.viewportChanged({ width: 800, height: 400 })
+        rendererOf(content)._fireResize(100, 30)
+        vi.advanceTimersByTime(10_000)
+        expect(session.sendResize).toHaveBeenCalledWith(100, 30)
+      } finally {
+        vi.useRealTimers()
+      }
+    } finally {
+      teardown()
+    }
+  })
+
+  it('lets the session grid pad or scroll inside the window rather than being cut', async () => {
+    const { content, teardown } = await reclaimingPane()
+    try {
+      const area = scrollbackFor(content).scrollbackArea
+      expect(area.dataset.gridOwner).toBe('session')
+
+      // …and the stylesheet is what makes that attribute mean something. The
+      // scroller's overflow-x is `hidden` for a grid this window chose —
+      // deliberately, so a wide grid can never widen the box its own cols are
+      // derived from. A grid this window did NOT choose is not in that loop,
+      // and being cut mid-glyph is the one outcome that is not allowed.
+      const css = stripComments(readFileSync(STYLE_ENTRY, 'utf8'))
+      const owned =
+        css.match(/\.scrollback-area\[data-grid-owner=['"]session['"]\]\s*\{([^}]*)\}/)?.[1] ?? ''
+      expect(owned).toMatch(/overflow-x\s*:\s*auto/)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('hands the grid back to the window the moment this window measures itself', async () => {
+    const { content, teardown } = await reclaimingPane()
+    try {
+      const renderer = rendererOf(content)
+      // THE CLOSING END OF THE INTERVAL. A fit is this window taking the
+      // session's size over — applying it is what makes this the client the
+      // channel follows — so from here the grid is its own again, and so is
+      // the scroller's overflow.
+      content.viewportChanged({ width: 800, height: 400 })
+      /* eslint-disable-next-line @typescript-eslint/unbound-method */
+      expect(renderer.fitViewport).toHaveBeenCalledTimes(1)
+      expect(scrollbackFor(content).scrollbackArea.dataset.gridOwner).toBeUndefined()
+    } finally {
+      teardown()
+    }
+  })
+
+  it('leaves the pane its own window: only the terminal takes the session grid', async () => {
+    const { content, tab, teardown } = await reclaimingPane()
+    try {
+      // Acceptance 3: the tab strip, the sidebar and the panels are DOM and
+      // lay themselves out. Nothing here may write the session's geometry
+      // onto the pane — a width put there is a window sized by somebody
+      // else's terminal.
+      expect(tab.pane.style.width).toBe('')
+      expect(scrollbackFor(content).scrollbackArea.style.width).toBe('')
+    } finally {
+      teardown()
+    }
+  })
+})

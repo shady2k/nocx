@@ -27,6 +27,7 @@ import (
 	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -548,6 +549,67 @@ func decodeRunRequest(t *testing.T, raw json.RawMessage) (rid, sid, command stri
 		t.Fatalf("runRequest missing identity: %s", raw)
 	}
 	return req.RequestID, req.SessionID, req.Command
+}
+
+// A lease can fire while the broker is still delivering the request. When
+// delivery fails, no renderer could submit a command: runState must carry the
+// submission-expired sentence and must not claim terminalization.
+func TestRunLease_BoundBeforeBrokerDeliveryNamesExpiredSubmissionInRunState(t *testing.T) {
+	h := newRunLeaseHarness(t, RunLeaseConfig{
+		WallClock:   time.Minute,
+		SignalGrace: 20 * time.Millisecond,
+	})
+	h.createEndpointAt()
+	sid := h.openSession(t)
+
+	deliverStarted := make(chan struct{})
+	releaseDeliver := make(chan struct{})
+	var deliverOnce sync.Once
+	broker := NewBroker(
+		func() []Conn { return []Conn{&harnessConn{}} },
+		func(Conn, string, json.RawMessage) error {
+			deliverOnce.Do(func() { close(deliverStarted) })
+			<-releaseDeliver
+			return errors.New("delivery held open for pre-delivery expiry")
+		},
+	)
+	h.ws.broker = broker
+
+	res := h.askRunsTool(sid, "echo never submitted")
+	<-deliverStarted
+
+	broker.mu.Lock()
+	var lease *runLease
+	for _, candidate := range broker.runLeases {
+		lease = candidate
+		break
+	}
+	broker.mu.Unlock()
+	if lease == nil {
+		t.Fatal("broker did not register the run lease before delivery")
+	}
+	lease.fire(content.TermTimeout)
+	close(releaseDeliver)
+
+	tap := newSocketTap(h.conn)
+	raw := tapNotify(t, tap, "agent.runState", 10*time.Second)
+	var state struct {
+		RunID int64  `json:"runId"`
+		State string `json:"state"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("runState unmarshal: %v\nraw: %s", err, raw)
+	}
+	if state.RunID != res.RunID || state.State != "failed" {
+		t.Fatalf("runState = %+v, want run %d failed", state, res.RunID)
+	}
+	if !strings.Contains(state.Error, "run submission expired before execution started") {
+		t.Fatalf("runState error = %q, want the submission-expired sentence", state.Error)
+	}
+	if strings.Contains(state.Error, "terminalized") {
+		t.Fatalf("runState error = %q, must not claim terminalization", state.Error)
+	}
 }
 
 // ── criterion 1 (wall-clock) + criterion 2 (a child, not only the shell) ──

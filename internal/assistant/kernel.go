@@ -1618,12 +1618,18 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		return modelResult{text: out, kind: modelToolOutput}, nil
 	}
 
-	// A lease bound is a product-caused outcome, so return it in the tool's
-	// slot and let the model explain it instead of failing the whole stream.
+	// A delivered lease bound is a product-caused outcome, so return it in
+	// the tool's slot and let the model explain it instead of failing the
+	// whole stream. An undelivered submission is different: no command
+	// existed, so it remains a run-level failure and its sentence belongs in
+	// agent.runState.Error.
 	if runErr != nil {
 		var leaseErr *RunLeaseError
 		if errors.As(runErr, &leaseErr) {
 			_ = k.closeAttempt(ctx, execID, leaseErr.Reason, content.EntryFailure)
+			if leaseErr.SubmissionExpired {
+				return modelResult{}, leaseErr
+			}
 			return modelResult{text: leaseResult(decl.Name, leaseErr), kind: modelToolOutput}, nil
 		}
 		_ = k.closeAttempt(ctx, execID, terminationReasonOf(runErr), content.EntryFailure)

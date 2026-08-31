@@ -102,10 +102,12 @@ describe('createLinkOpener — files', () => {
       displayHost: null,
     })
   })
-  it('opens a regular file without probing or revealing the Files panel', async () => {
+  it('opens a regular file after one classification probe without touching the Files panel', async () => {
     const openDirectory = vi.fn(() => Promise.resolve(false))
-    const d = deps({ openDirectory })
+    const pathKind = vi.fn(() => Promise.resolve<LinkPathProbe>({ kind: 'file' }))
+    const d = deps({ openDirectory, pathKind })
     await createLinkOpener(d).open({ kind: 'path', path: 'notes.md' }, origin)
+    expect(pathKind).toHaveBeenCalledOnce()
     expect(openDirectory).not.toHaveBeenCalled()
     expect(d.viewed).toHaveLength(1)
   })

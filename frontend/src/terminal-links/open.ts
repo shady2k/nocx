@@ -41,8 +41,8 @@ export interface LinkOpenDeps {
   /** files.open for one session — the binding every later files.* call
    *  echoes. `rootPath` is the panel's starting directory, not a sandbox. */
   readonly openBinding: (sessionId: string, rootPath?: string) => Promise<FilesOpenResult>
-  /** Classify a path from the existing files.list entry metadata, without
-   *  changing the Files panel. */
+  /** Classify a path with one files.stat call, without changing the Files
+   *  panel. */
   readonly pathKind: (bindingId: string, path: string) => Promise<LinkPathProbe>
   /** Reveal a directory through the existing Files panel. Resolves true
    *  when the panel's store reaches an expandable directory, false when the

@@ -75,9 +75,8 @@ import { registerTerminalLinks } from './terminal-links'
 import type { LinkPathProbe } from './terminal-links/open'
 import { createUrlOpener } from './open-url'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
-import { FILES_PAGE_SIZE, type FilesRevealHint } from './files/files-store'
+import { type FilesRevealHint } from './files/files-store'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
-import { isExpandable } from './ui/tree-row-kind'
 import { uploadSurfaceFor } from './files/upload-surface'
 import { uploadOperations } from './files/upload-operations'
 import { downloadSurfaceFor } from './files/download-surface'
@@ -871,26 +870,15 @@ async function main() {
   const terminalLinkUrlOpener = createUrlOpener({ openUrl: (url) => gitServices.openUrl(url) })
   const pathKind = async (bindingId: string, path: string): Promise<LinkPathProbe> => {
     if (path === '/') return { kind: 'directory' }
-    const slash = path.lastIndexOf('/')
-    if (slash < 0) return { kind: 'unknown' }
-    const parent = slash === 0 ? '/' : path.slice(0, slash)
-    let offset = 0
-    for (;;) {
-      const result = await filesServicesTracked.list(bindingId, parent, offset, FILES_PAGE_SIZE)
-      if (result.state !== 'ok') return { kind: 'unknown' }
-      const entry = result.entries.find((candidate) => candidate.path === path)
-      if (entry !== undefined) {
-        if (!isExpandable(entry.kind, entry.linkKind)) return { kind: 'file' }
-        return {
-          kind: 'directory',
-          hint: { bindingId, parentPath: parent, listing: result },
-        }
-      }
-      if (!result.hasMore || result.entries.length === 0) return { kind: 'unknown' }
-      offset = result.offset + result.entries.length
+    try {
+      const result = await filesServicesTracked.stat(bindingId, path)
+      if (result.kind === 'dir') return { kind: 'directory' }
+      if (result.kind === 'regular') return { kind: 'file' }
+      return { kind: 'unknown' }
+    } catch {
+      return { kind: 'unknown' }
     }
   }
-
   registerTerminalLinks({
     openUrl: (url) => terminalLinkUrlOpener.open(url),
     openBinding: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),

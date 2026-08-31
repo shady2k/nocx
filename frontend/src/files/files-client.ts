@@ -9,6 +9,7 @@
 import type { Dispatcher } from '../dispatcher'
 import type { FilesOpenResult } from '../generated/files.open'
 import type { FilesListResult } from '../generated/files.list'
+import type { FilesStatResult } from '../generated/files.stat'
 import type { FilesReadResult } from '../generated/files.read'
 import type { FilesCloseResult } from '../generated/files.close'
 import type { FilesWatchResult } from '../generated/files.watch'
@@ -33,6 +34,10 @@ class FilesClient {
    *  discriminator and the caller switches on it first (D14). */
   list(bindingId: string, path: string, offset: number, limit: number): Promise<FilesListResult> {
     return this.dispatcher.call<FilesListResult>('files.list', { bindingId, path, offset, limit })
+  }
+  /** Classify one path without enumerating its parent directory. */
+  stat(bindingId: string, path: string): Promise<FilesStatResult> {
+    return this.dispatcher.call<FilesStatResult>('files.stat', { bindingId, path })
   }
 
   /** Bounded content plus the canonical identity of what was actually read —
@@ -88,6 +93,7 @@ class FilesClient {
 /** The panel's entire backend surface, so a test can substitute a fake. */
 export interface FilesPanelServices {
   open(sessionId: string, rootPath?: string): Promise<FilesOpenResult>
+  stat(bindingId: string, path: string): Promise<FilesStatResult>
   list(bindingId: string, path: string, offset: number, limit: number): Promise<FilesListResult>
   read(bindingId: string, path: string, maxBytes: number): Promise<FilesReadResult>
   watch(bindingId: string, paths: string[]): Promise<FilesWatchResult>
@@ -102,6 +108,7 @@ export function createFilesPanelServices(dispatcher: Dispatcher): FilesPanelServ
   const client = new FilesClient(dispatcher)
   return {
     open: (sessionId, rootPath) => client.open(sessionId, rootPath),
+    stat: (bindingId, path) => client.stat(bindingId, path),
     list: (bindingId, path, offset, limit) => client.list(bindingId, path, offset, limit),
     read: (bindingId, path, maxBytes) => client.read(bindingId, path, maxBytes),
     watch: (bindingId, paths) => client.watch(bindingId, paths),

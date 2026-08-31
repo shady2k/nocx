@@ -434,6 +434,20 @@ func (p *Provider) Watch(ctx context.Context, path string) (filesystem.Watch, er
 	return nil, &filesystem.ErrWatchUnavailable{}
 }
 
+// Stat classifies one path by metadata without enumerating its parent. os.Stat
+// follows symlinks so the result describes the object a link would open or
+// expand, while wrapPathErr preserves the provider's typed path failures.
+func (p *Provider) Stat(ctx context.Context, path string) (filesystem.Stat, error) {
+	if err := checkPath(path); err != nil {
+		return filesystem.Stat{}, err
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		return filesystem.Stat{}, wrapPathErr("stat", path, err)
+	}
+	return filesystem.Stat{Kind: filesystem.KindOf(info.Mode())}, nil
+}
+
 // Canonical resolves a path to its provider-canonical identity. It exists
 // because the Provider contract declares it; no wire method reaches it today
 // — Listing.Canonical and Content.Canonical carry identity on every list and

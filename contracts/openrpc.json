@@ -2535,6 +2535,55 @@
       }
     },
     {
+      "name": "files.stat",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/files.stat.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32004,
+          "message": "Control plane busy",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "result": {
+        "name": "files.statResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/files.stat.schema.json"
+        }
+      }
+    },
+    {
       "name": "files.upload",
       "params": [
         {
@@ -9507,6 +9556,9 @@
     },
     {
       "$ref": "https://nocx.local/contracts/files.reveal.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/files.stat.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/files.upload.schema.json"

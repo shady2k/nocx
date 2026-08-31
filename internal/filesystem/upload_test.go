@@ -71,6 +71,11 @@ func (p touchyProvider) Read(context.Context, string, int64) (Content, error) {
 	return Content{}, nil
 }
 
+func (p touchyProvider) Stat(context.Context, string) (Stat, error) {
+	p.fail("Stat")
+	return Stat{}, nil
+}
+
 func (p touchyProvider) Watch(context.Context, string) (Watch, error) {
 	p.fail("Watch")
 	return nil, nil

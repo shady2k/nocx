@@ -121,6 +121,7 @@ function deferred<T>(): Deferred<T> {
 function makeServices(over: Partial<FilesPanelServices> = {}): FilesPanelServices {
   return {
     open: vi.fn().mockResolvedValue(OPEN_RESULT),
+    stat: vi.fn().mockResolvedValue({ kind: 'regular' }),
     list: vi.fn().mockResolvedValue(listOk('C:/', [])),
     read: vi.fn().mockResolvedValue({}),
     watch: vi.fn().mockResolvedValue({ mode: 'watching' }),

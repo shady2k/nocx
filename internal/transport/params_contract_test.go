@@ -453,6 +453,9 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"files.read": {
 			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","path":"/tmp/file.txt","maxBytes":0}`),
 		},
+		"files.stat": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","path":"/tmp/file.txt"}`),
+		},
 		"files.reveal": {
 			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","path":"/tmp/file.txt"}`),
 		},

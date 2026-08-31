@@ -35,24 +35,22 @@ export interface OverlayEntry {
    * which no z-index in the normal layer can reach — so "on top" is not a
    * number, it is a parent.
    */
-  element: HTMLElement | null
+  readonly element: HTMLElement | null
 }
 
 let idCounter = 0
 const stack: OverlayEntry[] = []
 
 const [topOverlayElement, setTopOverlayElement] = createSignal<HTMLElement | null>(null)
-const [overlayRevision, setOverlayRevision] = createSignal(0)
 
 /**
  * The topmost overlay's element, or null when nothing is open. Reactive, so a
  * component can re-parent itself into the top layer as overlays come and go.
  */
-export { topOverlayElement, overlayRevision }
+export { topOverlayElement }
 
 function syncTopElement(): void {
   setTopOverlayElement(stack.length > 0 ? stack[stack.length - 1].element : null)
-  setOverlayRevision((revision) => revision + 1)
 }
 
 let escapeHandler: ((e: KeyboardEvent) => void) | null = null
@@ -120,21 +118,6 @@ export function pushOverlay(
   syncTopElement()
   installEscapeHandler()
   return entry
-}
-
-/** Return whether an element still belongs to an open overlay. */
-export function isOverlayElementOpen(element: HTMLElement): boolean {
-  return stack.some((entry) => entry.element === element)
-}
-
-/**
- * Keep the stack's element reference aligned with a DOM node recreated by a
- * keyed portal when its mount target changes.
- */
-export function updateOverlayElement(entry: OverlayEntry, element: HTMLElement | null): void {
-  if (!stack.includes(entry) || entry.element === element) return
-  entry.element = element
-  syncTopElement()
 }
 
 /**
@@ -219,6 +202,5 @@ export function restoreFocus(entry: OverlayEntry): void {
 /** Clear the entire stack (for testing / teardown). */
 export function clearStack(): void {
   stack.length = 0
-  syncTopElement()
   uninstallEscapeHandler()
 }

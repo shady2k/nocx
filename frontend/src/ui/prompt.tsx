@@ -1,14 +1,11 @@
 import { Show, createEffect, createMemo, onCleanup, untrack, type JSX } from 'solid-js'
 import { Portal } from 'solid-js/web'
 import {
-  isOverlayElementOpen,
-  overlayRevision,
   popOverlay,
   pushOverlay,
   restoreFocus,
   topOverlay,
   topOverlayElement,
-  updateOverlayElement,
   type OverlayEntry,
 } from './overlay/stack'
 
@@ -86,28 +83,11 @@ export function Prompt(props: PromptProps) {
    * element was still in the DOM.
    *
    * `untrack` is what makes this the overlay we opened OVER: read reactively,
-   * pushing ourselves would immediately re-point it at this prompt. The
-   * underlay is captured during render, before the effect below pushes this
-   * prompt, then checked whenever the stack changes so a closed underlay cannot
-   * keep the prompt inside a closed dialog.
+   * pushing ourselves would immediately re-point it at this prompt. It is
+   * recomputed only when `open` flips, and computed during render — before the
+   * effect below pushes.
    */
-  let underlay: HTMLElement | null = null
-  let underlayCaptured = false
-  const host = createMemo(() => {
-    overlayRevision()
-    if (!props.open) {
-      underlay = null
-      underlayCaptured = false
-      return null
-    }
-    if (!underlayCaptured) {
-      underlay = untrack(topOverlayElement)
-      underlayCaptured = true
-    } else if (underlay && !isOverlayElementOpen(underlay)) {
-      underlay = null
-    }
-    return underlay
-  })
+  const host = createMemo(() => (props.open ? untrack(topOverlayElement) : null))
 
   createEffect(() => {
     if (props.open && !entry) {
@@ -125,15 +105,14 @@ export function Prompt(props: PromptProps) {
       // the initial focus below; reclaim that attempt before it reaches the
       // editor's focus listener.
       if (element) {
-        const promptElement = element
         const keepFocus = (e: FocusEvent) => {
-          if (topOverlay() !== entry || promptElement.contains(e.target as Node)) return
+          if (topOverlay() !== entry || element?.contains(e.target as Node)) return
           e.stopPropagation()
-          focusInitial(promptElement)
+          focusInitial(element)
         }
         document.addEventListener('focusin', keepFocus, true)
         removeFocusGuard = () => document.removeEventListener('focusin', keepFocus, true)
-        focusInitial(promptElement)
+        focusInitial(element)
       }
     } else if (!props.open && entry) {
       removeFocusGuard?.()
@@ -158,8 +137,7 @@ export function Prompt(props: PromptProps) {
    * means in Dialog and in every other form. Guarded three ways, mirroring
    * Dialog: only when the caller declared an action, only from a real input
    * (a textarea owns Enter, a button already has its own), and not
-   * mid-composition — an IME uses Enter to accept a candidate, and submitting
-   * there would eat the word being typed.
+   * mid-composition — an IME uses Enter to accept a candidate.
    */
   const onKeyDown = (e: KeyboardEvent) => {
     if (!props.onSubmit) return
@@ -173,10 +151,7 @@ export function Prompt(props: PromptProps) {
 
   const panel = () => (
     <div
-      ref={(el) => {
-        element = el
-        if (entry) updateOverlayElement(entry, el)
-      }}
+      ref={element}
       class="ui-prompt-overlay"
       data-placement={props.placement ?? 'floating'}
       onMouseDown={(event) => {
@@ -207,8 +182,8 @@ export function Prompt(props: PromptProps) {
   return (
     <Show when={props.open}>
       {/* `keyed` because Portal reads `mount` once — the same reason ToastHost
-          keys its own host. `host` changes only when the captured underlay
-          closes, so it never re-creates a panel while its parent remains open. */}
+          keys its own host. `host` only changes when the prompt opens, so this
+          never re-creates a panel the user is typing into. */}
       <Show when={host()} keyed fallback={panel()}>
         {(el) => <Portal mount={el}>{panel()}</Portal>}
       </Show>

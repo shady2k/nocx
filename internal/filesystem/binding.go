@@ -299,9 +299,26 @@ func (b *Binding) drop() {
 }
 
 // swapWatches replaces the binding's watch set atomically (spec §5.2): every
-// path is established first; if any fails, the partial set is closed and the
-// existing set is untouched; only on full success are the old watches closed
-// and the new set installed. Paths are a set — duplicates collapse.
+// ADDED path is established first; if any fails, only what this call
+// established is closed and the existing set is untouched; only on full
+// success are the DROPPED watches closed and the new set installed. Paths
+// are a set — duplicates collapse.
+//
+// The set is DIFFED rather than rebuilt (nocx-8hdia.5). files.watch replaces
+// the set rather than adding to it, and the client resends the whole set on
+// every expand and every collapse, so rebuilding made a one-folder gesture
+// re-establish the entire expanded tree. At the transport's 512-path ceiling
+// that also meant briefly holding nearly twice the watch resources — which
+// is precisely the moment an inotify or descriptor limit is reached, so the
+// rebuild made the ceiling it was operating under harder to satisfy. A
+// retained path keeps its existing Watch object: nothing is closed and
+// nothing is created, so no window opens in which an event could be missed.
+//
+// The failure path is what diffing makes delicate and is asserted in the
+// tests: `fresh` SHARES watch objects with the live set, so on failure only
+// the newly established ones may be closed. Closing everything in `fresh`
+// would tear down watches the caller still holds — turning a refused
+// addition into a silent loss of every existing watch.
 func (b *Binding) swapWatches(ctx context.Context, paths []string) (WatchMode, error) {
 	seen := make(map[string]struct{}, len(paths))
 	unique := make([]string, 0, len(paths))
@@ -315,19 +332,30 @@ func (b *Binding) swapWatches(ctx context.Context, paths []string) (WatchMode, e
 	b.watchMu.Lock()
 	defer b.watchMu.Unlock()
 	fresh := make(map[string]Watch, len(unique))
+	// Only what THIS call established, so the failure path can close exactly
+	// that and nothing the caller already had.
+	established := make([]string, 0, len(unique))
 	for _, p := range unique {
+		if w, ok := b.watches[p]; ok {
+			fresh[p] = w // retained: same live watch, no window
+			continue
+		}
 		w, err := b.provider.Watch(ctx, p)
 		if err != nil {
-			for _, fw := range fresh {
-				_ = fw.Close() // never leak a partially established set
+			for _, ep := range established {
+				_ = fresh[ep].Close() // never leak a partially established set
 			}
 			return WatchMode{}, err
 		}
 		fresh[p] = w
+		established = append(established, p)
 	}
 	old := b.watches
 	b.watches = fresh
-	for _, ow := range old {
+	for p, ow := range old {
+		if _, retained := fresh[p]; retained {
+			continue
+		}
 		_ = ow.Close() // the swap already succeeded; a stale watch's close error cannot change that
 	}
 	return aggregateMode(fresh), nil

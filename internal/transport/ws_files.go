@@ -308,7 +308,7 @@ type filesMachine interface {
 	stopFilesWatcher(w *filesWatcher)
 	// filesBaseline takes the watch baseline synchronously: one listing per
 	// path in the new set, inside files.watch, before the response.
-	filesBaseline(h filesystem.Handle, paths []string) map[string]string
+	filesBaseline(h filesystem.Handle, paths []string, known map[string]string) map[string]string
 	// cancelBindingTransfers cancels every running transfer of one binding
 	// and waits, bounded, for them to unwind — files.close's half of D8.
 	// It never waits for an upload: the bound expires and the close goes on.
@@ -741,14 +741,28 @@ func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState,
 		// baseline and never announced. The listing runs on this call's
 		// fresh handle, whose guard is held until the branch below releases
 		// it (filesBaseline documents the cost shape).
-		baseline := h.machine.filesBaseline(handle, params.Paths)
+		// What the watcher is ALREADY comparing against. A path in here is
+		// not re-listed (filesBaseline says why), so this call enumerates
+		// only what the set gained.
+		known := make(map[string]string)
+		h.machine.withFilesBinding(params.BindingID, func(b *filesBinding) {
+			if b.watcher == nil {
+				return
+			}
+			b.watcher.mu.Lock()
+			for p, rev := range b.watcher.paths {
+				known[p] = rev
+			}
+			b.watcher.mu.Unlock()
+		})
+		added := h.machine.filesBaseline(handle, params.Paths, known)
 
 		installed := h.machine.withFilesBinding(params.BindingID, func(b *filesBinding) {
 			if b.watcher == nil {
 				w := &filesWatcher{
 					bindingID: params.BindingID,
 					sessionID: b.sessionID,
-					paths:     baseline,
+					paths:     added,
 					dirty:     make(map[string]string),
 					stop:      make(chan struct{}),
 					done:      make(chan struct{}),
@@ -764,13 +778,37 @@ func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState,
 				// would close.
 				go h.machine.filesPollLoop(w)
 			} else {
-				// Replacement (spec §5.2): reset the poll baseline for the
-				// new set — every path baselined NOW, since the replace
-				// path had the same first-tick gap. The loop keeps its
-				// original handle — the guard is already taken — and this
-				// call's fresh handle is released, one guard in, one out.
+				// Replacement (spec §5.2): the set becomes exactly what the
+				// client asked for, and each path keeps or gains a baseline
+				// without any path losing one.
+				//
+				// A retained path takes its rev from the LIVE map rather
+				// than from the `known` snapshot above: the poll loop goes
+				// on updating it while the additions are being listed, and
+				// writing the snapshot back would re-announce a change the
+				// loop had already delivered.
+				//
+				// Neither retained nor added means the loop dropped the path
+				// while this call ran — filesPollPath deletes a directory
+				// that has vanished. "" is the unbaselined marker, so the
+				// first successful listing ANNOUNCES: the safe direction for
+				// a path the client still wants and the loop gave up on.
+				//
+				// The loop keeps its original handle — the guard is already
+				// taken — and this call's fresh handle is released, one
+				// guard in, one out.
 				b.watcher.mu.Lock()
-				b.watcher.paths = baseline
+				next := make(map[string]string, len(params.Paths))
+				for _, p := range params.Paths {
+					if rev, ok := b.watcher.paths[p]; ok {
+						next[p] = rev
+					} else if rev, ok := added[p]; ok {
+						next[p] = rev
+					} else {
+						next[p] = ""
+					}
+				}
+				b.watcher.paths = next
 				b.watcher.mu.Unlock()
 				release()
 			}
@@ -1053,8 +1091,8 @@ func (s *WSServer) filesPollLoop(w *filesWatcher) {
 }
 
 // filesBaseline takes the watch baseline synchronously: one listing per
-// path in the new set, inside files.watch, before the response. This is
-// the inotify install point — from the instant the call returns, every
+// ADDED path in the new set, inside files.watch, before the response. This
+// is the inotify install point — from the instant the call returns, every
 // change is delivered, and changes before it are not replayed (the
 // first-poll-tick baseline this replaces left a 500 ms blind spot). A path
 // whose listing fails is recorded as "" — unbaselined — and the first poll
@@ -1062,18 +1100,46 @@ func (s *WSServer) filesPollLoop(w *filesWatcher) {
 // a baseline nobody saw: the safe direction (a false positive re-lists the
 // directory; a false negative hides a change forever).
 //
-// Sequential, one listing per path, and deliberately so: each listing is
-// bounded by the D14 caps (entry cap, size cap, the provider's list
-// timeout) and, over SFTP, by the operation lane, so N paths cost at most
-// N bounded listings — the same per-tick cost the poll loop already pays,
-// moved earlier. The watch set is the expanded tree (one directory per
-// expand gesture), so N is small in practice, and the reachable provider
-// today is local (sub-ms listings); a bounded-concurrent baseline would add
-// machinery the loop itself does not have for a case the product does not
-// reach.
-func (s *WSServer) filesBaseline(h filesystem.Handle, paths []string) map[string]string {
+// `known` is what the binding's watcher is already comparing against, and a
+// path in it is SKIPPED rather than re-listed. That is not only the cheap
+// answer, it is the correct one, and the two arrived together (nocx-8hdia.5):
+//
+//   - Correctness. filesPollPath announces when the fresh rev differs from
+//     w.paths[path]. Re-baselining an already-watched path moves that
+//     comparison point to the CURRENT rev, so a change that landed after the
+//     last tick and before this call is folded into a baseline nobody saw and
+//     is never announced. Since files.watch REPLACES the set and the client
+//     resends the whole set on every expand and collapse, expanding one
+//     folder could silently swallow a pending change in another — the exact
+//     failure the synchronous baseline exists to prevent, reintroduced
+//     through the replacement path.
+//   - Cost. Every resend re-enumerated every already-watched directory, and
+//     each enumeration is a full readdir with an lstat per entry, a sort and
+//     a digest (internal/filesystem/{local,sftp}: the whole directory is
+//     enumerated before the page is sliced, so Limit does not bound it).
+//     That was charged to a click, and it grew with the number of folders
+//     the person had open.
+//
+// A path whose previous baseline is "" is retained too, not retried: "" means
+// the first successful poll ANNOUNCES, and re-listing it here would establish
+// a silent baseline instead — the unsafe direction.
+//
+// Sequential, one listing per added path, and deliberately so: each listing
+// is bounded by the D14 caps (entry cap, size cap, the provider's list
+// timeout) and, over SFTP, by the operation lane. Additions are one directory
+// per expand gesture, so this is normally a single listing; a bounded-
+// concurrent baseline would add machinery the poll loop itself does not have
+// for a case the product does not reach.
+func (s *WSServer) filesBaseline(
+	h filesystem.Handle,
+	paths []string,
+	known map[string]string,
+) map[string]string {
 	base := make(map[string]string, len(paths))
 	for _, p := range paths {
+		if _, ok := known[p]; ok {
+			continue // already being compared against; see above
+		}
 		// The poll loop is binding-owned, never request-scoped: it runs for
 		// the life of the watch (owner: the files binding, bounded by its
 		// session per spec §5.1, never by a WebSocket), so it keeps a

@@ -909,3 +909,127 @@ func TestFilesOpen_RemoteAttestationReachesTheWire(t *testing.T) {
 		t.Errorf("endpointId = %v, want %q", got.EndpointID, "v1:attested")
 	}
 }
+
+// ── the watch set is diffed, not replaced (nocx-8hdia.5) ───────────────────
+
+// countingProvider wraps a real provider and counts List calls per path, so
+// a test can assert what one files.watch actually enumerated. Only List is
+// overridden; everything else is the real local provider's.
+type countingProvider struct {
+	filesystem.Provider
+	mu    sync.Mutex
+	lists map[string]int
+}
+
+func (p *countingProvider) List(
+	ctx context.Context,
+	path string,
+	page filesystem.Page,
+) (filesystem.Listing, error) {
+	p.mu.Lock()
+	p.lists[path]++
+	p.mu.Unlock()
+	return p.Provider.List(ctx, path, page)
+}
+
+func (p *countingProvider) count(path string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lists[path]
+}
+
+// TestFilesWatch_ReplacementBaselinesOnlyTheAddedPath is the cost half of
+// the defect. files.watch REPLACES the set, and the client resends the whole
+// set every time it changes — after a first listing, on every expand, on
+// every collapse. Baselining the whole set therefore charged one full
+// enumeration PER ALREADY-WATCHED DIRECTORY to every expand gesture, and the
+// cost grew with the number of folders the person had open.
+func TestFilesWatch_ReplacementBaselinesOnlyTheAddedPath(t *testing.T) {
+	var prov *countingProvider
+	factory := func(sess session.Session, rootPath string) (filesystem.Provider, error) {
+		inner, err := filesLocalFactory(sess, rootPath)
+		if err != nil {
+			return nil, err
+		}
+		prov = &countingProvider{Provider: inner, lists: map[string]int{}}
+		return prov, nil
+	}
+	e := newFilesTestEnv(t, WithFilesystemProviderFactory(factory))
+	// No poll tick may run during the measurement: the loop lists too, and
+	// what is being counted is what files.watch itself enumerated.
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dirs := make([]string, 3)
+	for i := range dirs {
+		dirs[i] = filepath.Join(root, string(rune('a'+i)))
+		if err := os.MkdirAll(dirs[i], 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", dirs[i], err)
+		}
+	}
+	bid := e.openBinding(t, sid, root, 2)
+
+	e.watchDir(t, bid, []string{dirs[0], dirs[1]}, 3)
+	before := []int{prov.count(dirs[0]), prov.count(dirs[1])}
+
+	// One more folder expanded: the client resends the whole set with one
+	// path added. Only that path is new information.
+	e.watchDir(t, bid, []string{dirs[0], dirs[1], dirs[2]}, 4)
+
+	if got := prov.count(dirs[0]) - before[0]; got != 0 {
+		t.Errorf("already-watched %s was listed %d more times, want 0", dirs[0], got)
+	}
+	if got := prov.count(dirs[1]) - before[1]; got != 0 {
+		t.Errorf("already-watched %s was listed %d more times, want 0", dirs[1], got)
+	}
+	if got := prov.count(dirs[2]); got != 1 {
+		t.Errorf("added %s was listed %d times, want exactly 1", dirs[2], got)
+	}
+}
+
+// TestFilesChanged_AChangeIsNotSwallowedByAWatchSetReplacement is the
+// correctness half, and it is why this is a defect rather than an
+// inefficiency. filesPollPath announces when the fresh rev differs from
+// w.paths[path]. Re-baselining an ALREADY-WATCHED path overwrites that
+// comparison point with the current rev, so a change that landed after the
+// last tick and before the replacement is folded into a baseline nobody saw
+// and is never announced — the exact failure the synchronous baseline was
+// introduced to prevent, reintroduced through the replacement path.
+//
+// The gesture is ordinary: a file appears in one folder, and before the next
+// poll tick the person expands another folder.
+func TestFilesChanged_AChangeIsNotSwallowedByAWatchSetReplacement(t *testing.T) {
+	e := newFilesTestEnv(t)
+	// The write and the replacement must both land before the first tick,
+	// or the tick announces the change and the defect is hidden.
+	e.ws.filesPollInterval = slowFilesPollInterval
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir1 := filepath.Join(root, "one")
+	dir2 := filepath.Join(root, "two")
+	for _, d := range []string{dir1, dir2} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, []string{dir1}, 3)
+
+	// The change nobody has been told about yet.
+	if err := os.WriteFile(filepath.Join(dir1, "boom.md"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// The unrelated gesture that must not lose it.
+	e.watchDir(t, bid, []string{dir1, dir2}, 4)
+
+	raw := readNotification(t, e.conn, "files.changed", wantWithin)
+	var params map[string]any
+	if err := json.Unmarshal(raw, &params); err != nil {
+		t.Fatalf("files.changed: unmarshal: %v", err)
+	}
+	if params["path"] != dir1 {
+		t.Errorf("files.changed path = %v, want %s — the change to the "+
+			"already-watched directory was swallowed by the replacement",
+			params["path"], dir1)
+	}
+}

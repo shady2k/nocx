@@ -27,7 +27,7 @@ func TestWireTap_LogsOneStructuralOfferPerRun(t *testing.T) {
 		CrossBoundary:     content.EffectRow{Decision: content.DecisionAsk},
 		Delegate:          content.EffectRow{Decision: content.DecisionAsk},
 	}.AsGrant([]content.GrantScope{{Kind: content.ResourceSession, ID: "session-1"}})
-	ctx := WithWireToolOffer(context.Background(), "run-7", &grant)
+	ctx := WithWireToolOfferState(context.Background(), "run-7", &grant, NewWireToolOfferState())
 	body := `{"tools":[{"type":"function","function":{"name":"session.run"}},{"type":"function","function":{"name":"session.read"}}]}`
 	inner := roundTripperFunc(func(req *http.Request) (*http.Response, error) {
 		if _, err := io.ReadAll(req.Body); err != nil {
@@ -106,7 +106,7 @@ func TestClientAsk_TagsToolOfferOnModelRequest(t *testing.T) {
 	p.AttemptLedger = &fakeLedger{}
 	p.RunID = "run-7"
 	p.TurnEntryID = "entry-7"
-	if err := cl.Ask(WithWireToolOffer(context.Background(), p.RunID, p.Grant), p, func(AskEvent) error { return nil }); err != nil {
+	if err := cl.Ask(WithWireToolOfferState(context.Background(), p.RunID, p.Grant, NewWireToolOfferState()), p, func(AskEvent) error { return nil }); err != nil {
 		t.Fatalf("Ask: %v", err)
 	}
 	var record map[string]any
@@ -198,7 +198,7 @@ func TestWireTap_LogsEmptyStructuralOffer(t *testing.T) {
 	})
 	tap := newWireTapWith(inner, "", nil, logger)
 	req, err := http.NewRequestWithContext(
-		WithWireToolOffer(context.Background(), "run-empty", &grant),
+		WithWireToolOfferState(context.Background(), "run-empty", &grant, NewWireToolOfferState()),
 		http.MethodPost, "https://example.test/v1", strings.NewReader(`{"messages":[],"tools":null}`))
 	if err != nil {
 		t.Fatal(err)

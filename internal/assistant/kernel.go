@@ -506,11 +506,6 @@ const (
 	policyRefuse
 )
 
-func (m *effectKernel) decideInvocation(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool, invocation content.Invocation) (policyOutcome, PolicyRefusalReason) {
-	outcome, reason, _ := m.decideInvocationWithReason(t, resources, resourceDeclaration, invocation)
-	return outcome, reason
-}
-
 func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool, invocation content.Invocation) (policyOutcome, PolicyRefusalReason, string) {
 	if reason, denied := m.floorRefusal(invocation, resources); denied {
 		return policyRefuse, RefusedByFloor, reason

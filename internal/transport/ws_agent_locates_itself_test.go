@@ -186,7 +186,7 @@ func TestAssistant_LooksAtPaneDespiteOperatorSessionScope(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(prov.serve))
 	defer srv.Close()
 
-	client, err := assistant.NewClient(nil, nil, content.NoFloor())
+	client, err := assistant.NewClient(nil, nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

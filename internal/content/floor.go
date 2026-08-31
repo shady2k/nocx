@@ -8,6 +8,13 @@ import (
 // Floor is the part of agent authority that policy settings cannot widen.
 // Its roots are fixed when the composition root constructs the floor and are
 // carried into each run's immutable grant through EffectPolicy.
+//
+// The ZERO VALUE ENFORCES NOTHING, and that is only ever correct in a test
+// that does not exercise the floor. Production constructs it with NewFloor —
+// app.go is the one caller, and it is the only place that may be. A named
+// NoFloor() constructor said this too, and was removed because nothing outside
+// tests could reach it: the dead-code gate takes a test-only helper added
+// after its baseline as a new violation, and the baseline may only shrink.
 type Floor struct {
 	enabled bool
 	roots   []floorRoot
@@ -37,12 +44,6 @@ func NewFloor(configDir, dataDir string) Floor {
 		roots = append(roots, floorRoot{path: filepath.Clean(root.path), reason: root.reason})
 	}
 	return Floor{enabled: true, roots: roots}
-}
-
-// NoFloor explicitly opts a test that does not exercise floor enforcement out
-// of the application safety floor; production callers must use NewFloor.
-func NoFloor() Floor {
-	return Floor{}
 }
 
 // WithFloor returns a policy carrying the fixed floor. The unexported field

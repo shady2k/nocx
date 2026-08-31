@@ -63,12 +63,6 @@ type wireToolOffer struct {
 
 type wireToolOfferKey struct{}
 
-// WithWireToolOffer carries the structural authority context to the HTTP
-// recorder. It contains no question, prompt, arguments or tool output.
-func WithWireToolOffer(ctx context.Context, runID string, grant *content.Grant) context.Context {
-	return WithWireToolOfferState(ctx, runID, grant, NewWireToolOfferState())
-}
-
 // WithWireToolOfferState carries structural tool authority and caller-owned
 // per-run deduplication through the model framework.
 func WithWireToolOfferState(ctx context.Context, runID string, grant *content.Grant, state *WireToolOfferState) context.Context {

@@ -176,12 +176,12 @@ func TestFloor_RawCommandRefusalNormalizesWhitespace(t *testing.T) {
 	}
 }
 
-func TestNoFloor_DisablesEveryFloorRule(t *testing.T) {
-	floor := NoFloor()
+func TestZeroFloor_DisablesEveryFloorRule(t *testing.T) {
+	floor := Floor{}
 	if reason, denied := floor.Refusal(Invocation{Parsed: true, Commands: [][]string{{"rm", "-rf", "/"}}}, nil); denied {
-		t.Fatalf("NoFloor refused dangerous invocation: %s", reason)
+		t.Fatalf("the zero Floor refused dangerous invocation: %s", reason)
 	}
 	if reason, denied := floor.RawCommandRefusal(":(){ :|:& };:"); denied {
-		t.Fatalf("NoFloor refused raw fork bomb: %s", reason)
+		t.Fatalf("the zero Floor refused raw fork bomb: %s", reason)
 	}
 }

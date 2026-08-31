@@ -314,7 +314,7 @@ func TestReadScreen_EndToEndOverTheRealSocket(t *testing.T) {
 	defer srv.Close()
 
 	// The REAL engine: the embedded schemas include readScreen.
-	client, err := assistant.NewClient(nil, nil, content.NoFloor())
+	client, err := assistant.NewClient(nil, nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -431,7 +431,7 @@ func TestReadScreen_EndToEndOverTheRealSocket(t *testing.T) {
 // direction: a renderer that cannot produce the frame (a session it does
 // not know) answers "failed" and the run is not left hanging — the failure
 func TestReadScreen_FailedCaptureAnswersHonestly(t *testing.T) {
-	client, err := assistant.NewClient(nil, nil, content.NoFloor())
+	client, err := assistant.NewClient(nil, nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -518,7 +518,7 @@ func TestReadScreen_FailedCaptureAnswersHonestly(t *testing.T) {
 // leaking a pending request. The ledger is the record: the run reaches a
 // terminal state.
 func TestReadScreen_DisconnectedRendererTerminalizes(t *testing.T) {
-	client, err := assistant.NewClient(nil, nil, content.NoFloor())
+	client, err := assistant.NewClient(nil, nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

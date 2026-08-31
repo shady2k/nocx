@@ -190,12 +190,25 @@ func TestSeedsFireInAnOrdinaryLocalPane(t *testing.T) {
 		t.Fatal("no seeds to check")
 	}
 	env := regexp.MustCompile(`\{\{env:([^}]*)\}\}`)
+	// The second way a seed stops firing, and the one a condition
+	// introduced: a body with a newline in it is refused outright by any
+	// program that has not enabled bracketed paste. Text a condition can
+	// switch off is allowed to be multi-line — the person asked for the
+	// paragraph — but what is left when every tick is off must be one line,
+	// or the seed refuses in an ordinary pane for a paragraph nobody chose.
+	// Writing the tags on their own lines is what breaks this: a standalone
+	// tag line takes its own newline and leaves the previous one behind.
+	block := regexp.MustCompile(`(?s)\{%\s*if\b.*?\{%\s*endif\s*%\}`)
 	for _, s := range seeded {
 		for _, m := range env.FindAllStringSubmatch(s.Body, -1) {
 			if m[1] != "cwd" {
 				t.Errorf("seed %q uses {{env:%s}}, which a local pane cannot answer; "+
 					"a seed may use {{env:cwd}} and parameters only", s.Title, m[1])
 			}
+		}
+		if always := block.ReplaceAllString(s.Body, ""); strings.Contains(always, "\n") {
+			t.Errorf("seed %q is multi-line with every condition off, so a program without "+
+				"bracketed paste refuses it: %q", s.Title, always)
 		}
 	}
 }
@@ -223,6 +236,40 @@ func TestSeedsUseNoRetiredSyntax(t *testing.T) {
 			if strings.Contains(s.Body, retired) {
 				t.Errorf("seed %q uses %s, which no longer fires", s.Title, retired)
 			}
+		}
+	}
+}
+
+// TestSeedsTeachTheSyntaxThatExists is the seeds' other job. They are the
+// only documentation of the template language a person meets before they
+// write one — Settings shows a preview of what you typed, not a grammar —
+// so a form of the syntax that appears in no seed is a form nobody
+// discovers. An option list and a condition were added by nocx-92kes and
+// were in neither.
+//
+// It asserts the SHAPES rather than the bodies, so a seed can be rewritten
+// for a better reason without this failing for the wrong one.
+func TestSeedsTeachTheSyntaxThatExists(t *testing.T) {
+	svc := snippet.NewService(&memStore{existed: false}, counter())
+	seeded, err := svc.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	all := ""
+	for _, s := range seeded {
+		all += s.Body + "\n"
+	}
+	for _, want := range []struct {
+		what string
+		re   string
+	}{
+		{"a parameter with a default", `\{\{[a-z_]+=[^|}]+\}\}`},
+		{"an option list", `\{\{[a-z_]+=[^}]*\|[^}]*\}\}`},
+		{"a condition", `\{%\s*if\s+[a-z_]+\s*%\}`},
+		{"a condition that closes", `\{%\s*endif\s*%\}`},
+	} {
+		if !regexp.MustCompile(want.re).MatchString(all) {
+			t.Errorf("no seed demonstrates %s (%s)", want.what, want.re)
 		}
 	}
 }

@@ -98,6 +98,26 @@ describe('the snippets palette provider', () => {
     expect(h.onDelivered).not.toHaveBeenCalled()
   })
 
+  // A malformed body is not a resolution failure the pane can fix by moving
+  // — it is the snippet being unreadable — so the sentence must say that and
+  // name the problem, or the person edits the wrong thing.
+  it('a body nobody can read says so, and names what is wrong with it', async () => {
+    const h = harness([SNIP({ id: 'a', title: 'broken' })], {
+      kind: 'refused',
+      reason: { kind: 'malformed', detail: 'this condition has no {% endif %}' },
+    })
+    const items = await h.provider.getItems()
+    items[0].run()
+
+    await vi.waitFor(() => {
+      expect(h.onRefused).toHaveBeenCalledTimes(1)
+    })
+    const said = h.onRefused.mock.calls[0][0] as string
+    expect(said).toContain('cannot be read')
+    expect(said).toContain('no {% endif %}')
+    expect(h.onDelivered).not.toHaveBeenCalled()
+  })
+
   // nocx-8rtr.2 — the clipboard is a destination a person chooses, not a
   // remedy they are offered after being told no. Before these,
   // SnippetDestination had one caller outside its own tests.

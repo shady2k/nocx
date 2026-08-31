@@ -98,6 +98,32 @@ func TestLiteralInvocationRuleRejectsPatternCharacters(t *testing.T) {
 	}
 }
 
+func TestStandingRuleRejectsUnresolvedInvocationAndNeverMatchesItLater(t *testing.T) {
+	invocation := content.Invocation{
+		Commands: [][]string{{"cat", "$LOGFILE"}},
+		Parsed:   true,
+		Resources: content.ResourceReport{Unresolved: []content.UnresolvedResource{{
+			Path: "$LOGFILE", Verb: content.ResourceRead,
+			Reason: "could not resolve $LOGFILE without executing shell expansion",
+		}}},
+	}
+	rule, reason := content.StandingRule(invocation)
+	if reason == "" || !strings.Contains(reason, "$LOGFILE") {
+		t.Fatalf("standing rule = %#v, reason = %q, want refusal naming the unresolved variable", rule, reason)
+	}
+	if rule.Matches(invocation) {
+		t.Fatal("an unresolved invocation matched the rule it must not mint")
+	}
+
+	saved := content.InvocationRule{
+		Pattern:  invocation.Commands,
+		Decision: content.DecisionPermit,
+	}
+	if saved.Matches(invocation) {
+		t.Fatal("a saved rule matched a later invocation whose shell expansion may differ")
+	}
+}
+
 func TestStandingRuleUsesCanonicalSingleInvocationLabel(t *testing.T) {
 	rule, reason := content.StandingRule(content.Invocation{
 		Commands: [][]string{{"df", "-h"}},

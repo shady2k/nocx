@@ -90,6 +90,40 @@ func TestApprovalStore_Seam(t *testing.T) {
 	}
 }
 
+func TestApprovalStore_InvocationForPreservesUnresolvedResources(t *testing.T) {
+	store := NewApprovalStore()
+	invocation := content.Invocation{
+		Commands: [][]string{{"cat", "$LOGFILE"}},
+		Parsed:   true,
+		Resources: content.ResourceReport{Unresolved: []content.UnresolvedResource{{
+			Path: "$LOGFILE", Verb: content.ResourceRead,
+			Reason: "could not resolve $LOGFILE without executing shell expansion",
+		}}},
+	}
+	ap := Approval{
+		RunID: "run-dynamic", Attempt: 1, Tool: "session.run",
+		CallID: "call-dynamic", ArgHash: "hash-dynamic",
+		CommandInvocation: true, Invocation: invocation,
+	}
+	store.Request(ap)
+
+	got, parsed, command := store.InvocationFor(ap)
+	if !parsed || !command {
+		t.Fatalf("InvocationFor flags = parsed %v, command %v, want true/true", parsed, command)
+	}
+	if len(got.Resources.Unresolved) != 1 ||
+		got.Resources.Unresolved[0].Path != "$LOGFILE" {
+		t.Fatalf("InvocationFor resources = %+v, want the unresolved shell variable", got.Resources)
+	}
+	saved := content.InvocationRule{
+		Pattern:  invocation.Commands,
+		Decision: content.DecisionPermit,
+	}
+	if saved.Matches(got) {
+		t.Fatal("a cloned unresolved invocation matched a standing rule")
+	}
+}
+
 func TestApprovalStore_DeclinePreservesEffectForStandingWrite(t *testing.T) {
 	store := NewApprovalStore()
 	ap := Approval{

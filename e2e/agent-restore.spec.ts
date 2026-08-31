@@ -25,7 +25,8 @@
  * - THE ASSISTANT'S TWO ACTS are scripted by `e2e/fake-openai.ts`: a
  *   content-only response for the dialogue, and a `run` tool proposal
  *   followed by the answer written from its output for the agent command.
- * - THE GATE for `run` is `mutate-destructive`, set to Allowed through
+ * - THE GATE for the scripted `echo` run is `observe`, and the declaration
+ *   also reaches `mutate-destructive`; both rows are set to Allowed through
  *   Settings → Agent policy, the surface a person uses, so the proposal
  *   EXECUTES rather than suspending. agent-tool-approval.spec.ts owns the
  *   asking; this file needs the command to have actually run.
@@ -68,7 +69,8 @@ const INPUT = '.pane.active .nocx-editor-input'
 const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
 const SETTINGS_ROLES_NAV = '.ui-grouped-nav__item[data-item="roles"]'
 const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
-/** `run` is declared mutate-destructive in internal/agenttools/registry.go. */
+/** `echo` resolves to observe; `session.run` can also reach mutate-destructive. */
+const OBSERVE_ROW = '.st-policy__row[data-effect="observe"]'
 const DESTRUCTIVE_ROW = '.st-policy__row[data-effect="mutate-destructive"]'
 const APPROVAL_TITLE = 'This action needs your approval'
 const RESTORED = '.pane.active .cmd-block[data-restored="true"]'
@@ -290,12 +292,14 @@ test.describe('a restored pane knows what each block was (nocx-4em1z)', () => {
     await setDefaultModel(page, endpointName, 'e2e-model')
 
     await page.locator(SETTINGS_POLICY_NAV).click()
-    const destructive = page.locator(DESTRUCTIVE_ROW)
-    await expect(destructive).toBeVisible({ timeout: 15_000 })
-    await destructive.locator('select').first().selectOption({ label: 'Allowed' })
-    await expect(destructive.locator('.st-policy__state')).toContainText('Allowed', {
-      timeout: 15_000,
-    })
+    for (const row of [OBSERVE_ROW, DESTRUCTIVE_ROW]) {
+      const policyRow = page.locator(row)
+      await expect(policyRow).toBeVisible({ timeout: 15_000 })
+      await policyRow.locator('select').first().selectOption({ label: 'Allowed' })
+      await expect(policyRow.locator('.st-policy__state')).toContainText('Allowed', {
+        timeout: 15_000,
+      })
+    }
     await backToTerminal(page)
 
     // ── 1. A command a person typed ───────────────────────────────────────

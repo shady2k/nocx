@@ -1574,6 +1574,79 @@ func TestMiddleware_RunCommandClassifiesTheCallEffect(t *testing.T) {
 	}
 }
 
+// TestAsk_ScriptedRunCallExecutesAndCompletes watches a model tool call cross
+// the real Ask/ADK boundary, reach the renderer executor, return its result to
+// the model, and close the durable attempt. A kernel-only invocation test would
+// miss a dispatch regression; this uses the ordinary command the e2e journey
+// scripts.
+func TestAsk_ScriptedRunCallExecutesAndCompletes(t *testing.T) {
+	policy := content.EffectPolicy{
+		Observe:           content.EffectRow{Decision: content.DecisionPermit},
+		MutateReversible:  content.EffectRow{Decision: content.DecisionAsk},
+		MutateDestructive: content.EffectRow{Decision: content.DecisionPermit},
+		PrivilegeChange:   content.EffectRow{Decision: content.DecisionAsk},
+		Disclose:          content.EffectRow{Decision: content.DecisionAsk},
+		CrossBoundary:     content.EffectRow{Decision: content.DecisionAsk},
+		Delegate:          content.EffectRow{Decision: content.DecisionAsk},
+	}
+	grant := policy.AsGrant([]content.GrantScope{{Kind: content.ResourceSession, ID: "session-a"}})
+	ledger := &fakeLedger{}
+	requester := &runRequester{entryID: "shell-entry-1"}
+	var emitted ToolCall
+	var emittedCalls int
+	fake, srv := newFakeOpenAI(callThenAnswer(toolCallSpec{
+		name: "session.run",
+		args: `{"command":"echo scripted-tool-call"}`,
+		id:   "call-run",
+	}))
+	defer srv.Close()
+
+	cl, err := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	p := askParams(srv.URL, &grant, ledger, NewApprovalStore())
+	p.Requester = requester
+	if err := cl.Ask(context.Background(), p, func(event AskEvent) error {
+		if event.Kind == AskToolCall && event.Call != nil {
+			emitted = *event.Call
+			emittedCalls++
+		}
+		return nil
+	}); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	if emittedCalls != 1 {
+		t.Fatalf("tool-call events = %d, want 1", emittedCalls)
+	}
+	if emitted.Effect != content.EffectObserve {
+		t.Fatalf("emitted effect = %q, want observe for echo", emitted.Effect)
+	}
+	if requester.asked != 1 {
+		t.Fatalf("renderer executions = %d, want 1", requester.asked)
+	}
+	if ledger.started() != 1 {
+		t.Fatalf("started attempts = %d, want 1", ledger.started())
+	}
+	calls := ledger.calls()
+	finished := false
+	for _, call := range calls {
+		if call == "finish:success" {
+			finished = true
+			break
+		}
+	}
+	if !finished {
+		t.Fatalf("ledger calls = %v, want a completed attempt", calls)
+	}
+	if fake.requests.Load() != 2 {
+		t.Fatalf("model requests = %d, want initial tool call and terminal answer", fake.requests.Load())
+	}
+	if body := fake.body(); !strings.Contains(body, "shell-entry-1") {
+		t.Fatalf("terminal model request = %q, want the executed result", body)
+	}
+}
+
 // TestAsk_EscalationWithoutAResourceResolverCarriesNoResource is the null
 // half: an executable declaration whose resolver is nil names no resource,
 // while a non-nil resolver is a declaration of resource-bearing calls.

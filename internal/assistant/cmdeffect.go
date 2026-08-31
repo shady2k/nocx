@@ -93,11 +93,14 @@ type readProgramRule struct {
 // expose filesystem reads. Resource extraction, rather than this table, owns
 // effect derivation: commands with writes or network access have their own
 // resource verbs below.
+// Side-effect-free output commands such as echo are included because their
+// no-resource form is also observe.
 var readPrograms = map[string]readProgramRule{
 	"cat":    {},
 	"cut":    {},
 	"df":     {},
 	"du":     {},
+	"echo":   {},
 	"file":   {},
 	"free":   {},
 	"grep":   {},

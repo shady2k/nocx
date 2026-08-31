@@ -897,7 +897,8 @@ the sweep runs; which rows are preserved and which are proven absent; how an ope
 reconciled without declaring a running process finished; and how all of that happens without a
 second connection to the encrypted store (ADR-0043).
 
-**2. The durable lifecycle protocol, as its own document.** The clearest way to satisfy every
+**2. The durable lifecycle protocol** — written:
+`.internal/specs/2026-08-31-the-generation-daemon-lifecycle-design.md`. The clearest way to satisfy every
 word above and still break D1a is a daemon that treats bridge EOF as shutdown — which is what
 the code does today (`host.go:154`). It must define daemonization and parent-death behaviour; deterministic endpoint derivation and
 its short-path encoding; atomic socket establishment and stale-path recovery; peer

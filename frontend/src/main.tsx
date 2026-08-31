@@ -181,6 +181,10 @@ function main(): void {
   // The connection condition is the only startup surface that depends on the
   // socket. Mount it now, before the first attempt, so an unavailable backend
   // still leaves a populated application window.
+  // Assigned once PaneManager exists, some 260 lines down. The no-op stands only
+  // for the window between the two, and that window is closed by `main()` being
+  // synchronous: nothing can hide the overlay before the assignment, because the
+  // minimum visible time is a timer and the first `online` arrives off the socket.
   let focusActive: () => void = () => undefined
   const [connectionState, setConnectionState] = createSignal<ConnectionOverlayState>({
     kind: 'waiting',

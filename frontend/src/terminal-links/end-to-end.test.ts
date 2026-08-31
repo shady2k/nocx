@@ -22,6 +22,7 @@ import { lineWith } from '../scrollback/test-helpers'
 import { decorateLinks } from './decorate'
 import { attachLinkClicks } from './surface'
 import { createLinkOpener } from './open'
+import type { LinkOpener } from './open'
 import { createLivePolicy } from './live'
 import { trackLinkModifier, type ArmedTracker } from './armed'
 import type { FilesOpenResult } from '../generated/files.open'
@@ -64,29 +65,42 @@ function frozenBlock(text: string, colourUntil = 0): HTMLElement {
 function harness(): {
   opened: Array<FileViewerTarget & { line?: number }>
   urls: string[]
+  directories: string[]
   armed: ArmedTracker
-  opener: ReturnType<typeof createLinkOpener>
+  opener: LinkOpener
 } {
   const opened: Array<FileViewerTarget & { line?: number }> = []
   const urls: string[] = []
+  const directories: string[] = []
   const opener = createLinkOpener({
     openUrl: (url) => {
       urls.push(url)
       return Promise.resolve()
     },
     openBinding: () => Promise.resolve(BINDING),
+    pathKind: (_bindingId, path) =>
+      Promise.resolve({
+        kind: path === '/Users/a/repo/build' ? ('directory' as const) : ('file' as const),
+      }),
+    openDirectory: (path) => {
+      directories.push(path)
+      return Promise.resolve(true)
+    },
     openViewer: (t) => opened.push(t),
     notify: () => {},
     onBindingLiveness: () => () => {},
   })
-  return { opened, urls, armed: trackLinkModifier(), opener }
+  return { opened, urls, directories, armed: trackLinkModifier(), opener }
 }
 
 function metaClick(el: Element): void {
   el.dispatchEvent(new MouseEvent('click', { bubbles: true, cancelable: true, metaKey: true }))
 }
 
-const flush = (): Promise<void> => new Promise((r) => setTimeout(r, 0))
+const flush = async (): Promise<void> => {
+  await Promise.resolve()
+  await Promise.resolve()
+}
 
 describe('a path printed by a command opens the file it names', () => {
   it('resolves against the tab’s cwd and carries the line', async () => {
@@ -108,6 +122,22 @@ describe('a path printed by a command opens the file it names', () => {
       name: 'architecture.md',
       line: 101,
     })
+    detach()
+    armed.dispose()
+  })
+
+  it('reveals a directory through the Files panel and never opens its viewer', async () => {
+    const block = frozenBlock('see /Users/a/repo/build for generated files')
+    document.body.append(block)
+    decorateLinks(block)
+    const { opened, directories, armed, opener } = harness()
+    const detach = attachLinkClicks(block, { opener, origin: () => ORIGIN, armed })
+
+    metaClick(block.querySelector('a') as Element)
+    await flush()
+
+    expect(directories).toEqual(['/Users/a/repo/build'])
+    expect(opened).toEqual([])
     detach()
     armed.dispose()
   })

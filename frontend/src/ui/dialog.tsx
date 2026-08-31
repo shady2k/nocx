@@ -48,6 +48,8 @@ import {
 import { render } from 'solid-js/web'
 import { pushOverlay, popOverlay, restoreFocus, topOverlay } from './overlay/stack'
 import { Button } from './button'
+import { CloseIcon } from './icons'
+import { IconButton } from './icon-button'
 
 export interface DialogProps {
   /** Whether the dialog is open. */
@@ -87,6 +89,12 @@ export interface DialogProps {
    * closing (the palette's drill-in, nocx-4t37).
    */
   onEscape?: () => boolean
+  /**
+   * Whether the dialog offers a way out. Defaults to true; false suppresses
+   * the universal close control and makes Escape, cancel, and light dismiss
+   * inert for blocking overlays with no underlying surface to return to.
+   */
+  dismissible?: boolean
 }
 
 /**
@@ -103,7 +111,8 @@ export interface DialogProps {
  *   1. an explicit `autofocus` — the caller has said which control, and on a
  *      destructive confirmation that is deliberately the SAFE one;
  *   2. the first real field — what a form is for;
- *   3. the first button — a dialog with nothing to fill in.
+ *   3. the first contextual action — a dialog with nothing to fill in; the
+ *      universal close control is reached later by keyboard navigation.
  * A scroll container matches none of them, so it is reachable by Tab and never
  * chosen for you.
  */
@@ -111,12 +120,15 @@ function focusInitial(d: HTMLDialogElement): void {
   const panel = d.querySelector('.nocx-dialog__panel')
   if (!panel) return
   const enabled = ':not([disabled]):not([tabindex="-1"])'
+  const firstContextualButton = Array.from(
+    panel.querySelectorAll<HTMLButtonElement>('button' + enabled),
+  ).find((button) => !button.closest('.nocx-dialog__close'))
   const target =
     panel.querySelector<HTMLElement>('[autofocus]' + enabled) ??
     panel.querySelector<HTMLElement>(
       `input:not([type="hidden"])${enabled}, select${enabled}, textarea${enabled}`,
     ) ??
-    panel.querySelector<HTMLElement>('button' + enabled)
+    firstContextualButton
   target?.focus()
 }
 
@@ -242,6 +254,7 @@ export const Dialog: Component<DialogProps> = (props) => {
       // z-index, so a notification raised while this is open is only visible
       // if it is a child of it.
       const close = () => {
+        if (props.dismissible === false) return false
         if (props.onEscape?.() === true) return false
         props.onClose()
         return true
@@ -295,6 +308,10 @@ export const Dialog: Component<DialogProps> = (props) => {
     // An overlay state may claim Escape to walk back a step instead of
     // closing (the palette's drill, nocx-4t37); prevent the cancel so the
     // dialog stays open.
+    if (props.dismissible === false) {
+      e.preventDefault()
+      return
+    }
     if (props.onEscape?.() === true) {
       e.preventDefault()
       return
@@ -326,7 +343,7 @@ export const Dialog: Component<DialogProps> = (props) => {
    */
   const onPointerDown = (e: MouseEvent) => {
     const d = ref
-    if (!d) return
+    if (!d || props.dismissible === false) return
     // The toast host renders inside this dialog when it is topmost, so a click
     // on a toast is a click on a descendant that is deliberately outside the
     // panel. Dismissing a notification must not dismiss the form behind it.
@@ -378,6 +395,7 @@ export const Dialog: Component<DialogProps> = (props) => {
     <dialog
       ref={ref}
       class="nocx-dialog"
+      data-dismissible={props.dismissible === false ? 'false' : undefined}
       aria-labelledby={props.title ? titleId : undefined}
       onCancel={onCancel}
       onMouseDown={onPointerDown}
@@ -390,11 +408,28 @@ export const Dialog: Component<DialogProps> = (props) => {
         onTransitionEnd={onPanelTransitionEnd}
         onTransitionCancel={onPanelTransitionCancel}
       >
-        <Show when={props.title}>
-          <h2 id={titleId} class="nocx-dialog__title">
-            {props.title}
-          </h2>
-        </Show>
+        <div class="nocx-dialog__header">
+          <Show when={props.title}>
+            <h2 id={titleId} class="nocx-dialog__title">
+              {props.title}
+            </h2>
+          </Show>
+          {/* This is the universal dismiss affordance. A footer Cancel remains
+              a caller's explicit, contextual action; Dialog does not infer,
+              remove, or replace that action. */}
+          <Show when={props.dismissible !== false}>
+            <span class="nocx-dialog__close">
+              <IconButton
+                ariaLabel="Close dialog"
+                title="Close"
+                size="sm"
+                onClick={() => props.onClose()}
+              >
+                <CloseIcon />
+              </IconButton>
+            </span>
+          </Show>
+        </div>
         {/* The body is a slot with rhythm of its own, not a place children are
             dropped. They used to be panel children directly, and the panel is a
             gapless flex column — so a dialog whose body was several Fields had

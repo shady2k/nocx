@@ -63,7 +63,7 @@ func newGuardedHTTPClient(logger log.Logger, resolve func(ctx context.Context, h
 		// The wire tap is OUTSIDE the guard, so what it records is what the
 		// guard let through — the bytes that actually left. Inside it, it
 		// would record what we hoped to send.
-		Transport:     newWireTapWith(tr, os.Getenv("NOCX_WIRE_LOG"), recorder),
+		Transport:     newWireTapWith(tr, os.Getenv("NOCX_WIRE_LOG"), recorder, logger),
 		CheckRedirect: pt.CheckRedirect,
 	}
 }

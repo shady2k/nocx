@@ -737,11 +737,12 @@ function createHeader(
   // The grammar is the kind's (nocx-ex636): a command header carries the
   // same syntactic highlight pass as the live editor (same lexer, same
   // classes — see shell-highlight.ts); a question is prose and renders
-  // plain, never through the lexer. A running header stays plain: the
-  // command is still being executed, and the static pass is for reading a
-  // finished command back. The frozen branch is innerHTML by design, but
-  // the pass escapes every byte of the text, so command content can never
-  // inject markup.
+  // plain, never through the lexer. The same command markup is painted while
+  // running and after the block freezes. The command is known when the call
+  // is proposed, so repainting it on return made the first paint read as
+  // "the command did not register". The frozen branch uses innerHTML by
+  // design, but the pass escapes every byte of the text, so command content
+  // can never inject markup.
   const cmdSpan = document.createElement('span')
   cmdSpan.className = 'cmd-header-text'
   if (!rules.highlightHeader) {
@@ -761,8 +762,6 @@ function createHeader(
       // reference therefore renders plain, the way a masked one already does
       // (renderRecordedCommand) — the chip is the emphasis.
       cmdSpan.replaceChildren(commandFragment(command))
-    } else if (status === 'running') {
-      cmdSpan.textContent = command || '(empty)'
     } else {
       if (command) paintShellInto(cmdSpan, command, store)
       else cmdSpan.textContent = '(empty)'
@@ -2406,10 +2405,9 @@ export class BlockManager {
       '',
       null,
       null,
-      // The question is out and no answer has arrived: the header paints the
-      // ask kind's in-progress word ("thinking") beside a live pulse, and the
-      // children show the typing dots — both of which the first delta, or a
-      // terminal close, removes.
+      // ask kind's in-progress word ("thinking") beside a live pulse. The
+      // child marker stays for the whole run and is removed only when the
+      // turn closes.
       'waiting',
       this._getContainer,
       (bid, sel) => {
@@ -2474,13 +2472,16 @@ export class BlockManager {
     const now = this._now
     const startedAt = now()
 
-    /** Put the stand-in back, at the END of the children — where the next
-     *  thing the turn writes will land (nocx-vnirv.1). Idempotent: a turn
-     *  already showing it never stacks a second one. Shown while work is in
-     *  flight and nothing has been written yet: from open, and again while a
-     *  tool call runs. */
+    /** Put the stand-in at the END of the children — where the next thing the
+     *  turn writes will land (nocx-vnirv.1). Appending an existing node moves
+     *  it, so repeated calls both keep one marker and keep it at the tail.
+     *  Shown for the whole turn while work is in flight. */
     const showTyping = (): void => {
-      if (children.querySelector(':scope > .cmd-answer-typing')) return
+      const indicator = children.querySelector(':scope > .cmd-answer-typing')
+      if (indicator) {
+        children.appendChild(indicator)
+        return
+      }
       children.appendChild(createWorkingIndicator(blockKindRules('ask').statusChips!.inProgress))
     }
     const hideTyping = (): void => {
@@ -2489,11 +2490,9 @@ export class BlockManager {
     const stopWaiting = (): void => {
       el.querySelector('.cmd-header-right .cmd-answer-waiting')?.remove()
       el.querySelector('.cmd-header-right .cmd-answer-waiting-pulse')?.remove()
-      // Both ends of one fact: the corner stops reporting work and the
-      // children stop standing in for text. A run that fails before any delta
-      // clears both, or the dots would go on typing an answer that will never
-      // arrive.
-      hideTyping()
+      // The corner stops reporting work when the first answer delta lands.
+      // The child marker has a different lifetime: it belongs to the whole
+      // run and is removed only by close.
     }
 
     /** The run of prose being written, and the STORE's id for it. */
@@ -2548,13 +2547,13 @@ export class BlockManager {
       pel.appendChild(outputEl)
       children.appendChild(pel)
       own(pel)
+      showTyping()
       // The body is drawn by its ONE owner (answer-body.ts) — the same
       // function a RESTORED answer draws through, so a turn that comes back
       // after a restart is painted by the code that painted it live
       // (nocx-4em1z).
       const body = createAnswerBody(outputEl, {
         store,
-        onContent: hideTyping,
         copy: copyToClipboard,
       })
       prose = { body, blockId: blockId ?? null }
@@ -2626,6 +2625,7 @@ export class BlockManager {
         cel.dataset.tool = call.tool
         children.appendChild(cel)
         own(cel)
+        showTyping()
       },
       reasoning(text: string): void {
         if (text === '') return
@@ -2641,23 +2641,23 @@ export class BlockManager {
           // text then wrote past. With no run open it is a child of the turn,
           // which is where a model that thinks before it speaks belongs.
           if (prose) prose.body.insert(reasoningNote.el)
-          else {
-            hideTyping()
-            children.appendChild(reasoningNote.el)
-          }
+          else children.appendChild(reasoningNote.el)
         }
         reasoningNote.append(text)
+        showTyping()
       },
       append(text: string, blockId?: string): void {
         if (text === '') return
         stopWaiting()
         proseBody(blockId).append(text)
+        showTyping()
       },
       close(status: 'success' | 'failure' | 'cancelled', error?: string, model?: string): void {
         el.dataset.turnState = status
         el.dispatchEvent(new Event('nocx:block-settled'))
         stopWaiting()
         endProse()
+        hideTyping()
         // A `run` that was announced and never reached a command must not
         // adopt somebody else's block later: the claim dies with the turn.
         if (claimedBy() === children) claim(null)

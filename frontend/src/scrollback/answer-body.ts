@@ -147,6 +147,7 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
         mountCodeBlockCopyButton(copyHost, {
           getText: () => codeText(container),
           copy: opts.copy,
+          keepHostInBlock: true,
         })
       }
     }
@@ -168,8 +169,11 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
         // container, with the marker as its first row.
         codeEl = null
         row.remove()
-        codeContainer().appendChild(row)
+        const container = codeContainer()
+        container.appendChild(row)
         fenceLang = fenceLanguage(line)
+        const label = container.querySelector<HTMLElement>('.ui-code-block__label')
+        if (label) label.textContent = fenceLang || 'Code'
       }
       // The closer was created inside the code region and stays there; the
       // rows after it go back to the prose body.

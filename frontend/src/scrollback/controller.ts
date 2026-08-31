@@ -663,9 +663,10 @@ export class ScrollbackController {
    * @param exitCode Optional exit code from the D payload.
    */
   onCommandEnd(getLine: GetLineFn, endLine: number, exitCode: number | null): void {
+    const followIntent = this._followIntent()
     const rec = this._blockManager.freezeBlock(getLine, endLine, exitCode)
     if (rec) {
-      this._settleFrozen(rec)
+      this._settleFrozen(rec, followIntent)
     }
   }
 
@@ -726,10 +727,23 @@ export class ScrollbackController {
     }
   }
 
+  /** Whether the scroll position is at the live end even if the observer
+   *  briefly lost its target during a layout change. */
+  private _isAtBottom(): boolean {
+    const { scrollTop, clientHeight, scrollHeight } = this.scrollbackArea
+    return clientHeight > 0 && scrollHeight > 0 && scrollTop + clientHeight >= scrollHeight - 2
+  }
+
+  /** Preserve follow intent across a synchronous DOM mutation. */
+  private _followIntent(): boolean {
+    return this._following || this._isAtBottom()
+  }
+
   /** Scroll to the bottom, unless the user has scrolled away from the live
    *  end. */
   scrollToBottom(): void {
-    if (!this._following) return
+    if (!this._followIntent()) return
+    this._following = true
     this._scrollToBottom()
   }
 
@@ -813,7 +827,7 @@ export class ScrollbackController {
     if (this._following) this._scrollToBottom()
   }
 
-  private _glide(mutate: () => void): void {
+  private _glide(mutate: () => void, followIntent = this._followIntent()): void {
     // Measured with any in-flight transform still applied: this is where the
     // stack IS, not where layout says it belongs. A capture taken earlier in
     // this same task wins — see `_captureGlideOrigin`.
@@ -834,7 +848,12 @@ export class ScrollbackController {
     this._cancelGlides()
     mutate()
     this._watchPaintedTop()
-    if (!this._following || !this._motionAllowed()) return
+    if (!followIntent) return
+    // The observer can report the old sentinel position after this mutation
+    // has grown the scroller. The decision belongs to the pre-mutation state.
+    this._following = true
+    this._scrollToBottom()
+    if (!this._motionAllowed()) return
     const dy = before - this.scrollbackInner.getBoundingClientRect().top
     // Below a pixel there is nothing to watch. Above a viewport it is not a
     // settle at all — a clear, a restore, a jump the person asked for — and
@@ -934,11 +953,11 @@ export class ScrollbackController {
    * behaviour with six copies: the glide had to be added in six places, and
    * the seventh path to arrive would have been written without it.
    */
-  private _settleFrozen(rec: BlockRecord): void {
+  private _settleFrozen(rec: BlockRecord, followIntent = this._followIntent()): void {
     this._glide(() => {
       this._clearFrozenRows()
       this.setIdle()
-    })
+    }, followIntent)
     this._scrollToLastBlockEnd(rec.el)
   }
 
@@ -957,12 +976,13 @@ export class ScrollbackController {
    *  sighting, or after FENCE_DEFER_MS at the current output end. The
    *  authority check (kernel freezeBlock) is the caller's. */
   freezeFromAttempt(attempt: ExecutionAttempt, endLine: number): boolean {
+    const followIntent = this._followIntent()
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.freezeFromAttempt(attempt, getLine, endLine, () =>
       this._renderer.cursorLine(),
     )
     if (rec) {
-      this._settleFrozen(rec)
+      this._settleFrozen(rec, followIntent)
       return true
     }
     return false
@@ -971,10 +991,11 @@ export class ScrollbackController {
   /** The attempt-driven abandonment: the attempt went `unknown`, the block
    *  freezes as abandoned — never successful (ADR-0024 §5). */
   abandonAttempt(attempt: ExecutionAttempt, endLine: number): boolean {
+    const followIntent = this._followIntent()
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.abandonAttempt(attempt, getLine, endLine)
     if (rec) {
-      this._settleFrozen(rec)
+      this._settleFrozen(rec, followIntent)
       return true
     }
     return false
@@ -984,10 +1005,11 @@ export class ScrollbackController {
    *  ended before any start frame arrived, so nothing will ever complete it
    *  (nocx-mlyu). Unknown, never successful. */
   abandonUnbound(endLine: number): boolean {
+    const followIntent = this._followIntent()
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.abandonUnbound(getLine, endLine)
     if (rec) {
-      this._settleFrozen(rec)
+      this._settleFrozen(rec, followIntent)
       return true
     }
     return false
@@ -997,10 +1019,11 @@ export class ScrollbackController {
    *  nested environment, so it ends here, painted as neither success nor
    *  failure, and the running slot is freed for the blocks that follow. */
   enterBlock(endLine: number): boolean {
+    const followIntent = this._followIntent()
     const getLine = (y: number) => this._renderer.getBufferLine(y)
     const rec = this._blockManager.freezeEntered(getLine, endLine)
     if (rec) {
-      this._settleFrozen(rec)
+      this._settleFrozen(rec, followIntent)
       return true
     }
     return false

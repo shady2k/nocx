@@ -149,6 +149,84 @@ func TestAsGrantFoldsRunScopesIntoEveryRowAndDerivesEffects(t *testing.T) {
 	}
 }
 
+func TestAsGrantDropsDisjointSelectorKind(t *testing.T) {
+	p := content.EffectPolicy{
+		Observe: content.EffectRow{
+			Decision: content.DecisionPermit,
+			Scopes: []content.GrantScope{{
+				Kind: content.ResourceSession,
+				ID:   "operator-authored-session",
+			}},
+		},
+	}
+	g := p.AsGrant([]content.GrantScope{
+		{Kind: content.ResourceSession, ID: "live-session"},
+		{Kind: content.ResourcePath, ID: "/"},
+		{Kind: content.ResourceContent, ID: "content"},
+	})
+	scopes := g.Policy.RowScopes(content.EffectObserve)
+	if len(scopes) != 2 ||
+		scopes[0] != (content.GrantScope{Kind: content.ResourcePath, ID: "/"}) ||
+		scopes[1] != (content.GrantScope{Kind: content.ResourceContent, ID: "content"}) {
+		t.Fatalf("observe scopes = %+v, want only fence kinds absent from the selector", scopes)
+	}
+	for _, effect := range g.Effects {
+		if effect == content.EffectObserve {
+			t.Fatalf("partly overlapping selector kept observe effect in grant: %v", g.Effects)
+		}
+	}
+}
+
+func TestAsGrantDropsDisjointPathSelector(t *testing.T) {
+	p := content.EffectPolicy{
+		Observe: content.EffectRow{
+			Decision: content.DecisionPermit,
+			Scopes: []content.GrantScope{{
+				Kind: content.ResourcePath,
+				ID:   "/repo",
+			}},
+		},
+	}
+	g := p.AsGrant([]content.GrantScope{{
+		Kind: content.ResourcePath,
+		ID:   "/home/dev",
+	}})
+	if got := g.Policy.RowScopes(content.EffectObserve); len(got) != 0 {
+		t.Fatalf("observe scopes = %+v, want no path coverage for disjoint fence", got)
+	}
+	for _, effect := range g.Effects {
+		if effect == content.EffectObserve {
+			t.Fatalf("disjoint selector kept observe effect in grant: %v", g.Effects)
+		}
+	}
+}
+
+func TestAsGrantKeepsKindWhenAnyFenceScopeOverlaps(t *testing.T) {
+	p := content.EffectPolicy{
+		Observe: content.EffectRow{
+			Decision: content.DecisionPermit,
+			Scopes: []content.GrantScope{{
+				Kind: content.ResourcePath,
+				ID:   "/repo",
+			}},
+		},
+	}
+	g := p.AsGrant([]content.GrantScope{
+		{Kind: content.ResourcePath, ID: "/repo/project"},
+		{Kind: content.ResourcePath, ID: "/home/dev"},
+	})
+	scopes := g.Policy.RowScopes(content.EffectObserve)
+	if len(scopes) != 1 || scopes[0].ID != "/repo/project" {
+		t.Fatalf("observe scopes = %+v, want only the overlapping fence scope", scopes)
+	}
+	for _, effect := range g.Effects {
+		if effect == content.EffectObserve {
+			return
+		}
+	}
+	t.Fatalf("any overlapping fence scope refused observe: %v", g.Effects)
+}
+
 func TestParsePolicyFailsTowardAsking(t *testing.T) {
 	// Criterion 5, asserted for each of the three: unstated (the zero
 	// matrix), empty (a document with no rows), unparseable (not JSON).

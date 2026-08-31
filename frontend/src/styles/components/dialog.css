@@ -115,6 +115,26 @@ dialog.nocx-dialog::backdrop {
   width: 640px;
 }
 
+/* The heading row keeps the universal dismiss affordance visible even for a
+   title-less dialog. Footer Cancel buttons remain the caller's explicit action. */
+.nocx-dialog__header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2, 8px);
+  margin-bottom: var(--space-3, 12px);
+  min-width: 0;
+}
+
+.nocx-dialog__header > .nocx-dialog__title {
+  min-width: 0;
+  margin: 0;
+}
+
+.nocx-dialog__close {
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
 .nocx-dialog__title {
   font-size: var(--font-size-lg, 16px);
   font-weight: 600;

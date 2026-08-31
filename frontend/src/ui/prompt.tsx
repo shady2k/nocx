@@ -4,6 +4,7 @@ import {
   popOverlay,
   pushOverlay,
   restoreFocus,
+  topOverlay,
   topOverlayElement,
   type OverlayEntry,
 } from './overlay/stack'
@@ -62,6 +63,7 @@ function focusInitial(panel: HTMLElement): void {
 export function Prompt(props: PromptProps) {
   let element: HTMLDivElement | undefined
   let entry: OverlayEntry | null = null
+  let removeFocusGuard: (() => void) | null = null
   /**
    * The overlay this prompt renders INSIDE while open, or null to render in
    * place. A modal `<dialog>` lives in the browser's top layer, which is above
@@ -98,10 +100,23 @@ export function Prompt(props: PromptProps) {
         undefined,
         element,
       )
-      // Escape is supplied by the overlay stack's document-level handler —
-      // it closes the topmost overlay, which is this prompt.
-      if (element) focusInitial(element)
+      // Prompt is the keyboard owner while open. Pane activation can finish
+      // the same turn that raised this prompt and focus the composer after
+      // the initial focus below; reclaim that attempt before it reaches the
+      // editor's focus listener.
+      if (element) {
+        const keepFocus = (e: FocusEvent) => {
+          if (topOverlay() !== entry || element?.contains(e.target as Node)) return
+          e.stopPropagation()
+          focusInitial(element)
+        }
+        document.addEventListener('focusin', keepFocus, true)
+        removeFocusGuard = () => document.removeEventListener('focusin', keepFocus, true)
+        focusInitial(element)
+      }
     } else if (!props.open && entry) {
+      removeFocusGuard?.()
+      removeFocusGuard = null
       popOverlay(entry)
       restoreFocus(entry)
       entry = null
@@ -109,6 +124,8 @@ export function Prompt(props: PromptProps) {
   })
 
   onCleanup(() => {
+    removeFocusGuard?.()
+    removeFocusGuard = null
     if (entry) {
       popOverlay(entry)
       restoreFocus(entry)

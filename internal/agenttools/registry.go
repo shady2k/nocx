@@ -333,6 +333,8 @@ var declarations = []Declaration{
 		Params:           "files.create.schema.json",
 		Narrow:           narrowFilesCreate,
 	},
+	// git.status remains declaration-only until its Go executor is wired. Keeping
+	// Narrow nil makes ForGrant omit an action the product cannot currently serve.
 	{
 		Name:          "git.status",
 		Description:   "Report the state of the git working tree you are working in — the current branch and which files are staged, modified or untracked; reach for this before saying anything about uncommitted work.",

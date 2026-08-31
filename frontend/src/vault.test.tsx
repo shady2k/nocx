@@ -30,6 +30,7 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup()
+  document.querySelectorAll('#composer').forEach((element) => element.remove())
   HTMLDialogElement.prototype.showModal = origShowModal
   HTMLDialogElement.prototype.close = origClose
 })
@@ -712,6 +713,35 @@ describe('SetupDialog', () => {
 // ── UnlockDialog ───────────────────────────────────────────────────────
 
 describe('UnlockDialog', () => {
+  it('focuses the passphrase field when opened over a focused composer', () => {
+    const { client } = mockClient()
+    const composer = document.createElement('input')
+    composer.id = 'composer'
+    document.body.appendChild(composer)
+    composer.focus()
+
+    render(() => (
+      <UnlockDialog open onClose={vi.fn()} vaultClient={client} vaultStatus={BASE_STATUS} />
+    ))
+
+    expect(document.activeElement).toBe(screen.getByLabelText('Vault passphrase'))
+  })
+
+  it('keeps the passphrase field focused when the composer tries to reclaim the keyboard', () => {
+    const { client } = mockClient()
+    const composer = document.createElement('input')
+    composer.id = 'composer'
+    document.body.appendChild(composer)
+    composer.focus()
+
+    render(() => (
+      <UnlockDialog open onClose={vi.fn()} vaultClient={client} vaultStatus={BASE_STATUS} />
+    ))
+
+    composer.focus()
+
+    expect(document.activeElement).toBe(screen.getByLabelText('Vault passphrase'))
+  })
   it('calls vaultClient.unseal with passphrase when passphrase is entered', async () => {
     const { client, unseal } = mockClient()
     unseal.mockResolvedValue({})

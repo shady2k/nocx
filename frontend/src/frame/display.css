@@ -9,20 +9,20 @@
   color: var(--color-text);
   font-family: var(--font-family-mono);
   font-size: var(--font-size-terminal);
-  line-height: 1.2;
+  line-height: var(--term-cell-height, 1.2em);
   white-space: pre;
   pointer-events: none;
 }
 
 .nocx-freeze-frame__row {
   display: block;
-  height: 1.2em;
+  height: var(--term-cell-height, 1.2em);
   white-space: pre;
 }
 
 .nocx-freeze-frame__cell {
   display: inline-block;
-  width: 1ch;
-  height: 1.2em;
+  width: var(--term-cell-width, 1ch);
+  height: var(--term-cell-height, 1.2em);
   white-space: pre;
 }

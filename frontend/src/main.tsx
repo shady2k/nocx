@@ -72,9 +72,12 @@ import { profileRows } from './quick-connect-assembly'
 import { showToast } from './ui/toast'
 import { registerFileViewerSurface, openFileViewer } from './file-viewer'
 import { registerTerminalLinks } from './terminal-links'
+import type { LinkPathProbe } from './terminal-links/open'
 import { createUrlOpener } from './open-url'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
+import { FILES_PAGE_SIZE, type FilesRevealHint } from './files/files-store'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
+import { isExpandable } from './ui/tree-row-kind'
 import { uploadSurfaceFor } from './files/upload-surface'
 import { uploadOperations } from './files/upload-operations'
 import { downloadSurfaceFor } from './files/download-surface'
@@ -594,11 +597,13 @@ async function main() {
   const [activeSurfaceType, setActiveSurfaceType] = createSignal<SurfaceType | null>(
     tm.activeSurfaceType(),
   )
+  let rescopeFiles: () => void = () => {}
   tm.onActivePaneChange = () => {
     setActiveSurfaceType(tm.activeSurfaceType())
     setPortsTargetId(tm.portsTargetId())
     setPortsUnavailable(tm.portsUnavailableReason())
     setActiveOrigin(tm.activeOrigin())
+    rescopeFiles()
   }
   // ── Files panel (fm-w10) and its viewer (fm-w7) ──────────────────────
   // The panel's backend surface, wrapped so the composition root owns the
@@ -659,6 +664,8 @@ async function main() {
   // same reason: one store per dispatcher, because a transfer has one state.
   // Without this the panel's Download item would be dead code.
   const downloadSurface = downloadSurfaceFor(dispatcher)
+  let revealFilesPath: ((path: string, hint?: FilesRevealHint) => Promise<boolean>) | null = null
+  let revealFilesView: () => void = () => {}
   const filesView = createFilesView({
     services: filesServicesTracked,
     opener: { open: openFileViewer },
@@ -666,6 +673,10 @@ async function main() {
     activeOrigin,
     upload: uploadSurface,
     download: downloadSurface,
+    onStore: (store) => {
+      revealFilesPath = (path, hint) => store.revealPath(path, hint)
+      rescopeFiles = () => store.rescope(untrack(() => activeOrigin()))
+    },
   })
 
   // Everything running on somebody's behalf, in one list (nocx-hbdw4). Each
@@ -858,9 +869,39 @@ async function main() {
   // keeping its own view of whether a session is still there — and the
   // viewer surface itself.
   const terminalLinkUrlOpener = createUrlOpener({ openUrl: (url) => gitServices.openUrl(url) })
+  const pathKind = async (bindingId: string, path: string): Promise<LinkPathProbe> => {
+    if (path === '/') return { kind: 'directory' }
+    const slash = path.lastIndexOf('/')
+    if (slash < 0) return { kind: 'unknown' }
+    const parent = slash === 0 ? '/' : path.slice(0, slash)
+    let offset = 0
+    for (;;) {
+      const result = await filesServicesTracked.list(bindingId, parent, offset, FILES_PAGE_SIZE)
+      if (result.state !== 'ok') return { kind: 'unknown' }
+      const entry = result.entries.find((candidate) => candidate.path === path)
+      if (entry !== undefined) {
+        if (!isExpandable(entry.kind, entry.linkKind)) return { kind: 'file' }
+        return {
+          kind: 'directory',
+          hint: { bindingId, parentPath: parent, listing: result },
+        }
+      }
+      if (!result.hasMore || result.entries.length === 0) return { kind: 'unknown' }
+      offset = result.offset + result.entries.length
+    }
+  }
+
   registerTerminalLinks({
     openUrl: (url) => terminalLinkUrlOpener.open(url),
     openBinding: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),
+    pathKind,
+    openDirectory: async (path, probe) => {
+      const reveal = revealFilesPath
+      if (reveal === null) return false
+      rescopeFiles()
+      revealFilesView()
+      return reveal(path, probe.hint)
+    },
     openViewer: (target) => openFileViewer(target),
     onBindingLiveness: onFilesBindingLiveness,
     notify: (message) => showToast({ message, level: 'warning' }),
@@ -1268,6 +1309,7 @@ async function main() {
     sidebarWidthCtrl,
     () => activeSurfaceType() === SURFACE_SETTINGS,
   )
+  revealFilesView = () => sidebar.revealView(FILES_VIEW_ID)
 
   // Cmd/Ctrl+, opens or focuses the Settings tab.
   document.addEventListener('keydown', (e) => {

@@ -21,12 +21,21 @@ import (
 	"github.com/shady2k/nocx/internal/helper/proto"
 )
 
-// ExitVersionMismatch is the helper's exit code for a hello carrying the
-// wrong protocol version. The helper writes nothing to stdout first (D5).
+// ExitVersionMismatch is the exit code a helper LAUNCHED DIRECTLY over the
+// exec lane takes on a hello carrying the wrong protocol version, having
+// written nothing to stdout first (D5). It is the value the coordinator's
+// client classifies, and it is stated here because it is a wire constant.
+//
+// No shipped path takes it any more, and that is not an oversight: a helper
+// serving its endpoint holds somebody's running shell, so one caller speaking
+// the wrong version at it ends that CONNECTION and nothing else. The version
+// cannot arrive unnoticed either way — the endpoint's socket is named for the
+// protocol version, so a coordinator only ever dials a helper that speaks its
+// own (internal/helper/endpoint).
 const ExitVersionMismatch = 42
 
 // ErrVersionMismatch reports a hello whose Version disagrees with
-// proto.Version. main maps it to ExitVersionMismatch.
+// proto.Version. The connection ends on it; the helper does not.
 var ErrVersionMismatch = errors.New("host: helper version mismatch")
 
 // Host serves one helper connection: hello, sentinel, then requests until
@@ -294,7 +303,7 @@ func (h *Host) SendNotification(n proto.Notification) error {
 // never stalls the read loop or another request (D13). The per-request
 // context is stored by id so a TypeCancel can reach it.
 func (h *Host) request(ctx context.Context, req proto.Request) {
-	reqCtx, stop := context.WithCancel(ctx)
+	reqCtx, stop := context.WithCancel(WithConnection(ctx, h))
 	h.mu.Lock()
 	h.requests[req.ID] = pendingRequest{stop: stop, service: req.Service, op: req.Op}
 	h.mu.Unlock()
@@ -341,6 +350,26 @@ func (h *Host) request(ctx context.Context, req proto.Request) {
 	resp.Result = raw
 	h.respond(resp)
 }
+
+// connKey carries the connection a request arrived on into the request's
+// context.
+type connKey struct{}
+
+// WithConnection stamps a request's context with the connection it arrived
+// on. A host serves ONE connection, so this is constant per host — but a
+// helper daemon runs several hosts at once (internal/helper/endpoint's accept
+// loop), and a service that answered "the current connection" would then
+// answer the wrong one: a reader attached by coordinator A would have its
+// frames written down coordinator B's socket, because B bound later. The
+// connection is a property of the REQUEST, so it travels with the request.
+func WithConnection(ctx context.Context, conn any) context.Context {
+	return context.WithValue(ctx, connKey{}, conn)
+}
+
+// ConnectionFrom returns the connection a request arrived on, or nil outside a
+// request. A service casts it to whatever it needs from a connection — the
+// session service wants a sink to write data frames and notifications down.
+func ConnectionFrom(ctx context.Context) any { return ctx.Value(connKey{}) }
 
 // abandonCancellable cancels every in-flight request whose service allows
 // cancellation, which is what a dead transport means for a read: the answer

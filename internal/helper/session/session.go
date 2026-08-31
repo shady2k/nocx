@@ -480,18 +480,40 @@ func (s *hostSession) stopSubscriber(sub *subscriber) {
 }
 
 // releaseConnection drops every attachment made on the connection that is
-// going away. The sessions, their windows and their processes all survive it:
-// that is D1, and it is the whole point of the two identities.
-func (s *hostSession) releaseConnection() {
+// going away, AND ONLY THOSE. The sessions, their windows and their processes
+// all survive it: that is D1, and it is the whole point of the two identities.
+// So do the attachments of every other connection, which is what makes this
+// safe to call while other coordinators are still connected (D12).
+//
+// The write capability goes with it when its holder attached on that
+// connection — that is what "the write capability is released when its
+// connection closes, so a replacing coordinator can take it without
+// arbitration" means — and stays put when the holder attached on another.
+//
+// A nil sink releases everything, which is only shutdown (stop).
+func (s *hostSession) releaseConnection(sink Sink) {
 	s.mu.Lock()
 	subs := make([]*subscriber, 0, len(s.subs))
-	for _, sub := range s.subs {
+	for id, sub := range s.subs {
+		if sink != nil && sub.sink != sink {
+			continue
+		}
 		subs = append(subs, sub)
+		delete(s.subs, id)
 	}
-	s.subs = make(map[proto.SubscriberID]*subscriber)
-	s.attachments = make(map[proto.AttachmentID]*attachment)
-	s.writer = nil
-	s.writerAtt = ""
+	gone := make(map[proto.SubscriberID]bool, len(subs))
+	for _, sub := range subs {
+		gone[sub.id] = true
+	}
+	for id, att := range s.attachments {
+		if gone[att.subscriber] {
+			delete(s.attachments, id)
+		}
+	}
+	if s.writer != nil && gone[*s.writer] {
+		s.writer = nil
+		s.writerAtt = ""
+	}
 	s.mu.Unlock()
 
 	for _, sub := range subs {
@@ -533,7 +555,7 @@ func (s *hostSession) stop() {
 	}
 	s.stopped = true
 	s.mu.Unlock()
-	s.releaseConnection()
+	s.releaseConnection(nil)
 	_ = s.proc.Close()
 	s.win.close()
 }

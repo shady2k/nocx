@@ -26,6 +26,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/client"
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
+	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -479,7 +480,7 @@ func (h *hostHelper) open(ctx context.Context, cwd string) (git.Repo, git.OpenOu
 		}
 		c, err := client.Dial(ctx, client.Config{
 			Exec:       lane,
-			Command:    h.f.command,
+			Command:    bridgeCommand(h.f.command, h.f.expectHash),
 			ExpectHash: h.f.expectHash,
 			Log:        h.log,
 		})
@@ -519,6 +520,29 @@ func (h *hostHelper) open(ctx context.Context, cwd string) (git.Repo, git.OpenOu
 	return &refRepo{Repo: repo, released: h.released}, outcome, nil
 }
 
+// bridgeCommand is what the exec lane runs on the remote host: the installed
+// helper, asked to BRIDGE to the endpoint of the generation we installed
+// (level-1 design §5, D11).
+//
+// It is not the helper serving over this channel's stdin and stdout any more,
+// and that is the point. The authoritative endpoint is a private Unix socket
+// on the host; the bridge connects to it and copies bytes, holding no session,
+// no window and no lock. So the sessions live in a process that outlives this
+// channel, this coordinator and this nocx — which is what makes a session
+// survive a coordinator being replaced (D1) — while what rides the ssh channel
+// is exactly what rode it before: the frame protocol, unchanged.
+//
+// The generation is the content hash the installer wrote (D7, D21), because a
+// helper install is content-addressed and the generation IS the build: naming
+// it here is what stops a bridge from reaching a DIFFERENT generation's
+// sessions, and what lets two generations coexist on one host while an old one
+// still holds somebody's shell (D4).
+//
+// No port forwarding is configured and none is required: nothing is forwarded.
+func bridgeCommand(command, generation string) string {
+	return command + " " + endpoint.BridgeCommand + " " + generation
+}
+
 // dialFailure maps a helper dial error onto the §6 open outcome it is,
 // and reports whether the error is a refusal at all. A protocol version
 // or content-hash mismatch is helperVersionMismatch — the file at the
@@ -535,6 +559,13 @@ func dialFailure(err error, host string) (git.OpenOutcome, bool) {
 	case errors.Is(err, client.ErrVersionMismatch), errors.Is(err, client.ErrHashMismatch):
 		outcome.State = git.OpenHelperVersionMismatch
 		outcome.Message = "the helper installed on " + host + " answered with a different protocol version or content than nocx installed — reinstall it to recover (" + err.Error() + ")"
+	case errors.Is(err, client.ErrHelperNotServing):
+		// The bridge reached the host and found no helper serving that
+		// generation, and could not start one. It is its own sentence: "no
+		// helper is running there" is not "the host refused the exec", and the
+		// recovery is different.
+		outcome.State = git.OpenExecForbidden
+		outcome.Message = "no nocx helper is running on " + host + " for the generation nocx installed, and it could not be started: " + err.Error()
 	case errors.Is(err, client.ErrExecForbidden), errors.Is(err, client.ErrNotOurHelper), errors.Is(err, client.ErrSentinelTimeout):
 		outcome.State = git.OpenExecForbidden
 		outcome.Message = "the host did not answer with the nocx helper: " + err.Error()

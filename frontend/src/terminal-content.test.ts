@@ -10769,6 +10769,98 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       teardown()
     }
   })
+  it('corrects the tail after seated growth becomes observable', async () => {
+    let resize: (() => void) | null = null
+    const originalResizeObserver = globalThis.ResizeObserver
+    class DeferredResizeObserver {
+      constructor(callback: ResizeObserverCallback) {
+        resize = () => callback([], this as unknown as ResizeObserver)
+      }
+
+      observe(): void {}
+
+      disconnect(): void {}
+    }
+    vi.stubGlobal('ResizeObserver', DeferredResizeObserver)
+
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask') {
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      }
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    let teardown: (() => void) | undefined
+    try {
+      const mounted = await mountTerminal(makeClipboard(), { attachToDocument: true }, client)
+      teardown = mounted.teardown
+      const { content } = mounted
+      content.setVisible(true)
+      const handler = startCommand(client)
+      await summon(content)
+      await submitQuestion(content, client, 'how did the tail move?')
+      const state = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runState',
+      )?.[1] as ((params: unknown) => void) | undefined
+      expect(state).toBeDefined()
+
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-run',
+          state: 'completed',
+          exitCode: 0,
+          fence: commandFence,
+          completedAt: '2026-08-31T12:00:00Z',
+        },
+      })
+      rendererOf(content)._fireRenderFence({ hex: commandFence, line: 3, buffer: 'normal' })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+
+      const area = scrollbackFor(content).scrollbackArea
+      let scrollHeight = 900
+      let scrollTop = 500
+      Object.defineProperty(area, 'clientHeight', { configurable: true, value: 400 })
+      Object.defineProperty(area, 'scrollHeight', {
+        configurable: true,
+        get: () => scrollHeight,
+      })
+      Object.defineProperty(area, 'scrollTop', {
+        configurable: true,
+        get: () => scrollTop,
+        set: (value: number) => {
+          scrollTop = value
+        },
+      })
+      const scrollTo = vi.fn((options: { top: number }) => {
+        scrollTop = options.top
+      })
+      Object.defineProperty(area, 'scrollTo', { configurable: true, value: scrollTo })
+      scrollbackFor(content).scrollToBottom()
+      scrollTop = 500
+      scrollTo.mockClear()
+
+      state!({ runId: 42, entryId: 'entry-42', state: 'completed', droppedDeltas: 0 })
+      expect(scrollTo).toHaveBeenCalledWith({ top: 900, behavior: 'instant' })
+      expect(resize).toBeDefined()
+
+      // Seating grows the scroller after the first read. The resize callback
+      // is the observable completion of that layout change, not a timer.
+      scrollHeight = 1400
+      resize!()
+      expect(scrollTo).toHaveBeenLastCalledWith({ top: 1400, behavior: 'instant' })
+    } finally {
+      vi.stubGlobal('ResizeObserver', originalResizeObserver)
+      teardown?.()
+    }
+  })
 
   it('Escape seats the answer in scrollback before the running program resumes', async () => {
     const client = makeClient()

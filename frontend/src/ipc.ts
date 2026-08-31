@@ -171,14 +171,23 @@ const EMPTY_RECORDING: SessionRecording = {
 }
 
 /** The gap reason for a stretch that neither the recording nor the ring
- *  holds. It is the renderer's word because the fact is the renderer's to
- *  derive: `produced` belongs to session.output and `replayFrom` to
- *  sessions.live, and neither owner can see the other's number.
+ *  holds. The renderer DERIVES this one because only it can: `produced`
+ *  belongs to session.output and `replayFrom` to sessions.live, and neither
+ *  owner can see the other's number.
  *
- *  EXPORTED so the surface that reports the hole (recovery-notice.ts) reads
- *  the same word this file mints rather than spelling a second copy of it
- *  (nocx-fz4qa). Two string literals that must agree and only meet at
- *  runtime is the shape AGENTS.md calls a regression with a delay fuse. */
+ *  The backend mints the same word for a range nobody recorded on its side
+ *  (internal/content's GapReasonUnrecorded, nocx-k6p18.2), and that is
+ *  deliberate rather than a second owner: it is one fact — nobody has these
+ *  bytes — arrived at from two directions, and one fact told to a user in two
+ *  vocabularies is the defect. Keep them equal. What must stay distinct is
+ *  this and `cap`: the cap dropped bytes that were here, and telling a person
+ *  the cap took bytes it never had would send them to a limit that did
+ *  nothing.
+ *
+ *  EXPORTED so the surface that reports the hole (recovery-notice.tsx) reads
+ *  the word this file mints rather than spelling a second copy of it
+ *  (nocx-fz4qa). Two string literals that must agree and only meet at runtime
+ *  is the same delay-fused shape, one layer up. */
 export const UNRECORDED = 'unrecorded'
 
 /** base64 → bytes. atob is the platform's, and its output is one byte per

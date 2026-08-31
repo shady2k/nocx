@@ -1081,6 +1081,35 @@ type Gap struct {
 	Reason string `json:"reason"`
 }
 
+// The vocabulary for Gap.Reason. One owner for the word (AD-8): the store
+// mints it, the wire carries it verbatim (contracts' gap.reason is a free
+// string), and the renderer picks its sentence from it. A surface that
+// invented its own synonym would be telling a user about the same hole in a
+// second set of words.
+//
+// The two that matter are two DIFFERENT FACTS about who had the bytes, and
+// that is why one value cannot serve for both:
+const (
+	// GapReasonCap — the bytes were here and the per-command retention cap
+	// took them to stay inside its bound. Actionable: the knob that dropped
+	// them is the knob that would have kept them.
+	GapReasonCap = "cap"
+	// GapReasonUnrecorded — nobody ever had them. No recorder was attached
+	// to the stream over this range (nocx-k6p18.2: a coordinator can be
+	// replaced under a live session), so the cap never touched them and
+	// naming it would be a false statement in the product. The renderer
+	// already coined this exact word for the same fact it derives on its
+	// side — the stretch between a recording's end and the ring's oldest
+	// byte (frontend/src/ipc.ts) — and the two are deliberately the same
+	// word because they are the same sentence to a user.
+	GapReasonUnrecorded = "unrecorded"
+	// GapReasonUnknown — a hole whose reason nothing recorded. It is what a
+	// reader says INSTEAD OF GUESSING; see sessionOutputGapReason in
+	// internal/transport, which named the cap here until a second legitimate
+	// reason existed to make that a lie.
+	GapReasonUnknown = "unknown"
+)
+
 // Edge is one relation between entries (design §3.4): the difference
 // between a log and a memory. Cheap, one narrow table.
 type Edge struct {

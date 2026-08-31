@@ -64,6 +64,11 @@ type SessionOutputRecorder interface {
 	// Append records one run of bytes at its stream offset. A result with
 	// Kept false is a refusal — retention is off — and not a failure.
 	Append(ctx context.Context, in content.SessionOutputAppend) (content.SessionOutputResult, error)
+	// Skip advances the recording across a range that was never offered,
+	// records it as a gap carrying `reason`, and leaves the recording
+	// appendable. A result with Kept false is a refusal — retention is
+	// off — and not a failure.
+	Skip(ctx context.Context, sessionID string, resumeAt uint64, reason string) (content.SessionOutputResult, error)
 	// Read returns everything kept for a session, in stream order, with the
 	// byte ranges the bound dropped. An unknown session is an empty
 	// recording and not an error.
@@ -103,16 +108,81 @@ func (s *WSServer) recordSessionOutput(ctx context.Context, sid session.ID, ring
 
 	var pos uint64
 	for {
-		data, from, needsReset := ring.snapshot(pos)
+		data, _, needsReset := ring.snapshot(pos)
 		if needsReset {
-			// Unreachable while the flag above is set — trim never passes
-			// the persistence cursor — and checked rather than assumed
-			// because the cost of being wrong is a recording that claims
-			// bytes it does not hold. Recording that session stops here;
-			// what is already on disk stays, and stays honest.
-			s.log.Warn("session recording lost its place in the ring; recording stops for this session",
-				"session_id", string(sid), "at", pos, "ring_from", from)
-			return
+			// The recorder's cursor is behind the ring's oldest retained
+			// byte, so the bytes between them are gone from both sides:
+			// nothing offered them here and nothing can now. That is a HOLE
+			// and not the end of the recording (nocx-k6p18.2) — this branch
+			// used to return, which cost the whole session for one missed
+			// stretch, and a coordinator that can be replaced under a live
+			// session makes that stretch ordinary rather than a defect.
+			//
+			// It resumes at the ring's OLDEST byte and not at `from`, which
+			// snapshot reports as the write frontier for a client that has
+			// to clear its screen. A recorder has no screen to clear and the
+			// bytes in between are real, so taking `from` would widen the
+			// hole by everything the ring is still holding.
+			//
+			// The loop terminates: `base` only ever moves forward, so each
+			// pass through here advances `pos` strictly, and a second reset
+			// (the base moved again between the two calls) is another hole
+			// honestly recorded rather than a spin.
+			resumeAt := ring.oldestLocked()
+			if resumeAt <= pos {
+				// `base` cannot move backwards, so this is unreachable and
+				// is checked rather than assumed: looping on it would spin a
+				// core, and the cost of being wrong about a ring's cursor is
+				// a recording that claims bytes it does not hold.
+				s.log.Warn("session recording was told to resume where it already is; recording stops for this session",
+					"session_id", string(sid), "at", pos, "resume_at", resumeAt)
+				return
+			}
+			res, err := rec.Skip(ctx, string(sid), resumeAt, content.GapReasonUnrecorded)
+			if err != nil {
+				// A store that cannot record the hole cannot be trusted with
+				// the resume either — the alternative is a recording that
+				// silently joins two stretches that are not adjacent. Said
+				// where every other history write failure is said.
+				if s.historyStatus != nil {
+					s.historyStatus.Raise(HistoryDegradeWriteFailed, err.Error())
+				}
+				s.log.Warn("session recording could not record the hole it fell into; the ring falls back to client acks",
+					"session_id", string(sid), "at", pos, "resume_at", resumeAt, "error", err)
+				return
+			}
+			if !res.Kept {
+				// Retention is off, so there is no recording for a hole to
+				// be a hole in. The cursor stays put and the whole skip is
+				// retried when the setting comes back.
+				if s.recorderIdle(ctx, ring) {
+					return
+				}
+				continue
+			}
+			// A kept skip is a store write that succeeded, so it closes an
+			// open write-failure episode and puts the loop back on the ring
+			// as its consumer — both of which the append path below does for
+			// the same reason, and neither of which may wait for the first
+			// byte after the hole, since a session that produces nothing
+			// more would leave the product asserting a failure that ended.
+			ring.setRecording(true)
+			if s.historyStatus != nil {
+				s.historyStatus.ClearReason(HistoryDegradeWriteFailed)
+			}
+			s.log.Warn("session recording lost its place in the ring; the hole is recorded and recording resumes",
+				"session_id", string(sid), "at", pos, "resume_at", resumeAt)
+			pos = resumeAt
+			// The store owes nothing before the resume point, so the ring
+			// may free up to it. Without this the persistence cursor would
+			// sit at an offset the ring has already discarded until the next
+			// successful append moved it.
+			if err := ring.recordTo(pos); err != nil {
+				s.log.Warn("session recording could not advance its cursor across the hole",
+					"session_id", string(sid), "at", pos, "error", err)
+				return
+			}
+			continue
 		}
 		if len(data) == 0 {
 			if ring.waitForData(ctx, pos) {
@@ -143,22 +213,9 @@ func (s *WSServer) recordSessionOutput(ctx context.Context, sid session.ID, ring
 		}
 		if !res.Kept {
 			// Retention is off. Nothing is durable, so the cursor does not
-			// move and the flag comes down: the ring goes back to being
-			// freed by acks alone, which is the degrade the History section
-			// states. Re-read the stance in a moment — the setting is live.
-			ring.setRecording(false)
-			// The session's end is checked HERE and not at the top of the
-			// loop, because everywhere else the loop is already waiting on
-			// the ring and a close wakes it. This is the one wait that is
-			// not on the ring, so without this line a recorder that had
-			// nothing to keep would go on polling a session that ended.
-			if ring.isClosed() {
+			// move: this append is made again when the setting comes back.
+			if s.recorderIdle(ctx, ring) {
 				return
-			}
-			select {
-			case <-ctx.Done():
-				return
-			case <-time.After(recorderRetryInterval):
 			}
 			continue
 		}
@@ -181,6 +238,32 @@ func (s *WSServer) recordSessionOutput(ctx context.Context, sid session.ID, ring
 				"session_id", string(sid), "at", pos, "error", err)
 			return
 		}
+	}
+}
+
+// recorderIdle parks the loop after the store declined to keep anything, and
+// reports whether the session ended while it was parked.
+//
+// One function for both refusals — an append's and a skip's — because they
+// are one fact: retention is off, so nothing this loop does is durable. The
+// flag comes down, so the ring goes back to being freed by acks alone, which
+// is the degrade the History section states rather than one only a log
+// mentions.
+//
+// The session's end is checked HERE and not at the top of the loop, because
+// everywhere else the loop is already waiting on the ring and a close wakes
+// it. This is the one wait that is not on the ring, so without it a recorder
+// with nothing to keep would go on polling a session that ended.
+func (s *WSServer) recorderIdle(ctx context.Context, ring *outputRing) (stop bool) {
+	ring.setRecording(false)
+	if ring.isClosed() {
+		return true
+	}
+	select {
+	case <-ctx.Done():
+		return true
+	case <-time.After(recorderRetryInterval):
+		return false
 	}
 }
 
@@ -457,10 +540,23 @@ func projectSessionOutput(sid string, size session.Size, from uint64, rec conten
 }
 
 // sessionOutputGapReason names why [start,end) is missing, in the store's
-// own word where the store has one. The fallback is the bound's word rather
-// than a generic one: the retention cap is the only thing that drops bytes
-// from a recording, so a hole with no recorded reason is still that hole —
-// and a vaguer word would tell a reader less than the code already knows.
+// own word where the store has one.
+//
+// The fallback USED TO BE the bound's word, on the argument that the
+// retention cap was the only thing that could drop bytes from a recording,
+// so a hole with no recorded reason was still that hole and a vaguer word
+// would say less than the code knew. That argument died with Skip
+// (nocx-k6p18.2): a range nobody was there to record is a second kind of
+// hole, the cap never touched it, and naming the cap for it is exactly the
+// false statement in the product this change exists to remove — worse than
+// vague, because a user would go and raise a limit that dropped nothing.
+//
+// So it says `unknown`, which is what is actually known. The renderer
+// carries a reason through verbatim and picks its sentence from it, so a
+// word it has not seen degrades to "we do not know" rather than to a
+// confident wrong answer. This is unreachable in practice — the store gives
+// every hole a reason now — and it is a FALLBACK, so the one thing it may
+// not do is guess.
 func sessionOutputGapReason(start, end uint64, gaps []content.Gap) string {
 	for _, g := range gaps {
 		if g.Start < 0 || g.End < 0 {
@@ -473,7 +569,7 @@ func sessionOutputGapReason(start, end uint64, gaps []content.Gap) string {
 			return g.Reason
 		}
 	}
-	return string(content.TruncCap)
+	return content.GapReasonUnknown
 }
 
 // validateSessionOutputRaw is the registered validator for session.output.

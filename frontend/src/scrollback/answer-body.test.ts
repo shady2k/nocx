@@ -3,6 +3,7 @@
 import { describe, expect, it } from 'vitest'
 import { CommandSnapshotStore } from '../command-snapshot'
 import { createAnswerBody } from './answer-body'
+import { blockOutputText } from './blocks'
 
 function renderRows(chunks: string[]): string[] {
   const output = document.createElement('div')
@@ -13,6 +14,50 @@ function renderRows(chunks: string[]): string[] {
     (row) => row.textContent ?? '',
   )
 }
+describe('streamed markdown tables', () => {
+  it('turns split table lines into a grid while preserving row order and text', () => {
+    const block = document.createElement('div')
+    block.className = 'cmd-block'
+    const output = document.createElement('div')
+    output.className = 'cmd-output'
+    block.appendChild(output)
+    const body = createAnswerBody(output, { store: new CommandSnapshotStore() })
+
+    body.append('| Name | Age |\n|---|---:')
+    body.append('|\n| Ada | 37 |\n| only')
+    body.append(' |\nAfter')
+    body.finish()
+
+    const table = output.querySelector<HTMLElement>(':scope > .ui-md-table')
+    expect(table).not.toBeNull()
+    expect(table?.getAttribute('role')).toBe('table')
+    const rows = table?.querySelectorAll<HTMLElement>(':scope > .term-line')
+    expect(rows).toHaveLength(4)
+    expect(Array.from(rows ?? []).map((row) => row.textContent)).toEqual([
+      '| Name | Age |',
+      '|---|---:|',
+      '| Ada | 37 |',
+      '| only |',
+    ])
+    expect(table?.querySelectorAll('.ui-md-table-cell')).toHaveLength(5)
+    expect(table?.querySelector('.ui-md-table-cell-center')).toBeNull()
+    expect(table?.querySelector('.ui-md-table-cell-right')).not.toBeNull()
+    expect(output.querySelector<HTMLElement>(':scope > .term-line')?.textContent).toBe('After')
+    expect(blockOutputText(block)).toBe('| Name | Age |\n|---|---:|\n| Ada | 37 |\n| only |\nAfter')
+  })
+
+  it('keeps prose pipes and inline-code pipes outside a table', () => {
+    const output = document.createElement('div')
+    const body = createAnswerBody(output, { store: new CommandSnapshotStore() })
+    body.append('A | B\nUse `a | b` literally\nNo delimiter here')
+    body.finish()
+
+    expect(output.querySelector('.ui-md-table')).toBeNull()
+    expect(Array.from(output.querySelectorAll('.term-line')).map((row) => row.textContent)).toEqual(
+      ['A | B', 'Use a | b literally', 'No delimiter here'],
+    )
+  })
+})
 
 describe('createAnswerBody leading rows', () => {
   it('drops blank rows before the first non-empty answer row', () => {

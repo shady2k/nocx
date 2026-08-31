@@ -101,3 +101,38 @@
 .ui-md-em {
   font-style: italic;
 }
+
+/* Tables keep their source rows in the answer stack. The rows lose only their
+   own boxes; their cells participate in the bounded grid on the table island. */
+.ui-md-table {
+  display: grid;
+  grid-template-columns: repeat(var(--md-table-columns, 1), minmax(max-content, 1fr));
+  width: 100%;
+}
+
+.term-line.ui-md-table-row {
+  display: contents;
+}
+
+.ui-md-table-cell {
+  min-width: 0;
+  white-space: pre-wrap;
+}
+
+.ui-md-table-cell-center {
+  justify-self: center;
+  text-align: center;
+}
+
+.ui-md-table-cell-right {
+  justify-self: end;
+  text-align: right;
+}
+
+.ui-md-table-row:first-child .ui-md-table-cell {
+  font-weight: 600;
+}
+
+.ui-md-table-source {
+  display: none;
+}

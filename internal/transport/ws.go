@@ -141,6 +141,9 @@ type WSServer struct {
 	registry session.Registry
 	server   *http.Server
 	port     int
+	// heartbeatReadWindow bounds how long a half-open connection may hold its
+	// session before an inbound frame proves the peer is still present.
+	heartbeatReadWindow time.Duration
 
 	// Per-launch capability token (bead nocx-hl3).
 	token       string
@@ -1366,6 +1369,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		filesBySession:      make(map[session.ID]map[string]struct{}),
 		filesPollInterval:   defaultFilesPollInterval,
 		laneCapacity:        DefaultControlLaneCapacity,
+		heartbeatReadWindow: DefaultHeartbeatReadWindow,
 		domainWaitTimeout:   DefaultDomainConflictWaitTimeout,
 		domainMaxQueue:      DefaultDomainMaxQueue,
 		domainQueueDepth:    DefaultDomainQueueDepth,
@@ -1454,6 +1458,7 @@ func (s *WSServer) buildControlPlane() {
 	snippetOp := capability.NewSnippetOperation(gates.config, lane, s.snippets)
 	_ = endpointWired
 	specs := make([]methodSpec, 0, 96)
+	specs = append(specs, s.heartbeatSpecs(immediate)...)
 	specs = append(specs, s.sessionSpecs(lane, gates.session, gates.config)...)
 	specs = append(specs, s.signalSpecs(lane, gates.session)...)
 	specs = append(specs, s.askResolverSpecs(immediate)...)
@@ -2612,11 +2617,17 @@ func (s *WSServer) readLoop(ctx context.Context, wconn *wsConn, state *connState
 		default:
 		}
 
+		if err := wconn.out.SetReadDeadline(time.Now().Add(s.heartbeatReadWindow)); err != nil {
+			return
+		}
 		msgType, data, err := wconn.out.ReadMessage()
 		if err != nil {
 			return
 		}
 
+		if err := wconn.out.SetReadDeadline(time.Now().Add(s.heartbeatReadWindow)); err != nil {
+			return
+		}
 		switch msgType {
 		case websocket.TextMessage:
 			s.handleControlFrame(ctx, wconn, state, data)

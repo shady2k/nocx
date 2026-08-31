@@ -748,15 +748,13 @@ export class WSClient {
     return this.dispatcherImpl
   }
 
-  // connect resolves when the WebSocket handshake completes. Sessions are
-  // not open yet — call openSession() next to get a SessionHandle. The host
-  // defaults to loopback (the Wails shell serves the page locally); the
-  // plain-browser dev path overrides it with the page's own hostname.
-  // The token is the per-launch capability carried in Sec-WebSocket-Protocol.
-  connect(port: number, host = '127.0.0.1', token = ''): Promise<void> {
+  // Start discovery and connection. Sessions are not open yet — call
+  // openSession() next to get a SessionHandle. The Dispatcher asks its
+  // EndpointProvider for the endpoint on every attempt.
+  start(): void {
     this.sessions.clear()
     this.acks.clear()
-    return this.dispatcher.connect(port, host, token)
+    this.dispatcher.start()
   }
 
   /** Call a control-plane method and resolve with its typed result. The

@@ -22,6 +22,7 @@ import type { Candidate } from './candidate'
 import { ProfileClient } from '../profiles'
 import type { SSHProfile } from '../profiles'
 import { Dispatcher } from '../dispatcher'
+import { fixedEndpoint } from '../endpoint'
 import { rankCandidates } from './rank'
 
 const ctx = (over: Partial<SuggestContext> = {}): SuggestContext => ({
@@ -847,7 +848,7 @@ describe('createShellProviders under ssh (nocx-r35s)', () => {
     ...over,
   })
   const client = (): ProfileClient => {
-    const pc = new ProfileClient(new Dispatcher())
+    const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     vi.spyOn(pc, 'listProfiles').mockResolvedValue([profile()])
     vi.spyOn(pc, 'listSSHAliases').mockResolvedValue({
       aliases: [{ alias: 'staging-db', hostName: 'staging.example.com' }],

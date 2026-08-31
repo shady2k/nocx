@@ -14,6 +14,7 @@ import { afterEach, describe, expect, it, vi, type Mock } from 'vitest'
 import { EndpointsSection } from './endpoints-section'
 import { EndpointClient, type Endpoint, type EndpointWrite } from './endpoints'
 import { Dispatcher } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import {
   VaultOperationCancelledError,
   createVaultSecretSource,
@@ -50,7 +51,7 @@ function ep(overrides: Partial<Endpoint> = {}): Endpoint {
 function createClient(initial: Endpoint[] = []) {
   const store: Endpoint[] = [...initial]
   let next = 1
-  const client = new EndpointClient(new Dispatcher())
+  const client = new EndpointClient(new Dispatcher(fixedEndpoint(9876)))
   vi.spyOn(client, 'listEndpoints').mockImplementation(async () => [...store]) // eslint-disable-line @typescript-eslint/require-await
   const createEndpoint = vi
     .spyOn(client, 'createEndpoint')

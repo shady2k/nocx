@@ -55,6 +55,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  appReadyForInput,
   bindEndpoint,
   openImportDestination,
   settingsReady,
@@ -125,6 +126,7 @@ test.describe('the import ask on a stand with no Wails', () => {
     await bindEndpoint(page, ep)
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
 
     // The vault first, because the export carries a bearer token and the
     // import has to have somewhere to put it (design §8.1). This backend has

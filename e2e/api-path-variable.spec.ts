@@ -16,7 +16,7 @@ import { mkdtempSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { bindEndpoint, VaultBackend, type DisposableRoot } from './harness'
+import { appReadyForInput, bindEndpoint, VaultBackend, type DisposableRoot } from './harness'
 import { readStand } from './stand'
 import {
   startPathVariableServer,
@@ -59,6 +59,7 @@ test.describe('a request-owned path variable sends its resolved value', () => {
     await bindEndpoint(page, endpoint)
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
 
     // The activity-bar entry is how a person reaches the API workbench.
     await page.locator('.activity-bar button[data-action="api"]').click()

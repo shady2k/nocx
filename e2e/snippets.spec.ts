@@ -1,4 +1,4 @@
-import { test, expect, promptReady, type Page } from './harness'
+import { appReadyForInput, test, expect, promptReady, type Page } from './harness'
 
 /**
  * e2e: a snippet a person saved reaches a running program, filled in, and
@@ -140,6 +140,7 @@ test.describe('a saved snippet reaches a running program', () => {
   test('fires filled in, without a newline, into the program reading stdin', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
 
     // One env span and one ask span, exactly as the epic's criterion asks.
     // cwd rather than user: `user` is the SSH user and a local shell has
@@ -186,6 +187,7 @@ test.describe('a saved snippet reaches a running program', () => {
   }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
     await createSnippet(page, 'e2e two lines', 'first line\nsecond line')
 
     const blocksBefore = await programWaitingOnStdin(page, 'read x; printf \'got-%s\\n\' "$x"')
@@ -355,6 +357,7 @@ test.describe('a saved snippet reaches a running program', () => {
   }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
     // This stand has no vault set up, so the reference cannot resolve. The
     // rule under test is the one §11.1 states: an unresolved name refuses
     // the whole fire — the literal {{secret:…}} must never reach a running

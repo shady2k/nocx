@@ -48,7 +48,7 @@ describe('log — no Wails runtime (plain browser, jsdom)', () => {
 describe('log — shimmed browser (dev-web, headless e2e)', () => {
   it('still uses the console: the window.go shim carries no Log', () => {
     ;(globalThis as BridgeWindow).go = {
-      main: { WailsApp: { GetWSPort: () => Promise.resolve(1) } },
+      main: { WailsApp: { CheckForUpdate: () => Promise.resolve(null) } },
     }
     installBrowserTransport()
     const info = vi.spyOn(console, 'log').mockImplementation(() => {})

@@ -1,6 +1,6 @@
 import { expect, type Locator, type Page } from '@playwright/test'
 
-import { bindEndpoint, type VaultBackend } from './harness'
+import { appReadyForInput, bindEndpoint, type VaultBackend } from './harness'
 
 export const PLAYGROUND = 'Playground'
 export const ZEN = 'Zen'
@@ -25,6 +25,7 @@ export async function openWorkbench(
   await bindEndpoint(page, ep)
   await page.goto('/')
   await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
+  await appReadyForInput(page)
 
   await page.locator('.activity-bar button[data-action="api"]').click()
   const workbench = page.locator('.api-workbench')

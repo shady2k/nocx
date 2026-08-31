@@ -57,6 +57,7 @@ import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  appReadyForInput,
   VaultBackend,
   bindEndpoint,
   createAiEndpoint,
@@ -239,6 +240,7 @@ async function openApp(page: Page): Promise<void> {
   await bindEndpoint(page, endpoint)
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
+  await appReadyForInput(page)
 }
 
 async function openSettings(page: Page, navSelector: string): Promise<void> {
@@ -452,6 +454,7 @@ test.describe('a multi-step turn reads in order, live and after a restart (nocx-
     const second = await backend.restart()
     await bindEndpoint(page, second)
     await page.reload()
+    await appReadyForInput(page)
     await expect(page.locator('.pane.active .cmd-block[data-restored="true"]').first()).toBeVisible(
       { timeout: 90_000 },
     )

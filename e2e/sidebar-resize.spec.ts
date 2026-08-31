@@ -23,6 +23,7 @@ import { mkdtempSync, appendFileSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  appReadyForInput,
   VaultBackend,
   bindEndpoint,
   documentDir,
@@ -224,6 +225,7 @@ test.describe('sidebar resize (nocx-qmcu)', () => {
       const ep2 = await backend.restart()
       await bindEndpoint(page, ep2)
       await page.reload()
+      await appReadyForInput(page)
       await expect(page.locator('.nocx-tab')).toHaveCount(1, { timeout: 90_000 })
       await expect.poll(() => sidebarWidth(page)).toBe(480)
     } finally {

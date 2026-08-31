@@ -38,7 +38,7 @@ import { test as base, expect } from '@playwright/test'
 import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, bindEndpoint, type DisposableRoot } from './harness'
+import { appReadyForInput, VaultBackend, bindEndpoint, type DisposableRoot } from './harness'
 import { readStand } from './stand'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
@@ -121,6 +121,7 @@ test.describe('recall: typing narrows, and the panel states its coverage', () =>
     await bindEndpoint(page, ep)
     await page.goto('/')
     await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
 
     const input = page.locator(INPUT)
     await expect(input).toBeVisible({ timeout: 10_000 })

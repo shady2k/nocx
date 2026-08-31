@@ -6,11 +6,11 @@
  * binding call would throw and the app would fall back to "no Wails runtime"
  * even where a shim exists to say otherwise. The two browser entry points
  * (vite.dev-view.config.ts for `make dev-web`, e2e/harness.ts for the suite)
- * inject a `window.go` bridge carrying exactly the five bound methods the
- * frontend reads at startup (GetWSPort/GetWSToken/CheckForUpdate/
- * ReportHealthy/ApplyUpdate). Log is deliberately not among them: in a
- * browser a frontend log line belongs in the browser console, which is
- * where v2 put it for the same reason — see `bindingReachable` below.
+ * inject a `window.go` bridge carrying exactly the four bound methods the
+ * frontend reads at startup (ResolveBackend/CheckForUpdate/ReportHealthy/
+ * ApplyUpdate). Log is deliberately not among them: in a browser a frontend
+ * log line belongs in the browser console, which is where v2 put it for the
+ * same reason — see `bindingReachable` below.
  *
  * This adapter installs a custom transport that routes binding calls
  * (object 0 / method 0 of the runtime protocol) into that `window.go` bridge

@@ -344,6 +344,12 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"shell.openUrl": {
 			[]byte(`{"url":"https://example.com"}`),
 		},
+		// The heartbeat asks nothing and carries nothing: the client sends
+		// `{}` (frontend/src/dispatcher.ts), which is the only shape worth
+		// probing for a noParams() method.
+		"transport.ping": {
+			[]byte(`{}`),
+		},
 		"tunnel.open": {
 			[]byte(`{"profileId":"profile-1","destination":"example.com:22"}`),
 		},

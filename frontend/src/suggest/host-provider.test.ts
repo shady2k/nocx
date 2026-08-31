@@ -10,6 +10,7 @@ import type { SuggestContext } from './providers'
 import { ProfileClient } from '../profiles'
 import type { SSHAliasEntry, SSHAliasUnavailable, SSHProfile } from '../profiles'
 import { Dispatcher } from '../dispatcher'
+import { fixedEndpoint } from '../endpoint'
 
 const ctx = (over: Partial<SuggestContext> = {}): SuggestContext => ({
   doc: 'git sta',
@@ -36,7 +37,7 @@ describe('hostProvider', () => {
       unavailable?: SSHAliasUnavailable | null
     } = {},
   ): ProfileClient => {
-    const pc = new ProfileClient(new Dispatcher())
+    const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     vi.spyOn(pc, 'listProfiles').mockResolvedValue(over.profiles ?? [])
     vi.spyOn(pc, 'listSSHAliases').mockResolvedValue({
       aliases: over.aliases ?? [],

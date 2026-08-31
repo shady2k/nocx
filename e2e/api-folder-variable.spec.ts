@@ -18,7 +18,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import type { AddressInfo } from 'node:net'
 
-import { bindEndpoint, VaultBackend, type DisposableRoot } from './harness'
+import { appReadyForInput, bindEndpoint, VaultBackend, type DisposableRoot } from './harness'
 import { readStand } from './stand'
 
 const test = base
@@ -131,6 +131,7 @@ test.describe('a request inherits and sends a folder variable', () => {
     await bindEndpoint(page, endpoint)
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
 
     await page.locator('.activity-bar button[data-action="api"]').click()
     const workbench = page.locator('.api-workbench')

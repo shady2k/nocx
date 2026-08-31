@@ -62,10 +62,8 @@ func main() {
 
 	// The Wails v3 shell. The window is created before Run; on Linux the
 	// platform defers actually loading the webview until activation inside
-	// Run, which happens after ServiceStartup — so the frontend's first
-	// binding calls (GetWSPort/GetWSToken) resolve after the launcher has
-	// found the coordinator, preserving the ordering this composition root
-	// has always relied on.
+	// Run, which happens after ServiceStartup. The frontend's first
+	// ResolveBackend binding call therefore sees the held startup outcome.
 	shell := application.New(application.Options{
 		Name:        "nocx",
 		Description: "A local-first, Warp-style terminal",
@@ -132,6 +130,19 @@ func main() {
 	}
 }
 
+// BackendResolution is the result of one coordinator discovery attempt.
+// Token is returned only to the renderer through this binding; it is never
+// written to logs, argv or the spawned daemon's environment.
+type BackendResolution struct {
+	OK      bool   `json:"ok"`
+	Host    string `json:"host"`
+	Port    int    `json:"port"`
+	Token   string `json:"token"`
+	Kind    string `json:"kind"`
+	Message string `json:"message"`
+	Remedy  string `json:"remedy"`
+}
+
 // WailsApp is the bound service (v3) the frontend reaches over the Wails
 // runtime.
 //
@@ -144,10 +155,19 @@ type WailsApp struct {
 	logger *slog.Logger
 	window *application.WebviewWindow
 
-	// ws is what the launcher learned from the coordinator: the loopback
-	// address and the token the renderer needs. Written once, in
-	// ServiceStartup, before the webview loads.
-	ws coordinator.Hello
+	// launchCoordinatorFn is the launcher seam used by ResolveBackend. The
+	// production value is nil, which selects launchCoordinator; tests can
+	// exercise both binding outcomes without starting a daemon.
+	launchCoordinatorFn func(context.Context, string) (coordinator.Launch, error)
+
+	// launchMu serializes discovery attempts and protects launchFailure. The
+	// renderer normally provides single-flight, but the binding remains safe
+	// when callers arrive concurrently.
+	launchMu sync.Mutex
+
+	// launchFailure holds a startup failure until the first binding call can
+	// report it to the renderer. A later call retries the launcher.
+	launchFailure *coordinator.LaunchFailure
 
 	// notices holds what the launcher said a person must be told — today
 	// only that an incompatible coordinator was replaced and its sessions
@@ -248,17 +268,17 @@ func (w *WailsApp) ServiceStartup(ctx context.Context, _ application.ServiceOpti
 
 	launchCtx, cancel := context.WithTimeout(ctx, launchTimeout)
 	defer cancel()
-	launch, err := w.launchCoordinator(launchCtx, execPath)
+	launch, err := w.runLaunch(launchCtx, execPath)
 	if err != nil {
-		// A window with no backend is not a window: say why, in a dialog a
-		// person can read, and then quit. Asynchronously, because the dialog
-		// is dispatched onto the main thread and this hook is running before
-		// the event loop that would service it.
+		// Keep the typed outcome until the frontend can ask for it. The
+		// window must remain alive so Retry can run the launcher again.
+		failure := launchFailure(err)
+		w.launchMu.Lock()
+		w.launchFailure = failure
+		w.launchMu.Unlock()
 		w.logger.Error("nocx cannot reach its backend", "error", err)
-		go w.fatal("nocx cannot start", err.Error())
 		return nil
 	}
-	w.ws = launch.Hello
 	// From here a health report can certify: the updater can name the
 	// backend that answered this window, and refuse anything else.
 	w.probe.Attach(launch)
@@ -401,6 +421,128 @@ func (w *WailsApp) ServiceShutdown() error {
 	return nil
 }
 
+// runLaunch keeps ServiceStartup and ResolveBackend on one launcher path.
+func (w *WailsApp) runLaunch(ctx context.Context, execPath string) (coordinator.Launch, error) {
+	if w.launchCoordinatorFn != nil {
+		return w.launchCoordinatorFn(ctx, execPath)
+	}
+	return w.launchCoordinator(ctx, execPath)
+}
+
+// ResolveBackend runs one discovery attempt. A startup failure is reported
+// once before a later call retries, so the renderer sees the original reason
+// without turning startup into a second launch.
+func (w *WailsApp) ResolveBackend() BackendResolution {
+	w.launchMu.Lock()
+	defer w.launchMu.Unlock()
+
+	if failure := w.launchFailure; failure != nil {
+		w.launchFailure = nil
+		return backendFailureResolution(failure)
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), launchTimeout)
+	defer cancel()
+	execPath, err := os.Executable()
+	if err != nil {
+		failure := coordinator.NewLaunchFailure(
+			coordinator.FailureProfileUnusable,
+			"The application executable path could not be resolved.",
+			"Check that nocx can read its installation, then retry.",
+			err,
+		)
+		return backendFailureResolution(failure)
+	}
+	launch, err := w.runLaunch(ctx, execPath)
+	if err != nil {
+		if w.logger != nil {
+			w.logger.Error("nocx backend discovery failed", "error", err)
+		}
+		return backendFailureResolution(launchFailure(err))
+	}
+	if w.probe != nil {
+		w.probe.Attach(launch)
+	}
+	if w.attention == nil && w.window != nil {
+		w.startAttention(context.Background())
+	}
+	return backendResolution(launch.Hello)
+}
+
+func launchFailure(err error) *coordinator.LaunchFailure {
+	if failure, ok := coordinator.AsLaunchFailure(err); ok {
+		return failure
+	}
+	return coordinator.NewLaunchFailure(
+		coordinator.FailureNotReady,
+		"The nocx backend could not be reached.",
+		"Retry the launch, then check the backend's startup log if it continues.",
+		err,
+	)
+}
+
+func backendFailureResolution(failure *coordinator.LaunchFailure) BackendResolution {
+	return BackendResolution{
+		Kind:    string(failure.Kind),
+		Message: failure.Message,
+		Remedy:  failure.Remedy,
+	}
+}
+
+func backendResolution(hello coordinator.Hello) BackendResolution {
+	host, portText, err := net.SplitHostPort(hello.WSAddress)
+	if err != nil {
+		return backendFailureResolution(coordinator.NewLaunchFailure(
+			coordinator.FailureNotReady,
+			"The nocx backend reported an invalid WebSocket address.",
+			"Retry the launch, then check the backend's startup log if it continues.",
+			err,
+		))
+	}
+	port, err := strconv.Atoi(portText)
+	if err != nil || port <= 0 {
+		return backendFailureResolution(coordinator.NewLaunchFailure(
+			coordinator.FailureNotReady,
+			"The nocx backend reported an invalid WebSocket port.",
+			"Retry the launch, then check the backend's startup log if it continues.",
+			err,
+		))
+	}
+	return BackendResolution{
+		OK:    true,
+		Host:  host,
+		Port:  port,
+		Token: hello.WSToken,
+	}
+}
+
+func profilePathHint() string {
+	if base, err := os.UserConfigDir(); err == nil {
+		return filepath.Join(base, storage.AppDirName)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		return filepath.Join(home, ".config", storage.AppDirName)
+	}
+	return storage.AppDirName
+}
+
+func serverPathHint(execPath, dataDir string) string {
+	if runtime.GOOS == "darwin" {
+		return serverbin.SiblingPath(execPath)
+	}
+	return filepath.Join(dataDir, serverbin.DirName)
+}
+
+func serverBinaryRemedy() string {
+	if runtime.GOOS == "linux" {
+		return "Repair the nocx server binary under ~/.local/share/nocx/bin, then retry."
+	}
+	if runtime.GOOS == "darwin" {
+		return "Reinstall nocx, then retry."
+	}
+	return "Reinstall nocx, then retry."
+}
+
 // launchCoordinator finds the running nocx-server or raises one.
 //
 // This is the composition root for the launcher: every seam it depends on —
@@ -410,7 +552,13 @@ func (w *WailsApp) ServiceShutdown() error {
 func (w *WailsApp) launchCoordinator(ctx context.Context, execPath string) (coordinator.Launch, error) {
 	paths, err := storage.NewAppPaths()
 	if err != nil {
-		return coordinator.Launch{}, fmt.Errorf("resolving the profile directories: %w", err)
+		profilePath := profilePathHint()
+		return coordinator.Launch{}, coordinator.NewLaunchFailure(
+			coordinator.FailureProfileUnusable,
+			fmt.Sprintf("The profile directories at %s could not be read or written.", profilePath),
+			fmt.Sprintf("Check that %s can be read and written, then retry.", profilePath),
+			err,
+		)
 	}
 	// Where this build's nocx-server must be spawned from. On darwin that
 	// is the binary beside this executable inside the bundle; on Linux it
@@ -426,7 +574,13 @@ func (w *WailsApp) launchCoordinator(ctx context.Context, execPath string) (coor
 			Version: version.Version,
 		})
 	if err != nil {
-		return coordinator.Launch{}, fmt.Errorf("installing the coordinator binary: %w", err)
+		pathHint := serverPathHint(execPath, paths.DataDir())
+		return coordinator.Launch{}, coordinator.NewLaunchFailure(
+			coordinator.FailureServerBinaryUnusable,
+			fmt.Sprintf("The nocx server binary at %s could not be installed or used.", pathHint),
+			serverBinaryRemedy(),
+			err,
+		)
 	}
 
 	dir := coordinator.RuntimeDir(paths)
@@ -510,56 +664,12 @@ func (w *WailsApp) showNotices() {
 	}
 }
 
-// fatal shows a message and ends the process. Used only for a startup that
-// cannot produce a working window.
-func (w *WailsApp) fatal(title, message string) {
-	app := application.Get()
-	if app == nil {
-		os.Exit(1)
-	}
-	app.Dialog.Error().SetTitle(title).SetMessage(message).Show()
-	app.Quit()
-}
-
 func (w *WailsApp) shutdown() {
 	// The daemon is NOT stopped here. It outliving this window is the whole
 	// point of moving it out (design §1); when the last client detaches it
 	// ends itself after a grace period, which is nocx-server's decision and
 	// not a window's.
 	w.logger.Info("nocx window shutting down")
-}
-
-// GetWSPort reports the port the coordinator's WebSocket is listening on.
-//
-// The renderer has always been given a port and connects to loopback, so the
-// binding keeps its name and its signature and only its SOURCE has changed:
-// the address now comes from the discovery socket rather than from a server
-// this process started. 0 means the launcher never got one, and the fatal
-// dialog above is already on screen saying why.
-func (w *WailsApp) GetWSPort() int {
-	if w.ws.WSAddress == "" {
-		return 0
-	}
-	_, port, err := net.SplitHostPort(w.ws.WSAddress)
-	if err != nil {
-		w.logger.Error("the coordinator reported an address with no port", "wsAddress", w.ws.WSAddress, "error", err)
-		return 0
-	}
-	n, err := strconv.Atoi(port)
-	if err != nil {
-		w.logger.Error("the coordinator reported a non-numeric port", "wsAddress", w.ws.WSAddress, "error", err)
-		return 0
-	}
-	return n
-}
-
-// GetWSToken reports the capability that opens that WebSocket.
-//
-// It reaches this process over the discovery socket and leaves it only
-// through this binding — never a log line, never argv, never the spawned
-// daemon's environment (design §6).
-func (w *WailsApp) GetWSToken() string {
-	return w.ws.WSToken
 }
 
 // ── the client host: what this window IMPLEMENTS for the coordinator ──────

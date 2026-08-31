@@ -1,4 +1,4 @@
-import { test, expect, promptReady } from './harness'
+import { appReadyForInput, test, expect, promptReady } from './harness'
 
 // Sidebar e2e — activity bar zones, toolbar keyboard, panel behaviour.
 // These tests run against the full app so layout, focus and ARIA are real.
@@ -23,6 +23,7 @@ const ACTIONS_GROUP = '[role="group"][aria-label="Actions"]'
 
 test('the activity bar renders as a toolbar with views and actions groups', async ({ page }) => {
   await page.goto('/')
+  await appReadyForInput(page)
 
   // The activity bar toolbar exists
   await expect(page.locator(TOOLBAR)).toBeAttached()
@@ -46,6 +47,7 @@ test('the activity bar renders as a toolbar with views and actions groups', asyn
 
 test('the panel is collapsed exactly when no view is active', async ({ page }) => {
   await page.goto('/')
+  await appReadyForInput(page)
   // The app takes focus into the editor as it comes up, and it does so AFTER
   // the toolbar is in the DOM. Driving the bar before that races the startup
   // and loses: the click lands, the app then moves focus, and the assertion
@@ -101,5 +103,6 @@ test('the settings gear is keyboard-reachable', async ({ page }) => {
 
 test('the toolbar has aria-label="Activity bar"', async ({ page }) => {
   await page.goto('/')
+  await appReadyForInput(page)
   await expect(page.locator(TOOLBAR)).toHaveAttribute('aria-label', 'Activity bar')
 })

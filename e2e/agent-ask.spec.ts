@@ -71,7 +71,7 @@ import { test as base, expect, type Locator, type Page } from '@playwright/test'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, bindEndpoint, settingsReady } from './harness'
+import { VaultBackend, appReadyForInput, bindEndpoint, settingsReady } from './harness'
 import { readStand } from './stand'
 import { FakeOpenAI, type FakeRequest } from './fake-openai'
 import { fieldChip } from './secret-field'
@@ -187,6 +187,7 @@ async function openApp(page: Page): Promise<void> {
   await bindEndpoint(page, endpoint)
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
+  await appReadyForInput(page)
 }
 
 /** Open Settings via the keyboard shortcut and select the Endpoints page in

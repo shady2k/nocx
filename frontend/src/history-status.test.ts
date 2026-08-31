@@ -23,6 +23,7 @@ import type { WSClient } from './ipc'
 import { SettingsContent } from './settings-content'
 import { ProfileClient } from './profiles'
 import { Dispatcher } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import type { PaneHost } from './pane-content'
 import type { Declaration, SettingsGroup } from './settings-domain'
 
@@ -316,7 +317,7 @@ async function mountSettings(
   target: HTMLElement,
   store?: HistoryStatusStore,
 ): Promise<SettingsContent> {
-  const client = new ProfileClient(new Dispatcher())
+  const client = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
   vi.spyOn(client, 'describeSettings').mockResolvedValue({
     declarations: HISTORY_DECLS,
     groups: GROUPS,

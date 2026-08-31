@@ -7,6 +7,20 @@ export { expect } from '@playwright/test'
 export type { Page } from '@playwright/test'
 
 /**
+ * Wait until the startup/reconnect overlay has left the top layer.
+ *
+ * The native dialog makes the rest of the document inert while it is open.
+ * This is deliberately separate from `promptReady`: callers that use a
+ * shortcut or fill a different control after navigation still need to wait
+ * for the application's input gate without asserting a particular editor.
+ */
+export async function appReadyForInput(page: Page): Promise<void> {
+  const overlay = page.locator('dialog:has(.ui-connection-overlay)')
+  await baseExpect(overlay).toHaveCount(1, { timeout: 10_000 })
+  await baseExpect(overlay).not.toHaveAttribute('open', { timeout: 10_000 })
+}
+
+/**
  * Wait until the prompt editor owns input and typing can safely begin.
  *
  * Scoped to the ACTIVE pane, not to the document. Every open tab has its own
@@ -20,6 +34,7 @@ export type { Page } from '@playwright/test'
  * property of the tab under test, not of whichever editor the DOM lists first.
  */
 export async function promptReady(page: Page): Promise<void> {
+  await appReadyForInput(page)
   const input = page.locator('.pane.active .nocx-editor-input')
   await baseExpect(input).toBeVisible({ timeout: 10_000 })
   await baseExpect(input).toBeFocused({ timeout: 10_000 })
@@ -126,8 +141,16 @@ async function injectWailsShim(page: Page): Promise<void> {
       ;(window as unknown as { go: unknown }).go = {
         main: {
           WailsApp: {
-            GetWSPort: () => Promise.resolve(opts.p),
-            GetWSToken: () => Promise.resolve(opts.t),
+            ResolveBackend: () =>
+              Promise.resolve({
+                ok: true,
+                host: '127.0.0.1',
+                port: opts.p,
+                token: opts.t,
+                kind: '',
+                message: '',
+                remedy: '',
+              }),
             CheckForUpdate: () => Promise.resolve(null),
             ReportHealthy: () => Promise.resolve(),
             ApplyUpdate: () => Promise.resolve(),
@@ -429,6 +452,27 @@ export interface BackendEndpoint {
   port: number
   token: string
 }
+
+export async function resolveBackend(page: Page): Promise<BackendEndpoint> {
+  return page.evaluate(async () => {
+    type Resolution = { ok: true; port: number; token: string } | { ok: false; message: string }
+    type WailsBridge = {
+      go?: {
+        main?: {
+          WailsApp?: {
+            ResolveBackend?: () => Promise<Resolution>
+          }
+        }
+      }
+    }
+    const bridgeWindow = window as unknown as WailsBridge
+    const resolve = bridgeWindow.go?.main?.WailsApp?.ResolveBackend
+    if (!resolve) throw new Error('ResolveBackend binding not available')
+    const result = await resolve()
+    if (!result.ok) throw new Error(result.message)
+    return { port: result.port, token: result.token }
+  })
+}
 /**
  * Read the vault lifecycle from the backend the spec is actually exercising.
  *
@@ -517,8 +561,8 @@ export function collectionsDir(isolatedHome: string, name: string): string {
 }
 
 /**
- * Point the page at a backend THIS SPEC started, by supplying the two wails
- * bindings the frontend reads at startup.
+ * Point the page at a backend THIS SPEC started, by supplying ResolveBackend,
+ * the binding the frontend reads at startup.
  *
  * Legal only on the headless path, and it refuses everywhere else. Under
  * `wails dev` the HTML wails serves is:
@@ -563,8 +607,16 @@ export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promi
       const workbenchGo = {
         main: {
           WailsApp: {
-            GetWSPort: () => Promise.resolve(opts.p),
-            GetWSToken: () => Promise.resolve(opts.t),
+            ResolveBackend: () =>
+              Promise.resolve({
+                ok: true,
+                host: '127.0.0.1',
+                port: opts.p,
+                token: opts.t,
+                kind: '',
+                message: '',
+                remedy: '',
+              }),
             CheckForUpdate: () => Promise.resolve(null),
             ReportHealthy: () => Promise.resolve(),
             ApplyUpdate: () => Promise.resolve(),
@@ -583,6 +635,51 @@ export async function bindEndpoint(page: Page, endpoint: BackendEndpoint): Promi
     },
     { p: endpoint.port, t: endpoint.token },
   )
+}
+type ResolvableBackendResolution =
+  | {
+      ok: true
+      host: string
+      port: number
+      token: string
+      kind: ''
+      message: ''
+      remedy: ''
+    }
+  | { ok: false; kind: string; message: string; remedy: string }
+
+/**
+ * Point a page at a Node-owned endpoint that is resolved afresh on every
+ * frontend connection attempt. Unlike bindEndpoint, this is intentionally
+ * callable: restart-oriented specs must not keep returning a dead port or
+ * token from the first launch.
+ */
+export async function bindResolvableEndpoint(
+  page: Page,
+  resolver: () => Promise<ResolvableBackendResolution>,
+): Promise<void> {
+  await page.exposeFunction('__nocxResolveBackend', resolver)
+  await page.context().addInitScript(() => {
+    type ResolverWindow = Window & {
+      __nocxResolveBackend?: () => Promise<ResolvableBackendResolution>
+    }
+    const workbenchGo = {
+      main: {
+        WailsApp: {
+          ResolveBackend: () => (window as ResolverWindow).__nocxResolveBackend!(),
+          CheckForUpdate: () => Promise.resolve(null),
+          ReportHealthy: () => Promise.resolve(),
+          ApplyUpdate: () => Promise.resolve(),
+        },
+      },
+    }
+    Object.defineProperty(window, 'go', {
+      configurable: true,
+      enumerable: true,
+      get: () => workbenchGo,
+      set: () => undefined,
+    })
+  })
 }
 
 /**

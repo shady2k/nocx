@@ -2,6 +2,7 @@ package content
 
 import (
 	"context"
+	"time"
 
 	"github.com/shady2k/nocx/internal/log"
 )
@@ -69,6 +70,32 @@ func (s *Stub) APIRuns() APIRunRepository {
 func (s *Stub) SessionOutput() SessionOutputRepository {
 	s.log.Info("content stub: SessionOutput called (no-op)")
 	return &sessionOutputStub{log: s.log}
+}
+
+// Reconcile returns a reconciler with nothing to reconcile. It is not a
+// refusal: a store that never opened inherited no sessions, so an empty
+// pending set is the honest answer and every verdict is about a session it
+// never carried over.
+func (s *Stub) Reconcile() SessionReconciler {
+	s.log.Info("content stub: Reconcile called (no-op)")
+	return &reconcileStub{log: s.log}
+}
+
+type reconcileStub struct {
+	log log.Logger
+}
+
+func (s *reconcileStub) Pending(_ context.Context) ([]PendingSession, error) {
+	return nil, nil
+}
+
+func (s *reconcileStub) Apply(_ context.Context, j SessionJudgement) error {
+	s.log.Info("content stub: SessionReconciler.Apply", "session_id", j.SessionID, "verdict", string(j.Verdict))
+	return ErrNotPending
+}
+
+func (s *reconcileStub) SweepStale(_ context.Context, _ time.Duration) (int, error) {
+	return 0, nil
 }
 
 type sessionOutputStub struct {

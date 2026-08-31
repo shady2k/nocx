@@ -49,6 +49,10 @@ func (f *captureFakeDB) Layout() content.LayoutRepository               { return
 func (f *captureFakeDB) APIRuns() content.APIRunRepository              { return nil }
 func (f *captureFakeDB) SessionOutput() content.SessionOutputRepository { return nil }
 
+// Reconcile: this fake inherited no sessions, so there is nothing to
+// reconcile and no reconciler to hand out.
+func (f *captureFakeDB) Reconcile() content.SessionReconciler { return nil }
+
 func (f *captureFakeDB) RecordCompleted(_ context.Context, in content.CompletedCommand) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()

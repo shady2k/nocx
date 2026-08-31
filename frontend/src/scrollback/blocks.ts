@@ -104,7 +104,21 @@ export type FrozenStatus = 'success' | 'failure' | 'entered' | 'unknown'
  *  the moment the header derived a terminal chip from the status, which is
  *  what the group's one owner below does: a block spelled `success` would
  *  state an outcome it does not have. */
-type HeaderStatus = 'running' | 'waiting' | 'settled' | 'cancelled' | FrozenStatus
+type HeaderStatus =
+  | 'running'
+  | 'waiting'
+  | 'settled'
+  | 'cancelled'
+  // `unreconciled` is the THIRD STATE (nocx-k6p18.5), and it is deliberately
+  // here rather than in FrozenStatus: the LIVE path can never produce it. It
+  // arrives only from the store, on a restored block whose session was carried
+  // over from a previous coordinator and could not be asked about — so a block
+  // built with it has its rows fixed, like every other built status, and the
+  // one thing it must never do is claim an outcome. `unknown` claims one from
+  // the finished end ("this did not finish") and `running` from the other; a
+  // command whose host nobody could reach is neither.
+  | 'unreconciled'
+  | FrozenStatus
 
 /** The statuses a BUILT block can be handed — everything a header knows
  *  except `running`, which belongs to createRunningBlock's element and never
@@ -263,8 +277,14 @@ const BLOCK_KIND_RULES: Record<BlockKind, BlockKindRules> = {
       terminal: ({ status, exitCode }) => {
         // An 'entered' block froze on environment entry (N6): it carries no
         // exit code and must never paint success or failure, whatever code
-        // the local D later delivers to the ledger.
-        if (status === 'entered' || exitCode === null) return null
+        // the local D later delivers to the ledger. An 'unreconciled' block
+        // is the same refusal for a different reason (nocx-k6p18.5): nobody
+        // could be asked whether it is still running, so an outcome chip
+        // would be an answer this build does not have. Both are listed
+        // explicitly rather than left to the exitCode check below, because
+        // the rule is about the STATUS and a later exit code arriving must
+        // not silently start painting one.
+        if (status === 'entered' || status === 'unreconciled' || exitCode === null) return null
         return exitCode === 0 ? { ok: true, text: 'ok' } : { ok: false, text: `exit ${exitCode}` }
       },
     },
@@ -1332,6 +1352,11 @@ export function createCommandBlock(
   // neither success nor failure. The hook a stylesheet styles; the header
   // itself already refuses to paint an exit code or a failure for it.
   if (status === 'entered') wrapper.classList.add('cmd-block-entered')
+  // The third state's hook, and the reason it is a class rather than a chip:
+  // a chip states an outcome, and this block has none — what it has is a
+  // reason, which the pane's notice says once for all of them rather than
+  // repeating on every header (nocx-k6p18.5).
+  if (status === 'unreconciled') wrapper.classList.add('cmd-block-unreconciled')
   // A command carrying a vault reference renders its references as chips,
   // so the header's own text no longer spells the command. Copy reads the
   // full text from here — the reference intact, which is what the user

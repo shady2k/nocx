@@ -81,6 +81,12 @@ type ContentDB interface {
 	// id and a stream offset — neither an entry nor a request — which is why
 	// it owns its own two tables rather than widening the ledger's.
 	SessionOutput() SessionOutputRepository
+	// Reconcile returns the restart-reconciliation seam (reconcile.go,
+	// nocx-k6p18.5). `Open` no longer judges the sessions it inherits — it
+	// cannot, because asking needs a carrier and the carrier may need the
+	// vault, which needs this store — so it carries them over and this is
+	// where the three verdicts land afterwards.
+	Reconcile() SessionReconciler
 }
 
 // Redaction is one structured redaction segment on a history row. Offsets

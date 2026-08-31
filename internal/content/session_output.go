@@ -174,15 +174,24 @@ type SessionOutputRecording struct {
 // SessionOutputRepository owns session_output and session_output_chunks. It
 // is the ONE writer of both.
 //
-// Lifetime: a recording lives as long as the pipe it records. A session is
-// server-authoritative, lives inside one backend process and cannot outlive
-// it (AD-7, D5), so at store-open no recording names anything live and the
-// startup sweep drops them all — the same sentence dropDeadSessions already
-// makes about `sessions`, and the same one owner making it. That is why
-// these rows are NOT in the budget sweep: its unit is `artifacts.byte_len`
-// ordered by `ingest_seq`, and a session recording has neither. Giving it
-// one would mean a second meaning for that column or a second ordering
-// inside one sweep.
+// Lifetime, and it is longer than it was (nocx-k6p18.5). It used to end at
+// the next store-open: a session lived inside one backend process and could
+// not outlive it (AD-7, D5), so at store-open no recording named anything live
+// and the startup sweep dropped them all. The helper owns the host now, so a
+// recording found at open may be of a session that is still producing bytes,
+// and deleting it because the READER went away would throw out exactly what
+// the promise exists to keep. A recording therefore lives from its first
+// append until its session is reconciled ABSENT — a reachable generation was
+// asked and does not hold it — or until the age bound takes one nobody could
+// ever ask about (reconcile.go).
+//
+// These rows are still NOT in the budget sweep: its unit is
+// `artifacts.byte_len` ordered by `ingest_seq`, and a session recording has
+// neither. Giving it one would mean a second meaning for that column or a
+// second ordering inside one sweep. What changed is that "the bound on a dead
+// one" is no longer a line inside `Open` — it is the absent verdict and the
+// retention age, which is why removing the first without adding the second
+// would have been unshippable.
 type SessionOutputRepository interface {
 	// Append records bytes at their stream offset, evicting the oldest
 	// non-head bytes if the recording would exceed the per-command cap. It

@@ -79,6 +79,19 @@ export interface Entry {
    */
   status: 'pending' | 'running' | 'success' | 'failure' | 'interrupted' | 'unknown'
   /**
+   * The THIRD state (nocx-k6p18.5): this row's session was carried over from a previous coordinator and NOBODY COULD BE ASKED whether it still exists, so the row is neither running nor finished — and this says why nobody could be asked. It is a CAUSE and never a verdict: a refused connection, a timeout, a sealed vault and an unreachable host each produce one of these, and none of them means the session ended. Null is the ordinary case: the session was judged, or the row names none. Always present, never omitted, because absent and null are different bytes and a renderer must be able to tell 'this build does not send it' from 'this row is reconciled'. The vocabulary is closed so the renderer owns the sentence and a backend rewording never changes what a person reads.
+   */
+  unreconciled:
+    | null
+    | (
+        | 'notYetAsked'
+        | 'noInventory'
+        | 'connectionRefused'
+        | 'timedOut'
+        | 'hostUnreachable'
+        | 'vaultSealed'
+      )
+  /**
    * The store's wall clock when the row was created, in Unix milliseconds. Display only — a duration is never a difference of wall clocks.
    */
   submittedAt: number

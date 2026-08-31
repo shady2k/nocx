@@ -8,12 +8,12 @@ package content_test
 // Both edges, and neither does the other's work. Every assertion here spans a
 // RESTART — the store is closed and reopened — because that is the interval
 // the two edges disagree over, and reading a column back in the process that
-// wrote it cannot see it: a session dies with the backend (D5) and a pane does
-// not.
+// wrote it cannot see it: a pane outlives every backend, and a session outlives
+// only the one it was opened in — or, since nocx-k6p18.5, outlives that one too
+// and ends when a reachable host says it has.
 
 import (
 	"context"
-	"encoding/hex"
 	"errors"
 	"testing"
 
@@ -86,11 +86,14 @@ func TestBlockIsFoundByItsPaneAfterARestart(t *testing.T) {
 }
 
 // Both edges at once, which is the assertion that proves they are not
-// redundant: after a restart the block STILL NAMES ITS PANE and NO LONGER
-// NAMES A SESSION. The nulling is not automatic — the session row has to go,
-// and Open is what removes it, because at store-open every session row was
-// written by a previous incarnation.
-func TestAfterARestartABlockNamesItsPaneAndNoSession(t *testing.T) {
+// redundant: the block STILL NAMES ITS PANE and NO LONGER NAMES A SESSION
+// once that session is gone. The nulling is not automatic — the session row
+// has to go — and WHEN it goes moved with nocx-k6p18.5: `Open` no longer
+// removes the row, because a session can now outlive the coordinator that
+// opened it and Open cannot ask whether this one did. The row goes when a
+// reachable generation is asked and reports the session absent, which is what
+// this test now does explicitly.
+func TestABlockKeepsItsPaneWhenItsSessionIsReconciledAbsent(t *testing.T) {
 	ctx := context.Background()
 	db, led, path := newLedgerAt(t)
 	aPaneUnder(t, db, "ws-1", "tab-1", "pane-1")
@@ -132,15 +135,31 @@ func TestAfterARestartABlockNamesItsPaneAndNoSession(t *testing.T) {
 	}
 	defer func() { _ = again.Close() }()
 
+	// A restart alone decides nothing now: the row is carried over, and the
+	// block goes on naming the session until somebody could actually ask.
+	carried, err := again.Ledger().Entry(ctx, id)
+	if err != nil || carried == nil {
+		t.Fatalf("Entry after restart: %+v, %v", carried, err)
+	}
+	if carried.SessionID == nil || *carried.SessionID != sessionID {
+		t.Fatalf("sessionId after restart = %v, want %s — Open judges nothing", carried.SessionID, sessionID)
+	}
+
+	if applyErr := again.Reconcile().Apply(ctx, content.SessionJudgement{
+		SessionID: sessionID, Verdict: content.VerdictAbsent,
+	}); applyErr != nil {
+		t.Fatalf("Apply(absent): %v", applyErr)
+	}
+
 	after, err := again.Ledger().Entry(ctx, id)
 	if err != nil || after == nil {
-		t.Fatalf("Entry after restart: %+v, %v", after, err)
+		t.Fatalf("Entry after the verdict: %+v, %v", after, err)
 	}
 	if after.PaneID == nil || *after.PaneID != "pane-1" {
-		t.Fatalf("paneId after restart = %v, want pane-1 — the anchor is durable", after.PaneID)
+		t.Fatalf("paneId after the verdict = %v, want pane-1 — the anchor is durable", after.PaneID)
 	}
 	if after.SessionID != nil {
-		t.Fatalf("sessionId after restart = %v, want nil — the pipe died with the backend", *after.SessionID)
+		t.Fatalf("sessionId after the verdict = %v, want nil — the host says that pipe is gone", *after.SessionID)
 	}
 }
 
@@ -265,82 +284,14 @@ func TestClosingAPaneKeepsTheAnchorAndTheBlock(t *testing.T) {
 	}
 }
 
-// ── the startup sweep's own failure path (nocx-rtg0.28) ──────────────────
-
-// dropDeadSessions runs inside Open, so its failure is Open's failure — and
-// that is the whole point of testing it: the sweep is what makes
-// entries.session_id's "null once that pipe is gone" true, and a store that
-// came up with the sweep silently skipped would hand out rows naming sessions
-// of a backend that is no longer running. Refusing to open is the only honest
-// answer; a half-swept store is the soft degrade AGENTS.md names.
+// ── the sweep's own failure path moved with the sweep ────────────────────
 //
-// The interval has both ends: the file is UNCHANGED from before the failed
-// Open until a later Open succeeds, which is asserted by opening again with
-// the trigger gone and finding the block's provenance exactly as it was.
-func TestOpenFailsWhenTheDeadSessionSweepIsRefused(t *testing.T) {
-	ctx := context.Background()
-	db, led, path := newLedgerAt(t)
-	aPaneUnder(t, db, "ws-1", "tab-1", "pane-1")
-	envReady(t, led, "local")
-
-	const sessionID = "session-of-the-dead-backend"
-	if err := led.CreateSession(ctx, content.Session{ID: sessionID, WorkspaceID: "ws-1"}); err != nil {
-		t.Fatalf("CreateSession: %v", err)
-	}
-	const id = "00000000-0000-7000-8000-00000000f001"
-	if _, err := led.Submit(ctx, content.SubmitEntry{
-		ID: id, Client: "test-client", EnvironmentID: "local",
-		PaneID: strPtr("pane-1"), SessionID: strPtr(sessionID),
-		Cwd: "/repo", Kind: content.EntryShell, Intent: "make ci",
-	}); err != nil {
-		t.Fatalf("Submit: %v", err)
-	}
-	if err := db.Close(); err != nil {
-		t.Fatalf("Close: %v", err)
-	}
-
-	// Refuse the sweep's DELETE the way the retention failure tests refuse
-	// theirs: a trigger in the encrypted file, installed while nothing holds
-	// it, so the statement fails for a real reason rather than a stubbed one.
-	if err := rawLedger(t, path, hex.EncodeToString(testKey()),
-		`CREATE TRIGGER sweep_boom BEFORE DELETE ON sessions
-		 BEGIN SELECT RAISE(ABORT, 'sweep refused'); END`,
-	); err != nil {
-		t.Fatalf("install sweep trigger: %v", err)
-	}
-
-	again, err := reopenStore(t, path)
-	if err == nil {
-		_ = again.Close()
-		t.Fatal("Open succeeded while the dead-session sweep was refused")
-	}
-	if again != nil {
-		t.Fatal("Open returned a store alongside its error — a refused open must hand out nothing")
-	}
-
-	// The other end: with the refusal removed the store opens, the sweep runs,
-	// and the row is exactly where it was — its pane kept, its dead session
-	// dropped. Nothing was half-done by the failed attempt.
-	if dropErr := rawLedger(t, path, hex.EncodeToString(testKey()), `DROP TRIGGER sweep_boom`); dropErr != nil {
-		t.Fatalf("remove sweep trigger: %v", dropErr)
-	}
-	healthy, err := reopenStore(t, path)
-	if err != nil {
-		t.Fatalf("reopen after the refusal was lifted: %v", err)
-	}
-	defer func() { _ = healthy.Close() }()
-
-	got, err := healthy.Ledger().Entry(ctx, id)
-	if err != nil || got == nil {
-		t.Fatalf("Entry after recovery = %+v, %v", got, err)
-	}
-	if got.PaneID == nil || *got.PaneID != "pane-1" {
-		t.Fatalf("paneId after recovery = %v, want pane-1", got.PaneID)
-	}
-	if got.SessionID != nil {
-		t.Fatalf("sessionId after recovery = %v, want nil — the sweep ran this time", *got.SessionID)
-	}
-}
+// TestOpenFailsWhenTheDeadSessionSweepIsRefused lived here: it installed a
+// trigger that refused `DELETE FROM sessions` and asserted that Open failed
+// rather than handing out a half-swept store. `Open` no longer deletes a
+// sessions row at all (nocx-k6p18.5), so the property it guarded belongs to
+// whoever does — it is TestARefusedAbsentSweepLeavesNothingHalfJudged in
+// reconcile_test.go, with the same trigger and the same both-ended interval.
 
 // A TURN has the same anchor as a command, and for the same reason
 // (nocx-4em1z). The owner watched a restored tab lose every question and

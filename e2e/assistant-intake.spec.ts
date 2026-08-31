@@ -133,7 +133,9 @@ async function waitForChatRequests(count: number): Promise<FakeRequest[]> {
 }
 
 async function expectCompletedAnswer(page: Page, inputText: string, answer: string): Promise<void> {
-  const turn = page.locator('.pane.active .cmd-block').filter({ hasText: inputText }).last()
+  const turn = page
+    .locator('.pane.active .cmd-block')
+    .filter({ hasText: inputText, has: page.locator('[data-answer-body]') })
   await expect(turn.locator(':scope > .cmd-header .cmd-header-exit')).toHaveText('completed', {
     timeout: 30_000,
   })

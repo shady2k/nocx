@@ -95,10 +95,25 @@ documents that closing the lane ends the remote process. That contract still hol
 stub and for the bridge (D6). It stops applying to the daemon because the daemon never holds an
 SSH descriptor.
 
-**And the survival promise is scoped.** Ordinary OpenSSH supports this. A server using
-`ForceCommand`, PAM session cleanup, or systemd/cgroup session scoping may kill descendants
-regardless of `setsid`. Such a host is detected by the daemon being gone at step 6 and is
-reported as unsupported for durable sessions, not silently retried.
+**The readiness handshake is bounded, framed and reaped**, because "one bounded record" bounds
+a size and not a wait:
+
+- a **fixed readiness deadline** on the stub, in the spirit of the client's existing five-second
+  sentinel (`launch.go:30`) though not necessarily that number;
+- a **framed** success-or-error record with a maximum size, and a defined answer for a partial or
+  malformed one;
+- on timeout or malformed record, the stub **terminates and reaps the not-yet-ready daemon's
+  process group** rather than leaving an unreachable process holding a lock;
+- **stderr is treated separately from the record.** stdout/stderr interleaving over SSH is not a
+  protocol, so diagnostics travel beside the record and never inside it.
+
+**And the survival promise is scoped — but the failure is not over-attributed.** Ordinary
+OpenSSH supports this; a server using `ForceCommand`, PAM session cleanup or systemd/cgroup
+session scoping may kill descendants regardless of `setsid`. **A failure at the authenticated
+hello proves that durable launch verification failed, not why**: a daemon crash, a bind failure
+after readiness, policy cleanup and a hostile wrapper all present identically. The product
+reports "durable launch unsupported or failed" and retains the diagnostic evidence; it does not
+claim to have detected a particular host policy.
 
 ### D2 — Five shutdown cases, and the first two are not shutdown
 
@@ -173,11 +188,12 @@ trade. Here it is inverted: under a shared home two machines would read the _sam
 the collision this namespace exists to prevent. Its macOS half also returns an `ioreg` error
 rather than `errNoMachineID`, so it would not even reach its own fallback consistently.
 
-**A host with no identity of its own fails conservative, not closed and not silent.** nocx
-cannot prove such a home is unshared, so it uses one namespace and **refuses automatic
-retirement**, saying so in the footprint surface. Generations accumulate visibly and removably
-rather than one machine silently retiring another's live work. Refusing the helper outright
-would cost containers and minimal images a feature they can otherwise have.
+**A host with no identity of its own is refused a durable execution host, visibly.** An earlier
+draft used one shared namespace and disabled only automatic retirement — which recreates the bug
+this namespace exists to fix, because retirement is not the only destructive path: `Ensure`
+removes an incomplete canonical directory before reinstalling (`install.go:130`), uninstall
+removes the whole tree, and manual cleanup would be one machine tidying another's work. The
+ordinary non-durable SSH path is untouched, and the product says why durability is unavailable.
 
 **Establishment is `internal/coordinator`'s logic, extracted** (§1): verify the directory is
 owned by this user and is not a symlink (`ErrForeignOwner`), create it `0700`, check the path
@@ -230,7 +246,7 @@ and the repaint request (execution-host D9) hangs off this flag.
 
 **Local**: the coordinator connects to the endpoint directly.
 
-**Remote**: a per-connection **bridge** — `nocx-helper bridge <gen12>` over the pty-less exec
+**Remote**: a per-connection **bridge** — `nocx-helper bridge <generation>` over the pty-less exec
 lane — connects to the endpoint on the far side and copies bytes between it and the lane. The
 bridge is stateless and disposable: it holds no session, no window and no lock.
 
@@ -261,14 +277,15 @@ take it without arbitration.
 
 ### D7 — Discovery, retirement, and the reconciliation of a tombstone
 
-**Discovery is a listing.** A coordinator lists `~/.nocx/helper/`, and for each entry derives
-`<gen12>` and probes its endpoint under its own `<machine8>`. Reachable means live; that plus
+**Discovery is a listing, and it resolves the machine namespace first.** A coordinator resolves
+`<machine>` (D3), lists `~/.nocx/helper/<machine>/`, and probes each entry's endpoint under the
+same `<machine>`. Reachable means live; that plus
 `sessions` per generation is the whole inventory, with no index to keep consistent.
 
 **Retirement is the execution-host design's D5**, whose steps are frozen ABI and are restated
 here only where this document adds mechanism:
 
-- The lock is `flock(LOCK_EX)` held for the daemon's life on `<gen12>.lock`. `probe-prunable`
+- The lock is `flock(LOCK_EX)` held for the daemon's life on `<generation>.lock`. `probe-prunable`
   attempts `LOCK_EX|LOCK_NB`: failure means held.
 - On success the probe **retains** the lock while the coordinator renames the install
   directory to `<name>.tomb.<nonce>`, then releases. The canonical path is gone before the
@@ -288,9 +305,14 @@ here only where this document adds mechanism:
 2. Reconcile its durable pane → (generation, session) map against what the live generations
    report, **before** the content store's startup sweep runs — which is the second blocking
    prerequisite and its own document.
-3. Attach and **begin draining** each live session's window (execution-host D16), before the
-   vault is open, because reading needs neither the vault nor `content.db`.
-4. Open the store; start the recorder; record a `Skip` for whatever flowed while it was closed.
+3. Attach and **begin draining** each live session's window (execution-host D16) **where the
+   destination is reachable without vault credentials** — locally, and remotely with a key in an
+   agent or an unencrypted file. Reading needs neither the vault nor `content.db`; _reaching_ the
+   reader can need both, since SSH authentication may resolve a `KeySecretID` through the sealed
+   vault (`ssh_auth.go:99`, `:142`, `:244`). A vault-gated destination is marked **pending
+   unlock** and is not described as draining.
+4. Open the store; start the recorder **once the carrier is also reachable**; record a `Skip`
+   for whatever the window lost while it was closed.
 5. Install the current generation if absent; retire unheld ones; reconcile tombstones.
 
 The order is the decision. Draining before the store opens is what keeps human time out of the
@@ -332,10 +354,15 @@ read gap; retiring last is what keeps a slow install from delaying a live sessio
     discovery, install-repair, retirement and tombstone reconciliation leave A's **install
     directory**, lock, endpoint and sessions intact — the assertion that the earlier
     lock-only namespace would have failed.
-15. **A host with no machine identity refuses automatic retirement** and says so, rather than
-    namespacing two machines onto one identity. Asserted against a host with no
-    `/etc/machine-id`, and asserted specifically to **not** fall back to `contentkey`'s minted
-    id.
+15. **A host with no machine identity is refused a durable execution host**, and says so, rather
+    than namespacing two machines onto one identity. Asserted against a host with no
+    `/etc/machine-id`; asserted specifically to **not** fall back to `contentkey`'s minted id;
+    and asserted that the ordinary non-durable SSH tab still opens.
+    15a. **A hung daemon does not hang the launch**: a daemon that binds and then never writes its
+    readiness record is abandoned at the deadline, its process group is reaped, and its lock is
+    free afterwards — asserted by a `probe-prunable` that succeeds.
+    15b. **A malformed or partial readiness record is a failure, not a guess**, and a diagnostic on
+    stderr never satisfies the record.
 16. **One writer**: a second `attach` requesting the write capability is refused and names the
     holder; when the holder's connection closes, the next request succeeds.
 17. **Readers are unlimited**: many concurrent readers of one session see identical bytes at

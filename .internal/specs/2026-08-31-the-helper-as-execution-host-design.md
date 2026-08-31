@@ -222,8 +222,9 @@ begins after.
 
 ### D4 — Generations coexist, and held generations are never pruned
 
-`~/.nocx/helper/<version>-<goos>-<goarch>-<hash>/` is content-addressed: a new version
-installs into a **new** directory and does not touch the old.
+`~/.nocx/helper/<machine>/<version>-<goos>-<goarch>-<hash>/` is content-addressed within its
+machine namespace (D5): a new version installs into a **new** directory and does not touch the
+old.
 
 Prune's rule changes from "not current" to:
 
@@ -315,10 +316,12 @@ of each generation — 2.8 MB apiece (§6) — which is the price of a shared ho
 nobody else. An earlier draft rejected this on the claim that it "would double the footprint for
 every user"; **that claim was false** and is withdrawn with it.
 
-**The machine identity is obtained on the host, and it fails conservative.** `deploy.Probe`
-already runs on the far side to resolve `goos`/`goarch`; it returns the machine identity in the
-same round trip — `/etc/machine-id` (or `/var/lib/dbus/machine-id`) on Linux, `IOPlatformUUID`
-on macOS.
+**The machine identity is obtained on the host, by extending a round trip that already exists.**
+`deploy.Probe` runs on the far side today and returns **only** `GOOS`/`GOARCH` from `uname -s -m`
+(`platform.go:14`, `:27`) — it does **not** return an identity, and an earlier draft said it did.
+It is extended to: `/etc/machine-id` (or `/var/lib/dbus/machine-id`) on Linux, `IOPlatformUUID`
+on macOS. That is a real change to `Platform`, to the probe's command and to its failure
+classification, not a field that is already there.
 
 **It must not fall back to `internal/contentkey`.** That package's `machineIDOrMinted` mints an
 identifier and keeps it "beside the salt" in the **config directory** when the host exposes
@@ -326,10 +329,19 @@ none — a deliberate and correct trade for a content key, and exactly inverted 
 shared home two machines would read the _same_ minted id, which is the collision this namespace
 exists to prevent.
 
-When the host exposes no identity of its own, nocx **cannot prove the home is not shared**, so
-it uses a single namespace and **refuses automatic retirement**, saying so in the footprint
-surface (D13). Generations then accumulate visibly and removably rather than one machine
-silently retiring another's live work.
+**When the host exposes no identity of its own, the durable execution host is refused, visibly.**
+An earlier draft answered this with one shared namespace and no automatic retirement — and that
+recreates the bug this section exists to fix, by the argument two paragraphs above: retirement is
+not the only destructive path. `Ensure` removes an incomplete or corrupt canonical directory
+before reinstalling it (`install.go:130`), uninstall removes the whole tree, and a person doing
+the "visible and removable" cleanup the draft offered would be doing it across two machines'
+work. Disabling only the automatic path leaves three destructive paths open, which is exactly
+what was wrong with the draft before it.
+
+So: no stable machine identity means **no durable session on that host**. The tab still opens —
+the ordinary non-durable SSH path is untouched — and the product says why durability is
+unavailable. Knowingly reintroducing a corruption mode is not worth keeping a feature on a host
+that cannot name itself.
 
 ### D6 — The coordinator retires generations; the helper only tells the truth about itself
 
@@ -455,13 +467,32 @@ is its output. The product says which recording has a gap and where.
 **The bound is a configurable cap, defaulting to 4 MiB** — raised from the shipped 256 KiB,
 and see §6 for what the measurements say it buys.
 
-**It is a cap, not an allocation.** `write` computes `free := RingCapacity - len(r.buf)` and
-`buf` grows by append, so a quiet session holds nothing and only a producing one pays. Raising
-the ceiling therefore costs idle sessions **zero**, which is what makes a generous default the
-cheap answer rather than the expensive one.
+**It is a cap rather than an eager allocation — and that is a narrower claim than an earlier
+draft made.** A fresh window's buffer is nil (`ring.go:100`) and grows by `append`
+(`ring.go:162`), so a session that has never produced output does not reserve its capacity, and
+`RingCapacity` has **no production code reference outside `ring.go`** — `outbound.go` and
+`ws_session_record.go` mention it only in comments, and `ws.go` uses only `CreditLimit` and
+`FairChunk`, which stay constants. Making the bound a per-session field is therefore contained
+to one package.
+
+**But "an idle session holds nothing" is false as a general statement, and the draft's assertion
+would have passed anyway.** `append` may allocate a backing array larger than `len(buf)`; `trim`
+advances the slice (`ring.go:188`) without necessarily releasing that array; and `snapshot`
+copies every retained byte into a fresh allocation (`ring.go:321`), so a naïve port would
+transiently make a second 4 MiB copy to send an 8 KiB frame. A _formerly_ busy session can retain
+close to its peak. `len(buf)` is not resident memory, so an assertion phrased on it proves
+nothing.
+
+**So the replacement window owes a representation whose allocation is measurable and
+reclaimable** — fixed-size pages or a chunk deque — and a bound on any single pull response, so
+a reader never copies the whole window to send a frame. The assertion is on **allocated bytes
+after fill → consume → idle**, not on buffer length.
 
 **It resolves through the cascade that already exists** — profile → group → global → hardcoded
-default — the same one `DesiredMode` and `RelayConsent` use (`internal/profile/profile.go`).
+default — the one `DesiredMode` and `PortDiscovery` use. **Not** `RelayConsent`, which an earlier
+draft cited here and which is explicitly the opposite: `profile.go:123` says consent is
+"persisted per destination and NEVER inherited", and `:479` keeps it out of the sparse layer for
+that reason.
 Not a new mechanism, and per-destination on purpose: a laptop over a phone tether and a build
 server deserve different answers.
 
@@ -469,10 +500,20 @@ server deserve different answers.
 generation keeps the bound it was given for the life of its sessions — changing the setting
 affects the next session, never a running one.
 
-**The floor is enforced, not documented.** AD-10's `CreditLimit` is 64 KiB and `ring.go:20`
-says why it matters: it "must be less than `RingCapacity`, otherwise the credit never binds and
-AD-10 is dead code". A value at or below it is **refused** rather than silently disabling
-backpressure.
+**A floor, a ceiling, and an aggregate budget — all three, because raising a default 16× makes
+simultaneous pressure real.**
+
+- **Floor**: strictly above AD-10's `CreditLimit`, and meaningfully so rather than by one byte.
+  `ring.go:20`'s rationale — "otherwise the credit never binds and AD-10 is dead code" — does
+  **not** transfer literally once that ring is deleted: in the new topology WebSocket credit
+  still binds against a smaller helper window, it just resets sooner. The inequality is kept as a
+  product-quality invariant, not as a proof, and the document says which.
+- **Ceiling**: a maximum per session, with explicit units and a conversion to `int` that cannot
+  overflow. A floor alone stops one misconfiguration; it does nothing about a corrupted or
+  extreme value eventually consuming gigabytes.
+- **Aggregate**: a helper-wide memory budget with a stated eviction rule when many busy detached
+  sessions fill at once. "Live sessions × the bound" is the worst case only if nothing bounds
+  the sum, and at 4 MiB it is a number worth bounding.
 
 **And the cost is named because it is spent on someone else's machine.** The worst case on a
 host is its live session count times the bound, in the helper's memory — on a VM that may be
@@ -526,8 +567,8 @@ promises the process, not the screen.
 
 ### D10 — Discovery is a directory listing; no router, and the AD-7 amendment
 
-A coordinator finds what is on a host by **listing `~/.nocx/helper/`**. That directory _is_
-the index: each entry is a generation, each live one holds D5's lock, and each is asked for
+A coordinator resolves its machine namespace first (D5), then finds what is on a host by
+**listing `~/.nocx/helper/<machine>/`**. That directory _is_ the index: each entry is a generation, each live one holds D5's lock, and each is asked for
 its own sessions. There are one to three of them in practice. No router process, no durable
 index to keep consistent, no admission protocol.
 
@@ -573,7 +614,7 @@ and backpressure — D2's delay fuse from the other direction.
 - **D1a is delivered locally too.** The nocx-server design's D4 may kill an old coordinator
   and lose its sessions; with the local helper owning the PTY that stops being necessary.
 - **Local install reuses `deploy`** with a local FS adapter, into the same
-  `~/.nocx/helper/<version>-<goos>-<goarch>-<hash>/`. **Not** a sibling binary in the bundle:
+  `~/.nocx/helper/<machine>/<version>-<goos>-<goarch>-<hash>/`. **Not** a sibling binary in the bundle:
   updating the bundle replaces that binary in place, which is what generational coexistence
   forbids.
 - **`make build` gains one native helper build.** The 2×2 cross matrix stays a release
@@ -794,11 +835,17 @@ pass while the product was broken, the reason is recorded beside its replacement
     appends succeed** — the recording is not abandoned at the first discontinuity.
 18. Producing more than capacity with nothing attached **does not block the producer**, and the
     reset a later reader gets carries the base, not the written offset.
-    18a. **The bound is a cap, not an allocation**: a session that produces a hundred bytes holds a
-    hundred bytes at any configured bound, asserted on resident buffer length rather than on
-    the setting.
-    18b. **The floor is enforced**: a configured bound at or below `CreditLimit` is refused with a
-    named error, and no build starts a session whose credit cannot bind.
+    18a. **Memory is reclaimed, asserted on allocation and not on length**: after fill → consume →
+    idle, a session's **allocated** bytes return to the empty-session baseline at any configured
+    bound. `len(buf)` is not resident memory, and an earlier draft's assertion on it would have
+    passed while every formerly busy session retained its peak.
+    18d. **A pull never copies the window**: serving an 8 KiB frame from a full 4 MiB window
+    allocates on the order of the frame, not of the window.
+    18b. **Floor and ceiling are enforced**: a bound at or below the floor and one above the ceiling
+    are each refused with a named error, and a value that would overflow the conversion is
+    refused rather than wrapped.
+    18e. **The aggregate budget binds**: with enough busy detached sessions to exceed the helper-wide
+    budget, the stated eviction rule fires and the helper's total stays bounded.
     18c. **A running session keeps the bound it was given**: changing the setting while a session
     runs does not resize its window, and the next session gets the new value. (`ring.go:316` returns
     the written offset today; the change is expected and this is what catches it.)
@@ -853,125 +900,77 @@ pass while the product was broken, the reason is recorded beside its replacement
 
 ## 6. Measurements this design rests on, and the one it still owes
 
-**Measured 2026-08-31, commit `b0983332`, go1.26.7 linux/amd64, no build tags, with no
-embedded helper artifacts present (they are gitignored, and a fresh checkout embeds only
-the committed `.gitignore`):**
+### Binary size — why the execution host is not a coordinator
+
+Measured 2026-08-31, commit `b0983332`, go1.26.7 linux/amd64, no build tags, with no embedded
+helper artifacts present (they are gitignored, and a fresh checkout embeds only the committed
+`.gitignore`):
 
 ```
 CGO_ENABLED=0 go build -ldflags "-s -w" -o srv ./cmd/nocx-server            → 42,143,906 B (40.19 MiB)
 CGO_ENABLED=0 go build -trimpath -ldflags "-s -w" -o hlp ./cmd/nocx-helper  →  2,949,282 B ( 2.81 MiB)
 ```
 
-This decides **one** thing and is not asked to decide more: do not deploy the full
-coordinator as the execution host. Four cross-compiled coordinators would embed at ~160 MB
-raw against ~11 MB for helpers — a raw extrapolation, not a shipped download size, since the
-artifacts are gzipped.
+This decides **one** thing and is not asked to decide more: do not deploy the full coordinator
+as the execution host. Four cross-compiled coordinators would embed at ~160 MB raw against
+~11 MB for helpers — a raw extrapolation, not a shipped download size, since the artifacts are
+gzipped.
 
-**Owed before the local execution host ships: the local carrier budget** (D11), with
-thresholds and a consequence rather than a number alone: p50/p99 keystroke-to-echo against
-today's direct PTY; sustained output throughput; coordinator and helper CPU; wakeups and
-context switches; fairness of an interactive tab beside a flooding one; and backpressure onset
-with its memory bound. Failing the budget optimises the carrier, never the ownership.
+### Output rate — what the window has to survive
 
-**Measured, and answered: the window's bound** (D8). An earlier draft carried 256 KiB forward
-as a named deferral, which satisfied `nocx-8mllr` procedurally and evaded it in substance. It
-is now measured, raised to 4 MiB and made configurable per destination. Measured 2026-08-31 on this machine, each command run on a **real pty** — so
-colour, progress and repaints are present, which piping suppresses — with peak bytes in any
-rolling one-second window, because an average tells a bounded buffer nothing:
+Each command run on a **real pty**, so colour, progress and repaints are present, which piping
+suppresses. Peak bytes in a rolling window, because an average tells a bounded buffer nothing.
 
-| command                   | peak/1 s | 256 KiB survives |
-| ------------------------- | -------: | ---------------: |
-| `go build ./...` (cold)   |  1,412 B |            186 s |
-| `go vet ./...`            |  1,920 B |            137 s |
-| `npm run build` (vite)    |  4,480 B |             58 s |
-| `npm ls --all`            | 47,861 B |            5.5 s |
-| `go test -v` (2 packages) | 57,965 B |            4.5 s |
-| `cat` a 238 KB file       |   238 KB |            1.1 s |
-| `find / -xdev -type f`    |  10.1 MB |           0.03 s |
+| command                   | peak/1 s | peak/20 ms | peak/50 ms | peak/100 ms |
+| ------------------------- | -------: | ---------: | ---------: | ----------: |
+| `go build ./...` (cold)   |  1,412 B |          — |          — |           — |
+| `go vet ./...`            |  1,920 B |          — |          — |           — |
+| `npm run build` (vite)    |  4,480 B |          — |          — |           — |
+| `npm ls --all`            | 47,861 B |          — |          — |           — |
+| `go test -v` (2 packages) | 57,965 B |   39,292 B |   57,966 B |    57,966 B |
+| `cat` a 238 KB file       |   238 KB |  238,458 B |  238,458 B |   238,458 B |
+| `find / -xdev -type f`    |  10.1 MB |  250,592 B |  480,666 B |   801,252 B |
 
-**Coordinator start to `nocx-server ready`: 17 ms, 0 ms, 16 ms** over three runs on an empty
-profile with the OS keystore out of play. That is a **floor**, not a replacement: it excludes
-the bundle swap, a populated `content.db`, and the vault.
+**The per-second column answers the wrong question.** Bursty output does not arrive at its
+average, and what this design needs to know is what lands in a _read gap_. Against the
+262,144-byte shipped window, the 20 ms column is 15% for `go test`, 91% for a file dump and
+**96%** for a filesystem walk — one 20 ms gap of everything measured, with four percent to
+spare. At 50 ms only bulk overflows; at 100 ms bulk loses two thirds.
 
-**And a second table at the scale that actually matters.** Peak-per-second answers "what is the
-sustained rate"; the question this design asks is "what arrives during a read gap", and the
-measured machine gap is 17 ms. Same commands, same pty, peak bytes in rolling 20/50/100 ms
-windows, against the 262,144-byte window:
+### Coordinator start, with its limits attached
 
-| command             | peak/20 ms | peak/50 ms | peak/100 ms |      vs window |
-| ------------------- | ---------: | ---------: | ----------: | -------------: |
-| `go test -v`        |   39,292 B |   57,966 B |    57,966 B |      15% → 22% |
-| `cat` a 238 KB file |  238,458 B |  238,458 B |   238,458 B | 91%, one burst |
-| `find / -xdev`      |  250,592 B |  480,666 B |   801,252 B | **96% → 306%** |
+**`nocx-server` start to `ready`: 17 ms, 0 ms, 16 ms** over three runs, empty profile, OS
+keystore out of play. **Three samples are not a distribution**, one reads 0 ms — so millisecond
+truncation is material at this scale — and `ready` is not endpoint attach and first byte
+drained. These are a few observations of _part_ of the path, not a floor in any strong sense.
+§8's first item is the measurement that replaces them.
 
-That reframes the bound entirely. 256 KiB is **not** "4.5 seconds of `go test`" — bursty output
-does not arrive at its average. It is **one 20 ms gap of anything measured, including a
-filesystem walk, with four percent to spare**; at 50 ms only bulk overflows, and at 100 ms bulk
-loses two thirds.
+### What the measurements decided
 
-Four conclusions, and the last two each changed a decision:
+1. **At 256 KiB the margin was thin exactly where it should not be.** Fifteen-fold headroom for
+   ordinary work and 1.04× for a filesystem walk — against a _local_ partial measurement. The
+   remote gap is larger and unmeasured, so that row would go negative there.
+2. **The window is raised to 4 MiB and made configurable** (D8): ~7 s of `go test -v`'s bursts,
+   seventeen file dumps, and **~0.5 s of a filesystem walk at its measured 8 MB/s
+   instantaneous** — the order of a remote reattach including SSH. An earlier draft argued
+   against a larger window because it "costs every idle session the difference"; that was wrong
+   on a fact, though the corrected version is narrower than the correction first claimed — see
+   D8 on allocation versus length.
+3. **A bigger window still cannot cover bulk.** The per-second spread is four orders of
+   magnitude; another 32× would turn bulk's half-second into sixteen, at sixteen times the
+   ceiling. Bulk is outside the guarantee and §8 says so in the gate.
+4. **The bound is not what decides the loss — the read gap is.** A replacement can wait on a
+   **person**, and human time inside the gap makes any bound irrelevant. That is D16, and why
+   D16 is scoped by _reachability_ rather than promised generally.
 
-1. **At 256 KiB the margin is thin exactly where it should not be.** Fifteen-fold headroom for
-   ordinary work, and 1.04× for a filesystem walk — against a _local_ floor. The remote gap is
-   larger and unmeasured (conclusion 4), so the pathological row would go negative there.
-2. **The window is raised to 4 MiB and made configurable** (D8). What that buys, from the same
-   measurements: ~7 s of `go test -v`'s bursts, seventeen file dumps, and **~0.5 s of a
-   filesystem walk at its measured 8 MB/s instantaneous** — which is the order of a remote
-   reattach including SSH. An earlier draft argued against a bigger window on the grounds that
-   it "costs every idle session the difference"; **that was wrong**, because the bound is a cap
-   on `len(buf)` and not an allocation. A quiet session holds nothing at any bound.
-3. **The bound is not what decides the loss — the read gap is.** Against 17 ms nothing measured
-   overflows. But a replacement can wait on a **person**: the vault seals after a departure
-   window and a session needing a secret suspends until someone returns. Human time inside the
-   gap makes any bound irrelevant. That is D16, and it is why D16 is scoped by _reachability_
-   rather than stated as a general promise.
-4. **The 17 ms floor is local, and the remote gap is unmeasured and certainly larger.** It
-   includes SSH authentication, jump routes and bridge establishment — hundreds of milliseconds
-   is a reasonable expectation, which is where the third row of the table starts to bite. §8
-   carries this as owed.
+### Owed
 
-**Owed before the local execution host ships: the local carrier budget** (D11), with
-thresholds and a consequence rather than a number alone: p50/p99 keystroke-to-echo against
-today's direct PTY; sustained output throughput; coordinator and helper CPU; wakeups and
-context switches; fairness of an interactive tab beside a flooding one; and backpressure onset
-with its memory bound. Failing the budget optimises the carrier, never the ownership.
+**The local carrier budget** (D11): p50/p99 keystroke-to-echo against today's direct PTY;
+sustained throughput; coordinator and helper CPU; wakeups and context switches; fairness of an
+interactive tab beside a flooding one; backpressure onset and its memory bound. Failing the
+budget optimises the carrier, never the ownership.
 
-**Measured, and answered: the window's bound** (D8). An earlier draft carried 256 KiB forward
-as a named deferral, which satisfied `nocx-8mllr` procedurally and evaded it in substance. It
-is now measured, raised to 4 MiB and made configurable per destination. Measured 2026-08-31 on this machine, each command run on a **real pty** — so
-colour, progress and repaints are present, which piping suppresses — with peak bytes in any
-rolling one-second window, because an average tells a bounded buffer nothing:
-
-| command                   | peak/1 s | 256 KiB survives |
-| ------------------------- | -------: | ---------------: |
-| `go build ./...` (cold)   |  1,412 B |            186 s |
-| `go vet ./...`            |  1,920 B |            137 s |
-| `npm run build` (vite)    |  4,480 B |             58 s |
-| `npm ls --all`            | 47,861 B |            5.5 s |
-| `go test -v` (2 packages) | 57,965 B |            4.5 s |
-| `cat` a 238 KB file       |   238 KB |            1.1 s |
-| `find / -xdev -type f`    |  10.1 MB |           0.03 s |
-
-**Coordinator start to `nocx-server ready`: 17 ms, 0 ms, 16 ms** over three runs on an empty
-profile with the OS keystore out of play. That is a **floor**, not a replacement: it excludes
-the bundle swap, a populated `content.db`, and the vault.
-
-Three conclusions, and the third is the one that changes a decision:
-
-1. **For the common case 256 KiB is generous.** Compiles and builds peak in the low kilobytes
-   per second; the window holds one to three minutes of them.
-2. **A bigger window does not buy its way out.** The distribution spans four orders of
-   magnitude. Going 256 KiB → 8 MiB is 32×, which turns `go test -v`'s 4.5 s into two minutes
-   and `find /`'s 0.03 s into one second. Nothing in memory covers a bulk dump, and sizing for
-   one would cost every idle session the memory.
-3. **The bound is not what decides the loss — the length of the read gap is.** Against a 17 ms
-   machine floor even `find /` loses ~170 KB. But a replacement can wait on a **person**:
-   nocx-server D9 seals the vault after a departure window, and a session needing a secret
-   suspends until someone returns. Human time inside the read gap makes any fixed bound
-   irrelevant.
-
-So the bound stays **256 KiB**, and it is now a measured choice rather than an inherited one.
-What the measurement buys instead is **D16**, which removes human time from the gap.
+**The remote read gap** — §8's first item, with a pass/fail consequence rather than a number.
 
 ## 7. Deliberately out of scope — and document 2
 
@@ -1005,11 +1004,23 @@ ADR-0043 rather than solving multi-process encrypted SQLite).
 
 ## 8. Open questions
 
-1. **The remote read gap, end to end** (§6 conclusion 4) — fresh coordinator start → SSH
-   authentication (agent, file key, vault key, password) → jump route → bridge or streamlocal →
-   authenticated attach → first byte drained. The 17 ms floor is local; this is the number that
-   says how often the bulk row of the fine-grained table costs a user anything. Owed before the
-   remote execution host ships, and the one measurement that could still move the bound.
+1. **The remote read gap, end to end**, with a **pass/fail consequence rather than a number** —
+   "measure it before shipping" is not a gate:
+
+   > For credentials that are **not** human-gated, the 4 MiB default must avoid a reset in at
+   > least 99% of **injected** coordinator replacements over the declared ordinary-work corpus.
+   > Failing that, the default is raised within the ceiling, or carrier establishment is
+   > optimised. **Bulk output is explicitly outside the guarantee.**
+
+   Collected per credential class — agent, unencrypted file key, unlocked vault key, password,
+   interactive agent confirmation — and per route (direct, one jump, several), as p50/p95/p99 of
+   a cold fresh coordinator, timestamped at DNS/TCP/SSH handshake, bridge launch, authenticated
+   attach and first byte. **Bytes actually overwritten during an injected replacement**, never a
+   duration multiplied by a separate output-rate run.
+
+   Vault-gated credentials are their own class and are never folded into a percentile: the
+   person dominates, and a p99 over them would describe nothing.
+
 2. **The local carrier budget** (§6) — thresholds and a consequence. Not blocking acceptance: it
    decides a carrier, not an ownership.
 3. **`nocx-22k1c`** is answered for the case this document creates (D8 chooses D6-b). What

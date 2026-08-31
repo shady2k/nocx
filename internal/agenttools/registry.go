@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"net/url"
 	"strings"
 	"time"
 
@@ -29,6 +30,26 @@ import (
 type ResourceRef struct {
 	Kind content.ResourceKind `json:"kind"`
 	ID   string               `json:"id"`
+}
+
+// URLScope is the narrowed authority for fetch.url. It retains only the
+// destination identities this call resolved and the grant covers; the
+// executor still obtains the actual network capability from its composition
+// root seam.
+type URLScope struct {
+	URLs []string
+}
+
+func (s *URLScope) Allows(rawURL string) bool {
+	if s == nil {
+		return false
+	}
+	for _, allowed := range s.URLs {
+		if allowed == "*" || allowed == rawURL {
+			return true
+		}
+	}
+	return false
 }
 
 // RunContext carries only immutable identities of the run. It is passed to
@@ -43,6 +64,20 @@ type RunContext struct {
 // ResolveResources derives every resource touched by one validated call.
 // A nil resolver means the declaration names no resource in its parameters.
 type ResolveResources func(args map[string]any, runCtx RunContext) ([]ResourceRef, error)
+
+func resourceURL(arg string) ResolveResources {
+	return func(args map[string]any, _ RunContext) ([]ResourceRef, error) {
+		raw, ok := args[arg].(string)
+		if !ok || raw == "" {
+			return nil, fmt.Errorf("resource argument %q is absent", arg)
+		}
+		u, err := url.Parse(raw)
+		if err != nil || u.Hostname() == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return nil, fmt.Errorf("resource argument %q is not an absolute HTTP URL", arg)
+		}
+		return []ResourceRef{{Kind: content.ResourceDestination, ID: u.String()}}, nil
+	}
+}
 
 func resourceArgument(arg string, kind content.ResourceKind) ResolveResources {
 	return func(args map[string]any, _ RunContext) ([]ResourceRef, error) {
@@ -262,6 +297,20 @@ var declarations = []Declaration{
 		Executes:         InGo,
 		Params:           "files.read.schema.json",
 		Narrow:           narrowFilesRead,
+	},
+	{
+		Name:             "fetch.url",
+		Description:      "Fetch a public web URL from this machine and return its bounded UTF-8 text; reach for this when the answer depends on what a page says rather than on the URL alone.",
+		Effect:           content.EffectCrossBoundary,
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         60 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceDestination},
+		ResolveResources: resourceURL("url"),
+		Executes:         InGo,
+		Params:           "fetch.url.schema.json",
+		Narrow:           narrowURL,
 	},
 	{
 		Name:             "session.list",

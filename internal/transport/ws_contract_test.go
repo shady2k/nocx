@@ -88,7 +88,7 @@ func loadSchema(t *testing.T, name string) *jsonschema.Schema {
 			t.Fatalf("add %s: %v", e.Name(), addErr)
 		}
 	}
-	path := filepath.Join(contractDir, filepath.Base(name))
+	path := filepath.Join(contractDir, filepath.Clean(name))
 	f, openErr := os.Open(path) //nolint:gosec // a test-only path under contracts/
 	if openErr != nil {
 		t.Fatalf("open %s: %v", path, openErr)

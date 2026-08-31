@@ -586,17 +586,9 @@ func (m *effectKernel) inScope(t agenttools.Tool, resources []agenttools.Resourc
 	for _, resource := range resources {
 		inside := false
 		for _, scope := range m.grant.Policy.RowScopes(t.Effect) {
-			switch resource.Kind {
-			case content.ResourcePath:
-				inside = pathUnder(resource.ID, scope.ID) && scope.Kind == content.ResourcePath
-			case content.ResourceContent:
-				inside = scope.Kind == content.ResourceContent &&
-					(content.GrantScope{Kind: scope.Kind, ID: scope.ID}).Contains(
-						content.GrantScope{Kind: resource.Kind, ID: resource.ID},
-					)
-			default:
-				inside = resource.Kind == scope.Kind && resource.ID == scope.ID
-			}
+			inside = (content.GrantScope{Kind: scope.Kind, ID: scope.ID}).Contains(
+				content.GrantScope{Kind: resource.Kind, ID: resource.ID},
+			)
 			if inside {
 				break
 			}
@@ -616,20 +608,6 @@ func matchedResource(resources []agenttools.ResourceRef) *content.GrantScope {
 		return nil
 	}
 	return &content.GrantScope{Kind: resources[0].Kind, ID: resources[0].ID}
-}
-
-// pathUnder is the lexical containment test of the policy's scope check: the
-// path is the spelled argument, the scope is the grant's spelled scope. Both
-// ends are absolute; the capability's canonical check is what actually
-// decides whether the read happens.
-func pathUnder(path, scope string) bool {
-	if scope == "" {
-		return false
-	}
-	if path == scope {
-		return true
-	}
-	return strings.HasPrefix(path, strings.TrimSuffix(scope, "/")+"/")
 }
 
 // bindApprovalFileVersions captures path identities before an approval is

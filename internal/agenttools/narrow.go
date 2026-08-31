@@ -72,6 +72,17 @@ func narrowSession(grant content.Grant, resources []ResourceRef, _ RunContext) (
 	return NewSessionReader(scopes), nil
 }
 
+func narrowURL(grant content.Grant, resources []ResourceRef, _ RunContext) (Capability, error) {
+	scoped := grantedResources(grant, resources)
+	urls := make([]string, 0, len(scoped))
+	for _, ref := range scoped {
+		if ref.Kind == content.ResourceDestination {
+			urls = append(urls, ref.ID)
+		}
+	}
+	return &URLScope{URLs: urls}, nil
+}
+
 // narrowRun is the run row's capability constructor. It carries only the
 // resolved session identities that the grant also permits.
 func narrowRun(grant content.Grant, resources []ResourceRef, _ RunContext) (Capability, error) {

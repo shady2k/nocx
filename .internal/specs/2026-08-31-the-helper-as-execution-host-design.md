@@ -499,9 +499,12 @@ justify a stable registry role, recorded so it is recognised rather than redisco
 execution host mints session identity, the durable handle names generation and session, and
 the coordinator's registry stays authoritative over panes and tabs.
 
-**The endpoint is derived, not spelled.** `sockaddr_un.sun_path` is ~108 bytes on Linux and
-~104 on macOS; `$HOME` + `<version>-<goos>-<goarch>-<64-hex>` exceeds that on an ordinary
-machine. The runtime endpoint is a short encoding of the generation hash under a private
+**The endpoint is derived, not spelled, and this is not a theoretical limit.**
+`sockaddr_un.sun_path` is ~108 bytes on Linux and ~104 on macOS, and the coordinator already
+refuses past it — measured on 2026-08-31 with a deep home, `nocx-server` exits with
+"coordinator: socket path exceeds the platform's unix-socket limit: 161 bytes". A generation
+directory adds `<version>-<goos>-<goarch>-<64-hex>` on top of that, so the helper's endpoint
+**cannot** live under its install directory. The runtime endpoint is a short encoding of the generation hash under a private
 runtime directory; the full identity participates in the handshake.
 
 **The install/prune race is benign, and ordering is what makes it so.** A coordinator takes a
@@ -632,6 +635,21 @@ remove them:
 - **Session-keyed, 64-bit offsets** in `data` — already required by D3, and the thing that
   makes N readers an implementation question rather than a wire question.
 
+### D16 — A coordinator drains the window before it can record
+
+Reading the helper's window needs **no vault and no `content.db`**: those are the recorder's
+dependencies, not the reader's. A replacing coordinator therefore **attaches and drains
+immediately on start**, before the vault is open, holding what it reads in memory for
+delivery and starting the recorder only when the store is available.
+
+This is what keeps conclusion 3 from being fatal. Without it the read gap is bounded by
+however long a person takes to unlock; with it the gap is the machine floor plus carrier
+setup, which the measured table shows 256 KiB covering for everything but a bulk dump.
+
+The recorder's own gap remains real and is what `Skip` (D8) exists to record: bytes that
+flowed while the store was closed are delivered to the frontend and **absent from the
+recording**, and the product says so.
+
 ## 4. What the user sees
 
 **An update.** The coordinator installs vN into a new directory; vN−1 is untouched and its
@@ -759,7 +777,7 @@ pass while the product was broken, the reason is recorded beside its replacement
 32. Consent is revoked before any file is renamed or deleted, **and the first failure is
     asserted too**: a revocation that fails begins no removal.
 
-## 6. Measurements this design rests on, and the two it owes
+## 6. Measurements this design rests on, and the one it still owes
 
 **Measured 2026-08-31, commit `b0983332`, go1.26.7 linux/amd64, no build tags, with no
 embedded helper artifacts present (they are gitignored, and a fresh checkout embeds only
@@ -781,24 +799,42 @@ today's direct PTY; sustained output throughput; coordinator and helper CPU; wak
 context switches; fairness of an interactive tab beside a flooding one; and backpressure onset
 with its memory bound. Failing the budget optimises the carrier, never the ownership.
 
-**Owed before this design is accepted: the window's bound** (D8). An earlier draft carried
-256 KiB forward as an explicitly named deferral, satisfying `nocx-8mllr`'s acceptance
-criterion in its procedural sense. **That was evasion, and it is withdrawn.** Under D8 the
-bound is no longer an internal buffering choice: it is _how much output an ordinary
-coordinator restart destroys_, permanently, for every session that was busy. D9 cannot justify
-it, because D9 does nothing for shells, builds and streaming output and is best-effort even for
-TUIs — "a repaint makes a larger window unnecessary" is circular across most of the product's
-session types.
+**Measured, and no longer owed: the window's bound** (D8). An earlier draft carried 256 KiB
+forward as a named deferral, which satisfied `nocx-8mllr` procedurally and evaded it in
+substance. Measured 2026-08-31 on this machine, each command run on a **real pty** — so
+colour, progress and repaints are present, which piping suppresses — with peak bytes in any
+rolling one-second window, because an average tells a bounded buffer nothing:
 
-The rationale at `ring.go:10` does not survive being asked this question either. Its own
-illustrative 256 KiB/s means **the entire window rolls in about one second**, and its
-arithmetic is loose: it calls a 132×43 screen ~5.7 KiB and 256 KiB "about ten screens", where
-the raw figure is closer to forty.
+| command                   | peak/1 s | 256 KiB survives |
+| ------------------------- | -------: | ---------------: |
+| `go build ./...` (cold)   |  1,412 B |            186 s |
+| `go vet ./...`            |  1,920 B |            137 s |
+| `npm run build` (vite)    |  4,480 B |             58 s |
+| `npm ls --all`            | 47,861 B |            5.5 s |
+| `go test -v` (2 packages) | 57,965 B |            4.5 s |
+| `cat` a 238 KB file       |   238 KB |            1.1 s |
+| `find / -xdev -type f`    |  10.1 MB |           0.03 s |
 
-So the bound is measured before acceptance, not after: time-to-overflow distributions for real
-builds, package installs, test suites and agent TUIs, against the observed duration of a
-coordinator replacement. The bound is then chosen so that an ordinary restart does not
-routinely destroy output, and the number is recorded here with its measurement.
+**Coordinator start to `nocx-server ready`: 17 ms, 0 ms, 16 ms** over three runs on an empty
+profile with the OS keystore out of play. That is a **floor**, not a replacement: it excludes
+the bundle swap, a populated `content.db`, and the vault.
+
+Three conclusions, and the third is the one that changes a decision:
+
+1. **For the common case 256 KiB is generous.** Compiles and builds peak in the low kilobytes
+   per second; the window holds one to three minutes of them.
+2. **A bigger window does not buy its way out.** The distribution spans four orders of
+   magnitude. Going 256 KiB → 8 MiB is 32×, which turns `go test -v`'s 4.5 s into two minutes
+   and `find /`'s 0.03 s into one second. Nothing in memory covers a bulk dump, and sizing for
+   one would cost every idle session the memory.
+3. **The bound is not what decides the loss — the length of the read gap is.** Against a 17 ms
+   machine floor even `find /` loses ~170 KB. But a replacement can wait on a **person**:
+   nocx-server D9 seals the vault after a departure window, and a session needing a secret
+   suspends until someone returns. Human time inside the read gap makes any fixed bound
+   irrelevant.
+
+So the bound stays **256 KiB**, and it is now a measured choice rather than an inherited one.
+What the measurement buys instead is **D16**, which removes human time from the gap.
 
 ## 7. Deliberately out of scope — and document 2
 
@@ -836,20 +872,23 @@ ADR-0043 rather than solving multi-process encrypted SQLite).
    execution host ships. Not blocking acceptance: it decides a carrier, not an ownership.
 2. **`nocx-22k1c`** is answered for the case this document creates (D8 chooses D6-b). What
    remains with that bead is narrower: what the _recorder_ does when it is slower than the
-   source while a coordinator **is** attached — which D8's `Skip` gives it a way to express,
-   but does not decide a policy for.
+   source while a coordinator **is** attached — which D8's `Skip` gives it a way to express
+   but does not set a policy for.
 3. **A full-repaint criterion** for ADR-0041's grid (D9). Without it the grid stays `unknown`
    after an attach, which is the safe answer; with it, §0 could promise the screen as well as
    the process. Not blocking, because the safe answer is available today.
+4. **Bulk output is not covered by any in-memory bound** (§6, conclusion 2). A session
+   dumping megabytes per second loses output across any read gap longer than a moment. This
+   document accepts that and states it; whether some sessions deserve a durable spool is a
+   later question, and one D11's opaque store could answer without changing this design.
 
 ## 9. What must exist before this design is accepted
 
-Three things, and none of them is deferred implementation detail: each is a place where several
-plausible implementations satisfy every word above and make D1a **false**.
+Two things, and neither is deferred implementation detail: each is a place where several
+plausible implementations satisfy every word above and make D1a **false**. (The window's
+bound was a third until it was measured — see §6.)
 
-**1. The window's bound, measured** (§6). It decides how much an ordinary restart destroys.
-
-**2. Content-store restart reconciliation, as its own document.** `dropDeadSessions`
+**1. Content-store restart reconciliation, as its own document.** `dropDeadSessions`
 (`sqlite.go:410`) deletes every session row and every `session_output` recording at store open,
 because a session "cannot outlive" its backend — the premise this design removes. As it stands a
 fresh coordinator destroys the recordings of live sessions and terminalizes their open ledger
@@ -858,7 +897,7 @@ the sweep runs; which rows are preserved and which are proven absent; how an ope
 reconciled without declaring a running process finished; and how all of that happens without a
 second connection to the encrypted store (ADR-0043).
 
-**3. The durable lifecycle protocol, as its own document.** The clearest way to satisfy every
+**2. The durable lifecycle protocol, as its own document.** The clearest way to satisfy every
 word above and still break D1a is a daemon that treats bridge EOF as shutdown — which is what
 the code does today (`host.go:154`). It must define daemonization and parent-death behaviour; deterministic endpoint derivation and
 its short-path encoding; atomic socket establishment and stale-path recovery; peer

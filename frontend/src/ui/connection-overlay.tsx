@@ -70,7 +70,7 @@ const ConnectionOverlayView: Component<{
   visible: Accessor<boolean>
   onRetry: () => void
 }> = (props) => (
-  <Dialog open={props.visible()} onClose={() => undefined} onEscape={() => true}>
+  <Dialog open={props.visible()} dismissible={false} onClose={() => undefined}>
     <div
       class="ui-connection-overlay"
       data-state={props.state().kind}

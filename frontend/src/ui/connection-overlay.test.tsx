@@ -70,6 +70,20 @@ describe('ConnectionOverlay', () => {
     expect(showModal).toHaveBeenCalledOnce()
   })
 
+  it('does not offer a close control while connection is unavailable', () => {
+    const { host } = subject({ kind: 'connecting' }, { minimumVisibleMs: 0 })
+
+    expect(host.querySelector('.nocx-dialog__close')).toBeNull()
+  })
+
+  it('keeps the connection overlay open when Escape is pressed', () => {
+    const { host } = subject({ kind: 'connecting' }, { minimumVisibleMs: 0 })
+
+    fireEvent.keyDown(document, { key: 'Escape' })
+
+    expect(dialog(host).open).toBe(true)
+  })
+
   it('composes the logo, Spinner, and Button kit primitives without inline repainting', () => {
     const { host } = subject({ kind: 'connecting' }, { minimumVisibleMs: 0 })
 

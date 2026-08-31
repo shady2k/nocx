@@ -135,11 +135,12 @@ type agentAskParams struct {
 }
 
 type agentAttachedContentWire struct {
-	ItemID  string `json:"itemId"`
-	Command string `json:"command"`
-	State   string `json:"state"`
-	Start   *int   `json:"start,omitempty"`
-	Count   *int   `json:"count,omitempty"`
+	ItemID    string `json:"itemId"`
+	Command   string `json:"command"`
+	State     string `json:"state"`
+	Start     *int   `json:"start,omitempty"`
+	Count     *int   `json:"count,omitempty"`
+	Automatic bool   `json:"automatic,omitempty"`
 }
 type agentCancelParams struct {
 	RunID int64 `json:"runId"`
@@ -2281,7 +2282,7 @@ func validateAgentAsk(p agentAskParams) (content.AgentAsk, []assistant.AttachedC
 		}
 		attached = append(attached, assistant.AttachedContentItem{
 			ItemID: grant.ItemID, Command: grant.Command, State: grant.State,
-			Start: grant.Start, Count: grant.Count,
+			Start: grant.Start, Count: grant.Count, Automatic: grant.Automatic,
 		})
 	}
 	in := content.AgentAsk{

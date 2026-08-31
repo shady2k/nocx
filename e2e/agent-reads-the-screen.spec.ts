@@ -152,8 +152,13 @@ interface ResolvedFrame {
   rows?: ResolvedRow[]
 }
 
+interface AskRecord {
+  sessionId: string
+  attachedContent: unknown[]
+}
+
 interface SpecRecord {
-  asks: string[]
+  asks: AskRecord[]
   raised: string[]
   resolved: ResolvedFrame[]
 }
@@ -192,7 +197,12 @@ async function recordFrames(page: Page): Promise<void> {
           }
           const rec = window.__nocxScreenSpec!
           if (msg.method === 'agent.ask' && typeof msg.params?.sessionId === 'string') {
-            rec.asks.push(msg.params.sessionId)
+            rec.asks.push({
+              sessionId: msg.params.sessionId,
+              attachedContent: Array.isArray(msg.params.attachedContent)
+                ? msg.params.attachedContent
+                : [],
+            })
           }
           if (msg.method === 'notify.raise' && typeof msg.params?.body === 'string') {
             rec.raised.push(msg.params.body)
@@ -348,8 +358,9 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     await answerFinished(page, FIRST)
     await expect.poll(async () => (await recorded(page)).asks.length).toBeGreaterThan(0)
     const asks = (await recorded(page)).asks
-    const sessionId = asks[asks.length - 1]
+    const sessionId = asks[asks.length - 1].sessionId
     expect(sessionId).not.toBe('')
+    expect(asks[asks.length - 1].attachedContent).toEqual([])
 
     // ── Put a continuously repainting marker on that pane's screen ───────
     // The background command returns the prompt, then waits for the release
@@ -384,14 +395,30 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
       })
       .toBe(true)
 
+    // The question is raised over the still-running command. The renderer
+    // freezes its current frame for the overlay and automatically attaches
+    // the owning block id; no person mark or copied rows are involved.
+    await page.keyboard.press('ControlOrMeta+Enter')
+    await expect(page.locator('.nocx-editor-grant')).toContainText(
+      'frozen screen attached automatically',
+      { timeout: 10_000 },
+    )
+
     // ── The question ─────────────────────────────────────────────────────
     // Two model responses, because a real tool-calling run is two: the
     // proposal, then the answer written from the result. The second is
     // DERIVED — it can only name the marker if the marker reached the model.
-    // `session.read` with no item id is "the screen now" (contracts/tools/
-    // session.read.schema.json) — the tool that replaced the deleted screen
-    // reader in nocx-2ryxf.1.
-    fake.setScript({ chunks: [], toolCalls: [{ name: 'session.read', arguments: {} }] })
+    // `session.read` receives the exact automatically attached id from the
+    // prompt (contracts/tools/session.read.schema.json), so the model reads
+    // this frozen command item rather than an invented current-screen value.
+    fake.setScript({
+      chunks: [],
+      toolCalls: (body) => {
+        const id = body.match(/frozen screen was attached automatically[\s\S]*?- id: ([^;]+)/)?.[1]
+        if (!id) throw new Error('automatic frozen-frame id was absent from model prompt')
+        return [{ name: 'session.read', arguments: { id } }]
+      },
+    })
     fake.setScript({ chunks: answerFromWhatTheModelWasSent })
 
     const QUESTION = 'What is on my screen right now?'
@@ -400,6 +427,15 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     // that belong to it rather than counting across the whole file.
     const firstRequestOfTheRun = fake.requests().length
     await askFromPrompt(page, QUESTION)
+    const frozenAsk = (await recorded(page)).asks.at(-1)
+    expect(frozenAsk?.attachedContent).toEqual([
+      expect.objectContaining({
+        itemId: expect.any(String),
+        command: expect.stringContaining('put-marker-on-screen.sh'),
+        state: 'running',
+        automatic: true,
+      }),
+    ])
     await answerFinished(page, QUESTION)
 
     const body = answerBlock(page, QUESTION).locator('[data-answer-body]')
@@ -443,6 +479,14 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     // The capture answered while repainting continued; stop the fixture only
     // after the renderer's frame has been observed.
     writeFileSync(stopPath, 'stop\n')
+    await expect(
+      page
+        .locator('.pane.active .cmd-block.cmd-block-running')
+        .filter({ hasText: 'put-marker-on-screen.sh' }),
+    ).toHaveCount(0, { timeout: 20_000 })
+    await expect(page.locator('.nocx-editor-grant')).not.toContainText(
+      'frozen screen attached automatically',
+    )
 
     // 4. And the model was told the marker by the TOOL and by nothing else.
     //    This run sent two requests: the first carries the system prompt and

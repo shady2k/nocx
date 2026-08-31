@@ -243,6 +243,23 @@ func TestAgentAskAttachedContentWindowValidation(t *testing.T) {
 	}
 }
 
+func TestAgentAsk_AcceptsAutomaticFrozenFrameProvenance(t *testing.T) {
+	p := agentAskParams{
+		AskID:           "ask-frame",
+		SessionID:       "session-a",
+		Question:        "what is on screen?",
+		Cwd:             "/repo",
+		AttachedContent: json.RawMessage(`[{"itemId":"attempt-top","command":"top","state":"running","automatic":true}]`),
+	}
+	_, attached, reason := validateAgentAsk(p)
+	if reason != "" {
+		t.Fatalf("automatic frozen frame refused: %q", reason)
+	}
+	if len(attached) != 1 || !attached[0].Automatic {
+		t.Fatalf("attached = %+v, want one automatic frame", attached)
+	}
+}
+
 func TestAgentAsk_RejectsMalformedAttachedContent(t *testing.T) {
 	cases := []struct {
 		name string

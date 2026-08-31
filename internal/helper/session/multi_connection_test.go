@@ -225,6 +225,10 @@ func TestAckAndDetachAreBoundToTheAttachmentConnection(t *testing.T) {
 		proto.DetachParams{Attachment: old.Attachment})); result.ReleasedWrite {
 		t.Fatal("old connection detached a replacement write capability")
 	}
+	if _, err := svc.Call(host.WithConnection(context.Background(), second), proto.OpAck,
+		mustJSON(t, proto.AckParams{Subscriber: sub, Session: entry.Session, Offset: 0})); err != nil {
+		t.Fatalf("replacement connection lost its subscriber after stale detach: %v", err)
+	}
 
 	spawner.last().say(t, "survives\n")
 	awaitSink(t, second, "the replacement reader's bytes", func() bool {

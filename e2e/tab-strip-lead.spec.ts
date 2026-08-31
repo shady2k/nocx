@@ -34,7 +34,7 @@ test('a hidden update notice does not occupy tab strip width', async ({ page }) 
   await expect(page.locator('.update-notice')).toBeHidden()
 
   const widths = await page.evaluate(() =>
-    [...(document.querySelector(BAR) as HTMLElement).children]
+    [...(document.querySelector('.tabbar') as HTMLElement).children]
       .filter((child) => child.querySelector('.update-notice'))
       .map((child) => child.getBoundingClientRect().width),
   )
@@ -50,14 +50,38 @@ test('the tab strip lead follows the update notice without another condition chi
   await expect(page.locator('.update-notice')).toBeHidden()
   await expect(page.locator(LEAD)).toBeVisible()
 
-  const roles = await page.evaluate(() =>
-    [...(document.querySelector('.tabbar') as HTMLElement).children].map((child) => {
-      if (child.querySelector('.update-notice')) return 'update'
-      if (child.querySelector('.tabstrip-lead')) return 'lead'
+  const layout = await page.evaluate(() => {
+    const bar = document.querySelector('.tabbar')
+    if (!(bar instanceof HTMLElement)) throw new Error('tabbar is not mounted')
+    const children = [...bar.children]
+    const update = children.find((child) => child.querySelector('.update-notice') !== null)
+    const lead = children.find((child) => child.matches('.tabstrip-lead'))
+    const roles = children.map((child) => {
+      if (child.querySelector('.update-notice') !== null) return 'update'
+      if (child.matches('.tabstrip-lead')) return 'lead'
+      if (child.matches('.tabs-container')) return 'tabs'
+      if (child.matches('.tabstrip-actions')) return 'actions'
+      if (child.matches('.tabbar-spacer')) return 'spacer'
+      if (child.matches('.ui-connection-overlay, .ui-connection-indicator, .connection-notice')) {
+        return 'connection'
+      }
       return 'other'
-    }),
+    })
+    return {
+      roles,
+      leadAfterUpdate:
+        update !== undefined &&
+        lead !== undefined &&
+        Boolean(update.compareDocumentPosition(lead) & Node.DOCUMENT_POSITION_FOLLOWING),
+    }
+  })
+  expect(layout.roles).toHaveLength(5)
+  expect(layout.roles).toEqual(
+    expect.arrayContaining(['update', 'lead', 'tabs', 'actions', 'spacer']),
   )
-  expect(roles.slice(0, 2)).toEqual(['update', 'lead'])
+  expect(layout.roles).not.toContain('connection')
+  expect(layout.roles).not.toContain('other')
+  expect(layout.leadAfterUpdate).toBe(true)
 })
 
 // AND THEREFORE the first control sits exactly where the platform's window

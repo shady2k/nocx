@@ -1,4 +1,4 @@
-import { test, expect } from './harness'
+import { appReadyForInput, test, expect } from './harness'
 
 test.describe('theme switching', () => {
   const THEME_ROW = '.ui-settings-row[data-key="ui.theme"]'
@@ -8,6 +8,7 @@ test.describe('theme switching', () => {
     // Open the app and wait for the initial terminal tab
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await appReadyForInput(page)
 
     // Count panes before theme change
     const initialPaneCount = await page.locator('.pane').count()
@@ -71,6 +72,7 @@ test.describe('theme switching', () => {
   test('a ported theme changes the resolved tokens, not just the attribute', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await appReadyForInput(page)
 
     const canvas = (): Promise<string> =>
       page.evaluate(() =>

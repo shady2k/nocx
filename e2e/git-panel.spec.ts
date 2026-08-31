@@ -17,7 +17,7 @@
 // races the poll waits for the CONDITION (a row appearing, a list emptying,
 // a value landing) and never for a duration. Post-mutation status arrives
 // immediately (design D12), so most waits resolve fast.
-import { test, expect, promptReady, resolveBackend } from './harness'
+import { appReadyForInput, test, expect, promptReady, resolveBackend } from './harness'
 import { execFileSync, spawn } from 'node:child_process'
 import { appendFileSync, chmodSync, existsSync, mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
@@ -715,6 +715,7 @@ test('on an SSH tab with no consent the consent offer is present and the mutatio
 
     await page.goto('/')
     await expect(page.locator(TAB)).toHaveCount(1)
+    await appReadyForInput(page)
 
     // Read the backend port/token through the bindings (stubbed on the
     // headless path, real under wails dev) — the same seam shell-mode uses.

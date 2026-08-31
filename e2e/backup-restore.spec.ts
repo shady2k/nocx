@@ -1,4 +1,4 @@
-import { test, expect, settingsReady } from './harness'
+import { appReadyForInput, test, expect, settingsReady } from './harness'
 
 /**
  * The backup surface must move non-empty user state through the real renderer
@@ -11,6 +11,7 @@ test.describe('Backup & Restore', () => {
   }, testInfo) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await appReadyForInput(page)
 
     // Open settings.
     await page.keyboard.press('Meta+,')

@@ -38,7 +38,7 @@
 // profile carries a single forward, and a second replay of it would fail
 // its bind rather than mint a second running record.
 //
-import { test, expect, promptReady, resolveBackend } from './harness'
+import { appReadyForInput, test, expect, promptReady, resolveBackend } from './harness'
 import { readStand } from './stand'
 import { spawn, execFileSync } from 'node:child_process'
 import { createServer, connect } from 'node:net'
@@ -303,6 +303,7 @@ test('a forwarded row keeps its destination readable at the default rail width, 
     trustHostKey(fixture)
 
     await page.goto('/')
+    await appReadyForInput(page)
     const info = await resolveBackend(page)
 
     // A profile whose stored REMOTE forward replays at connection open. The

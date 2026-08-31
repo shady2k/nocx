@@ -1,4 +1,4 @@
-import { test, expect, type Page } from './harness'
+import { appReadyForInput, test, expect, type Page } from './harness'
 
 const MORE = '[aria-label="More"]'
 const MENU_ITEM = '.ui-context-menu__item'
@@ -29,6 +29,7 @@ test.describe('quick-connect picker', () => {
   }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
 
     // Open it from the strip's menu.
     await openQuickConnect(page)
@@ -56,6 +57,7 @@ test.describe('quick-connect picker', () => {
   test('Escape closes the picker and restores focus to the prompt', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
 
     // Open the picker from the strip's menu.
     await openQuickConnect(page)
@@ -80,6 +82,7 @@ test.describe('quick-connect picker', () => {
   test('the chord opens the palette: commands and hosts mixed, rows typed', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
 
     // Use the keyboard shortcut.
     await page.keyboard.press('Control+Shift+P')
@@ -97,6 +100,7 @@ test.describe('quick-connect picker', () => {
   test('typing filters the palette to one command', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
 
     await page.keyboard.press('Control+Shift+P')
     await expect(page.locator(QUICK_CONNECT_ITEM).first()).toContainText('Local shell')
@@ -110,6 +114,7 @@ test.describe('quick-connect picker', () => {
   test('Enter on "Local shell" opens a new tab', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
 
     // The chord opens the palette; "Local shell" is a command there.
     await page.keyboard.press('Control+Shift+P')
@@ -133,6 +138,7 @@ test.describe('quick-connect picker', () => {
   test('terminal host element persists through picker open/close', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
 
     // The terminal host element exists.
     const pane = page.locator('.pane.active')

@@ -7,6 +7,20 @@ export { expect } from '@playwright/test'
 export type { Page } from '@playwright/test'
 
 /**
+ * Wait until the startup/reconnect overlay has left the top layer.
+ *
+ * The native dialog makes the rest of the document inert while it is open.
+ * This is deliberately separate from `promptReady`: callers that use a
+ * shortcut or fill a different control after navigation still need to wait
+ * for the application's input gate without asserting a particular editor.
+ */
+export async function appReadyForInput(page: Page): Promise<void> {
+  const overlay = page.locator('dialog:has(.ui-connection-overlay)')
+  await baseExpect(overlay).toHaveCount(1, { timeout: 10_000 })
+  await baseExpect(overlay).not.toHaveAttribute('open', { timeout: 10_000 })
+}
+
+/**
  * Wait until the prompt editor owns input and typing can safely begin.
  *
  * Scoped to the ACTIVE pane, not to the document. Every open tab has its own
@@ -20,6 +34,7 @@ export type { Page } from '@playwright/test'
  * property of the tab under test, not of whichever editor the DOM lists first.
  */
 export async function promptReady(page: Page): Promise<void> {
+  await appReadyForInput(page)
   const input = page.locator('.pane.active .nocx-editor-input')
   await baseExpect(input).toBeVisible({ timeout: 10_000 })
   await baseExpect(input).toBeFocused({ timeout: 10_000 })

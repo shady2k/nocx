@@ -60,6 +60,7 @@ import { mkdtempSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  appReadyForInput,
   VaultBackend,
   bindEndpoint,
   createAiEndpoint,
@@ -225,6 +226,7 @@ async function openApp(page: Page): Promise<void> {
   await bindEndpoint(page, endpoint)
   await page.goto('/')
   await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
+  await appReadyForInput(page)
 }
 
 async function openSettings(page: Page, navSelector: string): Promise<void> {

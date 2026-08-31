@@ -22,7 +22,7 @@
  * Only the HORIZONTAL overlap is asserted. Both surfaces live at the bottom of
  * the window, so a vertical overlap is expected and says nothing.
  */
-import { test, expect, promptReady } from './harness'
+import { appReadyForInput, test, expect, promptReady } from './harness'
 import { createRepo, cleanupRepo } from './git-fixture'
 
 const TAB_TITLE = '.nocx-tab-title'
@@ -36,6 +36,7 @@ test('a toast does not cover the activity bar (nocx-nbxm6)', async ({ page }) =>
   const repo = createRepo({ file: 'a.txt' })
   try {
     await page.goto('/')
+    await appReadyForInput(page)
     // A NON-EMPTY TAB TITLE IS NOT READINESS TO TYPE. It says the pane exists;
     // it says nothing about which element has the keyboard, so keystrokes sent
     // on the strength of it can land before the editor is focused and lose

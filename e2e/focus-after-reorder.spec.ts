@@ -1,4 +1,4 @@
-import { test, expect, promptReady, type Page } from './harness'
+import { appReadyForInput, test, expect, promptReady, type Page } from './harness'
 
 // ── Placement helpers (shared with tabs.spec.ts conventions) ─────────────
 
@@ -160,6 +160,7 @@ test.describe('focus survives tab reorder', () => {
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', {
       timeout: 10_000,
     })
+    await appReadyForInput(page)
     // Reset to horizontal so persisted state does not contaminate.
     await switchPlacement(page, 'horizontal')
   })

@@ -6,14 +6,20 @@ import (
 	"github.com/shady2k/nocx/internal/content"
 )
 
+var runEffects = []content.Effect{
+	content.EffectObserve, content.EffectMutateReversible,
+	content.EffectMutateDestructive, content.EffectCrossBoundary,
+	content.EffectDelegate,
+}
+
 func TestCommandEffect_LowersReadPipeline(t *testing.T) {
-	if got := commandEffect(parseCanonicalInvocation("du -h | sort -rh | head -20"), content.EffectMutateDestructive); got != content.EffectObserve {
+	if got := commandEffect(parseCanonicalInvocation("du -h | sort -rh | head -20"), runEffects); got != content.EffectObserve {
 		t.Fatalf("effect = %q, want %q", got, content.EffectObserve)
 	}
 }
 
 func TestCommandEffect_JoinsSubcommandsWorstWins(t *testing.T) {
-	if got := commandEffect(parseCanonicalInvocation("ls && rm -rf /tmp/x"), content.EffectMutateDestructive); got != content.EffectMutateDestructive {
+	if got := commandEffect(parseCanonicalInvocation("ls && rm -rf /tmp/x"), runEffects); got != content.EffectMutateDestructive {
 		t.Fatalf("effect = %q, want %q", got, content.EffectMutateDestructive)
 	}
 }
@@ -26,7 +32,7 @@ func TestCommandEffect_SplitsOnlyTheShellSeparators(t *testing.T) {
 		"ls |& head file",
 	} {
 		t.Run(command, func(t *testing.T) {
-			if got := commandEffect(parseCanonicalInvocation(command), content.EffectMutateDestructive); got != content.EffectObserve {
+			if got := commandEffect(parseCanonicalInvocation(command), runEffects); got != content.EffectObserve {
 				t.Fatalf("effect = %q, want %q", got, content.EffectObserve)
 			}
 		})
@@ -39,7 +45,7 @@ func TestCommandEffect_QuotedArgumentsAreNotSyntax(t *testing.T) {
 		`ls '$(pwd)'`,
 	} {
 		t.Run(command, func(t *testing.T) {
-			if got := commandEffect(parseCanonicalInvocation(command), content.EffectMutateDestructive); got != content.EffectObserve {
+			if got := commandEffect(parseCanonicalInvocation(command), runEffects); got != content.EffectObserve {
 				t.Fatalf("effect = %q, want %q", got, content.EffectObserve)
 			}
 		})
@@ -47,8 +53,8 @@ func TestCommandEffect_QuotedArgumentsAreNotSyntax(t *testing.T) {
 }
 
 func TestCommandEffect_NewlineBackgroundStaysWorstCase(t *testing.T) {
-	if got := commandEffect(parseCanonicalInvocation("ls &\nhead file"), content.EffectMutateDestructive); got != content.EffectMutateDestructive {
-		t.Fatalf("effect = %q, want %q", got, content.EffectMutateDestructive)
+	if got := commandEffect(parseCanonicalInvocation("ls &\nhead file"), runEffects); got != content.EffectDelegate {
+		t.Fatalf("effect = %q, want %q", got, content.EffectDelegate)
 	}
 }
 
@@ -58,8 +64,8 @@ func TestCommandEffect_RedirectionIsWrite(t *testing.T) {
 		"cat f >> /etc/passwd",
 	} {
 		t.Run(command, func(t *testing.T) {
-			if got := commandEffect(parseCanonicalInvocation(command), content.EffectMutateDestructive); got != content.EffectMutateDestructive {
-				t.Fatalf("effect = %q, want %q", got, content.EffectMutateDestructive)
+			if got := commandEffect(parseCanonicalInvocation(command), runEffects); got != content.EffectDelegate {
+				t.Fatalf("effect = %q, want %q", got, content.EffectDelegate)
 			}
 		})
 	}
@@ -70,20 +76,20 @@ func TestCommandEffect_RedirectionSinksAndWrites(t *testing.T) {
 		command string
 		want    content.Effect
 	}{
-		{"du -sh /* 2>/dev/null", content.EffectObserve},            // stderr discarded; no file is mutated.
-		{"du -sh /* >/dev/null", content.EffectObserve},             // stdout discarded; no file is mutated.
-		{"du -sh /* &>/dev/null", content.EffectObserve},            // both streams discarded; no file is mutated.
-		{"du -sh /* 2>&1", content.EffectObserve},                   // stderr is duplicated to stdout; no file is mutated.
-		{"du -sh /* > real-file", content.EffectMutateDestructive},  // stdout creates or truncates a file.
-		{"du -sh /* 2> real-file", content.EffectMutateDestructive}, // stderr creates or truncates a file.
-		{"du -sh /* > &1", content.EffectMutateDestructive},         // spaced &1 is a filename, not descriptor duplication.
-		{"> /dev/null cat", content.EffectObserve},                  // a leading null sink still discards without mutation.
-		{"> /etc/passwd cat", content.EffectMutateDestructive},      // a leading file target remains a write.
-		{"du -sh /*", content.EffectObserve},                        // no redirection leaves a read-only command.
+		{"du -sh /* 2>/dev/null", content.EffectObserve},   // stderr discarded; no file is mutated.
+		{"du -sh /* >/dev/null", content.EffectObserve},    // stdout discarded; no file is mutated.
+		{"du -sh /* &>/dev/null", content.EffectObserve},   // both streams discarded; no file is mutated.
+		{"du -sh /* 2>&1", content.EffectObserve},          // stderr is duplicated to stdout; no file is mutated.
+		{"du -sh /* > real-file", content.EffectDelegate},  // read plus write is mixed and takes the set's worst member.
+		{"du -sh /* 2> real-file", content.EffectDelegate}, // read plus write is mixed and takes the set's worst member.
+		{"du -sh /* > &1", content.EffectDelegate},         // spaced &1 is a filename, so read plus write is mixed.
+		{"> /dev/null cat", content.EffectObserve},         // a leading null sink still discards without mutation.
+		{"> /etc/passwd cat", content.EffectDelegate},      // read plus write is mixed and takes the set's worst member.
+		{"du -sh /*", content.EffectObserve},               // no redirection leaves a read-only command.
 	}
 	for _, test := range tests {
 		t.Run(test.command, func(t *testing.T) {
-			if got := commandEffect(parseCanonicalInvocation(test.command), content.EffectMutateDestructive); got != test.want {
+			if got := commandEffect(parseCanonicalInvocation(test.command), runEffects); got != test.want {
 				t.Fatalf("effect = %q, want %q", got, test.want)
 			}
 		})
@@ -115,7 +121,7 @@ func TestCommandEffect_EveryReadAllowlistEntryLowers(t *testing.T) {
 		"whoami",
 	} {
 		t.Run(command, func(t *testing.T) {
-			if got := commandEffect(parseCanonicalInvocation(command), content.EffectMutateDestructive); got != content.EffectObserve {
+			if got := commandEffect(parseCanonicalInvocation(command), runEffects); got != content.EffectObserve {
 				t.Fatalf("effect = %q, want %q", got, content.EffectObserve)
 			}
 		})
@@ -130,22 +136,22 @@ func TestCommandEffect_SortOutputFormsKeepWorstCase(t *testing.T) {
 		"sort --output=/etc/passwd file",
 	} {
 		t.Run(command, func(t *testing.T) {
-			if got := commandEffect(parseCanonicalInvocation(command), content.EffectMutateDestructive); got != content.EffectMutateDestructive {
-				t.Fatalf("effect = %q, want %q", got, content.EffectMutateDestructive)
+			if got := commandEffect(parseCanonicalInvocation(command), runEffects); got != content.EffectDelegate {
+				t.Fatalf("effect = %q, want %q", got, content.EffectDelegate)
 			}
 		})
 	}
 }
 
 func TestCommandEffect_UniqSecondOperandKeepsWorstCase(t *testing.T) {
-	if got := commandEffect(parseCanonicalInvocation("uniq input output"), content.EffectMutateDestructive); got != content.EffectMutateDestructive {
-		t.Fatalf("effect = %q, want %q", got, content.EffectMutateDestructive)
+	if got := commandEffect(parseCanonicalInvocation("uniq input output"), runEffects); got != content.EffectDelegate {
+		t.Fatalf("effect = %q, want %q", got, content.EffectDelegate)
 	}
 }
 
 func TestCommandEffect_LsBoundaryDoesNotMatchLsof(t *testing.T) {
-	if got := commandEffect(parseCanonicalInvocation("lsof"), content.EffectMutateDestructive); got != content.EffectMutateDestructive {
-		t.Fatalf("effect = %q, want %q", got, content.EffectMutateDestructive)
+	if got := commandEffect(parseCanonicalInvocation("lsof"), runEffects); got != content.EffectDelegate {
+		t.Fatalf("effect = %q, want %q", got, content.EffectDelegate)
 	}
 }
 
@@ -178,8 +184,8 @@ func TestCommandEffect_DisqualifiersKeepDeclaredWorstCase(t *testing.T) {
 		{name: "tee", command: "ls | tee output"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := commandEffect(parseCanonicalInvocation(tc.command), content.EffectMutateDestructive); got != content.EffectMutateDestructive {
-				t.Fatalf("effect = %q, want %q", got, content.EffectMutateDestructive)
+			if got := commandEffect(parseCanonicalInvocation(tc.command), runEffects); got != content.EffectDelegate {
+				t.Fatalf("effect = %q, want %q", got, content.EffectDelegate)
 			}
 		})
 	}
@@ -207,9 +213,9 @@ func TestCommandEffect_PathPrefixedDisqualifiersMatchBareNames(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			bare := parseCanonicalInvocation(tc.command)
-			bareEffect := commandEffect(bare, content.EffectDelegate)
+			bareEffect := commandEffect(bare, runEffects)
 			prefixed := parseCanonicalInvocation("/usr/bin/" + tc.command)
-			prefixedEffect := commandEffect(prefixed, content.EffectDelegate)
+			prefixedEffect := commandEffect(prefixed, runEffects)
 
 			bareUnresolved := len(bare.Resources.Unresolved) > 0
 			prefixedUnresolved := len(prefixed.Resources.Unresolved) > 0
@@ -238,13 +244,13 @@ func TestCommandEffect_AllowListProgramNamesRemainCaseSensitive(t *testing.T) {
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
 			known := parseCanonicalInvocation(tc.known)
-			if got := commandEffect(known, content.EffectDelegate); got != content.EffectObserve ||
+			if got := commandEffect(known, runEffects); got != content.EffectObserve ||
 				len(known.Resources.Unresolved) != 0 {
 				t.Fatalf("known = %+v (effect %q), want resolved observe", known, got)
 			}
 
 			upperCase := parseCanonicalInvocation(tc.upperCase)
-			if got := commandEffect(upperCase, content.EffectDelegate); got != content.EffectDelegate ||
+			if got := commandEffect(upperCase, runEffects); got != content.EffectDelegate ||
 				len(upperCase.Resources.Unresolved) == 0 {
 				t.Fatalf("upper-case = %+v (effect %q), want unresolved delegate", upperCase, got)
 			}
@@ -253,7 +259,7 @@ func TestCommandEffect_AllowListProgramNamesRemainCaseSensitive(t *testing.T) {
 
 	t.Run("unknown", func(t *testing.T) {
 		inv := parseCanonicalInvocation("NOTAPROGRAM /etc")
-		if got := commandEffect(inv, content.EffectDelegate); got != content.EffectDelegate ||
+		if got := commandEffect(inv, runEffects); got != content.EffectDelegate ||
 			len(inv.Resources.Unresolved) == 0 {
 			t.Fatalf("unknown = %+v (effect %q), want unresolved delegate", inv, got)
 		}
@@ -267,7 +273,7 @@ func TestCommandEffect_UnparseableAndUnknownAreWorstCase(t *testing.T) {
 		"ls &&",
 	} {
 		t.Run(command, func(t *testing.T) {
-			if got := commandEffect(parseCanonicalInvocation(command), content.EffectMutateDestructive); got != content.EffectMutateDestructive {
+			if got := commandEffect(parseCanonicalInvocation(command), []content.Effect{content.EffectMutateDestructive}); got != content.EffectMutateDestructive {
 				t.Fatalf("effect = %q, want %q", got, content.EffectMutateDestructive)
 			}
 		})
@@ -284,7 +290,7 @@ func TestCommandEffect_LowersBelowAnyDeclaredWorstCaseWhenSafe(t *testing.T) {
 		content.EffectDelegate,
 	} {
 		t.Run(string(declared), func(t *testing.T) {
-			if got := commandEffect(parseCanonicalInvocation("ls -la"), declared); got != content.EffectObserve {
+			if got := commandEffect(parseCanonicalInvocation("ls -la"), []content.Effect{content.EffectObserve, declared}); got != content.EffectObserve {
 				t.Fatalf("effect = %q, want %q", got, content.EffectObserve)
 			}
 		})
@@ -364,7 +370,7 @@ func TestCommandResources_RMVariableIsUnresolvedDeletion(t *testing.T) {
 	if got.Reason == "" {
 		t.Fatal("unresolved deletion has no human-readable reason")
 	}
-	if got := commandEffect(inv, content.EffectMutateDestructive); got != content.EffectMutateDestructive {
+	if got := commandEffect(inv, []content.Effect{content.EffectMutateDestructive}); got != content.EffectMutateDestructive {
 		t.Fatalf("effect = %q, want declared worst case", got)
 	}
 }
@@ -384,7 +390,7 @@ func TestStandingRuleRejectsDynamicTokensInAnyPosition(t *testing.T) {
 }
 
 func TestCommandEffect_BackgroundWithFollowingCommandStaysWorstCase(t *testing.T) {
-	if got := commandEffect(parseCanonicalInvocation("ls & echo done"), content.EffectMutateDestructive); got != content.EffectMutateDestructive {
+	if got := commandEffect(parseCanonicalInvocation("ls & echo done"), runEffects); got != content.EffectDelegate {
 		t.Fatalf("effect = %q, want declared worst case", got)
 	}
 }
@@ -414,7 +420,7 @@ func TestCommandResources_DoubleQuotedSubstitutionIsUnresolved(t *testing.T) {
 	if len(inv.Resources.Unresolved) == 0 {
 		t.Fatal("unresolved = empty, want a reason for double-quoted command substitution")
 	}
-	if got := commandEffect(inv, content.EffectMutateDestructive); got != content.EffectMutateDestructive {
+	if got := commandEffect(inv, runEffects); got != content.EffectDelegate {
 		t.Fatalf("effect = %q, want declared worst case", got)
 	}
 }
@@ -430,7 +436,7 @@ func TestCommandResources_ReadWriteRedirectionNamesWriteTarget(t *testing.T) {
 	if !seenWrite {
 		t.Fatalf("resources = %+v, want write /tmp/state", inv.Resources.Resources)
 	}
-	if got := commandEffect(inv, content.EffectMutateDestructive); got != content.EffectMutateDestructive {
+	if got := commandEffect(inv, runEffects); got != content.EffectDelegate {
 		t.Fatalf("effect = %q, want declared worst case", got)
 	}
 }
@@ -569,7 +575,7 @@ func TestCommandEffect_DisqualifiedAlwaysHasUnresolvedCause(t *testing.T) {
 			if len(inv.Resources.Unresolved) == 0 {
 				t.Fatalf("unresolved = empty for disqualified command")
 			}
-			if got := commandEffect(inv, content.EffectMutateDestructive); got != content.EffectMutateDestructive {
+			if got := commandEffect(inv, runEffects); got != content.EffectDelegate {
 				t.Fatalf("effect = %q, want declared worst case", got)
 			}
 		})

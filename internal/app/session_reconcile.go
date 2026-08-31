@@ -97,6 +97,7 @@ func reconcileSessions(
 	for _, p := range pending {
 		j := content.SessionJudgement{SessionID: p.SessionID}
 		owner := -1
+		matches := 0
 		for i, inv := range inventories {
 			if typed, ok := inv.(generationOwnedInventory); ok {
 				if p.Generation == "" || typed.Generation() != p.Generation {
@@ -114,13 +115,20 @@ func reconcileSessions(
 			}
 			if inv.Owns(p.SessionID) {
 				owner = i
-				break
+				matches++
 			}
 		}
-		if owner < 0 {
+		switch {
+		case matches == 0:
 			j.Verdict = content.VerdictUnknown
 			j.Cause = content.CauseNoInventory
-		} else {
+		case matches > 1:
+			// Multiple owners indicate duplicate registration. Choosing one
+			// would make a broken ownership map silently first-wins.
+			j.Verdict = content.VerdictUnknown
+			j.Cause = content.CauseAmbiguousInventory
+			j.Detail = "multiple inventories claim this session id space"
+		default:
 			if !asked[owner] {
 				answers[owner], failures[owner] = inventories[owner].LiveSessions(ctx)
 				asked[owner] = true

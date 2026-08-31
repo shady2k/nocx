@@ -35,6 +35,7 @@ import { StatusCard } from './ui/status-card'
  *  through. */
 export type UnreconciledCause =
   | 'notYetAsked'
+  | 'ambiguousInventory'
   | 'noInventory'
   | 'connectionRefused'
   | 'timedOut'
@@ -50,6 +51,8 @@ export type UnreconciledCause =
  *  running. Two of them name something a person can act on. */
 const SENTENCES: Record<UnreconciledCause, string> = {
   notYetAsked: 'nocx has not been able to check this host since it restarted.',
+  ambiguousInventory:
+    'multiple inventories claim this session id space, so its owner could not be established.',
   noInventory: 'nothing on this host can be asked whether that session is still there.',
   connectionRefused: 'this host refused the connection, so its sessions could not be checked.',
   timedOut: 'this host did not answer in time, so its sessions could not be checked.',

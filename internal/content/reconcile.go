@@ -110,6 +110,10 @@ const (
 	// the ordinary answer for a session recorded before the helper owned the
 	// host, and it is the reason those recordings need the age bound below.
 	CauseNoInventory UnreconciledCause = "noInventory"
+	// CauseAmbiguousInventory means more than one inventory claimed the same
+	// id space. That can only be a duplicate registration bug; refusing to
+	// choose makes the bug loud instead of letting first-wins hide it.
+	CauseAmbiguousInventory UnreconciledCause = "ambiguousInventory"
 	// CauseConnectionRefused — a carrier answered, refusing.
 	CauseConnectionRefused UnreconciledCause = "connectionRefused"
 	// CauseTimedOut — the ask did not finish in time.

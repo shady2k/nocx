@@ -83,6 +83,7 @@ describe('a restored tab says which blocks nobody could check (nocx-k6p18.5)', (
   // the third state IS the cause.
   const sentences: Array<[UnreconciledCause, string]> = [
     ['notYetAsked', 'has not been able to check'],
+    ['ambiguousInventory', 'multiple inventories claim'],
     ['noInventory', 'nothing on this host can be asked'],
     ['connectionRefused', 'refused the connection'],
     ['timedOut', 'did not answer in time'],

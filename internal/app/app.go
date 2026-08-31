@@ -942,13 +942,6 @@ func New(opts ...Option) (*App, error) {
 		Budget: budget,
 		Policy: historyPolicy,
 		Logger: logger,
-		// The rebuild's own announcement (nocx-rtg0.19). A schema change
-		// discards the file, and the store says so in a slog.Warn nobody
-		// reads — while the symptom a person actually sees, an empty
-		// history, is indistinguishable from a fresh install. This is the
-		// composition root handing that fact to the surface that already
-		// exists to say when history is not what the settings promise.
-		OnDiscard: func(rows int) { historyStatus.Discarded(rows) },
 	}); openErr != nil {
 		slogger.Warn("durable command history unavailable; starting without it", "reason", openErr)
 		historyStatus.Raise(transport.HistoryDegradeOpenFailed, openErr.Error())

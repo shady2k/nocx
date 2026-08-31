@@ -147,11 +147,22 @@ func NewHistoryStatus() *HistoryStatus {
 }
 
 // Discarded records that the store rebuilt itself at open and how many
-// commands that cost. Called once, from the composition root, before the
-// transport starts — so no listener has to fire and no episode opens.
+// commands that cost. It was called once, from the composition root, before
+// the transport starts — so no listener has to fire and no episode opens.
 //
 // A count of -1 means the file held nothing this build could count, which is
 // still a discard worth stating: something was there and is not now.
+//
+// NOTHING CALLS IT ANY MORE, and the sentence it feeds can no longer appear
+// (nocx-lmb6v.1). The store does not rebuild a file for a version difference
+// at all: it migrates one it has a step for and refuses one it does not, and
+// a refusal speaks through HistoryDegradeOpenFailed like every other reason
+// Open can fail. This method, the `discarded` field on the wire, and the
+// renderer's historyDiscardSentence are the whole of a surface with no
+// producer left; removing them is a wire-contract change and is deliberately
+// not folded into the migration bead. The deadcode ratchet cannot see it —
+// RTA treats a method on a type a live interface can hold as reachable
+// (AGENTS.md) — so it is written down here instead.
 func (h *HistoryStatus) Discarded(rows int) {
 	h.mu.Lock()
 	defer h.mu.Unlock()

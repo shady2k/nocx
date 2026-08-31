@@ -171,9 +171,18 @@ const EMPTY_RECORDING: SessionRecording = {
 }
 
 /** The gap reason for a stretch that neither the recording nor the ring
- *  holds. It is the renderer's word because the fact is the renderer's to
- *  derive: `produced` belongs to session.output and `replayFrom` to
- *  sessions.live, and neither owner can see the other's number. */
+ *  holds. The renderer DERIVES this one because only it can: `produced`
+ *  belongs to session.output and `replayFrom` to sessions.live, and neither
+ *  owner can see the other's number.
+ *
+ *  The backend mints the same word for a range nobody recorded on its side
+ *  (internal/content's GapReasonUnrecorded, nocx-k6p18.2), and that is
+ *  deliberate rather than a second owner: it is one fact — nobody has these
+ *  bytes — arrived at from two directions, and one fact told to a user in two
+ *  vocabularies is the defect. Keep them equal. What must stay distinct is
+ *  this and `cap`: the cap dropped bytes that were here, and telling a person
+ *  the cap took bytes it never had would send them to a limit that did
+ *  nothing. */
 const UNRECORDED = 'unrecorded'
 
 /** base64 → bytes. atob is the platform's, and its output is one byte per

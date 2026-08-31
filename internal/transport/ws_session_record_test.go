@@ -71,9 +71,19 @@ type fakeRecorder struct {
 	appends  int
 	calls    int
 	reads    int
+	skips    []fakeSkip
 	stance   content.SessionOutputStance
 	failWith error
 	readErr  error
+	skipErr  error
+}
+
+// fakeSkip is one hole the recorder asked the store to record. Kept as a
+// list rather than a count because the two things a test needs to know about
+// a skip are where it resumed and what it called the hole.
+type fakeSkip struct {
+	resumeAt uint64
+	reason   string
 }
 
 func newFakeRecorder() *fakeRecorder {
@@ -121,6 +131,40 @@ func (r *fakeRecorder) Read(_ context.Context, _ string) (content.SessionOutputR
 		}}
 	}
 	return out, nil
+}
+
+// Skip records a hole nobody offered and leaves the recording appendable —
+// which for this fake means it does not touch `stream` at all, so a test can
+// tell "recorded nothing after the hole" from "recorded the hole as bytes".
+func (r *fakeRecorder) Skip(_ context.Context, _ string, resumeAt uint64, reason string) (content.SessionOutputResult, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.skipErr != nil {
+		return content.SessionOutputResult{}, r.skipErr
+	}
+	if r.stance != content.SessionOutputKept {
+		return content.SessionOutputResult{}, nil
+	}
+	r.skips = append(r.skips, fakeSkip{resumeAt: resumeAt, reason: reason})
+	return content.SessionOutputResult{Kept: true}, nil
+}
+
+func (r *fakeRecorder) setSkipFailure(err error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.skipErr = err
+}
+
+func (r *fakeRecorder) skipCalls() []fakeSkip {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]fakeSkip(nil), r.skips...)
+}
+
+func (r *fakeRecorder) firstOffset() uint64 {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return r.firstAt
 }
 
 func (r *fakeRecorder) setReadFailure(err error) {

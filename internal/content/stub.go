@@ -85,6 +85,15 @@ func (s *sessionOutputStub) Append(_ context.Context, in SessionOutputAppend) (S
 	return SessionOutputResult{}, nil
 }
 
+// Skip keeps nothing and says so, for the same reason Append does: with no
+// store there is no recording, so there is nothing for a hole to be a hole
+// in. The caller reads Kept and leaves its cursor where it is.
+func (s *sessionOutputStub) Skip(_ context.Context, sessionID string, resumeAt uint64, reason string) (SessionOutputResult, error) {
+	s.log.Info("content stub: SessionOutputRepository.Skip",
+		"session_id", sessionID, "resume_at", resumeAt, "reason", reason)
+	return SessionOutputResult{}, nil
+}
+
 func (s *sessionOutputStub) Read(_ context.Context, sessionID string) (SessionOutputRecording, error) {
 	s.log.Info("content stub: SessionOutputRepository.Read", "session_id", sessionID)
 	return SessionOutputRecording{SessionID: sessionID}, nil

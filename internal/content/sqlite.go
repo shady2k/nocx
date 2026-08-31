@@ -1065,7 +1065,13 @@ CREATE TABLE IF NOT EXISTS session_output (
   byte_len     INTEGER NOT NULL DEFAULT 0, -- what is currently KEPT, across every chunk
   head_end     INTEGER NOT NULL,        -- offset one past the reserved head; head chunks end at or before it
   truncated    TEXT CHECK (truncated IN ('cap','gap','suppressed')),
-  gaps         TEXT NOT NULL DEFAULT '[]', -- JSON [{start,end,reason}]; recomputed, never accumulated
+  -- JSON [{start,end,reason}]. The cap's own entries are RECOMPUTED from the
+  -- chunks on every write and never accumulated, so they cannot drift from
+  -- them; the rest are ranges nobody was there to record (nocx-k6p18.2),
+  -- which nothing can recompute -- the chunk layout of "the cap took these"
+  -- and "nobody ever offered these" is identical -- so those are read back
+  -- and carried forward. See session_output_sqlite.go's header.
+  gaps         TEXT NOT NULL DEFAULT '[]',
   started_at   INTEGER NOT NULL,
   updated_at   INTEGER NOT NULL
 ) STRICT;

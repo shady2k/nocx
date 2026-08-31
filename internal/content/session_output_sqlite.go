@@ -31,6 +31,23 @@ package content
 // inserts nothing. That is what lets the recorder retry an append whose error
 // it could not classify: the alternative is a cursor it dare not advance,
 // which is the stall this whole feature exists to remove.
+//
+// ── Two kinds of hole, and only one of them is derivable ─────────────────
+//
+// A cap eviction is DERIVED from the chunks that are actually there, so it
+// can never drift from them — that has always been true here and still is.
+// A skipped range cannot be derived from anything: the chunk layout of "the
+// cap took these" and "nobody was ever here to offer these" is identical, so
+// the difference lives only in what was recorded at the time (nocx-k6p18.2).
+//
+// So the `gaps` column carries BOTH and is read back as well as written: the
+// entries whose reason is not `cap` are facts nothing can recompute and are
+// carried forward, the cap's own hole is re-derived from the chunks on every
+// write, and the two are merged into one non-overlapping list. Where a cap
+// eviction later spans a skipped range, the skip wins that sub-range and the
+// cap keeps the rest — bytes the store never ingested cannot have been
+// evicted from it, and a single span carrying one reason for both would be
+// the false statement the whole bead exists to remove.
 
 import (
 	"context"
@@ -91,12 +108,126 @@ func (s *sqliteContent) Append(ctx context.Context, in SessionOutputAppend) (Ses
 	return out, nil
 }
 
+// Skip advances the recording across a range nobody recorded. The contract
+// is on SessionOutputRepository; this is the mechanism.
+//
+// The two refusals are decided before any transaction opens, exactly as
+// Append's are, so nothing is written for a call that was never going to be
+// kept. The empty reason is a refusal and not a default: a hole with no
+// reason is what makes a reader guess, and the guess it used to make was the
+// cap.
+func (s *sqliteContent) Skip(ctx context.Context, sessionID string, resumeAt uint64, reason string) (SessionOutputResult, error) {
+	if sessionID == "" {
+		return SessionOutputResult{}, errors.New("content: session output: session id is required")
+	}
+	if reason == "" {
+		return SessionOutputResult{}, errors.New("content: session output: a skipped range needs a reason; an unexplained hole is one a reader has to guess about")
+	}
+	if s.Stance() != SessionOutputKept {
+		return SessionOutputResult{}, nil
+	}
+	capBytes := int64(s.policy.OutputCapBytes())
+	// Offsets are byte counts of a stream one process produced; they cannot
+	// reach the int64 ceiling in any run this program survives.
+	at := int64(resumeAt) //nolint:gosec
+
+	var out SessionOutputResult
+	err := s.run(ctx, func(ctx context.Context) error {
+		var runErr error
+		out, runErr = s.skipSessionOutput(ctx, sessionID, at, reason, capBytes)
+		return runErr
+	})
+	if err != nil {
+		return SessionOutputResult{}, err
+	}
+	return out, nil
+}
+
+// skipSessionOutput runs ON the writer goroutine (see run's contract) and
+// must never call back into run.
+//
+// What is true on disk if it fails at each step, and how the next start
+// recovers: everything below happens inside ONE transaction, so a failure
+// before the commit leaves the recording exactly as it was — same cursor,
+// same gaps, same chunks — and the caller's next Skip does the whole thing
+// again from that unchanged state (resumeAt is the caller's own number, not
+// a delta, so a retry is the same call). A failure after the commit is not a
+// failure of this function: the hole is durable and the cursor has moved, and
+// a repeated Skip to the same resumeAt is the no-op below. There is no window
+// in which the cursor has advanced and the gap has not, because they are one
+// UPDATE.
+func (s *sqliteContent) skipSessionOutput(ctx context.Context, sessionID string, at int64, reason string, capBytes int64) (SessionOutputResult, error) {
+	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	if err != nil {
+		return SessionOutputResult{}, err
+	}
+	defer func() { _ = tx.Rollback() }()
+
+	now := time.Now().UnixMilli()
+	// The recording's coordinate space begins at the START OF THE STREAM and
+	// not at `at`, because that is what makes the hole measurable: a
+	// recording opened by a skip is missing [0,at), and anchoring it at `at`
+	// instead would report a session that produced its first `at` bytes
+	// invisibly. The head is still reserved where the bytes will actually
+	// arrive — there is nothing before `at` for it to protect.
+	row, err := loadOrCreateSessionOutput(ctx, tx, sessionID, 0, at, capBytes, now)
+	if err != nil {
+		return SessionOutputResult{}, err
+	}
+
+	switch {
+	case at == row.next:
+		// The same skip, sent again — a retry after an error the caller
+		// could not classify. A zero-width gap is not a hole, and recording
+		// one would turn a retry into a fiction.
+		if commitErr := tx.Commit(); commitErr != nil {
+			return SessionOutputResult{}, commitErr
+		}
+		return SessionOutputResult{Kept: true}, nil
+	case at < row.next:
+		// The caller HAD these bytes: the recording already covers them.
+		// This is the half of the old sentence that survives.
+		return SessionOutputResult{}, fmt.Errorf(
+			"%w: session %s is at %d, skip resumes at %d",
+			ErrSessionOutputDiscontinuous, sessionID, row.next, at)
+	}
+
+	recorded, err := sessionOutputRecordedGaps(row.gaps)
+	if err != nil {
+		return SessionOutputResult{}, err
+	}
+	recorded = append(recorded, Gap{Start: row.next, End: at, Reason: reason})
+	row.next = at
+
+	gaps, truncated, err := sessionOutputGaps(ctx, tx, sessionID, row, recorded)
+	if err != nil {
+		return SessionOutputResult{}, err
+	}
+	if _, updateErr := tx.ExecContext(ctx,
+		`UPDATE session_output
+		    SET next_offset = ?, truncated = ?, gaps = ?, updated_at = ?
+		  WHERE session_id = ?`,
+		row.next, truncated, gaps, now, sessionID); updateErr != nil {
+		return SessionOutputResult{}, fmt.Errorf("content: session output: record a skipped range: %w", updateErr)
+	}
+	if commitErr := tx.Commit(); commitErr != nil {
+		return SessionOutputResult{}, commitErr
+	}
+	// Dropped is zero and not merely unset: a skip evicts nothing. It cannot
+	// — the bytes it names were never here to evict.
+	return SessionOutputResult{Kept: true}, nil
+}
+
 // sessionOutputRow is the recording's own row, read at the top of an append.
 type sessionOutputRow struct {
 	first   int64
 	next    int64
 	byteLen int64
 	headEnd int64
+	// gaps is the row's stored gap list, carried in because half of it —
+	// every entry whose reason is not `cap` — cannot be recomputed from the
+	// chunks and must survive the next write.
+	gaps string
 }
 
 // appendSessionOutput runs ON the writer goroutine (see run's contract) and
@@ -115,7 +246,7 @@ func (s *sqliteContent) appendSessionOutput(ctx context.Context, in SessionOutpu
 	// Offsets are byte counts of a stream one process produced; they cannot
 	// reach the int64 ceiling in any run this program survives.
 	offset := int64(in.Offset) //nolint:gosec
-	row, err := loadOrCreateSessionOutput(ctx, tx, in.SessionID, offset, capBytes, now)
+	row, err := loadOrCreateSessionOutput(ctx, tx, in.SessionID, offset, offset, capBytes, now)
 	if err != nil {
 		return SessionOutputResult{}, err
 	}
@@ -155,7 +286,14 @@ func (s *sqliteContent) appendSessionOutput(ctx context.Context, in SessionOutpu
 		return SessionOutputResult{}, err
 	}
 
-	gaps, truncated, err := sessionOutputHole(ctx, tx, in.SessionID, row)
+	// The ranges nobody recorded are carried forward: an append cannot
+	// recompute them and cannot invalidate them either, since a skipped
+	// range lies behind the cursor and nothing will ever be written into it.
+	recorded, err := sessionOutputRecordedGaps(row.gaps)
+	if err != nil {
+		return SessionOutputResult{}, err
+	}
+	gaps, truncated, err := sessionOutputGaps(ctx, tx, in.SessionID, row, recorded)
 	if err != nil {
 		return SessionOutputResult{}, err
 	}
@@ -173,19 +311,27 @@ func (s *sqliteContent) appendSessionOutput(ctx context.Context, in SessionOutpu
 }
 
 // loadOrCreateSessionOutput reads the recording's row, creating it on the
-// first append. The head is reserved HERE and nowhere else — see the header.
-func loadOrCreateSessionOutput(ctx context.Context, tx *sql.Tx, sessionID string, offset, capBytes, now int64) (sessionOutputRow, error) {
+// first append or the first skip. The head is reserved HERE and nowhere
+// else — see the header.
+//
+// `first` is where the recording's coordinate space begins and `headStart`
+// is where the bytes it will actually hold begin. An append passes the same
+// offset for both, which is what it has always done. A skip passes 0 and the
+// resume point, because the range it is about lies BEFORE anything this
+// recording will ever hold, and a recording anchored past it could not
+// describe it.
+func loadOrCreateSessionOutput(ctx context.Context, tx *sql.Tx, sessionID string, first, headStart, capBytes, now int64) (sessionOutputRow, error) {
 	var row sessionOutputRow
 	err := tx.QueryRowContext(ctx,
-		`SELECT first_offset, next_offset, byte_len, head_end FROM session_output WHERE session_id = ?`,
-		sessionID).Scan(&row.first, &row.next, &row.byteLen, &row.headEnd)
+		`SELECT first_offset, next_offset, byte_len, head_end, gaps FROM session_output WHERE session_id = ?`,
+		sessionID).Scan(&row.first, &row.next, &row.byteLen, &row.headEnd, &row.gaps)
 	if err == nil {
 		return row, nil
 	}
 	if !errors.Is(err, sql.ErrNoRows) {
 		return row, fmt.Errorf("content: session output: read recording: %w", err)
 	}
-	row = sessionOutputRow{first: offset, next: offset, headEnd: offset + capBytes/2}
+	row = sessionOutputRow{first: first, next: first, headEnd: headStart + capBytes/2, gaps: "[]"}
 	if _, err := tx.ExecContext(ctx,
 		`INSERT INTO session_output
 		    (session_id, first_offset, next_offset, byte_len, head_end, truncated, gaps, started_at, updated_at)
@@ -256,38 +402,179 @@ func evictSessionOutput(ctx context.Context, tx *sql.Tx, sessionID string, row *
 	return dropped, nil
 }
 
-// sessionOutputHole derives the recording's gap from the chunks that are
-// actually there, rather than accumulating it as bytes go. Derived, so it
-// cannot drift: the hole is exactly the span between the last head byte and
-// the first surviving tail byte, whatever sequence of evictions produced it.
-func sessionOutputHole(ctx context.Context, tx *sql.Tx, sessionID string, row sessionOutputRow) (string, *string, error) {
-	var headEnd, tailStart sql.NullInt64
+// sessionOutputSpan is one half-open byte range [start,end) of the stream.
+type sessionOutputSpan struct {
+	start int64
+	end   int64
+}
+
+// sessionOutputRecordedGaps returns the gaps a row carries that nothing can
+// recompute: the ranges nobody was there to offer. Everything reasoned `cap`
+// is dropped, because the chunks say where the cap's hole is and a stored
+// copy could only ever drift from them.
+func sessionOutputRecordedGaps(encoded string) ([]Gap, error) {
+	if encoded == "" || encoded == "[]" {
+		return nil, nil
+	}
+	var all []Gap
+	if err := json.Unmarshal([]byte(encoded), &all); err != nil {
+		return nil, fmt.Errorf("content: session output: decode gaps: %w", err)
+	}
+	out := all[:0]
+	for _, g := range all {
+		if g.Reason != GapReasonCap && g.End > g.Start {
+			out = append(out, g)
+		}
+	}
+	return out, nil
+}
+
+// sessionOutputHoles derives every range inside [first,next) that the
+// recording does not hold, from the chunks that are actually there. Derived,
+// so it cannot drift from them — which is the property that made the old
+// two-aggregate version right and the reason this one replaces it rather
+// than sitting beside it: that version assumed the chunks were contiguous
+// apart from ONE evicted middle, and a skipped range breaks that assumption
+// (head chunks either side of a skip make MAX(head end) jump straight over
+// it, and the hole disappeared).
+//
+// Three sources of a hole, and the middle one is the only one SQLite has to
+// work for: before the first chunk, between two chunks, and after the last.
+func sessionOutputHoles(ctx context.Context, tx *sql.Tx, sessionID string, row sessionOutputRow) ([]sessionOutputSpan, error) {
+	var firstChunk, lastEnd sql.NullInt64
 	if err := tx.QueryRowContext(ctx,
-		`SELECT MAX(byte_offset + length(body)) FROM session_output_chunks
-		  WHERE session_id = ? AND head = 1`, sessionID).Scan(&headEnd); err != nil {
-		return "", nil, fmt.Errorf("content: session output: measure the head: %w", err)
+		`SELECT MIN(byte_offset), MAX(byte_offset + length(body))
+		   FROM session_output_chunks WHERE session_id = ?`, sessionID).
+		Scan(&firstChunk, &lastEnd); err != nil {
+		return nil, fmt.Errorf("content: session output: measure the recording: %w", err)
 	}
-	if err := tx.QueryRowContext(ctx,
-		`SELECT MIN(byte_offset) FROM session_output_chunks
-		  WHERE session_id = ? AND head = 0`, sessionID).Scan(&tailStart); err != nil {
-		return "", nil, fmt.Errorf("content: session output: measure the tail: %w", err)
+	if !firstChunk.Valid {
+		// Nothing kept at all. Everything produced is a hole, and a
+		// recording that has produced nothing has no hole either.
+		if row.next > row.first {
+			return []sessionOutputSpan{{start: row.first, end: row.next}}, nil
+		}
+		return nil, nil
 	}
-	from := row.first
-	if headEnd.Valid {
-		from = headEnd.Int64
+
+	var holes []sessionOutputSpan
+	if firstChunk.Int64 > row.first {
+		holes = append(holes, sessionOutputSpan{start: row.first, end: firstChunk.Int64})
 	}
-	to := row.next
-	if tailStart.Valid {
-		to = tailStart.Int64
+	// LAG rather than reading every chunk row back: the answer is the few
+	// boundaries where one chunk does not touch the next, and at the largest
+	// cap the user can set that would be five hundred rows crossing the
+	// driver on every append to find them.
+	rows, err := tx.QueryContext(ctx,
+		`SELECT prev_end, byte_offset FROM (
+		     SELECT byte_offset,
+		            LAG(byte_offset + length(body)) OVER (ORDER BY byte_offset) AS prev_end
+		       FROM session_output_chunks WHERE session_id = ?
+		   )
+		  WHERE prev_end IS NOT NULL AND byte_offset > prev_end
+		  ORDER BY byte_offset`, sessionID)
+	if err != nil {
+		return nil, fmt.Errorf("content: session output: find the holes: %w", err)
 	}
-	if to <= from {
-		return "[]", nil, nil
+	defer func() { _ = rows.Close() }()
+	for rows.Next() {
+		var span sessionOutputSpan
+		if err := rows.Scan(&span.start, &span.end); err != nil {
+			return nil, fmt.Errorf("content: session output: scan a hole: %w", err)
+		}
+		holes = append(holes, span)
 	}
-	body, err := json.Marshal([]Gap{{Start: from, End: to, Reason: "cap"}})
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("content: session output: find the holes: %w", err)
+	}
+
+	if row.next > lastEnd.Int64 {
+		holes = append(holes, sessionOutputSpan{start: lastEnd.Int64, end: row.next})
+	}
+	return holes, nil
+}
+
+// attributeSessionOutputGaps names every hole. A range the store was told
+// about is that range's reason; everything else in a hole is the cap, which
+// is the only other thing that can take bytes out of a recording.
+//
+// A recorded range always lies wholly inside a hole — the store cannot hold
+// bytes it was told it never received — so this only ever SPLITS a hole, and
+// the cap keeps whatever is left either side. That is the honest reading of
+// an eviction that later spans a skipped range: the cap took what it had, and
+// it never had the rest.
+//
+// `recorded` must be in stream order and non-overlapping, which is what
+// coalescing below preserves from one write to the next.
+func attributeSessionOutputGaps(holes []sessionOutputSpan, recorded []Gap) []Gap {
+	var out []Gap
+	for _, hole := range holes {
+		cursor := hole.start
+		for _, g := range recorded {
+			if g.End <= cursor || g.Start >= hole.end {
+				continue
+			}
+			start, end := g.Start, g.End
+			if start < cursor {
+				start = cursor
+			}
+			if end > hole.end {
+				end = hole.end
+			}
+			if start > cursor {
+				out = append(out, Gap{Start: cursor, End: start, Reason: GapReasonCap})
+			}
+			out = append(out, Gap{Start: start, End: end, Reason: g.Reason})
+			cursor = end
+		}
+		if cursor < hole.end {
+			out = append(out, Gap{Start: cursor, End: hole.end, Reason: GapReasonCap})
+		}
+	}
+	// Adjacent ranges with the SAME reason are one range. Two skips with
+	// nothing appended between them are one hole nobody recorded, and
+	// reporting them separately would make the stored list grow with every
+	// coordinator that came and went.
+	merged := out[:0]
+	for _, g := range out {
+		if n := len(merged); n > 0 && merged[n-1].End == g.Start && merged[n-1].Reason == g.Reason {
+			merged[n-1].End = g.End
+			continue
+		}
+		merged = append(merged, g)
+	}
+	return merged
+}
+
+// sessionOutputGaps is what goes into the row: the whole of what is missing,
+// in stream order, each range with the reason that is true of it, plus the
+// PRIMARY reason for the recording as a whole.
+//
+// The primary reason is `cap` whenever the bound evicted anything, because
+// that is the one a user can act on — the knob that dropped those bytes is
+// the knob that would have kept them — and `gap` for a recording holed only
+// by ranges nobody recorded, where no bound acted at all and saying `cap`
+// would name a setting that did nothing.
+func sessionOutputGaps(ctx context.Context, tx *sql.Tx, sessionID string, row sessionOutputRow, recorded []Gap) (string, *string, error) {
+	holes, err := sessionOutputHoles(ctx, tx, sessionID, row)
 	if err != nil {
 		return "", nil, err
 	}
-	trunc := string(TruncCap)
+	gaps := attributeSessionOutputGaps(holes, recorded)
+	if len(gaps) == 0 {
+		return "[]", nil, nil
+	}
+	body, err := json.Marshal(gaps)
+	if err != nil {
+		return "", nil, err
+	}
+	trunc := string(TruncGap)
+	for _, g := range gaps {
+		if g.Reason == GapReasonCap {
+			trunc = string(TruncCap)
+			break
+		}
+	}
 	return string(body), &trunc, nil
 }
 

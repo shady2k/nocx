@@ -5,11 +5,12 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { Dialog } from './dialog'
 import { Prompt } from './prompt'
 import { ToastHost, clearToasts, showToast } from './toast'
-import { stackDepth } from './overlay/stack'
+import { clearStack, stackDepth } from './overlay/stack'
 
 afterEach(() => {
   clearToasts()
   cleanup()
+  clearStack()
 })
 
 describe('Prompt', () => {
@@ -213,6 +214,37 @@ describe('Prompt', () => {
     const overlay = container.querySelector('.ui-prompt-overlay')
     expect(overlay).toBeTruthy()
     expect(overlay!.closest('dialog.nocx-dialog')).not.toBeNull()
+  })
+
+  it('reparents from a closed underlay while the prompt stays open', () => {
+    const [dialogOpen, setDialogOpen] = createSignal(true)
+    const [promptOpen, setPromptOpen] = createSignal(false)
+    const onPromptClose = vi.fn(() => setPromptOpen(false))
+    const { container } = render(() => (
+      <>
+        <Dialog open={dialogOpen()} onClose={() => undefined} title="Connection">
+          Body
+        </Dialog>
+        <Prompt open={promptOpen()} ariaLabel="Password" onClose={onPromptClose} actions={null}>
+          Secret
+        </Prompt>
+      </>
+    ))
+
+    setPromptOpen(true)
+    expect(container.querySelector('.ui-prompt-overlay')?.closest('dialog')).not.toBeNull()
+
+    setDialogOpen(false)
+
+    const overlay = container.querySelector('.ui-prompt-overlay')
+    expect(overlay).toBeTruthy()
+    expect(overlay!.closest('dialog')).toBeNull()
+    expect(stackDepth()).toBe(1)
+
+    fireEvent.mouseDown(overlay!)
+    expect(onPromptClose).toHaveBeenCalledOnce()
+    expect(container.querySelector('.ui-prompt-overlay')).toBeNull()
+    expect(stackDepth()).toBe(0)
   })
 
   it('renders in place when no overlay is open', () => {

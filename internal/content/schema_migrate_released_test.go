@@ -77,10 +77,15 @@ func releasedSchema(t *testing.T, version int) string {
 // pairs the right number of rows with the wrong values in them satisfies every
 // count anybody could assert. So each string below is unique in the file, and
 // assertTheRowsOfSchema14 reads them back as whole tuples.
+// The creation-time pragmas precede the first table exactly as they do in
+// Open. Omitting either would make this a schema-faithful but engine-different
+// fixture: an upgraded file could then pass a parity test for the wrong reason.
 func aReleasedSchema14Database(t *testing.T, path string) {
 	t.Helper()
 	rawExec(
 		t, path,
+		"PRAGMA auto_vacuum=INCREMENTAL",
+		"PRAGMA journal_mode=WAL",
 		releasedSchema(t, 14),
 		`INSERT INTO workspaces (id, name, colour, position, created_at, payload, digest)
 			VALUES ('ws-fourteen', 'the workspace from before the upgrade', '#123456', 7, 1400, '{"kept":true}', 'digest-fourteen')`,

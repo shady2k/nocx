@@ -27,6 +27,7 @@ import (
 
 	tools "github.com/shady2k/nocx/contracts/tools"
 	"github.com/shady2k/nocx/internal/agenttools"
+	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/credential"
@@ -235,6 +236,10 @@ type AskParams struct {
 	// them as seams; it never owns a service or a second store implementation.
 	NoteOperation    capability.NoteOperation
 	SnippetOperation capability.SnippetOperation
+	// Fetcher is the guarded direct-network seam for fetch.url. It is wired
+	// by the composition root; the tool cannot select a pane's connection
+	// route or construct another HTTP client.
+	Fetcher apifetch.TextFetcher
 	// Approvals is the process-lifetime approval store (design §7.2): the
 	// human's yes to one exact proposal, bound to run, attempt, tool, call
 	// id and a hash of the canonical arguments. Nil disables escalation's

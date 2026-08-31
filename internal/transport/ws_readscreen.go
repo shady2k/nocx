@@ -223,11 +223,15 @@ func (s *WSServer) brokerSpecs(immediate control.ImmediateSubmission) []methodSp
 // ONE place the order is stated: the workspace override when nocx-mp2vd
 // lands, the global default now (the store the composition root wired).
 // The mint supplies the run's own session, the whole accessible local
-// filesystem, and the content root as the RUN FENCE. EffectPolicy.AsGrant
-// keeps those fence scopes distinct from each policy row's POLICY SELECTOR:
-// a selector is intersected with the fence, while an empty selector applies
-// across it. This is why a narrow path row remains narrow even though the
-// run's outer path fence is "/"; the two lists are not unioned.
+// filesystem, the content root, and direct network destinations as the RUN
+// FENCE. The destination wildcard means "any destination reached through the
+// direct route"; httppolicy remains the authority that refuses private
+// redirects or unsafe addresses.
+// EffectPolicy.AsGrant keeps these fence scopes distinct from each policy
+// row's POLICY SELECTOR: a selector is intersected with the fence, while an
+// empty selector applies across it. This is why a narrow path row remains
+// narrow even though the run's outer path fence is "/"; the two lists are not
+// unioned.
 //
 // This is the workspace's default grant: the workspace concept (which
 // sessions read as one story) is not wired yet, so the single-session
@@ -257,6 +261,7 @@ func (s *WSServer) runGrantFor(sessionID string) *content.Grant {
 		{Kind: content.ResourceSession, ID: sessionID},
 		{Kind: content.ResourcePath, ID: "/"},
 		{Kind: content.ResourceContent, ID: "content"},
+		{Kind: content.ResourceDestination, ID: "*"},
 	})
 	return &g
 }

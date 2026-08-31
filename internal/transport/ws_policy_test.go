@@ -219,7 +219,7 @@ func TestPolicyGet_ReportsWhichEffectClassesAreLive(t *testing.T) {
 	if env.Error != nil {
 		t.Fatalf("policy.get error: %+v (%s)", env.Error, raw)
 	}
-	want := []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive}
+	want := []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive, content.EffectCrossBoundary}
 	if !reflect.DeepEqual(env.Result.Live, want) {
 		t.Fatalf("live = %v, want %v", env.Result.Live, want)
 	}
@@ -261,8 +261,8 @@ func TestPolicyGetLive_OverTheWireConformsToContract(t *testing.T) {
 	if !ok {
 		t.Fatalf("result carries no live key: %s", env.Result)
 	}
-	if string(live) != `["observe","mutate-reversible","mutate-destructive"]` {
-		t.Fatalf("live bytes = %s, want [\"observe\",\"mutate-reversible\",\"mutate-destructive\"]", live)
+	if string(live) != `["observe","mutate-reversible","mutate-destructive","cross-boundary"]` {
+		t.Fatalf("live bytes = %s, want [\"observe\",\"mutate-reversible\",\"mutate-destructive\",\"cross-boundary\"]", live)
 	}
 }
 

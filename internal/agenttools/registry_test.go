@@ -60,6 +60,26 @@ const filesReadSchema = `{
   }}
 }`
 
+const fetchURLSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["url"],
+  "properties": {"url": {"type": "string"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["url", "contentType", "text", "truncated", "omitted", "lossy"],
+    "properties": {
+      "url": {"type": "string"},
+      "contentType": {"type": "string"},
+      "text": {"type": "string"},
+      "truncated": {"type": "boolean"},
+      "omitted": {"type": "integer"},
+      "lossy": {"type": "boolean"}
+    }
+  }}
+}`
+
 const filesEditSchema = `{
   "type": "object",
   "additionalProperties": false,
@@ -337,6 +357,7 @@ func grant(effects []content.Effect, kinds ...content.ResourceKind) content.Gran
 func TestForGrant_ExactPermittedSet(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
 		"files.read.schema.json":       filesReadSchema,
+		"fetch.url.schema.json":        fetchURLSchema,
 		"git.status.schema.json":       gitStatusSchema,
 		"session.list.schema.json":     sessionListSchema,
 		"session.read.schema.json":     sessionReadSchema,
@@ -459,6 +480,7 @@ func containsName(tools []Tool, name string) bool {
 // exactly the state the code is in today — so this asserts the content.
 func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
+		"fetch.url.schema.json":        fetchURLSchema,
 		"files.read.schema.json":       filesReadSchema,
 		"git.status.schema.json":       gitStatusSchema,
 		"session.list.schema.json":     sessionListSchema,
@@ -589,7 +611,7 @@ func toolNames(tools []Tool) []string {
 // control over an effect no tool carries.
 func TestLiveEffects_IsWhatTheDeclarationsCarry(t *testing.T) {
 	got := LiveEffects()
-	want := []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive}
+	want := []content.Effect{content.EffectObserve, content.EffectMutateReversible, content.EffectMutateDestructive, content.EffectCrossBoundary}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("LiveEffects() = %v, want %v", got, want)
 	}
@@ -610,6 +632,7 @@ func TestLiveEffects_ADeclarationIsTheOnlyEditNeeded(t *testing.T) {
 		content.EffectMutateReversible,
 		content.EffectMutateDestructive,
 		content.EffectDisclose,
+		content.EffectCrossBoundary,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("liveEffects(+disclose) = %v, want %v", got, want)
@@ -634,6 +657,7 @@ func TestLiveEffects_IsTheLatticesOrderNotTheTables(t *testing.T) {
 		content.EffectObserve,
 		content.EffectMutateReversible,
 		content.EffectMutateDestructive,
+		content.EffectCrossBoundary,
 	}
 	if !reflect.DeepEqual(got, want) {
 		t.Fatalf("liveEffects(+mutate-reversible) = %v, want %v (table order, not the lattice's)", got, want)

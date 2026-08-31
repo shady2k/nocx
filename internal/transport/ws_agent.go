@@ -30,6 +30,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/content"
@@ -558,6 +559,8 @@ type agentHandlers struct {
 	credentials   credential.Resolver
 	client        assistant.Client
 	askSub        control.Submission
+	// fetcher is the guarded direct-network seam for fetch.url.
+	fetcher apifetch.TextFetcher
 	// attemptLedger is the ledger seam the tool-call pipeline records its
 	// attempts with (design §6.4 — the attempt is durable, before the
 	// call). The real ledger when the content store is wired; nil otherwise,
@@ -1223,6 +1226,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Requester:        h.requester,
 		NoteOperation:    h.noteOp,
 		SnippetOperation: h.snippetOp,
+		Fetcher:          h.fetcher,
 		KnownMaterial:    h.knownMaterial,
 		Approvals:        h.approvals,
 		RunID:            strconv.FormatInt(rc.runID, 10),
@@ -2395,7 +2399,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
 			noteOp: noteOp, snippetOp: snippetOp,
 			credentials: credentials, client: client, askSub: askSub,
-			attemptLedger: attemptLedger, grantFor: s.runGrantFor,
+			fetcher: s.agentFetcher, attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, knownMaterial: s.agentKnownMaterial,
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,

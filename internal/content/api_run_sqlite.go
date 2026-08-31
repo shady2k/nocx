@@ -19,10 +19,18 @@ const (
 )
 
 // migrateAPIRuns is a feature-owned migration inside ContentDB's open path.
-// The ledger's schema version deliberately does not advance for an API feature:
-// each typed repository owns a monotonic version, so adding runs cannot force
-// an unrelated ledger reset. The tables are still listed in rebuildDropOrder,
-// so a base-schema rebuild remains all-or-nothing and foreign-key complete.
+// The ledger's schema version deliberately does not advance for an API
+// feature: each typed repository owns a monotonic version, so adding runs
+// cannot force an unrelated ledger reset.
+//
+// It predates the ladder in schema_migrate.go and still runs beside it,
+// which is a duplication worth naming rather than leaving to be discovered:
+// two counters answer "what shape is this file in" — user_version for the
+// base schema and api_run_schema.version for this one. The reason it was
+// built apart still holds (a version bump here used to REBUILD the ledger,
+// which is a brutal price for a table nobody but the API panel reads) and
+// the reason has expired with the rebuild, so folding this into the ladder
+// is now possible. That is a deliberate refactor, not a side effect of one.
 func migrateAPIRuns(ctx context.Context, conn *sql.Conn) error {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {

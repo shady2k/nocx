@@ -56,21 +56,6 @@ type Config struct {
 	// Logger receives operational logging. When nil, the default slog
 	// adapter is used.
 	Logger log.Logger
-	// OnDiscard is called, once, when Open REBUILT the file because it was
-	// written by a different schema — with the number of commands that went
-	// with it, or -1 when the file held no countable table.
-	//
-	// IT EXISTS BECAUSE A LOG LINE IS NOT THE PRODUCT (nocx-rtg0.19).
-	// "your history was discarded" is a fact the user is entitled to, and
-	// AGENTS.md is explicit that a soft degrade must be visible where a
-	// person is looking rather than only in a warning nobody reads. This is
-	// a callback rather than a return value or an interface method so that
-	// adding it costs no caller anything: the composition root is the only
-	// place that knows what a product surface even is, and every test that
-	// opens a store keeps working without naming it.
-	//
-	// Nil means nobody is listening, which is the ordinary state in tests.
-	OnDiscard func(rows int)
 }
 
 const (
@@ -284,7 +269,18 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 		if _, err := createConn.ExecContext(ctx, "SELECT count(*) FROM sqlite_master"); err != nil {
 			return fmt.Errorf("content: open %s: %w (wrong key or corrupt file)", cfg.Path, err)
 		}
-		if err := resetIfSchemaChanged(ctx, createConn, cfg.Logger, cfg.OnDiscard); err != nil {
+		// The ladder, and it runs BEFORE schemaV1 (schema_migrate.go): a
+		// database behind this build is walked forward one explicit edge
+		// at a time, one ahead of it is refused, and one whose version the
+		// chain cannot reach is refused too. Nothing here drops a table.
+		//
+		// The order is load-bearing in both directions. A step edits the
+		// shape the PREVIOUS version left, so it has to run before the
+		// current shape is asserted over the top of it; and schemaV1 is
+		// `IF NOT EXISTS` throughout, so what a step deliberately does not
+		// write — a table or an index that is simply new — arrives on the
+		// line below at no cost.
+		if err := migrateSchema(ctx, createConn, schemaLadder, cfg.Logger); err != nil {
 			return err
 		}
 		if _, err := createConn.ExecContext(ctx, schemaV1); err != nil {
@@ -311,6 +307,14 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 		if err := dropDeadSessions(ctx, createConn, cfg.Logger); err != nil {
 			return err
 		}
+		// The stamp for a file the ladder did not walk: a CREATION. Every
+		// other path arrives here already stamped — an unchanged file was
+		// current before Open touched it, and a migrated one was stamped
+		// by the edge that carried it, inside that edge's own transaction
+		// (schema_migrate.go). This line is therefore a no-op on both, and
+		// it must stay one: a stamp out here that could move a file the
+		// ladder declined to move is exactly the half-migrated state the
+		// interval forbids.
 		if _, err := createConn.ExecContext(ctx, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion)); err != nil {
 			return fmt.Errorf("content: stamp schema version: %w", err)
 		}
@@ -437,245 +441,22 @@ func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 }
 
 // schemaVersion stamps the shape below into the file's user_version. Bump it
-// in the same commit as any change to schemaV1 — that is the whole protocol.
+// in the same commit as any change to schemaV1 AND add the rung that carries
+// an existing database across the edge (schema_migrate.go) — the three move
+// together or a build creates one shape and migrates to another.
 //
-// We write no migrations (greenfield), and `CREATE TABLE IF NOT EXISTS` is a
-// no-op against a table that already exists, so before this check an added
-// column produced a database that opened perfectly and then failed every
-// INSERT and every SELECT with "no such column". The store went on reporting
-// itself healthy while recording nothing; recall quietly fell back to the
-// session, which is the only reason it was noticeable at all. A silent
-// half-broken store is worse than no store, so the file is rebuilt instead —
-// and it says so, because "your history was discarded" is a fact the user is
-// entitled to rather than something to infer from an empty panel.
+// It exists because `CREATE TABLE IF NOT EXISTS` is a no-op against a table
+// that already exists, so an added column once produced a database that
+// opened perfectly and then failed every INSERT and every SELECT with "no
+// such column". The store went on reporting itself healthy while recording
+// nothing, and recall quietly fell back to the session, which is the only
+// reason it was noticeable at all.
+//
+// The answer to that mismatch used to be a rebuild — every table dropped and
+// the count of discarded rows announced to the user. It is a MIGRATION now
+// (nocx-lmb6v.1): the ladder in schema_migrate.go walks one explicit step per
+// edge, and a database it has no step for is refused rather than emptied.
 const schemaVersion = 15
-
-// rebuildDropOrder is the complete set of user tables this build owns,
-// children first — a habit kept for readability rather than for correctness,
-// since resetIfSchemaChanged suspends foreign keys for the demolition and no
-// ordering could satisfy entries' self-reference anyway. It is also the
-// membership gate in resetIfSchemaChanged: a
-// file whose user tables are all in this set was written by an earlier
-// schema of THIS store and is discarded deliberately; one containing any
-// other table is refused.
-var rebuildDropOrder = []string{
-	"session_output_chunks", "session_output",
-	"api_run_artifact_chunks", "api_run_artifacts", "api_runs", "api_run_schema",
-	"grant_scopes", "grant_effects", "artifact_chunks", "authority_grants", "artifacts",
-	"edges", "executions", "environment_observations", "entries",
-	"panes", "tabs",
-	"sessions", "environments", "workspaces", "ledger_sequence",
-	"retention_watermark",
-	// RETIRED, AND STILL LISTED ON PURPOSE (nocx-rtg0.19). command_history
-	// was the interim table this build no longer creates, reads or writes —
-	// but a file written by an earlier nocx still HAS it, and this list is
-	// also the membership gate below: a file holding a table that is not
-	// here is REFUSED as "written by a newer schema", not rebuilt. Dropping
-	// the name with the table would therefore turn every existing user's
-	// database into one the app declines to open, which is a worse answer
-	// than the discard the rebuild already promises. It comes out when no
-	// file in the wild can still carry it, and not before.
-	"command_history",
-}
-
-// resetIfSchemaChanged rebuilds the file when it was written by an EARLIER
-// schema, and REFUSES one written by a later schema (nocx-7qunp). Rows are
-// lost by design in the first case: they belong to a shape this build cannot
-// read, and inventing a migration to keep them is the backwards compatibility
-// this project deliberately does not carry. In the second they are not this
-// build's to lose — a newer nocx wrote them and can still read them.
-//
-// The rebuild is all-or-nothing (nocx-rtg0.17): every DROP and the
-// discarded-row count share ONE transaction, so a crash, a cancellation or a
-// failed DROP midway leaves the file wholly old or wholly new, and the
-// warning is logged only after the commit, with the count that commit
-// actually discarded. SQLite DDL is transactional, so this costs nothing.
-func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger, onDiscard func(rows int)) error {
-	var onDisk int
-	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&onDisk); err != nil {
-		return fmt.Errorf("content: read schema version: %w", err)
-	}
-	if onDisk == schemaVersion {
-		return nil
-	}
-	// DIRECTION DECIDES, and only one direction may rebuild (nocx-7qunp).
-	// The gate above answered `equal`, and everything else used to fall
-	// through to the demolition — so an OLDER binary meeting a file a NEWER
-	// one wrote destroyed it, and logged the loss as "written by an older
-	// schema". The unknown-table check below cannot catch that case: it
-	// compares NAMES, and a newer schema that adds or changes COLUMNS inside
-	// tables we already own presents a name set this build recognises
-	// completely.
-	//
-	// Refusing is not a compatibility shim and must not grow into one. It
-	// writes nothing, converts nothing and keeps no second shape alive; it
-	// declines to be the process that decides the fate of rows it cannot
-	// read. Downward (onDisk < schemaVersion) keeps the discard this store
-	// has always promised — the migration path is nocx-lmb6v, and refusing
-	// upward is correct with or without it.
-	//
-	// The message is the product's, not the log's: Open's error becomes the
-	// `detail` of the history.status degrade at the composition root, and
-	// the Settings notice prints it, so it has to name the version a person
-	// must update TO rather than merely report a mismatch.
-	//
-	// It promises the ROWS and not the bytes, deliberately — and MOVING THIS
-	// CHECK AHEAD OF Open'S PRAGMAS WOULD NOT CHANGE THAT. It is the obvious
-	// next idea, so it was measured rather than argued about.
-	//
-	// This function touches nothing: the test asserts the file is
-	// byte-identical across a refused reset. Open is another matter, and not
-	// because of the order of its pragmas. Our store runs in WAL, so a
-	// content.db a newer nocx has been using is a SMALL MAIN FILE PLUS A
-	// LARGE `-wal` (4 KB and 2.7 MB in the fixture), and WAL is a property of
-	// the FILE, not of the connection: opening such a file and reading its
-	// stamp modifies the main file not at all, but CLOSING the handle
-	// checkpoints the WAL into it — 4 KB to 272 KB, `-wal` deleted — with no
-	// journal_mode pragma of ours involved anywhere. Refusing before
-	// `PRAGMA journal_mode=WAL` would therefore buy byte-identity only for a
-	// file that was never in WAL, which a file from a newer nocx never is.
-	// Only never opening the database could deliver it, and that is a
-	// separate read-only probe connection, not a reorder.
-	//
-	// So the honest promise is the one a person needs, and it holds on every
-	// path: the checkpoint is schema-blind page copying, so the rows survive
-	// intact and still stamped for the build that wrote them. That is what
-	// TestOpenRefusesANewerDatabaseArrivingInWalWithoutLosingARow pins.
-	// "Nothing was modified" would be a promise the caller had already
-	// broken before this line ran.
-	if onDisk > schemaVersion {
-		return fmt.Errorf("content: refusing to open a database written by schema %d: this build understands schema %d, and rebuilding it would discard rows it cannot read — update nocx to a build that understands schema %d; no rows were discarded",
-			onDisk, schemaVersion, onDisk)
-	}
-	// A fresh file is version 0 with no tables — that is a creation, not a
-	// reset, and must not be announced as data loss. Any user table at all
-	// means the file belongs to a different schema and is rebuilt.
-	names, err := conn.QueryContext(ctx,
-		"SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'")
-	if err != nil {
-		return fmt.Errorf("content: probe schema: %w", err)
-	}
-	var tables []string
-	for names.Next() {
-		var name string
-		if scanErr := names.Scan(&name); scanErr != nil {
-			_ = names.Close()
-			return fmt.Errorf("content: probe schema: %w", scanErr)
-		}
-		tables = append(tables, name)
-	}
-	if iterErr := names.Err(); iterErr != nil {
-		return fmt.Errorf("content: probe schema: %w", iterErr)
-	}
-	if closeErr := names.Close(); closeErr != nil {
-		return fmt.Errorf("content: probe schema: %w", closeErr)
-	}
-	if len(tables) == 0 {
-		return nil
-	}
-	// A table this build does not know about is refused, deliberately: its
-	// content is unaccounted for, so discarding it is not the "history
-	// discarded" the rebuild promises — it is data this build cannot name.
-	// This gate is what makes the foreign-key suspension below safe to
-	// reason about: everything that will be dropped is a table this build
-	// owns, so there is no relationship left for the engine to protect. A
-	// file whose STAMP is newer never reaches here — the direction check
-	// above took it — so what this gate still catches is a file whose stamp
-	// does not admit what it holds: one written before the stamp existed, or
-	// carrying a table this store never owned, or not a ContentDB file at
-	// all. It goes on saying "newer schema" because that is the likeliest of
-	// the three and the only one with an action attached.
-	for _, name := range tables {
-		known := false
-		for _, t := range rebuildDropOrder {
-			if t == name {
-				known = true
-				break
-			}
-		}
-		if !known {
-			return fmt.Errorf("content: rebuild refused: table %q is not part of schema %d — the file was written by a newer schema (or is not a ContentDB file); update nocx rather than discard it",
-				name, schemaVersion)
-		}
-	}
-	// Count inside the transaction, before any DROP: the number is the only
-	// measure of what the user lost, and the count that is logged is the one
-	// this commit discards. It counts ENTRIES — the ledger's commands — since
-	// nocx-rtg0.19 made that the only place a command lives; before it, the
-	// number came from the interim table beside it. A count that fails (a
-	// file written before the ledger existed has no such table) is not a
-	// reason to abandon the rebuild — report it as unknown and carry on.
-	// FOREIGN KEYS OFF FOR THE DEMOLITION, and it is not a relaxation — it is
-	// the only order that exists. `DROP TABLE` runs an implicit DELETE of
-	// every row, which fires ON DELETE actions; entries.parent_id is a SELF
-	// reference with ON DELETE SET NULL, so dropping `entries` nulls its own
-	// children's parent_id and the table's
-	// `CHECK (parent_id IS NOT NULL OR pos IS NULL)` then refuses the child
-	// that still holds a seat. rebuildDropOrder's children-first rule cannot
-	// reach this: a self-referencing table is its own child, so no ordering
-	// drops it after its children. The result was a hard stop — every user
-	// with one nested block could never open a file written by an older
-	// schema again, so app.go fell back to the content stub and the renderer
-	// said "Tabs are not being remembered" for good.
-	//
-	// Referential integrity has nothing to protect here anyway: the whole
-	// point of a rebuild is that every table this build owns goes, and the
-	// membership gate above has already refused a file holding anything
-	// else. This is SQLite's own documented procedure for a schema change.
-	//
-	// It is set OUTSIDE the transaction because `PRAGMA foreign_keys` is a
-	// no-op inside one, and restored on every path — the connection is the
-	// store's one connection (nocx-4p3l2) and everything after this depends
-	// on the ON that Open set.
-	if _, offErr := conn.ExecContext(ctx, "PRAGMA foreign_keys=OFF"); offErr != nil {
-		return fmt.Errorf("content: suspend foreign keys for rebuild: %w", offErr)
-	}
-	defer func() {
-		if _, onErr := conn.ExecContext(ctx, "PRAGMA foreign_keys=ON"); onErr != nil && logger != nil {
-			logger.Warn("content: foreign keys could not be restored after the rebuild", "error", onErr)
-		}
-	}()
-	tx, err := conn.BeginTx(ctx, nil)
-	if err != nil {
-		return fmt.Errorf("content: begin rebuild: %w", err)
-	}
-	defer func() { _ = tx.Rollback() }()
-	// BOTH TABLES, SUMMED, because a file reaching here may be from either
-	// side of nocx-rtg0.19: a current one keeps its commands in `entries`,
-	// and one written before the cutover keeps them in the retired
-	// `command_history`. Counting only the table this build knows would
-	// report "0 rows discarded" while discarding a user's entire history,
-	// which is the one number this warning exists to get right. Each count
-	// fails independently to zero — an absent table is not an error — and
-	// the total is -1 only when neither could be read at all.
-	rowsDiscarded := -1
-	for _, table := range []string{"entries", "command_history"} {
-		var n int
-		if err := tx.QueryRowContext(ctx, "SELECT count(*) FROM "+table).Scan(&n); err != nil { //nolint:gosec // constant table names
-			continue
-		}
-		if rowsDiscarded < 0 {
-			rowsDiscarded = 0
-		}
-		rowsDiscarded += n
-	}
-	for _, t := range rebuildDropOrder {
-		if _, err := tx.ExecContext(ctx, "DROP TABLE IF EXISTS "+t); err != nil {
-			return fmt.Errorf("content: rebuild for schema %d: %w", schemaVersion, err)
-		}
-	}
-	if err := tx.Commit(); err != nil {
-		return fmt.Errorf("content: commit rebuild: %w", err)
-	}
-	if logger != nil {
-		logger.Warn("content: history discarded — the database was written by an older schema",
-			"was", onDisk, "now", schemaVersion, "rowsDiscarded", rowsDiscarded)
-	}
-	if onDiscard != nil {
-		onDiscard(rowsDiscarded)
-	}
-	return nil
-}
 
 // schemaV1 is schema v1 of the one authoritative ledger (nocx-rtg0.2),
 // design §5.2 as amended by ADR-0019 and ADR-0020. It used to carry an

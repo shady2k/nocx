@@ -573,8 +573,9 @@ export class TerminalContent extends BasePaneContent {
    *  It is an axis of the SHOW question only, never a second authority. The
    *  current answer temporarily occupies the frozen stack alone; its terminal
    *  close returns the same editor and read-only grid beneath every answer.
-   *  `inputOwner()` still derives from `editor.isVisible`, and the summon is
-   *  spent the moment the command stops running, whichever way it stops. */
+   *  `inputOwner()` still derives from `editor.isVisible`, and the summon ends
+   *  only after both the command has stopped and every summoned answer is
+   *  terminal. */
   /** The one live frame displayed while the summoned editor is open. The
    *  renderer keeps parsing underneath it; this is presentation state only. */
   private _pinnedFrame: CapturedFrame | null = null
@@ -4979,13 +4980,14 @@ export class TerminalContent extends BasePaneContent {
     this._summonAnswerList = null
   }
 
-  /** Return the newest non-terminal turn. Two submits can overlap only in the
-   * pre-ack window, before the first acceptance hides the composer; every key
-   * path uses this one ordering decision rather than re-deriving a target. */
+  /** Return the newest answer still owned by the summon list and not yet
+   *  terminal. A cleared scrollback block may leave a stale record in this
+   *  list until the next lifecycle reconciliation; a detached answer cannot
+   *  own the keyboard or keep a summon alive. */
   private _newestActiveSummonedAnswer(): (typeof this._summonedAnswers)[number] | null {
     for (let i = this._summonedAnswers.length - 1; i >= 0; i -= 1) {
       const answer = this._summonedAnswers[i]
-      if (!answer.terminal) return answer
+      if (!answer.terminal && answer.el.parentElement === this._summonAnswerList) return answer
     }
     return null
   }
@@ -5491,12 +5493,13 @@ export class TerminalContent extends BasePaneContent {
   private _syncLifecycleOwnership(): void {
     const editor = this.editor
     if (editor === null) return
-    // A SUMMON IS SPENT the moment the command stops running, whichever way
-    // it stops — completed, lost, the integration gone. Reconciled here
-    // rather than on the completion fact alone, because this is the one
-    // place every lifecycle change already arrives, and a second place that
-    // cleared it would be a second owner of the same flag.
-    if (!this.hasRunningCommand()) {
+    // A non-terminal summoned answer is the turn's ownership fact. While it
+    // exists, a lifecycle completion for a child command is only an
+    // intermediate result: the assistant turn still owns the overlay and the
+    // person's keystroke must not be advertised as available to the composer.
+    // The answer's terminal close clears this fact, then this same projection
+    // restores the editor and seats the answer.
+    if (!this.hasRunningCommand() && this._currentSummonedAnswer() === null) {
       // Restore the editor before removing its stack, then seat all answer
       // nodes consecutively after the command.
       if (this._summoned) this._endSummon()

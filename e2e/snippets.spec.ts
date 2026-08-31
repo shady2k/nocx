@@ -37,7 +37,7 @@ const ROW = `${PANEL} .quick-connect__item`
  *  there; that argument was about the way out the palette carried, and the
  *  way out lives on every row now (nocx-8rtr.2). */
 const REFUSAL = '.ui-toast__message'
-/** The form that asks for a snippet's {{ask:…}} fields — all of them at
+/** The form that asks for a snippet's parameter fields — all of them at
  *  once, with the palette closed behind it. */
 const ASK_FORM = '.nocx-dialog[open]'
 
@@ -144,7 +144,7 @@ test.describe('a saved snippet reaches a running program', () => {
     // cwd rather than user: `user` is the SSH user and a local shell has
     // none, so {{env:user}} would REFUSE here — correctly, and that refusal
     // is the subject of the resolver's own tests, not of this one.
-    await createSnippet(page, 'e2e fill', 'in-{{env:cwd}}-{{ask:tag}}')
+    await createSnippet(page, 'e2e fill', 'in-{{env:cwd}}-{{tag}}')
 
     const blocksBefore = await programWaitingOnStdin(page, 'read x; printf \'got-%s\\n\' "$x"')
 
@@ -152,7 +152,7 @@ test.describe('a saved snippet reaches a running program', () => {
     // the case the whole surface was built for.
     await pickSnippet(page, 'e2e fill')
 
-    // A body with {{ask:…}} closes the palette and asks for every field at
+    // A body with parameters closes the palette and asks for every field at
     // once, in a form (owner review: a field that filters a list cannot
     // also be where a value is typed).
     const form = page.locator(ASK_FORM).filter({ hasText: 'e2e fill' })

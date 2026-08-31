@@ -1,5 +1,5 @@
 /**
- * The form a snippet's `{{ask:…}}` fields are answered in (design §10.1,
+ * The form a snippet's parameter fields are answered in (design §10.1,
  * owner review) — every field at once, in a kit Dialog, with the palette
  * closed behind it.
  *

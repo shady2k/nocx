@@ -38,9 +38,15 @@ func NewService(store Store, newID func() string) *Service {
 // that cannot run teaches the opposite of what a seed is for.
 //
 // The rule that keeps this true: a seed may use {{env:cwd}} — a session
-// always has a working directory — and {{ask:…}}, which the person answers.
+// always has a working directory — and PARAMETERS, which the person answers.
 // It may not use an env key that depends on where the pane happens to be
 // pointed.
+//
+// A parameter is written {{name}} or {{name=default}}. It used to be
+// {{ask:name}}, and that spelling was retired when a colon became what
+// decides who owns a span (nocx-9xu1j) — so the second seed below shipped a
+// body that inserted its own placeholders verbatim until it was re-spelled.
+// A seed is data, so nothing but TestSeedsUseNoRetiredSyntax can catch that.
 func (s *Service) seeds() []Snippet {
 	return []Snippet{
 		{
@@ -51,7 +57,7 @@ func (s *Service) seeds() []Snippet {
 		{
 			ID:    s.newID(),
 			Title: "Forward a port over ssh",
-			Body:  "ssh -L {{ask:local=8080}}:localhost:{{ask:remote=8080}} {{ask:host}}",
+			Body:  "ssh -L {{local=8080}}:localhost:{{remote=8080}} {{host}}",
 		},
 	}
 }

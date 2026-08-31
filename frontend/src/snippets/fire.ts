@@ -71,7 +71,7 @@ export function createSnippetFireAdapter(
     if (outcome.kind === 'needs-fields') {
       // The palette asked for every field before firing; reaching this is a
       // palette bug, and refusing beats firing a body that still carries
-      // {{ask:…}} as literal text.
+      // an unanswered parameter as literal text.
       return { kind: 'refused', reason: { kind: 'no-owner' } }
     }
     const text = outcome.text

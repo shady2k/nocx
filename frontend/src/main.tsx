@@ -933,7 +933,7 @@ async function main() {
     onRefused: (message) => showToast({ message, level: 'danger' }),
     onCopied: (title) => showToast({ message: `Copied "${title}" to the clipboard.` }),
     onManage: () => openSettingsPane().openPage('snippets'),
-    // A body with {{ask:…}} fields: the palette closes and the form asks
+    // A body with parameter fields: the palette closes and the form asks
     // for all of them at once (owner review — a step that filters a list
     // cannot also be where a value is typed).
     onAsk: (snippet, destination) => snippetAsk.ask(snippet, destination),

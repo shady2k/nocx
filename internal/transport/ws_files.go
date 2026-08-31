@@ -362,6 +362,9 @@ type filesStatParams struct {
 type filesStatResult struct {
 	Kind string `json:"kind"`
 }
+type filesStatErrorData struct {
+	Reason string `json:"reason"`
+}
 
 // filesListEntry is one row of a listing. linkTarget/linkKind are present
 // only for symlinks — omitempty, never null — and kind closes at the
@@ -659,7 +662,11 @@ func (h filesBindingHandlers) handleStat(ctx context.Context, state *connState, 
 		defer release()
 		stat, err := handle.Stat(ctx, params.Path)
 		if err != nil {
-			_ = h.r.TryError(req.ID, RPCError{Code: filesErrorCode(err), Message: err.Error()})
+			_ = h.r.TryError(req.ID, RPCError{
+				Code:    filesErrorCode(err),
+				Message: err.Error(),
+				Data:    filesStatErrorDataOf(err),
+			})
 			return nil
 		}
 		_ = h.r.TryResult(req.ID, mustMarshal(filesStatResult{Kind: wireKind(stat.Kind)}))
@@ -1397,6 +1404,21 @@ func (s *WSServer) withFilesBinding(bid string, f func(b *filesBinding)) bool {
 
 // ── wire mapping helpers ──────────────────────────────────────────────────
 
+// filesStatErrorDataOf gives files.stat callers a typed reason for every
+// provider refusal. A missing path is proof of absence; permission and every
+// other provider failure mean classification was not possible.
+func filesStatErrorDataOf(err error) *filesStatErrorData {
+	var notFound *filesystem.ErrNotFound
+	if errors.As(err, &notFound) {
+		return &filesStatErrorData{Reason: "not-found"}
+	}
+	var permission *filesystem.ErrPermission
+	if errors.As(err, &permission) {
+		return &filesStatErrorData{Reason: "permission-denied"}
+	}
+	return &filesStatErrorData{Reason: "unavailable"}
+}
+
 // filesErrorCode maps filesystem domain errors to JSON-RPC codes: the
 // request-shaped refusals — a binding the caller cannot use, a path the
 // provider rejects, a row that cannot be opened — are invalid-params;
@@ -1404,23 +1426,29 @@ func (s *WSServer) withFilesBinding(bid string, f func(b *filesBinding)) bool {
 // error's own words (permission denied, no such file or directory), which
 // is what the panel surfaces.
 func filesErrorCode(err error) int {
-	switch err.(type) {
-	case *filesystem.ErrUnknownBinding, *filesystem.ErrNotOwned,
-		*filesystem.ErrInvalidPath, *filesystem.ErrInvalidPage,
-		*filesystem.ErrNotFound, *filesystem.ErrNotDir,
-		*filesystem.ErrNotRegular, *filesystem.ErrPermission,
-		// A binding with no sink cannot be uploaded to, and one with no
-		// source cannot be downloaded from (rule R1, in each direction).
-		// Both belong with the request-shaped refusals and not with
-		// -32603: the caller named a binding that cannot do this, which is
-		// a property of what they asked for, not of the server going
-		// wrong.
-		*filesystem.ErrUploadUnsupported,
-		*filesystem.ErrDownloadUnsupported:
+	var unknownBinding *filesystem.ErrUnknownBinding
+	var notOwned *filesystem.ErrNotOwned
+	var invalidPath *filesystem.ErrInvalidPath
+	var invalidPage *filesystem.ErrInvalidPage
+	var notFound *filesystem.ErrNotFound
+	var notDir *filesystem.ErrNotDir
+	var notRegular *filesystem.ErrNotRegular
+	var permission *filesystem.ErrPermission
+	var uploadUnsupported *filesystem.ErrUploadUnsupported
+	var downloadUnsupported *filesystem.ErrDownloadUnsupported
+	if errors.As(err, &unknownBinding) ||
+		errors.As(err, &notOwned) ||
+		errors.As(err, &invalidPath) ||
+		errors.As(err, &invalidPage) ||
+		errors.As(err, &notFound) ||
+		errors.As(err, &notDir) ||
+		errors.As(err, &notRegular) ||
+		errors.As(err, &permission) ||
+		errors.As(err, &uploadUnsupported) ||
+		errors.As(err, &downloadUnsupported) {
 		return -32602
-	default:
-		return -32603
 	}
+	return -32603
 }
 
 // wireKind maps a provider Kind onto the wire enum

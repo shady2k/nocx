@@ -26,7 +26,11 @@ import type { FileViewerTarget } from '../file-viewer'
 import type { LinkTarget } from './detect'
 import { resolvePath } from './resolve'
 
-export type LinkPathProbe = { kind: 'directory' } | { kind: 'file' } | { kind: 'unknown' }
+export type LinkPathProbe =
+  | { kind: 'directory' }
+  | { kind: 'file' }
+  | { kind: 'absent' }
+  | { kind: 'unknown'; reason: 'permission-denied' | 'unavailable' | 'other' }
 
 /** The opener's entire window onto the app. */
 // Every member is declared as a PROPERTY holding a function, never as a
@@ -137,20 +141,33 @@ export function createLinkOpener(deps: LinkOpenDeps): LinkOpener {
       return
     }
     const absolute = resolved.absolute
-    let probe: LinkPathProbe = { kind: 'unknown' }
+    let probe: LinkPathProbe = { kind: 'unknown', reason: 'unavailable' }
     try {
       probe = await deps.pathKind(binding.bindingId, absolute)
     } catch {
-      // An unavailable classification is not proof that the path is a file.
-      // Preserve the existing file-opening path without touching the panel.
+      // A rejected classifier is not proof that the path is a file. Keep the
+      // refusal visible instead of handing an unclassified path to the viewer.
     }
     if (probe.kind === 'directory') {
       try {
         if (await deps.openDirectory(absolute, probe)) return
       } catch {
-        // A failed reveal is not proof that the path is a file. Preserve the
-        // existing file-opening path when the Files panel is unavailable.
+        // A failed reveal is not proof that the path is a file.
       }
+      deps.notify(`Could not show directory ${target.path}`)
+      return
+    }
+    if (probe.kind === 'absent') {
+      deps.notify(`That path is not there: ${target.path}`)
+      return
+    }
+    if (probe.kind === 'unknown') {
+      deps.notify(
+        probe.reason === 'permission-denied'
+          ? `Could not inspect ${target.path}: permission was denied`
+          : `Could not determine what ${target.path} is, so it was not opened`,
+      )
+      return
     }
 
     deps.openViewer({

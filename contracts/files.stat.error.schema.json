@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files.stat.error.schema.json",
+  "title": "FilesStatError",
+  "description": "Data payload of a files.stat JSON-RPC error. The classifier must distinguish a confirmed missing path from a path it could not inspect; not-found and permission-denied are invalid-params refusals, while an unknown provider failure is an internal error.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["reason"],
+  "properties": {
+    "reason": {
+      "description": "Fixed classification refusal vocabulary. not-found proves the path is absent; permission-denied and unavailable mean the path could not be classified and must not be treated as a regular file.",
+      "type": "string",
+      "enum": ["not-found", "permission-denied", "unavailable"]
+    }
+  }
+}

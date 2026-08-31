@@ -30,7 +30,7 @@ import type { AgentApprove } from './generated/agent.approve'
 import type { AgentApprovalRequested } from './generated/agent.approvalRequested'
 import type { FilesDropped } from './generated/files.dropped'
 import { VaultObserver } from './vault-observer'
-import { Dispatcher } from './dispatcher'
+import { Dispatcher, RpcError } from './dispatcher'
 import { SettingsContent, SURFACE_SETTINGS, SINGLETON_SETTINGS } from './settings-content'
 import { HistoryStatusStore } from './history-status'
 import { FootprintClient } from './footprint-client'
@@ -73,6 +73,7 @@ import { showToast } from './ui/toast'
 import { registerFileViewerSurface, openFileViewer } from './file-viewer'
 import { registerTerminalLinks } from './terminal-links'
 import type { LinkPathProbe } from './terminal-links/open'
+import type { FilesStatError } from './generated/files.stat.error'
 import { createUrlOpener } from './open-url'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
@@ -867,15 +868,26 @@ async function main() {
   // keeping its own view of whether a session is still there — and the
   // viewer surface itself.
   const terminalLinkUrlOpener = createUrlOpener({ openUrl: (url) => gitServices.openUrl(url) })
+  const pathProbeFromError = (error: unknown): LinkPathProbe => {
+    const data =
+      error instanceof RpcError && typeof error.data === 'object' && error.data !== null
+        ? (error.data as Partial<FilesStatError>)
+        : undefined
+    if (data?.reason === 'not-found') return { kind: 'absent' }
+    if (data?.reason === 'permission-denied') {
+      return { kind: 'unknown', reason: 'permission-denied' }
+    }
+    return { kind: 'unknown', reason: data?.reason === 'unavailable' ? 'unavailable' : 'other' }
+  }
   const pathKind = async (bindingId: string, path: string): Promise<LinkPathProbe> => {
     if (path === '/') return { kind: 'directory' }
     try {
       const result = await filesServicesTracked.stat(bindingId, path)
       if (result.kind === 'dir') return { kind: 'directory' }
       if (result.kind === 'regular') return { kind: 'file' }
-      return { kind: 'unknown' }
-    } catch {
-      return { kind: 'unknown' }
+      return { kind: 'unknown', reason: 'other' }
+    } catch (error) {
+      return pathProbeFromError(error)
     }
   }
   registerTerminalLinks({

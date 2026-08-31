@@ -1483,6 +1483,23 @@ describe('XtermRenderer repaints after a grid resize (nocx-jfgb)', () => {
 
     expect(refresh).not.toHaveBeenCalled()
   })
+
+  // The grid also moves for a reason that has nothing to do with a viewport:
+  // the SESSION is running at a size this client did not choose, and the bytes
+  // on the wire were wrapped at it (nocx-eidfb.3). That path lands on the same
+  // resize, so it must land on the same repaint — the atlas does not care why
+  // the grid moved, and a second entry point that forgot the repaint would
+  // bring back exactly the corruption above.
+  it('repaints for a grid the session chose, not only for one a viewport implied', async () => {
+    const { r, term } = await mountWithCell()
+    const resize = vi.spyOn(term, 'resize')
+    const refresh = vi.spyOn(term, 'refresh')
+
+    r.setGrid(132, 43)
+
+    expect(resize).toHaveBeenCalledWith(132, 43)
+    expect(refresh).toHaveBeenCalledWith(0, term.rows - 1)
+  })
 })
 
 // ── DPR change refits INSIDE the last viewport (nocx-cwnz0) ────────────────

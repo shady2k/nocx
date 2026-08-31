@@ -4,7 +4,7 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import { XtermRenderer } from './renderers/xterm'
-import type { MarkerAdapter } from './renderers/types'
+import type { MarkerAdapter, TerminalRenderer } from './renderers/types'
 import { LifecycleClient } from './lifecycle/client'
 import {
   LifecycleKernel,
@@ -3105,6 +3105,13 @@ export class TerminalContent extends BasePaneContent {
         if (cols === this.cols && rows === this.rows) return
         this.cols = cols
         this.rows = rows
+        // A grid this window BORROWED is not a measurement this window made
+        // (nocx-eidfb.3). xterm reports every grid change the same way
+        // whoever caused it, and reporting this one back would be the window
+        // claiming a size it never measured — which under nocx-eidfb.2 is a
+        // claim on the session, made on behalf of the client that actually
+        // chose it.
+        if (this.sessionGrid) return
         clearTimeout(this.resizeTimer)
         this.resizeTimer = window.setTimeout(() => {
           // A resize makes the shell redraw its prompt, and that redraw arrives
@@ -3522,6 +3529,18 @@ export class TerminalContent extends BasePaneContent {
     }
 
     this.session = session
+    // A RECLAIMED session was sized by somebody else, and its recovered
+    // scrollback is about to be written (nocx-eidfb.3). The claim reports no
+    // geometry — reclaimSession attaches at an offset and nothing else — so
+    // the channel is still running at the size the last client left it at,
+    // and `recovered.size` is what the backend says that is. Draw at it, or
+    // bytes wrapped at 132 columns land in the 80×24 grid xterm booted with
+    // and are wrapped a second time, which no later fit can unpick.
+    //
+    // An OPEN has nothing here: it created the channel at this window's own
+    // measurement, so the two answers are already the same one.
+    if (session.recovered) this.renderAtSessionGrid(session.recovered.size, renderer)
+
     // What the reclaim could NOT give back, said where a person will see it
     // (nocx-fz4qa). The recovered bytes are already queued for the terminal
     // by the time this handle exists; the hole is the half the terminal
@@ -3874,6 +3893,79 @@ export class TerminalContent extends BasePaneContent {
   private lastFitGeometry: { width: number; height: number } | null = null
 
   /**
+   * The grid the SESSION is running at, while that is not this window's own
+   * (nocx-eidfb.3). Null whenever the two are the same thing, which is every
+   * moment this window is the client the channel follows.
+   *
+   * THE INTERVAL, both ends named. It OPENS when the pane is handed a session
+   * whose size somebody else chose — today that is a reclaim, which attaches
+   * without reporting any geometry (ipc.reclaimSession), so the channel keeps
+   * running at the size the last client left it at while this pane draws the
+   * recovered scrollback. It CLOSES at this window's first applied fit, which
+   * is the act of taking the size over: under nocx-eidfb.2 the client that
+   * reports last is the one the channel follows, so a fit that reaches the
+   * backend makes the window's answer and the session's the same answer
+   * again.
+   *
+   * While it is open the grid is the session's and this window pads or
+   * scrolls around it. Everything else in the window — the tab strip, the
+   * sidebar, the splits — is DOM and lays itself out; only the grid is
+   * borrowed.
+   */
+  private sessionGrid: { cols: number; rows: number } | null = null
+
+  /**
+   * Draw at the grid the session is running at rather than at this window's.
+   *
+   * The size decision belongs to the backend (nocx-eidfb.1) and follows the
+   * client that attached last (nocx-eidfb.2). A client that is not that one
+   * has the session's answer and its own window's answer in front of it at
+   * the same time, and only the session's describes the bytes it is being
+   * sent: the same stream wraps differently at two widths, so a window that
+   * draws them at its own width wraps them a second time and no later resize
+   * can unpick that. Two clients would then show two different screens of one
+   * session, which is the whole thing this epic exists to prevent.
+   *
+   * Called with the session's geometry BEFORE any of its bytes are written —
+   * a grid corrected afterwards corrects nothing.
+   *
+   * `target` exists for exactly that reason. The bind runs before mount
+   * publishes the renderer on `this.renderer`, and the recovered bytes are
+   * written inside the bind, so the one caller that has to beat them has to
+   * name the renderer it is binding.
+   */
+  renderAtSessionGrid(
+    size: { cols: number; rows: number },
+    target: TerminalRenderer | null = this.renderer,
+  ): void {
+    if (size.cols <= 0 || size.rows <= 0) return
+    this.sessionGrid = { cols: size.cols, rows: size.rows }
+    // The fit memo is stale the moment the grid stops being the one that
+    // rectangle produced. Left standing, a pane that was already fitted — a
+    // rebind — would dedupe its next fit against a rectangle that no longer
+    // describes the grid, and the borrowed one would never be handed back.
+    this.lastFitGeometry = null
+    // The scroller is told, because a grid this window did not choose is
+    // wider or narrower than the box it is shown in and must pad or scroll
+    // rather than be cut mid-glyph. It is safe here and only here: the
+    // `overflow-x: hidden` this replaces is what keeps a self-fitted grid out
+    // of a feedback loop with the clientWidth it was derived from, and a grid
+    // that came from the backend is not in that loop at all.
+    const area = this.scrollback?.scrollbackArea
+    if (area) area.dataset.gridOwner = 'session'
+    target?.setGrid(size.cols, size.rows)
+  }
+
+  /** The closing end of the interval above: this window's own measurement is
+   *  being applied, so the grid and the scroller are its own again. */
+  private releaseSessionGrid(): void {
+    if (!this.sessionGrid) return
+    this.sessionGrid = null
+    const area = this.scrollback?.scrollbackArea
+    if (area) delete area.dataset.gridOwner
+  }
+
+  /**
    * Re-fit the grid when the space it is shown in has changed size.
    *
    * `viewportChanged` only fires when the PANE's geometry changes, and the
@@ -3919,6 +4011,12 @@ export class TerminalContent extends BasePaneContent {
     const last = this.lastFitGeometry
     if (last && last.width === usable.width && last.height === usable.height) return
     this.lastFitGeometry = { width: usable.width, height: usable.height }
+    // Applying a fit IS this window taking the session's size over — the
+    // measurement goes to the backend on the grid change below, and the
+    // client that reports last is the one the channel follows (nocx-eidfb.2).
+    // So the borrowed grid ends here rather than being overwritten behind its
+    // own back.
+    this.releaseSessionGrid()
     this.renderer.fitViewport(usable)
   }
 

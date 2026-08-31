@@ -292,6 +292,13 @@ export function createRendererMock(): RendererMock {
     refreshAtlas: vi.fn(),
     focus: vi.fn(),
     fitViewport: vi.fn(),
+    // The session's answer rather than the window's (nocx-eidfb.3). It moves
+    // the mock's cols/rows, because the whole claim a caller makes with it is
+    // that the grid IS that size when the next byte is written.
+    setGrid: vi.fn((cols: number, rows: number) => {
+      mock.cols = cols
+      mock.rows = rows
+    }),
     registerMarker: vi.fn().mockReturnValue(undefined),
     cellHeight: 16,
     viewportTopLine: 0,
@@ -413,6 +420,17 @@ export interface SessionFake {
   /** What an enrolled pane's driver says its screen is inviting
    *  (nocx-szb40.3). */
   onObservation: ReturnType<typeof vi.fn>
+  /** What a reclaim recovered before it attached (ipc.SessionRecovery), or
+   *  undefined for a handle that was opened rather than taken back. `size` is
+   *  the grid the BACKEND says the session runs at — the one the recovered
+   *  bytes were wrapped at (nocx-eidfb.3). */
+  recovered?: { bytes: number; gaps: unknown[]; size: { cols: number; rows: number } }
+  /** Bytes waiting for a data callback, flushed synchronously the moment one
+   *  is registered — exactly what WSClient.onSessionData does with what
+   *  reclaimSession queued ahead of the live stream (ipc.ts). A fixture that
+   *  only stored the callback could not show a caller writing recovered
+   *  scrollback into the wrong grid, because in it nothing was ever written. */
+  pendingData?: string
   /** Fire the registered data callback. */
   fireData(data: string): void
   /** Fire the registered liveness callback with one observation. */
@@ -452,6 +470,11 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     close: vi.fn(),
     onData: vi.fn((cb: (data: string) => void) => {
       dataCb = cb
+      // The flush the real client does at registration time, not later: the
+      // recovered scrollback is already queued when the surface subscribes,
+      // so the grid it lands in is whatever the grid is at THIS moment.
+      const queued = overrides?.pendingData
+      if (queued) cb(queued)
     }),
     onExit: vi.fn(),
     onReset: vi.fn(),

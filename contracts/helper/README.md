@@ -68,8 +68,36 @@ and conflating the two is exactly what makes a replacing coordinator delete live
   are never wrapped in JSON, JSON-RPC or base64, so the data frame has no JSON shape to
   pin. Its layout is frozen by literal-byte golden vectors in
   `internal/helper/proto/abi_test.go` instead.
-- **The inventory and spawn shapes**, which land with the service that can answer them
-  (`nocx-k6p18.3`). The reservation they owe is recorded in `internal/helper/proto/abi.go`
-  so it is not lost between beads: an opaque `WorkspaceID`, never a display name.
 - **Runtime validation in production.** Both ends of this socket are ours, exactly as one
   directory up.
+- **`close-session`, `signal` and `uninstall`** — D9's remaining verbs, which land with
+  `nocx-k6p18.7`. An op ADDED by a later generation degrades gracefully (an older helper
+  answers `unknown_op`); an op renamed or reshaped does not, which is why only the ops that
+  exist are spelled.
+
+## What landed with `nocx-k6p18.3`
+
+The **inventory and spawn shapes** were the half `nocx-k6p18.1` deliberately left open,
+because freezing `spawn` and `sessions` without their semantics would have been worse than
+leaving them. They are frozen now, with the service that answers them:
+`session.spawn.params`, `session.spawn`, `session.sessions.params`, `session.sessions`,
+`session.resize.params`, and the `$defs` they share — `workspaceId`, `launchRecord`,
+`observation`, `windowSpan`, `sessionExitStatus`, `sessionEntry`.
+
+Three of those `$defs` carry a decision rather than a shape, and each is enforced by the
+schema rather than left to a reviewer:
+
+- **`launchRecord` and `observation` are two fields and never one.** What the helper
+  recorded when it spawned is the authority; what `/proc` says now is evidence. argv is
+  mutable by the process itself, a process can be replaced by `exec`, and macOS has no
+  `/proc` at all — so merging them would report a lie with the authority of a launch record.
+  `observation` is `null` when nobody could be asked, never `{}`.
+- **`sessionEntry` has no name, and `additionalProperties: false` is what keeps it that
+  way.** The helper reports derived diagnostics because the OS is their source; a friendly
+  alias is a projection owned by the local server. One owner ever.
+- **`spawn` takes no command and no argv**, and the schema refuses one rather than merely
+  omitting the field — an accepted-but-ignored field is what a later generation decides to
+  start reading.
+
+Also here now: `workspaceId`, D15's reservation, in `spawn`, in `sessions` and in every
+entry. It is unused by this generation and **required to stay**.

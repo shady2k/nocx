@@ -1,0 +1,14 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.spawn.schema.json",
+  "title": "HelperSessionSpawnResult",
+  "description": "Result of the helper session service's spawn op: the new session's inventory entry. It is the SAME shape the inventory returns, so a caller that spawned a session and a caller that found one hold the same value — two shapes would eventually be two decoders that disagree about the same session.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["entry"],
+  "properties": {
+    "entry": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/sessionEntry"
+    }
+  }
+}

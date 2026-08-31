@@ -444,24 +444,19 @@ func TestCancelReachesTheRequestContext(t *testing.T) {
 	}
 }
 
-// TestSessionIsReserved pins D15: registering a service named session panics
-// at construction, and the name answers ErrCodeUnknownService like any other.
-func TestSessionIsReserved(t *testing.T) {
-	h := host.New(nil, io.Discard, "h", "i", discardLogger())
-	func() {
-		defer func() {
-			if r := recover(); r == nil {
-				t.Fatal("want Register to panic for the reserved session name")
-			}
-		}()
-		h.Register(&fakeService{name: "session"})
-	}()
-
+// TestAGenerationWithoutASessionServiceStillAnswers is what remains of D15's
+// reservation now that nocx-k6p18.3 has cashed it in. The name is no longer
+// refused at registration — internal/helper/session owns it — but a build
+// composed WITHOUT that service is not a broken build: it answers the name
+// like any other unknown service rather than panicking, hanging or closing the
+// connection. Generations coexist for months, so a coordinator that knows
+// about sessions WILL reach a helper that does not.
+func TestAGenerationWithoutASessionServiceStillAnswers(t *testing.T) {
 	inR, inW := io.Pipe()
 	outR, outW := io.Pipe()
-	h2 := host.New(inR, outW, "h", "i", discardLogger())
+	h := host.New(inR, outW, "h", "i", discardLogger())
 	serveDone := make(chan error, 1)
-	go func() { serveDone <- h2.Serve(context.Background()) }()
+	go func() { serveDone <- h.Serve(context.Background()) }()
 
 	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
 	readSentinel(t, outR)
@@ -470,7 +465,7 @@ func TestSessionIsReserved(t *testing.T) {
 		t.Fatalf("want HelloOK, got %v", f.ty)
 	}
 
-	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 1, Service: "session", Op: "x"}))
+	writeFrame(t, inW, proto.TypeRequest, mustJSON(proto.Request{ID: 1, Service: proto.ServiceSession, Op: proto.OpSpawn}))
 	resp := readResponse(t, outCh)
 	if resp.ID != 1 || resp.Error == nil || resp.Error.Code != proto.ErrCodeUnknownService {
 		t.Fatalf("want a request for session answered unknown service, got %+v", resp)
@@ -480,6 +475,22 @@ func TestSessionIsReserved(t *testing.T) {
 	if err := <-serveDone; err != nil {
 		t.Fatalf("serve: %v", err)
 	}
+}
+
+// TestOneServiceOwnsOneName is the rule the reserved name existed to protect,
+// generalised now that the reservation is spent. serviceByName answers with
+// the FIRST match, so a second service registered under one name is not a
+// conflict anybody would ever see — it is a service that silently never runs,
+// which is the worst of the three possible outcomes.
+func TestOneServiceOwnsOneName(t *testing.T) {
+	h := host.New(nil, io.Discard, "h", "i", discardLogger())
+	h.Register(&fakeService{name: "twice", ops: map[string]any{"op": struct{}{}}})
+	defer func() {
+		if r := recover(); r == nil {
+			t.Fatal("want Register to panic on a duplicate service name")
+		}
+	}()
+	h.Register(&fakeService{name: "twice", ops: map[string]any{"other": struct{}{}}})
 }
 
 // TestEveryRequestLogsItsCorr pins D26: the log line the host emits for a

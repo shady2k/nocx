@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.resize.params.schema.json",
+  "title": "HelperSessionResizeParams",
+  "description": "Params of the helper session service's resize op. The size is a property of the PTY and the PTY is the helper's, so this is not a lifecycle verb and carries no attachment: any attached caller may state the size it is rendering at. It is keyed by the durable session handle, like every other op that names a session.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["session", "cols", "rows"],
+  "properties": {
+    "session": {
+      "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/hostSessionId"
+    },
+    "cols": { "type": "integer", "minimum": 0, "maximum": 65535 },
+    "rows": { "type": "integer", "minimum": 0, "maximum": 65535 }
+  }
+}

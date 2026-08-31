@@ -81,15 +81,141 @@ func TestAnUnservedSessionDataFrameIsDroppedAndTheConnectionSurvives(t *testing.
 	}
 }
 
-// TestTheReservedSessionServiceNameHasOneOwner — the name the host refuses to
-// register and the name the ABI freezes are the same constant, not two string
-// literals that can drift apart while both look right.
-func TestTheReservedSessionServiceNameHasOneOwner(t *testing.T) {
+// TestASessionDataFrameReachesTheServiceThatOwnsTheName is the other side of
+// the drop above, and it is the seam nocx-k6p18.3 cashed the reservation in
+// for: with a session service registered, a data frame is ROUTED to it, whole
+// — the same session, the same subscriber, the same lease epoch and the same
+// bytes, unread on the way past (AD-6).
+//
+// It is asserted through the wire rather than by calling SessionData directly,
+// because the thing that can be wrong is the routing: a host that decoded the
+// frame and then dropped it anyway would pass a direct call and fail here.
+func TestASessionDataFrameReachesTheServiceThatOwnsTheName(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	h := host.New(inR, outW, "hash", "inst", discardLogger())
+
+	got := make(chan proto.SessionFrame, 1)
+	h.Register(&dataPlaneService{
+		fakeService: fakeService{name: proto.ServiceSession, ops: map[string]any{proto.OpSpawn: struct{}{}}},
+		received:    got,
+	})
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+
+	want := proto.SessionFrame{
+		Session:    [16]byte{0xab},
+		Subscriber: [16]byte{0xcd},
+		Epoch:      7,
+		Payload:    []byte("ls\r\n"),
+	}
+	writeFrame(t, inW, proto.TypeSessionData, proto.EncodeSessionFrame(want))
+
+	select {
+	case f := <-got:
+		if f.Session != want.Session || f.Subscriber != want.Subscriber || f.Epoch != want.Epoch {
+			t.Fatalf("routed %+v, want %+v", f, want)
+		}
+		if string(f.Payload) != string(want.Payload) {
+			t.Fatalf("payload = %q, want %q", f.Payload, want.Payload)
+		}
+	case <-t.Context().Done():
+		t.Fatal("the data frame never reached the session service")
+	}
+
+	_ = inW.Close()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+}
+
+// TestTheHelperCanWriteADataFrameBack closes the loop the other way: the
+// helper's own output leaves as a TypeSessionData frame on the same wire, with
+// the layout the ABI froze — which is what makes the encode half of the codec
+// have a caller at all.
+func TestTheHelperCanWriteADataFrameBack(t *testing.T) {
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe()
+	h := host.New(inR, outW, "hash", "inst", discardLogger())
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- h.Serve(context.Background()) }()
+
+	writeFrame(t, inW, proto.TypeHello, mustJSON(proto.Hello{Version: proto.Version, Nonce: "n"}))
+	readSentinel(t, outR)
+	outCh := startReader(t, outR)
+	if f := readFrame(t, outCh); f.ty != proto.TypeHelloOK {
+		t.Fatalf("want HelloOK, got %v", f.ty)
+	}
+
+	if err := h.SendSessionData(proto.SessionFrame{
+		Session: [16]byte{1}, Subscriber: [16]byte{2}, Payload: []byte("out"),
+	}); err != nil {
+		t.Fatalf("SendSessionData: %v", err)
+	}
+	f := readFrame(t, outCh)
+	if f.ty != proto.TypeSessionData {
+		t.Fatalf("frame type = %v, want TypeSessionData", f.ty)
+	}
+	decoded, err := proto.DecodeSessionFrame(f.payload)
+	if err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if decoded.Session != [16]byte{1} || decoded.Subscriber != [16]byte{2} || string(decoded.Payload) != "out" {
+		t.Fatalf("decoded %+v", decoded)
+	}
+	// Helper→coordinator frames carry no lease: there is nothing to authorize
+	// in that direction, and a non-zero epoch here would invite a reader to
+	// check one.
+	if decoded.Epoch != 0 {
+		t.Errorf("epoch = %d on a helper→coordinator frame, want zero", decoded.Epoch)
+	}
+
+	_ = inW.Close()
+	if err := <-serveDone; err != nil {
+		t.Fatalf("serve: %v", err)
+	}
+}
+
+// TestTheSessionServiceNameHasOneOwner — the name the ABI freezes, the name the
+// host dispatches on and the name the service answers to are one constant, not
+// three string literals that can drift apart while all three look right.
+func TestTheSessionServiceNameHasOneOwner(t *testing.T) {
+	if proto.ServiceSession != "session" {
+		t.Fatalf("ServiceSession = %q: the frozen name changed", proto.ServiceSession)
+	}
 	h := host.New(nil, io.Discard, "h", "i", discardLogger())
+	h.Register(&dataPlaneService{
+		fakeService: fakeService{name: proto.ServiceSession, ops: map[string]any{proto.OpSpawn: struct{}{}}},
+	})
 	defer func() {
 		if r := recover(); r == nil {
-			t.Fatal("want Register to panic for proto.ServiceSession")
+			t.Fatal("a second service claimed the session name")
 		}
 	}()
-	h.Register(&fakeService{name: proto.ServiceSession})
+	h.Register(&dataPlaneService{
+		fakeService: fakeService{name: proto.ServiceSession, ops: map[string]any{proto.OpSessions: struct{}{}}},
+	})
+}
+
+// dataPlaneService is a fakeService that also implements host.DataPlane.
+type dataPlaneService struct {
+	fakeService
+	received chan proto.SessionFrame
+}
+
+func (d *dataPlaneService) SessionData(f proto.SessionFrame) {
+	if d.received == nil {
+		return
+	}
+	select {
+	case d.received <- f:
+	default:
+	}
 }

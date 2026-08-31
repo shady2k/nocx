@@ -5,6 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"reflect"
+
+	"github.com/shady2k/nocx/internal/helper/proto"
 )
 
 // Service is one named surface. Registering a second one is the whole
@@ -26,6 +28,22 @@ type Service interface {
 // service declares its five mutations; reads stay cancellable.
 type CancelPolicy interface {
 	RefusesCancel(op string) bool
+}
+
+// DataPlane is an optional capability a Service implements to receive
+// TypeSessionData frames — the raw PTY bytes of AD-1's binary plane, which
+// never cross as JSON. The host routes an inbound frame to the service named
+// proto.ServiceSession when that service implements this, and drops it
+// otherwise; the drop is what keeps a generation without a session service
+// from resyncing through a live PTY stream.
+//
+// It is an optional capability rather than a method on Service for the same
+// reason CancelPolicy and RefusalCoder are: the git service has no data plane
+// and must not be made to pretend it does.
+type DataPlane interface {
+	// SessionData is called on the host's read loop, once per frame, in wire
+	// order. An implementation must not block on the wire it was called from.
+	SessionData(f proto.SessionFrame)
 }
 
 // RefusalCoder is an optional capability a Service implements to give its

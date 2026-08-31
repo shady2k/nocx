@@ -200,6 +200,15 @@ func (lp *LocalPty) Shell() string {
 	return lp.cmd.Path
 }
 
+// Dir is the directory the shell was actually started in — the RESOLVED one,
+// after an empty Cwd has become the user's home the way Terminal.app and iTerm
+// do it (resolveCwd above). This package owns that resolution, so a caller
+// recording where a session began asks here rather than repeating the rule and
+// then disagreeing with it on a GUI launch (nocx-k6p18.3's launch record).
+func (lp *LocalPty) Dir() string {
+	return lp.cmd.Dir
+}
+
 // Pid is the process id of the shell this pty started, or 0 when the spawn
 // never produced one. It is read by the composition root so the process
 // observer can be told which process to watch (nocx-cgzc) — this is the only

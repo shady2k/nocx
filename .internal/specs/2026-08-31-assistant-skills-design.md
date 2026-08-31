@@ -138,20 +138,25 @@ in a JSON document rather than the ledger.
 One new declaration in `internal/agenttools`:
 
 ```
-Name:          "skills.read"
-Description:   "Read a skill's instructions by name, or one file inside that skill."
-Effect:        content.EffectObserve
-OutputTrust:   OutputTrustTrusted        ← justified by section 6, not by location
-ResultBound:   {MaxBytes: 64 << 10, Truncation: TruncationDropTail}
-Deadline:      30 * time.Second
-Cancellation:  CancellationReturnError
-ResourceKinds: []content.ResourceKind{content.ResourceContent}
-Executes:      InGo
-Params:        "skills.read.schema.json"
-Narrow:        narrowSkills
+Name:             "skills.read"
+Description:      "Read a skill's instructions by name, or one file inside that skill."
+Effect:           content.EffectObserve
+OutputTrust:      OutputTrustTrusted     ← justified by section 6, not by location
+ResultBound:      {MaxBytes: 64 << 10, Truncation: TruncationDropTail}
+Deadline:         30 * time.Second
+Cancellation:     CancellationReturnError
+ResourceKinds:    []content.ResourceKind{content.ResourceContent}
+ScopeFamily:      "skill"                ← what ForGrant matches on (section 4)
+ResolveResources: skillResource("name")
+Executes:         InGo
+Params:           "skills.read.schema.json"
+Narrow:           narrowContent
 ```
 
-Arguments: `name`, and an optional `path` relative to the skill's directory.
+Arguments: `name`, and an optional `path` relative to the skill's directory. An
+empty `path` returns the **body**, with the frontmatter stripped: the name and
+description are already in the prompt, and returning them again spends tokens on
+what the model was just told.
 Containment, all asserted: an absolute path is refused, `..` is refused, the
 resolved path must remain under the skill's own base directory, and a symlink
 leaving it is refused.
@@ -188,6 +193,12 @@ snapshot with no seam between the two, while our ledger already distinguishes
 them and already frames tool output on the way in. This cuts the taint at its
 source rather than pattern-matching it afterwards, and it is the layer the other
 three are a backstop for.
+
+It is not a proof. The assistant's own prose can restate what a tool returned —
+it read the output and answered about it, which is its job — so a body drafted
+from that prose can still carry an attacker's words in the assistant's voice.
+Layer 2 removes the verbatim path, which is the one an injection is written for;
+layers 3 and 4 exist because it does not remove the paraphrased one.
 
 **3. A static pattern scan, at both boundaries.** Bytes are scanned for
 injection and exfiltration patterns before a managed skill is written, and again
@@ -231,16 +242,20 @@ Three declarations, following the `notes.*` family shape. Stated in full,
 because `validateDeclaration` refuses a row with any of these unset:
 
 ```
-Name:          "skills.create" | "skills.update" | "skills.delete"
-Effect:        content.EffectMutateReversible
-OutputTrust:   OutputTrustUntrusted      ← the RESULT is a report, not a skill
-ResultBound:   {MaxBytes: 8 << 10, Truncation: TruncationDropTail}
-Deadline:      30 * time.Second
-Cancellation:  CancellationReturnError
-ResourceKinds: []content.ResourceKind{content.ResourceContent}
-Executes:      InGo
-Params:        "skills.create.schema.json" | ".update." | ".delete."
-Narrow:        narrowSkillsWrite
+Name:             "skills.create" | "skills.update" | "skills.delete"
+Description:      one sentence each, in the product's words — validateDeclaration
+                  refuses a row without one
+Effect:           content.EffectMutateReversible
+OutputTrust:      OutputTrustUntrusted   ← the RESULT is a report, not a skill
+ResultBound:      {MaxBytes: 8 << 10, Truncation: TruncationDropTail}
+Deadline:         30 * time.Second
+Cancellation:     CancellationReturnError
+ResourceKinds:    []content.ResourceKind{content.ResourceContent}
+ScopeFamily:      "skill"
+ResolveResources: skillResource("name")
+Executes:         InGo
+Params:           "skills.create.schema.json" | ".update." | ".delete."
+Narrow:           narrowSkillsWrite
 ```
 
 The result of a write is `OutputTrustUntrusted` on purpose: it is a report about
@@ -268,18 +283,27 @@ Validation, asserted:
   refuses a non-regular or multiply-linked file
 - writes to the same name are serialised in-process
 
-**Durability.** A write is to a temporary file in the same directory followed by
-`os.Rename`, so a `SKILL.md` is never observed half-written and a failed
+**Durability.** A write is to a temporary file in the same directory, `fsync`ed,
+then `os.Rename`d, and the containing directory is `fsync`ed after the rename —
+without that last step the rename itself is not durable across a power loss,
+only atomic. A `SKILL.md` is therefore never observed half-written and a failed
 `update` leaves the previous valid version in place. `create` makes the
 directory and the file in that order and is **idempotent on a leftover empty
 directory**: a process that dies between the two must not make the name
 permanently unusable, so a directory with no `SKILL.md` is not "already exists",
 it is the state `create` completes.
 
-**Every write is put to the person for approval.** The reason is not the risk of
-losing a file. ADR-0020 grants authority per run, and a skill outlives the run
-that wrote it: this is the only write in the product that changes the behaviour
-of future runs, so it cannot be quieter than an ordinary mutation.
+**Every write is put to the person for approval, and the effect class does not
+achieve that.** `DecisionForInvocation` may answer `DecisionPermit` for
+`EffectMutateReversible`, and `decideInvocationWithReason` then returns
+`policyPermit` with no question asked (`internal/assistant/kernel.go:509-522`).
+So the guarantee is an explicit rule in the policy — a skills write always
+escalates to `ask`, whatever the person's standing decision for reversible
+mutations says — and not an emergent property of the lattice. The reason is not
+the risk of losing a file: ADR-0020 grants authority per run, and a skill
+outlives the run that wrote it. This is the only write in the product that
+changes the behaviour of future runs, so it cannot be quieter than an ordinary
+mutation.
 
 **`skills.*` is the narrow path, not the only physical one.** `session.run`
 submits an ordinary shell command, and a command that computes its destination at
@@ -387,6 +411,12 @@ same commit, with `additionalProperties: false` and an explicit `required`:
   `skills.remove`
 - `roles.list` / `roles.assign` grow the `summarizing` row
 - backup's manifest grows the skills library
+- `agent.approvalRequested` grows the scan finding and the classifier verdict,
+  and its `resource.kind` enum grows `content` — the document is
+  `additionalProperties: false` and its enum is
+  `["path","session","environment","credential","destination"]` today, so the
+  first skills approval breaks the wire contract unless both change in the same
+  commit
 
 Each gets a `…_DTOConformsToContract` and a `…_OverTheWireConformsToContract` —
 the second off the real socket, because a payload the test itself built proves

@@ -13,8 +13,10 @@ import (
 )
 
 // pendingSession is one carried-over session as this incarnation holds it. The
-// durable half (id, start, bytes, open blocks) is read once at `Open`; the
-// cause is the only field a verdict writes, and it is memory-only because it
+// durable half (id, start, bytes, open blocks) is read once at `Open`; sinceMs is
+// the instant this incarnation marked the session unreconciled.
+//
+// The cause is the only field a verdict writes, and it is memory-only because it
 // describes THIS incarnation's attempts and means nothing to the next one.
 type pendingSession struct {
 	id       string
@@ -28,7 +30,9 @@ type pendingSession struct {
 // carryOver reads the set of sessions a previous incarnation left behind. It
 // runs on `Open`'s creation connection, after the schema and before the store
 // is handed out, which is what makes it exact: nothing this incarnation writes
-// exists yet, so every row it sees is a previous one's.
+// exists yet, so every row it sees is a previous one's. sinceMs is captured
+// once by `Open`, because retention measures the outage from that mark rather
+// than the remote command's age.
 //
 // The set is the UNION of two tables, because the two can legitimately
 // disagree. A `sessions` row without a recording is a session that printed
@@ -36,7 +40,7 @@ type pendingSession struct {
 // today, since the row needs a workspace and nothing mints one yet
 // (ws_ledger.go says so in as many words). Judging only one of them would
 // leave the other unbounded.
-func carryOver(ctx context.Context, conn *sql.Conn) (map[string]*pendingSession, error) {
+func carryOver(ctx context.Context, conn *sql.Conn, sinceMs int64) (map[string]*pendingSession, error) {
 	out := map[string]*pendingSession{}
 
 	rows, err := conn.QueryContext(ctx, `SELECT id, started_at FROM sessions`)
@@ -50,7 +54,7 @@ func carryOver(ctx context.Context, conn *sql.Conn) (map[string]*pendingSession,
 			_ = rows.Close()
 			return nil, fmt.Errorf("content: carry-over sessions: %w", scanErr)
 		}
-		out[id] = &pendingSession{id: id, sinceMs: started, cause: CauseNotYetAsked}
+		out[id] = &pendingSession{id: id, sinceMs: sinceMs, cause: CauseNotYetAsked}
 	}
 	if closeErr := errors.Join(rows.Err(), rows.Close()); closeErr != nil {
 		return nil, fmt.Errorf("content: carry-over sessions: %w", closeErr)
@@ -69,7 +73,7 @@ func carryOver(ctx context.Context, conn *sql.Conn) (map[string]*pendingSession,
 		}
 		p, ok := out[id]
 		if !ok {
-			p = &pendingSession{id: id, sinceMs: started, cause: CauseNotYetAsked}
+			p = &pendingSession{id: id, sinceMs: sinceMs, cause: CauseNotYetAsked}
 			out[id] = p
 		}
 		if byteLen > 0 {
@@ -241,7 +245,7 @@ func (s *sqliteContent) SweepStale(ctx context.Context, age time.Duration) (int,
 	if s.closed.Load() {
 		return 0, ErrClosed
 	}
-	cutoff := time.Now().Add(-age).UnixMilli()
+	cutoff := s.cfg.Clock().Add(-age).UnixMilli()
 
 	s.pendingMu.Lock()
 	stale := make([]string, 0, len(s.pending))
@@ -256,14 +260,12 @@ func (s *sqliteContent) SweepStale(ctx context.Context, age time.Duration) (int,
 	swept := 0
 	for _, id := range stale {
 		if err := s.run(ctx, func(ctx context.Context) error {
-			return boundStaleRecording(ctx, s.db, id)
+			return boundStaleRecording(ctx, s.db, id, s.cfg.Clock().UnixMilli())
 		}); err != nil {
 			return swept, err
 		}
-		// It stays out of the pending set for this incarnation, and it does
-		// not come back on the next start either: its row and its recording
-		// are what put it there. The blocks that named it are now
-		// session-less, and `Open` closes those.
+		// The transaction closes the entry before removing its session, so
+		// forgetting this pending marker cannot make the block render running.
 		s.forget(id)
 		swept++
 	}
@@ -274,19 +276,32 @@ func (s *sqliteContent) SweepStale(ctx context.Context, age time.Duration) (int,
 	return swept, nil
 }
 
-// boundStaleRecording removes what the age bound owns and nothing else: the
-// recording and the session row. It does NOT close the session's entries and
-// does not judge it absent — the product's statement is that the host was
-// never reachable again, not that the session ended.
-func boundStaleRecording(ctx context.Context, db *sql.DB, sessionID string) error {
+// boundStaleRecording removes the recording and session row, then closes open
+// entries in the same transaction. The retention bound is not an `absent`
+// verdict: the host was never reachable again, so ordinary entries become
+// `unknown` and asks become `interrupted`. Their pane anchor is untouched.
+func boundStaleRecording(ctx context.Context, db *sql.DB, sessionID string, endedAt int64) error {
 	tx, err := db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("content: bound stale recording: %w", err)
 	}
 	defer func() { _ = tx.Rollback() }()
 	if _, err := tx.ExecContext(ctx,
+		`UPDATE entries SET phase = 'closed', status =
+		   CASE WHEN kind = 'ask' THEN 'interrupted' ELSE 'unknown' END
+		 WHERE phase != 'closed' AND session_id = ?`, sessionID); err != nil {
+		return fmt.Errorf("content: bound stale recording: close entries: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE executions SET state = 'interrupted', termination_reason = 'interrupted', ended_at = ?
+		  WHERE state IS NOT NULL AND state NOT IN ('completed','cancelled','failed','interrupted')
+		    AND entry_id IN (SELECT id FROM entries WHERE session_id = ?)`,
+		endedAt, sessionID); err != nil {
+		return fmt.Errorf("content: bound stale recording: interrupt runs: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx,
 		`DELETE FROM session_output WHERE session_id = ?`, sessionID); err != nil {
-		return fmt.Errorf("content: bound stale recording: %w", err)
+		return fmt.Errorf("content: bound stale recording: drop recording: %w", err)
 	}
 	if _, err := tx.ExecContext(ctx, `DELETE FROM sessions WHERE id = ?`, sessionID); err != nil {
 		return fmt.Errorf("content: bound stale recording: drop session: %w", err)

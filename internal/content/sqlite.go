@@ -56,6 +56,9 @@ type Config struct {
 	// Logger receives operational logging. When nil, the default slog
 	// adapter is used.
 	Logger log.Logger
+	// Clock supplies wall time for restart marks and their retention bound.
+	// Production uses time.Now; tests may provide a deterministic clock.
+	Clock func() time.Time
 }
 
 const (
@@ -221,6 +224,9 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 	if cfg.Policy == nil {
 		cfg.Policy = NewPolicy()
 	}
+	if cfg.Clock == nil {
+		cfg.Clock = time.Now
+	}
 
 	dir := filepath.Dir(cfg.Path)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -319,8 +325,10 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 		// pending set and judged later by whoever could reach the host
 		// (reconcile.go). Open cannot ask — asking needs a carrier, the
 		// carrier may need the vault, and the vault needs this store — so
-		// Open judges nothing.
-		pending, carryErr = carryOver(ctx, createConn)
+		// Open judges nothing. Capture the unreconciled mark once for every
+		// carried-over row; retention is measured from this outage, not from
+		// the session's original start.
+		pending, carryErr = carryOver(ctx, createConn, cfg.Clock().UnixMilli())
 		if carryErr != nil {
 			return carryErr
 		}

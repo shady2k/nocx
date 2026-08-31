@@ -24,8 +24,10 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -34,9 +36,12 @@ import (
 
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/lifecycle"
+	"github.com/shady2k/nocx/internal/lifecyclepub"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
 	"github.com/shady2k/nocx/internal/vault"
 	"github.com/shady2k/nocx/internal/vault/file"
@@ -166,8 +171,83 @@ func tapDataFor(t *testing.T, tap *socketTap, sid, needle string, timeout time.D
 	return ""
 }
 
-// submitCommand writes command into the session the way the renderer's
-// submit path does: the line plus Enter, over the data plane.
+// submitLeaseCommand follows the renderer's assistant path: lifecycle.submitAttempt
+// completes before the command bytes enter the data plane. A blank requestID
+// is the ordinary human-command path and deliberately skips the assistant
+// lifecycle RPC.
+func (h *runLeaseHarness) submitLeaseCommand(t *testing.T, tap *socketTap, sid, command, requestID string) string {
+	t.Helper()
+	attemptID := ""
+	if requestID != "" {
+		resp := tapCall(t, h.conn, tap, 41, "lifecycle.submitAttempt", map[string]string{
+			"domain":    string(h.domain.Domain),
+			"requestId": requestID,
+			"command":   command,
+			"cwd":       "/repo",
+			"host":      "",
+			"source":    "assistant",
+		})
+		var envelope struct {
+			Error  *jsonrpcErrorObj `json:"error"`
+			Result struct {
+				ID string `json:"id"`
+			} `json:"result"`
+		}
+		if err := json.Unmarshal(resp, &envelope); err != nil {
+			t.Fatalf("lifecycle.submitAttempt: unmarshal: %v\nraw: %s", err, resp)
+		}
+		if envelope.Error != nil {
+			t.Fatalf("lifecycle.submitAttempt: %+v", envelope.Error)
+		}
+		if envelope.Result.ID == "" {
+			t.Fatal("lifecycle.submitAttempt returned no attempt id")
+		}
+		attemptID = envelope.Result.ID
+	}
+	sidBytes, err := session.IDToBytes(session.ID(sid))
+	if err != nil {
+		t.Fatalf("id to bytes: %v", err)
+	}
+	f := Frame{Version: FrameVersion, MsgType: MsgTypeData, SessionID: sidBytes, Payload: []byte(command + "\r")}
+	if err := h.conn.WriteMessage(websocket.BinaryMessage, f.Encode()); err != nil {
+		t.Fatalf("write command: %v", err)
+	}
+	if attemptID == "" {
+		return attemptID
+	}
+
+	// OSC 133 C is represented by the authenticated lifecycle fact. It is
+	// emitted after the shell echoes the submitted command, so the bind RPC
+	// opens accounting after the echo and before command output.
+	tapDataFor(t, tap, sid, command, 10*time.Second)
+	attempt := lifecycle.AttemptID(attemptID)
+	mustLifecycleIngest(t, h.pub, "T", lifecycleEnv("lane-run-lease", h.domain, 2, lifecycleStartEvt(&attempt, command)))
+	resp := tapCall(t, h.conn, tap, 42, "ledger.bind", map[string]any{
+		"envelope": map[string]any{
+			"id":          attemptID,
+			"sessionId":   sid,
+			"cwd":         "/repo",
+			"kind":        "shell",
+			"intent":      command,
+			"sensitivity": "normal",
+			"clientSeq":   0,
+			"attemptId":   attemptID,
+		},
+		"facts": map[string]any{},
+	})
+	var bind struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &bind); err != nil {
+		t.Fatalf("ledger.bind: unmarshal: %v\nraw: %s", err, resp)
+	}
+	if bind.Error != nil {
+		t.Fatalf("ledger.bind: %+v", bind.Error)
+	}
+	return attemptID
+}
+
+// submitCommand writes a human command into the session over the data plane.
 func submitCommand(t *testing.T, conn *websocket.Conn, sid, command string) {
 	t.Helper()
 	sidBytes, err := session.IDToBytes(session.ID(sid))
@@ -188,10 +268,12 @@ func submitCommand(t *testing.T, conn *websocket.Conn, sid, command string) {
 // the named lease config. The content store is real — the ledger assertion
 // (which bound ended the run) is read back from it.
 type runLeaseHarness struct {
-	t    *testing.T
-	ws   *WSServer
-	conn *websocket.Conn
-	db   content.ContentDB
+	t      *testing.T
+	ws     *WSServer
+	conn   *websocket.Conn
+	db     content.ContentDB
+	pub    *lifecyclepub.Publisher
+	domain lifecycle.DomainHandle
 	// fake is the run-tool provider: first request streams the run tool
 	// call, later requests stream the answer.
 	fake *runToolCallingServer
@@ -248,6 +330,8 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig) *runLeaseHarness 
 	t.Cleanup(func() { _ = db.Close() })
 	askPaneIn(t, db)
 
+	kernel := lifecycle.New(lifecycle.Options{})
+	pub := lifecyclepub.New(kernel)
 	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithReal(log.NewSlogAdapter(nil)),
 		WithProfileRepository(ps), WithGroupRepository(ps),
 		WithCredentialStore(v), WithVaultLifecycle(v),
@@ -256,15 +340,36 @@ func newRunLeaseHarness(t *testing.T, leaseCfg RunLeaseConfig) *runLeaseHarness 
 		WithAssistantClient(client),
 		WithAssistantProbeStore(assistant.NewProbeStore()),
 		WithAgentPolicy(autonomousPolicyStore(t)),
+		WithLifecyclePublisher(pub),
 		WithRunLease(leaseCfg),
 	)
+	pub.SetEmitter(ws)
 	if err := ws.Start(t.Context()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
 	t.Cleanup(func() { _ = ws.Stop(t.Context()) })
 	conn := connectWS(t, ws)
 	t.Cleanup(func() { _ = conn.Close() })
-	return &runLeaseHarness{t: t, ws: ws, conn: conn, db: db, fake: fake, srv: &testSrv{url: srv.URL}}
+	return &runLeaseHarness{t: t, ws: ws, conn: conn, db: db, pub: pub, fake: fake, srv: &testSrv{url: srv.URL}}
+}
+
+func (h *runLeaseHarness) openSession(t *testing.T) string {
+	t.Helper()
+	sid := openLocalSession(t, h.conn)
+	h.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationStarting, ssh.ReasonNone)
+	const lane = lifecycle.LaneID("lane-run-lease")
+	h.ws.RegisterLifecycleLane(lane, session.ID(sid))
+	if err := h.pub.BindTransport("T", noopPort{}); err != nil {
+		t.Fatalf("BindTransport: %v", err)
+	}
+	domain, err := h.pub.RequestDomain(lane, nil, "T")
+	if err != nil {
+		t.Fatalf("RequestDomain: %v", err)
+	}
+	mustLifecycleIngest(t, h.pub, "T", lifecycleEnv(lane, domain, 1, lifecycleHelloEvt()))
+	ackEstablishmentFrom(t, h.pub, lane, domain, h.conn)
+	h.domain = domain
+	return sid
 }
 
 // createEndpointAt makes one answering-role endpoint against the fake
@@ -407,6 +512,28 @@ func waitForRunState(t *testing.T, tap *socketTap, wantState string) (runID int6
 	return 0, ""
 }
 
+func waitForRunStateDetails(t *testing.T, tap *socketTap, wantState string) (int64, string, []string) {
+	t.Helper()
+	deadline := time.Now().Add(30 * time.Second)
+	for time.Now().Before(deadline) {
+		raw := tapNotify(t, tap, "agent.runState", 30*time.Second)
+		var st struct {
+			RunID         int64    `json:"runId"`
+			State         string   `json:"state"`
+			Error         string   `json:"error"`
+			UnarmedBounds []string `json:"unarmedBounds"`
+		}
+		if err := json.Unmarshal(raw, &st); err != nil {
+			t.Fatalf("runState unmarshal: %v\nraw: %s", err, raw)
+		}
+		if st.State == wantState {
+			return st.RunID, st.Error, st.UnarmedBounds
+		}
+	}
+	t.Fatalf("the run never reached %s", wantState)
+	return 0, "", nil
+}
+
 // runRequestParams decodes the agent.runRequest notification.
 func decodeRunRequest(t *testing.T, raw json.RawMessage) (rid, sid, command string) {
 	t.Helper()
@@ -424,6 +551,67 @@ func decodeRunRequest(t *testing.T, raw json.RawMessage) (rid, sid, command stri
 	return req.RequestID, req.SessionID, req.Command
 }
 
+// A lease can fire while the broker is still delivering the request. When
+// delivery fails, no renderer could submit a command: runState must carry the
+// submission-expired sentence and must not claim terminalization.
+func TestRunLease_BoundBeforeBrokerDeliveryNamesExpiredSubmissionInRunState(t *testing.T) {
+	h := newRunLeaseHarness(t, RunLeaseConfig{
+		WallClock:   time.Minute,
+		SignalGrace: 20 * time.Millisecond,
+	})
+	h.createEndpointAt()
+	sid := h.openSession(t)
+
+	deliverStarted := make(chan struct{})
+	releaseDeliver := make(chan struct{})
+	var deliverOnce sync.Once
+	broker := NewBroker(
+		func() []Conn { return []Conn{&harnessConn{}} },
+		func(Conn, string, json.RawMessage) error {
+			deliverOnce.Do(func() { close(deliverStarted) })
+			<-releaseDeliver
+			return errors.New("delivery held open for pre-delivery expiry")
+		},
+	)
+	h.ws.broker = broker
+
+	res := h.askRunsTool(sid, "echo never submitted")
+	<-deliverStarted
+
+	broker.mu.Lock()
+	var lease *runLease
+	for _, candidate := range broker.runLeases {
+		lease = candidate
+		break
+	}
+	broker.mu.Unlock()
+	if lease == nil {
+		t.Fatal("broker did not register the run lease before delivery")
+	}
+	lease.fire(content.TermTimeout)
+	close(releaseDeliver)
+
+	tap := newSocketTap(h.conn)
+	raw := tapNotify(t, tap, "agent.runState", 10*time.Second)
+	var state struct {
+		RunID int64  `json:"runId"`
+		State string `json:"state"`
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("runState unmarshal: %v\nraw: %s", err, raw)
+	}
+	if state.RunID != res.RunID || state.State != "failed" {
+		t.Fatalf("runState = %+v, want run %d failed", state, res.RunID)
+	}
+	if !strings.Contains(state.Error, "run submission expired before execution started") {
+		t.Fatalf("runState error = %q, want the submission-expired sentence", state.Error)
+	}
+	if strings.Contains(state.Error, "terminalized") {
+		t.Fatalf("runState error = %q, must not claim terminalization", state.Error)
+	}
+}
+
 // ── criterion 1 (wall-clock) + criterion 2 (a child, not only the shell) ──
 
 // A command that never finishes is terminalized by its wall-clock deadline;
@@ -436,7 +624,7 @@ func TestRunLease_WallClockTerminalizesAndTheLedgerNamesIt(t *testing.T) {
 		SignalGrace: 200 * time.Millisecond,
 	})
 	h.createEndpointAt()
-	sid := openLocalSession(t, h.conn)
+	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	res := h.askRunsTool(sid, "sh -c 'echo $$ > "+pidFile+"; exec sleep 100'")
 	tap := newSocketTap(h.conn)
@@ -444,11 +632,11 @@ func TestRunLease_WallClockTerminalizesAndTheLedgerNamesIt(t *testing.T) {
 	// The renderer half: the run request arrives, the command is submitted
 	// into the real session, and never resolves — the block never freezes.
 	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
-	_, wantSid, _ := decodeRunRequest(t, raw)
+	requestID, wantSid, _ := decodeRunRequest(t, raw)
 	if wantSid != sid {
 		t.Fatalf("runRequest session = %q, want %q", wantSid, sid)
 	}
-	submitCommand(t, h.conn, sid, "sh -c 'echo $$ > "+pidFile+"; exec sleep 100'")
+	h.submitLeaseCommand(t, tap, sid, "sh -c 'echo $$ > "+pidFile+"; exec sleep 100'", requestID)
 	pid := readPidFile(t, pidFile)
 	waitChildAlive(t, pid) // the child exists and runs: there is something to cancel
 
@@ -545,18 +733,18 @@ func TestRunLease_InactivityTerminalizesAndTheLedgerNamesIt(t *testing.T) {
 		SignalGrace: 200 * time.Millisecond,
 	})
 	h.createEndpointAt()
-	sid := openLocalSession(t, h.conn)
+	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := "sh -c 'echo $$ > " + pidFile + "; exec sleep 100'"
 	res := h.askRunsTool(sid, cmd)
 	tap := newSocketTap(h.conn)
 
 	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
-	_, wantSid, _ := decodeRunRequest(t, raw)
+	requestID, wantSid, _ := decodeRunRequest(t, raw)
 	if wantSid != sid {
 		t.Fatalf("runRequest session = %q, want %q", wantSid, sid)
 	}
-	submitCommand(t, h.conn, sid, cmd)
+	h.submitLeaseCommand(t, tap, sid, cmd, requestID)
 	pid := readPidFile(t, pidFile)
 	waitChildAlive(t, pid)
 
@@ -587,7 +775,7 @@ func TestRunLease_ShortCommandRunsUntouched(t *testing.T) {
 		SignalGrace:  200 * time.Millisecond,
 	})
 	h.createEndpointAt()
-	sid := openLocalSession(t, h.conn)
+	sid := h.openSession(t)
 	// An ordinary command that COMPLETES on its own — every lease bound is
 	// far beyond it, so none can explain anything that happens to it.
 	cmd := "sh -c 'echo done'"
@@ -596,7 +784,7 @@ func TestRunLease_ShortCommandRunsUntouched(t *testing.T) {
 
 	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
 	rid, _, _ := decodeRunRequest(t, raw)
-	submitCommand(t, h.conn, sid, cmd)
+	h.submitLeaseCommand(t, tap, sid, cmd, rid)
 
 	// The renderer's observable: the command's own output appeared. The
 	// block froze; the renderer resolves with the completed run body.
@@ -614,12 +802,15 @@ func TestRunLease_ShortCommandRunsUntouched(t *testing.T) {
 
 	// The run completes — no deadline fired, nothing was bounded — and the
 	// ledger agrees: the execution's reason is a plain completed.
-	runID, sentence := waitForRunState(t, tap, "completed")
+	runID, sentence, unarmed := waitForRunStateDetails(t, tap, "completed")
 	if runID != res.RunID {
 		t.Fatalf("runState runId = %d, want %d", runID, res.RunID)
 	}
 	if sentence != "" {
 		t.Fatalf("completed runState carries an error: %q", sentence)
+	}
+	if len(unarmed) != 0 {
+		t.Fatalf("integrated runState unarmedBounds = %v, want absent", unarmed)
 	}
 	reason := terminationReasonOfRun(t, h)
 	if reason == nil || *reason != content.TermCompleted {
@@ -641,18 +832,18 @@ func TestRunLease_EscalationReachesTermForAnIntIgnoringProcess(t *testing.T) {
 		SignalGrace: 300 * time.Millisecond,
 	})
 	h.createEndpointAt()
-	sid := openLocalSession(t, h.conn)
+	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := "sh -c 'echo $$ > " + pidFile + "; trap \"\" INT; sleep 100 & wait'"
 	res := h.askRunsTool(sid, cmd)
 	tap := newSocketTap(h.conn)
 
 	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
-	_, wantSid, _ := decodeRunRequest(t, raw)
+	requestID, wantSid, _ := decodeRunRequest(t, raw)
 	if wantSid != sid {
 		t.Fatalf("runRequest session = %q, want %q", wantSid, sid)
 	}
-	submitCommand(t, h.conn, sid, cmd)
+	h.submitLeaseCommand(t, tap, sid, cmd, requestID)
 	pid := readPidFile(t, pidFile)
 	waitChildAlive(t, pid)
 
@@ -676,18 +867,18 @@ func TestRunLease_EscalationReachesKillForAnIntAndTermIgnoringProcess(t *testing
 		SignalGrace: 300 * time.Millisecond,
 	})
 	h.createEndpointAt()
-	sid := openLocalSession(t, h.conn)
+	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	cmd := "sh -c 'echo $$ > " + pidFile + "; trap \"\" INT TERM; sleep 100 & wait'"
 	res := h.askRunsTool(sid, cmd)
 	tap := newSocketTap(h.conn)
 
 	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
-	_, wantSid, _ := decodeRunRequest(t, raw)
+	requestID, wantSid, _ := decodeRunRequest(t, raw)
 	if wantSid != sid {
 		t.Fatalf("runRequest session = %q, want %q", wantSid, sid)
 	}
-	submitCommand(t, h.conn, sid, cmd)
+	h.submitLeaseCommand(t, tap, sid, cmd, requestID)
 	pid := readPidFile(t, pidFile)
 	waitChildAlive(t, pid)
 
@@ -715,7 +906,7 @@ func TestRunLease_OutputBudgetBoundsAndTheBlockNamesIt(t *testing.T) {
 		SignalGrace:  200 * time.Millisecond,
 	})
 	h.createEndpointAt()
-	sid := openLocalSession(t, h.conn)
+	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
 	// 2 KiB of output (past the 512-byte budget), then it waits — so the
 	// budget, not the wall clock or the command's own exit, ends the run.
@@ -724,11 +915,11 @@ func TestRunLease_OutputBudgetBoundsAndTheBlockNamesIt(t *testing.T) {
 	tap := newSocketTap(h.conn)
 
 	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
-	_, wantSid, _ := decodeRunRequest(t, raw)
+	requestID, wantSid, _ := decodeRunRequest(t, raw)
 	if wantSid != sid {
 		t.Fatalf("runRequest session = %q, want %q", wantSid, sid)
 	}
-	submitCommand(t, h.conn, sid, cmd)
+	h.submitLeaseCommand(t, tap, sid, cmd, requestID)
 	pid := readPidFile(t, pidFile)
 
 	// No waitChildAlive here on purpose: the command's own output IS the
@@ -752,5 +943,67 @@ func TestRunLease_OutputBudgetBoundsAndTheBlockNamesIt(t *testing.T) {
 	reason := terminationReasonOfRun(t, h)
 	if reason == nil || *reason != content.TermOutputBudget {
 		t.Fatalf("ledger termination = %v, want output-budget", reason)
+	}
+}
+
+// A session without a lifecycle lane still runs the command, but the
+// output and inactivity bounds are explicitly named as unavailable. The
+// wall-clock bound remains active and is the only bound advertised.
+func TestRunLease_NoShellIntegrationMakesUnavailableBoundsVisible(t *testing.T) {
+	h := newRunLeaseHarness(t, RunLeaseConfig{
+		WallClock:    time.Minute,
+		Inactivity:   time.Minute,
+		OutputBudget: 512,
+		SignalGrace:  200 * time.Millisecond,
+	})
+	h.createEndpointAt()
+	sid := openLocalSession(t, h.conn)
+	// The session's axis explicitly reports a conventional terminal: shell
+	// integration was attempted but no authenticated lifecycle lane exists.
+	h.ws.RegisterIntegration(session.ID(sid), "/bin/bash", IntegrationConventional, ssh.ReasonUnsupportedShell)
+	cmd := "printf degraded-runs"
+	res := h.askRunsTool(sid, cmd)
+	tap := newSocketTap(h.conn)
+
+	raw := tapNotify(t, tap, "agent.runRequest", 10*time.Second)
+	requestID, wantSid, wantCommand := decodeRunRequest(t, raw)
+	if wantSid != sid || wantCommand != cmd {
+		t.Fatalf("runRequest = (%q, %q), want (%q, %q)", wantSid, wantCommand, sid, cmd)
+	}
+	h.submitLeaseCommand(t, tap, sid, cmd, "")
+	tapDataFor(t, tap, sid, "degraded-runs", 15*time.Second)
+	reply := tapCall(t, h.conn, tap, 42, "agent.runResolved",
+		runResolvedWire(requestID, "entry-degraded", 0, "success", 1, 0, 1, "degraded-runs"))
+	var rerr struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(reply, &rerr); err != nil {
+		t.Fatalf("runResolved unmarshal: %v", err)
+	}
+	if rerr.Error != nil {
+		t.Fatalf("runResolved refused: %+v", rerr.Error)
+	}
+
+	raw = tapNotify(t, tap, "agent.runState", 15*time.Second)
+	var state struct {
+		RunID         int64    `json:"runId"`
+		State         string   `json:"state"`
+		UnarmedBounds []string `json:"unarmedBounds"`
+	}
+	if err := json.Unmarshal(raw, &state); err != nil {
+		t.Fatalf("runState unmarshal: %v\nraw: %s", err, raw)
+	}
+	if state.RunID != res.RunID || state.State != "completed" {
+		t.Fatalf("runState = %+v, want run %d completed", state, res.RunID)
+	}
+	wantBounds := []string{
+		"the inactivity bound is not active because shell integration is unavailable",
+		"the output bound is not active because shell integration is unavailable",
+	}
+	if !reflect.DeepEqual(state.UnarmedBounds, wantBounds) {
+		t.Fatalf("unarmedBounds = %v, want %v", state.UnarmedBounds, wantBounds)
+	}
+	if reason := terminationReasonOfRun(t, h); reason == nil || *reason != content.TermCompleted {
+		t.Fatalf("ledger termination = %v, want completed for the command that ran", reason)
 	}
 }

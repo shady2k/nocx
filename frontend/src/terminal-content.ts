@@ -2636,6 +2636,32 @@ export class TerminalContent extends BasePaneContent {
             this.settleStoredEntry(rec.id, ack?.entryId ?? '')
             return ack
           }),
+        (rec, attempt) => {
+          const sessionId = this.session?.sessionId
+          if (!sessionId) return
+          void this.client
+            .call('ledger.bind', {
+              envelope: {
+                // attempt.id is the server identity used to create the row
+                // here; rec.id is only a renderer-local record counter.
+                id: attempt.id,
+                sessionId,
+                cwd: rec.cwd || '/',
+                kind: 'shell',
+                intent: rec.command,
+                sensitivity: 'normal',
+                clientSeq: 0,
+                attemptId: attempt.id,
+              },
+              facts: {},
+            })
+            .catch((error: unknown) => {
+              log.warn('nocx: ledger bind failed', {
+                attempt: attempt.id,
+                error: String(error),
+              })
+            })
+        },
       )
       this._projections.attach()
 
@@ -3298,6 +3324,7 @@ export class TerminalContent extends BasePaneContent {
       // handshake generation that was acknowledged to a backend lane that no
       // longer exists. Left standing, each of them would answer a question
       // about the new shell with a fact about the old one.
+      this._projections?.reset()
       this.lifecycle.reset()
       this._disposeAllMarkers()
       this._recovery = null
@@ -3662,6 +3689,7 @@ export class TerminalContent extends BasePaneContent {
       // that no longer exists (B.9). True for a clean exit AND a loss.
       this._sessionExited = true
       this.hooks.onActiveOriginChange?.()
+      this._projections?.reset()
       this.lifecycle.reset()
       this._disposeAllMarkers()
       if (exit.cause === 'interrupted') {
@@ -3713,6 +3741,7 @@ export class TerminalContent extends BasePaneContent {
     })
     session.onReset(() => {
       renderer.reset()
+      this._projections?.reset()
       this.lifecycle.reset()
       this._disposeAllMarkers()
     })
@@ -5852,8 +5881,12 @@ export class TerminalContent extends BasePaneContent {
     sendLine: (d: string) => void
     /** The broker request that caused this assistant submission. */
     requestId?: string
+    /** The broker withdraws this request while the attempt-open round trip
+     *  is in flight. The write gate is checked after that round trip and
+     *  immediately before the bytes are handed to the renderer. */
+    beforeWrite?: () => boolean
   }): { block: BlockRecord | null; ledgerId: number | null } {
-    const { doc, recordLine, author, takeKeys, callerOwnsGlide, sendLine } = opts
+    const { doc, recordLine, author, takeKeys, callerOwnsGlide, sendLine, beforeWrite } = opts
     if (takeKeys) {
       this.takeKeyboardToGrid()
       this.holdRawUntilSubmitted()
@@ -5870,6 +5903,10 @@ export class TerminalContent extends BasePaneContent {
     // shell still gets its newline — a conventional terminal stays
     // conventional.
     const write = (): void => {
+      // This is deliberately after lifecycle.submitAttempt resolved: the
+      // broker can withdraw the request during that round trip, and a
+      // check at submit entry would miss the only unsafe window.
+      if (beforeWrite && !beforeWrite()) return
       // Detach the queue BEFORE the command goes out, flush it after.
       //
       // Both halves matter and the order is the whole point. The command is
@@ -6005,7 +6042,11 @@ export class TerminalContent extends BasePaneContent {
    *  and it necessarily appended BELOW an answer that was already
    *  streaming. Deleting the block would have hidden a real command to fix
    *  a rendering-order defect. */
-  submitAgentCommand(command: string, requestId?: string): Promise<AgentRunCompletion> {
+  submitAgentCommand(
+    command: string,
+    requestId?: string,
+    signal?: AbortSignal,
+  ): Promise<AgentRunCompletion> {
     if (command === '') {
       return Promise.reject(new Error('run: an empty command is a bare newline, not an execution'))
     }
@@ -6018,6 +6059,28 @@ export class TerminalContent extends BasePaneContent {
       resolve = done
       reject = fail
     })
+    let openedBlock: BlockRecord | null = null
+    let openedLedgerId: number | null = null
+    let writeStarted = false
+    let cancellationHandled = false
+    const cleanupCancelled = (): void => {
+      if (openedBlock !== null) {
+        this.agentRuns.delete(openedBlock)
+        // The app-owned block has no attempt to complete it after a
+        // pre-execution withdrawal. Reuse the existing abandonment owner only
+        // while this submission still owns the running slot.
+        if (this.scrollback?.blockManager.runningBlock === openedBlock) {
+          this.scrollback.abandonUnbound(this.renderer?.cursorLine() ?? 0)
+        }
+      }
+      if (openedLedgerId !== null) this.runEntryIds.delete(openedLedgerId)
+    }
+    const cancel = (): void => {
+      if (writeStarted || cancellationHandled) return
+      cancellationHandled = true
+      cleanupCancelled()
+      reject(new Error('submission expired before execution'))
+    }
     const { block, ledgerId } = this.submitShellCommand({
       doc: command,
       recordLine: command,
@@ -6025,11 +6088,21 @@ export class TerminalContent extends BasePaneContent {
       requestId,
       takeKeys: false,
       callerOwnsGlide: false,
+      beforeWrite: () => {
+        if (signal?.aborted) {
+          cancel()
+          return false
+        }
+        writeStarted = true
+        return true
+      },
       sendLine: (d) => {
         this.renderer?.paste(d)
         this.session?.send('\r')
       },
     })
+    openedBlock = block
+    openedLedgerId = ledgerId
     if (block === null || ledgerId === null) {
       reject(new Error('run: the submission could not open a block — the agent lane is not usable'))
       return promise
@@ -6039,6 +6112,11 @@ export class TerminalContent extends BasePaneContent {
     // because the ack can arrive before the block finishes freezing and a
     // slot created at the freeze would miss it.
     this.runEntryIds.set(ledgerId, { entryId: null, waiting: null })
+    if (cancellationHandled) cleanupCancelled()
+    if (signal) {
+      signal.addEventListener('abort', cancel, { once: true })
+      if (signal.aborted) cancel()
+    }
     return promise
   }
 

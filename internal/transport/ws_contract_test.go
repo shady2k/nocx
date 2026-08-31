@@ -5869,10 +5869,24 @@ func TestAgentRunNotifications_DTOsConformToContract(t *testing.T) {
 		t.Fatalf("marshal: %v", err)
 	}
 	validateJSON(t, stateSchema, raw, "agent.runState DTO (failed with error)")
+	raw, err = json.Marshal(agentRunState{
+		RunID: 7, State: string(content.RunCompleted),
+		UnarmedBounds: []string{
+			"the inactivity bound is not active because shell integration is unavailable",
+			"the output bound is not active because shell integration is unavailable",
+		},
+	})
+	if err != nil {
+		t.Fatalf("marshal degraded: %v", err)
+	}
+	validateJSON(t, stateSchema, raw, "agent.runState DTO (completed with unavailable bounds)")
 
 	raw, err = json.Marshal(agentRunState{RunID: 7, State: string(content.RunCompleted)})
 	if err != nil {
 		t.Fatalf("marshal: %v", err)
+	}
+	if strings.Contains(string(raw), "unarmedBounds") {
+		t.Fatalf("clean completed runState includes unavailable bounds: %s", raw)
 	}
 	validateJSON(t, stateSchema, raw, "agent.runState DTO (completed, no error)")
 }
@@ -6149,12 +6163,12 @@ func TestLedgerEvents_OverTheWireConformToContract(t *testing.T) {
 		{"open creates", "ledger.open", openSchema, map[string]any{"envelope": ledgerEnv(sid, "wire-1", "make", 1)}},
 		{"open replayed", "ledger.open", openSchema, map[string]any{"envelope": ledgerEnv(sid, "wire-1", "make", 1)}},
 		{"bind advances", "ledger.bind", bindSchema, map[string]any{
-			"envelope": ledgerEnv(sid, "wire-1", "make", 2),
+			"envelope": ledgerBindEnv(sid, "wire-1", "make", 2),
 			"facts":    map[string]any{"interactivity": "tty", "executor": "zsh"},
 		}},
 		{"close advances", "ledger.close", closeSchema, closeParams("wire-1", 3)},
 		{"bind dropped after close", "ledger.bind", bindSchema, map[string]any{
-			"envelope": ledgerEnv(sid, "wire-1", "make", 4),
+			"envelope": ledgerBindEnv(sid, "wire-1", "make", 4),
 		}},
 		{"close creates a row nobody opened", "ledger.close", closeSchema, closeParams("wire-2", 1)},
 	}

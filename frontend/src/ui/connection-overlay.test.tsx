@@ -128,17 +128,6 @@ describe('ConnectionOverlay', () => {
     expect(text(host, 'detail')).toBe('Next attempt in 5 seconds')
   })
 
-  it('takes the caller sentence for a wait when there is one', () => {
-    vi.useFakeTimers()
-    const { host } = subject(
-      { kind: 'waiting', nextAttemptInMs: 2000, message: 'The nocx coordinator is not running.' },
-      { minimumVisibleMs: 0 },
-    )
-
-    expect(text(host, 'headline')).toBe('The nocx coordinator is not running.')
-    expect(text(host, 'detail')).toBe('Next attempt in 2 seconds')
-  })
-
   it('does not retitle the screen for each attempt of one outage', () => {
     vi.useFakeTimers()
     const { host, state } = subject({ kind: 'connecting' }, { minimumVisibleMs: 0 })
@@ -234,10 +223,12 @@ describe('ConnectionOverlay', () => {
     ['waiting', { kind: 'waiting', nextAttemptInMs: 1000 } as const],
     ['blocked', { kind: 'blocked', message: 'm', remedy: 'r' } as const],
   ])('carries its state on the root so the ring is keyed from it in %s', (_name, initial) => {
+    vi.useFakeTimers()
     const { host } = subject(initial, { minimumVisibleMs: 0 })
     const root = overlay(host)
 
     expect(root.dataset.state).toBe(initial.kind)
+    expect(root.dataset.shown).toBe(initial.kind)
     expect(root.querySelector('.ui-connection-overlay__mark')).not.toBeNull()
   })
 
@@ -254,7 +245,7 @@ describe('ConnectionOverlay', () => {
     expect(arc).toMatch(/opacity\s*:\s*0/)
     expect(
       css.match(
-        /\[data-state=['"]connecting['"]\]\s+\.ui-connection-overlay__mark::after\s*\{([^}]*)\}/,
+        /\[data-shown=['"]connecting['"]\]\s+\.ui-connection-overlay__mark::after\s*\{([^}]*)\}/,
       )?.[1] ?? '',
     ).toMatch(/animation\s*:/)
     const reduced =
@@ -307,7 +298,11 @@ describe('ConnectionOverlay', () => {
     vi.advanceTimersByTime(500)
 
     expect(dialog(host).open).toBe(true)
-    expect(overlay(host).dataset.state).toBe('connecting')
+    // The FACE holds; the CONNECTION says what is true. Collapsing the two took
+    // `online` out of the document entirely, and it is the only signal there
+    // that the socket came back — three e2e specs waited for it and timed out.
+    expect(overlay(host).dataset.shown).toBe('connecting')
+    expect(overlay(host).dataset.state).toBe('online')
     expect(text(host, 'headline')).toBe('Connecting to nocx…')
   })
 

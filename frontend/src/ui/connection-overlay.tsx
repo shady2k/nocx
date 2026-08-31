@@ -23,8 +23,7 @@ import { createModalHost } from './overlay/modal-host'
 
 export type ConnectionOverlayState =
   | { kind: 'connecting' }
-  /** `message` overrides the default sentence when the caller has a better one. */
-  | { kind: 'waiting'; nextAttemptInMs: number; message?: string }
+  | { kind: 'waiting'; nextAttemptInMs: number }
   | { kind: 'blocked'; message: string; remedy: string }
   | { kind: 'online' }
 
@@ -81,7 +80,7 @@ function headline(state: ShownState, recovering: boolean): string {
       // Not the countdown. The countdown was the headline once, set at the
       // largest size on the screen, so the biggest thing a person read was a
       // ticking number and the condition itself was stated nowhere.
-      return state.message ?? 'Cannot reach the nocx backend'
+      return 'Cannot reach the nocx backend'
     case 'blocked':
       return state.message
   }
@@ -109,6 +108,7 @@ function canRetry(state: ShownState): boolean {
 
 function ConnectionOverlayView(props: {
   state: Accessor<ShownState>
+  actual: Accessor<ConnectionOverlayState>
   visible: Accessor<boolean>
   exiting: Accessor<boolean>
   recovering: Accessor<boolean>
@@ -125,7 +125,17 @@ function ConnectionOverlayView(props: {
     <dialog
       ref={host.ref}
       class="ui-connection-overlay"
-      data-state={props.state().kind}
+      /* The CONNECTION's state, including `online` — this is the observable
+         "is it back yet", and it must go on saying so even during the window
+         where the overlay is still up and drawing its last real face. Holding
+         the drawn state here instead removed the only signal in the document
+         that the socket had recovered (nocx-ypbii). */
+      data-state={props.actual().kind}
+      /* The face being drawn. Never `online`, which has no face — see `shown`.
+         The ring keys off this, so it goes on turning through the startup
+         minimum rather than stopping on a screen that still says
+         "Connecting…". */
+      data-shown={props.state().kind}
       data-exiting={props.exiting() ? 'true' : undefined}
       onCancel={host.onCancel}
       onMouseDown={host.onMouseDown}
@@ -309,6 +319,7 @@ function ConnectionOverlay(props: ConnectionOverlayProps) {
   return (
     <ConnectionOverlayView
       state={shown}
+      actual={props.state}
       visible={visible}
       exiting={exiting}
       recovering={recovering}

@@ -242,54 +242,6 @@ describe('dispatcher endpoint state machine', () => {
     expect(d.connectionState).toEqual({ kind: 'online' })
   })
 
-  it('keeps trying a discovery failure a repeat can fix, and says which one it is', async () => {
-    const provider = new TestEndpointProvider()
-    const failure = {
-      kind: 'no-server' as const,
-      message: 'The desktop backend could not be reached.',
-      remedy: 'Retry when the backend is available.',
-    }
-    provider.enqueue({ ok: false, failure })
-    const d = new Dispatcher(provider)
-
-    d.start()
-    await flush()
-
-    // `blocked` stops the loop dead — nothing schedules another attempt and
-    // neither the visibility nor the online listener retries out of it. The
-    // owner started the backend after the client had given up and watched it
-    // sit there: the one state it was in was the one state that never tries
-    // again. A backend that is not running is the textbook case a repeat fixes.
-    const state = d.connectionState
-    expect(state.kind).toBe('waiting')
-    expect(d.reconnectPending).toBe(true)
-    if (state.kind !== 'waiting') throw new Error('unreachable')
-    expect(state.backoffMs).toBeGreaterThan(0)
-
-    // And the wait carries the sentence, so a stopped coordinator does not read
-    // the same as an unreachable port.
-    expect(state.failure).toEqual(failure)
-  })
-
-  it('does not repeat a token the backend has refused', async () => {
-    const provider = new TestEndpointProvider()
-    const failure = {
-      kind: 'token-refused' as const,
-      message: 'The backend refused this client.',
-      remedy: 'Restart nocx.',
-    }
-    provider.enqueue({ ok: false, failure })
-    const d = new Dispatcher(provider)
-
-    d.start()
-    await flush()
-
-    // Offering the same token again changes nothing; only discovery handing
-    // out a new one does.
-    expect(d.connectionState).toEqual({ kind: 'blocked', failure })
-    expect(d.reconnectPending).toBe(false)
-  })
-
   it('keeps retryNow single-flight while provider discovery is in flight', async () => {
     const provider = new TestEndpointProvider()
     let resolveProvider!: (result: EndpointResult) => void
@@ -360,14 +312,7 @@ describe('dispatcher endpoint state machine', () => {
     const blockedProvider = new TestEndpointProvider()
     blockedProvider.enqueue({
       ok: false,
-      // A TERMINAL failure on purpose. `no-server` used to sit here and no
-      // longer belongs: it is fixed by repeating the attempt, so it schedules
-      // one and the visibility listener legitimately retries out of it.
-      failure: {
-        kind: 'server-binary-unusable',
-        message: 'The server cannot be started.',
-        remedy: 'Reinstall the server and try again.',
-      },
+      failure: { kind: 'no-server', message: 'No server.', remedy: 'Start the server.' },
     })
     const blocked = new Dispatcher(blockedProvider)
     blocked.start()

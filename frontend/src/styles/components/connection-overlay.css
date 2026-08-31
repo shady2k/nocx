@@ -1,6 +1,6 @@
 /* ConnectionOverlay — the application's loading screen and its recovery
    surface. Identity: .ui-connection-overlay and its __content/__mark/__logo/
-   __headline/__detail/__action parts. Variance: data-state, data-exiting.
+   __headline/__detail/__action parts. Variance: data-state (the connection), data-shown (the face drawn), data-exiting.
 
    It is a native <dialog>, so it is in the browser top layer and nothing in
    the normal layer can paint over it — but a modal dialog is sized to its
@@ -105,7 +105,7 @@ dialog.ui-connection-overlay::backdrop {
    countdown already says when the next attempt is. 1.6s linear, deliberately:
    easing each revolution produces a pulse that reads as impatience, and
    anything near a second reads as a generic busy spinner. */
-.ui-connection-overlay[data-state='connecting'] .ui-connection-overlay__mark::after {
+.ui-connection-overlay[data-shown='connecting'] .ui-connection-overlay__mark::after {
   animation: ui-connection-overlay-ring 1.6s linear infinite;
   opacity: 1;
 }
@@ -191,7 +191,7 @@ dialog.ui-connection-overlay[data-exiting='true'] {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .ui-connection-overlay[data-state='connecting'] .ui-connection-overlay__mark::after {
+  .ui-connection-overlay[data-shown='connecting'] .ui-connection-overlay__mark::after {
     animation: none;
     /* Off the top of the circle, so the arc still reads as an arc rather than
        as a gap in the track. */

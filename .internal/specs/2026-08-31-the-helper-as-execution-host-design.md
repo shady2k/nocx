@@ -3,16 +3,18 @@
 ## 0. What a user can do that they could not before
 
 Start a long job on a remote host or locally, let nocx update itself, and come back to a tab
-still driving the same running process — including a full-screen program like a coding
-agent, showing what it shows right now.
+still driving the same running process.
 
 The check that watches it: start a program in a tab on a remote host that writes a marker
-file every second **and** produces more output than the ring can hold; replace the
+file every second **and** produces more output than the window can hold; replace the
 coordinator with a build carrying a different helper version; the marker timestamps span the
 update **with no gap in the file** — the process never stopped — the tab reads and writes
 that same process afterwards, and the product **states that output was missed** rather than
 implying continuity. A NEW tab on that host comes up on the new generation. Close the old
 tab; the old generation's directory is reclaimed.
+
+**What is deliberately not promised here**: that a full-screen program's current screen is
+restored on attach. D9 makes a best-effort attempt and says why it cannot be a guarantee.
 
 ## 1. In one sentence
 
@@ -52,12 +54,29 @@ that started it.
 window (D7 deletes the coordinator's), and it says one owner per _behaviour_, not one process
 per role.
 
-**AD-9 / AD-10** (`architecture.md:181`, `:188`) — the replay ring keyed by monotonic byte
-offset; bounded credit, throttle at the bound, "never drop, never grow unbounded; bytes are
-lossless and ordered". **AD-10 is amended by D8 in this document**, deliberately and with its
-one lossy case named. `nocx-8mllr` posed exactly this choice (D6-a lossless-and-stop versus
-D6-b continue-with-a-gap) and closed as _superseded, not decided_, moving the residue to
-`nocx-22k1c`. **This design answers it: D6-b.**
+**AD-9 / AD-10** (`architecture.md:181`, `:188`) — AD-9 puts the bounded per-session output
+ring **in the backend**, keyed by monotonic byte offset; AD-10 requires bounded credit,
+throttling at the bound, and "never drop, never grow unbounded; bytes are lossless and
+ordered". **Both are amended here**: AD-9 by D7, which moves the ring across a process
+boundary and deletes the backend's, and AD-10 by D8, which permits one lossy case and names
+it. `nocx-8mllr` posed exactly D8's choice (D6-a lossless-and-stop versus D6-b
+continue-with-a-gap) and closed as _superseded, not decided_. **This design answers it: D6-b.**
+
+**The content store's startup sweep** (`internal/content/sqlite.go:410`) — `dropDeadSessions`
+executes `DELETE FROM sessions` and `DELETE FROM session_output` on every store open, and its
+comment states the premises: "a session is server-authoritative (AD-7), lives inside one
+backend process and **cannot outlive it**", and "a recording is the bytes ONE pipe produced,
+**the pipe cannot outlive the process**". This design makes both premises false, so as it
+stands a fresh coordinator would **delete the recordings of live sessions** at exactly the
+moment D1a matters most, and the same sweep would terminalize their still-open ledger entries
+as `unknown`. Reconciling it is a blocking prerequisite (§9).
+
+**`session_output`'s contiguity guarantee** (`internal/content/session_output.go:70`) — a gap
+"is a caller defect and not a fact about the stream — accepting it would put a hole in a
+recording whose whole value is that its offsets line up with what the client received";
+`session_output_sqlite.go:141` rejects every discontinuity and `ws_session_record.go:106`
+stops recording permanently once it loses its place. D8 makes gaps a fact about the stream, so
+this guarantee is amended deliberately rather than violated by accident.
 
 **ADR-0041** — `x/vt` as the backend emulator, fed on the backend's own read path
 (`ws.go:2931`), deliberately not on the subscriber path, so it survives the client. It stays
@@ -93,11 +112,11 @@ observed-delivery axis's answer. §5.2's additive rule is kept.
 D25's prune and uninstall, whose prune rule **D4 replaces** and whose uninstall **D14 keeps
 whole-tree and adds to**.
 
-**`contracts/`** — 378 schemas today, and they describe the **frontend** wire, not the
-helper's: frontend `git.open` requires `sessionId`
-(`contracts/git.open.params.schema.json:8`) while helper `git.open` carries only `cwd`
-(`internal/git/hostsvc/params.go:9`). Two surfaces, two shapes. D12 extends the regime to the
-helper surface rather than claiming it is already covered.
+**`contracts/`** — 378 top-level schemas (398 counting `contracts/files` and
+`contracts/tools`), and they describe the **frontend** wire, not the helper's: frontend
+`git.open` requires `sessionId` (`contracts/git.open.params.schema.json:8`) while helper
+`git.open` carries only `cwd` (`internal/git/hostsvc/params.go:9`). Two surfaces, two shapes.
+D12 extends the regime to the helper surface rather than claiming it is already covered.
 
 ## 3. Decisions
 
@@ -158,7 +177,18 @@ either cost.
 rather than a hope:
 
 `attach`, `detach`, `write` (raw), `data` (raw, session-keyed, offset-carrying), `resize`,
-`signal`, `exit`, `close`, `sessions`, `nudge`.
+`signal`, `exit`, `close`, `sessions` — **and the retirement surface**: the lifetime lock's
+contract and `probe-prunable` (D5). A future coordinator must be able to probe a generation
+several versions old safely; if that surface can drift, D1a can be broken by an upgrade that
+merely reasoned wrongly about what it was allowed to delete.
+
+`attach` carries an explicit **`fresh`** flag — whether the caller holds render state — and
+never infers it from the offset. A fresh renderer can attach at a non-zero offset, and a
+renderer can retain an offset after losing its screen; the cursor cannot decide which.
+
+**`nudge` is deliberately NOT here.** An earlier draft froze it. `resize` already expresses
+it, and a presentation heuristic whose reliability D9 cannot vouch for does not belong in a
+contract that can never change.
 
 `spawn` is deliberately **outside** it: an old generation never starts new work. New starts
 go to the current generation; an old one only continues sessions it already owns and accepts
@@ -256,14 +286,26 @@ questions and neither replaces the other:
 | rendezvous socket   | can I communicate with this generation? (discovery, attach, health)  |
 | lifetime/prune lock | can I prove retirement is mutually exclusive with a live generation? |
 
-**Shared homes are answered explicitly rather than left to chance.** `installDir`'s comment
-already anticipates one account across two machines — "(NFS, or the same login on both)
-resolves to two directories" — but that is true only for _different platforms_: two
-same-platform machines sharing a home resolve to **one** directory, and a host-local advisory
-lock on one cannot bind the other. This design's stance: **automatic prune is disabled when
-the helper root is detected on shared storage**, and the footprint surface says so. Widening
-the install namespace with a machine identity is the alternative and is rejected here — it
-would double the footprint for every user to serve a case a refusal handles honestly.
+**Shared homes get a namespace, not a refusal.** `installDir`'s comment already anticipates
+one account across two machines — "(NFS, or the same login on both) resolves to two
+directories" — but that holds only for _different platforms_: two **same-platform** machines
+sharing a home resolve to **one** directory, and a host-local advisory lock on one cannot bind
+the other.
+
+An earlier draft answered this by disabling automatic prune on detected shared storage, on the
+argument that a machine namespace "would double the footprint for every user". **That argument
+is false**: a machine namespace produces one namespace on an ordinary single-machine home and
+duplicates only where homes are genuinely shared, which is precisely the colliding case. And
+the refusal was incomplete anyway — a shared tree makes `Ensure`'s repair path
+(`install.go:130`, which removes an incomplete directory), tombstone reconciliation, and
+whole-tree **uninstall** unsafe in the same way, not just automatic prune. One machine cannot
+enumerate another's live sessions, yet D14 proposes deleting their common `~/.nocx/helper`.
+
+So: **mutable generation state — the lock, the daemon's runtime endpoint, tombstones — is
+namespaced by machine identity.** Immutable artifact bytes may still be shared, since they are
+content-addressed and identical by construction. Detection of shared storage is not relied on
+as a gate: portable, reliable detection is itself hard, and treating a negative result as proof
+would put D1a on an inference.
 
 ### D6 — The coordinator retires generations; the helper only tells the truth about itself
 
@@ -287,113 +329,154 @@ longer read output, send input, resize, signal or deliberately stop it, and rein
 identical bytes does not reconstruct the lost attachment state. That violates D1a more
 directly than termination would, because nocx loses both control **and** recovery.
 
-### D7 — One output window, and it is the helper's
+### D7 — One output window, and three independent readers of it
 
-**This amends D2 of the nocx-server design**, for a physical reason: **only the process
-holding the fd can say what was produced while nobody was listening.** With the coordinator
-absent it cannot buffer.
+**This amends AD-9 and D2 of the nocx-server design.** AD-9 puts the ring in the backend; it
+moves across a process boundary, for a physical reason: **only the process holding the fd can
+say what was produced while nobody was listening.**
 
 `pumpToRing` is today the junction of three connection-independent consumers, and their
-co-location is the design: the enrolled VT grid (`ws.go:2931` — fed "on the backend's own
-read path, and deliberately not on the subscriber path"), the durable recorder (`:2936`,
-"started HERE, beside the pump and for the same reason"), and the replay ring (`:2945`). The
-whole read pipeline moves, not a data structure:
+co-location is the design: the enrolled VT grid (`ws.go:2931` — fed "on the backend's own read
+path, and deliberately not on the subscriber path"), the durable recorder (`ws_session_record.go:84`,
+"started HERE, beside the pump and for the same reason") and the replay ring (`ws.go:2945`).
+
+**`internal/transport.outputRing` is deleted**, not shared: a second buffer in series would be
+a second owner of replay, which is AD-8's whole point. But **"the coordinator becomes a
+pass-through" was wrong, and a single serial fan-out would be a defect**, because the three
+consumers have different pacing: WebSocket credit would stall the recorder, and a SQLite commit
+would stall the frontend.
+
+The topology is **independent pulls from one stateless window**:
 
 ```
-PTY master
-  → helper: sole reader, no interpretation
-  → helper: one bounded window per session, capacity-reclaimed
-  → raw session-keyed, offset-carrying frames
-  → coordinator fan-out
-       ├─ enrolled VT grid            (ADR-0041 stays coordinator-side)
-       ├─ recorder → content.db
-       └─ WebSocket subscriber → window
+PTY master → helper: sole reader, no interpretation
+           → helper: one bounded window per session, capacity-reclaimed, readers stateless
+
+coordinator, each pulling on its own cursor, none blocking another:
+   ├─ frontend delivery  — from the window's acked offset, stops pulling at CreditLimit
+   ├─ recorder           — from its persistence cursor (content.db)
+   └─ enrolled VT grid   — from its own cursor (ADR-0041 stays coordinator-side)
+
+each reader independently receives reset-to-base when its cursor falls behind
 ```
 
-**There is exactly one window and the coordinator does not have one.** `internal/transport`'s
-`outputRing` is **deleted**, not shared: a second buffer in series would be a second owner of
-replay, which is AD-8's whole point. On a window reconnect the coordinator asks the helper
-from the window's last acked offset. AD-10's `CreditLimit` and `FairChunk` stay in the
-transport as flow control on the WebSocket — flow control is not buffering.
+**D8 removes reader state from the helper; it does not remove reader state from the system.**
+A cursor is a position, not a buffer, and holding three of them is what keeps the consumers
+uncoupled.
 
-Cost, named so it is planned: the window's implementation lives in a package the helper links
-without dragging the transport in, and the coordinator's read path becomes a pass-through.
+**Correcting an earlier draft: "flow control is not buffering" is false as written.**
+`internal/transport/outbound/outbound.go:196` owns a bounded outbound queue, which is real
+buffering on the delivery path. `CreditLimit` and `FairChunk` stay, and so does that queue;
+what goes is the _replay_ buffer.
 
-Three obligations this creates, each owed an assertion:
+Four obligations, each owed an assertion, and two of them are existing couplings this design
+must move rather than assume away:
 
-1. Grid enrolment requiring byte-zero observation is committed **before spawn**, or the grid
-   is initialised by replay from the window's base and is **approximate until the first full
-   repaint** — which D9's nudge makes exact.
-2. Coordinator replacement must not double-consume into grid or recorder.
-3. The recorder is a reader like any other. It has **no authority over reclamation** and can
-   miss bytes (D8).
+1. **The run lease's output observation must move to the delivery path.** `run_lease.go:426`
+   takes `l.ring = rx.ring` and `:188` hangs `setWriteObserver(func(n int) { l.onOutput(n) })`
+   on it, and the field is declared `ring *outputRing // nil → no output observation
+(wall-clock only)`. Delete the ring without rehoming that observer and the agent's run lease
+   silently degrades to a wall clock — the soft degrade AGENTS.md forbids. Observing arriving
+   bytes is in fact more correct than observing buffered ones.
+2. **`waitForCredit` is not separable today.** `ws.go:3000` calls `ring.waitForCredit(ctx,
+startOffset, pos, CreditLimit)` and `ring.go:370` computes it from that ring's `acked`. The
+   credit accounting is extracted onto the delivery reader; this is work the design owes, not a
+   decomposition that already exists. `setAttached`, `close` and `wake` (`ws.go:98`, `:133`,
+   `:1720`, `:2589`) move with it.
+3. **Grid enrolment** requiring byte-zero observation is committed **before spawn**, or the
+   grid is initialised by replay from the window's base and **stays `unknown`** until ADR-0041's
+   full-repaint criterion is met (D9). It does not become trusted by being fed.
+4. **Coordinator replacement must not double-consume** into grid or recorder.
 
 ### D8 — AD-10 is amended: the window is capacity-bounded and a straggler is reset
 
-**The amendment**, which lands in `docs/architecture.md` in the same commit as its
-implementation:
+**The amendment**, landing in `docs/architecture.md` in the same commit as its implementation:
 
 > AD-10 permits exactly one lossy case. A session's output window is bounded; when it is full
 > the **oldest bytes are discarded** rather than the source throttled, and a reader asking for
 > a discarded offset is told the window's base instead. Every other path stays lossless and
 > ordered. **The loss is stated in the product**, never only in a log.
 
-This is `nocx-8mllr`'s D6-b, and it is the decision that keeps D1a's promise honest: a
-three-hour build continues rather than stopping because nobody is watching.
+This is `nocx-8mllr`'s D6-b, and it is what keeps D1a honest: a three-hour build continues
+rather than stopping because nobody is watching.
 
-**What it buys is simplicity, not just continuity.** A capacity-reclaimed window needs to know
-**nothing about its readers**. There is no subscriber map, no lease, no expiry, no
-minimum-cursor rule, no recorder authority, no arbitration. A reader says "from offset X"; if
-`X ≥ base` it is served, otherwise it is told `base` and resets. **Readers are stateless from
-the helper's point of view.** Everything the earlier draft carried under those names existed
-only to serve losslessness.
+**What it buys is simplicity, not only continuity.** A capacity-reclaimed window needs to know
+**nothing about its readers**: no subscriber map, no lease, no expiry, no minimum-cursor rule,
+no recorder authority, no arbitration. A reader asks "from offset X"; if `X ≥ base` it is
+served, otherwise it is told `base` and resets. Everything an earlier draft carried under those
+names existed only to serve losslessness.
 
-**What it costs, and both halves must be visible:**
+**The lossy case is wider than "no coordinator attached", and the earlier draft understated
+it.** It fires whenever _any_ reader is slower than the source: a stalled WebSocket, a
+congested carrier, a paused SQLite recorder, a scheduling stall. `CreditLimit` bounds
+coordinator-to-frontend bytes in flight; it does **not** stop the helper's window advancing
+while the frontend is credit-blocked. Two consequences follow:
 
-- A reader that falls behind loses what it missed. A brief disconnect does not — that is what
-  the window is sized for.
-- **The ledger gets holes.** The recorder lives with the coordinator and writes as bytes flow;
-  while no coordinator is attached nothing is recorded, and once the window rolls past, those
-  bytes are gone for everyone. "I ran this while I was away" is not findable. The product says
-  where a gap is; it does not pretend the history is complete.
+- **A live reset path is required, not only an attach-time one.** Today the pump treats losing
+  its position as nominally unreachable and simply stops the stream (`ws.go:3004`). Under this
+  rule an attached, slow reader must receive one explicit gap-and-reset and resume at the base
+  — never go quietly silent.
+- **The recorder needs a gap operation.** `session_output` today rejects every discontinuity
+  by design, because "its whole value is that its offsets line up with what the client
+  received". D8 makes a gap a fact about the stream, so recording gains an explicit
+  `Skip(expected, resumeAt, reason)` — atomically advancing the produced cursor and permitting
+  later appends — and **recording resumes after it**. Showing a gap in the frontend is not
+  sufficient; a recorder that stops at the first gap turns one lost second into a lost session.
 
-**The bound stays 256 KiB** — `RingCapacity`, with its own reasoning at `ring.go:14`. It is
-not raised to imitate scrollback, because D9 recovers a screen without one. `nocx-8mllr`
-required the per-session bound to be a measured number or an explicitly named deferral: **this
-is a deferral.** The argument for 256 KiB is that D9 makes a larger window unnecessary, and an
-argument is not a measurement; the measurement is owed by §6's second item.
+**Correcting an earlier draft: `session_output` is not the ledger.** The holes are in the
+_recording_ of a session's output. Ledger entries — blocks — are frontend-derived and cross
+the control plane, so a block whose bytes were partly missed is still an entry; what it loses
+is its output. The product says which recording has a gap and where.
 
-### D9 — Fresh attach nudges; reconnect replays
+**The bound is 256 KiB today, and it is no longer deferred** — see §6. It is the number that
+decides how much an ordinary coordinator restart destroys, and `ring.go:10`'s own illustrative
+256 KiB/s means the whole window can roll in about a second.
 
-The point of attaching to a long-running full-screen program is to **see what it shows now**,
-not to reconstruct its history. A coding agent that painted its screen once and has been idle
-for hours has that paint far outside any bounded window.
+### D9 — Reconnect replays; a fresh attach may ask for a repaint, and may not get one
 
-Two entry paths, two behaviours:
+Two entry paths, distinguished by `attach`'s explicit `fresh` flag (D3) and never by the
+cursor's value:
 
-- **Reconnect after a carrier drop** → replay from the last acked offset. A network blip must
-  deliver the bytes that were missed, never repaint: repainting would erase what scrolled by.
-- **Fresh attach with no prior position** → **`nudge`**: a one-shot, app-safe winsize change
-  that makes a TUI repaint itself, then stream forward.
+- **Reconnect after a carrier drop** → replay from the last acked offset, and **do not
+  repaint**: a network blip must deliver the bytes that were missed, never erase what
+  scrolled by.
+- **Fresh attach, no render state** → replay the retained window, and **may additionally
+  request a best-effort repaint** via `resize` — a one-shot winsize change that a TUI
+  typically answers by redrawing.
 
-The technique is herdr's, and its guard rails are taken with it: herdr calls it an "app-safe
-resize nudge" applied once after the first client attaches (`src/server/headless.rs:336`) and
-guards it on `rows > 2` (`src/pty/actor/unix.rs:762`).
+**It is best-effort, and the document will not pretend otherwise.** `SIGWINCH` is advisory; an
+application may ignore it or repaint partially; a resize can change a program's layout or its
+state; and there is **no observable signal saying a complete repaint has occurred**. A shell at
+a prompt, a finished build's output and `tail -f` reconstruct nothing at all — for them the
+window is the only answer there is.
 
-**Three limits, recorded rather than discovered.** It is a side effect on a program nobody
-asked to resize. There is one PTY and one winsize, so it is felt by every viewer. And a
-program that does not repaint on `SIGWINCH` — a shell at a prompt, a finished build's output,
-`tail -f` — is not covered by it at all, which is exactly what the window still covers.
+**Therefore the backend grid does not become trusted by being nudged.** ADR-0041 keeps an
+adopted grid `unknown` until a full repaint has been observed, and `internal/panegrid`'s store
+has no trust state and no repaint-completeness detector — it is an emulator fed bytes
+(`panegrid.go:244`). This is safety-relevant, because the grid is what decides whether nocx may
+inject input. An earlier draft claimed the grid "becomes exact after a nudge"; **that was
+false**, and the criterion that would make it true is not designed here.
 
-The two are complements, and neither replaces the other:
+**Correcting this draft's own reading of herdr.** The nudge is real
+(`src/pty/actor/unix.rs:758`), but `rows > 2` is **not a safety guard** — it selects a _row_
+nudge, and the `else` branch does a _column_ nudge (`cols.saturating_sub(1).max(4)`); there is
+also a 30 ms sleep between the two size changes (`:787`). "App-safe" is a source comment, not a
+demonstrated property. And herdr does not use it as a substitute for terminal state: it applies
+one nudge to _imported_ panes after the first client attaches (`headless.rs:336`) on top of a
+server that already owns authoritative Ghostty state and renders frames with no client attached
+(`headless.rs:4358`). Taking the technique is fine; citing it as a guarantee was not.
 
-| mechanism | recovers       | correct for                                    |
-| --------- | -------------- | ---------------------------------------------- |
-| window    | recent bytes   | a shell, scrolling output, a brief disconnect  |
-| nudge     | current screen | a long-running TUI whose last repaint is older |
+The two mechanisms remain complements, with honest reach:
 
-`nudge` is in the frozen ABI (D3) because a coordinator of any version must be able to ask an
-old generation for it.
+| mechanism       | recovers       | reliable for                                     |
+| --------------- | -------------- | ------------------------------------------------ |
+| window          | recent bytes   | everything, up to its bound                      |
+| repaint request | current screen | TUIs that fully repaint on `SIGWINCH` — untested |
+
+**What would make the repaint promotable from best-effort to promised**: a declared, bounded
+set of supported programs shown to fully repaint under the exact sequence, plus a criterion
+that prevents the grid being trusted after a partial one. Neither exists; until they do, §0
+promises the process, not the screen.
 
 ### D10 — Discovery is a directory listing; no router, and the AD-7 amendment
 
@@ -476,7 +559,7 @@ surface, which is what `contracts/README.md` already asks of any method being to
 
 **The limitation is stated rather than papered over: JSON Schema describes shapes, not
 sequences.** The hard part of the frozen ABI is ordering and state — attach, offsets, reset,
-nudge, exit/close races. Neither JSON Schema nor OpenRPC expresses that. The ABI's contract is
+repaint requests, exit/close races. Neither JSON Schema nor OpenRPC expresses that. The ABI's contract is
 **schema plus assertions**, and the load-bearing half is the assertions.
 
 ### D13 — What the product says, and what it stays quiet about
@@ -557,14 +640,17 @@ their generation, over the frozen ABI. If a non-core service changed its wire, t
 on that tab — says why. When vN−1's last session ends its daemon exits, its lock releases,
 and the next connect retires it. Nothing is interrupted.
 
-**A long absence.** The build ran the whole time. The tab comes back, the agent's screen is
-there because attaching nudged it into repainting, and the stream shows — in place — that
-output was missed while nobody was attached.
+**A long absence.** The build ran the whole time. The tab comes back and the stream shows —
+in place — that output was missed while nobody was attached. If the pane held a full-screen
+program that repaints on a resize, attaching asks it to, and it usually comes back looking like
+itself; if it held a shell or a scrolling build, what rolled out of the window is gone, and the
+gap says so rather than the tab pretending otherwise.
 
 ## 5. Assertions
 
 Written as assertions rather than prose (AGENTS.md rule 4); the ones that matter are written
-from this spec by someone who did not implement it.
+from this spec by someone who did not implement it. Where an earlier draft's assertion could
+pass while the product was broken, the reason is recorded beside its replacement.
 
 **Continuity (D1a, D4, D8)**
 
@@ -578,74 +664,102 @@ from this spec by someone who did not implement it.
    production install-and-prune path; and an **unheld** vN−1 is retired by that same path.
 4. With vN−1 held, prune retires nothing; after the hold releases, it does — driven through a
    **real generation daemon**, not a synthetic hold.
-5. A generation killed without cleanup is retired on a later connect, with staleness decided
-   by D5's lock: no remote PID read, no wall clock compared.
+5. A generation killed without cleanup is retired on a later connect, with staleness decided by
+   D5's lock: no remote PID read, no wall clock compared.
 6. With **three** held old generations plus current, none is retired and the footprint is
    reported.
-7. The frozen ABI is exercised by a coordinator against **an archived released helper binary**,
-   not the same source with a changed version constant.
+7. The frozen ABI — including the retirement surface — is exercised by a coordinator against
+   **an archived released helper binary**, not the same source with a changed version constant.
 8. Retirement is a rename: interrupting the coordinator between rename and tombstone deletion
-   leaves a recognisable tombstone, the canonical path absent, and the next pass reconciles it
-   with no manual cleanup.
-9. On a helper root detected as shared storage, automatic prune does not run and the footprint
-   surface says why.
+   leaves a recognisable tombstone, the canonical path absent, and the next pass reconciles it.
+9. **Two same-platform hosts sharing one home cannot damage each other**: with a live
+   generation on host A, host B's install-repair, prune and whole-tree uninstall each leave A's
+   generation and its live sessions intact. (An earlier assertion tested only a local
+   filesystem and would have passed while this was broken.)
 
 **The frozen ABI (D3, D12)**
 
 10. A non-core service whose wire changed answers a version refusal naming the service, **over
     the real wire**, while the same session continues reading and writing.
-11. A raw data frame round-trips a payload containing invalid UTF-8 and bytes resembling a
-    frame header, across split reads and adjacent frames, with multiple sessions multiplexed
-    and offsets above 2³², and the gap callback reports nothing.
-12. Input travels as raw frames: a `write` carrying arbitrary bytes, including a NUL and a
-    valid JSON document, arrives at the PTY byte-identical.
+11. A raw data frame round-trips a payload containing invalid UTF-8 and bytes resembling a frame
+    header, across split reads and adjacent frames, with multiple sessions multiplexed and
+    offsets above 2³², and the gap callback reports nothing.
+12. Input travels as raw frames: a `write` carrying arbitrary bytes, including a NUL and a valid
+    JSON document, arrives at the PTY byte-identical.
+13. **`fresh` is explicit**: an attach with `fresh=false` at offset zero does not request a
+    repaint, and an attach with `fresh=true` at a non-zero offset does. Neither is inferred from
+    the cursor.
 
-**The window (D7, D8, D9)**
+**The window and its readers (D7, D8, D9)**
 
-13. **The coordinator constructs no output window**: the helper's production composition root
-    constructs the one concrete implementation, proven reachable by `deadcode -whylive`, and
-    the coordinator binary contains no replay implementation or instance. (`-whylive` proves
-    production reachability only; it cannot prove semantic singularity, and this assertion does
-    not claim it does.)
-14. One shared trace suite drives the real helper window through the real coordinator adapter
+14. **The coordinator constructs no output window**: the helper's production composition root
+    constructs the one concrete implementation, proven reachable by `deadcode -whylive`, and the
+    coordinator binary contains no replay implementation or instance. This proves _placement_
+    only — 15 and 16 are what prove the replacement is correct.
+15. **The three readers do not couple.** With the frontend held credit-stalled, the recorder and
+    the grid keep advancing; with the recorder blocked on a slow commit, frontend delivery keeps
+    advancing. Asserted concurrently, because a sequential trace passes while a serial fan-out
+    deadlocks.
+16. **An attached slow reader is reset, never silenced.** Hold an attached frontend
+    credit-stalled, produce more than capacity, and it receives exactly **one** explicit
+    gap-and-reset and resumes at the helper's base — it does not stop receiving. (`ws.go:3004`
+    stops the stream today; this is the behaviour that replaces it.)
+17. **The recorder records a gap and resumes.** Starve the recorder past the window's bound: it
+    writes an explicit gap through `Skip`, its produced cursor advances, and **subsequent
+    appends succeed** — the recording is not abandoned at the first discontinuity.
+18. Producing more than capacity with nothing attached **does not block the producer**, and the
+    reset a later reader gets carries the base, not the written offset. (`ring.go:316` returns
+    the written offset today; the change is expected and this is what catches it.)
+19. One shared trace suite drives the real helper window through the real coordinator adapters
     and the real wire — write, attach, read-from-offset, overflow, reset, detach, close —
-    observing identical offsets, output and reset points. A boundary ratchet forbids offset and
-    reset arithmetic outside that package.
-15. Producing more than capacity with nothing attached **does not block the producer**; a
-    reader then asking for a discarded offset is told the base and resets, and the product
-    shows the gap in the stream.
-16. A reconnect at the last acked offset replays exactly and **does not nudge**; a fresh attach
-    with no prior position **does nudge**, and a program that ignores `SIGWINCH` still yields
-    whatever the window holds.
-17. Grid enrolment sees byte zero — or is initialised by replay and becomes exact after a
-    nudge — and coordinator replacement double-consumes into neither grid nor recorder.
+    observing identical offsets, output and reset points across all three readers, with memory
+    bounded throughout. A boundary ratchet forbids offset and reset arithmetic outside that
+    package.
+20. **A partial or absent repaint leaves the grid `unknown`.** A fixture that ignores `SIGWINCH`
+    and one that repaints only its top half both leave the backend grid untrusted, and input
+    injection is refused on it. (An earlier assertion claimed the grid "becomes exact after a
+    nudge" and could be made green by a cooperative fixture alone.)
+21. A reconnect at the last acked offset replays exactly and **does not request a repaint**.
+22. **The run lease still observes output** with no ring in the coordinator: a command producing
+    output does not terminalize on the wall clock, asserted against the lease's own behaviour
+    rather than against the presence of an observer.
+
+**Restart reconciliation (§9)**
+
+23. **A coordinator restart preserves the recordings and the open ledger state of sessions the
+    helper proves live**, and sweeps only those it proves absent. Asserted against the real
+    startup path, because `dropDeadSessions` deletes both today.
+24. A command spanning a coordinator replacement is **not** terminalized as `unknown` while its
+    process is still running.
 
 **Failure paths (AGENTS.md rule 3)**
 
-18. Install fails at each enumerated write boundary in turn; vN−1 keeps serving, and the next
+25. Install fails at each enumerated write boundary in turn; vN−1 keeps serving, and the next
     connect converges through the automatic path with no manual cleanup.
-19. The lock cannot be taken because the directory is read-only: the product refuses visibly,
+26. The lock cannot be taken because the directory is read-only: the product refuses visibly,
     names the reason, **spawns no child** and retires no generation.
-20. The carrier drops mid-session: **a fresh coordinator reattaches and proves the same PID and
-    exact stream continuation** from the last acked offset.
-21. **And the paired positive**: on an ordinary host with an ordinary home, using the shipped
+27. The carrier drops **for long enough to roll the window**: a fresh coordinator reattaches,
+    proves the same PID, receives a reset carrying the base rather than a false continuation,
+    and the product shows the gap. (An earlier assertion produced less than capacity and would
+    have passed without ever exercising loss.)
+28. **And the paired positive**: on an ordinary host with an ordinary home, using the shipped
     coordinator and helper binaries over a real carrier, a generation is installed, held,
     served, reattached and retired end to end.
 
 **Product surfaces (D13, D14)**
 
-22. After an update with an old generation serving, no tab acquires a badge, and
+29. After an update with an old generation serving, no tab acquires a badge, and
     `shell.footprint.status` lists both generations **without connecting**, labelled
     last-observed.
-23. A detached durable session's tab carries the info badge, and it clears on reattach **by a
+30. A detached durable session's tab carries the info badge, and it clears on reattach **by a
     fresh coordinator**.
-24. Uninstall's confirmation lists every session it will end **across every generation**, bound
+31. Uninstall's confirmation lists every session it will end **across every generation**, bound
     to a snapshot token; a session started after the snapshot invalidates the confirmation
     rather than being silently killed; declining ends and removes nothing.
-25. Consent is revoked before any file is renamed or deleted, **and the first failure is
+32. Consent is revoked before any file is renamed or deleted, **and the first failure is
     asserted too**: a revocation that fails begins no removal.
 
-## 6. Measurements this design rests on, and the one it owes
+## 6. Measurements this design rests on, and the two it owes
 
 **Measured 2026-08-31, commit `b0983332`, go1.26.7 linux/amd64, no build tags, with no
 embedded helper artifacts present (they are gitignored, and a fresh checkout embeds only
@@ -661,14 +775,30 @@ coordinator as the execution host. Four cross-compiled coordinators would embed 
 raw against ~11 MB for helpers — a raw extrapolation, not a shipped download size, since the
 artifacts are gzipped.
 
-**Owed: the local carrier budget** (D11), before the local execution host ships, with
+**Owed before the local execution host ships: the local carrier budget** (D11), with
 thresholds and a consequence rather than a number alone: p50/p99 keystroke-to-echo against
 today's direct PTY; sustained output throughput; coordinator and helper CPU; wakeups and
 context switches; fairness of an interactive tab beside a flooding one; and backpressure onset
 with its memory bound. Failing the budget optimises the carrier, never the ownership.
 
-**Also owed: the window's bound** (D8). 256 KiB is carried forward with D9 as its argument,
-and `nocx-8mllr` required a measured number or a named deferral. This is the named deferral.
+**Owed before this design is accepted: the window's bound** (D8). An earlier draft carried
+256 KiB forward as an explicitly named deferral, satisfying `nocx-8mllr`'s acceptance
+criterion in its procedural sense. **That was evasion, and it is withdrawn.** Under D8 the
+bound is no longer an internal buffering choice: it is _how much output an ordinary
+coordinator restart destroys_, permanently, for every session that was busy. D9 cannot justify
+it, because D9 does nothing for shells, builds and streaming output and is best-effort even for
+TUIs — "a repaint makes a larger window unnecessary" is circular across most of the product's
+session types.
+
+The rationale at `ring.go:10` does not survive being asked this question either. Its own
+illustrative 256 KiB/s means **the entire window rolls in about one second**, and its
+arithmetic is loose: it calls a 132×43 screen ~5.7 KiB and 256 KiB "about ten screens", where
+the raw figure is closer to forty.
+
+So the bound is measured before acceptance, not after: time-to-overflow distributions for real
+builds, package installs, test suites and agent TUIs, against the observed duration of a
+coordinator replacement. The bound is then chosen so that an ordinary restart does not
+routinely destroy output, and the number is recorded here with its measurement.
 
 ## 7. Deliberately out of scope — and document 2
 
@@ -703,22 +833,37 @@ ADR-0043 rather than solving multi-process encrypted SQLite).
 ## 8. Open questions
 
 1. **The local carrier budget** (§6) — owed as numbers with thresholds before the local
-   execution host ships.
-2. **The window's bound** (§6) — 256 KiB carried forward on D9's argument, measurement
-   deferred by name.
-3. **`nocx-22k1c`** is answered for the case this document creates (D8 chooses D6-b), and its
-   remaining question — what the _recorder_ does when it is slower than the source while a
-   coordinator **is** attached — stays with that bead.
+   execution host ships. Not blocking acceptance: it decides a carrier, not an ownership.
+2. **`nocx-22k1c`** is answered for the case this document creates (D8 chooses D6-b). What
+   remains with that bead is narrower: what the _recorder_ does when it is slower than the
+   source while a coordinator **is** attached — which D8's `Skip` gives it a way to express,
+   but does not decide a policy for.
+3. **A full-repaint criterion** for ADR-0041's grid (D9). Without it the grid stays `unknown`
+   after an attach, which is the safe answer; with it, §0 could promise the screen as well as
+   the process. Not blocking, because the safe answer is available today.
 
 ## 9. What must exist before this design is accepted
 
-**The durable lifecycle protocol, as its own document.** This is not deferred implementation
-detail: several plausible implementations satisfy every word above and make D1a **false** —
-most obviously a daemon treating bridge EOF as shutdown, which is what the code does today
-(`host.go:154`). It must define daemonization and parent-death behaviour; deterministic
-endpoint derivation and the short-path encoding; atomic socket establishment and stale-path
-recovery; peer authentication and attach authorisation; durable generation-bearing handles;
-reader ownership and the single-writer rule; the SSH streamlocal and exec-bridge behaviour;
-reconnect after carrier loss and after coordinator replacement; the lifetime and prune lock
-with its tombstone reconciliation; and shutdown rules distinguishing bridge EOF, last detach,
-process exit, explicit close and uninstall.
+Three things, and none of them is deferred implementation detail: each is a place where several
+plausible implementations satisfy every word above and make D1a **false**.
+
+**1. The window's bound, measured** (§6). It decides how much an ordinary restart destroys.
+
+**2. Content-store restart reconciliation, as its own document.** `dropDeadSessions`
+(`sqlite.go:410`) deletes every session row and every `session_output` recording at store open,
+because a session "cannot outlive" its backend — the premise this design removes. As it stands a
+fresh coordinator destroys the recordings of live sessions and terminalizes their open ledger
+entries as `unknown`. It must define: how live sessions are discovered from the helper before
+the sweep runs; which rows are preserved and which are proven absent; how an open entry is
+reconciled without declaring a running process finished; and how all of that happens without a
+second connection to the encrypted store (ADR-0043).
+
+**3. The durable lifecycle protocol, as its own document.** The clearest way to satisfy every
+word above and still break D1a is a daemon that treats bridge EOF as shutdown — which is what
+the code does today (`host.go:154`). It must define daemonization and parent-death behaviour; deterministic endpoint derivation and
+its short-path encoding; atomic socket establishment and stale-path recovery; peer
+authentication and attach authorisation; durable generation-bearing handles; the machine
+namespace for mutable generation state (D5); reader ownership and the single-writer rule; the
+SSH streamlocal and exec-bridge behaviour; reconnect after carrier loss and after coordinator
+replacement; the lifetime and prune lock with its tombstone reconciliation; and shutdown rules
+distinguishing bridge EOF, last detach, process exit, explicit close and uninstall.

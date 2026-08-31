@@ -27,6 +27,26 @@ func TestSystemPrompt_DoesNotTellModelToRepeatSessionID(t *testing.T) {
 	}
 }
 
+// TestSystemPrompt_ExplainsBareInputAndNeverGuesses keeps the three intake
+// cases in the model-facing document rather than leaving their meaning to
+// chance.
+func TestSystemPrompt_ExplainsBareInputAndNeverGuesses(t *testing.T) {
+	got := SystemPrompt(SystemPromptFacts{
+		Env: content.Environment{Kind: content.EnvLocal},
+		OS:  "linux",
+	})
+	for _, want := range []string{
+		"A link on its own means go there and tell the person what is on it.",
+		"Text on its own means remember this as a note.",
+		"When the intent is not plain, ask one question and stop.",
+		"Do not guess, and do not call a tool to check first.",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt lacks intake rule %q:\n%s", want, got)
+		}
+	}
+}
+
 func quoted(s string) string {
 	b, _ := json.Marshal(s)
 	return string(b)

@@ -34,13 +34,13 @@ describe('resolveBody', () => {
   })
 
   it('asks for ask fields before resolving', () => {
-    const out = resolveBody('run -p {{ask:port=8080}}', FULL, NONE)
+    const out = resolveBody('run -p {{port=8080}}', FULL, NONE)
     expect(out).toEqual({ kind: 'needs-fields', fields: [{ name: 'port', defaultValue: '8080' }] })
   })
 
   it('substitutes answered fields, including a name used twice', () => {
     const answers = new Map([['port', '9000']])
-    const out = resolveBody('{{ask:port}} and {{ask:port}}', FULL, answers)
+    const out = resolveBody('{{port}} and {{port}}', FULL, answers)
     expect(out).toEqual({ kind: 'resolved', text: '9000 and 9000' })
   })
 
@@ -57,7 +57,7 @@ describe('resolveBody', () => {
 
 describe('askFields', () => {
   it('deduplicates by name and keeps the first default', () => {
-    expect(askFields('{{ask:p=1}} {{ask:p=2}} {{ask:q}}')).toEqual([
+    expect(askFields('{{p=1}} {{p=2}} {{q}}')).toEqual([
       { name: 'p', defaultValue: '1' },
       { name: 'q', defaultValue: '' },
     ])

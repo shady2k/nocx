@@ -3,7 +3,7 @@
 // form elsewhere — rejected, because that is two implementations of "fill in
 // the blanks" that would agree in every case anyone tried. Design §8.
 import { findReferences } from '../secret-reference'
-import { findSnippetSpans } from './reference'
+import { valueSpans, type ValueSpan } from './parse'
 import type { SessionFacts } from './session-facts'
 
 export type { SessionFacts } from './session-facts'
@@ -28,13 +28,26 @@ export function splitAsk(arg: string): AskField {
   return { name: arg.slice(0, at), defaultValue: arg.slice(at + 1) }
 }
 
+/** The spans this module may REPLACE: a parameter's answer and an env key's
+ *  value, and nothing else.
+ *
+ *  The parser reports two more kinds, and both must be left exactly as the
+ *  author wrote them. A `secret` span is the vault's to resolve, on its own
+ *  path and at its own moment; an `unrecognised` one is literal text a person
+ *  typed. Substituting over either would be this module answering a question
+ *  it does not own — and for the vault that is the difference between a
+ *  reference travelling on and a credential-shaped hole in the text. */
+function substitutable(body: string): ValueSpan[] {
+  return valueSpans(body).filter((s) => s.kind === 'env' || s.kind === 'param')
+}
+
 /** The distinct fields a body asks for, in first-occurrence order. One entry
  *  per NAME: the same name twice is one question and two substitutions. */
 export function askFields(body: string): AskField[] {
   const out: AskField[] = []
   const seen = new Set<string>()
-  for (const span of findSnippetSpans(body)) {
-    if (span.ns !== 'ask') continue
+  for (const span of substitutable(body)) {
+    if (span.kind !== 'param') continue
     const field = splitAsk(span.arg)
     if (seen.has(field.name)) continue
     seen.add(field.name)
@@ -79,7 +92,7 @@ export function resolveBody(
   facts: SessionFacts,
   answers: ReadonlyMap<string, string>,
 ): ResolveOutcome {
-  const spans = findSnippetSpans(body)
+  const spans = substitutable(body)
   if (spans.length === 0) return { kind: 'resolved', text: body }
 
   const pending = askFields(body).filter((f) => !answers.has(f.name))
@@ -92,7 +105,7 @@ export function resolveBody(
   const missing: string[] = []
   const seen = new Set<string>()
   for (const span of spans) {
-    if (span.ns !== 'env') continue
+    if (span.kind !== 'env') continue
     if (envValue(span.arg, facts) === null && !seen.has(span.arg)) {
       seen.add(span.arg)
       missing.push(span.arg)
@@ -105,7 +118,7 @@ export function resolveBody(
   for (let i = spans.length - 1; i >= 0; i--) {
     const span = spans[i]
     const value =
-      span.ns === 'env'
+      span.kind === 'env'
         ? (envValue(span.arg, facts) ?? '')
         : (answers.get(splitAsk(span.arg).name) ?? '')
     text = text.slice(0, span.from) + value + text.slice(span.to)

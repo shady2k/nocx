@@ -14,8 +14,8 @@ describe('describeBody (design §10.4)', () => {
   })
 
   it('names an ask field and its default', () => {
-    expect(describeBody('curl :{{ask:port=8080}}')).toEqual([
-      { kind: 'ask', text: '{{ask:port=8080}}', name: 'port', defaultValue: '8080' },
+    expect(describeBody('curl :{{port=8080}}')).toEqual([
+      { kind: 'ask', text: '{{port=8080}}', name: 'port', defaultValue: '8080' },
     ])
   })
 
@@ -34,9 +34,14 @@ describe('describeBody (design §10.4)', () => {
     ])
   })
 
-  it('a bare {{cwd}} and a misspelt namespace are unrecognised', () => {
+  it('a colon is what decides: a bare name is a field, a misspelt namespace is literal', () => {
+    // This case reversed when `ask` was retired, and the reversal IS the
+    // grammar: `{{cwd}}` used to be unrecognised because it named no
+    // namespace, and is now a field precisely because it names none. What
+    // did not move is the other half — a colon commits the span to the
+    // registry, and a namespace nobody owns stays literal text.
     expect(describeBody('{{cwd}} {{evn:cwd}}')).toEqual([
-      { kind: 'unrecognised', text: '{{cwd}}' },
+      { kind: 'ask', text: '{{cwd}}', name: 'cwd', defaultValue: '' },
       { kind: 'unrecognised', text: '{{evn:cwd}}' },
     ])
   })
@@ -51,7 +56,7 @@ describe('describeBody (design §10.4)', () => {
   })
 
   it('reports every span in the order it occurs, across namespaces', () => {
-    const parts = describeBody('{{ask:name}} in {{env:cwd}} then {{secret:k}} and {{oops}}')
+    const parts = describeBody('{{name}} in {{env:cwd}} then {{secret:k}} and {{evn:oops}}')
     expect(parts.map((p) => p.kind)).toEqual(['ask', 'env', 'secret', 'unrecognised'])
   })
 

@@ -85,7 +85,7 @@ describe('the fire adapter (design §8, §9.2, §11)', () => {
   it('resolves env and ask spans into the body once, then delivers through insertSnippet', async () => {
     const d = deps()
     const outcome = await createSnippetFireAdapter(d)({
-      snippet: SNIP({ body: 'run {{env:branch}} with {{ask:port=8080}}' }),
+      snippet: SNIP({ body: 'run {{env:branch}} with {{port=8080}}' }),
       answers: answersOf([['port', '9090']]),
       destination: 'input',
     })
@@ -163,7 +163,7 @@ describe('the fire adapter (design §8, §9.2, §11)', () => {
     const secretish = 'hunter2-not-a-real-value'
     const d = deps()
     await createSnippetFireAdapter(d)({
-      snippet: SNIP({ body: 'ssh -L {{ask:local=8080}}' }),
+      snippet: SNIP({ body: 'ssh -L {{local=8080}}' }),
       answers: answersOf([['local', secretish]]),
       destination: 'input',
     })
@@ -178,7 +178,7 @@ describe('the fire adapter (design §8, §9.2, §11)', () => {
   it('a fire whose body still carries an unanswered ask field refuses rather than firing literal text', async () => {
     const d = deps()
     const outcome = await createSnippetFireAdapter(d)({
-      snippet: SNIP({ body: 'echo {{ask:port}}' }),
+      snippet: SNIP({ body: 'echo {{port}}' }),
       answers: answersOf([]),
       destination: 'input',
     })

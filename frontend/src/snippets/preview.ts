@@ -9,11 +9,11 @@
 // unrecognised text rather than as substitutions.
 //
 // This module DECIDES nothing. Every recognition it reports comes from the
-// scan that already owns it — findSnippetSpans for env/ask, findReferences
+// scan that already owns it — valueSpans for env and parameters, findReferences
 // for the vault's secret, ENV_KEYS for what an env key may be — so the
 // preview cannot tell the author one thing and the fire do another (AD-8).
 import { findReferences } from '../secret-reference'
-import { findSnippetSpans } from './reference'
+import { valueSpans } from './parse'
 import { ENV_KEYS, splitAsk } from './resolve'
 
 export type PreviewPart =
@@ -61,9 +61,10 @@ function unrecognisedText(body: string, at: number): string {
  */
 export function describeBody(body: string): PreviewPart[] {
   const recognised = new Map<number, PreviewPart>()
-  for (const span of findSnippetSpans(body)) {
+  for (const span of valueSpans(body)) {
+    if (span.kind !== 'env' && span.kind !== 'param') continue
     const text = body.slice(span.from, span.to)
-    if (span.ns === 'env') {
+    if (span.kind === 'env') {
       recognised.set(span.from, {
         kind: 'env',
         text,

@@ -145,8 +145,78 @@ func tapNotify(t *testing.T, tap *socketTap, method string, timeout time.Duratio
 	return nil
 }
 
+// unwrap undoes the SOFT LINE WRAP a terminal writes when an echoed line
+// reaches the right margin, so a literal can be looked for in what the shell
+// echoed rather than in how the terminal drew it.
+//
+// The margin is not a property of what is being tested. These sessions open at
+// 80 columns (openLocalSession) and the commands here embed t.TempDir(), into
+// which Go interpolates the TEST NAME — so a command runs to about 115
+// characters and the prompt in front of it adds another twenty-odd. The echo
+// wraps, and at the wrap the terminal emits the last byte, a CR, and that same
+// byte again: `...TerminalizesAnd...` reaches the socket as
+// `...TerminalizesAn\rnd...`. The literal is then not in the stream at all.
+//
+// Which is why this decided the outcome by geometry. Where the wrap falls
+// depends on the prompt width (the hostname is in it) and on the TMPDIR path
+// length (the test name and a random number are in it), so the same code passed
+// on a developer host, failed five of these tests in the CI container, and on
+// the GitHub runner got past the echo and failed a later wait instead —
+// imitating nocx-2h08, the CLOSED starvation bug whose signature is a 30s
+// timeout under a different test name every run, and costing an investigation
+// before the bytes were read (nocx-3n0f3).
+//
+// The rule is exactly one shape, and every observed failure matched it: the
+// byte before the CR is the byte after it. Anything else — a real CRLF, a
+// program's own carriage return — is left alone.
+func unwrap(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); i++ {
+		if s[i] == '\r' && i > 0 && i+1 < len(s) && s[i-1] == s[i+1] {
+			i++ // drop the CR and the byte it repeated
+			continue
+		}
+		b.WriteByte(s[i])
+	}
+	return b.String()
+}
+
+// The wrap rule, stated as the cases that produced it. Every line here is a
+// byte sequence taken off a real socket during the run that found this
+// (nocx-3n0f3), plus the two shapes that must survive untouched.
+func TestUnwrapUndoesTheMarginAndLeavesEverythingElseAlone(t *testing.T) {
+	for _, c := range []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{"wrap inside a word", "TerminalizesAn\rnd", "TerminalizesAnd"},
+		{"wrap at a capital", "InactivityTerminalizesA\rAndTheLedger", "InactivityTerminalizesAndTheLedger"},
+		{"wrap inside a path", "2>/dev/nul\rll", "2>/dev/null"},
+		{"wrap inside a number", "sleep 10\r00", "sleep 100"},
+		{"several wraps in one line", "Fo\ror an In\rnt", "For an Int"},
+		// A carriage return whose neighbours differ is the terminal saying
+		// something else, and it is none of this helper's business.
+		{"a real CRLF is not a wrap", "done\r\nnext", "done\r\nnext"},
+		{"a bare CR is not a wrap", "progress\rdone", "progress\rdone"},
+		{"nothing to do", "plain output", "plain output"},
+		{"empty", "", ""},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			if got := unwrap(c.raw); got != c.want {
+				t.Fatalf("unwrap(%q) = %q, want %q", c.raw, got, c.want)
+			}
+		})
+	}
+}
+
 // tapDataFor waits until the session's data plane has carried needle and
 // returns everything collected for the session so far.
+//
+// The needle is looked for in the UNWRAPPED view and the RAW buffer is what is
+// returned: the wait is about what the shell echoed, and a caller that wants to
+// read the stream wants the bytes that actually arrived.
 func tapDataFor(t *testing.T, tap *socketTap, sid, needle string, timeout time.Duration) string {
 	t.Helper()
 	var buf strings.Builder
@@ -161,13 +231,14 @@ func tapDataFor(t *testing.T, tap *socketTap, sid, needle string, timeout time.D
 				continue
 			}
 			buf.Write(f.Payload)
-			if strings.Contains(buf.String(), needle) {
+			if strings.Contains(unwrap(buf.String()), needle) {
 				return buf.String()
 			}
 		case <-time.After(100 * time.Millisecond):
 		}
 	}
-	t.Fatalf("the session's output never contained %q; got %q", needle, buf.String())
+	t.Fatalf("the session's output never contained %q; got %q (unwrapped: %q)",
+		needle, buf.String(), unwrap(buf.String()))
 	return ""
 }
 

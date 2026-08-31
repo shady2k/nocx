@@ -266,7 +266,7 @@ func TestKillChildStampsAndBlocks(t *testing.T) {
 		t.Fatalf("child: commit the bulk: %v", commitErr)
 	}
 
-	killer := []migrationStep{{
+	killer := theLadderWithThisEdgeSwapped(migrationStep{
 		from: 14, to: 15,
 		apply: func(ctx context.Context, tx *sql.Tx) error {
 			if edgeErr := migrateGrantScopeKinds14to15(ctx, tx); edgeErr != nil {
@@ -287,7 +287,7 @@ func TestKillChildStampsAndBlocks(t *testing.T) {
 			_, _ = os.Stdin.Read(b[:])
 			return fmt.Errorf("child: the parent was supposed to kill this process")
 		},
-	}}
+	})
 	err = migrateSchema(ctx, conn, killer, log.NewSlogAdapter(nil))
 	t.Fatalf("child: migrateSchema returned (%v) — the process should have been killed inside the edge", err)
 }

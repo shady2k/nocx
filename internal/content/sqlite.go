@@ -280,14 +280,18 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 		// `IF NOT EXISTS` throughout, so what a step deliberately does not
 		// write — a table or an index that is simply new — arrives on the
 		// line below at no cost.
+		//
+		// These two lines are the WHOLE schema sequence, which they were not
+		// until schema 16: a third step used to follow them and version the
+		// `api_run*` tables through a counter of its own, outside the ladder
+		// and outside every refusal it makes (nocx-lmb6v.5). Those tables are
+		// in schemaV1 now and the counter is retired by the 15→16 rung, so
+		// one number — user_version — answers for the whole file.
 		if err := migrateSchema(ctx, createConn, schemaLadder, cfg.Logger); err != nil {
 			return err
 		}
 		if _, err := createConn.ExecContext(ctx, schemaV1); err != nil {
 			return fmt.Errorf("content: schema: %w", err)
-		}
-		if err := migrateAPIRuns(ctx, createConn); err != nil {
-			return err
 		}
 		// Startup reconciliation (spec §4.3): every entry that never reached
 		// 'closed' — a crash, a force-quit, a session that died — is closed
@@ -456,7 +460,13 @@ func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 // the count of discarded rows announced to the user. It is a MIGRATION now
 // (nocx-lmb6v.1): the ladder in schema_migrate.go walks one explicit step per
 // edge, and a database it has no step for is refused rather than emptied.
-const schemaVersion = 15
+//
+// It governs the WHOLE file — the ledger, the layout and the api runs alike.
+// That is a decision and its argument is in schema_migrate.go under "ONE
+// COUNTER, FOR ONE FILE" (nocx-lmb6v.3); 16 is the version that made it true,
+// by folding the `api_run*` tables in and retiring the private counter they
+// used to carry (nocx-lmb6v.5).
+const schemaVersion = 16
 
 // schemaV1 is schema v1 of the one authoritative ledger (nocx-rtg0.2),
 // design §5.2 as amended by ADR-0019 and ADR-0020. It used to carry an
@@ -962,6 +972,54 @@ CREATE INDEX IF NOT EXISTS observations_by_env   ON environment_observations(env
 -- The frame idempotency replay check is an index lookup, never a scan: one
 -- capture_key per frame (nocx-f4s5).
 CREATE UNIQUE INDEX IF NOT EXISTS entries_capture_key ON entries(capture_key) WHERE capture_key IS NOT NULL;
+
+-- The API panel's exchanges (nocx-lmb6v.5). They are NOT the ledger's
+-- artifacts and are deliberately tables of their own: an artifact hangs on an
+-- ENTRY, a block a person ran, and these bytes belong to a REQUEST nobody
+-- typed into a shell — the same argument session_output makes above.
+--
+-- These are the shapes migrateAPIRuns used to create as a THIRD schema step
+-- after this constant, versioning them through a private
+-- api_run_schema counter of its own. Its justification was that a user_version
+-- bump REBUILT the whole ledger, so the api runs needed a counter that could
+-- survive somebody else's change; that reason expired with the rebuild
+-- (nocx-lmb6v.1), and the tables are ordinary members of this schema now. The
+-- 15 to 16 rung drops the counter off files that still carry it.
+CREATE TABLE IF NOT EXISTS api_runs (
+  id               INTEGER PRIMARY KEY,
+  collection_path  TEXT NOT NULL,
+  request_rel_path TEXT NOT NULL,
+  repeated_from    INTEGER REFERENCES api_runs(id) ON DELETE SET NULL,
+  method           TEXT NOT NULL,
+  url              TEXT NOT NULL,
+  outcome          TEXT NOT NULL CHECK (outcome IN ('pending','answered','failed','stopped')),
+  request_spans    TEXT NOT NULL DEFAULT '[]',
+  metadata         TEXT NOT NULL DEFAULT '{}',
+  started_at       INTEGER NOT NULL,
+  ended_at         INTEGER,
+  logical_bytes    INTEGER NOT NULL DEFAULT 0 CHECK (logical_bytes >= 0)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS api_run_artifacts (
+  id          INTEGER PRIMARY KEY,
+  run_id      INTEGER NOT NULL REFERENCES api_runs(id) ON DELETE CASCADE,
+  kind        TEXT NOT NULL CHECK (kind IN ('request','response-text','response-raw')),
+  byte_len    INTEGER NOT NULL DEFAULT 0 CHECK (byte_len >= 0),
+  chunk_count INTEGER NOT NULL DEFAULT 0 CHECK (chunk_count >= 0),
+  UNIQUE (run_id, kind)
+) STRICT;
+
+CREATE TABLE IF NOT EXISTS api_run_artifact_chunks (
+  artifact_id INTEGER NOT NULL REFERENCES api_run_artifacts(id) ON DELETE CASCADE,
+  seq         INTEGER NOT NULL CHECK (seq >= 1),
+  body        BLOB NOT NULL,
+  PRIMARY KEY (artifact_id, seq)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS api_runs_by_request
+  ON api_runs(collection_path, request_rel_path, started_at DESC, id DESC);
+CREATE INDEX IF NOT EXISTS api_run_artifacts_by_run
+  ON api_run_artifacts(run_id, kind);
 `
 
 // keyedURI is the ONE file-creating path (canary rule): every file this

@@ -208,12 +208,12 @@ func TestTheSchemaComparisonReportsADivergenceRatherThanNormalisingItAway(t *tes
 		t.Run(tc.what, func(t *testing.T) {
 			diverged := filepath.Join(t.TempDir(), "content.db")
 			aReleasedSchema14Database(t, diverged)
-			applyTheOpenSequence(t, diverged, []migrationStep{{
+			applyTheOpenSequence(t, diverged, theLadderWithThisEdgeSwapped(migrationStep{
 				from: 14, to: 15,
 				apply: func(ctx context.Context, tx *sql.Tx) error {
 					return rebuildGrantScopesAs(ctx, tx, tc.rebuild)
 				},
-			}})
+			}))
 
 			if got := rawUserVersion(t, diverged); got != schemaVersion {
 				t.Fatalf("the diverged database is stamped %d, want %d — the fixture did not migrate", got, schemaVersion)
@@ -241,15 +241,18 @@ func TestTheSchemaComparisonReportsADivergenceRatherThanNormalisingItAway(t *tes
 	}
 }
 
-// applyTheOpenSequence reproduces, on a raw connection, the three schema steps
+// applyTheOpenSequence reproduces, on a raw connection, the two schema steps
 // `Open` takes and in its order: the walk first, because a step edits the shape
-// the PREVIOUS version left; `schemaV1` over the top, because what a step
-// deliberately does not write arrives from there; and `migrateAPIRuns`, which
-// owns the `api_run*` tables on a version stamp of its own rather than through
-// the ladder. Doing it here rather than calling `Open` is what lets a test hand
-// the walk a ladder other than the shipped one — and it has to stay in step
-// with `Open`, or the fabricated divergence would be the harness's rather than
-// the ladder's.
+// the PREVIOUS version left; then `schemaV1` over the top, because what a step
+// deliberately does not write arrives from there. Doing it here rather than
+// calling `Open` is what lets a test hand the walk a ladder other than the
+// shipped one — and it has to stay in step with `Open`, or the fabricated
+// divergence would be the harness's rather than the ladder's.
+//
+// It was three steps until schema 16: a `migrateAPIRuns` ran last and owned
+// the `api_run*` tables on a version stamp of its own. Those tables are in
+// `schemaV1` now and the file carries one version (nocx-lmb6v.5), so the
+// sequence and this helper are two steps again.
 func applyTheOpenSequence(t *testing.T, path string, ladder []migrationStep) {
 	t.Helper()
 	ctx := context.Background()
@@ -260,9 +263,6 @@ func applyTheOpenSequence(t *testing.T, path string, ladder []migrationStep) {
 	}
 	if _, err := conn.ExecContext(ctx, schemaV1); err != nil {
 		t.Fatalf("apply schemaV1 over the migrated fixture: %v", err)
-	}
-	if err := migrateAPIRuns(ctx, conn); err != nil {
-		t.Fatalf("apply the api-run tables over the migrated fixture: %v", err)
 	}
 }
 

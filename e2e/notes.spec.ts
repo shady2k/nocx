@@ -1,4 +1,4 @@
-import { test, expect, promptReady, showSidebarView, type Page } from './harness'
+import { appReadyForInput, test, expect, promptReady, showSidebarView, type Page } from './harness'
 
 /**
  * e2e: write it down without leaving the terminal (nocx-z56hq.7 — the notes
@@ -79,6 +79,7 @@ test.describe('notes', () => {
     // backend kept.
     await page.reload()
     await expect(page.locator('.nocx-tab')).toHaveCount(1, { timeout: 15_000 })
+    await appReadyForInput(page)
 
     await openPanel(page)
     await filterField(page).fill('zephyrine')
@@ -102,6 +103,7 @@ test.describe('notes', () => {
   }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
     await openPanel(page)
 
     // A query that matches nothing says so — it does not look like a
@@ -129,6 +131,7 @@ test.describe('notes', () => {
     await expect(page.locator('.nocx-tab')).toHaveCount(1, { timeout: 10_000 })
 
     await page.reload()
+    await appReadyForInput(page)
     await expect(page.locator('.nocx-tab')).toHaveCount(1, { timeout: 15_000 })
     await openPanel(page)
     await expect(page.locator(ROW)).toHaveCount(rowsBefore, { timeout: 10_000 })

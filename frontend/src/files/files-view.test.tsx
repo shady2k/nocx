@@ -24,6 +24,7 @@ import type { FilesListEntry, FilesListResult } from '../generated/files.list'
 import type { FilesOpenResult } from '../generated/files.open'
 import type { FilesReadResult } from '../generated/files.read'
 import type { FilesPanelServices } from './files-client'
+import type { FilesTreeStore } from './files-store'
 import type { ActiveOrigin, PaneContent } from '../pane-content'
 import { ToastHost, clearToasts } from '../ui/toast'
 import type { ClipboardAccess } from '../clipboard'
@@ -181,6 +182,7 @@ async function mountApp(
   // assertions call it detached from the object, and unbound-method exists
   // to catch exactly that detachment — the mock is the object's own.
   const open = vi.fn()
+  let filesStore: FilesTreeStore | undefined
   const files = createFilesView({
     services,
     opener: { open },
@@ -190,6 +192,9 @@ async function mountApp(
     download: uploadDeps?.download,
     pickSources: uploadDeps?.pickSources,
     native: uploadDeps?.native,
+    onStore: (store) => {
+      filesStore = store
+    },
   })
   // Ports stands in at order 0 (main.tsx registers it there); the views
   // reach mountSidebar in order-sorted arrangement, which is what makes
@@ -227,7 +232,7 @@ async function mountApp(
   // ASSERTABLE as rendered toasts, the way a user sees them.
   render(() => <ToastHost />)
   liveHandles.push(handle)
-  return { manager, bar, panel, handle, open, originFor, setActiveOrigin }
+  return { manager, bar, panel, handle, open, originFor, setActiveOrigin, filesStore: filesStore! }
 }
 
 function filesIcon(bar: HTMLElement): HTMLElement {
@@ -289,6 +294,28 @@ describe('files sidebar view', () => {
     icon.click()
     await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
     expect(panel.querySelector('[data-testid="files-panel"]')?.getAttribute('data-root')).toBe('/')
+  })
+
+  it('keeps its reveal handle usable after the Files panel is refocused', async () => {
+    const list = vi
+      .fn()
+      .mockImplementation((bindingId: string, path: string) =>
+        Promise.resolve(
+          path === '/'
+            ? listFixture('C:/', [entryFixture({ name: 'docs', path: '/docs', kind: 'dir' })])
+            : listFixture('C:/docs', [entryFixture({ name: 'notes.md', path: '/docs/notes.md' })]),
+        ),
+      )
+    const { panel, handle, filesStore } = await mountApp(fakeServices({ list }))
+    await vi.waitFor(() => expect(rowNamed(panel, 'docs')).not.toBeUndefined())
+
+    handle.revealView('ports')
+    await vi.waitFor(() => expect(panel.querySelector('[data-testid="files-panel"]')).toBeNull())
+    handle.revealView(FILES_VIEW_ID)
+
+    // This is the composition-root order: focus the Files view, then ask its
+    // existing store to reveal the path. It must not call a disposed handle.
+    await expect(filesStore.revealPath('/docs')).resolves.toBe(true)
   })
 
   it('expanding a directory reaches files.list and the returned entries appear as rows', async () => {

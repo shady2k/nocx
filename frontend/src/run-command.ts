@@ -34,11 +34,14 @@ export const MAX_RUN_OUTPUT_WINDOW_CHARS = 64 << 10 // 64 KiB of output text
  *  an entered environment), total (the block's output line count), the span
  *  of the window actually returned and its text. The window is clamped by
  *  the renderer: a long output is answered honestly, never truncated
- *  silently — the total tells the model how much more the block holds. */
+ *  silently — the total tells the model how much more the block holds. The
+ *  stopped fact is explicit renderer evidence and is never inferred from
+ *  the exit code. */
 export interface AgentRunCompletion {
   entryId: string
   exitCode: number | null
   status: 'success' | 'failure' | 'entered' | 'unknown'
+  stopped: boolean
   total: number
   start: number
   end: number
@@ -49,10 +52,15 @@ export interface AgentRunCompletion {
  *  lane's session. submitAgentCommand runs the SAME submit orchestration a
  *  person's Enter runs — the ledger record, the running block, the
  *  lifecycle attempt, the paste+CR delivery — with the agent's author, and
- *  resolves when the block freezes. */
+ *  resolves when the block freezes. The signal is aborted when the broker
+ *  withdraws this request before execution. */
 export interface RunCommandContent {
   sessionId(): string
-  submitAgentCommand(command: string, requestId: string): Promise<AgentRunCompletion>
+  submitAgentCommand(
+    command: string,
+    requestId: string,
+    signal?: AbortSignal,
+  ): Promise<AgentRunCompletion>
 }
 
 /** Mount the run pull handler on the app's dispatcher. Returns the
@@ -63,46 +71,81 @@ export function mountRunCommandHandler(
   dispatcher: Dispatcher,
   findContent: (sessionId: string) => RunCommandContent | null,
 ): () => void {
-  return dispatcher.subscribe('agent.runRequest', (params) => {
+  const cancelled = new Set<string>()
+  const active = new Map<string, AbortController>()
+  const unsubscribeCancel = dispatcher.subscribe('agent.runCancel', (params) => {
+    const p = params as { requestId?: unknown }
+    if (!p || typeof p.requestId !== 'string' || p.requestId === '') return
+    cancelled.add(p.requestId)
+    active.get(p.requestId)?.abort()
+  })
+  const unsubscribeRequest = dispatcher.subscribe('agent.runRequest', (params) => {
     const p = params as AgentRunRequest
     if (!p || !p.requestId || !p.sessionId || !p.command) return
-    void answerRun(dispatcher, findContent, p)
+    const controller = new AbortController()
+    active.set(p.requestId, controller)
+    void answerRun(dispatcher, findContent, p, controller, cancelled, active)
   })
+  return () => {
+    unsubscribeRequest()
+    unsubscribeCancel()
+    for (const controller of active.values()) controller.abort()
+    active.clear()
+    cancelled.clear()
+  }
 }
 
 async function answerRun(
   dispatcher: Dispatcher,
   findContent: (sessionId: string) => RunCommandContent | null,
   p: AgentRunRequest,
+  controller: AbortController,
+  cancelled: Set<string>,
+  active: Map<string, AbortController>,
 ): Promise<void> {
-  const content = findContent(p.sessionId)
-  if (!content) {
-    resolve(dispatcher, {
-      requestId: p.requestId,
-      outcome: 'failed',
-      error: `no such session: ${p.sessionId}`,
-    })
-    return
-  }
+  const isCancelled = (): boolean => controller.signal.aborted || cancelled.has(p.requestId)
   try {
-    const run = await content.submitAgentCommand(p.command, p.requestId)
+    if (isCancelled()) return
+    const content = findContent(p.sessionId)
+    if (!content) {
+      if (!isCancelled()) {
+        resolve(dispatcher, {
+          requestId: p.requestId,
+          outcome: 'failed',
+          stopped: false,
+          error: `no such session: ${p.sessionId}`,
+        })
+      }
+      return
+    }
+    const run = await content.submitAgentCommand(p.command, p.requestId, controller.signal)
+    if (isCancelled()) return
     resolve(dispatcher, {
       requestId: p.requestId,
       outcome: 'completed',
       entryId: run.entryId,
       exitCode: run.exitCode,
       status: run.status,
+      stopped: run.stopped,
       total: run.total,
       start: run.start,
       end: run.end,
       text: run.text,
     })
   } catch (err) {
+    if (isCancelled()) return
     // An honest "failed": the submission could not be made or completed.
     // The backend answers the pending request with the sentence rather than
     // hanging the run.
     const reason = err instanceof Error ? err.message : String(err)
-    resolve(dispatcher, { requestId: p.requestId, outcome: 'failed', error: reason })
+    resolve(dispatcher, {
+      requestId: p.requestId,
+      outcome: 'failed',
+      stopped: false,
+      error: reason,
+    })
+  } finally {
+    active.delete(p.requestId)
   }
 }
 

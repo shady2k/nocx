@@ -30,6 +30,7 @@ function harness(
   const onManage = vi.fn()
   const onAsk = vi.fn()
   const onDelivered = vi.fn()
+  const onCopied = vi.fn()
   const provider = new SnippetsQuickConnectProvider({
     store: new SnippetsStore(client),
     fire,
@@ -37,8 +38,9 @@ function harness(
     onManage,
     onAsk,
     onDelivered,
+    onCopied,
   })
-  return { provider, fire, onRefused, onManage, onAsk, onDelivered }
+  return { provider, fire, onRefused, onManage, onAsk, onDelivered, onCopied }
 }
 
 describe('the snippets palette provider', () => {
@@ -70,7 +72,7 @@ describe('the snippets palette provider', () => {
   })
 
   it('a body with ask fields does NOT fire from the row: the form asks first', async () => {
-    const h = harness([SNIP({ id: 'a', title: 'asks', body: 'ssh -p {{ask:port=22}} h' })])
+    const h = harness([SNIP({ id: 'a', title: 'asks', body: 'ssh -p {{port=22}} h' })])
     const items = await h.provider.getItems()
     items[0].run()
 
@@ -96,11 +98,76 @@ describe('the snippets palette provider', () => {
     expect(h.onDelivered).not.toHaveBeenCalled()
   })
 
+  // A malformed body is not a resolution failure the pane can fix by moving
+  // — it is the snippet being unreadable — so the sentence must say that and
+  // name the problem, or the person edits the wrong thing.
+  it('a body nobody can read says so, and names what is wrong with it', async () => {
+    const h = harness([SNIP({ id: 'a', title: 'broken' })], {
+      kind: 'refused',
+      reason: { kind: 'malformed', detail: 'this condition has no {% endif %}' },
+    })
+    const items = await h.provider.getItems()
+    items[0].run()
+
+    await vi.waitFor(() => {
+      expect(h.onRefused).toHaveBeenCalledTimes(1)
+    })
+    const said = h.onRefused.mock.calls[0][0] as string
+    expect(said).toContain('cannot be read')
+    expect(said).toContain('no {% endif %}')
+    expect(h.onDelivered).not.toHaveBeenCalled()
+  })
+
+  // nocx-8rtr.2 — the clipboard is a destination a person chooses, not a
+  // remedy they are offered after being told no. Before these,
+  // SnippetDestination had one caller outside its own tests.
+  it('every snippet row offers the clipboard, named so a screen reader can say which', async () => {
+    const h = harness([SNIP({ id: 'a', title: 'Orchestrator' })])
+    const [row] = await h.provider.getItems()
+    expect(row.action?.ariaLabel).toBe('Copy "Orchestrator" to the clipboard')
+  })
+
+  it('taking it fires the SAME adapter at the clipboard, and says it landed', async () => {
+    const h = harness([SNIP({ id: 'a', title: 'Orchestrator', body: 'plain' })], {
+      kind: 'delivered',
+      where: 'clipboard',
+    })
+    const [row] = await h.provider.getItems()
+    row.action?.run()
+    await vi.waitFor(() => expect(h.fire).toHaveBeenCalled())
+    expect(h.fire.mock.calls[0][0]).toMatchObject({ destination: 'clipboard' })
+    await vi.waitFor(() => expect(h.onCopied).toHaveBeenCalledWith('Orchestrator'))
+    // The pane keeps the keyboard: nothing was inserted into it.
+    expect(h.onDelivered).not.toHaveBeenCalled()
+  })
+
+  it('a body with fields is answered FIRST, for the destination the row chose', async () => {
+    const h = harness([SNIP({ id: 'a', title: 'T', body: 'run {{host}}' })])
+    const [row] = await h.provider.getItems()
+    row.action?.run()
+    await vi.waitFor(() => expect(h.onAsk).toHaveBeenCalled())
+    expect(h.onAsk.mock.calls[0][1]).toBe('clipboard')
+    // Nothing was fired: the answers are not known yet.
+    expect(h.fire).not.toHaveBeenCalled()
+  })
+
+  it('a refused copy says why — a secret must not outlive the fire on the clipboard', async () => {
+    const h = harness([SNIP({ id: 'a', title: 'T', body: 'plain' })], {
+      kind: 'refused',
+      reason: { kind: 'secret-to-clipboard', name: 'prod-db' },
+    })
+    const [row] = await h.provider.getItems()
+    row.action?.run()
+    await vi.waitFor(() => expect(h.onRefused).toHaveBeenCalled())
+    expect(h.onRefused.mock.calls[0][0]).toContain('prod-db')
+    expect(h.onCopied).not.toHaveBeenCalled()
+  })
+
   it('fireReporting hands the reason to its caller instead of the palette', async () => {
     // The ask form owns a surface of its own, so it shows the refusal there
     // — beside the answers that caused it.
     const h = harness([], { kind: 'refused', reason: { kind: 'no-owner' } })
-    const message = await h.provider.fireReporting(SNIP({ id: 'a' }), new Map())
+    const message = await h.provider.fireReporting(SNIP({ id: 'a' }), new Map(), 'input')
     expect(message).toContain('no terminal or editor')
     expect(h.onRefused).not.toHaveBeenCalled()
   })
@@ -120,6 +187,7 @@ describe('the snippets palette provider', () => {
       onManage: vi.fn(),
       onAsk: vi.fn(),
       onDelivered: vi.fn(),
+      onCopied: vi.fn(),
     })
     const items = await provider.getItems()
     expect(items).toHaveLength(1)

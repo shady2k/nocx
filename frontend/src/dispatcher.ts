@@ -2,7 +2,15 @@
 // correlation, notification routing, disconnect/reconnect behaviour, and
 // typed subscribe/unsubscribe.  WSClient and ProfileClient consume it.
 
+import type {
+  Endpoint,
+  EndpointFailure,
+  EndpointFailureKind,
+  EndpointProvider,
+  EndpointResult,
+} from './endpoint'
 import type { ControlSaturated } from './generated/control.saturated'
+import type { TransportPingResult } from './generated/transport.ping'
 import type { ControlSaturatedNotification } from './generated/control.saturated.notification'
 import { log } from './log'
 export type NotificationHandler = (params: unknown) => void
@@ -95,6 +103,16 @@ function isSaturationData(data: unknown): data is Pick<ControlSaturated, 'reason
 const MIN_BACKOFF_MS = 250
 const MAX_BACKOFF_MS = 5000
 
+/**
+ * An idle control socket is probed after 15 s, long enough to avoid adding
+ * chatter while a user is active. A response has 5 s to arrive; closing then
+ * deliberately reuses the existing WebSocket close path.
+ */
+export const HEARTBEAT_IDLE_WINDOW_MS = 15_000
+const HEARTBEAT_RESPONSE_TIMEOUT_MS = 5_000
+
+type TimerHandle = ReturnType<typeof setTimeout>
+
 interface PendingCall {
   resolve: (v: unknown) => void
   reject: (e: Error) => void
@@ -105,6 +123,12 @@ interface PendingCall {
   sealedRetried: boolean
 }
 
+export type ConnectionState =
+  | { kind: 'connecting' }
+  | { kind: 'online' }
+  | { kind: 'waiting'; backoffMs: number }
+  | { kind: 'blocked'; failure: EndpointFailure }
+
 export class Dispatcher {
   private ws: WebSocket | null = null
   private nextID = 1
@@ -114,51 +138,143 @@ export class Dispatcher {
   // Lifecycle subscribers.
   private connectHandlers = new Set<LifecycleHandler>()
   private disconnectHandlers = new Set<LifecycleHandler>()
+  private connectionStateHandlers = new Set<(state: ConnectionState) => void>()
 
   // Reconnect state.
-  private _port = 0
-  private _host = '127.0.0.1'
-  private _token = ''
+  private _connectionState: ConnectionState = { kind: 'waiting', backoffMs: MIN_BACKOFF_MS }
   private _closingDeliberately = false
   private _backoffMs = MIN_BACKOFF_MS
   private _reconnectTimer: ReturnType<typeof setTimeout> | null = null
+  private _started = false
+  private _attemptInFlight = false
+
+  private _heartbeatIdleTimer: TimerHandle | null = null
+  private _heartbeatResponseTimer: TimerHandle | null = null
+  private _heartbeatSocket: WebSocket | null = null
+  private _heartbeatRequestID: number | null = null
+
+  constructor(private readonly provider: EndpointProvider) {
+    this.subscribe('control.saturated', (params: unknown) => {
+      // Consume the generated params type (the contract file must be
+      // reachable from main() — dead-exports ratchet). The notification's
+      // shape is the contract; the toast does not read it, so the cast is
+      // the consumption.
+      const _: ControlSaturatedNotification = params as ControlSaturatedNotification
+      void _
+      this.raiseSaturationToast()
+    })
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', this._onVisibilityChange)
+    }
+    if (typeof window !== 'undefined') {
+      window.addEventListener('online', this._onOnline)
+    }
+  }
 
   // --- WebSocket lifecycle -------------------------------------------------
 
-  connect(port: number, host = '127.0.0.1', token = ''): Promise<void> {
-    this._port = port
-    this._host = host
-    this._token = token
+  /** Begin discovery and connection. Further attempts are scheduled by drops. */
+  start(): void {
+    if (this._started) return
+    this._started = true
     this._closingDeliberately = false
     this._backoffMs = MIN_BACKOFF_MS
-    return this._connectInternal()
+    void this._attemptConnection()
   }
 
-  private _connectInternal(): Promise<void> {
+  /** Cancel the scheduled wait, reset backoff, and attempt immediately. */
+  retryNow(): void {
+    if (!this._started) {
+      this.start()
+      return
+    }
+    if (
+      this._attemptInFlight ||
+      this._connectionState.kind === 'connecting' ||
+      this._connectionState.kind === 'online'
+    ) {
+      return
+    }
+    if (this._reconnectTimer !== null) {
+      clearTimeout(this._reconnectTimer)
+      this._reconnectTimer = null
+    }
+    this._backoffMs = MIN_BACKOFF_MS
+    void this._attemptConnection()
+  }
+
+  private async _attemptConnection(): Promise<void> {
+    if (this._attemptInFlight || this._closingDeliberately) return
+    this._attemptInFlight = true
+    this.setConnectionState({ kind: 'connecting' })
+    try {
+      let result: EndpointResult
+      try {
+        result = await this.provider.resolve()
+      } catch {
+        this._scheduleReconnect()
+        return
+      }
+      if (!result.ok) {
+        this.setConnectionState({ kind: 'blocked', failure: result.failure })
+        return
+      }
+      try {
+        await this._openSocket(result.endpoint)
+        this._backoffMs = MIN_BACKOFF_MS
+      } catch {
+        if (!this._closingDeliberately) this._scheduleReconnect()
+      }
+    } finally {
+      this._attemptInFlight = false
+    }
+  }
+
+  private _openSocket(endpoint: Endpoint): Promise<void> {
     return new Promise((resolve, reject) => {
-      const subprotocol = `nocx.token.${this._token}`
-      const ws = new WebSocket(`ws://${this._host}:${this._port}/session`, subprotocol)
+      const subprotocol = `nocx.token.${endpoint.token}`
+      const ws = new WebSocket(`ws://${endpoint.host}:${endpoint.port}/session`, subprotocol)
       ws.binaryType = 'arraybuffer'
+      let settled = false
+      const onMessage = (event: MessageEvent) => this._onSocketMessage(event, ws)
 
       ws.onopen = () => {
+        // A retry can replace this socket before its handshake callback runs.
+        // A superseded socket must not announce a connection.
+        if (this.ws !== ws) return
+        if (settled) return
+        settled = true
+        this.setConnectionState({ kind: 'online' })
+        this._armHeartbeatIdle(ws)
         this.fireConnect()
         resolve()
       }
-      ws.onerror = () => reject(new Error('ws connection failed'))
+      ws.onerror = () => {
+        if (this.ws !== ws || settled) return
+        settled = true
+        ws.removeEventListener('message', onMessage)
+        this._clearHeartbeatTimers()
+        this.ws = null
+        reject(new Error('ws connection failed'))
+      }
 
-      ws.addEventListener('message', this._onSocketMessage)
+      ws.addEventListener('message', onMessage)
       ws.addEventListener(
         'close',
         () => {
           if (this.ws !== ws) return
-          ws.removeEventListener('message', this._onSocketMessage)
+          ws.removeEventListener('message', onMessage)
+          this._clearHeartbeatTimers()
           this.ws = null
+          if (!settled) {
+            settled = true
+            reject(new Error('ws closed'))
+          }
           this.rejectAllPending('ws closed')
           // Decide the reconnect policy BEFORE the lifecycle event: a
           // subscriber reading `reconnectPending` at event time must see
-          // the state that will hold after the event (nocx-gbhwh). It also
-          // means a throwing subscriber cannot prevent the reconnect from
-          // being scheduled.
+          // the state that will hold — the sentence can say "reconnecting"
+          // instead of guessing (nocx-gbhwh).
           if (!this._closingDeliberately) {
             this._scheduleReconnect()
           }
@@ -173,16 +289,25 @@ export class Dispatcher {
 
   close(): void {
     this._closingDeliberately = true
+    this._started = false
     if (this._reconnectTimer !== null) {
       clearTimeout(this._reconnectTimer)
       this._reconnectTimer = null
     }
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', this._onVisibilityChange)
+    }
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('online', this._onOnline)
+    }
+    this._clearHeartbeatTimers()
     this.ws?.close()
     this.ws = null
     this.rejectAllPending('closed')
     this.subscribers.clear()
     this.connectHandlers.clear()
     this.disconnectHandlers.clear()
+    this.connectionStateHandlers.clear()
   }
 
   // --- RPC -----------------------------------------------------------------
@@ -207,19 +332,23 @@ export class Dispatcher {
         params,
         sealedRetried: false,
       })
-      if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      const ws = this.ws
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
         this.pending.delete(id)
         reject(new Error('not connected'))
         return
       }
-      this.ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
+      this._noteOutboundActivity(ws)
     })
   }
 
   /** Send a JSON-RPC notification (no id, no response expected). */
   notify(method: string, params: unknown): void {
-    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) return
-    this.ws.send(JSON.stringify({ jsonrpc: '2.0', method, params }))
+    const ws = this.ws
+    if (!ws || ws.readyState !== WebSocket.OPEN) return
+    ws.send(JSON.stringify({ jsonrpc: '2.0', method, params }))
+    this._noteOutboundActivity(ws)
   }
 
   // --- Notifications -------------------------------------------------------
@@ -235,28 +364,6 @@ export class Dispatcher {
     return () => {
       set.delete(handler)
     }
-  }
-
-  /**
-   * Registered at construction: a refused notification (no id) cannot carry
-   * the -32004 error, so the server emits the control.saturated notification
-   * instead (rate-limited, with methodClass and scope only — the generated
-   * params type is consumed here, making the contract file reachable). It
-   * raises the same deduplicated saturation toast as the error path, with no
-   * calling surface opting in — a refused action must be visible in the
-   * product, not only in a log. close() is terminal (deliberate shutdown),
-   * so a constructor registration is not lost to a reconnect.
-   */
-  constructor() {
-    this.subscribe('control.saturated', (params: unknown) => {
-      // Consume the generated params type (the contract file must be
-      // reachable from main() — dead-exports ratchet). The notification's
-      // shape is the contract; the toast does not read it, so the cast is
-      // the consumption.
-      const _: ControlSaturatedNotification = params as ControlSaturatedNotification
-      void _
-      this.raiseSaturationToast()
-    })
   }
 
   // --- Lifecycle subscriptions ---------------------------------------------
@@ -275,7 +382,18 @@ export class Dispatcher {
     }
   }
 
+  onConnectionStateChange(handler: (state: ConnectionState) => void): () => void {
+    this.connectionStateHandlers.add(handler)
+    return () => {
+      this.connectionStateHandlers.delete(handler)
+    }
+  }
+
   // --- Accessors -----------------------------------------------------------
+
+  get connectionState(): ConnectionState {
+    return this._connectionState
+  }
 
   get connected(): boolean {
     return this.ws?.readyState === WebSocket.OPEN
@@ -300,7 +418,9 @@ export class Dispatcher {
 
   // --- Internal message handling -------------------------------------------
 
-  private _onSocketMessage = (ev: MessageEvent): void => {
+  private _onSocketMessage = (ev: MessageEvent, source: WebSocket | null = this.ws): void => {
+    if (source === null || source !== this.ws) return
+    this._noteInboundActivity(source)
     if (typeof ev.data !== 'string') return
     let msg: {
       id?: number
@@ -312,6 +432,22 @@ export class Dispatcher {
     try {
       msg = JSON.parse(ev.data) as typeof msg
     } catch {
+      return
+    }
+
+    // Response to a heartbeat request. Its timer is transport-owned rather
+    // than a PendingCall timeout, so ordinary RPCs keep their existing
+    // lifetime semantics.
+    if (msg.id !== undefined && this._heartbeatRequestID === msg.id) {
+      if (
+        typeof msg.result !== 'object' ||
+        msg.result === null ||
+        typeof (msg.result as TransportPingResult).serverTimeMs !== 'number'
+      ) {
+        return
+      }
+      this._clearHeartbeatResponse()
+      this._armHeartbeatIdle(source)
       return
     }
 
@@ -337,14 +473,14 @@ export class Dispatcher {
             () => {
               const id = this.nextID++
               this.pending.set(id, p)
-              if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+              const ws = this.ws
+              if (!ws || ws.readyState !== WebSocket.OPEN) {
                 this.pending.delete(id)
                 p.reject(new Error('not connected'))
                 return
               }
-              this.ws.send(
-                JSON.stringify({ jsonrpc: '2.0', id, method: p.method, params: p.params }),
-              )
+              ws.send(JSON.stringify({ jsonrpc: '2.0', id, method: p.method, params: p.params }))
+              this._noteOutboundActivity(ws)
             },
             (e: unknown) => {
               p.reject(e instanceof Error ? e : new Error(String(e)))
@@ -381,30 +517,116 @@ export class Dispatcher {
   }
 
   // --- Reconnect plumbing --------------------------------------------------
+  private _clearHeartbeatResponse(): void {
+    if (this._heartbeatResponseTimer !== null) {
+      clearTimeout(this._heartbeatResponseTimer)
+      this._heartbeatResponseTimer = null
+    }
+    this._heartbeatRequestID = null
+  }
+
+  private _clearHeartbeatTimers(): void {
+    if (this._heartbeatIdleTimer !== null) {
+      clearTimeout(this._heartbeatIdleTimer)
+      this._heartbeatIdleTimer = null
+    }
+    this._clearHeartbeatResponse()
+    this._heartbeatSocket = null
+  }
+
+  private _armHeartbeatIdle(ws: WebSocket): void {
+    if (
+      this.ws !== ws ||
+      ws.readyState !== WebSocket.OPEN ||
+      this._closingDeliberately ||
+      this._heartbeatRequestID !== null
+    ) {
+      return
+    }
+    this._heartbeatSocket = ws
+    if (this._heartbeatIdleTimer !== null) clearTimeout(this._heartbeatIdleTimer)
+    this._heartbeatIdleTimer = setTimeout(() => {
+      if (this._heartbeatSocket !== ws || this.ws !== ws || ws.readyState !== WebSocket.OPEN) return
+      this._heartbeatIdleTimer = null
+      if (this.pending.size !== 0) {
+        this._armHeartbeatIdle(ws)
+        return
+      }
+      const id = this.nextID++
+      this._heartbeatRequestID = id
+      ws.send(JSON.stringify({ jsonrpc: '2.0', id, method: 'transport.ping', params: {} }))
+      this._heartbeatResponseTimer = setTimeout(() => {
+        if (
+          this._heartbeatSocket !== ws ||
+          this.ws !== ws ||
+          this._heartbeatRequestID !== id ||
+          this._closingDeliberately
+        ) {
+          return
+        }
+        // Deliberately use the existing close path. It rejects pending calls,
+        // publishes waiting, schedules the retry, and fires onDisconnect.
+        ws.close()
+      }, HEARTBEAT_RESPONSE_TIMEOUT_MS)
+    }, HEARTBEAT_IDLE_WINDOW_MS)
+  }
+
+  private _noteOutboundActivity(ws: WebSocket): void {
+    if (this.ws !== ws || ws.readyState !== WebSocket.OPEN || this._heartbeatRequestID !== null)
+      return
+    this._armHeartbeatIdle(ws)
+  }
+
+  private _noteInboundActivity(ws: WebSocket): void {
+    if (this.ws !== ws || ws.readyState !== WebSocket.OPEN || this._heartbeatRequestID !== null)
+      return
+    this._armHeartbeatIdle(ws)
+  }
 
   private _scheduleReconnect(): void {
-    if (this._reconnectTimer !== null) return
+    if (this._reconnectTimer !== null || this._closingDeliberately) return
     const jitter = Math.random() * this._backoffMs * 0.5
     const delay = this._backoffMs + jitter
+    this.setConnectionState({ kind: 'waiting', backoffMs: delay })
     this._reconnectTimer = setTimeout(() => {
       this._reconnectTimer = null
-      void this._tryReconnect()
+      void this._attemptConnection()
     }, delay)
     this._backoffMs = Math.min(this._backoffMs * 2, MAX_BACKOFF_MS)
   }
 
-  private async _tryReconnect(): Promise<void> {
-    try {
-      await this._connectInternal()
-      this._backoffMs = MIN_BACKOFF_MS
-    } catch {
-      if (!this._closingDeliberately) {
-        this._scheduleReconnect()
-      }
+  // --- Helpers -------------------------------------------------------------
+
+  private setConnectionState(next: ConnectionState): void {
+    if (this.sameConnectionState(this._connectionState, next)) return
+    this._connectionState = next
+    for (const handler of this.connectionStateHandlers) {
+      handler(next)
     }
   }
 
-  // --- Helpers -------------------------------------------------------------
+  private sameConnectionState(a: ConnectionState, b: ConnectionState): boolean {
+    if (a.kind !== b.kind) return false
+    if (a.kind === 'waiting' && b.kind === 'waiting') return a.backoffMs === b.backoffMs
+    if (a.kind === 'blocked' && b.kind === 'blocked') {
+      const aFailureKind: EndpointFailureKind = a.failure.kind
+      const bFailureKind: EndpointFailureKind = b.failure.kind
+      return (
+        aFailureKind === bFailureKind &&
+        a.failure.message === b.failure.message &&
+        a.failure.remedy === b.failure.remedy
+      )
+    }
+    return true
+  }
+
+  private _onVisibilityChange = (): void => {
+    if (this._connectionState.kind === 'waiting') this.retryNow()
+  }
+
+  private _onOnline = (): void => {
+    if (this._connectionState.kind === 'waiting') this.retryNow()
+  }
 
   private rejectAllPending(reason: string): void {
     for (const p of this.pending.values()) {
@@ -428,8 +650,9 @@ export class Dispatcher {
   /**
    * The global fallback for a refused control request. A surface that
    * forgets to show its refusal still degrades visibly — a soft degrade
-   * must be visible in the product, not only in a log. Individual surfaces
-   * may later disable an action or retry; this is what stops silence.
+   * must be visible in the product, not only in a log. Individual
+   * surfaces may later disable an action or retry; this is what stops
+   * silence.
    */
   private handleSaturationData(data: unknown): void {
     if (!isSaturationData(data)) return

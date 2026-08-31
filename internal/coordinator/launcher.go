@@ -7,6 +7,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"runtime"
 	"time"
 )
 
@@ -43,6 +44,8 @@ const (
 	// decide to raise a daemon.
 	spawnLockName = "spawn.lock"
 )
+
+var errSpawnLockTimedOut = errors.New("coordinator: spawn lock wait timed out")
 
 // NoticeKind names what a [Notice] is about. A type rather than a free
 // string so a UI can switch on it without matching prose.
@@ -203,7 +206,12 @@ func (l *Launcher) Launch(ctx context.Context) (Launch, error) {
 	default:
 		// A socket that answered something we could not use. Spawning a
 		// second daemon on top of it would be a guess; reporting it is not.
-		return Launch{}, err
+		return Launch{}, NewLaunchFailure(
+			FailureIncompatible,
+			fmt.Sprintf("A coordinator at %s answered with an incompatible response.", l.socket),
+			"Stop the other or older nocx coordinator, then retry.",
+			err,
+		)
 	}
 }
 
@@ -257,10 +265,13 @@ func (l *Launcher) replace(ctx context.Context, sighting Sighting, why string) (
 		"runningCommit", sighting.Hello.Build.Commit,
 		"runningProtocol", sighting.Hello.Protocol,
 	)
-
 	if err := l.cfg.Stopper.Stop(ctx, sighting); err != nil {
-		return Launch{}, fmt.Errorf("coordinator: the running coordinator (%s) is incompatible — %s — "+
-			"and could not be stopped: %w", describe(sighting), why, err)
+		return Launch{}, NewLaunchFailure(
+			FailureIncompatible,
+			fmt.Sprintf("The incompatible coordinator at %s could not be stopped.", l.socket),
+			"Stop the other or older nocx coordinator, then retry.",
+			err,
+		)
 	}
 	hello, spawned, err := l.raise(ctx)
 	if err != nil {
@@ -271,8 +282,12 @@ func (l *Launcher) replace(ctx context.Context, sighting Sighting, why string) (
 	// binary on the path — would be accepted silently, which is the mixed
 	// pair again with an extra step.
 	if incompat := l.incompatibility(hello); incompat != "" {
-		return Launch{}, fmt.Errorf("coordinator: replaced the running coordinator, but the one now "+
-			"serving %s is still incompatible: %s", l.socket, incompat)
+		return Launch{}, NewLaunchFailure(
+			FailureIncompatible,
+			fmt.Sprintf("The replacement coordinator at %s is still incompatible with this build.", l.socket),
+			"Stop the other or older nocx coordinator, then retry.",
+			fmt.Errorf("coordinator replacement is incompatible: %s", incompat),
+		)
 	}
 	return Launch{Hello: hello, Spawned: spawned, Replaced: true}, nil
 }
@@ -291,12 +306,28 @@ func (l *Launcher) raise(ctx context.Context) (Hello, bool, error) {
 	// refuse to start and that refusal reaches this launcher as a readiness
 	// failure naming it. One owner for that check.
 	if err := os.MkdirAll(l.cfg.Dir, 0o700); err != nil {
-		return Hello{}, false, fmt.Errorf("coordinator: create runtime dir %s: %w", l.cfg.Dir, err)
+		return Hello{}, false, NewLaunchFailure(
+			FailureProfileUnusable,
+			fmt.Sprintf("The profile runtime directory %s could not be created or used.", l.cfg.Dir),
+			fmt.Sprintf("Check that %s can be read and written, then retry.", l.cfg.Dir),
+			err,
+		)
 	}
 
 	lock, err := l.takeSpawnLock(ctx)
 	if err != nil {
-		return Hello{}, false, err
+		if errors.Is(err, errSpawnLockTimedOut) ||
+			errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) {
+			return Hello{}, false, l.notReadyFailure(
+				"The nocx backend could not become ready because another launch is still in progress.",
+				err,
+			)
+		}
+		return Hello{}, false, l.profileFailure(
+			fmt.Sprintf("The profile runtime directory %s could not be used for launching.", l.cfg.Dir),
+			err,
+		)
 	}
 	defer func() {
 		if relErr := lock.release(); relErr != nil {
@@ -310,9 +341,12 @@ func (l *Launcher) raise(ctx context.Context) (Hello, bool, error) {
 			// and it is not one we can use. Replacing it here would be a
 			// second launcher killing a daemon a first one just started —
 			// so this stops and says so instead.
-			return Hello{}, false, fmt.Errorf(
-				"coordinator: another launcher raised a coordinator at %s that this build cannot use: %s",
-				l.socket, incompat)
+			return Hello{}, false, NewLaunchFailure(
+				FailureIncompatible,
+				fmt.Sprintf("A coordinator at %s was raised by another launcher, but this build cannot use it.", l.socket),
+				"Stop the other or older nocx coordinator, then retry.",
+				fmt.Errorf("coordinator build is incompatible: %s", incompat),
+			)
 		}
 		l.cfg.Logger.Info("coordinator: another launcher raised the coordinator first", "pid", sighting.PID)
 		return sighting.Hello, false, nil
@@ -320,7 +354,12 @@ func (l *Launcher) raise(ctx context.Context) (Hello, bool, error) {
 
 	spawned, err := l.cfg.Spawner.Spawn(ctx)
 	if err != nil {
-		return Hello{}, false, fmt.Errorf("coordinator: could not start nocx-server: %w", err)
+		return Hello{}, false, NewLaunchFailure(
+			FailureServerBinaryUnusable,
+			"The nocx server binary could not be started.",
+			serverBinaryRemedy(),
+			err,
+		)
 	}
 	hello, err := l.waitReady(ctx, spawned)
 	if err != nil {
@@ -349,8 +388,8 @@ func (l *Launcher) takeSpawnLock(ctx context.Context) (*fileLock, error) {
 			return nil, err
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("coordinator: another launcher has held %s for %s without "+
-				"raising a coordinator", l.lock, l.cfg.ReadyTimeout)
+			return nil, fmt.Errorf("%w: another launcher has held %s for %s without "+
+				"raising a coordinator", errSpawnLockTimedOut, l.lock, l.cfg.ReadyTimeout)
 		}
 		select {
 		case <-ctx.Done():
@@ -380,12 +419,11 @@ func (l *Launcher) waitReady(ctx context.Context, spawned Spawned) (Hello, error
 		select {
 		case exitErr, ok := <-spawned.Exit:
 			if ok || exitErr != nil {
-				how := "exited cleanly without serving anything"
-				if exitErr != nil {
-					how = "exited: " + exitErr.Error()
-				}
-				return Hello{}, fmt.Errorf("coordinator: %s (pid %d) %s before its discovery "+
-					"socket at %s answered", spawned.Command, spawned.PID, how, l.socket)
+				return Hello{}, l.notReadyFailure(
+					fmt.Sprintf("The nocx backend %s (process %d) exited before its discovery socket at %s became ready.",
+						spawned.Command, spawned.PID, l.socket),
+					exitErr,
+				)
 			}
 		default:
 		}
@@ -405,25 +443,56 @@ func (l *Launcher) waitReady(ctx context.Context, spawned Spawned) (Hello, error
 		if !errors.Is(err, ErrNoCoordinator) {
 			// The socket is there and answering something unusable. More
 			// waiting cannot fix that.
-			return Hello{}, fmt.Errorf("coordinator: %s (pid %d) is serving %s but the handshake "+
-				"failed: %w", spawned.Command, spawned.PID, l.socket, err)
+			return Hello{}, l.notReadyFailure(
+				fmt.Sprintf("The nocx backend %s (process %d) answered on %s but did not provide a usable coordinator.",
+					spawned.Command, spawned.PID, l.socket),
+				err,
+			)
 		}
 		if time.Now().After(deadline) {
-			return Hello{}, fmt.Errorf("coordinator: %s (pid %d) did not answer its discovery socket "+
-				"at %s within %s: %w", spawned.Command, spawned.PID, l.socket, l.cfg.ReadyTimeout, last)
+			return Hello{}, l.notReadyFailure(
+				fmt.Sprintf("The nocx backend %s (process %d) did not become ready on %s within %s.",
+					spawned.Command, spawned.PID, l.socket, l.cfg.ReadyTimeout),
+				last,
+			)
 		}
 		select {
 		case <-ctx.Done():
-			return Hello{}, fmt.Errorf("coordinator: waiting for %s (pid %d) to serve %s: %w",
-				spawned.Command, spawned.PID, l.socket, ctx.Err())
+			return Hello{}, l.notReadyFailure(
+				fmt.Sprintf("The nocx backend %s (process %d) was not ready before launch was canceled.",
+					spawned.Command, spawned.PID),
+				ctx.Err(),
+			)
 		case <-ticker.C:
 		}
 	}
 }
 
-// describe names a running coordinator in one phrase, for a message a
-// person reads.
-func describe(s Sighting) string {
-	return fmt.Sprintf("nocx %s, commit %s, protocol %d, pid %d",
-		s.Hello.Build.Version, s.Hello.Build.Commit, s.Hello.Protocol, s.PID)
+func (l *Launcher) profileFailure(message string, cause error) *LaunchFailure {
+	return NewLaunchFailure(
+		FailureProfileUnusable,
+		message,
+		fmt.Sprintf("Check that %s can be read and written, then retry.", l.cfg.Dir),
+		cause,
+	)
+}
+
+func (l *Launcher) notReadyFailure(message string, cause error) *LaunchFailure {
+	return NewLaunchFailure(
+		FailureNotReady,
+		message,
+		"The backend could not start or respond. If retrying does not help, check whether another instance is already running and look for the backend’s startup error.",
+		cause,
+	)
+}
+
+func serverBinaryRemedy() string {
+	switch runtime.GOOS {
+	case "darwin":
+		return "Reinstall nocx, then retry."
+	case "linux":
+		return "Repair the nocx server binary under ~/.local/share/nocx/bin, then retry."
+	default:
+		return "Reinstall nocx, then retry."
+	}
 }

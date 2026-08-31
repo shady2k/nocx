@@ -113,7 +113,7 @@ describe('the snippet provider (nocx-nlhe)', () => {
   })
 
   it('an ask: snippet is offered like any other — §10.2 disables ghost text, not the row', () => {
-    const p = providerOver([SNIP({ id: 'a', title: 'ssh-port', body: 'ssh -p {{ask:port}} h' })])
+    const p = providerOver([SNIP({ id: 'a', title: 'ssh-port', body: 'ssh -p {{port}} h' })])
     expect(ask(p, ctxFor('ssh-', 'ssh-', 'command')).candidates).toHaveLength(1)
   })
 })

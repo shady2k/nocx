@@ -33,7 +33,13 @@ import { test as base, expect } from '@playwright/test'
 import { mkdtempSync, mkdirSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, bindEndpoint, settingsReady, type DisposableRoot } from './harness'
+import {
+  VaultBackend,
+  appReadyForInput,
+  bindEndpoint,
+  settingsReady,
+  type DisposableRoot,
+} from './harness'
 import { readStand } from './stand'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
@@ -101,6 +107,7 @@ test.describe('vault secrets in the prompt — the owner’s acceptance', () => 
     await bindEndpoint(page, ep)
     await page.goto('/')
     await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
 
     await page.keyboard.press('Meta+,')
     await settingsReady(page)
@@ -183,6 +190,7 @@ test.describe('vault secrets in the prompt — the owner’s acceptance', () => 
     await bindEndpoint(page, ep2)
     await page.reload()
     await expect(page.locator(TITLE).first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
 
     // Up opens recall only from a focused prompt; after a reload the editor
     // takes a moment to own input (the harness's promptReady contract).

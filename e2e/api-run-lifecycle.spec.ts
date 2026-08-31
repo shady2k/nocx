@@ -38,7 +38,7 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { test, expect } from './harness'
+import { appReadyForInput, test, expect } from './harness'
 import { startStallingServer, type StallingServer } from './fixtures/api-stalling-server'
 
 /** A name reserved never to resolve (RFC 2606). The failure it produces is
@@ -116,6 +116,7 @@ test.describe('an API run you can watch, stop, and read a failure off', () => {
   }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
 
     // ── The workbench, and the folder in it ─────────────────────────────────
     //

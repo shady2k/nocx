@@ -2,6 +2,7 @@ package assistant
 
 import (
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"github.com/shady2k/nocx/internal/content"
@@ -23,6 +24,13 @@ import (
 // CommandInvocation is the parser result shared by effect classification and
 // invocation-rule policy. The parser is deliberately owned here: policy
 // consumers receive this result instead of tokenizing the command again.
+//
+// The invariant is `Disqualified ⇒ non-empty Unresolved`. Its CONVERSE has
+// never held: `Disqualified` is false for a path-prefixed program that a bare
+// name would have disqualified. What made that safe was `Unresolved`, filled
+// by the `readPrograms` default at the bottom of the switch — not
+// `Disqualified`. An audit that reads `Disqualified` as the guard is reading
+// the wrong field.
 func parseCanonicalInvocation(command string) content.Invocation {
 	subcommands, disqualified, ok := splitCommand(command)
 	inv := content.Invocation{Parsed: ok, Disqualified: disqualified}
@@ -46,6 +54,9 @@ func parseCanonicalInvocation(command string) content.Invocation {
 			inv.Disqualified = true
 		}
 		inv.Resources = appendResourceReport(inv.Resources, subcommand, facts)
+		if redirectionDisqualifies(facts) {
+			inv.Disqualified = true
+		}
 	}
 	if reason := shellFeatureReason(command); strings.HasPrefix(reason, "runs in the background") {
 		inv.Resources.Unresolved = append(inv.Resources.Unresolved, content.UnresolvedResource{
@@ -136,23 +147,31 @@ func uniqWrites(args []string) bool {
 }
 
 type commandWordFact struct {
-	value   string
-	dynamic bool
+	value       string
+	dynamic     bool
+	fdDupTarget bool
 }
 
 func appendResourceReport(report content.ResourceReport, subcommand string, facts []commandWordFact) content.ResourceReport {
-	words := make([]string, 0, len(facts))
-	for _, fact := range facts {
+	programFacts := commandProgramFacts(facts)
+	if len(programFacts) == 0 {
+		withoutRedirections(facts, &report)
+		return unresolvedCommand(report, facts[0].value, "has no command")
+	}
+	words := make([]string, 0, len(programFacts))
+	for _, fact := range programFacts {
 		words = append(words, fact.value)
 	}
-	program := words[0]
+	// This is an allow-list: over-matching would permit more, so preserve case.
+	program := allowListProgram(words[0])
 
 	if reason := shellFeatureReason(subcommand); reason != "" {
 		report.Unresolved = append(report.Unresolved, content.UnresolvedResource{
 			Path: subcommand, Verb: content.ResourceUnknown, Reason: reason,
 		})
 	}
-	if disqualifyingWords(words) {
+	disqualified := disqualifyingWords(words)
+	if disqualified {
 		report.Unresolved = append(report.Unresolved, content.UnresolvedResource{
 			Path: program, Verb: content.ResourceUnknown,
 			Reason: disqualifierReason(words),
@@ -160,6 +179,7 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 	}
 
 	args := withoutRedirections(facts, &report)
+
 	switch program {
 	case "cp":
 		operands, target := cpOperands(args)
@@ -254,6 +274,23 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 			report = addResource(report, operand, verb)
 		}
 		return report
+	case "source", ".":
+		// Sourcing runs in the current shell and can permanently change its
+		// environment; it is not subprocess execution of a file.
+		operands := resourceOperands(program, args)
+		if len(operands) == 0 {
+			return unresolvedCommand(report, program, "has no statically named source file")
+		}
+		return addResource(report, operands[0], content.ResourceSource)
+	case "bash", "sh":
+		script, ok := shellScriptOperand(program, args)
+		if !ok {
+			return unresolvedCommand(report, program, "has no statically named script file")
+		}
+		if disqualified {
+			return report
+		}
+		return addResource(report, script, content.ResourceExecute)
 	case "curl":
 		operands := resourceOperands("curl", args)
 		if len(operands) == 0 {
@@ -274,12 +311,25 @@ func appendResourceReport(report content.ResourceReport, subcommand string, fact
 	}
 
 	if _, known := readPrograms[program]; !known {
+		if isExecutablePath(facts[0].value) && !disqualified {
+			return addResource(report, facts[0], content.ResourceExecute)
+		}
 		return unresolvedCommand(report, program, "is not a recognized resource access form")
 	}
 	for _, operand := range readOperands(program, args) {
 		report = addResource(report, operand, content.ResourceRead)
 	}
 	return report
+}
+
+func commandProgramFacts(facts []commandWordFact) []commandWordFact {
+	for i := 0; i < len(facts); {
+		if !isRedirection(facts[i].value) {
+			return facts[i:]
+		}
+		i += 2
+	}
+	return nil
 }
 
 func addResource(report content.ResourceReport, fact commandWordFact, verb content.ResourceVerb) content.ResourceReport {
@@ -312,21 +362,33 @@ func appendUnresolvedRedirection(report content.ResourceReport, operator, target
 
 func withoutRedirections(facts []commandWordFact, report *content.ResourceReport) []commandWordFact {
 	args := make([]commandWordFact, 0, len(facts)-1)
-	for i := 1; i < len(facts); i++ {
+	programSeen := false
+	for i := 0; i < len(facts); i++ {
 		fact := facts[i]
 		if isRedirection(fact.value) {
 			if i+1 >= len(facts) {
 				*report = unresolvedCommand(*report, fact.value, "has no target path")
 				continue
 			}
-			if isReadWriteRedirection(fact.value) {
-				*report = addResource(*report, facts[i+1], content.ResourceRead)
-				*report = addResource(*report, facts[i+1], content.ResourceWrite)
-			} else {
-				*report = addResource(*report, facts[i+1], redirectionVerb(fact.value))
+			target := facts[i+1].value
+			// A null-device sink and a file-descriptor duplication only
+			// redirect or discard streams; neither mutates a filesystem path.
+			// Keep recording and marking real file targets unresolved because
+			// their writes remain genuine mutations.
+			if !isNonMutatingRedirectionTarget(target, facts[i+1].fdDupTarget) {
+				if isReadWriteRedirection(fact.value) {
+					*report = addResource(*report, facts[i+1], content.ResourceRead)
+					*report = addResource(*report, facts[i+1], content.ResourceWrite)
+				} else {
+					*report = addResource(*report, facts[i+1], redirectionVerb(fact.value))
+				}
+				*report = appendUnresolvedRedirection(*report, fact.value, target)
 			}
-			*report = appendUnresolvedRedirection(*report, fact.value, facts[i+1].value)
 			i++
+			continue
+		}
+		if !programSeen {
+			programSeen = true
 			continue
 		}
 		args = append(args, fact)
@@ -334,8 +396,27 @@ func withoutRedirections(facts []commandWordFact, report *content.ResourceReport
 	return args
 }
 
+func redirectionDisqualifies(facts []commandWordFact) bool {
+	for i := 0; i < len(facts); i++ {
+		if !isRedirection(facts[i].value) {
+			continue
+		}
+		if i+1 >= len(facts) ||
+			!isNonMutatingRedirectionTarget(facts[i+1].value, facts[i+1].fdDupTarget) {
+			return true
+		}
+		i++
+	}
+	return false
+}
+
+func isNonMutatingRedirectionTarget(target string, fdDupTarget bool) bool {
+	return target == "/dev/null" ||
+		(fdDupTarget && strings.HasPrefix(target, "&") && isFileDescriptor(target[1:]))
+}
+
 func isRedirection(word string) bool {
-	if word == ">" || word == ">>" || word == "<" || word == "<<" || word == "<>" {
+	if word == ">" || word == ">>" || word == "<" || word == "<<" || word == "<>" || word == "&>" {
 		return true
 	}
 	if strings.HasSuffix(word, ">>") || strings.HasSuffix(word, "<<") {
@@ -365,6 +446,12 @@ func isFileDescriptor(word string) bool {
 	return word != "" && strings.Trim(word, "0123456789") == ""
 }
 
+func isExecutablePath(program string) bool {
+	return strings.HasPrefix(program, "/") ||
+		strings.HasPrefix(program, "./") ||
+		strings.HasPrefix(program, "../")
+}
+
 func resourceOperands(program string, args []commandWordFact) []commandWordFact {
 	operands := make([]commandWordFact, 0, len(args))
 	optionsEnded := false
@@ -383,6 +470,29 @@ func resourceOperands(program string, args []commandWordFact) []commandWordFact 
 		operands = append(operands, arg)
 	}
 	return operands
+}
+
+func shellScriptOperand(program string, args []commandWordFact) (commandWordFact, bool) {
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+		if arg.value == "--" {
+			if i+1 < len(args) {
+				return args[i+1], true
+			}
+			return commandWordFact{}, false
+		}
+		if !strings.HasPrefix(arg.value, "-") {
+			return arg, true
+		}
+		if arg.value == "-c" || arg.value == "--command" ||
+			(!strings.HasPrefix(arg.value, "--") && strings.Contains(arg.value[1:], "c")) {
+			return commandWordFact{}, false
+		}
+		if optionTakesNextValue(program, arg.value) && i+1 < len(args) {
+			i++
+		}
+	}
+	return commandWordFact{}, false
 }
 
 func optionTakesNextValue(program, option string) bool {
@@ -407,6 +517,8 @@ func optionTakesNextValue(program, option string) bool {
 			option == "-L" || option == "-l" || option == "-o" ||
 			option == "-p" || option == "-R" || option == "-S" ||
 			option == "-W"
+	case "bash", "sh":
+		return option == "-o" || option == "--option" || option == "--rcfile"
 	case "curl":
 		return option == "-A" || option == "-b" || option == "-d" ||
 			option == "-e" || option == "-F" || option == "-H" ||
@@ -468,8 +580,22 @@ func readOperands(program string, args []commandWordFact) []commandWordFact {
 	return operands[1:]
 }
 
+func shellHasCommandString(words []string) bool {
+	for _, word := range words {
+		if word == "-c" || word == "--command" {
+			return true
+		}
+		if strings.HasPrefix(word, "-") && !strings.HasPrefix(word, "--") &&
+			strings.Contains(word[1:], "c") {
+			return true
+		}
+	}
+	return false
+}
+
 func disqualifierReason(words []string) string {
-	program := words[0]
+	// This is a deny-list: over-matching only refuses more, so fold case.
+	program := denyListProgram(words[0])
 	switch {
 	case strings.HasPrefix(program, "$"):
 		return "the program name comes from a shell variable"
@@ -481,7 +607,7 @@ func disqualifierReason(words []string) string {
 		return "xargs constructs further commands from input"
 	case program == "tee":
 		return "tee writes named paths"
-	case (program == "sh" || program == "bash") && containsWord(words[1:], "-c"):
+	case (program == "sh" || program == "bash") && shellHasCommandString(words[1:]):
 		return "the shell will interpret a nested command string"
 	case program == "find" && containsWord(words[1:], "-exec"):
 		return "find executes a command for discovered paths"
@@ -533,6 +659,10 @@ func shellFeatureReason(command string) string {
 			}
 		case '&':
 			if i > 0 && (command[i-1] == '|' || command[i-1] == '&') {
+				continue
+			}
+			if (i > 0 && (command[i-1] == '>' || command[i-1] == '<')) ||
+				(i+1 < len(command) && command[i+1] == '>') {
 				continue
 			}
 			if i+1 >= len(command) || command[i+1] != '&' {
@@ -593,14 +723,12 @@ func splitCommand(command string) (subcommands []string, disqualified, ok bool) 
 			disqualified = true
 		case '>':
 			current.WriteByte(c)
-			disqualified = true
 			if i+1 < len(command) && command[i+1] == '>' {
 				i++
 				current.WriteByte(command[i])
 			}
 		case '<':
 			current.WriteByte(c)
-			disqualified = true
 			if i+1 < len(command) && command[i+1] == '(' {
 				disqualified = true
 			}
@@ -609,6 +737,11 @@ func splitCommand(command string) (subcommands []string, disqualified, ok bool) 
 				return nil, false, false
 			}
 		case '&':
+			if (i > 0 && (command[i-1] == '>' || command[i-1] == '<')) ||
+				(i+1 < len(command) && command[i+1] == '>') {
+				current.WriteByte(c)
+				continue
+			}
 			if i+1 < len(command) && command[i+1] == '&' {
 				if !appendSubcommand(&subcommands, &current) {
 					return nil, false, false
@@ -658,13 +791,19 @@ func commandWordFacts(command string) ([]commandWordFact, bool) {
 	var quote byte
 	wordStarted := false
 	wordDynamic := false
+	wordFDDupTarget := false
 
 	flush := func() {
 		if wordStarted {
-			facts = append(facts, commandWordFact{value: word.String(), dynamic: wordDynamic})
+			facts = append(facts, commandWordFact{
+				value:       word.String(),
+				dynamic:     wordDynamic,
+				fdDupTarget: wordFDDupTarget,
+			})
 			word.Reset()
 			wordStarted = false
 			wordDynamic = false
+			wordFDDupTarget = false
 		}
 	}
 
@@ -712,6 +851,11 @@ func commandWordFacts(command string) ([]commandWordFact, bool) {
 		case ' ', '\t', '\r':
 			flush()
 		case '>', '<':
+			if c == '>' && wordStarted && word.String() == "&" {
+				word.WriteByte(c)
+				flush()
+				continue
+			}
 			if wordStarted && isFileDescriptor(word.String()) {
 				word.WriteByte(c)
 				if i+1 < len(command) && (command[i+1] == c || (c == '<' && command[i+1] == '>')) {
@@ -730,6 +874,9 @@ func commandWordFacts(command string) ([]commandWordFact, bool) {
 			}
 			flush()
 		default:
+			if c == '&' && i > 0 && (command[i-1] == '>' || command[i-1] == '<') {
+				wordFDDupTarget = true
+			}
 			if c == '$' || c == '`' {
 				wordDynamic = true
 			}
@@ -745,11 +892,20 @@ func commandWordFacts(command string) ([]commandWordFact, bool) {
 	return facts, true
 }
 
+func allowListProgram(program string) string {
+	return filepath.Base(program)
+}
+
+func denyListProgram(program string) string {
+	return strings.ToLower(filepath.Base(program))
+}
+
 func disqualifyingWords(words []string) bool {
 	if len(words) == 0 {
 		return true
 	}
-	program := words[0]
+	// This is a deny-list: over-matching only refuses more, so fold case.
+	program := denyListProgram(words[0])
 	if strings.HasPrefix(program, "$") {
 		return true
 	}
@@ -759,7 +915,7 @@ func disqualifyingWords(words []string) bool {
 		program == "tee" {
 		return true
 	}
-	if (program == "sh" || program == "bash") && containsWord(words[1:], "-c") {
+	if (program == "sh" || program == "bash") && shellHasCommandString(words[1:]) {
 		return true
 	}
 	if program == "find" && (containsWord(words[1:], "-exec") || containsWord(words[1:], "-delete")) {

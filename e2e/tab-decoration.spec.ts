@@ -1,5 +1,5 @@
 import path from 'node:path'
-import { test, expect, promptReady, type Page } from './harness'
+import { appReadyForInput, test, expect, promptReady, type Page } from './harness'
 import { readStand } from './stand'
 
 /**
@@ -143,6 +143,7 @@ test.describe('a decorated strip survives the renderer', () => {
     // Nothing here restarts the backend: this is the reload the epic names,
     // and everything below came out of the chain the backend holds.
     await page.reload()
+    await appReadyForInput(page)
     await expect(page.locator(TAB)).toHaveCount(2, { timeout: 20_000 })
 
     const head = page.locator(TAB).nth(0)

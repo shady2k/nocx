@@ -1,20 +1,21 @@
 import './style.css'
-import {
-  GetWSPort,
-  GetWSToken,
-  CheckForUpdate,
-  ReportHealthy,
-} from '../bindings/github.com/shady2k/nocx/wailsapp'
+import { CheckForUpdate, ReportHealthy } from '../bindings/github.com/shady2k/nocx/wailsapp'
 import { render } from 'solid-js/web'
 import { Show, createSignal, untrack } from 'solid-js'
 import App from './App'
 import { log } from './log'
 import { hasWailsWebview, installBrowserTransport } from './wails-runtime'
 import { WSClient } from './ipc'
+import { createDesktopEndpointProvider } from './endpoint-desktop'
 import { LayoutStore } from './layout/layout-store'
 import { LayoutClient } from './layout/layout-client'
 import { LOCAL_BACKEND_ID, PaneManager } from './panes'
-import { mountSidebar, type SidebarViewDescriptor, type SidebarViewStatus } from './sidebar'
+import {
+  mountSidebar,
+  type SidebarHandle,
+  type SidebarViewDescriptor,
+  type SidebarViewStatus,
+} from './sidebar'
 import { createClipboardAccess, ClipboardGate } from './clipboard'
 import { AboutClient } from './about-client'
 import { ClipboardBannerImpl } from './banner'
@@ -42,7 +43,7 @@ import { SurfaceRegistry, SURFACE_ID_SETTINGS } from './surface-registry'
 import { apiSidebarAction, registerApiSurface } from './api'
 import { createApiWorkbenchServices, nativePickers } from './api/api-client'
 import { mountUpdateNotice } from './update-notice'
-import { mountConnectionNotice } from './connection-notice'
+import { mountConnectionOverlay, type ConnectionOverlayState } from './ui/connection-overlay'
 import { IconButton } from './ui/icon-button'
 import { BellIcon, CheckCircleIcon, PlugIcon, RefreshIcon, SettingsIcon } from './ui/icons'
 import { SettingsObserver } from './settings-observer'
@@ -72,9 +73,12 @@ import { profileRows } from './quick-connect-assembly'
 import { showToast } from './ui/toast'
 import { registerFileViewerSurface, openFileViewer } from './file-viewer'
 import { registerTerminalLinks } from './terminal-links'
+import type { LinkPathProbe } from './terminal-links/open'
 import { createUrlOpener } from './open-url'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
+import { FILES_PAGE_SIZE, type FilesRevealHint } from './files/files-store'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
+import { isExpandable } from './ui/tree-row-kind'
 import { uploadSurfaceFor } from './files/upload-surface'
 import { uploadOperations } from './files/upload-operations'
 import { downloadSurfaceFor } from './files/download-surface'
@@ -118,7 +122,7 @@ import { subscribeNotifyToast } from './notify/toast-bridge'
 import { NotificationsPanel } from './notify/notifications-panel'
 import type { NotifyCatalogue } from './generated/notify.catalogue'
 import { createOverviewController } from './overview/overview-controller'
-import { askFields } from './snippets/resolve'
+import { needsForm } from './snippets/resolve'
 
 const NOTIFICATIONS_CENTRE_PREFIX = 'notifications.centre.'
 
@@ -132,10 +136,10 @@ function hiddenNotificationKinds(values: Record<string, unknown>): ReadonlySet<s
   return hidden
 }
 
-async function main() {
+function main(): void {
   // The browser transport must be installed before any binding call: in the
-  // dev-web and headless-e2e browsers the window.go shim is the only thing
-  // that can answer GetWSPort/GetWSToken. A no-op in the packaged webview.
+  // dev-web and headless-e2e browsers the window.go shim carries the binding
+  // methods used by this composition root. A no-op in the packaged webview.
   installBrowserTransport()
 
   log.info('nocx: main() called')
@@ -168,42 +172,57 @@ async function main() {
   const gate = new ClipboardGate()
   const banner = new ClipboardBannerImpl()
 
-  // Bound Go method — no startup-event race. Guarded so the renderers still
-  // mount without a Wails runtime (plain browser), where GetWSPort throws.
-  // In that dev path the backend lives on the page's own host (e.g. a remote
-  // dev VM), not necessarily on loopback.
-  let port = 9876
-  let token = ''
-  let host: string | undefined
-  try {
-    port = await GetWSPort()
-    token = await GetWSToken()
-  } catch {
-    host = location.hostname
-    console.warn('nocx: no Wails runtime, using fallback WS port', port)
-  }
-  const dispatcher = new Dispatcher()
+  // The desktop provider re-runs coordinator discovery for each attempt; the
+  // renderer owns when to attempt and how often to retry.
+  const dispatcher = new Dispatcher(createDesktopEndpointProvider())
   // What build this is, for the About page (nocx-8bbp). Constructed here with
   // every other client: the page is registered unconditionally, so the client
   // has to exist for it to have anything to read.
   const aboutClient = new AboutClient(dispatcher)
   const client = new WSClient(dispatcher)
-  // Connection notice — the transport's condition, stated where a person is
-  // already looking (the tab bar). A dropped connection is a persistent
-  // condition: not a toast that fades if it has not come back. This is the
-  // ONE subscriber to the dispatcher's disconnect lifecycle (nocx-gbhwh);
-  // the return value is for tests, the wiring here ignores it.
-  mountConnectionNotice(bar, dispatcher, client)
-  await client.connect(port, host, token)
+
+  // The connection condition is the only startup surface that depends on the
+  // socket. Mount it now, before the first attempt, so an unavailable backend
+  // still leaves a populated application window.
+  // Assigned once PaneManager exists, some 260 lines down. The no-op stands only
+  // for the window between the two, and that window is closed by `main()` being
+  // synchronous: nothing can hide the overlay before the assignment, because the
+  // minimum visible time is a timer and the first `online` arrives off the socket.
+  let focusActive: () => void = () => undefined
+  const [connectionState, setConnectionState] = createSignal<ConnectionOverlayState>({
+    kind: 'waiting',
+    nextAttemptInMs: dispatcher.backoffMs,
+  })
+  const connectionOverlayRoot = document.createElement('div')
+  document.body.append(connectionOverlayRoot)
+  mountConnectionOverlay(connectionOverlayRoot, {
+    state: () => connectionState(),
+    onRetry: () => dispatcher.retryNow(),
+    onHidden: () => focusActive(),
+  })
+
   const profileClient = new ProfileClient(dispatcher)
   const vaultClient = new VaultClient(dispatcher)
+  dispatcher.onConnectionStateChange((state) => {
+    if (state.kind === 'waiting') {
+      setConnectionState({ kind: 'waiting', nextAttemptInMs: state.backoffMs })
+    } else if (state.kind === 'blocked') {
+      setConnectionState({
+        kind: 'blocked',
+        message: state.failure.message,
+        remedy: state.failure.remedy,
+      })
+    } else {
+      setConnectionState({ kind: state.kind })
+    }
+  })
   const dialogClient = new DialogClient(dispatcher)
   const footprintClient = new FootprintClient(dispatcher)
   const endpointsClient = new EndpointClient(dispatcher)
   const agentClient = new AgentClient(dispatcher)
   // The UI-state document (ADR-0048): what the app remembers without being
-  // asked — the sidebar's collapse, its view, its width. Not the settings
-  // registry, which holds what a user deliberately chose, and not
+  // asked — the sidebar's collapse, its active view, its width. Not the
+  // settings registry, which holds what a user deliberately chose, and not
   // localStorage, which may not carry facts.
   const uiStateClient = new UIStateClient(dispatcher)
   // The snippet library: ONE store, read by the palette, the settings page
@@ -217,7 +236,6 @@ async function main() {
   vaultObserver.start(() => {
     void vaultController.refresh()
   })
-  void vaultController.refresh()
 
   // The no-mint-seam fallback: this surface has no create ask of its own, so
   // a store row lands on the Secrets page's create form — with the NAME AND
@@ -392,45 +410,18 @@ async function main() {
   const [hiddenKindIds, setHiddenKindIds] = createSignal<ReadonlySet<string>>(new Set())
 
   let placement: unknown = 'horizontal'
-  // The sidebar's remembered state, from the UI-state document rather than
-  // the settings snapshot below — a drag is not a decision (ADR-0048). A
-  // failure falls back to the declared defaults, which is also what the CSS
-  // paints before this bootstrap runs (style.css #sidebar); load() never
-  // throws for exactly that reason.
-  const uiState = await uiStateClient.load()
-  const sidebarWidth = clampSidebarWidth(uiState.sidebar.width)
-  try {
-    const snap = await profileClient.getSnapshot()
-    initialSettingsRevision = snap.revision
-    setHiddenKindIds(hiddenNotificationKinds(snap.values))
-    placement = snap.values[PLACEMENT_KEY] ?? 'horizontal'
-    // Reconcile the Go theme setting against the bootstrap cache. Go is
-    // authoritative (ADR-0013 §8.1): the bootstrap cache covers the first
-    // frame, but the persisted Go value wins on snapshot arrival.
-    reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined, appliedThemeId)
-    // The default wrap for a command block's output — one attribute on the
-    // root, read by the CSS; the per-block ⋮ override is not touched by it.
-    applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
-    // Whether an answer's thinking note opens by itself (nocx-y9e88), beside
-    // the wrap for the same reason: it decides what the surface does before
-    // anything is drawn on it.
-    applyReasoningExpanded(snap.values[REASONING_EXPANDED_KEY])
-    // How much of one command's output is kept. Applied here beside the wrap
-    // for the same reason: the renderer is where it is enforced, so it has to
-    // know before the first block freezes.
-    applyOutputCap(snap.values[OUTPUT_CAP_KEY])
-    // Whether boot reopens what was left. Read HERE, before the pane manager
-    // exists, because it decides what the first frame contains — and read
-    // once: flipping it mid-session must not make tabs appear or vanish
-    // under the person.
-    applyRestoreOnStartup(snap.values[RESTORE_ON_STARTUP_KEY])
-    applySSHReconnect(snap.values[SSH_RECONNECT_KEY])
-  } catch {
-    // Backend may not be ready yet — safe fallback.
+  // The sidebar and tab strip start from declared defaults so the shell can be
+  // built before the first socket attempt. The backend mirror overwrites them
+  // on the first online lifecycle event.
+  let uiState = uiStateClient.state
+  let sidebarWidth = clampSidebarWidth(uiState.sidebar.width)
+  let sidebarPersistenceState = {
+    collapsed: uiState.sidebar.collapsed,
+    activeViewId: uiState.sidebar.activeViewId,
   }
-  const tabStrip = placement === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
   const [displayRevision, setDisplayRevision] = createSignal(0)
   const notifyDisplayChange = () => setDisplayRevision((revision) => revision + 1)
+  const tabStrip = new HorizontalTabStrip() as HorizontalTabStrip | VerticalTabStrip
 
   // The layout chain, which the backend owns and the renderer renders
   // (nocx-isoph.4). Constructed here, beside every other wire client, and
@@ -446,8 +437,8 @@ async function main() {
   //
   // Before the pane manager rather than after it (nocx-22k1c.3): the panes
   // read the same status to say what is happening to a plain tab's output,
-  // and the first status should be in hand before the first tab is built
-  // rather than one round trip later.
+  // and the observer refreshes it on the first connection before the first
+  // terminal can report readiness.
   const historyStatusStore = new HistoryStatusStore(client)
   historyStatusStore.start()
 
@@ -462,10 +453,11 @@ async function main() {
     profileClient,
     tabStrip,
     layout,
-    // Which tab was in front: the UI-state document holds it, and the mirror
-    // is already warm — `load()` above ran before this line (ADR-0048).
+    // Which tab was in front: the UI-state client is loaded on the first
+    // online lifecycle event, immediately before PaneManager boots.
     uiStateClient,
   )
+  focusActive = () => tm.overviewPort().focusActive()
   tm.onDisplayRevision(notifyDisplayChange)
   // A plain tab records its output and produces no blocks; the card that
   // says so reads the recording half from the store that owns it, rather
@@ -594,11 +586,13 @@ async function main() {
   const [activeSurfaceType, setActiveSurfaceType] = createSignal<SurfaceType | null>(
     tm.activeSurfaceType(),
   )
+  let rescopeFiles: () => void = () => {}
   tm.onActivePaneChange = () => {
     setActiveSurfaceType(tm.activeSurfaceType())
     setPortsTargetId(tm.portsTargetId())
     setPortsUnavailable(tm.portsUnavailableReason())
     setActiveOrigin(tm.activeOrigin())
+    rescopeFiles()
   }
   // ── Files panel (fm-w10) and its viewer (fm-w7) ──────────────────────
   // The panel's backend surface, wrapped so the composition root owns the
@@ -659,6 +653,8 @@ async function main() {
   // same reason: one store per dispatcher, because a transfer has one state.
   // Without this the panel's Download item would be dead code.
   const downloadSurface = downloadSurfaceFor(dispatcher)
+  let revealFilesPath: ((path: string, hint?: FilesRevealHint) => Promise<boolean>) | null = null
+  let revealFilesView: () => void = () => {}
   const filesView = createFilesView({
     services: filesServicesTracked,
     opener: { open: openFileViewer },
@@ -666,6 +662,10 @@ async function main() {
     activeOrigin,
     upload: uploadSurface,
     download: downloadSurface,
+    onStore: (store) => {
+      revealFilesPath = (path, hint) => store.revealPath(path, hint)
+      rescopeFiles = () => store.rescope(untrack(() => activeOrigin()))
+    },
   })
 
   // Everything running on somebody's behalf, in one list (nocx-hbdw4). Each
@@ -858,9 +858,39 @@ async function main() {
   // keeping its own view of whether a session is still there — and the
   // viewer surface itself.
   const terminalLinkUrlOpener = createUrlOpener({ openUrl: (url) => gitServices.openUrl(url) })
+  const pathKind = async (bindingId: string, path: string): Promise<LinkPathProbe> => {
+    if (path === '/') return { kind: 'directory' }
+    const slash = path.lastIndexOf('/')
+    if (slash < 0) return { kind: 'unknown' }
+    const parent = slash === 0 ? '/' : path.slice(0, slash)
+    let offset = 0
+    for (;;) {
+      const result = await filesServicesTracked.list(bindingId, parent, offset, FILES_PAGE_SIZE)
+      if (result.state !== 'ok') return { kind: 'unknown' }
+      const entry = result.entries.find((candidate) => candidate.path === path)
+      if (entry !== undefined) {
+        if (!isExpandable(entry.kind, entry.linkKind)) return { kind: 'file' }
+        return {
+          kind: 'directory',
+          hint: { bindingId, parentPath: parent, listing: result },
+        }
+      }
+      if (!result.hasMore || result.entries.length === 0) return { kind: 'unknown' }
+      offset = result.offset + result.entries.length
+    }
+  }
+
   registerTerminalLinks({
     openUrl: (url) => terminalLinkUrlOpener.open(url),
     openBinding: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),
+    pathKind,
+    openDirectory: async (path, probe) => {
+      const reveal = revealFilesPath
+      if (reveal === null) return false
+      rescopeFiles()
+      revealFilesView()
+      return reveal(path, probe.hint)
+    },
     openViewer: (target) => openFileViewer(target),
     onBindingLiveness: onFilesBindingLiveness,
     notify: (message) => showToast({ message, level: 'warning' }),
@@ -923,21 +953,27 @@ async function main() {
   const snippetsProvider = new SnippetsQuickConnectProvider({
     store: snippetsStore,
     fire: snippetFire,
-    // A refusal re-opens the list with the reason on it: the surface it is
-    // about is still there, and a toast would take the explanation away
-    // from it (design §11).
-    onRefused: (message) => qc.showSnippets(message),
+    // A refusal is a TOAST now, and the reason the spec gave for putting it
+    // back on the palette has expired (design §11). That reason was that the
+    // surface the refusal is about is still there — true while the palette
+    // carried the only way out, which was "copy this instead". The way out
+    // lives on every row now (nocx-8rtr.2), so the sentence has nothing left
+    // to be anchored to, and Toast is the kit's one notification affordance
+    // (ui/README.md).
+    onRefused: (message) => showToast({ message, level: 'danger' }),
+    onCopied: (title) => showToast({ message: `Copied "${title}" to the clipboard.` }),
     onManage: () => openSettingsPane().openPage('snippets'),
-    // A body with {{ask:…}} fields: the palette closes and the form asks
+    // A body with parameter fields: the palette closes and the form asks
     // for all of them at once (owner review — a step that filters a list
     // cannot also be where a value is typed).
-    onAsk: (snippet) => snippetAsk.ask(snippet),
+    onAsk: (snippet, destination) => snippetAsk.ask(snippet, destination),
     onDelivered: returnKeyboardToThePane,
   })
   // The form the fields are answered in. It reports its own refusals, so a
   // person who mistyped an answer sees why beside what they typed.
   const snippetAsk = mountSnippetAskDialog(document.body, {
-    fire: (snippet, answers) => snippetsProvider.fireReporting(snippet, answers),
+    fire: (snippet, answers, destination) =>
+      snippetsProvider.fireReporting(snippet, answers, destination),
     onDelivered: returnKeyboardToThePane,
   })
   /**
@@ -1112,7 +1148,6 @@ async function main() {
   dispatcher.onConnect(() => {
     void readCatalogue()
   })
-  void readCatalogue()
 
   const sessionNameOf = (backendId: string, sessionId: string): string | null => {
     // PaneManager owns these mutable display fields. The signal makes Solid
@@ -1214,54 +1249,53 @@ async function main() {
   if (sidebarViews[0]?.id !== FILES_VIEW_ID) {
     throw new Error('nocx: Files must be the first activity-bar view')
   }
-  // The sidebar renders array order, so the views reach mountSidebar sorted
-  // by their order field — the field then means what it says, and a future
-  // view cannot slip in front by registration order. Files registers below
-  // Ports (FILES_VIEW_ORDER < 0) and must be the FIRST icon in the view
-  // zone — an owner requirement, asserted here and in files-view.test.tsx.
-  const sidebar = mountSidebar(
-    activityBar,
-    sidebarPanel,
-    sidebarViews,
-    /* actions */ [
-      // The bottom zone: an action opens a tab and never touches the panel.
-      // The API workbench belongs here rather than in the view zone for the
-      // reason design §9.2 gives — the tree lives IN the workbench, and a
-      // second tree in the panel would be a second owner of one selection.
-      apiSidebarAction(),
+  let sidebar: SidebarHandle | null = null
+  const mountConnectedSidebar = (): void => {
+    // The sidebar is connection-scoped: its panel clients must disappear with
+    // the socket so no stale "not connected" state survives an outage.
+    sidebar = mountSidebar(
+      activityBar,
+      sidebarPanel,
+      sidebarViews,
+      /* actions */ [
+        apiSidebarAction(),
+        {
+          id: 'settings',
+          title: 'Settings',
+          icon: SettingsIcon,
+          onActivate: () => {
+            log.info('nocx: opening Settings tab')
+            openSettingsPane()
+          },
+        },
+      ],
       {
-        id: 'settings',
-        title: 'Settings',
-        icon: SettingsIcon,
-        onActivate: () => {
-          log.info('nocx: opening Settings tab')
-          openSettingsPane()
+        collapsed: sidebarPersistenceState.collapsed,
+        activeViewId: sidebarPersistenceState.activeViewId,
+        save: (next) => {
+          sidebarPersistenceState = next
+          void uiStateClient.save({ sidebar: next }).catch(() => {})
         },
       },
-    ],
-    {
-      collapsed: uiState.sidebar.collapsed,
-      activeViewId: uiState.sidebar.activeViewId,
-      save: (next) => {
-        // Fire-and-forget, and silent: a collapse that fails to persist
-        // costs the next launch's starting state and nothing a user could
-        // act on now. The width's seam warns because a drag is a
-        // deliberate act with an expectation attached; toggling a panel
-        // twenty times a session is not.
-        void uiStateClient.save({ sidebar: next }).catch(() => {})
-      },
-    },
-    /* eslint-disable solid/reactivity -- mountSidebar consumes these
-       accessors reactively (SidebarViewProps.activeProfileId and
-       .activeOrigin, fed with the ports target and the Files origin, plus
-       the settings-mode accessor below); the reads happen inside the
-       views' tracked scopes, and the gate cannot see across the function
-       boundary. */
-    () => portsTargetId(),
-    () => activeOrigin(),
-    sidebarWidthCtrl,
-    () => activeSurfaceType() === SURFACE_SETTINGS,
-  )
+      /* eslint-disable solid/reactivity -- mountSidebar consumes these
+         accessors reactively (SidebarViewProps.activeProfileId and
+         .activeOrigin, fed with the ports target and the Files origin, plus
+         the settings-mode accessor below); the reads happen inside the
+         views' tracked scopes, and the gate cannot see across the
+         function boundary. */
+      () => portsTargetId(),
+      () => activeOrigin(),
+      sidebarWidthCtrl,
+      () => activeSurfaceType() === SURFACE_SETTINGS,
+    )
+  }
+
+  // From main: a directory link reveals the Files view (nocx-tsqfx). Bound
+  // once, but reading `sidebar` at call time rather than capturing it — the
+  // sidebar is now destroyed and rebuilt on every connection generation, so a
+  // captured handle would be the previous connection's, and while offline
+  // there is no sidebar to reveal anything in.
+  revealFilesView = () => sidebar?.revealView(FILES_VIEW_ID)
 
   // Cmd/Ctrl+, opens or focuses the Settings tab.
   document.addEventListener('keydown', (e) => {
@@ -1474,8 +1508,8 @@ async function main() {
     // One path for every surface that hands over a chosen snippet (the
     // completion dropdown today): a body that asks for values opens the
     // form; a plain one fires.
-    if (askFields(snippet.body).length > 0) {
-      snippetAsk.ask(snippet)
+    if (needsForm(snippet.body)) {
+      snippetAsk.ask(snippet, 'input')
       return
     }
     void snippetsProvider.fire(snippet, new Map())
@@ -1560,33 +1594,21 @@ async function main() {
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.shiftKey && !e.altKey && e.key.toLowerCase() === 'o') {
       e.preventDefault()
-      sidebar.revealView('ports')
+      sidebar?.revealView('ports')
     }
   })
 
-  void tm.openInitialPane()
-
-  // --- Auto-update: check on start, then every 24 h ---
-
-  // Report healthy once the initial tab's renderer mounted and PTY opened.
-  tm.initialPaneReady.then(
-    () => {
-      ReportHealthy().catch((err) => console.warn('nocx: ReportHealthy failed', err))
-    },
-    () => {
-      console.warn('nocx: initial tab failed — not reporting healthy')
-    },
-  )
-
   // Check for updates. Failures are silent (airplane mode, DNS hiccup, etc.).
-  try {
-    const info = await CheckForUpdate()
-    if (info) {
-      notice.showAvailable(info.Version, info.NotesURL)
+  void (async () => {
+    try {
+      const info = await CheckForUpdate()
+      if (info) {
+        notice.showAvailable(info.Version, info.NotesURL)
+      }
+    } catch {
+      // Silent — automatic check failures are not surfaced to the user.
     }
-  } catch {
-    // Silent — automatic check failures are not surfaced to the user.
-  }
+  })()
 
   // Re-check every 24 hours.
   const DAY_MS = 24 * 60 * 60 * 1000
@@ -1689,6 +1711,89 @@ async function main() {
     ),
     vaultRoot,
   )
+  let connectionGeneration = 0
+  let initialPaneStarted = false
+
+  const closeBackendDialogs = (): void => {
+    vaultController.closeSetup()
+    vaultController.closeUnlock()
+    pendingBackendUnlock = null
+    setPendingConnectionPassword(null)
+    pendingApprovals.clear()
+    setActiveApproval(null)
+    setApprovalBusy(false)
+    while (pendingOpenHostKey()) {
+      pendingOpenHostKey()!.abort()
+    }
+    setPendingOpenHostKey(null)
+    setOpenHostKeyBusy(false)
+  }
+
+  dispatcher.onConnectionStateChange((state) => {
+    if (state.kind === 'online') return
+    connectionGeneration += 1
+    sidebar?.destroy()
+    sidebar = null
+    closeBackendDialogs()
+  })
+
+  dispatcher.onConnect(() => {
+    const generation = connectionGeneration
+    void (async () => {
+      await uiStateClient.load()
+      if (generation !== connectionGeneration || !dispatcher.connected) return
+      uiState = uiStateClient.state
+      sidebarWidth = clampSidebarWidth(uiState.sidebar.width)
+      sidebarPersistenceState = {
+        collapsed: uiState.sidebar.collapsed,
+        activeViewId: uiState.sidebar.activeViewId,
+      }
+      sidebarWidthCtrl.apply(sidebarWidth)
+
+      try {
+        const snap = await profileClient.getSnapshot()
+        if (generation !== connectionGeneration || !dispatcher.connected) return
+        initialSettingsRevision = snap.revision
+        setHiddenKindIds(hiddenNotificationKinds(snap.values))
+        const nextPlacement = snap.values[PLACEMENT_KEY] ?? 'horizontal'
+        if (nextPlacement !== placement) {
+          placement = nextPlacement
+          const newStrip =
+            nextPlacement === 'vertical' ? new VerticalTabStrip() : new HorizontalTabStrip()
+          wireQuickConnect(newStrip)
+          tm.replaceStrip(newStrip)
+        }
+        reconcileThemeFromGo(snap.values[THEME_KEY] as string | undefined, appliedThemeId)
+        applyOutputWrap(snap.values[OUTPUT_WRAP_KEY])
+        applyReasoningExpanded(snap.values[REASONING_EXPANDED_KEY])
+        applyOutputCap(snap.values[OUTPUT_CAP_KEY])
+        applyRestoreOnStartup(snap.values[RESTORE_ON_STARTUP_KEY])
+        applySSHReconnect(snap.values[SSH_RECONNECT_KEY])
+      } catch {
+        // The shell remains usable with declared defaults until the next
+        // connection state transition supplies a fresh snapshot.
+      }
+      if (generation !== connectionGeneration || !dispatcher.connected) return
+      observer.setRevision(initialSettingsRevision)
+      if (!sidebar) mountConnectedSidebar()
+      if (initialPaneStarted) return
+      initialPaneStarted = true
+      void tm
+        .openInitialPane()
+        .then(() => ReportHealthy())
+        .catch((err) => {
+          console.warn('nocx: initial tab failed — not reporting healthy', err)
+        })
+    })()
+  })
+
+  // The dispatcher owns the first socket attempt; all stable clients, roots,
+  // handlers and the connection-scoped lifecycle above are now installed.
+  dispatcher.start()
 }
 
-main().catch((err) => log.error('nocx: main error', { message: (err as Error).message }))
+try {
+  main()
+} catch (err) {
+  log.error('nocx: main error', { message: (err as Error).message })
+}

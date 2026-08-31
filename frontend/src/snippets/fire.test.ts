@@ -85,7 +85,7 @@ describe('the fire adapter (design §8, §9.2, §11)', () => {
   it('resolves env and ask spans into the body once, then delivers through insertSnippet', async () => {
     const d = deps()
     const outcome = await createSnippetFireAdapter(d)({
-      snippet: SNIP({ body: 'run {{env:branch}} with {{ask:port=8080}}' }),
+      snippet: SNIP({ body: 'run {{env:branch}} with {{port=8080}}' }),
       answers: answersOf([['port', '9090']]),
       destination: 'input',
     })
@@ -99,6 +99,21 @@ describe('the fire adapter (design §8, §9.2, §11)', () => {
     expect(outcome).toEqual({
       kind: 'refused',
       reason: { kind: 'env-unavailable', keys: ['branch'] },
+    })
+    expect(d.insertSpy()).not.toHaveBeenCalled()
+  })
+
+  // A MALFORMED BODY REFUSES AT THE FIRE, not only in the settings preview.
+  // A snippet arrives through backup and restore and may never have been
+  // opened in Settings at all, so the preview cannot be the only reader of
+  // the parse — and a body that cannot be read must not be fired as the
+  // literal text it happens to be (design §7 step 1).
+  it('refuses a body that does not parse, names the problem, and writes nothing', async () => {
+    const d = deps()
+    const outcome = await fire(d, '{% if x %}no end')
+    expect(outcome).toEqual({
+      kind: 'refused',
+      reason: { kind: 'malformed', detail: 'this condition has no {% endif %}' },
     })
     expect(d.insertSpy()).not.toHaveBeenCalled()
   })
@@ -163,7 +178,7 @@ describe('the fire adapter (design §8, §9.2, §11)', () => {
     const secretish = 'hunter2-not-a-real-value'
     const d = deps()
     await createSnippetFireAdapter(d)({
-      snippet: SNIP({ body: 'ssh -L {{ask:local=8080}}' }),
+      snippet: SNIP({ body: 'ssh -L {{local=8080}}' }),
       answers: answersOf([['local', secretish]]),
       destination: 'input',
     })
@@ -178,7 +193,7 @@ describe('the fire adapter (design §8, §9.2, §11)', () => {
   it('a fire whose body still carries an unanswered ask field refuses rather than firing literal text', async () => {
     const d = deps()
     const outcome = await createSnippetFireAdapter(d)({
-      snippet: SNIP({ body: 'echo {{ask:port}}' }),
+      snippet: SNIP({ body: 'echo {{port}}' }),
       answers: answersOf([]),
       destination: 'input',
     })

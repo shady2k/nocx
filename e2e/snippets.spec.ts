@@ -1,4 +1,4 @@
-import { test, expect, promptReady, type Page } from './harness'
+import { appReadyForInput, test, expect, promptReady, type Page } from './harness'
 
 /**
  * e2e: a snippet a person saved reaches a running program, filled in, and
@@ -31,9 +31,13 @@ const INPUT = '.pane.active .nocx-editor-input'
 // DOM — answers to the same class as the ask form.
 const PANEL = '.nocx-dialog[open] .quick-connect[data-variant="snippets"]'
 const ROW = `${PANEL} .quick-connect__item`
-/** A refused fire re-opens the palette with the reason above the list. */
-const NOTICE = `${PANEL} .quick-connect__notice`
-/** The form that asks for a snippet's {{ask:…}} fields — all of them at
+/** A refused fire says why in a toast — the kit's one notification
+ *  affordance. It used to re-open the palette with the sentence above the
+ *  list, on the argument that the surface the refusal was about was still
+ *  there; that argument was about the way out the palette carried, and the
+ *  way out lives on every row now (nocx-8rtr.2). */
+const REFUSAL = '.ui-toast__message'
+/** The form that asks for a snippet's parameter fields — all of them at
  *  once, with the palette closed behind it. */
 const ASK_FORM = '.nocx-dialog[open]'
 
@@ -130,17 +134,19 @@ test.describe('a saved snippet reaches a running program', () => {
     await promptReady(page)
     await removeSnippet(page, 'e2e fill')
     await removeSnippet(page, 'e2e two lines')
+    await removeSnippet(page, 'e2e choice')
   })
 
   test('fires filled in, without a newline, into the program reading stdin', async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
 
     // One env span and one ask span, exactly as the epic's criterion asks.
     // cwd rather than user: `user` is the SSH user and a local shell has
     // none, so {{env:user}} would REFUSE here — correctly, and that refusal
     // is the subject of the resolver's own tests, not of this one.
-    await createSnippet(page, 'e2e fill', 'in-{{env:cwd}}-{{ask:tag}}')
+    await createSnippet(page, 'e2e fill', 'in-{{env:cwd}}-{{tag}}')
 
     const blocksBefore = await programWaitingOnStdin(page, 'read x; printf \'got-%s\\n\' "$x"')
 
@@ -148,7 +154,7 @@ test.describe('a saved snippet reaches a running program', () => {
     // the case the whole surface was built for.
     await pickSnippet(page, 'e2e fill')
 
-    // A body with {{ask:…}} closes the palette and asks for every field at
+    // A body with parameters closes the palette and asks for every field at
     // once, in a form (owner review: a field that filters a list cannot
     // also be where a value is typed).
     const form = page.locator(ASK_FORM).filter({ hasText: 'e2e fill' })
@@ -181,20 +187,23 @@ test.describe('a saved snippet reaches a running program', () => {
   }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
     await createSnippet(page, 'e2e two lines', 'first line\nsecond line')
 
     const blocksBefore = await programWaitingOnStdin(page, 'read x; printf \'got-%s\\n\' "$x"')
 
     await pickSnippet(page, 'e2e two lines')
 
-    // The refusal re-opens the palette with the reason above the list and
-    // stays there: a newline would be read as Return and run half the
-    // phrase, so nothing is sent at all.
-    await expect(page.locator(NOTICE)).toContainText('bracketed paste', { timeout: 10_000 })
-    await expect(page.locator('.cmd-block')).toHaveCount(blocksBefore)
-
-    await page.keyboard.press('Escape')
+    // The palette closes and the reason arrives as a toast: a newline would be
+    // read as Return and run half the phrase, so nothing is sent at all.
+    // Filtered by its own words rather than asserted as the only toast: a
+    // toast from an earlier case in this file may still be on screen, and
+    // "the only one" is a claim about the others, not about this refusal.
+    await expect(page.locator(REFUSAL).filter({ hasText: 'bracketed paste' })).toBeVisible({
+      timeout: 10_000,
+    })
     await expectPaletteClosed(page)
+    await expect(page.locator('.cmd-block')).toHaveCount(blocksBefore)
     // And the program is still waiting: Enter ends it with the empty line
     // the person typed, not with anything the refused fire sent.
     await page.keyboard.press('Enter')
@@ -243,14 +252,13 @@ test.describe('a saved snippet reaches a running program', () => {
     await expect
       .poll(
         async () => {
+          // Counted per attempt rather than merely looked for: a toast from
+          // the previous attempt is still on screen while this one runs, and
+          // reading it as this one's answer would make the poll never finish.
+          const toastsBefore = await page.locator(REFUSAL).count()
           await pickSnippet(page, 'e2e two lines')
-          if ((await page.locator(NOTICE).count()) > 0) {
-            await page.keyboard.press('Escape')
-            await expectPaletteClosed(page)
-            return 'refused'
-          }
           await expectPaletteClosed(page)
-          return 'delivered'
+          return (await page.locator(REFUSAL).count()) > toastsBefore ? 'refused' : 'delivered'
         },
         { timeout: 15_000 },
       )
@@ -268,11 +276,88 @@ test.describe('a saved snippet reaches a running program', () => {
     await expect(block).toContainText('second line')
   })
 
+  // The epic's own sentence (nocx-92kes): a body whose CHOICES and whose
+  // PARAGRAPHS both vary, fired by a person who picks one and leaves the
+  // other switched off.
+  //
+  // What makes it an end-to-end check rather than a third rendering of the
+  // resolver's unit tests is the program on the other side. `read -r a` then
+  // `read -r b` reads exactly two lines and prints them bracketed, so the
+  // assertion discriminates the failures that matter and that a unit test
+  // cannot see: a blank line left where the dropped paragraph was arrives as
+  // an empty `b`, and a paragraph that was not dropped arrives as the wrong
+  // one. The person's own Enter is what completes the second read, which is
+  // how "no trailing newline was sent" is observed — the fire left the
+  // program still waiting.
+  test('a chosen option and an un-ticked condition reach the program', async ({ page }) => {
+    await page.goto('/')
+    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+
+    // The tags stand on their own lines here, which is the case that needs
+    // watching: each takes its whole line with it, so switching `parallel`
+    // off has to leave `run codex\ndone` and NOT a blank line between them.
+    await createSnippet(
+      page,
+      'e2e choice',
+      'run {{worker=claude|omp|codex}}\n{% if parallel %}\nin parallel\n{% endif %}\ndone',
+    )
+
+    const blocksBefore = await programWaitingOnStdin(
+      page,
+      'printf \'\\033[?2004h\'; read -r a; read -r b; printf \'got-[%s][%s]\\n\' "$a" "$b"',
+    )
+
+    // Same shape as the bracketed-paste test above, and for the same reason:
+    // the program's DECSET may still be in flight at the first moment this
+    // spec can act, and a refused fire is provably side-effect-free, so the
+    // poll re-attempts rather than waiting on a duration.
+    await expect
+      .poll(
+        async () => {
+          const toastsBefore = await page.locator(REFUSAL).count()
+          await pressChord(page)
+          await expect(page.locator(PANEL)).toBeVisible({ timeout: 10_000 })
+          await page.locator(`${PANEL} .quick-connect__search input`).fill('e2e choice')
+          await expect(page.locator(ROW, { hasText: 'e2e choice' })).toHaveCount(1)
+          await page.keyboard.press('Enter')
+
+          // The form asks both questions at once: a dropdown for the choice
+          // and a tick for the paragraph.
+          const form = page.locator(ASK_FORM).filter({ hasText: 'e2e choice' })
+          await expect(form).toBeVisible({ timeout: 10_000 })
+          const flag = form.locator('label.ui-checkbox', { hasText: 'parallel' })
+          await expect(flag).toBeVisible()
+          await expect(flag.locator('input')).not.toBeChecked()
+          await form.locator('#snippet-ask-worker').selectOption('codex')
+          await form.getByRole('button', { name: 'Insert', exact: true }).click()
+          await expect(form).toHaveCount(0, { timeout: 10_000 })
+
+          await expectPaletteClosed(page)
+          return (await page.locator(REFUSAL).count()) > toastsBefore ? 'refused' : 'delivered'
+        },
+        { timeout: 20_000 },
+      )
+      .toBe('delivered')
+
+    // Nothing was submitted: the fire never sends a newline of its own, so
+    // the second `read` is still waiting for the person.
+    await expect(page.locator('.cmd-block')).toHaveCount(blocksBefore)
+
+    await page.keyboard.press('Enter')
+    const block = page.locator('.cmd-block', { hasText: 'got-[' }).first()
+    await expect(block).toBeVisible({ timeout: 10_000 })
+    // The whole assertion in one string: the chosen option is there, the
+    // un-ticked paragraph is not, there is no blank line where it was, and
+    // no {{…}} survived as literal text.
+    await expect(block).toContainText('got-[run codex][done]')
+  })
+
   test('a snippet whose secret cannot be resolved refuses, and writes nothing', async ({
     page,
   }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
     // This stand has no vault set up, so the reference cannot resolve. The
     // rule under test is the one §11.1 states: an unresolved name refuses
     // the whole fire — the literal {{secret:…}} must never reach a running
@@ -283,10 +368,15 @@ test.describe('a saved snippet reaches a running program', () => {
 
     await pickSnippet(page, 'e2e fill')
 
-    await expect(page.locator(NOTICE)).toContainText('could not be resolved', { timeout: 10_000 })
+    await expect(page.locator(REFUSAL).filter({ hasText: 'could not be resolved' })).toBeVisible({
+      timeout: 10_000,
+    })
+    await expectPaletteClosed(page)
     await expect(page.locator('.cmd-block')).toHaveCount(blocksBefore)
 
-    await page.keyboard.press('Escape')
+    // No Escape: the palette closed itself on the refusal, and an Escape with
+    // nothing to dismiss would reach the program as an ESC byte and land in
+    // the very value this then asserts on.
     await page.keyboard.press('Enter')
     const block = page.locator('.cmd-block', { hasText: 'got-' }).first()
     await expect(block).toBeVisible({ timeout: 10_000 })

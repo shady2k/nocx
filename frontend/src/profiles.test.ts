@@ -11,6 +11,7 @@ import {
   type SSHAliasResponse,
 } from './profiles'
 import { Dispatcher } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import type { ProfileGroup } from './profiles'
 
 describe('buildGroupTree', () => {
@@ -205,7 +206,7 @@ describe('importSSHConfig', () => {
   })
 
   it('imports all aliases when no collisions exist', async () => {
-    const pc = new ProfileClient(new Dispatcher())
+    const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     vi.spyOn(pc, 'listSSHAliases').mockResolvedValue(MOCK_ALIASES)
     vi.spyOn(pc, 'listProfiles').mockResolvedValue([])
     const createSpy = vi.spyOn(pc, 'createProfile').mockResolvedValue(mockProfile('', ''))
@@ -217,7 +218,7 @@ describe('importSSHConfig', () => {
   })
 
   it('skips aliases whose name already exists in saved profiles', async () => {
-    const pc = new ProfileClient(new Dispatcher())
+    const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     vi.spyOn(pc, 'listSSHAliases').mockResolvedValue(MOCK_ALIASES)
     vi.spyOn(pc, 'listProfiles').mockResolvedValue([mockProfile('prod-db', 'different-host')])
     const createSpy = vi.spyOn(pc, 'createProfile').mockResolvedValue(mockProfile('', ''))
@@ -229,7 +230,7 @@ describe('importSSHConfig', () => {
   })
 
   it('skips aliases whose host already exists in saved profiles', async () => {
-    const pc = new ProfileClient(new Dispatcher())
+    const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     vi.spyOn(pc, 'listSSHAliases').mockResolvedValue(MOCK_ALIASES)
     vi.spyOn(pc, 'listProfiles').mockResolvedValue([mockProfile('other-name', '10.0.0.1')])
     const createSpy = vi.spyOn(pc, 'createProfile').mockResolvedValue(mockProfile('', ''))
@@ -241,7 +242,7 @@ describe('importSSHConfig', () => {
   })
 
   it('deduplicates aliases within the same batch by name', async () => {
-    const pc = new ProfileClient(new Dispatcher())
+    const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     vi.spyOn(pc, 'listSSHAliases').mockResolvedValue({
       aliases: [
         { alias: 'dup-name', hostName: '10.0.0.1' },
@@ -260,7 +261,7 @@ describe('importSSHConfig', () => {
   })
 
   it('deduplicates aliases within the same batch by host', async () => {
-    const pc = new ProfileClient(new Dispatcher())
+    const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     vi.spyOn(pc, 'listSSHAliases').mockResolvedValue({
       aliases: [
         { alias: 'first', hostName: '10.0.0.1' },
@@ -279,7 +280,7 @@ describe('importSSHConfig', () => {
   })
 
   it('maps alias fields into the created profile', async () => {
-    const pc = new ProfileClient(new Dispatcher())
+    const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     vi.spyOn(pc, 'listSSHAliases').mockResolvedValue(MOCK_ALIASES)
     vi.spyOn(pc, 'listProfiles').mockResolvedValue([])
     const created: SSHProfile[] = []
@@ -302,7 +303,7 @@ describe('importSSHConfig', () => {
   })
 
   it('throws when aliases are unavailable', async () => {
-    const pc = new ProfileClient(new Dispatcher())
+    const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     vi.spyOn(pc, 'listSSHAliases').mockResolvedValue({
       aliases: [],
       unavailable: { reason: 'no-ssh-binary', detail: 'ssh not found' },
@@ -313,7 +314,7 @@ describe('importSSHConfig', () => {
   })
 
   it('propagates non-collision createProfile errors', async () => {
-    const pc = new ProfileClient(new Dispatcher())
+    const pc = new ProfileClient(new Dispatcher(fixedEndpoint(9876)))
     vi.spyOn(pc, 'listSSHAliases').mockResolvedValue(MOCK_ALIASES)
     vi.spyOn(pc, 'listProfiles').mockResolvedValue([])
     vi.spyOn(pc, 'createProfile').mockRejectedValue(new Error('network error'))

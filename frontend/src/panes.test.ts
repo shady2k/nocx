@@ -21,6 +21,7 @@ import {
 } from './test-support/panes-fixtures'
 import { isUuidv7 } from './layout/uuid7'
 import { Dispatcher } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import { WSClient } from './ipc'
 import { LOCAL_BACKEND_ID, Pane, PaneManager } from './panes'
 import { PANE_WORK_FINISHED_SETTLE_MS } from './pane-work-finished'
@@ -2603,7 +2604,7 @@ describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', ()
   it('shows three panes, their sources, and refuses a stale wire observation', async () => {
     vi.stubGlobal('WebSocket', MockWebSocket)
     MockWebSocket.last = null
-    const realClient = new WSClient(new Dispatcher())
+    const realClient = new WSClient(new Dispatcher(fixedEndpoint(9876)))
     const sessionIDs = [
       '0123456789abcdef0011223344556677',
       '1123456789abcdef0011223344556677',
@@ -2616,12 +2617,12 @@ describe('a driver observation reaches the tab (nocx-szb40.3, nocx-szb40.4)', ()
     // The socket is taken before the helpers that close over it, so it can be
     // const: connect() constructs it synchronously and MockWebSocket.last is
     // how the fixture hands it back.
-    const connecting = realClient.connect(9876)
+    realClient.start()
+    await Promise.resolve()
     const constructed: MockWebSocket | null = MockWebSocket.last
     if (!constructed) throw new Error('no WebSocket was constructed')
     const realSocket: MockWebSocket = constructed
     realSocket.serverAccepts()
-    await connecting
 
     const openRequests = () => realSocket.requests().filter((request) => request.method === 'open')
     // BOOT ASKS THE COORDINATOR WHAT IT IS STILL RUNNING before it draws the

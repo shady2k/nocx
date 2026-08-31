@@ -43,6 +43,7 @@ import { IconButton } from '../ui/icon-button'
 import { CloseIcon, FolderOpenIcon, PencilIcon } from '../ui/icons'
 import { Select, type SelectOption } from '../ui/select'
 import { TextField } from '../ui/text-field'
+import { isCollectionsRoot } from './api-paths'
 import type { ApiConnection } from './api-client'
 import type { ApiRoute } from './api-model'
 
@@ -187,12 +188,10 @@ export interface PostmanImportDialogProps {
 export function PostmanImportDialog(props: PostmanImportDialogProps) {
   /** The root the ask proposed, with or without its trailing separator —
    *  the two values `askForImport` can leave in the field before anybody
-   *  has said anything. */
-  const isBareRoot = (value: string): boolean => {
-    if (props.defaultRoot === '') return false
-    const root = props.defaultRoot.replace(/[\\/]+$/, '')
-    return value === root || value === `${root}/`
-  }
+   *  has said anything. The predicate belongs to api-paths.ts, beside the
+   *  functions that propose a destination, because the pane asks the same
+   *  question when it re-offers one (nocx-s47is). */
+  const isBareRoot = (value: string): boolean => isCollectionsRoot(props.defaultRoot, value)
 
   /** Whether the destination NAMES a folder yet — the same predicate `ready`
    *  submits on, read one more time by the summary, because a line that

@@ -141,6 +141,9 @@ type WSServer struct {
 	registry session.Registry
 	server   *http.Server
 	port     int
+	// heartbeatReadWindow bounds how long a half-open connection may hold its
+	// session before an inbound frame proves the peer is still present.
+	heartbeatReadWindow time.Duration
 
 	// Per-launch capability token (bead nocx-hl3).
 	token       string
@@ -1366,6 +1369,7 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 		filesBySession:      make(map[session.ID]map[string]struct{}),
 		filesPollInterval:   defaultFilesPollInterval,
 		laneCapacity:        DefaultControlLaneCapacity,
+		heartbeatReadWindow: DefaultHeartbeatReadWindow,
 		domainWaitTimeout:   DefaultDomainConflictWaitTimeout,
 		domainMaxQueue:      DefaultDomainMaxQueue,
 		domainQueueDepth:    DefaultDomainQueueDepth,
@@ -1450,15 +1454,18 @@ func (s *WSServer) buildControlPlane() {
 	// lane — a pending requestor blocks on it).
 	s.broker = NewBroker(s.rendererConns, s.rendererDeliver)
 	configOp, endpointWired := s.buildConfigOp(lane, gates.config, gates.vault)
+	noteOp := capability.NewNoteOperation(gates.config, lane, s.notes)
+	snippetOp := capability.NewSnippetOperation(gates.config, lane, s.snippets)
 	_ = endpointWired
 	specs := make([]methodSpec, 0, 96)
+	specs = append(specs, s.heartbeatSpecs(immediate)...)
 	specs = append(specs, s.sessionSpecs(lane, gates.session, gates.config)...)
 	specs = append(specs, s.signalSpecs(lane, gates.session)...)
 	specs = append(specs, s.askResolverSpecs(immediate)...)
 	specs = append(specs, s.laneInteractivitySpec(immediate))
 	specs = append(specs, s.brokerSpecs(immediate)...)
 	specs = append(specs, s.clientHostSpecs(immediate, s.lane)...)
-	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired)...)
+	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired, noteOp, snippetOp)...)
 	specs = append(specs, s.backupSpecs(lane, gates.config)...)
 	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)
 	specs = append(specs, s.notifySpecs()...)
@@ -1473,7 +1480,7 @@ func (s *WSServer) buildControlPlane() {
 	// mutex read of in-memory state and must stay answerable while the
 	// content domain is exactly what is broken.
 	specs = append(specs, s.historyStatusSpecs(s.lane)...)
-	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, s.credentialResolver(), s.assistantClient, s.askSub)...)
+	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, noteOp, snippetOp, s.credentialResolver(), s.assistantClient, s.askSub)...)
 	specs = append(specs, s.ledgerSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.layoutSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)
@@ -2610,11 +2617,17 @@ func (s *WSServer) readLoop(ctx context.Context, wconn *wsConn, state *connState
 		default:
 		}
 
+		if err := wconn.out.SetReadDeadline(time.Now().Add(s.heartbeatReadWindow)); err != nil {
+			return
+		}
 		msgType, data, err := wconn.out.ReadMessage()
 		if err != nil {
 			return
 		}
 
+		if err := wconn.out.SetReadDeadline(time.Now().Add(s.heartbeatReadWindow)); err != nil {
+			return
+		}
 		switch msgType {
 		case websocket.TextMessage:
 			s.handleControlFrame(ctx, wconn, state, data)

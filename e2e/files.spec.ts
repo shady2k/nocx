@@ -1,6 +1,6 @@
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs'
 import { join } from 'node:path'
-import { test, expect } from './harness'
+import { appReadyForInput, test, expect } from './harness'
 import { readStand } from './stand'
 import { promptReady } from './harness'
 import type { Page } from '@playwright/test'
@@ -113,6 +113,7 @@ test('cold start: the Files icon is first in the activity bar, present and enabl
   page,
 }) => {
   await page.goto('/')
+  await appReadyForInput(page)
 
   // First view button in the activity bar is Files.
   await expect(page.locator(VIEW_BTN).first()).toHaveAttribute('data-view', 'files')

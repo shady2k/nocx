@@ -1148,9 +1148,10 @@ describe('frozen block header highlighting', () => {
     expect(el.querySelector('.cmd-header-text')?.textContent).toBe('ls -la | grep foo > out.txt')
   })
 
-  it('keeps a running header plain (no token spans)', () => {
+  it('highlights the running header before the block freezes', async () => {
+    await shellHighlightReady
     const container = document.createElement('div')
-    const el = createRunningBlock(
+    const running = createRunningBlock(
       1,
       'ls -la | grep foo > out.txt',
       '~',
@@ -1159,8 +1160,23 @@ describe('frozen block header highlighting', () => {
       noopSelect,
       freshStore(),
     )
-    expect(el.querySelector('.cmd-header-text')?.textContent).toBe('ls -la | grep foo > out.txt')
-    expect(el.querySelectorAll('.cmd-header-text [class^="tok-"]').length).toBe(0)
+    const proposedMarkup = running.querySelector<HTMLElement>('.cmd-header-text')?.innerHTML
+    const frozen = freezeBlock(
+      running,
+      1,
+      'ls -la | grep foo > out.txt',
+      '~',
+      '',
+      '<div></div>',
+      100,
+      0,
+      () => container,
+      noopSelect,
+      freshStore(),
+      'success',
+    )
+    expect(proposedMarkup).toContain('tok-command')
+    expect(frozen.querySelector<HTMLElement>('.cmd-header-text')?.innerHTML).toBe(proposedMarkup)
   })
 })
 
@@ -2072,26 +2088,6 @@ describe('BlockManager.addAnswerBlock', () => {
     applyReasoningExpanded(false)
   })
 
-  it('renders nothing at all for a model that thought nothing, with the setting ON', () => {
-    const { manager } = newManager()
-    applyReasoningExpanded(true)
-    const h = manager.addAnswerBlock('q', '/')
-    h.append('hello world')
-    h.close('success')
-    expect(h.el.querySelector('.ui-reasoning')).toBeNull()
-    applyReasoningExpanded(false)
-  })
-
-  it('a model with no reasoning and no calls renders exactly what it always did', () => {
-    const { manager } = newManager()
-    const h = manager.addAnswerBlock('q', '/')
-    h.append('hello world')
-    h.close('success')
-    expect(h.el.querySelector('.ui-reasoning')).toBeNull()
-    expect(h.el.querySelector('.cmd-block[data-block-kind="tool"]')).toBeNull()
-    expect(flowOf(h)).toEqual(['text:hello world'])
-  })
-
   it('leaves no empty seat across an escalated decline and resumed prose', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('what is on disk?', '/repo')
@@ -2111,6 +2107,25 @@ describe('BlockManager.addAnswerBlock', () => {
     expect(h.el.querySelectorAll('.cmd-block[data-block-kind="text"]')).toHaveLength(2)
   })
 
+  it('renders nothing at all for a model that thought nothing, with the setting ON', () => {
+    const { manager } = newManager()
+    applyReasoningExpanded(true)
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('hello world')
+    h.close('success')
+    expect(h.el.querySelector('.ui-reasoning')).toBeNull()
+    applyReasoningExpanded(false)
+  })
+
+  it('keeps the working marker until the answer closes', () => {
+    const { manager } = newManager()
+    const h = manager.addAnswerBlock('q', '/')
+    h.append('the answer')
+    expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
+    h.close('success')
+    expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
+  })
+
   it('a call in flight returns the stand-in where the answer will be written', () => {
     const { manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
@@ -2120,9 +2135,10 @@ describe('BlockManager.addAnswerBlock', () => {
     expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
     // ...and the corner keeps saying the run is working, because it is: the
     // model has done something and it has not answered.
-    expect(h.el.querySelector('.cmd-answer-waiting')).not.toBeNull()
-    // The moment a delta lands, the stand-in stands down.
+    // The marker belongs to the answer's WORK, not its first delta.
     h.append('the answer')
+    expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
+    h.close('success')
     expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
   })
 
@@ -2354,17 +2370,22 @@ describe('the working stand-in (nocx-vnirv.1)', () => {
     inner.remove()
   })
 
-  it('a turn shows the stand-in at open, loses it at a delta, regains it during a call, loses it at the next delta', () => {
+  it('keeps the stand-in for the whole turn, across deltas and calls', () => {
     const { inner, manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
     expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
     h.append('let me look')
-    expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
-    // A call in flight writes no prose, so the stand-in returns — the
-    // empty-body defect this task fixes.
+    expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
+    const children = h.el.querySelector(':scope > .cmd-children')!
+    expect(children.lastElementChild?.classList.contains('cmd-answer-typing')).toBe(true)
+    expect(children.firstElementChild?.classList.contains('cmd-answer-typing')).toBe(false)
+    // A call in flight writes no prose, so the stand-in remains the
+    // answer's report while work continues.
     h.toolCall({ callId: 'call_1', tool: 'readScreen', effect: 'observe', opensBlock: false })
     expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
     h.append('line 3 is wrong')
+    expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
+    h.close('success')
     expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
     manager.dispose()
     inner.remove()
@@ -2393,10 +2414,12 @@ describe('the working stand-in (nocx-vnirv.1)', () => {
     inner.remove()
   })
 
-  it('reasoning is content: it stands the stand-in down', () => {
+  it('keeps the stand-in while reasoning, then removes it on close', () => {
     const { inner, manager } = newManager()
     const h = manager.addAnswerBlock('q', '/')
     h.reasoning('weighing the two options')
+    expect(h.el.querySelector('.cmd-answer-typing')).not.toBeNull()
+    h.close('success')
     expect(h.el.querySelector('.cmd-answer-typing')).toBeNull()
     manager.dispose()
     inner.remove()

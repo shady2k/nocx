@@ -53,6 +53,7 @@
 @import './styles/components/status-card.css';
 @import './styles/components/connection-indicator.css';
 @import './styles/components/status-dot.css';
+@import './styles/components/connection-overlay.css';
 @import './styles/components/action-group.css';
 @import './styles/components/toolbar.css';
 @import './styles/components/dialog.css';
@@ -97,7 +98,6 @@
 @import './styles/surfaces/banner.css';
 @import './styles/surfaces/integration-notice.css';
 @import './styles/surfaces/update-notice.css';
-@import './styles/surfaces/connection-notice.css';
 @import './styles/surfaces/about.css';
 @import './styles/surfaces/settings.css';
 @import './styles/surfaces/backup-restore.css';
@@ -189,6 +189,9 @@
   right: var(--pane-inline-padding);
   bottom: 0;
   z-index: 10;
+  /* The stack owns the rows it occupies. Its opaque ground stops the frozen
+     frame underneath from painting through the answer. */
+  background: var(--color-canvas);
   display: flex;
   flex-direction: column;
   max-height: 100%;
@@ -199,13 +202,12 @@
 /* The cap is the feature: this is "ask ABOUT a full-screen program WITHOUT
    leaving it", so the answers may never grow into the whole pane and hide the
    program the question is about. The stack's own `max-height: 100%` is only
-   the outer bound — `.pane` is `position: absolute; inset: 0`, so 100% is the
-   entire pane, and after Escape (which keeps these nodes and takes the
-   composer away) nothing else would stop them. Same value the single
-   bottom-pinned answer carried before the stack existed. */
+   the outer bound — `.pane` is `position: absolute; inset: 0`, so 100% is
+   the entire pane. Escape ends the summon and removes these nodes
+   synchronously before the program owns the rows again. */
 .nocx-summon-answers {
   display: flex;
-  flex: 1 1 auto;
+  flex: none;
   flex-direction: column;
   min-height: 0;
   max-height: min(50vh, calc(36em + 6px));
@@ -1335,13 +1337,6 @@
   overflow-x: auto;
   position: relative;
   padding-top: calc(var(--space-2) + 22px);
-}
-
-.cmd-output-code-copy-host {
-  position: absolute;
-  top: var(--space-1);
-  right: var(--space-1);
-  z-index: 1;
 }
 
 /* Fence delimiters are structural rows, not visible answer content. Keep them

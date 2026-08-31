@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -64,6 +65,7 @@ func TestAgentCancel_DTOConformsToContract(t *testing.T) {
 		RunID: 7, State: string(content.RunCancelled), Cancelled: true,
 		Error:         "no local process group to signal — the execution keeps running",
 		DroppedDeltas: 2,
+		UnarmedBounds: []string{"the inactivity bound is not active because shell integration is unavailable"},
 	}), "agent.cancel DTO")
 }
 
@@ -178,6 +180,11 @@ func TestAgentCancel_UnsupportedOwnedRunStillClosesWithPresentation(t *testing.T
 	h.ws.pendingRunsMu.Lock()
 	rc := h.ws.pendingRuns[res.RunID]
 	lease := h.ws.newRunLease(session.ID(sid), RunLeaseConfig{})
+	if rc.leaseDegradation == nil {
+		h.ws.pendingRunsMu.Unlock()
+		t.Fatal("agent run has no lease degradation context")
+	}
+	rc.leaseDegradation.Add(assistant.RunLeaseBoundInactivity)
 	lease.sess = nil
 	lease.cancel = func() {} // armed RequestRun: the renderer execution exists
 	if !rc.control.attachRunLease(lease) {
@@ -200,6 +207,10 @@ func TestAgentCancel_UnsupportedOwnedRunStillClosesWithPresentation(t *testing.T
 	if env.Error != nil || env.Result.Error != warning || env.Result.DroppedDeltas != 2 {
 		t.Fatalf("agent.cancel = %+v, want warning and two dropped deltas", env)
 	}
+	wantUnarmed := []string{"the inactivity bound is not active because shell integration is unavailable"}
+	if !reflect.DeepEqual(env.Result.UnarmedBounds, wantUnarmed) {
+		t.Fatalf("agent.cancel unarmedBounds = %v, want %v", env.Result.UnarmedBounds, wantUnarmed)
+	}
 	if len(notifications) == 0 {
 		notifications = append(notifications, readNotification(t, h.conn, "agent.runState", time.Second))
 	}
@@ -212,6 +223,9 @@ func TestAgentCancel_UnsupportedOwnedRunStillClosesWithPresentation(t *testing.T
 	}
 	if state.State != string(content.RunCancelled) || state.Error != warning || state.DroppedDeltas != 2 {
 		t.Fatalf("runState = %+v, want cancelled with matching presentation", state)
+	}
+	if !reflect.DeepEqual(state.UnarmedBounds, wantUnarmed) {
+		t.Fatalf("runState unarmedBounds = %v, want %v", state.UnarmedBounds, wantUnarmed)
 	}
 	select {
 	case <-client.stopped:

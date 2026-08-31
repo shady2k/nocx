@@ -371,6 +371,17 @@ describe('AgentApprovalPrompt — what the call does, where (nocx-njn8s, nocx-0m
       'make changes that cannot be undone',
     ])
   })
+
+  it('names execution as handing work to another agent', () => {
+    const { container } = renderPrompt({
+      ask: { ...RUN_ASK, effect: 'delegate' },
+      sessionWhere: () => LOCAL,
+    })
+    expect(rows(container).find(([name]) => name === 'effect')).toEqual([
+      'effect',
+      'hand work to another agent',
+    ])
+  })
 })
 
 /**

@@ -38,20 +38,42 @@ func NewService(store Store, newID func() string) *Service {
 // that cannot run teaches the opposite of what a seed is for.
 //
 // The rule that keeps this true: a seed may use {{env:cwd}} — a session
-// always has a working directory — and {{ask:…}}, which the person answers.
+// always has a working directory — and PARAMETERS, which the person answers.
 // It may not use an env key that depends on where the pane happens to be
 // pointed.
+//
+// The seeds are also the only place the template language is written down
+// where somebody meets it before writing one — Settings previews what you
+// typed, it does not document a grammar. So between them they demonstrate
+// each form: a parameter with a default, an option list ({{mode=L|R}}, one
+// of which is chosen from a dropdown), and a condition, whose paragraph is
+// kept only if the tick is on. TestSeedsTeachTheSyntaxThatExists holds them
+// to it.
+//
+// A parameter is written {{name}} or {{name=default}}. It used to be
+// {{ask:name}}, and that spelling was retired when a colon became what
+// decides who owns a span (nocx-9xu1j) — so the second seed below shipped a
+// body that inserted its own placeholders verbatim until it was re-spelled.
+// A seed is data, so nothing but TestSeedsUseNoRetiredSyntax can catch that.
 func (s *Service) seeds() []Snippet {
 	return []Snippet{
 		{
 			ID:    s.newID(),
 			Title: "Explain this project",
-			Body:  "Explain what the project in {{env:cwd}} does, and how it is laid out.",
+			// The tags share their lines deliberately. A tag alone on a line
+			// takes the whole line with it, which is tidier to read and
+			// leaves a trailing newline behind when the tick is off — and a
+			// body with a newline in it is refused by any program that has
+			// not enabled bracketed paste. Off, this one has to be exactly
+			// one line, or the seed stops firing in an ordinary pane for a
+			// paragraph the person switched off.
+			Body: "Explain what the project in {{env:cwd}} does, and how it is laid out." +
+				"{% if deep %}\nGo file by file rather than summarising.{% endif %}",
 		},
 		{
 			ID:    s.newID(),
 			Title: "Forward a port over ssh",
-			Body:  "ssh -L {{ask:local=8080}}:localhost:{{ask:remote=8080}} {{ask:host}}",
+			Body:  "ssh -{{mode=L|R}} {{local=8080}}:localhost:{{remote=8080}} {{host}}",
 		},
 	}
 }

@@ -33,4 +33,10 @@ export interface AgentCancel {
    * The authoritative whole-run count of streamed chunks refused by the wire. Present only when non-zero so the reserved response preserves the same visible gap marker as agent.runState.
    */
   droppedDeltas?: number
+  /**
+   * Human-readable sentences naming lease bounds that could not be armed because shell integration was unavailable. Present only when at least one bound did not apply; never null or empty.
+   *
+   * @minItems 1
+   */
+  unarmedBounds?: [string, ...string[]]
 }

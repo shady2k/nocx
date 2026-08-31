@@ -627,4 +627,23 @@ describe('AgentInputTarget dropped-delta gap (nocx-dw3.1)', () => {
     )
     expect(handle.close).toHaveBeenCalledWith('failure', 'the model stopped mid-answer')
   })
+  it('shows named unavailable lease bounds while preserving a successful run', async () => {
+    const { dispatcher, handle, target } = makeTarget()
+    await target.submit('run without shell integration')
+    const runId = dispatcher.next.run - 1
+
+    dispatcher.emit('agent.runState', {
+      runId,
+      state: 'completed',
+      unarmedBounds: [
+        'the inactivity bound is not active because shell integration is unavailable',
+        'the output bound is not active because shell integration is unavailable',
+      ],
+    })
+
+    expect(handle.append).toHaveBeenCalledWith(
+      '— the inactivity bound is not active because shell integration is unavailable; the output bound is not active because shell integration is unavailable; only the wall-clock deadline remains active —',
+    )
+    expect(handle.close).toHaveBeenCalledWith('success', undefined, 'qwen3')
+  })
 })

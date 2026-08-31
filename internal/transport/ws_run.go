@@ -27,6 +27,7 @@ import (
 	"time"
 	"unicode/utf8"
 
+	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/lifecycle"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/transport/control"
@@ -41,6 +42,11 @@ import (
 // could fire before the lease would recreate the wedged-command gap this
 // bead closes.
 const runRequestTimeout = 10 * time.Minute
+
+// errRunSubmissionExpired is the user-facing result when a run request was
+// withdrawn before its renderer could open a lifecycle attempt. It must not
+// use terminalization language: no command existed to terminate.
+var errRunSubmissionExpired = errors.New("submission expired before execution")
 
 // maxRunOutputWindowChars is the renderer-side clamp on the output window
 // text one run resolution carries: the model reads this much output per
@@ -94,6 +100,7 @@ type runResolvedParams struct {
 	EntryID   string `json:"entryId"`
 	ExitCode  *int   `json:"exitCode"`
 	Status    string `json:"status"`
+	Stopped   bool   `json:"stopped"`
 	Total     int    `json:"total"`
 	Start     int    `json:"start"`
 	End       int    `json:"end"`
@@ -103,11 +110,13 @@ type runResolvedParams struct {
 // runResolvedBody is the resolved result the broker's Request decodes into:
 // the run body only, requestId and outcome consumed by the correlation. The
 // assistant executor reads this shape (its own minimal consumer view) to
-// build the tool's windowed return.
+// build the tool's windowed return. Stopped is explicit renderer evidence
+// that the person ended this command; it is never inferred from ExitCode.
 type runResolvedBody struct {
 	EntryID  string `json:"entryId"`
 	ExitCode *int   `json:"exitCode"`
 	Status   string `json:"status"`
+	Stopped  bool   `json:"stopped"`
 	Total    int    `json:"total"`
 	Start    int    `json:"start"`
 	End      int    `json:"end"`
@@ -127,6 +136,7 @@ func runKind() RequestKind {
 	return RequestKind{
 		NotifyMethod:       "agent.runRequest",
 		ResolveMethod:      "agent.runResolved",
+		CancelMethod:       "agent.runCancel",
 		NoClientErr:        errRunNoRenderer,
 		Timeout:            runRequestTimeout,
 		MaxResolutionBytes: budgetDocument,
@@ -148,7 +158,7 @@ func resolveRun(raw json.RawMessage) (json.RawMessage, error) {
 	}
 	body, err := json.Marshal(runResolvedBody{
 		EntryID: p.EntryID, ExitCode: p.ExitCode, Status: p.Status,
-		Total: p.Total, Start: p.Start, End: p.End, Text: p.Text,
+		Stopped: p.Stopped, Total: p.Total, Start: p.Start, End: p.End, Text: p.Text,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("run: body: %w", err)
@@ -169,8 +179,15 @@ func validateRunResolvedRaw(raw json.RawMessage) string {
 	if msg := decodeParams(raw, &p); msg != "" {
 		return msg
 	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return "params must be a JSON object"
+	}
 	switch p.Outcome {
 	case "completed":
+		if _, ok := fields["stopped"]; !ok {
+			return "a completed outcome requires the stopped fact"
+		}
 		if p.Error != "" {
 			return "a completed outcome carries no error"
 		}
@@ -237,6 +254,16 @@ func (s *WSServer) RequestRun(ctx context.Context, sessionID string, command str
 	}
 
 	cfg := s.effectiveRunLease()
+	if cfg.needsShellIntegration() && !s.runLeaseIntegrationAvailable(sid) {
+		if degradation := assistant.RunLeaseDegradationFromContext(ctx); degradation != nil {
+			degradation.Add(assistant.RunLeaseUnavailableBounds(cfg.Inactivity > 0, cfg.OutputBudget > 0)...)
+		}
+		// The command still runs. Remove only bounds whose authenticated
+		// lifecycle start can never arrive; WallClock remains armed.
+		cfg.Inactivity = 0
+		cfg.OutputBudget = 0
+	}
+
 	kind := runKind()
 	if cfg.WallClock <= 0 && cfg.Inactivity <= 0 && cfg.OutputBudget <= 0 {
 		// Lease disabled: the pre-lease broker bound applies unchanged.
@@ -266,6 +293,11 @@ func (s *WSServer) RequestRun(ctx context.Context, sessionID string, command str
 	kind.BeforeDeliver = func(requestID string) {
 		s.broker.registerRunLease(requestID, lease)
 	}
+	kind.AfterDeliver = func(_ string) {
+		lease.mu.Lock()
+		lease.submissionDelivered = true
+		lease.mu.Unlock()
+	}
 	defer s.broker.unregisterRunLease(lease)
 	if control := agentRunControlFromContext(ctx); control != nil {
 		if !control.attachRunLease(lease) {
@@ -278,6 +310,31 @@ func (s *WSServer) RequestRun(ctx context.Context, sessionID string, command str
 		return s.broker.Request(ctx, kind, runRequestParams{SessionID: sessionID, Command: command}, &body)
 	})
 	if err != nil {
+		// The two branches below cannot both match, and saying so is the point
+		// of this comment. RunLeaseError is minted in exactly one place, under
+		// `reason != ""` (run_lease.go); the pre-execution case requires
+		// firedReason == "". So the order is NOT load-bearing and nothing here
+		// guards against one swallowing the other. Pre-execution is written
+		// first only because it returns, so a reader asking "what happens when
+		// nothing started" meets it before an enrichment that cannot apply.
+		cancelledBeforeExecution := errors.Is(err, context.Canceled) ||
+			errors.Is(err, context.DeadlineExceeded) ||
+			errors.Is(err, ErrRequestTimedOut)
+		lease.mu.Lock()
+		firedReason := lease.firedReason
+		lease.mu.Unlock()
+		if cancelledBeforeExecution && firedReason == "" {
+			_, started := s.broker.runAttemptForLease(lease)
+			if !started {
+				return nil, fmt.Errorf("run: %w", errRunSubmissionExpired)
+			}
+		}
+		var leaseErr *assistant.RunLeaseError
+		if errors.As(err, &leaseErr) {
+			if attempt, ok := s.broker.runAttemptForLease(lease); ok {
+				leaseErr.EntryID = attempt
+			}
+		}
 		return nil, fmt.Errorf("run: %w", err)
 	}
 	return body, nil

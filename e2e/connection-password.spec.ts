@@ -28,7 +28,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs'
 import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
-import { VaultBackend, bindEndpoint, documentDir, settingsReady } from './harness'
+import { VaultBackend, appReadyForInput, bindEndpoint, documentDir, settingsReady } from './harness'
 import { readStand } from './stand'
 
 /** Lazily, not at module scope: the stand is started by globalSetup, which
@@ -200,6 +200,7 @@ test.describe('connection password ask: first open prompts, remembered second op
     await bindEndpoint(page, ep)
     await page.goto('/')
     await expect(page.locator(TAB_TITLE).first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
 
     // ── Phase 1: set up the vault (no Secret Service → passphrase dialog) ─
     await setupVault(page)
@@ -304,6 +305,7 @@ test.describe('open-time host key consent', () => {
     await bindEndpoint(page, ep)
     await page.goto('/')
     await expect(page.locator(TAB_TITLE).first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
 
     await setupVault(page)
     await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()

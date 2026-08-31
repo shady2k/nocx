@@ -3,7 +3,7 @@
 // message — the one outcome that is not allowed is silence, which is what
 // clicking a path in nocx did before this existed.
 import { describe, expect, it, vi } from 'vitest'
-import { createLinkOpener, homeFromRoot, type LinkOpenDeps } from './open'
+import { createLinkOpener, homeFromRoot, type LinkOpenDeps, type LinkPathProbe } from './open'
 import type { FilesOpenResult } from '../generated/files.open'
 import type { ActiveOrigin } from '../pane-content'
 
@@ -34,14 +34,19 @@ const origin: Omit<ActiveOrigin, 'paneId'> = {
 function deps(over: Partial<LinkOpenDeps> = {}): LinkOpenDeps & {
   viewed: Parameters<LinkOpenDeps['openViewer']>[0][]
   said: string[]
+  revealed: string[]
 } {
   const viewed: Parameters<LinkOpenDeps['openViewer']>[0][] = []
   const said: string[] = []
+  const revealed: string[] = []
   return {
     viewed,
     said,
+    revealed,
     openUrl: vi.fn(() => Promise.resolve()),
     openBinding: vi.fn(() => Promise.resolve(openResult())),
+    pathKind: vi.fn(() => Promise.resolve<LinkPathProbe>({ kind: 'file' })),
+    openDirectory: vi.fn(() => Promise.resolve(false)),
     openViewer: (t) => viewed.push(t),
     notify: (m) => said.push(m),
     onBindingLiveness: () => () => {},
@@ -96,6 +101,25 @@ describe('createLinkOpener — files', () => {
       line: 101,
       displayHost: null,
     })
+  })
+  it('opens a regular file without probing or revealing the Files panel', async () => {
+    const openDirectory = vi.fn(() => Promise.resolve(false))
+    const d = deps({ openDirectory })
+    await createLinkOpener(d).open({ kind: 'path', path: 'notes.md' }, origin)
+    expect(openDirectory).not.toHaveBeenCalled()
+    expect(d.viewed).toHaveLength(1)
+  })
+  it('reveals a directory through the Files panel instead of opening a viewer', async () => {
+    const openDirectory = vi.fn(() => Promise.resolve(true))
+    const probe: LinkPathProbe = { kind: 'directory' }
+    const d = deps({
+      pathKind: () => Promise.resolve(probe),
+      openDirectory,
+    })
+    await createLinkOpener(d).open({ kind: 'path', path: 'build' }, origin)
+    expect(openDirectory).toHaveBeenCalledWith('/Users/a/repo/build', probe)
+    expect(d.revealed).toEqual([])
+    expect(d.viewed).toEqual([])
   })
 
   it('binds against the session the link was printed in', async () => {

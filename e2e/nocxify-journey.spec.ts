@@ -1,4 +1,4 @@
-import { test, expect } from './harness'
+import { appReadyForInput, test, expect } from './harness'
 import { documentDir } from './harness'
 import { readStand } from './stand'
 import { spawn, execFileSync } from 'node:child_process'
@@ -378,6 +378,7 @@ test('a hand-typed ssh: frozen local block, remote blocks, integrated second con
 
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await appReadyForInput(page)
     const editor = page.locator('.pane.active .nocx-editor-input')
     await expect(editor).toBeVisible({ timeout: 20_000 })
 

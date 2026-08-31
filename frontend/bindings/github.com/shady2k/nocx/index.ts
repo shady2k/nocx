@@ -5,3 +5,7 @@ import * as WailsApp from "./wailsapp.js";
 export {
     WailsApp
 };
+
+export {
+    BackendResolution
+} from "./models.js";

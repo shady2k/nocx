@@ -33,6 +33,7 @@ const completion: AgentRunCompletion = {
   entryId: 'entry-7',
   exitCode: 0,
   status: 'success',
+  stopped: false,
   total: 2,
   start: 0,
   end: 2,
@@ -54,7 +55,9 @@ describe('mountRunCommandHandler — the renderer half of the run tool', () => {
       command: 'ls -la',
     })
 
-    await vi.waitFor(() => expect(submitAgentCommand).toHaveBeenCalledWith('ls -la', 'req-1'))
+    await vi.waitFor(() =>
+      expect(submitAgentCommand).toHaveBeenCalledWith('ls -la', 'req-1', expect.any(AbortSignal)),
+    )
     await vi.waitFor(() => expect(d.call).toHaveBeenCalled())
     expect(d.calls[0].method).toBe('agent.runResolved')
     const params = d.calls[0].params as Record<string, unknown>
@@ -63,6 +66,7 @@ describe('mountRunCommandHandler — the renderer half of the run tool', () => {
     expect(params.entryId).toBe('entry-7')
     expect(params.exitCode).toBe(0)
     expect(params.status).toBe('success')
+    expect(params.stopped).toBe(false)
     expect(params.text).toBe('file1\nfile2')
   })
 
@@ -76,7 +80,7 @@ describe('mountRunCommandHandler — the renderer half of the run tool', () => {
     const params = d.calls[0].params as Record<string, unknown>
     expect(d.calls[0].method).toBe('agent.runResolved')
     expect(params.outcome).toBe('failed')
-    expect(String(params.error)).toContain('no such session')
+    expect(params.stopped).toBe(false)
   })
 
   it('answers failed honestly when the submission itself fails', async () => {
@@ -99,7 +103,44 @@ describe('mountRunCommandHandler — the renderer half of the run tool', () => {
     const params = d.calls[0].params as Record<string, unknown>
     expect(d.calls[0].method).toBe('agent.runResolved')
     expect(params.outcome).toBe('failed')
-    expect(String(params.error)).toContain('not prompt-ready')
+    expect(params.stopped).toBe(false)
+  })
+  it('withdraws a submission before its renderer writes and stays silent', async () => {
+    const d = scriptedDispatcher()
+    let release!: () => void
+    let wrote = false
+    const submitAgentCommand = vi.fn(
+      (_command: string, _requestId: string, signal?: AbortSignal) =>
+        new Promise<AgentRunCompletion>((resolve, reject) => {
+          release = () => {
+            if (signal?.aborted) {
+              reject(new Error('submission withdrawn'))
+              return
+            }
+            wrote = true
+            resolve(completion)
+          }
+        }),
+    )
+    mountRunCommandHandler(d as unknown as Dispatcher, () => ({
+      sessionId: () => 'session-a',
+      submitAgentCommand,
+    }))
+
+    d.handlers.get('agent.runRequest')!({
+      requestId: 'req-cancel',
+      sessionId: 'session-a',
+      command: 'touch pid',
+    })
+    await vi.waitFor(() => expect(submitAgentCommand).toHaveBeenCalled())
+
+    d.handlers.get('agent.runCancel')!({ requestId: 'req-cancel' })
+    release()
+    await Promise.resolve()
+    await Promise.resolve()
+
+    expect(wrote).toBe(false)
+    expect(d.call).not.toHaveBeenCalled()
   })
 
   it('ignores a malformed request (no requestId, sessionId or command)', async () => {

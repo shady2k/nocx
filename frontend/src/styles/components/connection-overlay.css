@@ -1,0 +1,58 @@
+/* ConnectionOverlay — startup and transport recovery surface.
+   Identity: .ui-connection-overlay and its __logo/__message/__remedy parts.
+   Variance: data-state. */
+
+.ui-connection-overlay {
+  display: flex;
+  width: 100%;
+  flex-direction: column;
+  align-items: center;
+  text-align: center;
+}
+
+.ui-connection-overlay__logo {
+  display: block;
+  width: 96px;
+  height: 96px;
+  object-fit: contain;
+  flex: 0 0 auto;
+}
+
+.ui-connection-overlay[data-state='connecting'] .ui-connection-overlay__logo {
+  animation: ui-connection-overlay-pulse 1.8s ease-in-out infinite;
+}
+
+.ui-connection-overlay__message,
+.ui-connection-overlay__remedy {
+  margin: 0;
+  max-width: 42ch;
+  overflow-wrap: anywhere;
+}
+
+.ui-connection-overlay__message {
+  font-size: var(--font-size-lg);
+  font-weight: 600;
+}
+
+.ui-connection-overlay__remedy {
+  color: var(--color-text-dim);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .ui-connection-overlay[data-state='connecting'] .ui-connection-overlay__logo {
+    animation: none;
+  }
+}
+
+@keyframes ui-connection-overlay-pulse {
+  0%,
+  100% {
+    opacity: 0.72;
+    transform: scale(0.96);
+  }
+
+  50% {
+    opacity: 1;
+    transform: scale(1);
+  }
+}

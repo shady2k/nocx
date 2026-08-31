@@ -79,19 +79,28 @@ function previewSentence(part: PreviewPart): string {
       return part.known
         ? `${part.text} → ${ENV_KEYS[part.key as EnvKey]}`
         : `${part.text} → not a key nocx can answer; the fire will refuse`
-    case 'ask':
+    case 'param':
+      if (part.options.length > 0) {
+        return `${part.text} → you will choose one of ${part.options.join(', ')}`
+      }
       return part.defaultValue === ''
         ? `${part.text} → you will be asked`
         : `${part.text} → you will be asked (default ${part.defaultValue})`
+    case 'flag':
+      return part.negated
+        ? `${part.text} → kept unless you tick "${part.name}"`
+        : `${part.text} → kept only if you tick "${part.name}"`
     case 'secret':
       return `${part.text} → the vault secret "${part.name}"`
     case 'unrecognised':
       return `${part.text} → not recognised; it will be sent as it is`
+    case 'problem':
+      return `${part.text} → ${part.detail}; this snippet cannot be fired`
   }
 }
 
 const previewRecognised = (part: PreviewPart): boolean =>
-  part.kind !== 'unrecognised' && !(part.kind === 'env' && !part.known)
+  part.kind !== 'unrecognised' && part.kind !== 'problem' && !(part.kind === 'env' && !part.known)
 
 /** The row's one-line description of a body: its first non-empty line,
  *  bounded. A body is multi-line and the row is one line — a raw body would

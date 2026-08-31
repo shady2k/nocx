@@ -1,4 +1,4 @@
-import { test, expect, type Page } from './harness'
+import { appReadyForInput, test, expect, type Page } from './harness'
 
 test.describe('vertical tab placement', () => {
   // Fixed: #vertical-tabstrip container now exists alongside #body.
@@ -35,6 +35,7 @@ test.describe('vertical tab placement', () => {
   test.beforeEach(async ({ page }) => {
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await appReadyForInput(page)
     // Ensure horizontal before every test
     await switchPlacement(page, 'horizontal')
   })

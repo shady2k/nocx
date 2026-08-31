@@ -40,6 +40,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  appReadyForInput,
   bindEndpoint,
   openImportDestination,
   settingsReady,
@@ -107,6 +108,7 @@ test.describe('a secret in the path: the value crosses to the server and never t
     await bindEndpoint(page, ep)
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
 
     // ── The vault, because the import has somewhere to put the token ──────
     await page.keyboard.press('Meta+,')

@@ -243,6 +243,72 @@ describe('Dialog', () => {
     )
   })
 
+  it('renders a keyboard-reachable close control even without a title', () => {
+    const onClose = vi.fn()
+    subject({ open: true, title: undefined, onClose })
+
+    const close = document.querySelector<HTMLButtonElement>(
+      '.nocx-dialog__close [aria-label="Close dialog"]',
+    )
+    expect(close).not.toBeNull()
+    expect(close?.tabIndex).not.toBe(-1)
+
+    fireEvent.click(close!)
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('keeps the close control and its behavior when dismissible is unset', () => {
+    const onClose = vi.fn()
+    subject({ open: true, onClose })
+
+    const close = document.querySelector<HTMLButtonElement>(
+      '.nocx-dialog__close [aria-label="Close dialog"]',
+    )
+    expect(close).not.toBeNull()
+    close!.click()
+    expect(onClose).toHaveBeenCalledOnce()
+  })
+
+  it('renders no way out and ignores close events when dismissible is false', () => {
+    const onClose = vi.fn()
+    subject({
+      open: true,
+      onClose,
+      dismissible: false,
+      children: <button>Continue</button>,
+    })
+
+    const dialog = document.querySelector<HTMLDialogElement>('dialog.nocx-dialog')!
+    expect(dialog.dataset.dismissible).toBe('false')
+    expect(dialog.querySelector('.nocx-dialog__close')).toBeNull()
+
+    fireEvent(dialog, new Event('cancel', { bubbles: true, cancelable: true }))
+    fireEvent(
+      document,
+      new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+    )
+    fireEvent.mouseDown(dialog, { clientX: 300, clientY: 300 })
+    expect(onClose).not.toHaveBeenCalled()
+  })
+
+  it('focuses the first contextual action with or without the close control', () => {
+    const first = subject({ open: true, children: <button>Continue</button> })
+    const firstButton = first.container.querySelector('.nocx-dialog__body button')
+    expect(firstButton?.textContent).toBe('Continue')
+    expect(document.activeElement).toBe(firstButton)
+    cleanup()
+    clearStack()
+
+    const second = subject({
+      open: true,
+      dismissible: false,
+      children: <button>Continue</button>,
+    })
+    const secondButton = second.container.querySelector('.nocx-dialog__body button')
+    expect(secondButton?.textContent).toBe('Continue')
+    expect(document.activeElement).toBe(secondButton)
+  })
+
   it('renders footer actions', () => {
     subject({
       open: true,
@@ -538,8 +604,34 @@ describe('showConfirm', () => {
     expect(dialog.querySelector('.nocx-dialog__actions')).toBeTruthy()
 
     // Cleanup: click cancel to close
-    const cancelBtn = dialog.querySelector<HTMLButtonElement>('button')!
-    cancelBtn.click()
+    const cancelBtn = Array.from(dialog.querySelectorAll<HTMLButtonElement>('button')).find(
+      (button) => button.textContent === 'Cancel',
+    )
+    expect(cancelBtn).toBeDefined()
+    cancelBtn!.click()
+  })
+
+  it('focuses the first contextual action instead of the universal close control', async () => {
+    const promise = showConfirm('Test', 'Yes', 'Cancel')
+    await vi.waitFor(() => {
+      expect(document.querySelector<HTMLDialogElement>('dialog.nocx-dialog')).toBeTruthy()
+    })
+
+    const dialog = document.querySelector<HTMLDialogElement>('dialog.nocx-dialog')!
+    const cancel = Array.from(dialog.querySelectorAll<HTMLButtonElement>('button')).find(
+      (button) => button.textContent === 'Cancel',
+    )
+    const close = dialog.querySelector<HTMLButtonElement>('[aria-label="Close dialog"]')
+
+    expect(cancel).toBeDefined()
+    expect(close).not.toBeNull()
+    expect(close?.tabIndex).not.toBe(-1)
+    await vi.waitFor(() => {
+      expect(document.activeElement).toBe(cancel)
+    })
+
+    cancel!.click()
+    await promise
   })
 
   it('resolves to false on cancel click', async () => {
@@ -548,7 +640,9 @@ describe('showConfirm', () => {
       expect(document.querySelector<HTMLDialogElement>('dialog')).toBeTruthy()
     })
 
-    const cancelBtn = document.querySelector<HTMLButtonElement>('dialog button')!
+    const cancelBtn = document.querySelector<HTMLButtonElement>(
+      'dialog button:not([aria-label="Close dialog"])',
+    )!
     cancelBtn.click()
 
     const result = await promise
@@ -561,9 +655,11 @@ describe('showConfirm', () => {
       expect(document.querySelector<HTMLDialogElement>('dialog')).toBeTruthy()
     })
 
-    const buttons = document.querySelectorAll<HTMLButtonElement>('dialog button')
-    // Second button is the confirm (OK)
-    buttons[1].click()
+    const confirmBtn = Array.from(
+      document.querySelectorAll<HTMLButtonElement>('dialog button'),
+    ).find((button) => button.textContent === 'Yes')
+    expect(confirmBtn).toBeDefined()
+    confirmBtn!.click()
 
     const result = await promise
     expect(result).toBe(true)
@@ -575,7 +671,9 @@ describe('showConfirm', () => {
       expect(document.querySelector<HTMLDialogElement>('dialog')).toBeTruthy()
     })
 
-    const cancelBtn = document.querySelector<HTMLButtonElement>('dialog button')!
+    const cancelBtn = document.querySelector<HTMLButtonElement>(
+      'dialog button:not([aria-label="Close dialog"])',
+    )!
     cancelBtn.click()
     await promise
 
@@ -591,11 +689,10 @@ describe('showConfirm', () => {
 
     const promise = showConfirm('Test')
 
-    // Simulate timer for rAF
-    vi.runAllTimers()
-
     // Click cancel
-    const cancelBtn = document.querySelector<HTMLButtonElement>('dialog button')!
+    const cancelBtn = document.querySelector<HTMLButtonElement>(
+      'dialog button:not([aria-label="Close dialog"])',
+    )!
     cancelBtn.click()
 
     await promise

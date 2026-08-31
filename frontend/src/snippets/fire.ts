@@ -29,6 +29,10 @@ export type SnippetDestination = 'input' | 'clipboard'
 export type SnippetRefusalReason =
   | { kind: 'no-owner' }
   | { kind: 'env-unavailable'; keys: string[] }
+  /** The body does not parse. It reaches the FIRE and not only the settings
+   *  preview because a snippet arrives through backup and restore and may
+   *  never have been opened in Settings at all (design §7 step 1). */
+  | { kind: 'malformed'; detail: string }
   | { kind: 'multi-line-no-bracketed-paste' }
   | { kind: 'unresolved-secret'; name?: string }
   | { kind: 'write-failed' }
@@ -66,12 +70,21 @@ export function createSnippetFireAdapter(
     const facts = await deps.facts()
     const outcome = resolveBody(req.snippet.body, facts, req.answers)
     if (outcome.kind === 'refused') {
-      return { kind: 'refused', reason: { kind: 'env-unavailable', keys: outcome.keys } }
+      // The two refusals are different failures and are not collapsed: one
+      // says the pane cannot answer a question the body asks, the other
+      // says the body asks nothing answerable. A person can act on the
+      // first by moving; on the second only by editing the snippet.
+      return outcome.reason === 'malformed'
+        ? {
+            kind: 'refused',
+            reason: { kind: 'malformed', detail: outcome.diagnostics[0]?.detail ?? '' },
+          }
+        : { kind: 'refused', reason: { kind: 'env-unavailable', keys: outcome.keys } }
     }
     if (outcome.kind === 'needs-fields') {
       // The palette asked for every field before firing; reaching this is a
       // palette bug, and refusing beats firing a body that still carries
-      // {{ask:…}} as literal text.
+      // an unanswered parameter as literal text.
       return { kind: 'refused', reason: { kind: 'no-owner' } }
     }
     const text = outcome.text

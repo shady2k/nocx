@@ -96,6 +96,26 @@ export function classifyPastedSource(text: string): PastedSource {
 }
 
 /**
+ * Whether a destination is the collections ROOT itself rather than a folder
+ * inside it — which is the one destination Import is disabled for, because
+ * the root certainly exists and importing onto it comes back "a folder is
+ * already there" about a folder nobody chose.
+ *
+ * It lives here, beside the three functions that PROPOSE a destination,
+ * because "the bare root" is the same question they answer around: a second
+ * spelling of it in the ask and a third in the pane would agree on every
+ * path anybody typed and disagree on a trailing slash.
+ *
+ * A root nobody has answered with yet (`''`) makes no value bare: there is
+ * nothing to be equal to.
+ */
+export function isCollectionsRoot(defaultRoot: string, value: string): boolean {
+  if (defaultRoot === '') return false
+  const root = defaultRoot.replace(/[\\/]+$/, '')
+  return value === root || value === `${root}/`
+}
+
+/**
  * The destination a PASTED EXPORT proposes: `<defaultRoot>/<slug of
  * info.name>`.
  *

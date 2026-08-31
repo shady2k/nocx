@@ -44,7 +44,7 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from 
 import path from 'node:path'
 
 import { dropFileOnActivePane } from './drop-gesture'
-import { test, expect } from './harness'
+import { appReadyForInput, test, expect } from './harness'
 import { readStand } from './stand'
 import { rpc, startSshd, type SshdFixture } from './sshd-fixture'
 
@@ -78,6 +78,7 @@ test('a file dropped on an SSH tab arrives on the far host', async ({ page }) =>
 
     await page.goto('/')
     await expect(page.locator('.nocx-tab')).toHaveCount(1, { timeout: 15_000 })
+    await appReadyForInput(page)
 
     // Seed the connection the way Settings would. The name is unique per run:
     // the stand's document store persists across runs in this home, and a

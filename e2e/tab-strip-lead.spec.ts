@@ -1,13 +1,13 @@
 import { test, expect } from './harness'
 
 /**
- * e2e: what stands between the window's edge and the first control of the tab
- * strip (nocx-gm4fj).
+ * e2e: a hidden update notice must not reserve width in the tab strip
+ * (nocx-gm4fj).
  *
- * Measured in a browser and not asserted in jsdom, because both halves of the
- * defect are layout: an attribute that a `display` declaration overrode, and a
- * padding calibrated for a title bar the app stopped asking for. Neither is
- * visible to a test that reads the DOM.
+ * Measured in a browser and not asserted in jsdom, because this is a layout
+ * defect: `.update-notice` uses `display: flex`, which can override the
+ * browser's `[hidden] { display: none }` rule. Its padding then leaves a
+ * blank 48px box even while the notice is hidden.
  */
 
 const BAR = '.tabbar'
@@ -25,29 +25,63 @@ async function leftWithin(
   }, selector)
 }
 
-// THE NOTICES ARE CONDITIONS, AND A CONDITION THAT IS NOT TRUE TAKES NO ROOM.
-// `.update-notice` and `.connection-notice` are the strip's first two children.
-// Both carry `hidden`, and both declared `display: flex` — which beats the UA
-// stylesheet's `[hidden] { display: none }`, so neither was hidden at all: two
-// empty flex boxes with `padding: 0 12px` owned 48px of the row at all times,
-// on every platform. On macOS that landed immediately after the traffic-light
-// inset, which is where it was noticed.
-test('a hidden notice takes no width in the tab strip', async ({ page }) => {
+// The update notice is the only optional child before the tab strip lead.
+// Connection state now owns a top-layer overlay, so it must not add a second
+// child to the tab bar or participate in this layout contract.
+test('a hidden update notice does not occupy tab strip width', async ({ page }) => {
   await page.goto('/')
   await expect(page.locator(BAR)).toBeVisible()
-
-  // The precondition, stated rather than assumed: this asserts nothing about
-  // hiding if the notices are showing.
   await expect(page.locator('.update-notice')).toBeHidden()
-  await expect(page.locator('.connection-notice')).toBeHidden()
 
   const widths = await page.evaluate(() =>
     [...(document.querySelector('.tabbar') as HTMLElement).children]
-      .filter((c) => c.querySelector('.update-notice, .connection-notice'))
-      .map((c) => c.getBoundingClientRect().width),
+      .filter((child) => child.querySelector('.update-notice'))
+      .map((child) => child.getBoundingClientRect().width),
   )
   expect(widths.length).toBeGreaterThan(0)
   for (const w of widths) expect(w).toBe(0)
+})
+
+test('the tab strip lead follows the update notice without another condition child', async ({
+  page,
+}) => {
+  await page.goto('/')
+  await expect(page.locator(BAR)).toBeVisible()
+  await expect(page.locator('.update-notice')).toBeHidden()
+  await expect(page.locator(LEAD)).toBeVisible()
+
+  const layout = await page.evaluate(() => {
+    const bar = document.querySelector('.tabbar')
+    if (!(bar instanceof HTMLElement)) throw new Error('tabbar is not mounted')
+    const children = [...bar.children]
+    const update = children.find((child) => child.querySelector('.update-notice') !== null)
+    const lead = children.find((child) => child.matches('.tabstrip-lead'))
+    const roles = children.map((child) => {
+      if (child.querySelector('.update-notice') !== null) return 'update'
+      if (child.matches('.tabstrip-lead')) return 'lead'
+      if (child.matches('.tabs-container')) return 'tabs'
+      if (child.matches('.tabstrip-actions')) return 'actions'
+      if (child.matches('.tabbar-spacer')) return 'spacer'
+      if (child.matches('.ui-connection-overlay, .ui-connection-indicator, .connection-notice')) {
+        return 'connection'
+      }
+      return 'other'
+    })
+    return {
+      roles,
+      leadAfterUpdate:
+        update !== undefined &&
+        lead !== undefined &&
+        Boolean(update.compareDocumentPosition(lead) & Node.DOCUMENT_POSITION_FOLLOWING),
+    }
+  })
+  expect(layout.roles).toHaveLength(5)
+  expect(layout.roles).toEqual(
+    expect.arrayContaining(['update', 'lead', 'tabs', 'actions', 'spacer']),
+  )
+  expect(layout.roles).not.toContain('connection')
+  expect(layout.roles).not.toContain('other')
+  expect(layout.leadAfterUpdate).toBe(true)
 })
 
 // AND THEREFORE the first control sits exactly where the platform's window

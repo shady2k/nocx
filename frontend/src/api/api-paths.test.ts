@@ -9,6 +9,7 @@ import { describe, expect, it } from 'vitest'
 import {
   classifyPastedSource,
   environmentPath,
+  isCollectionsRoot,
   proposedDestination,
   proposedDestinationFromDocument,
   proposedDestinationFromURL,
@@ -97,6 +98,26 @@ describe('classifyPastedSource — what a pasted string IS, asked in one place',
     expect(classifyPastedSource('curl https://h -X POST')).toEqual({ kind: 'unusable' })
     expect(classifyPastedSource('')).toEqual({ kind: 'unusable' })
     expect(classifyPastedSource('   ')).toEqual({ kind: 'unusable' })
+  })
+})
+
+describe('isCollectionsRoot — the one destination Import is disabled for', () => {
+  it('is the root itself, with or without the separator the prefill leaves', () => {
+    expect(isCollectionsRoot(ROOT, ROOT)).toBe(true)
+    expect(isCollectionsRoot(ROOT, `${ROOT}/`)).toBe(true)
+  })
+
+  it('is not a folder INSIDE the root, which is every destination worth having', () => {
+    expect(isCollectionsRoot(ROOT, `${ROOT}/acme`)).toBe(false)
+    expect(isCollectionsRoot(ROOT, '/somewhere/else')).toBe(false)
+  })
+
+  it('makes nothing bare while the backend has not answered with a root', () => {
+    // '' is "not read yet", not "the root is the empty string": a value
+    // cannot be equal to a root nobody has yet named, and treating it as
+    // bare would disable Import over a destination the person did choose.
+    expect(isCollectionsRoot('', '')).toBe(false)
+    expect(isCollectionsRoot('', '/anywhere')).toBe(false)
   })
 })
 

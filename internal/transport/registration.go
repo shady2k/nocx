@@ -40,6 +40,9 @@ import (
 // transition, so a report queued behind a full lane would delay the
 // awaiting-takeover transition and a lease that has not seen it would keep
 // enforcing its bounds on a TUI the human now owns.
+// transport.ping is a liveness probe and must remain answerable while the
+// ordinary lane is busy; its handler only reads the clock and enqueues a
+// response.
 var ingressCriticalMethods = map[string]struct{}{
 	"ack":                          {},
 	"vault.unlockResolved":         {},
@@ -61,6 +64,7 @@ var ingressCriticalMethods = map[string]struct{}{
 	// waits on the awaiting-takeover transition it feeds, so it must never
 	// queue behind the lane either. Handler: a mutex update, microseconds.
 	"agent.laneInteractivity": {},
+	"transport.ping":          {},
 }
 
 // methodSpec declares one control method at server construction: the

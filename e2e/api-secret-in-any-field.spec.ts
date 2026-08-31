@@ -22,6 +22,7 @@ import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
 import {
+  appReadyForInput,
   bindEndpoint,
   openImportDestination,
   settingsReady,
@@ -208,6 +209,7 @@ test.describe('vault secrets in Auth and header fields with no environment', () 
     await bindEndpoint(page, endpoint)
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
 
     // The vault must be real: the picker-created secrets go through the
     // product's own setup and create paths, never through RPC state seeding.

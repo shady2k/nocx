@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Dispatcher } from './dispatcher'
+import { fixedEndpoint } from './endpoint'
 import { SettingsObserver } from './settings-observer'
 
 class MockSocket {
@@ -83,15 +84,15 @@ function lastSocket(): MockSocket {
   return nextSocket
 }
 
-async function connect(d: Dispatcher, port = 9876): Promise<void> {
-  const p = d.connect(port)
+async function connect(d: Dispatcher): Promise<void> {
+  d.retryNow()
+  await Promise.resolve()
   lastSocket().accept()
-  await p
 }
 
 describe('SettingsObserver', () => {
   it('calls handler on settings.changed notification', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const obs = new SettingsObserver(d)
     const handler = vi.fn()
@@ -110,7 +111,7 @@ describe('SettingsObserver', () => {
   })
 
   it('ignores duplicate or older revision', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const obs = new SettingsObserver(d)
     const handler = vi.fn()
@@ -145,7 +146,7 @@ describe('SettingsObserver', () => {
   })
 
   it('accepts gap (non-sequential revision) and calls handler', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const obs = new SettingsObserver(d)
     const handler = vi.fn()
@@ -164,7 +165,7 @@ describe('SettingsObserver', () => {
   })
 
   it('calls handler on reconnect', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const obs = new SettingsObserver(d)
     const handler = vi.fn()
@@ -182,7 +183,7 @@ describe('SettingsObserver', () => {
   })
 
   it('does not call handler after stop', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const obs = new SettingsObserver(d)
     const handler = vi.fn()
@@ -200,7 +201,7 @@ describe('SettingsObserver', () => {
   })
 
   it('notifies every active handler without one cleanup stopping the others', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const obs = new SettingsObserver(d)
     const first = vi.fn()
@@ -231,7 +232,7 @@ describe('SettingsObserver', () => {
   })
 
   it('does not call handler on reconnect after stop', async () => {
-    const d = new Dispatcher()
+    const d = new Dispatcher(fixedEndpoint(9876))
     await connect(d)
     const obs = new SettingsObserver(d)
     const handler = vi.fn()

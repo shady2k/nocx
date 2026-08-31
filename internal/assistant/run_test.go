@@ -6,18 +6,18 @@ package assistant
 // minted at the renderer), waits for the completion, and resolves the
 // broker request with the entry id, the exit status and a window of the
 // output. The backend never writes to the PTY (design §2.1 — rejected, not
-// open for re-litigation): the executor asks the renderer through the run's
+// open for re-litigation): the executor asks the renderer through the
 // requester seam, exactly as readScreen does.
 //
 // These tests mirror readscreen_test.go: the session narrowing (criterion 4
 // — asserted by trying: a grant naming session A cannot run in session B,
 // and the renderer is never asked), the wiring-gap honesty, and the window
 // contract of the return (design §4.4).
-
 import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
 	"testing"
@@ -33,12 +33,13 @@ import (
 type recordingRunner struct {
 	unscriptedBlocks
 
-	mu      sync.Mutex
-	asked   []askedRun
-	body    json.RawMessage
-	err     error
-	screen  json.RawMessage
-	screenE error
+	mu          sync.Mutex
+	asked       []askedRun
+	body        json.RawMessage
+	err         error
+	screen      json.RawMessage
+	screenE     error
+	requireLive bool
 }
 
 type askedRun struct {
@@ -57,6 +58,9 @@ func (r *recordingRunner) RequestRun(ctx context.Context, sessionID string, comm
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.asked = append(r.asked, askedRun{sessionID: sessionID, command: command})
+	if r.requireLive && ctx.Err() != nil {
+		return nil, fmt.Errorf("request context canceled before renderer call: %w", ctx.Err())
+	}
 	if r.err != nil {
 		return nil, r.err
 	}
@@ -72,11 +76,17 @@ func (r *recordingRunner) runCalls() []askedRun {
 // runResolvedBody builds the resolved body the transport's run kind would
 // deliver: the entry id, the exit status (null when the block froze without
 // one — an entered environment), the output's total line count, the span of
-// the window actually returned and its text.
+// the window actually returned and its text. stopped is an explicit fact
+// about who ended the command; it is never inferred from exitCode.
 func runResolvedBody(entryID string, exitCode *int, status string, total, start, end int, text string) json.RawMessage {
+	return runResolvedBodyWithStopped(entryID, exitCode, status, total, start, end, text, false)
+}
+
+func runResolvedBodyWithStopped(entryID string, exitCode *int, status string, total, start, end int, text string, stopped bool) json.RawMessage {
 	b, _ := json.Marshal(map[string]any{
 		"entryId": entryID, "exitCode": exitCode, "status": status,
 		"total": total, "start": start, "end": end, "text": text,
+		"stopped": stopped,
 	})
 	return b
 }
@@ -204,6 +214,86 @@ func TestMiddleware_RunWithoutRequesterIsHonest(t *testing.T) {
 	}
 }
 
+// A zero declaration deadline means the run lease owns the execution bound;
+// it must not become an already-cancelled context at the kernel boundary.
+func TestMiddleware_RunZeroDeadlineStillReachesRenderer(t *testing.T) {
+	grant := sessionGrant("session-a", autonomousMatrix())
+	req := &recordingRunner{
+		body:        runResolvedBody("entry-live", new(0), "success", 1, 0, 1, "ok"),
+		requireLive: true,
+	}
+	mw := middlewareForWithRequester(t, grant, &fakeLedger{}, nil, req)
+
+	out, err := wrappedEndpoint(mw, "session.run", "c1", `{"command":"printf ok"}`)
+	if err != nil {
+		t.Fatalf("session.run with lease-owned deadline: %v", err)
+	}
+	if !strings.Contains(out, `"entryId":"entry-live"`) {
+		t.Fatalf("result %q lacks the renderer response", out)
+	}
+	if calls := req.runCalls(); len(calls) != 1 {
+		t.Fatalf("renderer calls = %+v, want one call", calls)
+	}
+}
+
+// A lease timeout is a product-caused outcome. It occupies the tool result
+// slot with the bound's sentence so the model can explain it and continue.
+func TestMiddleware_RunLeaseOutcomeIsAResult(t *testing.T) {
+	grant := sessionGrant("session-a", autonomousMatrix())
+	req := &recordingRunner{
+		err: &RunLeaseError{Reason: content.TermTimeout, Err: context.Canceled, EntryID: "entry-abandoned"},
+	}
+	led := &fakeLedger{}
+	mw := middlewareForTurn(t, grant, led, nil, req, &fakeKnownMaterial{}, "turn-entry")
+
+	out, err := wrappedEndpoint(mw, "session.run", "c1", `{"command":"du -sh /"}`)
+	if err != nil {
+		t.Fatalf("lease outcome returned an error: %v", err)
+	}
+	if !strings.Contains(out, "wall-clock deadline") {
+		t.Fatalf("lease result = %q, want the wall-clock bound named", out)
+	}
+	if strings.Contains(out, "context deadline exceeded") || strings.Contains(out, "NodeRunError") {
+		t.Fatalf("lease result leaked an implementation error: %q", out)
+	}
+	causes := led.recordedCauses()
+	found := false
+	for _, cause := range causes {
+		if cause.caused == "entry-abandoned" {
+			found = true
+			break
+		}
+	}
+	if !found {
+		t.Fatalf("causes = %+v, want the abandoned command joined to the turn", causes)
+	}
+}
+
+// Lease errors arrive with the run context already canceled. Cause persistence
+// still has to complete because it closes the command-to-turn interval.
+func TestMiddleware_RunLeaseOutcomeRecordsCauseAfterCancellation(t *testing.T) {
+	grant := sessionGrant("session-a", autonomousMatrix())
+	req := &recordingRunner{
+		err: &RunLeaseError{Reason: content.TermTimeout, Err: context.Canceled, EntryID: "entry-abandoned"},
+	}
+	led := &fakeLedger{rejectCanceledCause: true}
+	mw := middlewareForTurn(t, grant, led, nil, req, &fakeKnownMaterial{}, "turn-entry")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	out, err := wrappedEndpointContext(mw, ctx, "session.run", "canceled-lease", `{"command":"du -sh /"}`)
+	if err != nil {
+		t.Fatalf("lease outcome returned an error: %v", err)
+	}
+	if !strings.Contains(out, "wall-clock deadline") {
+		t.Fatalf("lease result = %q, want the wall-clock bound named", out)
+	}
+	causes := led.recordedCauses()
+	if len(causes) != 1 || causes[0].caused != "entry-abandoned" {
+		t.Fatalf("causes = %+v, want one abandoned command relation", causes)
+	}
+}
+
 // TestExecuteRun_WindowIsHonest is design §4.4's window contract on the run
 // return: total (the block's output line count), the window that was asked
 // for (run asks for the whole output — [0, total)), the window that was
@@ -281,6 +371,56 @@ func TestExecuteRun_EnteredCarriesNoExitCode(t *testing.T) {
 	if res.Status != "entered" {
 		t.Errorf("status = %q, want entered", res.Status)
 	}
+}
+
+func TestExecuteRun_StoppedFactIsDirectiveAndNotExitCode(t *testing.T) {
+	runner := agenttools.NewRunner([]content.GrantScope{{Kind: content.ResourceSession, ID: "session-a"}})
+	code := 130
+
+	t.Run("person stopped", func(t *testing.T) {
+		req := &recordingRunner{body: runResolvedBodyWithStopped("entry-stop", &code, "failure", 1, 0, 1, "partial", true)}
+		out, err := executeRun(toolTestContext(), runner, req, json.RawMessage(`{"command":"scan"}`), nil)
+		if err != nil {
+			t.Fatalf("stopped run failed: %v", err)
+		}
+		var res struct {
+			ExitCode *int   `json:"exitCode"`
+			Status   string `json:"status"`
+			Stopped  bool   `json:"stopped"`
+			Message  string `json:"message"`
+			Text     string `json:"text"`
+		}
+		if err := json.Unmarshal([]byte(out), &res); err != nil {
+			t.Fatalf("result does not parse: %v", err)
+		}
+		if res.ExitCode == nil || *res.ExitCode != 130 || res.Status != "failure" || !res.Stopped {
+			t.Fatalf("stopped result = %+v, want failure/exit 130/stopped", res)
+		}
+		if res.Message != runStoppedMessage {
+			t.Fatalf("message = %q, want %q", res.Message, runStoppedMessage)
+		}
+		if res.Text != "partial" {
+			t.Fatalf("text = %q, want command output kept separate", res.Text)
+		}
+	})
+
+	t.Run("command exited 130", func(t *testing.T) {
+		req := &recordingRunner{body: runResolvedBodyWithStopped("entry-exit", &code, "failure", 1, 0, 1, "self-interrupted", false)}
+		out, err := executeRun(toolTestContext(), runner, req, json.RawMessage(`{"command":"scan"}`), nil)
+		if err != nil {
+			t.Fatalf("exit-130 run failed: %v", err)
+		}
+		var res struct {
+			Stopped bool   `json:"stopped"`
+			Message string `json:"message"`
+		}
+		if err := json.Unmarshal([]byte(out), &res); err != nil {
+			t.Fatalf("result does not parse: %v", err)
+		}
+		if res.Stopped || res.Message != "" {
+			t.Fatalf("self-interrupted result = %+v, want stopped=false and no stop directive", res)
+		}
+	})
 }
 
 // TestExecuteRun_FailedOutcomeSurfaces: a renderer that refuses or fails the

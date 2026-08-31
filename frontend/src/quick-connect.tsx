@@ -194,7 +194,7 @@ export interface DrillChoice {
 }
 
 /** One drill step: a named picker over `fetch`'s choices. A step that needs
- *  a value nobody can offer choices for — a snippet's `{{ask:…}}` field —
+ *  a value nobody can offer choices for — a snippet's parameter field —
  *  is NOT this: it belongs in a form that asks for every field at once, and
  *  the palette closes to show it. A step that looked like a filter and was
  *  in fact an input read as a filter, which is exactly how it was used

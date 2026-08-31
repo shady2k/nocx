@@ -178,11 +178,11 @@ describe('the snippets settings page (nocx-gjnr)', () => {
     expect(d, 'the new-snippet dialog did not open').toBeTruthy()
 
     fill(d!, 'snippet-title', 'deploy')
-    host.type('kubectl rollout status {{ask:service}}')
+    host.type('kubectl rollout status {{service}}')
     clickButton(d!, 'Create snippet')
 
     await vi.waitFor(() => {
-      expect(spies.create).toHaveBeenCalledWith('deploy', 'kubectl rollout status {{ask:service}}')
+      expect(spies.create).toHaveBeenCalledWith('deploy', 'kubectl rollout status {{service}}')
     })
     await waitForRows(container, 1)
   })

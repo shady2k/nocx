@@ -5,54 +5,39 @@
 // with one closing brace matches nothing, so it is not a span, and without
 // this line the author has no signal at all until the malformed literal is
 // fired into somebody's agent session. Recognition is also the honest place
-// to report an unknown namespace: `{{cwd}}` and `{{evn:cwd}}` appear here as
-// unrecognised text rather than as substitutions.
+// to report a name nobody owns: `{{evn:cwd}}` appears here as unrecognised
+// text rather than as a substitution.
 //
-// This module DECIDES nothing. Every recognition it reports comes from the
-// scan that already owns it — findSnippetSpans for env/ask, findReferences
-// for the vault's secret, ENV_KEYS for what an env key may be — so the
-// preview cannot tell the author one thing and the fire do another (AD-8).
-import { findReferences } from '../secret-reference'
-import { findSnippetSpans } from './reference'
-import { ENV_KEYS, splitAsk } from './resolve'
+// This module DECIDES nothing, and after nocx-22y46 that is literally true
+// rather than nearly true: every part below is a position and a label read
+// off `parse`. It contains no regular expression, no brace literal and no
+// second reading of the grammar, so the legend an author reads and the
+// refusal a fire produces cannot disagree (AD-8).
+import { parse, splitDeclaration } from './parse'
+import { ENV_KEYS } from './resolve'
 
 export type PreviewPart =
   /** An `{{env:key}}` span. `known` is false for a key outside the table:
    *  it parses, so no scan can catch it as a typo, and the fire refuses on
    *  it (design §11.2) — the author learns it here instead. */
   | { kind: 'env'; text: string; key: string; known: boolean }
-  /** An `{{ask:name=default}}` span — a question asked at fire time. */
-  | { kind: 'ask'; text: string; name: string; defaultValue: string }
-  /** A vault reference. Saving one is allowed and unremarked (§11.1), but
-   *  the preview still says it was recognised: the author needs to know it
-   *  is not literal text. */
+  /** A `{{name}}`, `{{name=default}}` or `{{name=a|b}}` span — a question
+   *  asked at fire time, with what it will offer. */
+  | {
+      kind: 'param'
+      text: string
+      name: string
+      defaultValue: string
+      options: readonly string[]
+    }
+  /** A condition's opening tag — a tick at fire time. */
+  | { kind: 'flag'; text: string; name: string; negated: boolean }
+  /** A vault reference, which this feature never resolves. */
   | { kind: 'secret'; text: string; name: string }
-  /** Something that opens like a span and is not one. It will be sent
-   *  literally, which is the whole reason this line exists. */
+  /** Text that looked like a span and is not one. It is sent as it is. */
   | { kind: 'unrecognised'; text: string }
-
-/** Every `{{` in the body — the candidate openings a reader means as a span.
- *  A recognised span starts at one of these; anything left over is the
- *  unrecognised half of the report. */
-const OPENING = '{{'
-
-/** How much of an unrecognised opening to quote back. It ends at the first
- *  `}` (a mistyped `{{ask:port}` ends there), else at the end of the line —
- *  never across lines, because a runaway quote would be the rest of the
- *  body. */
-function unrecognisedText(body: string, at: number): string {
-  const lineEnd = body.indexOf('\n', at) >= 0 ? body.indexOf('\n', at) : body.length
-  const line = body.slice(at, lineEnd)
-  // A well-formed-looking `{{cwd}}` is quoted whole, braces and all: the
-  // author is looking for the thing they typed. A `{{ask:port}` with one
-  // brace ends at that brace — quoting to the end of the line would report
-  // the rest of the command as part of the mistake.
-  const both = line.indexOf('}}')
-  if (both >= 0) return line.slice(0, both + 2)
-  const one = line.indexOf('}')
-  if (one >= 0) return line.slice(0, one + 1)
-  return line
-}
+  /** A body that cannot be fired at all, and why. */
+  | { kind: 'problem'; text: string; detail: string }
 
 /**
  * The body's spans in first-occurrence order, each with what it will become.
@@ -60,45 +45,42 @@ function unrecognisedText(body: string, at: number): string {
  * second rendering of the body.
  */
 export function describeBody(body: string): PreviewPart[] {
-  const recognised = new Map<number, PreviewPart>()
-  for (const span of findSnippetSpans(body)) {
+  const parsed = parse(body)
+  const at = new Map<number, PreviewPart>()
+
+  for (const span of parsed.spans) {
     const text = body.slice(span.from, span.to)
-    if (span.ns === 'env') {
-      recognised.set(span.from, {
-        kind: 'env',
+    if (span.kind === 'env') {
+      at.set(span.from, { kind: 'env', text, key: span.arg, known: span.arg in ENV_KEYS })
+    } else if (span.kind === 'secret') {
+      at.set(span.from, { kind: 'secret', text, name: span.arg })
+    } else if (span.kind === 'param') {
+      const d = splitDeclaration(span.arg)
+      at.set(span.from, {
+        kind: 'param',
         text,
-        key: span.arg,
-        known: span.arg in ENV_KEYS,
+        name: d.name,
+        defaultValue: d.defaultValue,
+        options: d.options,
       })
     } else {
-      const field = splitAsk(span.arg)
-      recognised.set(span.from, {
-        kind: 'ask',
-        text,
-        name: field.name,
-        defaultValue: field.defaultValue,
-      })
+      at.set(span.from, { kind: 'unrecognised', text })
     }
   }
-  for (const ref of findReferences(body)) {
-    recognised.set(ref.from, {
-      kind: 'secret',
-      text: body.slice(ref.from, ref.to),
-      name: ref.name,
+  for (const b of parsed.blocks) {
+    at.set(b.openFrom, {
+      kind: 'flag',
+      text: body.slice(b.openFrom, b.openTo),
+      name: b.name,
+      negated: b.negated,
     })
   }
-
-  const parts: PreviewPart[] = []
-  for (let at = body.indexOf(OPENING); at >= 0; at = body.indexOf(OPENING, at + 1)) {
-    const hit = recognised.get(at)
-    if (hit !== undefined) {
-      parts.push(hit)
-      // Skip past the span: a `{{` inside one belongs to it, not to a
-      // second opening.
-      at += hit.text.length - 1
-      continue
-    }
-    parts.push({ kind: 'unrecognised', text: unrecognisedText(body, at) })
+  // A problem takes the position it is about, REPLACING whatever the scan
+  // made of it: an author reading the line needs the refusal, not the
+  // classification that will never be used.
+  for (const d of parsed.diagnostics) {
+    at.set(d.from, { kind: 'problem', text: body.slice(d.from, d.to), detail: d.detail })
   }
-  return parts
+
+  return [...at.entries()].sort((a, z) => a[0] - z[0]).map(([, part]) => part)
 }

@@ -72,7 +72,7 @@ describe('the snippets palette provider', () => {
   })
 
   it('a body with ask fields does NOT fire from the row: the form asks first', async () => {
-    const h = harness([SNIP({ id: 'a', title: 'asks', body: 'ssh -p {{ask:port=22}} h' })])
+    const h = harness([SNIP({ id: 'a', title: 'asks', body: 'ssh -p {{port=22}} h' })])
     const items = await h.provider.getItems()
     items[0].run()
 
@@ -122,7 +122,7 @@ describe('the snippets palette provider', () => {
   })
 
   it('a body with fields is answered FIRST, for the destination the row chose', async () => {
-    const h = harness([SNIP({ id: 'a', title: 'T', body: 'run {{ask:host}}' })])
+    const h = harness([SNIP({ id: 'a', title: 'T', body: 'run {{host}}' })])
     const [row] = await h.provider.getItems()
     row.action?.run()
     await vi.waitFor(() => expect(h.onAsk).toHaveBeenCalled())

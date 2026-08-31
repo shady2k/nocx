@@ -1,5 +1,5 @@
 /**
- * The form a snippet's `{{ask:…}}` fields are answered in (design §10.1,
+ * The form a snippet's parameter fields are answered in (design §10.1,
  * owner review) — every field at once, in a kit Dialog, with the palette
  * closed behind it.
  *
@@ -22,7 +22,8 @@ import { Dialog } from '../ui/dialog'
 import { Stack } from '../ui/stack'
 import { StatusCard } from '../ui/status-card'
 import { TextField } from '../ui/text-field'
-import { askFields } from './resolve'
+import { visibleFields } from './resolve'
+import { parse } from './parse'
 import type { SnippetDestination } from './fire'
 import type { Snippet } from './snippets-store'
 
@@ -137,7 +138,10 @@ export function mountSnippetAskDialog(
 
   return {
     ask(s: Snippet, dest: SnippetDestination): void {
-      const fields = askFields(s.body)
+      // With no answers yet, a field inside a condition is not visible:
+      // the form opens on the ticks and what sits outside them (design §7
+      // step 2). Revealing the rest as a tick goes on is nocx-0ow2b.
+      const fields = visibleFields(parse(s.body), new Map())
       if (fields.length === 0) return
       setDestination(dest)
       setNames(fields.map((f) => f.name))

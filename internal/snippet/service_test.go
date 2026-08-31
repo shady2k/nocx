@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"regexp"
+	"strings"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/snippet"
@@ -174,7 +175,7 @@ func TestCreateUpdateListRoundTrip(t *testing.T) {
 }
 
 // TestSeedsFireInAnOrdinaryLocalPane is the rule the seeds' comment states,
-// as an assertion: a seed may use {{env:cwd}} and {{ask:…}} and nothing
+// as an assertion: a seed may use {{env:cwd}} and parameters, and nothing
 // else. The first pair used {{env:branch}} and {{env:host}} — null and
 // empty respectively in a plain local shell — so the two examples a new
 // user is handed both refused when they tried them (owner review). Nothing
@@ -193,7 +194,34 @@ func TestSeedsFireInAnOrdinaryLocalPane(t *testing.T) {
 		for _, m := range env.FindAllStringSubmatch(s.Body, -1) {
 			if m[1] != "cwd" {
 				t.Errorf("seed %q uses {{env:%s}}, which a local pane cannot answer; "+
-					"a seed may use {{env:cwd}} and {{ask:…}} only", s.Title, m[1])
+					"a seed may use {{env:cwd}} and parameters only", s.Title, m[1])
+			}
+		}
+	}
+}
+
+// TestSeedsUseNoRetiredSyntax guards the OTHER way a seed stops firing, and
+// it is the way that actually happened. The ask: namespace was retired when
+// a colon became what decides who owns a span (nocx-9xu1j): a question is
+// written {{port=8080}} now, and {{ask:port=8080}} is ordinary literal text.
+// The seeds were data, so no compiler and no type could notice — the second
+// seed went on shipping a body that inserts its own placeholders verbatim.
+//
+// Written as a ban on the retired spellings rather than as an expected body,
+// so it keeps its meaning when somebody rewrites a seed for a better reason.
+func TestSeedsUseNoRetiredSyntax(t *testing.T) {
+	svc := snippet.NewService(&memStore{existed: false}, counter())
+	seeded, err := svc.List()
+	if err != nil {
+		t.Fatalf("List: %v", err)
+	}
+	if len(seeded) == 0 {
+		t.Fatal("no seeds to check")
+	}
+	for _, s := range seeded {
+		for _, retired := range []string{"{{ask:", "{{env:host}}", "{{env:user}}", "{{env:branch}}"} {
+			if strings.Contains(s.Body, retired) {
+				t.Errorf("seed %q uses %s, which no longer fires", s.Title, retired)
 			}
 		}
 	}

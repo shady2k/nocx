@@ -130,9 +130,9 @@ type PendingSession struct {
 	// SessionID is the row's id — the same id `entries.session_id` names and
 	// the recording is keyed by.
 	SessionID string
-	// Since is when the session started, or when its recording did for a
-	// session with no row of its own. It is what the age bound reads and what
-	// the product shows: "not reachable since" is a fact with a date.
+	// Since is when this incarnation marked the session unreconciled at Open,
+	// not when the remote command started. It is what the age bound reads and
+	// what the product shows: "not reachable since" is a fact with a date.
 	Since time.Time
 	// Cause is why this is still unjudged. Never a verdict.
 	Cause UnreconciledCause
@@ -199,12 +199,12 @@ type SessionReconciler interface {
 	// behind. What it cannot bound is the `unknown` case: a host that never
 	// comes back would accumulate recordings forever.
 	//
-	// So a session still unreconciled `age` after it started has its recording
-	// and its row removed, WITHOUT being judged absent — the product says the
-	// host was never reachable again, never that the session ended. Deleting a
-	// recording is not deleting a block: the entry keeps its row and its
-	// anchor, and the next `Open` closes it with the other entries that name
-	// no session.
+	// So a session still unreconciled `age` after it was marked has its
+	// recording and its row removed, WITHOUT being judged absent — the product
+	// says the host was never reachable again, never that the session ended.
+	// The same transaction closes open entries as unknown (or interrupted for
+	// an ask), preserving each entry's pane anchor so forgetting the pending
+	// marker cannot make the block render as running.
 	//
 	// It returns how many sessions were bounded.
 	SweepStale(ctx context.Context, age time.Duration) (int, error)

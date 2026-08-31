@@ -15,6 +15,7 @@ import (
 	"context"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"testing"
 	"time"
 
@@ -56,6 +57,24 @@ func aLiveSessionsWork(t *testing.T, sessionID, entryID string) (string, []byte)
 		t.Fatalf("Close: %v", err)
 	}
 	return path, body
+}
+
+type retentionClock struct {
+	now time.Time
+}
+
+func (c *retentionClock) Now() time.Time {
+	return c.now
+}
+
+func reopenStoreWithClock(t *testing.T, path string, clock *retentionClock) (content.ContentDB, error) {
+	t.Helper()
+	return content.Open(context.Background(), content.Config{
+		Path:   path,
+		Key:    testKey(),
+		Budget: testBudget,
+		Clock:  clock.Now,
+	})
 }
 
 // assertTheWorkSurvived is the four things `Open` used to destroy, checked
@@ -354,63 +373,98 @@ func TestApplyingAbsentTwiceIsIdempotent(t *testing.T) {
 	}
 }
 
-// Assertion 10, the replacement bound: `dropDeadSessions` was the only bound
-// on session recordings, and removing it without replacing it is not an
-// acceptable intermediate state. A recording still unreconciled past the
-// retention age is removed — and doing so deletes neither its entry nor its
-// anchor.
-func TestTheRetentionAgeBoundsARecordingNobodyCouldJudge(t *testing.T) {
-	const sessionID = "session-on-a-host-that-never-came-back"
+// Assertion 10 and the retention regression: the mark is when this
+// incarnation became unable to reach the host, not when the remote command
+// started. An eight-day-old command that has been unreconciled for one second
+// is still inside the seven-day bound because the replacement just happened.
+func TestRetentionMeasuresFromCoordinatorReplacement(t *testing.T) {
+	const sessionID = "session-on-a-host-that-was-just-lost"
 	const entryID = "00000000-0000-7000-8000-00000000e007"
-	path, _ := aLiveSessionsWork(t, sessionID, entryID)
-	ctx := context.Background()
+	const sessionAge = 8 * 24 * time.Hour
+	const unreachableAge = time.Second
+	const retentionAge = 7 * 24 * time.Hour
+	now := time.UnixMilli(1_800_000_000_000)
 
-	again, err := reopenStore(t, path)
+	path, body := aLiveSessionsWork(t, sessionID, entryID)
+	if err := rawLedger(t, path, hex.EncodeToString(testKey()),
+		fmt.Sprintf("UPDATE sessions SET started_at = %d", now.Add(-sessionAge).UnixMilli())); err != nil {
+		t.Fatalf("age session: %v", err)
+	}
+
+	clock := &retentionClock{now: now.Add(-unreachableAge)}
+	again, err := reopenStoreWithClock(t, path, clock)
 	if err != nil {
 		t.Fatalf("reopen: %v", err)
 	}
 	defer func() { _ = again.Close() }()
-	rec := again.Reconcile()
 
-	// Nothing is old yet: a bound that took a recording made a minute ago
-	// would be deleting live work, not bounding dead work.
-	swept, err := rec.SweepStale(ctx, time.Hour)
+	clock.now = now
+	swept, err := again.Reconcile().SweepStale(context.Background(), retentionAge)
 	if err != nil {
 		t.Fatalf("SweepStale: %v", err)
 	}
 	if swept != 0 {
-		t.Fatalf("SweepStale(1h) removed %d recordings that are minutes old", swept)
+		t.Fatalf("SweepStale removed %d sessions after only %s unreconciled", swept, unreachableAge)
 	}
-	if got, readErr := again.SessionOutput().Read(ctx, sessionID); readErr != nil || len(got.Runs) == 0 {
-		t.Fatalf("recording gone before the age: %+v (err %v)", got, readErr)
+	pending, err := again.Reconcile().Pending(context.Background())
+	if err != nil {
+		t.Fatalf("Pending: %v", err)
+	}
+	if len(pending) != 1 || !pending[0].Since.Equal(now.Add(-unreachableAge)) {
+		t.Fatalf("pending = %+v, want one session marked at %s", pending, now.Add(-unreachableAge))
+	}
+	got, err := again.SessionOutput().Read(context.Background(), sessionID)
+	if err != nil || len(got.Runs) == 0 || string(got.Runs[0].Body) != string(body) {
+		t.Fatalf("recording after one-second outage = %+v (err %v), want the seeded bytes", got, err)
+	}
+}
+
+// The paired positive: once the mark itself is past the bound, the recording
+// is swept, and the block is closed in the same operation so it cannot render
+// as running after its session disappears.
+func TestRetentionSweepsSessionPastTheMarkAgeAndClosesEntry(t *testing.T) {
+	const sessionID = "session-on-a-host-that-never-came-back"
+	const entryID = "00000000-0000-7000-8000-00000000e008"
+	const retentionAge = 7 * 24 * time.Hour
+	now := time.UnixMilli(1_800_000_000_000)
+
+	path, _ := aLiveSessionsWork(t, sessionID, entryID)
+	if err := rawLedger(t, path, hex.EncodeToString(testKey()),
+		fmt.Sprintf("UPDATE sessions SET started_at = %d", now.Add(-8*24*time.Hour).UnixMilli())); err != nil {
+		t.Fatalf("age session: %v", err)
 	}
 
-	// An age of zero is "everything still unreconciled is past it", which is
-	// how the bound is exercised without waiting for one: a test may not
-	// depend on a duration, and the age is a parameter precisely so the
-	// passage of time is never the thing under test.
-	swept, err = rec.SweepStale(ctx, 0)
+	clock := &retentionClock{now: now.Add(-retentionAge - time.Second)}
+	again, err := reopenStoreWithClock(t, path, clock)
 	if err != nil {
-		t.Fatalf("SweepStale(0): %v", err)
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = again.Close() }()
+
+	clock.now = now
+	swept, err := again.Reconcile().SweepStale(context.Background(), retentionAge)
+	if err != nil {
+		t.Fatalf("SweepStale: %v", err)
 	}
 	if swept != 1 {
-		t.Fatalf("SweepStale(0) removed %d, want the one unreconciled recording", swept)
+		t.Fatalf("SweepStale removed %d sessions, want one past-mark session", swept)
 	}
-	if got, readErr := again.SessionOutput().Read(ctx, sessionID); readErr != nil || len(got.Runs) != 0 {
+	got, readErr := again.SessionOutput().Read(context.Background(), sessionID)
+	if readErr != nil || len(got.Runs) != 0 {
 		t.Fatalf("recording after the age bound = %+v (err %v), want nothing", got, readErr)
 	}
-
-	// The block is NOT deleted, and neither is its anchor: deleting a
-	// recording is not deleting a block.
-	e, err := again.Ledger().Entry(ctx, entryID)
+	e, err := again.Ledger().Entry(context.Background(), entryID)
 	if err != nil || e == nil {
 		t.Fatalf("Entry after the age bound: %v (nil=%v)", err, e == nil)
 	}
+	if e.Phase != content.PhaseClosed || e.Status != content.EntryUnknown {
+		t.Fatalf("entry after the age bound = %s/%s, want closed/unknown", e.Phase, e.Status)
+	}
+	if e.SessionID != nil {
+		t.Fatalf("session_id after the age bound = %v, want nil", e.SessionID)
+	}
 	if e.PaneID == nil || *e.PaneID != "pane-1" {
 		t.Fatalf("pane_id after the age bound = %v, want pane-1", e.PaneID)
-	}
-	if e.Intent != "make build" {
-		t.Fatalf("the entry was rewritten by the age bound: %+v", e)
 	}
 }
 

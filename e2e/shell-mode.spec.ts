@@ -1,4 +1,4 @@
-import { test, expect, resolveBackend } from './harness'
+import { appReadyForInput, test, expect, resolveBackend } from './harness'
 import { readStand } from './stand'
 import { spawn, execFileSync } from 'node:child_process'
 import { mkdirSync, writeFileSync, existsSync } from 'node:fs'
@@ -152,6 +152,7 @@ test('an SSH connection comes up integrated and its commands become blocks', asy
     trustHostKey(fixture)
 
     await page.goto('/')
+    await appReadyForInput(page)
     await expect(page.locator('.nocx-tab')).toHaveCount(1)
 
     // Read the backend port/token through the bindings (stubbed on the

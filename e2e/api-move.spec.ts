@@ -43,7 +43,13 @@ import { existsSync, mkdtempSync, readFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { bindEndpoint, collectionsDir, VaultBackend, type DisposableRoot } from './harness'
+import {
+  appReadyForInput,
+  bindEndpoint,
+  collectionsDir,
+  VaultBackend,
+  type DisposableRoot,
+} from './harness'
 import { readStand } from './stand'
 
 const test = base
@@ -103,6 +109,7 @@ test.describe('a request can be moved into a folder, and stays open', () => {
     await bindEndpoint(page, ep)
     await page.goto('/')
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 15_000 })
+    await appReadyForInput(page)
 
     await page.locator('.activity-bar button[data-action="api"]').click()
     const workbench = page.locator('.api-workbench')

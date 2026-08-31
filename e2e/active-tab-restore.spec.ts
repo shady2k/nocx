@@ -22,6 +22,7 @@ import { mkdtempSync, readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  appReadyForInput,
   VaultBackend,
   bindEndpoint,
   documentDir,
@@ -115,6 +116,7 @@ test.describe('the window reopens on the tab you left (nocx-mqie.5)', () => {
     const ep2 = await backend.restart()
     await bindEndpoint(page, ep2)
     await page.reload()
+    await appReadyForInput(page)
 
     await expect(page.locator(TAB)).toHaveCount(2, { timeout: 90_000 })
     await expect(page.locator(TAB).nth(1)).toHaveAttribute('aria-selected', 'true')

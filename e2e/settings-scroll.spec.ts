@@ -1,4 +1,4 @@
-import { test, expect, settingsReady, type Page } from './harness'
+import { appReadyForInput, test, expect, settingsReady, type Page } from './harness'
 
 // nocx-82l9.2: SettingsContent.mount appended an unclassed <div> into .pane, so
 // flex:1 on .ui-page__scroll never received a bounded block size and the pane
@@ -18,6 +18,7 @@ const BACKUP_SECTION = '.ui-grouped-nav__item[data-item="backup"]'
 async function openOverflowingSection(page: Page): Promise<void> {
   await page.goto('/')
   await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+  await appReadyForInput(page)
   await page.keyboard.press('Meta+,')
   await settingsReady(page)
   await page.locator(`${BACKUP_SECTION} button`).click()

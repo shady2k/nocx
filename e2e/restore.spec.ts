@@ -22,6 +22,7 @@ import { mkdtempSync } from 'node:fs'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import {
+  appReadyForInput,
   VaultBackend,
   bindEndpoint,
   promptReady,
@@ -153,6 +154,7 @@ test.describe('the application opens on what you left (nocx-l21ib)', () => {
     const ep1 = await backend.start()
     await bindEndpoint(page, ep1)
     await page.goto('/')
+    await appReadyForInput(page)
 
     // Two tabs, each having printed something only it printed. Two rather
     // than one because a restore that put every block in every pane would
@@ -172,6 +174,7 @@ test.describe('the application opens on what you left (nocx-l21ib)', () => {
     const ep2 = await backend.restart()
     await bindEndpoint(page, ep2)
     await page.reload()
+    await appReadyForInput(page)
 
     await expect(page.locator(TAB)).toHaveCount(2, { timeout: 90_000 })
 
@@ -208,6 +211,7 @@ test.describe('the application opens on what you left (nocx-l21ib)', () => {
     const ep1 = await backend.start()
     await bindEndpoint(page, ep1)
     await page.goto('/')
+    await appReadyForInput(page)
 
     await run(page, 'echo BOUNDARY-ALT-SCREEN')
     await stored(page, ep1, 'echo BOUNDARY-ALT-SCREEN')
@@ -215,6 +219,7 @@ test.describe('the application opens on what you left (nocx-l21ib)', () => {
     const ep2 = await backend.restart()
     await bindEndpoint(page, ep2)
     await page.reload()
+    await appReadyForInput(page)
 
     await expect(page.locator(TAB)).toHaveCount(1, { timeout: 90_000 })
     await expect(page.locator(`.pane.active ${BOUNDARY}`)).toBeVisible({ timeout: 60_000 })
@@ -245,6 +250,7 @@ test.describe('the application opens on what you left (nocx-l21ib)', () => {
     const ep1 = await backend.start()
     await bindEndpoint(page, ep1)
     await page.goto('/')
+    await appReadyForInput(page)
 
     await run(page, 'echo BEFORE-THE-CLEAN-START')
     await page.locator(NEW_TAB).click()
@@ -265,6 +271,7 @@ test.describe('the application opens on what you left (nocx-l21ib)', () => {
     const ep2 = await backend.restart()
     await bindEndpoint(page, ep2)
     await page.reload()
+    await appReadyForInput(page)
 
     // One tab, nothing restored, and no boundary — a clean start says
     // nothing about a previous session because it is not showing one.

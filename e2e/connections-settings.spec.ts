@@ -7,7 +7,7 @@
  * registration). Without it the Connect button dispatches a no-op and the
  * tab assertion fails.
  */
-import { test, expect, settingsReady, type Page } from './harness'
+import { appReadyForInput, test, expect, settingsReady, type Page } from './harness'
 
 const PROFILE_NAME = 'Test SSH'
 
@@ -56,6 +56,7 @@ test.describe('Connections inside Settings', () => {
     // spent the test's whole budget describing a page that was never going to
     // change. The body already waits; the hook did not.
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await appReadyForInput(page)
     await page.keyboard.press('Meta+,')
     await page.locator('.ui-grouped-nav__item[data-item="connections"]').click()
     // Wait for the list before reading it: count() is a one-shot read with no
@@ -72,6 +73,7 @@ test.describe('Connections inside Settings', () => {
     await page.goto('/')
     // Wait for the app to load.
     await expect(page.locator('.nocx-tab-title').first()).not.toHaveText('', { timeout: 10_000 })
+    await appReadyForInput(page)
 
     // Open Settings via keyboard shortcut (Meta+,).
     await page.keyboard.press('Meta+,')

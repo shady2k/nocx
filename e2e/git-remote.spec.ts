@@ -45,7 +45,7 @@
 // Timing: every wait is on an observable state change — a row appearing, a
 // badge appearing, a marker file existing. There is no waitForTimeout in
 // this file.
-import { test, expect, resolveBackend } from './harness'
+import { appReadyForInput, test, expect, resolveBackend } from './harness'
 import { execFileSync, spawn } from 'node:child_process'
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
@@ -265,6 +265,7 @@ test('a commit from the panel, on a remote host, through its own pre-commit hook
 
     await page.goto('/')
     await expect(page.locator(TAB)).toHaveCount(1)
+    await appReadyForInput(page)
 
     // Read the backend port/token through the bindings (stubbed on the
     // headless path, real under wails dev) — the same seam shell-mode uses.

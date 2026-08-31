@@ -48,7 +48,7 @@
 import { mkdirSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 
-import { test, expect, resolveBackend, type Page } from './harness'
+import { appReadyForInput, test, expect, resolveBackend, type Page } from './harness'
 import { startFaultProxy, type FaultProxy } from './fault-proxy'
 import { startSshd, rpc, type SshdFixture } from './sshd-fixture'
 import { readStand } from './stand'
@@ -153,6 +153,7 @@ async function wire(page: Page, home: string): Promise<Wired> {
   trustHostKey(knownHostsFor(fixture, proxy.port))
 
   await page.goto('/')
+  await appReadyForInput(page)
   await expect(page.locator(TAB)).toHaveCount(1)
 
   const endpoint = await resolveBackend(page)

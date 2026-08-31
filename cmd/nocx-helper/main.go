@@ -53,7 +53,7 @@ func main() {
 	sessions := session.New(session.Options{
 		Generation: proto.GenerationID(contentHash),
 		Spawner:    session.NewLocalSpawner(log, session.Shell{}),
-		Inspector:  session.NewProcFS(),
+		Inspector:  session.NewInspector(),
 		Log:        log,
 		Limits:     session.DefaultLimits(),
 	})

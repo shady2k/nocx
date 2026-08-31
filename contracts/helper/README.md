@@ -101,3 +101,37 @@ schema rather than left to a reviewer:
 
 Also here now: `workspaceId`, D15's reservation, in `spawn`, in `sessions` and in every
 entry. It is unused by this generation and **required to stay**.
+
+## What changed with `nocx-k6p18.10`, and why it could still change
+
+One field: `observation.unavailable`, required, a closed set of the diagnostic names
+`observation` itself carries.
+
+It is a **shape change to a frozen `$def`**, and the freeze is what makes that worth
+spelling out rather than quietly doing. Nothing is deployed: no generation of this helper
+has shipped, so there is no peer months old holding a session against the old shape, and
+this is still inside the window `nocx-k6p18.3` named when it froze `sessions` and `spawn`
+("the last moment it could be"). After the first published generation the same change is
+not available — `additionalProperties: false` means an older reader REJECTS a payload
+carrying a field it does not know, so a field added later is a break rather than an
+extension.
+
+The defect it closes is one the freeze itself created. Every optional field in
+`observation` is omitted when empty, so a diagnostic the OS could not answer arrived as
+nothing at all — the same bytes as an inspector with nothing to add. A reader with nothing
+falls back to `launch.cwd`, which was true once and goes stale the moment the user `cd`s,
+and it then shows the directory a shell STARTED in as though it were where the shell is.
+That is a stale value carrying the authority of a launch record, which is the one thing
+splitting `launch` from `observed` exists to prevent — arriving by the back door.
+
+macOS is where it bit, and it is the platform nocx ships on first. There is no `/proc`;
+`proc_pidinfo(PROC_PIDVNODEPATHINFO)` is the only route to another process's working
+directory and it needs cgo, which the helper's size argument refuses. So the darwin
+inspector answers `argv` and the foreground command through `sysctl` — cgo-free, through a
+dependency the helper already linked — and reports `["cwd"]` here. `observed` is not null
+there any more: the platform has evidence, it just does not have all of it, and those are
+different answers.
+
+The rule the field states is per-OBSERVATION and not per-platform: a `/proc/<pid>/cwd` read
+that was refused is named the same way a platform that cannot answer at all is. The
+reader's problem is identical and the reason is not its business.

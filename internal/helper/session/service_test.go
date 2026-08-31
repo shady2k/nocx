@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 
@@ -966,5 +967,90 @@ func (lyingInspector) Observe(int, int) *proto.Observation {
 		Source: "a-test-that-contradicts-the-launch-record",
 		Cwd:    "/somewhere/else",
 		Argv:   []string{"/usr/bin/not-what-was-launched"},
+	}
+}
+
+// TestAPlatformThatCannotObserveTheCwdSaysSoRatherThanLeavingItBlank is
+// nocx-k6p18.10 asserted through the seam a coordinator actually reads: the
+// inventory result, marshalled by the real encoder.
+//
+// macOS answers argv and the foreground command through sysctl and cannot
+// answer cwd at all. Before this, that arrived as an observation with no `cwd`
+// key — indistinguishable from an inspector that simply had nothing to add, so
+// a tab showing a working directory fell back to launch.cwd and showed the
+// directory the shell STARTED in, silently, forever. The two payloads below
+// are what a reader has to be able to tell apart, and they are compared as
+// bytes so no decoder can conflate them by accident.
+func TestAPlatformThatCannotObserveTheCwdSaysSoRatherThanLeavingItBlank(t *testing.T) {
+	inventory := func(insp session.Inspector) []byte {
+		t.Helper()
+		svc := session.New(session.Options{
+			Generation: "gen-under-test",
+			Spawner:    &fakeSpawner{},
+			Log:        discardLog(),
+			Inspector:  insp,
+		})
+		t.Cleanup(svc.Close)
+		t.Cleanup(svc.Bind(newSink()))
+		spawnOne(t, svc)
+		res, err := svc.Call(context.Background(), proto.OpSessions, mustJSON(t, proto.SessionsParams{}))
+		if err != nil {
+			t.Fatalf("sessions: %v", err)
+		}
+		raw, err := json.Marshal(res)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		return raw
+	}
+
+	blind := inventory(cwdBlindInspector{})
+	seeing := inventory(cwdSeeingInspector{})
+
+	if !strings.Contains(string(blind), `"unavailable":["cwd"]`) {
+		t.Errorf("an inspector that cannot observe the cwd does not say so:\n%s", blind)
+	}
+	if strings.Contains(string(blind), `"cwd":"/observed`) {
+		t.Errorf("a cwd was reported by an inspector that cannot observe one:\n%s", blind)
+	}
+	// The LAUNCH record is untouched by any of this — it is the authority and
+	// it is still there. What changed is that a reader can now tell that the
+	// launch value is all it has, instead of reading it as current.
+	if !strings.Contains(string(blind), `"launch":`) {
+		t.Errorf("the launch record went missing:\n%s", blind)
+	}
+	if !strings.Contains(string(seeing), `"cwd":"/observed/right/now"`) {
+		t.Errorf("an inspector that CAN observe the cwd did not report it:\n%s", seeing)
+	}
+	if !strings.Contains(string(seeing), `"unavailable":[]`) {
+		t.Errorf("an inspector that answered everything did not say so:\n%s", seeing)
+	}
+	if string(blind) == string(seeing) {
+		t.Fatal("'we do not know where the shell is' and 'the shell is in /observed/right/now' are the same bytes")
+	}
+}
+
+// cwdBlindInspector answers the way macOS's sysctl inspector does: the
+// diagnostics sysctl carries, and cwd named as unanswerable.
+type cwdBlindInspector struct{}
+
+func (cwdBlindInspector) Observe(int, int) *proto.Observation {
+	return &proto.Observation{
+		Source:      "sysctl",
+		Argv:        []string{"-zsh"},
+		Unavailable: []proto.Diagnostic{proto.DiagnosticCwd},
+	}
+}
+
+// cwdSeeingInspector answers the way procfs does on an ordinary Linux box:
+// everything asked for, and an empty unavailable list saying so.
+type cwdSeeingInspector struct{}
+
+func (cwdSeeingInspector) Observe(int, int) *proto.Observation {
+	return &proto.Observation{
+		Source:      "procfs",
+		Cwd:         "/observed/right/now",
+		Argv:        []string{"-zsh"},
+		Unavailable: []proto.Diagnostic{},
 	}
 }

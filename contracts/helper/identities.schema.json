@@ -41,10 +41,10 @@
       "description": "What the OS says about the process NOW. EVIDENCE, never authority: every fact here can be wrong in a way the launch record cannot. It is null — never an empty object, and never an omitted field — when the OS could not be asked, which is the ordinary answer on an entire platform: macOS has no /proc, so an empty record there would decode as 'we looked and this process has no working directory'.",
       "type": ["object", "null"],
       "additionalProperties": false,
-      "required": ["source"],
+      "required": ["source", "unavailable"],
       "properties": {
         "source": {
-          "description": "Where the evidence came from — 'procfs' today. Evidence that cannot say where it came from cannot be weighed against a launch record it contradicts.",
+          "description": "Where the evidence came from — 'procfs' on Linux, 'sysctl' on macOS. Evidence that cannot say where it came from cannot be weighed against a launch record it contradicts, and the two sources answer different subsets: see `unavailable`.",
           "type": "string",
           "minLength": 1
         },
@@ -62,7 +62,13 @@
           "type": "integer",
           "minimum": 0
         },
-        "foregroundCommand": { "type": "string" }
+        "foregroundCommand": { "type": "string" },
+        "unavailable": {
+          "description": "Every diagnostic above that this inspector was asked for and could NOT supply. Always present — [] when everything asked for was answered — because a missing diagnostic and a stale one must not look alike. Every other field here is omitted when empty, so a diagnostic the OS could not answer arrives as nothing at all, and a reader with nothing falls back to the LAUNCH record: a value that was true once and goes stale the moment the user cds. That is a stale value presented as a current observation, which is exactly the lie the authority/evidence split exists to prevent, arriving by the back door. macOS is where it bites and why this field exists: there is no /proc, and the only route to another process's working directory is proc_pidinfo(PROC_PIDVNODEPATHINFO) in libproc, which needs cgo — refused by the helper's size argument — so the shipped platform answers argv and the foreground command through sysctl and reports ['cwd'] here. The rule is per-OBSERVATION and not per-platform: a /proc read that was refused is named the same way, because the reader's problem is identical and the reason is not its business. The vocabulary is closed so a reader can switch on it exhaustively; a free-form string would let a later generation invent a name nothing understands, which is the defect additionalProperties:false refuses one level up.",
+          "type": "array",
+          "uniqueItems": true,
+          "items": { "type": "string", "enum": ["cwd", "argv", "foregroundCommand"] }
+        }
       }
     },
     "windowSpan": {

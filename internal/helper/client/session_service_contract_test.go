@@ -36,7 +36,7 @@ func hostedSessions(t *testing.T) *client.Client {
 	svc := session.New(session.Options{
 		Generation: "testhash",
 		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: "/bin/sh"}),
-		Inspector:  session.NewProcFS(),
+		Inspector:  session.NewInspector(),
 		Log:        log,
 		Limits:     session.DefaultLimits(),
 	})

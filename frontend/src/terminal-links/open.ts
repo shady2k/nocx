@@ -21,10 +21,14 @@
 // ═══════════════════════════════════════════════════════════════════════════
 
 import type { FilesOpenResult } from '../generated/files.open'
+import type { FilesRevealHint } from '../files/files-store'
 import type { ActiveOrigin } from '../pane-content'
 import type { FileViewerTarget } from '../file-viewer'
 import type { LinkTarget } from './detect'
 import { resolvePath } from './resolve'
+
+export type LinkPathProbe =
+  { kind: 'directory'; hint?: FilesRevealHint } | { kind: 'file' } | { kind: 'unknown' }
 
 /** The opener's entire window onto the app. */
 // Every member is declared as a PROPERTY holding a function, never as a
@@ -37,6 +41,16 @@ export interface LinkOpenDeps {
   /** files.open for one session — the binding every later files.* call
    *  echoes. `rootPath` is the panel's starting directory, not a sandbox. */
   readonly openBinding: (sessionId: string, rootPath?: string) => Promise<FilesOpenResult>
+  /** Classify a path from the existing files.list entry metadata, without
+   *  changing the Files panel. */
+  readonly pathKind: (bindingId: string, path: string) => Promise<LinkPathProbe>
+  /** Reveal a directory through the existing Files panel. Resolves true
+   *  when the panel's store reaches an expandable directory, false when the
+   *  path is a regular file or cannot be reached. */
+  readonly openDirectory: (
+    path: string,
+    probe: Extract<LinkPathProbe, { kind: 'directory' }>,
+  ) => Promise<boolean>
   /** Open (or focus) the file-viewer tab for one file. */
   readonly openViewer: (target: FileViewerTarget & { line?: number }) => void
   /** Tell the user why nothing opened. */
@@ -125,6 +139,22 @@ export function createLinkOpener(deps: LinkOpenDeps): LinkOpener {
       return
     }
     const absolute = resolved.absolute
+    let probe: LinkPathProbe = { kind: 'unknown' }
+    try {
+      probe = await deps.pathKind(binding.bindingId, absolute)
+    } catch {
+      // An unavailable classification is not proof that the path is a file.
+      // Preserve the existing file-opening path without touching the panel.
+    }
+    if (probe.kind === 'directory') {
+      try {
+        if (await deps.openDirectory(absolute, probe)) return
+      } catch {
+        // A failed reveal is not proof that the path is a file. Preserve the
+        // existing file-opening path when the Files panel is unavailable.
+      }
+    }
+
     deps.openViewer({
       bindingId: binding.bindingId,
       endpointId: binding.endpointId,

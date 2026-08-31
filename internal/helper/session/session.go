@@ -159,12 +159,12 @@ type hostSession struct {
 	stopped     bool
 }
 
-// pump moves bytes from the PTY into the window and nowhere else. It is the
-// sole reader of the fd (D7: only the process holding the fd can say what was
-// produced while nobody was listening) and it never interprets a byte — it
-// reads them to MOVE them (AD-6).
-//
-// It ends when the PTY's read ends, which is what an exiting shell produces.
+// pump moves bytes from the PTY into the window and nowhere else. Its interval
+// starts before each proc.Read and ends after that read's bytes reach win.write
+// (or win.close on EOF); throughout it MUST NOT take s.mu. write holds s.mu
+// from lease validation until proc.Write returns, so making pump contend on
+// that mutex would deadlock a blocked PTY write before the pump can drain it.
+// It never interprets a byte — it reads them to MOVE them (AD-6).
 func (s *hostSession) pump() {
 	buf := make([]byte, pageSize)
 	for {
@@ -535,8 +535,10 @@ func (s *hostSession) releaseConnection(sink Sink) {
 
 // write applies one inbound data frame to the PTY, if and only if it comes
 // from the current holder of the write capability at the current lease epoch
-// and from the connection that owns that attachment. Validation and the PTY
-// write share s.mu, so a lease transition cannot complete between them.
+// and from the connection that owns that attachment. It holds s.mu from
+// validation through the return of s.proc.Write; lease transitions wait for
+// that interval to end, and pump MUST NOT acquire s.mu during its own
+// proc.Read-to-window-write interval.
 func (s *hostSession) write(sink Sink, f proto.SessionFrame) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()

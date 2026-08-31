@@ -98,6 +98,9 @@ func containsEffect(effects []Effect, want Effect) bool {
 }
 
 func WorstEffect(effects []Effect) Effect {
+	if len(effects) == 0 {
+		return ""
+	}
 	worst := effects[0]
 	for _, candidate := range effects[1:] {
 		if effectOrder(candidate) > effectOrder(worst) {

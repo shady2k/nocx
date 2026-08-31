@@ -95,6 +95,12 @@ func TestResourceReportEffectPluralUnknownTakesWorstMember(t *testing.T) {
 	}
 }
 
+func TestWorstEffect_EmptySetIsUnclassified(t *testing.T) {
+	if got := WorstEffect(nil); got != "" {
+		t.Fatalf("WorstEffect(nil) = %q, want empty effect", got)
+	}
+}
+
 func TestUnresolvedResourceRequiresHumanReason(t *testing.T) {
 	report := ResourceReport{Unresolved: []UnresolvedResource{{
 		Path: "$BUILD", Verb: ResourceDelete, Reason: "could not resolve $BUILD without executing the shell",

@@ -218,34 +218,57 @@ stream when nobody did.
 `Produced` already measures the hole — "including what was dropped … what makes a hole
 measurable rather than invisible" — so nothing parallel is invented.
 
-### D7 — The exit code must still be able to land, and removing the forced close is not enough
+### D7 — The exit code comes back from the bytes, and a Lost domain is never revived
 
-Found by codex and not by me: dropping `phase='closed'` is necessary and insufficient. Today a
-lifecycle transport loss makes the domain `Lost` and its open attempts `unknown`
-(`docs/lifecycle-protocol.md`), so nothing would ever deliver the real exit status to the row
-we kept open. One `UPDATE` cannot supply an authority that does not exist.
+**Rewritten the same day it was written, after the owner asked the obvious question — "the
+helper writes the bytes anyway, where is the problem?" — and there was no good answer. The
+withdrawn version is recorded below, because it was wrong in a way that is easy to be wrong
+in again.**
 
-**Chosen: authenticated snapshot recovery, with the helper owning continuity and not the
-kernel.** The helper retains, in memory, for the PTY's lifetime: the lifecycle rendezvous, the
-epoch/capability material needed to authenticate a recovery, the session association, and
-enough sequence state to reject a stale one. A replacing coordinator sends a `refresh_request`
-through that rendezvous and rebuilds its kernel from the shell's authenticated
-`active_attempt`, `last_completed` and `next_seq` — a shape `docs/lifecycle-protocol.md`
-already defines.
+Dropping `phase='closed'` is necessary. What it needs beside it is much less than this
+document first claimed.
 
-Rejected, with reasons:
+**Block boundaries and exit status travel IN THE BYTE STREAM, as OSC 133, and the backend
+never parses them** — AD-6 and ADR-0001 put that parsing frontend-side, in xterm.js. The
+helper writes bytes into its window whether or not a coordinator is attached (D1). So a
+replacing coordinator replays the window, its frontend re-parses the same OSC 133 it would
+have parsed live, and the block boundaries and exit codes come back on their own. No
+mechanism is required to carry them.
 
-- **Move the lifecycle kernel into the helper.** Imports block and attempt POLICY into the
-  execution host, against D3 and against the size argument behind it.
-- **A durable event journal on the host.** A second ledger, with its own retention, replay,
-  migration and generation-handoff problems — for a question a snapshot answers.
+**And the lifecycle domain is not meant to come back.** `docs/lifecycle-protocol.md:424`
+describes this exact case in its own words — "The channel dies, the pty lives" — and :438
+says the domain stays permanently `Lost`, any future integration being a fresh one, while
+:460's transition table "can never revive a `DomainLost`". Reattaching therefore
+establishes a FRESH domain with a new epoch, which is what the protocol already prescribes.
 
-**The invariant this freezes, and it must be stated because the snapshot is only sufficient
-under it: no new top-level command may begin while no writer is attached.** One command may
-finish during the absence; the shell then waits at its prompt, which `active_attempt` plus
-`last_completed` fully describes. If autonomous submission with no coordinator present is ever
-wanted, a single snapshot stops being enough and the journal becomes unavoidable. That is a
-product decision, taken here, deliberately.
+So what is owed here is small: on reattach, a fresh lifecycle domain; an entry kept open
+across the replacement takes its real outcome from the replayed bytes rather than being
+stamped `unknown` or left open forever; and where the outcome fell outside the window, it
+is genuinely unknown and D1's gap is the honest report. Nothing else.
+
+**The withdrawn version, and the two things that killed it.** It specified _authenticated
+snapshot recovery_: the helper retains the lifecycle rendezvous, epoch material and
+sequence state, and a replacing coordinator sends a `refresh_request` and rebuilds its
+kernel from `active_attempt`, `last_completed` and `next_seq`.
+
+1. **The helper has no lifecycle involvement and must not gain any.** The lifecycle
+   transport is coordinator-to-shell: nocx establishes it and the shell's bootstrap
+   connects. `internal/helper/session/` mentions lifecycle nowhere, correctly, because D3
+   says the helper never owns blocks, the ledger or product policy. "The helper retains the
+   rendezvous" asked for something the helper never had.
+2. **It was trying to revive a `Lost` domain**, which the document it cited forbids.
+
+The invariant this document froze — _no new top-level command may begin while no writer is
+attached_ — goes with it. It was introduced to make a single snapshot sufficient, and an
+adversarial reading then showed it is not enforceable by gating PTY writes anyway, since a
+writer can queue two newline-terminated commands before detaching. Both objections dissolve
+once the completions are understood to be in the bytes. **A bounded in-memory journal was
+considered as the repair and is also not needed**; it is recorded here so it is not proposed
+a third time.
+
+**What does NOT dissolve, and is tracked separately:** "the host session exists" is not "the
+command is running" (`nocx-k6p18.18`), and the helper's exit status is the SHELL PROCESS's,
+which is not an attempt's authenticated completion.
 
 ### D8 — Many readers, one writer, and the identities are frozen now
 

@@ -80,23 +80,10 @@ type historyStatusResponse struct {
 	Available bool    `json:"available"`
 	Reason    *string `json:"reason"`
 	Detail    *string `json:"detail"`
-	// Discarded is how many commands the store threw away when it opened,
-	// because the file was written by a different schema — null when nothing
-	// was, which is every ordinary start (nocx-rtg0.19).
-	//
-	// IT IS NOT A DEGRADE, and that is why it rides beside `available`
-	// rather than as a reason for it: history IS running, and it is empty
-	// because the format changed under it. Saying that with `available:
-	// false` would claim the feature is off; saying it only in a log is the
-	// silent degrade AGENTS.md forbids, and the one that hurts most, because
-	// the honest symptom — an empty history — is indistinguishable from a
-	// fresh install.
-	Discarded *int `json:"discarded"`
 	// DetachedOutput is what happens to a session's output while no client
-	// is attached (nocx-22k1c.1). It rides here, beside `available`, for the
-	// reason `discarded` does: it is not a degrade OF durable history, it is
-	// a CONSEQUENCE of the History switches that the settings below do not
-	// otherwise state.
+	// is attached (nocx-22k1c.1). It rides here, beside `available`, because
+	// it is not a degrade OF durable history, it is a CONSEQUENCE of the
+	// History switches that the settings below do not otherwise state.
 	//
 	// And it has to be stated. With no recorder there is no consumer for the
 	// replay ring, so a session whose window is closed throttles once the
@@ -129,11 +116,6 @@ type HistoryStatus struct {
 	available bool
 	reason    HistoryDegradeReason
 	detail    string
-	// discarded is a ONE-SHOT FACT, not an episode: the store rebuilt itself
-	// at open and this many commands went with the old shape. It has no
-	// closing event because there is nothing to close — it happened once, on
-	// this start, and the next start either repeats it or does not.
-	discarded *int
 	listeners []func()
 }
 
@@ -146,28 +128,28 @@ func NewHistoryStatus() *HistoryStatus {
 	return &HistoryStatus{available: true}
 }
 
-// Discarded records that the store rebuilt itself at open and how many
-// commands that cost. It was called once, from the composition root, before
-// the transport starts — so no listener has to fire and no episode opens.
+// THE ONE-SHOT FACT THAT USED TO LIVE HERE (nocx-lmb6v.4). Discarded(rows)
+// recorded that the store had REBUILT itself at open and how many commands
+// that cost, and it fed a `discarded` field on the wire and the renderer's
+// historyDiscardSentence. The store does not rebuild a file for a version
+// difference at all any more (nocx-lmb6v.1): it migrates one it has a step
+// for and refuses one it does not, and a refusal speaks through
+// HistoryDegradeOpenFailed like every other reason Open can fail, carrying
+// the refusal's own words — which name the version to update to — as the
+// detail. So the whole chain had no producer left and is gone rather than
+// left declaring a value no start can send.
 //
-// A count of -1 means the file held nothing this build could count, which is
-// still a discard worth stating: something was there and is not now.
+// A refused database and a discarded one are DIFFERENT FACTS and must not
+// share a sentence: a refusal means durable history is not running and the
+// rows are still on disk, a discard meant it was running and started from
+// nothing. That is why the removal did not fold the discard's words into the
+// refusal's — the refusal already has its own, through `available` and
+// `reason` above.
 //
-// NOTHING CALLS IT ANY MORE, and the sentence it feeds can no longer appear
-// (nocx-lmb6v.1). The store does not rebuild a file for a version difference
-// at all: it migrates one it has a step for and refuses one it does not, and
-// a refusal speaks through HistoryDegradeOpenFailed like every other reason
-// Open can fail. This method, the `discarded` field on the wire, and the
-// renderer's historyDiscardSentence are the whole of a surface with no
-// producer left; removing them is a wire-contract change and is deliberately
-// not folded into the migration bead. The deadcode ratchet cannot see it —
-// RTA treats a method on a type a live interface can hold as reachable
-// (AGENTS.md) — so it is written down here instead.
-func (h *HistoryStatus) Discarded(rows int) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	h.discarded = &rows
-}
+// Written down because the deadcode ratchet could never have caught it: RTA
+// treats a method on a type a live interface can hold as reachable
+// (AGENTS.md), so the orphan was invisible to the gate for as long as it
+// existed.
 
 // ClearReason closes an episode ONLY if it is the one named, and returns
 // whether it closed anything.
@@ -281,10 +263,6 @@ func (h *HistoryStatus) snapshot() historyStatusResponse {
 	if h.detail != "" {
 		detail := h.detail
 		out.Detail = &detail
-	}
-	if h.discarded != nil {
-		n := *h.discarded
-		out.Discarded = &n
 	}
 	return out
 }

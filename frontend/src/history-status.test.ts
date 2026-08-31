@@ -14,7 +14,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest'
 import {
   HistoryStatusStore,
   detachedOutputSentence,
-  historyDiscardSentence,
   historyUnavailableSentence,
   HISTORY_UNAVAILABLE_RECALL_TITLE,
 } from './history-status'
@@ -76,17 +75,16 @@ function fakeClient(initial: HistoryStatus | Error): FakeClient {
 }
 
 /** THE factory for a status in these tests. One, because a literal here is a
- *  promise that ages badly: HistoryStatus gains fields as the product learns
- *  new things to say about durable history — `discarded` was the first — and
- *  every literal keeps compiling with whatever the old shape had, so the test
- *  goes on passing over a status the backend no longer sends. A caller names
- *  only what its assertion is about. */
+ *  promise that ages badly: HistoryStatus gains and loses fields as the
+ *  product learns new things to say about durable history — `discarded` came
+ *  and went — and every literal keeps compiling with whatever the old shape
+ *  had, so the test goes on passing over a status the backend no longer
+ *  sends. A caller names only what its assertion is about. */
 function aStatus(over: Partial<HistoryStatus> = {}): HistoryStatus {
   return {
     available: true,
     reason: null,
     detail: null,
-    discarded: null,
     detachedOutput: { recorded: true, reason: null },
     ...over,
   }
@@ -466,49 +464,6 @@ describe('Settings → History says when durable history is not running', () => 
   })
 })
 
-// ── the discard: a working feature that starts from nothing (nocx-rtg0.19) ──
-
-describe('historyDiscardSentence', () => {
-  it('says nothing when nothing was discarded, which is every ordinary start', () => {
-    // A notice on every start is a notice nobody reads by the third one.
-    expect(historyDiscardSentence(aStatus())).toBeNull()
-    expect(historyDiscardSentence(null)).toBeNull()
-  })
-
-  it('names the number, because an empty history looks like a fresh install', () => {
-    const s = historyDiscardSentence(aStatus({ discarded: 42 }))
-    expect(s).not.toBeNull()
-    expect(s!.description).toContain('42 commands')
-  })
-
-  it('says one command in the singular', () => {
-    expect(historyDiscardSentence(aStatus({ discarded: 1 }))!.description).toContain('1 command')
-    expect(historyDiscardSentence(aStatus({ discarded: 1 }))!.description).not.toContain(
-      '1 commands',
-    )
-  })
-
-  it('still says it happened when the store could not count', () => {
-    // -1 is "there was something and I could not count it". Silence would be
-    // the one answer that is wrong: the rows are gone either way.
-    const s = historyDiscardSentence(aStatus({ discarded: -1 }))
-    expect(s).not.toBeNull()
-    expect(s!.description).not.toContain('-1')
-  })
-
-  it('is a DIFFERENT fact from the unavailable notice, and both can be true', () => {
-    // Folding them together would make the settings read as ungoverned when
-    // they govern perfectly: history is running, it just starts empty.
-    const running = aStatus({ discarded: 3 })
-    expect(historyUnavailableSentence(running)).toBeNull()
-    expect(historyDiscardSentence(running)).not.toBeNull()
-
-    const down = aStatus({ available: false, reason: 'noKey', discarded: 3 })
-    expect(historyUnavailableSentence(down)).not.toBeNull()
-    expect(historyDiscardSentence(down)).not.toBeNull()
-  })
-})
-
 // The runtime degrade (nocx-rtg0.10) — the only reason that ends without a
 // restart, and the sentence says so.
 describe('historyUnavailableSentence for a refusing store', () => {
@@ -560,21 +515,18 @@ describe('detachedOutputSentence', () => {
     expect(s!.description).not.toContain('History is turned off')
   })
 
-  it('is a DIFFERENT fact from the two notices beside it, and all three can be true', () => {
+  it('is a DIFFERENT fact from the notice beside it, and both can be true', () => {
     const down = aStatus({
       available: false,
       reason: 'noKey',
-      discarded: 3,
       detachedOutput: { recorded: false, reason: 'historyOff' },
     })
     expect(historyUnavailableSentence(down)).not.toBeNull()
-    expect(historyDiscardSentence(down)).not.toBeNull()
     expect(detachedOutputSentence(down)).not.toBeNull()
 
-    // And a perfectly healthy store still says nothing about any of them.
+    // And a perfectly healthy store still says nothing about either.
     const fine = aStatus()
     expect(historyUnavailableSentence(fine)).toBeNull()
-    expect(historyDiscardSentence(fine)).toBeNull()
     expect(detachedOutputSentence(fine)).toBeNull()
   })
 })

@@ -99,45 +99,32 @@ export function historyUnavailableSentence(
 }
 
 /**
- * What to say about a DISCARD, or null when there was none.
+ * THE SENTENCE THAT USED TO SIT HERE (nocx-lmb6v.4). historyDiscardSentence
+ * said "earlier history was discarded", and named how many commands went, for
+ * the start on which the store REBUILT itself because content.db had been
+ * written by a different schema. Nothing rebuilds for a version difference
+ * any more (nocx-lmb6v.1): a file the migration ladder has a step for is
+ * carried forward with its rows, and one it does not is REFUSED without a
+ * byte touched. So no start can produce the fact, and the wire field it read
+ * is gone from the schema with it.
  *
- * A DIFFERENT FACT FROM THE ONE ABOVE, and kept apart on purpose: history is
- * running, and it is empty because the storage format changed under it
- * (nocx-rtg0.19). The sentence above says a feature is down; this one says a
- * working feature starts from nothing. Folding them together would make the
- * settings below read as ungoverned when they govern perfectly.
- *
- * It is worth saying at all because the symptom is invisible: an empty
- * history after an update looks exactly like a fresh install, and a person
- * with no explanation concludes the feature never worked.
- *
- * -1 is the store's "there was something and I could not count it", which is
- * still a discard and still theirs to know.
+ * A REFUSAL IS NOT A DISCARD and must never inherit these words. A refusal
+ * means durable history is not running and every row is still on disk, which
+ * is what `historyUnavailableSentence` above says through reason 'openFailed'
+ * — with the refusal's own text, naming the version to update to, arriving as
+ * the `detail` it appends. A discard meant the opposite: history running, and
+ * empty. Handing the second sentence to the first fact would tell somebody
+ * their rows were thrown away at the one moment they have not been.
  */
-export function historyDiscardSentence(
-  status: HistoryStatus | null,
-): HistoryUnavailableSentence | null {
-  if (status === null || status.discarded === null || status.discarded === undefined) return null
-  const rows = status.discarded
-  return {
-    title: 'Earlier history was discarded',
-    description:
-      rows < 0
-        ? 'The storage format changed in this version, so what was kept before could not be carried over.'
-        : `The storage format changed in this version, so ${rows === 1 ? '1 command' : `${rows} commands`} kept before it could not be carried over.`,
-  }
-}
 
 /**
  * What to say about a DETACHED session's output, or null when it is being
  * kept (nocx-22k1c.1).
  *
- * A THIRD FACT, kept apart from the two above for the reason they are kept
- * apart from each other. The first says durable history is down; the second
- * says a working history starts from nothing; this one says a session whose
- * window is closed will STOP — which is a statement about the terminal, not
- * about the history panel, and the only place the person can learn it is
- * beside the switch that caused it.
+ * A SECOND FACT, kept apart from the one above: that one says durable history
+ * is down; this one says a session whose window is closed will STOP — which
+ * is a statement about the terminal, not about the history panel, and the
+ * only place the person can learn it is beside the switch that caused it.
  *
  * The mechanism, in one line: the backend buffers a detached session's output
  * and frees that buffer either when a client acknowledges the bytes or when
@@ -285,7 +272,6 @@ function sameStatus(a: HistoryStatus | null, b: HistoryStatus | null): boolean {
     a.available === b.available &&
     a.reason === b.reason &&
     a.detail === b.detail &&
-    a.discarded === b.discarded &&
     a.detachedOutput.recorded === b.detachedOutput.recorded &&
     a.detachedOutput.reason === b.detachedOutput.reason
   )
@@ -300,15 +286,10 @@ function asHistoryStatus(params: unknown): HistoryStatus | null {
   if (typeof p.available !== 'boolean') return null
   const reason = p.reason
   const detail = p.detail
-  const discarded = p.discarded
   return {
     available: p.available,
     reason: typeof reason === 'string' ? (reason as HistoryStatus['reason']) : null,
     detail: typeof detail === 'string' ? detail : null,
-    // A non-integer is dropped to null rather than coerced: "how many
-    // commands you lost" is a number or it is nothing, and a NaN rendered
-    // into that sentence would be worse than not saying it.
-    discarded: typeof discarded === 'number' && Number.isInteger(discarded) ? discarded : null,
     detachedOutput: asDetachedOutput(p.detachedOutput),
   }
 }

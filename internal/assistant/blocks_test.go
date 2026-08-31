@@ -249,7 +249,7 @@ func TestAsk_LongOutputIsAnsweredFromTheEnd(t *testing.T) {
 	p.Requester = &blocksOnlyRequester{blocks: src}
 	p.Messages = []Message{{Role: "user", Content: "did df fail, and why?"}}
 
-	cl, err := newClient(nil, toolsDirFS(t), nil, content.NoFloor())
+	cl, err := newClient(nil, toolsDirFS(t), nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}

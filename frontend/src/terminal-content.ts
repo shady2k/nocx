@@ -659,6 +659,7 @@ export class TerminalContent extends BasePaneContent {
     BlockRecord,
     {
       ledgerId: number
+      stopped: boolean
       resolve: (run: AgentRunCompletion) => void
       reject: (reason: unknown) => void
     }
@@ -2468,7 +2469,12 @@ export class TerminalContent extends BasePaneContent {
       })
 
       renderer.onBufferChange((type) => {
+        const thawing = this._bufferType === 'alternate' && type === 'normal'
         this._bufferType = type
+        // The ask interval ends at the program's thaw: clear the frozen
+        // presentation, then seat every answer before normal-buffer ownership
+        // resumes. The shared helper preserves each exact answer node.
+        if (thawing && this._summoned) this._endSummonAndSeatAnswers()
         // The buffer is its own axis (ADR-0024 §6): a renderer-owned
         // presentation fact, never an authority. The kernel tracks it
         // independently of the lifecycle, so entering or leaving the
@@ -3950,6 +3956,10 @@ export class TerminalContent extends BasePaneContent {
     // this pane leaves the front.
     if (visible) this.reconcileGrantPresentation()
     else {
+      // Tab changes hide rather than unmount this pane. End the summon and
+      // seat its answers at that visibility boundary, so nothing remains
+      // painted over the program when this pane returns.
+      this._endSummonAndSeatAnswers()
       this.markAffordance?.hide()
       this.grantController?.setVisible(false)
       this.scrollback?.blockManager.closeOverflowMenus()
@@ -4842,8 +4852,14 @@ export class TerminalContent extends BasePaneContent {
     // so their grid keeps its size and the program receives no resize.
 
     this._summonPending = true
+    // The alternate buffer is the program's complete screen, so its frozen
+    // photograph owns absolute row zero. Normal-buffer nil keeps xterm's
+    // visible viewport semantics, which may begin above buffer row zero.
     try {
-      const frame = await this.captureLiveFrame()
+      const frame =
+        this._bufferType === 'alternate'
+          ? await this.captureLiveFrame({ start: 0, end: this.rows })
+          : await this.captureLiveFrame()
       // The command may have finished, the tab may have closed, or another
       // path may have shown the editor while capture was in flight. All are
       // refusals: no stale frame, marker, placement or target mutation.
@@ -5008,7 +5024,11 @@ export class TerminalContent extends BasePaneContent {
     owned.terminal = true
     // The close is the authoritative terminal seam. Returning the composer
     // from here avoids deriving completion from text, time, or DOM classes.
+    // Escape can have already thawed the summon while the command remains
+    // live; in that case lifecycle ownership will not seat the answer, so
+    // preserve the terminalized turn in ordinary scrollback directly.
     if (this._summoned) this._syncLifecycleOwnership()
+    else this._seatSummonedAnswers()
   }
 
   /** AgentInputTarget removes a refused handle before reporting the refusal.
@@ -5041,7 +5061,7 @@ export class TerminalContent extends BasePaneContent {
     // away, the command finished, the prompt came back wearing a mode
     // nobody had chosen, and their next Enter went to the model. Caught by
     // the e2e, because no unit followed a dismissal past the command's end.
-    this._endSummon()
+    this._endSummonAndSeatAnswers()
     this._syncLifecycleOwnership()
     // Escape is the discoverable hand-back gesture. Read-only state alone
     // does not route the next physical key: focus can remain on the hidden
@@ -5104,24 +5124,43 @@ export class TerminalContent extends BasePaneContent {
   }
 
   /** The summon is over — dismissed by Escape, or outlived by the command
-   *  it was opened over. Both exits come through here.
+   *  it was opened over. Both exits clear the frozen presentation.
+   *
+   *  Normal exits preserve answer nodes; `_endSummonAndSeatAnswers` immediately
+   *  reparents them into scrollback so the program owns the pane again without
+   *  losing streamed or settled prose. `discardAnswers` is reserved for
+   *  teardown/reset paths that cannot provide a valid command seat.
    *
    *  The target goes back to what the summon displaced ONLY if the draft is
    *  empty. A half-typed question re-pointed at the shell would turn the
    *  person's next Enter into a command they never wrote — the exact reason
    *  the dropped auto-switching design was dropped. */
-  private _endSummon(): void {
+  private _endSummon(discardAnswers = false): void {
     this._summoned = false
     const restore = this._summonRestoreTargetId
     this._summonRestoreTargetId = null
     this._pendingReadFrame = null
     this._clearFreezePresentation()
+    if (discardAnswers) {
+      for (const answer of this._summonedAnswers) answer.el.remove()
+      this._summonedAnswers = []
+      this._summonedCommand = null
+    }
     this._restoreEditorHome()
     this._removeSummonStackIfEmpty()
     if (restore === null || this.editor === null) return
     if (this.editor.getDoc() !== '') return
     if (this.inputTargets?.active().id === restore) return
     this.inputTargets?.setActive(restore)
+  }
+
+  /** End the summon while preserving its answers, then seat those exact nodes
+   * in scrollback. Escape, a thaw, and a hidden tab all return ownership to
+   * the program while its command is still running, so they must use the same
+   * reparenting path as normal command completion. */
+  private _endSummonAndSeatAnswers(): void {
+    this._endSummon()
+    this._seatSummonedAnswers()
   }
 
   /** Remove the static frame, marker, and temporary containing-block style. */
@@ -5182,6 +5221,7 @@ export class TerminalContent extends BasePaneContent {
   private signalActiveCommand(signal: SessionSignal['signal']): void {
     const session = this.session
     if (session === null || !this.hasRunningCommand()) return
+    const targetBlock = this.scrollback?.blockManager.runningBlock ?? null
     void session.signal(signal).then(
       (result) => {
         // A SWITCH, AND EXHAUSTIVE ON PURPOSE. The outcome set is closed by
@@ -5194,6 +5234,10 @@ export class TerminalContent extends BasePaneContent {
         let message: string
         switch (result.outcome) {
           case 'delivered':
+            if (signal === 'stop') {
+              const waiter = targetBlock === null ? undefined : this.agentRuns.get(targetBlock)
+              if (waiter) waiter.stopped = true
+            }
             return
           case 'unsupported':
             message =
@@ -5316,8 +5360,24 @@ export class TerminalContent extends BasePaneContent {
     }
     if (owner === 'none') return { ok: false, reason: 'no-owner' }
     const renderer = this.renderer
-    if (text.includes('\n') && !(renderer?.bracketedPasteActive() ?? false)) {
-      return { ok: false, reason: 'multi-line-no-bracketed-paste' }
+    if (text.includes('\n')) {
+      // FENCE BEFORE DECIDING (nocx-8rtr.1). write() is fire-and-forget and
+      // the parse runs one pass behind it, so a synchronous read of the mode
+      // answers about the terminal as it was BEFORE the bytes the program
+      // just sent. A program that enables mode 2004 and then waits on stdin
+      // is exactly the case: its DECSET is in the queue at the moment the
+      // person fires, and the fire refused a body the destination could
+      // honour. Measured both ways — the wire carries the DECSET (an e2e
+      // probe recorded ON/off/ON), and the real renderer answers false
+      // immediately after write() and true after the parse.
+      //
+      // The barrier is the renderer's own, the same one a capture uses; this
+      // method is already async, so the wait costs the multi-line path one
+      // parse pass and the single-line path nothing.
+      await renderer?.awaitWriteBarrier()
+      if (!(renderer?.bracketedPasteActive() ?? false)) {
+        return { ok: false, reason: 'multi-line-no-bracketed-paste' }
+      }
     }
     let line = text
     if (hasSecretReference(text)) {
@@ -5612,16 +5672,7 @@ export class TerminalContent extends BasePaneContent {
       document.removeEventListener('keydown', this._targetChordKeydown, true)
       this._targetChordKeydown = null
     }
-    this._summoned = false
-    this._summonRestoreTargetId = null
-    this._clearFreezePresentation()
-    this._restoreEditorHome()
-    for (const answer of this._summonedAnswers) answer.el.remove()
-    this._summonedAnswers = []
-    this._summonedCommand = null
-    this._summonStack?.remove()
-    this._summonStack = null
-    this._summonAnswerList = null
+    this._endSummon(true)
     this.session?.close()
     this._connectionMark?.dispose()
     this._connectionMark = null
@@ -5983,7 +6034,7 @@ export class TerminalContent extends BasePaneContent {
       reject(new Error('run: the submission could not open a block — the agent lane is not usable'))
       return promise
     }
-    this.agentRuns.set(block, { ledgerId, resolve, reject })
+    this.agentRuns.set(block, { ledgerId, stopped: false, resolve, reject })
     // The slot the store's answer lands in. Opened HERE, at the submit,
     // because the ack can arrive before the block finishes freezing and a
     // slot created at the freeze would miss it.
@@ -6016,6 +6067,7 @@ export class TerminalContent extends BasePaneContent {
     const body = {
       exitCode: rec.exitCode,
       status: rec.status === 'running' ? ('unknown' as const) : rec.status,
+      stopped: waiter.stopped,
       total: lines.length,
       start: 0,
       end,

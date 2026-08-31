@@ -7,7 +7,9 @@ package assistant
 // headers, so API keys and secret-valued headers cannot enter a dump.
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -15,6 +17,9 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/log"
 )
 
 // WireRecorder receives the bytes of one provider exchange. Implementations
@@ -38,6 +43,48 @@ func WithWireIdentity(ctx context.Context, runID, entryID string) context.Contex
 	return context.WithValue(ctx, wireIdentityKey{}, wireIdentity{runID: runID, entryID: entryID})
 }
 
+// WireToolOfferState deduplicates one structural offer across all provider
+// requests made by one run, including approval resumes.
+type WireToolOfferState struct {
+	once sync.Once
+}
+
+// NewWireToolOfferState creates the per-run state used by the wire offer log.
+func NewWireToolOfferState() *WireToolOfferState {
+	return &WireToolOfferState{}
+}
+
+type wireToolOffer struct {
+	runID   string
+	effects []content.Effect
+	scopes  []content.GrantScope
+	state   *WireToolOfferState
+}
+
+type wireToolOfferKey struct{}
+
+// WithWireToolOfferState carries structural tool authority and caller-owned
+// per-run deduplication through the model framework.
+func WithWireToolOfferState(ctx context.Context, runID string, grant *content.Grant, state *WireToolOfferState) context.Context {
+	if grant == nil || runID == "" {
+		return ctx
+	}
+	if state == nil {
+		state = NewWireToolOfferState()
+	}
+	return context.WithValue(ctx, wireToolOfferKey{}, wireToolOffer{
+		runID:   runID,
+		effects: append([]content.Effect(nil), grant.Effects...),
+		scopes:  append([]content.GrantScope(nil), grant.Scopes...),
+		state:   state,
+	})
+}
+
+func wireToolOfferFrom(ctx context.Context) (wireToolOffer, bool) {
+	v, ok := ctx.Value(wireToolOfferKey{}).(wireToolOffer)
+	return v, ok && v.runID != ""
+}
+
 func wireIdentityFrom(ctx context.Context) (wireIdentity, bool) {
 	v, ok := ctx.Value(wireIdentityKey{}).(wireIdentity)
 	return v, ok && v.runID != "" && v.entryID != ""
@@ -49,19 +96,21 @@ func wireIdentityFrom(ctx context.Context) (wireIdentity, bool) {
 const wireCaptureCap = 1 << 20
 
 // wireTap is an http.RoundTripper that copies a request and its response into
-// the optional developer log and product recorder. It changes neither.
+// the optional developer log and product recorder, and derives the run's tool
+// offer from the request it observed. It changes none of them.
 type wireTap struct {
 	inner    http.RoundTripper
 	logPath  string
 	recorder WireRecorder
+	logger   log.Logger
 	mu       sync.Mutex
 }
 
-func newWireTapWith(inner http.RoundTripper, logPath string, recorder WireRecorder) http.RoundTripper {
-	if logPath == "" && recorder == nil {
+func newWireTapWith(inner http.RoundTripper, logPath string, recorder WireRecorder, logger log.Logger) http.RoundTripper {
+	if logPath == "" && recorder == nil && logger == nil {
 		return inner
 	}
-	return &wireTap{inner: inner, logPath: logPath, recorder: recorder}
+	return &wireTap{inner: inner, logPath: logPath, recorder: recorder, logger: logger}
 }
 
 func (w *wireTap) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -96,6 +145,50 @@ func (w *wireTap) RoundTrip(req *http.Request) (*http.Response, error) {
 		buf:    make([]byte, 0, minInt(wireCaptureCap, 64*1024)),
 	}
 	return resp, nil
+}
+
+func (w *wireTap) logToolOffer(ctx context.Context, body []byte) {
+	if w.logger == nil {
+		return
+	}
+	offer, ok := wireToolOfferFrom(ctx)
+	if !ok {
+		return
+	}
+	var envelope struct {
+		Tools *json.RawMessage `json:"tools"`
+	}
+	if err := json.Unmarshal(body, &envelope); err != nil {
+		w.logger.Warn("agent ask: tool offer could not be parsed", "run", offer.runID, "parseError", true)
+		return
+	}
+	var tools []struct {
+		Function struct {
+			Name string `json:"name"`
+		} `json:"function"`
+	}
+	if envelope.Tools != nil {
+		rawTools := bytes.TrimSpace(*envelope.Tools)
+		if !bytes.Equal(rawTools, []byte("null")) {
+			if err := json.Unmarshal(rawTools, &tools); err != nil {
+				w.logger.Warn("agent ask: tool offer could not be parsed", "run", offer.runID, "parseError", true)
+				return
+			}
+		}
+	}
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		if tool.Function.Name != "" {
+			names = append(names, tool.Function.Name)
+		}
+	}
+	if offer.state == nil {
+		return
+	}
+	offer.state.once.Do(func() {
+		w.logger.Info("agent ask: tools offered", "run", offer.runID, "count", len(names),
+			"tools", names, "effects", offer.effects, "scopes", offer.scopes)
+	})
 }
 
 func (w *wireTap) record(ctx context.Context, kind string, body []byte, early bool) {
@@ -180,6 +273,7 @@ func (b *wireRequestBody) finish(closedEarly bool) {
 	b.mu.Unlock()
 	b.parent.write(b.label + "\n" + string(body))
 	b.parent.record(b.ctx, "request", body, truncated)
+	b.parent.logToolOffer(b.ctx, body)
 }
 
 type wireResponseBody struct {

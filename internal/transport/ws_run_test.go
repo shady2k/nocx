@@ -60,6 +60,7 @@ func runResolvedWire(rid, entryID string, exitCode int, status string, total, st
 		"entryId":   entryID,
 		"exitCode":  exitCode,
 		"status":    status,
+		"stopped":   false,
 		"total":     total,
 		"start":     start,
 		"end":       end,
@@ -88,6 +89,15 @@ func TestRunResolved_ACompletedOutcomeMayNameNoEntry(t *testing.T) {
 	if msg := validateRunResolvedRaw(raw); msg != "" {
 		t.Fatalf("a completed resolution naming no entry was refused: %s", msg)
 	}
+	missingStop := runResolvedWire("req-1", "", 0, "success", 1, 0, 1, "ok")
+	delete(missingStop, "stopped")
+	raw, err = json.Marshal(missingStop)
+	if err != nil {
+		t.Fatalf("marshal missing stopped: %v", err)
+	}
+	if msg := validateRunResolvedRaw(raw); msg == "" {
+		t.Fatal("a completed resolution without the stopped fact was accepted")
+	}
 	// And the bound still bites: an id longer than the ledger's is refused
 	// exactly as it was.
 	long := runResolvedWire("req-1", strings.Repeat("x", maxIDRunes+1), 0, "success", 1, 0, 1, "ok")
@@ -109,7 +119,7 @@ func TestRun_EndToEndOverTheRealSocket(t *testing.T) {
 	fake, srv := newRunToolCallingServer("")
 	defer srv.Close()
 
-	client, err := assistant.NewClient(nil, nil, content.NoFloor())
+	client, err := assistant.NewClient(nil, nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

@@ -1134,3 +1134,114 @@ describe('the running live region follows its written rows', () => {
     pane.remove()
   })
 })
+
+describe('follow intent survives block geometry changes (nocx-n5q44)', () => {
+  let reportFollow: IntersectionObserverCallback | null = null
+
+  beforeEach(() => {
+    reportFollow = null
+    vi.stubGlobal(
+      'IntersectionObserver',
+      class {
+        constructor(callback: IntersectionObserverCallback) {
+          reportFollow = callback
+        }
+
+        observe(): void {}
+
+        disconnect(): void {}
+
+        unobserve(): void {}
+
+        takeRecords(): IntersectionObserverEntry[] {
+          return []
+        }
+      },
+    )
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  function observerReports(intersecting: boolean): void {
+    if (reportFollow === null) throw new Error('follow observer was not constructed')
+    reportFollow(
+      [{ isIntersecting: intersecting } as IntersectionObserverEntry],
+      {} as IntersectionObserver,
+    )
+  }
+
+  interface TailGeometry {
+    setScrollHeight: (height: number) => void
+    scrollTo: Mock
+  }
+
+  function atTail(controller: ScrollbackController): TailGeometry {
+    let scrollHeight = 1000
+    let scrollTop = 600
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      configurable: true,
+      value: 400,
+    })
+    Object.defineProperty(controller.scrollbackArea, 'scrollHeight', {
+      configurable: true,
+      get: () => scrollHeight,
+    })
+    Object.defineProperty(controller.scrollbackArea, 'scrollTop', {
+      configurable: true,
+      get: () => scrollTop,
+      set: (value: number) => {
+        scrollTop = value
+      },
+    })
+    const scrollTo = vi.fn((options: { top: number }) => {
+      scrollTop = options.top
+    })
+    Object.defineProperty(controller.scrollbackArea, 'scrollTo', {
+      configurable: true,
+      value: scrollTo,
+    })
+    return {
+      setScrollHeight: (height) => {
+        scrollHeight = height
+      },
+      scrollTo,
+    }
+  }
+
+  it('keeps the tail visible when a tool-call block is inserted', () => {
+    const { controller } = makeController()
+    const geometry = atTail(controller)
+    observerReports(false)
+
+    controller.settleAround(() => {
+      controller.blockManager.startBlock('tool command', '~', 0)
+      observerReports(false)
+      geometry.setScrollHeight(1400)
+    })
+
+    expect(geometry.scrollTo).toHaveBeenCalledWith({ top: 1400, behavior: 'instant' })
+  })
+
+  it('keeps the tail visible when a running block is replaced', () => {
+    const { controller } = makeController()
+    const geometry = atTail(controller)
+    observerReports(true)
+    controller.blockManager.startBlock('tool command', '~', 0)
+    controller.setRunning()
+    geometry.scrollTo.mockClear()
+
+    geometry.setScrollHeight(1400)
+    controller.onCommandEnd(
+      () => {
+        observerReports(false)
+        return new BufferLine('tool output')
+      },
+      2,
+      0,
+    )
+
+    expect(geometry.scrollTo).toHaveBeenCalledWith({ top: 1400, behavior: 'instant' })
+  })
+})

@@ -30,6 +30,7 @@ function harness(
   const onManage = vi.fn()
   const onAsk = vi.fn()
   const onDelivered = vi.fn()
+  const onCopied = vi.fn()
   const provider = new SnippetsQuickConnectProvider({
     store: new SnippetsStore(client),
     fire,
@@ -37,8 +38,9 @@ function harness(
     onManage,
     onAsk,
     onDelivered,
+    onCopied,
   })
-  return { provider, fire, onRefused, onManage, onAsk, onDelivered }
+  return { provider, fire, onRefused, onManage, onAsk, onDelivered, onCopied }
 }
 
 describe('the snippets palette provider', () => {
@@ -96,11 +98,56 @@ describe('the snippets palette provider', () => {
     expect(h.onDelivered).not.toHaveBeenCalled()
   })
 
+  // nocx-8rtr.2 — the clipboard is a destination a person chooses, not a
+  // remedy they are offered after being told no. Before these,
+  // SnippetDestination had one caller outside its own tests.
+  it('every snippet row offers the clipboard, named so a screen reader can say which', async () => {
+    const h = harness([SNIP({ id: 'a', title: 'Orchestrator' })])
+    const [row] = await h.provider.getItems()
+    expect(row.action?.ariaLabel).toBe('Copy "Orchestrator" to the clipboard')
+  })
+
+  it('taking it fires the SAME adapter at the clipboard, and says it landed', async () => {
+    const h = harness([SNIP({ id: 'a', title: 'Orchestrator', body: 'plain' })], {
+      kind: 'delivered',
+      where: 'clipboard',
+    })
+    const [row] = await h.provider.getItems()
+    row.action?.run()
+    await vi.waitFor(() => expect(h.fire).toHaveBeenCalled())
+    expect(h.fire.mock.calls[0][0]).toMatchObject({ destination: 'clipboard' })
+    await vi.waitFor(() => expect(h.onCopied).toHaveBeenCalledWith('Orchestrator'))
+    // The pane keeps the keyboard: nothing was inserted into it.
+    expect(h.onDelivered).not.toHaveBeenCalled()
+  })
+
+  it('a body with fields is answered FIRST, for the destination the row chose', async () => {
+    const h = harness([SNIP({ id: 'a', title: 'T', body: 'run {{ask:host}}' })])
+    const [row] = await h.provider.getItems()
+    row.action?.run()
+    await vi.waitFor(() => expect(h.onAsk).toHaveBeenCalled())
+    expect(h.onAsk.mock.calls[0][1]).toBe('clipboard')
+    // Nothing was fired: the answers are not known yet.
+    expect(h.fire).not.toHaveBeenCalled()
+  })
+
+  it('a refused copy says why — a secret must not outlive the fire on the clipboard', async () => {
+    const h = harness([SNIP({ id: 'a', title: 'T', body: 'plain' })], {
+      kind: 'refused',
+      reason: { kind: 'secret-to-clipboard', name: 'prod-db' },
+    })
+    const [row] = await h.provider.getItems()
+    row.action?.run()
+    await vi.waitFor(() => expect(h.onRefused).toHaveBeenCalled())
+    expect(h.onRefused.mock.calls[0][0]).toContain('prod-db')
+    expect(h.onCopied).not.toHaveBeenCalled()
+  })
+
   it('fireReporting hands the reason to its caller instead of the palette', async () => {
     // The ask form owns a surface of its own, so it shows the refusal there
     // — beside the answers that caused it.
     const h = harness([], { kind: 'refused', reason: { kind: 'no-owner' } })
-    const message = await h.provider.fireReporting(SNIP({ id: 'a' }), new Map())
+    const message = await h.provider.fireReporting(SNIP({ id: 'a' }), new Map(), 'input')
     expect(message).toContain('no terminal or editor')
     expect(h.onRefused).not.toHaveBeenCalled()
   })
@@ -120,6 +167,7 @@ describe('the snippets palette provider', () => {
       onManage: vi.fn(),
       onAsk: vi.fn(),
       onDelivered: vi.fn(),
+      onCopied: vi.fn(),
     })
     const items = await provider.getItems()
     expect(items).toHaveLength(1)

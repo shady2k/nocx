@@ -14,7 +14,12 @@ import { describe, expect, it, vi } from 'vitest'
 import type { FilesListEntry, FilesListResult } from '../generated/files.list'
 import type { FilesChanged } from '../generated/files.changed'
 import type { FilesPanelServices } from './files-client'
-import { createFilesTreeStore, FILES_PAGE_SIZE, type FilesTreeStore } from './files-store'
+import {
+  createFilesTreeStore,
+  FILES_PAGE_SIZE,
+  type FilesRevealHint,
+  type FilesTreeStore,
+} from './files-store'
 import type { ActiveOrigin } from '../pane-content'
 
 // ── Fixtures ──────────────────────────────────────────────────────────────
@@ -394,10 +399,140 @@ describe('files tree store', () => {
     expect(store.revealTarget()).toBe('/home/alice')
 
     // The public operation is idempotent the same way.
-    store.revealPath('/home/alice')
+    await expect(store.revealPath('/home/alice')).resolves.toBe(true)
     await settle()
     expect(list.mock.calls.length).toBe(listsAfterFirst)
     expect(store.revealTarget()).toBe('/home/alice')
+  })
+  it('reports a regular target as not a directory without selecting it', async () => {
+    const list = vi
+      .fn()
+      .mockResolvedValue(listOk('C:/', [entry({ name: 'notes.md', path: '/notes.md' })]))
+    const store = createFilesTreeStore(makeServices({ list }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    await expect(store.revealPath('/notes.md')).resolves.toBe(false)
+    expect(store.revealTarget()).toBe('/')
+  })
+  it('consumes a probed parent listing during directory reveal', async () => {
+    const list = vi.fn().mockImplementation((_bindingId: string, path: string) => {
+      if (path === '/')
+        return Promise.resolve(listOk('C:/', [entry({ name: 'home', path: '/home', kind: 'dir' })]))
+      if (path === '/home') {
+        return Promise.resolve(
+          listOk('C:/home', [entry({ name: 'alice', path: '/home/alice', kind: 'dir' })]),
+        )
+      }
+      return Promise.resolve(listOk(`C:${path}`, []))
+    })
+    const store = createFilesTreeStore(makeServices({ list }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    const hint: FilesRevealHint = {
+      bindingId: 'b1',
+      parentPath: '/home',
+      listing: listOk('C:/home', [entry({ name: 'alice', path: '/home/alice', kind: 'dir' })], {
+        path: '/home',
+      }) as Extract<FilesListResult, { state: 'ok' }>,
+    }
+    await expect(store.revealPath('/home/alice', hint)).resolves.toBe(true)
+    expect(list).toHaveBeenCalledTimes(2)
+    expect(list).toHaveBeenNthCalledWith(1, 'b1', '/', 0, FILES_PAGE_SIZE)
+    expect(list).toHaveBeenNthCalledWith(2, 'b1', '/home/alice', 0, FILES_PAGE_SIZE)
+  })
+  it('does not consume a directory hint from another binding', async () => {
+    const list = vi.fn().mockImplementation((_bindingId: string, path: string) => {
+      if (path === '/')
+        return Promise.resolve(listOk('C:/', [entry({ name: 'home', path: '/home', kind: 'dir' })]))
+      if (path === '/home') {
+        return Promise.resolve(
+          listOk('C:/home', [entry({ name: 'alice', path: '/home/alice', kind: 'dir' })]),
+        )
+      }
+      return Promise.resolve(listOk(`C:${path}`, []))
+    })
+    const store = createFilesTreeStore(makeServices({ list }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    const hint: FilesRevealHint = {
+      bindingId: 'other-binding',
+      parentPath: '/home',
+      listing: listOk('C:/home', [entry({ name: 'alice', path: '/home/alice', kind: 'dir' })], {
+        path: '/home',
+      }) as Extract<FilesListResult, { state: 'ok' }>,
+    }
+    await expect(store.revealPath('/home/alice', hint)).resolves.toBe(true)
+    expect(list).toHaveBeenCalledWith('b1', '/home', 0, FILES_PAGE_SIZE)
+  })
+
+  it('queues a reveal until a newly opened binding has listed its root', async () => {
+    const opening = deferred<typeof OPEN_RESULT>()
+    const list = vi
+      .fn()
+      .mockImplementation((bindingId: string, path: string) =>
+        Promise.resolve(
+          path === '/'
+            ? listOk('C:/', [entry({ name: 'docs', path: '/docs', kind: 'dir' })])
+            : listOk('C:/docs', []),
+        ),
+      )
+    const store = createFilesTreeStore(makeServices({ open: vi.fn(() => opening.promise), list }))
+    store.rescope(LOCAL_A)
+    const reveal = store.revealPath('/docs')
+
+    opening.resolve(OPEN_RESULT)
+    await expect(reveal).resolves.toBe(true)
+    expect(store.revealTarget()).toBe('/docs')
+    expect(list).toHaveBeenCalledWith('b1', '/', 0, FILES_PAGE_SIZE)
+  })
+
+  it('resolves a queued reveal when opening the binding fails and retries', async () => {
+    const opening = deferred<typeof OPEN_RESULT>()
+    const retryOpening = deferred<typeof OPEN_RESULT>()
+    const open = vi
+      .fn()
+      .mockReturnValueOnce(opening.promise)
+      .mockReturnValueOnce(retryOpening.promise)
+    const list = vi
+      .fn()
+      .mockResolvedValue(listOk('C:/', [entry({ name: 'docs', path: '/docs', kind: 'dir' })]))
+    const store = createFilesTreeStore(makeServices({ open, list }))
+    store.rescope(LOCAL_A)
+    const reveal = store.revealPath('/docs')
+
+    opening.reject(new Error('session gone'))
+    await expect(reveal).resolves.toBe(false)
+    expect(store.phase()).toBe('failed')
+
+    store.rescope(LOCAL_A)
+    const retry = store.revealPath('/docs')
+    retryOpening.resolve(OPEN_RESULT)
+    await expect(retry).resolves.toBe(true)
+    expect(open).toHaveBeenCalledTimes(2)
+  })
+
+  it('reports a directory symlink as a directory and opens it in the tree', async () => {
+    const list = vi
+      .fn()
+      .mockImplementation((_bindingId: string, path: string) =>
+        Promise.resolve(
+          path === '/'
+            ? listOk('C:/', [
+                entry({ name: 'link', path: '/link', kind: 'symlink', linkKind: 'dir' }),
+              ])
+            : listOk('C:/link', []),
+        ),
+      )
+    const store = createFilesTreeStore(makeServices({ list }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    await expect(store.revealPath('/link')).resolves.toBe(true)
+    expect(nodeRows(store, 'link').expanded).toBe(true)
+    expect(store.revealTarget()).toBe('/link')
   })
 
   it('the walk pages a level to find the target beyond the first page', async () => {
@@ -949,10 +1084,10 @@ describe('files tree store', () => {
     expect(watch).toHaveBeenLastCalledWith('b1', ['/'])
 
     // Walk 1 expands /home and blocks on its listing.
-    store.revealPath('/home/alice')
+    void store.revealPath('/home/alice')
     await settle()
     // Walk 2 lands immediately: a file opens nothing and ends the walk.
-    store.revealPath('/a.txt')
+    void store.revealPath('/a.txt')
     await settle()
 
     homeList.resolve(

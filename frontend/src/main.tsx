@@ -73,9 +73,12 @@ import { profileRows } from './quick-connect-assembly'
 import { showToast } from './ui/toast'
 import { registerFileViewerSurface, openFileViewer } from './file-viewer'
 import { registerTerminalLinks } from './terminal-links'
+import type { LinkPathProbe } from './terminal-links/open'
 import { createUrlOpener } from './open-url'
 import { createFilesView, FILES_VIEW_ID } from './files/files-view'
+import { FILES_PAGE_SIZE, type FilesRevealHint } from './files/files-store'
 import { createFilesPanelServices, type FilesPanelServices } from './files/files-client'
+import { isExpandable } from './ui/tree-row-kind'
 import { uploadSurfaceFor } from './files/upload-surface'
 import { uploadOperations } from './files/upload-operations'
 import { downloadSurfaceFor } from './files/download-surface'
@@ -583,11 +586,13 @@ function main(): void {
   const [activeSurfaceType, setActiveSurfaceType] = createSignal<SurfaceType | null>(
     tm.activeSurfaceType(),
   )
+  let rescopeFiles: () => void = () => {}
   tm.onActivePaneChange = () => {
     setActiveSurfaceType(tm.activeSurfaceType())
     setPortsTargetId(tm.portsTargetId())
     setPortsUnavailable(tm.portsUnavailableReason())
     setActiveOrigin(tm.activeOrigin())
+    rescopeFiles()
   }
   // ── Files panel (fm-w10) and its viewer (fm-w7) ──────────────────────
   // The panel's backend surface, wrapped so the composition root owns the
@@ -648,6 +653,8 @@ function main(): void {
   // same reason: one store per dispatcher, because a transfer has one state.
   // Without this the panel's Download item would be dead code.
   const downloadSurface = downloadSurfaceFor(dispatcher)
+  let revealFilesPath: ((path: string, hint?: FilesRevealHint) => Promise<boolean>) | null = null
+  let revealFilesView: () => void = () => {}
   const filesView = createFilesView({
     services: filesServicesTracked,
     opener: { open: openFileViewer },
@@ -655,6 +662,10 @@ function main(): void {
     activeOrigin,
     upload: uploadSurface,
     download: downloadSurface,
+    onStore: (store) => {
+      revealFilesPath = (path, hint) => store.revealPath(path, hint)
+      rescopeFiles = () => store.rescope(untrack(() => activeOrigin()))
+    },
   })
 
   // Everything running on somebody's behalf, in one list (nocx-hbdw4). Each
@@ -847,9 +858,39 @@ function main(): void {
   // keeping its own view of whether a session is still there — and the
   // viewer surface itself.
   const terminalLinkUrlOpener = createUrlOpener({ openUrl: (url) => gitServices.openUrl(url) })
+  const pathKind = async (bindingId: string, path: string): Promise<LinkPathProbe> => {
+    if (path === '/') return { kind: 'directory' }
+    const slash = path.lastIndexOf('/')
+    if (slash < 0) return { kind: 'unknown' }
+    const parent = slash === 0 ? '/' : path.slice(0, slash)
+    let offset = 0
+    for (;;) {
+      const result = await filesServicesTracked.list(bindingId, parent, offset, FILES_PAGE_SIZE)
+      if (result.state !== 'ok') return { kind: 'unknown' }
+      const entry = result.entries.find((candidate) => candidate.path === path)
+      if (entry !== undefined) {
+        if (!isExpandable(entry.kind, entry.linkKind)) return { kind: 'file' }
+        return {
+          kind: 'directory',
+          hint: { bindingId, parentPath: parent, listing: result },
+        }
+      }
+      if (!result.hasMore || result.entries.length === 0) return { kind: 'unknown' }
+      offset = result.offset + result.entries.length
+    }
+  }
+
   registerTerminalLinks({
     openUrl: (url) => terminalLinkUrlOpener.open(url),
     openBinding: (sessionId, rootPath) => filesServicesTracked.open(sessionId, rootPath),
+    pathKind,
+    openDirectory: async (path, probe) => {
+      const reveal = revealFilesPath
+      if (reveal === null) return false
+      rescopeFiles()
+      revealFilesView()
+      return reveal(path, probe.hint)
+    },
     openViewer: (target) => openFileViewer(target),
     onBindingLiveness: onFilesBindingLiveness,
     notify: (message) => showToast({ message, level: 'warning' }),
@@ -912,21 +953,27 @@ function main(): void {
   const snippetsProvider = new SnippetsQuickConnectProvider({
     store: snippetsStore,
     fire: snippetFire,
-    // A refusal re-opens the list with the reason on it: the surface it is
-    // about is still there, and a toast would take the explanation away
-    // from it (design §11).
-    onRefused: (message) => qc.showSnippets(message),
+    // A refusal is a TOAST now, and the reason the spec gave for putting it
+    // back on the palette has expired (design §11). That reason was that the
+    // surface the refusal is about is still there — true while the palette
+    // carried the only way out, which was "copy this instead". The way out
+    // lives on every row now (nocx-8rtr.2), so the sentence has nothing left
+    // to be anchored to, and Toast is the kit's one notification affordance
+    // (ui/README.md).
+    onRefused: (message) => showToast({ message, level: 'danger' }),
+    onCopied: (title) => showToast({ message: `Copied "${title}" to the clipboard.` }),
     onManage: () => openSettingsPane().openPage('snippets'),
     // A body with {{ask:…}} fields: the palette closes and the form asks
     // for all of them at once (owner review — a step that filters a list
     // cannot also be where a value is typed).
-    onAsk: (snippet) => snippetAsk.ask(snippet),
+    onAsk: (snippet, destination) => snippetAsk.ask(snippet, destination),
     onDelivered: returnKeyboardToThePane,
   })
   // The form the fields are answered in. It reports its own refusals, so a
   // person who mistyped an answer sees why beside what they typed.
   const snippetAsk = mountSnippetAskDialog(document.body, {
-    fire: (snippet, answers) => snippetsProvider.fireReporting(snippet, answers),
+    fire: (snippet, answers, destination) =>
+      snippetsProvider.fireReporting(snippet, answers, destination),
     onDelivered: returnKeyboardToThePane,
   })
   /**
@@ -1243,6 +1290,13 @@ function main(): void {
     )
   }
 
+  // From main: a directory link reveals the Files view (nocx-tsqfx). Bound
+  // once, but reading `sidebar` at call time rather than capturing it — the
+  // sidebar is now destroyed and rebuilt on every connection generation, so a
+  // captured handle would be the previous connection's, and while offline
+  // there is no sidebar to reveal anything in.
+  revealFilesView = () => sidebar?.revealView(FILES_VIEW_ID)
+
   // Cmd/Ctrl+, opens or focuses the Settings tab.
   document.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && !e.shiftKey && !e.altKey && e.key === ',') {
@@ -1455,7 +1509,7 @@ function main(): void {
     // completion dropdown today): a body that asks for values opens the
     // form; a plain one fires.
     if (askFields(snippet.body).length > 0) {
-      snippetAsk.ask(snippet)
+      snippetAsk.ask(snippet, 'input')
       return
     }
     void snippetsProvider.fire(snippet, new Map())

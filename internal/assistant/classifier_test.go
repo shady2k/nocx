@@ -228,7 +228,7 @@ func TestAsk_ClassifierSuspectEscalatesPermittedCall(t *testing.T) {
 	clf, clfSrv := newClassifierServer(classifyCompletion(`{"verdict":"suspect","reason":"the input looks like a second command"}`))
 	defer clfSrv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -343,7 +343,7 @@ func TestAsk_ClassifierInputKnownMaterialNeverReachesClassifier(t *testing.T) {
 	p.KnownMaterial = &knownMatcher{value: secret, name: "github-token"}
 	p = askParamsWithClassifier(p, fixedResolver{classifierTargetAt(clfCount.srv.URL)})
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -403,7 +403,7 @@ func TestClassifierUnreachableEscalates(t *testing.T) {
 
 	// Port 1 is closed by convention on loopback, which the guard permits —
 	// the dial fails with connection refused.
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -459,7 +459,7 @@ func TestAsk_ClassifierUnparseableEscalates(t *testing.T) {
 	_, clfSrv := newClassifierServer(classifyCompletion(`{"verdict":"safe"}`))
 	defer clfSrv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -487,7 +487,7 @@ func TestClassifierRoleUnassignedEscalates(t *testing.T) {
 	ans, ansSrv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: args}))
 	defer ansSrv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -568,7 +568,7 @@ func TestAsk_ClassifierQuietPermittedCallRuns(t *testing.T) {
 	clf, clfSrv := newClassifierServer(classifyCompletion(`{"verdict":"clear"}`))
 	defer clfSrv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -629,7 +629,7 @@ func TestAsk_NoClassifierBehavesAsToday(t *testing.T) {
 	ans, ansSrv := newFakeOpenAI(callThenAnswer(toolCallSpec{name: "files.read", args: args}))
 	defer ansSrv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}
@@ -736,7 +736,7 @@ func TestAsk_ClassifierEscalationCarriesTheEffectAndTheResource(t *testing.T) {
 	_, clfSrv := newClassifierServer(classifyCompletion(`{"verdict":"suspect","reason":"the input looks like a second command"}`))
 	defer clfSrv.Close()
 
-	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.NoFloor())
+	cl, clErr := newClient(nil, os.DirFS(realToolsFS), nil, content.Floor{})
 	if clErr != nil {
 		t.Fatalf("newClient: %v", clErr)
 	}

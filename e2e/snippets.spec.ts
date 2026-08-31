@@ -31,8 +31,12 @@ const INPUT = '.pane.active .nocx-editor-input'
 // DOM — answers to the same class as the ask form.
 const PANEL = '.nocx-dialog[open] .quick-connect[data-variant="snippets"]'
 const ROW = `${PANEL} .quick-connect__item`
-/** A refused fire re-opens the palette with the reason above the list. */
-const NOTICE = `${PANEL} .quick-connect__notice`
+/** A refused fire says why in a toast — the kit's one notification
+ *  affordance. It used to re-open the palette with the sentence above the
+ *  list, on the argument that the surface the refusal was about was still
+ *  there; that argument was about the way out the palette carried, and the
+ *  way out lives on every row now (nocx-8rtr.2). */
+const REFUSAL = '.ui-toast__message'
 /** The form that asks for a snippet's {{ask:…}} fields — all of them at
  *  once, with the palette closed behind it. */
 const ASK_FORM = '.nocx-dialog[open]'
@@ -189,14 +193,16 @@ test.describe('a saved snippet reaches a running program', () => {
 
     await pickSnippet(page, 'e2e two lines')
 
-    // The refusal re-opens the palette with the reason above the list and
-    // stays there: a newline would be read as Return and run half the
-    // phrase, so nothing is sent at all.
-    await expect(page.locator(NOTICE)).toContainText('bracketed paste', { timeout: 10_000 })
-    await expect(page.locator('.cmd-block')).toHaveCount(blocksBefore)
-
-    await page.keyboard.press('Escape')
+    // The palette closes and the reason arrives as a toast: a newline would be
+    // read as Return and run half the phrase, so nothing is sent at all.
+    // Filtered by its own words rather than asserted as the only toast: a
+    // toast from an earlier case in this file may still be on screen, and
+    // "the only one" is a claim about the others, not about this refusal.
+    await expect(page.locator(REFUSAL).filter({ hasText: 'bracketed paste' })).toBeVisible({
+      timeout: 10_000,
+    })
     await expectPaletteClosed(page)
+    await expect(page.locator('.cmd-block')).toHaveCount(blocksBefore)
     // And the program is still waiting: Enter ends it with the empty line
     // the person typed, not with anything the refused fire sent.
     await page.keyboard.press('Enter')
@@ -205,14 +211,69 @@ test.describe('a saved snippet reaches a running program', () => {
     })
   })
 
-  // The OTHER multi-line branch — bracketed paste ON, body delivered — is
-  // NOT here, and that is a finding rather than an omission: neither a
-  // program setting DECSET 2004 itself nor a nested interactive bash made
-  // the mode read as active at fire time in this container, while the
-  // renderer's own read answers correctly against the real parser
-  // (renderers/xterm.test.ts, 'bracketed paste, read from the real
-  // parser'). Either the bytes never reach xterm in the stand or something
-  // resets the mode; nocx-8rtr.1 carries the question and this test.
+  // The OTHER multi-line branch: bracketed paste ON, body delivered. It could
+  // not be arranged here until nocx-8rtr.1 was root-caused, and the cause was
+  // not the stand — the wire carries the program's DECSET (an ON/off/ON probe
+  // recorded it), while renderer.write() is fire-and-forget and insertSnippet
+  // read the mode a parse pass too early. The product fences on the parse now,
+  // so this branch is reachable, and it is the check that keeps it that way.
+  test('a multi-line body is delivered when the program HAS enabled bracketed paste', async ({
+    page,
+  }) => {
+    await page.goto('/')
+    await expect(page.locator('.nocx-tab')).toHaveCount(1)
+    await createSnippet(page, 'e2e two lines', 'first line\nsecond line')
+
+    // The program turns mode 2004 on itself and then holds the pane on stdin.
+    // `read -r` keeps the backslashes the two-line body does not have, and
+    // keeps the whole paste as ONE value, which is what makes the assertion
+    // below about delivery rather than about the shell's word splitting.
+    const blocksBefore = await programWaitingOnStdin(
+      page,
+      "printf '\\033[?2004h'; read -r x; printf 'got-%s\\n' \"$x\"",
+    )
+
+    // WHY THIS RETRIES, and why retrying is not a disguised sleep.
+    //
+    // The DECSET the program sends crosses the wire AFTER the editor hides:
+    // the editor hides on the shell-integration marker that says a command
+    // started, and the program's printf runs after that marker. So the moment
+    // this spec can first act is, by construction, a moment at which the byte
+    // may still be in flight. The product's fence covers bytes that have
+    // ARRIVED and are not yet parsed; nothing can make it wait for a byte
+    // nobody has announced, and it should not try.
+    //
+    // So the wait is on the observable outcome rather than on a duration
+    // (AGENTS.md: a test may not depend on timing). Each refused attempt is
+    // provably side-effect-free — the OFF-branch test above asserts a refusal
+    // writes nothing and submits nothing — so re-attempting costs a keystroke
+    // and proves the same thing a person's slower hand would.
+    await expect
+      .poll(
+        async () => {
+          // Counted per attempt rather than merely looked for: a toast from
+          // the previous attempt is still on screen while this one runs, and
+          // reading it as this one's answer would make the poll never finish.
+          const toastsBefore = await page.locator(REFUSAL).count()
+          await pickSnippet(page, 'e2e two lines')
+          await expectPaletteClosed(page)
+          return (await page.locator(REFUSAL).count()) > toastsBefore ? 'refused' : 'delivered'
+        },
+        { timeout: 15_000 },
+      )
+      .toBe('delivered')
+
+    // Nothing was submitted — the fire never sends a newline (§9.3), even when
+    // the destination could carry one.
+    await expect(page.locator('.cmd-block')).toHaveCount(blocksBefore)
+
+    // The person presses Enter themselves, and the program echoes what it
+    // read: both lines arrived, as one bracketed paste.
+    await page.keyboard.press('Enter')
+    const block = page.locator('.cmd-block', { hasText: 'got-first line' }).first()
+    await expect(block).toBeVisible({ timeout: 10_000 })
+    await expect(block).toContainText('second line')
+  })
 
   test('a snippet whose secret cannot be resolved refuses, and writes nothing', async ({
     page,
@@ -230,10 +291,15 @@ test.describe('a saved snippet reaches a running program', () => {
 
     await pickSnippet(page, 'e2e fill')
 
-    await expect(page.locator(NOTICE)).toContainText('could not be resolved', { timeout: 10_000 })
+    await expect(page.locator(REFUSAL).filter({ hasText: 'could not be resolved' })).toBeVisible({
+      timeout: 10_000,
+    })
+    await expectPaletteClosed(page)
     await expect(page.locator('.cmd-block')).toHaveCount(blocksBefore)
 
-    await page.keyboard.press('Escape')
+    // No Escape: the palette closed itself on the refusal, and an Escape with
+    // nothing to dismiss would reach the program as an ESC byte and land in
+    // the very value this then asserts on.
     await page.keyboard.press('Enter')
     const block = page.locator('.cmd-block', { hasText: 'got-' }).first()
     await expect(block).toBeVisible({ timeout: 10_000 })

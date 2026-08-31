@@ -506,11 +506,6 @@ const (
 	policyRefuse
 )
 
-func (m *effectKernel) decideInvocation(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool, invocation content.Invocation) (policyOutcome, PolicyRefusalReason) {
-	outcome, reason, _ := m.decideInvocationWithReason(t, resources, resourceDeclaration, invocation)
-	return outcome, reason
-}
-
 func (m *effectKernel) decideInvocationWithReason(t agenttools.Tool, resources []agenttools.ResourceRef, resourceDeclaration bool, invocation content.Invocation) (policyOutcome, PolicyRefusalReason, string) {
 	if reason, denied := m.floorRefusal(invocation, resources); denied {
 		return policyRefuse, RefusedByFloor, reason
@@ -1590,6 +1585,18 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 			_ = k.closeAttempt(ctx, execID, content.TermInterrupted, content.EntryInterrupted)
 			return modelResult{}, &EgressRequestedError{Request: req}
 		}
+	}
+
+	// A person's Stop is a successful tool exchange carrying an explicit
+	// renderer fact, not a tool error. Preserve that fact in the action
+	// ledger: the command's own exit code may also be 130, so it cannot
+	// select the user-killed reason. The result remains model-visible so the
+	// model is told not to retry it.
+	if runErr == nil && runResultStopped(decl.Name, out) {
+		if err := k.closeAttempt(ctx, execID, content.TermUserKilled, content.EntryInterrupted); err != nil {
+			return modelResult{}, fmt.Errorf("agent tool %q: record stopped outcome: %w", decl.Name, err)
+		}
+		return modelResult{text: out, kind: modelToolOutput}, nil
 	}
 
 	// 8. The outcome is recorded on the attempt — the interval closes

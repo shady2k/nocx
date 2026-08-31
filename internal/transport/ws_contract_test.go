@@ -5811,6 +5811,7 @@ func TestAgentRunResolved_DTOConformsToContract(t *testing.T) {
 		EntryID:  "entry-7",
 		ExitCode: new(0),
 		Status:   "success",
+		Stopped:  true,
 		Total:    2,
 		Start:    0,
 		End:      2,

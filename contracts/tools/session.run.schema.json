@@ -24,6 +24,7 @@
         "entryId",
         "exitCode",
         "status",
+        "stopped",
         "total",
         "window",
         "returned",
@@ -46,6 +47,15 @@
           "type": "string",
           "enum": ["success", "failure", "entered", "unknown"],
           "description": "The block's frozen status vocabulary. `entered` means the command was submitted to a program that owns the terminal rather than run to completion."
+        },
+        "stopped": {
+          "type": "boolean",
+          "description": "True only when the person stopped this command."
+        },
+        "message": {
+          "type": "string",
+          "maxLength": 256,
+          "description": "Directive shown to the model when the person stopped the command."
         },
         "total": {
           "type": "integer",
@@ -101,7 +111,21 @@
           "type": "string",
           "description": "The output itself, over the returned span."
         }
-      }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": { "stopped": { "const": true } },
+            "required": ["stopped"]
+          },
+          "then": {
+            "required": ["message"],
+            "properties": {
+              "message": { "const": "The person stopped this command. Do not retry it." }
+            }
+          }
+        }
+      ]
     }
   }
 }

@@ -33,6 +33,7 @@ const completion: AgentRunCompletion = {
   entryId: 'entry-7',
   exitCode: 0,
   status: 'success',
+  stopped: false,
   total: 2,
   start: 0,
   end: 2,
@@ -63,6 +64,7 @@ describe('mountRunCommandHandler — the renderer half of the run tool', () => {
     expect(params.entryId).toBe('entry-7')
     expect(params.exitCode).toBe(0)
     expect(params.status).toBe('success')
+    expect(params.stopped).toBe(false)
     expect(params.text).toBe('file1\nfile2')
   })
 

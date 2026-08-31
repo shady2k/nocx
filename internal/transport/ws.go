@@ -1454,6 +1454,8 @@ func (s *WSServer) buildControlPlane() {
 	// lane — a pending requestor blocks on it).
 	s.broker = NewBroker(s.rendererConns, s.rendererDeliver)
 	configOp, endpointWired := s.buildConfigOp(lane, gates.config, gates.vault)
+	noteOp := capability.NewNoteOperation(gates.config, lane, s.notes)
+	snippetOp := capability.NewSnippetOperation(gates.config, lane, s.snippets)
 	_ = endpointWired
 	specs := make([]methodSpec, 0, 96)
 	specs = append(specs, s.heartbeatSpecs(immediate)...)
@@ -1463,7 +1465,7 @@ func (s *WSServer) buildControlPlane() {
 	specs = append(specs, s.laneInteractivitySpec(immediate))
 	specs = append(specs, s.brokerSpecs(immediate)...)
 	specs = append(specs, s.clientHostSpecs(immediate, s.lane)...)
-	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired)...)
+	specs = append(specs, s.configSpecs(lane, gates.config, gates.vault, configOp, endpointWired, noteOp, snippetOp)...)
 	specs = append(specs, s.backupSpecs(lane, gates.config)...)
 	specs = append(specs, s.vaultSpecs(lane, gates.config, gates.vault)...)
 	specs = append(specs, s.notifySpecs()...)
@@ -1478,7 +1480,7 @@ func (s *WSServer) buildControlPlane() {
 	// mutex read of in-memory state and must stay answerable while the
 	// content domain is exactly what is broken.
 	specs = append(specs, s.historyStatusSpecs(s.lane)...)
-	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, s.credentialResolver(), s.assistantClient, s.askSub)...)
+	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, noteOp, snippetOp, s.credentialResolver(), s.assistantClient, s.askSub)...)
 	specs = append(specs, s.ledgerSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.layoutSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)

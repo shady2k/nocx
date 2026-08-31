@@ -134,6 +134,17 @@ func TestFloor_SurvivesWorkspaceAndSessionPolicyResolution(t *testing.T) {
 	if !denied || !strings.Contains(reason, "floor") {
 		t.Fatalf("resolved policy floor refusal = (%q, %v), want immutable floor refusal", reason, denied)
 	}
+	grant := resolved.AsGrant([]GrantScope{{
+		Kind: ResourcePath,
+		ID:   "/workspace",
+	}})
+	reason, denied = grant.Policy.FloorRefusal(Invocation{Parsed: true}, []GrantScope{{
+		Kind: ResourcePath,
+		ID:   filepath.Join(configDir, "agent-policy.json"),
+	}})
+	if !denied || !strings.Contains(reason, "floor") {
+		t.Fatalf("minted policy floor refusal = (%q, %v), want immutable floor refusal", reason, denied)
+	}
 }
 
 func TestFloor_DoesNotRefuseUnrelatedDisqualifiedInvocation(t *testing.T) {
@@ -165,12 +176,12 @@ func TestFloor_RawCommandRefusalNormalizesWhitespace(t *testing.T) {
 	}
 }
 
-func TestNoFloor_DisablesEveryFloorRule(t *testing.T) {
-	floor := NoFloor()
+func TestZeroFloor_DisablesEveryFloorRule(t *testing.T) {
+	floor := Floor{}
 	if reason, denied := floor.Refusal(Invocation{Parsed: true, Commands: [][]string{{"rm", "-rf", "/"}}}, nil); denied {
-		t.Fatalf("NoFloor refused dangerous invocation: %s", reason)
+		t.Fatalf("the zero Floor refused dangerous invocation: %s", reason)
 	}
 	if reason, denied := floor.RawCommandRefusal(":(){ :|:& };:"); denied {
-		t.Fatalf("NoFloor refused raw fork bomb: %s", reason)
+		t.Fatalf("the zero Floor refused raw fork bomb: %s", reason)
 	}
 }

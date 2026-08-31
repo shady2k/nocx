@@ -160,6 +160,81 @@ func TestCommandEffect_DisqualifiersKeepDeclaredWorstCase(t *testing.T) {
 	}
 }
 
+func TestCommandEffect_PathPrefixedDisqualifiersMatchBareNames(t *testing.T) {
+	tests := []struct {
+		name    string
+		command string
+	}{
+		{name: "sudo", command: "sudo rm -rf /home/me/x"},
+		{name: "env", command: "env rm -rf /home/me/x"},
+		{name: "xargs", command: "xargs rm"},
+		{name: "watch", command: "watch ls"},
+		{name: "setsid", command: "setsid ls"},
+		{name: "ionice", command: "ionice ls"},
+		{name: "flock", command: "flock /tmp/l ls"},
+		{name: "nohup", command: "nohup ls"},
+		{name: "timeout", command: "timeout 5 rm -rf /home/me/x"},
+		{name: "tee", command: "tee /home/me/x"},
+		{name: "bash -c", command: "bash -c 'rm -rf /home/me/x'"},
+		{name: "sh -c", command: "sh -c 'rm -rf /home/me/x'"},
+		{name: "find -delete", command: "find . -delete"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			bare := parseCanonicalInvocation(tc.command)
+			bareEffect := commandEffect(bare, content.EffectDelegate)
+			prefixed := parseCanonicalInvocation("/usr/bin/" + tc.command)
+			prefixedEffect := commandEffect(prefixed, content.EffectDelegate)
+
+			bareUnresolved := len(bare.Resources.Unresolved) > 0
+			prefixedUnresolved := len(prefixed.Resources.Unresolved) > 0
+			if prefixed.Disqualified != bare.Disqualified ||
+				prefixedUnresolved != bareUnresolved ||
+				prefixedEffect != bareEffect {
+				t.Fatalf("bare = %+v (effect %q), prefixed = %+v (effect %q)",
+					bare, bareEffect, prefixed, prefixedEffect)
+			}
+			if !bare.Disqualified || !bareUnresolved {
+				t.Fatalf("bare = %+v, want disqualified with unresolved resources", bare)
+			}
+		})
+	}
+}
+
+func TestCommandEffect_AllowListProgramNamesRemainCaseSensitive(t *testing.T) {
+	tests := []struct {
+		name      string
+		known     string
+		upperCase string
+	}{
+		{name: "ls", known: "ls /etc", upperCase: "LS /etc"},
+		{name: "cat", known: "cat /etc/passwd", upperCase: "CAT /etc/passwd"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			known := parseCanonicalInvocation(tc.known)
+			if got := commandEffect(known, content.EffectDelegate); got != content.EffectObserve ||
+				len(known.Resources.Unresolved) != 0 {
+				t.Fatalf("known = %+v (effect %q), want resolved observe", known, got)
+			}
+
+			upperCase := parseCanonicalInvocation(tc.upperCase)
+			if got := commandEffect(upperCase, content.EffectDelegate); got != content.EffectDelegate ||
+				len(upperCase.Resources.Unresolved) == 0 {
+				t.Fatalf("upper-case = %+v (effect %q), want unresolved delegate", upperCase, got)
+			}
+		})
+	}
+
+	t.Run("unknown", func(t *testing.T) {
+		inv := parseCanonicalInvocation("NOTAPROGRAM /etc")
+		if got := commandEffect(inv, content.EffectDelegate); got != content.EffectDelegate ||
+			len(inv.Resources.Unresolved) == 0 {
+			t.Fatalf("unknown = %+v (effect %q), want unresolved delegate", inv, got)
+		}
+	})
+}
+
 func TestCommandEffect_UnparseableAndUnknownAreWorstCase(t *testing.T) {
 	for _, command := range []string{
 		"ls 'unterminated",
@@ -372,6 +447,48 @@ func TestCommandResources_InstallCompareFlagKeepsRoles(t *testing.T) {
 	}
 	if !seenRead || !seenWrite {
 		t.Fatalf("resources = %+v, want read source and write dest", inv.Resources.Resources)
+	}
+}
+
+func TestCommandResources_DistinguishesExecutionFromSourcing(t *testing.T) {
+	tests := []struct {
+		command string
+		path    string
+		verb    content.ResourceVerb
+	}{
+		{command: "./deploy.sh", path: "./deploy.sh", verb: content.ResourceExecute},
+		{command: "bash deploy.sh", path: "deploy.sh", verb: content.ResourceExecute},
+		{command: "source env.sh", path: "env.sh", verb: content.ResourceSource},
+		{command: ". env.sh", path: "env.sh", verb: content.ResourceSource},
+	}
+	for _, tc := range tests {
+		t.Run(tc.command, func(t *testing.T) {
+			inv := parseCanonicalInvocation(tc.command)
+			if len(inv.Resources.Unresolved) != 0 {
+				t.Fatalf("unresolved = %+v, want resolved resource", inv.Resources.Unresolved)
+			}
+			if len(inv.Resources.Resources) != 1 ||
+				inv.Resources.Resources[0].Path != tc.path ||
+				inv.Resources.Resources[0].Verb != tc.verb {
+				t.Fatalf("resources = %+v, want %s %s", inv.Resources.Resources, tc.path, tc.verb)
+			}
+		})
+	}
+}
+
+func TestCommandResources_ShellCommandStringRemainsUnresolved(t *testing.T) {
+	for _, command := range []string{"bash -c 'cat deploy.sh'", "sh -ec 'cat deploy.sh'"} {
+		t.Run(command, func(t *testing.T) {
+			inv := parseCanonicalInvocation(command)
+			if !inv.Disqualified || len(inv.Resources.Unresolved) == 0 {
+				t.Fatalf("invocation = %+v, want disqualified unresolved command", inv)
+			}
+			for _, resource := range inv.Resources.Resources {
+				if resource.Verb == content.ResourceExecute {
+					t.Fatalf("resources = %+v, shell command string must not be an executable path", inv.Resources.Resources)
+				}
+			}
+		})
 	}
 }
 

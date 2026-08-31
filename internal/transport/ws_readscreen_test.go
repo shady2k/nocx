@@ -59,12 +59,28 @@ func autonomousMatrixForTests() content.EffectPolicy {
 	}
 }
 
-// Mutate-reversible stopped being an effect class with no tool behind it, so
-// the product-minted grant now includes the two corresponding file tools.
+func askEveryTimePolicyStore(t *testing.T) *assistant.GlobalPolicyStore {
+	t.Helper()
+	store := assistant.NewGlobalPolicyStore(storage.NewDocumentStore(t.TempDir()), "agent-policy.json")
+	if err := store.SetPolicy(askEveryTimeMatrixForTests()); err != nil {
+		t.Fatalf("seed global policy: %v", err)
+	}
+	return store
+}
+
+func askEveryTimeMatrixForTests() content.EffectPolicy {
+	r := content.EffectRow{Decision: content.DecisionAsk}
+	return content.EffectPolicy{
+		Observe: r, MutateReversible: r, MutateDestructive: r,
+		PrivilegeChange: r, Disclose: r, CrossBoundary: r, Delegate: r,
+	}
+}
+
+// The product-minted grant includes the path, session and content roots, so
+// the registry can offer both filesystem and notes/snippets tools.
 func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
 	logger := log.NewSlogAdapter(nil)
-	policy := assistant.NewGlobalPolicyStore(storage.NewDocumentStore(t.TempDir()), "agent-policy.json")
-	server := NewWSServer(logger, newRegWithStub(logger), WithAgentPolicy(policy))
+	server := NewWSServer(logger, newRegWithStub(logger), WithAgentPolicy(askEveryTimePolicyStore(t)))
 	const sid = "session-a"
 
 	grant := server.runGrantFor(sid)
@@ -77,8 +93,11 @@ func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
 	if !hasGrantScope(grant.Scopes, content.ResourceSession, sid) {
 		t.Fatalf("grant scopes = %+v, want the run's session scope", grant.Scopes)
 	}
-	if len(grant.Scopes) != 2 {
-		t.Fatalf("grant scopes = %+v, want exactly one path and one session scope", grant.Scopes)
+	if !hasGrantScope(grant.Scopes, content.ResourceContent, "content") {
+		t.Fatalf("grant scopes = %+v, want the content root for notes and snippets", grant.Scopes)
+	}
+	if len(grant.Scopes) != 3 {
+		t.Fatalf("grant scopes = %+v, want path, session and content scopes", grant.Scopes)
 	}
 
 	reg, err := agenttools.Assemble(tools.Schemas)
@@ -89,7 +108,7 @@ func TestRunGrantFor_OffersPathToolsAndKeepsSessionScope(t *testing.T) {
 	for _, tool := range reg.ForGrant(*grant) {
 		names = append(names, tool.Name)
 	}
-	want := []string{"files.read", "session.list", "session.read", "session.run", "files.edit", "files.create"}
+	want := []string{"files.read", "session.list", "session.read", "session.run", "files.edit", "files.create", "notes.search", "notes.create", "notes.update", "notes.delete", "snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder"}
 	if !reflect.DeepEqual(names, want) {
 		t.Fatalf("tools offered by the product-minted grant = %v, want %v", names, want)
 	}
@@ -295,7 +314,7 @@ func TestReadScreen_EndToEndOverTheRealSocket(t *testing.T) {
 	defer srv.Close()
 
 	// The REAL engine: the embedded schemas include readScreen.
-	client, err := assistant.NewClient(nil, nil, content.NoFloor())
+	client, err := assistant.NewClient(nil, nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -412,7 +431,7 @@ func TestReadScreen_EndToEndOverTheRealSocket(t *testing.T) {
 // direction: a renderer that cannot produce the frame (a session it does
 // not know) answers "failed" and the run is not left hanging — the failure
 func TestReadScreen_FailedCaptureAnswersHonestly(t *testing.T) {
-	client, err := assistant.NewClient(nil, nil, content.NoFloor())
+	client, err := assistant.NewClient(nil, nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}
@@ -499,7 +518,7 @@ func TestReadScreen_FailedCaptureAnswersHonestly(t *testing.T) {
 // leaking a pending request. The ledger is the record: the run reaches a
 // terminal state.
 func TestReadScreen_DisconnectedRendererTerminalizes(t *testing.T) {
-	client, err := assistant.NewClient(nil, nil, content.NoFloor())
+	client, err := assistant.NewClient(nil, nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("assistant.NewClient: %v", err)
 	}

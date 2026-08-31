@@ -314,6 +314,16 @@ const (
 type Session struct {
 	ID          string // server-authoritative (AD-7)
 	WorkspaceID string
+	// Host and Account identify the execution target whose helper owns the
+	// session id space. They are persisted in the existing session payload,
+	// rather than new columns, so reconciliation can select the right host
+	// before asking any helper.
+	Host    string
+	Account string
+	// Generation qualifies a helper-owned session's id space. Empty is
+	// deliberately unowned: rows written before helper generation tracking
+	// remain unknown rather than being attributed heuristically.
+	Generation string
 }
 
 // Environment is the durable identity of where work happens (design §3.1,

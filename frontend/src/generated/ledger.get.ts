@@ -82,6 +82,7 @@ export interface Entry {
     | null
     | (
         | 'notYetAsked'
+        | 'ambiguousInventory'
         | 'noInventory'
         | 'connectionRefused'
         | 'timedOut'

@@ -110,6 +110,10 @@ const (
 	// the ordinary answer for a session recorded before the helper owned the
 	// host, and it is the reason those recordings need the age bound below.
 	CauseNoInventory UnreconciledCause = "noInventory"
+	// CauseAmbiguousInventory means more than one inventory claimed the same
+	// id space. That can only be a duplicate registration bug; refusing to
+	// choose makes the bug loud instead of letting first-wins hide it.
+	CauseAmbiguousInventory UnreconciledCause = "ambiguousInventory"
 	// CauseConnectionRefused — a carrier answered, refusing.
 	CauseConnectionRefused UnreconciledCause = "connectionRefused"
 	// CauseTimedOut — the ask did not finish in time.
@@ -130,6 +134,14 @@ type PendingSession struct {
 	// SessionID is the row's id — the same id `entries.session_id` names and
 	// the recording is keyed by.
 	SessionID string
+	// Host and Account identify the execution target whose helper may judge
+	// this session. They are durable binding facts, not values inferred from
+	// the helper generation or session id.
+	Host    string
+	Account string
+	// Generation is the helper generation that owns SessionID's id space.
+	// Empty means no inventory may judge it.
+	Generation string
 	// Since is when this incarnation marked the session unreconciled at Open,
 	// not when the remote command started. It is what the age bound reads and
 	// what the product shows: "not reachable since" is a fact with a date.

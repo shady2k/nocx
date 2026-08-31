@@ -664,6 +664,10 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 			[]byte(`{}`),
 			[]byte(`null`),
 		},
+		"sessions.inventory": {
+			[]byte(`{}`),
+			[]byte(`null`),
+		},
 		// The id alone is enough to read; instanceId and sessionEpoch are the
 		// claim a RECLAIMING client makes about which incarnation it means,
 		// and a client that was never told either still reads (nocx-22k1c.2).

@@ -106,6 +106,7 @@
             {
               "enum": [
                 "notYetAsked",
+                "ambiguousInventory",
                 "noInventory",
                 "connectionRefused",
                 "timedOut",

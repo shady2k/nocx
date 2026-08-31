@@ -6,6 +6,7 @@ package content
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"sort"
@@ -19,12 +20,15 @@ import (
 // The cause is the only field a verdict writes, and it is memory-only because it
 // describes THIS incarnation's attempts and means nothing to the next one.
 type pendingSession struct {
-	id       string
-	sinceMs  int64
-	bytes    uint64
-	openRows int
-	cause    UnreconciledCause
-	detail   string
+	id         string
+	host       string
+	account    string
+	generation string
+	sinceMs    int64
+	bytes      uint64
+	openRows   int
+	cause      UnreconciledCause
+	detail     string
 }
 
 // carryOver reads the set of sessions a previous incarnation left behind. It
@@ -43,18 +47,30 @@ type pendingSession struct {
 func carryOver(ctx context.Context, conn *sql.Conn, sinceMs int64) (map[string]*pendingSession, error) {
 	out := map[string]*pendingSession{}
 
-	rows, err := conn.QueryContext(ctx, `SELECT id, started_at FROM sessions`)
+	rows, err := conn.QueryContext(ctx, `SELECT id, started_at, payload FROM sessions`)
 	if err != nil {
 		return nil, fmt.Errorf("content: carry-over sessions: %w", err)
 	}
 	for rows.Next() {
-		var id string
+		var id, payload string
 		var started int64
-		if scanErr := rows.Scan(&id, &started); scanErr != nil {
+		if scanErr := rows.Scan(&id, &started, &payload); scanErr != nil {
 			_ = rows.Close()
 			return nil, fmt.Errorf("content: carry-over sessions: %w", scanErr)
 		}
-		out[id] = &pendingSession{id: id, sinceMs: sinceMs, cause: CauseNotYetAsked}
+		var metadata struct {
+			Generation string `json:"generation"`
+			Host       string `json:"host"`
+			Account    string `json:"account"`
+		}
+		if decodeErr := json.Unmarshal([]byte(payload), &metadata); decodeErr != nil {
+			_ = rows.Close()
+			return nil, fmt.Errorf("content: carry-over session metadata: %w", decodeErr)
+		}
+		out[id] = &pendingSession{
+			id: id, host: metadata.Host, account: metadata.Account,
+			generation: metadata.Generation, sinceMs: sinceMs, cause: CauseNotYetAsked,
+		}
 	}
 	if closeErr := errors.Join(rows.Err(), rows.Close()); closeErr != nil {
 		return nil, fmt.Errorf("content: carry-over sessions: %w", closeErr)
@@ -123,6 +139,9 @@ func (s *sqliteContent) Pending(_ context.Context) ([]PendingSession, error) {
 	for _, p := range s.pending {
 		out = append(out, PendingSession{
 			SessionID:     p.id,
+			Host:          p.host,
+			Account:       p.account,
+			Generation:    p.generation,
 			Since:         time.UnixMilli(p.sinceMs),
 			Cause:         p.cause,
 			Detail:        p.detail,
@@ -131,8 +150,6 @@ func (s *sqliteContent) Pending(_ context.Context) ([]PendingSession, error) {
 		})
 	}
 	s.pendingMu.Unlock()
-	// Oldest first: the surface that shows these shows the longest-waiting
-	// first, and a map's order is not an order.
 	sort.Slice(out, func(i, j int) bool {
 		if out[i].Since.Equal(out[j].Since) {
 			return out[i].SessionID < out[j].SessionID

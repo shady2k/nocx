@@ -557,6 +557,10 @@ type WSServer struct {
 	// durable history is not running instead of presenting the in-memory
 	// ledger as all history (contracts/history.query.schema.json).
 	contentDB content.ContentDB
+	// hostSessionInventory answers what active helper generations hold. It is
+	// nil when the helper plane is not wired, which is a visible unavailable
+	// method rather than a fabricated empty answer.
+	hostSessionInventory HostSessionInventory
 
 	// historyStatus is the raise/clear state of durable command history:
 	// whether it is running and, when it is not, why. It answers
@@ -1458,8 +1462,13 @@ func (s *WSServer) buildControlPlane() {
 	snippetOp := capability.NewSnippetOperation(gates.config, lane, s.snippets)
 	_ = endpointWired
 	specs := make([]methodSpec, 0, 96)
+	inventorySub := s.operationQueue("session-inventory")
 	specs = append(specs, s.heartbeatSpecs(immediate)...)
 	specs = append(specs, s.sessionSpecs(lane, gates.session, gates.config)...)
+	specs = append(specs, whenAvailable(
+		s.hostSessionInventorySpecs(inventorySub)[0],
+		func() bool { return s.hostSessionInventory != nil },
+		"method not found: helper session inventory not wired"))
 	specs = append(specs, s.signalSpecs(lane, gates.session)...)
 	specs = append(specs, s.askResolverSpecs(immediate)...)
 	specs = append(specs, s.laneInteractivitySpec(immediate))

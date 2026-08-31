@@ -4,6 +4,7 @@ import { historyOutbox } from './history-client'
 import type { AttachResult } from './generated/attach'
 import type { Exit } from './generated/exit'
 import type { Open } from './generated/open'
+import type { SessionEntry, SessionsInventoryResult } from './generated/sessions.inventory'
 import type { LiveSession, SessionsLiveResult } from './generated/sessions.live'
 import type {
   EffectiveSize as SessionSize,
@@ -1002,6 +1003,14 @@ export class WSClient {
   listLiveSessions(): Promise<LiveSession[]> {
     return this.dispatcher
       .call<SessionsLiveResult>('sessions.live', {})
+      .then((result) => result.sessions)
+  }
+
+  /** The sessions currently held by authenticated helper generations known
+   *  to the coordinator (contracts/sessions.inventory.schema.json). */
+  listHelperSessions(): Promise<SessionEntry[]> {
+    return this.dispatcher
+      .call<SessionsInventoryResult>('sessions.inventory', {})
       .then((result) => result.sessions)
   }
 

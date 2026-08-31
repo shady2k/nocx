@@ -174,6 +174,143 @@ func TestAnInventoryNeverJudgesAnIdSpaceItDoesNotOwn(t *testing.T) {
 	}
 }
 
+type countingGenerationInventory struct {
+	generation string
+	live       map[string]struct{}
+	calls      int
+}
+
+func (i *countingGenerationInventory) Generation() string { return i.generation }
+func (i *countingGenerationInventory) Owns(string) bool   { return true }
+func (i *countingGenerationInventory) LiveSessions(context.Context) (map[string]struct{}, error) {
+	i.calls++
+	return i.live, nil
+}
+
+type targetGenerationInventory struct {
+	generation string
+	host       string
+	account    string
+	live       map[string]struct{}
+	calls      int
+}
+
+func (i *targetGenerationInventory) Generation() string { return i.generation }
+func (i *targetGenerationInventory) Host() string       { return i.host }
+func (i *targetGenerationInventory) Account() string    { return i.account }
+func (i *targetGenerationInventory) Owns(string) bool   { return true }
+func (i *targetGenerationInventory) LiveSessions(context.Context) (map[string]struct{}, error) {
+	i.calls++
+	return i.live, nil
+}
+
+func TestTargetMatchPreventsAskingTheWrongSameGenerationHost(t *testing.T) {
+	const other = "session-on-host-b"
+	rec := &recordingReconciler{pending: []content.PendingSession{
+		{SessionID: other, Host: "host-b", Account: "deploy", Generation: "generation-a"},
+	}}
+	hostA := &targetGenerationInventory{
+		generation: "generation-a", host: "host-a", account: "deploy",
+		live: map[string]struct{}{other: {}},
+	}
+	hostB := &targetGenerationInventory{
+		generation: "generation-a", host: "host-b", account: "deploy",
+		live: map[string]struct{}{},
+	}
+	wrongAccount := &targetGenerationInventory{
+		generation: "generation-a", host: "host-b", account: "root",
+		live: map[string]struct{}{other: {}},
+	}
+
+	reconcileSessions(context.Background(), rec, []sessionInventory{hostA, wrongAccount, hostB}, time.Hour, quietLogger())
+
+	if hostA.calls != 0 || wrongAccount.calls != 0 || hostB.calls != 1 {
+		t.Fatalf("inventory calls = %d/%d/%d, want host-a 0, host-b/root 0 and host-b/deploy 1",
+			hostA.calls, wrongAccount.calls, hostB.calls)
+	}
+	if len(rec.applied) != 1 || rec.applied[0].Verdict != content.VerdictAbsent {
+		t.Fatalf("judgement = %+v, want absent from host-b/deploy's answered empty inventory", rec.applied)
+	}
+}
+
+func TestGenerationMatchPreventsAskingTheWrongInventory(t *testing.T) {
+	const other = "session-other-generation"
+	rec := &recordingReconciler{pending: []content.PendingSession{
+		{SessionID: aSession, Generation: "generation-a"},
+		{SessionID: other, Generation: "generation-b"},
+	}}
+	first := &countingGenerationInventory{generation: "generation-a", live: map[string]struct{}{aSession: {}}}
+	second := &countingGenerationInventory{generation: "generation-b", live: map[string]struct{}{other: {}}}
+	unrelated := &countingGenerationInventory{generation: "generation-c", live: map[string]struct{}{}}
+
+	reconcileSessions(context.Background(), rec, []sessionInventory{first, second, unrelated}, time.Hour, quietLogger())
+
+	if first.calls != 1 || second.calls != 1 || unrelated.calls != 0 {
+		t.Fatalf("inventory calls = %d/%d/%d, want one call to each matching generation and none to generation-c", first.calls, second.calls, unrelated.calls)
+	}
+	if len(rec.applied) != 2 || rec.applied[0].Verdict != content.VerdictLive || rec.applied[1].Verdict != content.VerdictLive {
+		t.Fatalf("judgements = %+v, want both matching sessions live", rec.applied)
+	}
+}
+
+func TestAmbiguousInventoryOwnershipLeavesSessionUnknown(t *testing.T) {
+	const generation = "generation-a"
+	rec := &recordingReconciler{pending: []content.PendingSession{
+		{SessionID: aSession, Generation: generation},
+	}}
+	first := &countingGenerationInventory{
+		generation: generation, live: map[string]struct{}{aSession: {}},
+	}
+	second := &countingGenerationInventory{
+		generation: generation, live: map[string]struct{}{aSession: {}},
+	}
+
+	reconcileSessions(context.Background(), rec, []sessionInventory{first, second}, time.Hour, quietLogger())
+
+	if len(rec.applied) != 1 {
+		t.Fatalf("judgements = %+v, want exactly one", rec.applied)
+	}
+	got := rec.applied[0]
+	if got.Verdict != content.VerdictUnknown || got.Cause != content.CauseAmbiguousInventory {
+		t.Fatalf("judgement = %q/%q, want unknown/ambiguousInventory", got.Verdict, got.Cause)
+	}
+	if first.calls != 0 || second.calls != 0 {
+		t.Fatalf("ambiguous inventories were queried %d/%d times, want zero", first.calls, second.calls)
+	}
+}
+
+func TestExactlyOneInventoryMatchStillProducesLiveAndAbsent(t *testing.T) {
+	const generation = "generation-a"
+	const gone = "session-not-reported"
+	rec := &recordingReconciler{pending: []content.PendingSession{
+		{SessionID: aSession, Generation: generation},
+		{SessionID: gone, Generation: generation},
+	}}
+	matching := &countingGenerationInventory{
+		generation: generation, live: map[string]struct{}{aSession: {}},
+	}
+	nonmatching := &countingGenerationInventory{
+		generation: "generation-b", live: map[string]struct{}{gone: {}},
+	}
+
+	reconcileSessions(context.Background(), rec, []sessionInventory{matching, nonmatching}, time.Hour, quietLogger())
+
+	if len(rec.applied) != 2 {
+		t.Fatalf("judgements = %+v, want one per session", rec.applied)
+	}
+	byID := map[string]content.SessionJudgement{}
+	for _, judgement := range rec.applied {
+		byID[judgement.SessionID] = judgement
+	}
+	if byID[aSession].Verdict != content.VerdictLive || byID[gone].Verdict != content.VerdictAbsent {
+		t.Fatalf("judgements = %+v, want live and absent from the one matching inventory", byID)
+	}
+	if matching.calls != 1 || nonmatching.calls != 0 {
+		t.Fatalf("inventory calls = %d/%d, want one matching call and no nonmatching call",
+			matching.calls, nonmatching.calls)
+	}
+}
+
 // The same with no inventories at all, which is what the composition root
 // passes today, and the age bound still runs — because removing the startup
 // delete without replacing the bound is what must never ship.

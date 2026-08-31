@@ -48,6 +48,22 @@ type sessionInventory interface {
 	LiveSessions(ctx context.Context) (map[string]struct{}, error)
 }
 
+// generationOwnedInventory identifies the helper generation this inventory
+// answers for. It is optional so existing coordinator-local inventories keep
+// their Owns decision, while persisted helper generations are matched before
+// any helper call is made.
+type generationOwnedInventory interface {
+	Generation() string
+}
+
+// targetOwnedInventory identifies the execution host and account answered by
+// an inventory. Generation alone is not enough: the same helper build can run
+// on multiple hosts.
+type targetOwnedInventory interface {
+	Host() string
+	Account() string
+}
+
 // reconcileSessions is one pass: every session the store carried over gets
 // exactly one verdict, and then the age bound runs.
 //
@@ -70,53 +86,67 @@ func reconcileSessions(
 		return
 	}
 
-	// One ask per inventory, not per session: an inventory is a list, and
-	// asking it once per row would be N round trips for one answer. The error
-	// is KEPT rather than logged and dropped, because it is the cause every
-	// session under that inventory is then reported with.
+	// Answers are memoized per inventory, but an inventory is queried only
+	// after a pending session's persisted generation has selected it. This
+	// ordering is the safety property: asking a helper about another
+	// generation's id space could turn its truthful absence into deletion.
 	answers := make([]map[string]struct{}, len(inventories))
 	failures := make([]error, len(inventories))
-	for i, inv := range inventories {
-		answers[i], failures[i] = inv.LiveSessions(ctx)
-	}
+	asked := make([]bool, len(inventories))
 
 	for _, p := range pending {
 		j := content.SessionJudgement{SessionID: p.SessionID}
 		owner := -1
+		matches := 0
 		for i, inv := range inventories {
+			if typed, ok := inv.(generationOwnedInventory); ok {
+				if p.Generation == "" || typed.Generation() != p.Generation {
+					continue
+				}
+			}
+			if typed, ok := inv.(targetOwnedInventory); ok {
+				if p.Host != typed.Host() || p.Account != typed.Account() {
+					continue
+				}
+			} else if p.Host != "" || p.Account != "" {
+				// A stored target must not be judged by an inventory that
+				// cannot prove it answers that target.
+				continue
+			}
 			if inv.Owns(p.SessionID) {
 				owner = i
-				break
+				matches++
 			}
 		}
 		switch {
-		case owner < 0:
-			// NOBODY OWNS THIS ID SPACE, so there is nothing to ask and the
-			// answer is unknown. It is the ordinary case today: no coordinator
-			// yet records which generation a stored session belongs to, so no
-			// inventory is entitled to judge one. Asking a helper about a
-			// session it never spawned would get a truthful "I do not hold
-			// that" and turn it into a deletion.
+		case matches == 0:
 			j.Verdict = content.VerdictUnknown
 			j.Cause = content.CauseNoInventory
-		case failures[owner] != nil:
+		case matches > 1:
+			// Multiple owners indicate duplicate registration. Choosing one
+			// would make a broken ownership map silently first-wins.
 			j.Verdict = content.VerdictUnknown
-			j.Cause = causeFor(failures[owner])
-			j.Detail = failures[owner].Error()
+			j.Cause = content.CauseAmbiguousInventory
+			j.Detail = "multiple inventories claim this session id space"
 		default:
-			if _, live := answers[owner][p.SessionID]; live {
+			if !asked[owner] {
+				answers[owner], failures[owner] = inventories[owner].LiveSessions(ctx)
+				asked[owner] = true
+			}
+			if failures[owner] != nil {
+				j.Verdict = content.VerdictUnknown
+				j.Cause = causeFor(failures[owner])
+				j.Detail = failures[owner].Error()
+			} else if _, live := answers[owner][p.SessionID]; live {
 				j.Verdict = content.VerdictLive
 			} else {
-				// The one path to absent: an inventory that owns this id was
-				// asked, answered, and does not report it.
+				// The one path to absent: an inventory that owns this id
+				// space was asked, answered, and does not report it.
 				j.Verdict = content.VerdictAbsent
 			}
 		}
 		if applyErr := rec.Apply(ctx, j); applyErr != nil {
-			// The session stays pending and the next pass repeats it. Not a
-			// startup failure: a terminal that refuses to open because one
-			// verdict could not be written is worse than one that opens and
-			// tries again.
+			// The session stays pending and the next pass repeats it.
 			logger.Warn("a carried-over session could not be reconciled",
 				"session", p.SessionID, "verdict", string(j.Verdict), "error", applyErr)
 		}

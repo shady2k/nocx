@@ -55,7 +55,18 @@ type helperInstallProvider interface {
 	DiscoveryConn(ctx context.Context, host string, opts ...ssh.ConnectOption) (ssh.DiscoveryConn, error)
 }
 
+func accountFromOptions(opts []ssh.ConnectOption) string {
+	var cfg ssh.ConnectConfig
+	for _, opt := range opts {
+		if opt != nil {
+			opt(&cfg)
+		}
+	}
+	return cfg.User
+}
+
 // helperGitFactory is the composition root's answer to
+
 // transport.GitFactoryFor: for an SSH session it decides whether the
 // helper may be used for that machine at all (D8) — the consent decision
 // comes before any remote write — and when it may, installs the helper
@@ -69,6 +80,7 @@ type helperInstallProvider interface {
 // installs idempotently, and an already-complete directory uploads nothing
 // (D7), so both consultations converge on the same install. The dial
 // happens inside the returned factory's Open, never here.
+
 func helperGitFactory(lanes helperInstallProvider, store *consent.Store, installs *consent.InstallStore, log *slog.Logger) (transport.GitFactoryFor, *helperRegistry) {
 	reg := &helperRegistry{lanes: lanes, log: log, hosts: make(map[session.ID]*hostHelper)}
 	return func(sess session.Session) transport.GitOpenSelection {
@@ -132,6 +144,7 @@ func helperGitFactory(lanes helperInstallProvider, store *consent.Store, install
 				reg:        reg,
 				sid:        sess.ID(),
 				host:       sess.Host(),
+				account:    accountFromOptions(sess.SSHOptions()),
 				fp:         sess.HostKeyFingerprint(),
 				opts:       sess.SSHOptions(),
 				command:    command,
@@ -392,6 +405,55 @@ func (r *helperRegistry) forget(f *sessionFactory) {
 	r.mu.Unlock()
 }
 
+// inventories returns one reconciliation inventory per helper generation
+// currently held by this coordinator. A helper channel that was never opened
+// has no client and therefore cannot claim any stored id space.
+func (r *helperRegistry) inventories() []sessionInventory {
+	r.mu.Lock()
+	helpers := make([]*hostHelper, 0, len(r.hosts))
+	for _, h := range r.hosts {
+		helpers = append(helpers, h)
+	}
+	r.mu.Unlock()
+
+	out := make([]sessionInventory, 0, len(helpers))
+	for _, h := range helpers {
+		h.mu.Lock()
+		c, generation := h.client, h.f.expectHash
+		host, account := h.f.host, h.f.account
+		h.mu.Unlock()
+		if c != nil && generation != "" {
+			out = append(out, &helperSessionInventory{
+				client: c, generation: generation, host: host, account: account,
+			})
+		}
+	}
+	return out
+}
+
+// sessions asks each active helper once and combines the coordinator DTOs for
+// the read-only inventory RPC. A failed helper fails the aggregate answer;
+// callers must not interpret a partial list as a complete inventory.
+func (r *helperRegistry) sessions(ctx context.Context) ([]client.SessionEntry, error) {
+	inventories := r.inventories()
+	if len(inventories) == 0 {
+		return nil, errors.New("helper session inventory unavailable: no active helper")
+	}
+	out := make([]client.SessionEntry, 0)
+	for _, raw := range inventories {
+		inv, ok := raw.(*helperSessionInventory)
+		if !ok {
+			return nil, fmt.Errorf("helper inventory has unexpected type %T", raw)
+		}
+		entries, err := inv.client.Sessions(ctx)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, entries...)
+	}
+	return out, nil
+}
+
 // CloseHelpersFor closes every live helper channel on the machine whose
 // host public-key fingerprint is fp — the D25 order an uninstall is bound
 // by: no helper may be running out of a directory being deleted, so the
@@ -426,9 +488,10 @@ func (r *helperRegistry) CloseHelpersFor(fp string) {
 // lives in the registry), so the two times git.open consults the selection
 // both resolve to the same shared helper.
 type sessionFactory struct {
-	reg  *helperRegistry
-	sid  session.ID
-	host string
+	reg     *helperRegistry
+	sid     session.ID
+	host    string
+	account string
 	// fp is the machine's host public-key fingerprint — the consent key —
 	// captured at selection time so the registry can close every live
 	// helper channel on a machine without holding a session (D25).

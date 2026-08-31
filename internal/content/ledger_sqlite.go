@@ -38,9 +38,24 @@ import (
 
 func (s *sqliteContent) CreateSession(ctx context.Context, sess Session) error {
 	return s.run(ctx, func(ctx context.Context) error {
-		_, err := s.db.ExecContext(ctx,
-			`INSERT INTO sessions (id, workspace_id, started_at) VALUES (?, ?, ?)`,
-			sess.ID, sess.WorkspaceID, time.Now().UnixMilli())
+		payload := struct {
+			Generation string `json:"generation,omitempty"`
+			Host       string `json:"host,omitempty"`
+			Account    string `json:"account,omitempty"`
+		}{
+			Generation: sess.Generation,
+			Host:       sess.Host,
+			Account:    sess.Account,
+		}
+		raw, err := json.Marshal(payload)
+		if err != nil {
+			return fmt.Errorf("content: encode session metadata: %w", err)
+		}
+		_, err = s.db.ExecContext(ctx,
+			`INSERT INTO sessions (id, workspace_id, started_at, payload) VALUES (?, ?, ?, ?)`,
+			// string(raw), not raw: `sessions` is STRICT and `payload` is
+			// TEXT, so a []byte binds as a BLOB and the constraint refuses it.
+			sess.ID, sess.WorkspaceID, time.Now().UnixMilli(), string(raw))
 		return err
 	})
 }

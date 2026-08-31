@@ -110,10 +110,196 @@ export function valueSpans(body: string): ValueSpan[] {
   return out
 }
 
+// ── The LOGIC half of the grammar ────────────────────────────────────────
+//
+// Borrowed notation, parsed here: `{% if x %}` … `{% endif %}` is Jinja's
+// spelling and nothing else about Jinja is adopted. The spelling was taken
+// rather than invented because an author has almost certainly seen it, and
+// no templating engine we surveyed could be used instead — the vault's
+// `{{secret:…}}` renders to nothing under Handlebars and refuses to parse
+// under Nunjucks, and none of them can express an inline option list.
+//
+// These four are declared and not EXPORTED. Nothing outside this module
+// names them yet, and the frontend's dead-exports ratchet is right to say
+// so: they are exported by the task that gives them a consumer, not by the
+// one that writes them. `SnippetParse` exposes them structurally, so a
+// consumer can already read a block without naming its type.
+
+interface Block {
+  readonly openFrom: number
+  readonly openTo: number
+  readonly closeFrom: number
+  readonly closeTo: number
+  readonly name: string
+  readonly negated: boolean
+}
+
+interface Escape {
+  readonly from: number
+  readonly to: number
+}
+
+type DiagnosticKind =
+  'unclosed-block' | 'stray-endif' | 'nested-block' | 'unterminated-tag' | 'unknown-tag'
+
+interface Diagnostic {
+  readonly from: number
+  readonly to: number
+  readonly kind: DiagnosticKind
+  readonly detail: string
+}
+
+const TAG_OPEN = '{%'
+const TAG_CLOSE = '%}'
+/** The escape: `{%%` is a literal `{%`. ONE escaping mechanism, applied to
+ *  the delimiter that gained a meaning — `|` inside a default is knowingly
+ *  not expressible (design §4.1). */
+const ESCAPE = '{%%'
+
+interface OpenTag {
+  readonly from: number
+  readonly to: number
+  readonly name: string
+  readonly negated: boolean
+}
+
+interface TagScan {
+  readonly blocks: Block[]
+  readonly escapes: Escape[]
+  readonly diagnostics: Diagnostic[]
+}
+
+/**
+ * Every tag in the body, paired into blocks or reported as a defect.
+ *
+ * A body with a structural defect is not half-parsed: whatever survives here
+ * is still returned, and it is `diagnostics` being non-empty that the
+ * consumers refuse on. That is deliberate — the settings preview has to draw
+ * something while an author is mid-keystroke, and the fire has to name what
+ * is wrong rather than say only "no".
+ *
+ * NESTING IS REFUSED RATHER THAN SUPPORTED. One level covers the case this
+ * work was asked for (a sentence kept or dropped), and a nested condition is
+ * far more likely to be a missing `{% endif %}` than an intention.
+ */
+function scanTags(body: string): TagScan {
+  const blocks: Block[] = []
+  const escapes: Escape[] = []
+  const diagnostics: Diagnostic[] = []
+  let open: OpenTag | null = null
+
+  // `at` advances only at two points — past an escape, and past a
+  // well-formed tag's `%}` — so a `{%` inside a tag's own text can never be
+  // re-entered, and `tagFrom` is captured before `at` moves.
+  let at = body.indexOf(TAG_OPEN)
+  while (at >= 0) {
+    if (body.startsWith(ESCAPE, at)) {
+      escapes.push({ from: at, to: at + ESCAPE.length })
+      at = body.indexOf(TAG_OPEN, at + ESCAPE.length)
+      continue
+    }
+    const tagFrom = at
+    const close = body.indexOf(TAG_CLOSE, tagFrom + TAG_OPEN.length)
+    if (close < 0) {
+      // The rest of the body is inside a tag that never closes, so there is
+      // nothing after it to scan — reporting one defect and stopping beats
+      // reporting the remainder as a cascade of consequences.
+      diagnostics.push({
+        from: tagFrom,
+        to: body.length,
+        kind: 'unterminated-tag',
+        detail: 'this tag has no closing %}',
+      })
+      break
+    }
+    const tagTo = close + TAG_CLOSE.length
+    const words = body
+      .slice(tagFrom + TAG_OPEN.length, close)
+      .trim()
+      .split(/\s+/)
+    at = body.indexOf(TAG_OPEN, tagTo)
+
+    if (words.length === 1 && words[0] === 'endif') {
+      if (open === null) {
+        diagnostics.push({
+          from: tagFrom,
+          to: tagTo,
+          kind: 'stray-endif',
+          detail: 'there is no {% if %} open here',
+        })
+        continue
+      }
+      blocks.push({
+        openFrom: open.from,
+        openTo: open.to,
+        closeFrom: tagFrom,
+        closeTo: tagTo,
+        name: open.name,
+        negated: open.negated,
+      })
+      open = null
+      continue
+    }
+
+    const isIf =
+      words[0] === 'if' && (words.length === 2 || (words.length === 3 && words[1] === 'not'))
+    if (isIf) {
+      if (open !== null) {
+        // The OUTER block stays open: the inner tag is the defect, and
+        // treating it as the opener would make the next {% endif %} close
+        // the wrong one and turn one mistake into two.
+        diagnostics.push({
+          from: tagFrom,
+          to: tagTo,
+          kind: 'nested-block',
+          detail: 'a condition inside another condition is not supported',
+        })
+        continue
+      }
+      open = {
+        from: tagFrom,
+        to: tagTo,
+        name: words[words.length - 1],
+        negated: words.length === 3,
+      }
+      continue
+    }
+
+    diagnostics.push({
+      from: tagFrom,
+      to: tagTo,
+      kind: 'unknown-tag',
+      detail: 'only {% if %}, {% if not %} and {% endif %} exist',
+    })
+  }
+
+  if (open !== null) {
+    // Reported at the OPENING, not at the end of the body: the author's
+    // mistake is where the block was opened, and that is where a cursor
+    // should land.
+    diagnostics.push({
+      from: open.from,
+      to: open.to,
+      kind: 'unclosed-block',
+      detail: 'this condition has no {% endif %}',
+    })
+  }
+  return { blocks, escapes, diagnostics }
+}
+
 export interface SnippetParse {
   readonly spans: readonly ValueSpan[]
+  readonly blocks: readonly Block[]
+  readonly escapes: readonly Escape[]
+  readonly diagnostics: readonly Diagnostic[]
 }
 
 export function parse(body: string): SnippetParse {
-  return { spans: valueSpans(body) }
+  const tags = scanTags(body)
+  return {
+    spans: valueSpans(body),
+    blocks: tags.blocks,
+    escapes: tags.escapes,
+    diagnostics: tags.diagnostics,
+  }
 }

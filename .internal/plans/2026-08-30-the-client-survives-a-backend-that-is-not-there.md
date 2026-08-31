@@ -621,6 +621,37 @@ states where that mechanism is implemented, and the plan checks it there before 
 criterion is written down.** Two minutes in `ws_reclaim.go` would have caught this
 before a worker spent a container run on it.
 
+### Two more, found by the gate rather than by a review
+
+**A task that registers a wire method names and counts BOTH halves of the contract.**
+The merged gate came back red on `transport.ping has no valid params probes`. T2 had
+shipped `contracts/transport.ping.params.schema.json` and no entry in the probe table
+in `internal/transport/params_contract_test.go` — a file its task never named, so a
+worker running only the tests for the files it changed could not see the failure, and
+did not. Rule 5 in AGENTS.md says the wire is a party to the contract; what this adds is
+that the contract has two artefacts and a brief that names one of them silently descopes
+the other. The probe table is the enforcement, and it is not co-located with the schema
+on purpose — so the brief has to carry the second path.
+
+**Adopting a kit component adopts its whole behaviour, including what it does to the
+rest of the page.** The overlay was built on `Dialog`, which is correct — the kit had
+the component and rule 1 of the UI kit says import it. What the plan never asked was
+what `showModal()` does to everything underneath: the background goes inert, so a
+`focus()` call on a pane beneath it is discarded, and on close `dialog.tsx:259-260`
+restores focus to whatever was focused BEFORE the dialog opened, which at startup is
+`body`. Composed with the deliberate one-second minimum visibility and a first pane
+that opens inside `onConnect`, that is a terminal which accepts no keystrokes after
+launch until the person clicks (`nocx-0c7qz.1`). Every unit was right and the
+composition was not — the same shape rule 2 exists for, and the reason the epic's
+end-to-end check is what found it, at the cost of a full container run.
+
+The instrument: **when a surface adopts a kit component that takes over the page —
+modality, inertness, focus capture, scroll locking — the plan states what that surface
+hands back, and to whom, when the component goes away.** For a modal the answer is
+almost never "nothing", because the component's own restore targets the element that
+opened it, and a surface raised by the application rather than by a click has no such
+element.
+
 ### Revised ordering
 
 ```

@@ -35,14 +35,16 @@ type ResourceReport struct {
 	Unresolved []UnresolvedResource `json:"unresolved,omitempty"`
 }
 
-// Effect derives the safest effect from this report without exceeding the
-// tool's declared ceiling. Unresolved access retains that ceiling; a resolved
-// report with one known verb may choose its mapped row only when that row is
-// explicitly below the declaration. Mixed verbs remain declared because this
-// lattice has no implicit total ordering for combining unlike effects.
-func (r ResourceReport) Effect(declared Effect) Effect {
+// Effect selects one class from the declaration set. Unresolved, unknown or
+// mixed access takes the set's worst member; a resolved report selects its
+// mapped member only when that member is declared. This keeps uncertainty
+// tightening and never turns an unrepresented class into a permissive result.
+func (r ResourceReport) Effect(declared []Effect) Effect {
+	if len(declared) == 0 {
+		return ""
+	}
 	if len(r.Unresolved) != 0 {
-		return declared
+		return WorstEffect(declared)
 	}
 
 	derived := Effect("")
@@ -64,49 +66,64 @@ func (r ResourceReport) Effect(declared Effect) Effect {
 			// subprocess execution, so they use the privilege-change row.
 			candidate = EffectPrivilegeChange
 		default:
-			return declared
+			return WorstEffect(declared)
 		}
 		if derived == "" {
 			derived = candidate
 			continue
 		}
 		if derived != candidate {
-			return declared
+			return WorstEffect(declared)
 		}
 	}
 	if derived == "" {
-		return EffectObserve
+		if containsEffect(declared, EffectObserve) {
+			return EffectObserve
+		}
+		return WorstEffect(declared)
 	}
-	if !effectBelowCeiling(declared, derived) {
-		return declared
+	if containsEffect(declared, derived) {
+		return derived
 	}
-	return derived
+	return WorstEffect(declared)
 }
 
-// effectBelowCeiling states the only safe lowering relations. Observe is
-// already the historical lowering for a read-only report; every other
-// relation is named instead of inferred from the effect strings' order.
-func effectBelowCeiling(declared, derived Effect) bool {
-	if derived == EffectObserve {
-		return true
+func containsEffect(effects []Effect, want Effect) bool {
+	for _, effect := range effects {
+		if effect == want {
+			return true
+		}
 	}
-	switch declared {
+	return false
+}
+
+func WorstEffect(effects []Effect) Effect {
+	worst := effects[0]
+	for _, candidate := range effects[1:] {
+		if effectOrder(candidate) > effectOrder(worst) {
+			worst = candidate
+		}
+	}
+	return worst
+}
+
+func effectOrder(effect Effect) int {
+	switch effect {
+	case EffectObserve:
+		return 0
 	case EffectMutateReversible:
-		return derived == EffectMutateReversible
+		return 1
 	case EffectMutateDestructive:
-		return derived == EffectMutateReversible || derived == EffectMutateDestructive
+		return 2
 	case EffectPrivilegeChange:
-		return derived == EffectPrivilegeChange
+		return 3
 	case EffectDisclose:
-		return derived == EffectPrivilegeChange || derived == EffectDisclose
+		return 4
 	case EffectCrossBoundary:
-		return derived == EffectPrivilegeChange || derived == EffectDisclose ||
-			derived == EffectCrossBoundary
+		return 5
 	case EffectDelegate:
-		return derived == EffectMutateReversible || derived == EffectMutateDestructive ||
-			derived == EffectPrivilegeChange || derived == EffectDisclose ||
-			derived == EffectCrossBoundary || derived == EffectDelegate
+		return 6
 	default:
-		return false
+		return -1
 	}
 }

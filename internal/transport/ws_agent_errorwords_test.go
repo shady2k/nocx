@@ -318,13 +318,14 @@ const unreachableEndpoint = "http://127.0.0.1:1/v1"
 // unknownToolThenAnswer is a provider that first proposes one tool call and
 // then answers after receiving the model-visible result. The atomic flag is
 // set only when the expected result crossed the real model boundary.
-func unknownToolThenAnswer(name, args, expected string, firstBody *atomic.Value, saw *atomic.Bool) http.HandlerFunc {
+func unknownToolThenAnswer(name, args, expected string, firstBody, toolBody *atomic.Value, saw *atomic.Bool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
 		if firstBody.Load() == nil {
 			firstBody.Store(string(body))
 		}
 		if strings.Contains(string(body), `"role":"tool"`) {
+			toolBody.Store(string(body))
 			if strings.Contains(string(body), expected) {
 				saw.Store(true)
 			}
@@ -335,11 +336,11 @@ func unknownToolThenAnswer(name, args, expected string, firstBody *atomic.Value,
 	}
 }
 
-func unknownToolRun(t *testing.T, policy *assistant.GlobalPolicyStore, name, args, expected string) (string, string, error, bool, string, bool) {
+func unknownToolRun(t *testing.T, policy *assistant.GlobalPolicyStore, name, args, expected string) (string, string, error, bool, string, string, bool) {
 	t.Helper()
 	saw := &atomic.Bool{}
-	var firstBody atomic.Value
-	srv := httptest.NewServer(unknownToolThenAnswer(name, args, expected, &firstBody, saw))
+	var firstBody, toolBody atomic.Value
+	srv := httptest.NewServer(unknownToolThenAnswer(name, args, expected, &firstBody, &toolBody, saw))
 	t.Cleanup(srv.Close)
 
 	rec := &recordingClient{inner: mustClient(t)}
@@ -363,8 +364,9 @@ func unknownToolRun(t *testing.T, policy *assistant.GlobalPolicyStore, name, arg
 		t.Fatalf("runState unmarshal: %v\nraw: %s", err, raw)
 	}
 	_, approvalRequested := inboxOf(h.conn).take(isNotification("agent.approvalRequested"))
-	body, _ := firstBody.Load().(string)
-	return st.State, st.Error, rec.lastError(), saw.Load(), body, approvalRequested
+	first, _ := firstBody.Load().(string)
+	tool, _ := toolBody.Load().(string)
+	return st.State, st.Error, rec.lastError(), saw.Load(), first, tool, approvalRequested
 }
 
 func refusingPolicyStore(t *testing.T) *assistant.GlobalPolicyStore {
@@ -388,8 +390,8 @@ func refusingPolicyStore(t *testing.T) *assistant.GlobalPolicyStore {
 // neither advertised nor executed; its standing policy refusal is returned
 // to the model, which answers in words.
 func TestAsk_StandingNeverUnknownCallCompletes(t *testing.T) {
-	const expected = "this kind of action is refused by the policy this question runs under"
-	state, sentence, engineErr, saw, firstBody, approvalRequested := unknownToolRun(
+	const expected = "this kind of action is refused by the policy"
+	state, sentence, engineErr, saw, firstBody, _, approvalRequested := unknownToolRun(
 		t, refusingPolicyStore(t), "session.read", `{"sessionId":"not-this-run"}`, expected,
 	)
 	if state != "completed" || sentence != "" || engineErr != nil {
@@ -407,11 +409,40 @@ func TestAsk_StandingNeverUnknownCallCompletes(t *testing.T) {
 	}
 }
 
+func TestAsk_WithheldToolNamesEveryRefusedEffect(t *testing.T) {
+	state, sentence, engineErr, saw, _, toolBody, approvalRequested := unknownToolRun(
+		t, refusingPolicyStore(t), "session.run", `{}`, "every effect it can reach is refused by policy",
+	)
+	if state != "completed" || sentence != "" || engineErr != nil {
+		t.Fatalf("run = state %q, sentence %q, error %v; want completed withheld-tool answer", state, sentence, engineErr)
+	}
+	if !saw {
+		t.Fatal("the withheld-tool explanation never reached the model as a tool result")
+	}
+	if toolBody == "" {
+		t.Fatal("the tool-result request body was not captured")
+	}
+	const wantRows = "every effect it can reach is refused by policy (observe, mutate-reversible, mutate-destructive, delegate, cross-boundary)."
+	if !strings.Contains(toolBody, wantRows) {
+		t.Fatalf("withheld-tool explanation %q does not name every refusing row", toolBody)
+	}
+	for _, effect := range []string{
+		"observe", "mutate-reversible", "mutate-destructive", "cross-boundary", "delegate",
+	} {
+		if !strings.Contains(toolBody, effect) {
+			t.Errorf("withheld-tool explanation %q does not name refusing row %q", toolBody, effect)
+		}
+	}
+	if approvalRequested {
+		t.Fatal("withheld tool raised an approval request")
+	}
+}
+
 // TestAsk_InventedUnknownCallCompletes proves a wholly invented name follows
 // the same model-visible result path while permitted tools remain advertised.
 func TestAsk_InventedUnknownCallCompletes(t *testing.T) {
 	const expected = "There is no such tool"
-	state, sentence, engineErr, saw, _, approvalRequested := unknownToolRun(
+	state, sentence, engineErr, saw, _, _, approvalRequested := unknownToolRun(
 		t, autonomousPolicyStore(t), "model.invented.tool", `{}`, expected,
 	)
 	if state != "completed" || sentence != "" || engineErr != nil {

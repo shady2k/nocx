@@ -492,7 +492,7 @@ func classifyCall(decl agenttools.Tool, args map[string]any) (agenttools.Tool, c
 		return decl, content.Invocation{}
 	}
 	invocation := parseCanonicalInvocation(command)
-	decl.Effect = commandEffect(invocation, decl.Effect)
+	decl.Effect = commandEffect(invocation, decl.Declaration.Effect)
 	return decl, invocation
 }
 
@@ -824,6 +824,18 @@ func canonicalArgHash(raw string) string {
 	}
 	h := sha256.Sum256(b)
 	return hex.EncodeToString(h[:])
+}
+
+// withheldToolResult is the product-visible answer when offer-time filtering
+// removes every class a declared tool can reach. The rows are named so a person
+// can understand the omission and change the policy, rather than seeing a
+// completed turn that silently skipped the tool.
+func withheldToolResult(tool string, effects []content.Effect) string {
+	rows := make([]string, 0, len(effects))
+	for _, effect := range effects {
+		rows = append(rows, string(effect))
+	}
+	return fmt.Sprintf("REFUSED: nocx did not offer tool %q: every effect it can reach is refused by policy (%s).", tool, strings.Join(rows, ", "))
 }
 
 // refusalResult is the TOOL RESULT a refused call returns to the model
@@ -1324,10 +1336,10 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 		return modelResult{}, fmt.Errorf("%w: tool %q: %v", ErrMalformedModelOutput, decl.Name, err)
 	}
 	// The mechanical call classifier is deliberately after validation and
-	// before every policy/approval/ledger path. Unlike the model classifier
-	// below, it may lower a declared worst case: CommandEffect retains that
-	// worst case for every disqualified command. The returned invocation is
-	// the parser result reused by rule matching; it is never re-tokenized.
+	// before every policy/approval/ledger path. It selects one effect from the
+	// declaration's reachable set; unresolved input keeps the set's worst
+	// member. The returned invocation is the parser result reused by rule
+	// matching; it is never re-tokenized.
 	var invocation content.Invocation
 	decl, invocation = classifyCall(decl, args)
 	if decl.CommandArg == "" {

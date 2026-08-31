@@ -9,7 +9,7 @@ import (
 )
 
 // CommandEffect derives the effect of one run command from its text and the
-// tool's declared worst-case effect. It is a PURE function of those facts: no
+// tool's reachable effect set. It is a PURE function of those facts: no
 // registry lookup, settings read, shell invocation, or runtime state.
 //
 // The parser deliberately does not pretend to be the person's shell. An alias
@@ -19,8 +19,8 @@ import (
 // loses only the blanket grant, not the chance to ask.
 //
 // The class is derived from the structural resource report. A report with only
-// resolved reads can lower the declared effect; writes, deletes, network
-// access and unresolved parts retain the declared worst case.
+// resolved resources selects its mapped member; writes, deletes, network
+// access and unresolved parts select the set's worst member.
 // CommandInvocation is the parser result shared by effect classification and
 // invocation-rule policy. The parser is deliberately owned here: policy
 // consumers receive this result instead of tokenizing the command again.
@@ -78,9 +78,9 @@ func finalizeInvocation(inv content.Invocation, command string) content.Invocati
 	return inv
 }
 
-func commandEffect(inv content.Invocation, declared content.Effect) content.Effect {
+func commandEffect(inv content.Invocation, declared []content.Effect) content.Effect {
 	if !inv.Parsed {
-		return declared
+		return content.WorstEffect(declared)
 	}
 	return inv.Resources.Effect(declared)
 }

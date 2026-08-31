@@ -14,7 +14,6 @@ import (
 	"strings"
 
 	"github.com/cloudwego/eino/components/tool"
-	"github.com/shady2k/nocx/internal/content"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 )
@@ -41,9 +40,11 @@ func (c *callsCarrier) Declare(permitted []agenttools.Tool) ([]tool.BaseTool, er
 }
 
 func (c *callsCarrier) UnknownTool(name, _ string) (string, error) {
-	if decl, ok := c.effectKernel.registry.Lookup(name); ok &&
-		c.effectKernel.grant.Policy.DecisionFor(decl.Effect) == content.DecisionRefuse {
-		return refusalResult(name, RefusedByDecision, ""), nil
+	if refused := c.effectKernel.registry.RefusedEffects(c.effectKernel.grant, name); len(refused) > 0 {
+		if len(refused) == 1 {
+			return refusalResult(name, RefusedByDecision, ""), nil
+		}
+		return withheldToolResult(name, refused), nil
 	}
 	return fmt.Sprintf("There is no such tool %q. The tools you may call are the ones you were given and no others: %s.",
 		name, strings.Join(permittedNames(c.effectKernel), ", ")), nil

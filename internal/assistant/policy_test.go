@@ -365,7 +365,7 @@ func TestPolicyNarrowRowRefusesOutsideRunFence(t *testing.T) {
 	})
 	kernel := &effectKernel{grant: grant}
 	tool := agenttools.Tool{
-		Declaration: agenttools.Declaration{Effect: content.EffectObserve},
+		Declaration: agenttools.Declaration{Effect: []content.Effect{content.EffectObserve}},
 	}
 	outside := filepath.Join(filepath.Dir(rowRoot), "outside.txt")
 	if kernel.inScope(tool, []agenttools.ResourceRef{{
@@ -1770,7 +1770,6 @@ func TestMiddleware_RefusesWhenAnyResolvedResourceIsOutsideScope(t *testing.T) {
 // declared class: reading this script is permitted, while executing that same
 // path asks under Delegate.
 func TestPolicy_DistinguishesReadPermitFromExecuteAskOnOnePath(t *testing.T) {
-	t.Skip("nocx-tyhel: session.run must declare Delegate before this distinction exists")
 	sess := "session-a"
 	dir := t.TempDir()
 	path := filepath.Join(dir, "deploy.sh")

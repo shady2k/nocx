@@ -35,8 +35,9 @@
  *   header is the QUESTION, whose `.cmd-output[data-answer-body]` streams
  *   the deltas, and whose header gains a `completed` chip
  *   (`.nocx-chip.cmd-header-exit`) when the run terminalizes.
- * - The payload to the model contains the referenced block's output and no
- *   other block's (bead acceptance 2).
+ * - The model receives the marked block as metadata naming its `session.read`
+ *   id; only the tool result carries the block's output, and no unmarked
+ *   block's output can reach the answer (bead acceptance 2).
  * - agent.status drives the no-endpoint sentence on BOTH surfaces: the
  *   Endpoints readiness line (the page was renamed from AI Endpoints) and
  *   the composer's own readiness line (agent-status-line.ts, one
@@ -111,6 +112,8 @@ const serverBin = () => readStand().server
 const TITLE = '.nocx-tab-title'
 const INPUT = '.pane.active .nocx-editor-input'
 const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
+const SETTINGS_POLICY_NAV = '.ui-grouped-nav__item[data-item="policy"]'
+const OBSERVE_ROW = '.st-policy__row[data-effect="observe"]'
 /** WHAT A SELECTION LEAVES BEHIND (nocx-wcswn). The ask entry is a gesture
  *  at the prompt (nocx-4wtlh) — the per-block Ask control and the receipt
  *  that carried its chip are both gone — and a selection now GRANTS its
@@ -414,6 +417,34 @@ function answerBlockOf(page: Page, question: string): Locator {
   return page.locator('.cmd-block').filter({ hasText: question })
 }
 
+function systemPrompt(body: string): string {
+  const request = JSON.parse(body) as { messages?: { role?: string; content?: string }[] }
+  return (request.messages ?? []).find((message) => message.role === 'system')?.content ?? ''
+}
+
+/** Read the attached item id from the model's actual system prompt. The
+ *  scripted model must use this id, not one the spec invents, so a successful
+ *  answer proves the grant survives the frontend-to-ledger join. */
+function attachedItemID(body: string): string {
+  const match = systemPrompt(body).match(/\n- id: ([^;]+); state: (?:running|exited)/)
+  if (!match) throw new Error('model request has no attached terminal item id')
+  return match[1]
+}
+
+/** Derive the scripted answer only from non-system, non-user messages. The
+ *  marker therefore has to arrive in session.read's result, not merely in the
+ *  command label the prompt announces. */
+function answerFromAttachedItem(body: string, marker: string): string[] {
+  const request = JSON.parse(body) as { messages?: { role?: string; content?: string }[] }
+  const toolMessages = (request.messages ?? [])
+    .filter((message) => message.role !== 'system' && message.role !== 'user')
+    .map((message) => message.content ?? '')
+    .join('\n')
+  return toolMessages.includes(marker)
+    ? ['The first block output contains ', marker, '.']
+    : ['The marked block output was not delivered.']
+}
+
 test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
   test.use({ viewport: { width: 1280, height: 900 } })
 
@@ -511,16 +542,20 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // person is actually asking, not floating above this page's frame
     // (nocx-q27y removed `.ep-status-row`, so nothing here may assert on it).
     // The row is selected by the endpoint's own name rather than by the page
-    // root: this file creates a second endpoint later, and a page-wide
-    // contains would then pass on the wrong row.
     const savedRow = page.locator('.ui-collection-row').filter({ hasText: `E2E Fake ${nonce}` })
     await expect(savedRow).toBeVisible({ timeout: 10_000 })
-
-    // ── The answering role (nocx-e6kn2): the ask resolves the role to
-    // its assigned (endpoint, model) pair, so the fresh endpoint is not
     // askable until the role names it — the refusal for an unassigned
     // role is "no model assigned", and the ask would never reach the
     // fake. The assignment goes through the surface a person uses.
+    // Allow the measured session.read so the model request can reach the
+    // second completion without an approval sheet unrelated to this join.
+    await page.locator(SETTINGS_POLICY_NAV).click()
+    const observeRow = page.locator(OBSERVE_ROW)
+    await expect(observeRow).toBeVisible({ timeout: 15_000 })
+    await observeRow.locator('select').first().selectOption({ label: 'Allowed' })
+    await expect(observeRow.locator('.st-policy__state')).toContainText('Allowed', {
+      timeout: 15_000,
+    })
     await assignAnsweringRole(page, `E2E Fake ${nonce}`, 'e2e-model')
 
     // ── Two finished blocks with output that cannot be confused ──────────
@@ -534,15 +569,18 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // below proves markerB is absent, which needs the block to exist on
     // screen and nothing else.
     await runCommand(page, cmdB, markerB)
-
-    // ── The gesture: point at the block's output ─────────────────────────
-    // Script the fake FIRST: the answer the model gives is decided by the
-    // test, streamed in several chunks and HELD after the first so the spec
-    // can observe partial text while the stream is genuinely open. The
-    // request base is captured BEFORE this ask: the fake's ids accumulate
-    // across the file's tests, and every index below is relative to it.
+    // Script the fake to call session.read with the id the product actually
+    // announces, then derive the answer from that tool result. A fixed answer
+    // would pass even if the grant disappeared before the model request.
     const base = fake.requests().length
-    fake.setScript({ chunks: ['The first block printed ', markerA, '.'], holdAfter: 1 })
+    fake.setScript({
+      chunks: [],
+      toolCalls: (body) => [{ name: 'session.read', arguments: { id: attachedItemID(body) } }],
+    })
+    fake.setScript({
+      chunks: (body) => answerFromAttachedItem(body, markerA),
+      holdAfter: 1,
+    })
     // Ask has to be active before the offer exists (nocx-a7mw7.5). The Run
     // half of that rule has its own coverage in pointAtFromRun; here the
     // flip is setup, made through the same real chord.
@@ -558,16 +596,24 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     const question = 'What did the first block print?'
     await askFromPrompt(page, question)
 
-    // The request reached the fake — the whole ask round trip through the
-    // real backend. The payload carries the chosen block's output and no
-    // other block's, and the credential arrived as the Bearer it was stored
-    // as (the endpoints.probe suite's paired wire facts, same path).
-    const reqs = await fake.waitForRequests(base + 1)
-    const req1 = reqs[base]
-    expect(req1.path.endsWith('/chat/completions')).toBe(true)
-    expect(req1.authorization).toBe(`Bearer e2e-key-${nonce}`)
-    expect(req1.body).toContain(markerA)
-    expect(req1.body).not.toContain(markerB)
+    // Two model requests are required: the first proposes session.read and
+    // the second receives its result. The backend must resolve the announced
+    // id; otherwise the derived answer below says the read was absent.
+    const reqs = await fake.waitForRequests(base + 2)
+    const askRequests = reqs.slice(base).filter((request) => request.body.includes('"messages"'))
+    expect(askRequests).toHaveLength(2)
+    const requestBeforeRead = askRequests[0]
+    const requestAfterRead = askRequests[1]
+    expect(requestBeforeRead.path.endsWith('/chat/completions')).toBe(true)
+    expect(requestBeforeRead.authorization).toBe(`Bearer e2e-key-${nonce}`)
+    const beforeSystem = systemPrompt(requestBeforeRead.body)
+    const afterSystem = systemPrompt(requestAfterRead.body)
+    expect(beforeSystem).toContain('Attached terminal content')
+    expect(beforeSystem).toContain('state: exited')
+    expect(beforeSystem).toContain(cmdA)
+    expect(beforeSystem).not.toContain(markerB)
+    expect(afterSystem).toContain(markerA)
+    expect(afterSystem).not.toContain(markerB)
 
     // The answer block appears in the flow: a .cmd-block whose header is the
     // QUESTION and whose output is the agent answer body — a shell command
@@ -582,16 +628,20 @@ test.describe('agent ask about a frozen block (nocx-x8s2.2)', () => {
     // The answer STREAMS IN: the body already shows the first chunk while
     // the stream is still open (the fake holds after chunk 1). A product
     // that buffered the answer would never show this partial text.
-    await expect(answerBody).toContainText('The first block printed ', { timeout: 15_000 })
-    await expect.poll(() => fake.requests()[base]?.state).toBe('streaming')
+    await expect(answerBody).toContainText('The first block output contains ', { timeout: 15_000 })
+    await expect
+      .poll(() => fake.requests().find((request) => request.id === requestAfterRead.id)?.state)
+      .toBe('streaming')
 
     // Release the held stream: the rest arrives, the run terminalizes, and
     // the block's header gains the completion chip — the surface's own word
     // for "the answer finished".
-    fake.release(req1.id)
-    const answer = `The first block printed ${markerA}.`
+    fake.release(requestAfterRead.id)
+    const answer = `The first block output contains ${markerA}.`
     await expect(answerBody).toContainText(answer, { timeout: 15_000 })
-    await expect.poll(() => fake.requests()[base]?.state).toBe('done')
+    await expect
+      .poll(() => fake.requests().find((request) => request.id === requestAfterRead.id)?.state)
+      .toBe('done')
     await expect(answerBlock.locator('.cmd-header-exit')).toHaveText('completed', {
       timeout: 15_000,
     })

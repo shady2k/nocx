@@ -298,7 +298,11 @@ export function createAnswerBody(outputEl: HTMLElement, opts: AnswerBodyOpts): A
       onContent?.()
       const hadContent = partial !== null && partial.textContent.trim() !== ''
       if (hadContent) started = true
-      if (!started && partial) partial.remove()
+      // A newline opens an empty partial row for the next chunk. It is only a
+      // placeholder while text may continue; once another element takes the
+      // stream seat, no future chunk can fill it. Completed blank rows remain
+      // untouched, so paragraph spacing still survives.
+      if (partial && partial.textContent.trim() === '') partial.remove()
       partial = null
       tableCandidate = null
       endTable()

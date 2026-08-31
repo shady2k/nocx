@@ -19,12 +19,11 @@ import (
 )
 
 // AttachedContentItem is the metadata for one terminal item attached to this
-// question. ItemID is the ledger row id accepted by session.read's `id`
-// argument. The command and state are descriptive facts; the item body is
-// deliberately not carried here. A nil Start and Count mean the whole block;
-// when present they are the exact session.read window. Automatic is true only
-// for the renderer's frozen-frame attachment, which was added without a
-// person marking it.
+// question. ItemID is the id accepted by session.read's `id` argument; normal
+// items name ledger rows, while Automatic items name renderer-owned frozen
+// screen attachments. The command and state are descriptive facts; the item
+// body is deliberately not carried here. A nil Start and Count mean the whole
+// block; when present they are the exact session.read window.
 type AttachedContentItem struct {
 	ItemID    string
 	Command   string
@@ -57,8 +56,9 @@ type SystemPromptFacts struct {
 	// confidence of having been told.
 	OS string
 	// AttachedContent names the terminal items attached to THIS question.
-	// Their ids are the exact ledger ids accepted by session.read; their
-	// bodies are fetched by that tool, never copied into this prompt.
+	// Normal ids name ledger rows; automatic ids name renderer-owned frozen
+	// screens. Their bodies are fetched by that tool, never copied into this
+	// prompt.
 	AttachedContent []AttachedContentItem
 	// PersonalInstructions is what the person wrote in Settings (design §1
 	// item 6, nocx-avogl.4) - their own standing paragraph, verbatim. It is

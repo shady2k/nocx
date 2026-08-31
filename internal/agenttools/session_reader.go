@@ -6,12 +6,33 @@ import "github.com/shady2k/nocx/internal/content"
 // session.read. It carries only the session ids named by the run's grant;
 // the ledger and renderer seams are supplied separately by the assistant.
 type SessionReader struct {
-	sessions  map[string]struct{}
-	sessionID string
+	sessions       map[string]struct{}
+	sessionID      string
+	automaticItems map[string]struct{}
 }
 
 func NewSessionReader(scopes []content.GrantScope) *SessionReader {
-	r := &SessionReader{sessions: make(map[string]struct{})}
+	return newSessionReader(scopes, nil)
+}
+
+// NewSessionReaderWithAutomaticItems adds renderer-owned item ids whose
+// session.read calls must use the current renderer screen rather than a
+// durable ledger row. These ids are validated as part of the ask envelope and
+// remain scoped to this run's session grant.
+func NewSessionReaderWithAutomaticItems(scopes []content.GrantScope, automaticItems []string) *SessionReader {
+	return newSessionReader(scopes, automaticItems)
+}
+
+func newSessionReader(scopes []content.GrantScope, automaticItems []string) *SessionReader {
+	r := &SessionReader{
+		sessions:       make(map[string]struct{}),
+		automaticItems: make(map[string]struct{}, len(automaticItems)),
+	}
+	for _, item := range automaticItems {
+		if item != "" {
+			r.automaticItems[item] = struct{}{}
+		}
+	}
 	for _, scope := range scopes {
 		if scope.Kind == content.ResourceSession && scope.ID != "" {
 			r.sessions[scope.ID] = struct{}{}
@@ -23,6 +44,16 @@ func NewSessionReader(scopes []content.GrantScope) *SessionReader {
 		}
 	}
 	return r
+}
+
+// IsAutomaticItem reports whether id is a renderer-owned screen attachment
+// for this run. The caller must still enforce the session grant separately.
+func (r *SessionReader) IsAutomaticItem(id string) bool {
+	if r == nil || id == "" {
+		return false
+	}
+	_, ok := r.automaticItems[id]
+	return ok
 }
 
 func (r *SessionReader) Allows(sessionID string) bool {

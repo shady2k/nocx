@@ -8262,6 +8262,32 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
       teardown()
     }
   })
+  it('attaches the still-running owner when its block froze before summon capture', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client, 'top')
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      scrollback.beginBlockNow('top', '~', 0)
+      scrollback.blockManager.bindAttempt('att-run')
+      scrollback.blockManager.freezeBlock(() => undefined, 0, 0)
+
+      await summonChord(content)
+
+      expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).toContain(
+        'frozen screen attached automatically',
+      )
+    } finally {
+      restore()
+      teardown()
+    }
+  })
 
   it('disposal removes the freeze presentation and restores the live host', async () => {
     const client = makeClient()
@@ -8659,6 +8685,56 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         chordOn(viewOf(ed).contentDOM)
         expect(targetNamed(ed)).toBe('shell')
         expect(ed.getDoc()).toBe('ls -la')
+      } finally {
+        teardown()
+      }
+    })
+    it('attaches the retained frozen owner when Ctrl+Enter flips a visible editor to Ask', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        frozenBlock(content, 'top', ['screen marker'])
+        rendererOf(content)._fireWriteParsed()
+        const renderer = rendererOf(content)
+        const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+        renderer.captureLiveFrame = captureLiveFrame
+
+        chordOn(viewOf(ed).contentDOM)
+
+        await vi.waitFor(() =>
+          expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).toContain(
+            'frozen screen attached automatically',
+          ),
+        )
+        expect(captureLiveFrame).toHaveBeenCalledTimes(1)
+      } finally {
+        teardown()
+      }
+    })
+    it('does not attach a historical block when no screen bytes follow its freeze', async () => {
+      const { ed, content, teardown } = await mountTerminal(makeClipboard(), {
+        attachToDocument: true,
+      })
+      try {
+        content.setVisible(true)
+        ed.show()
+        ed.focus()
+        frozenBlock(content, 'old command', ['old output'])
+        const renderer = rendererOf(content)
+        const captureLiveFrame = vi.fn().mockResolvedValue(defaultPinnedFrame())
+        renderer.captureLiveFrame = captureLiveFrame
+
+        chordOn(viewOf(ed).contentDOM)
+        await Promise.resolve()
+
+        expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).not.toContain(
+          'frozen screen attached automatically',
+        )
+        expect(captureLiveFrame).not.toHaveBeenCalled()
       } finally {
         teardown()
       }

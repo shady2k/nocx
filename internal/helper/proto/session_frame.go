@@ -47,12 +47,13 @@ import (
 //
 // # Encoding lives with its caller
 //
-// This file decodes and does not encode, and that is not an omission. Nothing
-// produces these frames until the helper owns a PTY (nocx-k6p18.3), and a
-// function with no caller is a function nobody can tell is right. The layout
-// is pinned by literal-byte golden vectors rather than by an encoder's own
-// output, which is the stronger pin anyway: a vector built by the codec under
-// test proves only that the codec agrees with itself.
+// This file decoded and did not encode until nocx-k6p18.3, and that was not an
+// omission: nothing produced these frames until the helper owned a PTY, and a
+// function with no caller is a function nobody can tell is right. The encoder
+// arrived with the per-subscriber pump that calls it. The layout stays pinned
+// by literal-byte golden vectors rather than by the encoder's own output,
+// which is the stronger pin anyway: a vector built by the codec under test
+// proves only that the codec agrees with itself.
 //
 // Decoding, by contrast, is needed today. Generations coexist for months, so a
 // coordinator newer than the helper it reached will send TypeSessionData at a
@@ -101,4 +102,25 @@ func DecodeSessionFrame(payload []byte) (SessionFrame, error) {
 	f.Payload = make([]byte, len(payload)-SessionFrameHeaderLen)
 	copy(f.Payload, payload[SessionFrameHeaderLen:])
 	return f, nil
+}
+
+// EncodeSessionFrame builds one TypeSessionData payload: the fixed header
+// followed by the raw PTY bytes, never JSON and never base64 (AD-1).
+//
+// It lands now, with its producer, for the reason the decode half landed
+// alone: a function with no caller is a function nobody can tell is right.
+// The helper's per-subscriber pump is that caller, and the coordinator's write
+// path is the other one. It is checked against the literal-byte golden vectors
+// in abi_test.go rather than against DecodeSessionFrame, because a vector
+// built by the codec under test proves only that the codec agrees with itself.
+//
+// A zero-length payload encodes to exactly the header, which the decoder
+// accepts: a write of no bytes is not a malformed frame.
+func EncodeSessionFrame(f SessionFrame) []byte {
+	out := make([]byte, SessionFrameHeaderLen+len(f.Payload))
+	copy(out[0:16], f.Session[:])
+	copy(out[16:32], f.Subscriber[:])
+	binary.BigEndian.PutUint64(out[32:40], uint64(f.Epoch))
+	copy(out[SessionFrameHeaderLen:], f.Payload)
+	return out
 }

@@ -1,0 +1,17 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.sessions.schema.json",
+  "title": "HelperSessionsResult",
+  "description": "Result of the helper session service's sessions op: every live host session this generation holds. The array is never null — an empty inventory is [], because a decoder distinguishing 'no sessions' from 'no answer' needs the empty case to arrive as one. The distinction is load-bearing beyond tidiness: a coordinator turns an ANSWER that a session is absent into a deletion, and anything else into 'unknown', where nothing is deleted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["sessions"],
+  "properties": {
+    "sessions": {
+      "type": "array",
+      "items": {
+        "$ref": "https://nocx.local/contracts/helper/identities.schema.json#/$defs/sessionEntry"
+      }
+    }
+  }
+}

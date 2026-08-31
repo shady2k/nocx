@@ -25,11 +25,14 @@ import (
 // difference matters. It drives the REAL host and the REAL client over a real
 // socket — the framing, the writer mutex, the response envelope, the chunking
 // path and the client's decode — so a shape that survives it survives the
-// transport. It does NOT drive the session service, because there is not one:
-// the name is reserved and unbuilt (D15), and building it is nocx-k6p18.3.
-// When that service lands, this file is where its ops get their over-the-wire
-// case, and the schemas below do not change — that is the whole claim of a
-// frozen ABI.
+// transport. It does NOT drive the session service: when this file was written
+// there was not one, the name being reserved and unbuilt (D15).
+//
+// There is one now (nocx-k6p18.3), and the schemas below did not change — which
+// is the whole claim of a frozen ABI, and the reason this file was left alone
+// rather than rewritten around the new service. Its over-the-wire cases live in
+// session_service_contract_test.go, beside the ops that needed a PTY to have
+// semantics.
 
 const helperContractDir = "../../../contracts/helper"
 
@@ -274,10 +277,11 @@ func TestAnAttachmentMayNotStandInForASession(t *testing.T) {
 // ── the real payload, off the real socket ──────────────────────────────
 
 // abiService answers the frozen ops with the frozen shapes. Its NAME is not
-// proto.ServiceSession, and it cannot be: that name is reserved and
-// host.Register panics on it until the PTY-owning service exists (D15). What
-// this drives is therefore the shapes and the transport, not the service —
-// see the note at the top of this file.
+// proto.ServiceSession, and it stays that way now that the name is taken: what
+// this drives is the SHAPES and the transport, deliberately without the real
+// service behind them, so an attach answer that no implementation happens to
+// produce today is still checked against the contract. The real service's own
+// over-the-wire cases are in session_service_contract_test.go.
 type abiService struct{}
 
 func (abiService) Name() string { return "session-abi-freeze" }

@@ -190,6 +190,10 @@ All decisions below are **[ADOPTED]**. Each carries stable IDs; do not re-litiga
 - Binds: transport + session + ipc + terminal.
 - Prevents: OOM, dropped bytes, and cross-tab head-of-line stalls on the shared WS.
 - Rule: bounded in-flight-byte **credit per session**; when the credit is exhausted, apply backpressure to the PTY/SSH read (throttle the source — **never drop, never grow unbounded**). Bytes are lossless and ordered; per-session fairness ensures one busy tab cannot starve others.
+- **Amendment (nocx-k6p18.3): exactly one lossy case, and only on a host the helper owns.** A helper-hosted session's output window is **bounded**; when it is full the **oldest bytes are discarded** rather than the source throttled, and a reader asking for a discarded offset is told the window's base instead, with the range it lost stated explicitly. Every other path stays lossless and ordered — the coordinator's own replay ring (AD-9) is unchanged and still throttles.
+  - Why the exception exists: on a host the coordinator can be replaced by an update, a crash or a quit, and throttling then means a three-hour build **stops because nobody is watching**. Losing the oldest bytes of a stream nobody is reading is the cheaper failure, and it is what makes the promise implementable without a disk on the host.
+  - The loss is **stated in the product**, never only logged: a reader whose cursor falls behind — at attach or mid-stream — receives an explicit reset carrying the gap, and the recording records the hole rather than stopping at it.
+  - The bound is per session, travels at spawn, and the session keeps it for its whole life; the helper clamps it to a floor strictly above the credit limit, a ceiling, and a helper-wide aggregate budget, because the memory is spent on somebody else's machine.
 
 ## Cross-Cutting Concerns
 

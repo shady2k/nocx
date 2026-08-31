@@ -1,7 +1,9 @@
 // Command nocx-helper is the remote-helper binary: it is launched on a
 // remote host over a single pty-less SSH exec channel and speaks the frame
-// protocol over stdin/stdout (design §4). It serves the git service; files,
-// ports and session are reserved names.
+// protocol over stdin/stdout (design §4). It serves the git service and the
+// SESSION service — it spawns the shell and owns its PTY, which is what makes
+// the helper the integration rather than a script (level-1 design D3); files
+// and ports are still reserved names.
 package main
 
 import (
@@ -16,6 +18,8 @@ import (
 	"github.com/shady2k/nocx/internal/git/hostsvc"
 	"github.com/shady2k/nocx/internal/git/local"
 	"github.com/shady2k/nocx/internal/helper/host"
+	"github.com/shady2k/nocx/internal/helper/proto"
+	"github.com/shady2k/nocx/internal/helper/session"
 )
 
 func main() {
@@ -40,8 +44,35 @@ func main() {
 
 	factory := local.NewFactory()
 	defer factory.Stop()
+
+	// The session service (nocx-k6p18.3). Its GENERATION is the content hash
+	// of this binary, because a helper install is content-addressed: the
+	// generation is not a name assigned to the build, it IS the build, so a
+	// durable session handle addresses the exact install that minted it and
+	// needs no lookup service to be resolved (D10).
+	sessions := session.New(session.Options{
+		Generation: proto.GenerationID(contentHash),
+		Spawner:    session.NewLocalSpawner(log, session.Shell{}),
+		Inspector:  session.NewProcFS(),
+		Log:        log,
+		Limits:     session.DefaultLimits(),
+	})
+	defer sessions.Close()
+
 	h := host.New(os.Stdin, os.Stdout, contentHash, instanceID, log)
 	h.Register(hostsvc.New(factory))
+	h.Register(sessions)
+
+	// The connection is bound to the service, not the other way round: the
+	// sessions outlive it. Today this process serves exactly one connection
+	// over stdin/stdout, so the release below is also the end of the process;
+	// when the helper listens on its private Unix socket (nocx-k6p18.4) the
+	// same two lines move inside the accept loop and the sessions stay put
+	// across every connection it serves. That is D1, and it is why Bind exists
+	// at all rather than the sink being a constructor argument.
+	release := sessions.Bind(h)
+	defer release()
+
 	if err := h.Serve(context.Background()); err != nil {
 		if errors.Is(err, host.ErrVersionMismatch) {
 			os.Exit(host.ExitVersionMismatch)

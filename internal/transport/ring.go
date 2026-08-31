@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"io"
 	"sync"
+
+	"github.com/shady2k/nocx/internal/helper/proto"
 )
 
 // RingCapacity is the per-session replay ring size in bytes.
@@ -318,13 +320,28 @@ func (r *outputRing) oldestLocked() uint64 {
 // written offset (the client must clear and resync). When offset is at or
 // past the current end, data is empty and needsReset is false (the caller
 // should wait for new data).
+//
+// The VERDICT — is this offset still in the window — is proto.ResumeAt's, and
+// not a second derivation here. The same question is asked on the host by the
+// helper's bounded output window (nocx-k6p18.3), and two derivations of one
+// predicate agree everywhere anybody looks and disagree somewhere nobody does.
+//
+// Where a reset RESTARTS is this ring's own and deliberately not taken from
+// there, because the two windows lose bytes for different reasons. This ring
+// is lossless: a byte leaves it only once a consumer has passed it, so an
+// offset below the base is a stale or buggy cursor for bytes the client
+// already had, and the honest answer is "clear and resync at now". The
+// helper's window is capacity-reclaimed, so an offset below ITS base names
+// bytes nobody ever held, and the honest answer there is the oldest byte that
+// still exists plus an explicit gap. Same predicate, two windows, and the
+// difference is in the caller where it can be read.
 func (r *outputRing) snapshot(offset uint64) (data []byte, from uint64, needsReset bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 
 	w := r.written()
 
-	if offset < r.base {
+	if proto.ResumeAt(proto.StreamOffset(r.base), proto.StreamOffset(w), proto.StreamOffset(offset)).Reset {
 		return nil, w, true
 	}
 	if offset >= w {

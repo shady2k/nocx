@@ -51,10 +51,13 @@ package proto
 //     about the stream rather than only a fact about a slow client.
 //
 // The DECISION rule — is the offset still in the window, and if not where does
-// the reader restart — is deliberately NOT written here. It is
-// internal/transport's outputRing.snapshot today and it moves into the helper
-// with the window itself (nocx-k6p18.3). A second implementation of it here
-// would be two owners of one behaviour that agree everywhere anybody looks.
+// the reader restart — was deliberately NOT written here, so that it would land
+// with the window it decides for. It landed with nocx-k6p18.3 as ResumeAt in
+// session_service.go, beside the Resume shape that states its answer, and
+// internal/transport's outputRing.snapshot now takes its VERDICT from there
+// rather than keeping a second derivation. What that ring keeps is only where a
+// reset restarts, because the two windows lose bytes for different reasons —
+// the comment on ResumeAt says which.
 //
 // # The trust boundary, and that it cannot be retrofitted (D12)
 //
@@ -74,17 +77,20 @@ package proto
 //
 // # Reserved here, unused here, and required to stay (D15)
 //
-// An opaque WorkspaceID belongs in the inventory and spawn envelopes when
-// those land (nocx-k6p18.3). It is named here so a later optimisation does not
-// quietly drop it: it is opaque and never a display name, because human names
-// bring rename, collision, normalisation and guessability into execution-host
-// policy, and the helper owns no human-authored name (D3).
+// An opaque WorkspaceID belonged in the inventory and spawn envelopes when
+// those landed, and it is in both (session_service.go). It was named here first
+// so a later optimisation would not quietly drop it: it is opaque and never a
+// display name, because human names bring rename, collision, normalisation and
+// guessability into execution-host policy, and the helper owns no
+// human-authored name (D3).
 
-// ServiceSession is the name of the helper service that owns PTYs. The name is
-// reserved and its service is not built yet (D15) — internal/helper/host
-// refuses to register anything under it, and this constant is where that
-// reservation is spelled, so the name has one owner rather than a literal in
-// each package that cares.
+// ServiceSession is the name of the helper service that owns PTYs. The name was
+// RESERVED here while its service did not exist (D15) and internal/helper/host
+// refused to register anything under it; nocx-k6p18.3 cashed that reservation
+// in, and internal/helper/session is what answers to it now. This constant is
+// still where the name is spelled, so it has one owner rather than a literal in
+// each package that cares — and host.Register still refuses a SECOND service
+// claiming any name, which is what the reservation was protecting.
 const ServiceSession = "session"
 
 // The operations of the session service. Frozen with the envelopes below; an

@@ -4849,26 +4849,16 @@ export class TerminalContent extends BasePaneContent {
     return { kind: 'ok', editor, targets, agentId }
   }
 
-  /** Find the block that owns the screen this ask will describe. The
-   *  lifecycle can still be running after the block's visual freeze has
-   *  released the manager's running slot, so retain that attempt-bound block.
-   *  A background child has no open attempt; in that case the most recent
-   *  frozen block is eligible only after the renderer parsed newer bytes.
-   *  `frozenOnly` excludes an un-frozen manager slot, which is stale once the
-   *  lifecycle has returned to the prompt. */
-  private automaticAttachmentOwner(frozenOnly = false): BlockRecord | null {
+  /** Find the frozen block that owns the current screen frame. A historical
+   *  block is eligible only after the renderer parsed newer bytes. */
+  private automaticAttachmentOwner(): BlockRecord | null {
     const scrollback = this.scrollback
     const manager = scrollback?.blockManager
     if (scrollback === null || manager === undefined) return null
-    if (!frozenOnly && manager.runningBlock !== null) return manager.runningBlock
-    const state = this.lifecycle.state
-    if (!frozenOnly && state.kind === 'running' && state.attempt.state === 'open') {
-      return manager.blockForAttempt(state.attempt.id)
-    }
     const frozen = this._lastFrozenBlock
     if (
       frozen === null ||
-      this._screenWriteGeneration <= this._lastFrozenWriteGeneration ||
+      this._screenWriteGeneration <= this._lastFrozenWriteGeneration + 5 ||
       !manager.blocks.includes(frozen) ||
       !scrollback.scrollbackInner.contains(frozen.el)
     )
@@ -4879,7 +4869,7 @@ export class TerminalContent extends BasePaneContent {
   /** Capture the current screen for a visible-editor Ask transition. Unlike
    *  summonEditor this changes no layout: the frame is pinned for session.read
    *  and its owner is shown in the grant chip. */
-  private async captureAutomaticFrozenFrame(owner: BlockRecord): Promise<void> {
+  private async captureAutomaticFrozenFrame(): Promise<void> {
     if (this._automaticCapturePending || this._summoned || this.editor === null) return
     const editor = this.editor
     const targets = this.inputTargets
@@ -4891,12 +4881,13 @@ export class TerminalContent extends BasePaneContent {
         this._bufferType === 'alternate'
           ? await this.captureLiveFrame({ start: 0, end: this.rows })
           : await this.captureLiveFrame()
+      const owner = this.automaticAttachmentOwner()
       if (
         this._disposed ||
         this.editor !== editor ||
         !editor.isVisible ||
         targets.active().id !== agentId ||
-        !this.scrollback?.blockManager.blocks.includes(owner)
+        owner === null
       )
         return
       this._pinnedFrame = frame
@@ -4923,8 +4914,13 @@ export class TerminalContent extends BasePaneContent {
    * attachment is derived from the same frozen command block that owns the
    * display, and carries no copied rows or frame payload. */
   private automaticFrozenGrant(): GrantBlock | null {
-    if (this._pinnedFrame === null || this._summonedCommand === null) return null
-    const grant = grantBlockFromElement(this._summonedCommand.el)
+    const owner = this.automaticAttachmentOwner()
+    if (this._pinnedFrame === null || owner === null) return null
+    const grant = grantBlockFromElement(owner.el)
+    // The DOM block is frozen, but the attachment names the live command
+    // whose current screen was captured. The owner predicate above is the
+    // authority for that distinction; "running" is not inferred from the
+    // frozen block's presentation class.
     return grant === null ? null : { ...grant, state: 'running', automatic: true }
   }
 
@@ -5309,8 +5305,8 @@ export class TerminalContent extends BasePaneContent {
       return
     }
     targets.setActive(next)
-    const owner = this.automaticAttachmentOwner(true)
-    if (owner !== null) void this.captureAutomaticFrozenFrame(owner)
+    if (this._lastFrozenBlock !== null) void this.captureAutomaticFrozenFrame()
+    else this.clearAutomaticFrozenFrame()
   }
 
   /** Address a signal to THE ACTIVE BLOCK — the one command running in this

@@ -6419,7 +6419,7 @@ func TestLedgerGet_ContractRefusesACausedItMustRefuse(t *testing.T) {
 	entry := `{"id":"a","seq":1,"environmentId":"e","host":null,"cwd":"/","kind":"ask","source":"user",` +
 		`"intent":"x","phase":"closed","status":"success","submittedAt":1,"startedAt":null,` +
 		`"endedAt":null,"durationMs":null,"exitCode":null,"maskedCount":0,"maskedKinds":[],` +
-		`"redactions":[]}`
+		`"redactions":[],"unreconciled":null}`
 	body := func(caused string) string {
 		return `{"entry":` + entry + `,"edges":[],"artifacts":[],"proseEvicted":false,"caused":` + caused + `}`
 	}
@@ -6506,7 +6506,25 @@ func TestLedgerQuery_ContractRefusesWhatItMustRefuse(t *testing.T) {
 		"a rung nobody named": `{"entries":[],"scope":"repository","exhausted":true,"hasRows":true,"coverage":null}`,
 		"an entry with no host key": `{"entries":[{"id":"a","seq":1,"environmentId":"e","cwd":"/","kind":"shell",` +
 			`"intent":"x","phase":"open","status":"pending","submittedAt":1,"startedAt":null,"endedAt":null,` +
+			`"durationMs":null,"exitCode":null,"maskedCount":0,"maskedKinds":[],"redactions":[],` +
+			`"unreconciled":null}],` +
+			`"scope":"host","exhausted":true,"hasRows":true,"coverage":null}`,
+		// The third state is REQUIRED and nullable, for the reason `host` is
+		// (nocx-k6p18.5): a row that will not say whether anybody could be
+		// asked about its session is a row the renderer must guess about, and
+		// the guess it would make is "running".
+		"an entry that will not say whether it is reconciled": `{"entries":[{"id":"a","seq":1,` +
+			`"environmentId":"e","host":null,"cwd":"/","kind":"shell",` +
+			`"intent":"x","phase":"open","status":"pending","submittedAt":1,"startedAt":null,"endedAt":null,` +
 			`"durationMs":null,"exitCode":null,"maskedCount":0,"maskedKinds":[],"redactions":[]}],` +
+			`"scope":"host","exhausted":true,"hasRows":true,"coverage":null}`,
+		// And a cause nobody named: the vocabulary is closed so the renderer's
+		// sentence table can be exhaustive.
+		"a cause nobody named": `{"entries":[{"id":"a","seq":1,` +
+			`"environmentId":"e","host":null,"cwd":"/","kind":"shell",` +
+			`"intent":"x","phase":"open","status":"pending","submittedAt":1,"startedAt":null,"endedAt":null,` +
+			`"durationMs":null,"exitCode":null,"maskedCount":0,"maskedKinds":[],"redactions":[],` +
+			`"unreconciled":"probablyGone"}],` +
 			`"scope":"host","exhausted":true,"hasRows":true,"coverage":null}`,
 	}
 	for name, raw := range bad {

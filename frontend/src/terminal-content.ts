@@ -63,6 +63,7 @@ import {
 } from './integration/status'
 import { mountIntegrationNotice } from './integration/notice'
 import { mountRecoveryNotice } from './recovery-notice'
+import { mountUnreconciledNotice, type UnreconciledCause } from './unreconciled-notice'
 import { mountConnectionMark } from './connection-mark'
 import { mountReconnectOffer, type ReconnectOfferHandle } from './reconnect-offer'
 import {
@@ -924,6 +925,10 @@ export class TerminalContent extends BasePaneContent {
    *  session state that comes and goes, this one is a settled fact about one
    *  reclaim that will never stop being true. */
   private _recoveryNoticeDispose: (() => void) | null = null
+  /** The third state's card (nocx-k6p18.5), raised by a RESTORE rather
+   *  than by a session: it is a fact about the blocks this pane read back,
+   *  not about the pipe it is attached to now. */
+  private _unreconciledNoticeDispose: (() => void) | null = null
   /** The pane the card mounts over. */
   private _paneTarget: HTMLElement | null = null
   // The last thing the backend said about REACHING this pane's host, and the
@@ -4280,6 +4285,15 @@ export class TerminalContent extends BasePaneContent {
     this._pastRetryPending = false
     this._pastRestored = true
     this._pastRestoring = false
+    // THE THIRD STATE, said before the blocks are drawn (nocx-k6p18.5). Some
+    // of these rows may be neither running nor finished: their session was
+    // carried over from a previous coordinator and nobody could be asked
+    // whether it still exists. The blocks themselves claim nothing — no
+    // outcome chip, no spinner — and this is where the reason is said, once
+    // for the pane rather than once per block. A page with none of them
+    // raises nothing: mountUnreconciledNotice answers null, and the decision
+    // lives there so this side is not a second reader of it.
+    this._showUnreconciledNotice(blocks)
     if (blocks.length === 0) return
     const snapshot = fromITheme(getCurrentTheme())
     // Every block's body AND its causal flow, in the one round trip pair the
@@ -4586,6 +4600,40 @@ export class TerminalContent extends BasePaneContent {
     // integration card goes through, and for the same reason: the pane's own
     // box is unchanged, so no viewport observer fires for this.
     if (this._recoveryNoticeDispose) this.scheduleLiveResize()
+  }
+
+  /** Raise the third state's card for a restored page, when it has one
+   *  (nocx-k6p18.5).
+   *
+   *  A page whose rows were all judged raises nothing, which is nearly every
+   *  page: the notice exists for the tab whose host has not been reachable
+   *  since the app restarted, and one that appeared otherwise would be noise
+   *  on every tab. Any card from a previous restore goes first — a second
+   *  read is a new answer, and a stale card would be describing blocks that
+   *  have since been judged. */
+  private _showUnreconciledNotice(
+    rows: readonly { unreconciled: UnreconciledCause | null }[],
+  ): void {
+    this._dropUnreconciledNotice()
+    const target = this._paneTarget
+    if (!target) return
+    this._unreconciledNoticeDispose = mountUnreconciledNotice(target, {
+      rows,
+      onDismiss: () => this._dropUnreconciledNotice(),
+    })
+    // The card takes its height off the top of the pane, so the scroller is
+    // smaller than the grid fitted to it — the same re-measure the reclaim
+    // card goes through, and for the same reason.
+    if (this._unreconciledNoticeDispose) this.scheduleLiveResize()
+  }
+
+  /** Take the third state's card down and give the pane back to the
+   *  terminal. */
+  private _dropUnreconciledNotice(): void {
+    if (!this._unreconciledNoticeDispose) return
+    this._unreconciledNoticeDispose()
+    this._unreconciledNoticeDispose = null
+    this.scheduleLiveResize()
   }
 
   /** Take the reclaim card down and give the pane back to the terminal. */
@@ -5826,6 +5874,8 @@ export class TerminalContent extends BasePaneContent {
     this._noticeDispose = null
     this._recoveryNoticeDispose?.()
     this._recoveryNoticeDispose = null
+    this._unreconciledNoticeDispose?.()
+    this._unreconciledNoticeDispose = null
     this._lifecycleChangeUnsub?.()
     this._lifecycleChangeUnsub = null
     this._projections?.detach()

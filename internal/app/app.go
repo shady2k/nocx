@@ -954,6 +954,24 @@ func New(opts ...Option) (*App, error) {
 		// draining) closes its episode on.
 		historyStatus.Clear()
 		clearWindowOnCleanStart(ctx, settingsRegistry, db, slogger)
+		// Restart reconciliation (nocx-k6p18.5). `Open` no longer judges the
+		// sessions it inherits — a session can outlive the coordinator that
+		// opened it now, so deleting its row, its recording and its open
+		// block at startup would destroy work that is still going on — and
+		// this is where the verdicts land instead.
+		//
+		// IT IS CALLED WITH NO INVENTORIES, and that is the honest state of
+		// the product rather than an oversight: nothing yet records WHICH
+		// generation a stored session belongs to (ws_ledger.go leaves
+		// entries.session_id nil for a shell submit, and the helper is not
+		// yet the coordinator's spawner), so no inventory owns any stored
+		// session's id space and every verdict is `unknown`. Asking the
+		// nearest helper anyway would get a truthful "I do not hold that"
+		// about somebody else's id and turn it into a deletion. What this
+		// pass DOES do today is the half that is owed either way: the age
+		// bound, which is the only thing standing between a host that never
+		// comes back and a recording kept forever.
+		reconcileSessions(ctx, db.Reconcile(), nil, content.DefaultUnreconciledRetention, slogger)
 	}
 
 	// Live History policy: a Settings toggle applies without a restart. The

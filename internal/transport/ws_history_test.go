@@ -40,6 +40,10 @@ func (f *fakeHistoryDB) Layout() content.LayoutRepository               { return
 func (f *fakeHistoryDB) APIRuns() content.APIRunRepository              { return nil }
 func (f *fakeHistoryDB) SessionOutput() content.SessionOutputRepository { return nil }
 
+// Reconcile: this fake inherited no sessions, so there is nothing to
+// reconcile and no reconciler to hand out.
+func (f *fakeHistoryDB) Reconcile() content.SessionReconciler { return nil }
+
 // RecordCompleted keeps no row: this fake is the STORE-FAILURE arm of the
 // write path (TestHistoryRecord_StoreErrorIsRPCError). The fake that actually
 // stores what it is handed is fakeRecordHistoryDB.

@@ -1,0 +1,32 @@
+/* The third state's notice — the card raised above a restored tab holding
+   blocks that are neither running nor finished (nocx-k6p18.5).
+
+   PLACEMENT ONLY. Everything visible inside is the kit's StatusCard, and a
+   surface may place a kit component but never repaint it
+   (frontend/src/ui/README.md). There is deliberately no rule here for
+   anything that paints: wanting one would mean StatusCard is missing a
+   variant, and the fix would be in the kit.
+
+   The same placement the reclaim notice arrived at, for the same reason: it
+   takes space rather than overlaying, because the blocks it is describing are
+   the first thing under it and a card over them hides what it is about. */
+
+.nocx-unreconciled-notice {
+  --wails-draggable: no-drag;
+  /* It never gives up its own height to the terminal — a card squeezed to
+     nothing is the overlay defect wearing a different hat. */
+  flex: 0 0 auto;
+  /* Top only. StatusCard owns the air below itself, so a symmetric margin
+     here would spend terminal rows on one card. */
+  margin: 8px 0 0;
+}
+
+/* The block's own hook, and it deliberately paints nothing yet — like
+   .cmd-block-entered, which has carried no rule since it was added. The state
+   is said in words on the card above; a colour here would be a second
+   vocabulary for one fact, and the honest colour for "nobody knows" is not
+   one of the outcome colours. It exists so a person's own stylesheet, and the
+   tests, can find these blocks. */
+.cmd-block-unreconciled {
+  --nocx-block-unreconciled: 1;
+}

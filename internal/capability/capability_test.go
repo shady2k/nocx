@@ -571,6 +571,10 @@ func (f *fakeContentDB) Layout() content.LayoutRepository               { return
 func (f *fakeContentDB) APIRuns() content.APIRunRepository              { return nil }
 func (f *fakeContentDB) SessionOutput() content.SessionOutputRepository { return nil }
 
+// Reconcile: this fake inherited no sessions, so there is nothing to
+// reconcile and no reconciler to hand out.
+func (f *fakeContentDB) Reconcile() content.SessionReconciler { return nil }
+
 // fakeReset is a capability.VaultReset recorder.
 type fakeReset struct {
 	mu      sync.Mutex

@@ -119,6 +119,14 @@ type sqliteContent struct {
 	closed  atomic.Bool
 	closeMu sync.Once
 	wg      sync.WaitGroup
+
+	// pending is the set of sessions a PREVIOUS incarnation left behind,
+	// read once at Open and emptied by verdicts (reconcile.go). It is in
+	// memory and not on the rows because it is exact without a stamp: Open
+	// is the first thing this incarnation does, so what it finds is what it
+	// inherited, and what is written afterwards is its own.
+	pendingMu sync.Mutex
+	pending   map[string]*pendingSession
 }
 
 // writeReq is one mutation on the serialized write path: a function the
@@ -256,6 +264,8 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 		_ = db.Close()
 		return nil, err
 	}
+	var pending map[string]*pendingSession
+	var carryErr error
 	creationErr := func() error {
 		if _, err := createConn.ExecContext(ctx, "PRAGMA auto_vacuum=INCREMENTAL"); err != nil {
 			return fmt.Errorf("content: auto_vacuum: %w", err)
@@ -293,23 +303,26 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 		if _, err := createConn.ExecContext(ctx, schemaV1); err != nil {
 			return fmt.Errorf("content: schema: %w", err)
 		}
-		// Startup reconciliation (spec §4.3): every entry that never reached
-		// 'closed' — a crash, a force-quit, a session that died — is closed
-		// as status='unknown' through the entries_open partial index. Must
-		// run before the store is handed out: after this, no open row
-		// survives a restart.
-		if err := closeOpenEntries(ctx, createConn, cfg.Logger); err != nil {
+		// Startup reconciliation, and its scope is now half of what it was
+		// (nocx-k6p18.5; reconcile.go carries the argument). An entry that
+		// never reached 'closed' AND NAMES NO SESSION belonged to a pipe
+		// whose provenance had already ended, so nothing could ever report
+		// it live and closing it here is still right. An entry that names a
+		// session is not judged here at all: its session may be running on a
+		// host that outlived this coordinator, and only whoever can ask that
+		// host may say.
+		if err := closeUnanchoredEntries(ctx, createConn, cfg.Logger); err != nil {
 			return err
 		}
-		// And the other half of the same reconciliation (nocx-rtg0.28): every
-		// sessions row at store-open belongs to a PREVIOUS incarnation,
-		// because a session dies with the backend (D5) and this Open is the
-		// new one. Removing them is what nulls entries.session_id through the
-		// foreign key, which is what makes "provenance, null once that pipe
-		// is gone" (design §6.1) a fact rather than an affordance nobody
-		// triggers. The block itself is untouched — it hangs on its pane.
-		if err := dropDeadSessions(ctx, createConn, cfg.Logger); err != nil {
-			return err
+		// The other half is no longer a sweep. `sessions` rows and the
+		// recordings beside them SURVIVE Open; they are carried over as the
+		// pending set and judged later by whoever could reach the host
+		// (reconcile.go). Open cannot ask — asking needs a carrier, the
+		// carrier may need the vault, and the vault needs this store — so
+		// Open judges nothing.
+		pending, carryErr = carryOver(ctx, createConn)
+		if carryErr != nil {
+			return carryErr
 		}
 		// The stamp for a file the ladder did not walk: a CREATION. Every
 		// other path arrives here already stamped — an unchanged file was
@@ -333,12 +346,13 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 	enforceFileModes(cfg.Path)
 
 	s := &sqliteContent{
-		log:    cfg.Logger,
-		cfg:    cfg,
-		db:     db,
-		keyHex: keyHex,
-		path:   cfg.Path,
-		policy: cfg.Policy,
+		log:     cfg.Logger,
+		cfg:     cfg,
+		db:      db,
+		keyHex:  keyHex,
+		path:    cfg.Path,
+		policy:  cfg.Policy,
+		pending: pending,
 	}
 	s.writeCh = make(chan writeReq)
 	s.stop = make(chan struct{})
@@ -347,21 +361,48 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 	return s, nil
 }
 
-// closeOpenEntries is the startup sweep of design §5 (one sweep, both
-// lifecycles), run once per Open on the creation connection, ONE
+// closeUnanchoredEntries is what is LEFT of the startup sweep of design §5
+// (one sweep, both lifecycles) once a session can outlive the coordinator
+// (nocx-k6p18.5). It runs once per Open on the creation connection, in ONE
 // transaction so the two tables can never disagree:
 //
-//   - entries: every open entry closes. An agent-kind entry (a question)
-//     whose run was non-terminal says `interrupted` — the block says so and
-//     the user asks again (design §4.2) — every other kind closes as
+//   - entries: every open entry NOTHING COULD STILL BE RUNNING closes — one
+//     that names no session, and every question. An agent-kind entry (a
+//     question) whose run was non-terminal says `interrupted` — the block says
+//     so and the user asks again (design §4.2) — every other kind closes as
 //     `unknown`: the reconstruction UI shows the gap, never a fabricated
-//     outcome. Frame entries are already closed at ingest and never reach
-//     this update.
-//   - executions: every non-terminal agent run (state IS NOT NULL and not
-//     in the terminal set) becomes `interrupted`, with the termination
-//     reason and an end time — an interrupted run has an end. Executions
-//     without a state (frame captures, future shell runs) are not runs and
-//     are untouched.
+//     outcome. Frame entries are already closed at ingest and never reach this
+//     update.
+//   - executions: every non-terminal agent run becomes `interrupted`, with the
+//     termination reason and an end time — an interrupted run has an end.
+//     Executions without a state (frame captures, future shell runs) are not
+//     runs and are untouched.
+//
+// WHY THE WHERE CLAUSE GREW TWO TERMS, and they are the whole of what this
+// bead changed here. The question each asks is the same one: could anything,
+// anywhere, still be running this?
+//
+//   - `session_id IS NULL` — provenance is "which pipe it ran in, null once
+//     that pipe is gone", so an open entry with a NULL one is an entry whose
+//     pipe was already gone before this Open. No inventory owns it and nothing
+//     can report it live, so leaving it open would show a running command that
+//     no process anywhere is running.
+//   - `kind = 'ask'` — a question is answered by the ASSISTANT, which lives in
+//     THIS process and dies with it (design §4.2: on start every non-terminal
+//     run becomes interrupted, the block says so, and the user asks again).
+//     Nothing survives a replacement to go on answering it, whatever host its
+//     session was on. A shell command is the opposite: its process belongs to
+//     the session, and since nocx-k6p18.3 the session belongs to the helper.
+//
+// What is left open is therefore exactly the shape this bead exists for: a
+// SHELL entry that still names a session. Closing one is what would declare a
+// running command finished; it waits for its session's verdict (reconcile.go).
+//
+// The executions half is NOT narrowed, for the same reason `ask` is closed
+// here: an execution with a state is an agent run (frame captures and shell
+// runs carry none), and an agent run is this process's own work. Delivering
+// the real exit status to a shell entry left open is a different problem with
+// a different authority, and it is nocx-k6p18.6.
 //
 // Both updates run in one transaction because the interval they guard has
 // one closing event: a restart that interrupted the run also closed the
@@ -369,7 +410,7 @@ func Open(ctx context.Context, cfg Config) (ContentDB, error) {
 // half of "this ask was interrupted" — and the next start repairs it, but
 // a reader between the two would see an inconsistency that never existed
 // in any running process.
-func closeOpenEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) error {
+func closeUnanchoredEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) error {
 	tx, err := conn.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("content: startup sweep: %w", err)
@@ -379,7 +420,7 @@ func closeOpenEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 	res, err := tx.ExecContext(ctx,
 		`UPDATE entries SET phase = 'closed', status =
 		   CASE WHEN kind = 'ask' THEN 'interrupted' ELSE 'unknown' END
-		 WHERE phase != 'closed'`)
+		 WHERE phase != 'closed' AND (session_id IS NULL OR kind = 'ask')`)
 	if err != nil {
 		return fmt.Errorf("content: startup sweep: %w", err)
 	}
@@ -397,49 +438,7 @@ func closeOpenEntries(ctx context.Context, conn *sql.Conn, logger log.Logger) er
 		return fmt.Errorf("content: startup sweep: %w", err)
 	}
 	if n > 0 && logger != nil {
-		logger.Info("content: startup sweep closed open entries", "closed", n)
-	}
-	return nil
-}
-
-// dropDeadSessions removes the ledger sessions written by earlier
-// incarnations of the backend, at the one moment when that is every row there
-// is: a session is server-authoritative (AD-7), lives inside one backend
-// process and cannot outlive it (D5), so at store-open none of them names
-// anything live.
-//
-// It runs for the entries, not for the sessions. entries.session_id is
-// PROVENANCE with an explicit end — "null after that pipe is gone" (design
-// §6.1) — and before this nothing ever ended it: DeleteSession had no
-// production caller at all, so a restarted backend left every block pointing
-// at a session id that resolved to a dead process, which reads as a live edge
-// and is not one. The block keeps its own anchor, entries.pane_id, which is
-// durable exactly because it is not this.
-func dropDeadSessions(ctx context.Context, conn *sql.Conn, logger log.Logger) error {
-	res, err := conn.ExecContext(ctx, `DELETE FROM sessions`)
-	if err != nil {
-		return fmt.Errorf("content: startup sweep: drop dead sessions: %w", err)
-	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return fmt.Errorf("content: startup sweep: drop dead sessions: %w", err)
-	}
-	if n > 0 && logger != nil {
-		logger.Info("content: startup sweep dropped sessions of a previous backend", "sessions", n)
-	}
-	// The output recordings go with them, and for the same sentence
-	// (nocx-22k1c.1): a recording is the bytes ONE pipe produced, the pipe
-	// cannot outlive the process, so at open no recording names anything
-	// live. This is also why session_output is absent from the budget sweep
-	// — its unit is `artifacts.byte_len` ordered by `ingest_seq`, and a
-	// recording has neither; the bound on a live recording is the per-command
-	// cap, and the bound on a dead one is this line.
-	rec, err := conn.ExecContext(ctx, `DELETE FROM session_output`)
-	if err != nil {
-		return fmt.Errorf("content: startup sweep: drop dead session recordings: %w", err)
-	}
-	if m, affErr := rec.RowsAffected(); affErr == nil && m > 0 && logger != nil {
-		logger.Info("content: startup sweep dropped session recordings of a previous backend", "recordings", m)
+		logger.Info("content: startup sweep closed open entries with no session", "closed", n)
 	}
 	return nil
 }

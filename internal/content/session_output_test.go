@@ -443,14 +443,26 @@ func TestSessionOutput_CancelledContextFailsTheAppend(t *testing.T) {
 	}
 }
 
-// The lifetime, both ends named: a recording exists from the first append
-// until the next store-open, because a session cannot outlive the backend
-// process (AD-7, D5) and at open no recording names anything live.
-func TestSessionOutput_RecordingsDoNotSurviveARestart(t *testing.T) {
+// The lifetime, both ends named — AND THE CLOSING END MOVED (nocx-k6p18.5).
+//
+// It used to be the next store-open: a session could not outlive the backend
+// process (AD-7, D5), so at open no recording named anything live and Open
+// deleted them all. The helper owns the host now, so a recording at open may
+// name a session that is still producing bytes, and this test asserts the
+// replacement interval: a recording exists from the first append until its
+// session is reconciled ABSENT — or until the age bound takes it, which is
+// what keeps "not deleted at open" from meaning "kept forever"
+// (TestTheRetentionAgeBoundsARecordingNobodyCouldJudge).
+//
+// A coordinator that recorded thirty minutes of a build, updated, and came
+// back is the whole reason: deleting the recording because the READER went
+// away throws out exactly what survived.
+func TestSessionOutput_ARecordingOutlivesTheCoordinatorUntilAHostSaysOtherwise(t *testing.T) {
+	ctx := context.Background()
 	dir := t.TempDir()
 	db := openRecordingStore(t, dir, content.NewPolicy())
 	appendAll(t, db.SessionOutput(), "sess-old", streamOf(4096), 1024)
-	rec, err := db.SessionOutput().Read(context.Background(), "sess-old")
+	rec, err := db.SessionOutput().Read(ctx, "sess-old")
 	if err != nil {
 		t.Fatalf("Read before close: %v", err)
 	}
@@ -462,11 +474,28 @@ func TestSessionOutput_RecordingsDoNotSurviveARestart(t *testing.T) {
 	}
 
 	reopened := openRecordingStore(t, dir, content.NewPolicy())
-	after, err := reopened.SessionOutput().Read(context.Background(), "sess-old")
+	after, err := reopened.SessionOutput().Read(ctx, "sess-old")
 	if err != nil {
 		t.Fatalf("Read after reopen: %v", err)
 	}
-	if after.Bytes != 0 || len(after.Runs) != 0 {
-		t.Errorf("a recording of a dead pipe survived the restart: %+v", after)
+	if after.Bytes != rec.Bytes || len(after.Runs) != len(rec.Runs) {
+		t.Fatalf("the recording did not survive the replacement: %d bytes in %d runs, want %d in %d",
+			after.Bytes, len(after.Runs), rec.Bytes, len(rec.Runs))
+	}
+
+	// The other end: a reachable generation is asked and reports the session
+	// gone, and the recording goes with it — which is the bound the old
+	// store-open delete used to provide.
+	if applyErr := reopened.Reconcile().Apply(ctx, content.SessionJudgement{
+		SessionID: "sess-old", Verdict: content.VerdictAbsent,
+	}); applyErr != nil {
+		t.Fatalf("Apply(absent): %v", applyErr)
+	}
+	gone, err := reopened.SessionOutput().Read(ctx, "sess-old")
+	if err != nil {
+		t.Fatalf("Read after the verdict: %v", err)
+	}
+	if gone.Bytes != 0 || len(gone.Runs) != 0 {
+		t.Errorf("a recording of a session the host does not report survived: %+v", gone)
 	}
 }

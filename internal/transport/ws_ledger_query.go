@@ -80,6 +80,18 @@ type ledgerEntryWire struct {
 	MaskedCount int             `json:"maskedCount"`
 	MaskedKinds []string        `json:"maskedKinds"`
 	Redactions  []redactionWire `json:"redactions"`
+	// Unreconciled is the third state (nocx-k6p18.5): the row's session was
+	// carried over from a previous coordinator and NOBODY COULD BE ASKED
+	// whether it still exists, so the row is neither running nor finished and
+	// this says why. A CAUSE, never a verdict — `absent` requires an answer,
+	// and none of the values here is one.
+	//
+	// It is always present and null in the ordinary case, never omitted:
+	// absent and null are different bytes, and a renderer must be able to
+	// tell "this build does not send the field" from "this row is
+	// reconciled". That distinction is what vault.status's missing
+	// defaultProvider cost a release to learn.
+	Unreconciled *string `json:"unreconciled"`
 }
 
 // ledgerQueryResponse is the page plus the three facts that keep it honest.
@@ -548,6 +560,14 @@ func ledgerEntryWireOf(row content.LedgerEntrySummary) (ledgerEntryWire, error) 
 		h := row.Environment.Host()
 		host = &h
 	}
+	// The store derives the third state; the wire carries it verbatim. No
+	// sentence is chosen here — the renderer owns the words, keyed on this
+	// closed vocabulary.
+	var unreconciled *string
+	if row.Unreconciled != nil {
+		cause := string(*row.Unreconciled)
+		unreconciled = &cause
+	}
 	return ledgerEntryWire{
 		ID: row.ID, Seq: row.IngestSeq, EnvID: row.EnvironmentID, Host: host,
 		Cwd: row.Cwd, Kind: string(row.Kind), Source: string(row.Source), Intent: row.Intent,
@@ -555,6 +575,7 @@ func ledgerEntryWireOf(row content.LedgerEntrySummary) (ledgerEntryWire, error) 
 		SubmittedAt: row.SubmittedAt, StartedAt: row.StartedAt, EndedAt: row.EndedAt,
 		DurationMs: row.DurationMs, ExitCode: exit,
 		MaskedCount: masking.MaskedCount, MaskedKinds: kinds, Redactions: reds,
+		Unreconciled: unreconciled,
 	}, nil
 }
 

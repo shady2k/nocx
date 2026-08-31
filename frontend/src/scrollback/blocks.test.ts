@@ -122,6 +122,36 @@ describe('createRunningBlock', () => {
 describe('createCommandBlock', () => {
   const c = (): HTMLElement => document.createElement('div')
 
+  // THE THIRD STATE (nocx-k6p18.5). A restored block whose session nobody
+  // could be asked about must claim nothing: no outcome chip in either
+  // direction, and no spinner. A chip here would be the answer this build does
+  // not have — and an exit code arriving later must not start painting one,
+  // which is why the rule is keyed on the STATUS and not on the code.
+  it('a block nobody could reconcile paints no outcome, whatever code it carries', () => {
+    const el = createCommandBlock(
+      'command',
+      1,
+      'make build',
+      '~',
+      '',
+      'output',
+      null,
+      0,
+      'unreconciled',
+      c,
+      noopSelect,
+      freshStore(),
+      'shell',
+    )
+    expect(el.classList.contains('cmd-block-unreconciled')).toBe(true)
+    expect(el.querySelector('.cmd-header-exit')).toBeNull()
+    expect(el.querySelector('.cmd-header-exit-ok')).toBeNull()
+    expect(el.querySelector('.cmd-header-exit-fail')).toBeNull()
+    // Not running either: its rows are fixed, so there is no spinner. Neither
+    // running nor finished is the whole of what it says.
+    expect(el.querySelector('.cmd-header-spinner')).toBeNull()
+  })
+
   it('creates a frozen block with success status', () => {
     const el = createCommandBlock(
       'command',

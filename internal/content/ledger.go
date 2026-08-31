@@ -1250,6 +1250,21 @@ type LedgerEntrySummary struct {
 	// hands the column over rather than decoding it, so there is exactly one
 	// decoder per key and it is the one that already exists.
 	Payload string
+	// SessionID is the entry's provenance — which pipe it ran in. On the
+	// summary because the row's THIRD state is derived from it (below), and
+	// deriving it anywhere else would need a second read per row.
+	SessionID *string
+	// Unreconciled is the third state (nocx-k6p18.5): this entry's session
+	// was carried over from a previous incarnation and NOBODY COULD BE ASKED
+	// whether it still exists, so the row is neither running nor finished and
+	// the value says why. Nil is the ordinary case — the session was judged,
+	// or the entry names none.
+	//
+	// It is DERIVED at read time from the store's pending set rather than
+	// stored on the row, because it is a fact about this incarnation's
+	// attempts and not about the entry: the next start has its own answer and
+	// must not inherit this one's.
+	Unreconciled *UnreconciledCause
 }
 
 // Summary is the timeline row of a recall-shaped entry — a projection, never
@@ -1262,8 +1277,10 @@ func (e LedgerEntry) Summary() LedgerEntrySummary {
 		Environment: e.Environment, Cwd: e.Cwd, Kind: e.Kind, Intent: e.Intent,
 		Phase: e.Phase, Status: e.Status, SubmittedAt: e.SubmittedAt,
 		StartedAt: e.StartedAt, EndedAt: e.EndedAt, DurationMs: e.DurationMs,
-		Source:  e.Source,
-		Payload: e.Payload,
+		Source:       e.Source,
+		Payload:      e.Payload,
+		SessionID:    e.SessionID,
+		Unreconciled: e.Unreconciled,
 	}
 }
 
@@ -1380,6 +1397,11 @@ type LedgerEntry struct {
 	// wrote it exited (design §6.1).
 	PaneID    *string
 	SessionID *string
+	// Unreconciled is the third state (nocx-k6p18.5), derived at read time
+	// from the store's pending set exactly as it is on the summary — one
+	// derivation, so the page and the detail read cannot disagree about
+	// whether anybody has been able to check this row's session.
+	Unreconciled *UnreconciledCause
 	// ParentID and Pos are the entry's place in the tree (ADR-0040): the
 	// block it sits inside and its seat among that block's children. Both nil
 	// on a top-level block.

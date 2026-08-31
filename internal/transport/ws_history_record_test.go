@@ -58,6 +58,10 @@ func (f *fakeRecordHistoryDB) Layout() content.LayoutRepository               { 
 func (f *fakeRecordHistoryDB) APIRuns() content.APIRunRepository              { return nil }
 func (f *fakeRecordHistoryDB) SessionOutput() content.SessionOutputRepository { return nil }
 
+// Reconcile: this fake inherited no sessions, so there is nothing to
+// reconcile and no reconciler to hand out.
+func (f *fakeRecordHistoryDB) Reconcile() content.SessionReconciler { return nil }
+
 // RecordCompleted mints the entry id the backend owns (the renderer sends
 // none) and keeps the row the way the store does: the intent, its resolved
 // environment, and the payload column carrying both sparse readers' keys.

@@ -478,10 +478,12 @@ var rebuildDropOrder = []string{
 	"command_history",
 }
 
-// resetIfSchemaChanged rebuilds the file when it was written by a different
-// schema. Rows are lost by design: they belong to a shape this build cannot
+// resetIfSchemaChanged rebuilds the file when it was written by an EARLIER
+// schema, and REFUSES one written by a later schema (nocx-7qunp). Rows are
+// lost by design in the first case: they belong to a shape this build cannot
 // read, and inventing a migration to keep them is the backwards compatibility
-// this project deliberately does not carry.
+// this project deliberately does not carry. In the second they are not this
+// build's to lose — a newer nocx wrote them and can still read them.
 //
 // The rebuild is all-or-nothing (nocx-rtg0.17): every DROP and the
 // discarded-row count share ONE transaction, so a crash, a cancellation or a
@@ -495,6 +497,55 @@ func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger
 	}
 	if onDisk == schemaVersion {
 		return nil
+	}
+	// DIRECTION DECIDES, and only one direction may rebuild (nocx-7qunp).
+	// The gate above answered `equal`, and everything else used to fall
+	// through to the demolition — so an OLDER binary meeting a file a NEWER
+	// one wrote destroyed it, and logged the loss as "written by an older
+	// schema". The unknown-table check below cannot catch that case: it
+	// compares NAMES, and a newer schema that adds or changes COLUMNS inside
+	// tables we already own presents a name set this build recognises
+	// completely.
+	//
+	// Refusing is not a compatibility shim and must not grow into one. It
+	// writes nothing, converts nothing and keeps no second shape alive; it
+	// declines to be the process that decides the fate of rows it cannot
+	// read. Downward (onDisk < schemaVersion) keeps the discard this store
+	// has always promised — the migration path is nocx-lmb6v, and refusing
+	// upward is correct with or without it.
+	//
+	// The message is the product's, not the log's: Open's error becomes the
+	// `detail` of the history.status degrade at the composition root, and
+	// the Settings notice prints it, so it has to name the version a person
+	// must update TO rather than merely report a mismatch.
+	//
+	// It promises the ROWS and not the bytes, deliberately — and MOVING THIS
+	// CHECK AHEAD OF Open'S PRAGMAS WOULD NOT CHANGE THAT. It is the obvious
+	// next idea, so it was measured rather than argued about.
+	//
+	// This function touches nothing: the test asserts the file is
+	// byte-identical across a refused reset. Open is another matter, and not
+	// because of the order of its pragmas. Our store runs in WAL, so a
+	// content.db a newer nocx has been using is a SMALL MAIN FILE PLUS A
+	// LARGE `-wal` (4 KB and 2.7 MB in the fixture), and WAL is a property of
+	// the FILE, not of the connection: opening such a file and reading its
+	// stamp modifies the main file not at all, but CLOSING the handle
+	// checkpoints the WAL into it — 4 KB to 272 KB, `-wal` deleted — with no
+	// journal_mode pragma of ours involved anywhere. Refusing before
+	// `PRAGMA journal_mode=WAL` would therefore buy byte-identity only for a
+	// file that was never in WAL, which a file from a newer nocx never is.
+	// Only never opening the database could deliver it, and that is a
+	// separate read-only probe connection, not a reorder.
+	//
+	// So the honest promise is the one a person needs, and it holds on every
+	// path: the checkpoint is schema-blind page copying, so the rows survive
+	// intact and still stamped for the build that wrote them. That is what
+	// TestOpenRefusesANewerDatabaseArrivingInWalWithoutLosingARow pins.
+	// "Nothing was modified" would be a promise the caller had already
+	// broken before this line ran.
+	if onDisk > schemaVersion {
+		return fmt.Errorf("content: refusing to open a database written by schema %d: this build understands schema %d, and rebuilding it would discard rows it cannot read — update nocx to a build that understands schema %d; no rows were discarded",
+			onDisk, schemaVersion, onDisk)
 	}
 	// A fresh file is version 0 with no tables — that is a creation, not a
 	// reset, and must not be announced as data loss. Any user table at all
@@ -528,8 +579,12 @@ func resetIfSchemaChanged(ctx context.Context, conn *sql.Conn, logger log.Logger
 	// This gate is what makes the foreign-key suspension below safe to
 	// reason about: everything that will be dropped is a table this build
 	// owns, so there is no relationship left for the engine to protect. A
-	// file that reaches here with an unknown table was written by a newer
-	// schema (or is not a ContentDB file at all).
+	// file whose STAMP is newer never reaches here — the direction check
+	// above took it — so what this gate still catches is a file whose stamp
+	// does not admit what it holds: one written before the stamp existed, or
+	// carrying a table this store never owned, or not a ContentDB file at
+	// all. It goes on saying "newer schema" because that is the likeliest of
+	// the three and the only one with an action attached.
 	for _, name := range tables {
 		known := false
 		for _, t := range rebuildDropOrder {

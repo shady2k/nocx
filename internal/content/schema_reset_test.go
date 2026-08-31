@@ -8,11 +8,16 @@ package content
 
 import (
 	"context"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
+	"fmt"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/log"
 
@@ -451,5 +456,286 @@ func TestRebuildDiscardsAFileHoldingANestedEntry(t *testing.T) {
 	t.Cleanup(func() { _ = db.Close() })
 	if got := rawUserVersion(t, path); got != schemaVersion {
 		t.Fatalf("user_version = %d, want %d — the file was not rebuilt", got, schemaVersion)
+	}
+}
+
+// ── nocx-7qunp: a file written by a NEWER schema is refused, not rebuilt ──
+
+// rawConn hands back a connection onto the encrypted file, opened the way
+// Open opens it and with none of the pragmas Open sets afterwards. It exists
+// so resetIfSchemaChanged can be exercised DIRECTLY: `journal_mode=WAL`
+// rewrites the header before Open ever reaches the reset, so a byte-identity
+// assertion is only meaningful against the function that makes the decision.
+func rawConn(t *testing.T, path string) (*sql.Conn, func()) {
+	t.Helper()
+	keyHex := hex.EncodeToString(schemaTestKey())
+	db, err := driver.Open("file:"+path+"?vfs=adiantum", func(c *sqlite3.Conn) error {
+		return c.Exec("PRAGMA hexkey='" + keyHex + "'")
+	})
+	if err != nil {
+		t.Fatalf("raw open: %v", err)
+	}
+	conn, err := db.Conn(context.Background())
+	if err != nil {
+		_ = db.Close()
+		t.Fatalf("raw conn: %v", err)
+	}
+	return conn, func() {
+		_ = conn.Close()
+		_ = db.Close()
+	}
+}
+
+// fileFingerprint is "not one byte modified", made checkable: the content
+// itself, plus the two pieces of metadata a write moves.
+type fileFingerprint struct {
+	size int64
+	mod  time.Time
+	sum  string
+}
+
+func fingerprint(t *testing.T, path string) fileFingerprint {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatalf("stat %s: %v", path, err)
+	}
+	body, err := os.ReadFile(path) // #nosec G304 — path is the t.TempDir file this test wrote.
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	sum := sha256.Sum256(body)
+	return fileFingerprint{size: info.Size(), mod: info.ModTime(), sum: hex.EncodeToString(sum[:])}
+}
+
+// aFileFromANewerSchema writes the reproduction: every table name is one this
+// build owns, and `entries` carries a column no build of ours has ever heard
+// of. That is the whole defect — a newer schema that adds or changes COLUMNS
+// inside FAMILIAR tables walks past the unknown-table gate, which only ever
+// looks at names.
+func aFileFromANewerSchema(t *testing.T, path string) {
+	t.Helper()
+	rawExec(
+		t, path,
+		`CREATE TABLE entries (
+			id TEXT PRIMARY KEY, ingest_seq INTEGER NOT NULL UNIQUE,
+			client TEXT NOT NULL, digest TEXT NOT NULL, environment_id TEXT NOT NULL,
+			cwd TEXT NOT NULL, kind TEXT NOT NULL, intent TEXT NOT NULL,
+			phase TEXT NOT NULL, status TEXT NOT NULL, submitted_at INTEGER NOT NULL,
+			a_column_from_the_future TEXT
+		) STRICT`,
+		`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, intent, phase, status, submitted_at, a_column_from_the_future)
+			VALUES ('e1', 1, 'c', 'd', 'env', '/', 'shell', 'echo tomorrow', 'closed', 'success', 0, 'x')`,
+		`CREATE TABLE workspaces (id TEXT PRIMARY KEY, name TEXT NOT NULL) STRICT`,
+		`INSERT INTO workspaces (id, name) VALUES ('ws-1', 'work')`,
+		fmt.Sprintf("PRAGMA user_version=%d", schemaVersion+1),
+	)
+}
+
+// The bug, stated as an assertion: a file stamped ABOVE this build is refused
+// and NOT ONE BYTE of it is modified.
+//
+// Before the direction check, `onDisk == schemaVersion -> return` sent every
+// inequality into the rebuild, and the unknown-table gate below it could not
+// catch this file because it owns every name in it. The older binary
+// therefore DESTROYED rows written by the newer one — tolerable while the
+// file belongs to one machine and one build, and not tolerable at all once
+// it is shared, which is what the tier-2 remote server makes true.
+//
+// Asserted against resetIfSchemaChanged rather than through Open, because
+// Open's own prologue (auto_vacuum, journal_mode=WAL) rewrites the header
+// before the decision is reached: byte identity is a property of the refusal,
+// not of the caller around it.
+func TestResetRefusesADatabaseWrittenByANewerSchemaWithoutTouchingAByte(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.db")
+	aFileFromANewerSchema(t, path)
+
+	before := fingerprint(t, path)
+
+	conn, done := rawConn(t, path)
+	defer done()
+	warned := 0
+	discards := 0
+	err := resetIfSchemaChanged(
+		context.Background(),
+		conn,
+		&captureLogger{warn: func(string, ...any) { warned++ }},
+		func(int) { discards++ },
+	)
+	if err == nil {
+		t.Fatal("resetIfSchemaChanged accepted a file written by a newer schema — the rows it holds were rebuilt away")
+	}
+	// The refusal names both versions and what to do about it, because this
+	// string is what the person reads: the composition root hands Open's
+	// error to history.status as its detail, and the Settings notice prints
+	// it after "The history database could not be opened".
+	for _, want := range []string{
+		fmt.Sprintf("%d", schemaVersion+1),
+		fmt.Sprintf("%d", schemaVersion),
+		"update",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error = %v, want it to contain %q — the refusal must say which version is needed", err, want)
+		}
+	}
+
+	after := fingerprint(t, path)
+	if before != after {
+		t.Fatalf("the file changed under a refused open:\n before = %+v\n after  = %+v", before, after)
+	}
+	if warned != 0 || discards != 0 {
+		t.Fatalf("the refusal warned %d times and announced %d discards — nothing was discarded", warned, discards)
+	}
+	// And the stamp is still the newer one: a refusal that downgraded the
+	// stamp would let the very next open rebuild the file.
+	if got := rawUserVersion(t, path); got != schemaVersion+1 {
+		t.Fatalf("user_version = %d, want %d", got, schemaVersion+1)
+	}
+}
+
+// The same file through the real Open: the store refuses to hand itself out,
+// and the ROWS survive.
+//
+// Byte identity is deliberately not claimed here and cannot be — Open sets
+// auto_vacuum and journal_mode before it reaches the reset, and WAL rewrites
+// the header. What the product promises is the thing that matters to a
+// person: an older build opening a newer file loses nothing.
+func TestOpenRefusesADatabaseWrittenByANewerSchemaAndKeepsItsRows(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.db")
+	aFileFromANewerSchema(t, path)
+
+	_, err := Open(context.Background(), Config{
+		Path: path, Key: schemaTestKey(), Budget: testBudgetInternal(), Logger: log.NewSlogAdapter(nil),
+	})
+	if err == nil {
+		t.Fatal("Open over a file from a newer schema succeeded — the older build rebuilt a database it does not understand")
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("%d", schemaVersion+1)) {
+		t.Fatalf("error = %v, want it to name the schema the file was written by", err)
+	}
+	want := []string{"entries", "workspaces"}
+	if got := rawTableNames(t, path); !slices.Equal(want, got) {
+		t.Fatalf("tables after the refusal = %v, want %v — the newer file was rebuilt", got, want)
+	}
+	if n := rawRowCount(t, path, "entries"); n != 1 {
+		t.Fatalf("entries rows = %d, want 1 — the newer schema's rows were discarded", n)
+	}
+	if got := rawUserVersion(t, path); got != schemaVersion+1 {
+		t.Fatalf("user_version = %d, want %d — the refusal restamped the file", got, schemaVersion+1)
+	}
+}
+
+// aHotWalFileFromANewerSchema is the SHARED-FILE version of the fixture
+// above, and the one that matters (nocx-7qunp, follow-up): a content.db as a
+// newer nocx actually leaves it. Our store runs in WAL, so a live database is
+// a small main file plus a large `-wal` holding most of the content — copy
+// one, sync one, or kill the process, and that is the pair the older binary
+// finds. The `-shm` is deliberately NOT copied: rebuilding it from the `-wal`
+// is what makes this a genuine hot-WAL recovery rather than a resumed one.
+//
+// It returns the path and the number of rows written.
+func aHotWalFileFromANewerSchema(t *testing.T, rows int) (string, int) {
+	t.Helper()
+	live := filepath.Join(t.TempDir(), "content.db")
+	conn, done := rawConn(t, live)
+	ctx := context.Background()
+	var jm string
+	if err := conn.QueryRowContext(ctx, "PRAGMA journal_mode=WAL").Scan(&jm); err != nil {
+		t.Fatalf("journal_mode=WAL: %v", err)
+	}
+	if jm != "wal" {
+		t.Fatalf("journal_mode = %q, want wal — the fixture is not the shared-file case", jm)
+	}
+	stmts := []string{
+		`CREATE TABLE entries (
+			id TEXT PRIMARY KEY, ingest_seq INTEGER NOT NULL UNIQUE,
+			client TEXT NOT NULL, digest TEXT NOT NULL, environment_id TEXT NOT NULL,
+			cwd TEXT NOT NULL, kind TEXT NOT NULL, intent TEXT NOT NULL,
+			phase TEXT NOT NULL, status TEXT NOT NULL, submitted_at INTEGER NOT NULL,
+			a_column_from_the_future TEXT
+		) STRICT`,
+	}
+	for i := range rows {
+		stmts = append(stmts, fmt.Sprintf(
+			`INSERT INTO entries (id, ingest_seq, client, digest, environment_id, cwd, kind, intent, phase, status, submitted_at, a_column_from_the_future)
+				VALUES ('e%d', %d, 'c', 'd', 'env', '/', 'shell', 'echo %d', 'closed', 'success', 0, '%s')`,
+			i, i, i, strings.Repeat("x", 512)))
+	}
+	stmts = append(stmts, fmt.Sprintf("PRAGMA user_version=%d", schemaVersion+1))
+	for _, s := range stmts {
+		if _, err := conn.ExecContext(ctx, s); err != nil {
+			t.Fatalf("hot-wal fixture %q: %v", s, err)
+		}
+	}
+
+	// Copy the pair while the writer still holds it — before any checkpoint.
+	shared := filepath.Join(t.TempDir(), "content.db")
+	mainSize := copyFile(t, live, shared)
+	walSize := copyFile(t, live+"-wal", shared+"-wal")
+	done()
+
+	// The fixture is only the case it claims to be if the rows really are in
+	// the WAL. Asserted, not assumed: a checkpoint between the writes and the
+	// copy would quietly turn this into the ordinary test above.
+	if walSize <= mainSize {
+		t.Fatalf("wal=%d main=%d — the content is not in the WAL, so this is not the shared-file case", walSize, mainSize)
+	}
+	t.Logf("shared content.db: main=%d bytes, hot -wal=%d bytes", mainSize, walSize)
+	return shared, rows
+}
+
+func copyFile(t *testing.T, from, to string) int64 {
+	t.Helper()
+	body, err := os.ReadFile(from) // #nosec G304 — both paths are t.TempDir files this test made.
+	if err != nil {
+		t.Fatalf("read %s: %v", from, err)
+	}
+	if err := os.WriteFile(to, body, 0o600); err != nil {
+		t.Fatalf("write %s: %v", to, err)
+	}
+	return int64(len(body))
+}
+
+// The shared-database case, end to end: a newer nocx's content.db arrives as
+// a main file plus a hot `-wal`, an older binary opens it, and EVERY ROW
+// SURVIVES.
+//
+// This is the case the bead was really about — the one that arrives once a
+// content.db is shared between two machines or two versions — and it is not
+// the same test as the one above, because WAL mode changes what "untouched"
+// can even mean. Measured while writing this: opening such a file and reading
+// its stamp modifies the main file not at all, but CLOSING the handle
+// checkpoints the WAL into it (4 KB → 272 KB here) and deletes the `-wal`.
+// That happens with no journal_mode pragma of ours involved, because WAL is a
+// property of the FILE, not of the connection — so no reordering inside Open
+// can avoid it, and "not one byte modified" is unreachable through any path
+// that opens the database at all.
+//
+// What IS reachable, and what a person actually needs, is asserted here: the
+// checkpoint is schema-blind page copying, so the rows a newer nocx wrote are
+// all still there afterwards, still stamped with its schema, and still
+// readable by it. The refusal costs a running feature, never a data set.
+func TestOpenRefusesANewerDatabaseArrivingInWalWithoutLosingARow(t *testing.T) {
+	path, rows := aHotWalFileFromANewerSchema(t, 200)
+
+	_, err := Open(context.Background(), Config{
+		Path: path, Key: schemaTestKey(), Budget: testBudgetInternal(), Logger: log.NewSlogAdapter(nil),
+	})
+	if err == nil {
+		t.Fatal("Open over a shared newer database succeeded — an older binary rebuilt a file it does not understand")
+	}
+	if !strings.Contains(err.Error(), fmt.Sprintf("%d", schemaVersion+1)) {
+		t.Fatalf("error = %v, want it to name the schema the file was written by", err)
+	}
+	if n := rawRowCount(t, path, "entries"); n != rows {
+		t.Fatalf("entries rows = %d, want %d — rows written by the newer nocx were lost", n, rows)
+	}
+	if got := rawUserVersion(t, path); got != schemaVersion+1 {
+		t.Fatalf("user_version = %d, want %d — the older binary restamped a file it refused", got, schemaVersion+1)
+	}
+	// And the column this build has never heard of is still there: the file
+	// is intact as a NEWER database, not merely non-empty.
+	if got := rawTableNames(t, path); !slices.Equal([]string{"entries"}, got) {
+		t.Fatalf("tables = %v, want [entries]", got)
 	}
 }

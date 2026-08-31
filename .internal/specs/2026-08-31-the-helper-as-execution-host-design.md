@@ -286,26 +286,50 @@ questions and neither replaces the other:
 | rendezvous socket   | can I communicate with this generation? (discovery, attach, health)  |
 | lifetime/prune lock | can I prove retirement is mutually exclusive with a live generation? |
 
-**Shared homes get a namespace, not a refusal.** `installDir`'s comment already anticipates
-one account across two machines — "(NFS, or the same login on both) resolves to two
-directories" — but that holds only for _different platforms_: two **same-platform** machines
-sharing a home resolve to **one** directory, and a host-local advisory lock on one cannot bind
-the other.
+**Shared homes: the whole install tree is namespaced by machine, not just its lock.**
+`installDir`'s comment anticipates one account across two machines — "(NFS, or the same login
+on both) resolves to two directories" — but that holds only for _different platforms_. Two
+**same-platform** machines sharing a home resolve to **one** directory.
 
-An earlier draft answered this by disabling automatic prune on detected shared storage, on the
-argument that a machine namespace "would double the footprint for every user". **That argument
-is false**: a machine namespace produces one namespace on an ordinary single-machine home and
-duplicates only where homes are genuinely shared, which is precisely the colliding case. And
-the refusal was incomplete anyway — a shared tree makes `Ensure`'s repair path
-(`install.go:130`, which removes an incomplete directory), tombstone reconciliation, and
-whole-tree **uninstall** unsafe in the same way, not just automatic prune. One machine cannot
-enumerate another's live sessions, yet D14 proposes deleting their common `~/.nocx/helper`.
+Two earlier answers are withdrawn, and the second was worse than the first because it looked
+like it worked. Disabling automatic prune on detected shared storage was incomplete: `Ensure`'s
+repair path (`install.go:130`, which removes an incomplete directory) and whole-tree uninstall
+are unsafe in the same way. Namespacing only the **lock** was **actively wrong**: machine B
+probes its own lock, finds it free — it is a different file — and retires the shared install
+directory out from under machine A's live daemon. A machine-scoped lock cannot prove global
+disuse of an artifact that is not machine-scoped.
 
-So: **mutable generation state — the lock, the daemon's runtime endpoint, tombstones — is
-namespaced by machine identity.** Immutable artifact bytes may still be shared, since they are
-content-addressed and identical by construction. Detection of shared storage is not relied on
-as a gate: portable, reliable detection is itself hard, and treating a negative result as proof
-would put D1a on an inference.
+So the scopes are made to match:
+
+```
+~/.nocx/helper/<machine>/<version>-<goos>-<goarch>-<hash>/
+~/.nocx/run/<machine>/<generation>.{sock,lock}
+```
+
+Every rule in D4, D5 and D6 then holds unchanged, because nothing has to reason across
+machines: a lock, the artifact it guards and the endpoint that reaches it are one scope.
+
+**The cost is paid only where the hazard exists.** An ordinary single-machine home has exactly
+one namespace and one copy, as today. A home shared by N same-platform machines holds N copies
+of each generation — 2.8 MB apiece (§6) — which is the price of a shared home and is charged to
+nobody else. An earlier draft rejected this on the claim that it "would double the footprint for
+every user"; **that claim was false** and is withdrawn with it.
+
+**The machine identity is obtained on the host, and it fails conservative.** `deploy.Probe`
+already runs on the far side to resolve `goos`/`goarch`; it returns the machine identity in the
+same round trip — `/etc/machine-id` (or `/var/lib/dbus/machine-id`) on Linux, `IOPlatformUUID`
+on macOS.
+
+**It must not fall back to `internal/contentkey`.** That package's `machineIDOrMinted` mints an
+identifier and keeps it "beside the salt" in the **config directory** when the host exposes
+none — a deliberate and correct trade for a content key, and exactly inverted here: under a
+shared home two machines would read the _same_ minted id, which is the collision this namespace
+exists to prevent.
+
+When the host exposes no identity of its own, nocx **cannot prove the home is not shared**, so
+it uses a single namespace and **refuses automatic retirement**, saying so in the footprint
+surface (D13). Generations then accumulate visibly and removably rather than one machine
+silently retiring another's live work.
 
 ### D6 — The coordinator retires generations; the helper only tells the truth about itself
 
@@ -635,20 +659,41 @@ remove them:
 - **Session-keyed, 64-bit offsets** in `data` — already required by D3, and the thing that
   makes N readers an implementation question rather than a wire question.
 
-### D16 — A coordinator drains the window before it can record
+### D16 — A coordinator drains before it can record, where it can reach at all
 
-Reading the helper's window needs **no vault and no `content.db`**: those are the recorder's
-dependencies, not the reader's. A replacing coordinator therefore **attaches and drains
-immediately on start**, before the vault is open, holding what it reads in memory for
-delivery and starting the recorder only when the store is available.
+**Reading** the helper's window needs neither the vault nor `content.db` — those are the
+recorder's dependencies. So a replacing coordinator attaches and drains **as soon as it can
+connect**, and starts the recorder only when the store opens.
 
-This is what keeps conclusion 3 from being fatal. Without it the read gap is bounded by
-however long a person takes to unlock; with it the gap is the machine floor plus carrier
-setup, which the measured table shows 256 KiB covering for everything but a bulk dump.
+**But reaching the reader is a separate question, and an earlier draft conflated them.** A
+remote session's carrier must be re-established first, and SSH authentication can itself need
+the vault: `ssh_auth.go:99` reads a `KeySecretID`'s material only from `SecretStore`, `:142`
+propagates a sealed vault rather than bypassing it, `:244` does the same for a stored password,
+and `ssh_helperconn.go:181` reacquires the pooled connection with the same credential
+configuration.
 
-The recorder's own gap remains real and is what `Skip` (D8) exists to record: bytes that
-flowed while the store was closed are delivered to the frontend and **absent from the
-recording**, and the product says so.
+So the promise is scoped, and the scope is stated rather than implied:
+
+| session                                        | read gap                             |
+| ---------------------------------------------- | ------------------------------------ |
+| local                                          | the machine floor                    |
+| remote, key in an agent or an unencrypted file | the machine floor plus carrier setup |
+| **remote, key or password held in the vault**  | **bounded by a person unlocking it** |
+
+For the third row the loss is real and the product says so — the tab reports that it is waiting
+for unlock, and the gap it produced is shown where it happened (D13.4). Removing that row needs
+a reattachment credential that survives coordinator replacement without the vault, which is not
+designed here and is not promised.
+
+**And the drain has a bounded sink, because an unbounded one would undo D8.** A coordinator
+drains **into an actual consumer**: bytes go to an attached frontend as they arrive. It does
+**not** accumulate a private buffer against a frontend that is absent — that would be a second
+window with its own capacity, reset semantics and owner, which is the thing this design has one
+of. With no frontend attached, the coordinator does not drain; the helper's window holds what it
+holds, and the reset when someone attaches is the honest answer.
+
+The recorder attaches independently once the store is open and writes a `Skip` for whatever the
+window lost while it was closed (D8).
 
 ## 4. What the user sees
 
@@ -819,6 +864,65 @@ rolling one-second window, because an average tells a bounded buffer nothing:
 profile with the OS keystore out of play. That is a **floor**, not a replacement: it excludes
 the bundle swap, a populated `content.db`, and the vault.
 
+**And a second table at the scale that actually matters.** Peak-per-second answers "what is the
+sustained rate"; the question this design asks is "what arrives during a read gap", and the
+measured machine gap is 17 ms. Same commands, same pty, peak bytes in rolling 20/50/100 ms
+windows, against the 262,144-byte window:
+
+| command             | peak/20 ms | peak/50 ms | peak/100 ms |      vs window |
+| ------------------- | ---------: | ---------: | ----------: | -------------: |
+| `go test -v`        |   39,292 B |   57,966 B |    57,966 B |      15% → 22% |
+| `cat` a 238 KB file |  238,458 B |  238,458 B |   238,458 B | 91%, one burst |
+| `find / -xdev`      |  250,592 B |  480,666 B |   801,252 B | **96% → 306%** |
+
+That reframes the bound entirely. 256 KiB is **not** "4.5 seconds of `go test`" — bursty output
+does not arrive at its average. It is **one 20 ms gap of anything measured, including a
+filesystem walk, with four percent to spare**; at 50 ms only bulk overflows, and at 100 ms bulk
+loses two thirds.
+
+Four conclusions, and the last two each changed a decision:
+
+1. **Sized for the gap, the bound is right and its margin is known.** Fifteen-fold headroom for
+   ordinary work; 1.04× for the pathological case at the measured floor.
+2. **A bigger window still cannot buy its way out.** The per-second spread is four orders of
+   magnitude; 32× the memory turns bulk's 20 ms into 640 ms and costs every idle session the
+   difference.
+3. **The bound is not what decides the loss — the read gap is.** Against 17 ms nothing measured
+   overflows. But a replacement can wait on a **person**: the vault seals after a departure
+   window and a session needing a secret suspends until someone returns. Human time inside the
+   gap makes any bound irrelevant. That is D16, and it is why D16 is scoped by _reachability_
+   rather than stated as a general promise.
+4. **The 17 ms floor is local, and the remote gap is unmeasured and certainly larger.** It
+   includes SSH authentication, jump routes and bridge establishment — hundreds of milliseconds
+   is a reasonable expectation, which is where the third row of the table starts to bite. §8
+   carries this as owed.
+
+**Owed before the local execution host ships: the local carrier budget** (D11), with
+thresholds and a consequence rather than a number alone: p50/p99 keystroke-to-echo against
+today's direct PTY; sustained output throughput; coordinator and helper CPU; wakeups and
+context switches; fairness of an interactive tab beside a flooding one; and backpressure onset
+with its memory bound. Failing the budget optimises the carrier, never the ownership.
+
+**Measured, and no longer owed: the window's bound** (D8). An earlier draft carried 256 KiB
+forward as a named deferral, which satisfied `nocx-8mllr` procedurally and evaded it in
+substance. Measured 2026-08-31 on this machine, each command run on a **real pty** — so
+colour, progress and repaints are present, which piping suppresses — with peak bytes in any
+rolling one-second window, because an average tells a bounded buffer nothing:
+
+| command                   | peak/1 s | 256 KiB survives |
+| ------------------------- | -------: | ---------------: |
+| `go build ./...` (cold)   |  1,412 B |            186 s |
+| `go vet ./...`            |  1,920 B |            137 s |
+| `npm run build` (vite)    |  4,480 B |             58 s |
+| `npm ls --all`            | 47,861 B |            5.5 s |
+| `go test -v` (2 packages) | 57,965 B |            4.5 s |
+| `cat` a 238 KB file       |   238 KB |            1.1 s |
+| `find / -xdev -type f`    |  10.1 MB |           0.03 s |
+
+**Coordinator start to `nocx-server ready`: 17 ms, 0 ms, 16 ms** over three runs on an empty
+profile with the OS keystore out of play. That is a **floor**, not a replacement: it excludes
+the bundle swap, a populated `content.db`, and the vault.
+
 Three conclusions, and the third is the one that changes a decision:
 
 1. **For the common case 256 KiB is generous.** Compiles and builds peak in the low kilobytes
@@ -868,19 +972,25 @@ ADR-0043 rather than solving multi-process encrypted SQLite).
 
 ## 8. Open questions
 
-1. **The local carrier budget** (§6) — owed as numbers with thresholds before the local
-   execution host ships. Not blocking acceptance: it decides a carrier, not an ownership.
-2. **`nocx-22k1c`** is answered for the case this document creates (D8 chooses D6-b). What
+1. **The remote read gap, end to end** (§6 conclusion 4) — fresh coordinator start → SSH
+   authentication (agent, file key, vault key, password) → jump route → bridge or streamlocal →
+   authenticated attach → first byte drained. The 17 ms floor is local; this is the number that
+   says how often the bulk row of the fine-grained table costs a user anything. Owed before the
+   remote execution host ships, and the one measurement that could still move the bound.
+2. **The local carrier budget** (§6) — thresholds and a consequence. Not blocking acceptance: it
+   decides a carrier, not an ownership.
+3. **`nocx-22k1c`** is answered for the case this document creates (D8 chooses D6-b). What
    remains with that bead is narrower: what the _recorder_ does when it is slower than the
-   source while a coordinator **is** attached — which D8's `Skip` gives it a way to express
-   but does not set a policy for.
-3. **A full-repaint criterion** for ADR-0041's grid (D9). Without it the grid stays `unknown`
-   after an attach, which is the safe answer; with it, §0 could promise the screen as well as
-   the process. Not blocking, because the safe answer is available today.
-4. **Bulk output is not covered by any in-memory bound** (§6, conclusion 2). A session
-   dumping megabytes per second loses output across any read gap longer than a moment. This
-   document accepts that and states it; whether some sessions deserve a durable spool is a
-   later question, and one D11's opaque store could answer without changing this design.
+   source while a coordinator **is** attached — which `Skip` gives it a way to express but does
+   not set a policy for.
+4. **A full-repaint criterion** for ADR-0041's grid (D9). Without it the grid stays `unknown`
+   after an attach, which is the safe answer.
+5. **A reattachment credential that survives coordinator replacement without the vault** (D16,
+   third row). Its absence is what leaves a vault-gated remote session's read gap bounded by a
+   person. Not designed here and not promised.
+6. **Bulk output is not covered by any in-memory bound** (§6 conclusion 2). Accepted and stated;
+   whether some sessions deserve a durable spool is a later question, and one document 2's
+   opaque store could answer without changing this design.
 
 ## 9. What must exist before this design is accepted
 

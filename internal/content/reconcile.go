@@ -130,6 +130,14 @@ type PendingSession struct {
 	// SessionID is the row's id — the same id `entries.session_id` names and
 	// the recording is keyed by.
 	SessionID string
+	// Host and Account identify the execution target whose helper may judge
+	// this session. They are durable binding facts, not values inferred from
+	// the helper generation or session id.
+	Host    string
+	Account string
+	// Generation is the helper generation that owns SessionID's id space.
+	// Empty means no inventory may judge it.
+	Generation string
 	// Since is when the session started, or when its recording did for a
 	// session with no row of its own. It is what the age bound reads and what
 	// the product shows: "not reachable since" is a fact with a date.

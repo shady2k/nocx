@@ -116,6 +116,10 @@ type App struct {
 	// (nocx-6pz0); stopped at shutdown so no resolution child outlives
 	// the process.
 	gitFactory *gitlocal.Factory
+	// helperRegistry owns the live helper channels shared by git and the
+	// sessions inventory. Kept here so the composition root's ownership is
+	// explicit; the registry itself remains private to app.
+	helperRegistry *helperRegistry
 
 	// procs owns the process observation (nocx-cgzc); closed at shutdown so
 	// its kernel queue and its goroutine do not outlive the process.
@@ -960,18 +964,10 @@ func New(opts ...Option) (*App, error) {
 		// block at startup would destroy work that is still going on — and
 		// this is where the verdicts land instead.
 		//
-		// IT IS CALLED WITH NO INVENTORIES, and that is the honest state of
-		// the product rather than an oversight: nothing yet records WHICH
-		// generation a stored session belongs to (ws_ledger.go leaves
-		// entries.session_id nil for a shell submit, and the helper is not
-		// yet the coordinator's spawner), so no inventory owns any stored
-		// session's id space and every verdict is `unknown`. Asking the
-		// nearest helper anyway would get a truthful "I do not hold that"
-		// about somebody else's id and turn it into a deletion. What this
-		// pass DOES do today is the half that is owed either way: the age
-		// bound, which is the only thing standing between a host that never
-		// comes back and a recording kept forever.
-		reconcileSessions(ctx, db.Reconcile(), nil, content.DefaultUnreconciledRetention, slogger)
+		// Each active helper contributes one generation-qualified inventory.
+		// A stored row without generation remains unowned and therefore
+		// unknown; no helper is asked to guess.
+		reconcileSessions(ctx, db.Reconcile(), helperReg.inventories(), content.DefaultUnreconciledRetention, slogger)
 	}
 
 	// Live History policy: a Settings toggle applies without a restart. The
@@ -1229,6 +1225,7 @@ func New(opts ...Option) (*App, error) {
 		// uninstall surface needs it to close them before removing an
 		// install directory (D25), so the same registry is wired there.
 		transport.WithGitHelperFactory(helperFactory),
+		transport.WithHostSessionInventory(&helperSessionInventories{registry: helperReg}),
 		// The D25 channel closer (remote-helper design D25): the registry
 		// closes every live helper channel on a machine before
 		// shell.footprint.helperUninstall removes its install directory —
@@ -1767,6 +1764,7 @@ func New(opts ...Option) (*App, error) {
 		noteCloser:       noteCloser,
 		discoverySched:   discoverySched,
 		gitFactory:       gitFactory,
+		helperRegistry:   helperReg,
 		logFilePath:      logFilePath,
 		logFile:          logFile,
 		procs:            procs,

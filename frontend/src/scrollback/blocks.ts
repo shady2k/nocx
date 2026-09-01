@@ -1872,6 +1872,42 @@ export class BlockManager {
     this._own(boundary, anchor)
   }
 
+  /** Apply a completion parsed from a recovered OSC 133 stream to a restored
+   *  command block. This is deliberately not a BlockRecord operation: the
+   *  fresh lifecycle domain owns live attempts, while this DOM element is the
+   *  durable entry whose unreconciled presentation the replay adjudicates. */
+  completeRestoredBlock(entryId: string, exitCode: number, durationMs: number | null): boolean {
+    const isMatch = (candidate: HTMLElement): boolean =>
+      candidate.dataset.restored === 'true' &&
+      candidate.classList.contains('cmd-block-unreconciled') &&
+      candidate.dataset.entryId === entryId &&
+      candidate.dataset.blockKind === 'command'
+    let block: HTMLElement | null = null
+    for (const owned of this._owned) {
+      if (isMatch(owned)) {
+        block = owned
+        break
+      }
+      for (const candidate of owned.querySelectorAll<HTMLElement>(
+        '[data-restored="true"][data-entry-id][data-block-kind="command"]',
+      )) {
+        if (isMatch(candidate)) {
+          block = candidate
+          break
+        }
+      }
+      if (block) break
+    }
+    if (!block) return false
+    const right = block.querySelector('.cmd-header-right')
+    if (!right) return false
+    const status = exitCode === 0 ? 'success' : 'failure'
+    block.classList.remove('cmd-block-unreconciled')
+    block.dataset.restoredStatus = status
+    settleHeaderRight(right, 'command', durationMs, { status, exitCode })
+    return true
+  }
+
   /**
    * Mark where a lost session ended and a NEW shell begins (nocx-rtzo4).
    *

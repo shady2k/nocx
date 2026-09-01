@@ -157,6 +157,10 @@ const rendererOf = (content: TerminalContent): RendererMock => {
  *  escape hatch editorOf uses. `send` is what a raw pty write lands on. */
 const sessionOf = (content: TerminalContent): SessionFake =>
   (content as unknown as { session: SessionFake }).session
+/** Adapt the public-only fake at the injected adoption seam. SessionHandle's
+ * private client prevents structural typing even though all used methods match. */
+const asSessionHandleForTest = (session: SessionFake): SessionHandle =>
+  session as unknown as SessionHandle
 
 /** The scrollback owner behind TerminalContent, for placement assertions. */
 const scrollbackFor = (content: TerminalContent): ScrollbackController => {
@@ -11311,10 +11315,10 @@ describe('a reclaimed pane says what is missing (nocx-fz4qa)', () => {
   /** The pane's own reclaim: a session handle carrying what the claim
    *  recovered, handed back by the thunk PaneManager supplies. */
   function reclaiming(recovered: SessionRecovery | null) {
-    const session = { ...makeSession(), recovered }
+    const session = makeSession({ recovered: recovered ?? undefined })
     return {
       session,
-      hooks: { adoptSession: () => Promise.resolve(session as unknown as SessionHandle) },
+      hooks: { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) },
     }
   }
 
@@ -11437,7 +11441,7 @@ describe('a pane drawing a session it did not size (nocx-eidfb.3)', () => {
       pendingData: RECOVERED,
     })
     const mounted = await mountTerminal(makeClipboard(), {
-      hooks: { adoptSession: () => Promise.resolve(session as unknown as never) },
+      hooks: { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) },
     })
     return { ...mounted, session }
   }
@@ -11538,6 +11542,109 @@ describe('a pane drawing a session it did not size (nocx-eidfb.3)', () => {
       // else's terminal.
       expect(tab.pane.style.width).toBe('')
       expect(scrollbackFor(content).scrollbackArea.style.width).toBe('')
+    } finally {
+      teardown()
+    }
+  })
+})
+
+describe('replayed completion restores a durable block outcome (nocx-gm21o)', () => {
+  it('lands OSC 133 D on the restored entry rather than leaving it unknown', async () => {
+    const session = makeSession({
+      recovered: {
+        bytes: 1,
+        gaps: [],
+        size: { cols: 80, rows: 24 },
+      },
+    })
+    const entry = {
+      id: 'entry-replayed-command',
+      seq: 1,
+      environmentId: 'env-1',
+      host: 'host.example',
+      cwd: '/repo',
+      kind: 'shell',
+      source: 'user',
+      intent: 'make deploy',
+      phase: 'bound',
+      status: 'running',
+      unreconciled: 'notYetAsked',
+      submittedAt: 1,
+      startedAt: 1,
+      endedAt: null,
+      durationMs: null,
+      exitCode: null,
+      maskedCount: 0,
+      maskedKinds: [],
+      redactions: [],
+    } as const
+    let resolveQuery!: (value: unknown) => void
+    const queryPending = new Promise<unknown>((resolve) => {
+      resolveQuery = resolve
+    })
+    const client = makeClient({
+      call: vi.fn((method: string) => {
+        if (method === 'ledger.query') return queryPending
+        if (method === 'ledger.get') {
+          return Promise.resolve({
+            entry,
+            edges: [],
+            artifacts: [{ id: 'artifact-1', mediaType: 'application/vt' }],
+            proseEvicted: false,
+            caused: [],
+          })
+        }
+        if (method === 'ledger.artifact') {
+          return Promise.resolve({
+            id: 'artifact-1',
+            mediaType: 'application/vt',
+            body: '',
+            truncated: null,
+            byteLen: 0,
+          })
+        }
+        return Promise.reject(new Error(`unexpected method ${method}`))
+      }),
+    })
+    const { content, tab, teardown } = await mountTerminal(
+      makeClipboard(),
+      {
+        visibleBeforeMount: true,
+        hooks: { adoptSession: () => Promise.resolve(asSessionHandleForTest(session)) },
+      },
+      client,
+    )
+    try {
+      // The parsed C/D callbacks arrive while the durable page read is still
+      // pending. This is the replacement-reader race; xterm parser coverage
+      // is owned by parseOsc133 tests, while this test pins the association.
+      const renderer = rendererOf(content)
+      renderer._fireCommandMarker({ kind: 'C', line: 1, col: 0, buffer: 'normal' })
+      renderer._fireCommandMarker({
+        kind: 'D',
+        exitCode: 7,
+        line: 2,
+        col: 0,
+        buffer: 'normal',
+      })
+      resolveQuery({
+        entries: [entry],
+        scope: 'everywhere',
+        exhausted: true,
+        hasRows: true,
+        coverage: null,
+      })
+
+      await vi.waitFor(() =>
+        expect(tab.pane.querySelector('[data-entry-id="entry-replayed-command"]')).not.toBeNull(),
+      )
+      const restored = tab.pane.querySelector<HTMLElement>(
+        '[data-entry-id="entry-replayed-command"]',
+      )
+      expect(
+        restored?.querySelector('.cmd-header-exit')?.textContent,
+        'the restored block still reads unknown after its completion replayed',
+      ).toBe('exit 7')
     } finally {
       teardown()
     }

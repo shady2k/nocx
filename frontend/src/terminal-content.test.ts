@@ -11439,6 +11439,101 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
+  // nocx-hp8p2.8. The live region is where a RUNNING command's output is —
+  // the block holds only its header until the freeze — so an answer seated
+  // after the block element alone reads as spliced into the middle of `top`.
+  // The ordering has to hold in both directions at once: the answer below
+  // the running output, and the NEXT command below the answer.
+  it('seats an answer below the running command output, and opens the next command below the answer (nocx-hp8p2.8)', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask')
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      if (method === 'agent.cancel')
+        return Promise.resolve({ runId: 42, state: 'cancelled', cancelled: true })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      const handler = startCommand(client)
+      await summon(content)
+      const answer = await submitQuestion(content, client, 'what is on screen?')
+      await vi.waitFor(() => expect(answer.dataset.entryId).toBe('entry-42'))
+      const delta = client.dispatcher.subscribe.mock.calls.find(
+        ([method]) => method === 'agent.runDelta',
+      )?.[1] as ((params: unknown) => void) | undefined
+      delta!({ runId: 42, entryId: 'entry-42', text: 'overlay prose' })
+
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      const inner = scrollback.scrollbackInner
+      const live = scrollback.xtermLiveContainer
+
+      // Escape while `top` is STILL running.
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+
+      const command = inner.querySelector<HTMLElement>('.cmd-block[data-block-kind="command"]')
+      expect(command).not.toBeNull()
+      const seatedOrder = (): number[] => {
+        const kids = Array.from(inner.children)
+        return [kids.indexOf(command!), kids.indexOf(live), kids.indexOf(answer)]
+      }
+      const [cmdAt, liveAt, answerAt] = seatedOrder()
+      expect(cmdAt).toBeLessThan(liveAt)
+      expect(liveAt).toBeLessThan(answerAt)
+
+      // The order a person watched during the run is the order they keep.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: {
+          id: 'att-run',
+          state: 'completed',
+          exitCode: 0,
+          fence: commandFence,
+          completedAt: '2026-08-28T12:00:00Z',
+        },
+      })
+      rendererOf(content)._fireRenderFence({ hex: commandFence, line: 3, buffer: 'normal' })
+      handler({ lane: 'lane-1', lifecycle: 'prompt_ready', domain: 'd1', epoch: 1 })
+      const frozen = inner.querySelector<HTMLElement>('.cmd-block[data-block-kind="command"]')
+      const afterFreeze = Array.from(inner.children)
+      expect(afterFreeze.indexOf(frozen!)).toBeLessThan(afterFreeze.indexOf(answer))
+
+      // And the next command opens BELOW the answer, which is what makes
+      // "seat after the live container" wrong on its own.
+      handler({
+        lane: 'lane-1',
+        lifecycle: 'running',
+        domain: 'd1',
+        epoch: 1,
+        attempt: { id: 'att-run-2', state: 'open', origin: 'app', command: 'ls' },
+      })
+      const commands = Array.from(
+        inner.querySelectorAll<HTMLElement>('.cmd-block[data-block-kind="command"]'),
+      )
+      const next = commands[commands.length - 1]
+      expect(next).not.toBe(frozen)
+      const kids = Array.from(inner.children)
+      expect(kids.indexOf(answer)).toBeLessThan(kids.indexOf(next))
+      expect(kids.indexOf(next)).toBeLessThan(kids.indexOf(live))
+    } finally {
+      teardown()
+    }
+  })
+
   it('Escape cancellation seats a stopped answer, never failed, after runState', async () => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {

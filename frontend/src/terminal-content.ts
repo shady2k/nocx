@@ -5542,8 +5542,15 @@ export class TerminalContent extends BasePaneContent {
     const settle = this.scrollback
     const owned = this._summonedAnswers
     const tail = owned[owned.length - 1].el
+    // WHAT THE ANSWER SITS AFTER is the command's whole presence, not its
+    // element: while the command still runs its output is in the live
+    // region, which BlockManager keeps immediately after the block
+    // (nocx-hp8p2.8). Anchoring on the element alone seated the reply
+    // between `top`'s header and `top`'s own screen.
+    const manager = this.scrollback?.blockManager
+    const commandTail = manager ? manager.tailOf(command.el) : command.el
     const seat = () => {
-      let anchor = command.el
+      let anchor: ChildNode = commandTail.parentNode === parent ? commandTail : command.el
       for (const answer of owned) {
         parent.insertBefore(answer.el, anchor.nextSibling)
         answer.el.classList.remove('nocx-answer-overlay')

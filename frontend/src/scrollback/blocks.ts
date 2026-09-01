@@ -1759,6 +1759,45 @@ export class BlockManager {
     this._owned.add(el)
   }
 
+  /** WHERE THE LIVE REGION BELONGS (nocx-hp8p2.8).
+   *
+   *  A running command's output is not inside its block: the block holds
+   *  its header until the freeze, and the bytes are in
+   *  `.xterm-live-container`. So the live region sits immediately AFTER the
+   *  block whose output it is, and everything opened afterwards goes at the
+   *  TAIL of the scrollback, below it.
+   *
+   *  BOTH HALVES ARE NEEDED AND NEITHER WORKS ALONE. With the region
+   *  permanently last — what it was — an answer seated after the command
+   *  block lands between the command and its own output, so a reply reads
+   *  as spliced into the middle of `top`. Seating the answer after the
+   *  region instead, with the region still last, puts the NEXT command
+   *  ABOVE the answer that preceded it, because a new block inserts before
+   *  the region too. Together they order both ways at once, and the order a
+   *  person watched during the run survives the freeze: the rows move into
+   *  the block and the emptied region stays where it is.
+   *
+   *  The region stays a DIRECT child of `.scrollback-inner` — the
+   *  fullscreen rule addresses it there, and the controller measures and
+   *  sizes it as a sibling of the stack — so a block nested inside a turn
+   *  is followed at its turn's seat rather than inside it. */
+  private _liveFollows(el: HTMLElement): void {
+    let seat: HTMLElement = el
+    while (seat.parentElement !== null && seat.parentElement !== this._scrollbackInner) {
+      seat = seat.parentElement
+    }
+    if (seat.parentElement !== this._scrollbackInner) return
+    this._scrollbackInner.insertBefore(this._xtermContainer, seat.nextSibling)
+  }
+
+  /** The last element belonging to `el`: its live output when the live
+   *  region is this block's, the block itself otherwise. What anything
+   *  seated after a block anchors on — the other half of `_liveFollows`,
+   *  read from the seating side (nocx-hp8p2.8). */
+  tailOf(el: HTMLElement): ChildNode {
+    return el.nextSibling === this._xtermContainer ? this._xtermContainer : el
+  }
+
   /** Put a COMMAND block in the next seat: inside the turn that claimed it
    *  (ADR-0040), or — nobody claimed it — at the tail of the scrollback,
    *  where every block a person opens goes.
@@ -1771,11 +1810,13 @@ export class BlockManager {
     const claim = this._claimedBy
     this._claimedBy = null
     if (!claim) {
-      this._own(el, this._xtermContainer)
+      this._own(el, null)
+      this._liveFollows(el)
       return
     }
     claim.appendChild(el)
     this._owned.add(el)
+    this._liveFollows(el)
     // A turn's working stand-in marks where the answer will continue: a
     // block that lands inside the turn's children goes ABOVE it, and the
     // stand-in returns to the tail — the next output's position
@@ -1856,8 +1897,10 @@ export class BlockManager {
    * defect this repository names most often. Only two things differ, and both
    * follow from WHEN it is drawn: the wording, and the anchor. A restore puts
    * the past above a present that is already there; a reconnect turns the
-   * present into the past, so the mark goes at the tail, above the live
-   * region and below every block the dead session left.
+   * present into the past, so the mark goes at the tail — below every block
+   * the dead session left, and below the live region the dead session's last
+   * command was writing into (nocx-hp8p2.8: the region belongs to that
+   * block, not to the end of the scrollback).
    *
    * It says what actually happened rather than "reconnected". The shell is a
    * new one and the process the old shell was running may still be alive on
@@ -1870,7 +1913,7 @@ export class BlockManager {
     boundary.className = 'scrollback-restore-boundary'
     boundary.dataset.reconnectBoundary = 'true'
     boundary.textContent = 'New shell — the one above is gone'
-    this._own(boundary, this._xtermContainer)
+    this._own(boundary, null)
   }
 
   /** An id for a block this manager did not create: a RESTORED one, built
@@ -2429,7 +2472,9 @@ export class BlockManager {
     const children = document.createElement('div')
     children.className = 'cmd-children'
     el.appendChild(children)
-    this._own(el, this._xtermContainer)
+    // At the TAIL: below the running command's live output, which is where
+    // an answer about that command belongs (nocx-hp8p2.8).
+    this._own(el, null)
     this._answerBlocks.push({ id, question, el })
 
     // The answer says it is being written, WHERE it will be written. The

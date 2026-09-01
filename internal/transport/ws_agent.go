@@ -699,6 +699,27 @@ func systemPromptFactsFor(cwd string, env content.Environment, attached []assist
 	return f
 }
 
+// markedSessionWindows is the other half of the same envelope: the row spans
+// a PERSON marked. They bound a session.read of those items, so a call that
+// names the item without naming the window is answered inside the mark
+// rather than past it (nocx-hp8p2.15). A whole-block mark carries no span
+// and bounds nothing.
+func markedSessionWindows(attached []assistant.AttachedContentItem) []assistant.MarkedSessionWindow {
+	marks := make([]assistant.MarkedSessionWindow, 0, len(attached))
+	for _, item := range attached {
+		if item.Automatic || item.Start == nil || item.Count == nil || *item.Count <= 0 {
+			continue
+		}
+		marks = append(marks, assistant.MarkedSessionWindow{
+			ItemID: item.ItemID, Start: *item.Start, Count: *item.Count,
+		})
+	}
+	if len(marks) == 0 {
+		return nil
+	}
+	return marks
+}
+
 func automaticSessionItems(attached []assistant.AttachedContentItem) []string {
 	ids := make([]string, 0, len(attached))
 	for _, item := range attached {
@@ -956,6 +977,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		// person's own paragraph as the settings document holds it right now.
 		promptFacts:           systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph(), skillRefs),
 		automaticSessionItems: automaticSessionItems(attached),
+		markedSessionWindows:  markedSessionWindows(attached),
 	}
 	h.pendingRunsMu.Lock()
 	h.pendingRuns[rc.runID] = rc
@@ -1133,6 +1155,9 @@ type askRunContext struct {
 	// automaticSessionItems is pinned from the renderer's attached-content
 	// metadata at ask submission and reused on approval resume.
 	automaticSessionItems []string
+	// markedSessionWindows is the row spans the person marked, pinned from
+	// the same attached-content envelope.
+	markedSessionWindows []assistant.MarkedSessionWindow
 	// sessionID is the session the run lives in — the session an "allow in
 	// this session" answer is about. Carried EXPLICITLY, from the ask that
 	// named it, rather than read back out of the grant: the grant's scope
@@ -1376,6 +1401,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		// never sends an arrangement of its own.
 		TurnEntryID:           rc.entryID,
 		AutomaticSessionItems: rc.automaticSessionItems,
+		MarkedSessionWindows:  rc.markedSessionWindows,
 	}, func(ev assistant.AskEvent) error {
 		if rc.control != nil {
 			// Declared inside the branch, like the other two: outside it

@@ -142,6 +142,11 @@ import { createCapturedFrameView, createFreezeMarker } from './frame/display'
 import { type ProfileClient } from './profiles'
 import { RpcError } from './dispatcher'
 import { NotifyClient } from './notify-client'
+import { render } from 'solid-js/web'
+import { createSignal, type Setter } from 'solid-js'
+import { ResizeHandle } from './ui/resize-handle'
+import { IconButton } from './ui/icon-button'
+import { CloseIcon } from './ui/icons'
 import { secretReference } from './secret-reference'
 import { hasSecretReference } from './snippets/resolve'
 import { LOCAL_TARGET_ID } from './ports-client'
@@ -156,6 +161,30 @@ import {
 } from './capability'
 
 // How long the grid must hold still before the PTY is told about it.
+/** The assistant's floor when the seam is dragged down: a question and one
+ *  line of answer still have to be readable, or the drag has hidden the
+ *  surface rather than resized it. */
+const MIN_SUMMON_ANSWERS_PX = 96
+
+/** The band of the program's screen a drag may never take. The surface is
+ *  "ask ABOUT a full-screen program WITHOUT leaving it", so the program stays
+ *  on the pane at every position of the seam. */
+const MIN_SUMMON_SCREEN_PX = 96
+
+/** Where the seam starts before anything has been measured — the jsdom case,
+ *  and the first paint of a stack whose box the browser has not laid out yet.
+ *  In a real pane the stylesheet's own box is measured instead. */
+const DEFAULT_SUMMON_ANSWERS_PX = 320
+
+/** How tall the assistant may be dragged: the space the stack has, less the
+ *  band the program keeps. An unmeasured pane (jsdom, a first paint) falls
+ *  back to the window rather than to zero — a ceiling of zero would report
+ *  the seam as immovable when it is only unmeasured. */
+function summonAnswersCeiling(pane: HTMLElement): number {
+  const available = pane.getBoundingClientRect().height || window.innerHeight
+  return Math.max(MIN_SUMMON_ANSWERS_PX, available - MIN_SUMMON_SCREEN_PX)
+}
+
 const RESIZE_SETTLE_MS = 80
 
 /**
@@ -590,6 +619,10 @@ export class TerminalContent extends BasePaneContent {
    *  containers do not otherwise establish the frame view's containing block. */
   private _freezeFrameParentPosition: string | null = null
   private _freezeMarker: HTMLElement | null = null
+  /** The pointer's way out of the summon, beside the badge that says the
+   *  screen is frozen. Escape was the only one. */
+  private _freezeDismiss: HTMLElement | null = null
+  private _freezeDismissDispose: (() => void) | null = null
   /** Prevent two concurrent capture transactions from both summoning. */
   private _summonPending = false
   /** Prevent concurrent visible-editor frame captures from replacing one
@@ -643,6 +676,16 @@ export class TerminalContent extends BasePaneContent {
    *  active; neither surface is rebuilt. */
   private _summonStack: HTMLElement | null = null
   private _summonAnswerList: HTMLElement | null = null
+  /** The seam's solid root, disposed with the stack that carries it. */
+  private _summonSeamDispose: (() => void) | null = null
+  /** Keeps the frozen screen's box off the assistant's rows: the stack is an
+   *  overlay, so without this the screen is not shortened but COVERED. */
+  private _summonStackObserver: ResizeObserver | null = null
+  /** The height the person last dragged the assistant to, in px. Null until
+   *  they touch the seam: until then the stylesheet owns the default, so
+   *  there is one owner of that number rather than two that drift. */
+  private _summonAnswersHeight: number | null = null
+  private _setSummonAnswersHeight: Setter<number> | null = null
   private _summonEditorHome: { parent: Node; nextSibling: ChildNode | null } | null = null
   private scrollback: ScrollbackController | null = null
   private dumpSource: DumpSource | null = null
@@ -707,6 +750,9 @@ export class TerminalContent extends BasePaneContent {
   private recall: RecallOverlay | null = null
   /** Marks are either whole-block grants or row windows selected by gesture.
    *  The absent window is the explicit whole-block form. */
+  /** The answer being written right now outside a summon, and the Stop its
+   *  own menu carries. Null between turns. */
+  private _liveAnswer: { el: HTMLElement; running: RunningBlockActions } | null = null
   private grantedBlocks: GrantBlock[] = []
   private grantController: GrantController | null = null
   /** A selection offers a grant; only the body-level control confirms it. */
@@ -719,9 +765,32 @@ export class TerminalContent extends BasePaneContent {
     toggleGrant: (blockEl) => this.toggleGrant(blockEl),
     stop: () => this.signalActiveCommand('stop'),
   }
+  /** True from pointerdown until pointerup: the person is still choosing
+   *  what to select. */
+  private _selectionGestureLive = false
+  private readonly onSelectionPointerDown = (): void => {
+    this._selectionGestureLive = true
+  }
+  private readonly onSelectionPointerUp = (): void => {
+    if (!this._selectionGestureLive) return
+    this._selectionGestureLive = false
+    // The gesture is over and the range is final: ask the same handler the
+    // selection events go through, so there is one place that decides.
+    this.onSelectionChange()
+  }
   private readonly onSelectionChange = (): void => {
     const selection = window.getSelection()
     if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+      this.markAffordance?.hide()
+      return
+    }
+    // AN OFFER IS MADE ABOUT A FINISHED SELECTION (nocx-hp8p2.16).
+    // selectionchange fires on every pixel of a drag, so the button appeared
+    // under the pointer while the person was still choosing what to select —
+    // it named a range they had not finished making, and it moved as they
+    // moved. The pointerup above brings the handler back with the range they
+    // actually meant. A keyboard selection has no gesture and is unaffected.
+    if (this._selectionGestureLive) {
       this.markAffordance?.hide()
       return
     }
@@ -1986,6 +2055,12 @@ export class TerminalContent extends BasePaneContent {
         // the person has scrolled away to read, so this follows without
         openAnswer: (question, cwd, running?: RunningBlockActions) => {
           const handle = this.scrollback!.blockManager.addAnswerBlock(question, cwd, running)
+          // THE TURN A KEY CAN REACH (nocx-hp8p2.14). A summoned answer is
+          // remembered in _summonedAnswers and Escape stops it there; an
+          // ORDINARY answer was remembered nowhere, so the only way to stop
+          // one was the ⋮ menu and Escape read as a dead key. The action is
+          // the exact object the menu got — one Stop, two ways to reach it.
+          this._liveAnswer = running === undefined ? null : { el: handle.el, running }
           if (this._summoned && this._summonedCommand !== null) {
             // The editor hides itself when the question submits. Keep every
             // answer in ask order above the one existing composer rather than
@@ -2034,6 +2109,7 @@ export class TerminalContent extends BasePaneContent {
               error?: string,
               model?: string,
             ) => {
+              if (this._liveAnswer?.el === handle.el) this._liveAnswer = null
               this._mutateSummonAnswers(() => {
                 handle.close(status, error, model)
                 this._terminalizeSummonedAnswer(handle.el)
@@ -2235,7 +2311,10 @@ export class TerminalContent extends BasePaneContent {
           // Escape then stops the current summoned turn through its answer's
           // exact Stop action and unwinds the summon; with no active turn it
           // keeps the prior dismiss-only behaviour.
-          onEscape: () => this.stopCurrentSummonedAnswerAndDismiss(),
+          // The summoned turn first, then an ordinary one. The editor asks
+          // its host before spending Escape on its own draft, and while the
+          // assistant is writing the answer is what the key is for.
+          onEscape: () => this.stopCurrentSummonedAnswerAndDismiss() || this.stopLiveAnswer(),
           // A taller editor is a shorter scrollback. Keep the bottom of the
           // transcript where it belongs — just above the editor — instead of
           // letting it slide underneath.
@@ -2897,6 +2976,24 @@ export class TerminalContent extends BasePaneContent {
           if (this.stopCurrentSummonedAnswerAndDismiss()) e.preventDefault()
           return
         }
+        // AN ORDINARY ANSWER IS STOPPABLE FROM THE KEYBOARD TOO
+        // (nocx-hp8p2.14). The branch above is the summoned turn; this is
+        // the same gesture when nothing was summoned, and without it Escape
+        // did nothing at all while the assistant was writing. It runs BEFORE
+        // the editor's own Escape, which would otherwise clear the draft and
+        // report the key as handled while the answer kept streaming — but
+        // only while a turn is actually live, so an idle Escape still
+        // belongs to the draft.
+        if (e.key === 'Escape' && !this._summoned && this._liveAnswer !== null) {
+          const active = document.activeElement
+          if (isTextEntry(active, this.scrollback?.xtermLiveContainer)) return
+          if (hasOpenOverlays()) return
+          if (document.querySelector('.cmd-overflow-menu')) return
+          if (this.stopLiveAnswer()) {
+            e.preventDefault()
+            return
+          }
+        }
         // Escape with the editor on screen but out of focus: the editor's
         // own capture listener only sees keys that traverse its surface, so
         // after a click elsewhere — a frozen block, the scrollback, the
@@ -3269,6 +3366,9 @@ export class TerminalContent extends BasePaneContent {
       })
       this.reconcileGrantPresentation()
       document.addEventListener('selectionchange', this.onSelectionChange)
+      document.addEventListener('pointerdown', this.onSelectionPointerDown, true)
+      document.addEventListener('pointerup', this.onSelectionPointerUp, true)
+      document.addEventListener('pointercancel', this.onSelectionPointerUp, true)
       this._mounted = true
       this._readyResolve(true)
       log.info('nocx: terminal content ready', {
@@ -5054,8 +5154,26 @@ export class TerminalContent extends BasePaneContent {
       const frameHost = this.scrollback?.xtermLiveContainer
       if (markerHost === null || frameHost === undefined) return false
       if (!this._placeEditorInSummonStack(editor)) return false
-      const frozenOwner = this.automaticAttachmentOwner(true)
-      const automaticOwner = this._bufferType === 'alternate' ? frozenOwner : null
+      // THE FROZEN PHOTOGRAPH BELONGS TO THE BLOCK THIS SUMMON IS OVER, and
+      // that is `owner` — whichever buffer it paints in. Two things were
+      // wrong here (nocx-hp8p2.4). automaticAttachmentOwner(true) demanded a
+      // block that had already FROZEN, which a program still running never
+      // has; and the alternate-buffer gate excluded the commonest case there
+      // is, because procps `top` owns the whole viewport WITHOUT taking the
+      // alternate screen — the shape ask-about-full-screen-program.spec.ts
+      // already names as "a key-owning full-viewport normal-buffer program …
+      // mirrors top's screen ownership". Between them, the owner pressed
+      // Ctrl+Enter over `top`, watched the screen freeze, and asked a
+      // question that carried nothing — a grant chip counting zero, and an
+      // assistant answering from no context at all.
+      //
+      // This is not the over-attachment nocx-7l4ex.21 fixed. That one is the
+      // path where NOBODY summoned — toggleInputTarget's automatic capture,
+      // which still asks automaticAttachmentOwner(true) and still refuses
+      // anything but a validated frozen screen. Here the person made the
+      // gesture over this command, and the pinned frame on screen is the
+      // product's promise about which screen the question carries.
+      const automaticOwner = owner
 
       const view = createCapturedFrameView(frame)
       this._freezeFrameParentPosition = frameHost.style.position
@@ -5068,6 +5186,32 @@ export class TerminalContent extends BasePaneContent {
       const marker = createFreezeMarker()
       markerHost.appendChild(marker)
       this._freezeMarker = marker
+      // A GESTURE A PERSON CAN SEE. Escape ended the summon and nothing on
+      // screen said so — a surface whose only exit is a key a person has to
+      // already know is a surface they can be stuck in (nocx-hp8p2.8). One
+      // owner for the exit: this is the same call the key makes, not a
+      // second dismissal path.
+      const dismissHost = document.createElement('span')
+      dismissHost.className = 'nocx-freeze-dismiss'
+      this._freezeDismissDispose = render(
+        () =>
+          IconButton({
+            size: 'xs',
+            ariaLabel: 'Close the assistant and return to the program',
+            title: 'Close the assistant (Esc)',
+            onClick: () => {
+              this.stopCurrentSummonedAnswerAndDismiss()
+            },
+            children: CloseIcon({}),
+          }),
+        dismissHost,
+      )
+      markerHost.appendChild(dismissHost)
+      this._freezeDismiss = dismissHost
+      // The first paint too, not only later changes: the observer fires on
+      // the next frame, and until then the screen would be full height under
+      // an assistant that is already on top of it.
+      this._syncFrozenScreenBox()
       this._automaticFrameOwner = automaticOwner
       this._summonedCommand = owner
       this.grantController?.setAutomaticBlock(this.automaticFrozenGrant())
@@ -5117,11 +5261,118 @@ export class TerminalContent extends BasePaneContent {
     stack.className = 'nocx-summon-stack'
     const answers = document.createElement('div')
     answers.className = 'nocx-summon-answers'
+    stack.appendChild(this._buildSummonSeam(pane, answers))
     stack.appendChild(answers)
     pane.appendChild(stack)
     this._summonStack = stack
     this._summonAnswerList = answers
+    // Every source of a height change reaches the frozen screen through one
+    // observer rather than through each caller remembering: the seam's drag,
+    // the composer growing with a long question, an answer arriving, a pane
+    // resize.
+    if (typeof ResizeObserver === 'function') {
+      this._summonStackObserver = new ResizeObserver(() => this._syncFrozenScreenBox())
+      this._summonStackObserver.observe(stack)
+    }
+    if (this._summonAnswersHeight !== null) {
+      this._applySummonAnswersHeight(answers, this._summonAnswersHeight)
+    }
     return { stack, answers }
+  }
+
+  /** The edge between the frozen screen and the assistant, as the kit's own
+   *  separator (ui/resize-handle) rather than a hand-rolled hit area — a
+   *  surface PLACES a kit component and never rebuilds one (ui/README).
+   *
+   *  Horizontal, measuring the pane AFTER it: the screen is above, the
+   *  assistant below, so ArrowUp gives the assistant room and ArrowDown
+   *  gives it back to the program.
+   *
+   *  THE CEILING IS THE FEATURE, not a nicety. This whole surface is "ask
+   *  ABOUT a full-screen program WITHOUT leaving it", so a drag may never
+   *  push the program off the pane — `summonAnswersCeiling` keeps a band of
+   *  screen visible whatever the person does, which is the same promise the
+   *  stylesheet's `max-height` made before the edge became draggable. */
+  private _buildSummonSeam(pane: HTMLElement, answers: HTMLElement): HTMLElement {
+    const seam = document.createElement('div')
+    seam.className = 'nocx-summon-seam'
+    const [height, setHeight] = createSignal(this._summonAnswersHeight ?? this.summonAnswersRest())
+    this._setSummonAnswersHeight = setHeight
+    const apply = (next: number): void => {
+      this._summonAnswersHeight = next
+      setHeight(next)
+      this._applySummonAnswersHeight(answers, next)
+    }
+    this._summonSeamDispose = render(
+      () =>
+        ResizeHandle({
+          orientation: 'horizontal',
+          pane: 'after',
+          ariaLabel: 'Resize the assistant against the frozen screen',
+          get value() {
+            return height()
+          },
+          get min() {
+            return MIN_SUMMON_ANSWERS_PX
+          },
+          get max() {
+            return summonAnswersCeiling(pane)
+          },
+          onChange: apply,
+          onCommit: apply,
+        }),
+      seam,
+    )
+    return seam
+  }
+
+  /** The height the seam starts from: what the person last dragged to, or
+   *  the box the stylesheet is already painting. Measured rather than
+   *  restated, so the default has one owner (style.css). */
+  private summonAnswersRest(): number {
+    const measured = this._summonAnswerList?.getBoundingClientRect().height ?? 0
+    return measured > 0 ? measured : DEFAULT_SUMMON_ANSWERS_PX
+  }
+
+  /** Both bounds move together: the stylesheet caps the box and the drag
+   *  must be able to exceed that cap, so the dragged height owns both. */
+  private _applySummonAnswersHeight(answers: HTMLElement, px: number): void {
+    answers.style.height = `${px}px`
+    answers.style.maxHeight = `${px}px`
+    this._syncFrozenScreenBox()
+  }
+
+  /** THE SCREEN IS SHORTENED, NOT COVERED (nocx-hp8p2.6).
+   *
+   *  The summon stack is an overlay by design — the live grid must keep its
+   *  size, because resizing it would send the program a SIGWINCH and repaint
+   *  the very screen the question is about (this is "ask ABOUT a full-screen
+   *  program WITHOUT leaving it"; ask-about-full-screen-program.spec.ts
+   *  watches for exactly that resize). So the pane cannot give the assistant
+   *  rows by taking them from the terminal.
+   *
+   *  What CAN move is the frozen photograph, which is DOM of our own: its box
+   *  ends where the assistant begins. The frame already clips itself
+   *  (`overflow: hidden`), so a shorter box shows fewer rows and the screen
+   *  visibly gives ground as the seam is dragged — with no resize, and with
+   *  the live grid underneath untouched. */
+  private _syncFrozenScreenBox(): void {
+    const view = this._freezeFrameView
+    const host = view?.parentElement
+    if (!view || !host) return
+    const stack = this._summonStack
+    if (stack === null) {
+      view.style.bottom = ''
+      return
+    }
+    // MEASURED AS AN OVERLAP, not as the stack's own height. The frame is
+    // positioned inside the live container, and the stack is positioned
+    // against the PANE — in the structured running layout those two boxes do
+    // not share a bottom edge, so the stack's height is not how far it
+    // reaches into this one. What the frame must give up is exactly the part
+    // of itself the stack stands on.
+    const overlap = host.getBoundingClientRect().bottom - stack.getBoundingClientRect().top
+    view.style.bottom = `${Math.max(0, overlap)}px`
   }
 
   /** Reparent, never recreate, the editor into the stack's final flex seat. */
@@ -5154,6 +5405,11 @@ export class TerminalContent extends BasePaneContent {
   private _removeSummonStackIfEmpty(): void {
     if (this._summonAnswerList?.childElementCount !== 0) return
     if (this.editor?.root.parentNode === this._summonStack) return
+    this._summonSeamDispose?.()
+    this._summonSeamDispose = null
+    this._setSummonAnswersHeight = null
+    this._summonStackObserver?.disconnect()
+    this._summonStackObserver = null
     this._summonStack?.remove()
     this._summonStack = null
     this._summonAnswerList = null
@@ -5180,6 +5436,17 @@ export class TerminalContent extends BasePaneContent {
    * The action is the exact object the answer menu received. Its isActive
    * guard owns run acceptance, terminal state and repeat-stop idempotence;
    * dismissing through the existing unwind makes repeated Escape a no-op. */
+  /** Stop the answer being written outside a summon, if there is one. The
+   *  action is the exact object its ⋮ menu received, so its own isActive
+   *  guard owns run acceptance and repeat-stop idempotence — the same
+   *  contract the summoned path relies on. */
+  private stopLiveAnswer(): boolean {
+    const live = this._liveAnswer
+    if (live === null || !live.running.isActive(live.el)) return false
+    live.running.stop()
+    return true
+  }
+
   private stopCurrentSummonedAnswerAndDismiss(): boolean {
     if (!this._summoned) return false
     const answer = this._newestActiveSummonedAnswer()
@@ -5359,6 +5626,10 @@ export class TerminalContent extends BasePaneContent {
     this._automaticFrameOwner = null
     this._freezeMarker?.remove()
     this._freezeMarker = null
+    this._freezeDismissDispose?.()
+    this._freezeDismissDispose = null
+    this._freezeDismiss?.remove()
+    this._freezeDismiss = null
   }
 
   /** The person's ONE explicit target switch: the caret indicator's click
@@ -5779,8 +6050,18 @@ export class TerminalContent extends BasePaneContent {
     return true
   }
 
+  /** WHAT MAKES TWO MARKS THE SAME MARK (nocx-hp8p2.16).
+   *
+   *  The item id alone does not: every row of one block shares it, so a
+   *  second selection in the same output REPLACED the first and a person
+   *  could only ever have one line marked. A mark is the item AND the span,
+   *  and a whole-block mark is the span-less one. */
+  private sameGrant(a: GrantBlock, b: GrantBlock): boolean {
+    return a.itemId === b.itemId && a.start === b.start && a.count === b.count
+  }
+
   private ensureGrant(grant: GrantBlock): void {
-    const index = this.grantedBlocks.findIndex((item) => item.itemId === grant.itemId)
+    const index = this.grantedBlocks.findIndex((item) => this.sameGrant(item, grant))
     this.grantedBlocks =
       index < 0
         ? [...this.grantedBlocks, grant]
@@ -5793,12 +6074,16 @@ export class TerminalContent extends BasePaneContent {
   private toggleGrant(blockEl: HTMLElement): void {
     const grant = grantBlockFromElement(blockEl)
     if (!grant) return
-    const index = this.grantedBlocks.findIndex((item) => item.itemId === grant.itemId)
-    const adding = index < 0
+    // THE MENU IS A TOGGLE FOR THE BLOCK AS A WHOLE. Its label says Mark or
+    // Unmark about this block, so with anything of it marked — the block
+    // itself, or rows of it (nocx-hp8p2.16) — the action is to clear them
+    // all, and with nothing marked it marks the block.
+    const marked = this.grantedBlocks.some((item) => item.itemId === grant.itemId)
+    const adding = !marked
     const isRunningBlock = this.scrollback?.blockManager.runningBlock?.el === blockEl
     this.grantedBlocks = adding
       ? [...this.grantedBlocks, grant]
-      : this.grantedBlocks.filter((_, candidateIndex) => candidateIndex !== index)
+      : this.grantedBlocks.filter((item) => item.itemId !== grant.itemId)
     this.grantController?.setBlocks(this.grantedBlocks)
     // The menu's Ask action is the mouse door to the same summon path as
     // Ctrl+Enter. Unmarking remains a pure toggle and never summons.
@@ -5807,10 +6092,12 @@ export class TerminalContent extends BasePaneContent {
   private refreshGrant(blockEl: HTMLElement): void {
     const refreshed = grantBlockFromElement(blockEl)
     if (!refreshed) return
-    const index = this.grantedBlocks.findIndex((grant) => grant.itemId === refreshed.itemId)
-    if (index < 0) return
-    this.grantedBlocks = this.grantedBlocks.map((grant, candidateIndex) => {
-      if (candidateIndex !== index) return grant
+    // EVERY mark on this block, not the first one found: one block can now
+    // carry several row marks (nocx-hp8p2.16), and refreshing only one left
+    // the rest pointing at the element the freeze replaced.
+    if (!this.grantedBlocks.some((grant) => grant.itemId === refreshed.itemId)) return
+    this.grantedBlocks = this.grantedBlocks.map((grant) => {
+      if (grant.itemId !== refreshed.itemId) return grant
       return grant.start !== undefined && grant.count !== undefined
         ? { ...refreshed, start: grant.start, count: grant.count }
         : refreshed
@@ -5883,6 +6170,9 @@ export class TerminalContent extends BasePaneContent {
     this.markAffordance?.dispose()
     this.markAffordance = null
     document.removeEventListener('selectionchange', this.onSelectionChange)
+    document.removeEventListener('pointerdown', this.onSelectionPointerDown, true)
+    document.removeEventListener('pointerup', this.onSelectionPointerUp, true)
+    document.removeEventListener('pointercancel', this.onSelectionPointerUp, true)
     this.indicator = null
     this.promptVault?.destroy()
     this.promptVault = null

@@ -64,6 +64,19 @@ type RunContext struct {
 	// immutable ids carried by this run so session.read can route them to the
 	// renderer even when the shell-originated attempt has no ledger row.
 	AutomaticSessionItems []string
+	// MarkedSessionWindows are the row spans a PERSON marked and sent with
+	// the question. They bound a read of those items: the run knows what was
+	// asked about, so a call that names the item without naming the window
+	// is answered inside the mark rather than past it (nocx-hp8p2.15).
+	MarkedSessionWindows []MarkedSessionWindow
+}
+
+// MarkedSessionWindow is one person-marked row span: which item, and which
+// rows of it the question is about.
+type MarkedSessionWindow struct {
+	ItemID string
+	Start  int
+	Count  int
 }
 
 // ResolveResources derives every resource touched by one validated call.

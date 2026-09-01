@@ -363,3 +363,145 @@ func isPromptHeading(line string) bool {
 	}
 	return !strings.HasSuffix(l, ".") && !strings.HasSuffix(l, ":") && !strings.Contains(l, ": ")
 }
+
+// TestSystemPrompt_DoesNotForbidReadingWhatItAttached is the prompt read as
+// one document rather than as sections (nocx-hp8p2.4).
+//
+// The owner asked "Привет! Что это?" over a running `top` whose screen the
+// product had attached, and the model answered "I don't have enough context"
+// without ever calling session.read. Its reasoning named the attachment, so
+// it had read the section — and then obeyed the later line: "When the intent
+// is not plain, ask one question and stop. Do not guess, and do not call a
+// tool to check first." An unclear question is exactly when that line fires,
+// and the attachment is exactly what it forbade reading.
+//
+// The rule is about going OUTSIDE for something nobody offered. What was
+// attached to this very question is not a check; it is the reason the
+// question was asked here at all. So when there is attached content, the
+// prompt must say so rather than leave the model to resolve a contradiction.
+func TestSystemPrompt_DoesNotForbidReadingWhatItAttached(t *testing.T) {
+	attached := SystemPrompt(SystemPromptFacts{
+		Cwd: "/repo",
+		Env: content.Environment{Kind: content.EnvLocal},
+		OS:  "linux",
+		AttachedContent: []AttachedContentItem{{
+			ItemID:    "attempt-top",
+			Command:   "top",
+			State:     "running",
+			Automatic: true,
+		}},
+	})
+	if strings.Contains(attached, "do not call a tool to check first.") {
+		t.Errorf("the prompt attaches a screen and then forbids reading it:\n%s", attached)
+	}
+	if !strings.Contains(attached, "what is attached above is already yours") {
+		t.Errorf("the prompt does not exempt its own attachment from the rule:\n%s", attached)
+	}
+
+	// With nothing attached the rule keeps its whole force: there is nothing
+	// to exempt, and "go and look before answering" would be the guessing
+	// this rule exists to prevent.
+	bare := SystemPrompt(SystemPromptFacts{
+		Cwd: "/repo",
+		Env: content.Environment{Kind: content.EnvLocal},
+		OS:  "linux",
+	})
+	if !strings.Contains(bare, "do not call a tool to check first.") {
+		t.Errorf("the rule lost its force where nothing was attached:\n%s", bare)
+	}
+}
+
+// TestSystemPrompt_AutomaticFrameIsWhatTheQuestionIsAbout states the one fact
+// the automatic attachment exists to carry (nocx-hp8p2.10).
+//
+// The screen is not merely available — it is FROZEN ON THE PERSON'S SCREEN
+// while they type, which is why they wrote "what is this?" and "what is the
+// second line?" rather than naming anything. A prompt that offers the frame
+// as one readable item among several leaves the model to guess that the
+// question is about it; the guess it made instead was that it had no context.
+func TestSystemPrompt_AutomaticFrameIsWhatTheQuestionIsAbout(t *testing.T) {
+	got := SystemPrompt(SystemPromptFacts{
+		Cwd: "/repo",
+		Env: content.Environment{Kind: content.EnvLocal},
+		OS:  "linux",
+		AttachedContent: []AttachedContentItem{{
+			ItemID:    "attempt-top",
+			Command:   "top",
+			State:     "running",
+			Automatic: true,
+		}},
+	})
+	for _, want := range []string{
+		// The person is looking at it as they ask.
+		"looking at it",
+		// So the question is about it, and a bare deictic points there.
+		"the question is about that screen",
+		// Which means reading it is the first move, not an option.
+		"Read it before you answer",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt lacks %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestSystemPrompt_PersonMarksAreWhatTheQuestionIsAbout is nocx-hp8p2.10's
+// rule for the OTHER kind of attachment (nocx-hp8p2.15).
+//
+// A person who marked one line of `df -h` and asked "what does this mean?"
+// was answered with a description of `df -h` — the model read from the marked
+// line to the end of the block and explained the command. Two things were
+// missing from the prompt: that a mark is the SUBJECT of the question, and
+// that a row mark is only that row, so BOTH bounds have to be passed.
+func TestSystemPrompt_PersonMarksAreWhatTheQuestionIsAbout(t *testing.T) {
+	start, count := 6, 1
+	got := SystemPrompt(SystemPromptFacts{
+		Cwd: "/repo",
+		Env: content.Environment{Kind: content.EnvLocal},
+		OS:  "linux",
+		AttachedContent: []AttachedContentItem{{
+			ItemID:  "att-581fff725edf7adf",
+			Command: "df -h",
+			State:   "exited",
+			Start:   &start,
+			Count:   &count,
+		}},
+	})
+	for _, want := range []string{
+		"marked them because the question is about them",
+		"Read them before you answer",
+		// Both bounds, or the read runs past the mark and answers about the
+		// whole block instead.
+		"pass BOTH its start and its count",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt lacks %q:\n%s", want, got)
+		}
+	}
+}
+
+// TestSystemPrompt_AMarkMayBeWidenedForContext keeps the mark from becoming a
+// cage (nocx-hp8p2.15). The default is the mark; a line of a long log often
+// means nothing without the lines around it, and the reader honours any window
+// the model asks for. Saying "exactly as listed" and stopping there told it
+// the opposite.
+func TestSystemPrompt_AMarkMayBeWidenedForContext(t *testing.T) {
+	start, count := 6, 1
+	got := SystemPrompt(SystemPromptFacts{
+		Cwd: "/repo",
+		Env: content.Environment{Kind: content.EnvLocal},
+		OS:  "linux",
+		AttachedContent: []AttachedContentItem{{
+			ItemID: "att-1", Command: "df -h", State: "exited", Start: &start, Count: &count,
+		}},
+	})
+	for _, want := range []string{
+		"read a wider window around it",
+		// And the answer is still about the mark, not about the context.
+		"answer about the marked rows",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("prompt lacks %q:\n%s", want, got)
+		}
+	}
+}

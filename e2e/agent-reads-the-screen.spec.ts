@@ -401,10 +401,16 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
     // freezes its current frame for the overlay and automatically attaches
     // the owning block id; no person mark or copied rows are involved.
     await page.keyboard.press('ControlOrMeta+Enter')
-    await expect(page.locator('.nocx-editor-grant')).toContainText(
-      'frozen screen attached automatically',
+    // The chip is a count in a narrow row, so the sentence lives in its
+    // accessible name and the visible label carries the short form
+    // (nocx-hp8p2.5). Both are asserted: the name is what a screen reader
+    // says, the label is what the row shows.
+    await expect(page.locator('.nocx-editor-grant')).toHaveAttribute(
+      'aria-label',
+      /frozen screen attached automatically/,
       { timeout: 10_000 },
     )
+    await expect(page.locator('.nocx-editor-grant')).toContainText('+ screen')
 
     // ── The question ─────────────────────────────────────────────────────
     // Two model responses, because a real tool-calling run is two: the
@@ -486,8 +492,9 @@ test.describe('the assistant reads the screen of the pane it was asked in (nocx-
         .locator('.pane.active .cmd-block.cmd-block-running')
         .filter({ hasText: 'put-marker-on-screen.sh' }),
     ).toHaveCount(0, { timeout: 20_000 })
-    await expect(page.locator('.nocx-editor-grant')).not.toContainText(
-      'frozen screen attached automatically',
+    await expect(page.locator('.nocx-editor-grant')).not.toHaveAttribute(
+      'aria-label',
+      /frozen screen attached automatically/,
     )
 
     // 4. And the model was told the marker by the TOOL and by nothing else.

@@ -366,7 +366,7 @@ type effectKernel struct {
 // logger may be nil for the same callers — the only thing it reports is a
 // relation that could not be written, which is a degrade the reader already
 // handles.
-func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID, sessionID string, attempt int, turnEntryID string, requester RendererRequester, automaticItems []string, classifier CallClassifier, onCall func(ToolCall) error, seams ...toolSeams) (*effectKernel, error) {
+func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools.Registry, ledger AttemptLedger, approvals *ApprovalStore, known KnownMaterial, runID, sessionID string, attempt int, turnEntryID string, requester RendererRequester, attached Attachments, classifier CallClassifier, onCall func(ToolCall) error, seams ...toolSeams) (*effectKernel, error) {
 	if known == nil {
 		return nil, errors.New("agent run: no egress vault comparison wired — a run that may execute tools must screen its results against known vault material (design §7.1)")
 	}
@@ -389,7 +389,8 @@ func newEffectKernel(logger log.Logger, grant content.Grant, registry agenttools
 		runCtx: agenttools.RunContext{
 			RunID:                 runID,
 			Session:               sessionID,
-			AutomaticSessionItems: append([]string(nil), automaticItems...),
+			AutomaticSessionItems: append([]string(nil), attached.AutomaticItems...),
+			MarkedSessionWindows:  markedWindows(attached.MarkedWindows),
 		},
 		validators: make(map[string]*jsonschema.Schema, len(registry.All())),
 		results:    make(map[string]*jsonschema.Schema, len(registry.All())),
@@ -1814,4 +1815,20 @@ func (k *effectKernel) classifyProposal(ctx context.Context, decl agenttools.Too
 		Verdict:   ClassifierClear,
 		Model:     classification.Model,
 	}, nil
+}
+
+// markedWindows converts the ask's marks into the tool layer's vocabulary.
+// A copy, so a later mutation of the caller's slice cannot change what this
+// run may read.
+func markedWindows(in []MarkedSessionWindow) []agenttools.MarkedSessionWindow {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make([]agenttools.MarkedSessionWindow, 0, len(in))
+	for _, mark := range in {
+		out = append(out, agenttools.MarkedSessionWindow{
+			ItemID: mark.ItemID, Start: mark.Start, Count: mark.Count,
+		})
+	}
+	return out
 }

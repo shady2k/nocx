@@ -306,6 +306,26 @@ type AskParams struct {
 	// are scoped to this run and let session.read resolve those ids through the
 	// renderer even when no durable ledger row exists.
 	AutomaticSessionItems []string
+	// MarkedSessionWindows are the row spans the person marked and sent with
+	// this question. They bound a session.read of those items (nocx-hp8p2.15).
+	MarkedSessionWindows []MarkedSessionWindow
+}
+
+// MarkedSessionWindow is one person-marked row span: which item, and which
+// rows of it the question is about.
+type MarkedSessionWindow struct {
+	ItemID string
+	Start  int
+	Count  int
+}
+
+// Attachments is what came WITH the question, as the run carries it: the
+// renderer-owned frozen-screen ids, and the row spans the person marked.
+// One parameter rather than two because they travel together everywhere and
+// answer one question — what is this ask about (nocx-hp8p2.15).
+type Attachments struct {
+	AutomaticItems []string
+	MarkedWindows  []MarkedSessionWindow
 }
 
 // StreamError is a model-stream failure the transport terminalizes the run

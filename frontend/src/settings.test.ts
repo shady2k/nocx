@@ -1808,7 +1808,11 @@ describe("the person's own instructions to the assistant", () => {
       'A link on its own means go there and tell the person what is on it.',
       'Text on its own means remember this as a note.',
       'When the intent is not plain, ask one question and stop.',
-      'Do not guess, and do not call a tool to check first.',
+      // The settings artifact shows the prompt WITH attachments, and there
+      // the rule carries its exemption: what came with the question is not
+      // an outside check (nocx-hp8p2.4).
+      'Do not guess, and do not go outside this pane to check first',
+      'what is attached above is already yours',
     ]) {
       expect(systemPromptText).toContain(intakeRule)
       expect(prompt!.textContent).toContain(intakeRule)

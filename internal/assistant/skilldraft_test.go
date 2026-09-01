@@ -90,7 +90,7 @@ func TestSkillCreateProposalUsesTheSummarizingDraft(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	k, err := newEffectKernel(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), &fakeKnownMaterial{}, "run-draft", "session-draft", 1, "", nil, nil, nil, nil, toolSeams{
+	k, err := newEffectKernel(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), &fakeKnownMaterial{}, "run-draft", "session-draft", 1, "", nil, Attachments{}, nil, nil, toolSeams{
 		skillDraft:     request,
 		skillDraftHTTP: http.DefaultClient,
 	})
@@ -153,7 +153,7 @@ func TestSkillCreateDraftFailuresReturnSafeToolResultsWithoutApproval(t *testing
 				t.Fatalf("Assemble: %v", err)
 			}
 			ledger := &fakeLedger{}
-			k, err := newEffectKernel(nil, grant, reg, ledger, NewApprovalStore(), &fakeKnownMaterial{}, "run-draft-failure", "session-draft", 1, "", nil, nil, nil, nil, toolSeams{
+			k, err := newEffectKernel(nil, grant, reg, ledger, NewApprovalStore(), &fakeKnownMaterial{}, "run-draft-failure", "session-draft", 1, "", nil, Attachments{}, nil, nil, toolSeams{
 				skillDraft:     request,
 				skillDraftHTTP: http.DefaultClient,
 			})

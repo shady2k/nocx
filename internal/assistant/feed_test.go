@@ -3,6 +3,7 @@ package assistant
 import (
 	"context"
 	"encoding/json"
+	"reflect"
 	"strconv"
 	"strings"
 	"testing"
@@ -11,14 +12,14 @@ import (
 	"github.com/shady2k/nocx/internal/apifetch"
 )
 
-func executeFetchedText(t *testing.T, contentType, text string) map[string]any {
+func executeFetchedDocument(t *testing.T, doc apifetch.TextDocument) map[string]any {
 	t.Helper()
 	out, err := executeFetchURL(
 		withToolBound(context.Background(), agenttools.ResultBound{MaxBytes: 64 << 10, Truncation: agenttools.TruncationDropTail}),
 		&agenttools.URLScope{URLs: []string{"https://example.test/feed"}},
 		json.RawMessage(`{"url":"https://example.test/feed"}`),
 		toolSeams{
-			fetcher:   fakeTextFetcher{result: apifetch.TextDocument{URL: "https://example.test/feed", ContentType: contentType, Text: text}},
+			fetcher:   fakeTextFetcher{result: doc},
 			snapshots: newRunSnapshots(),
 			runID:     "run-feed-test",
 		},
@@ -27,6 +28,11 @@ func executeFetchedText(t *testing.T, contentType, text string) map[string]any {
 		t.Fatalf("executeFetchURL: %v", err)
 	}
 	return fetchWindowResult(t, out)
+}
+
+func executeFetchedText(t *testing.T, contentType, text string) map[string]any {
+	t.Helper()
+	return executeFetchedDocument(t, apifetch.TextDocument{URL: "https://example.test/feed", ContentType: contentType, Text: text})
 }
 
 func fetchedText(t *testing.T, result map[string]any) string {
@@ -102,10 +108,80 @@ func TestExecuteFetchURLLeavesNonFeedXMLAndMalformedFeedsRaw(t *testing.T) {
 	}
 }
 
-func TestExecuteFetchURLDoesNotTreatHTMLFeedMarkerAsFeed(t *testing.T) {
+func TestExecuteFetchURLExtractsHTMLWithoutTreatingFeedMarkerAsFeed(t *testing.T) {
 	const body = `<html><body>The article says <rss is not a tag here.</body></html>`
 	result := executeFetchedText(t, "text/html", body)
+	if got := fetchedText(t, result); got != "The article says" {
+		t.Fatalf("text = %q, want extracted HTML prose", got)
+	}
+}
+
+func TestExecuteFetchURLPrettyPrintsJSONWithoutChangingItsValue(t *testing.T) {
+	const body = ` {"name":"nocx","items":[1,true,{"nested":"value"}]} `
+	result := executeFetchedText(t, "application/json", body)
+	text := fetchedText(t, result)
+	if !strings.Contains(text, "\"name\": \"nocx\"") || !strings.Contains(text, "      \"nested\": \"value\"") {
+		t.Fatalf("formatted JSON = %q, want indentation", text)
+	}
+	var got, want any
+	if err := json.Unmarshal([]byte(text), &got); err != nil {
+		t.Fatalf("formatted JSON is invalid: %v", err)
+	}
+	if err := json.Unmarshal([]byte(body), &want); err != nil {
+		t.Fatalf("test JSON is invalid: %v", err)
+	}
+	if !reflect.DeepEqual(got, want) {
+		t.Fatalf("formatted value = %#v, want %#v", got, want)
+	}
+	if result["lossy"] != false {
+		t.Fatalf("lossy = %v, want false for JSON formatting", result["lossy"])
+	}
+}
+
+func TestExecuteFetchURLPrettyPrintsBodySniffedJSON(t *testing.T) {
+	result := executeFetchedText(t, "text/plain", "\n\t[{\"ok\":true}]")
+	text := fetchedText(t, result)
+	if !strings.Contains(text, "\n  {\n    \"ok\": true\n  }\n]") {
+		t.Fatalf("formatted sniffed JSON = %q, want indentation", text)
+	}
+}
+
+func TestExecuteFetchURLLeavesMalformedClaimedJSONUnchanged(t *testing.T) {
+	const body = `<html><body>not JSON</body></html>`
+	result := executeFetchedText(t, "application/json", body)
 	if got := fetchedText(t, result); got != body {
-		t.Fatalf("text = %q, want raw HTML body %q", got, body)
+		t.Fatalf("text = %q, want unchanged claimed JSON body %q", got, body)
+	}
+}
+
+func TestExecuteFetchURLExtractsHTMLAndMarksItLossy(t *testing.T) {
+	const body = `<!doctype html><!-- drop this --><html><head><style>.secret { color: red }</style><script>window.secretScript = "do not show";</script></head><body><p>First paragraph.</p><div>Second <strong>paragraph.</strong></div><noscript>disabled content</noscript></body></html>`
+	result := executeFetchedText(t, "text/html", body)
+	text := fetchedText(t, result)
+	if !strings.Contains(text, "First paragraph.\n") || !strings.Contains(text, "Second paragraph.") {
+		t.Fatalf("extracted HTML = %q, want block boundaries", text)
+	}
+	for _, unwanted := range []string{"window.secretScript", ".secret", "disabled content", "<!-- drop this -->"} {
+		if strings.Contains(text, unwanted) {
+			t.Fatalf("extracted HTML = %q, contains %q", text, unwanted)
+		}
+	}
+	if result["lossy"] != true {
+		t.Fatalf("lossy = %v, want true for HTML extraction", result["lossy"])
+	}
+}
+
+func TestExecuteFetchURLExtractsHTMLFragment(t *testing.T) {
+	result := executeFetchedText(t, "text/html", `<p>Fragment one</p><div>Fragment two</div>`)
+	if got := fetchedText(t, result); got != "Fragment one\nFragment two" {
+		t.Fatalf("fragment text = %q, want block-separated prose", got)
+	}
+}
+
+func TestExecuteFetchURLLeavesPlainTextUnchanged(t *testing.T) {
+	const body = "plain response with no special shape"
+	result := executeFetchedText(t, "text/plain", body)
+	if got := fetchedText(t, result); got != body {
+		t.Fatalf("text = %q, want unchanged plain text %q", got, body)
 	}
 }

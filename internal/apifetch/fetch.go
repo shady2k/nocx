@@ -10,9 +10,11 @@
 // The assistant's text fetch extends this package instead of creating a sibling:
 // both operations need the same guarded transport, route table and exchange
 // bounds, while their response interpretation is explicit (JSON import versus
-// UTF-8 text). A sibling would make it possible for the assistant to acquire a
-// second HTTP client and silently diverge from the address and credential
-// boundary owned by httppolicy.
+// UTF-8 text). Presentation-specific shaping belongs to the assistant, which
+// decides whether to return source markup, pretty-print JSON, or extract HTML.
+// A sibling would make it possible for the assistant to acquire a second HTTP
+// client and silently diverge from the address and credential boundary owned by
+// httppolicy.
 //
 // WHAT IT REUSES, AND WHY IT IS NOT A SECOND SENDER. The route table is
 // apisend's own (apisend.Routes): `direct` dials from this machine and
@@ -97,6 +99,10 @@ type TextRequest struct {
 }
 
 // TextDocument is the complete decoded document acquired by the fetch seam.
+// Text is decoded source text, not a presentation guarantee, and may contain
+// markup. Callers may transform it for their presentation. Lossy reports either
+// replacement characters from charset decoding or such a lossy presentation
+// transformation.
 // URL is metadata from the HTTP request; callers that authorize a URL keep
 // their original request identity rather than replacing it with a redirect
 // target.

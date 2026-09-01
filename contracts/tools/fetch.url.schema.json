@@ -26,7 +26,7 @@
   "$defs": {
     "result": {
       "title": "FetchURLResult",
-      "description": "One bounded byte window from the complete decoded UTF-8 response captured under revision. The result keeps the original authorized URL identity, and a continuation repeats that URL and revision with start set to window.end; an expired revision is refused rather than re-fetched.",
+      "description": "One bounded byte window from the complete decoded UTF-8 response captured under revision. JSON responses are indented and HTML responses are reduced to readable text before this window is made. The result keeps the original authorized URL identity, and a continuation repeats that URL and revision with start set to window.end; an expired revision is refused rather than re-fetched.",
       "type": "object",
       "additionalProperties": false,
       "required": [
@@ -94,7 +94,7 @@
         },
         "lossy": {
           "type": "boolean",
-          "description": "Whether charset decoding substituted replacement characters."
+          "description": "Whether charset decoding substituted replacement characters or HTML presentation extraction changed the response."
         }
       }
     }

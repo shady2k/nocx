@@ -62,6 +62,7 @@ import (
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/shellintegration"
 	"github.com/shady2k/nocx/internal/skill"
+	"github.com/shady2k/nocx/internal/skill/builtin"
 	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
@@ -552,6 +553,7 @@ func New(opts ...Option) (*App, error) {
 
 	skillRoots := []skill.Root{
 		{Dir: filepath.Join(paths.ConfigDir(), "skills"), Provenance: skill.ProvenanceAuthored},
+		{FS: builtin.FS, Provenance: skill.ProvenanceBuiltin},
 		{Dir: filepath.Join(paths.ConfigDir(), "managed-skills"), Provenance: skill.ProvenanceManaged},
 	}
 	skills := skill.NewLibrary(skillRoots)

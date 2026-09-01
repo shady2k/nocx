@@ -322,8 +322,10 @@ export class FakeOpenAI {
         // non-stream response shape below.
       }
       // The assistant makes two model-call shapes: the ordinary ask streams,
-      // while skill drafting uses Generate and sends stream:false. The fake
-      // must answer both honestly or the drafting path cannot be tested.
+      // while skill drafting uses Generate and omits the `stream` field rather
+      // than sending `stream: false`. An absent field is non-streaming here;
+      // only `payload.stream === true` selects the SSE path. The fake must
+      // answer both honestly or the drafting path cannot be tested.
       if (streamRequest) {
         this.stream(record, res, script)
       } else {

@@ -217,7 +217,7 @@ test.describe('a skill written in pane A is followed in pane B (nocx-hzd6t)', ()
     const requestsA = await fake.waitForRequests(requestBaseA + 3)
     expect(requestsA[requestBaseA].body).toContain('skills.create')
     expect(JSON.parse(requestsA[requestBaseA].body)).toMatchObject({ stream: true })
-    expect(JSON.parse(requestsA[requestBaseA + 1].body)).toMatchObject({ stream: false })
+    expect(JSON.parse(requestsA[requestBaseA + 1].body).stream).not.toBe(true)
     expect(JSON.parse(requestsA[requestBaseA + 2].body)).toMatchObject({ stream: true })
     await expect(answerBlock(page, QUESTION_A).locator('[data-answer-body]')).toContainText(
       `Saved ${SKILL_NAME}`,
@@ -254,8 +254,23 @@ test.describe('a skill written in pane A is followed in pane B (nocx-hzd6t)', ()
     expect(proposal.body).toContain(SKILL_NAME)
     expect(proposal.body).toContain(SKILL_DESCRIPTION)
     expect(proposal.body).toContain('skills.read')
-    expect(followUp.body).toContain('"role":"tool"')
-    expect(followUp.body).toContain(SKILL_BODY)
+    const followUpPayload = JSON.parse(followUp.body) as {
+      messages?: {
+        role?: string
+        content?: unknown
+        tool_calls?: { function?: { name?: string } }[]
+      }[]
+    }
+    const followUpMessages = followUpPayload.messages ?? []
+    expect(
+      followUpMessages.some((message) =>
+        message.tool_calls?.some((call) => call.function?.name === 'skills.read'),
+      ),
+    ).toBe(true)
+    const toolResult = followUpMessages.find(
+      (message) => message.role === 'tool' && typeof message.content === 'string',
+    )?.content as string | undefined
+    expect(toolResult).toContain(SKILL_BODY)
 
     await answerFinished(page, QUESTION_B)
     await expect(answerBlock(page, QUESTION_B).locator('[data-answer-body]')).toContainText(

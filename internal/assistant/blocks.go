@@ -263,6 +263,23 @@ func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, s
 	if source == nil {
 		return "", errors.New("session.read: no session source is wired for this run")
 	}
+	// A MARKED ITEM IS READ INSIDE ITS MARK (nocx-hp8p2.15). The person
+	// selected those rows and asked about them, and the span travelled here
+	// with the ask — so it is what the run knows, not a hint. A call that
+	// names the item and leaves the window out used to fall through to the
+	// default below and read to the end of the block: one marked line of
+	// `df -h` came back as the whole of `df -h`, and the answer was about
+	// the command. Two rounds of prompt wording did not stop it, because
+	// asking the model to be careful is not a bound.
+	//
+	// A window the model DID ask for is honoured — it may legitimately want
+	// context around the mark, and it can only ever reach rows the grant
+	// already allows.
+	if mark, ok := reader.MarkedWindow(p.ID); ok && p.Start == 0 && p.Count <= 0 {
+		p.Start, p.Count = mark.Start, mark.Count
+	} else if mark, ok := reader.MarkedWindow(p.ID); ok && p.Count <= 0 {
+		p.Count = mark.Count
+	}
 	if p.Count <= 0 {
 		p.Count = defaultBlockLines
 	}

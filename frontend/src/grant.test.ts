@@ -158,7 +158,10 @@ describe('GrantController', () => {
     controller.setAutomaticBlock(frozen)
 
     expect(controller.current).toEqual([])
-    expect(controller.chip.textContent).toBe(
+    // Short on the chip, whole in the accessible name: the chip shares a
+    // narrow row and the sentence is stated at full length beside it.
+    expect(controller.chip.textContent).toBe('marked for the question · 0 + screen')
+    expect(controller.chip.getAttribute('aria-label')).toBe(
       'marked for the question · 0 · frozen screen attached automatically',
     )
     expect(frozen.blockEl.dataset.granted).toBeUndefined()
@@ -181,7 +184,10 @@ describe('GrantController', () => {
     controller.setAutomaticBlock(frozen)
 
     expect(controller.current).toEqual([marked])
-    expect(controller.chip.textContent).toContain('· 1 · frozen screen attached automatically')
+    expect(controller.chip.textContent).toContain('· 1 + screen')
+    expect(controller.chip.getAttribute('aria-label')).toContain(
+      '· 1 · frozen screen attached automatically',
+    )
     controller.chip.click()
     const panel = document.querySelector<HTMLElement>('.ui-floating-panel[data-variant="grant"]')
     expect(panel?.textContent).toContain('git status')

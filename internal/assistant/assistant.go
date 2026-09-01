@@ -248,6 +248,10 @@ type AskParams struct {
 	// Skills is the filesystem-backed library for all skill tools. The
 	// transport supplies one owner whose index, reads and writes agree.
 	Skills SkillLibrary
+	// SkillDraft is the run's immutable transcript and summarizing-role seam.
+	// When set, a model-proposed skills.create call uses its cached generated
+	// arguments before validation, policy, approval, or execution.
+	SkillDraft *SkillDraftRequest
 	// Approvals is the process-lifetime approval store (design §7.2): the
 	// human's yes to one exact proposal, bound to run, attempt, tool, call
 	// id and a hash of the canonical arguments. Nil disables escalation's

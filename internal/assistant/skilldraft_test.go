@@ -3,13 +3,18 @@ package assistant
 import (
 	"context"
 	"errors"
+	"net/http"
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/cloudwego/eino/components/model"
 	"github.com/cloudwego/eino/schema"
 
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/credential"
+	"github.com/shady2k/nocx/internal/profile"
 )
 
 func TestDraftInputCarriesNoToolOutputAndNoAttachedBody(t *testing.T) {
@@ -67,5 +72,105 @@ func TestDraftSkillReportsSummarizingFailure(t *testing.T) {
 	_, _, _, err := DraftSkill(context.Background(), draftModel{err: want}, "conversation")
 	if !errors.Is(err, want) {
 		t.Fatalf("DraftSkill error = %v, want the model failure", err)
+	}
+}
+
+func TestSkillCreateProposalUsesTheSummarizingDraft(t *testing.T) {
+	_, srv := newClassifierServer(classifyCompletion(`{"name":"deploy","description":"How we ship","body":"Run make release."}`))
+	defer srv.Close()
+	grant := autonomousMatrix().AsGrant([]content.GrantScope{{
+		Kind: content.ResourceContent,
+		ID:   "skill/deploy",
+	}})
+	resolver := SkillDraftResolverFunc(func(context.Context) (SkillDraftTarget, error) {
+		return SkillDraftTarget{Key: credential.NewSecret("sk-draft-test"), BaseURL: srv.URL, Model: "draft-model"}, nil
+	})
+	request := NewSkillDraftRequest("Person: how do we deploy\nAssistant: Run make release.\n", resolver)
+	reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	k, err := newEffectKernel(nil, grant, reg, &fakeLedger{}, NewApprovalStore(), &fakeKnownMaterial{}, "run-draft", "session-draft", 1, "", nil, nil, nil, toolSeams{
+		skillDraft:     request,
+		skillDraftHTTP: http.DefaultClient,
+	})
+	if err != nil {
+		t.Fatalf("newEffectKernel: %v", err)
+	}
+
+	_, err = k.Invoke(context.Background(), "skills.create", "call-draft", `{"name":"wrong","description":"wrong","body":"wrong"}`)
+	var approval *ApprovalRequestedError
+	if !errors.As(err, &approval) {
+		t.Fatalf("Invoke error = %v, want an approval for the generated skill", err)
+	}
+	if approval.Request == nil || approval.Request.Arguments != `{"body":"Run make release.","description":"How we ship","name":"deploy"}` {
+		t.Fatalf("approval = %+v, want the summarizer's exact create arguments", approval.Request)
+	}
+}
+
+func TestSkillCreateDraftFailuresReturnSafeToolResultsWithoutApproval(t *testing.T) {
+	_, callErrServer := newFakeOpenAI(func(w http.ResponseWriter, _ *http.Request) {
+		http.Error(w, "provider response contained secret-like diagnostics", http.StatusBadGateway)
+	})
+	defer callErrServer.Close()
+
+	tests := []struct {
+		name     string
+		resolver SkillDraftResolver
+	}{
+		{
+			name: "unassigned role",
+			resolver: SkillDraftResolverFunc(func(context.Context) (SkillDraftTarget, error) {
+				return SkillDraftTarget{}, profile.ErrRoleUnassigned
+			}),
+		},
+		{
+			name: "endpoint gone",
+			resolver: SkillDraftResolverFunc(func(context.Context) (SkillDraftTarget, error) {
+				return SkillDraftTarget{}, profile.ErrRoleEndpointGone
+			}),
+		},
+		{
+			name: "summarizing call error",
+			resolver: SkillDraftResolverFunc(func(context.Context) (SkillDraftTarget, error) {
+				return SkillDraftTarget{
+					Key:     credential.NewSecret("sk-draft-test"),
+					BaseURL: callErrServer.URL,
+					Model:   "draft-model",
+				}, nil
+			}),
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			grant := autonomousMatrix().AsGrant([]content.GrantScope{{
+				Kind: content.ResourceContent,
+				ID:   "skill/deploy",
+			}})
+			request := NewSkillDraftRequest("Person: remember this\n", test.resolver)
+			reg, err := agenttools.Assemble(os.DirFS(realToolsFS))
+			if err != nil {
+				t.Fatalf("Assemble: %v", err)
+			}
+			ledger := &fakeLedger{}
+			k, err := newEffectKernel(nil, grant, reg, ledger, NewApprovalStore(), &fakeKnownMaterial{}, "run-draft-failure", "session-draft", 1, "", nil, nil, nil, toolSeams{
+				skillDraft:     request,
+				skillDraftHTTP: http.DefaultClient,
+			})
+			if err != nil {
+				t.Fatalf("newEffectKernel: %v", err)
+			}
+
+			out, err := k.Invoke(context.Background(), "skills.create", "call-draft-failure", `{"name":"wrong","description":"wrong","body":"wrong"}`)
+			if err != nil {
+				t.Fatalf("Invoke error = %v, want a safe tool result", err)
+			}
+			if !strings.Contains(out, "could not draft") || strings.Contains(out, "secret-like diagnostics") {
+				t.Fatalf("tool result = %q, want a safe explanation without provider diagnostics", out)
+			}
+			if started := ledger.started(); started != 0 {
+				t.Fatalf("draft failure opened %d execution attempts, want none", started)
+			}
+		})
 	}
 }

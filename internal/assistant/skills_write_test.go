@@ -15,6 +15,7 @@ import (
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/credential"
 	"github.com/shady2k/nocx/internal/skill"
 )
 
@@ -82,7 +83,17 @@ func TestAskSkillsCreateWritesThroughTheSkillLibrarySeam(t *testing.T) {
 		Provenance: skill.ProvenanceManaged,
 	}})
 	var requests atomic.Int64
-	_, server := newFakeOpenAI(func(w http.ResponseWriter, _ *http.Request) {
+	_, server := newFakeOpenAI(func(w http.ResponseWriter, r *http.Request) {
+		var envelope struct {
+			Stream bool `json:"stream"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&envelope)
+		if !envelope.Stream {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(classifyCompletion(`{"name":"deploy","description":"Generated release procedure","body":"Run make release."}`)))
+			return
+		}
 		if requests.Add(1) == 1 {
 			streamToolCalls(w, toolCallSpec{
 				name: "skills.create",
@@ -110,10 +121,23 @@ func TestAskSkillsCreateWritesThroughTheSkillLibrarySeam(t *testing.T) {
 	params.Approvals = approvals
 	params.KnownMaterial = &fakeKnownMaterial{}
 	params.Skills = store
+	params.SkillDraft = NewSkillDraftRequest(
+		"Person: remember how to release\nAssistant: Run make release.\n",
+		SkillDraftResolverFunc(func(context.Context) (SkillDraftTarget, error) {
+			return SkillDraftTarget{
+				Key:     credential.NewSecret("sk-draft-test"),
+				BaseURL: server.URL,
+				Model:   "draft-model",
+			}, nil
+		}),
+	)
 	askErr := client.Ask(context.Background(), params, func(AskEvent) error { return nil })
 	var asked *ApprovalRequestedError
 	if !errors.As(askErr, &asked) || asked.Request == nil {
 		t.Fatalf("Ask error = %v, want the approval-requested suspension", askErr)
+	}
+	if got := asked.Request.Arguments; got != `{"body":"Run make release.","description":"Generated release procedure","name":"deploy"}` {
+		t.Fatalf("approval arguments = %s, want the summarizer's generated fields", got)
 	}
 	if !approvals.Approve(Approval{
 		RunID: asked.Request.RunID, Attempt: asked.Request.Attempt,
@@ -132,8 +156,10 @@ func TestAskSkillsCreateWritesThroughTheSkillLibrarySeam(t *testing.T) {
 	if readErr != nil {
 		t.Fatalf("read %s: %v", path, readErr)
 	}
-	if !strings.Contains(string(got), "name: deploy") || !strings.HasSuffix(string(got), "body") {
-		t.Fatalf("skill file = %q, want frontmatter and body", got)
+	if !strings.Contains(string(got), "name: deploy") ||
+		!strings.Contains(string(got), `description: "Generated release procedure"`) ||
+		!strings.HasSuffix(string(got), "Run make release.") {
+		t.Fatalf("skill file = %q, want the approved draft", got)
 	}
 }
 

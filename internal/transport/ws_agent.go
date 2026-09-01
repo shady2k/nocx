@@ -1009,6 +1009,40 @@ func (h agentHandlers) resolveEndpointMaterial(
 	return secret, headers, nil
 }
 
+// skillDraftResolver adapts the config operation and endpoint credential
+// resolver to the assistant's summarizing seam. An unassigned summarizing
+// role deliberately spends the answering role's resolved endpoint; all other
+// role refusals remain visible rather than silently changing providers.
+func (h agentHandlers) skillDraftResolver() assistant.SkillDraftResolver {
+	return assistant.SkillDraftResolverFunc(func(ctx context.Context) (assistant.SkillDraftTarget, error) {
+		if h.configOp == nil {
+			return assistant.SkillDraftTarget{}, errors.New("skill draft: config operation is not wired")
+		}
+		var target assistant.SkillDraftTarget
+		err := h.configOp.Run(ctx, func(ctx context.Context, svc capability.ConfigService) error {
+			endpoint, model, resolveErr := svc.ResolveRole(profile.RoleSummarizing)
+			if errors.Is(resolveErr, profile.ErrRoleUnassigned) {
+				endpoint, model, resolveErr = svc.ResolveRole(profile.RoleAnswering)
+			}
+			if resolveErr != nil {
+				return resolveErr
+			}
+			key, headers, materialErr := h.resolveEndpointMaterial(ctx, endpoint)
+			if materialErr != nil {
+				return materialErr
+			}
+			target = assistant.SkillDraftTarget{
+				Key:     key,
+				BaseURL: endpoint.BaseURL,
+				Model:   model,
+				Headers: headers,
+			}
+			return nil
+		})
+		return target, err
+	})
+}
+
 // askRunContext is the durable run identity and non-secret input handed to the
 // stream task. Secret material is resolved by that task and never persisted.
 type askRunContext struct {
@@ -1037,6 +1071,10 @@ type askRunContext struct {
 	// the pendingRuns copy; never wire-facing as a struct.
 	prose    content.ProseBlock
 	question string
+	// draft carries the bounded conversation used by a skills.create trigger.
+	// It crosses approval suspension so the same generated proposal is
+	// validated and approved on resume without a second model call.
+	draft    *assistant.SkillDraftRequest
 	endpoint profile.Endpoint
 	model    string
 	// grant is the run's authority (ADR-0020 decision 5), minted by the
@@ -1210,6 +1248,8 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 	// separate from prose inside that message, and is never the tool output.
 	const conversationBudget = 12000
 	priorTurns, priorErr := h.priorTurns(ctx, rc)
+	draftTurns := make([]content.PriorTurn, 0, len(priorTurns)+1)
+	draftTurns = append(draftTurns, priorTurns...)
 	if priorErr != nil {
 		h.log.Warn("the previous conversation could not be read; answering without it",
 			"run", rc.runID, "entry", rc.entryID, "error", priorErr)
@@ -1240,6 +1280,9 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 				total -= len(message.Content)
 			}
 			turnMessages = turnMessages[1:]
+			if len(draftTurns) > 0 {
+				draftTurns = draftTurns[1:]
+			}
 			trimmed = true
 		}
 		if trimmed {
@@ -1252,6 +1295,16 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		}
 	}
 	msgs = append(msgs, assistant.Message{Role: "user", Content: rc.question})
+	draftTurns = append(draftTurns, content.PriorTurn{Question: rc.question})
+	if rc.draft == nil && h.skills != nil && h.configOp != nil {
+		rc.draft = assistant.NewSkillDraftRequest(assistant.ComposeDraftInput(draftTurns, nil), h.skillDraftResolver())
+		h.pendingRunsMu.Lock()
+		if stored, ok := h.pendingRuns[rc.runID]; ok {
+			stored.draft = rc.draft
+			h.pendingRuns[rc.runID] = stored
+		}
+		h.pendingRunsMu.Unlock()
+	}
 
 	// The deltas continue where the last drive of this run stopped: a
 	// resumed run is one answer, numbered once (see askRunContext.nextSeq).
@@ -1276,6 +1329,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		NoteOperation:    h.noteOp,
 		SnippetOperation: h.snippetOp,
 		Skills:           h.skills,
+		SkillDraft:       rc.draft,
 		KnownMaterial:    h.knownMaterial,
 		Approvals:        h.approvals,
 		RunID:            strconv.FormatInt(rc.runID, 10),

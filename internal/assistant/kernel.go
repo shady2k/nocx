@@ -1399,6 +1399,17 @@ func (k *effectKernel) invokeClassified(ctx context.Context, name, callID, rawAr
 	if !ok {
 		return modelResult{}, fmt.Errorf("%w: unknown tool %q", ErrMalformedModelOutput, name)
 	}
+	if decl.Name == "skills.create" && k.runSeams.skillDraft != nil {
+		generated, err := k.runSeams.skillDraft.arguments(ctx, k.runSeams.skillDraftHTTP)
+		if err != nil {
+			k.warn("agent tool: skill draft could not be generated", "error", err)
+			return modelResult{
+				text: "I could not draft this skill for approval because the summarizing model was unavailable or returned an unusable draft.",
+				kind: modelNocxMessage,
+			}, nil
+		}
+		rawArgs = generated
+	}
 
 	// 2. Parameter validation against the tool's schema: the file the
 	// model was shown, byte for byte, plus the ingress size bound.

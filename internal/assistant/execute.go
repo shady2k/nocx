@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
 
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/capability"
@@ -84,6 +85,8 @@ type toolSeams struct {
 	noteOperation    capability.NoteOperation
 	snippetOperation capability.SnippetOperation
 	skills           SkillLibrary
+	skillDraft       *SkillDraftRequest
+	skillDraftHTTP   *http.Client
 }
 
 type noteSearchRow struct {

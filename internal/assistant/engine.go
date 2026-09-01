@@ -412,6 +412,8 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 			noteOperation:    p.NoteOperation,
 			snippetOperation: p.SnippetOperation,
 			skills:           p.Skills,
+			skillDraft:       p.SkillDraft,
+			skillDraftHTTP:   c.http,
 		})
 		if err != nil {
 			return err

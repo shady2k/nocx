@@ -20,11 +20,13 @@ import { FILES_VIEW_ID, FILES_VIEW_ORDER, createFilesView } from './files-view'
 import { mountSidebar, type SidebarHandle, type SidebarViewDescriptor } from '../sidebar'
 import { PlugIcon } from '../ui/icons'
 import { createRendererMock, makeClient, mountPaneManager } from '../test-support/panes-fixtures'
+import { setDocumentHidden } from '../test-support/document-visibility'
 import type { FilesListEntry, FilesListResult } from '../generated/files.list'
+import type { FilesRefreshStateChanged } from '../generated/files.refreshStateChanged'
 import type { FilesOpenResult } from '../generated/files.open'
 import type { FilesReadResult } from '../generated/files.read'
 import type { FilesPanelServices } from './files-client'
-import type { FilesTreeStore } from './files-store'
+import { FILES_PAGE_SIZE, type FilesTreeStore } from './files-store'
 import type { ActiveOrigin, PaneContent } from '../pane-content'
 import { ToastHost, clearToasts } from '../ui/toast'
 import type { ClipboardAccess } from '../clipboard'
@@ -110,12 +112,22 @@ function fakeServices(over: Partial<FilesPanelServices> = {}): FilesPanelService
     list: vi.fn().mockResolvedValue(listFixture('C:/', [])),
     read: vi.fn().mockResolvedValue(readFixture()),
     watch: vi.fn().mockResolvedValue({ mode: 'watching' }),
+    visible: vi.fn().mockResolvedValue({}),
     reveal: vi.fn().mockResolvedValue({}),
     subscribeFilesChanged: vi.fn().mockReturnValue(() => {}),
+    subscribeFilesRefreshStateChanged: vi.fn().mockReturnValue(() => {}),
     onConnect: vi.fn().mockReturnValue(() => {}),
     close: vi.fn().mockResolvedValue({}),
     ...over,
   }
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve: (value: T) => void } {
+  let resolve!: (value: T) => void
+  const promise = new Promise<T>((done) => {
+    resolve = done
+  })
+  return { promise, resolve }
 }
 
 // Fixture origins stand in for the PaneContent capability (design §5.4) —
@@ -491,15 +503,22 @@ describe('files sidebar view', () => {
     const list = vi.fn().mockImplementation((bindingId: string, path: string, offset: number) =>
       Promise.resolve(
         offset === 0
-          ? listFixture('C:/', [entryFixture({ name: 'f1' })], {
+          ? listFixture('C:/', [entryFixture({ name: 'f1', path: '/f1' })], {
               total: 3,
               hasMore: true,
             })
-          : listFixture('C:/', [entryFixture({ name: 'f2' }), entryFixture({ name: 'f3' })], {
-              offset: 1,
-              total: 3,
-              hasMore: false,
-            }),
+          : listFixture(
+              'C:/',
+              [
+                entryFixture({ name: 'f2', path: '/f2' }),
+                entryFixture({ name: 'f3', path: '/f3' }),
+              ],
+              {
+                offset: 1,
+                total: 3,
+                hasMore: false,
+              },
+            ),
       ),
     )
     const services = fakeServices({ list })
@@ -1045,6 +1064,38 @@ describe('files sidebar view', () => {
     // recovers.
     watch.mockResolvedValue({ mode: 'watching' })
     panel.querySelector<HTMLElement>('[data-testid="files-watch-retry"]')!.click()
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-testid="files-watch-error"]')).toBeNull(),
+    )
+  })
+
+  it('shows the delayed refresh state and removes it when the backend catches up', async () => {
+    let refreshStateHandler: ((params: FilesRefreshStateChanged) => void) | null = null
+    const services = fakeServices({
+      list: vi
+        .fn()
+        .mockResolvedValue(
+          listFixture('C:/', [entryFixture({ name: 'notes.md', path: '/notes.md' })]),
+        ),
+      subscribeFilesRefreshStateChanged: vi.fn(
+        (handler: (params: FilesRefreshStateChanged) => void) => {
+          refreshStateHandler = handler
+          return () => {}
+        },
+      ),
+    })
+    const { panel } = await mountApp(services)
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
+
+    refreshStateHandler!({ bindingId: 'b1', state: 'delayed' })
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-testid="files-watch-error"]')?.textContent).toContain(
+        'This tree may be out of date — Retry to catch it up.',
+      ),
+    )
+    expect(panel.querySelector('[data-testid="files-watch-retry"]')).not.toBeNull()
+
+    refreshStateHandler!({ bindingId: 'b1', state: 'ok' })
     await vi.waitFor(() =>
       expect(panel.querySelector('[data-testid="files-watch-error"]')).toBeNull(),
     )
@@ -1663,6 +1714,146 @@ describe('filtering the tree by name', () => {
     return app
   }
 
+  it('finds a file past the first page after filtering an opened directory', async () => {
+    const rootPage = [
+      ...Array.from({ length: FILES_PAGE_SIZE - 1 }, (_, i) =>
+        entryFixture({ name: `file-${i}`, path: `/file-${i}` }),
+      ),
+      entryFixture({ name: 'docs', path: '/docs', kind: 'dir' }),
+    ]
+    const docsPage = Array.from({ length: FILES_PAGE_SIZE }, (_, i) =>
+      entryFixture({ name: `docs-file-${i}`, path: `/docs/docs-file-${i}` }),
+    )
+    const list = vi
+      .fn()
+      .mockImplementation((_bindingId: string, path: string, _offset: number, limit: number) => {
+        const wide = limit > FILES_PAGE_SIZE
+        if (path === '/') {
+          return Promise.resolve(
+            wide
+              ? listFixture(
+                  'C:/',
+                  [...rootPage, entryFixture({ name: 'root-tail', path: '/root-tail' })],
+                  {
+                    total: FILES_PAGE_SIZE + 1,
+                    hasMore: false,
+                    rev: 'r51',
+                  },
+                )
+              : listFixture('C:/', rootPage, {
+                  total: FILES_PAGE_SIZE + 1,
+                  hasMore: true,
+                  rev: 'r51',
+                }),
+          )
+        }
+        return Promise.resolve(
+          wide
+            ? listFixture(
+                'C:/docs',
+                [...docsPage, entryFixture({ name: 'needle.txt', path: '/docs/needle.txt' })],
+                {
+                  path: '/docs',
+                  total: FILES_PAGE_SIZE + 1,
+                  hasMore: false,
+                  rev: 'r51',
+                },
+              )
+            : listFixture('C:/docs', docsPage, {
+                path: '/docs',
+                total: FILES_PAGE_SIZE + 1,
+                hasMore: true,
+                rev: 'r51',
+              }),
+        )
+      })
+    const app = await mountApp(fakeServices({ list }))
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'docs')).not.toBeUndefined())
+    rowNamed(app.panel, 'docs').click()
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'docs-file-0')).not.toBeUndefined())
+
+    fireEvent.input(box(app.panel), { target: { value: 'needle' } })
+
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'needle.txt')).not.toBeUndefined())
+    expect(list).toHaveBeenLastCalledWith('b1', '/docs', 0, FILES_PAGE_SIZE + 1)
+  })
+
+  it('keeps the empty state hidden until every paginated directory is searched', async () => {
+    const firstPage = Array.from({ length: FILES_PAGE_SIZE }, (_, i) =>
+      entryFixture({ name: `file-${i}`, path: `/file-${i}` }),
+    )
+    const wideA = deferred<FilesListResult>()
+    const wideB = deferred<FilesListResult>()
+    const list = vi
+      .fn()
+      .mockImplementation((_bindingId: string, path: string, _offset: number, limit: number) => {
+        if (path === '/' && limit === FILES_PAGE_SIZE) {
+          return Promise.resolve(
+            listFixture('C:/', [
+              entryFixture({ name: 'a', path: '/a', kind: 'dir' }),
+              entryFixture({ name: 'b', path: '/b', kind: 'dir' }),
+            ]),
+          )
+        }
+        if (path === '/a' && limit === FILES_PAGE_SIZE) {
+          return Promise.resolve(
+            listFixture('C:/a', firstPage, {
+              path: '/a',
+              total: FILES_PAGE_SIZE + 1,
+              hasMore: true,
+              rev: 'r-a',
+            }),
+          )
+        }
+        if (path === '/b' && limit === FILES_PAGE_SIZE) {
+          return Promise.resolve(
+            listFixture('C:/b', firstPage, {
+              path: '/b',
+              total: FILES_PAGE_SIZE + 1,
+              hasMore: true,
+              rev: 'r-b',
+            }),
+          )
+        }
+        if (path === '/a') return wideA.promise
+        if (path === '/b') return wideB.promise
+        throw new Error(`unexpected list ${path} ${limit}`)
+      })
+    const app = await mountApp(fakeServices({ list }))
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'a')).not.toBeUndefined())
+    rowNamed(app.panel, 'a').click()
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'file-0')).not.toBeUndefined())
+    rowNamed(app.panel, 'b').click()
+    await vi.waitFor(() => expect(rowNamed(app.panel, 'file-0')).not.toBeUndefined())
+
+    fireEvent.input(box(app.panel), { target: { value: 'zzzz' } })
+    await vi.waitFor(() => expect(list).toHaveBeenCalledWith('b1', '/a', 0, FILES_PAGE_SIZE + 1))
+    expect(app.panel.querySelector('[data-testid="files-filter-clear"]')).toBeNull()
+
+    wideA.resolve(
+      listFixture('C:/a', firstPage, {
+        path: '/a',
+        total: FILES_PAGE_SIZE + 1,
+        hasMore: false,
+        rev: 'r-a',
+      }),
+    )
+    await vi.waitFor(() => expect(list).toHaveBeenCalledWith('b1', '/b', 0, FILES_PAGE_SIZE + 1))
+    expect(app.panel.querySelector('[data-testid="files-filter-clear"]')).toBeNull()
+
+    wideB.resolve(
+      listFixture('C:/b', firstPage, {
+        path: '/b',
+        total: FILES_PAGE_SIZE + 1,
+        hasMore: false,
+        rev: 'r-b',
+      }),
+    )
+    await vi.waitFor(() =>
+      expect(app.panel.querySelector('[data-testid="files-filter-clear"]')).not.toBeNull(),
+    )
+  })
+
   it('is the kit`s SearchField, not a hand-rolled input', () => {
     // A surface may place a kit component and may never draw its own. The
     // identity class is what says which one is here.
@@ -1727,7 +1918,10 @@ describe('filtering the tree by name', () => {
   it('a filter that matches nothing is a state with a way out, never a blank tree', async () => {
     const { panel } = await mountWithTree()
     fireEvent.input(box(panel), { target: { value: 'zzzz' } })
-    await vi.waitFor(() => expect(shown(panel)).toHaveLength(0))
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-testid="files-filter-clear"]')).not.toBeNull(),
+    )
+    expect(shown(panel)).toHaveLength(0)
 
     const clear = panel.querySelector<HTMLElement>('[data-testid="files-filter-clear"]')
     expect(clear).not.toBeNull()
@@ -1761,5 +1955,104 @@ describe('filtering the tree by name', () => {
     filesIcon(bar).click()
     await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
     await vi.waitFor(() => expect(box(panel).value).toBe('notes'))
+  })
+})
+
+describe('the visibility signal (nocx-8hdia.1)', () => {
+  /** Services whose files.visible records what it was told, kept as a bare
+   *  array rather than read back off the object — the same reason the
+   *  opener's mock is held as a bare reference above: unbound-method exists
+   *  to catch a detached method, and reaching through services.visible to
+   *  its .mock is exactly that detachment. */
+  function recordingServices(): { services: FilesPanelServices; sent: boolean[] } {
+    const sent: boolean[] = []
+    const services = fakeServices({
+      visible: (_bindingId: string, isVisible: boolean) => {
+        sent.push(isVisible)
+        return Promise.resolve({})
+      },
+    })
+    return { services, sent }
+  }
+
+  it('tells the backend when the panel leaves the screen, and when it comes back', async () => {
+    // The Files poll runs on the BACKEND, so unlike Git and Ports this panel
+    // cannot stop it by not asking — the flag has to travel. One poll tick
+    // is a full enumeration of every watched directory, so a collapsed
+    // sidebar used to cost exactly as much as an open one.
+    const { services, sent } = recordingServices()
+    const { bar, panel } = await mountApp(services)
+    await vi.waitFor(() => expect(sent).toEqual([true]))
+
+    filesIcon(bar).click()
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(true))
+    await vi.waitFor(() => expect(sent).toEqual([true, false]))
+
+    filesIcon(bar).click()
+    await vi.waitFor(() => expect(panel.classList.contains('collapsed')).toBe(false))
+    await vi.waitFor(() => expect(sent).toEqual([true, false, true]))
+  })
+
+  it('counts another sidebar view being in front as off screen', async () => {
+    // A view that is not rendered is not being looked at, and the sidebar
+    // already says so — SidebarViewProps.visible is false for every view but
+    // the one in front. Files was the only panel ignoring it.
+    const { services, sent } = recordingServices()
+    const { handle } = await mountApp(services)
+    await vi.waitFor(() => expect(sent).toEqual([true]))
+
+    handle.revealView('ports')
+    await vi.waitFor(() => expect(sent).toEqual([true, false]))
+
+    handle.revealView(FILES_VIEW_ID)
+    await vi.waitFor(() => expect(sent).toEqual([true, false, true]))
+  })
+
+  it('does not re-send a value the backend already has', async () => {
+    // The effect refires on a re-scope as well as on a transition, and a
+    // repeated "visible: true" that reached the backend would make the panel
+    // a poll trigger the cadence does not govern — every becoming-visible
+    // edge costs one immediate enumeration.
+    const { services, sent } = recordingServices()
+    const { filesStore } = await mountApp(services)
+    await vi.waitFor(() => expect(sent).toEqual([true]))
+
+    filesStore.setVisible(true)
+    filesStore.setVisible(true)
+    expect(sent).toEqual([true])
+  })
+
+  it('hiding the window tells Files to stop its background work, then showing resumes it', async () => {
+    const restore = setDocumentHidden(false)
+    try {
+      const { services, sent } = recordingServices()
+      await mountApp(services)
+      await vi.waitFor(() => expect(sent).toEqual([true]))
+
+      const hide = setDocumentHidden(true)
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.waitFor(() => expect(sent).toEqual([true, false]))
+
+      hide()
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.waitFor(() => expect(sent).toEqual([true, false, true]))
+    } finally {
+      restore()
+    }
+  })
+
+  it('a window already hidden at mount starts Files hidden and resumes on show', async () => {
+    const restore = setDocumentHidden(true)
+    try {
+      const { services, sent } = recordingServices()
+      await mountApp(services)
+      await vi.waitFor(() => expect(sent).toEqual([false]))
+
+      restore()
+      document.dispatchEvent(new Event('visibilitychange'))
+      await vi.waitFor(() => expect(sent).toEqual([false, true]))
+    } finally {
+      restore()
+    }
   })
 })

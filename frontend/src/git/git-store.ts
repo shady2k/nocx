@@ -51,7 +51,9 @@
 //    repository and never crosses to another.
 // 6. POLLING RUNS ONLY WHILE THE SIDEBAR'S visible() IS TRUE AND THE STORE
 //    IS READY — the same cadence as Ports (POLL_INTERVAL_MS), one poll in
-//    flight, never queued, suppressed while a mutation is in flight.
+//    flight, never queued, suppressed while a mutation is in flight. In
+//    production the responsive end is 5s and the idle tail is 50s; changes,
+//    mutations and user actions return the self-arming timer to 5s.
 //
 // The state the panel renders is one discriminator (rule "state IS A
 // DISCRIMINATOR, SWITCHED ON FIRST"): state() answers exactly one of the
@@ -304,6 +306,32 @@ function isGitErrorReason(data: unknown, reason: GitError['reason']): boolean {
   return d.reason === reason
 }
 
+/** The status DTO is a complete wire snapshot; its arrays are ordered rows.
+ *  JSON comparison is the cheapest honest equality here because it includes
+ *  every field (including optional count fields) without maintaining a second
+ *  list of status properties that could drift from the contract. This is
+ *  honest because both snapshots come from the same decode path, so their
+ *  insertion order is consistent; the exact `additionalProperties: false`
+ *  contract means no hidden fields are omitted from either snapshot. */
+function sameStatus(a: Status | null, b: Status): boolean {
+  return a !== null && JSON.stringify(a) === JSON.stringify(b)
+}
+
+/** Adaptive status cadence: production Git stays responsive at its 5s
+ *  base, then backs off through 10s, 20s and a 50s idle tail. The 50s
+ *  tail is deliberately below a 100s stale view while remaining slower
+ *  than Ports' 10s remote-host sampling floor; `pollIntervalMs` remains
+ *  the base unit so tests can scale the same cadence without changing it. */
+const GIT_POLL_MULTIPLIERS = [1, 2, 4, 10] as const
+
+// A completed-command hint is deliberately unused here. Ports receives its
+// hint backend-side in discovery.Scheduler; this frontend store has no
+// command-end signal. The seam we would use is TerminalContent's
+// renderer.onCommandMarker C/D callback, but ADR-0024 severs C/D markers
+// from application state, and wiring it into this store would be new
+// cross-surface plumbing. Timer-driven polling is therefore the honest
+// boundary for Git today.
+
 export function createGitStore(
   services: GitPanelServices,
   opts: { pollIntervalMs?: number } = {},
@@ -326,7 +354,11 @@ export function createGitStore(
   let lastLogEpoch = 0
   let lastRemoteEpoch = 0
   let visible = false
-  let pollTimer: ReturnType<typeof setInterval> | null = null
+  let pollTimer: ReturnType<typeof setTimeout> | null = null
+  let pollRung = 0
+  /** Invalidates a poll's cadence result when a user action or lifecycle
+   *  event resets the schedule while that read is still in flight. */
+  let pollScheduleVersion = 0
   let pollInFlight = false
   /** The D7 staleness subscriptions: {bindingId, path, side} → the diff
    *  tab's Reload offer. Fired from applyStatus, at most once per change. */
@@ -452,16 +484,19 @@ export function createGitStore(
 
   /** Apply a status-producing response: scope first, then epoch ordering
    *  (rule 1). Sets the status and clears the stale mark, then reports
-   *  the row moves the D7 staleness subscribers are watching for. */
-  function applyStatus(ctx: ScopeCtx, res: Status | undefined): void {
-    if (res === undefined) return
-    if (!scopeCurrent(ctx)) return
-    if (ctx.epoch < lastAppliedEpoch) return
+   *  the row moves the D7 staleness subscribers are watching for. Returns
+   *  whether the applied snapshot differs from the last one. */
+  function applyStatus(ctx: ScopeCtx, res: Status | undefined): boolean {
+    if (res === undefined) return false
+    if (!scopeCurrent(ctx)) return false
+    if (ctx.epoch < lastAppliedEpoch) return false
     lastAppliedEpoch = ctx.epoch
     const prev = untrack(status)
+    const changed = !sameStatus(prev, res)
     setStatus(res)
     setStatusStale(false)
     fireStale(res, prev)
+    return changed
   }
 
   /** The panel's poll observed a subscribed row move (D7): the diff tab
@@ -488,29 +523,92 @@ export function createGitStore(
     openScope(o)
   }
 
+  function clearPollTimer(): void {
+    if (pollTimer !== null) clearTimeout(pollTimer)
+    pollTimer = null
+  }
+
+  /** Return to the responsive rung and invalidate a poll response that was
+   *  issued before this user or lifecycle action. */
+  function resetPollSchedule(): void {
+    pollRung = 0
+    pollScheduleVersion++
+    clearPollTimer()
+  }
+
+  function armPollTimer(): void {
+    if (
+      !visible ||
+      pollTimer !== null ||
+      pollInFlight ||
+      untrack(mutationInFlight) ||
+      untrack(phase) !== 'ready' ||
+      untrack(binding) === null
+    ) {
+      return
+    }
+    const multiplier =
+      GIT_POLL_MULTIPLIERS[pollRung] ?? GIT_POLL_MULTIPLIERS[GIT_POLL_MULTIPLIERS.length - 1]
+    pollTimer = setTimeout(() => {
+      pollTimer = null
+      pollTick()
+    }, pollIntervalMs * multiplier)
+  }
+
+  function finishPoll(
+    ctx: ScopeCtx,
+    scheduleVersion: number,
+    changed: boolean,
+    failed: boolean,
+  ): void {
+    if (!scopeCurrent(ctx)) return
+    if (scheduleVersion !== pollScheduleVersion || changed || failed) {
+      pollRung = 0
+    } else {
+      pollRung = Math.min(pollRung + 1, GIT_POLL_MULTIPLIERS.length - 1)
+    }
+    armPollTimer()
+  }
+
+  function finishMutationPoll(ctx: ScopeCtx): void {
+    if (!scopeCurrent(ctx)) return
+    armPollTimer()
+  }
+
   /** One status-producing request: bump the epoch, issue the call, apply
    *  under rule 1. The scope is captured AT ISSUE TIME, untracked. */
-  function issueStatus(): void {
+  function issueStatus(options: { poll?: boolean; armOnSettled?: boolean } = {}): void {
     const o = untrack(origin)
     const b = untrack(binding)
     if (o === null || b === null) return
     epoch++
     const ctx: ScopeCtx = { paneId: o.paneId, generation, bindingId: b.bindingId, epoch }
+    const scheduleVersion = pollScheduleVersion
     pollInFlight = true
     services.status(b.bindingId).then(
       (res) => {
         pollInFlight = false
-        applyStatus(ctx, res.status)
+        const changed = applyStatus(ctx, res.status)
         // The environment fact rides the poll (nocx-69ey): Open's answer
         // is provisional (nocx-6pz0) — whatever settled by open, degraded
         // in the pre-settle window — so the warning it may have shown must
         // be withdrawable, and the poll is the repeating channel that
         // carries the settled answer. Same rule 1 triple as the status.
         applyEnv(ctx, res.envState, res.envReason)
+        if (options.poll) {
+          finishPoll(ctx, scheduleVersion, changed, false)
+        } else if (options.armOnSettled) {
+          armPollTimer()
+        }
       },
       (e) => {
         pollInFlight = false
         onStatusError(ctx, e)
+        if (options.poll) {
+          finishPoll(ctx, scheduleVersion, false, true)
+        } else if (options.armOnSettled) {
+          armPollTimer()
+        }
       },
     )
   }
@@ -655,6 +753,7 @@ export function createGitStore(
   function openScope(o: ActiveOrigin): void {
     const prev = untrack(binding)
     generation++
+    resetPollSchedule()
     setBinding(null)
     setPhase('opening')
     setOpenError(null)
@@ -731,7 +830,8 @@ export function createGitStore(
         // binding is live and the next poll retries.
         applyStatus(ctx, res.status)
         setPhase('ready')
-        if (visible && res.status === undefined) issueStatus()
+        if (visible && res.status === undefined) issueStatus({ armOnSettled: true })
+        else if (visible) armPollTimer()
         // D13: history does not change under the user the way the working
         // tree does, so the log is read once per scope — here — and never
         // by the poll.
@@ -856,42 +956,42 @@ export function createGitStore(
   }
 
   // ── Polling (rule 6, D13) ─────────────────────────────────────────────
-
   function pollTick(): void {
     if (!visible) return
     if (pollInFlight || mutationInFlight()) return
     if (phase() !== 'ready' || untrack(binding) === null) return
-    issueStatus()
+    issueStatus({ poll: true })
   }
 
   function setVisible(v: boolean): void {
-    visible = v
-    if (v) {
-      if (pollTimer === null) pollTimer = setInterval(pollTick, pollIntervalMs)
-      // An immediate status when the panel becomes visible makes it fresh
-      // the moment it is seen rather than up to one interval later.
-      if (
-        phase() === 'ready' &&
-        untrack(binding) !== null &&
-        !pollInFlight &&
-        !mutationInFlight()
-      ) {
-        issueStatus()
-        // The log rides the same "fresh the moment it is seen" read as the
-        // status — one-shot, never the timer (D13).
-        issueLog()
-        issueRemote()
-      }
+    if (!v) {
+      visible = false
+      resetPollSchedule()
       return
     }
-    if (pollTimer !== null) {
-      clearInterval(pollTimer)
-      pollTimer = null
+    const becomingVisible = !visible
+    visible = true
+    if (becomingVisible) resetPollSchedule()
+    // An immediate status when the panel becomes visible makes it fresh
+    // the moment it is seen rather than up to one interval later.
+    if (
+      becomingVisible &&
+      phase() === 'ready' &&
+      untrack(binding) !== null &&
+      !pollInFlight &&
+      !mutationInFlight()
+    ) {
+      issueStatus({ armOnSettled: true })
+      // The log rides the same "fresh the moment it is seen" read as the
+      // status — one-shot, never the timer (D13).
+      issueLog()
+      issueRemote()
     }
   }
   function refresh(): void {
     const o = untrack(origin)
     if (o === null) return
+    resetPollSchedule()
     if (phase() === 'failed' || untrack(binding) === null) {
       // The Retry for a failed open, and the re-ask after a refusing answer
       // (git init in the shell deserves a working Refresh).
@@ -900,7 +1000,7 @@ export function createGitStore(
     }
     if (phase() === 'ready') {
       if (pollInFlight || mutationInFlight()) return
-      issueStatus()
+      issueStatus({ armOnSettled: true })
       issueLog()
       issueRemote()
     }
@@ -916,6 +1016,7 @@ export function createGitStore(
     const o = untrack(origin)
     const b = untrack(binding)
     if (o === null || b === null) return null
+    resetPollSchedule()
     epoch++
     const ctx: ScopeCtx = { paneId: o.paneId, generation, bindingId: b.bindingId, epoch }
     setMutationInFlight(true)
@@ -935,6 +1036,7 @@ export function createGitStore(
     // the view is stale rather than reverting the row.
     setStatusStale(true)
     setMutationError({ message: messageOf(e) })
+    finishMutationPoll(ctx)
   }
 
   function stage(paths: string[]): void {
@@ -945,6 +1047,7 @@ export function createGitStore(
       (res) => {
         setMutationInFlight(false)
         applyStatus(m.ctx, res.status)
+        finishMutationPoll(m.ctx)
       },
       (e) => onMutationError(m.ctx, e),
     )
@@ -958,6 +1061,7 @@ export function createGitStore(
       (res) => {
         setMutationInFlight(false)
         applyStatus(m.ctx, res.status)
+        finishMutationPoll(m.ctx)
       },
       (e) => onMutationError(m.ctx, e),
     )
@@ -987,6 +1091,7 @@ export function createGitStore(
       (res) => {
         setMutationInFlight(false)
         applyStatus(m.ctx, res.status)
+        finishMutationPoll(m.ctx)
       },
       (e) => onMutationError(m.ctx, e),
     )
@@ -1000,6 +1105,7 @@ export function createGitStore(
       (res) => {
         setMutationInFlight(false)
         applyStatus(m.ctx, res.status)
+        finishMutationPoll(m.ctx)
       },
       (e) => onMutationError(m.ctx, e),
     )
@@ -1074,11 +1180,13 @@ export function createGitStore(
         applyStatus(ctx, res.status)
       }
       if (visible) issueLog()
+      finishMutationPoll(ctx)
       return
     }
     // failed — git's own account, shown in the panel, message stays (D11).
     setCommitState('failed')
     setCommitOutput({ output: res.output ?? '', truncated: res.outputTruncated })
+    finishMutationPoll(ctx)
   }
 
   // ── The notification: a binding is gone (design §5.2) ─────────────────

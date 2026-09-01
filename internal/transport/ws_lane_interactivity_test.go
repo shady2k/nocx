@@ -82,13 +82,11 @@ func TestLaneInteractivity_AwaitingTakeoverRefusesWritesAndAllowsReads(t *testin
 	case <-time.After(5 * time.Second):
 		t.Fatal("RequestScreen never settled")
 	}
-	// The frame's text is per-cell (the wire vocabulary) — join the chars
-	// to assert the READ carried the renderer's answer.
+	// A frame row is its text (the wire vocabulary) — join the rows to
+	// assert the READ carried the renderer's answer.
 	var body struct {
 		Rows []struct {
-			Cells []struct {
-				Char string `json:"char"`
-			} `json:"cells"`
+			Text string `json:"text"`
 		} `json:"rows"`
 	}
 	if err := json.Unmarshal(frame, &body); err != nil {
@@ -96,9 +94,7 @@ func TestLaneInteractivity_AwaitingTakeoverRefusesWritesAndAllowsReads(t *testin
 	}
 	var text strings.Builder
 	for _, r := range body.Rows {
-		for _, c := range r.Cells {
-			text.WriteString(c.Char)
-		}
+		text.WriteString(r.Text)
 	}
 	if !strings.Contains(text.String(), "the human owns it") {
 		t.Fatalf("RequestScreen frame text = %q, want the renderer's answer", text.String())

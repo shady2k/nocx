@@ -61,21 +61,14 @@ func (r *recordingRequester) calls() []askedScreen {
 }
 
 // liveFrameBody builds a minimal validated frame body the way the transport's
-// readScreen kind resolves one: cells rows, cursor, identity and range.
+// readScreen kind resolves one: text rows, cursor, identity and range.
 func liveFrameBody(rows ...string) json.RawMessage {
-	cells := make([]map[string]any, 0, len(rows))
+	wire := make([]map[string]any, 0, len(rows))
 	for _, text := range rows {
-		cs := make([]map[string]any, 0, len(text))
-		for _, ch := range text {
-			cs = append(cs, map[string]any{
-				"char":  string(ch),
-				"attrs": map[string]any{},
-			})
-		}
-		cells = append(cells, map[string]any{"kind": "cells", "cells": cs})
+		wire = append(wire, map[string]any{"kind": "text", "text": text})
 	}
 	b, _ := json.Marshal(map[string]any{
-		"rows":   cells,
+		"rows":   wire,
 		"cursor": map[string]any{"line": 0, "col": 0},
 		"identity": map[string]any{
 			"buffer": map[string]any{"kind": "normal"},

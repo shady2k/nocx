@@ -10022,8 +10022,7 @@ describe('a program printing BEL (nocx-n3nfg)', () => {
 })
 describe('session.read serves the frame the question is about (nocx-7l4ex.3)', () => {
   type ReadCall = { method: string; params: unknown }
-  type ReadCell = { char: string }
-  type ReadRow = { cells?: ReadCell[] }
+  type ReadRow = { kind: string; text: string }
   type ReadResolution = {
     requestId: string
     outcome: string
@@ -10084,7 +10083,7 @@ describe('session.read serves the frame the question is about (nocx-7l4ex.3)', (
   function wireText(params: unknown): string {
     const resolution = params as ReadResolution
     const rows = resolution.rows ?? []
-    return rows.map((row) => (row.cells ?? []).map((cell) => cell.char).join('')).join('\n')
+    return rows.map((row) => row.text).join('\n')
   }
 
   function startRunning(client: ClientFake, command = 'top'): void {

@@ -363,17 +363,12 @@ func executeSessionScreen(ctx context.Context, sessionID string, requester Rende
 	if frame.Range != nil {
 		returned = blockSpan{Start: frame.Range.Start, End: frame.Range.End}
 	}
-	var lines []string
+	// A frame row is its text: the renderer joins the cells' characters in
+	// column order before the row leaves it, blanks kept, so the row's width
+	// is the screen's (nocx-u3vxd).
+	lines := make([]string, 0, len(frame.Rows))
 	for _, row := range frame.Rows {
-		if row.Kind == "text" {
-			lines = append(lines, row.Text)
-			continue
-		}
-		var line strings.Builder
-		for _, cell := range row.Cells {
-			line.WriteString(cell.Char)
-		}
-		lines = append(lines, line.String())
+		lines = append(lines, row.Text)
 	}
 	fullText := strings.Join(lines, "\n")
 	text, returnedEnd := boundBlockText(fullText, returned.Start, returned.End, maxBytes)

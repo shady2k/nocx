@@ -204,8 +204,8 @@ func streamOKChunks(w http.ResponseWriter) {
 }
 
 // readScreenFrameWire is the renderer's answer to a readScreen request: the
-// live frame shape — cells rows, cursor, identity, range — under the closed
-// "frame" outcome. The rows carry exactly identity.cols cells, the range
+// live frame shape — text rows, cursor, identity, range — under the closed
+// "frame" outcome. Each row is padded to identity.cols, the range
 // spans exactly the rows, and the cursor is inside the geometry: the wire
 // validation of the broker (validateReadScreenResolvedRaw) is what the test
 // is crossing.
@@ -219,15 +219,12 @@ func readScreenFrameWire(t *testing.T, rid string, texts ...string) map[string]a
 	}
 	rows := make([]any, 0, len(texts))
 	for _, text := range texts {
-		cells := make([]any, 0, cols)
-		for i := 0; i < cols; i++ {
-			ch := " "
-			if i < len(text) {
-				ch = string(text[i])
-			}
-			cells = append(cells, map[string]any{"char": ch, "attrs": map[string]any{}})
-		}
-		rows = append(rows, map[string]any{"kind": "cells", "cells": cells})
+		// Padded to the width, the way a mint pads a short line with blank
+		// cells: the row's width IS the screen's.
+		rows = append(rows, map[string]any{
+			"kind": "text",
+			"text": text + strings.Repeat(" ", cols-len(text)),
+		})
 	}
 	return map[string]any{
 		"requestId": rid,

@@ -54,6 +54,7 @@ import {
   SIDEBAR_WIDTH_STEP,
   type SidebarWidthController,
 } from './sidebar-width'
+import { createAppVisibility, type AppVisibility } from './app-visible'
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -61,9 +62,9 @@ import {
  *  profile scope or visibility gating read these inside effects — the
  *  accessors are reactive, never snapshots. */
 export interface SidebarViewProps {
-  /** True while THIS view is on screen and the panel is expanded.
-   *  Collapsing the sidebar counts as not visible: a view that renders
-   *  background work (polling, sampling) must gate it on this. */
+  /** True while THIS view is on screen, the panel is expanded, and the
+   *  application window is visible. A panel that renders background work
+   *  (polling, sampling) must gate it on this complete visibility fact. */
   visible: () => boolean
   /** Reactive accessor for the active tab's ports scope — its saved-profile
    *  id, or the reserved "local" for a local shell (nocx-wzc4.8). Null when
@@ -197,6 +198,7 @@ interface PanelRootProps {
   views: readonly SidebarViewDescriptor[]
   getActiveProfileId: () => string | null
   getActiveOrigin: () => ActiveOrigin | null
+  appVisibility: AppVisibility
   /** The width controller (nocx-qmcu) — when present the panel renders the
    *  kit ResizeHandle at its LEADING edge, facing the panes, and the drag
    *  resizes #sidebar (nocx-crjft). */
@@ -243,6 +245,7 @@ function PanelRoot(props: PanelRootProps) {
       </Show>
       <ActiveView
         desc={activeDesc()!}
+        appVisible={props.appVisibility.visible}
         collapsed={() => props.state.sidebar.collapsed}
         getActiveProfileId={props.getActiveProfileId}
         getActiveOrigin={props.getActiveOrigin}
@@ -262,12 +265,14 @@ function PanelRoot(props: PanelRootProps) {
 function ActiveView(props: {
   desc: SidebarViewDescriptor
   collapsed: () => boolean
+  appVisible: () => boolean
   getActiveProfileId: () => string | null
   getActiveOrigin: () => ActiveOrigin | null
 }) {
-  // Only the active view renders, so "visible" is exactly the panel's
-  // expanded state — a collapsed sidebar is a hidden view (nocx-wzc4.7).
-  const visible = () => !props.collapsed()
+  // Only the active view renders. The sidebar is visible only when expanded
+  // AND the application window is visible, so every background-work panel
+  // shares one shell-owned window-visibility signal.
+  const visible = () => !props.collapsed() && props.appVisible()
 
   // A TERNARY, never `<Show>`. `<Show when={props.desc.filter}>` looks like
   // the guard and is not one: the JSX evaluates to Show's memo whether or
@@ -651,6 +656,7 @@ export function mountSidebar(
       storeActions.collapseSidebar()
     }
   }
+  const appVisibility = createAppVisibility()
 
   // ── Render the activity bar (toolbar) into `bar` ─────────────────────
   const destroyBar = render(
@@ -674,6 +680,7 @@ export function mountSidebar(
         state={state}
         views={views}
         getActiveProfileId={activeProfileId}
+        appVisibility={appVisibility}
         getActiveOrigin={activeOrigin}
         resize={resize}
       />
@@ -701,6 +708,7 @@ export function mountSidebar(
 
   return {
     destroy() {
+      appVisibility.destroy()
       destroyBar()
       destroyPanel()
     },

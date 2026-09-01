@@ -6,6 +6,7 @@
   "additionalProperties": false,
   "required": [
     "strategy",
+    "skills",
     "settingsChanged",
     "settingsReset",
     "connectionsAdded",
@@ -20,6 +21,7 @@
   ],
   "properties": {
     "strategy": { "type": "string", "enum": ["merge", "replace"] },
+    "skills": { "type": "integer" },
     "settingsChanged": { "type": "integer" },
     "settingsReset": { "type": "integer" },
     "connectionsAdded": { "type": "integer" },

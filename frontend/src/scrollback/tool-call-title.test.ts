@@ -130,10 +130,27 @@ describe('toolCallTitle', () => {
   it('a value that is not a string is its compact JSON — what the model sent', () => {
     expect(
       toolCallTitle({ tool: 'run', args: { command: 'ls -la', timeoutMs: 5000, quiet: true } }),
-    ).toBe('run command=ls -la timeoutMs=5000 quiet=true')
+    ).toBe('run command="ls -la" timeoutMs=5000 quiet=true')
     expect(toolCallTitle({ tool: 'files.write', args: { lines: ['a', 'b'] } })).toBe(
       'files.write lines=["a","b"]',
     )
+  })
+
+  it('quotes a value that carries a space, so the pairs stay readable (nocx-hp8p2.12)', () => {
+    // Pairs are joined by spaces, so an unquoted value with a space in it
+    // stops being one value. Tab titles are written by people and are the
+    // common case: `session=* Claude Code id=att-cf87…` reads as though
+    // `Claude` and `Code` were parts of the line rather than of the name.
+    expect(
+      toolCallTitle(
+        {
+          tool: 'session.read',
+          args: { id: 'att-cf87c40a4ab68275' },
+          resource: { kind: 'session', id: 'sess-1' },
+        },
+        { sessionName: () => '* Claude Code' },
+      ),
+    ).toBe('session.read session="* Claude Code" id=att-cf87c40a4ab68275')
   })
 
   it('nothing is truncated: the title is what the ⋮ copies', () => {

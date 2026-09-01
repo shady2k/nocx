@@ -21,7 +21,7 @@ func newBackupContractWSServer(t *testing.T) (*WSServer, func()) {
 	profileService := profile.NewProfileService(profiles)
 	doc := storage.NewDocumentStore(dir)
 	registry := settings.New(doc, &fakeSecretStore{})
-	backupService := backup.NewService(profiles, registry, doc, nil, nil)
+	backupService := backup.NewService(profiles, registry, doc, nil, nil, nil)
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil),
 		newRegWithStub(log.NewSlogAdapter(nil)),
@@ -117,7 +117,7 @@ func TestBackup_SaveToFileCancel_ConformsToContract(t *testing.T) {
 	profileService := profile.NewProfileService(profiles)
 	doc := storage.NewDocumentStore(dir)
 	registry := settings.New(doc, &fakeSecretStore{})
-	backupService := backup.NewService(profiles, registry, doc, nil, nil)
+	backupService := backup.NewService(profiles, registry, doc, nil, nil, nil)
 	// Saver returns (nil, nil) to simulate user cancelling the save dialog.
 	ws := NewWSServer(
 		log.NewSlogAdapter(nil),

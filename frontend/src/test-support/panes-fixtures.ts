@@ -322,6 +322,10 @@ export function createRendererMock(): RendererMock {
     // the same behaviour as before this method existed. Zero would be a
     // different statement: a grid nobody has written to.
     liveContentHeight: vi.fn().mockReturnValue(null),
+    // Wake diagnostics are queried when visibilitychange is dispatched. The
+    // mock must satisfy the renderer contract so visibility tests reach the
+    // panel gates instead of failing in the unrelated wake reporter.
+    diagnostics: vi.fn().mockReturnValue({ bufferRows: 0, accelerated: false }),
     cols: 80,
     rows: 24,
     // A REAL store, not a stub: the composition point hands

@@ -61,6 +61,8 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/skill"
+	"github.com/shady2k/nocx/internal/skill/builtin"
 	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
@@ -99,7 +101,7 @@ type App struct {
 	Updater          update.Updater
 	Profiles         profile.ProfileRepository
 	Credentials      credential.SecretStore
-
+	skills           assistant.SkillLibrary
 	// vaultCloser releases the vault's background worker and seals it at
 	// shutdown. Held as a minimal interface rather than *vault.Vault so the
 	// composition root keeps depending on behaviour instead of a type.
@@ -553,6 +555,12 @@ func New(opts ...Option) (*App, error) {
 		return nil, fmt.Errorf("storage paths: %w", err)
 	}
 
+	skillRoots := []skill.Root{
+		{Dir: filepath.Join(paths.ConfigDir(), "skills"), Provenance: skill.ProvenanceAuthored},
+		{FS: builtin.FS, Provenance: skill.ProvenanceBuiltin},
+		{Dir: filepath.Join(paths.ConfigDir(), "managed-skills"), Provenance: skill.ProvenanceManaged},
+	}
+
 	logFilePath := filepath.Join(paths.DataDir(), "nocx.log")
 	if o.logFilePath != nil {
 		logFilePath = *o.logFilePath // test override; empty disables file logging
@@ -691,6 +699,7 @@ func New(opts ...Option) (*App, error) {
 	// system (OS keychain) and file (encrypted document).
 	docStore := storage.NewDocumentStore(paths.ConfigDir())
 	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
+	skills := skill.NewStore(skill.OSFileSystem{}, skillRoots, docStore)
 	// The snippet library is the same document family: one versioned
 	// document under the profile directory, sharing the docStore. The id
 	// source is injected rather than called inline so tests can force
@@ -904,7 +913,7 @@ func New(opts ...Option) (*App, error) {
 		}
 	}
 
-	backupService := backup.NewService(profileStore, settingsRegistry, docStore, snippetStore, noteBackup)
+	backupService := backup.NewService(profileStore, settingsRegistry, docStore, snippetStore, noteBackup, skills)
 	if recoverErr := backupService.Recover(); recoverErr != nil {
 		return nil, fmt.Errorf("backup recovery: %w", recoverErr)
 	}
@@ -1598,13 +1607,15 @@ func New(opts ...Option) (*App, error) {
 	// vault, ledger, and shell-integration documents; no policy layer can
 	// widen it.
 	floor := content.NewFloor(paths.ConfigDir(), paths.DataDir())
-	assistantClient, err := assistant.NewClient(logger, &ledgerWireRecorder{ledger: contentDB.Ledger()}, floor)
+	assistantClient, agentToolRegistry, err := assistant.NewClientAndRegistry(logger, &ledgerWireRecorder{ledger: contentDB.Ledger()}, floor, skill.FilesystemRoots(skillRoots))
 	if err != nil {
 		return nil, err
 	}
 	tpOpts = append(tpOpts,
 		transport.WithAssistantClient(assistantClient),
 		transport.WithAssistantProbeStore(assistantProbes),
+		transport.WithSkillSource(skills),
+		transport.WithAgentToolRegistry(agentToolRegistry),
 		transport.WithAgentFetcher(apiFetcher),
 	)
 	// The same store the publisher enrols into, on its other end: the
@@ -1763,6 +1774,7 @@ func New(opts ...Option) (*App, error) {
 		ShellIntegration: shint,
 		Profiles:         profileStore,
 		Credentials:      v,
+		skills:           skills,
 		vaultCloser:      v,
 		noteCloser:       noteCloser,
 		discoverySched:   discoverySched,

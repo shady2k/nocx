@@ -188,6 +188,16 @@ type Header struct {
 	Value string
 }
 
+// SkillLibrary is the assistant's filesystem-backed skill seam. Read and
+// mutation tools share this one owner so a composition root cannot offer
+// writes with a read-only source.
+type SkillLibrary interface {
+	SkillSource
+	Create(name, description, body string) error
+	Update(name, description, body string) error
+	Delete(name string) error
+}
+
 // AskParams is one ask's model call: the resolved endpoint's facts plus the
 // conversation context (question + referenced frames, design §4.2).
 type AskParams struct {
@@ -236,6 +246,13 @@ type AskParams struct {
 	// them as seams; it never owns a service or a second store implementation.
 	NoteOperation    capability.NoteOperation
 	SnippetOperation capability.SnippetOperation
+	// Skills is the filesystem-backed library for all skill tools. The
+	// transport supplies one owner whose index, reads and writes agree.
+	Skills SkillLibrary
+	// SkillDraft is the run's immutable transcript and summarizing-role seam.
+	// When set, a model-proposed skills.create call uses its cached generated
+	// arguments before validation, policy, approval, or execution.
+	SkillDraft *SkillDraftRequest
 	// Fetcher is the guarded direct-network seam for fetch.url. It is wired
 	// by the composition root; the tool cannot select a pane's connection
 	// route or construct another HTTP client.
@@ -289,6 +306,26 @@ type AskParams struct {
 	// are scoped to this run and let session.read resolve those ids through the
 	// renderer even when no durable ledger row exists.
 	AutomaticSessionItems []string
+	// MarkedSessionWindows are the row spans the person marked and sent with
+	// this question. They bound a session.read of those items (nocx-hp8p2.15).
+	MarkedSessionWindows []MarkedSessionWindow
+}
+
+// MarkedSessionWindow is one person-marked row span: which item, and which
+// rows of it the question is about.
+type MarkedSessionWindow struct {
+	ItemID string
+	Start  int
+	Count  int
+}
+
+// Attachments is what came WITH the question, as the run carries it: the
+// renderer-owned frozen-screen ids, and the row spans the person marked.
+// One parameter rather than two because they travel together everywhere and
+// answer one question — what is this ask about (nocx-hp8p2.15).
+type Attachments struct {
+	AutomaticItems []string
+	MarkedWindows  []MarkedSessionWindow
 }
 
 // StreamError is a model-stream failure the transport terminalizes the run
@@ -377,22 +414,35 @@ type ProbeResult struct {
 	At time.Time `json:"at"`
 }
 
-// NewClient builds the engine client with the caller-declared safety floor.
-// The floor is mandatory so production and tests cannot silently omit it.
-func NewClient(logger log.Logger, recorder WireRecorder, floor content.Floor) (Client, error) {
-	return newClient(logger, tools.Schemas, recorder, floor)
+// NewClientAndRegistry builds the assistant and returns the exact registry
+// used by its engine. The composition root passes that same registry to
+// transport so prompt offers and execution use one declaration table.
+func NewClientAndRegistry(logger log.Logger, recorder WireRecorder, floor content.Floor, skillRoots []string) (Client, agenttools.Registry, error) {
+	reg, err := assembleToolRegistry(tools.Schemas, skillRoots)
+	if err != nil {
+		return nil, agenttools.Registry{}, err
+	}
+	searchSchema, _ := fs.ReadFile(tools.Schemas, "search.schema.json")
+	return newClientWithRegistry(logger, reg, recorder, floor, searchSchema), reg, nil
 }
 
-func newClient(logger log.Logger, toolsFS fs.FS, recorder WireRecorder, floor content.Floor) (Client, error) {
-	reg, err := agenttools.Assemble(toolsFS)
+func assembleToolRegistry(toolsFS fs.FS, skillRoots []string) (agenttools.Registry, error) {
+	var (
+		reg agenttools.Registry
+		err error
+	)
+	if len(skillRoots) == 0 {
+		reg, err = agenttools.Assemble(toolsFS)
+	} else {
+		reg, err = agenttools.AssembleWithSkillRoots(toolsFS, skillRoots)
+	}
 	if err != nil {
-		return nil, fmt.Errorf("assistant: tool registry: %w", err)
+		return agenttools.Registry{}, fmt.Errorf("assistant: tool registry: %w", err)
 	}
 	if len(reg.All()) == 0 {
-		return nil, errors.New("assistant: tool registry assembled EMPTY — the tool schemas did not reach the binary; a model would be offered no tools")
+		return agenttools.Registry{}, errors.New("assistant: tool registry assembled EMPTY — the tool schemas did not reach the binary; a model would be offered no tools")
 	}
-	searchSchema, _ := fs.ReadFile(toolsFS, "search.schema.json")
-	return newClientWithRegistry(logger, reg, recorder, floor, searchSchema), nil
+	return reg, nil
 }
 
 func newClientWithRegistry(logger log.Logger, reg agenttools.Registry, recorder WireRecorder, floor content.Floor, searchSchema ...[]byte) Client {

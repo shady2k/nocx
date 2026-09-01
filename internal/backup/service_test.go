@@ -144,7 +144,7 @@ func newFakeServiceWithNotes() (*backup.Service, *fakeSnippetStore, *fakeNoteSto
 	doc := &fakeDocStore{}
 	snips := &fakeSnippetStore{}
 	notes := &fakeNoteStore{}
-	return backup.NewService(conn, sett, doc, snips, notes), snips, notes
+	return backup.NewService(conn, sett, doc, snips, notes, nil), snips, notes
 }
 
 func newFakeService() (*backup.Service, *fakeConnStore, *fakeSettingsStore, *fakeDocStore, *fakeSnippetStore) {
@@ -157,7 +157,7 @@ func newFakeService() (*backup.Service, *fakeConnStore, *fakeSettingsStore, *fak
 	sett := &fakeSettingsStore{overrides: map[string]any{}}
 	doc := &fakeDocStore{}
 	snips := &fakeSnippetStore{}
-	svc := backup.NewService(conn, sett, doc, snips, nil)
+	svc := backup.NewService(conn, sett, doc, snips, nil, nil)
 	return svc, conn, sett, doc, snips
 }
 
@@ -1144,7 +1144,7 @@ func TestRestore_WithoutSnippetStoreRefusesASnippetsBackup(t *testing.T) {
 	}
 	sett := &fakeSettingsStore{overrides: map[string]any{}}
 	doc := &fakeDocStore{}
-	svc := backup.NewService(conn, sett, doc, nil, nil)
+	svc := backup.NewService(conn, sett, doc, nil, nil, nil)
 
 	contents := backupWithSnippets(t)
 

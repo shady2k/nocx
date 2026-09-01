@@ -23,7 +23,7 @@ func TestFloor_RefusesUnderMostPermissivePolicy(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	k, err := newEffectKernel(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-floor", "session-floor", 1, "", nil, nil, nil, nil)
+	k, err := newEffectKernel(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-floor", "session-floor", 1, "", nil, Attachments{}, nil, nil)
 	if err != nil {
 		t.Fatalf("newEffectKernel: %v", err)
 	}
@@ -85,7 +85,7 @@ func TestNewClient_InjectsFloorBeforeToolExecution(t *testing.T) {
 		{Kind: content.ResourceSession, ID: "session-a"},
 		{Kind: content.ResourcePath, ID: "/"},
 	})
-	client, err := NewClient(nil, nil, content.NewFloor(configDir, filepath.Join(t.TempDir(), "data", "nocx")))
+	client, _, err := NewClientAndRegistry(nil, nil, content.NewFloor(configDir, filepath.Join(t.TempDir(), "data", "nocx")), nil)
 	if err != nil {
 		t.Fatalf("NewClient: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestFloor_ReasonIsTruthfulForReadAndWrite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
 	}
-	k, err := newEffectKernel(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-floor-reason", "session-floor-reason", 1, "", nil, nil, nil, nil)
+	k, err := newEffectKernel(nil, grant, reg, &fakeLedger{}, nil, &fakeKnownMaterial{}, "run-floor-reason", "session-floor-reason", 1, "", nil, Attachments{}, nil, nil)
 	if err != nil {
 		t.Fatalf("newEffectKernel: %v", err)
 	}

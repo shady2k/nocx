@@ -445,6 +445,14 @@ test('a run collapses into one row that opens, and narrowing the feed leaves the
     const search = page.locator('.quick-connect__search input')
     await expect(search).toBeVisible()
     await search.fill(profileName)
+    // Wait for the saved row before Enter. The palette renders its search box
+    // before its providers have answered, and on an EMPTY list Enter used to
+    // reach the ad-hoc "Connect to <host>" fallback — dialling root@<the profile
+    // name> with no credential, which is what CI caught (nocx-k1691). The row is
+    // the observable state that says the saved profile is the thing Enter picks.
+    await expect(page.locator('.quick-connect__item', { hasText: profileName })).toBeVisible({
+      timeout: 10_000,
+    })
     await page.keyboard.press('Enter')
     await expect(page.locator(TAB)).toHaveCount(2)
 

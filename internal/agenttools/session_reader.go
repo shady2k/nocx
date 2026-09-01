@@ -9,16 +9,27 @@ type SessionReader struct {
 	sessions       map[string]struct{}
 	sessionID      string
 	automaticItems map[string]struct{}
+	markedWindows  map[string]MarkedSessionWindow
 }
 
 // NewSessionReader adds renderer-owned item ids whose session.read calls must
 // use the current renderer screen rather than a durable ledger row. These ids
 // are validated as part of the ask envelope and remain scoped to this run's
 // session grant. Pass nil for an ordinary session reader.
-func NewSessionReader(scopes []content.GrantScope, automaticItems []string) *SessionReader {
+func NewSessionReader(
+	scopes []content.GrantScope,
+	automaticItems []string,
+	markedWindows []MarkedSessionWindow,
+) *SessionReader {
 	r := &SessionReader{
 		sessions:       make(map[string]struct{}),
 		automaticItems: make(map[string]struct{}, len(automaticItems)),
+		markedWindows:  make(map[string]MarkedSessionWindow, len(markedWindows)),
+	}
+	for _, mark := range markedWindows {
+		if mark.ItemID != "" && mark.Count > 0 {
+			r.markedWindows[mark.ItemID] = mark
+		}
 	}
 	for _, item := range automaticItems {
 		if item != "" {
@@ -63,4 +74,15 @@ func (r *SessionReader) SessionID() string {
 		return ""
 	}
 	return r.sessionID
+}
+
+// MarkedWindow reports the row span a person marked on this item, when they
+// marked one. The run carries it from the ask envelope, so it is authority
+// about what the question is about — not a hint the model may improve on.
+func (r *SessionReader) MarkedWindow(id string) (MarkedSessionWindow, bool) {
+	if r == nil || id == "" {
+		return MarkedSessionWindow{}, false
+	}
+	mark, ok := r.markedWindows[id]
+	return mark, ok
 }

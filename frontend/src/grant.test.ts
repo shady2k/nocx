@@ -34,6 +34,20 @@ function productionModules(dir: string): string[] {
   return modules
 }
 
+const DOCUMENT_HIDDEN_READ = /\bdocument\s*\.\s*hidden\b/
+const APP_VISIBILITY_MODULE = resolve(SRC_ROOT, 'app-visible.ts')
+
+function stripComments(source: string): string {
+  return source.replace(/\/\*[\s\S]*?\*\/|\/\/[^\n]*/g, '')
+}
+
+it('keeps direct document visibility reads in the app visibility module', () => {
+  const readers = productionModules(SRC_ROOT)
+    .filter((file) => !file.includes('/test-support/'))
+    .filter((file) => DOCUMENT_HIDDEN_READ.test(stripComments(readFileSync(file, 'utf8'))))
+  expect(readers.filter((file) => file !== APP_VISIBILITY_MODULE)).toEqual([])
+})
+
 it('keeps the grant chip label in one production module', () => {
   const owners = productionModules(SRC_ROOT).filter((file) =>
     readFileSync(file, 'utf8').includes(GRANT_LABEL),
@@ -144,7 +158,10 @@ describe('GrantController', () => {
     controller.setAutomaticBlock(frozen)
 
     expect(controller.current).toEqual([])
-    expect(controller.chip.textContent).toBe(
+    // Short on the chip, whole in the accessible name: the chip shares a
+    // narrow row and the sentence is stated at full length beside it.
+    expect(controller.chip.textContent).toBe('marked for the question · 0 + screen')
+    expect(controller.chip.getAttribute('aria-label')).toBe(
       'marked for the question · 0 · frozen screen attached automatically',
     )
     expect(frozen.blockEl.dataset.granted).toBeUndefined()
@@ -167,7 +184,10 @@ describe('GrantController', () => {
     controller.setAutomaticBlock(frozen)
 
     expect(controller.current).toEqual([marked])
-    expect(controller.chip.textContent).toContain('· 1 · frozen screen attached automatically')
+    expect(controller.chip.textContent).toContain('· 1 + screen')
+    expect(controller.chip.getAttribute('aria-label')).toContain(
+      '· 1 · frozen screen attached automatically',
+    )
     controller.chip.click()
     const panel = document.querySelector<HTMLElement>('.ui-floating-panel[data-variant="grant"]')
     expect(panel?.textContent).toContain('git status')

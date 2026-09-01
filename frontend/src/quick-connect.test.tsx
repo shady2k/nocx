@@ -942,6 +942,70 @@ describe('free-form connect entry', () => {
     expect(items[0].textContent).not.toContain('Connect to')
   })
 
+  /**
+   * The same promise as the two tests above, held across the window where the
+   * saved list is not yet known.
+   *
+   * "Nothing matched" is only knowable once the providers have answered. While
+   * they have not, the list is EMPTY rather than exhausted, and offering the
+   * ad-hoc row there means Enter dials a host that merely shares the name of a
+   * profile the person actually saved — with none of its credentials. CI caught
+   * exactly that: a fresh profile, typed at once, opened as `root@<the profile
+   * name>` and the pane read "nothing to authenticate" (nocx-k1691).
+   */
+  it('offers nothing — not the ad-hoc row — until the saved list has answered', async () => {
+    const ctrl = new QuickConnectController()
+    afterEach(() => ctrl.destroy())
+    let release!: (profiles: unknown[]) => void
+    const pending = new Promise<unknown[]>((resolve) => {
+      release = resolve
+    })
+    const newPaneByHost = vi.fn()
+    const providers: QuickConnectProvider[] = [
+      new ActionsQuickConnectProvider(vi.fn(), vi.fn()),
+      new SSHQuickConnectProvider(
+        { listProfiles: vi.fn().mockReturnValue(pending) } as never,
+        vi.fn(),
+      ),
+      new AdHocQuickConnectProvider(newPaneByHost),
+    ]
+    ctrl.mount(container, providers)
+    ctrl.show()
+    await waitForItems()
+
+    const input = container.querySelector<HTMLInputElement>('.quick-connect__search input')
+    expect(input).toBeTruthy()
+    // A query the ad-hoc provider WOULD parse into a host, so the row is
+    // suppressed by the load state rather than by failing to parse.
+    typeQuery(input!, 'prod-db.internal')
+
+    expect(container.querySelectorAll('.quick-connect__item')).toHaveLength(0)
+    expect(container.querySelector('.quick-connect__empty')?.textContent).toContain('Loading')
+
+    // And Enter here is a no-op, not a connection to somewhere else.
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    expect(newPaneByHost).not.toHaveBeenCalled()
+
+    release([
+      {
+        id: 'ssh:custom:prod:uuid',
+        type: 'ssh' as const,
+        name: 'prod-db.internal',
+        options: { host: '10.0.0.4', port: 22, user: 'deploy' },
+      },
+    ])
+    await waitForItems()
+
+    const items = container.querySelectorAll('.quick-connect__item')
+    expect(items).toHaveLength(1)
+    expect(items[0].textContent).toContain('prod-db.internal')
+    expect(items[0].textContent).not.toContain('Connect to')
+
+    // Enter now reaches the SAVED profile, which is the whole point of waiting.
+    input!.dispatchEvent(new KeyboardEvent('keydown', { key: 'Enter', bubbles: true }))
+    expect(newPaneByHost).not.toHaveBeenCalled()
+  })
+
   it('ranks a matching alias above the ad-hoc entry — suppresses it', async () => {
     const ctrl = new QuickConnectController()
     afterEach(() => ctrl.destroy())

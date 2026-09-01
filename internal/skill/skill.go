@@ -27,10 +27,31 @@ const (
 	ProvenanceManaged Provenance = "managed"
 )
 
+// Status describes whether the bytes still match the person's approval.
+type Status string
+
+const (
+	// StatusApproved means the discovered bytes are the approved bytes.
+	StatusApproved Status = "approved"
+	// StatusChanged means the bytes differ from the approved managed skill.
+	StatusChanged Status = "changed"
+)
+
+func statusFor(provenance Provenance, changed bool) Status {
+	if provenance == ProvenanceManaged && changed {
+		return StatusChanged
+	}
+	return StatusApproved
+}
+
 // disabledNames is supplied by a Store's document owner. Discovery owns the
 // filtering decision; roots only provide the persisted state to that one
 // decision point.
 type disabledNames func() (map[string]struct{}, error)
+
+// approvedDigests is supplied by a Store's document owner. It contains the
+// digest recorded when the person approved each managed skill.
+type approvedDigests func() (map[string]string, error)
 
 // Root is one searched location. FS is set for the builtin root, whose bytes
 // live in an embed.FS; Dir is set for the on-disk roots. Exactly one of them
@@ -40,6 +61,7 @@ type Root struct {
 	FS         fs.FS
 	Provenance Provenance
 	disabled   disabledNames
+	digests    approvedDigests
 }
 
 // Skill is one discovered skill. The body is deliberately absent: discovery
@@ -51,6 +73,7 @@ type Skill struct {
 	Provenance  Provenance
 	BaseDir     string
 	Enabled     bool
+	Status      Status
 }
 
 // FilesystemRoots returns the on-disk directories among roots, preserving
@@ -72,6 +95,7 @@ type Content struct {
 	Bytes      []byte
 	Provenance Provenance
 	Path       string
+	Changed    bool
 }
 
 // The bounds. Each is a cost paid on every ask, so each is capped and the

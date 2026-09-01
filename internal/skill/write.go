@@ -107,6 +107,13 @@ func (s *Store) Index() []Skill {
 		return nil
 	}
 	index := Discover(s.roots)
+	ready := index[:0]
+	for _, item := range index {
+		if item.Status != StatusChanged {
+			ready = append(ready, item)
+		}
+	}
+	index = ready
 	if len(index) > MaxIndexed {
 		slog.Warn("skill: index cap reached", "cap", MaxIndexed)
 		index = index[:MaxIndexed]
@@ -161,7 +168,10 @@ func (s *Store) Create(name, description, body string) error {
 	if err := s.fs.MkdirAll(dir, managedSkillDirMode); err != nil {
 		return fmt.Errorf("skill %q: create directory: %w", name, err)
 	}
-	return s.atomicWrite(dir, target, data)
+	if err := s.atomicWrite(dir, target, data); err != nil {
+		return err
+	}
+	return s.recordApprovalDigest(name, dir)
 }
 
 // Update replaces an existing managed skill atomically.
@@ -192,7 +202,10 @@ func (s *Store) Update(name, description, body string) error {
 	if err := s.checkExistingPath(dir, target, true); err != nil {
 		return err
 	}
-	return s.atomicWrite(dir, target, data)
+	if err := s.atomicWrite(dir, target, data); err != nil {
+		return err
+	}
+	return s.recordApprovalDigest(name, dir)
 }
 
 // Delete removes only a managed SKILL.md and leaves its now-empty directory so
@@ -229,6 +242,9 @@ func (s *Store) Delete(name string) error {
 	}
 	if err := s.fs.Sync(dir); err != nil {
 		return fmt.Errorf("skill %q: sync directory after delete: %w", name, err)
+	}
+	if err := s.clearApprovalDigest(name); err != nil {
+		return fmt.Errorf("skill %q: clear approval: %w", name, err)
 	}
 	return nil
 }

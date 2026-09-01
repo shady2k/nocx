@@ -69,3 +69,40 @@ func TestSetEnabledPersistsAndHidesSkill(t *testing.T) {
 		t.Fatalf("fresh list = %+v, want one disabled skill", freshList.Skills)
 	}
 }
+
+func TestApprovedDigestCoversEveryFileAndIsDeterministic(t *testing.T) {
+	configDir := t.TempDir()
+	managed := filepath.Join(configDir, "managed-skills")
+	store := NewStoreWithDocumentStore(OSFileSystem{}, []Root{{Dir: managed, Provenance: ProvenanceManaged}}, storage.NewDocumentStore(configDir))
+	if err := store.Create("deploy", "deploy", "body"); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(managed, "deploy", "references"), 0o700); err != nil {
+		t.Fatalf("mkdir references: %v", err)
+	}
+	for _, file := range []struct {
+		name string
+		body string
+	}{
+		{name: "z.md", body: "last"},
+		{name: "a.md", body: "first"},
+	} {
+		if err := os.WriteFile(filepath.Join(managed, "deploy", "references", file.name), []byte(file.body), 0o600); err != nil {
+			t.Fatalf("write %s: %v", file.name, err)
+		}
+	}
+	first, err := hashSkillDirectory(filepath.Join(managed, "deploy"))
+	if err != nil {
+		t.Fatalf("first hash: %v", err)
+	}
+	second, err := hashSkillDirectory(filepath.Join(managed, "deploy"))
+	if err != nil {
+		t.Fatalf("second hash: %v", err)
+	}
+	if first != second {
+		t.Fatalf("hash changed without content change: %q != %q", first, second)
+	}
+	if got := store.Index(); len(got) != 0 {
+		t.Fatalf("index = %+v, want reference files to invalidate approval", got)
+	}
+}

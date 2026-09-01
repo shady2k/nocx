@@ -15,13 +15,14 @@
     "skill": {
       "type": "object",
       "additionalProperties": false,
-      "required": ["name", "description", "provenance", "path", "enabled"],
+      "required": ["name", "description", "provenance", "path", "enabled", "status"],
       "properties": {
         "name": { "type": "string" },
         "description": { "type": "string" },
         "provenance": { "type": "string", "enum": ["authored", "builtin", "managed"] },
         "path": { "type": "string" },
-        "enabled": { "type": "boolean" }
+        "enabled": { "type": "boolean" },
+        "status": { "type": "string", "enum": ["approved", "changed"] }
       }
     }
   }

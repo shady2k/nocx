@@ -1,6 +1,8 @@
 package skill
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +24,7 @@ var Module = storage.Module{Name: "skills", Current: 1}
 type document struct {
 	SchemaVersion storage.SchemaVersion `json:"schemaVersion"`
 	Disabled      []string              `json:"disabled"`
+	Digests       map[string]string     `json:"digests,omitempty"`
 }
 
 // ListedSkill is the settings page's complete view of a discovered skill.
@@ -31,6 +34,7 @@ type ListedSkill struct {
 	Provenance  Provenance `json:"provenance"`
 	Path        string     `json:"path"`
 	Enabled     bool       `json:"enabled"`
+	Status      Status     `json:"status"`
 }
 
 // ListResult is returned by the settings-page RPC. A document failure is a
@@ -66,6 +70,7 @@ func newStore(fsys FileSystem, roots []Root, docStore storage.DocumentStore) *St
 	}
 	for i := range s.roots {
 		s.roots[i].disabled = s.loadDisabled
+		s.roots[i].digests = s.loadApprovedDigests
 	}
 	return s
 }
@@ -79,56 +84,94 @@ func NewStoreWithDocumentStore(fsys FileSystem, roots []Root, docStore storage.D
 func (s *Store) loadDisabled() (map[string]struct{}, error) {
 	s.docMu.Lock()
 	defer s.docMu.Unlock()
-	return s.loadDisabledLocked()
+	d, err := s.loadDocumentLocked()
+	if err != nil {
+		return nil, err
+	}
+	disabled := make(map[string]struct{}, len(d.Disabled))
+	for _, name := range d.Disabled {
+		disabled[name] = struct{}{}
+	}
+	return disabled, nil
 }
 
-func (s *Store) loadDisabledLocked() (map[string]struct{}, error) {
-	disabled := make(map[string]struct{})
+func (s *Store) loadApprovedDigests() (map[string]string, error) {
+	s.docMu.Lock()
+	defer s.docMu.Unlock()
+	d, err := s.loadDocumentLocked()
+	if err != nil {
+		return nil, err
+	}
+	return d.Digests, nil
+}
+
+func (s *Store) loadDocumentLocked() (document, error) {
+	d := document{Disabled: []string{}, Digests: map[string]string{}}
 	if s.docStore == nil {
 		s.docFailure = nil
-		return disabled, nil
+		return d, nil
 	}
 	var raw json.RawMessage
 	found, err := s.docStore.Read(DocumentName, &raw)
 	if err != nil {
 		s.docFailure = fmt.Errorf("read %s: %w", DocumentName, err)
-		return nil, s.docFailure
+		return document{}, s.docFailure
 	}
 	if !found {
 		s.docFailure = nil
-		return disabled, nil
+		return d, nil
 	}
 	var probe struct {
 		SchemaVersion storage.SchemaVersion `json:"schemaVersion"`
 	}
 	if parseErr := json.Unmarshal(raw, &probe); parseErr != nil {
 		s.docFailure = fmt.Errorf("parse %s: %w", DocumentName, parseErr)
-		return nil, s.docFailure
+		return document{}, s.docFailure
 	}
 	migrated, err := Module.Migrate(raw, probe.SchemaVersion)
 	if err != nil {
 		s.docFailure = fmt.Errorf("read %s: %w", DocumentName, err)
-		return nil, s.docFailure
+		return document{}, s.docFailure
 	}
-	var d document
 	if err := json.Unmarshal(migrated, &d); err != nil {
 		s.docFailure = fmt.Errorf("parse %s: %w", DocumentName, err)
-		return nil, s.docFailure
+		return document{}, s.docFailure
+	}
+	if d.Digests == nil {
+		d.Digests = map[string]string{}
 	}
 	for _, name := range d.Disabled {
 		canonical, err := normalizeName(name)
 		if err != nil {
 			s.docFailure = fmt.Errorf("parse %s: disabled name %q: %w", DocumentName, name, err)
-			return nil, s.docFailure
+			return document{}, s.docFailure
 		}
 		if canonical != name {
 			s.docFailure = fmt.Errorf("parse %s: disabled name %q is not canonical", DocumentName, name)
-			return nil, s.docFailure
+			return document{}, s.docFailure
 		}
-		disabled[canonical] = struct{}{}
+	}
+	for name, digest := range d.Digests {
+		canonical, err := normalizeName(name)
+		if err != nil || canonical != name {
+			s.docFailure = fmt.Errorf("parse %s: digest name %q is not canonical", DocumentName, name)
+			return document{}, s.docFailure
+		}
+		if len(digest) != sha256HexSize || !isHexDigest(digest) {
+			s.docFailure = fmt.Errorf("parse %s: digest for %q is invalid", DocumentName, name)
+			return document{}, s.docFailure
+		}
 	}
 	s.docFailure = nil
-	return disabled, nil
+	return d, nil
+}
+
+const sha256HexSize = sha256.Size * 2
+
+func isHexDigest(value string) bool {
+	var decoded [sha256.Size]byte
+	_, err := hex.Decode(decoded[:], []byte(value))
+	return err == nil
 }
 
 func (s *Store) documentError() error {
@@ -137,8 +180,8 @@ func (s *Store) documentError() error {
 	return s.docFailure
 }
 
-// List returns every discovered skill, including disabled ones, for Settings.
-// Prompt indexing and Read use discoverDetailed's exclusion mode instead.
+// List returns every discovered skill, including disabled and changed ones,
+// for Settings. Prompt indexing and Read use discoverDetailed's exclusion mode.
 func (s *Store) List() (ListResult, error) {
 	if s == nil {
 		return ListResult{}, errUnavailable
@@ -159,6 +202,7 @@ func (s *Store) List() (ListResult, error) {
 			Provenance:  found.Provenance,
 			Path:        filepath.Join(found.BaseDir, "SKILL.md"),
 			Enabled:     found.Enabled,
+			Status:      found.Status,
 		})
 	}
 	return result, nil
@@ -200,19 +244,23 @@ func (s *Store) SetEnabled(name string, enabled bool) error {
 
 	s.docMu.Lock()
 	defer s.docMu.Unlock()
-	disabled, err := s.loadDisabledLocked()
+	d, err := s.loadDocumentLocked()
 	if err != nil {
 		return err
+	}
+	disabled := make(map[string]struct{}, len(d.Disabled))
+	for _, item := range d.Disabled {
+		disabled[item] = struct{}{}
 	}
 	if enabled {
 		delete(disabled, name)
 	} else {
 		disabled[name] = struct{}{}
 	}
-	return s.writeDisabledLocked(disabled)
+	return s.writeDocumentLocked(disabled, d.Digests)
 }
 
-func (s *Store) writeDisabledLocked(disabled map[string]struct{}) error {
+func (s *Store) writeDocumentLocked(disabled map[string]struct{}, digests map[string]string) error {
 	if s.docStore == nil {
 		return errors.New("skill settings document is unavailable")
 	}
@@ -221,11 +269,80 @@ func (s *Store) writeDisabledLocked(disabled map[string]struct{}) error {
 		names = append(names, name)
 	}
 	sort.Strings(names)
-	if err := s.docStore.Write(DocumentName, document{SchemaVersion: Module.Current, Disabled: names}); err != nil {
+	if err := s.docStore.Write(DocumentName, document{SchemaVersion: Module.Current, Disabled: names, Digests: digests}); err != nil {
 		return fmt.Errorf("write %s: %w", DocumentName, err)
 	}
 	s.docFailure = nil
 	return nil
+}
+
+func (s *Store) recordApprovalDigest(name, dir string) error {
+	digest, err := hashSkillDirectory(dir)
+	if err != nil {
+		return fmt.Errorf("skill %q: hash: %w", name, err)
+	}
+	s.docMu.Lock()
+	defer s.docMu.Unlock()
+	d, err := s.loadDocumentLocked()
+	if err != nil {
+		return err
+	}
+	if d.Digests == nil {
+		d.Digests = make(map[string]string)
+	}
+	d.Digests[name] = digest
+	disabled := make(map[string]struct{}, len(d.Disabled))
+	for _, item := range d.Disabled {
+		disabled[item] = struct{}{}
+	}
+	return s.writeDocumentLocked(disabled, d.Digests)
+}
+
+func (s *Store) clearApprovalDigest(name string) error {
+	s.docMu.Lock()
+	defer s.docMu.Unlock()
+	d, err := s.loadDocumentLocked()
+	if err != nil {
+		return err
+	}
+	delete(d.Digests, name)
+	disabled := make(map[string]struct{}, len(d.Disabled))
+	for _, item := range d.Disabled {
+		disabled[item] = struct{}{}
+	}
+	return s.writeDocumentLocked(disabled, d.Digests)
+}
+
+// Approve records the current bytes of a changed managed skill. Authored and
+// builtin skills have no assistant approval digest and cannot use this path.
+func (s *Store) Approve(name string) error {
+	name, err := normalizeName(name)
+	if err != nil {
+		return err
+	}
+	unlock, err := s.lockName(name)
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	if rootErr := s.requireManagedRoot(); rootErr != nil {
+		return rootErr
+	}
+	var target *discovered
+	for _, found := range discoverDetailed(s.roots, true) {
+		if found.Name == name {
+			copy := found
+			target = &copy
+			break
+		}
+	}
+	if target == nil || target.Provenance != ProvenanceManaged {
+		return fmt.Errorf("skill %q is not a changed managed skill", name)
+	}
+	if target.Status != StatusChanged {
+		return fmt.Errorf("skill %q is not changed", name)
+	}
+	return s.recordApprovalDigest(name, target.BaseDir)
 }
 
 // Remove deletes the person-facing authored or managed skill. Builtins are
@@ -298,6 +415,11 @@ func (s *Store) removeDiscovered(found discovered) error {
 	}
 	if err := s.fs.Sync(dir); err != nil {
 		return fmt.Errorf("skill %q: sync directory after delete: %w", found.Name, err)
+	}
+	if found.Provenance == ProvenanceManaged {
+		if err := s.clearApprovalDigest(found.Name); err != nil {
+			return fmt.Errorf("skill %q: clear approval: %w", found.Name, err)
+		}
 	}
 	return nil
 }

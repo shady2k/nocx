@@ -19,6 +19,7 @@ const SKILLS: SkillsList = {
       provenance: 'authored',
       path: '/tmp/nocx/skills/deploy/SKILL.md',
       enabled: true,
+      status: 'approved',
     },
     {
       name: 'skill-authoring',
@@ -26,6 +27,7 @@ const SKILLS: SkillsList = {
       provenance: 'builtin',
       path: 'skill-authoring/SKILL.md',
       enabled: true,
+      status: 'approved',
     },
   ],
 }
@@ -35,6 +37,7 @@ function fakeClient(overrides: Partial<SkillsClientLike> = {}): SkillsClientLike
     list: vi.fn().mockResolvedValue(SKILLS),
     setEnabled: vi.fn().mockResolvedValue({ name: 'deploy', enabled: false }),
     remove: vi.fn().mockResolvedValue({ name: 'deploy' }),
+    approve: vi.fn().mockResolvedValue({ name: 'deploy', status: 'approved' }),
     ...overrides,
   }
 }
@@ -94,6 +97,31 @@ describe('SkillsSection', () => {
     fireEvent.click(toggle)
     await waitFor(() => expect(setEnabled).toHaveBeenCalledWith('deploy', false))
     await waitFor(() => expect(toggle.checked).toBe(false))
+  })
+
+  it('shows a changed managed skill with its path and offers re-approval', async () => {
+    const approve = vi.fn().mockResolvedValue({ name: 'deploy', status: 'approved' })
+    const changed: SkillsList = {
+      ...SKILLS,
+      skills: [{ ...SKILLS.skills[0], provenance: 'managed', status: 'changed' }],
+    }
+    const approved: SkillsList = {
+      ...changed,
+      skills: [{ ...changed.skills[0], status: 'approved' }],
+    }
+    const client = fakeClient({
+      approve,
+      list: vi.fn().mockResolvedValueOnce(changed).mockResolvedValueOnce(approved),
+    })
+    const store = new SkillsStore(client)
+    const { container } = render(() => <SkillsSection store={store} />)
+
+    await waitFor(() => expect(screen.getByText(/Changed since approval/)).toBeTruthy())
+    const deploy = container.querySelector<HTMLElement>('[data-skill-name="deploy"]')!
+    expect(deploy.textContent).toContain('/tmp/nocx/skills/deploy/SKILL.md')
+    fireEvent.click(screen.getByRole('button', { name: 'Re-approve' }))
+    await waitFor(() => expect(approve).toHaveBeenCalledWith('deploy'))
+    await waitFor(() => expect(container.textContent).not.toContain('Changed since approval'))
   })
 
   it('shows a corrupt document as an actionable failure with its path', async () => {

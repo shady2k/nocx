@@ -238,7 +238,7 @@ describe('historyProvider', () => {
     const provider = historyProvider({ query })
     const got = await provider.suggest(ctx({ doc: 'git sta' }), new AbortController().signal)
 
-    expect(query).toHaveBeenCalledWith('/repo', '')
+    expect(query).toHaveBeenCalledWith('/repo', '', expect.any(AbortSignal))
     // Only commands starting with the line; the duplicate `git status` keeps
     // the newest row (freshness 200), and the line itself is the replacement.
     expect(got.candidates.map((c) => c.insertText)).toEqual(['git status', 'git stash pop'])
@@ -408,7 +408,11 @@ describe('historyProvider', () => {
     // …but marked stale: the backend answered no entry named exactly the
     // token (soft-empty for a missing path), so the rank sinks it last.
     expect(got.candidates[0].stalePath).toBe(true)
-    expect(completeFs).toHaveBeenCalledWith('zzz-e2e-cmp-msbojbc7', '/repo')
+    expect(completeFs).toHaveBeenCalledWith(
+      'zzz-e2e-cmp-msbojbc7',
+      '/repo',
+      expect.any(AbortSignal),
+    )
   })
 
   it('an exact entry-name match is existence — the row is not demoted', async () => {
@@ -645,7 +649,7 @@ describe('fsProvider', () => {
       ctx({ doc: 'ls ', token: { text: '', from: 3, to: 3 } }),
       new AbortController().signal,
     )
-    expect(complete).toHaveBeenCalledWith('./', '/repo')
+    expect(complete).toHaveBeenCalledWith('./', '/repo', expect.any(AbortSignal))
     // The display keys off the REAL token, so rows show bare names — never a
     // `./` the user did not type.
     expect(got.candidates.map((c) => c.displayText)).toEqual(['src/', 'notes.txt'])
@@ -759,7 +763,7 @@ describe('fsProvider', () => {
       ctx({ doc: 'cd ./sr', token: { text: './sr', from: 3, to: 7 } }),
       new AbortController().signal,
     )
-    expect(complete).toHaveBeenCalledWith('./sr', '/repo')
+    expect(complete).toHaveBeenCalledWith('./sr', '/repo', expect.any(AbortSignal))
     expect(got.candidates).toHaveLength(1)
     const c = got.candidates[0]
     // Report 3 — the display is the LAST SEGMENT: the typed `./` prefix is
@@ -1042,5 +1046,33 @@ describe('shellCompleteProvider — the line a pick produces', () => {
     const c = remote('git checkout ma', 'ma')
     const { candidates } = await provider.suggest(c, new AbortController().signal)
     expect(accepted(c.doc, candidates[0])).toBe('git checkout main')
+    expect(candidates[0].source).toBe('function')
+  })
+
+  it('a withdrawn completion is silent — a cancelled query is not a failure to report', async () => {
+    const provider = shellCompleteProvider({
+      complete: () => Promise.resolve({ entries: [], truncated: false, reason: 'cancelled' }),
+      sessionId: () => 'sess-1',
+    })
+    const got = await provider.suggest(
+      remote('git checkout ma', 'ma'),
+      new AbortController().signal,
+    )
+    expect(got.emptyReason).toBeUndefined()
+  })
+
+  it('names remote completion failures as completion failures, not SSH config failures', async () => {
+    const provider = shellCompleteProvider({
+      complete: () => Promise.resolve({ entries: [], truncated: false, reason: 'remote failed' }),
+      sessionId: () => 'sess-1',
+    })
+    const got = await provider.suggest(
+      remote('git checkout ma', 'ma'),
+      new AbortController().signal,
+    )
+    expect(got.emptyReason).toEqual({
+      kind: 'completion-unavailable',
+      reason: 'remote failed',
+    })
   })
 })

@@ -1893,14 +1893,17 @@ export class TerminalContent extends BasePaneContent {
       this.completion = new CompletionController({
         providers: createShellProviders({
           store: renderer.snapshotStore,
-          queryHistory: (cwd, host) => queryHistory(this.client, 'directory', cwd, host),
-          completeFs: (text, cwd) => this.client.call<FsComplete>('fs.complete', { text, cwd }),
+          queryHistory: (cwd, host, signal) =>
+            queryHistory(this.client, 'directory', cwd, host, undefined, undefined, signal),
+          completeFs: (text, cwd, signal) =>
+            this.client.call<FsComplete>('fs.complete', { text, cwd }, signal),
           // The remote completion adapter (nocx-w7h.15): active only on
           // remote sessions, where it asks the remote shell's own
           // completion machinery — paths from the remote filesystem,
           // command names, and command-specific completions from bash
           // completion functions.
-          completeShell: (params) => this.client.call<ShellComplete>('shell.complete', params),
+          completeShell: (params, signal) =>
+            this.client.call<ShellComplete>('shell.complete', params, signal),
           sessionId: () => this.session?.sessionId ?? '',
           // The host provider is built inside createShellProviders (the
           // assembly it routes is plain code, not the DOM-bound quick-connect

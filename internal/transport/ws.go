@@ -1471,6 +1471,7 @@ func (s *WSServer) buildControlPlane() {
 	snippetOp := capability.NewSnippetOperation(gates.config, lane, s.snippets)
 	_ = endpointWired
 	specs := make([]methodSpec, 0, 96)
+	specs = append(specs, rpcCancelSpec(immediate))
 	specs = append(specs, s.heartbeatSpecs(immediate)...)
 	specs = append(specs, s.sessionSpecs(lane, gates.session, gates.config)...)
 	specs = append(specs, s.signalSpecs(lane, gates.session)...)
@@ -1909,9 +1910,10 @@ type RPCError struct {
 // id is the per-connection (per-tab) identity: backend-assigned, monotonic,
 // and never reused.
 type wsConn struct {
-	out *outbound.Conn
-	log log.Logger
-	id  uint64
+	out            *outbound.Conn
+	log            log.Logger
+	id             uint64
+	requestCancels *requestCancels
 	// methods is this connection's materialised control-handler set
 	// (registration.go): method → submission + handler closure. The handlers
 	// are constructed with THIS connection's Responder, so the set is
@@ -1931,8 +1933,9 @@ func newWSConn(s *WSServer, conn *websocket.Conn, id uint64) *wsConn {
 				}
 			},
 		}),
-		log: s.log,
-		id:  id,
+		log:            s.log,
+		id:             id,
+		requestCancels: newRequestCancels(),
 	}
 }
 
@@ -2587,6 +2590,9 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	go s.readLoop(ctx, wconn, state, readErr)
 
 	<-readErr
+	// A disconnected renderer cannot cancel through the socket, so wake every
+	// cancellable read before the connection's handler state is discarded.
+	wconn.requestCancels.cancelAll()
 
 	// Connection dropped. Clear this connection from every subscriber slot
 	// it still holds (a newer subscriber is preserved), then wake any ring
@@ -2738,11 +2744,34 @@ func (s *WSServer) handleControlFrame(ctx context.Context, wconn *wsConn, state 
 	// them being passed the method or the id. A handler that goes on to
 	// drive an EXCHANGE (an agent run) adds the trace beside it.
 	ctx = log.WithRequestID(ctx, requestTag(wconn, req))
-	rej := m.submission.TrySubmit(ctx, control.Task{Run: func(pctx context.Context) {
+	requestCtx := ctx
+	cancelRequest := func() {}
+	var cancelEntry *requestCancel
+	if req.ID != nil && requestMethodCancellable(req.Method) {
+		requestCtx, cancelRequest = context.WithCancel(ctx)
+		var err error
+		cancelEntry, err = wconn.requestCancels.register(req.ID, cancelRequest)
+		if err != nil {
+			cancelRequest()
+			_ = respond(wconn, newJSONRPCError(req.ID, -32600, "Invalid Request"))
+			return
+		}
+	}
+	rej := m.submission.TrySubmit(requestCtx, control.Task{Run: func(pctx context.Context) {
+		defer cancelRequest()
+		defer func() {
+			if cancelEntry != nil {
+				wconn.requestCancels.drop(req.ID, cancelEntry)
+			}
+		}()
 		m.handle(pctx, req)
 	}})
 	if rej == nil {
 		return
+	}
+	cancelRequest()
+	if cancelEntry != nil {
+		wconn.requestCancels.drop(req.ID, cancelEntry)
 	}
 	sat := saturationErrorFor(rej)
 	// Refused. A request (has an id) answers with the saturation error; a

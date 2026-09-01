@@ -242,10 +242,14 @@ describe('queryHistory', () => {
       coverage: null,
     })
     await queryHistory(client as unknown as WSClient, 'pane', '/repo', '', '', 'pane-a')
-    expect(client.call).toHaveBeenCalledWith('history.query', {
-      scope: 'pane',
-      paneId: 'pane-a',
-    })
+    expect(client.call).toHaveBeenCalledWith(
+      'history.query',
+      {
+        scope: 'pane',
+        paneId: 'pane-a',
+      },
+      undefined,
+    )
   })
   it('directory rung carries cwd and host', async () => {
     const client = fakeClient()
@@ -256,18 +260,26 @@ describe('queryHistory', () => {
       source: 'store',
     })
     await queryHistory(client as unknown as WSClient, 'directory', '/repo', '')
-    expect(client.call).toHaveBeenCalledWith('history.query', {
-      scope: 'directory',
-      cwd: '/repo',
-      host: '',
-    })
+    expect(client.call).toHaveBeenCalledWith(
+      'history.query',
+      {
+        scope: 'directory',
+        cwd: '/repo',
+        host: '',
+      },
+      undefined,
+    )
   })
 
   it('host rung carries host only', async () => {
     const client = fakeClient()
     client.call.mockResolvedValue({ entries: [], scope: 'host', exhausted: true, source: 'store' })
     await queryHistory(client as unknown as WSClient, 'host', '/repo', 'prod')
-    expect(client.call).toHaveBeenCalledWith('history.query', { scope: 'host', host: 'prod' })
+    expect(client.call).toHaveBeenCalledWith(
+      'history.query',
+      { scope: 'host', host: 'prod' },
+      undefined,
+    )
   })
 
   it('everywhere rung carries nothing but the scope', async () => {
@@ -279,7 +291,7 @@ describe('queryHistory', () => {
       source: 'store',
     })
     await queryHistory(client as unknown as WSClient, 'everywhere', '/repo', '')
-    expect(client.call).toHaveBeenCalledWith('history.query', { scope: 'everywhere' })
+    expect(client.call).toHaveBeenCalledWith('history.query', { scope: 'everywhere' }, undefined)
   })
 
   it('text filter rides on every rung when present', async () => {
@@ -292,10 +304,14 @@ describe('queryHistory', () => {
       coverage: null,
     })
     await queryHistory(client as unknown as WSClient, 'pane', '/repo', '', 'deploy', 'pane-a')
-    expect(client.call).toHaveBeenCalledWith('history.query', {
-      scope: 'everywhere',
-      text: 'deploy',
-    })
+    expect(client.call).toHaveBeenCalledWith(
+      'history.query',
+      {
+        scope: 'everywhere',
+        text: 'deploy',
+      },
+      undefined,
+    )
   })
 
   it('omits text when empty: no filter is one state on the wire, not two', async () => {
@@ -308,7 +324,7 @@ describe('queryHistory', () => {
       coverage: null,
     })
     await queryHistory(client as unknown as WSClient, 'everywhere', '/repo', '', '')
-    expect(client.call).toHaveBeenCalledWith('history.query', { scope: 'everywhere' })
+    expect(client.call).toHaveBeenCalledWith('history.query', { scope: 'everywhere' }, undefined)
   })
 
   it('returns the store page with its coverage', async () => {

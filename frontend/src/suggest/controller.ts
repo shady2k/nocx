@@ -16,9 +16,13 @@
 //     even if a provider answers later.
 //   - A late arrival may not move the selection — within one query, batches
 //     merge and the selection tracks the candidate id (merge.ts).
-//   - A keystroke aborts: every user document change starts a fresh query,
-//     and a provider may not deliver after abort (batches are dropped by
-//     generation, never trusted).
+//   - A keystroke invalidates the query: the controller debounces document
+//     changes for QUERY_DEBOUNCE_MS, then aborts the previous query before
+//     issuing the latest one. This amends the original per-keystroke
+//     decision (nocx-7jujk): completion is still refreshed after each typing
+//     burst, but control-plane work is coalesced and superseded work is
+//     CANCELLED on the backend rather than merely discarded here. Batches
+//     remain generation-guarded and are never trusted after abort.
 //   - A provider's error never kills the others.
 //   - The same candidate from two providers dedups by id.
 //
@@ -55,6 +59,12 @@ import { logDecision, isDecisionTracing } from '../log'
  *  opening for that query (a slow provider is never waited for). */
 export const LATENCY_BUDGET_MS = 250
 
+/** The trailing typing debounce is 150 ms: it matches the existing Files
+ *  filter debounce (`frontend/src/files/files-store.ts`) and stays below the
+ *  250 ms first-result latency budget, so a person typing at human speed gets
+ *  one refresh per pause without waiting an unfamiliar extra interval. */
+export const QUERY_DEBOUNCE_MS = 150
+
 /** The minimal editor surface the controller drives. CommandEditor
  *  satisfies it; tests substitute a fake. */
 export interface CompletionEditor {
@@ -80,6 +90,9 @@ export interface CompletionControllerOptions {
    *  the controller's own guard. */
   recallIsOpen?: () => boolean
   latencyBudgetMs?: number
+  /** Override for deterministic controller tests; production uses
+   *  QUERY_DEBOUNCE_MS. */
+  queryDebounceMs?: number
   /**
    * Accepting a snippet row (design §10.2, bead nocx-nlhe). The controller
    * clears the token the row completed and hands the LIBRARY ID over —
@@ -335,6 +348,7 @@ export class CompletionController {
    *  accept and ghost render is checked against. */
   private queryDoc = ''
   private abort: AbortController | null = null
+  private queryTimer: ReturnType<typeof setTimeout> | undefined
   private budgetTimer: ReturnType<typeof setTimeout> | undefined
   private gaveUp = false
   /** The id of the ghosted candidate carried into an open (Tab) query — the
@@ -417,14 +431,35 @@ export class CompletionController {
   /** Tab pressed with the dropdown closed — open it (or stay closed if the
    *  query yields nothing within the budget). */
   open(): void {
+    this.clearQueryTimer()
     this.runQuery(true)
   }
 
-  /** A user-driven document change — a keystroke aborts the query in flight
-   *  and starts a fresh one, for the ghost and (when open) the dropdown.
-   *  Typing never OPENS the dropdown; only Tab does. */
+  /** A user-driven document change schedules ONE fresh query after the
+   *  typing burst, and withdraws the query in flight at once — so the
+   *  backend stops working on an answer nobody will read, rather than
+   *  serving it to be thrown away here.
+   *
+   *  The surface is left exactly as it was: an open dropdown keeps its rows
+   *  until the replacement query answers, which is what it did before the
+   *  debounce existed. Nothing stale can be taken from the ghost while it
+   *  waits — ghostAcceptable refuses a box whose document has moved, on both
+   *  the draw and the accept path. Typing never OPENS the dropdown; only
+   *  Tab does. */
   onDocChanged(): void {
-    this.runQuery(false)
+    this.generation++
+    this.abort?.abort()
+    this.abort = null
+    this.clearQueryTimer()
+    const delay = this.options.queryDebounceMs ?? QUERY_DEBOUNCE_MS
+    if (delay <= 0) {
+      this.runQuery(false)
+      return
+    }
+    this.queryTimer = setTimeout(() => {
+      this.queryTimer = undefined
+      this.runQuery(false)
+    }, delay)
   }
 
   /** Mouse hover: move the selection to an absolute row (the dropdown's
@@ -563,6 +598,14 @@ export class CompletionController {
   /** Close the dropdown and drop the ghost (Esc, or the recall overlay
    *  taking the surface). The draft is untouched. */
   dismiss(): void {
+    this.generation++
+    this.clearQueryTimer()
+    this.abort?.abort()
+    this.abort = null
+    if (this.budgetTimer !== undefined) {
+      clearTimeout(this.budgetTimer)
+      this.budgetTimer = undefined
+    }
     if (this.state.name !== 'closed') {
       this.state = { name: 'closed' }
       this.options.dropdown.hide()
@@ -571,9 +614,18 @@ export class CompletionController {
   }
 
   destroy(): void {
+    this.generation++
     this.abort?.abort()
-    if (this.budgetTimer !== undefined) clearTimeout(this.budgetTimer)
+    this.abort = null
+    this.clearQueryTimer()
+    clearTimeout(this.budgetTimer)
+    this.budgetTimer = undefined
     this.options.dropdown.destroy()
+  }
+
+  private clearQueryTimer(): void {
+    clearTimeout(this.queryTimer)
+    this.queryTimer = undefined
   }
 
   private runQuery(openIntent: boolean): void {
@@ -841,6 +893,7 @@ export class CompletionController {
       'empty-dir': 0,
       'command-names': 1,
       'hosts-unavailable': 1,
+      'completion-unavailable': 1,
       'no-match': 2,
     }
     if (priority[reason.kind] < priority[this.bestReason.kind]) this.bestReason = reason
@@ -858,6 +911,8 @@ export class CompletionController {
           : `${this.bestReason.dir} is empty`
       case 'command-names':
         return commandNamesMessage(this.bestReason)
+      case 'completion-unavailable':
+        return `Shell completion unavailable: ${this.bestReason.reason}`
       case 'hosts-unavailable':
         // The quick-connect vocabulary for the degraded `ssh -G` resolver —
         // the condition, never silence. The detail names the failure the

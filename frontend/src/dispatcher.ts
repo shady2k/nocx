@@ -121,6 +121,20 @@ interface PendingCall {
   method: string
   params: unknown
   sealedRetried: boolean
+  sent: boolean
+  settled: boolean
+  /** The id the BACKEND is working on. A vault-sealed retry re-sends the
+   *  request under a fresh id, and a withdrawal must name that one. */
+  currentID: number
+  signal?: AbortSignal
+  onAbort?: () => void
+  removeAbortListener?: () => void
+}
+
+function abortError(): Error {
+  const err = new Error('The operation was aborted')
+  err.name = 'AbortError'
+  return err
 }
 
 export type ConnectionState =
@@ -322,22 +336,54 @@ export class Dispatcher {
    */
   onVaultSealed?: (method: string) => Promise<void>
 
-  call<T = unknown>(method: string, params: unknown): Promise<T> {
+  call<T = unknown>(method: string, params: unknown, signal?: AbortSignal): Promise<T> {
     return new Promise((resolve, reject) => {
       const id = this.nextID++
-      this.pending.set(id, {
+      const pending: PendingCall = {
         resolve: resolve as (v: unknown) => void,
         reject,
         method,
         params,
         sealedRetried: false,
-      })
+        sent: false,
+        settled: false,
+        currentID: id,
+      }
+      const abort = (): void => {
+        if (pending.settled) return
+        pending.settled = true
+        const activeID = pending.currentID
+        if (this.pending.get(activeID) === pending) this.pending.delete(activeID)
+        pending.removeAbortListener?.()
+        reject(abortError())
+        const ws = this.ws
+        if (pending.sent && ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(
+            JSON.stringify({ jsonrpc: '2.0', method: 'rpc.cancel', params: { id: activeID } }),
+          )
+          this._noteOutboundActivity(ws)
+        }
+      }
+      this.pending.set(id, pending)
+      if (signal?.aborted) {
+        abort()
+        return
+      }
+      if (signal) {
+        pending.signal = signal
+        pending.onAbort = abort
+        signal.addEventListener('abort', abort, { once: true })
+        pending.removeAbortListener = () => signal.removeEventListener('abort', abort)
+      }
       const ws = this.ws
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         this.pending.delete(id)
+        pending.settled = true
+        pending.removeAbortListener?.()
         reject(new Error('not connected'))
         return
       }
+      pending.sent = true
       ws.send(JSON.stringify({ jsonrpc: '2.0', id, method, params }))
       this._noteOutboundActivity(ws)
     })
@@ -456,6 +502,7 @@ export class Dispatcher {
       const p = this.pending.get(msg.id)
       if (!p) return
       this.pending.delete(msg.id)
+      p.removeAbortListener?.()
       if (msg.error) {
         if (
           this.onVaultSealed &&
@@ -471,18 +518,37 @@ export class Dispatcher {
           p.sealedRetried = true
           void this.onVaultSealed(p.method).then(
             () => {
+              if (p.signal?.aborted) {
+                // Withdrawn while the unlock prompt was up. The first request
+                // has already been answered and the replacement was never
+                // sent, so nothing is in flight to cancel.
+                p.settled = true
+                p.reject(abortError())
+                return
+              }
               const id = this.nextID++
+              p.currentID = id
               this.pending.set(id, p)
               const ws = this.ws
               if (!ws || ws.readyState !== WebSocket.OPEN) {
                 this.pending.delete(id)
+                p.settled = true
                 p.reject(new Error('not connected'))
                 return
               }
               ws.send(JSON.stringify({ jsonrpc: '2.0', id, method: p.method, params: p.params }))
               this._noteOutboundActivity(ws)
+              // The listener was dropped with the first response; the caller's
+              // signal still owns this call, so re-arm it against the new id.
+              const signal = p.signal
+              const onAbort = p.onAbort
+              if (signal && onAbort) {
+                signal.addEventListener('abort', onAbort, { once: true })
+                p.removeAbortListener = () => signal.removeEventListener('abort', onAbort)
+              }
             },
             (e: unknown) => {
+              p.settled = true
               p.reject(e instanceof Error ? e : new Error(String(e)))
             },
           )

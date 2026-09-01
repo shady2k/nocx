@@ -1750,6 +1750,9 @@ func (s *WSServer) filesPollPath(
 		return filesPollPathOK
 	}
 	path := selection.path
+	// Same owner and closing event as filesBaseline: the poll loop is
+	// binding-owned (spec §5.1) and outlives any connection, so it runs on
+	// a background context until the binding is torn down.
 	listing, err := h.List(context.Background(), path, filesystem.Page{Offset: 0, Limit: 1})
 	if err != nil {
 		var released *filesystem.ErrHandleReleased

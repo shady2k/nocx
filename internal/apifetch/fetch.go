@@ -42,6 +42,7 @@ import (
 	"mime"
 	"net/http"
 	"net/url"
+	"regexp"
 	"strings"
 	"time"
 	"unicode"
@@ -269,11 +270,20 @@ func validateDeclaredCharset(contentType string) error {
 	return nil
 }
 
+var xmlEncodingDeclaration = regexp.MustCompile(`(?is)^\x{FEFF}?\s*<\?xml\b[^>]*\bencoding\s*=\s*["']([^"']+)["']`)
+
 func decodeText(body []byte, contentType string) (text string, lossy bool, err error) {
 	if len(body) == 0 {
 		return "", false, nil
 	}
-	reader, err := charset.NewReader(bytes.NewReader(body), contentType)
+	effectiveContentType, err := contentTypeForDecode(body, contentType)
+	if err != nil {
+		return "", false, err
+	}
+	// Header charset beats the XML declaration, which beats charset.NewReader's
+	// content sniffing: transport metadata is closer to the bytes than XML's
+	// document-level opinion.
+	reader, err := charset.NewReader(bytes.NewReader(body), effectiveContentType)
 	if err != nil {
 		return "", false, fmt.Errorf("%w: %v", ErrNotText, err)
 	}
@@ -288,6 +298,45 @@ func decodeText(body []byte, contentType string) (text string, lossy bool, err e
 		text = replaceInvalidUTF8(text)
 	}
 	return text, lossy, nil
+}
+
+func contentTypeForDecode(body []byte, contentType string) (string, error) {
+	_, params, parseErr := mime.ParseMediaType(contentType)
+	if parseErr == nil {
+		if _, headerCharset := params["charset"]; headerCharset {
+			return contentType, nil
+		}
+	} else if contentType != "" {
+		return contentType, nil
+	}
+	declarationCharset, ok := xmlDeclarationCharset(body)
+	if !ok {
+		return contentType, nil
+	}
+	if _, name := charset.Lookup(declarationCharset); name == "" {
+		return "", fmt.Errorf("%w: unsupported charset %q", ErrNotText, declarationCharset)
+	}
+	return contentTypeWithCharset(contentType, declarationCharset), nil
+}
+
+func xmlDeclarationCharset(body []byte) (string, bool) {
+	match := xmlEncodingDeclaration.FindSubmatch(body)
+	if len(match) != 2 {
+		return "", false
+	}
+	return strings.TrimSpace(string(match[1])), true
+}
+
+func contentTypeWithCharset(contentType, label string) string {
+	if contentType == "" {
+		return "text/plain; charset=" + label
+	}
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil {
+		return contentType + "; charset=" + label
+	}
+	params["charset"] = label
+	return mime.FormatMediaType(mediaType, params)
 }
 
 func replaceInvalidUTF8(text string) string {

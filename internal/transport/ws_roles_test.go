@@ -51,10 +51,10 @@ func (h *endpointHarness) assignRole(t *testing.T, role string, endpointID, mode
 func TestRolesList_UnassignedRolesAreVisibleNullRows(t *testing.T) {
 	h := newEndpointHarness(t)
 	roles := h.listRoles(t)
-	if len(roles) != 3 {
-		t.Fatalf("roles.list = %+v, want exactly the three product roles", roles)
+	if len(roles) != len(profile.AllRoles()) {
+		t.Fatalf("roles.list = %+v, want exactly the closed product role set", roles)
 	}
-	want := []profile.ModelRole{profile.RoleAnswering, profile.RoleClassifier, profile.RoleSummarizing}
+	want := profile.AllRoles()
 	for i, r := range roles {
 		if r.Role != want[i] {
 			t.Errorf("roles[%d].role = %q, want %q (product order)", i, r.Role, want[i])
@@ -358,8 +358,8 @@ func TestRolesSetDefault_ReturnsTheTableAndTheDefaultItJustWrote(t *testing.T) {
 	if err := json.Unmarshal(env.Result, &got); err != nil {
 		t.Fatalf("decode roles: %v", err)
 	}
-	if len(got.Roles) != 2 {
-		t.Fatalf("roles.setDefault returned %d rows, want the closed role set", len(got.Roles))
+	if len(got.Roles) != len(profile.AllRoles()) {
+		t.Fatalf("roles.setDefault returned %d rows, want the closed role set of %d", len(got.Roles), len(profile.AllRoles()))
 	}
 	if d := wireDefault(t, env.Result); d == nil || d.Model != "gpt-4o-mini" {
 		t.Fatalf("roles.setDefault result default = %+v, want the pair it just wrote", d)

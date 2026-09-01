@@ -42,7 +42,6 @@ const test = base
 const nonce = Date.now().toString(36)
 
 const TITLE = '.nocx-tab-title'
-const TAB = '.nocx-tab'
 const INPUT = '.pane.active .nocx-editor-input'
 const NEW_TAB = '[aria-label="New tab"]'
 const SETTINGS_AI_NAV = '.ui-grouped-nav__item[data-item="endpoints"]'
@@ -227,8 +226,8 @@ test.describe('a skill written in pane A is followed in pane B (nocx-hzd6t)', ()
     // pane A's active editor. The prompt index and read are both observed from
     // the model requests belonging to this pane.
     await page.locator(NEW_TAB).click()
-    await expect(page.locator(TAB)).toHaveCount(2, { timeout: 15_000 })
     await expect(page.locator(INPUT)).toBeVisible({ timeout: 15_000 })
+    await expect(page.locator(INPUT)).toBeFocused({ timeout: 15_000 })
 
     fake.setScript({
       chunks: [],

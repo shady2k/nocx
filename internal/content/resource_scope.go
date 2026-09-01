@@ -88,7 +88,7 @@ func parseContentID(id string) (contentResourceID, bool) {
 		return contentResourceID{kind: "content"}, true
 	}
 	parts := strings.Split(id, "/")
-	if len(parts) != 2 || (parts[0] != "note" && parts[0] != "snippet") || !validResourceAtom(parts[1]) {
+	if len(parts) != 2 || (parts[0] != "note" && parts[0] != "snippet" && parts[0] != "skill") || !validResourceAtom(parts[1]) {
 		return contentResourceID{}, false
 	}
 	return contentResourceID{kind: parts[0], id: parts[1]}, true
@@ -96,7 +96,7 @@ func parseContentID(id string) (contentResourceID, bool) {
 
 func validateContentID(id string) error {
 	if _, ok := parseContentID(id); !ok {
-		return fmt.Errorf("want content, note/<id> or snippet/<id>")
+		return fmt.Errorf("want content, note/<id>, snippet/<id> or skill/<name>")
 	}
 	return nil
 }

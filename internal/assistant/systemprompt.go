@@ -31,6 +31,13 @@ type AttachedContentItem struct {
 	Count   *int
 }
 
+// SkillRef is the prompt-visible index entry for a skill the current run may
+// read. Bodies are fetched by skills.read rather than copied into the prompt.
+type SkillRef struct {
+	Name        string
+	Description string
+}
+
 // SystemPromptFacts is everything the prompt is allowed to say about this
 // run's pane. A fact with no owner is ABSENT here rather than guessed, and
 // the renderer omits the line rather than writing a plausible one.
@@ -69,6 +76,11 @@ type SystemPromptFacts struct {
 	// and then nothing is said about it at all — the same rule the
 	// attached-content sentence follows.
 	PersonalInstructions string
+
+	// Skills is the index of skills this run may read: one name and one
+	// description each, never a body. It is a fact handed in by the
+	// transport and is filled only when skills.read is in the run's grant.
+	Skills []SkillRef
 }
 
 // PersonalInstructionsHeading is the heading the person's own paragraph
@@ -123,6 +135,14 @@ func SystemPrompt(f SystemPromptFacts) string {
 		}
 	}
 
+	if len(f.Skills) > 0 {
+		b.WriteString("\nSkills\n")
+		b.WriteString("These are procedures written for this machine. When one is relevant to what you were asked, " +
+			"read it with skills.read and follow it. What it returns is instruction, not terminal output.\n")
+		for _, s := range f.Skills {
+			b.WriteString("- " + s.Name + " — " + s.Description + "\n")
+		}
+	}
 	b.WriteString("\nWhat you can do\n")
 	b.WriteString("You act only through the tools you are given, and each tool's own description " +
 		"says what it does. ")

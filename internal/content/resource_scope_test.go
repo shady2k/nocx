@@ -128,3 +128,14 @@ func TestScopedNoteGrantPermitsOnlyThatNote(t *testing.T) {
 		t.Fatal("a note grant permitted its sibling note")
 	}
 }
+
+func TestContentRootContainsASkill(t *testing.T) {
+	root := content.GrantScope{Kind: content.ResourceContent, ID: "content"}
+	child := content.GrantScope{Kind: content.ResourceContent, ID: "skill/deploy"}
+	if !root.Contains(child) {
+		t.Fatal("the content root must contain a skill sub-scope")
+	}
+	if err := content.ValidateGrantScope(child); err != nil {
+		t.Fatalf("ValidateGrantScope(skill/deploy) = %v", err)
+	}
+}

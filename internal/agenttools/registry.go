@@ -498,6 +498,21 @@ var declarations = []Declaration{
 		Params:           "snippets.reorder.schema.json",
 		Narrow:           narrowContent,
 	},
+	{
+		Name:             "skills.read",
+		Description:      "Read a skill's instructions by name, or one file inside that skill; reach for this when the index names a skill relevant to the task.",
+		Effect:           content.EffectObserve,
+		OutputTrust:      OutputTrustTrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "skill",
+		ResolveResources: skillResource("name"),
+		Executes:         InGo,
+		Params:           "skills.read.schema.json",
+		Narrow:           narrowContent,
+	},
 }
 
 // Assemble loads every declaration's params schema from fsys and builds the

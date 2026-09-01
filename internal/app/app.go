@@ -61,6 +61,7 @@ import (
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/settings"
 	"github.com/shady2k/nocx/internal/shellintegration"
+	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/snippet"
 	"github.com/shady2k/nocx/internal/ssh"
 	"github.com/shady2k/nocx/internal/storage"
@@ -548,6 +549,12 @@ func New(opts ...Option) (*App, error) {
 	if err != nil {
 		return nil, fmt.Errorf("storage paths: %w", err)
 	}
+
+	skillRoots := []skill.Root{
+		{Dir: filepath.Join(paths.ConfigDir(), "skills"), Provenance: skill.ProvenanceAuthored},
+		{Dir: filepath.Join(paths.ConfigDir(), "managed-skills"), Provenance: skill.ProvenanceManaged},
+	}
+	skills := skill.NewLibrary(skillRoots)
 
 	logFilePath := filepath.Join(paths.DataDir(), "nocx.log")
 	if o.logFilePath != nil {
@@ -1595,6 +1602,7 @@ func New(opts ...Option) (*App, error) {
 	tpOpts = append(tpOpts,
 		transport.WithAssistantClient(assistantClient),
 		transport.WithAssistantProbeStore(assistantProbes),
+		transport.WithSkillSource(skills),
 	)
 	// The same store the publisher enrols into, on its other end: the
 	// transport is what feeds it, from the session's own read path.

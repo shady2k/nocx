@@ -260,6 +260,25 @@ func TestSystemPrompt_AttachedCommandsAreQuotedAndLast(t *testing.T) {
 	}
 }
 
+func TestSystemPromptListsSkills(t *testing.T) {
+	prompt := SystemPrompt(SystemPromptFacts{
+		Env: content.Environment{Kind: content.EnvLocal},
+		Skills: []SkillRef{
+			{Name: "deploy", Description: "How we ship this service."},
+		},
+	})
+	if !strings.Contains(prompt, "deploy — How we ship this service.") {
+		t.Fatalf("the prompt does not list the skill:\n%s", prompt)
+	}
+}
+
+func TestSystemPromptOmitsTheSectionWithNoSkills(t *testing.T) {
+	prompt := SystemPrompt(SystemPromptFacts{Env: content.Environment{Kind: content.EnvLocal}})
+	if strings.Contains(prompt, "Skills") {
+		t.Fatalf("the prompt names skills with none available:\n%s", prompt)
+	}
+}
+
 // isPromptHeading recognises the prompt's own section headings: a short bare
 // line that is neither empty nor a sentence. The prompt writes each as
 // "\n<Heading>\n", so a heading is the line after a blank one and it does

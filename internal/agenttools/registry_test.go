@@ -166,6 +166,23 @@ const contentToolSchema = `{
   }}
 }`
 
+const skillsReadSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name"],
+  "properties": {"name": {"type": "string"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["name", "path", "content"],
+    "properties": {
+      "name": {"type": "string"},
+      "path": {"type": "string"},
+      "content": {"type": "string"}
+    }
+  }}
+}`
+
 // TestAssemble_MissingSchemaDoesNotAssemble is acceptance criterion 1: a tool
 // whose params schema is absent from contracts/ does not assemble into the
 // set — asserted, not documented in a comment. The tool is omitted and named
@@ -399,6 +416,26 @@ func TestForGrantDoesNotOfferSnippetsOnANoteOnlyGrant(t *testing.T) {
 	}
 }
 
+func TestForGrantOffersSkillsReadOnlyOnASkillGrant(t *testing.T) {
+	reg, err := Assemble(mustDirFS(t))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	g := content.Grant{
+		Effects: []content.Effect{content.EffectObserve},
+		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "skill/deploy"}},
+	}
+	if !containsName(reg.ForGrant(g), "skills.read") {
+		t.Fatalf("a skill grant must offer skills.read; got %v", toolNames(reg.ForGrant(g)))
+	}
+	if containsName(reg.ForGrant(content.Grant{
+		Effects: []content.Effect{content.EffectObserve},
+		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "note/deploy"}},
+	}), "skills.read") {
+		t.Fatal("a note grant must not offer skills.read")
+	}
+}
+
 func TestForGrant_ExactPermittedSet(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
 		"files.read.schema.json":       filesReadSchema,
@@ -417,6 +454,7 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"snippets.update.schema.json":  contentToolSchema,
 		"snippets.delete.schema.json":  contentToolSchema,
 		"snippets.reorder.schema.json": contentToolSchema,
+		"skills.read.schema.json":      skillsReadSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -540,6 +578,7 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"snippets.update.schema.json":  contentToolSchema,
 		"snippets.delete.schema.json":  contentToolSchema,
 		"snippets.reorder.schema.json": contentToolSchema,
+		"skills.read.schema.json":      skillsReadSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)

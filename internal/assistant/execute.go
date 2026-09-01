@@ -23,6 +23,7 @@ import (
 	"github.com/shady2k/nocx/internal/capability"
 	"github.com/shady2k/nocx/internal/filesystem"
 	"github.com/shady2k/nocx/internal/note"
+	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/snippet"
 )
 
@@ -60,6 +61,15 @@ var executors = map[string]func(ctx context.Context, cap agenttools.Capability, 
 	"snippets.update":  executeSnippetsUpdate,
 	"snippets.delete":  executeSnippetsDelete,
 	"snippets.reorder": executeSnippetsReorder,
+	"skills.read":      executeSkillsRead,
+}
+
+// SkillSource is the assistant's seam onto the skill library. The index is
+// what the prompt lists; Read is what the tool returns. The interface exists
+// so the assistant depends on the abstraction and not on internal/skill.
+type SkillSource interface {
+	Index() []skill.Skill
+	Read(name, relPath string) (skill.Content, error)
 }
 
 // toolSeams is the per-RUN infrastructure an executor may need and the
@@ -70,6 +80,7 @@ type toolSeams struct {
 	sessions         SessionSource
 	noteOperation    capability.NoteOperation
 	snippetOperation capability.SnippetOperation
+	skills           SkillSource
 }
 
 type noteSearchRow struct {
@@ -427,6 +438,37 @@ func marshalResult(v any) (string, error) {
 		return "", fmt.Errorf("agent tool: marshal result: %w", err)
 	}
 	return string(b), nil
+}
+
+type skillReadResult struct {
+	Name    string `json:"name"`
+	Path    string `json:"path"`
+	Content string `json:"content"`
+}
+
+func executeSkillsRead(ctx context.Context, cap agenttools.Capability, args json.RawMessage, seams toolSeams) (string, error) {
+	scope, err := contentScope(cap, "skills.read")
+	if err != nil {
+		return "", err
+	}
+	var p struct {
+		Name string `json:"name"`
+		Path string `json:"path"`
+	}
+	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
+		return "", fmt.Errorf("skills.read: args: %w", unmarshalErr)
+	}
+	if !scope.Allows("skill/" + p.Name) {
+		return "", fmt.Errorf("skills.read: %q is outside this run's grant", p.Name)
+	}
+	if seams.skills == nil {
+		return "", errors.New("skills.read: the skill library is unavailable")
+	}
+	got, err := seams.skills.Read(p.Name, p.Path)
+	if err != nil {
+		return "", fmt.Errorf("skills.read: %w", err)
+	}
+	return marshalResult(skillReadResult{Name: p.Name, Path: got.Path, Content: string(got.Bytes)})
 }
 
 func marshalBoundedNotes(rows []noteSearchRow, max int64) (string, error) {

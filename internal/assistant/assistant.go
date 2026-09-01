@@ -235,6 +235,9 @@ type AskParams struct {
 	// them as seams; it never owns a service or a second store implementation.
 	NoteOperation    capability.NoteOperation
 	SnippetOperation capability.SnippetOperation
+	// Skills is the filesystem-backed source for the skills.read tool. The
+	// transport supplies the same source whose index it put in the prompt.
+	Skills SkillSource
 	// Approvals is the process-lifetime approval store (design §7.2): the
 	// human's yes to one exact proposal, bound to run, attempt, tool, call
 	// id and a hash of the canonical arguments. Nil disables escalation's

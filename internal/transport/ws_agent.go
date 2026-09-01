@@ -554,6 +554,7 @@ type agentHandlers struct {
 	configOp  capability.ConfigOperation
 	noteOp    capability.NoteOperation
 	snippetOp capability.SnippetOperation
+	skills    assistant.SkillSource
 	log       log.Logger
 	// endpointWired is the config handlers' "endpoints not available" gate:
 	// with no endpoint repository, ListEndpoints would nil-panic inside the
@@ -659,13 +660,13 @@ func environmentForSession(sess session.Session) content.Environment {
 //     owner is the settings document (nocx-avogl.4). It is read here, on
 //     the request path, and handed in — the prompt function never looks a
 //     setting up. Read fresh per ask, so a change on the settings screen
-//     governs the next question with no restart and nothing to invalidate.
-func systemPromptFactsFor(cwd string, env content.Environment, attached []assistant.AttachedContentItem, personal string) assistant.SystemPromptFacts {
+func systemPromptFactsFor(cwd string, env content.Environment, attached []assistant.AttachedContentItem, personal string, skills []assistant.SkillRef) assistant.SystemPromptFacts {
 	f := assistant.SystemPromptFacts{
 		Cwd:                  cwd,
 		Env:                  env,
 		AttachedContent:      attached,
 		PersonalInstructions: personal,
+		Skills:               skills,
 	}
 	if env.Kind != content.EnvSSH {
 		f.OS = runtime.GOOS
@@ -681,6 +682,36 @@ func (h agentHandlers) personalParagraph() string {
 		return ""
 	}
 	return h.personalInstructions()
+}
+
+func skillRefsForGrant(grant *content.Grant, source assistant.SkillSource) []assistant.SkillRef {
+	if grant == nil || source == nil {
+		return nil
+	}
+	observes := false
+	for _, effect := range grant.Effects {
+		if effect == content.EffectObserve {
+			observes = true
+			break
+		}
+	}
+	if !observes {
+		return nil
+	}
+	for _, scope := range grant.Scopes {
+		if scope.Kind == content.ResourceContent && (scope.ID == "content" || strings.HasPrefix(scope.ID, "skill/")) {
+			index := source.Index()
+			refs := make([]assistant.SkillRef, 0, len(index))
+			for _, item := range index {
+				child := content.GrantScope{Kind: content.ResourceContent, ID: "skill/" + item.Name}
+				if scope.Contains(child) {
+					refs = append(refs, assistant.SkillRef{Name: item.Name, Description: item.Description})
+				}
+			}
+			return refs
+		}
+	}
+	return nil
 }
 
 // personalInstructionsText reads the person's own paragraph out of the
@@ -886,7 +917,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		// this question carried and the ledger recorded with it, the pane's
 		// environment as environmentForSession already derived it, and the
 		// person's own paragraph as the settings document holds it right now.
-		promptFacts: systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph()),
+		promptFacts: systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph(), skillRefsForGrant(runGrant, h.skills)),
 	}
 	h.pendingRunsMu.Lock()
 	h.pendingRuns[rc.runID] = rc
@@ -1236,6 +1267,7 @@ func (h agentHandlers) runAskStream(ctx context.Context, rc askRunContext, r Res
 		Requester:        h.requester,
 		NoteOperation:    h.noteOp,
 		SnippetOperation: h.snippetOp,
+		Skills:           h.skills,
 		KnownMaterial:    h.knownMaterial,
 		Approvals:        h.approvals,
 		RunID:            strconv.FormatInt(rc.runID, 10),
@@ -2405,7 +2437,7 @@ func derefOrEmpty(s *string) string {
 // agentSpecs declares the agent.* control methods on the CONTENT operation
 // queue (the ask transaction is the ledger — ADR-0019's one writer — so it
 // shares the content domain's gate and queue).
-func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
+func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admission, contentGate control.Admission, configOp capability.ConfigOperation, endpointWired bool, noteOp capability.NoteOperation, snippetOp capability.SnippetOperation, skills assistant.SkillSource, credentials credential.Resolver, client assistant.Client, askSub control.Submission) []methodSpec {
 	var agentOp capability.AgentOperation
 	if s.contentDB != nil {
 		agentOp = capability.NewAgentOperation(contentGate, lane, s.contentDB)
@@ -2424,7 +2456,7 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 		// to a renderer-minted tab.
 		return agentHandlers{
 			op: agentOp, dumpOp: dumpOp, configOp: configOp, endpointWired: endpointWired,
-			noteOp: noteOp, snippetOp: snippetOp,
+			noteOp: noteOp, snippetOp: snippetOp, skills: skills,
 			credentials: credentials, client: client, askSub: askSub,
 			attemptLedger: attemptLedger, grantFor: s.runGrantFor,
 			requester: s, knownMaterial: s.agentKnownMaterial,

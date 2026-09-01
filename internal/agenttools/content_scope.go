@@ -57,3 +57,17 @@ func contentItemResource(arg, kind string) ResolveResources {
 		return []ResourceRef{{Kind: content.ResourceContent, ID: kind + "/" + id}}, nil
 	}
 }
+
+// skillResource resolves the skill named by the call into its content
+// sub-scope. A skill is a ResourceContent sub-scope exactly as a note and a
+// snippet are: the resource vocabulary is the ledger's closed set, and
+// ResourceContent's hierarchy already expresses a grantable library.
+func skillResource(arg string) ResolveResources {
+	return func(args map[string]any, _ RunContext) ([]ResourceRef, error) {
+		name, ok := args[arg].(string)
+		if !ok || name == "" {
+			return nil, nil
+		}
+		return []ResourceRef{{Kind: content.ResourceContent, ID: "skill/" + name}}, nil
+	}
+}

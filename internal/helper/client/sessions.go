@@ -70,6 +70,29 @@ func (c *Client) Sessions(ctx context.Context) ([]SessionEntry, error) {
 	return entries, nil
 }
 
+// CloseSession deliberately ends one helper-hosted session. The helper owns
+// the PTY, so closing this client connection is not a substitute: the daemon
+// remains reachable and the session is removed only by this operation.
+func (c *Client) CloseSession(ctx context.Context, id HostSessionID) error {
+	return c.Call(ctx, proto.ServiceSession, proto.OpCloseSession, proto.CloseSessionParams{
+		Session: proto.HostSessionID{
+			Generation: proto.GenerationID(id.Generation),
+			Session:    id.Session,
+		},
+	}, nil)
+}
+
+// Signal sends one signal to the helper-owned process group.
+func (c *Client) Signal(ctx context.Context, id HostSessionID, sig int) error {
+	return c.Call(ctx, proto.ServiceSession, proto.OpSignal, proto.SignalParams{
+		Session: proto.HostSessionID{
+			Generation: proto.GenerationID(id.Generation),
+			Session:    id.Session,
+		},
+		Signal: sig,
+	}, nil)
+}
+
 func mapSessionEntry(in proto.SessionEntry) SessionEntry {
 	out := SessionEntry{
 		HostSessionID: HostSessionID{Generation: string(in.Session.Generation), Session: in.Session.Session},

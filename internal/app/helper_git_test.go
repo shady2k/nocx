@@ -38,6 +38,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	helpersession "github.com/shady2k/nocx/internal/helper/session"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -445,6 +446,9 @@ func realHelperPeer() func(in io.Reader, out io.Writer) int {
 	return func(in io.Reader, out io.Writer) int {
 		h := host.New(in, out, contentHash, "instance-1", discardLogger())
 		h.Register(hostsvc.New(localgit.NewFactory()))
+		h.Register(helpersession.New(helpersession.Options{
+			Generation: proto.GenerationID(contentHash),
+		}))
 		if err := h.Serve(context.Background()); err != nil {
 			return 1
 		}
@@ -822,7 +826,9 @@ func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 		t.Fatalf("two machines brought up %d helpers, want 2", got)
 	}
 
-	reg.CloseHelpersFor("SHA256:machine-a")
+	if closeErr := reg.CloseHelpersFor(context.Background(), "SHA256:machine-a"); closeErr != nil {
+		t.Fatalf("close machine-a helper: %v", closeErr)
+	}
 
 	// The machine named by the fingerprint lost its helper channel; the
 	// other machine's helper is untouched.
@@ -837,11 +843,22 @@ func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 	if _, ok := reg.hosts["s1"]; ok {
 		t.Fatal("the closed helper is still registered")
 	}
+	if _, _, openErr := selA.Factory.Open(context.Background(), dir); openErr == nil || openErr.Error() != "helper is closing for uninstall" {
+		t.Fatalf("open during uninstall gate: got %v, want helper is closing for uninstall", openErr)
+	}
+	reg.FinishHelpersFor("SHA256:machine-a")
+	retryRepo, retryOutcome, err := selA.Factory.Open(context.Background(), dir)
+	if err != nil || retryOutcome.State != git.OpenOK {
+		t.Fatalf("open after uninstall gate: %v %+v", err, retryOutcome)
+	}
+	_ = retryRepo.Close()
 	_ = repoB.Close()
 	_ = repoA.Close()
 
 	// An unknown fingerprint closes nothing and is not an error.
-	reg.CloseHelpersFor("SHA256:nobody")
+	if err := reg.CloseHelpersFor(context.Background(), "SHA256:nobody"); err != nil {
+		t.Fatalf("close unknown helper: %v", err)
+	}
 }
 
 // TestHelperDialFactory_RefusingOpenClosesTheLane: an open that answers

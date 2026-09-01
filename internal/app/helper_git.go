@@ -27,6 +27,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/consent"
 	"github.com/shady2k/nocx/internal/helper/deploy"
 	"github.com/shady2k/nocx/internal/helper/endpoint"
+	"github.com/shady2k/nocx/internal/helper/proto"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -82,7 +83,11 @@ func accountFromOptions(opts []ssh.ConnectOption) string {
 // happens inside the returned factory's Open, never here.
 
 func helperGitFactory(lanes helperInstallProvider, store *consent.Store, installs *consent.InstallStore, log *slog.Logger) (transport.GitFactoryFor, *helperRegistry) {
-	reg := &helperRegistry{lanes: lanes, log: log, hosts: make(map[session.ID]*hostHelper)}
+	reg := &helperRegistry{
+		lanes: lanes, log: log,
+		hosts:   make(map[session.ID]*hostHelper),
+		closing: make(map[string]struct{}),
+	}
 	return func(sess session.Session) transport.GitOpenSelection {
 		// The platform probe is the one bounded remote exec the decision
 		// runs before the user has accepted anything — it writes nothing.
@@ -384,8 +389,9 @@ type helperRegistry struct {
 	lanes helperLaneProvider
 	log   *slog.Logger
 
-	mu    sync.Mutex
-	hosts map[session.ID]*hostHelper
+	mu      sync.Mutex
+	hosts   map[session.ID]*hostHelper
+	closing map[string]struct{}
 }
 
 func (r *helperRegistry) helper(f *sessionFactory) *hostHelper {
@@ -395,6 +401,9 @@ func (r *helperRegistry) helper(f *sessionFactory) *hostHelper {
 		return h
 	}
 	h := &hostHelper{f: f, lanes: r.lanes, log: r.log}
+	if _, ok := r.closing[f.fp]; ok {
+		h.closing = true
+	}
 	r.hosts[f.sid] = h
 	return h
 }
@@ -403,6 +412,13 @@ func (r *helperRegistry) forget(f *sessionFactory) {
 	r.mu.Lock()
 	delete(r.hosts, f.sid)
 	r.mu.Unlock()
+}
+
+func (r *helperRegistry) isClosing(fp string) bool {
+	r.mu.Lock()
+	_, ok := r.closing[fp]
+	r.mu.Unlock()
+	return ok
 }
 
 // inventories returns one reconciliation inventory per helper generation
@@ -454,21 +470,22 @@ func (r *helperRegistry) sessions(ctx context.Context) ([]client.SessionEntry, e
 	return out, nil
 }
 
-// CloseHelpersFor closes every live helper channel on the machine whose
-// host public-key fingerprint is fp — the D25 order an uninstall is bound
-// by: no helper may be running out of a directory being deleted, so the
-// channels the backend KNOWS about (its own, per session) are closed
-// before the install directory is removed. The registry's channels are
-// the backend's whole knowledge: a helper running from a DIFFERENT nocx
-// instance sharing the same $HOME is out of reach, which the design
-// accepts because the backend can only account for its own channels.
-// A closed helper is forgotten; the next open redials it, and a machine
-// whose install directory is gone answers the honest dial refusal (D6).
-func (r *helperRegistry) CloseHelpersFor(fp string) {
+// CloseHelpersFor first asks every helper daemon this coordinator knows about
+// for its sessions and closes each one through the daemon's close-session
+// operation. Only after all those acknowledgements does it close the bridge
+// channels and forget the registry entries. A daemon that cannot enumerate
+// sessions refuses the operation rather than allowing uninstall to delete a
+// live session's executable.
+func (r *helperRegistry) CloseHelpersFor(ctx context.Context, fp string) error {
 	if fp == "" {
-		return
+		return nil
 	}
 	r.mu.Lock()
+	if _, alreadyClosing := r.closing[fp]; alreadyClosing {
+		r.mu.Unlock()
+		return errors.New("helper uninstall already in progress")
+	}
+	r.closing[fp] = struct{}{}
 	var victims []*hostHelper
 	for _, h := range r.hosts {
 		if h.f.fp == fp {
@@ -476,12 +493,76 @@ func (r *helperRegistry) CloseHelpersFor(fp string) {
 		}
 	}
 	r.mu.Unlock()
-	// closeLocked takes h.mu (an open in flight finishes first, so the
-	// close is exact) and calls reg.forget, which re-takes r.mu — the
-	// iteration therefore releases r.mu before closing.
 	for _, h := range victims {
-		h.closeLocked()
+		if err := h.closeSessions(ctx); err != nil {
+			for _, victim := range victims {
+				victim.cancelClosing()
+			}
+			r.FinishHelpersFor(fp)
+			return err
+		}
 	}
+
+	// closeLocked takes h.mu and calls reg.forget, which re-takes r.mu; the
+	// registry lock is therefore released before closing each helper.
+	for _, h := range victims {
+		h.mu.Lock()
+		h.closeLocked()
+		h.mu.Unlock()
+	}
+	return nil
+}
+
+func (r *helperRegistry) FinishHelpersFor(fp string) {
+	r.mu.Lock()
+	delete(r.closing, fp)
+	r.mu.Unlock()
+}
+
+func (h *hostHelper) cancelClosing() {
+	h.mu.Lock()
+	h.closing = false
+	h.mu.Unlock()
+}
+
+func (h *hostHelper) closeSessions(ctx context.Context) error {
+	h.mu.Lock()
+	if h.closing {
+		h.mu.Unlock()
+		return errors.New("helper is already closing")
+	}
+	h.closing = true
+	c, generation := h.client, h.f.expectHash
+	h.mu.Unlock()
+	ok := false
+	defer func() {
+		if !ok {
+			h.cancelClosing()
+		}
+	}()
+	if c == nil {
+		ok = true
+		return nil
+	}
+	entries, err := c.Sessions(ctx)
+	if err != nil {
+		var refusal *client.RefusalError
+		if errors.As(err, &refusal) &&
+			(refusal.Code == proto.ErrCodeUnknownService || refusal.Code == proto.ErrCodeUnknownOp) {
+			return fmt.Errorf("helper session service unavailable: %w", err)
+		}
+		return fmt.Errorf("list helper sessions: %w", err)
+	}
+	for _, entry := range entries {
+		if entry.HostSessionID.Generation != generation {
+			continue
+		}
+		if err := c.CloseSession(ctx, entry.HostSessionID); err != nil {
+			return fmt.Errorf("close helper session %s: %w", entry.HostSessionID.Session, err)
+		}
+	}
+	ok = true
+	return nil
 }
 
 // sessionFactory is a git.RepoFactory for one session: stateless (the state
@@ -502,15 +583,21 @@ type sessionFactory struct {
 }
 
 func (f *sessionFactory) Open(ctx context.Context, cwd string) (git.Repo, git.OpenOutcome, error) {
+	if f.reg.isClosing(f.fp) {
+		return nil, git.OpenOutcome{}, errors.New("helper is closing for uninstall")
+	}
 	h := f.reg.helper(f)
 	repo, outcome, err := h.open(ctx, cwd)
 	if err != nil && errors.Is(err, client.ErrLost) {
 		// The shared client died under us: real transport loss, not the
 		// last-binding-close (that path sets dead and never reuses the
 		// client). A fresh dial can heal the session, and open is
-		// idempotent — exactly one retry; a mutation would never be
-		// retried (D12).
+		// idempotent — exactly one retry; a mutation would never be retried
+		// (D12).
 		h.evict()
+		if f.reg.isClosing(f.fp) {
+			return nil, git.OpenOutcome{}, errors.New("helper is closing for uninstall")
+		}
 		repo, outcome, err = h.open(ctx, cwd)
 	}
 	return repo, outcome, err
@@ -531,11 +618,15 @@ type hostHelper struct {
 	factory git.RepoFactory
 	refs    int
 	dead    bool // the shared client is closed; the next open must redial
+	closing bool // uninstall has frozen this helper against new opens
 }
 
 func (h *hostHelper) open(ctx context.Context, cwd string) (git.Repo, git.OpenOutcome, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.closing {
+		return nil, git.OpenOutcome{}, errors.New("helper is closing for uninstall")
+	}
 	if h.dead || h.factory == nil {
 		lane, err := h.lanes.HelperConn(ctx, h.f.host, h.f.opts...)
 		if err != nil {

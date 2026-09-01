@@ -409,12 +409,21 @@ type recordingHelperCloser struct {
 	fingerprint string
 }
 
-func (c *recordingHelperCloser) CloseHelpersFor(fp string) {
+func (c *recordingHelperCloser) CloseHelpersFor(_ context.Context, fp string) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	c.fingerprint = fp
 	if c.events != nil {
 		*c.events = append(*c.events, "close")
+	}
+	return nil
+}
+
+func (c *recordingHelperCloser) FinishHelpersFor(fp string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if c.fingerprint != fp {
+		panic("finished a different helper fingerprint")
 	}
 }
 
@@ -448,18 +457,21 @@ func (r *recordingHelperUninstaller) UninstallHelper(_ context.Context, host str
 // footprintHelperUninstallHarness wires the helper-uninstall surface with
 // the store and both seams, and returns the WSServer plus the event log the
 // two recording fakes share.
-func footprintHelperUninstallHarness(t *testing.T, installs *consent.InstallStore, closer *recordingHelperCloser, remover *recordingHelperUninstaller) (*WSServer, *[]string) {
+func footprintHelperUninstallHarness(t *testing.T, installs *consent.InstallStore, closer *recordingHelperCloser, remover *recordingHelperUninstaller, stores ...*consent.Store) (*WSServer, *[]string) {
 	t.Helper()
 	events := &[]string{}
 	closer.events = events
 	remover.events = events
-	ws := NewWSServer(
-		log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+	options := []WSServerOption{
 		WithHelperInstallStore(installs),
 		WithHelperChannelCloser(closer),
 		WithRemoteHelperUninstaller(remover),
 		WithProfileResolver(&openProfileResolver{host: "pi@192.168.0.93"}),
-	)
+	}
+	if len(stores) > 0 {
+		options = append(options, WithHelperConsentStore(stores[0]))
+	}
+	ws := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)), options...)
 	if err := ws.Start(context.Background()); err != nil {
 		t.Fatalf("Start: %v", err)
 	}
@@ -525,6 +537,122 @@ func TestFootprintHelperUninstall_ClosesBeforeRemoves(t *testing.T) {
 	// advertise a helper that was removed.
 	if got := installs.All(); len(got) != 0 {
 		t.Fatalf("install observations after a successful uninstall = %v, want none", got)
+	}
+}
+
+func TestFootprintHelperUninstallRevokesMachineConsent(t *testing.T) {
+	installs := consent.NewInstallStore(
+		log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "helper-installs.json")
+	consents := consent.NewStore(
+		log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	const fingerprint = "SHA256:consented"
+	if err := consents.Grant(fingerprint); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	if err := installs.Record(consent.Install{
+		Fingerprint: fingerprint,
+		Identity:    "u@db01:22",
+		Path:        "~/.nocx/helper/1-linux-amd64-abc/",
+		Hash:        "abc",
+		InstalledAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	closer := &recordingHelperCloser{}
+	remover := &recordingHelperUninstaller{removed: true}
+	ws, _ := footprintHelperUninstallHarness(t, installs, closer, remover, consents)
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := vaultCall(t, conn, "shell.footprint.helperUninstall", map[string]any{
+		"profileId": "p_01", "fingerprint": fingerprint,
+		"path": "~/.nocx/helper/1-linux-amd64-abc/",
+	}, 1)
+	if resp.Error != nil {
+		t.Fatalf("helper uninstall: %+v", resp.Error)
+	}
+	if _, ok := consents.Lookup(fingerprint); ok {
+		t.Fatal("helper uninstall left machine consent granted")
+	}
+}
+
+func TestFootprintHelperUninstall_ConsentFailureLeavesRetryState(t *testing.T) {
+	installs := consent.NewInstallStore(
+		log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "helper-installs.json")
+	const fingerprint = "SHA256:consent-failure"
+	if err := installs.Record(consent.Install{
+		Fingerprint: fingerprint,
+		Identity:    "u@db01:22",
+		Path:        "~/.nocx/helper/1-linux-amd64-abc/",
+		Hash:        "abc",
+		InstalledAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	consentStore := consent.NewStore(
+		log.NewSlogAdapter(nil),
+		&failOnSecondWrite{DocumentStore: storage.NewDocumentStore(t.TempDir())},
+		"consent.json")
+	if err := consentStore.Grant(fingerprint); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	remover := &recordingHelperUninstaller{removed: true}
+	ws, _ := footprintHelperUninstallHarness(t, installs, &recordingHelperCloser{}, remover, consentStore)
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := vaultCall(t, conn, "shell.footprint.helperUninstall", map[string]any{
+		"profileId": "p_01", "fingerprint": fingerprint,
+		"path": "~/.nocx/helper/1-linux-amd64-abc/",
+	}, 1)
+	if resp.Error == nil {
+		t.Fatal("consent persistence failure was reported as success")
+	}
+	if _, ok := consentStore.Lookup(fingerprint); !ok {
+		t.Fatal("failed revoke forgot the grant in memory")
+	}
+	if got := installs.All(); len(got) != 1 {
+		t.Fatalf("failed revoke removed install observations = %v, want one retryable row", got)
+	}
+}
+
+func TestFootprintHelperUninstall_ObservationFailureRestoresConsent(t *testing.T) {
+	installStore := consent.NewInstallStore(
+		log.NewSlogAdapter(nil),
+		&failOnSecondWrite{DocumentStore: storage.NewDocumentStore(t.TempDir())},
+		"helper-installs.json")
+	const fingerprint = "SHA256:observation-failure"
+	if err := installStore.Record(consent.Install{
+		Fingerprint: fingerprint,
+		Identity:    "u@db01:22",
+		Path:        "~/.nocx/helper/1-linux-amd64-abc/",
+		Hash:        "abc",
+		InstalledAt: time.Now().UTC(),
+	}); err != nil {
+		t.Fatalf("Record: %v", err)
+	}
+	consentStore := consent.NewStore(
+		log.NewSlogAdapter(nil), storage.NewDocumentStore(t.TempDir()), "consent.json")
+	if err := consentStore.Grant(fingerprint); err != nil {
+		t.Fatalf("Grant: %v", err)
+	}
+	remover := &recordingHelperUninstaller{removed: true}
+	ws, _ := footprintHelperUninstallHarness(t, installStore, &recordingHelperCloser{}, remover, consentStore)
+	conn := connectWS(t, ws)
+	defer func() { _ = conn.Close() }()
+
+	resp := vaultCall(t, conn, "shell.footprint.helperUninstall", map[string]any{
+		"profileId": "p_01", "fingerprint": fingerprint,
+		"path": "~/.nocx/helper/1-linux-amd64-abc/",
+	}, 1)
+	if resp.Error == nil {
+		t.Fatal("observation persistence failure was reported as success")
+	}
+	if _, ok := consentStore.Lookup(fingerprint); !ok {
+		t.Fatal("observation failure did not restore machine consent")
+	}
+	if got := installStore.All(); len(got) != 1 {
+		t.Fatalf("failed observation removal changed rows = %v, want one retryable row", got)
 	}
 }
 

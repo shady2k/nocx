@@ -237,18 +237,17 @@ describe('remote footprint', () => {
     fireEvent.click(uninstallButton)
 
     // The confirmation names the boundary AND the consent decision: the
-    // whole helper tree is removed, but the relay-tier consent for this
-    // machine stays — uninstall is not a silent revocation, and the
-    // helper is reinstalled when a remote feature next needs it.
+    // whole helper tree is removed, every live helper-hosted session ends,
+    // and consent for this machine is revoked.
     await vi.waitFor(() => {
       expect(
         [...document.querySelectorAll('dialog')].some((d) =>
-          d.textContent?.includes('Consent for this machine stays'),
+          d.textContent?.includes('consent for this machine is revoked'),
         ),
       ).toBe(true)
     })
     const dialog = [...document.querySelectorAll('dialog')].find((d) =>
-      d.textContent?.includes('Consent for this machine stays'),
+      d.textContent?.includes('consent for this machine is revoked'),
     )!
     expect(dialog.textContent).toContain('u@db01:22')
 
@@ -285,8 +284,7 @@ describe('remote footprint', () => {
       expect(container.textContent).toContain('root@10.0.0.7:22')
     })
     const text = container.textContent ?? ''
-    expect(text).toContain('Removal needs a saved connection')
-    expect(text).toContain('~/.nocx/helper/1-linux-amd64-abc/')
+    expect(text).toContain('Removal and consent revocation need a saved connection')
     const uninstallButtons = [...container.querySelectorAll('button')].filter((b) =>
       b.textContent?.includes('Uninstall'),
     )

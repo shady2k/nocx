@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/helper/host"
@@ -86,6 +87,9 @@ type fakeProcess struct {
 	rows    uint16
 	fg      int
 	fgErr   error
+	closed  bool
+	signal  syscall.Signal
+	sigErr  error
 }
 
 func newFakeProcess() *fakeProcess {
@@ -112,6 +116,9 @@ func (p *fakeProcess) Write(b []byte) (int, error) {
 
 func (p *fakeProcess) Close() error {
 	p.closeOne.Do(func() {
+		p.mu.Lock()
+		p.closed = true
+		p.mu.Unlock()
 		_ = p.produce.CloseWithError(io.EOF)
 		close(p.done)
 	})
@@ -123,6 +130,13 @@ func (p *fakeProcess) Resize(_ context.Context, cols, rows, _, _ uint16) error {
 	defer p.mu.Unlock()
 	p.cols, p.rows = cols, rows
 	return nil
+}
+
+func (p *fakeProcess) SignalProcessGroup(_ int, sig syscall.Signal) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.signal = sig
+	return p.sigErr
 }
 
 func (p *fakeProcess) WaitErr() (error, bool) {
@@ -949,6 +963,50 @@ func TestAnInspectorThatCannotAnswerReportsNothingRatherThanEmptiness(t *testing
 	}
 }
 
+// TestCloseSessionEndsTheProcessAndRemovesItsInventoryRow names both ends of
+// the close-session interval: the PTY is closed and the durable row is gone.
+func TestCloseSessionEndsTheProcessAndRemovesItsInventoryRow(t *testing.T) {
+	spawner := &fakeSpawner{}
+	svc := newService(t, newSink(), spawner, session.Limits{})
+	entry := spawnOne(t, svc)
+	proc := spawner.last()
+
+	call[proto.CloseSessionResult](t, svc, proto.OpCloseSession,
+		proto.CloseSessionParams{Session: entry.Session})
+
+	proc.mu.Lock()
+	closed := proc.closed
+	proc.mu.Unlock()
+	if !closed {
+		t.Fatal("close-session returned before closing the PTY")
+	}
+	inv := call[proto.SessionsResult](t, svc, proto.OpSessions, proto.SessionsParams{})
+	if len(inv.Sessions) != 0 {
+		t.Fatalf("close-session left %d inventory rows, want 0", len(inv.Sessions))
+	}
+}
+
+// TestSignalSendsTheRequestedSignalToTheOwnedProcessGroup proves the helper,
+// rather than the coordinator, owns the process-group signal operation.
+func TestSignalSendsTheRequestedSignalToTheOwnedProcessGroup(t *testing.T) {
+	spawner := &fakeSpawner{}
+	svc := newService(t, newSink(), spawner, session.Limits{})
+	entry := spawnOne(t, svc)
+	proc := spawner.last()
+
+	call[proto.SignalResult](t, svc, proto.OpSignal, proto.SignalParams{
+		Session: entry.Session,
+		Signal:  int(syscall.SIGTERM),
+	})
+
+	proc.mu.Lock()
+	got := proc.signal
+	proc.mu.Unlock()
+	if got != syscall.SIGTERM {
+		t.Fatalf("signal = %v, want %v", got, syscall.SIGTERM)
+	}
+}
+
 // TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv closes the loop with
 // internal/helper/host: the name the ABI froze, the name the host dispatches
 // on and the name this service answers to are one constant, and every op's
@@ -961,6 +1019,7 @@ func TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv(t *testing.T) {
 	want := map[string]bool{
 		proto.OpSpawn: true, proto.OpSessions: true, proto.OpAttach: true,
 		proto.OpAck: true, proto.OpDetach: true, proto.OpResize: true,
+		proto.OpCloseSession: true, proto.OpSignal: true,
 	}
 	for _, op := range svc.Ops() {
 		if !want[op] {

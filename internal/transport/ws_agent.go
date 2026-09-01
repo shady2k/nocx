@@ -610,6 +610,9 @@ type agentHandlers struct {
 	// built without it, which is what a unit test constructing the struct
 	// directly has.
 	personalInstructions func() string
+	// skillsEnabled reads the global declaration for each ask; nil preserves
+	// the direct-construction test seam's historical enabled default.
+	skillsEnabled func() bool
 	// sessionPolicy is where "allow in this session" lands and where it
 	// dies (ws_sessionpolicy.go). Never nil: the server constructs one.
 	sessionPolicy *sessionPolicyStore
@@ -622,6 +625,14 @@ type agentHandlers struct {
 	state        *connState
 	clientID     string
 	r            Responder
+}
+
+func (s *WSServer) skillsEnabled() bool {
+	if s.settings == nil {
+		return true
+	}
+	enabled, err := s.settings.GetBool(settings.SkillsEnabled)
+	return err == nil && enabled
 }
 
 // environmentForSession derives the ledger environment from the session's
@@ -891,6 +902,10 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 
 	// The STREAM runs off the read loop on its own admission (the ask
 	// response is already sent). The task context derives from the
+	skillRefs := []assistant.SkillRef(nil)
+	if h.skillsEnabled == nil || h.skillsEnabled() {
+		skillRefs = skillRefsForGrant(runGrant, h.skills, h.agentTools)
+	}
 	// connection, so a disconnect cancels the stream and the run
 	// terminalizes — a refused socket write never wedges it. A refused
 	// submit (the stream capacity is exhausted) terminalizes the run
@@ -925,7 +940,7 @@ func (h agentHandlers) handleAsk(ctx context.Context, req jsonrpcRequest) {
 		// this question carried and the ledger recorded with it, the pane's
 		// environment as environmentForSession already derived it, and the
 		// person's own paragraph as the settings document holds it right now.
-		promptFacts: systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph(), skillRefsForGrant(runGrant, h.skills, h.agentTools)),
+		promptFacts: systemPromptFactsFor(in.Cwd, in.Env, attached, h.personalParagraph(), skillRefs),
 	}
 	h.pendingRunsMu.Lock()
 	h.pendingRuns[rc.runID] = rc
@@ -2525,8 +2540,8 @@ func (s *WSServer) agentSpecs(contentSub control.Submission, lane control.Admiss
 			requester: s, knownMaterial: s.agentKnownMaterial,
 			approvals: s.agentApprovals, pendingRuns: s.pendingRuns,
 			pendingRunsMu:        &s.pendingRunsMu,
-			personalInstructions: s.personalInstructionsText,
-			sessionPolicy:        s.sessionPolicy, globalPolicy: s.agentPolicy,
+			personalInstructions: s.personalInstructionsText, skillsEnabled: s.skillsEnabled,
+			sessionPolicy: s.sessionPolicy, globalPolicy: s.agentPolicy,
 			log: s.log, state: state, clientID: connectionID(w), r: r,
 		}
 	}

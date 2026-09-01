@@ -111,7 +111,7 @@ func TestAskSkillsCreateWritesThroughTheSkillLibrarySeam(t *testing.T) {
 	}
 	grant := autonomousMatrix().AsGrant([]content.GrantScope{{
 		Kind: content.ResourceContent,
-		ID:   "skill/deploy",
+		ID:   "skill",
 	}})
 	approvals := NewApprovalStore()
 	params := testAskParams(server.URL)
@@ -171,6 +171,27 @@ func TestExecuteSkillsWriteRefusesAnOutOfScopeName(t *testing.T) {
 	}
 	if len(library.calls) != 0 {
 		t.Fatalf("out-of-scope call reached store: %v", library.calls)
+	}
+}
+
+func TestPolicyRefusesSkillsCreateWhenSkillFamilyIsOutsideGrant(t *testing.T) {
+	grant := autonomousMatrix().AsGrant([]content.GrantScope{
+		{Kind: content.ResourceContent, ID: "note"},
+		{Kind: content.ResourceContent, ID: "snippet"},
+	})
+	ledger := &fakeLedger{}
+	mw := middlewareFor(t, grant, ledger, nil)
+
+	out, err := wrappedEndpoint(mw, "skills.create", "call-1",
+		`{"name":"deploy","description":"d","body":"body"}`)
+	if err != nil {
+		t.Fatalf("policy refusal returned an error: %v", err)
+	}
+	if !strings.Contains(out, "skills.create") || !strings.Contains(out, "outside what this question is allowed to reach") {
+		t.Fatalf("result = %q, want policy-time out-of-scope refusal", out)
+	}
+	if len(ledger.log) != 0 {
+		t.Fatalf("refused policy call recorded ledger activity: %v", ledger.log)
 	}
 }
 
@@ -255,7 +276,7 @@ func TestSkillsWriteResultsConformOnTheProviderSocket(t *testing.T) {
 			}
 			grant := autonomousMatrix().AsGrant([]content.GrantScope{{
 				Kind: content.ResourceContent,
-				ID:   "skill/deploy",
+				ID:   "skill",
 			}})
 			approvals := NewApprovalStore()
 			params := testAskParams(server.URL)

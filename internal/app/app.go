@@ -556,7 +556,6 @@ func New(opts ...Option) (*App, error) {
 		{FS: builtin.FS, Provenance: skill.ProvenanceBuiltin},
 		{Dir: filepath.Join(paths.ConfigDir(), "managed-skills"), Provenance: skill.ProvenanceManaged},
 	}
-	skills := skill.NewStore(skill.OSFileSystem{}, skillRoots)
 
 	logFilePath := filepath.Join(paths.DataDir(), "nocx.log")
 	if o.logFilePath != nil {
@@ -696,6 +695,7 @@ func New(opts ...Option) (*App, error) {
 	// system (OS keychain) and file (encrypted document).
 	docStore := storage.NewDocumentStore(paths.ConfigDir())
 	profileStore := profile.NewJSONStoreWithDocStore(docStore, "profiles.json")
+	skills := skill.NewStoreWithDocumentStore(skill.OSFileSystem{}, skillRoots, docStore)
 	// The snippet library is the same document family: one versioned
 	// document under the profile directory, sharing the docStore. The id
 	// source is injected rather than called inline so tests can force

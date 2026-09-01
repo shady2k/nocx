@@ -136,9 +136,9 @@ func contentScope(cap agenttools.Capability, tool string) (*agenttools.ContentSc
 	return scope, nil
 }
 
-func requireContentRoot(scope *agenttools.ContentScope, tool string) error {
-	if !scope.Allows("content") {
-		return fmt.Errorf("%s: content library is outside the run's grant", tool)
+func requireContentFamily(scope *agenttools.ContentScope, tool, family string) error {
+	if !scope.Allows(family) {
+		return fmt.Errorf("%s: %s library is outside the run's grant", tool, family)
 	}
 	return nil
 }
@@ -178,7 +178,7 @@ func executeNotesSearch(ctx context.Context, cap agenttools.Capability, args jso
 			result.Notes = []noteSearchRow{{ID: n.ID, Title: n.Title, Body: n.Body, UpdatedAt: n.UpdatedAt}}
 			return nil
 		}
-		if rootErr := requireContentRoot(scope, "notes.search"); rootErr != nil {
+		if rootErr := requireContentFamily(scope, "notes.search", "note"); rootErr != nil {
 			return rootErr
 		}
 		rows, searchErr := svc.Search(callCtx, p.Query)
@@ -215,7 +215,7 @@ func executeNotesCreate(ctx context.Context, cap agenttools.Capability, args jso
 	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
 		return "", fmt.Errorf("notes.create: args: %w", unmarshalErr)
 	}
-	if rootErr := requireContentRoot(scope, "notes.create"); rootErr != nil {
+	if rootErr := requireContentFamily(scope, "notes.create", "note"); rootErr != nil {
 		return "", rootErr
 	}
 	if seams.noteOperation == nil {
@@ -294,7 +294,7 @@ func executeSnippetsList(ctx context.Context, cap agenttools.Capability, args js
 	if err != nil {
 		return "", err
 	}
-	if rootErr := requireContentRoot(scope, "snippets.list"); rootErr != nil {
+	if rootErr := requireContentFamily(scope, "snippets.list", "snippet"); rootErr != nil {
 		return "", rootErr
 	}
 	if seams.snippetOperation == nil {
@@ -334,7 +334,7 @@ func executeSnippetsCreate(ctx context.Context, cap agenttools.Capability, args 
 	if unmarshalErr := json.Unmarshal(args, &p); unmarshalErr != nil {
 		return "", fmt.Errorf("snippets.create: args: %w", unmarshalErr)
 	}
-	if rootErr := requireContentRoot(scope, "snippets.create"); rootErr != nil {
+	if rootErr := requireContentFamily(scope, "snippets.create", "snippet"); rootErr != nil {
 		return "", rootErr
 	}
 	if seams.snippetOperation == nil {
@@ -414,7 +414,7 @@ func executeSnippetsReorder(ctx context.Context, cap agenttools.Capability, args
 	if err != nil {
 		return "", err
 	}
-	if rootErr := requireContentRoot(scope, "snippets.reorder"); rootErr != nil {
+	if rootErr := requireContentFamily(scope, "snippets.reorder", "snippet"); rootErr != nil {
 		return "", rootErr
 	}
 	var p struct {

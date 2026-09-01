@@ -32,7 +32,7 @@ type discovered struct {
 // candidate SKILL.md. Broken entries are logged and skipped so one bad file
 // cannot make an ask fail.
 func Discover(roots []Root) []Skill {
-	detailed := discoverDetailed(roots)
+	detailed := discoverDetailed(roots, false)
 	out := make([]Skill, 0, len(detailed))
 	for _, candidate := range detailed {
 		out = append(out, candidate.Skill)
@@ -41,9 +41,22 @@ func Discover(roots []Root) []Skill {
 }
 
 // discoverDetailed is the single source of truth for root precedence,
-// validation, diagnostics, and name deduplication. Read selects from this
-// same result so a skill cannot be indexed differently from how it is read.
-func discoverDetailed(roots []Root) []discovered {
+// validation, diagnostics, name deduplication, and enablement. Read selects
+// from this same result so a skill cannot be indexed differently from how it
+// is read.
+func discoverDetailed(roots []Root, includeDisabled bool) []discovered {
+	disabled := map[string]struct{}{}
+	for _, root := range roots {
+		if root.disabled == nil {
+			continue
+		}
+		var err error
+		disabled, err = root.disabled()
+		if err != nil {
+			return nil
+		}
+		break
+	}
 	seen := make(map[string]struct{})
 	out := make([]discovered, 0)
 	for _, root := range roots {
@@ -108,9 +121,16 @@ func discoverDetailed(roots []Root) []discovered {
 				continue
 			}
 			seen[skName] = struct{}{}
+			enabled := true
+			if _, isDisabled := disabled[skName]; isDisabled {
+				enabled = false
+				if !includeDisabled {
+					continue
+				}
+			}
 			out = append(out, discovered{Skill: Skill{
 				Name: skName, Description: description,
-				Provenance: root.Provenance, BaseDir: base,
+				Provenance: root.Provenance, BaseDir: base, Enabled: enabled,
 			}, root: root})
 		}
 	}

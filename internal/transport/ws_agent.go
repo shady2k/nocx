@@ -670,10 +670,18 @@ func systemPromptFactsFor(cwd string, env content.Environment, attached []assist
 // names the item without naming the window is answered inside the mark
 // rather than past it (nocx-hp8p2.15). A whole-block mark carries no span
 // and bounds nothing.
+//
+// AN AUTOMATIC ITEM CAN CARRY A SPAN TOO, and it means the same thing: rows
+// selected inside the frozen screen a summon attached narrow THAT item
+// rather than adding a second one (nocx-hp8p2.7). Excluding automatic items
+// here read `automatic` as "nobody marked this", which is true of the whole
+// screen and false of a band of it — the span itself is what says a person
+// chose, and an attachment with no span is skipped by the check below either
+// way.
 func markedSessionWindows(attached []assistant.AttachedContentItem) []assistant.MarkedSessionWindow {
 	marks := make([]assistant.MarkedSessionWindow, 0, len(attached))
 	for _, item := range attached {
-		if item.Automatic || item.Start == nil || item.Count == nil || *item.Count <= 0 {
+		if item.Start == nil || item.Count == nil || *item.Count <= 0 {
 			continue
 		}
 		marks = append(marks, assistant.MarkedSessionWindow{

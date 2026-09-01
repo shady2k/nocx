@@ -795,7 +795,9 @@ export class TerminalContent extends BasePaneContent {
       return
     }
     const range = selection.getRangeAt(0)
-    const grant = grantBlockFromSelection(selection)
+    // The frozen screen is markable too, and only this surface knows which
+    // attachment its rows belong to (nocx-hp8p2.7).
+    const grant = grantBlockFromSelection(selection, this.automaticFrozenGrant())
     if (!grant || !this.scrollback?.scrollbackInner.contains(grant.blockEl)) {
       this.markAffordance?.hide()
       return
@@ -2038,7 +2040,20 @@ export class TerminalContent extends BasePaneContent {
         // no rows or frame text cross the control plane.
         grants: () => {
           const automatic = this.automaticFrozenGrant()
-          return automatic === null ? this.grantedBlocks : [...this.grantedBlocks, automatic]
+          if (automatic === null) return this.grantedBlocks
+          // A ROW MARK NARROWS THE ATTACHMENT, IT DOES NOT ADD ONE
+          // (nocx-hp8p2.7). A selection inside the frozen screen is marked on
+          // the attachment's own id plus a row span; sending the whole screen
+          // beside it would be two items claiming one id, and the model would
+          // read the screen it was asked to read a band of. The item stays
+          // renderer-owned — which is what `automatic` says about an ITEM,
+          // not about the mark — so the backend still answers it from the
+          // pinned frame, now inside the span.
+          const narrowing = this.grantedBlocks.find((grant) => grant.itemId === automatic.itemId)
+          if (narrowing === undefined) return [...this.grantedBlocks, automatic]
+          return this.grantedBlocks.map((grant) =>
+            grant === narrowing ? { ...grant, automatic: true as const } : grant,
+          )
         },
         onTurnAccepted: () => {
           // Agent asks keep the editor visible by default. A summoned answer
@@ -5627,6 +5642,16 @@ export class TerminalContent extends BasePaneContent {
       frameParent.style.position = this._freezeFrameParentPosition
     }
     this._freezeFrameParentPosition = null
+    // A ROW MARK MADE IN THE FROZEN SCREEN GOES WITH THE SCREEN
+    // (nocx-hp8p2.7). Its span is resolved against the PINNED frame — that
+    // is what makes it cost nothing on the wire — so once the pin is gone
+    // the span addresses nothing, and a mark that outlived its surface would
+    // claim rows the ask could no longer serve.
+    const view = this._freezeFrameView
+    if (view !== null && this.grantedBlocks.some((grant) => grant.blockEl === view)) {
+      this.grantedBlocks = this.grantedBlocks.filter((grant) => grant.blockEl !== view)
+      this.grantController?.setBlocks(this.grantedBlocks)
+    }
     this._freezeFrameView?.remove()
     this._freezeFrameView = null
     this._pinnedFrame = null

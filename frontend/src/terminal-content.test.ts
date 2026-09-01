@@ -11534,6 +11534,118 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
     }
   })
 
+  // nocx-hp8p2.7. The frozen screen became scrollable in nocx-hp8p2.6, which
+  // enabled a selection gesture that led nowhere: the frame is not a
+  // .cmd-block, so no mark was ever built and the chip counted zero.
+  it('marks rows selected inside the frozen screen onto the attachment itself (nocx-hp8p2.7)', async () => {
+    const client = makeClient()
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method === 'agent.ask')
+        return Promise.resolve({ runId: 42, entryId: 'entry-42', model: 'test-model' })
+      return Promise.resolve({
+        endpointConfigured: true,
+        credential: 'resolvable',
+        answering: { ready: true, reason: null, endpoint: 'test', model: 'test-model' },
+      })
+    })
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      startCommand(client)
+      const renderer = rendererOf(content)
+      renderer.captureLiveFrame = vi.fn().mockResolvedValue({
+        rows: ['load 1.00', 'PID USER', 'nocx 0.1', 'idle'].map((text) => ({
+          kind: 'text' as const,
+          text,
+        })),
+        cursor: { line: 0, col: 0 },
+        provenance: {
+          source: 'live',
+          identity: {
+            buffer: { kind: 'normal' },
+            cols: renderer.cols,
+            rows: 4,
+            generation: 0,
+          },
+          range: { start: 0, end: 4 },
+          scrollbackCapLines: 10000,
+        },
+      } satisfies CapturedFrame)
+      const grid = (content as unknown as { scrollback: ScrollbackController }).scrollback
+        .xtermLiveContainer
+      grid.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          ctrlKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      await vi.waitFor(() => expect(editorOf(content).isVisible).toBe(true))
+
+      const frame = document.querySelector<HTMLElement>('.nocx-freeze-frame')
+      expect(frame).not.toBeNull()
+      const rows = Array.from(frame!.querySelectorAll<HTMLElement>('.nocx-freeze-frame__row'))
+      expect(rows).toHaveLength(4)
+
+      // Select the middle band and finish the gesture, the way a scrollback
+      // selection reaches the same handler.
+      const range = document.createRange()
+      range.setStart(rows[1].firstChild!, 0)
+      range.setEnd(rows[2].firstChild!, rows[2].textContent.length)
+      range.getClientRects = () =>
+        [new DOMRect(100, 220, 200, 20), new DOMRect(100, 240, 200, 20)] as unknown as DOMRectList
+      const selection = window.getSelection()!
+      selection.removeAllRanges()
+      selection.addRange(range)
+      document.dispatchEvent(new Event('selectionchange'))
+
+      const affordance = document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')
+      expect(affordance).not.toBeNull()
+      affordance!.click()
+
+      // Counted as a person mark, and the rows are painted as granted.
+      const chip = document.querySelector<HTMLElement>('.nocx-editor-grant')
+      expect(chip?.textContent).toContain('· 1')
+      expect(rows[1].dataset.granted).toBe('true')
+      expect(rows[2].dataset.granted).toBe('true')
+      expect(rows[0].dataset.granted).toBeUndefined()
+      expect(rows[3].dataset.granted).toBeUndefined()
+
+      // ONE item on the wire: the attachment's own id, still renderer-owned,
+      // now carrying the band.
+      await submitQuestion(content, client, 'what are these two lines?')
+      const ask = client.dispatcher.call.mock.calls.find(([method]) => method === 'agent.ask')
+      const attached = (ask?.[1] as { attachedContent: Record<string, unknown>[] }).attachedContent
+      expect(attached).toHaveLength(1)
+      expect(attached[0]).toMatchObject({ start: 1, count: 2, automatic: true })
+
+      // And dismissing the row mark leaves the whole screen attached: the
+      // person took back the narrowing, not the attachment.
+      chip!.click()
+      document.querySelector<HTMLButtonElement>('[data-action="dismiss-grant"]')!.click()
+      expect(chip?.textContent).toContain('· 0')
+      expect(chip?.textContent).toContain('+ screen')
+      expect(rows[1].dataset.granted).toBeUndefined()
+      await submitQuestion(content, client, 'and the whole screen?')
+      const second = client.dispatcher.call.mock.calls.filter(
+        ([method]) => method === 'agent.ask',
+      )[1]
+      const secondAttached = (second?.[1] as { attachedContent: Record<string, unknown>[] })
+        .attachedContent
+      expect(secondAttached).toHaveLength(1)
+      expect(secondAttached[0]).toMatchObject({ automatic: true })
+      expect(secondAttached[0]).not.toHaveProperty('start')
+      expect(secondAttached[0]).not.toHaveProperty('count')
+    } finally {
+      teardown()
+    }
+  })
+
   it('Escape cancellation seats a stopped answer, never failed, after runState', async () => {
     const client = makeClient()
     client.dispatcher.call.mockImplementation((method: string) => {

@@ -234,6 +234,29 @@ func executeSessionList(ctx context.Context, reader *agenttools.SessionReader, s
 	return string(b), nil
 }
 
+// applyMarkedWindow narrows a session.read to the row span a PERSON marked on
+// this item, when they marked one and the call did not name a window of its
+// own. It is the one owner of that rule, because the rule is the same
+// wherever the rows come from: a block read from the ledger (nocx-hp8p2.15)
+// and the frozen screen a summon attaches (nocx-hp8p2.7) are two surfaces
+// with one meaning — the person asked about THESE rows, and the span is
+// authority rather than a hint the model may improve on.
+//
+// A window the model asked for itself is honoured: it may legitimately want
+// context around the mark, and it can only ever reach rows the grant already
+// allows. A start with no count keeps the mark's count, so "read from here"
+// stays as long as the mark rather than becoming the whole item.
+func applyMarkedWindow(reader *agenttools.SessionReader, id string, start, count *int) {
+	mark, ok := reader.MarkedWindow(id)
+	if !ok || *count > 0 {
+		return
+	}
+	if *start == 0 {
+		*start = mark.Start
+	}
+	*count = mark.Count
+}
+
 func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, source SessionSource, requester RendererRequester, args json.RawMessage) (string, error) {
 	bound, err := toolBound(ctx)
 	if err != nil {
@@ -258,6 +281,10 @@ func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, s
 		return executeSessionScreen(ctx, sessionID, requester, p.Start, p.Count, bound.MaxBytes)
 	}
 	if reader.IsAutomaticItem(p.ID) {
+		// A ROW MARK NARROWS THE FROZEN SCREEN, exactly as it narrows a block
+		// below (nocx-hp8p2.7): a person who selected rows inside the pinned
+		// screen marked THAT item, and the span travelled here with the ask.
+		applyMarkedWindow(reader, p.ID, &p.Start, &p.Count)
 		return executeSessionItemScreen(ctx, sessionID, p.ID, requester, p.Start, p.Count, bound.MaxBytes)
 	}
 	if source == nil {
@@ -275,11 +302,7 @@ func executeSessionRead(ctx context.Context, reader *agenttools.SessionReader, s
 	// A window the model DID ask for is honoured — it may legitimately want
 	// context around the mark, and it can only ever reach rows the grant
 	// already allows.
-	if mark, ok := reader.MarkedWindow(p.ID); ok && p.Start == 0 && p.Count <= 0 {
-		p.Start, p.Count = mark.Start, mark.Count
-	} else if mark, ok := reader.MarkedWindow(p.ID); ok && p.Count <= 0 {
-		p.Count = mark.Count
-	}
+	applyMarkedWindow(reader, p.ID, &p.Start, &p.Count)
 	if p.Count <= 0 {
 		p.Count = defaultBlockLines
 	}

@@ -3837,6 +3837,48 @@ func TestFilesChanged_OverTheWireConformsToContract(t *testing.T) {
 	}
 }
 
+func TestFilesRefreshStateChanged_DTOConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.refreshStateChanged.schema.json")
+	for _, state := range []filesRefreshState{filesRefreshStateOK, filesRefreshStateDelayed} {
+		raw, err := json.Marshal(filesRefreshStateChangedParams{
+			BindingID: "binding-1",
+			State:     string(state),
+		})
+		if err != nil {
+			t.Fatalf("marshal %s: %v", state, err)
+		}
+		validateJSON(t, schema, raw, "files.refreshStateChanged DTO")
+	}
+}
+
+// The real notification is emitted by attach's state replay, then validated
+// from the params bytes read off the new WebSocket connection.
+func TestFilesRefreshStateChanged_OverTheWireConformsToContract(t *testing.T) {
+	schema := loadSchema(t, "files.refreshStateChanged.schema.json")
+	e := newFilesTestEnv(t)
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	dir := t.TempDir()
+	bid := e.openBinding(t, sid, dir, 2)
+	w := e.watchDir(t, bid, []string{dir}, 3)
+
+	w.mu.Lock()
+	w.refreshState = filesRefreshStateDelayed
+	w.mu.Unlock()
+	dropSubscriber(t, e, sid)
+	connB := reattach(t, e, sid, 4)
+
+	raw := readNotification(t, connB, "files.refreshStateChanged", wantWithin)
+	validateJSON(t, schema, raw, "files.refreshStateChanged params (real socket)")
+	var got filesRefreshStateChangedParams
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	if got.BindingID != bid || got.State != string(filesRefreshStateDelayed) {
+		t.Fatalf("got %+v; want binding %q delayed", got, bid)
+	}
+}
+
 // ── git.* ───────────────────────────────────────────────────────────────
 
 // The eleven wire shapes of the git-manager control plane (spec §5.2,

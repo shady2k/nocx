@@ -9,6 +9,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"math/rand/v2"
 	"os"
 	"path/filepath"
@@ -1696,5 +1697,76 @@ func TestFilesPoll_StaleCompletionDoesNotOverwriteReaddedPath(t *testing.T) {
 	defer w.mu.Unlock()
 	if got := w.paths[dir].rev; got != "new-baseline" {
 		t.Fatalf("re-added path rev = %q, stale completion overwrote it", got)
+	}
+}
+
+// TestFilesRefreshState_RoutineDeferralAtCeilingIsSilent keeps routine
+// round-robin pacing from being mistaken for a stalled watcher. Every
+// dispatch succeeds, so the aggregate observation window stays fresh even
+// though each individual path is revisited less often at the ceiling.
+func TestFilesRefreshState_RoutineDeferralAtCeilingIsSilent(t *testing.T) {
+	e, _ := newCountingFilesEnv(t)
+	e.ws.filesPollInterval = 5 * time.Millisecond
+	e.ws.filesRefreshStateThreshold = 100 * time.Millisecond
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	paths := make([]string, maxWatchPaths)
+	for i := range paths {
+		paths[i] = filepath.Join(root, fmt.Sprintf("watched-%d", i))
+		if err := os.MkdirAll(paths[i], 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", paths[i], err)
+		}
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, paths, 3)
+
+	if _, err := awaitNotification(e.conn, "files.refreshStateChanged", 100*time.Millisecond); err == nil {
+		t.Fatal("routine successful dispatches emitted delayed state")
+	}
+}
+
+func TestFilesRefreshState_CrossesAndRecoversOnlyOnEdges(t *testing.T) {
+	now := time.Unix(100, 0)
+	entry := &filesPollEntry{lastSuccessfulObservation: now}
+	w := &filesWatcher{
+		paths:        map[string]*filesPollEntry{"/watched": entry},
+		visible:      true,
+		refreshState: filesRefreshStateOK,
+	}
+	const threshold = time.Minute
+
+	if state, changed := w.updateRefreshState(now.Add(threshold), threshold); state != filesRefreshStateDelayed || !changed {
+		t.Fatalf("first threshold crossing = %q/%t, want delayed/true", state, changed)
+	}
+	if state, changed := w.updateRefreshState(now.Add(2*threshold), threshold); state != filesRefreshStateDelayed || changed {
+		t.Fatalf("steady delayed state = %q/%t, want delayed/false", state, changed)
+	}
+
+	entry.lastSuccessfulObservation = now.Add(2 * threshold)
+	if state, changed := w.updateRefreshState(now.Add(2*threshold), threshold); state != filesRefreshStateOK || !changed {
+		t.Fatalf("recovery = %q/%t, want ok/true", state, changed)
+	}
+	if state, changed := w.updateRefreshState(now.Add(5*threshold/2), threshold); state != filesRefreshStateOK || changed {
+		t.Fatalf("steady ok state = %q/%t, want ok/false", state, changed)
+	}
+}
+
+func TestFilesRefreshState_HiddenTimeDoesNotCount(t *testing.T) {
+	now := time.Unix(100, 0)
+	entry := &filesPollEntry{lastSuccessfulObservation: now}
+	w := &filesWatcher{
+		paths:        map[string]*filesPollEntry{"/watched": entry},
+		visible:      false,
+		refreshState: filesRefreshStateOK,
+		wake:         make(chan struct{}, 1),
+	}
+	const threshold = time.Minute
+
+	if state, changed := w.updateRefreshState(now.Add(10*threshold), threshold); state != filesRefreshStateOK || changed {
+		t.Fatalf("hidden state = %q/%t, want ok/false", state, changed)
+	}
+	w.setVisible(true)
+	if state, changed := w.updateRefreshState(now.Add(10*threshold+threshold/2), threshold); state != filesRefreshStateOK || changed {
+		t.Fatalf("fresh visible window = %q/%t, want ok/false", state, changed)
 	}
 }

@@ -692,14 +692,23 @@ function FilesPanel(props: FilesPanelProps) {
         </div>
       </Show>
       <Show when={props.store.phase() === 'ready'}>
-        {/* Refresh that has actually stopped (§5.5): a sticky INLINE
-            message with Retry — not a toast, because a toast cannot answer
-            "why is this stale?" ten minutes later. The Retry is the header
-            refresh cycle, which re-sends the watch set and clears the
-            failure the instant it recovers. */}
-        <Show when={props.store.watchFailed() !== null}>
+        {/* Refresh degradation (§5.5): a sticky INLINE message with Retry —
+            not a toast, because a toast cannot answer "why is this stale?"
+            ten minutes later. Two distinct facts share the surface:
+            watchFailed means the watch could not be established, while
+            refreshState 'delayed' means the visible refresh loop is not
+            keeping up. They differ in cause and not in consequence — the
+            tree may be out of date and the remedy is the same header
+            refresh cycle — so one message with one Retry is clearer than
+            two warnings competing for the same strip. */}
+        <Show when={props.store.watchFailed() !== null || props.store.refreshState() === 'delayed'}>
           <div class="files-watch-error" data-testid="files-watch-error">
-            <span>{props.store.watchFailed()}</span>
+            <span>
+              {props.store.watchFailed() ??
+                (props.store.refreshState() === 'delayed'
+                  ? 'This tree may be out of date — Retry to catch it up.'
+                  : '')}
+            </span>
             <Button size="sm" data-testid="files-watch-retry" onClick={() => props.store.refresh()}>
               Retry
             </Button>

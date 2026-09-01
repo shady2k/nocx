@@ -13,6 +13,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import type { FilesListEntry, FilesListResult } from '../generated/files.list'
 import type { FilesChanged } from '../generated/files.changed'
+import type { FilesRefreshStateChanged } from '../generated/files.refreshStateChanged'
 import type { FilesPanelServices } from './files-client'
 import {
   createFilesTreeStore,
@@ -127,6 +128,7 @@ function makeServices(over: Partial<FilesPanelServices> = {}): FilesPanelService
     visible: vi.fn().mockResolvedValue({}),
     reveal: vi.fn().mockResolvedValue({}),
     subscribeFilesChanged: vi.fn().mockReturnValue(() => {}),
+    subscribeFilesRefreshStateChanged: vi.fn().mockReturnValue(() => {}),
     onConnect: vi.fn().mockReturnValue(() => {}),
     close: vi.fn().mockResolvedValue({}),
     ...over,
@@ -1461,6 +1463,24 @@ describe('files tree store', () => {
     await settle()
     expect(watch.mock.calls.length).toBe(callsBefore + 1)
     expect(watch).toHaveBeenLastCalledWith('b1', ['/'])
+  })
+
+  it('shows only matching refresh-state notifications and clears on recovery', async () => {
+    let handler: ((p: FilesRefreshStateChanged) => void) | null = null
+    const subscribeFilesRefreshStateChanged = vi.fn((h: (p: FilesRefreshStateChanged) => void) => {
+      handler = h
+      return () => {}
+    })
+    const store = createFilesTreeStore(makeServices({ subscribeFilesRefreshStateChanged }))
+    store.rescope(LOCAL_A)
+    await settle()
+
+    handler!({ bindingId: 'b1', state: 'delayed' })
+    expect(store.refreshState()).toBe('delayed')
+    handler!({ bindingId: 'other', state: 'ok' })
+    expect(store.refreshState()).toBe('delayed')
+    handler!({ bindingId: 'b1', state: 'ok' })
+    expect(store.refreshState()).toBe('ok')
   })
 
   it('dispose unsubscribes from the change stream and the reconnect hook', async () => {

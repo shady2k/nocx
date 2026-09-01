@@ -9604,6 +9604,9 @@
       "$ref": "https://nocx.local/contracts/files.read.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/files.refreshStateChanged.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/files.reveal.schema.json"
     },
     {

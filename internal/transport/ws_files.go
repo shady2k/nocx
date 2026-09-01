@@ -274,21 +274,26 @@ const (
 	filesPollMaxFailureStep       = 4
 )
 
+// The delayed edge is derived from the scheduler's production envelope:
+// routine idle polling tops out at 20×500 ms = 10 s, while the failure ladder
+// tops out at 120×500 ms = 60 s. A visible panel is delayed only when no
+// eligible path has been successfully observed across that whole envelope.
+// Tests shorten this window through WSServer.filesRefreshStateThreshold.
+const defaultFilesRefreshStateThreshold = 60 * time.Second
+
 // A dispatch is one bounded listing of one watched path. maxWatchPaths=512
 // bounds the watched set; the watcher owns exactly one timer for the earliest
 // dueAt and breaks ties round-robin, never creating one timer or goroutine per
 // watched directory. At the 512-path ceiling, exact freshness, bounded load,
 // and full enumeration cannot all hold, so a scheduler that falls behind
 // prefers stale-but-responsive over continuous load. Making that degradation
-// visible is nocx-8hdia.7, not this server-side scheduling bead.
-
 // filesPollEntry is the independent schedule and observation for one watched
 // path. The pointer is the path's identity: a dispatch captures it and its
 // generation so a remove-and-readd cannot let an old completion mutate the
 // replacement.
 type filesPollEntry struct {
 	rev                       string
-	lastSuccessfulObservation string
+	lastSuccessfulObservation time.Time
 	idleStep                  int
 	failureStep               int
 	dueAt                     time.Time
@@ -302,6 +307,13 @@ const (
 	filesPollPathChanged
 	filesPollPathFailed
 	filesPollPathStopped
+)
+
+type filesRefreshState string
+
+const (
+	filesRefreshStateOK      filesRefreshState = "ok"
+	filesRefreshStateDelayed filesRefreshState = "delayed"
 )
 
 // filesPollWait chooses a path's next delay. The idle and failure ladders are
@@ -346,10 +358,11 @@ func filesPollWait(base time.Duration, idleStep, failureStep int, jitter *rand.R
 }
 
 func newFilesPollEntry(rev string, generation uint64, base time.Duration, jitter *rand.Rand) *filesPollEntry {
+	now := time.Now()
 	return &filesPollEntry{
 		rev:                       rev,
-		lastSuccessfulObservation: rev,
-		dueAt:                     time.Now().Add(filesPollWait(base, 0, 0, jitter)),
+		lastSuccessfulObservation: now,
+		dueAt:                     now.Add(filesPollWait(base, 0, 0, jitter)),
 		generation:                generation,
 	}
 }
@@ -385,9 +398,9 @@ type filesWatcher struct {
 	// polling is "paused while visible() is false"). True at creation, since
 	// files.watch is sent by a panel that is rendering; the client sends
 	// every transition after that.
-	visible  bool
-	pollBase time.Duration
-
+	visible      bool
+	pollBase     time.Duration
+	refreshState filesRefreshState
 	// jitter is non-nil only for remote bindings. Local tests leave jitter nil,
 	// making the ladder deterministic; remote waits vary by up to ±10%.
 	jitter *rand.Rand
@@ -417,6 +430,7 @@ func (w *filesWatcher) markVisibleCatchUpLocked(now time.Time) {
 	}
 	for path, entry := range w.paths {
 		entry.dueAt = now
+		entry.lastSuccessfulObservation = now
 		w.catchUp[path] = entry
 	}
 }
@@ -464,7 +478,7 @@ func (w *filesWatcher) observeSuccessful(
 	delete(w.catchUp, path)
 	now := time.Now()
 	entry.rev = rev
-	entry.lastSuccessfulObservation = rev
+	entry.lastSuccessfulObservation = now
 	entry.idleStep = 0
 	entry.failureStep = 0
 	entry.dueAt = now.Add(filesPollWait(base, 0, 0, w.jitter))
@@ -564,6 +578,56 @@ func (w *filesWatcher) isVisible() bool {
 	w.mu.Lock()
 	defer w.mu.Unlock()
 	return w.visible
+}
+
+// refreshStateAt derives the binding-level freshness state from the latest
+// successful observation of any eligible path. Hidden time is excluded by
+// the visibility gate; the visible edge resets each path's observation window.
+func (w *filesWatcher) refreshStateAtLocked(now time.Time, threshold time.Duration) filesRefreshState {
+	if !w.visible || len(w.paths) == 0 {
+		return filesRefreshStateOK
+	}
+	var latest time.Time
+	for _, entry := range w.paths {
+		if entry.lastSuccessfulObservation.After(latest) {
+			latest = entry.lastSuccessfulObservation
+		}
+	}
+	if latest.IsZero() || now.Before(latest.Add(threshold)) {
+		return filesRefreshStateOK
+	}
+	return filesRefreshStateDelayed
+}
+
+func (w *filesWatcher) refreshStateDeadline(threshold time.Duration) time.Time {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if !w.visible || len(w.paths) == 0 || w.refreshState == filesRefreshStateDelayed {
+		return time.Time{}
+	}
+	var latest time.Time
+	for _, entry := range w.paths {
+		if entry.lastSuccessfulObservation.After(latest) {
+			latest = entry.lastSuccessfulObservation
+		}
+	}
+	if latest.IsZero() {
+		return time.Time{}
+	}
+	return latest.Add(threshold)
+}
+
+// updateRefreshState applies an edge only. The caller emits the returned state
+// outside the lock so a blocked socket cannot hold scheduler bookkeeping.
+func (w *filesWatcher) updateRefreshState(now time.Time, threshold time.Duration) (filesRefreshState, bool) {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	want := w.refreshStateAtLocked(now, threshold)
+	if w.refreshState == want {
+		return want, false
+	}
+	w.refreshState = want
+	return want, true
 }
 
 // filesMachine is the transport-owned files.* surface the handlers reach
@@ -669,8 +733,9 @@ type filesListOK struct {
 	Entries   []filesListEntry `json:"entries"` // never null: [] for an empty directory
 	Offset    int              `json:"offset"`
 	Total     int              `json:"total"`
-	HasMore   bool             `json:"hasMore"`
-	Rev       string           `json:"rev"`
+
+	HasMore bool   `json:"hasMore"`
+	Rev     string `json:"rev"`
 }
 
 type filesListTooLarge struct {
@@ -734,6 +799,11 @@ type filesChangedParams struct {
 	BindingID string `json:"bindingId"`
 	Path      string `json:"path"`
 	Rev       string `json:"rev,omitempty"` // absent when nothing has been re-listed
+}
+
+type filesRefreshStateChangedParams struct {
+	BindingID string `json:"bindingId"`
+	State     string `json:"state"`
 }
 
 // ── handlers (constructed types) ───────────────────────────────────────────
@@ -1109,6 +1179,7 @@ func (h filesBindingHandlers) handleWatch(ctx context.Context, state *connState,
 					dirty:          make(map[string]string),
 					visible:        true,
 					pollBase:       base,
+					refreshState:   filesRefreshStateOK,
 					nextGeneration: 1,
 					stop:           make(chan struct{}),
 					done:           make(chan struct{}),
@@ -1355,7 +1426,12 @@ func (s *WSServer) filesSpecs(lane control.Admission, sessionGate, fsGate contro
 			return func(_ context.Context, req jsonrpcRequest) { h.handleVisible(state, req) }
 		}),
 		reg(bindingSub, "files.watch", params(validateFilesWatchRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
-			h := filesBindingHandlers{op: bindingOp, machine: s, revealer: s.revealer, r: r}
+			h := filesBindingHandlers{
+				op:       bindingOp,
+				machine:  s,
+				revealer: s.revealer,
+				r:        r,
+			}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleWatch(ctx, state, req) }
 		}),
 		reg(bindingSub, "files.close", params(validateFilesCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
@@ -1420,6 +1496,21 @@ func (s *WSServer) emitFilesChanged(w *filesWatcher, path, rev string) {
 	w.mu.Unlock()
 }
 
+func (s *WSServer) emitFilesRefreshState(w *filesWatcher, state filesRefreshState) {
+	rx := s.getRx(w.sessionID)
+	if rx == nil {
+		return
+	}
+	wconn, _ := rx.getSubscriber()
+	if wconn == nil {
+		return
+	}
+	_ = wconn.TryNotify("files.refreshStateChanged", mustMarshal(filesRefreshStateChangedParams{
+		BindingID: w.bindingID,
+		State:     string(state),
+	}))
+}
+
 // flushFilesChanged delivers the dirty paths a session's bindings
 // accumulated while no connection was attached, to the connection that
 // just attached. One notification per dirty path, then clear — the
@@ -1458,6 +1549,18 @@ func (s *WSServer) flushFilesChanged(sid session.ID, wconn Responder) {
 			delete(w.dirty, p)
 			w.mu.Unlock()
 		}
+		w.mu.Lock()
+		state := w.refreshState
+		w.mu.Unlock()
+		if state == "" {
+			state = filesRefreshStateOK
+		}
+		if err := wconn.TryNotify("files.refreshStateChanged", mustMarshal(filesRefreshStateChangedParams{
+			BindingID: w.bindingID,
+			State:     string(state),
+		})); err != nil {
+			return
+		}
 	}
 }
 
@@ -1479,6 +1582,10 @@ func (s *WSServer) filesPollBaseInterval() time.Duration {
 func (s *WSServer) filesPollLoop(w *filesWatcher) {
 	defer close(w.done)
 	base := s.filesPollBaseInterval()
+	threshold := s.filesRefreshStateThreshold
+	if threshold <= 0 {
+		threshold = defaultFilesRefreshStateThreshold
+	}
 	w.mu.Lock()
 	w.pollBase = base
 	w.mu.Unlock()
@@ -1500,14 +1607,30 @@ func (s *WSServer) filesPollLoop(w *filesWatcher) {
 					wait = 0
 				}
 			}
+			if deadline := w.refreshStateDeadline(threshold); !deadline.IsZero() {
+				stateWait := time.Until(deadline)
+				if stateWait < wait {
+					wait = stateWait
+				}
+				if wait < 0 {
+					wait = 0
+				}
+			}
 		}
 		timer.Reset(wait)
+	}
+	updateState := func() {
+		state, changed := w.updateRefreshState(time.Now(), threshold)
+		if changed {
+			s.emitFilesRefreshState(w, state)
+		}
 	}
 	runPoll := func() bool {
 		result := s.filesPollTick(w)
 		if result == filesPollPathStopped {
 			return false
 		}
+		updateState()
 		resetTimer()
 		return true
 	}
@@ -1685,7 +1808,7 @@ func (s *WSServer) filesPollPath(
 	}
 	changed := current.rev == "" || listing.Rev != current.rev
 	current.rev = listing.Rev
-	current.lastSuccessfulObservation = listing.Rev
+	current.lastSuccessfulObservation = time.Now()
 	current.failureStep = 0
 	if changed {
 		current.idleStep = 0

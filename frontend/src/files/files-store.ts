@@ -38,6 +38,7 @@
 import { createMemo, createSignal, untrack } from 'solid-js'
 import type { FilesListResult, FilesListEntry } from '../generated/files.list'
 import type { FilesChanged } from '../generated/files.changed'
+import type { FilesRefreshStateChanged } from '../generated/files.refreshStateChanged'
 import type { FilesPanelServices } from './files-client'
 import type { ActiveOrigin } from '../pane-content'
 import { isExpandable, type TreeRowKind } from '../ui/tree-row-kind'
@@ -282,6 +283,9 @@ export interface FilesTreeStore {
    *  until the next successful watch (the header refresh re-establishes
    *  it); rendered as an inline message with Retry, never a toast. */
   watchFailed(): string | null
+  /** The binding-level freshness state: delayed only after the backend's
+   *  visible observation window crosses its threshold, and ok on recovery. */
+  refreshState(): 'ok' | 'delayed' | null
   /** The entry's path relative to the display root, as spelled — lexical,
    *  symlinks unresolved (the copy-path action's "path in this tree"). */
   relativePath(node: FilesNode): string
@@ -313,11 +317,12 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
   }
   /** The §5.5 watching state: the backend's reported refresh mode for the
    *  current watch set, the degraded-mode reason (local fallback to
-   *  polling), and a sticky failure — the inline "refresh stopped" state,
-   *  cleared by the next successful files.watch (the header refresh). */
+   *  polling), a sticky watch failure, and the binding-level freshness edge
+   *  (routine pacing stays invisible). */
   const [watchMode, setWatchMode] = createSignal<'watching' | 'polling' | null>(null)
   const [watchDegradedReason, setWatchDegradedReason] = createSignal<string | null>(null)
   const [watchFailed, setWatchFailed] = createSignal<string | null>(null)
+  const [refreshState, setRefreshState] = createSignal<'ok' | 'delayed' | null>(null)
   /** The panel's name filter (nocx-708q.2): the one string that narrows the
    *  tree. Typing activates one serialized, whole-directory projection after
    *  a debounce; subsequent keystrokes reuse it, so they cannot churn the
@@ -1109,11 +1114,19 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     refreshDir(dir, ctx)
   }
 
+  function onFilesRefreshStateChanged(p: FilesRefreshStateChanged): void {
+    const b = untrack(binding)
+    if (b === null || p.bindingId !== b.bindingId) return
+    if (p.state !== 'ok' && p.state !== 'delayed') return
+    setRefreshState(p.state)
+  }
+
   function openScope(o: ActiveOrigin): void {
     generation++
     discardFilterProjection()
     if (filter().trim() !== '') setFilter(filter())
     setPhase('opening')
+    setRefreshState(null)
     setOpenError(null)
     // A fresh binding has no watch state yet: the badge and the sticky
     // message wait for this binding's first files.watch response.
@@ -1736,6 +1749,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     setWatchMode(null)
     setWatchDegradedReason(null)
     setWatchFailed(null)
+    setRefreshState(null)
     setRevealTarget(null)
     pendingRevealHint = undefined
     // Supersede any walk still in flight: closed already drops its
@@ -1749,6 +1763,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     if (b !== null) void services.close(b.bindingId).catch(() => {})
     unsubChanged()
     unsubConnect()
+    unsubRefreshState()
   }
 
   /** The change stream, subscribed once for the store's whole life: the
@@ -1759,6 +1774,9 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
    *  backend diffs), so a dropped socket cannot silently detach the panel
    *  from the change stream. Unsubscribed in dispose() with the binding. */
   const unsubChanged = services.subscribeFilesChanged((p) => onFilesChanged(p))
+  const unsubRefreshState = services.subscribeFilesRefreshStateChanged((p) =>
+    onFilesRefreshStateChanged(p),
+  )
   const unsubConnect = services.onConnect(() => {
     forgetPublishedWatchSet()
     void syncWatchSet()
@@ -1782,6 +1800,7 @@ export function createFilesTreeStore(services: FilesPanelServices): FilesTreeSto
     showMore,
     retry,
     refresh,
+    refreshState,
     setVisible,
     watchMode,
     watchDegradedReason,

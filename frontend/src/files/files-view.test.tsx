@@ -22,6 +22,7 @@ import { PlugIcon } from '../ui/icons'
 import { createRendererMock, makeClient, mountPaneManager } from '../test-support/panes-fixtures'
 import { setDocumentHidden } from '../test-support/document-visibility'
 import type { FilesListEntry, FilesListResult } from '../generated/files.list'
+import type { FilesRefreshStateChanged } from '../generated/files.refreshStateChanged'
 import type { FilesOpenResult } from '../generated/files.open'
 import type { FilesReadResult } from '../generated/files.read'
 import type { FilesPanelServices } from './files-client'
@@ -113,6 +114,7 @@ function fakeServices(over: Partial<FilesPanelServices> = {}): FilesPanelService
     visible: vi.fn().mockResolvedValue({}),
     reveal: vi.fn().mockResolvedValue({}),
     subscribeFilesChanged: vi.fn().mockReturnValue(() => {}),
+    subscribeFilesRefreshStateChanged: vi.fn().mockReturnValue(() => {}),
     onConnect: vi.fn().mockReturnValue(() => {}),
     close: vi.fn().mockResolvedValue({}),
     ...over,
@@ -1061,6 +1063,38 @@ describe('files sidebar view', () => {
     // recovers.
     watch.mockResolvedValue({ mode: 'watching' })
     panel.querySelector<HTMLElement>('[data-testid="files-watch-retry"]')!.click()
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-testid="files-watch-error"]')).toBeNull(),
+    )
+  })
+
+  it('shows the delayed refresh state and removes it when the backend catches up', async () => {
+    let refreshStateHandler: ((params: FilesRefreshStateChanged) => void) | null = null
+    const services = fakeServices({
+      list: vi
+        .fn()
+        .mockResolvedValue(
+          listFixture('C:/', [entryFixture({ name: 'notes.md', path: '/notes.md' })]),
+        ),
+      subscribeFilesRefreshStateChanged: vi.fn(
+        (handler: (params: FilesRefreshStateChanged) => void) => {
+          refreshStateHandler = handler
+          return () => {}
+        },
+      ),
+    })
+    const { panel } = await mountApp(services)
+    await vi.waitFor(() => expect(rowNamed(panel, 'notes.md')).not.toBeUndefined())
+
+    refreshStateHandler!({ bindingId: 'b1', state: 'delayed' })
+    await vi.waitFor(() =>
+      expect(panel.querySelector('[data-testid="files-watch-error"]')?.textContent).toContain(
+        'This tree may be out of date — Retry to catch it up.',
+      ),
+    )
+    expect(panel.querySelector('[data-testid="files-watch-retry"]')).not.toBeNull()
+
+    refreshStateHandler!({ bindingId: 'b1', state: 'ok' })
     await vi.waitFor(() =>
       expect(panel.querySelector('[data-testid="files-watch-error"]')).toBeNull(),
     )

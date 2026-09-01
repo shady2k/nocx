@@ -15,6 +15,7 @@ import type { FilesWatchResult } from '../generated/files.watch'
 import type { FilesVisibleResult } from '../generated/files.visible'
 import type { FilesRevealResult } from '../generated/files.reveal'
 import type { FilesChanged } from '../generated/files.changed'
+import type { FilesRefreshStateChanged } from '../generated/files.refreshStateChanged'
 
 class FilesClient {
   constructor(private dispatcher: Dispatcher) {}
@@ -81,6 +82,20 @@ class FilesClient {
     })
   }
 
+  /** Subscribe to the binding-level refresh freshness edge. Routine polling
+   *  stays silent; delayed and recovered state are the only transitions, with
+   *  the current state replayed after attach/reconnect by the backend. */
+  subscribeFilesRefreshStateChanged(
+    handler: (params: FilesRefreshStateChanged) => void,
+  ): () => void {
+    return this.dispatcher.subscribe('files.refreshStateChanged', (params: unknown) => {
+      const p = params as FilesRefreshStateChanged
+      if (p && typeof p.bindingId === 'string' && (p.state === 'ok' || p.state === 'delayed')) {
+        handler(p)
+      }
+    })
+  }
+
   /** Reconnect hook: the watch set is re-sent so a WebSocket drop cannot
    *  silently detach the panel from the change stream (the backend's dirty
    *  set is flushed to the re-attached subscriber, and re-sending the set
@@ -105,6 +120,7 @@ export interface FilesPanelServices {
   visible(bindingId: string, visible: boolean): Promise<FilesVisibleResult>
   reveal(bindingId: string, path: string): Promise<FilesRevealResult>
   subscribeFilesChanged(handler: (params: FilesChanged) => void): () => void
+  subscribeFilesRefreshStateChanged(handler: (params: FilesRefreshStateChanged) => void): () => void
   onConnect(handler: () => void): () => void
   close(bindingId: string): Promise<FilesCloseResult>
 }
@@ -119,6 +135,8 @@ export function createFilesPanelServices(dispatcher: Dispatcher): FilesPanelServ
     watch: (bindingId, paths) => client.watch(bindingId, paths),
     visible: (bindingId, isVisible) => client.visible(bindingId, isVisible),
     reveal: (bindingId, path) => client.reveal(bindingId, path),
+    subscribeFilesRefreshStateChanged: (handler) =>
+      client.subscribeFilesRefreshStateChanged(handler),
     subscribeFilesChanged: (handler) => client.subscribeFilesChanged(handler),
     onConnect: (handler) => client.onConnect(handler),
     close: (bindingId) => client.close(bindingId),

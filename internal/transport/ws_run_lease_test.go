@@ -86,6 +86,17 @@ func newSocketTap(conn *websocket.Conn) *socketTap {
 	return t
 }
 
+// socketClosedWhy is appended to every "socket closed" failure in this file,
+// because that sentence names the messenger and never the cause. The server
+// releases a client that sends nothing for heartbeatReadWindow (ws.go:2620,
+// DefaultHeartbeatReadWindow = 30s), and the window is refreshed only by frames
+// the CLIENT sends — a tap only reads, so any wait longer than the window kills
+// the socket before the wait can reach its own deadline and print its own error.
+// Four CI failures and three rounds of investigation were spent on the corpse
+// before the deadline was found (nocx-a96sf).
+const socketClosedWhy = " — the server closes a client that has sent nothing for " +
+	"30s (heartbeatReadWindow); a wait longer than that is the first thing to check"
+
 // tapCall sends one JSON-RPC request over the tap and waits for the
 // response carrying the same id (notifications pass through untouched).
 func tapCall(t *testing.T, conn *websocket.Conn, tap *socketTap, id int, method string, params any) json.RawMessage {
@@ -103,7 +114,7 @@ func tapCall(t *testing.T, conn *websocket.Conn, tap *socketTap, id int, method 
 		select {
 		case msg, ok := <-tap.msgs:
 			if !ok {
-				t.Fatalf("socket closed before %s answered", method)
+				t.Fatalf("socket closed before %s answered%s", method, socketClosedWhy)
 			}
 			var env struct {
 				ID *json.RawMessage `json:"id"`
@@ -128,7 +139,7 @@ func tapNotify(t *testing.T, tap *socketTap, method string, timeout time.Duratio
 		select {
 		case msg, ok := <-tap.msgs:
 			if !ok {
-				t.Fatalf("socket closed before %s arrived", method)
+				t.Fatalf("socket closed before %s arrived%s", method, socketClosedWhy)
 			}
 			var n struct {
 				Method string          `json:"method"`
@@ -225,7 +236,7 @@ func tapDataFor(t *testing.T, tap *socketTap, sid, needle string, timeout time.D
 		select {
 		case f, ok := <-tap.data:
 			if !ok {
-				t.Fatalf("socket closed before the output contained %q", needle)
+				t.Fatalf("socket closed before the output contained %q%s", needle, socketClosedWhy)
 			}
 			if string(session.IDFromBytes(f.SessionID)) != sid {
 				continue
@@ -979,9 +990,21 @@ func TestRunLease_OutputBudgetBoundsAndTheBlockNamesIt(t *testing.T) {
 	h.createEndpointAt()
 	sid := h.openSession(t)
 	pidFile := filepath.Join(t.TempDir(), "child.pid")
-	// 2 KiB of output (past the 512-byte budget), then it waits — so the
-	// budget, not the wall clock or the command's own exit, ends the run.
-	cmd := "sh -c 'echo $$ > " + pidFile + "; dd if=/dev/zero bs=256 count=8 2>/dev/null; sleep 100'"
+	// Output that KEEPS COMING until something stops it, rather than one
+	// burst followed by a wait.
+	//
+	// The burst raced the accounting it was meant to exceed. Budget
+	// accounting opens at ledger.bind, which submitLeaseCommand sends after
+	// the shell echoes the command; a fixed 2 KiB written before that RPC
+	// lands is not counted, and `sleep 100` then produces nothing, so the
+	// budget never fires and the WALL CLOCK ends the run 60 seconds later.
+	// Whether that happened was decided by how fast the machine was, and on
+	// the GitHub runner it happened every time (nocx-3n0f3.1).
+	//
+	// A stream cannot lose that race: whenever accounting opens, 512 bytes
+	// arrive within the next fifth of a second. 512 bytes per 100ms is also
+	// slow enough that a run which somehow is NOT bounded floods nothing.
+	cmd := "sh -c 'echo $$ > " + pidFile + "; while :; do dd if=/dev/zero bs=256 count=2 2>/dev/null; sleep 0.1; done'"
 	res := h.askRunsTool(sid, cmd)
 	tap := newSocketTap(h.conn)
 

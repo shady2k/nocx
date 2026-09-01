@@ -5,7 +5,9 @@ import (
 	"sort"
 
 	"github.com/shady2k/nocx/internal/log"
+	"github.com/shady2k/nocx/internal/loginshell"
 	"github.com/shady2k/nocx/internal/pty"
+	"github.com/shady2k/nocx/internal/shellintegration"
 )
 
 // LocalSpawner starts the shell through internal/pty — the same package the
@@ -54,16 +56,56 @@ func NewLocalSpawner(logger *slog.Logger, shell Shell) *LocalSpawner {
 // shell leads its own process group and the helper owns that group — which is
 // what makes signalling a job on the host possible at all (D3).
 func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
-	lp, err := pty.NewLocal(s.log, pty.Config{
-		Command: s.shell.Path,
-		Args:    s.shell.Args,
+	shellPath, shellArgs := s.shell.Path, s.shell.Args
+	if shellPath == "" {
+		shell := loginshell.New().Resolve()
+		shellPath = shell.Path
+		shellArgs = nil
+	}
+
+	cfg := pty.Config{
+		Command: shellPath,
+		Args:    shellArgs,
 		Cwd:     req.Cwd,
 		Env:     envSlice(req.Env),
 		Cols:    req.Cols,
 		Rows:    req.Rows,
-	})
+	}
+	var launch shellintegration.LocalLaunch
+	var err error
+	if req.SessionID != "" && len(shellArgs) == 0 {
+		launch, err = shellintegration.LocalEnhancedLaunchInMemory(
+			shellPath,
+			shellintegration.LocalShellKind(shellPath),
+			shellintegration.LaunchOptions{SessionID: req.SessionID, Enhanced: true},
+		)
+		if err != nil {
+			return nil, err
+		}
+		cfg.Command = launch.Command
+		cfg.Args = launch.Args
+		cfg.Env = append(cfg.Env, launch.Env...)
+		cfg.ExtraFiles = launch.ExtraFiles
+	}
+
+	lp, err := pty.NewLocal(s.log, cfg)
 	if err != nil {
+		if launch.Abort != nil {
+			launch.Abort()
+		}
 		return nil, err
+	}
+	if len(launch.Bootstrap) > 0 {
+		if _, err := lp.Write(launch.Bootstrap); err != nil {
+			if launch.Abort != nil {
+				launch.Abort()
+			}
+			_ = lp.Close()
+			return nil, err
+		}
+	}
+	if launch.Cleanup != nil {
+		launch.Cleanup()
 	}
 	return &localProcess{LocalPty: lp}, nil
 }

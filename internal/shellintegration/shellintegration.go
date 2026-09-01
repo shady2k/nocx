@@ -26,9 +26,9 @@ type CwdInfo struct {
 }
 
 // ShellIntegration is the OSC 7/133 substrate contract (Tier A shell hooks
-// now; Tier B remote-helper seam later). Per AD-6 the backend never parses
-// OSC — the VT frontend surfaces OSC events and the backend only validates
-// the results.
+// remain available on hosts without a helper; Tier B uses helper-hosted
+// in-memory delivery). Per AD-6 the backend never parses OSC — the VT frontend
+// surfaces OSC events and the backend only validates the results.
 type ShellIntegration interface {
 	// ValidateCwd validates a frontend-supplied host and path from an
 	// OSC 7 event.

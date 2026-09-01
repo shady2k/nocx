@@ -91,25 +91,22 @@ func (s *runSnapshots) Fetch(ctx context.Context, fetcher apifetch.TextFetcher, 
 	if err != nil {
 		return fetchURLResult{}, err
 	}
-	if int64(len(doc.Text)) > snapshotMaxBytes {
+	text := renderFetchedDocument(doc)
+	if int64(len(text)) > snapshotMaxBytes {
 		return fetchURLResult{}, ErrSnapshotTooLarge
 	}
 	revision, err = newSnapshotRevision()
 	if err != nil {
 		return fetchURLResult{}, fmt.Errorf("fetch.url: mint snapshot revision: %w", err)
 	}
-	s.store(runID, revision, runSnapshot{
+	snapshot := runSnapshot{
 		URL:         rawURL,
 		ContentType: doc.ContentType,
-		Text:        doc.Text,
+		Text:        text,
 		Lossy:       doc.Lossy,
-	})
-	return makeFetchURLResult(rawURL, revision, runSnapshot{
-		URL:         rawURL,
-		ContentType: doc.ContentType,
-		Text:        doc.Text,
-		Lossy:       doc.Lossy,
-	}, start, maxBytes)
+	}
+	s.store(runID, revision, snapshot)
+	return makeFetchURLResult(rawURL, revision, snapshot, start, maxBytes)
 }
 
 func (s *runSnapshots) lookup(runID, revision string) (runSnapshot, bool) {

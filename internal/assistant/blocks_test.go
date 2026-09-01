@@ -24,6 +24,7 @@ import (
 	"testing"
 
 	"github.com/shady2k/nocx/internal/content"
+	"github.com/shady2k/nocx/internal/log"
 )
 
 // fakeBlocks is the session source with a call log and scripted answers.
@@ -144,6 +145,18 @@ func toolsDirFS(t *testing.T) fs.FS {
 	return os.DirFS(realToolsFS)
 }
 
+// newClientWithTestToolsFS keeps filesystem-backed schema fixtures on the
+// production client assembly path without restoring a production-only
+// no-skill-roots constructor.
+func newClientWithTestToolsFS(logger log.Logger, toolsFS fs.FS, recorder WireRecorder, floor content.Floor) (Client, error) {
+	reg, err := assembleToolRegistry(toolsFS, nil)
+	if err != nil {
+		return nil, err
+	}
+	searchSchema, _ := fs.ReadFile(toolsFS, "search.schema.json")
+	return newClientWithRegistry(logger, reg, recorder, floor, searchSchema), nil
+}
+
 // ── the middleware ───────────────────────────────────────────────────────
 
 // The wiring gap is honest: a run whose block seam is not wired refuses the
@@ -249,7 +262,7 @@ func TestAsk_LongOutputIsAnsweredFromTheEnd(t *testing.T) {
 	p.Requester = &blocksOnlyRequester{blocks: src}
 	p.Messages = []Message{{Role: "user", Content: "did df fail, and why?"}}
 
-	cl, err := newClient(nil, toolsDirFS(t), nil, content.Floor{})
+	cl, err := newClientWithTestToolsFS(nil, toolsDirFS(t), nil, content.Floor{})
 	if err != nil {
 		t.Fatalf("newClient: %v", err)
 	}
@@ -279,4 +292,119 @@ func TestAsk_LongOutputIsAnsweredFromTheEnd(t *testing.T) {
 		t.Errorf("the model read from line %d; the marker is at 397 — the total did not reach it", calls[0].start)
 	}
 	_ = f
+}
+
+// TestAsk_AMarkedWindowIsReadEvenWhenTheModelOmitsTheCount is the marked
+// line the person actually asked about (nocx-hp8p2.15).
+//
+// The person selected ONE line of `df -h` and asked what it means. The model
+// called session.read with the mark's start and no count, so the read ran
+// from that line to the end of the block and it answered about `df -h`. Two
+// rounds of prompt wording did not stop it, and the prompt is the wrong place
+// for this: the run already KNOWS what was marked — the window travelled with
+// the ask — so a read of a marked item cannot be allowed to run past the mark
+// just because the model left a field out.
+func TestAsk_AMarkedWindowIsReadEvenWhenTheModelOmitsTheCount(t *testing.T) {
+	lines := make([]string, 12)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("tmpfs      1.0M   0  1.0M  0%% /run/credentials/unit-%02d.service", i)
+	}
+	src := &fakeBlocks{
+		items: SessionItems{Items: []SessionItem{{
+			ID: "blk-df", Command: "df -h", State: "exited", Lines: len(lines),
+		}}},
+		item: SessionItemRead{
+			Command: "df -h", State: "exited", Total: len(lines),
+			Start: 0, End: len(lines), Text: strings.Join(lines, "\n"),
+		},
+	}
+	var turn int
+	_, srv := newFakeOpenAI(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		if turn == 1 {
+			// The model names the item and the start it was given, and omits
+			// the count — the exact call the owner's model made.
+			streamToolCalls(w, toolCallSpec{
+				name: "session.read", args: `{"id":"blk-df","start":5}`, id: "call_read",
+			})
+			return
+		}
+		streamAnswer(w, "that line is a credentials mount")
+	})
+	defer srv.Close()
+
+	p := askParams(srv.URL, ptrGrant(sessionGrant("session-a", autonomousMatrix())), &fakeLedger{}, nil)
+	p.Requester = &blocksOnlyRequester{blocks: src}
+	p.MarkedSessionWindows = []MarkedSessionWindow{{ItemID: "blk-df", Start: 5, Count: 1}}
+	p.Messages = []Message{{Role: "user", Content: "what does this mean?"}}
+
+	cl, err := newClientWithTestToolsFS(nil, toolsDirFS(t), nil, content.Floor{})
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	calls := src.readCalls()
+	if len(calls) != 1 {
+		t.Fatalf("read %d windows, want exactly 1", len(calls))
+	}
+	if calls[0].start != 5 || calls[0].count != 1 {
+		t.Errorf("read window was start=%d count=%d; the mark is start=5 count=1 — a read of a marked item must not run past it",
+			calls[0].start, calls[0].count)
+	}
+}
+
+// TestAsk_AWiderWindowAroundAMarkIsHonoured is the other half of
+// nocx-hp8p2.15: the mark is the DEFAULT, never a cage. A line of a long log
+// often means nothing without its neighbours, so a window the model asks for
+// is read as asked — the substitution only fills a window it left out.
+func TestAsk_AWiderWindowAroundAMarkIsHonoured(t *testing.T) {
+	lines := make([]string, 40)
+	for i := range lines {
+		lines[i] = fmt.Sprintf("log line %02d", i)
+	}
+	src := &fakeBlocks{
+		items: SessionItems{Items: []SessionItem{{
+			ID: "blk-log", Command: "journalctl", State: "exited", Lines: len(lines),
+		}}},
+		item: SessionItemRead{
+			Command: "journalctl", State: "exited", Total: len(lines),
+			Start: 0, End: len(lines), Text: strings.Join(lines, "\n"),
+		},
+	}
+	var turn int
+	_, srv := newFakeOpenAI(func(w http.ResponseWriter, r *http.Request) {
+		turn++
+		if turn == 1 {
+			// Ten rows either side of the marked line 20.
+			streamToolCalls(w, toolCallSpec{
+				name: "session.read", args: `{"id":"blk-log","start":10,"count":21}`, id: "call_read",
+			})
+			return
+		}
+		streamAnswer(w, "the marked line follows a restart")
+	})
+	defer srv.Close()
+
+	p := askParams(srv.URL, ptrGrant(sessionGrant("session-a", autonomousMatrix())), &fakeLedger{}, nil)
+	p.Requester = &blocksOnlyRequester{blocks: src}
+	p.MarkedSessionWindows = []MarkedSessionWindow{{ItemID: "blk-log", Start: 20, Count: 1}}
+	p.Messages = []Message{{Role: "user", Content: "what does this line mean?"}}
+
+	cl, err := newClientWithTestToolsFS(nil, toolsDirFS(t), nil, content.Floor{})
+	if err != nil {
+		t.Fatalf("newClient: %v", err)
+	}
+	if err := cl.Ask(context.Background(), p, func(AskEvent) error { return nil }); err != nil {
+		t.Fatalf("Ask: %v", err)
+	}
+	calls := src.readCalls()
+	if len(calls) != 1 {
+		t.Fatalf("read %d windows, want exactly 1", len(calls))
+	}
+	if calls[0].start != 10 || calls[0].count != 21 {
+		t.Errorf("read window was start=%d count=%d; the model asked for start=10 count=21 — a mark bounds a read it did not ask for, never one it did",
+			calls[0].start, calls[0].count)
+	}
 }

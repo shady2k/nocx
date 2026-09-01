@@ -1,0 +1,13 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files.visible.params.schema.json",
+  "title": "FilesVisibleParams",
+  "description": "Params for files.visible: whether the panel showing this binding's tree is on screen. While it is not, the binding's digest poll issues no listing at all; becoming visible polls once immediately.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bindingId", "visible"],
+  "properties": {
+    "bindingId": { "type": "string", "pattern": "^[0-9a-f]{32}$" },
+    "visible": { "type": "boolean" }
+  }
+}

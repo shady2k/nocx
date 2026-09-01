@@ -38,6 +38,23 @@ function rowText(frame: CapturedFrame): string[] {
 }
 
 describe('live mint', () => {
+  it('parks a pending-wrap cursor on the last column rather than past it (nocx-hp8p2.4)', () => {
+    // xterm reports cursorX === cols while the cursor "hangs" past the last
+    // written cell, which is the ordinary state of a full-width TUI row.
+    // A frame carrying that column is refused by the wire contract
+    // (cursor.Col < identity.cols), and the refusal is what silently killed
+    // the assistant's session.read: 878 KB of screen dropped on the ingress
+    // and a run that died thirty seconds later on the request timeout.
+    const source = seedSource(['AB', 'CD'])
+    const tracker = new CaptureIdentityTracker(source)
+    const identity = tracker.identity()
+    source.cursor = { line: 1, col: identity.cols }
+
+    const frame = mintLiveFrame(identity, { start: 0, end: 2 }, seamFor(source))
+
+    expect(frame.cursor).toEqual({ line: 1, col: identity.cols - 1 })
+  })
+
   it('mints cells + attributes + cursor of one capture identity, with live provenance', () => {
     const source = seedSource(['AB', 'CD'])
     const tracker = new CaptureIdentityTracker(source)

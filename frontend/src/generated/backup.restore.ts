@@ -11,6 +11,7 @@
 
 export interface BackupRestoreResult {
   strategy: 'merge' | 'replace'
+  skills: number
   settingsChanged: number
   settingsReset: number
   connectionsAdded: number

@@ -21,6 +21,7 @@
         "groups",
         "snippets",
         "notes",
+        "skills",
         "credentialBindingsRemoved",
         "groupCredentialBindingsRemoved",
         "groupDefaultKeysOmitted"
@@ -37,6 +38,10 @@
         },
         "snippets": {
           "description": "The number of snippets in the backup. 0 when the service has no snippet store or the library is empty.",
+          "type": "integer"
+        },
+        "skills": {
+          "description": "The number of authored and managed skill trees in the backup. Builtins are embedded and never carried.",
           "type": "integer"
         },
         "credentialBindingsRemoved": {

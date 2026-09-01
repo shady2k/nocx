@@ -7,6 +7,7 @@ import (
 	"github.com/shady2k/nocx/internal/note"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/settings"
+	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/snippet"
 )
 
@@ -79,6 +80,14 @@ type NoteStore interface {
 	ReplaceNotes([]note.Note) error
 }
 
+// SkillStore reads and replaces authored and managed skill trees together
+// with the skills.json enablement document. Builtin skills are embedded in
+// the binary and never belong to a backup.
+type SkillStore interface {
+	Snapshot() (skill.Snapshot, error)
+	RestoreSnapshot(skill.Snapshot) error
+}
+
 // ── Document envelope ────────────────────────────────────────────────────
 
 // Document is the on-disk/wire shape of a nocx backup file.
@@ -95,6 +104,10 @@ type Document struct {
 	// Notes is the notes library at backup time, oldest first. Absent for a
 	// backup written before this section existed, with the same rule.
 	Notes []BackupNote `json:"notes,omitempty"`
+	// Skills is the authored and managed skill library. Absent for a backup
+	// written before this section existed; restore leaves the current library
+	// alone in that case.
+	Skills *skill.Snapshot `json:"skills,omitempty"`
 }
 
 // BackupNote is the wire shape of one note. The title is deliberately

@@ -634,6 +634,10 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
   let gen = 0
   const [query, setQuery] = createSignal('')
   const [items, setItems] = createSignal<GroupedItem[]>([])
+  /** True from the moment the dialog opens until every provider has answered.
+   *  Read by the list: an ad-hoc row may not be offered while the saved list
+   *  is still unknown (see filteredItems). */
+  const [loadingItems, setLoadingItems] = createSignal(false)
   const [selectedIndex, setSelectedIndex] = createSignal(0)
   const [drill, setDrill] = createSignal<DrillState | null>(null)
   /** Choices per drill depth, so walking back restores a step without
@@ -676,6 +680,7 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
     }
     if (currentGen !== gen) return
     setItems(all)
+    setLoadingItems(false)
 
     // Focus the search input. requestAnimationFrame ensures the dialog's
     // showModal animation has completed before we focus.
@@ -713,12 +718,17 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
     gen++
     const currentGen = gen
 
-    if (!props.open) return
+    if (!props.open) {
+      setLoadingItems(false)
+      return
+    }
 
     // Read the providers inside the tracked scope, so a change to them
     // re-runs this effect; everything after the handoff is untracked.
     const providers = props.providers
 
+    setLoadingItems(true)
+    setItems([])
     setQuery('')
     setSelectedIndex(0)
     setDrill(null)
@@ -845,6 +855,13 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
       return [...matched, ...trailing]
     }
 
+    // Nothing static matched — but "nothing matched" is only knowable once the
+    // providers have answered. Until then the saved list is EMPTY rather than
+    // exhausted, and every fallback below would be answering a question that
+    // has not been asked yet, so the list is empty and Enter is a no-op
+    // (nocx-k1691).
+    if (loadingItems()) return []
+
     // Nothing static matched — consult the query-dependent providers (the
     // ad-hoc "Connect to <host>" fallback). Only reached when every real
     // match missed, so the free-form entry can never outrank a saved profile
@@ -946,6 +963,7 @@ const QuickConnectDialog: Component<QuickConnectDialogProps> = (props) => {
   }
 
   const emptyMessage = createMemo(() => {
+    if (loadingItems()) return 'Loading…'
     if (parseFailureMessage() != null) return parseFailureMessage()
     if (drill()) return `No matching ${currentStep()?.name}s`
     return 'No matches'

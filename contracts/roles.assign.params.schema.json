@@ -9,7 +9,7 @@
   "properties": {
     "role": {
       "type": "string",
-      "enum": ["answering", "classifier"]
+      "enum": ["answering", "classifier", "summarizing"]
     },
     "endpointId": {
       "type": ["string", "null"]

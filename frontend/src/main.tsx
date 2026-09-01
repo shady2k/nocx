@@ -105,6 +105,8 @@ import { HostKeyDialog } from './host-key-dialog'
 import { OpenHostKeyRequestQueue, type OpenHostKeyRequest } from './host-key-controller'
 import { SnippetsClient } from './snippets/snippets-client'
 import { SnippetsStore, type Snippet } from './snippets/snippets-store'
+import { SkillsClient } from './skills-client'
+import { SkillsStore } from './skills-store'
 import { createSessionFactsProvider } from './snippets/session-facts'
 import { createSnippetFireAdapter } from './snippets/fire'
 import { SnippetsQuickConnectProvider } from './snippets/snippets-quick-connect'
@@ -231,6 +233,7 @@ function main(): void {
   // wire, a writer re-reads). Constructed with the other clients because
   // the Settings tab's factory below closes over it.
   const snippetsStore = new SnippetsStore(new SnippetsClient(dispatcher))
+  const skillsStore = new SkillsStore(new SkillsClient(dispatcher))
   const policyClient = new PolicyClient(dispatcher)
   const vaultObserver = new VaultObserver(dispatcher)
   const vaultController = createVaultState(vaultClient)
@@ -538,6 +541,7 @@ function main(): void {
         // The same source the workbench takes below: one panel, one
         // fallback, one place a store row can land (nocx-3o0ed.4).
         secretSource,
+        skillsStore,
       )
       content.onConnect = (profile) => {
         log.info('nocx: connect from Settings', { profileId: profile.id })

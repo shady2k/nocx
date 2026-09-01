@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
+	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/apicoll"
 	"github.com/shady2k/nocx/internal/apifetch"
 	"github.com/shady2k/nocx/internal/apisend"
@@ -423,6 +424,12 @@ type WSServer struct {
 	// endpoints.probe and agent.status's last-probe fact. When nil, the
 	// endpoints.probe method answers -32601 "agent not available".
 	assistantClient assistant.Client
+	// skillLibrary is the single filesystem-backed owner for skills.read and
+	// the skills mutation tools.
+	skillLibrary assistant.SkillLibrary
+	// agentTools is the registry used to decide which declarations this run
+	// may be offered. It is the same assembled table used by the assistant.
+	agentTools agenttools.Registry
 	// agentFetcher is the guarded direct-network capability for fetch.url.
 	// It is kept separate from the model client because the tool must use the
 	// same apifetch route/policy owner without exposing a remote pane route.
@@ -573,10 +580,11 @@ type WSServer struct {
 	// (fm-w8). When nil, those methods return -32601. The provider
 	// factories and the revealer ride separate options; the transport
 	// never constructs a provider itself (AD-8).
-	filesys           *filesystem.Registry
-	filesProviderFor  FilesystemProviderFactory
-	revealer          FilesRevealer
-	filesPollInterval time.Duration // transport-side digest-poll cadence (files.watch)
+	filesys                    *filesystem.Registry
+	filesProviderFor           FilesystemProviderFactory
+	revealer                   FilesRevealer
+	filesPollInterval          time.Duration // transport-side digest-poll cadence (files.watch)
+	filesRefreshStateThreshold time.Duration // visible no-observation threshold
 
 	// filesMu guards filesBindings and filesBySession: the transport's own
 	// bookkeeping for bindings it issued (filesystem exposes neither a
@@ -975,6 +983,17 @@ func WithAssistantClient(ac assistant.Client) WSServerOption {
 	return func(ws *WSServer) { ws.assistantClient = ac }
 }
 
+// WithSkillSource attaches the single skill library used by assistant asks.
+func WithSkillSource(source assistant.SkillLibrary) WSServerOption {
+	return func(ws *WSServer) { ws.skillLibrary = source }
+}
+
+// WithAgentToolRegistry attaches the registry used by the assistant engine.
+// Prompt indexing asks this registry which declarations the grant permits.
+func WithAgentToolRegistry(reg agenttools.Registry) WSServerOption {
+	return func(ws *WSServer) { ws.agentTools = reg }
+}
+
 // WithAgentFetcher attaches the guarded direct-network seam used by fetch.url.
 // Without it the declaration remains policy-visible but execution refuses
 // honestly as unavailable; production wires the same route table as imports.
@@ -1362,31 +1381,32 @@ func NewWSServer(logger log.Logger, reg session.Registry, opts ...WSServerOption
 			// call handles origin/host policy before the upgrade.
 			CheckOrigin: func(r *http.Request) bool { return true },
 		},
-		rx:                  make(map[session.ID]*sessionRx),
-		closeRequested:      make(map[session.ID]struct{}),
-		conns:               make(map[*wsConn]struct{}),
-		outboundBudget:      outbound.NewBudget(outboundBudgetBytes),
-		tunnels:             make(map[string]*tunnel.Tunnel),
-		resolver:            &resolverHolder{},
-		ownerTunnels:        make(map[*wsConn]map[string]struct{}),
-		origins:             LoopbackOriginPolicy{},
-		agentApprovals:      assistant.NewApprovalStore(),
-		sessionPolicy:       newSessionPolicyStore(),
-		laneInteractivity:   newLaneState(),
-		satNotify:           newSaturatedNotifyLimiter(time.Second),
-		pendingRuns:         make(map[int64]askRunContext),
-		filesBindings:       make(map[string]*filesBinding),
-		lanes:               make(map[session.ID]*sessionLane),
-		filesBySession:      make(map[session.ID]map[string]struct{}),
-		filesPollInterval:   defaultFilesPollInterval,
-		laneCapacity:        DefaultControlLaneCapacity,
-		heartbeatReadWindow: DefaultHeartbeatReadWindow,
-		domainWaitTimeout:   DefaultDomainConflictWaitTimeout,
-		domainMaxQueue:      DefaultDomainMaxQueue,
-		domainQueueDepth:    DefaultDomainQueueDepth,
-		controlDrainTimeout: defaultControlDrainTimeout,
-		gitBindings:         make(map[string]*gitBinding),
-		gitBySession:        make(map[session.ID]map[string]struct{}),
+		rx:                         make(map[session.ID]*sessionRx),
+		closeRequested:             make(map[session.ID]struct{}),
+		conns:                      make(map[*wsConn]struct{}),
+		outboundBudget:             outbound.NewBudget(outboundBudgetBytes),
+		tunnels:                    make(map[string]*tunnel.Tunnel),
+		resolver:                   &resolverHolder{},
+		ownerTunnels:               make(map[*wsConn]map[string]struct{}),
+		origins:                    LoopbackOriginPolicy{},
+		agentApprovals:             assistant.NewApprovalStore(),
+		sessionPolicy:              newSessionPolicyStore(),
+		laneInteractivity:          newLaneState(),
+		satNotify:                  newSaturatedNotifyLimiter(time.Second),
+		pendingRuns:                make(map[int64]askRunContext),
+		filesBindings:              make(map[string]*filesBinding),
+		filesBySession:             make(map[session.ID]map[string]struct{}),
+		lanes:                      make(map[session.ID]*sessionLane),
+		filesPollInterval:          defaultFilesPollInterval,
+		filesRefreshStateThreshold: defaultFilesRefreshStateThreshold,
+		laneCapacity:               DefaultControlLaneCapacity,
+		heartbeatReadWindow:        DefaultHeartbeatReadWindow,
+		domainWaitTimeout:          DefaultDomainConflictWaitTimeout,
+		domainMaxQueue:             DefaultDomainMaxQueue,
+		domainQueueDepth:           DefaultDomainQueueDepth,
+		controlDrainTimeout:        defaultControlDrainTimeout,
+		gitBindings:                make(map[string]*gitBinding),
+		gitBySession:               make(map[session.ID]map[string]struct{}),
 	}
 	// The mint's emitter is this server: a drop is told to the renderer
 	// over this socket. Constructed here so there is exactly one store per
@@ -1491,7 +1511,7 @@ func (s *WSServer) buildControlPlane() {
 	// mutex read of in-memory state and must stay answerable while the
 	// content domain is exactly what is broken.
 	specs = append(specs, s.historyStatusSpecs(s.lane)...)
-	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, noteOp, snippetOp, s.credentialResolver(), s.assistantClient, s.askSub)...)
+	specs = append(specs, s.agentSpecs(contentSub, lane, gates.content, configOp, endpointWired, noteOp, snippetOp, s.skillLibrary, s.agentTools, s.credentialResolver(), s.assistantClient, s.askSub)...)
 	specs = append(specs, s.ledgerSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.layoutSpecs(contentSub, lane, gates.content)...)
 	specs = append(specs, s.shellSpecs(lane, gates.session)...)

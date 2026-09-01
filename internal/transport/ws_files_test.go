@@ -10,6 +10,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"path/filepath"
 	"strings"
@@ -23,6 +24,7 @@ import (
 	"github.com/shady2k/nocx/internal/filesystem/local"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/session"
+	"github.com/shady2k/nocx/internal/transfer"
 	"github.com/shady2k/nocx/internal/transport/outbound"
 	"github.com/shady2k/nocx/internal/waittest"
 )
@@ -245,7 +247,7 @@ func TestFilesChanged_ReachesNewConnectionAfterReattach(t *testing.T) {
 	waittest.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		return w.paths[dir] != ""
+		return w.paths[dir] != nil && w.paths[dir].rev != ""
 	})
 
 	// Drop the connection, then change the directory. The server closes
@@ -310,7 +312,8 @@ func TestFilesChanged_DirtyPathsDeliveredOnceOnReattach(t *testing.T) {
 	waittest.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		return w.paths[dir1] != "" && w.paths[dir2] != ""
+		return w.paths[dir1] != nil && w.paths[dir1].rev != "" &&
+			w.paths[dir2] != nil && w.paths[dir2].rev != ""
 	})
 
 	// No subscriber: the same state a WebSocket drop leaves the session
@@ -380,7 +383,7 @@ func TestFilesWatch_EmptySetStopsTheLoop(t *testing.T) {
 	waittest.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		return w.paths[dir] != ""
+		return w.paths[dir] != nil && w.paths[dir].rev != ""
 	})
 
 	resp := jsonrpcCallWithID(t, e.conn, "files.watch", map[string]any{
@@ -999,7 +1002,7 @@ func TestFilesClose_DoesNotWaitOnABlockedNotificationWrite(t *testing.T) {
 	waittest.WaitForTimeout(t, "watch baseline", wantWithin, func() bool {
 		w.mu.Lock()
 		defer w.mu.Unlock()
-		return w.paths[dir] != ""
+		return w.paths[dir] != nil && w.paths[dir].rev != ""
 	})
 
 	// Wedge the subscriber's outbound pump mid-write. The next
@@ -1119,5 +1122,862 @@ func TestFilesOpen_RemoteAttestationReachesTheWire(t *testing.T) {
 	}
 	if got.EndpointID == nil || *got.EndpointID != "v1:attested" {
 		t.Errorf("endpointId = %v, want %q", got.EndpointID, "v1:attested")
+	}
+}
+
+// ── the watch set is diffed, not replaced (nocx-8hdia.5) ───────────────────
+
+// countingProvider wraps a real provider and counts List calls per path, so
+// a test can assert what one files.watch actually enumerated. Only List is
+// overridden; everything else is the real local provider's.
+type countingProvider struct {
+	filesystem.Provider
+	mu    sync.Mutex
+	lists map[string]int
+
+	blockNextList bool
+	listStarted   chan struct{}
+	listRelease   chan struct{}
+	listFinished  chan struct{}
+	failNextList  error
+}
+
+func (p *countingProvider) blockNext() {
+	p.mu.Lock()
+	p.blockNextList = true
+	p.mu.Unlock()
+}
+
+func (p *countingProvider) failNext(err error) {
+	p.mu.Lock()
+	p.failNextList = err
+	p.mu.Unlock()
+}
+
+func (p *countingProvider) List(
+	ctx context.Context,
+	path string,
+	page filesystem.Page,
+) (filesystem.Listing, error) {
+	p.mu.Lock()
+	p.lists[path]++
+	fail := p.failNextList
+	p.failNextList = nil
+	block := p.blockNextList
+	if block {
+		p.blockNextList = false
+		close(p.listStarted)
+	}
+	p.mu.Unlock()
+	if fail != nil {
+		return filesystem.Listing{}, fail
+	}
+	if block {
+		<-p.listRelease
+	}
+	listing, err := p.Provider.List(ctx, path, page)
+	if block {
+		close(p.listFinished)
+	}
+	return listing, err
+}
+
+func (p *countingProvider) count(path string) int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.lists[path]
+}
+
+// TestFilesWatch_ReplacementBaselinesOnlyTheAddedPath is the cost half of
+// the defect. files.watch REPLACES the set, and the client resends the whole
+// set every time it changes — after a first listing, on every expand, on
+// every collapse. Baselining the whole set therefore charged one full
+// enumeration PER ALREADY-WATCHED DIRECTORY to every expand gesture, and the
+// cost grew with the number of folders the person had open.
+func TestFilesWatch_ReplacementBaselinesOnlyTheAddedPath(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	// No poll tick may run during the measurement: the loop lists too, and
+	// what is being counted is what files.watch itself enumerated.
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dirs := make([]string, 3)
+	for i := range dirs {
+		dirs[i] = filepath.Join(root, string(rune('a'+i)))
+		if err := os.MkdirAll(dirs[i], 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", dirs[i], err)
+		}
+	}
+	bid := e.openBinding(t, sid, root, 2)
+
+	e.watchDir(t, bid, []string{dirs[0], dirs[1]}, 3)
+	before := []int{count(dirs[0]), count(dirs[1])}
+
+	// One more folder expanded: the client resends the whole set with one
+	// path added. Only that path is new information.
+	e.watchDir(t, bid, []string{dirs[0], dirs[1], dirs[2]}, 4)
+
+	if got := count(dirs[0]) - before[0]; got != 0 {
+		t.Errorf("already-watched %s was listed %d more times, want 0", dirs[0], got)
+	}
+	if got := count(dirs[1]) - before[1]; got != 0 {
+		t.Errorf("already-watched %s was listed %d more times, want 0", dirs[1], got)
+	}
+	if got := count(dirs[2]); got != 1 {
+		t.Errorf("added %s was listed %d times, want exactly 1", dirs[2], got)
+	}
+}
+
+// TestFilesChanged_AChangeIsNotSwallowedByAWatchSetReplacement is the
+// correctness half, and it is why this is a defect rather than an
+// inefficiency. filesPollPath announces when the fresh rev differs from
+// w.paths[path]. Re-baselining an ALREADY-WATCHED path overwrites that
+// comparison point with the current rev, so a change that landed after the
+// last tick and before the replacement is folded into a baseline nobody saw
+// and is never announced — the exact failure the synchronous baseline was
+// introduced to prevent, reintroduced through the replacement path.
+//
+// The gesture is ordinary: a file appears in one folder, and before the next
+// poll tick the person expands another folder.
+func TestFilesChanged_AChangeIsNotSwallowedByAWatchSetReplacement(t *testing.T) {
+	e := newFilesTestEnv(t)
+	// The write and the replacement must both land before the first tick,
+	// or the tick announces the change and the defect is hidden.
+	e.ws.filesPollInterval = slowFilesPollInterval
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir1 := filepath.Join(root, "one")
+	dir2 := filepath.Join(root, "two")
+	for _, d := range []string{dir1, dir2} {
+		if err := os.MkdirAll(d, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", d, err)
+		}
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, []string{dir1}, 3)
+
+	// The change nobody has been told about yet.
+	if err := os.WriteFile(filepath.Join(dir1, "boom.md"), []byte("x"), 0o600); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+	// The unrelated gesture that must not lose it.
+	e.watchDir(t, bid, []string{dir1, dir2}, 4)
+
+	raw := readNotification(t, e.conn, "files.changed", wantWithin)
+	var params map[string]any
+	if err := json.Unmarshal(raw, &params); err != nil {
+		t.Fatalf("files.changed: unmarshal: %v", err)
+	}
+	if params["path"] != dir1 {
+		t.Errorf("files.changed path = %v, want %s — the change to the "+
+			"already-watched directory was swallowed by the replacement",
+			params["path"], dir1)
+	}
+}
+
+// ── the visibility gate (nocx-8hdia.1) ─────────────────────────────────────
+
+// setVisible sends files.visible and fails on a refusal.
+func (e *filesTestEnv) setVisible(t *testing.T, bid string, visible bool, id int) {
+	t.Helper()
+	resp := jsonrpcCallWithID(t, e.conn, "files.visible", map[string]any{
+		"bindingId": bid,
+		"visible":   visible,
+	}, id)
+	var envelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("files.visible: unmarshal: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.visible: %+v", envelope.Error)
+	}
+}
+
+// newCountingFilesEnv boots the env with a provider that counts List calls,
+// so a test can assert what the poll loop actually enumerated.
+func newCountingFilesEnv(t *testing.T) (*filesTestEnv, func(path string) int) {
+	t.Helper()
+	// The factory runs on the goroutine serving files.open and the counter is
+	// read from the test's, with only a WebSocket between them — and the race
+	// detector cannot derive a happens-before edge through a socket. So the
+	// handle itself is guarded, not just the counts behind it.
+	var mu sync.Mutex
+	var prov *countingProvider
+	factory := func(sess session.Session, rootPath string) (filesystem.Provider, error) {
+		inner, err := filesLocalFactory(sess, rootPath)
+		if err != nil {
+			return nil, err
+		}
+		p := &countingProvider{Provider: inner, lists: map[string]int{}}
+		mu.Lock()
+		prov = p
+		mu.Unlock()
+		return p, nil
+	}
+	e := newFilesTestEnv(t, WithFilesystemProviderFactory(factory))
+	return e, func(path string) int {
+		mu.Lock()
+		p := prov
+		mu.Unlock()
+		if p == nil {
+			return 0
+		}
+		return p.count(path)
+	}
+}
+
+// TestFilesPoll_HiddenPanelIssuesNoListing is the gate itself. The Files
+// poll is BACKEND-driven, so unlike Git and Ports the frontend cannot stop
+// it by going away — a collapsed sidebar used to cost exactly as much as an
+// open one, and one tick is a full enumeration of every watched directory
+// (both providers enumerate before slicing the page, so Limit does not bound
+// it). Design §5.5 has always required this: polling is "paused while
+// visible() is false".
+//
+// Not a cheaper listing while hidden. None.
+func TestFilesPoll_HiddenPanelIssuesNoListing(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, []string{dir}, 3)
+
+	// The panel goes away. A tick already in flight may still land, so the
+	// measurement starts after one interval has passed.
+	e.setVisible(t, bid, false, 4)
+	interval := e.ws.filesPollInterval
+	time.Sleep(2 * interval)
+	before := count(dir)
+
+	// Many intervals of a hidden panel must cost nothing at all.
+	time.Sleep(10 * interval)
+	if got := count(dir) - before; got != 0 {
+		t.Errorf("hidden panel issued %d listings over 10 intervals, want 0", got)
+	}
+}
+
+// TestFilesPoll_BecomingVisiblePollsImmediately is the other half, and it is
+// what keeps the gate from costing freshness: a person who opens a panel is
+// owed the truth now, not at the next tick. The interval here is an hour, so
+// any listing at all can only be the becoming-visible poll.
+func TestFilesPoll_BecomingVisiblePollsImmediately(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	// No ordinary tick may fire during this test: what is being measured is
+	// the transition, not the cadence.
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, []string{dir}, 3)
+	e.setVisible(t, bid, false, 4)
+	before := count(dir)
+
+	e.setVisible(t, bid, true, 5)
+	waittest.WaitForTimeout(t, "the becoming-visible poll", wantWithin, func() bool {
+		return count(dir) > before
+	})
+	if got := count(dir) - before; got != 1 {
+		t.Errorf("becoming visible issued %d listings, want exactly 1", got)
+	}
+}
+
+// TestFilesPoll_StayingVisibleIsNotAPollTrigger guards the edge rather than
+// the value. The client re-sends its visibility on transitions it considers
+// interesting, and if every "visible: true" produced a poll, the panel would
+// have a second, undeclared cadence that the interval does not govern —
+// which is the whole class of defect this epic exists to remove.
+func TestFilesPoll_StayingVisibleIsNotAPollTrigger(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, []string{dir}, 3)
+	before := count(dir)
+
+	// Already visible: three more of the same must change nothing.
+	for i := range 3 {
+		e.setVisible(t, bid, true, 4+i)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if got := count(dir) - before; got != 0 {
+		t.Errorf("re-asserting visibility issued %d listings, want 0", got)
+	}
+}
+
+// TestFilesPoll_IdleLadderBacksOff pins the exact per-path idle and failure
+// ladders without a server, goroutine, or wall clock.
+func TestFilesPoll_IdleLadderBacksOff(t *testing.T) {
+	const base = time.Second
+	idleWant := []time.Duration{
+		2 * base,
+		2 * base,
+		4 * base,
+		10 * base,
+		20 * base,
+		20 * base,
+	}
+	for idleStep, expected := range idleWant {
+		if got := filesPollWait(base, idleStep, 0, nil); got != expected {
+			t.Fatalf("idle rung %d wait = %s, want %s", idleStep, got, expected)
+		}
+	}
+	failureWant := []time.Duration{
+		20 * base,
+		40 * base,
+		80 * base,
+		120 * base,
+		120 * base,
+	}
+	for failureStep, expected := range failureWant {
+		if got := filesPollWait(base, 0, failureStep+1, nil); got != expected {
+			t.Fatalf("failure rung %d wait = %s, want %s", failureStep+1, got, expected)
+		}
+	}
+}
+
+// TestFilesPoll_RemoteJitterIsBounded proves that only a remote path gets
+// deterministic ±10% jitter; local paths retain exact ladder waits.
+func TestFilesPoll_RemoteJitterIsBounded(t *testing.T) {
+	const base = time.Second
+	if got := filesPollWait(base, 0, 0, nil); got != 2*base {
+		t.Fatalf("local wait = %s, want %s", got, 2*base)
+	}
+	remote := rand.New(rand.NewPCG(1, 2)) //nolint:gosec // fixed non-security PRNG seed
+	for i := range 100 {
+		got := filesPollWait(base, 0, 0, remote)
+		if got < 1800*time.Millisecond || got > 2200*time.Millisecond {
+			t.Fatalf("remote wait %d = %s, want [1.8s, 2.2s]", i, got)
+		}
+	}
+}
+
+// TestFilesPoll_ChangeAnnouncementDoesNotResetOtherPaths proves that
+// notification delivery does not mutate any path's scheduling state.
+func TestFilesPoll_ChangeAnnouncementDoesNotResetOtherPaths(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dirs := []string{filepath.Join(root, "one"), filepath.Join(root, "two")}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	w := e.watchDir(t, bid, dirs, 3)
+	w.mu.Lock()
+	first := w.paths[dirs[0]]
+	second := w.paths[dirs[1]]
+	first.idleStep = filesPollMaxIdleStep
+	first.dueAt = time.Now().Add(time.Hour)
+	second.idleStep = 1
+	second.dueAt = time.Now().Add(2 * time.Hour)
+	w.mu.Unlock()
+	e.ws.emitFilesChanged(w, dirs[0], "synthetic")
+	w.mu.Lock()
+	if first.idleStep != filesPollMaxIdleStep || second.idleStep != 1 {
+		w.mu.Unlock()
+		t.Fatalf("notification changed path ladders: first=%d second=%d", first.idleStep, second.idleStep)
+	}
+	w.mu.Unlock()
+	if count(dirs[0])+count(dirs[1]) != 2 {
+		t.Fatalf("notification performed a listing, counts: %d %d", count(dirs[0]), count(dirs[1]))
+	}
+}
+
+// TestFilesPoll_ListActionResetsLadder proves that a user listing action
+// resets the adaptive rung without spending a second full scan, then allows
+// the next scheduled poll at the responsive rung.
+func TestFilesPoll_ListActionResetsLadder(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	e.ws.filesPollInterval = 20 * time.Millisecond
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, []string{dir}, 3)
+	before := count(dir)
+	waittest.WaitForTimeout(t, "the idle ladder to advance", 5*time.Second, func() bool {
+		return count(dir)-before >= 3
+	})
+
+	resp := jsonrpcCallWithID(t, e.conn, "files.list", map[string]any{
+		"bindingId": bid,
+		"path":      dir,
+		"offset":    0,
+		"limit":     1,
+	}, 4)
+	var envelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("files.list: unmarshal: %v", err)
+	}
+	if envelope.Error != nil {
+		t.Fatalf("files.list: %+v", envelope.Error)
+	}
+	afterAction := count(dir)
+	waittest.WaitForTimeout(t, "the responsive poll after files.list", wantWithin,
+		func() bool {
+			return count(dir) > afterAction
+		})
+}
+
+// TestFilesPoll_FailureLadderUsesRealListingErrors proves a provider listing
+// failure reaches the separate retry ladder, and that a later successful
+// listing returns to the responsive idle ladder.
+func TestFilesPoll_FailureLadderUsesRealListingErrors(t *testing.T) {
+	e, provider := newBlockingCountingFilesEnv(t)
+	const base = 5 * time.Millisecond
+	e.ws.filesPollInterval = base
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	w := e.watchDir(t, bid, []string{dir}, 3)
+	p := provider()
+	beforeFailure := p.count(dir)
+	p.failNext(errors.New("synthetic listing failure"))
+
+	waittest.WaitForTimeout(t, "the failure ladder to record the failed listing", wantWithin,
+		func() bool {
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			entry := w.paths[dir]
+			return entry != nil && entry.failureStep >= 1
+		})
+	w.mu.Lock()
+	entry := w.paths[dir]
+	if got := filesPollWait(base, entry.idleStep, entry.failureStep, nil); got != 20*base {
+		w.mu.Unlock()
+		t.Fatalf("first failure wait = %s, want %s", got, 20*base)
+	}
+	w.mu.Unlock()
+	waittest.WaitForTimeout(t, "a successful listing after the failure", wantWithin,
+		func() bool {
+			w.mu.Lock()
+			defer w.mu.Unlock()
+			current := w.paths[dir]
+			return current != nil && current.failureStep == 0 && p.count(dir) > beforeFailure
+		})
+	w.mu.Lock()
+	entry = w.paths[dir]
+	if got := filesPollWait(base, entry.idleStep, entry.failureStep, nil); got != 2*base {
+		w.mu.Unlock()
+		t.Fatalf("post-failure idle wait = %s, want %s", got, 2*base)
+	}
+	w.mu.Unlock()
+}
+
+// newBlockingCountingFilesEnv exposes the counting provider's one-shot List
+// wedge so the timer test can release a deliberately slow poll and observe
+// whether another scan was already pending.
+func newBlockingCountingFilesEnv(t *testing.T) (*filesTestEnv, func() *countingProvider) {
+	t.Helper()
+	var mu sync.Mutex
+	var prov *countingProvider
+	factory := func(sess session.Session, rootPath string) (filesystem.Provider, error) {
+		inner, err := filesLocalFactory(sess, rootPath)
+		if err != nil {
+			return nil, err
+		}
+		p := &countingProvider{
+			Provider:     inner,
+			lists:        map[string]int{},
+			listStarted:  make(chan struct{}),
+			listRelease:  make(chan struct{}),
+			listFinished: make(chan struct{}),
+		}
+		mu.Lock()
+		prov = p
+		mu.Unlock()
+		return p, nil
+	}
+	e := newFilesTestEnv(t, WithFilesystemProviderFactory(factory))
+	return e, func() *countingProvider {
+		mu.Lock()
+		defer mu.Unlock()
+		return prov
+	}
+}
+
+// TestFilesPoll_ArmsTimerAfterPoll proves that a slow scan does not leave a
+// pending tick that starts the next scan immediately when the first returns.
+func TestFilesPoll_ArmsTimerAfterPoll(t *testing.T) {
+	e, provider := newBlockingCountingFilesEnv(t)
+	e.ws.filesPollInterval = 10 * time.Millisecond
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, []string{dir}, 3)
+	p := provider()
+	p.blockNext()
+
+	select {
+	case <-p.listStarted:
+	case <-time.After(wantWithin):
+		t.Fatal("poll did not reach the deliberately slow listing")
+	}
+	beforeRelease := p.count(dir)
+	close(p.listRelease)
+	select {
+	case <-p.listFinished:
+	case <-time.After(wantWithin):
+		t.Fatal("slow listing did not finish")
+	}
+	afterRelease := p.count(dir)
+	if afterRelease != beforeRelease {
+		t.Fatalf("listing count changed while the slow poll was completing: before=%d after=%d",
+			beforeRelease, afterRelease)
+	}
+
+	time.Sleep(e.ws.filesPollInterval)
+	if got := p.count(dir); got != afterRelease {
+		t.Fatalf("next poll started immediately after slow work: count=%d want %d", got, afterRelease)
+	}
+	waittest.WaitForTimeout(t, "the next poll after the post-work wait", 5*time.Second, func() bool {
+		return p.count(dir) > afterRelease
+	})
+}
+
+func TestFilesPoll_DispatchesOnePathPerDispatch(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dirs := []string{
+		filepath.Join(root, "one"),
+		filepath.Join(root, "two"),
+		filepath.Join(root, "three"),
+	}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	w := e.watchDir(t, bid, dirs, 3)
+
+	w.mu.Lock()
+	w.markVisibleCatchUpLocked(time.Now())
+	w.mu.Unlock()
+	visited := make(map[string]bool, len(dirs))
+	for i := range dirs {
+		before := make(map[string]int, len(dirs))
+		for _, dir := range dirs {
+			before[dir] = count(dir)
+		}
+		if result := e.ws.filesPollTick(w); result == filesPollPathStopped {
+			t.Fatal("poll stopped during visibility catch-up")
+		}
+		totalDelta := 0
+		for _, dir := range dirs {
+			delta := count(dir) - before[dir]
+			if delta > 1 {
+				t.Fatalf("dispatch %d listed %s %d times, want at most once", i, dir, delta)
+			}
+			if delta == 1 {
+				visited[dir] = true
+				totalDelta++
+			}
+		}
+		if totalDelta != 1 {
+			t.Fatalf("dispatch %d listed %d paths, want exactly one", i, totalDelta)
+		}
+	}
+	for _, dir := range dirs {
+		if !visited[dir] {
+			t.Fatalf("catch-up never visited %s", dir)
+		}
+	}
+}
+
+func TestFilesPoll_PerPathLaddersAreIndependent(t *testing.T) {
+	e, provider := newBlockingCountingFilesEnv(t)
+	const base = 5 * time.Millisecond
+	e.ws.filesPollInterval = base
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	firstPath := filepath.Join(root, "first")
+	secondPath := filepath.Join(root, "second")
+	for _, dir := range []string{firstPath, secondPath} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	w := e.watchDir(t, bid, []string{firstPath, secondPath}, 3)
+	w.mu.Lock()
+	first := w.paths[firstPath]
+	second := w.paths[secondPath]
+	first.idleStep = 3
+	second.idleStep = 1
+	w.pollBase = base
+	w.mu.Unlock()
+	provider().failNext(errors.New("synthetic first-path failure"))
+	result := e.ws.filesPollPath(w, w.handle, &filesPollSelection{
+		path: firstPath, entry: first, generation: first.generation,
+	})
+	if result != filesPollPathFailed {
+		t.Fatalf("first path result = %v, want failure", result)
+	}
+	w.mu.Lock()
+	if first.failureStep != 1 || first.idleStep != 3 {
+		t.Fatalf("failed path state = failure %d idle %d, want 1/3", first.failureStep, first.idleStep)
+	}
+	if second.failureStep != 0 || second.idleStep != 1 {
+		t.Fatalf("healthy path changed after unrelated failure: failure %d idle %d", second.failureStep, second.idleStep)
+	}
+	second.failureStep = 2
+	w.mu.Unlock()
+	result = e.ws.filesPollPath(w, w.handle, &filesPollSelection{
+		path: firstPath, entry: first, generation: first.generation,
+	})
+	if result != filesPollPathOK {
+		t.Fatalf("first path recovery result = %v, want ok", result)
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if first.failureStep != 0 || second.failureStep != 2 {
+		t.Fatalf("recovery reset unrelated path: first failure %d second failure %d", first.failureStep, second.failureStep)
+	}
+}
+
+func TestFilesPoll_FailedListDoesNotResetPath(t *testing.T) {
+	e, provider := newBlockingCountingFilesEnv(t)
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	w := e.watchDir(t, bid, []string{dir}, 3)
+	w.mu.Lock()
+	w.paths[dir].idleStep = filesPollMaxIdleStep
+	w.mu.Unlock()
+	provider().failNext(errors.New("synthetic list failure"))
+	resp := jsonrpcCallWithID(t, e.conn, "files.list", map[string]any{
+		"bindingId": bid, "path": dir, "offset": 0, "limit": 1,
+	}, 4)
+	var envelope struct {
+		Error *jsonrpcErrorObj `json:"error"`
+	}
+	if err := json.Unmarshal(resp, &envelope); err != nil {
+		t.Fatalf("files.list: unmarshal: %v", err)
+	}
+	if envelope.Error == nil {
+		t.Fatal("failed files.list unexpectedly succeeded")
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if got := w.paths[dir].idleStep; got != filesPollMaxIdleStep {
+		t.Fatalf("failed files.list reset idle rung to %d, want %d", got, filesPollMaxIdleStep)
+	}
+}
+
+func TestFilesPoll_WatchReplacementRetainsPathState(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	firstPath := filepath.Join(root, "first")
+	secondPath := filepath.Join(root, "second")
+	for _, dir := range []string{firstPath, secondPath} {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	w := e.watchDir(t, bid, []string{firstPath}, 3)
+	w.mu.Lock()
+	retained := w.paths[firstPath]
+	retained.idleStep = 3
+	retained.failureStep = 2
+	w.mu.Unlock()
+	e.watchDir(t, bid, []string{firstPath, secondPath}, 4)
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if w.paths[firstPath] != retained || w.paths[firstPath].idleStep != 3 || w.paths[firstPath].failureStep != 2 {
+		t.Fatal("retained path lost its scheduling state during watch replacement")
+	}
+	added := w.paths[secondPath]
+	if added == nil || added.idleStep != 0 || added.failureStep != 0 || added.rev == "" {
+		t.Fatalf("added path state = %+v, want fresh successful baseline", added)
+	}
+	if count(secondPath) != 1 {
+		t.Fatalf("added path baseline count = %d, want 1", count(secondPath))
+	}
+}
+
+func TestFilesPoll_UploadTargetsBothDestinations(t *testing.T) {
+	e, count := newCountingFilesEnv(t)
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dirs := []string{filepath.Join(root, "one"), filepath.Join(root, "two")}
+	for _, dir := range dirs {
+		if err := os.MkdirAll(dir, 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", dir, err)
+		}
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, dirs, 3)
+	before := map[string]int{dirs[0]: count(dirs[0]), dirs[1]: count(dirs[1])}
+	for _, dir := range dirs {
+		e.ws.invalidateUploadDest(&runningTransfer{
+			sessionID: session.ID(sid),
+			bindingID: bid,
+			upload:    transfer.Upload{DestDir: dir},
+		})
+	}
+	waittest.WaitForTimeout(t, "both upload destinations to be polled", wantWithin, func() bool {
+		return count(dirs[0]) > before[dirs[0]] && count(dirs[1]) > before[dirs[1]]
+	})
+	for _, dir := range dirs {
+		if got := count(dir) - before[dir]; got != 1 {
+			t.Fatalf("upload destination %s polled %d times, want 1", dir, got)
+		}
+	}
+}
+
+func TestFilesPoll_StaleCompletionDoesNotOverwriteReaddedPath(t *testing.T) {
+	e, provider := newBlockingCountingFilesEnv(t)
+	e.ws.filesPollInterval = time.Hour
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	dir := filepath.Join(root, "watched")
+	if err := os.MkdirAll(dir, 0o750); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	w := e.watchDir(t, bid, []string{dir}, 3)
+	w.mu.Lock()
+	old := w.paths[dir]
+	old.dueAt = time.Now()
+	h := w.handle
+	w.mu.Unlock()
+	selection := &filesPollSelection{path: dir, entry: old, generation: old.generation}
+	p := provider()
+	p.blockNext()
+	result := make(chan filesPollPathResult, 1)
+	go func() { result <- e.ws.filesPollPath(w, h, selection) }()
+	select {
+	case <-p.listStarted:
+	case <-time.After(wantWithin):
+		t.Fatal("stale listing did not start")
+	}
+	w.mu.Lock()
+	readded := newFilesPollEntry("new-baseline", old.generation+1, time.Hour, nil)
+	w.paths[dir] = readded
+	w.mu.Unlock()
+	close(p.listRelease)
+	select {
+	case <-result:
+	case <-time.After(wantWithin):
+		t.Fatal("stale listing did not finish")
+	}
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	if got := w.paths[dir].rev; got != "new-baseline" {
+		t.Fatalf("re-added path rev = %q, stale completion overwrote it", got)
+	}
+}
+
+// TestFilesRefreshState_RoutineDeferralAtCeilingIsSilent keeps routine
+// round-robin pacing from being mistaken for a stalled watcher. Every
+// dispatch succeeds, so the aggregate observation window stays fresh even
+// though each individual path is revisited less often at the ceiling.
+func TestFilesRefreshState_RoutineDeferralAtCeilingIsSilent(t *testing.T) {
+	e, _ := newCountingFilesEnv(t)
+	e.ws.filesPollInterval = 5 * time.Millisecond
+	e.ws.filesRefreshStateThreshold = 100 * time.Millisecond
+	sid := e.openSession(t, 1)
+	root := t.TempDir()
+	paths := make([]string, maxWatchPaths)
+	for i := range paths {
+		paths[i] = filepath.Join(root, fmt.Sprintf("watched-%d", i))
+		if err := os.MkdirAll(paths[i], 0o750); err != nil {
+			t.Fatalf("mkdir %s: %v", paths[i], err)
+		}
+	}
+	bid := e.openBinding(t, sid, root, 2)
+	e.watchDir(t, bid, paths, 3)
+
+	if _, err := awaitNotification(e.conn, "files.refreshStateChanged", 100*time.Millisecond); err == nil {
+		t.Fatal("routine successful dispatches emitted delayed state")
+	}
+}
+
+func TestFilesRefreshState_CrossesAndRecoversOnlyOnEdges(t *testing.T) {
+	now := time.Unix(100, 0)
+	entry := &filesPollEntry{lastSuccessfulObservation: now}
+	w := &filesWatcher{
+		paths:        map[string]*filesPollEntry{"/watched": entry},
+		visible:      true,
+		refreshState: filesRefreshStateOK,
+	}
+	const threshold = time.Minute
+
+	if state, changed := w.updateRefreshState(now.Add(threshold), threshold); state != filesRefreshStateDelayed || !changed {
+		t.Fatalf("first threshold crossing = %q/%t, want delayed/true", state, changed)
+	}
+	if state, changed := w.updateRefreshState(now.Add(2*threshold), threshold); state != filesRefreshStateDelayed || changed {
+		t.Fatalf("steady delayed state = %q/%t, want delayed/false", state, changed)
+	}
+
+	entry.lastSuccessfulObservation = now.Add(2 * threshold)
+	if state, changed := w.updateRefreshState(now.Add(2*threshold), threshold); state != filesRefreshStateOK || !changed {
+		t.Fatalf("recovery = %q/%t, want ok/true", state, changed)
+	}
+	if state, changed := w.updateRefreshState(now.Add(5*threshold/2), threshold); state != filesRefreshStateOK || changed {
+		t.Fatalf("steady ok state = %q/%t, want ok/false", state, changed)
+	}
+}
+
+func TestFilesRefreshState_HiddenTimeDoesNotCount(t *testing.T) {
+	now := time.Unix(100, 0)
+	entry := &filesPollEntry{lastSuccessfulObservation: now}
+	w := &filesWatcher{
+		paths:        map[string]*filesPollEntry{"/watched": entry},
+		visible:      false,
+		refreshState: filesRefreshStateOK,
+		wake:         make(chan struct{}, 1),
+	}
+	const threshold = time.Minute
+
+	if state, changed := w.updateRefreshState(now.Add(10*threshold), threshold); state != filesRefreshStateOK || changed {
+		t.Fatalf("hidden state = %q/%t, want ok/false", state, changed)
+	}
+	w.setVisible(true)
+	if state, changed := w.updateRefreshState(now.Add(10*threshold+threshold/2), threshold); state != filesRefreshStateOK || changed {
+		t.Fatalf("fresh visible window = %q/%t, want ok/false", state, changed)
 	}
 }

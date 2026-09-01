@@ -15,7 +15,7 @@
 // there to report. The root the panel is actually showing lives on the panel
 // element as data-root, which is what the checks read.
 
-import { createEffect, createMemo, createSignal, For, on, Show } from 'solid-js'
+import { createEffect, createMemo, createSignal, For, on, onCleanup, Show } from 'solid-js'
 import type { Component } from 'solid-js'
 import type { SidebarViewDescriptor } from '../sidebar'
 import type { ActiveOrigin } from '../pane-content'
@@ -135,6 +135,12 @@ interface FilesPanelProps {
   /** The ACTIVE tab's origin — a reactive accessor, never a capture: the
    *  panel follows the tab in front. */
   activeOrigin: () => ActiveOrigin | null
+  /** True while this view is on screen and the panel is expanded — the
+   *  sidebar's own accessor, which a collapsed sidebar makes false. The
+   *  Files poll is BACKEND-driven, so unlike Git and Ports this panel
+   *  cannot stop it by simply not asking: the flag has to travel
+   *  (nocx-8hdia.1). */
+  visible: () => boolean
   /** The app's single upload surface, or null where none was injected —
    *  the panel then shows no transfers and offers no Upload action, rather
    *  than offering one that reaches nothing. */
@@ -168,6 +174,28 @@ function FilesPanel(props: FilesPanelProps) {
       (origin) => props.store.rescope(origin),
     ),
   )
+  // Visibility travels to the backend on every transition AND on every
+  // re-scope, which is why both are sources: a rescope mints a new binding
+  // whose watcher starts visible, so a panel that is hidden at that moment
+  // has to say so again. This is the Ports shape (ports.tsx: an on() over
+  // [profileId, visible]), and it is the same rule for the same reason.
+  createEffect(
+    on(
+      [() => props.store.binding()?.bindingId ?? null, () => props.visible()],
+      ([bindingId, isVisible]) => {
+        if (bindingId === null) return
+        props.store.setVisible(isVisible)
+      },
+    ),
+  )
+  // Collapsing the sidebar leaves this panel MOUNTED with visible() false,
+  // but putting another sidebar view in front UNMOUNTS it — which disposes
+  // the effect above before it can say so, and the backend would go on
+  // polling for a panel that is not on screen and no longer even exists.
+  // The store outlives the panel (it is where the filter and the tree live,
+  // so both survive a swap), so the last word belongs here. A binding that
+  // has already gone simply rejects, which setVisible swallows.
+  onCleanup(() => props.store.setVisible(false))
   // The reveal's SCROLL is the view's job — the store only says which
   // path the last completed reveal reached (revealTarget); this effect
   // watches that answer and scrolls the row into view when it lands.
@@ -470,7 +498,7 @@ function FilesPanel(props: FilesPanelProps) {
    * — it was only being drawn through a narrower opening.
    */
   const visibleRows = createMemo<FilesFlatRow[]>(() =>
-    narrowFilesRows(props.store.rows(), props.store.filter()),
+    narrowFilesRows(props.store.filterRows(), props.store.filter()),
   )
   /** A filter is typed AND the tree has nothing to show for it. Not "the
    *  tree is empty": an empty directory with no filter is a different state
@@ -478,7 +506,9 @@ function FilesPanel(props: FilesPanelProps) {
    *  the narrowing, and walking the tree twice per render for one answer is
    *  the kind of waste a long tree makes visible. */
   const filterMatchedNothing = (): boolean =>
-    filterIsActive(props.store.filter()) && visibleRows().length === 0
+    filterIsActive(props.store.filter()) &&
+    props.store.filterSettled() &&
+    visibleRows().length === 0
 
   const renderRow = (row: FilesFlatRow) => {
     if (row.kind === 'entry') {
@@ -491,6 +521,10 @@ function FilesPanel(props: FilesPanelProps) {
           onClick={() => {
             if (openable(node)) {
               void openFile(node)
+              return
+            }
+            if (row.projected) {
+              void props.store.revealPath(node.path)
               return
             }
             // A click anywhere on a directory row expands or collapses it —
@@ -523,8 +557,33 @@ function FilesPanel(props: FilesPanelProps) {
             // completed reveal reached. The kit row owns the rendering
             // (data-selected); the panel only names the target.
             selected={node.path === props.store.revealTarget()}
-            onToggle={() => props.store.toggle(node)}
+            onToggle={() =>
+              row.projected ? void props.store.revealPath(node.path) : props.store.toggle(node)
+            }
           />
+        </div>
+      )
+    }
+    if (row.kind === 'filter-searching') {
+      return (
+        <div
+          class="files-row files-row-state"
+          data-depth={row.depth}
+          data-testid="files-filter-searching"
+        >
+          <Spinner size="sm" label="Searching opened directory" />
+          <span>Searching opened directory…</span>
+        </div>
+      )
+    }
+    if (row.kind === 'filter-refusal') {
+      return (
+        <div
+          class="files-row files-row-state"
+          data-depth={row.depth}
+          data-testid="files-filter-refusal"
+        >
+          <span>Could not search this opened folder: {row.message}</span>
         </div>
       )
     }
@@ -633,14 +692,23 @@ function FilesPanel(props: FilesPanelProps) {
         </div>
       </Show>
       <Show when={props.store.phase() === 'ready'}>
-        {/* Refresh that has actually stopped (§5.5): a sticky INLINE
-            message with Retry — not a toast, because a toast cannot answer
-            "why is this stale?" ten minutes later. The Retry is the header
-            refresh cycle, which re-sends the watch set and clears the
-            failure the instant it recovers. */}
-        <Show when={props.store.watchFailed() !== null}>
+        {/* Refresh degradation (§5.5): a sticky INLINE message with Retry —
+            not a toast, because a toast cannot answer "why is this stale?"
+            ten minutes later. Two distinct facts share the surface:
+            watchFailed means the watch could not be established, while
+            refreshState 'delayed' means the visible refresh loop is not
+            keeping up. They differ in cause and not in consequence — the
+            tree may be out of date and the remedy is the same header
+            refresh cycle — so one message with one Retry is clearer than
+            two warnings competing for the same strip. */}
+        <Show when={props.store.watchFailed() !== null || props.store.refreshState() === 'delayed'}>
           <div class="files-watch-error" data-testid="files-watch-error">
-            <span>{props.store.watchFailed()}</span>
+            <span>
+              {props.store.watchFailed() ??
+                (props.store.refreshState() === 'delayed'
+                  ? 'This tree may be out of date — Retry to catch it up.'
+                  : '')}
+            </span>
             <Button size="sm" data-testid="files-watch-retry" onClick={() => props.store.refresh()}>
               Retry
             </Button>
@@ -653,7 +721,7 @@ function FilesPanel(props: FilesPanelProps) {
         <Show when={filterMatchedNothing()}>
           <EmptyState
             title="No files match"
-            description="Only the folders you have opened are searched."
+            description="Opened folders are searched completely. Unopened folders are not searched."
             action={
               <Button
                 size="sm"
@@ -923,6 +991,7 @@ export function createFilesView(deps: FilesViewDeps): SidebarViewDescriptor {
         opener={opener}
         clipboard={clipboard}
         activeOrigin={props.activeOrigin}
+        visible={props.visible}
         upload={upload}
         download={download}
         pickSources={pick}

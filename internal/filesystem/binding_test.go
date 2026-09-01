@@ -395,14 +395,18 @@ func TestWatchSwapIsAtomicAndReplaces(t *testing.T) {
 		t.Error("new watch /c was closed immediately")
 	}
 
-	// Failure: establishing /d fails; the existing set stays healthy, the
-	// partially established /c (a second establishment) is closed, and the
-	// error is the provider's own.
+	// Failure: establishing /d fails; the existing set stays healthy and the
+	// error is the provider's own. /c is RETAINED rather than re-established
+	// (see TestWatchSwapRetainsUnchangedWatches), so there is no second /c
+	// to leak — and closing the one live /c on the failure path would take
+	// down a watch the caller still has, which is the trap diffing
+	// introduces and this asserts against.
 	boom := errors.New("watch refused")
 	p.mu.Lock()
 	p.watchErrs = map[string]error{"/d": boom}
 	p.mu.Unlock()
 	oldC := p.watchOf("/c")
+	establishments := len(p.watchOrder)
 	_, err = h.Watch(ctx, []string{"/c", "/d"})
 	if !errors.Is(err, boom) {
 		t.Fatalf("Watch failure = %v, want the provider's error", err)
@@ -410,8 +414,8 @@ func TestWatchSwapIsAtomicAndReplaces(t *testing.T) {
 	if oldC.closed.Load() {
 		t.Error("existing watch was taken down by a failed swap")
 	}
-	if wc2 := p.watchOf("/c"); !wc2.closed.Load() {
-		t.Error("partially established watch was leaked")
+	if got := len(p.watchOrder) - establishments; got != 0 {
+		t.Errorf("failed swap established %d watches, want 0 — /c was retained", got)
 	}
 
 	// An empty set closes everything.
@@ -421,6 +425,58 @@ func TestWatchSwapIsAtomicAndReplaces(t *testing.T) {
 	}
 	if !oldC.closed.Load() {
 		t.Error("watch /c not closed by empty replacement")
+	}
+}
+
+// TestWatchSwapRetainsUnchangedWatches is the diffing half of the swap
+// (nocx-8hdia.5). files.watch REPLACES the set and the client resends the
+// whole set on every expand and collapse, so rebuilding every watch made a
+// one-folder gesture cost a full re-establishment of the entire expanded
+// tree — and, at the 512-path ceiling, briefly held nearly twice the
+// resources, which is exactly the moment a watch descriptor limit is hit.
+//
+// A path present in both sets keeps its existing watch object: nothing is
+// closed and nothing is created, so no event window opens between the two.
+func TestWatchSwapRetainsUnchangedWatches(t *testing.T) {
+	reg := New()
+	p := newStubProvider()
+	id, err := reg.Register(p, "s1", "", Capabilities{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, release, err := reg.Acquire(id, owner("s1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	ctx := context.Background()
+
+	if _, err := h.Watch(ctx, []string{"/a", "/b"}); err != nil {
+		t.Fatal(err)
+	}
+	wa, wb := p.watchOf("/a"), p.watchOf("/b")
+
+	// One folder expanded, one collapsed: /a is unchanged, /b leaves, /c
+	// arrives. Only /c is new information.
+	if _, err := h.Watch(ctx, []string{"/a", "/c"}); err != nil {
+		t.Fatal(err)
+	}
+	if wa.closed.Load() {
+		t.Error("retained watch /a was closed and re-established")
+	}
+	if got := p.watchOf("/a"); got != wa {
+		t.Error("retained watch /a was replaced by a second establishment")
+	}
+	if !wb.closed.Load() {
+		t.Error("dropped watch /b was not closed")
+	}
+	if wc := p.watchOf("/c"); wc == nil || wc.closed.Load() {
+		t.Error("added watch /c was not established, or was closed immediately")
+	}
+	// The provider saw exactly three establishments across both calls:
+	// /a and /b, then /c. A rebuild would show four.
+	if got := p.watchOrder; len(got) != 3 {
+		t.Errorf("watchOrder = %v, want three establishments (/a /b /c)", got)
 	}
 }
 
@@ -448,11 +504,14 @@ func TestWatchModeAggregation(t *testing.T) {
 	if mode.Kind != WatchPolling || mode.DegradedReason != "fsnotify unavailable" {
 		t.Fatalf("mode = %+v, want polling with the degradation reason", mode)
 	}
-	// Designed polling (SFTP) warns about nothing.
+	// Designed polling (SFTP) warns about nothing. A DIFFERENT path, because
+	// the swap retains an unchanged one: re-watching /x would keep the watch
+	// object established above and report its mode, which would make this an
+	// assertion about re-establishment rather than about aggregation.
 	p.mu.Lock()
 	p.watchMode = WatchMode{Kind: WatchPolling}
 	p.mu.Unlock()
-	mode, err = h.Watch(context.Background(), []string{"/x"})
+	mode, err = h.Watch(context.Background(), []string{"/y"})
 	if err != nil {
 		t.Fatal(err)
 	}

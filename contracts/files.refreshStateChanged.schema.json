@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files.refreshStateChanged.schema.json",
+  "title": "FilesRefreshStateChanged",
+  "description": "The files.refreshStateChanged JSON-RPC notification: a server-initiated binding-level edge that tells the Files panel whether its visible refresh loop is keeping up. It carries no path, queue depth, ladder position, timing, or provider error text — only the user-facing state. Routine polling and designed remote polling remain silent; delayed is emitted only after the visible observation window crosses its threshold, and ok on recovery. The current state is re-emitted on attach so AD-9 reconnects cannot leave a stale warning behind. Nothing existing carries this state: files.changed means \"this directory is dirty, re-list it\", not \"I could not observe it\"; files.watch.degradedReason describes provider establishment and explicitly excludes designed remote polling; a files.watch response cannot report a transition minutes after its request; and control.saturated reports a different failure.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bindingId", "state"],
+  "properties": {
+    "bindingId": {
+      "description": "Which files binding the state belongs to. The panel ignores notifications for other bindings, and the binding's session determines the attached destination.",
+      "type": "string"
+    },
+    "state": {
+      "description": "Whether the visible refresh loop is keeping up with eligible observations.",
+      "type": "string",
+      "enum": ["ok", "delayed"]
+    }
+  }
+}

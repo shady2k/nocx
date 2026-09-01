@@ -471,6 +471,13 @@ func TestParamsContractsAgreeWithRegisteredValidators(t *testing.T) {
 		"files.uploadCancel": {
 			[]byte(`{"transferId":"0123456789abcdef0123456789abcdef"}`),
 		},
+		// Both values, because the flag is the whole method: a probe set that
+		// only ever says "true" would accept a schema that had made the field
+		// a constant.
+		"files.visible": {
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","visible":true}`),
+			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","visible":false}`),
+		},
 		"files.watch": {
 			[]byte(`{"bindingId":"0123456789abcdef0123456789abcdef","paths":[]}`),
 		},

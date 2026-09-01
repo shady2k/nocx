@@ -2682,6 +2682,55 @@
       }
     },
     {
+      "name": "files.visible",
+      "params": [
+        {
+          "name": "params",
+          "required": false,
+          "schema": {
+            "$ref": "https://nocx.local/contracts/files.visible.params.schema.json"
+          }
+        }
+      ],
+      "errors": [
+        {
+          "code": -32601,
+          "message": "Method not found",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32602,
+          "message": "Invalid params",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32603,
+          "message": "Internal error",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        },
+        {
+          "code": -32004,
+          "message": "Control plane busy",
+          "x-nocx-errorSchema": {
+            "$ref": "https://nocx.local/contracts/rpc.error.schema.json"
+          }
+        }
+      ],
+      "x-nocx-agent-disposition": "operation-owned",
+      "result": {
+        "name": "files.visibleResult",
+        "schema": {
+          "$ref": "https://nocx.local/contracts/files.visible.schema.json"
+        }
+      }
+    },
+    {
       "name": "files.watch",
       "params": [
         {
@@ -9604,6 +9653,9 @@
       "$ref": "https://nocx.local/contracts/files.read.schema.json"
     },
     {
+      "$ref": "https://nocx.local/contracts/files.refreshStateChanged.schema.json"
+    },
+    {
       "$ref": "https://nocx.local/contracts/files.reveal.schema.json"
     },
     {
@@ -9623,6 +9675,9 @@
     },
     {
       "$ref": "https://nocx.local/contracts/files.uploadProgress.schema.json"
+    },
+    {
+      "$ref": "https://nocx.local/contracts/files.visible.schema.json"
     },
     {
       "$ref": "https://nocx.local/contracts/files.watch.schema.json"

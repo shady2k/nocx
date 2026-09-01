@@ -129,6 +129,40 @@ func TestReleasedSchema14FixtureIncludesTheAPIRunTablesAndCounter(t *testing.T) 
 	}
 }
 
+func TestAStampedSchema14DatabaseWithAnotherShapeIsRefusedBeforeMigration(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "content.db")
+	aReleasedSchema14Database(t, path)
+	rawExec(t, path,
+		`DROP TABLE entries`,
+		`CREATE TABLE entries (id TEXT PRIMARY KEY) STRICT`,
+		`PRAGMA user_version=14`,
+	)
+
+	_, err := Open(context.Background(), Config{
+		Path: path, Key: schemaTestKey(), Budget: testBudgetInternal(), Logger: log.NewSlogAdapter(nil),
+	})
+	if err == nil {
+		t.Fatal("Open accepted a database stamped schema 14 whose tables have a different shape")
+	}
+	for _, want := range []string{
+		"stamped schema 14",
+		"expected schema 14",
+		"found shape",
+		"stamp and contents disagree",
+		"no rows were discarded",
+	} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("shape refusal reads %q; it must name the expected and found shapes", err)
+		}
+	}
+	if got := rawUserVersion(t, path); got != 14 {
+		t.Fatalf("user_version = %d after shape refusal, want 14 — the ladder migrated a file before checking what its stamp described", got)
+	}
+	if scopeErr := rawTry(t, path, aContentScope); scopeErr == nil {
+		t.Fatal("the malformed schema 14 file was migrated before its shape was refused")
+	}
+}
+
 // assertTheRowsOfSchema14 is "its rows are present AND CORRECT afterwards",
 // spelled out. Every assertion is a whole tuple read back from the raw file,
 // because the failure this suite exists to catch is not an empty table — an

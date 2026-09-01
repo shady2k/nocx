@@ -33,6 +33,8 @@ func aDatabaseAtSchema14(t *testing.T, path string) {
 	rawExec(
 		t, path,
 		theSchema14Script(t),
+		theTwoCounterEraAPIRunScript(t),
+		`INSERT INTO api_run_schema (id, version) VALUES (1, 1)`,
 		fmt.Sprintf(`INSERT INTO workspaces (id, name, created_at) VALUES ('ws-1', 'work', %d)`, now),
 		`INSERT INTO tabs (id, workspace_id, name) VALUES ('tab-1', 'ws-1', 'the tab from before the upgrade')`,
 		`INSERT INTO panes (id, tab_id, cwd, kind) VALUES ('pane-1', 'tab-1', '/srv', 'local')`,
@@ -331,3 +333,4 @@ func TestTheLadderIsAContiguousChainEndingAtTheCurrentSchema(t *testing.T) {
 		t.Fatal("validateLadder accepted a ladder with a hole between 2 and 3")
 	}
 }
+

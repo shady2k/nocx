@@ -108,6 +108,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/shady2k/nocx/internal/log"
 )
@@ -189,6 +190,63 @@ func validateLadderForSchema(ladder []migrationStep, version int, schema string)
 	return nil
 }
 
+// schemaShapeDigests pins the complete SQLite catalog for the historical
+// shapes this build migrates. The catalog includes every table and index
+// definition, so a stamp cannot make a different set of columns or
+// constraints look like the version it names.
+var schemaShapeDigests = map[int]string{
+	14: "761c706c342c6df9456353abe9e52b5151bd4c7c9c597d6be78bc5705f111b0c",
+	15: "067063ecdc151e3d344a7a122f4e678c21dbabfad1f848a60cf3d46e9b702a3d",
+}
+
+func validateOnDiskSchemaShape(ctx context.Context, conn *sql.Conn, version int) error {
+	expected, ok := schemaShapeDigests[version]
+	if !ok {
+		return nil
+	}
+	found, err := sqliteSchemaShapeDigest(ctx, conn)
+	if err != nil {
+		return fmt.Errorf("content: inspect schema %d shape: %w", version, err)
+	}
+	if found != expected {
+		return fmt.Errorf("content: refusing database stamped schema %d: expected schema %d shape %s, found shape %s; stamp and contents disagree, and no rows were discarded",
+			version, version, expected, found)
+	}
+	return nil
+}
+
+func sqliteSchemaShapeDigest(ctx context.Context, conn *sql.Conn) (string, error) {
+	rows, err := conn.QueryContext(ctx, `SELECT type, name, tbl_name, COALESCE(sql, '')
+		FROM sqlite_master
+		WHERE name NOT LIKE 'sqlite_%'
+		ORDER BY type, name`)
+	if err != nil {
+		return "", err
+	}
+	defer func() { _ = rows.Close() }()
+
+	var shape strings.Builder
+	for rows.Next() {
+		var typ, name, table, sqlText string
+		if err := rows.Scan(&typ, &name, &table, &sqlText); err != nil {
+			return "", err
+		}
+		shape.WriteString(typ)
+		shape.WriteString(`\x00`)
+		shape.WriteString(name)
+		shape.WriteString(`\x00`)
+		shape.WriteString(table)
+		shape.WriteString(`\x00`)
+		shape.WriteString(sqlText)
+		shape.WriteString(`\x00`)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	sum := sha256.Sum256([]byte(shape.String()))
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // migrateSchema brings the file up to schemaVersion, or refuses it. It is the
 // whole of the protocol above and the only place user_version is read for a
 // decision.
@@ -199,6 +257,9 @@ func migrateSchema(ctx context.Context, conn *sql.Conn, ladder []migrationStep, 
 	var onDisk int
 	if err := conn.QueryRowContext(ctx, "PRAGMA user_version").Scan(&onDisk); err != nil {
 		return fmt.Errorf("content: read schema version: %w", err)
+	}
+	if err := validateOnDiskSchemaShape(ctx, conn, onDisk); err != nil {
+		return err
 	}
 	if onDisk == schemaVersion {
 		return nil

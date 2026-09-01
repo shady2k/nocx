@@ -5638,6 +5638,104 @@ describe('the ask entry gesture (nocx-4wtlh)', () => {
     }
   })
 
+  it('makes no offer until the drag ends (nocx-hp8p2.16)', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const block = frozenBlockOf(content, 'ls', ['one', 'two'])
+      submitKey(ed, { metaKey: true })
+
+      // Mid-gesture: selectionchange fires on every pixel of a drag, and the
+      // button used to appear over a range that was still growing.
+      document.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true }))
+      selectRows(block, 0, 1)
+      expect(document.querySelector<HTMLElement>('.mark-affordance')?.style.display).toBe('none')
+
+      // Released: the range is what the person meant, and the offer is made.
+      document.dispatchEvent(new PointerEvent('pointerup', { bubbles: true }))
+      expect(
+        document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')?.textContent,
+      ).toBe('Mark 1 line')
+    } finally {
+      teardown()
+    }
+  })
+
+  it('keeps a second row mark instead of replacing the first (nocx-hp8p2.16)', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const block = frozenBlockOf(content, 'ls', ['one', 'two', 'three'])
+      submitKey(ed, { metaKey: true })
+      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+
+      selectRows(block, 0, 1)
+      document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')!.click()
+      expect(chip.textContent).toContain('1')
+
+      // A different line of the SAME block. Every row shares the block's item
+      // id, so identifying a mark by that id alone made this replace the
+      // first one and a person could never mark two lines.
+      selectRows(block, 2, 3)
+      document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')!.click()
+      expect(chip.textContent).toContain('2')
+      expect(block.querySelectorAll<HTMLElement>('.term-line[data-granted]')).toHaveLength(2)
+    } finally {
+      teardown()
+    }
+  })
+
+  it('the block menu clears every mark on that block, rows included (nocx-hp8p2.16)', async () => {
+    const { client } = agentDispatcher()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      _resetThemeState()
+      ed.show()
+      const block = frozenBlockOf(content, 'ls', ['one', 'two', 'three'])
+      submitKey(ed, { metaKey: true })
+      const chip = ed.root.querySelector<HTMLButtonElement>('.nocx-editor-grant')!
+      selectRows(block, 0, 1)
+      document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')!.click()
+      selectRows(block, 2, 3)
+      document.querySelector<HTMLButtonElement>('.mark-affordance .ui-button')!.click()
+      expect(chip.textContent).toContain('2')
+
+      // The menu speaks about the BLOCK, so with any of it marked its action
+      // is Unmark — and it takes the row marks with it rather than leaving
+      // half of them behind under a label that says nothing is marked.
+      block.querySelector<HTMLButtonElement>('.cmd-overflow-btn')!.click()
+      const action = document.querySelector<HTMLButtonElement>(
+        '.cmd-overflow-menu-item[data-action="grant"]',
+      )!
+      expect(action.textContent).toBe('Unmark')
+      action.click()
+
+      expect(chip.textContent).toContain('0')
+      expect(block.querySelector('.term-line[data-granted]')).toBeNull()
+    } finally {
+      teardown()
+    }
+  })
+
   it('offers selected rows, marks only when the button is used, and unmarks from its menu', async () => {
     const { client } = agentDispatcher()
     const { ed, content, teardown } = await mountTerminal(
@@ -8317,7 +8415,12 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
       expect(ed.isVisible).toBe(true)
       expect(ed.root.dataset.placement).toBe('overlay')
-      expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).not.toContain(
+      // The gesture is what attaches, not the kind of program: the person
+      // pressed the chord over THIS command, the product froze THIS screen
+      // and says so on the badge below. An ordinary running command is no
+      // exception — a summon that pins a photograph and then sends nothing
+      // is where the owner's zero-count report came from (nocx-hp8p2.4).
+      expect(ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label')).toContain(
         'frozen screen attached automatically',
       )
       // Ask, not the shell: the summoned editor's only target. Read off the
@@ -8363,9 +8466,169 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
 
       await summonChord(content)
 
-      expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).toContain(
+      expect(ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label')).toContain(
         'frozen screen attached automatically',
       )
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('attaches the live alternate screen of a program that has never frozen (nocx-hp8p2.4)', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client, 'top')
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      scrollback.beginBlockNow('top', '~', 0)
+      scrollback.blockManager.bindAttempt('att-run')
+      const renderer = rendererOf(content)
+      renderer._fireBufferChange('alternate')
+      renderer._fireWriteParsed()
+
+      await summonChord(content)
+
+      // The program is still painting its screen — it has never frozen, so the
+      // attachment owner is the running block itself. Without this the
+      // assistant is asked about a screen nothing handed it.
+      expect(ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label')).toContain(
+        'frozen screen attached automatically',
+      )
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('attaches the screen of a full-viewport program that never left the normal buffer (nocx-hp8p2.4)', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client, 'top')
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      scrollback.beginBlockNow('top', '~', 0)
+      scrollback.blockManager.bindAttempt('att-run')
+      rendererOf(content)._fireWriteParsed()
+
+      await summonChord(content)
+
+      // procps `top` owns the whole viewport without taking the alternate
+      // screen, and it is the program the owner reported this against. The
+      // gesture, not the buffer kind, is what says which screen the question
+      // carries.
+      expect(ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label')).toContain(
+        'frozen screen attached automatically',
+      )
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('gives the person the seam between the frozen screen and the assistant (nocx-hp8p2.6)', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client, 'top')
+      const scrollback = (content as unknown as { scrollback: ScrollbackController }).scrollback
+      scrollback.beginBlockNow('top', '~', 0)
+      scrollback.blockManager.bindAttempt('att-run')
+      rendererOf(content)._fireWriteParsed()
+
+      await summonChord(content)
+
+      // The kit's separator, on the one axis this edge has: the frozen
+      // screen is above and the assistant below, so what a person drags is
+      // how much of the pane each keeps.
+      //
+      // And it has to be VISIBLE. The kit's grab line is transparent at
+      // rest — "the pane border beside it is the visible seam" — so the
+      // surface owes it that border, or the edge is a six-pixel invisible
+      // strip nobody can find.
+      const stackCss = stripComments(
+        extractRuleBlock(readFileSync(STYLE_ENTRY, 'utf8'), 'nocx-summon-stack') ?? '',
+      )
+      expect(stackCss).toMatch(/border-top\s*:\s*1px\s+solid/)
+      const stack = document.querySelector<HTMLElement>('.nocx-summon-stack')
+      expect(stack).not.toBeNull()
+      const seam = stack!.querySelector<HTMLElement>('[role="separator"]')
+      expect(seam).not.toBeNull()
+      expect(seam?.getAttribute('aria-orientation')).toBe('horizontal')
+      // It is above the answers it measures, which is where the edge is.
+      const answers = stack!.querySelector<HTMLElement>('.nocx-summon-answers')
+      expect(answers).not.toBeNull()
+      expect(
+        seam!.compareDocumentPosition(answers!) & Node.DOCUMENT_POSITION_FOLLOWING,
+      ).toBeTruthy()
+
+      // Dragging the seam up gives the assistant more room. Read off the
+      // element's own height, which is what a person sees change.
+      const before = Number.parseFloat(answers!.style.height || '0')
+      seam!.dispatchEvent(new KeyboardEvent('keydown', { key: 'ArrowUp', bubbles: true }))
+      const after = Number.parseFloat(answers!.style.height || '0')
+      expect(after).toBeGreaterThan(before)
+      // And the cap survives the drag: the program the question is about
+      // may never be pushed off the pane entirely, which is the whole point
+      // of asking WITHOUT leaving it. The ceiling therefore stops short of
+      // the space the stack could otherwise fill.
+      const ceiling = Number(seam!.getAttribute('aria-valuemax'))
+      const floor = Number(seam!.getAttribute('aria-valuemin'))
+      expect(ceiling).toBeGreaterThan(floor)
+      expect(ceiling).toBeLessThan(window.innerHeight)
+
+      expect(ed.isVisible).toBe(true)
+    } finally {
+      restore()
+      teardown()
+    }
+  })
+
+  it('gives the summon a pointer way out beside its badge (nocx-hp8p2.8)', async () => {
+    const client = makeClient()
+    const { ed, content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    const restore = stubScrolling()
+    try {
+      content.setVisible(true)
+      startCommand(client)
+
+      await summonChord(content)
+
+      // Escape was the only exit, and a surface whose only way out is a key
+      // a person has to already know is one they can be stuck in.
+      const dismiss = ed.root.querySelector<HTMLButtonElement>(
+        '.nocx-freeze-dismiss .ui-icon-button',
+      )
+      expect(dismiss).not.toBeNull()
+      expect(dismiss?.getAttribute('aria-label')).toContain('Close the assistant')
+
+      dismiss!.click()
+
+      // The same unwind the key performs — one exit, two ways to reach it.
+      expect(content.pinnedFrame()).toBeNull()
+      expect(ed.root.querySelector('[role="status"]')).toBeNull()
     } finally {
       restore()
       teardown()
@@ -8817,7 +9080,7 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         chordOn(viewOf(ed).contentDOM)
 
         await vi.waitFor(() =>
-          expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).toContain(
+          expect(ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label')).toContain(
             'frozen screen attached automatically',
           ),
         )
@@ -8842,9 +9105,9 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         chordOn(viewOf(ed).contentDOM)
         await settleAttachment()
 
-        expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).not.toContain(
-          'frozen screen attached automatically',
-        )
+        expect(
+          ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label'),
+        ).not.toContain('frozen screen attached automatically')
         expect(captureLiveFrame).not.toHaveBeenCalled()
       } finally {
         teardown()
@@ -8881,9 +9144,9 @@ describe('asking about, and stopping, a running command (nocx-92gfl, nocx-23rph)
         await settleAttachment()
 
         expect(targetNamed(ed)).toBe('agent')
-        expect(ed.root.querySelector('.nocx-editor-grant')?.textContent).not.toContain(
-          'frozen screen attached automatically',
-        )
+        expect(
+          ed.root.querySelector('.nocx-editor-grant')?.getAttribute('aria-label'),
+        ).not.toContain('frozen screen attached automatically')
         expect(captureLiveFrame).not.toHaveBeenCalled()
       } finally {
         teardown()
@@ -10549,7 +10812,11 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
       expect(ed.isVisible).toBe(true)
       expect(first.parentElement).toBe(answerList)
       expect(ed.root.parentElement).toBe(stack)
-      expect(Array.from(stack!.children)).toEqual([answerList, editorRoot])
+      // The stack's seats, in order: the draggable seam between the frozen
+      // screen and the assistant, the answers, then the one composer.
+      const seam = stack?.querySelector<HTMLElement>('.nocx-summon-seam')
+      expect(seam).not.toBeNull()
+      expect(Array.from(stack!.children)).toEqual([seam, answerList, editorRoot])
       expect(rendererReadOnly(content)).toHaveBeenLastCalledWith(true)
       expect(session.send).not.toHaveBeenCalled()
       expect(session.sendResize).toHaveBeenCalledTimes(resizeCalls)
@@ -10862,6 +11129,44 @@ describe('summoned answers return one composer and take ordered seats (nocx-7l4e
         ([method]) => method === 'agent.runState',
       )?.[1] as ((params: unknown) => void) | undefined
       state?.({ runId: 1, entryId: 'entry-1', state: 'completed', droppedDeltas: 0 })
+    } finally {
+      teardown()
+    }
+  })
+
+  it('Escape stops an ordinary answer, with no summon anywhere (nocx-hp8p2.14)', async () => {
+    const client = makeClient()
+    const { content, teardown } = await mountTerminal(
+      makeClipboard(),
+      { attachToDocument: true },
+      client,
+    )
+    try {
+      content.setVisible(true)
+      const ed = editorOf(content)
+      ed.show()
+      // Point Enter at Ask through the same chord a person uses. No summon:
+      // nothing is frozen and no command is running — this is the ordinary
+      // panel, where Escape used to be a dead key.
+      viewOf(ed).contentDOM.dispatchEvent(
+        new KeyboardEvent('keydown', {
+          key: 'Enter',
+          metaKey: true,
+          bubbles: true,
+          cancelable: true,
+        }),
+      )
+      await submitQuestion(content, client, 'what is in this directory?')
+
+      // The answer's Stop existed only in its ⋮ menu until now.
+      document.body.dispatchEvent(
+        new KeyboardEvent('keydown', { key: 'Escape', bubbles: true, cancelable: true }),
+      )
+      await Promise.resolve()
+
+      expect(
+        client.dispatcher.call.mock.calls.filter(([method]) => method === 'agent.cancel'),
+      ).toHaveLength(1)
     } finally {
       teardown()
     }

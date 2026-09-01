@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"io/fs"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
@@ -184,6 +185,17 @@ type Declaration struct {
 	// ResourceKinds is the presentation-time upper bound of the resource
 	// kinds a call may resolve to. The policy checks the resolved resources.
 	ResourceKinds []content.ResourceKind
+	// ScopeFamily is the content sub-scope family a grant must CONTAIN for
+	// this tool to be offered — "note", "snippet", "skill". Empty for a
+	// declaration that needs no sub-scope.
+	//
+	// It exists because ForGrant used to answer coverage from scope KINDS
+	// alone, so a grant naming one note offered every notes AND snippets
+	// tool: the kind is `content` for all of them. The family is what the
+	// grant actually said, and content.GrantScope.Contains is what compares
+	// them, so the content root still covers everything and a narrow grant
+	// covers only what it named.
+	ScopeFamily string
 	// ResolveResources derives the resources named by validated arguments.
 	// Nil means the declaration names no resource at all; a non-nil resolver
 	// returning no refs is a distinct zero-resource call.
@@ -437,7 +449,8 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
-		ResolveResources: contentRootResources,
+		ScopeFamily:      "note",
+		ResolveResources: contentFamilyResources("note"),
 		Executes:         InGo,
 		Params:           "notes.search.schema.json",
 		Narrow:           narrowContent,
@@ -451,7 +464,8 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
-		ResolveResources: contentRootResources,
+		ScopeFamily:      "note",
+		ResolveResources: contentFamilyResources("note"),
 		Executes:         InGo,
 		Params:           "notes.create.schema.json",
 		Narrow:           narrowContent,
@@ -465,6 +479,7 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "note",
 		ResolveResources: contentItemResource("id", "note"),
 		Executes:         InGo,
 		Params:           "notes.update.schema.json",
@@ -479,6 +494,7 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "note",
 		ResolveResources: contentItemResource("id", "note"),
 		Executes:         InGo,
 		Params:           "notes.delete.schema.json",
@@ -493,7 +509,8 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
-		ResolveResources: contentRootResources,
+		ScopeFamily:      "snippet",
+		ResolveResources: contentFamilyResources("snippet"),
 		Executes:         InGo,
 		Params:           "snippets.list.schema.json",
 		Narrow:           narrowContent,
@@ -507,7 +524,8 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
-		ResolveResources: contentRootResources,
+		ScopeFamily:      "snippet",
+		ResolveResources: contentFamilyResources("snippet"),
 		Executes:         InGo,
 		Params:           "snippets.create.schema.json",
 		Narrow:           narrowContent,
@@ -521,6 +539,7 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "snippet",
 		ResolveResources: contentItemResource("id", "snippet"),
 		Executes:         InGo,
 		Params:           "snippets.update.schema.json",
@@ -535,6 +554,7 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "snippet",
 		ResolveResources: contentItemResource("id", "snippet"),
 		Executes:         InGo,
 		Params:           "snippets.delete.schema.json",
@@ -549,10 +569,71 @@ var declarations = []Declaration{
 		Deadline:         30 * time.Second,
 		Cancellation:     CancellationReturnError,
 		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
-		ResolveResources: contentRootResources,
+		ScopeFamily:      "snippet",
+		ResolveResources: contentFamilyResources("snippet"),
 		Executes:         InGo,
 		Params:           "snippets.reorder.schema.json",
 		Narrow:           narrowContent,
+	},
+	{
+		Name:             "skills.read",
+		Description:      "Read a skill's instructions by name, or one file inside that skill; reach for this when the index names a skill relevant to the task.",
+		Effect:           []content.Effect{content.EffectObserve},
+		OutputTrust:      OutputTrustTrusted,
+		ResultBound:      ResultBound{MaxBytes: 64 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "skill",
+		ResolveResources: skillResource("name"),
+		Executes:         InGo,
+		Params:           "skills.read.schema.json",
+		Narrow:           narrowContent,
+	},
+	{
+		Name:             "skills.create",
+		Description:      "Write a new skill the person asked you to remember; the person approves its exact text before it is stored.",
+		Effect:           []content.Effect{content.EffectMutateReversible},
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "skill",
+		ResolveResources: skillResource("name"),
+		Executes:         InGo,
+		Params:           "skills.create.schema.json",
+		Narrow:           narrowSkillsWrite,
+	},
+	{
+		Name:             "skills.update",
+		Description:      "Replace a managed skill after the person asks you to change how it is remembered; the person approves its exact text before it is stored.",
+		Effect:           []content.Effect{content.EffectMutateReversible},
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "skill",
+		ResolveResources: skillResource("name"),
+		Executes:         InGo,
+		Params:           "skills.update.schema.json",
+		Narrow:           narrowSkillsWrite,
+	},
+	{
+		Name:             "skills.delete",
+		Description:      "Delete a managed skill the person no longer wants remembered; the person approves the removal before it happens.",
+		Effect:           []content.Effect{content.EffectMutateReversible},
+		OutputTrust:      OutputTrustUntrusted,
+		ResultBound:      ResultBound{MaxBytes: 8 << 10, Truncation: TruncationDropTail},
+		Deadline:         30 * time.Second,
+		Cancellation:     CancellationReturnError,
+		ResourceKinds:    []content.ResourceKind{content.ResourceContent},
+		ScopeFamily:      "skill",
+		ResolveResources: skillResource("name"),
+		Executes:         InGo,
+		Params:           "skills.delete.schema.json",
+		Narrow:           narrowSkillsWrite,
 	},
 }
 
@@ -566,6 +647,28 @@ var declarations = []Declaration{
 // loud.
 func Assemble(fsys fs.FS) (Registry, error) {
 	return assemble(fsys, declarations)
+}
+
+// AssembleWithSkillRoots assembles the registry with the application's
+// filesystem skill roots bound into the three general-purpose file tools.
+// Declarations are cloned so one application profile cannot alter another
+// registry or the package-level declaration table.
+func AssembleWithSkillRoots(fsys fs.FS, skillRoots []string) (Registry, error) {
+	if len(skillRoots) == 0 {
+		return Assemble(fsys)
+	}
+	decls := slices.Clone(declarations)
+	for i := range decls {
+		switch decls[i].Name {
+		case "files.read":
+			decls[i].Narrow = narrowFilesReadWithSkillRoots(skillRoots)
+		case "files.edit":
+			decls[i].Narrow = narrowFilesEditWithSkillRoots(skillRoots)
+		case "files.create":
+			decls[i].Narrow = narrowFilesCreateWithSkillRoots(skillRoots)
+		}
+	}
+	return assemble(fsys, decls)
 }
 
 func assemble(fsys fs.FS, decls []Declaration) (Registry, error) {
@@ -647,6 +750,9 @@ func validateDeclaration(d Declaration) string {
 			bad = append(bad, fmt.Sprintf("unsupported resource kind %q", k))
 		}
 	}
+	if hasContentResource := slices.Contains(d.ResourceKinds, content.ResourceContent); hasContentResource && strings.TrimSpace(d.ScopeFamily) == "" {
+		bad = append(bad, "missing scope family for content resource")
+	}
 	if !supportedExecutes(d.Executes) {
 		bad = append(bad, fmt.Sprintf("unsupported execution site %q", d.Executes))
 	}
@@ -703,6 +809,9 @@ func (r Registry) ForGrant(g content.Grant) []Tool {
 		if !anyEffectPermitted(t.Declaration.Effect, effectPermitted) {
 			continue
 		}
+		if t.ScopeFamily != "" && !familyCovered(g, t.ScopeFamily) {
+			continue
+		}
 		covered := true
 		for _, k := range t.ResourceKinds {
 			if !kindCovered[k] {
@@ -715,6 +824,18 @@ func (r Registry) ForGrant(g content.Grant) []Tool {
 		}
 	}
 	return out
+}
+
+// familyCovered reports whether a grant scope contains the family root.
+// Containment is the only family predicate; no synthetic item is needed.
+func familyCovered(g content.Grant, family string) bool {
+	root := content.GrantScope{Kind: content.ResourceContent, ID: family}
+	for _, s := range g.Scopes {
+		if s.Kind == content.ResourceContent && s.Contains(root) {
+			return true
+		}
+	}
+	return false
 }
 
 // Lookup returns the tool with the given name — the middleware's declaration

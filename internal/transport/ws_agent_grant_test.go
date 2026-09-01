@@ -15,10 +15,36 @@ import (
 	"github.com/shady2k/nocx/internal/agenttools"
 	"github.com/shady2k/nocx/internal/assistant"
 	"github.com/shady2k/nocx/internal/capability"
+	"github.com/shady2k/nocx/internal/content"
 	"github.com/shady2k/nocx/internal/log"
 	"github.com/shady2k/nocx/internal/note"
+	"github.com/shady2k/nocx/internal/settings"
+	"github.com/shady2k/nocx/internal/skill"
 	"github.com/shady2k/nocx/internal/snippet"
+	"github.com/shady2k/nocx/internal/storage"
 )
+
+type fixedSkills []skill.Skill
+
+func (s fixedSkills) Index() []skill.Skill {
+	return s
+}
+
+func (fixedSkills) Read(string, string) (skill.Content, error) {
+	return skill.Content{}, errors.New("not used")
+}
+
+func (fixedSkills) Create(string, string, string) error {
+	return errors.New("not used")
+}
+
+func (fixedSkills) Update(string, string, string) error {
+	return errors.New("not used")
+}
+
+func (fixedSkills) Delete(string) error {
+	return errors.New("not used")
+}
 
 type grantPromptClient struct {
 	seen chan assistant.AskParams
@@ -120,6 +146,78 @@ func TestRunGrantForOffersContentTools(t *testing.T) {
 		if !names[want] {
 			t.Fatalf("run grant offered tools %v, missing %q", names, want)
 		}
+	}
+}
+
+func TestRunGrantFor_GlobalSkillsOffOmitsSkillTools(t *testing.T) {
+	dir := t.TempDir()
+	registry := settings.New(storage.NewDocumentStore(dir), &fakeSecretStore{})
+	if err := registry.SetBool(settings.SkillsEnabled, false); err != nil {
+		t.Fatalf("disable skills: %v", err)
+	}
+	server := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithSettingsRegistry(registry), WithAgentPolicy(autonomousPolicyStore(t)))
+	grant := server.runGrantFor("session-a")
+	if grant == nil {
+		t.Fatal("runGrantFor returned no grant")
+	}
+	tools, err := agenttools.Assemble(os.DirFS("../../contracts/tools"))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	for _, tool := range tools.ForGrant(*grant) {
+		if strings.HasPrefix(tool.Name, "skills.") {
+			t.Fatalf("skills disabled but tool %q was offered", tool.Name)
+		}
+	}
+	if len(tools.ForGrant(*grant)) == 0 {
+		t.Fatal("skills exclusion removed all ordinary tools")
+	}
+}
+
+func TestRunGrantFor_GlobalSkillsOffOmitsSkillScope(t *testing.T) {
+	dir := t.TempDir()
+	registry := settings.New(storage.NewDocumentStore(dir), &fakeSecretStore{})
+	if err := registry.SetBool(settings.SkillsEnabled, false); err != nil {
+		t.Fatalf("disable skills: %v", err)
+	}
+	server := NewWSServer(log.NewSlogAdapter(nil), newRegWithStub(log.NewSlogAdapter(nil)),
+		WithSettingsRegistry(registry), WithAgentPolicy(autonomousPolicyStore(t)))
+	grant := server.runGrantFor("session-a")
+	if grant == nil {
+		t.Fatal("runGrantFor returned no grant")
+	}
+	for _, scope := range grant.Scopes {
+		if scope.Kind == content.ResourceContent && (scope.ID == "skill" || strings.HasPrefix(scope.ID, "skill/")) {
+			t.Fatalf("skills disabled but grant contains skill scope %q", scope.ID)
+		}
+	}
+	if !hasGrantScope(grant.Scopes, content.ResourceContent, "note") ||
+		!hasGrantScope(grant.Scopes, content.ResourceContent, "snippet") {
+		t.Fatalf("skills disabled but ordinary content family scopes missing: %+v", grant.Scopes)
+	}
+}
+
+func TestSkillRefsForGrantListsEveryGrantedSkillScope(t *testing.T) {
+	reg, err := agenttools.Assemble(os.DirFS("../../contracts/tools"))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	grant := content.Grant{
+		Effects: []content.Effect{content.EffectObserve},
+		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "skill"}},
+	}
+	source := fixedSkills{
+		{Name: "deploy", Description: "deployment"},
+		{Name: "backup", Description: "backups"},
+	}
+
+	got := skillRefsForGrant(&grant, source, reg)
+	if len(got) != 2 {
+		t.Fatalf("skill refs = %+v, want both granted skills", got)
+	}
+	if got[0].Name != "deploy" || got[1].Name != "backup" {
+		t.Fatalf("skill refs = %+v, want deploy and backup", got)
 	}
 }
 

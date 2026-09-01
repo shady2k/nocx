@@ -28,6 +28,7 @@ import { VaultSection, createVaultSecretSource, type VaultController } from './v
 import type { VaultClient } from './vault-client'
 import { render, cleanup, fireEvent } from '@solidjs/testing-library'
 import { log } from './log'
+import { SkillsStore, type SkillsClientLike } from './skills-store'
 // ── Test declarations ────────────────────────────────────────────────
 // 5 declarations spanning 3 sections and all control types.
 
@@ -423,6 +424,7 @@ describe('SettingsContent', () => {
         groups: { included: 0, added: 0, updated: 0, removed: 0 },
         snippets: { included: 0 },
         notes: { included: 0 },
+        skills: { included: 0 },
         connectionsRequiringCredential: [],
         omissions: {
           credentialBindingsRemoved: 0,
@@ -556,6 +558,7 @@ describe('SettingsContent', () => {
       'Application',
       'Backup & Restore',
       'Snippets',
+      'Skills',
       'About',
       'AI',
     ])
@@ -567,6 +570,52 @@ describe('SettingsContent', () => {
     // And no page appears twice.
     const ids = items.map((l) => l.getAttribute('data-item'))
     expect(new Set(ids).size).toBe(ids.length)
+  })
+
+  it('Skills rail navigation mounts the Skills page', async () => {
+    const skillsClient: SkillsClientLike = {
+      list: vi.fn().mockResolvedValue({
+        documentPath: '/tmp/nocx/skills.json',
+        skills: [
+          {
+            name: 'deploy',
+            description: 'Deploy the service',
+            provenance: 'authored',
+            path: '/tmp/nocx/skills/deploy/SKILL.md',
+            enabled: true,
+            status: 'approved',
+          },
+        ],
+      }),
+      setEnabled: vi.fn().mockResolvedValue({ name: 'deploy', enabled: false }),
+      remove: vi.fn().mockResolvedValue({ name: 'deploy' }),
+      approve: vi.fn().mockResolvedValue({ name: 'deploy', status: 'approved' }),
+    }
+    const skillsStore = new SkillsStore(skillsClient)
+    content = new SettingsContent(
+      client,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      skillsStore,
+    )
+    mockReady(client)
+    await content.mount(target, host, signal)
+
+    openSection(target, 'Skills')
+    await vi.waitFor(() => {
+      expect(target.querySelector('[data-skill-name="deploy"]')).toBeTruthy()
+    })
   })
 
   it('section nav shows per-section modified counts', async () => {

@@ -1,6 +1,10 @@
 package agenttools
 
-import "github.com/shady2k/nocx/internal/content"
+import (
+	"strings"
+
+	"github.com/shady2k/nocx/internal/content"
+)
 
 // ContentScope is the authority half of a notes or snippets tool. It carries
 // only ResourceContent scopes that survived grant intersection; the operation
@@ -44,8 +48,10 @@ func narrowContent(grant content.Grant, resources []ResourceRef, _ RunContext) (
 	return NewContentScope(grantedResources(grant, resources)), nil
 }
 
-func contentRootResources(_ map[string]any, _ RunContext) ([]ResourceRef, error) {
-	return []ResourceRef{{Kind: content.ResourceContent, ID: "content"}}, nil
+func contentFamilyResources(family string) ResolveResources {
+	return func(_ map[string]any, _ RunContext) ([]ResourceRef, error) {
+		return []ResourceRef{{Kind: content.ResourceContent, ID: family}}, nil
+	}
 }
 
 func contentItemResource(arg, kind string) ResolveResources {
@@ -56,4 +62,58 @@ func contentItemResource(arg, kind string) ResolveResources {
 		}
 		return []ResourceRef{{Kind: content.ResourceContent, ID: kind + "/" + id}}, nil
 	}
+}
+
+// skillResource resolves the skill named by the call into its content
+// sub-scope. A skill is a ResourceContent sub-scope exactly as a note and a
+// snippet are: the resource vocabulary is the ledger's closed set, and
+// ResourceContent's hierarchy already expresses a grantable library.
+func skillResource(arg string) ResolveResources {
+	return func(args map[string]any, _ RunContext) ([]ResourceRef, error) {
+		name, ok := args[arg].(string)
+		if !ok || name == "" {
+			return nil, nil
+		}
+		return []ResourceRef{{Kind: content.ResourceContent, ID: "skill/" + name}}, nil
+	}
+}
+
+// SkillWriteScope is the authority half of a skills write: the granted
+// skill/<name> scopes and nothing else. The managed root is wiring held by
+// the assistant's skill library, not by this capability.
+type SkillWriteScope struct {
+	scopes []content.GrantScope
+}
+
+// NewSkillWriteScope builds a capability from only the skill resources that
+// survived grant intersection.
+func NewSkillWriteScope(resources []ResourceRef) *SkillWriteScope {
+	scopes := make([]content.GrantScope, 0, len(resources))
+	for _, ref := range resources {
+		if ref.Kind == content.ResourceContent && strings.HasPrefix(ref.ID, "skill/") && len(ref.ID) > len("skill/") {
+			scopes = append(scopes, content.GrantScope{Kind: ref.Kind, ID: ref.ID})
+		}
+	}
+	return &SkillWriteScope{scopes: scopes}
+}
+
+// Allows reports whether this exact skill name is inside the narrowed
+// capability. It accepts a name rather than a canonical resource id so an
+// executor cannot accidentally broaden the check with a caller-supplied
+// prefix.
+func (s *SkillWriteScope) Allows(name string) bool {
+	if s == nil || name == "" || strings.Contains(name, "/") {
+		return false
+	}
+	child := content.GrantScope{Kind: content.ResourceContent, ID: "skill/" + name}
+	for _, parent := range s.scopes {
+		if parent.Contains(child) {
+			return true
+		}
+	}
+	return false
+}
+
+func narrowSkillsWrite(grant content.Grant, resources []ResourceRef, _ RunContext) (Capability, error) {
+	return NewSkillWriteScope(grantedResources(grant, resources)), nil
 }

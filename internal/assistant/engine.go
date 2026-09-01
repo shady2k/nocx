@@ -411,6 +411,9 @@ func (c *client) Ask(ctx context.Context, p AskParams, onEvent func(AskEvent) er
 		}, toolSeams{
 			noteOperation:    p.NoteOperation,
 			snippetOperation: p.SnippetOperation,
+			skills:           p.Skills,
+			skillDraft:       p.SkillDraft,
+			skillDraftHTTP:   c.http,
 			fetcher:          p.Fetcher,
 		})
 		if err != nil {

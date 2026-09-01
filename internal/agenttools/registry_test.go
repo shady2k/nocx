@@ -186,6 +186,23 @@ const contentToolSchema = `{
   }}
 }`
 
+const skillsReadSchema = `{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["name"],
+  "properties": {"name": {"type": "string"}},
+  "$defs": {"result": {
+    "type": "object",
+    "additionalProperties": false,
+    "required": ["name", "path", "content"],
+    "properties": {
+      "name": {"type": "string"},
+      "path": {"type": "string"},
+      "content": {"type": "string"}
+    }
+  }}
+}`
+
 // TestAssemble_MissingSchemaDoesNotAssemble is acceptance criterion 1: a tool
 // whose params schema is absent from contracts/ does not assemble into the
 // set — asserted, not documented in a comment. The tool is omitted and named
@@ -346,6 +363,33 @@ func TestDeclarationsAreClassified(t *testing.T) {
 	}
 }
 
+func TestValidateDeclarationRequiresContentScopeFamily(t *testing.T) {
+	d := Declaration{
+		Name:          "content.tool",
+		Description:   "a content tool",
+		Effect:        []content.Effect{content.EffectObserve},
+		OutputTrust:   OutputTrustUntrusted,
+		ResultBound:   ResultBound{MaxBytes: 1024, Truncation: TruncationDropTail},
+		Deadline:      time.Second,
+		Cancellation:  CancellationReturnError,
+		ResourceKinds: []content.ResourceKind{content.ResourceContent},
+		Executes:      InGo,
+		Params:        "content.tool.schema.json",
+	}
+	if got := validateDeclaration(d); !strings.Contains(got, "scope family") {
+		t.Fatalf("validateDeclaration = %q, want a missing scope family error", got)
+	}
+}
+
+func TestFamilyCoveredIgnoresNonContentScopes(t *testing.T) {
+	g := content.Grant{
+		Scopes: []content.GrantScope{{Kind: content.ResourcePath, ID: "note/foo"}},
+	}
+	if familyCovered(g, "note") {
+		t.Fatal("a non-content scope must not cover a content family")
+	}
+}
+
 func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 	want := map[string][]content.Effect{
 		"files.read":   {content.EffectObserve},
@@ -369,9 +413,13 @@ func TestDeclarationsHaveExpectedEffectSets(t *testing.T) {
 		"snippets.update":  {content.EffectMutateReversible},
 		"snippets.delete":  {content.EffectMutateReversible},
 		"snippets.reorder": {content.EffectMutateReversible},
+		"skills.read":      {content.EffectObserve},
+		"skills.create":    {content.EffectMutateReversible},
+		"skills.update":    {content.EffectMutateReversible},
+		"skills.delete":    {content.EffectMutateReversible},
 	}
-	if len(declarations) != 17 {
-		t.Fatalf("declaration count = %d, want 17", len(declarations))
+	if len(declarations) != 21 {
+		t.Fatalf("declaration count = %d, want 21", len(declarations))
 	}
 	for _, declaration := range declarations {
 		effects, ok := want[declaration.Name]
@@ -397,6 +445,73 @@ func grant(effects []content.Effect, kinds ...content.ResourceKind) content.Gran
 	return content.Grant{Effects: effects, Scopes: scopes}
 }
 
+func TestForGrantDoesNotOfferSnippetsOnANoteOnlyGrant(t *testing.T) {
+	reg, err := Assemble(mustDirFS(t))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	g := content.Grant{
+		Effects: []content.Effect{content.EffectObserve, content.EffectMutateReversible},
+		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "note"}},
+	}
+
+	var names []string
+	for _, tool := range reg.ForGrant(g) {
+		names = append(names, tool.Name)
+	}
+
+	for _, n := range names {
+		if strings.HasPrefix(n, "snippets.") {
+			t.Fatalf("a note-only grant offered %q; ForGrant matched the kind and not the family", n)
+		}
+	}
+	if !containsName(reg.ForGrant(g), "notes.search") {
+		t.Fatalf("a note grant must still offer notes.search; got %v", names)
+	}
+
+	root := content.Grant{
+		Effects: []content.Effect{content.EffectObserve, content.EffectMutateReversible},
+		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "content"}},
+	}
+	for _, name := range []string{
+		"notes.search", "notes.create", "notes.update", "notes.delete",
+		"snippets.list", "snippets.create", "snippets.update", "snippets.delete", "snippets.reorder",
+	} {
+		if !containsName(reg.ForGrant(root), name) {
+			t.Fatalf("a content-root grant omitted %q; got %v", name, toolNames(reg.ForGrant(root)))
+		}
+	}
+}
+
+func TestForGrantOffersSkillsReadOnlyOnASkillGrant(t *testing.T) {
+	reg, err := Assemble(mustDirFS(t))
+	if err != nil {
+		t.Fatalf("Assemble: %v", err)
+	}
+	g := content.Grant{
+		Effects: []content.Effect{content.EffectObserve},
+		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "skill"}},
+	}
+	if !containsName(reg.ForGrant(g), "skills.read") {
+		t.Fatalf("a skill grant must offer skills.read; got %v", toolNames(reg.ForGrant(g)))
+	}
+	mutationGrant := content.Grant{
+		Effects: []content.Effect{content.EffectMutateReversible},
+		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "skill"}},
+	}
+	for _, name := range []string{"skills.create", "skills.update", "skills.delete"} {
+		if !containsName(reg.ForGrant(mutationGrant), name) {
+			t.Fatalf("a mutation skill grant omitted %q; got %v", name, toolNames(reg.ForGrant(mutationGrant)))
+		}
+	}
+	if containsName(reg.ForGrant(content.Grant{
+		Effects: []content.Effect{content.EffectObserve},
+		Scopes:  []content.GrantScope{{Kind: content.ResourceContent, ID: "note/deploy"}},
+	}), "skills.read") {
+		t.Fatal("a note grant must not offer skills.read")
+	}
+}
+
 func TestForGrant_ExactPermittedSet(t *testing.T) {
 	reg, err := Assemble(schemaFS(t, map[string]string{
 		"files.read.schema.json":       filesReadSchema,
@@ -416,6 +531,10 @@ func TestForGrant_ExactPermittedSet(t *testing.T) {
 		"snippets.update.schema.json":  contentToolSchema,
 		"snippets.delete.schema.json":  contentToolSchema,
 		"snippets.reorder.schema.json": contentToolSchema,
+		"skills.read.schema.json":      skillsReadSchema,
+		"skills.create.schema.json":    skillsReadSchema,
+		"skills.update.schema.json":    skillsReadSchema,
+		"skills.delete.schema.json":    skillsReadSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)
@@ -552,6 +671,10 @@ func TestForGrant_PermittedToolCarriesSchema(t *testing.T) {
 		"snippets.update.schema.json":  contentToolSchema,
 		"snippets.delete.schema.json":  contentToolSchema,
 		"snippets.reorder.schema.json": contentToolSchema,
+		"skills.read.schema.json":      skillsReadSchema,
+		"skills.create.schema.json":    skillsReadSchema,
+		"skills.update.schema.json":    skillsReadSchema,
+		"skills.delete.schema.json":    skillsReadSchema,
 	}))
 	if err != nil {
 		t.Fatalf("Assemble: %v", err)

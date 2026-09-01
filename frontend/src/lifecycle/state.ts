@@ -134,8 +134,9 @@ export class LifecycleKernel {
   /** Domain ids that have ended (closed, or lost with their lane). Ids are
    *  never reused, so a fact naming a closed id is stale and rejected. */
   private readonly _closed = new Set<string>()
-  /** How many domains of this lane have ENDED. Only ever grows, and it is
-   *  deliberately a count rather than a set: the projections need to know
+  /** How many domains of this lane have ENDED in this session. The count
+   *  resets with the session, only ever grows within it, and it is deliberately
+   *  a count rather than a set: the projections need to know
    *  THAT one ended, not which — a block opened at an app submit carries no
    *  domain until an attempt binds it, and the whole point is the case
    *  where no attempt ever arrives (nocx-mlyu). A suspension never touches
@@ -262,6 +263,7 @@ export class LifecycleKernel {
     this._stack = emptyStack()
     this._attempts.clear()
     this._lane = null
+    this._ended = 0
     if (changed) this.notify()
   }
 

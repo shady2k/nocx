@@ -143,7 +143,6 @@ func (c *Client) Fetch(ctx context.Context, rawURL string, route apicoll.Route) 
 		break
 	}
 	return nil, fmt.Errorf("%w: %s", ErrNotADocument, u.Redacted())
-
 }
 
 // FetchText gets a direct-route HTTP response as complete UTF-8 text. The
@@ -162,8 +161,8 @@ func (c *Client) FetchText(ctx context.Context, rawURL string, maxBytes int64) (
 	if err != nil {
 		return TextResult{}, fmt.Errorf("%s: reading %s: %w", component, u.Redacted(), err)
 	}
-	if err := validateDeclaredCharset(contentType); err != nil {
-		return TextResult{}, err
+	if charsetErr := validateDeclaredCharset(contentType); charsetErr != nil {
+		return TextResult{}, charsetErr
 	}
 	// The header remains metadata and a decoding hint; the body is the only
 	// witness for whether this response is text or binary.

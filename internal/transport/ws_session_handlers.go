@@ -43,33 +43,35 @@ type sessionMachine interface {
 	takeSize(sid session.ID, sess session.Session, reported session.Size)
 	closeLane(sid session.ID)
 	closeSession(sid session.ID, sess session.Session)
+	// detachSession drops only this connection's subscriber. It never closes
+	// the helper-owned session or its ring, and it must preserve a newer
+	// subscriber that displaced this connection.
+	detachSession(sid session.ID, sess session.Session, wconn *wsConn, state *connState)
 	// markCloseRequested records that this session's end was asked for, so
 	// the exit it produces is not filed as news the user has to read.
 	markCloseRequested(sid session.ID)
 	ringToConn(ctx context.Context, wconn *wsConn, sidBytes [16]byte, rx *sessionRx, startOffset uint64)
 	flushFilesChanged(sid session.ID, wconn Responder)
 	// flushUploadDone re-emits the upload outcomes that settled while
-	// nothing was attached (upload design §5.3). Separate from the files
-	// flush because it is a terminal fact rather than an invalidation: a
-	// missed files.changed costs a stale listing the next poll corrects,
+	// nothing was attached (upload design §5.3). Separate from the
+	// files flush because it is a terminal fact rather than an invalidation:
+	// a missed files.changed costs a stale listing the next poll corrects,
 	// and a missed uploadDone leaves the UI saying "uploading" forever.
 	flushUploadDone(sid session.ID, wconn Responder)
 	notifyInputStalled(sid session.ID)
-	// announceDisplacement tells the client that has just lost a session that
-	// it lost it, and takes the session out of its connection state (D8). One
-	// narrow method rather than the notification machinery itself: the handler
-	// may report the displacement it caused, and nothing more.
+	// announceDisplacement tells the client that has just lost a session
+	// that it lost it, and takes the session out of its connection state (D8).
 	announceDisplacement(sid session.ID, ident session.Identity, prev *wsConn, prevState *connState)
 	// replayLifecycleFacts re-emits the current lifecycle projection of the
 	// session's lanes on reattach (ADR-0024 decision 8 / AD-9). One narrow
 	// method rather than the publisher itself: the handler may resynchronise
 	// a session it already owns, and nothing more.
 	replayLifecycleFacts(sid session.ID)
-	// replayIntegration re-sends the session's integration status on
-	// reattach (nocx-dvql). Separate from the lifecycle replay because it
-	// is a state rather than a transition: a frontend that reconnects after
-	// the handshake expired must learn it is in a conventional terminal,
-	// and no further transition is ever coming to tell it.
+	// replayIntegration re-sends the session's integration status on reattach
+	// (nocx-dvql). Separate from the lifecycle replay because it is a state
+	// rather than a transition: a frontend that reconnects after the
+	// handshake expired must learn it is in a conventional terminal, and no
+	// further transition is ever coming to tell it.
 	replayIntegration(sid session.ID)
 	// replayPaneObservation re-sends an enrolled pane's current
 	// classification on reattach (nocx-szb40.3). Beside replayIntegration
@@ -684,6 +686,7 @@ type sessionOpsHandlers struct {
 	// registry could do more than judge (migration map: handlers hold seams,
 	// never stores).
 	instance session.InstanceID
+	conn     *wsConn
 	machine  sessionMachine
 }
 
@@ -816,6 +819,48 @@ func (h sessionOpsHandlers) handleClose(ctx context.Context, state *connState, r
 		h.machine.closeSession(sid, sess)
 		state.remove(sid)
 
+		result, _ := json.Marshal(map[string]any{})
+		resp := newJSONRPCResult(req.ID, result)
+		_ = respond(h.r, resp)
+		return nil
+	})
+	if err != nil {
+		answerOperationRefusal(h.r, req, err)
+	}
+}
+
+// handleDetach drops this connection's attachment without ending the
+// helper-owned session. The session remains in the registry and can be
+// claimed by a later attach.
+func (h sessionOpsHandlers) handleDetach(ctx context.Context, state *connState, req jsonrpcRequest) {
+	var params closeParams
+	if err := json.Unmarshal(req.Params, &params); err != nil || params.SessionID == "" {
+		resp := newJSONRPCError(req.ID, -32602, "Invalid params: sessionId required")
+		_ = respond(h.r, resp)
+		return
+	}
+
+	sid := session.ID(params.SessionID)
+	if !state.has(sid) {
+		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
+		_ = respond(h.r, resp)
+		return
+	}
+
+	op, err := h.ops.ForSession(sid)
+	if err != nil {
+		resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
+		_ = respond(h.r, resp)
+		return
+	}
+	err = op.Run(ctx, func(ctx context.Context, svc capability.SessionService) error {
+		sess, gerr := svc.Get(sid)
+		if gerr != nil {
+			resp := newJSONRPCError(req.ID, -32602, "Invalid params: unknown sessionId")
+			_ = respond(h.r, resp)
+			return nil
+		}
+		h.machine.detachSession(sid, sess, h.conn, state)
 		result, _ := json.Marshal(map[string]any{})
 		resp := newJSONRPCResult(req.ID, result)
 		_ = respond(h.r, resp)
@@ -1097,6 +1142,10 @@ func (s *WSServer) sessionSpecs(lane control.Admission, sessionGate, configGate 
 		reg(openSub, "open", params(validateOpenRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := openHandlers{op: openOp, sess: s, resolver: s.resolver, sshCfg: s.sshConfigResolver, launcher: s.remoteLauncher, installer: s.remoteInstaller, lifecycle: s.remoteLifecycle, panes: s.layoutReader(), log: s.log}
 			return func(ctx context.Context, req jsonrpcRequest) { h.handleOpen(ctx, w, r, state, req) }
+		}),
+		reg(ordered, "detach", params(validateCloseRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
+			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, conn: w, machine: s}
+			return func(ctx context.Context, req jsonrpcRequest) { h.handleDetach(ctx, state, req) }
 		}),
 		reg(ordered, "resize", params(validateResizeRaw), func(w *wsConn, state *connState, r Responder) handlerFunc {
 			h := sessionOpsHandlers{ops: sessionOps, r: r, instance: instance, machine: s}

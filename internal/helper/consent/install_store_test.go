@@ -216,3 +216,29 @@ func TestInstallStoreRemoveFailureLeavesMemoryUnchanged(t *testing.T) {
 		t.Fatalf("Remove after heal: %v", err)
 	}
 }
+
+// TestInstallStoreRemoveMachineForgetsEveryHome proves helper uninstall
+// clears all observed generations for one machine, not only the row clicked.
+func TestInstallStoreRemoveMachineForgetsEveryHome(t *testing.T) {
+	s := newTestInstallStore(t)
+	one := testInstall("SHA256:same")
+	two := one
+	two.Path = "/home/other/.nocx/helper/v2-linux-amd64-def/"
+	other := testInstall("SHA256:other")
+	if err := s.Record(one); err != nil {
+		t.Fatalf("Record one: %v", err)
+	}
+	if err := s.Record(two); err != nil {
+		t.Fatalf("Record two: %v", err)
+	}
+	if err := s.Record(other); err != nil {
+		t.Fatalf("Record other: %v", err)
+	}
+	if err := s.RemoveMachine("SHA256:same"); err != nil {
+		t.Fatalf("RemoveMachine: %v", err)
+	}
+	got := s.All()
+	if len(got) != 1 || got[0].Fingerprint != "SHA256:other" {
+		t.Fatalf("All after RemoveMachine = %+v, want only the other machine", got)
+	}
+}

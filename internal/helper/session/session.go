@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/shady2k/nocx/internal/helper/proto"
@@ -40,6 +41,13 @@ type Process interface {
 	// ForegroundProcessGroup is the group the terminal is currently giving
 	// input to — the OS's answer to "what is running in here right now".
 	ForegroundProcessGroup() (int, error)
+}
+
+// ProcessGroupSignaller is the optional process-group control seam. The
+// helper's local PTY implements it; tests and platforms without POSIX process
+// groups can omit it and receive a named refusal.
+type ProcessGroupSignaller interface {
+	SignalProcessGroup(pgid int, sig syscall.Signal) error
 }
 
 // SpawnRequest is what the helper decided to launch, after the wire's params

@@ -36,26 +36,40 @@ import (
 // ledger becomes its owner. One owner ever, and TestTheHelperPersistsNoHuman-
 // AuthoredName is that decision made enforceable.
 
-// The remaining operations of the session service. OpAttach, OpAck and
-// OpDetach are frozen alongside their envelopes in abi.go; these three are the
-// half that needed a PTY to have semantics.
-//
-// `close-session`, `signal` and `uninstall` are D9's verbs and are deliberately
-// NOT here (nocx-k6p18.7). An op ADDED by a later generation degrades
-// gracefully — an older helper answers ErrCodeUnknownOp — while an op renamed
-// or reshaped does not, which is why only what is implemented is spelled.
+// The session service's lifecycle operations. They are service-level additions
+// to the frozen frame ABI: an older helper answers unknown_op without changing
+// how frames are decoded.
 const (
 	// OpSpawn starts a shell under a new PTY and returns its inventory entry.
 	OpSpawn = "spawn"
 	// OpSessions is the inventory: every live host session this generation
-	// holds. There is no router and no registry beside the helper — it holds
-	// the PTYs, so it is the only thing that can answer (D10).
+	// holds.
 	OpSessions = "sessions"
-	// OpResize sets a session's window size. It is not a lifecycle verb: a
-	// terminal whose size cannot change is not a terminal, and the size is a
-	// property of the PTY, which the helper owns (D3).
+	// OpResize sets a session's window size.
 	OpResize = "resize"
+	// OpCloseSession deliberately ends one helper-hosted session and removes it
+	// from the inventory.
+	OpCloseSession = "close-session"
+	// OpSignal sends one signal to the session's process group.
+	OpSignal = "signal"
 )
+
+// CloseSessionParams deliberately ends one helper-hosted session.
+type CloseSessionParams struct {
+	Session HostSessionID `json:"session"`
+}
+
+// CloseSessionResult is empty; success is the answer that the session ended.
+type CloseSessionResult struct{}
+
+// SignalParams sends Signal to the session's process group.
+type SignalParams struct {
+	Session HostSessionID `json:"session"`
+	Signal  int           `json:"signal"`
+}
+
+// SignalResult is empty; success is the answer that the signal was delivered.
+type SignalResult struct{}
 
 // The events a helper sends unsolicited, as TypeNotify frames on the same wire
 // as the data frames — so a reader sees exactly which bytes each fact sits

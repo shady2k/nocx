@@ -2616,6 +2616,21 @@ func (s *WSServer) handleSession(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// detachSession drops only the named connection's attachment. It does not
+// close the registry session, ring, resize lane, or durable bindings.
+func (s *WSServer) detachSession(sid session.ID, sess session.Session, wconn *wsConn, state *connState) {
+	rx := s.getRx(sid)
+	if rx == nil {
+		state.remove(sid)
+		return
+	}
+	if rx.clearSubscriber(wconn) {
+		s.takeSize(sid, sess, session.NoClient())
+	}
+	rx.ring.wake()
+	state.remove(sid)
+}
+
 func (s *WSServer) readLoop(ctx context.Context, wconn *wsConn, state *connState, readErr chan<- error) {
 	defer func() { readErr <- nil }()
 

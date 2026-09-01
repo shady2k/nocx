@@ -1,0 +1,10 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/helper/session.signal.schema.json",
+  "title": "HelperSessionSignalResult",
+  "description": "Result of delivering a signal to a helper-owned process group.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [],
+  "properties": {}
+}

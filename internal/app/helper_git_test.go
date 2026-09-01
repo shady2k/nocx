@@ -38,6 +38,7 @@ import (
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/host"
 	"github.com/shady2k/nocx/internal/helper/proto"
+	helpersession "github.com/shady2k/nocx/internal/helper/session"
 	"github.com/shady2k/nocx/internal/profile"
 	"github.com/shady2k/nocx/internal/session"
 	"github.com/shady2k/nocx/internal/ssh"
@@ -445,6 +446,9 @@ func realHelperPeer() func(in io.Reader, out io.Writer) int {
 	return func(in io.Reader, out io.Writer) int {
 		h := host.New(in, out, contentHash, "instance-1", discardLogger())
 		h.Register(hostsvc.New(localgit.NewFactory()))
+		h.Register(helpersession.New(helpersession.Options{
+			Generation: proto.GenerationID(contentHash),
+		}))
 		if err := h.Serve(context.Background()); err != nil {
 			return 1
 		}
@@ -822,7 +826,9 @@ func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 		t.Fatalf("two machines brought up %d helpers, want 2", got)
 	}
 
-	reg.CloseHelpersFor("SHA256:machine-a")
+	if closeErr := reg.CloseHelpersFor(context.Background(), "SHA256:machine-a"); closeErr != nil {
+		t.Fatalf("close machine-a helper: %v", closeErr)
+	}
 
 	// The machine named by the fingerprint lost its helper channel; the
 	// other machine's helper is untouched.
@@ -837,11 +843,22 @@ func TestHelperCloseHelpersForClosesOnlyTheMachine(t *testing.T) {
 	if _, ok := reg.hosts["s1"]; ok {
 		t.Fatal("the closed helper is still registered")
 	}
+	if _, _, openErr := selA.Factory.Open(context.Background(), dir); openErr == nil || openErr.Error() != "helper is closing for uninstall" {
+		t.Fatalf("open during uninstall gate: got %v, want helper is closing for uninstall", openErr)
+	}
+	reg.FinishHelpersFor("SHA256:machine-a")
+	retryRepo, retryOutcome, err := selA.Factory.Open(context.Background(), dir)
+	if err != nil || retryOutcome.State != git.OpenOK {
+		t.Fatalf("open after uninstall gate: %v %+v", err, retryOutcome)
+	}
+	_ = retryRepo.Close()
 	_ = repoB.Close()
 	_ = repoA.Close()
 
 	// An unknown fingerprint closes nothing and is not an error.
-	reg.CloseHelpersFor("SHA256:nobody")
+	if err := reg.CloseHelpersFor(context.Background(), "SHA256:nobody"); err != nil {
+		t.Fatalf("close unknown helper: %v", err)
+	}
 }
 
 // TestHelperDialFactory_RefusingOpenClosesTheLane: an open that answers
@@ -1047,5 +1064,84 @@ func TestTheExecLaneRunsTheBridgeForTheGenerationInstalled(t *testing.T) {
 	// verifies the hello-ok's content hash against (D21).
 	if !strings.HasSuffix(path.Dir(fields[0]), "-"+fields[2]) {
 		t.Fatalf("the bridge names generation %q but the binary was installed at %q", fields[2], fields[0])
+	}
+}
+
+// TestHelperSessionsRedialsAfterCarrierLoss proves that inventory remains
+// available when the SSH carrier dies but the helper daemon still exists.
+// The binding keeps the hostHelper registered; only its client is lost.
+func TestHelperSessionsRedialsAfterCarrierLoss(t *testing.T) {
+	logger := slog.New(slog.NewTextHandler(io.Discard, nil))
+	daemon := helpersession.New(helpersession.Options{
+		Generation: proto.GenerationID(syntheticArtifactHash),
+		Spawner:    helpersession.NewLocalSpawner(logger, helpersession.Shell{Path: "/bin/sh"}),
+		Log:        logger,
+	})
+	t.Cleanup(daemon.Close)
+	peer := func(in io.Reader, out io.Writer) int {
+		h := host.New(in, out, syntheticArtifactHash, "instance-1", discardLogger())
+		h.Register(hostsvc.New(localgit.NewFactory()))
+		h.Register(daemon)
+		release := daemon.Bind(h)
+		defer release()
+		if err := h.Serve(context.Background()); err != nil {
+			return 1
+		}
+		return 0
+	}
+	provider := &fakeLaneProvider{peer: peer}
+	factory := configuredSelector(t, provider)
+	sel := factory(&fakeRemoteSession{id: "s1", host: "host.example"})
+	dir := fixtureRepo(t)
+	repo, outcome, err := sel.Factory.Open(context.Background(), dir)
+	if err != nil || outcome.State != git.OpenOK {
+		t.Fatalf("open: %v %+v", err, outcome)
+	}
+	t.Cleanup(func() { _ = repo.Close() })
+
+	selectedFactory, ok := sel.Factory.(*sessionFactory)
+	if !ok {
+		t.Fatal("selection factory has unexpected type")
+	}
+	reg := selectedFactory.reg
+	h := reg.hosts["s1"]
+	h.mu.Lock()
+	carrier := h.client
+	h.mu.Unlock()
+	if carrier == nil {
+		t.Fatal("open did not retain a helper client")
+	}
+	var spawned proto.SpawnResult
+	callErr := carrier.Call(context.Background(), proto.ServiceSession, proto.OpSpawn,
+		proto.SpawnParams{Cwd: "/", Cols: 80, Rows: 24}, &spawned)
+	if callErr != nil {
+		t.Fatalf("spawn daemon session: %v", callErr)
+	}
+	closeErr := carrier.Close()
+	if closeErr != nil {
+		t.Fatalf("close carrier: %v", closeErr)
+	}
+	select {
+	case <-carrier.Done():
+	case <-time.After(5 * time.Second):
+		t.Fatal("closed carrier did not report loss")
+	}
+
+	entries, err := reg.sessions(context.Background())
+	if err != nil {
+		t.Fatalf("inventory after carrier loss: %v", err)
+	}
+	if len(entries) != 1 || entries[0].HostSessionID.Session != spawned.Entry.Session.Session {
+		t.Fatalf("inventory after carrier loss = %+v, want daemon session %q",
+			entries, spawned.Entry.Session.Session)
+	}
+	if got := provider.laneCount(); got != 2 {
+		t.Fatalf("inventory used %d helper lanes, want 2 after redial", got)
+	}
+	if err := reg.CloseHelpersFor(context.Background(), "SHA256:test-host"); err != nil {
+		t.Fatalf("uninstall after carrier loss: %v", err)
+	}
+	if _, ok := reg.hosts["s1"]; ok {
+		t.Fatal("uninstall left the carrier-loss helper registered")
 	}
 }

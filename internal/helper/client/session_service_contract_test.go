@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"log/slog"
+	"syscall"
 	"testing"
 	"time"
 
@@ -114,6 +115,130 @@ func TestSpawnAndInventoryOverTheWireConformToTheirContracts(t *testing.T) {
 	}
 	if len(inv.Sessions) != 1 || inv.Sessions[0].Session != spawned.Entry.Session {
 		t.Fatalf("the inventory does not list the session that was just spawned: %+v", inv.Sessions)
+	}
+}
+
+// TestSessionLifecycleVerbsCrossTheHelperSocket proves the three control
+// verbs use the service plane and that closing a session removes only the
+// requested row. The helper remains reachable after the operation, so the
+// empty inventory is a daemon answer rather than a lost-channel guess.
+func TestSessionLifecycleVerbsCrossTheHelperSocket(t *testing.T) {
+	c := hostedSessions(t)
+	var spawned proto.SpawnResult
+	if err := c.Call(context.Background(), proto.ServiceSession, proto.OpSpawn,
+		proto.SpawnParams{Cwd: "/", Cols: 80, Rows: 24}, &spawned); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+
+	var attached proto.AttachResult
+	if err := c.Call(context.Background(), proto.ServiceSession, proto.OpAttach,
+		proto.AttachParams{
+			Subscriber: "0123456789abcdef0123456789abcdef",
+			Session:    spawned.Entry.Session,
+			Offset:     spawned.Entry.Window.Base,
+			Fresh:      true,
+		}, &attached); err != nil {
+		t.Fatalf("attach: %v", err)
+	}
+	var detached proto.DetachResult
+	if err := c.Call(context.Background(), proto.ServiceSession, proto.OpDetach,
+		proto.DetachParams{Attachment: attached.Attachment}, &detached); err != nil {
+		t.Fatalf("detach: %v", err)
+	}
+	entries, err := c.Sessions(context.Background())
+	if err != nil {
+		t.Fatalf("inventory after detach: %v", err)
+	}
+	if len(entries) != 1 {
+		t.Fatalf("inventory after detach = %d rows, want 1", len(entries))
+	}
+
+	signalParams := proto.SignalParams{
+		Session: spawned.Entry.Session,
+		Signal:  int(syscall.SIGTERM),
+	}
+	if contractErr := validateHelperJSON(loadHelperSchema(t, "session.signal.params.schema.json"), mustMarshal(t, signalParams)); contractErr != nil {
+		t.Fatalf("signal params do not satisfy the contract: %v", contractErr)
+	}
+	var signalRaw json.RawMessage
+	if callErr := c.Call(context.Background(), proto.ServiceSession, proto.OpSignal, signalParams, &signalRaw); callErr != nil {
+		t.Fatalf("signal: %v", callErr)
+	}
+	if contractErr := validateHelperJSON(loadHelperSchema(t, "session.signal.schema.json"), signalRaw); contractErr != nil {
+		t.Fatalf("signal result off the socket does not satisfy its contract: %v", contractErr)
+	}
+
+	closeParams := proto.CloseSessionParams{Session: spawned.Entry.Session}
+	if contractErr := validateHelperJSON(loadHelperSchema(t, "session.close-session.params.schema.json"), mustMarshal(t, closeParams)); contractErr != nil {
+		t.Fatalf("close-session params do not satisfy the contract: %v", contractErr)
+	}
+	var closeRaw json.RawMessage
+	if callErr := c.Call(context.Background(), proto.ServiceSession, proto.OpCloseSession, closeParams, &closeRaw); callErr != nil {
+		t.Fatalf("close-session: %v", callErr)
+	}
+	if contractErr := validateHelperJSON(loadHelperSchema(t, "session.close-session.schema.json"), closeRaw); contractErr != nil {
+		t.Fatalf("close-session result off the socket does not satisfy its contract: %v", contractErr)
+	}
+	entries, err = c.Sessions(context.Background())
+	if err != nil {
+		t.Fatalf("inventory after close-session: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("inventory after close-session = %d rows, want 0", len(entries))
+	}
+}
+
+// TestSessionInventorySurvivesCarrierLossUsesFreshDaemonHandshake proves
+// liveness from a new helper connection, not from the dead carrier's error.
+func TestSessionInventorySurvivesCarrierLossUsesFreshDaemonHandshake(t *testing.T) {
+	log := slog.New(slog.NewTextHandler(io.Discard, nil))
+	svc := session.New(session.Options{
+		Generation: "testhash",
+		Spawner:    session.NewLocalSpawner(log, session.Shell{Path: "/bin/sh"}),
+		Log:        log,
+		Limits:     session.DefaultLimits(),
+	})
+	t.Cleanup(svc.Close)
+
+	connect := func() *client.Client {
+		conn := newFakeConn(func(in io.Reader, out io.Writer) int {
+			h := hostFor(in, out, log)
+			h.Register(svc)
+			release := svc.Bind(h)
+			defer release()
+			if err := h.Serve(context.Background()); err != nil {
+				return 1
+			}
+			return 0
+		})
+		c, err := client.Dial(context.Background(), client.Config{
+			Exec: conn, Command: "/opt/nocx-helper", ExpectHash: "testhash",
+			SentinelTTL: time.Second,
+		})
+		if err != nil {
+			t.Fatalf("Dial: %v", err)
+		}
+		return c
+	}
+
+	first := connect()
+	var spawned proto.SpawnResult
+	if err := first.Call(context.Background(), proto.ServiceSession, proto.OpSpawn,
+		proto.SpawnParams{Cwd: "/", Cols: 80, Rows: 24}, &spawned); err != nil {
+		t.Fatalf("spawn: %v", err)
+	}
+	if err := first.Close(); err != nil {
+		t.Fatalf("close carrier: %v", err)
+	}
+
+	second := connect()
+	t.Cleanup(func() { _ = second.Close() })
+	entries, err := second.Sessions(context.Background())
+	if err != nil {
+		t.Fatalf("inventory after carrier loss: %v", err)
+	}
+	if len(entries) != 1 || entries[0].HostSessionID.Session != spawned.Entry.Session.Session {
+		t.Fatalf("fresh daemon inventory = %+v, want session %q", entries, spawned.Entry.Session.Session)
 	}
 }
 

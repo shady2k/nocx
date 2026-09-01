@@ -9,6 +9,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 
 	"github.com/shady2k/nocx/internal/helper/host"
@@ -78,24 +79,30 @@ type fakeProcess struct {
 	done     chan struct{}
 	closeOne sync.Once
 
-	mu      sync.Mutex
-	written []byte
-	waitErr error
-	waitSet bool
-	cols    uint16
-	rows    uint16
-	fg      int
-	fgErr   error
+	mu         sync.Mutex
+	written    []byte
+	waitErr    error
+	waitSet    bool
+	cols       uint16
+	rows       uint16
+	fg         int
+	fgErr      error
+	closed     bool
+	signal     syscall.Signal
+	signalPgid int
+	pgid       int
+	sigErr     error
 }
 
 func newFakeProcess() *fakeProcess {
 	r, w := io.Pipe()
-	return &fakeProcess{stdout: r, produce: w, done: make(chan struct{})}
+	return &fakeProcess{stdout: r, produce: w, done: make(chan struct{}), pgid: 4343}
 }
 
 func (p *fakeProcess) Read(b []byte) (int, error) { return p.stdout.Read(b) }
 func (p *fakeProcess) Done() <-chan struct{}      { return p.done }
 func (p *fakeProcess) Pid() int                   { return 4242 }
+func (p *fakeProcess) ProcessGroup() int          { return p.pgid }
 func (p *fakeProcess) Shell() string              { return "/bin/fake" }
 func (p *fakeProcess) ForegroundProcessGroup() (int, error) {
 	p.mu.Lock()
@@ -112,6 +119,9 @@ func (p *fakeProcess) Write(b []byte) (int, error) {
 
 func (p *fakeProcess) Close() error {
 	p.closeOne.Do(func() {
+		p.mu.Lock()
+		p.closed = true
+		p.mu.Unlock()
 		_ = p.produce.CloseWithError(io.EOF)
 		close(p.done)
 	})
@@ -123,6 +133,14 @@ func (p *fakeProcess) Resize(_ context.Context, cols, rows, _, _ uint16) error {
 	defer p.mu.Unlock()
 	p.cols, p.rows = cols, rows
 	return nil
+}
+
+func (p *fakeProcess) SignalProcessGroup(pgid int, sig syscall.Signal) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.signal = sig
+	p.signalPgid = pgid
+	return p.sigErr
 }
 
 func (p *fakeProcess) WaitErr() (error, bool) {
@@ -949,6 +967,54 @@ func TestAnInspectorThatCannotAnswerReportsNothingRatherThanEmptiness(t *testing
 	}
 }
 
+// TestCloseSessionEndsTheProcessAndRemovesItsInventoryRow names both ends of
+// the close-session interval: the PTY is closed and the durable row is gone.
+func TestCloseSessionEndsTheProcessAndRemovesItsInventoryRow(t *testing.T) {
+	spawner := &fakeSpawner{}
+	svc := newService(t, newSink(), spawner, session.Limits{})
+	entry := spawnOne(t, svc)
+	proc := spawner.last()
+
+	call[proto.CloseSessionResult](t, svc, proto.OpCloseSession,
+		proto.CloseSessionParams{Session: entry.Session})
+
+	proc.mu.Lock()
+	closed := proc.closed
+	proc.mu.Unlock()
+	if !closed {
+		t.Fatal("close-session returned before closing the PTY")
+	}
+	inv := call[proto.SessionsResult](t, svc, proto.OpSessions, proto.SessionsParams{})
+	if len(inv.Sessions) != 0 {
+		t.Fatalf("close-session left %d inventory rows, want 0", len(inv.Sessions))
+	}
+}
+
+// TestSignalSendsTheRequestedSignalToTheOwnedProcessGroup proves the helper,
+// rather than the coordinator, owns the process-group signal operation.
+func TestSignalSendsTheRequestedSignalToTheOwnedProcessGroup(t *testing.T) {
+	spawner := &fakeSpawner{}
+	svc := newService(t, newSink(), spawner, session.Limits{})
+	entry := spawnOne(t, svc)
+	proc := spawner.last()
+
+	call[proto.SignalResult](t, svc, proto.OpSignal, proto.SignalParams{
+		Session: entry.Session,
+		Signal:  int(syscall.SIGTERM),
+	})
+
+	proc.mu.Lock()
+	got, gotPgid := proc.signal, proc.signalPgid
+	proc.mu.Unlock()
+	if got != syscall.SIGTERM {
+		t.Fatalf("signal = %v, want %v", got, syscall.SIGTERM)
+	}
+	if gotPgid != entry.Launch.Pgid {
+		t.Fatalf("signal pgid = %d, want the launched process group %d",
+			gotPgid, entry.Launch.Pgid)
+	}
+}
+
 // TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv closes the loop with
 // internal/helper/host: the name the ABI froze, the name the host dispatches
 // on and the name this service answers to are one constant, and every op's
@@ -961,6 +1027,7 @@ func TestTheServiceIsNamedAfterTheReservedNameAndTakesNoArgv(t *testing.T) {
 	want := map[string]bool{
 		proto.OpSpawn: true, proto.OpSessions: true, proto.OpAttach: true,
 		proto.OpAck: true, proto.OpDetach: true, proto.OpResize: true,
+		proto.OpCloseSession: true, proto.OpSignal: true,
 	}
 	for _, op := range svc.Ops() {
 		if !want[op] {

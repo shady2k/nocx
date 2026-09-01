@@ -28,6 +28,7 @@ import (
 	"fmt"
 	"log/slog"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/shady2k/nocx/internal/helper/host"
@@ -50,6 +51,7 @@ var (
 	ErrStaleLease    = errors.New("session: the frame carries a stale lease epoch")
 	ErrBudget        = errors.New("session: the helper's aggregate window budget is exhausted")
 	ErrSpawn         = errors.New("session: the shell could not be started")
+	ErrSignal        = errors.New("session: signal is invalid or unavailable")
 )
 
 // Limits are the helper's bounds on output windows: D8 asks for all three,
@@ -280,7 +282,10 @@ func (s *Service) live() []*hostSession {
 func (s *Service) Name() string { return proto.ServiceSession }
 
 func (s *Service) Ops() []string {
-	return []string{proto.OpSpawn, proto.OpSessions, proto.OpAttach, proto.OpAck, proto.OpDetach, proto.OpResize}
+	return []string{
+		proto.OpSpawn, proto.OpSessions, proto.OpAttach, proto.OpAck,
+		proto.OpDetach, proto.OpResize, proto.OpCloseSession, proto.OpSignal,
+	}
 }
 
 func (s *Service) ParamsSchema(op string) *host.Schema {
@@ -297,6 +302,10 @@ func (s *Service) ParamsSchema(op string) *host.Schema {
 		return host.SchemaFor(proto.DetachParams{})
 	case proto.OpResize:
 		return host.SchemaFor(proto.ResizeParams{})
+	case proto.OpCloseSession:
+		return host.SchemaFor(proto.CloseSessionParams{})
+	case proto.OpSignal:
+		return host.SchemaFor(proto.SignalParams{})
 	}
 	return nil
 }
@@ -321,6 +330,8 @@ func (s *Service) Refusal(err error) (string, json.RawMessage) {
 		return proto.ErrCodeWriteRefused, nil
 	case errors.Is(err, ErrBudget):
 		return proto.ErrCodeWindowBudget, nil
+	case errors.Is(err, ErrSignal):
+		return proto.ErrCodeBadParams, nil
 	case errors.Is(err, ErrSpawn):
 		return proto.ErrCodeSpawnFailed, nil
 	}
@@ -381,6 +392,24 @@ func (s *Service) Call(ctx context.Context, op string, params json.RawMessage) (
 			return nil, err
 		}
 		return proto.ResizeResult{}, nil
+	case proto.OpCloseSession:
+		var p proto.CloseSessionParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		if err := s.closeSession(p); err != nil {
+			return nil, err
+		}
+		return proto.CloseSessionResult{}, nil
+	case proto.OpSignal:
+		var p proto.SignalParams
+		if err := decode(params, &p); err != nil {
+			return nil, err
+		}
+		if err := s.signal(p); err != nil {
+			return nil, err
+		}
+		return proto.SignalResult{}, nil
 	}
 	return nil, fmt.Errorf("session: no op %q", op)
 }
@@ -471,6 +500,7 @@ func (s *Service) spawn(p proto.SpawnParams) (proto.SpawnResult, error) {
 	}
 
 	s.mu.Lock()
+
 	s.sessions[hs.id.Session] = hs
 	s.mu.Unlock()
 
@@ -480,6 +510,48 @@ func (s *Service) spawn(p proto.SpawnParams) (proto.SpawnResult, error) {
 	s.log.Info("session spawned", "session", hs.id.Session, "generation", string(s.generation),
 		"shell", hs.launch.Shell, "pid", hs.launch.Pid, "pgid", hs.launch.Pgid, "windowBytes", bound)
 	return proto.SpawnResult{Entry: hs.entry(s.inspector)}, nil
+}
+
+// closeSession ends the PTY first, then removes its inventory row and releases
+// the reserved window budget. The row is present until this operation starts
+// and absent after it returns; a disconnect alone never reaches this path.
+func (s *Service) closeSession(p proto.CloseSessionParams) error {
+	hs, err := s.find(p.Session)
+	if err != nil {
+		return err
+	}
+	hs.stop()
+
+	s.mu.Lock()
+	if current, ok := s.sessions[p.Session.Session]; ok && current == hs {
+		delete(s.sessions, p.Session.Session)
+		s.budget -= hs.launch.WindowBytes
+	}
+	s.mu.Unlock()
+	return nil
+}
+
+const maxSignal = 64
+
+// signal sends a bounded POSIX signal to the process group recorded at spawn.
+// The launch pgid is authoritative: looking up the current foreground group
+// could signal an unrelated command after the session changed state.
+func (s *Service) signal(p proto.SignalParams) error {
+	if p.Signal <= 0 || p.Signal > maxSignal {
+		return fmt.Errorf("%w: %d is outside 1..%d", ErrSignal, p.Signal, maxSignal)
+	}
+	hs, err := s.find(p.Session)
+	if err != nil {
+		return err
+	}
+	signaller, ok := hs.proc.(ProcessGroupSignaller)
+	if !ok {
+		return fmt.Errorf("%w: process groups are unavailable", ErrSignal)
+	}
+	if err := signaller.SignalProcessGroup(hs.launch.Pgid, syscall.Signal(p.Signal)); err != nil {
+		return fmt.Errorf("%w: %v", ErrSignal, err)
+	}
+	return nil
 }
 
 // clamp applies D8's floor and ceiling to what the coordinator asked for, and

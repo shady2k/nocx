@@ -409,6 +409,7 @@ export interface SessionFake {
    *  Resolves `delivered` by default — the case a test that is not about
    *  the refusal wants; a test that IS overrides the mock. */
   signal: ReturnType<typeof vi.fn>
+  detach: ReturnType<typeof vi.fn>
   close: ReturnType<typeof vi.fn>
   onData: ReturnType<typeof vi.fn>
   onExit: ReturnType<typeof vi.fn>
@@ -467,6 +468,7 @@ export function makeSession(overrides?: Partial<SessionFake>): SessionFake {
     // that always answered 'interrupt' would let a caller that asked for
     // 'stop' pass unnoticed.
     signal: vi.fn((signal: string) => Promise.resolve({ signal, outcome: 'delivered' })),
+    detach: vi.fn(),
     close: vi.fn(),
     onData: vi.fn((cb: (data: string) => void) => {
       dataCb = cb
@@ -566,6 +568,7 @@ export interface ClientFake {
   close: ReturnType<typeof vi.fn>
   sendToSession: ReturnType<typeof vi.fn>
   sendResize: ReturnType<typeof vi.fn>
+  detachSession: ReturnType<typeof vi.fn>
   closeSession: ReturnType<typeof vi.fn>
   onSessionData: ReturnType<typeof vi.fn>
   onSessionExit: ReturnType<typeof vi.fn>
@@ -679,6 +682,7 @@ export function makeClient(overrides?: Partial<ClientFake>): ClientFake {
     close: vi.fn(),
     sendToSession: vi.fn(),
     sendResize: vi.fn(),
+    detachSession: vi.fn(),
     closeSession: vi.fn(),
     onSessionData: vi.fn(),
     onSessionExit: vi.fn(),

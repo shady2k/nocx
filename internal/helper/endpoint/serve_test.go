@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/shady2k/nocx/internal/helper/endpoint"
 	"github.com/shady2k/nocx/internal/helper/host"
@@ -181,10 +182,13 @@ func (c *coordinator) waiter() <-chan struct{} {
 	return c.arrived
 }
 
-// await blocks until want() holds, waking on each frame. Never on a clock: a
-// condition that never becomes true is reported by the test's own timeout.
+// await blocks until want() holds, waking on each frame. The deadline is only
+// a diagnostic guard: the assertion still requires the exact marker or
+// response, and a healthy endpoint completes from observable frame arrival.
 func (c *coordinator) await(what string, want func() bool) {
 	c.t.Helper()
+	deadline := time.NewTimer(10 * time.Second)
+	defer deadline.Stop()
 	for {
 		next := c.waiter()
 		if want() {
@@ -192,8 +196,10 @@ func (c *coordinator) await(what string, want func() bool) {
 		}
 		select {
 		case <-next:
+		case <-deadline.C:
+			c.t.Fatalf("timed out: %s", what)
 		case <-c.t.Context().Done():
-			c.t.Fatalf("timed out waiting for %s", what)
+			c.t.Fatalf("test context canceled while waiting for %s", what)
 		}
 	}
 }
@@ -394,7 +400,7 @@ func TestTheBinaryPlaneIsNotRewrappedInJSONRPCOnTheSocket(t *testing.T) {
 		Payload:    append(append([]byte(nil), marker...), '\n'),
 	}))
 
-	c.await("the marker to come back off the process", func() bool {
+	c.await("the marker did not come back off the process", func() bool {
 		return bytes.Contains(c.received(subRaw), marker)
 	})
 	if !bytes.Contains(c.wire(), marker) {

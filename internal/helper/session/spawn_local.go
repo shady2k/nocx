@@ -74,18 +74,21 @@ func (s *LocalSpawner) Spawn(req SpawnRequest) (Process, error) {
 	var launch shellintegration.LocalLaunch
 	var err error
 	if req.SessionID != "" && len(shellArgs) == 0 {
-		launch, err = shellintegration.LocalEnhancedLaunchInMemory(
-			shellPath,
-			shellintegration.LocalShellKind(shellPath),
-			shellintegration.LaunchOptions{SessionID: req.SessionID, Enhanced: true},
-		)
-		if err != nil {
-			return nil, err
+		kind := shellintegration.LocalShellKind(shellPath)
+		if kind == shellintegration.ShellBash || kind == shellintegration.ShellZsh {
+			launch, err = shellintegration.LocalEnhancedLaunchInMemory(
+				shellPath,
+				kind,
+				shellintegration.LaunchOptions{SessionID: req.SessionID, Enhanced: true},
+			)
+			if err != nil {
+				return nil, err
+			}
+			cfg.Command = launch.Command
+			cfg.Args = launch.Args
+			cfg.Env = append(cfg.Env, launch.Env...)
+			cfg.ExtraFiles = launch.ExtraFiles
 		}
-		cfg.Command = launch.Command
-		cfg.Args = launch.Args
-		cfg.Env = append(cfg.Env, launch.Env...)
-		cfg.ExtraFiles = launch.ExtraFiles
 	}
 
 	lp, err := pty.NewLocal(s.log, cfg)

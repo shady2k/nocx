@@ -40,14 +40,14 @@ func TestFetchTextReturnsUTF8TextAndMetadata(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: srv.URL, MaxBytes: 64 << 10})
 	if err != nil {
 		t.Fatalf("FetchText: %v", err)
 	}
 	if got.URL != srv.URL || got.ContentType != "text/html; charset=utf-8" {
 		t.Fatalf("metadata = %+v, want URL and content type", got)
 	}
-	if got.Text != "<html><body>Hello from the page</body></html>" || got.Truncated || got.Lossy {
+	if got.Text != "<html><body>Hello from the page</body></html>" || got.Lossy {
 		t.Fatalf("result = %+v, want complete lossless text", got)
 	}
 }
@@ -59,7 +59,7 @@ func TestFetchTextRefusesUnsafeHTTPAddressAndOversize(t *testing.T) {
 	unsafeRoutes := routedTextRoutes(func(context.Context, string) ([]net.IP, error) {
 		return []net.IP{net.ParseIP("203.0.113.7")}, nil
 	})
-	_, err := apifetch.New(unsafeRoutes, nil).FetchText(context.Background(), "http://public.example/page", 64<<10)
+	_, err := apifetch.New(unsafeRoutes, nil).FetchText(context.Background(), apifetch.TextRequest{URL: "http://public.example/page", MaxBytes: 64 << 10})
 	if err == nil || !strings.Contains(err.Error(), "not a loopback or private address") {
 		t.Fatalf("unsafe HTTP error = %v, want the shared policy's stated refusal", err)
 	}
@@ -68,7 +68,7 @@ func TestFetchTextRefusesUnsafeHTTPAddressAndOversize(t *testing.T) {
 		_, _ = w.Write([]byte(strings.Repeat("x", 129)))
 	}))
 	defer srv.Close()
-	_, err = apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 128)
+	_, err = apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: srv.URL, MaxBytes: 128})
 	if !errors.Is(err, apifetch.ErrTooLarge) || !strings.Contains(err.Error(), "128") {
 		t.Fatalf("oversize error = %v, want ErrTooLarge and limit", err)
 	}
@@ -81,7 +81,7 @@ func TestFetchTextPrivateHTTPUsesTheSharedPolicy(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: srv.URL, MaxBytes: 64 << 10})
 	if err != nil || got.Text != "local service" {
 		t.Fatalf("private HTTP result = %+v, err = %v; want policy-permitted local text", got, err)
 	}
@@ -116,7 +116,7 @@ func TestFetchTextClassifiesBodyRatherThanContentType(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+			got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: srv.URL, MaxBytes: 64 << 10})
 			if tc.wantErr {
 				if !errors.Is(err, apifetch.ErrNotText) {
 					t.Fatalf("result = %+v, error = %v; want ErrNotText", got, err)
@@ -137,7 +137,7 @@ func TestFetchTextDecodesDeclaredWindows1251(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: srv.URL, MaxBytes: 64 << 10})
 	if err != nil {
 		t.Fatalf("FetchText: %v", err)
 	}
@@ -154,7 +154,7 @@ func TestFetchTextSniffsHTMLMetaCharset(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: srv.URL, MaxBytes: 64 << 10})
 	if err != nil || got.Text != `<meta charset="windows-1251"><p>Привет` || got.Lossy {
 		t.Fatalf("result = %+v, err = %v; want meta-decoded UTF-8", got, err)
 	}
@@ -167,7 +167,7 @@ func TestFetchTextMarksReplacementFromDeclaredCharsetLossy(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: srv.URL, MaxBytes: 64 << 10})
 	if err != nil {
 		t.Fatalf("FetchText: %v", err)
 	}
@@ -183,7 +183,7 @@ func TestFetchTextRefusesUnknownDeclaredCharset(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: srv.URL, MaxBytes: 64 << 10})
 	if err == nil || !strings.Contains(err.Error(), "x-made-up-charset") {
 		t.Fatalf("error = %v, want refusal naming unsupported charset", err)
 	}
@@ -195,7 +195,7 @@ func TestFetchTextWithoutCharsetKeepsUTF8(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: srv.URL, MaxBytes: 64 << 10})
 	if err != nil || got.Text != "Привет" || got.Lossy {
 		t.Fatalf("result = %+v, err = %v; want lossless UTF-8", got, err)
 	}
@@ -209,7 +209,7 @@ func TestFetchTextHonorsDeclaredCharsetOverWireUTF8(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 64<<10)
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: srv.URL, MaxBytes: 64 << 10})
 	if err != nil {
 		t.Fatalf("FetchText: %v", err)
 	}
@@ -225,7 +225,7 @@ func TestFetchTextRejectsTranscodedBodyOverCeiling(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), srv.URL, 6)
+	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: srv.URL, MaxBytes: 6})
 	if !errors.Is(err, apifetch.ErrTooLarge) {
 		t.Fatalf("error = %v, want ErrTooLarge after UTF-8 expansion", err)
 	}
@@ -244,11 +244,11 @@ func TestFetchTextDNSFailureHasPairedSuccess(t *testing.T) {
 		}
 		return httppolicy.SystemResolver().LookupIP(ctx, host)
 	})
-	_, err := apifetch.New(routes, nil).FetchText(context.Background(), "http://dns-failure.test/page", 64<<10)
+	_, err := apifetch.New(routes, nil).FetchText(context.Background(), apifetch.TextRequest{URL: "http://dns-failure.test/page", MaxBytes: 64 << 10})
 	if err == nil || !strings.Contains(err.Error(), "resolver unavailable") {
 		t.Fatalf("DNS error = %v, want resolver failure", err)
 	}
-	got, err := apifetch.New(routes, nil).FetchText(context.Background(), srv.URL, 64<<10)
+	got, err := apifetch.New(routes, nil).FetchText(context.Background(), apifetch.TextRequest{URL: srv.URL, MaxBytes: 64 << 10})
 	if err != nil || got.Text != "resolved" {
 		t.Fatalf("ordinary URL = %+v, err = %v; want success after DNS failure case", got, err)
 	}
@@ -262,7 +262,7 @@ func TestFetchTextConnectionRefusedHasPairedSuccess(t *testing.T) {
 	closedURL := srv.URL
 	srv.Close()
 
-	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), closedURL, 64<<10)
+	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: closedURL, MaxBytes: 64 << 10})
 	if err == nil || !strings.Contains(err.Error(), "127.0.0.1") {
 		t.Fatalf("connection error = %v, want refused local address", err)
 	}
@@ -272,7 +272,7 @@ func TestFetchTextConnectionRefusedHasPairedSuccess(t *testing.T) {
 		_, _ = w.Write([]byte("connected"))
 	}))
 	defer open.Close()
-	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), open.URL, 64<<10)
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: open.URL, MaxBytes: 64 << 10})
 	if err != nil || got.Text != "connected" {
 		t.Fatalf("ordinary URL = %+v, err = %v; want connection success", got, err)
 	}
@@ -285,7 +285,7 @@ func TestFetchTextTLSFailureHasPairedSuccess(t *testing.T) {
 	}))
 	defer tlsSrv.Close()
 
-	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), tlsSrv.URL, 64<<10)
+	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: tlsSrv.URL, MaxBytes: 64 << 10})
 	if err == nil || !strings.Contains(strings.ToLower(err.Error()), "certificate") {
 		t.Fatalf("TLS error = %v, want certificate failure", err)
 	}
@@ -295,7 +295,7 @@ func TestFetchTextTLSFailureHasPairedSuccess(t *testing.T) {
 		_, _ = w.Write([]byte("ordinary"))
 	}))
 	defer plain.Close()
-	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), plain.URL, 64<<10)
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: plain.URL, MaxBytes: 64 << 10})
 	if err != nil || got.Text != "ordinary" {
 		t.Fatalf("ordinary URL = %+v, err = %v; want success after TLS failure case", got, err)
 	}
@@ -308,7 +308,7 @@ func TestFetchTextRedirectChainPastBoundHasPairedSuccess(t *testing.T) {
 	}))
 	defer redirector.Close()
 
-	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), redirector.URL, 64<<10)
+	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: redirector.URL, MaxBytes: 64 << 10})
 	if err == nil || !strings.Contains(err.Error(), "redirects") {
 		t.Fatalf("redirect error = %v, want the chain bound", err)
 	}
@@ -318,7 +318,7 @@ func TestFetchTextRedirectChainPastBoundHasPairedSuccess(t *testing.T) {
 		_, _ = w.Write([]byte("one hop"))
 	}))
 	defer ordinary.Close()
-	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), ordinary.URL, 64<<10)
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: ordinary.URL, MaxBytes: 64 << 10})
 	if err != nil || got.Text != "one hop" {
 		t.Fatalf("ordinary URL = %+v, err = %v; want success", got, err)
 	}
@@ -336,7 +336,7 @@ func TestFetchTextRedirectToUnsafeHTTPIsRefusedAtTheHop(t *testing.T) {
 		}
 		return httppolicy.SystemResolver().LookupIP(ctx, host)
 	})
-	_, err := apifetch.New(routes, nil).FetchText(context.Background(), redirector.URL, 64<<10)
+	_, err := apifetch.New(routes, nil).FetchText(context.Background(), apifetch.TextRequest{URL: redirector.URL, MaxBytes: 64 << 10})
 	if err == nil || !strings.Contains(err.Error(), "not a loopback or private address") {
 		t.Fatalf("redirect error = %v, want policy refusal at the redirect hop", err)
 	}
@@ -361,7 +361,7 @@ func TestFetchTextBodyThatStopsMidStreamHasPairedSuccess(t *testing.T) {
 	truncatedURL := truncated.URL
 	defer truncated.Close()
 
-	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), truncatedURL, 64<<10)
+	_, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: truncatedURL, MaxBytes: 64 << 10})
 	if err == nil {
 		t.Fatal("mid-stream body was accepted as complete text")
 	}
@@ -371,8 +371,29 @@ func TestFetchTextBodyThatStopsMidStreamHasPairedSuccess(t *testing.T) {
 		_, _ = w.Write([]byte("complete"))
 	}))
 	defer ordinary.Close()
-	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), ordinary.URL, 64<<10)
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{URL: ordinary.URL, MaxBytes: 64 << 10})
 	if err != nil || got.Text != "complete" {
 		t.Fatalf("ordinary URL = %+v, err = %v; want complete text", got, err)
+	}
+}
+
+func TestFetchTextKeepsOriginalURLAcrossRedirect(t *testing.T) {
+	target := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("redirected"))
+	}))
+	defer target.Close()
+	redirector := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, target.URL, http.StatusFound)
+	}))
+	defer redirector.Close()
+
+	got, err := apifetch.New(directTextRoutes(), nil).FetchText(context.Background(), apifetch.TextRequest{
+		URL: redirector.URL, MaxBytes: 64 << 10,
+	})
+	if err != nil {
+		t.Fatalf("FetchText: %v", err)
+	}
+	if got.URL != redirector.URL || got.Text != "redirected" {
+		t.Fatalf("result = %+v, want original URL identity and redirected body", got)
 	}
 }

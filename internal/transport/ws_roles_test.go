@@ -51,10 +51,10 @@ func (h *endpointHarness) assignRole(t *testing.T, role string, endpointID, mode
 func TestRolesList_UnassignedRolesAreVisibleNullRows(t *testing.T) {
 	h := newEndpointHarness(t)
 	roles := h.listRoles(t)
-	if len(roles) != 2 {
-		t.Fatalf("roles.list = %+v, want exactly the two product roles", roles)
+	if len(roles) != 3 {
+		t.Fatalf("roles.list = %+v, want exactly the three product roles", roles)
 	}
-	want := []profile.ModelRole{profile.RoleAnswering, profile.RoleClassifier}
+	want := []profile.ModelRole{profile.RoleAnswering, profile.RoleClassifier, profile.RoleSummarizing}
 	for i, r := range roles {
 		if r.Role != want[i] {
 			t.Errorf("roles[%d].role = %q, want %q (product order)", i, r.Role, want[i])

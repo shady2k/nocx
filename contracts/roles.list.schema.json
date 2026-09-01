@@ -41,9 +41,9 @@
       "required": ["role", "endpointId", "model"],
       "properties": {
         "role": {
-          "description": "The role name, a closed enum: 'answering' is the model the assistant speaks with; 'classifier' is the second model judging proposed tool calls (its own bead).",
+          "description": "The role name, a closed enum: 'answering' is the model the assistant speaks with; 'classifier' is the second model judging proposed tool calls (its own bead); 'summarizing' drafts reusable skills from the person's own words.",
           "type": "string",
-          "enum": ["answering", "classifier"]
+          "enum": ["answering", "classifier", "summarizing"]
         },
         "endpointId": {
           "description": "The assigned endpoint's backend-minted id, or null when the role has no assignment.",

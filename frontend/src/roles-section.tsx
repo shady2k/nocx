@@ -3,9 +3,10 @@
  * (endpoint, model) pair to each model role (bead nocx-e6kn2), and names
  * the ONE default pair every role without an assignment of its own answers
  * with (bead nocx-rikz5). A feature asks for a role — the assistant asks
- * for `answering`, the classifier bead will ask for `classifier` — and
- * NEVER names a model id; the pair is written HERE and every feature picks
- * it up at its next call, resolved in exactly one place on the backend.
+ * for `answering`; the classifier bead will ask for `classifier`, and skill
+ * drafting asks for `summarizing` — and NEVER names a model id; the pair is
+ * written HERE and every feature picks it up at its next call, resolved in
+ * exactly one place on the backend.
  *
  * The role set is CLOSED and defined by the product. The wire's roles.list
  * sends every role (an unassigned role is a row with nulls, never an absent
@@ -59,12 +60,15 @@ export interface RolesSectionProps {
 const ROLE_NAME: Record<string, string> = {
   answering: 'Answering',
   classifier: 'Classifier',
+  summarizing: 'Summarizing',
 }
 
 const ROLE_DESCRIPTION: Record<string, string> = {
   answering: 'The model the assistant speaks with — the one that answers your questions.',
   classifier:
     'The second model that will judge proposed tool calls. No feature uses it yet; it is assignable so the classifier task (its own bead) has a role to ask for.',
+  summarizing:
+    'The model that drafts reusable skills from your own words and the procedures you want to remember.',
 }
 
 /** The label the endpoint select shows for "no assignment of my own" — the
@@ -96,6 +100,7 @@ export function roleStateLine(
   row: WireRole,
   def: WireDefault,
   endpoints: Endpoint[],
+  answering?: WireRole,
 ): { tone: StatusDotTone; text: string } | null {
   // An explicit assignment: the two selects already show it, so a healthy
   // row says nothing and a broken one keeps its refusal verbatim.
@@ -103,6 +108,17 @@ export function roleStateLine(
     return brokenLine(row.endpointId, row.model, endpoints)
   }
   if (!def) {
+    if ((row.role as string) === 'summarizing') {
+      const answeringEndpoint =
+        answering?.endpointId === null || answering?.endpointId === undefined
+          ? undefined
+          : endpoints.find((endpoint) => endpoint.id === answering.endpointId)
+      const endpointNote = answeringEndpoint ? ` (${answeringEndpoint.name})` : ''
+      return {
+        tone: 'warning',
+        text: `No model assigned — skill drafting will use the answering role's endpoint${endpointNote}`,
+      }
+    }
     return { tone: 'warning', text: 'No model assigned — the role cannot be used until it is' }
   }
   // Resolves through the default, or names the rung of it that failed. A
@@ -336,7 +352,13 @@ export function RolesSection(props: RolesSectionProps) {
 
   function renderRow(row: WireRole) {
     const draft = () => drafts()[row.role] ?? blankDraft()
-    const line = () => roleStateLine(row, wireDefault(), endpoints())
+    const line = () =>
+      roleStateLine(
+        row,
+        wireDefault(),
+        endpoints(),
+        roles().find((candidate) => candidate.role === 'answering'),
+      )
     const busy = () => busyRole() === row.role
 
     return (

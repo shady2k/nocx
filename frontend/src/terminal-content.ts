@@ -827,6 +827,12 @@ export class TerminalContent extends BasePaneContent {
    *  be sighted more than once before the await resolves, and only the
    *  first sighting may claim the episode. */
   private _recoveryAcking = false
+  private _recoveryAckClaim: {
+    bindGeneration: number
+    sessionId: string
+    fence: string
+    generation: string
+  } | null = null
   /** The establishment generation whose acknowledgement is in flight, and the
    *  one whose acknowledgement the backend accepted. Replays are intentionally
    *  idempotent — the same projection may arrive from a live transition and
@@ -843,6 +849,10 @@ export class TerminalContent extends BasePaneContent {
    *  accept expired. */
   private _establishmentAckInFlight: string | null = null
   private _establishmentAcked: string | null = null
+  /** Monotonic identity for the pane's current session bind. Async
+   *  acknowledgements from an old shell may settle after reconnect, but they
+   *  must never mutate the new shell's episode. */
+  private _bindGeneration = 0
   /** The disposable projections (ADR-0024 §5–§7, bead nocx-u7uh.7): the
    *  ledger, history and the block model, driven by this kernel. */
   private _projections: LifecycleProjections | null = null
@@ -3343,6 +3353,8 @@ export class TerminalContent extends BasePaneContent {
       // handshake generation that was acknowledged to a backend lane that no
       // longer exists. Left standing, each of them would answer a question
       // about the new shell with a fact about the old one.
+      this._recoveryAcking = false
+      this._recoveryAckClaim = null
       this._projections?.reset()
       this.lifecycle.reset()
       this._disposeAllMarkers()
@@ -3414,6 +3426,7 @@ export class TerminalContent extends BasePaneContent {
     renderer: XtermRenderer,
     rebind: boolean,
   ): Promise<boolean> {
+    const bindGeneration = ++this._bindGeneration
     // The pane's own parts, which this method uses and never creates. A caller
     // that has not built them is a programming error rather than a state to
     // handle: mount() builds them before the first bind, and a rebind only
@@ -3438,9 +3451,20 @@ export class TerminalContent extends BasePaneContent {
       // editor holds no authority and offers none). A native fact ends
       // the episode.
       if (fact.lifecycle === 'lost' && fact.recovery) {
-        this._recovery = { fence: fact.recovery.fence, generation: fact.recovery.generation }
+        const nextRecovery = { fence: fact.recovery.fence, generation: fact.recovery.generation }
+        if (
+          this._recovery !== null &&
+          (this._recovery.fence !== nextRecovery.fence ||
+            this._recovery.generation !== nextRecovery.generation)
+        ) {
+          this._recoveryAcking = false
+          this._recoveryAckClaim = null
+        }
+        this._recovery = nextRecovery
       } else if (fact.lifecycle === 'native') {
         this._recovery = null
+        this._recoveryAcking = false
+        this._recoveryAckClaim = null
       }
       // The kernel applies the fact and notifies onChange on a real
       // change; the ownership sync runs there, once.
@@ -3462,16 +3486,14 @@ export class TerminalContent extends BasePaneContent {
         this.session
       ) {
         const generation = fact.generation
+        const sessionId = this.session.sessionId
         this._establishmentAckInFlight = generation
         new LifecycleClient(this.client.dispatcher)
-          .establishAck(
-            this.session.sessionId,
-            fact.lane,
-            fact.domain ?? '',
-            fact.epoch ?? 0,
-            generation,
-          )
+          .establishAck(sessionId, fact.lane, fact.domain ?? '', fact.epoch ?? 0, generation)
           .then(() => {
+            if (this._bindGeneration !== bindGeneration || this.session?.sessionId !== sessionId) {
+              return
+            }
             // Only a landed acknowledgement retires the generation. The
             // backend has flushed the accept, so a later replay of the
             // same projection needs no second ack.
@@ -3481,6 +3503,9 @@ export class TerminalContent extends BasePaneContent {
             }
           })
           .catch((e: unknown) => {
+            if (this._bindGeneration !== bindGeneration || this.session?.sessionId !== sessionId) {
+              return
+            }
             // Release the claim: this generation was NOT acknowledged, and
             // a replay carrying it again — the reattach case, where only a
             // fresh shell hello would have minted a new one — is the retry
@@ -4744,23 +4769,64 @@ export class TerminalContent extends BasePaneContent {
    *  applied. The acknowledgement is deliberately narrow — session identity
    *  and the generation; the backend validates it against the episode it
    *  opened, and the transition permits only Lost → Native. Cleared on
-   *  success; a refusal (session died, episode superseded) is a fact about
-   *  the session, and the exit path closes the tab. */
+   *  success; a refusal keeps the episode pending but releases this
+   *  acknowledgement claim so a later fence replay may retry. */
   private async _ackRecovery(): Promise<void> {
     if (!this._recovery || this._recoveryAcking || !this.session || this._sessionExited) return
     const rec = this._recovery
+    const bindGeneration = this._bindGeneration
+    const sessionId = this.session.sessionId
     this._recoveryAcking = true // claim the episode: exactly one ack per fence
+    this._recoveryAckClaim = {
+      bindGeneration,
+      sessionId,
+      fence: rec.fence,
+      generation: rec.generation,
+    }
     try {
-      await new LifecycleClient(this.client.dispatcher).recoverAck(
-        this.session.sessionId,
-        rec.generation,
-      )
+      await new LifecycleClient(this.client.dispatcher).recoverAck(sessionId, rec.generation)
+      const claim = this._recoveryAckClaim
+      if (
+        claim === null ||
+        claim.bindGeneration !== bindGeneration ||
+        claim.sessionId !== sessionId ||
+        claim.fence !== rec.fence ||
+        claim.generation !== rec.generation ||
+        this._bindGeneration !== bindGeneration ||
+        this.session?.sessionId !== sessionId ||
+        this._recovery?.fence !== rec.fence ||
+        this._recovery?.generation !== rec.generation
+      ) {
+        return
+      }
       this._recovery = null
+      this._recoveryAckClaim = null
+      this._recoveryAcking = false
     } catch (e) {
-      // A refusal is a fact about the episode (session died, generation
-      // superseded, lane no longer lost): the pending guard stays, and the
-      // exit path closes the tab. Re-arming lets a replayed episode retry.
-      log.warn('nocx: recovery acknowledgement refused', { error: e })
+      const claim = this._recoveryAckClaim
+      if (
+        claim === null ||
+        claim.bindGeneration !== bindGeneration ||
+        claim.sessionId !== sessionId ||
+        claim.fence !== rec.fence ||
+        claim.generation !== rec.generation ||
+        this._bindGeneration !== bindGeneration ||
+        this.session?.sessionId !== sessionId ||
+        this._recovery?.fence !== rec.fence ||
+        this._recovery?.generation !== rec.generation
+      ) {
+        return
+      }
+      // A refusal is usually the backend's own bookkeeping (stale
+      // generation, superseded establishment, replaced subscriber),
+      // and then the replay simply does not come. Retrying costs one
+      // refused call in that case and recovers the session in the
+      // case that matters, so releasing is the safe direction.
+      log.warn('nocx: recovery acknowledgement refused', {
+        reason: e instanceof Error ? e.message : String(e),
+        generation: rec.generation,
+      })
+      this._recoveryAckClaim = null
       this._recoveryAcking = false
     }
   }

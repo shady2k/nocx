@@ -1597,7 +1597,7 @@ func New(opts ...Option) (*App, error) {
 	// vault, ledger, and shell-integration documents; no policy layer can
 	// widen it.
 	floor := content.NewFloor(paths.ConfigDir(), paths.DataDir())
-	assistantClient, agentToolRegistry, err := assistant.NewClientAndRegistry(logger, &ledgerWireRecorder{ledger: contentDB.Ledger()}, floor)
+	assistantClient, agentToolRegistry, err := assistant.NewClientAndRegistry(logger, &ledgerWireRecorder{ledger: contentDB.Ledger()}, floor, []string{skillRoots[0].Dir, skillRoots[1].Dir})
 	if err != nil {
 		return nil, err
 	}

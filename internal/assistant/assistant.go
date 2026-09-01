@@ -374,15 +374,15 @@ type ProbeResult struct {
 // NewClient builds the engine client with the caller-declared safety floor.
 // The floor is mandatory so production and tests cannot silently omit it.
 func NewClient(logger log.Logger, recorder WireRecorder, floor content.Floor) (Client, error) {
-	client, _, err := NewClientAndRegistry(logger, recorder, floor)
+	client, _, err := NewClientAndRegistry(logger, recorder, floor, nil)
 	return client, err
 }
 
 // NewClientAndRegistry builds the assistant and returns the exact registry
 // used by its engine. The composition root passes that same registry to
 // transport so prompt offers and execution use one declaration table.
-func NewClientAndRegistry(logger log.Logger, recorder WireRecorder, floor content.Floor) (Client, agenttools.Registry, error) {
-	reg, err := assembleToolRegistry(tools.Schemas)
+func NewClientAndRegistry(logger log.Logger, recorder WireRecorder, floor content.Floor, skillRoots []string) (Client, agenttools.Registry, error) {
+	reg, err := assembleToolRegistry(tools.Schemas, skillRoots)
 	if err != nil {
 		return nil, agenttools.Registry{}, err
 	}
@@ -391,7 +391,7 @@ func NewClientAndRegistry(logger log.Logger, recorder WireRecorder, floor conten
 }
 
 func newClient(logger log.Logger, toolsFS fs.FS, recorder WireRecorder, floor content.Floor) (Client, error) {
-	reg, err := assembleToolRegistry(toolsFS)
+	reg, err := assembleToolRegistry(toolsFS, nil)
 	if err != nil {
 		return nil, err
 	}
@@ -399,8 +399,16 @@ func newClient(logger log.Logger, toolsFS fs.FS, recorder WireRecorder, floor co
 	return newClientWithRegistry(logger, reg, recorder, floor, searchSchema), nil
 }
 
-func assembleToolRegistry(toolsFS fs.FS) (agenttools.Registry, error) {
-	reg, err := agenttools.Assemble(toolsFS)
+func assembleToolRegistry(toolsFS fs.FS, skillRoots []string) (agenttools.Registry, error) {
+	var (
+		reg agenttools.Registry
+		err error
+	)
+	if len(skillRoots) == 0 {
+		reg, err = agenttools.Assemble(toolsFS)
+	} else {
+		reg, err = agenttools.AssembleWithSkillRoots(toolsFS, skillRoots)
+	}
 	if err != nil {
 		return agenttools.Registry{}, fmt.Errorf("assistant: tool registry: %w", err)
 	}

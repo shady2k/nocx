@@ -735,6 +735,35 @@ describe('the echoed command line leaves the live region too (nocx-w1n4)', () =>
     }
   }
 
+  it('releases the shift when the program overwrote the echo row (nocx-hp8p2.9)', () => {
+    const { renderer } = rendererWithGeometry()
+    const pane = document.createElement('div')
+    const controller = new ScrollbackController({
+      pane,
+      renderer,
+      snapshotStore: new CommandSnapshotStore(),
+    })
+    Object.defineProperty(controller.scrollbackArea, 'clientHeight', {
+      value: 360,
+      configurable: true,
+    })
+    controller.scrollbackArea.scrollTo = vi.fn()
+
+    controller.beginBlock('top', '~', 0, 1)
+    expect(controller.xtermInner.style.transform).toBe('translateY(-16px)')
+
+    // `top` clears the screen and paints from home, so its FIRST line lands
+    // on the row the shell echoed the command on. The shift would then hide
+    // a line of the program's output — the uptime header — instead of the
+    // echo, which is exactly what the owner saw.
+    renderer.getBufferLine = () =>
+      ({
+        translateToString: () => 'top - 19:20:15 up 18 days,  1:53,  2 users',
+      }) as unknown as ReturnType<typeof renderer.getBufferLine>
+    controller.setLiveHeight(3 * 16)
+    expect(controller.xtermInner.style.transform).toBe('')
+  })
+
   it('hides the echo row from the running block and releases it once the grid scrolls past', () => {
     const { renderer, sight, setViewportTop } = rendererWithGeometry()
 

@@ -66,10 +66,24 @@
 /* Deeper than three is clamped by having no rule: it renders at depth 3's
    indent rather than marching off the right edge of a pane. */
 
+/* A MARKER IS ONE PIECE, however wide it is (nocx-hp8p2.11).
+   `width: 1.2em` is about a bullet; an ordered marker is "1." — two
+   monospace cells, which is 1.2em only by luck and not at every font size.
+   The answer body wraps with `overflow-wrap: break-word`, so the moment the
+   glyph did not fit its box the browser did what it was told and BROKE IT:
+   the digit on one line, the period on the next, every numbered item in the
+   answer split across two rows.
+
+   The box is now a floor rather than a size, the marker never wraps, and
+   the two wrap properties are stated here rather than inherited — this is
+   the one span in the answer where breaking a "word" is always wrong. */
 .ui-md-marker {
   display: inline-block;
-  width: 1.2em;
+  min-width: 1.2em;
   margin-left: -1.2em;
+  white-space: nowrap;
+  overflow-wrap: normal;
+  word-break: normal;
   color: var(--color-text-dim);
 }
 

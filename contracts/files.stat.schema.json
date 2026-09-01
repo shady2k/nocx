@@ -1,0 +1,16 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files.stat.schema.json",
+  "title": "FilesStatResult",
+  "description": "Result of the files.stat JSON-RPC method: the kind of one path, obtained without enumerating its parent. Providers follow symlinks, so the kind describes the object a path link would open or expand. The result is deliberately minimal because path-link classification does not read size, mode or modification time.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["kind"],
+  "properties": {
+    "kind": {
+      "description": "The object kind at the requested path: regular file, directory, or another filesystem object. Symlinks are followed before classification.",
+      "type": "string",
+      "enum": ["regular", "dir", "other"]
+    }
+  }
+}

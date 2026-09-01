@@ -64,6 +64,7 @@ type Handle interface {
 	Root(ctx context.Context) (Root, error)
 	List(ctx context.Context, path string, page Page) (Listing, error)
 	Read(ctx context.Context, path string, maxBytes int64) (Content, error)
+	Stat(ctx context.Context, path string) (Stat, error)
 	Watch(ctx context.Context, paths []string) (WatchMode, error)
 	// Uploader returns the binding's write half — the sink one transfer
 	// runs on — or *ErrUploadUnsupported when the binding has none, which
@@ -417,6 +418,15 @@ func (h *handle) Read(ctx context.Context, path string, maxBytes int64) (Content
 	}
 	defer drop()
 	return h.b.provider.Read(ctx, path, maxBytes)
+}
+
+func (h *handle) Stat(ctx context.Context, path string) (Stat, error) {
+	drop, err := h.begin()
+	if err != nil {
+		return Stat{}, err
+	}
+	defer drop()
+	return h.b.provider.Stat(ctx, path)
 }
 
 func (h *handle) Watch(ctx context.Context, paths []string) (WatchMode, error) {

@@ -5,7 +5,12 @@
 // the model's bytes are DATA and never markup, and a line with no structure
 // is left exactly as it was before any of this existed.
 import { describe, it, expect } from 'vitest'
-import { paintAnswerLine } from './answer-markdown'
+import {
+  paintAnswerLine,
+  paintTableRow,
+  tableDelimiterAlignments,
+  tableRowParts,
+} from './answer-markdown'
 import { readFileSync } from 'node:fs'
 
 function paint(text: string): HTMLElement {
@@ -52,6 +57,39 @@ describe('AnswerMarkdown — structure', () => {
     expect(row.dataset.md).toBeUndefined()
     expect(row.innerHTML).toBe('the command exited with 1')
     expect(row.children.length).toBe(0)
+  })
+})
+
+describe('AnswerMarkdown — table rows', () => {
+  it('recognises delimiter alignment and preserves source separators in the row text', () => {
+    expect(tableDelimiterAlignments('|:---|:---:|---:|')).toEqual(['left', 'center', 'right'])
+    const row = document.createElement('span')
+    row.className = 'term-line'
+    paintTableRow(row, '| Name | Score |', ['left', 'right'], true)
+    expect(row.className).toBe('term-line ui-md-table-row')
+    expect(row.getAttribute('role')).toBe('row')
+    expect(row.textContent).toBe('| Name | Score |')
+    expect(row.querySelectorAll('.ui-md-table-cell')).toHaveLength(2)
+    expect(row.querySelectorAll('[role="columnheader"]')).toHaveLength(2)
+  })
+
+  it('does not mistake a pipe inside inline code for a table separator', () => {
+    expect(tableRowParts('use `a | b` as an example')).toBeNull()
+    expect(tableDelimiterAlignments('use `a | b` as an example')).toBeNull()
+  })
+
+  it('renders ragged cells without inventing padding', () => {
+    const row = document.createElement('span')
+    row.className = 'term-line'
+    paintTableRow(row, '| only |', ['left'], false)
+    expect(row.querySelectorAll('.ui-md-table-cell')).toHaveLength(1)
+    expect(row.textContent).toBe('| only |')
+  })
+
+  it('lets CSS own the cross-row sizing and removes only each row box', () => {
+    const css = readFileSync('src/styles/components/answer-markdown.css', 'utf8')
+    expect(css).toMatch(/\.term-line\.ui-md-table-row\s*\{[^}]*display:\s*contents/s)
+    expect(css).toMatch(/grid-template-columns:\s*repeat\([^;]*max-content/s)
   })
 })
 

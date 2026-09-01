@@ -257,8 +257,9 @@ func TestHistoryQuery_AnswersFromAskedRung(t *testing.T) {
 	// ledger's name for the same coordinate.
 	q, calls := fake.recorded()
 	wantEnv := environmentForHost("").ID
-	if calls != 1 || q.Scope != content.ScopeDirectory || q.Cwd != "/srv/api" || q.EnvironmentID != wantEnv || q.Limit != 10 {
-		t.Fatalf("store asked with %+v calls=%d, want directory /srv/api env=%s limit=10 calls=1",
+	if calls != 1 || q.Scope != content.ScopeDirectory || q.Cwd != "/srv/api" ||
+		q.EnvironmentID != wantEnv || q.Kind != content.EntryShell || q.Limit != 10 {
+		t.Fatalf("store asked with %+v calls=%d, want directory /srv/api env=%s kind=shell limit=10 calls=1",
 			q, calls, wantEnv)
 	}
 }

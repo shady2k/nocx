@@ -9,7 +9,7 @@ import (
 )
 
 // CommandEffect derives the effect of one run command from its text and the
-// tool's declared worst-case effect. It is a PURE function of those facts: no
+// tool's reachable effect set. It is a PURE function of those facts: no
 // registry lookup, settings read, shell invocation, or runtime state.
 //
 // The parser deliberately does not pretend to be the person's shell. An alias
@@ -19,8 +19,8 @@ import (
 // loses only the blanket grant, not the chance to ask.
 //
 // The class is derived from the structural resource report. A report with only
-// resolved reads can lower the declared effect; writes, deletes, network
-// access and unresolved parts retain the declared worst case.
+// resolved resources selects its mapped member; writes, deletes, network
+// access and unresolved parts select the set's worst member.
 // CommandInvocation is the parser result shared by effect classification and
 // invocation-rule policy. The parser is deliberately owned here: policy
 // consumers receive this result instead of tokenizing the command again.
@@ -53,7 +53,9 @@ func parseCanonicalInvocation(command string) content.Invocation {
 		if disqualifyingWords(words) {
 			inv.Disqualified = true
 		}
-		inv.Resources = appendResourceReport(inv.Resources, subcommand, facts)
+		inv.Resources = appendDynamicUnresolved(
+			appendResourceReport(inv.Resources, subcommand, facts), facts,
+		)
 		if redirectionDisqualifies(facts) {
 			inv.Disqualified = true
 		}
@@ -76,9 +78,9 @@ func finalizeInvocation(inv content.Invocation, command string) content.Invocati
 	return inv
 }
 
-func commandEffect(inv content.Invocation, declared content.Effect) content.Effect {
+func commandEffect(inv content.Invocation, declared []content.Effect) content.Effect {
 	if !inv.Parsed {
-		return declared
+		return content.WorstEffect(declared)
 	}
 	return inv.Resources.Effect(declared)
 }
@@ -91,11 +93,14 @@ type readProgramRule struct {
 // expose filesystem reads. Resource extraction, rather than this table, owns
 // effect derivation: commands with writes or network access have their own
 // resource verbs below.
+// Side-effect-free output commands such as echo are included because their
+// no-resource form is also observe.
 var readPrograms = map[string]readProgramRule{
 	"cat":    {},
 	"cut":    {},
 	"df":     {},
 	"du":     {},
+	"echo":   {},
 	"file":   {},
 	"free":   {},
 	"grep":   {},
@@ -330,6 +335,31 @@ func commandProgramFacts(facts []commandWordFact) []commandWordFact {
 		i += 2
 	}
 	return nil
+}
+
+// Dynamic tokens are recorded even when they are options rather than resource
+// operands, because a standing rule must cover every token it was shown.
+func appendDynamicUnresolved(report content.ResourceReport, facts []commandWordFact) content.ResourceReport {
+	for _, fact := range facts {
+		if !fact.dynamic {
+			continue
+		}
+		alreadyUnresolved := false
+		for _, unresolved := range report.Unresolved {
+			if unresolved.Path == fact.value {
+				alreadyUnresolved = true
+				break
+			}
+		}
+		if alreadyUnresolved {
+			continue
+		}
+		report.Unresolved = append(report.Unresolved, content.UnresolvedResource{
+			Path: fact.value, Verb: content.ResourceUnknown,
+			Reason: fmt.Sprintf("could not resolve %s without executing shell expansion", fact.value),
+		})
+	}
+	return report
 }
 
 func addResource(report content.ResourceReport, fact commandWordFact, verb content.ResourceVerb) content.ResourceReport {

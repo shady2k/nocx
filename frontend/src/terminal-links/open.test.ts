@@ -102,10 +102,12 @@ describe('createLinkOpener — files', () => {
       displayHost: null,
     })
   })
-  it('opens a regular file without probing or revealing the Files panel', async () => {
+  it('opens a regular file after one classification probe without touching the Files panel', async () => {
     const openDirectory = vi.fn(() => Promise.resolve(false))
-    const d = deps({ openDirectory })
+    const pathKind = vi.fn(() => Promise.resolve<LinkPathProbe>({ kind: 'file' }))
+    const d = deps({ openDirectory, pathKind })
     await createLinkOpener(d).open({ kind: 'path', path: 'notes.md' }, origin)
+    expect(pathKind).toHaveBeenCalledOnce()
     expect(openDirectory).not.toHaveBeenCalled()
     expect(d.viewed).toHaveLength(1)
   })
@@ -120,6 +122,55 @@ describe('createLinkOpener — files', () => {
     expect(openDirectory).toHaveBeenCalledWith('/Users/a/repo/build', probe)
     expect(d.revealed).toEqual([])
     expect(d.viewed).toEqual([])
+  })
+  it('does not misrepresent a directory when its reveal fails', async () => {
+    const d = deps({
+      pathKind: () => Promise.resolve({ kind: 'directory' }),
+      openDirectory: () => Promise.resolve(false),
+    })
+    await createLinkOpener(d).open({ kind: 'path', path: 'build' }, origin)
+    expect(d.viewed).toEqual([])
+    expect(d.said).toEqual(['Could not show directory build'])
+  })
+
+  it('tells the person when the path is confirmed absent', async () => {
+    const d = deps({ pathKind: () => Promise.resolve({ kind: 'absent' }) })
+    await createLinkOpener(d).open({ kind: 'path', path: 'gone.txt' }, origin)
+    expect(d.viewed).toEqual([])
+    expect(d.said).toHaveLength(1)
+    expect(d.said[0]).toContain('not there')
+    expect(d.said[0]).toContain('gone.txt')
+  })
+
+  it('refuses a path whose classification was denied by permissions', async () => {
+    const d = deps({
+      pathKind: () => Promise.resolve({ kind: 'unknown', reason: 'permission-denied' }),
+    })
+    await createLinkOpener(d).open({ kind: 'path', path: 'secret.txt' }, origin)
+    expect(d.viewed).toEqual([])
+    expect(d.said).toHaveLength(1)
+    expect(d.said[0]).toContain('permission')
+    expect(d.said[0]).toContain('secret.txt')
+  })
+
+  it('refuses a path whose kind could not be determined', async () => {
+    const d = deps({
+      pathKind: () => Promise.resolve({ kind: 'unknown', reason: 'unavailable' }),
+    })
+    await createLinkOpener(d).open({ kind: 'path', path: 'unclear.txt' }, origin)
+    expect(d.viewed).toEqual([])
+    expect(d.said).toHaveLength(1)
+    expect(d.said[0]).toContain('determine')
+    expect(d.said[0]).toContain('unclear.txt')
+  })
+
+  it('refuses a path that is neither a regular file nor a directory', async () => {
+    const d = deps({ pathKind: () => Promise.resolve({ kind: 'unknown', reason: 'other' }) })
+    await createLinkOpener(d).open({ kind: 'path', path: 'device' }, origin)
+    expect(d.viewed).toEqual([])
+    expect(d.said).toHaveLength(1)
+    expect(d.said[0]).toContain('determine')
+    expect(d.said[0]).toContain('device')
   })
 
   it('binds against the session the link was printed in', async () => {

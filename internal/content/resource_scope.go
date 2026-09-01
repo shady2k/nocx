@@ -74,6 +74,9 @@ func (scope GrantScope) Contains(child GrantScope) bool {
 		}
 		return parent.pane == candidate.pane
 	default:
+		if scope.Kind == ResourceDestination && scope.ID == "*" {
+			return true
+		}
 		return scope.ID == child.ID
 	}
 }

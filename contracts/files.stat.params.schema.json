@@ -1,0 +1,21 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://nocx.local/contracts/files.stat.params.schema.json",
+  "title": "FilesStatParams",
+  "description": "Parameters for files.stat: classify one path on a filesystem binding without enumerating its parent directory.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["bindingId", "path"],
+  "properties": {
+    "bindingId": {
+      "description": "The opaque binding id returned by files.open.",
+      "type": "string",
+      "pattern": "^[0-9a-f]{32}$"
+    },
+    "path": {
+      "description": "The absolute, clean provider path to classify.",
+      "type": "string",
+      "minLength": 1
+    }
+  }
+}

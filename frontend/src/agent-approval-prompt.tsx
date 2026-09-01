@@ -342,6 +342,12 @@ export function AgentApprovalPrompt(props: AgentApprovalPromptProps) {
         rows.push({ name: key, value: argumentValue(key, value) })
       }
     }
+    if (ask().reason === 'policy' && ask().tool === 'fetch.url') {
+      rows.push({
+        name: 'network',
+        value: 'reaches the network from this machine',
+      })
+    }
     if (ask().reason === 'policy' && !ask().standing.available && ask().standing.reason !== '') {
       rows.push({
         name: 'standing',

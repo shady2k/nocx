@@ -6,9 +6,10 @@ import "github.com/shady2k/nocx/internal/content"
 // content.Effect lives beside content.ResourceKind in internal/content,
 // because the durable grant record persists both. This package consumes it,
 // never duplicates it: a grant records the effect classes it permits, the
-// declaration table classifies each tool with one, and the policy evaluates
-// the pair. AD-8: the ledger owns the vocabulary; a member added to
-// content.Effect is a member this package sees the moment it compiles.
+// declaration table classifies each tool with its reachable effect set, and
+// the policy evaluates the pair. AD-8: the ledger owns the vocabulary; a
+// member added to content.Effect is a member this package sees the moment it
+// compiles.
 //
 // What this package does own is the list of members it handles.
 // supportedEffect's switch is the tripwire: a member a declaration uses but

@@ -256,4 +256,39 @@ describe('CodeBlock answer variant', () => {
   it('defines the answer border in the CodeBlock stylesheet', () => {
     expect(CSS).toMatch(/\.ui-code-block\[data-variant='answer'\][^}]*border:\s*1px solid/s)
   })
+
+  it('marks dump blocks with the taller kit-owned height variant', () => {
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    render(
+      () => (
+        <CodeBlock variant="dump" ariaLabel="Dump">
+          <span>highlighted</span>
+        </CodeBlock>
+      ),
+      { container: host },
+    )
+    expect(host.querySelector<HTMLElement>('.ui-code-block')?.dataset.variant).toBe('dump')
+    expect(CSS).toMatch(
+      /\.ui-code-block\[data-variant='dump'\][^}]*max-height:\s*min\(60vh,\s*768px\)/s,
+    )
+  })
+
+  it('copies explicit visible text when children are highlighted elements', async () => {
+    const copy = vi.fn().mockResolvedValue(undefined)
+    const host = document.createElement('div')
+    document.body.appendChild(host)
+    render(
+      () => (
+        <CodeBlock copy={copy} copyText={'formatted\nrequest'} ariaLabel="Dump request">
+          <span>formatted</span>
+          {'\n'}
+          <span>request</span>
+        </CodeBlock>
+      ),
+      { container: host },
+    )
+    fireEvent.click(host.querySelector<HTMLButtonElement>('[aria-label="Copy code"]')!)
+    await vi.waitFor(() => expect(copy).toHaveBeenCalledWith('formatted\nrequest'))
+  })
 })

@@ -30,6 +30,12 @@
   border: 1px solid var(--color-border);
 }
 
+/* Dump blocks are deliberately taller than ordinary machine-output blocks.
+   The height belongs to this kit variant, not to the dump surface. */
+.ui-code-block[data-variant='dump'] {
+  max-height: min(60vh, 768px);
+}
+
 /* The copy affordance turns the reserved line into a real header: the block's
    kind is visible on the left and the one copy control sits on the right. */
 .ui-code-block-wrap--copy > .ui-code-block__header {

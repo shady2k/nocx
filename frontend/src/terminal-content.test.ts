@@ -2111,6 +2111,83 @@ describe('the restoration episode (ADR-0024 decision 8)', () => {
       teardown()
     }
   })
+  it('keeps a new recovery episode pending when an old bind acknowledgement settles late', async () => {
+    const client = makeClient()
+    const pending: Array<{
+      resolve: (value: unknown) => void
+      reject: (reason?: unknown) => void
+    }> = []
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method !== 'lifecycle.recoverAck') return Promise.resolve({})
+      let resolve!: (value: unknown) => void
+      let reject!: (reason?: unknown) => void
+      const promise = new Promise<unknown>((release, fail) => {
+        resolve = release
+        reject = fail
+      })
+      pending.push({ resolve, reject })
+      return promise
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const subscriptions = () =>
+        client.dispatcher.subscribe.mock.calls.filter(
+          (call: unknown[]) => call[0] === 'lifecycle.changed',
+        )
+      const first = client._sessions[0]
+      const firstHandler = subscriptions()[0]?.[1] as (params: unknown) => void
+      firstHandler({ ...LOST_WITH_RECOVERY, sessionId: first.sessionId })
+      rendererOf(content)._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence)
+      expect(pending).toHaveLength(1)
+
+      const onExit = first.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      expect(onExit).toBeDefined()
+      if (!onExit) throw new Error('the first session did not register an exit handler')
+      onExit({ sessionId: first.sessionId, cause: 'interrupted' })
+      expect(await content.reconnect()).toBe(true)
+
+      const second = client._sessions[1]
+      const secondHandler = subscriptions()[1]?.[1] as (params: unknown) => void
+      secondHandler({ ...LOST_WITH_RECOVERY, sessionId: second.sessionId })
+      rendererOf(content)._fireRecoveryFence(LOST_WITH_RECOVERY.recovery.fence)
+      expect(
+        pending,
+        'a fresh bind must claim its recovery acknowledgement without inheriting the old bind',
+      ).toHaveLength(2)
+
+      // The old bind settles after the new bind has claimed the same-shaped
+      // recovery contract. It must not clear the new episode.
+      pending[0]?.resolve({ accepted: true })
+      await Promise.resolve()
+      await Promise.resolve()
+      const recoveryChip =
+        editorOf(content).root.querySelector<HTMLElement>('.nocx-editor-recovery')
+      expect(recoveryChip?.style.display).toBe('none')
+
+      // The current acknowledgement refuses. A genuinely fresh episode must
+      // be able to claim its own acknowledgement rather than inheriting the
+      // old bind's in-flight guard.
+      pending[1]?.reject(new Error('session is not open'))
+      await Promise.resolve()
+      await Promise.resolve()
+      expect(recoveryChip?.style.display).toBe('none')
+      const freshRecovery = {
+        fence: '12'.repeat(32),
+        generation: 'ef'.repeat(32),
+      }
+      secondHandler({
+        sessionId: second.sessionId,
+        lane: 'lane-1',
+        lifecycle: 'lost',
+        recovery: freshRecovery,
+      })
+      rendererOf(content)._fireRecoveryFence(freshRecovery.fence)
+      expect(pending).toHaveLength(3)
+    } finally {
+      teardown()
+    }
+  })
 })
 
 describe('the establishment acknowledgement (ADR-0024 decision 9)', () => {
@@ -2154,6 +2231,74 @@ describe('the establishment acknowledgement (ADR-0024 decision 9)', () => {
       expect(
         call.mock.calls.filter((c: unknown[]) => c[0] === 'lifecycle.establishAck'),
       ).toHaveLength(1)
+    } finally {
+      teardown()
+    }
+  })
+  it('does not let an old bind acknowledgement complete the new establishment episode', async () => {
+    const client = makeClient()
+    const pending: Array<{ resolve: (value: unknown) => void }> = []
+    client.dispatcher.call.mockImplementation((method: string) => {
+      if (method !== 'lifecycle.establishAck') return Promise.resolve({})
+      let resolve!: (value: unknown) => void
+      const promise = new Promise<unknown>((release) => {
+        resolve = release
+      })
+      pending.push({ resolve })
+      return promise
+    })
+    const { content, teardown } = await mountTerminal(makeClipboard(), {}, client)
+    try {
+      const first = client._sessions[0]
+      const subscriptions = () =>
+        client.dispatcher.subscribe.mock.calls.filter(
+          (call: unknown[]) => call[0] === 'lifecycle.changed',
+        )
+      const firstHandler = subscriptions()[0]?.[1] as (params: unknown) => void
+      firstHandler({
+        sessionId: first.sessionId,
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd1',
+        epoch: 1,
+        generation: 'est-old',
+      })
+      expect(pending).toHaveLength(1)
+
+      const onExit = first.onExit.mock.calls[0]?.[0] as
+        ((exit: { sessionId: string; cause: 'interrupted' }) => void) | undefined
+      onExit?.({ sessionId: first.sessionId, cause: 'interrupted' })
+      expect(await content.reconnect()).toBe(true)
+
+      const second = client._sessions[1]
+      const secondHandler = subscriptions()[1]?.[1] as (params: unknown) => void
+      const freshFact = {
+        sessionId: second.sessionId,
+        lane: 'lane-1',
+        lifecycle: 'prompt_ready',
+        domain: 'd2',
+        epoch: 1,
+        generation: 'est-new',
+      } as const
+      secondHandler(freshFact)
+      expect(pending).toHaveLength(2)
+
+      // The new bind lands first. The old bind then resolves late and must
+      // not overwrite which generation the current bind has acknowledged.
+      pending[1]?.resolve({ accepted: true })
+      await Promise.resolve()
+      await Promise.resolve()
+      pending[0]?.resolve({ accepted: true })
+      await Promise.resolve()
+      await Promise.resolve()
+
+      secondHandler(freshFact)
+      expect(
+        client.dispatcher.call.mock.calls.filter(
+          (call: unknown[]) => call[0] === 'lifecycle.establishAck',
+        ),
+        'a late acknowledgement from the old bind must not mint a duplicate acknowledgement for the current bind',
+      ).toHaveLength(2)
     } finally {
       teardown()
     }

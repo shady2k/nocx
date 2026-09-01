@@ -128,8 +128,8 @@ func TestOpenJudgesNoSession(t *testing.T) {
 	assertTheWorkSurvived(t, again, sessionID, entryID, body)
 }
 
-// …and the same state survives the LIVE verdict, which is the whole of what
-// `live` does: it clears the mark and writes nothing.
+// …and the same state survives the LIVE verdict, which records only that the
+// host session exists; replay still has to recover the open attempt.
 func TestTheLiveVerdictKeepsEverything(t *testing.T) {
 	const sessionID = "session-that-is-still-running"
 	const entryID = "00000000-0000-7000-8000-00000000e002"
@@ -160,14 +160,17 @@ func TestTheLiveVerdictKeepsEverything(t *testing.T) {
 	}
 	assertTheWorkSurvived(t, again, sessionID, entryID, body)
 
-	// A judged session leaves the pending set: it is reconciled, and the
-	// product has nothing left to say about it.
+	// Inventory answered the host-session question, but the attempt is not
+	// recovered until replay evidence arrives, so the pending marker remains.
 	after, err := rec.Pending(ctx)
 	if err != nil {
 		t.Fatalf("Pending after live: %v", err)
 	}
-	if len(after) != 0 {
-		t.Fatalf("pending after the live verdict = %+v, want none", after)
+	if len(after) != 1 || after[0].SessionID != sessionID {
+		t.Fatalf("live inventory must preserve the lifecycle-unreconciled session until attempt recovery; pending = %+v", after)
+	}
+	if !after[0].SessionExists {
+		t.Fatalf("live inventory must record host-session existence separately from attempt recovery; pending = %+v", after)
 	}
 }
 
@@ -509,15 +512,55 @@ func TestThePageSaysWhichRowsAreAwaitingAVerdict(t *testing.T) {
 		t.Fatalf("cause after the vault refused = %v, want %q", row.Unreconciled, content.CauseVaultSealed)
 	}
 
-	// And a judged session leaves nothing on the row: live means the block is
-	// running, and the mark would contradict it.
+	// A live inventory answer only establishes that the host session exists.
+	// Replay must recover the attempt before the row can render as running.
 	if applyErr := rec.Apply(ctx, content.SessionJudgement{
 		SessionID: sessionID, Verdict: content.VerdictLive,
 	}); applyErr != nil {
 		t.Fatalf("Apply(live): %v", applyErr)
 	}
 	row = entriesForPane(t, again.Ledger(), "pane-1").Entries[0]
-	if row.Unreconciled != nil {
-		t.Fatalf("a reconciled row is still marked: %v", *row.Unreconciled)
+	if row.Unreconciled == nil || *row.Unreconciled != content.CauseNotYetAsked {
+		t.Fatalf("a live inventory answer must keep the row lifecycle-unreconciled until replay recovers the attempt; cause = %v", row.Unreconciled)
+	}
+}
+
+// A live inventory answers only the first question: the host session exists.
+// Until replay evidence recovers the open attempt, the row remains marked
+// unreconciled and must not render as running.
+func TestLiveInventoryPreservesLifecycleUnreconciledUntilAttemptRecovery(t *testing.T) {
+	const sessionID = "session-host-exists-but-attempt-is-not-recovered"
+	const entryID = "00000000-0000-7000-8000-00000000e009"
+	path, _ := aLiveSessionsWork(t, sessionID, entryID)
+	ctx := context.Background()
+
+	db, err := reopenStore(t, path)
+	if err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	defer func() { _ = db.Close() }()
+
+	rec := db.Reconcile()
+	if err = rec.Apply(ctx, content.SessionJudgement{
+		SessionID: sessionID,
+		Verdict:   content.VerdictLive,
+	}); err != nil {
+		t.Fatalf("Apply(live): %v", err)
+	}
+
+	pending, err := rec.Pending(ctx)
+	if err != nil {
+		t.Fatalf("Pending after live inventory answer: %v", err)
+	}
+	if len(pending) != 1 {
+		t.Fatalf("live inventory must leave the lifecycle-unreconciled session pending until attempt recovery; pending = %+v", pending)
+	}
+	if !pending[0].SessionExists {
+		t.Fatalf("live inventory answer must record that the host session exists before attempt recovery; pending = %+v", pending)
+	}
+
+	row := entriesForPane(t, db.Ledger(), "pane-1").Entries[0]
+	if row.Unreconciled == nil {
+		t.Fatal("a host-session answer without replay evidence must keep the block lifecycle-unreconciled rather than render it as running")
 	}
 }

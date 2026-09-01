@@ -20,15 +20,18 @@ import (
 // The cause is the only field a verdict writes, and it is memory-only because it
 // describes THIS incarnation's attempts and means nothing to the next one.
 type pendingSession struct {
-	id         string
-	host       string
-	account    string
-	generation string
-	sinceMs    int64
-	bytes      uint64
-	openRows   int
-	cause      UnreconciledCause
-	detail     string
+	id string
+	// sessionExists is the inventory's answer to the host-session question;
+	// it does not clear the lifecycle-unreconciled marker.
+	sessionExists bool
+	host          string
+	account       string
+	generation    string
+	sinceMs       int64
+	bytes         uint64
+	openRows      int
+	cause         UnreconciledCause
+	detail        string
 }
 
 // carryOver reads the set of sessions a previous incarnation left behind. It
@@ -139,6 +142,7 @@ func (s *sqliteContent) Pending(_ context.Context) ([]PendingSession, error) {
 	for _, p := range s.pending {
 		out = append(out, PendingSession{
 			SessionID:     p.id,
+			SessionExists: p.sessionExists,
 			Host:          p.host,
 			Account:       p.account,
 			Generation:    p.generation,
@@ -180,10 +184,14 @@ func (s *sqliteContent) Apply(ctx context.Context, j SessionJudgement) error {
 		s.pendingMu.Unlock()
 		return nil
 	case VerdictLive:
-		// The mark is cleared and NOTHING else happens: the row stays, its
-		// entries keep their session_id, its recording keeps its bytes, and
-		// its open entry stays open because the command is still running.
-		s.forget(j.SessionID)
+		// Inventory answers only whether the host session exists. The open
+		// attempt still needs replay evidence, so keep the pending marker and
+		// leave the block out of the running presentation.
+		s.pendingMu.Lock()
+		p.sessionExists = true
+		p.cause = CauseNotYetAsked
+		p.detail = ""
+		s.pendingMu.Unlock()
 		return nil
 	case VerdictAbsent:
 		if err := s.run(ctx, func(ctx context.Context) error {

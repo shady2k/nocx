@@ -134,6 +134,10 @@ type PendingSession struct {
 	// SessionID is the row's id — the same id `entries.session_id` names and
 	// the recording is keyed by.
 	SessionID string
+	// SessionExists is the first reconciliation fact: the exact helper
+	// generation reports this host session. It does not say that any open
+	// attempt has been recovered, so it never clears Unreconciled.
+	SessionExists bool
 	// Host and Account identify the execution target whose helper may judge
 	// this session. They are durable binding facts, not values inferred from
 	// the helper generation or session id.
